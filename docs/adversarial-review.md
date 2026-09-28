@@ -16,6 +16,7 @@ and `bench/mutations/`.
 - [Metrics](#metrics)
 - [Stopping criteria](#stopping-criteria)
 - [Between passes](#between-passes)
+- [Fix phase](#fix-phase)
 - [Lenses](#lenses)
 - [Pass record](#pass-record)
 - [Pass history](#pass-history)
@@ -208,6 +209,48 @@ meant to draw says nothing. The rules that keep the loop honest:
 
 The loop, in full: pin, hunt, verify, file, fix with guard and mutation, close each finding by its own
 reproduction, merge the batch with a rebase and a fresh CI run per PR, pin again.
+
+## Fix phase
+
+The fix phase is the pass's counterpart and it is run with the same separation of roles. The
+**coordinator** (`/fix-phase`) assigns, spawns, lands and closes; it fixes nothing. One **fixer**
+agent per issue, or per group of issues that share a mechanism, works in its own worktree under
+`CLAUDE.md`'s rules and opens one PR. The issue's verified reproductions are that PR's acceptance
+test. Pass 2's fix phase (27 issues, 24 PRs, 2026-09-25 to 2026-09-26) is the measured baseline for
+what follows.
+
+- **Assign before spawning.** Parallel fixers collide on test file numbers, guard database names and
+  scratch space unless the coordinator hands them out first. Pass 2 ended with seven test files
+  numbered 124 because each fixer took "the next free" one. Numbers are assigned in the brief.
+- **Gate locally, then let the queue test the tree.** Every PR passes `./test.sh 15 --channel=psql` on
+  its own head before it is landed; the merge queue then runs every track on the exact tree it merges,
+  which is what catches a pair of fixes that were each green alone.
+- **Land in order, one at a time, with `scripts/review/land.sh`.** Under a squash queue this cannot be
+  pipelined: a squash commit has no ancestry link to its branch, so once PR k-1 lands, PR k conflicts
+  with `main` in the three list files every fix appends to and must be rebased and re-checked before
+  it can be queued. Stacking PRs on each other does not help; the queue's own merge sees the same
+  conflict. Measured: about 24 minutes per PR, a 10-hour landing for 24 PRs. The alternative is a
+  merge-commit queue, which preserves ancestry and allows groups of five, at the cost of merge commits
+  and the fixers' individual commits in `main`'s history. That is a ruleset decision (the merge queue
+  rule's `merge_method`, `SQUASH` today), made by the maintainer, not by the tooling.
+- **Retry only a known flake, once.** `flake_check.sh` matches a failed run against narrow signatures
+  (the failing assertion, its liveness witness green, nothing else red); anything else stops the
+  landing for a human. A signature nobody can point at an issue for is a way of hiding a regression.
+- **When two fixes interact, the guard stays.** A fix that changes what a configuration can be will
+  meet another fix's guard that depends on that configuration; the guard's `LIVENESS:` witness is what
+  makes the meeting legible. The guard is not retired until someone shows the state is unreachable on
+  upgraded installs too, not merely through the API. Precedent: #504 made a naive column's grid UTC
+  by construction, and #501's guard now rebuilds the pre-#504 legacy grid by hand, still discriminated.
+- **Pace the pushes.** A batch of heads pushed at once is a CI storm: pass 2's seventeen heads queued
+  45 runs against a limit of 20 concurrent jobs and exhausted a registry's anonymous pull quota. Third-
+  party images are cached in the workflows; heads are pushed as the queue reaches them.
+- **Close by re-running the reproductions.** `closure.sh` re-runs every reproduction of the pass against
+  the fixed `main`, using the verifier's rebuilt version where one exists; `close_comments.py` posts
+  the evidence on each issue and reopens one whose sound reproduction still fails. Every reproduction
+  that still fails is either explained in a caveat that says why it is unsound, or it is a reopen.
+- **Record it.** The pass record gets a fix-phase section: PRs, landing measurements, hand-resolved
+  conflicts, flakes and their signatures, interactions, the closure table and the explained failures,
+  root causes closed. The fixers' adjacent observations are filed as issues, marked unverified.
 
 ## Lenses
 

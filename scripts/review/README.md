@@ -84,3 +84,30 @@ scripts/review/classify_claims.py --claims /tmp/claims --review-tree /tmp/rt --p
 ```
 
 The claim classifies as `seed_hit` attributed to `S1`.
+
+## Fix phase tooling
+
+The hunt ends with issues; the fix phase turns them into merged PRs and closes each issue by
+re-running its reproduction. `/fix-phase` is the coordinator checklist (`.claude/skills/fix-phase/`),
+`fixer` the agent that fixes one issue (`.claude/agents/fixer.md`). The scripts:
+
+| script | does | proof |
+|---|---|---|
+| `land.sh <pr> ...` | rebases each PR onto the current `main`, resolves the list files, verifies what CI would fail on (splices, `test.sh`, unique guard databases, every mutation builds), pushes, waits for the head checks, enqueues, waits for the merge; one PR at a time, Tier 1 first | `--rebase-only` dry path; exit codes in its header |
+| `keep_both.py <file>` | keep-both resolution of an add/add conflict in `CHANGELOG.md`, `bench/mutations/mutate.py`, `test.sh` or the perf/archive workflows, with the three structural repairs `mutate.py` needs; refuses any other file | `--selftest` holds the three conflict shapes pass 2 met |
+| `flake_check.sh <run>` | says whether every failed job of a run matches a KNOWN flake signature (narrow: the lock guard's probe with its liveness green and no other failure; a third-party image pull refused by a quota with no test run) | each signature names its issue |
+| `closure.sh --claims <dir> --out <json>` | re-runs every reproduction against `main` in the harness, using a verifier's `repro.verified.sql` where one exists; refuses to run while a `fix/` PR is open | preconditions checked, not assumed |
+| `close_comments.py` | renders one evidence comment per issue from the closure output, `--post` posts them and REOPENS an issue whose sound reproduction still fails | `--selftest` |
+
+Why one PR at a time. Every fix appends at the same three spots (a changelog bullet, a mutation
+entry, a guard line), so every rebase conflicts there; `keep_both.py` makes that mechanical. What no
+script can remove is the squash queue's shape: a squash commit has no ancestry link to its branch, so
+once PR k-1 lands, PR k conflicts with `main` in those files and must be rebased and re-checked before
+it can be queued. Stacking PRs on each other does not help (the queue's three-way merge sees the same
+conflict), and a plain `git rebase main` of a stacked PR replays its predecessor onto its own squash.
+Measured in pass 2: about 24 minutes per PR, serial. A merge-commit queue would allow groups of five;
+that is a repository ruleset decision, recorded in `docs/adversarial-review.md`.
+
+Assign before spawning. Fixers working in parallel each take "the next free" test number and guard
+database unless the coordinator hands them out; pass 2 ended with seven files numbered 124. `land.sh`
+renumbers a duplicate `pgpm_perfNN` (databases) but cannot renumber files.
