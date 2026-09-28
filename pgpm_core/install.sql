@@ -2394,17 +2394,21 @@ begin
     -- of never splitting a tie. The lookup is an index probe on the unit's minimal literal, not a decode
     -- per row. The identity codecs (time, id) decode distinct values distinctly and cannot get here;
     -- their unit is their type's own resolution, so the same step would still be right if they did.
+    -- The row past the unit is read with ORDER BY ... ASC LIMIT 1 and NOT min(), for #507's reason:
+    -- there is no min(uuid) before PostgreSQL 18, and as an aggregate this read raised 42883 on every
+    -- uuidv7 pick that reached it, so the burst it exists for wedged the child instead (#571).
     if not pgpm._native_gt(cfg.control_kind, v_stop, v_lo) then
       v_unit := case cfg.control_kind
                   when 'text_time' then case cfg.text_time_unit when 's' then '1 second' else '1 millisecond' end
                   when 'uuidv7' then '1 millisecond'
                   when 'time' then '1 microsecond'
                   else '1' end;
-      execute format('select min(%I)::text from %I.%I t where t.%I >= %L',
+      execute format('select t.%I::text from %I.%I t where t.%I >= %L order by t.%I asc limit 1',
                      cfg.control_column, v_nsp, p_child, cfg.control_column,
                      pgpm._encode(cfg.control_kind, pgpm._grid_next(cfg.control_kind, v_unit, v_lo, cfg.partition_tz),
                                   cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
-                                  cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz))
+                                  cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
+                     cfg.control_column)
         into v_next_distinct_col;
       v_stop := case when v_next_distinct_col is null then v_child_hi
                      else pgpm._col_to_native(cfg, v_next_distinct_col) end;

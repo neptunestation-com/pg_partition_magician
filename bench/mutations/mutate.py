@@ -410,11 +410,12 @@ ARCHIVE_CHUNK_TIES_BLOCK = """    if not pgpm._native_gt(cfg.control_kind, v_sto
                   when 'uuidv7' then '1 millisecond'
                   when 'time' then '1 microsecond'
                   else '1' end;
-      execute format('select min(%I)::text from %I.%I t where t.%I >= %L',
+      execute format('select t.%I::text from %I.%I t where t.%I >= %L order by t.%I asc limit 1',
                      cfg.control_column, v_nsp, p_child, cfg.control_column,
                      pgpm._encode(cfg.control_kind, pgpm._grid_next(cfg.control_kind, v_unit, v_lo, cfg.partition_tz),
                                   cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
-                                  cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz))
+                                  cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
+                     cfg.control_column)
         into v_next_distinct_col;
       v_stop := case when v_next_distinct_col is null then v_child_hi
                      else pgpm._col_to_native(cfg, v_next_distinct_col) end;
@@ -1982,6 +1983,24 @@ $$;''',
         "chunks, the burst whole in the second) and its retire assertions are what catch it, through "
         "bench/archive_chunk_ties.sh.",
         [(ARCHIVE_CHUNK_TIES_BLOCK, "", 1)],
+    ),
+    "archive_chunk_native_tie_min_uuid": (
+        "bench/archive_chunk_uuidv7_ties.sh",
+        "Pre-#571 _next_archive_chunk: #513's extension past a native unit read the first row minted after "
+        "it with min(<control>), the one aggregate #507 missed. PostgreSQL has no min(uuid) before 18, so "
+        "on a uuidv7 table a millisecond holding a chunk's worth of rows raises 42883 at every pick: every "
+        "archive tick logs skip_archive, no ledger row is written past the burst and the aged child is "
+        "never covered nor retired. Reached only through a budget-limited chunk that ends inside one "
+        "millisecond, which tests/125_uuidv7_regrain_archive never builds; tests/137's direct pick, its "
+        "ledger identity (three chunks, the burst whole in the second) and its retire assertions are what "
+        "catch it, through bench/archive_chunk_uuidv7_ties.sh, on PostgreSQL 17.",
+        [("      execute format('select t.%I::text from %I.%I t where t.%I >= %L order by t.%I asc limit 1',\n",
+          "      execute format('select min(%I)::text from %I.%I t where t.%I >= %L',\n", 1),
+         ("                                  cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),\n"
+          "                     cfg.control_column)\n"
+          "        into v_next_distinct_col;\n",
+          "                                  cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz))\n"
+          "        into v_next_distinct_col;\n", 1)],
     ),
     "retire_drops_regrain_source": (
         "bench/retire_regrain_source.sh",

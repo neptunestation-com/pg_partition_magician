@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **A uuidv7 millisecond holding a chunk's worth of rows no longer wedges archiving and retention**
+  (#571). #513's extension of a chunk past a native unit read the first row minted after it with
+  `min(<control>)`, the one aggregate read in `pgpm._next_archive_chunk` that #507 missed, and PostgreSQL
+  has no `min(uuid)` before 18. So on PostgreSQL 15 to 17 every pick that reached it raised 42883: each
+  tick's archive step was logged `skip_archive`, no ledger row was written past the burst, and the aged
+  partition was never covered nor retired. The read is now `ORDER BY ... LIMIT 1`, and the burst travels
+  as one oversized chunk as `docs/reference.md` says it does. `tests/137_archive_chunk_uuidv7_ties_test.sql`
+  is tests/125's tie fixture as uuidv7 (100 ids in one millisecond, a budget for fewer) and asserts the
+  direct pick and the ledger's exact three chunks through write-block, archive and retire;
+  `bench/archive_chunk_uuidv7_ties.sh` runs it in the perf track, and `./test.sh discriminate` requires it
+  to fail against `archive_chunk_native_tie_min_uuid`, the mutation that puts `min()` back.
 - **`obtain()` stops at an `int` or `smallint` id column's type ceiling with what it built, instead of
   building nothing** (#578). Its grid-ceiling check only ran `_encode` on the candidate's upper bound, and
   `_encode` is a passthrough for `id`, so it could not see that an `int` column ends at 2147483647. On a
