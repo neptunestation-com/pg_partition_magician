@@ -689,6 +689,9 @@ run_perf() {
     "bench/maintain_all_sweep_turns.sh pgpm_perf64"
     "bench/regrain_candidate_lock_race.sh pgpm_perf65"
     "bench/untransmute_fk_validate_lock.sh pgpm_perf62"
+    "bench/transmute_resume_lattice.sh pgpm_perf56"
+    "bench/transmute_reap_identity.sh pgpm_perf57"
+    "bench/transmute_step_preflight.sh pgpm_perf58"
   )
   local selected=()
   local n=${#guards[@]} idx
