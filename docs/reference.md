@@ -2070,6 +2070,14 @@ midnight twice a year, so two adjacent day cells could otherwise start on the sa
 adjacent hour cells share a wall hour every autumn) and share a name. UTC never repeats a date or an
 hour.
 
+A day or week partition created before that rule keeps the name it was given, the wall date of its start
+in `partition_tz`. East of UTC, with the grid anchored at local midnight, that is exactly the UTC date
+of the cell after it, so on such a grid the next cell's plain name is already taken. When `obtain` or
+`extend_to` finds a missing cell's plain name held by one of the same parent's partitions over a
+different range, it builds the cell under its explicit-range name (`events_p2026_10_02_to_2026_10_03`,
+one step wide) and leaves the older partition untouched. A name held by anything else still stops the
+cell from being built.
+
 The name is a human-facing label; `pgpm.part` holds the authoritative bounds. The `_to_` form is also
 what keeps `transmute`'s orphan check from mistaking a monolith for a leftover of an interrupted regrain.
 

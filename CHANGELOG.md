@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **An upgraded day grid builds the cell its old labels collide with** (#572). #503 relabelled day and
+  week cells by the UTC date of their start and left existing partitions under their old names, the wall
+  date of their start in `partition_tz`. East of UTC with the grid anchored at local midnight (Asia/Tokyo:
+  cells start 15:00Z) a cell's wall date is its UTC date plus one, so the new label of every cell is the
+  old label of the cell before it, and on a grid converted before the upgrade the first cell past the last
+  old-named partition rendered the name that partition carries. `obtain` and `extend_to` took the taken
+  name for "already built" and skipped the cell: a one-day hole that refused every write into it, nothing
+  logged, while the cells after it were built. Both now ask their overlap check first and, when a missing
+  cell's plain name belongs to one of the parent's own partitions (by `pgpm.part.child_oid`) over a
+  different range, build it under its explicit-range name `_p<lo>_to_<hi>`, leaving the old partition
+  untouched; a name held by anything else is left alone as before. `tests/138` builds the pre-#503 state on
+  two Tokyo grids, and `bench/legacy_day_labels.sh` runs it against `legacy_day_label_skipped_by_name`.
 - **A uuidv7 millisecond holding a chunk's worth of rows no longer wedges archiving and retention**
   (#571). #513's extension of a chunk past a native unit read the first row minted after it with
   `min(<control>)`, the one aggregate read in `pgpm._next_archive_chunk` that #507 missed, and PostgreSQL

@@ -1423,6 +1423,22 @@ begin
         [("    v_label_tz := case when v_months > 0 then p_tz else 'UTC' end;\n",
           "    v_label_tz := case when v_months > 0 or v_secs >= 86400 then p_tz else 'UTC' end;\n", 1)],
     ),
+    "legacy_day_label_skipped_by_name": (
+        "bench/legacy_day_labels.sh",
+        "Pre-#572 obtain and extend_to: a missing cell whose plain name is held by one of the parent's own "
+        "partitions over a DIFFERENT range is skipped as though it were built, instead of being built under "
+        "its explicit-range name. The #503 relabelling left pre-upgrade day children with their wall-date "
+        "labels, and east of UTC with a local-midnight anchor the new label of every cell is the old label "
+        "of the cell before it, so on an upgraded grid the first cell past the last legacy child is never "
+        "built: a one-day hole that refuses every write, nothing logged, while the cells after it are "
+        "built. Only the fallback is removed (the helper returns null where it would take the explicit "
+        "name), so the mutant is exactly 'a taken name means built'. tests/138's Tokyo grids, relabelled "
+        "the pre-#503 way, are what catch it: the collided cell is missing and the write into it refused.",
+        [("  v_name := pgpm._part_name(p_rel, cfg.control_kind, cfg.partition_step, p_lo, p_hi, cfg.partition_tz, true);\n"
+          "  if to_regclass(format('%I.%I', p_nsp, v_name)) is not null then return null; end if;\n"
+          "  return v_name;\n",
+          "  return null;\n", 1)],
+    ),
     "naive_column_grid_in_session_zone": (
         "bench/naive_column_utc_grid.sh",
         "Pre-#504 _transmute and set_partition_tz: a timestamp or date control column records the "
