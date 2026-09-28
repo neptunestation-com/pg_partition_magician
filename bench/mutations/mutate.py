@@ -620,6 +620,25 @@ TRANSMUTE_DATE_WHOLE_DAYS_RE = re.compile(
     r"the cutover would fail on an empty partition range', quote_ident\(p_control\), p_step;\n",
     re.DOTALL,
 )
+# archive.to_s3's enclosing query_canceled handler (#595), whole, so the mutant reads as the function
+# before it: the labelled export block with its `when others` abort, and nothing around it.
+TO_S3_CANCEL_HANDLER = """end export;
+exception when query_canceled then
+  -- a cancel, from the export or from the handler above before it could abort (see the top of the
+  -- body). It is taken by now, so this DELETE runs; the cancel is re-raised either way.
+  if v_upload_id is not null then
+    begin
+      perform archive.s3_signed_request('DELETE', cfg.endpoint, cfg.bucket, cfg.region, v_key,
+                                       'uploadId=' || archive.s3_url_encode(v_upload_id),
+                                       'text/plain', '', v_key_id, v_secret);
+    exception when others then null;
+    end;
+  end if;
+  raise;
+end;
+$$;
+"""
+
 MUTATIONS = {
     "transmute_no_commits": (
         "bench/transmute_lock.sh",
@@ -2718,6 +2737,34 @@ $$;''',
       end if;
 """, "", 1)],
     ),
+    "to_s3_part_bytes_unbounded": (
+        "bench/archive_to_s3_part_bytes.sh",
+        "Pre-#594 archive.configure and archive.to_s3: configure stores any p_part_bytes, and to_s3 reads "
+        "whatever the row holds as the size of each multipart part. With 0 or less its read loop "
+        "(`while octet_length(payload) < part_bytes`) is false at once, so the export never reads a row: "
+        "it initiates a multipart upload and PUTs empty parts until the store refuses part 10001 (about "
+        "20 s against MinIO, 10000 round trips against S3, all in the caller's transaction). Two sites, "
+        "both bounds, so the mutant is the old code exactly; tests/archive/db/23 asserts each on its own.",
+        [
+            ("  if p_part_bytes <= 0 then\n"
+             "    raise exception 'archive.configure: p_part_bytes must be a positive number of bytes, not %', p_part_bytes;\n"
+             "  end if;\n", "", 1),
+            ("  if cfg.part_bytes <= 0 then\n"
+             "    raise exception 'archive.to_s3: % has archive.config.part_bytes %; it must be a positive number of bytes (set it with archive.configure)',\n"
+             "      p_parent, cfg.part_bytes;\n"
+             "  end if;\n", "", 1),
+        ],
+    ),
+    "to_s3_abort_misses_cancel": (
+        "bench/archive_to_s3_cancel_abort.sh",
+        "Pre-#595 archive.to_s3: the multipart abort runs only from `exception when others`, which does "
+        "not catch query_canceled (57014). A statement_timeout or pg_cancel_backend mid-export, or a "
+        "cancel still pending when a transport error is raised (taken at the handler's first statement), "
+        "skips the DELETE ?uploadId and leaves the upload and its parts in the bucket, against the "
+        "README's 'an in-flight multipart upload is aborted'. One site: the enclosing query_canceled "
+        "handler, removed whole, so only the old `when others` handler is left.",
+        [(TO_S3_CANCEL_HANDLER, "end export;\nend;\n$$;\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
@@ -2751,6 +2798,8 @@ MUTATION_SRC = {
     "archive_huffman_temp_table": "pgpm_archive/install.sql",
     "uninstall_drops_pending_fk": "pgpm_core/uninstall.sql",
     "uninstall_keeps_regrain_copies": "pgpm_core/uninstall.sql",
+    "to_s3_part_bytes_unbounded": "pgpm_archive/install.sql",
+    "to_s3_abort_misses_cancel": "pgpm_archive/install.sql",
 }
 
 # name -> the CI track whose job runs it; anything not listed here belongs to the default `perf`
