@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **CI caches the third-party images, so a burst of PRs cannot spend a registry's anonymous quota**
+  (#558). On 2026-09-26 seventeen PR heads pushed within twenty minutes spent ECR Public's anonymous
+  data quota for `public.ecr.aws/supabase/postgres` (`toomanyrequests: Data limit exceeded`) and
+  failed a TimescaleDB job outright; `test.sh`'s five-attempt backoff is sized for a rate limit, which
+  clears in seconds, not for a quota, which does not. The TimescaleDB job, the archive job and every
+  `discriminate` shard (each of which brings MinIO up from Docker Hub) now restore a `docker save`
+  tarball from the Actions cache, keyed on the exact image reference compose resolves, and save one
+  after a miss whether the tests passed or not. `test.sh` skips the pull of an image that is already
+  present, so a cache hit never calls the registry. MinIO is cached under the local tag
+  `pgpm-cache/minio:<digest>`, which `PGPM_MINIO_IMAGE` points compose at, because the runners'
+  classic image store drops the digest on `docker save` and a loaded copy could not answer to the
+  pinned reference itself.
+
 - **Review tooling: verifiers store the reproduction they rebuilt, seeds record their side effects, and
   issues are filed by script** (part of #558). In pass 2 five candidates reached their defect only because
   another seed had frozen the monolith; their verifiers rebuilt the fixtures but never stored them, so the

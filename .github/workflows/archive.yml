@@ -19,6 +19,14 @@ name: Archive track
 # bench/ matching. It does rest on that naming convention holding for the next one. If a future
 # archive guard is named something else, add it here BY NAME rather than widening this to
 # bench/*.sh, which would start the whole MinIO-and-pyarrow track on every unrelated bench edit.
+#
+# MinIO comes from Docker Hub anonymously, and it is pulled here and by every perf.yml discriminate
+# shard, so a burst of PRs multiplies it the way it multiplied the supabase/postgres pull that spent
+# ECR Public's anonymous DATA quota on 2026-09-26 (#558). A quota, unlike a rate limit, does not clear
+# within any backoff a job can afford. So the image is restored from the Actions cache, keyed on its
+# digest reference, and test.sh skips the pull of an image that is already present: a hit never calls
+# Docker Hub. A miss pulls as before and saves the image afterwards, pass or fail. perf.yml's
+# discriminate job carries the same steps and the same key, so either workflow's save serves both.
 on:
   # The merge queue builds main plus the queued PRs and runs this on that tree, so a queued
   # change is tested exactly as it will land. merge_group has no paths filter by design.
@@ -61,5 +69,62 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # MinIO from the Actions cache rather than Docker Hub (see this file's header). The reference is read
+      # from docker-compose.yml, never restated here, and the cached copy is the digest-pulled image under
+      # the local tag pgpm-cache/minio:<digest hex>: the runners' classic image store drops digests on
+      # `docker save`, so a loaded copy could never answer to the digest reference itself (docker-compose.yml
+      # explains PGPM_MINIO_IMAGE, which points compose at that tag on a hit).
+      - name: Resolve the MinIO image reference
+        id: minio
+        run: |
+          ref=$(docker compose --profile archive config --images minio)
+          case "$ref" in
+            *@sha256:*) ;;
+            *) echo "::error::the MinIO image is no longer pinned by digest ($ref); the cache keys on the digest"; exit 1 ;;
+          esac
+          {
+            echo "ref=$ref"
+            echo "alias=pgpm-cache/minio:${ref##*@sha256:}"
+            echo "key=third-party-image-v1-${RUNNER_OS}-${RUNNER_ARCH}-$ref"
+            echo "tarball=$RUNNER_TEMP/third-party-images/minio.tar"
+          } >> "$GITHUB_OUTPUT"
+      - name: Restore the MinIO image from the cache
+        id: minio-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.minio.outputs.tarball }}
+          key: ${{ steps.minio.outputs.key }}
+      - name: Load the cached MinIO image
+        if: steps.minio-cache.outputs.cache-hit == 'true'
+        env:
+          ALIAS: ${{ steps.minio.outputs.alias }}
+          TARBALL: ${{ steps.minio.outputs.tarball }}
+        run: |
+          docker load -i "$TARBALL"
+          # Witness: the tag compose will be pointed at answers locally, so test.sh does not pull.
+          docker image inspect "$ALIAS" >/dev/null
+          echo "PGPM_MINIO_IMAGE=$ALIAS" >> "$GITHUB_ENV"
       - name: Run the archive track
         run: ./test.sh archive
+      # On a miss, after the track whatever its result, and only if the digest-pinned image was pulled.
+      - name: Save the MinIO image for the cache
+        id: minio-save
+        if: ${{ !cancelled() && steps.minio-cache.outputs.cache-hit != 'true' }}
+        env:
+          REF: ${{ steps.minio.outputs.ref }}
+          ALIAS: ${{ steps.minio.outputs.alias }}
+          TARBALL: ${{ steps.minio.outputs.tarball }}
+        run: |
+          if [ -z "$REF" ] || ! docker image inspect "$REF" >/dev/null 2>&1; then
+            echo "the MinIO image was never pulled; nothing to cache"; exit 0
+          fi
+          mkdir -p "$(dirname "$TARBALL")"
+          docker tag "$REF" "$ALIAS"
+          docker save -o "$TARBALL" "$ALIAS"
+          echo "saved=true" >> "$GITHUB_OUTPUT"
+      - name: Store the MinIO image in the cache
+        if: ${{ !cancelled() && steps.minio-save.outputs.saved == 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.minio.outputs.tarball }}
+          key: ${{ steps.minio.outputs.key }}

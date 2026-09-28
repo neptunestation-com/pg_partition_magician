@@ -9,8 +9,17 @@ name: TimescaleDB track
 # ts_pg_tags selects the image tag(s); the default 15.14.1.127 bundles TimescaleDB 2.16.1 (the larger fleet
 # cluster, ~434 projects). The 2.9.x cluster (~224 projects) is not covered here yet: the image bundles one
 # TS version per tag, so a 2.9.x leg needs a supabase/postgres:15 tag that ships TimescaleDB 2.9.1 -- pass it
-# via a manual dispatch (deferred as a standing CI leg). ECR Public rate-limits anonymous pulls, so test.sh
-# retries the pull with backoff.
+# via a manual dispatch (deferred as a standing CI leg).
+#
+# The image comes from the Actions cache, not from ECR, whenever the cache has it. ECR Public limits
+# anonymous pulls two ways. The RATE limit ("toomanyrequests: Rate exceeded") is transient, and test.sh
+# retries the pull with backoff for it. The DATA quota ("toomanyrequests: Data limit exceeded") is not: on
+# 2026-09-26 seventeen PR heads pushed within twenty minutes spent it and failed this job outright (#558),
+# and no backoff a job can afford outlasts it. So the job restores a `docker save` tarball keyed on the
+# exact image reference and `docker load`s it, and test.sh skips the pull of an image that is already
+# present: a hit never calls the registry. A miss pulls as before and saves the tarball afterwards, pass or
+# fail, so the next run hits. A PR run can read the entry `main` saved, so once `main` has run this job for
+# a tag, a burst of PRs costs the registry nothing.
 on:
   workflow_call:
     inputs:
@@ -31,5 +40,60 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Read the references from docker-compose.yml the way test.sh does, one per tag, so the key is exactly
+      # the image `up` would run and a new tag can never be served another tag's tarball.
+      - name: Resolve the supabase/postgres image references
+        id: images
+        env:
+          TS_PG_TAGS: ${{ inputs.ts_pg_tags }}
+        run: |
+          refs=""
+          for tag in $TS_PG_TAGS; do
+            refs="$refs $(TS_PG_TAG="$tag" docker compose --profile timescale config --images timescale)"
+          done
+          refs="${refs# }"
+          {
+            echo "refs=$refs"
+            echo "key=third-party-image-v1-${RUNNER_OS}-${RUNNER_ARCH}-${refs// /+}"
+            echo "tarball=$RUNNER_TEMP/third-party-images/supabase-postgres.tar"
+          } >> "$GITHUB_OUTPUT"
+      - name: Restore the supabase/postgres image from the cache
+        id: image-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.images.outputs.tarball }}
+          key: ${{ steps.images.outputs.key }}
+      - name: Load the cached supabase/postgres image
+        if: steps.image-cache.outputs.cache-hit == 'true'
+        env:
+          REFS: ${{ steps.images.outputs.refs }}
+          TARBALL: ${{ steps.images.outputs.tarball }}
+        run: |
+          docker load -i "$TARBALL"
+          # Witness: every reference test.sh will look for answers locally, so none of them is pulled.
+          for ref in $REFS; do docker image inspect "$ref" >/dev/null; done
       - name: Run the from_hypertable track
         run: TS_PG_TAGS='${{ inputs.ts_pg_tags }}' ./test.sh timescale
+      # On a miss, after the track whatever its result. Only when EVERY reference was pulled: an entry is
+      # immutable once written, so a partial tarball would be served under this key until it is evicted.
+      - name: Save the supabase/postgres image for the cache
+        id: image-save
+        if: ${{ !cancelled() && steps.image-cache.outputs.cache-hit != 'true' }}
+        env:
+          REFS: ${{ steps.images.outputs.refs }}
+          TARBALL: ${{ steps.images.outputs.tarball }}
+        run: |
+          [ -n "$REFS" ] || { echo "no image reference was resolved; nothing to cache"; exit 0; }
+          for ref in $REFS; do
+            docker image inspect "$ref" >/dev/null 2>&1 || { echo "$ref was never pulled; not caching"; exit 0; }
+          done
+          mkdir -p "$(dirname "$TARBALL")"
+          # shellcheck disable=SC2086  # word-split on purpose: one argument per reference
+          docker save -o "$TARBALL" $REFS
+          echo "saved=true" >> "$GITHUB_OUTPUT"
+      - name: Store the supabase/postgres image in the cache
+        if: ${{ !cancelled() && steps.image-save.outputs.saved == 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.images.outputs.tarball }}
+          key: ${{ steps.images.outputs.key }}

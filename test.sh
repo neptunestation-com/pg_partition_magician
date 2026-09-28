@@ -298,6 +298,33 @@ run_version() {  # <pg_version>
   echo "PostgreSQL $v: PASS"
 }
 
+# Pull the third-party image a compose service runs (supabase/postgres for timescale, MinIO for the
+# archive profile), unless it is already here. The reference is read from compose itself, so it is
+# exactly the one `up` would pull: TS_PG_TAG interpolated into the supabase/postgres tag, and MinIO's
+# digest pin (or PGPM_MINIO_IMAGE, the CI cache's local alias for it) as docker-compose.yml states it.
+#
+# An image that is already present is never pulled. CI restores both images from the Actions cache
+# (timescale.yml, archive.yml, perf.yml) because a registry's anonymous DATA quota is not a rate limit:
+# once a burst of PRs has spent it ("toomanyrequests: Data limit exceeded", 2026-09-26, #558) it does
+# not come back within any backoff this loop could afford, so the only pull that cannot fail is the
+# one that is not made. The backoff below is for the other failure, the anonymous RATE limit
+# ("toomanyrequests: Rate exceeded"), which runners sharing source IPs trip often and which clears in
+# seconds. A pull that still fails falls through rather than aborting under `set -e` (left operand of
+# `&&`): `up` then tries once more and fails loudly if the image really is unavailable.
+pull_third_party() {  # <profile> <service>
+  local ref attempt
+  ref=$($DC --profile "$1" config --images "$2")
+  if docker image inspect "$ref" >/dev/null 2>&1; then
+    echo "  $ref is already present; not pulling it"
+    return 0
+  fi
+  for attempt in 1 2 3 4 5; do
+    $DC --profile "$1" pull "$2" && return 0
+    echo "  pull attempt $attempt for $ref failed (usually a rate limit); backing off $((attempt * 15))s..."
+    sleep $((attempt * 15))
+  done
+}
+
 # The from_hypertable track. PG15 + Apache TimescaleDB, run on the Supabase fleet image
 # (public.ecr.aws/supabase/postgres -- the Apache edition the migration actually targets; it ships
 # timescaledb, pgTAP, and the timescaledb shared_preload preloaded, so there is no image build). Each
@@ -315,15 +342,7 @@ run_timescale() {
     echo "Apache TimescaleDB via supabase/postgres:$tag / pg15 -- from_hypertable"
     echo "========================================="
     $DC --profile "$prof" down -v 2>/dev/null || true
-    # ECR Public rate-limits ANONYMOUS pulls, and CI runners share source IPs, so a single image pull often
-    # trips "toomanyrequests: Rate exceeded" and the suite never runs. Pull explicitly with growing backoff
-    # first (the throttle is transient); once the image is cached, `up` reuses it (default pull policy =
-    # missing). Left operand of `&&`, so a failed pull is not fatal under `set -e`.
-    for attempt in 1 2 3 4 5; do
-      $DC --profile "$prof" pull "$svc" && break
-      echo "  image pull attempt $attempt hit a rate limit; backing off $((attempt * 15))s..."
-      sleep $((attempt * 15))
-    done
+    pull_third_party "$prof" "$svc"
     $DC --profile "$prof" up -d
     # This track is where the TCP-probe rule was learned; wait_pg now carries it for every track.
     wait_pg "$prof" "$svc" 120
@@ -433,6 +452,7 @@ run_archive() {
   echo "========================================="
   $DC --profile "$prof" down -v 2>/dev/null || true
   $DC --profile "$prof" build $BUILD_PROGRESS archive
+  pull_third_party "$prof" minio
   $DC --profile "$prof" up -d
 
   wait_pg "$prof" "$svc" 60
@@ -676,6 +696,7 @@ run_discriminate() {
   fi
   $DC --profile "$prof" up -d --wait "$svc"
   $DC --profile "$aprof" build $BUILD_PROGRESS "$asvc"
+  pull_third_party "$aprof" minio
   $DC --profile "$aprof" up -d
   wait_pg "$aprof" "$asvc" 60
   local rc=0
