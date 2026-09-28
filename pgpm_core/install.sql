@@ -750,11 +750,26 @@ $$;
 -- and the first tick takes the table offline. Zero is legitimate: its horizon is the write partition's own
 -- floor, so it keeps exactly that partition and ages everything behind it (tests/63 relies on it). Null is
 -- null here (no policy); callers decide what that means for them.
+--
+-- #565: an interval is judged FIELD BY FIELD (months, days, time), never with `>= interval '0'`. Interval
+-- comparison normalises a month to 30 days and a year to 360, while the horizon this protects is calendar
+-- arithmetic on the wall clock (_retain_boundary), where a year is 365 or 366 days and a month 28 to 31: so
+-- '-1 year 360 days' compared equal to zero and was accepted, and its horizon sat five or six days in the
+-- future. A mixed-sign value has no calendar-independent sign at all ('-1 mon 30 days' is a day ahead of now
+-- from a 31-day month and two behind from February), while a value with no negative field moves the wall
+-- clock back, or leaves it, on every date. The mixed-sign values that happen to net positive ('1 mon -1 day')
+-- are refused with the rest; no retention policy needs one.
 create or replace function pgpm._retain_nonnegative(p_kind text, p_retain text)
 returns boolean language plpgsql immutable as $$
+declare v_i interval;
 begin
-  if p_kind = 'id' then return p_retain::numeric >= 0;
-  else return p_retain::interval >= interval '0'; end if;
+  if p_kind = 'id' then return p_retain::numeric >= 0; end if;
+  v_i := p_retain::interval;
+  -- date_trunc keeps the months, then the months and days; the differences isolate one field each, and a
+  -- single-field interval compares exactly
+  return date_trunc('month', v_i) >= interval '0'
+     and date_trunc('day', v_i) - date_trunc('month', v_i) >= interval '0'
+     and v_i - date_trunc('day', v_i) >= interval '0';
 end;
 $$;
 

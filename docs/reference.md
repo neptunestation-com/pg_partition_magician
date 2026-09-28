@@ -128,7 +128,10 @@ Parameters:
 - `p_retain` -- drop partitions older than this `interval`; `null` keeps everything. Must not be
   negative: a negative interval is refused before anything is committed, because it would put the
   retention horizon past the partition taking writes and the first maintenance tick would drop every
-  partition. `interval '0'` is allowed and keeps only the partition taking writes.
+  partition. Negative means any field: none of the interval's months, days or time may be below zero,
+  so a mixed-sign value such as `'-1 year 360 days'` is refused too (it compares equal to zero, yet
+  taken off the calendar it moves the horizon five or six days into the future). `interval '0'` is
+  allowed and keeps only the partition taking writes.
 - `p_regrain_batch` -- rows per regrain COPY microbatch.
 - `p_anchor` -- the grid origin the boundaries align to (month and year steps count from its month in
   the session's zone; day and shorter steps count seconds from the instant).
@@ -1540,7 +1543,8 @@ pgpm.set_retain(p_parent regclass, p_retain text default null) returns void
 
 Change `config.retain`, the retention horizon `retain()` drops partitions past (`null` = keep forever).
 `p_retain` is validated against `control_kind` the same way `transmute` does: `numeric` for `id`, an
-interval for `time`/`uuidv7`/`text_time`, and, like `transmute`, it must not be negative. A negative
+interval for `time`/`uuidv7`/`text_time`, and, like `transmute`, it must not be negative, in any of an
+interval's fields (a mixed-sign value is refused as `transmute` refuses it). A negative
 value is refused outright, whatever the current value: it puts the horizon past the partition taking
 writes, and the guard below compares boundaries, so on its own it cannot see a value that grid-floors to
 the current boundary. `'0'` is allowed and keeps only the partition taking writes.

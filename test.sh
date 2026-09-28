@@ -653,6 +653,7 @@ run_perf() {
     "bench/archive_chunk_ties.sh pgpm_perf38"
     "bench/retire_regrain_source.sh pgpm_perf39"
     "bench/throws_pinned.sh pgpm_perf40"
+    "bench/retain_interval_sign.sh pgpm_perf44"
   )
   local selected=()
   local n=${#guards[@]} idx
