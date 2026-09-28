@@ -2037,6 +2037,63 @@ $$;''',
           "        from d x join d y on y.i = x.i + 1 cross join d s\n",
           "", 1)],
     ),
+    "parquet_numeric_scale_unsigned": (
+        "bench/archive_parquet_negative_scale.sh",
+        "Pre-#567 numeric decode: archive._pq_decimal_shape reads the typmod's scale as the unsigned low "
+        "16 bits again, ignoring PostgreSQL 15's signed 11-bit field, so numeric(5,-2) comes out as scale "
+        "2046. Every value is multiplied by 10^2046 before it is written, the leaf no longer declares "
+        "DECIMAL(7,0), and the file no longer equals its numeric(7,0) twin's. One site: the scale line of "
+        "the one helper both encoders take the shape from.",
+        [
+            ("  v_scale int4 := (((p_typmod - 4) & 2047) # 1024) - 1024;\n",
+             "  v_scale int4 := (p_typmod - 4) & 65535;\n", 1),
+        ],
+    ),
+    "parquet_timestamp_no_infinity": (
+        "bench/archive_parquet_timestamp_infinity.sh",
+        "Pre-#586 archive._pq_epoch_micros: the bare round(extract(epoch from v) * 1e6)::int8 with no case "
+        "for 'infinity' or '-infinity', so a legal infinite timestamp or timestamptz raises 'cannot convert "
+        "infinity to bigint' on every encode of its chunk: maintain() logs skip_archive each tick, and at "
+        "archive_batch 1 the partition holding it and every younger one are never archived or retired. One "
+        "site, the helper both timestamp branches call.",
+        [
+            ("  select case\n"
+             "    when isfinite(v) then round(extract(epoch from v) * 1000000)::int8\n"
+             "    when v > 'epoch'::timestamptz then 9223372036854775807::int8\n"
+             "    else -9223372036854775807::int8\n"
+             "  end;\n",
+             "  select round(extract(epoch from v) * 1000000)::int8;\n", 1),
+        ],
+    ),
+    "parquet_decimal_scale_above_precision": (
+        "bench/archive_parquet_scale_above_precision.sh",
+        "Pre-#596 leaf shape: a numeric(p,s) column with s > p (legal since PostgreSQL 15) is declared "
+        "DECIMAL(p, s) again, which Parquet forbids and pyarrow refuses for the whole file, while the "
+        "upload and the ledger row succeed. One site: the widening branch of archive._pq_decimal_shape "
+        "keeps the column's own precision.",
+        [
+            ("  elsif v_scale > v_precision then\n"
+             "    p_precision := v_scale;\n",
+             "  elsif v_scale > v_precision then\n"
+             "    p_precision := v_precision;\n", 1),
+        ],
+    ),
+    "parquet_range_refuses_keyless": (
+        "bench/archive_parquet_keyless.sh",
+        "Pre-#597 archive._pq_to_parquet_range_counted: a parent with no primary key or predicate-free "
+        "unique constraint is refused on every chunk for want of a tiebreak, although pgpm.set_archive_fn "
+        "accepts the Parquet strategy for it and the single snapshot (#462) makes the tiebreak unnecessary. "
+        "Every maintain() tick logs skip_archive and nothing of the table is ever covered or retired. The "
+        "exact pre-#597 refusal, put back in front of the ordering.",
+        [
+            ("  v_order_cols := array[p_control] || coalesce(v_key_cols, '{}'::name[]);\n",
+             "  if v_key_cols is null then\n"
+             "    raise exception 'archive._pq_to_parquet_range: % has no primary key or predicate/expression-free unique constraint; a resumable cross-partition range read cannot tiebreak ties on % without one (the same refusal pgpm.regrain_step already makes for keyless tables)',\n"
+             "      p_parent, p_control;\n"
+             "  end if;\n"
+             "  v_order_cols := array[p_control] || v_key_cols;\n", 1),
+        ],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
@@ -2061,6 +2118,10 @@ MUTATION_SRC = {
     "archive_object_key_digits_only": "pgpm_archive/install.sql",
     "sigv4_transaction_start_stamp": "pgpm_archive/install.sql",
     "to_s3_compress_unread": "pgpm_archive/install.sql",
+    "parquet_numeric_scale_unsigned": "pgpm_archive/install.sql",
+    "parquet_timestamp_no_infinity": "pgpm_archive/install.sql",
+    "parquet_decimal_scale_above_precision": "pgpm_archive/install.sql",
+    "parquet_range_refuses_keyless": "pgpm_archive/install.sql",
 }
 
 # name -> the CI track whose job runs it; anything not listed here belongs to the default `perf`

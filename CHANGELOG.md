@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+- **The Parquet writer reads a negative numeric scale as negative** (#567). Since PostgreSQL 15 a
+  numeric typmod's scale is a signed 11-bit field, and both encoders read it as the unsigned low 16
+  bits, so a `numeric(5,-2)` column was written at scale 2046: every value came out as zero and the
+  footer declared a scale no reader accepts, while the upload and the ledger row succeeded. The column
+  shape now comes from one helper, `archive._pq_decimal_shape`, which decodes the signed scale and
+  writes `numeric(p,-k)` as `DECIMAL(p+k, 0)`, every value exactly as itself.
+  `tests/archive/db/18_parquet_negative_scale_test.sql` pins the leaf and the value bytes of both
+  encoders; `bench/archive_parquet_negative_scale.sh` reads the files back with pyarrow and DuckDB and
+  is required to fail against the `parquet_numeric_scale_unsigned` mutation.
+- **The Parquet writer archives `infinity` and `-infinity` timestamps** (#586). A `timestamptz` or
+  `timestamp` holding either raised `cannot convert infinity to bigint` on every encode of its chunk,
+  so `maintain()` logged `skip_archive` every tick and, at `archive_batch`'s default of 1, the
+  partition and every younger one of the table were never archived or retired. They are now written as
+  INT64 max and minus INT64 max, the pair DuckDB reads back as `infinity` and `-infinity`.
+  `tests/archive/db/19_parquet_timestamp_infinity_test.sql` pins the bytes and runs the issue's two
+  ticks; `bench/archive_parquet_timestamp_infinity.sh` reads the files back with pyarrow and DuckDB and
+  is required to fail against the `parquet_timestamp_no_infinity` mutation.
+- **The Parquet writer declares a precision that covers the scale** (#596). A `numeric(2,4)` column
+  (legal since PostgreSQL 15) was declared `DECIMAL(2,4)`, which Parquet forbids and pyarrow refuses
+  for the whole file, while the upload and the ledger row succeeded. Such a column is now declared
+  `DECIMAL(s, s)`, which holds its values unchanged.
+  `tests/archive/db/20_parquet_scale_above_precision_test.sql` pins the leaf and the value bytes;
+  `bench/archive_parquet_scale_above_precision.sh` reads the files back with pyarrow and DuckDB and is
+  required to fail against the `parquet_decimal_scale_above_precision` mutation.
+- **The Parquet strategy archives keyless tables** (#597). `archive._pq_to_parquet_range` refused a
+  parent with no primary key or unique constraint on every chunk, for want of a tiebreak on the
+  control column, while `pgpm.set_archive_fn` accepted `pgpm.archive_to_s3_parquet` for it: every
+  tick logged `skip_archive` and nothing of the table was covered or retired. The tiebreak has been
+  unnecessary since every column is read from one numbered snapshot, so a keyless parent is now
+  ordered by its control column alone, and a keyed table's bytes do not change.
+  `tests/archive/db/21_parquet_keyless_test.sql` asserts that tied rows keep their values together
+  and runs the issue's tick; `bench/archive_parquet_keyless.sh` reads the file back with pyarrow and
+  DuckDB and is required to fail against the `parquet_range_refuses_keyless` mutation.
+  `scripts/verify_parquet_range.py`'s two refusal checks now assert the archive instead.
 - **`retire()` discards archive coverage it finds without its write block, instead of dropping on it**
   (#564). `_enforce_write_blocks` has discarded ledger rows on an unblocked partition since #452 (a
   trigger dropped by hand, or lifted by an older pgpm, leaves a watermark nothing has been guarding),

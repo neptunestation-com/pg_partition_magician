@@ -133,7 +133,7 @@ $$;
 
 -- key discovery, shared by every reader that has to order a read spanning more than one child's
 -- heap (where ctid is no longer comparable): archive._pq_to_parquet_range, the Parquet range
--- reader, calls this. Identical contract to pgpm.regrain_step's own v_keyidx/v_pkjoin_q discovery: a PRIMARY KEY
+-- reader, calls this, and orders a keyless relation by its control column alone (#597). Identical contract to pgpm.regrain_step's own v_keyidx/v_pkjoin_q discovery: a PRIMARY KEY
 -- preferred, else a predicate/expression-free UNIQUE CONSTRAINT, never a bare UNIQUE INDEX
 -- unbacked by a constraint. Returns null for a genuinely keyless relation -- the same 'nokey'
 -- contract regrain() already enforces, an inherited limitation, not a new gap. (On a partitioned
@@ -484,6 +484,25 @@ language sql immutable as $$
   select archive._pq_reverse_bytes(int8send(v));
 $$;
 
+-- A timestamp as the INT64 microseconds since the Unix epoch that a TIMESTAMP_MICROS leaf holds, for
+-- both column types (a `timestamp` arrives here already read as UTC; see _pq_encode_column_data).
+-- 'infinity' and '-infinity' are legal values of both types, the usual "never expires" sentinel, and
+-- extract(epoch) returns them as numeric Infinity, which no int8 cast accepts: one such row raised
+-- 'cannot convert infinity to bigint' on every encode of its chunk, so maintain() logged skip_archive
+-- every tick and at archive_batch 1 nothing younger of the table was archived or retired (#586). They
+-- are written as INT64 max and minus INT64 max, the pair DuckDB's reader decodes as infinity and
+-- -infinity (INT64 min it decodes as a year-290309 BC date, which is why the negative sentinel is not
+-- INT64 min, PostgreSQL's own internal one); pyarrow hands back the same two integers. No finite
+-- value comes near either: PostgreSQL's range ends in 294276 AD, about 9.2e18 microseconds short.
+create or replace function archive._pq_epoch_micros(v timestamptz) returns int8
+language sql immutable as $$
+  select case
+    when isfinite(v) then round(extract(epoch from v) * 1000000)::int8
+    when v > 'epoch'::timestamptz then 9223372036854775807::int8
+    else -9223372036854775807::int8
+  end;
+$$;
+
 create or replace function archive._pq_plain_double(v float8) returns bytea
 language sql immutable as $$
   select archive._pq_reverse_bytes(float8send(v));
@@ -524,6 +543,44 @@ begin
     n := n + 1;
   end loop;
   return n;
+end;
+$$;
+
+-- The (precision, scale) a numeric(p,s) column's Parquet DECIMAL leaf declares, from its atttypmod.
+-- Both encoders take the column shape from here and nowhere else, so the leaf, the byte width
+-- (_pq_decimal_byte_width over the precision returned) and the unscaled values (_pq_plain_decimal
+-- over the scale returned) cannot disagree between them. Parquet requires 0 <= scale <= precision;
+-- PostgreSQL 15 and later accept both a negative scale and a scale above the precision, so the
+-- declared shape is not always a legal leaf, and each of the two cases below is its own defect.
+--
+-- The scale is an 11-bit SIGNED field since PostgreSQL 15 (numeric.c's numeric_typmod_scale). It was
+-- read as the unsigned low 16 bits, so numeric(5,-2) came out as scale 2046: every value multiplied
+-- by 10^2046 and cut to the column's 3-byte width, which is zero for every value since 10^2046 is a
+-- multiple of 2^24. The file uploaded and was ledgered as archived with the values destroyed (#567).
+-- A negative scale -k means every value is a whole multiple of 10^k with at most p significant
+-- digits, so at most p + k digits in all: DECIMAL(p + k, 0) holds each value exactly as itself.
+--
+-- A scale above the precision, numeric(2,4) holding -0.0099..0.0099, was copied into the leaf as
+-- DECIMAL(2,4), which Parquet forbids and pyarrow refuses for the whole file ("Invalid DECIMAL scale 4
+-- cannot be greater than precision 2") while the upload and the ledger row succeeded (#596). Its
+-- values are below 10^(p-s) <= 1 in magnitude, so their unscaled integers have at most s digits and
+-- DECIMAL(s, s) holds them unchanged.
+create or replace function archive._pq_decimal_shape(p_typmod int4, out p_precision int4, out p_scale int4)
+language plpgsql immutable as $$
+declare
+  v_precision int4 := ((p_typmod - 4) >> 16) & 65535;
+  v_scale int4 := (((p_typmod - 4) & 2047) # 1024) - 1024;
+begin
+  if v_scale < 0 then
+    p_precision := v_precision - v_scale;
+    p_scale := 0;
+  elsif v_scale > v_precision then
+    p_precision := v_scale;
+    p_scale := v_scale;
+  else
+    p_precision := v_precision;
+    p_scale := v_scale;
+  end if;
 end;
 $$;
 
@@ -1731,10 +1788,10 @@ $$;
 -- columns)' for the range one, since ctid is not comparable once a read spans more than one child's
 -- heap -- and numbers them, and both encoders then pass {archive_pq_ord} over that table.
 -- quote_ident('ctid') is `ctid` -- a system column needs no special case here. Every caller
--- guarantees p_order_by is a strict total order with no ties: ctid is unique per live row, the range
--- variant requires a primary key/predicate-free unique constraint specifically so the control column
--- can be tiebroken (see the exception archive._pq_to_parquet_range_counted raises when one is
--- missing), and a row_number() ordinal is unique by construction. That matters below,
+-- guarantees p_order_by is a strict total order with no ties: ctid is unique per live row, and a
+-- row_number() ordinal is unique by construction, which is what both encoders pass since #462 (the
+-- range variant's control-and-key order, or control column alone on a keyless parent (#597), only
+-- decides the ordinal archive._pq_snapshot assigns once). That matters below,
 -- where is_present and values_payload are two SEPARATE aggregate calls sharing the same ORDER BY
 -- text rather than one shared array: with no ties, there is only one valid row ordering for
 -- p_order_by, so the two sorts can't land on different sequences relative to each other. This one
@@ -1833,13 +1890,14 @@ begin
     -- bytes, while NDJSON's row_to_json kept the wall clock either way (issue #465). `at time zone
     -- 'UTC'` reads the wall clock as if it were UTC, Parquet's representation of a naive timestamp,
     -- and the leaf says so (LogicalType TIMESTAMP isAdjustedToUTC=false, _pq_logical_timestamp_micros).
+    -- archive._pq_epoch_micros turns either into the INT64, 'infinity' and '-infinity' included (#586).
     execute format(
       case when p_pgtype = 'timestamp'
         then 'select coalesce(array_agg(%I is not null order by %s), ''{}''::boolean[]),
-                     coalesce(string_agg(archive._pq_plain_int64(round(extract(epoch from (%I at time zone ''UTC'')) * 1000000)::int8), ''''::bytea order by %s) filter (where %I is not null), ''''::bytea)
+                     coalesce(string_agg(archive._pq_plain_int64(archive._pq_epoch_micros(%I at time zone ''UTC'')), ''''::bytea order by %s) filter (where %I is not null), ''''::bytea)
                 from %s'
         else 'select coalesce(array_agg(%I is not null order by %s), ''{}''::boolean[]),
-                     coalesce(string_agg(archive._pq_plain_int64(round(extract(epoch from %I::timestamptz) * 1000000)::int8), ''''::bytea order by %s) filter (where %I is not null), ''''::bytea)
+                     coalesce(string_agg(archive._pq_plain_int64(archive._pq_epoch_micros(%I::timestamptz)), ''''::bytea order by %s) filter (where %I is not null), ''''::bytea)
                 from %s'
       end,
       p_col, v_order_q, p_col, v_order_q, p_col, v_from_q)
@@ -1892,10 +1950,12 @@ $$;
 -- to mid-transaction (SET TRANSACTION is legal only before the transaction's first query).
 --
 -- archive_pq_ord is the row's position under p_order_by, computed once here so the per-column reads
--- sort a bigint instead of re-sorting the key. Under a strict total order (which every caller
--- guarantees: see archive._pq_encode_column_data's own contract) a row's position is fixed, so
--- `order by archive_pq_ord` reproduces p_order_by exactly and the file's bytes do not change:
--- verified byte-for-byte against the pre-#462 encoder, both entry points, compressed and not. The
+-- sort a bigint instead of re-sorting the key. Under a strict total order (ctid, or the control
+-- column and a key) a row's position is fixed, so `order by archive_pq_ord` reproduces p_order_by
+-- exactly and the file's bytes do not change: verified byte-for-byte against the pre-#462 encoder,
+-- both entry points, compressed and not. On a keyless parent (#597) p_order_by is the control column
+-- alone and ties take whatever order this one row_number() gives them; that is still ONE order, the
+-- one every column is read in, so a row's values stay on one row. The
 -- ordinal has to be a column of its own because ctid, the whole-relation encoder's order, does not
 -- survive a copy (the temp table has ctids of its own), and a fresh heap's insertion order is not a
 -- documented property to lean on.
@@ -2021,8 +2081,7 @@ begin
         if v_col.atttypmod = -1 then
           raise exception 'archive._pq_to_parquet: column % is numeric with no declared precision/scale; declare it numeric(p,s) to archive it as Parquet DECIMAL', v_col.attname;
         end if;
-        v_precision := ((v_col.atttypmod - 4) >> 16) & 65535;
-        v_scale := (v_col.atttypmod - 4) & 65535;
+        select d.p_precision, d.p_scale into v_precision, v_scale from archive._pq_decimal_shape(v_col.atttypmod) d;
         v_col_pgtypes := v_col_pgtypes || 'numeric'::text; v_col_ptypes := v_col_ptypes || 7; v_col_converted := v_col_converted || 5;
         v_col_typelen := v_col_typelen || archive._pq_decimal_byte_width(v_precision); v_col_scale := v_col_scale || v_scale; v_col_precision := v_col_precision || v_precision;
         else raise exception 'archive._pq_to_parquet: unsupported column type % for column %', v_col.typname, v_col.attname;
@@ -2137,14 +2196,20 @@ begin
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where c.oid = p_parent;
 
-  v_key_cols := archive._key_columns(p_parent);
-  if v_key_cols is null then
-    raise exception 'archive._pq_to_parquet_range: % has no primary key or predicate/expression-free unique constraint; a resumable cross-partition range read cannot tiebreak ties on % without one (the same refusal pgpm.regrain_step already makes for keyless tables)',
-      p_parent, p_control;
-  end if;
   -- the ordering travels as column NAMES, not as a joined SQL fragment: the encoder quote_ident's
-  -- each one itself (#408). The control column leads, the key columns tiebreak it.
-  v_order_cols := array[p_control] || v_key_cols;
+  -- each one itself (#408). The control column leads, the key columns, when there are any, tiebreak it.
+  --
+  -- A keyless parent is archived too, ordered by the control column alone (#597). It used to be
+  -- refused here, on every chunk, for want of a tiebreak, while pgpm.set_archive_fn accepted the
+  -- strategy for it and transmute partitions keyless tables as a supported shape: every maintain()
+  -- tick logged skip_archive and nothing of the table was ever covered or retired. The tiebreak buys
+  -- nothing since #462. Every column is read from ONE materialisation (archive._pq_snapshot) whose
+  -- row_number() is assigned once, so rows tied on the control column land in some order, the same
+  -- order in every column; and the read is one statement with no pagination (pgpm._next_archive_chunk
+  -- extends a chunk to the next distinct control value, so a run of ties is never split across two
+  -- chunks). With a key the order among ties is still the key's, so a keyed table's bytes do not change.
+  v_key_cols := archive._key_columns(p_parent);
+  v_order_cols := array[p_control] || coalesce(v_key_cols, '{}'::name[]);
 
   for v_col in
     select a.attname, a.attnotnull, t.typname, t.typtype, t.typcategory, t.typelem, a.atttypmod
@@ -2187,8 +2252,7 @@ begin
         if v_col.atttypmod = -1 then
           raise exception 'archive._pq_to_parquet_range: column % is numeric with no declared precision/scale; declare it numeric(p,s) to archive it as Parquet DECIMAL', v_col.attname;
         end if;
-        v_precision := ((v_col.atttypmod - 4) >> 16) & 65535;
-        v_scale := (v_col.atttypmod - 4) & 65535;
+        select d.p_precision, d.p_scale into v_precision, v_scale from archive._pq_decimal_shape(v_col.atttypmod) d;
         v_col_pgtypes := v_col_pgtypes || 'numeric'::text; v_col_ptypes := v_col_ptypes || 7; v_col_converted := v_col_converted || 5;
         v_col_typelen := v_col_typelen || archive._pq_decimal_byte_width(v_precision); v_col_scale := v_col_scale || v_scale; v_col_precision := v_col_precision || v_precision;
         else raise exception 'archive._pq_to_parquet_range: unsupported column type % for column %', v_col.typname, v_col.attname;
