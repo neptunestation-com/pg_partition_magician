@@ -35,6 +35,12 @@ null-results file as a hypothesis, not in a claim directory.
   fixtures where compensating errors cannot cancel (2 in, 1 out).
 - **Pair every negative with a liveness witness**: a reproduction that shows "X did not happen" must
   also show the conditions for X were present.
+- **Every reproduction holds at least one `LIVENESS:` assertion.** Name each premise check
+  `LIVENESS: ...` (or `GUARD: ...`, `fixture: ...` for the other setup checks) and every defect check
+  without a prefix, so the classifier can tell "the defect did not fire" from "the fixture never ran".
+  In a `repro.sh`, echo the same prefix on the line that reports the check. A reproduction with no
+  `LIVENESS:` assertion at all is `invalid_repro` and is never run: `classify_claims.py` scans for the
+  prefix and rejects the claim, whatever the defect.
 - **Tier honestly** by the rubric in the methodology. A wrong tier costs the verifier time; an
   inflated one costs your precision, which is measured and recorded per finder.
 

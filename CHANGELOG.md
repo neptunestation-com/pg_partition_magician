@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- **Review tooling: verifiers store the reproduction they rebuilt, seeds record their side effects, and
+  issues are filed by script** (part of #558). In pass 2 five candidates reached their defect only because
+  another seed had frozen the monolith; their verifiers rebuilt the fixtures but never stored them, so the
+  issues shipped with reproductions that could not close them. The `verifier` agent now writes any rebuilt
+  reproduction as `repro.verified.sql` (or `.sh`) beside the finder's and marks its verdict
+  `"rebuilt": true`. `scripts/review/classify_claims.py` runs that file in preference to the finder's, records
+  `repro_used` per claim, counts the verified ones in its summary, and classifies a reproduction with no
+  `LIVENESS:` assertion as `invalid_repro` without running it (the prefix is now mandatory in the finder's
+  contract). A plan entry's optional `side_effects` reaches `sealed.json` and `--catalogue`, and
+  `pass_metrics.py` prints it in the record's new "Seeds" section and lists, under "Seed interactions to
+  check", every candidate whose pristine run failed only its liveness checks. The new
+  `scripts/review/file_issues.py` renders one issue per root-cause group with the reproductions inline
+  (the verified one when present) and an acceptance paragraph, and with `--post` files them Tier 1 first
+  and writes `filed.json`. Each script's `--selftest` holds the new cases and runs in the lint workflow.
+
 - **The fix phase has its own tooling and roles.** `scripts/review/land.sh` lands fix PRs through the
   squash merge queue one at a time (rebase onto `main`, keep-both resolution of the three list files
   with `keep_both.py`, the checks CI would fail on run first, known flakes retried once via

@@ -105,6 +105,7 @@ jobs:
           python3 scripts/review/pass_metrics.py --selftest
           python3 scripts/review/keep_both.py --selftest
           python3 scripts/review/close_comments.py --selftest
+          python3 scripts/review/file_issues.py --selftest
 
   shellcheck:
     name: Shell scripts

@@ -8,9 +8,10 @@ the two model roles.
 | script | step | what it does |
 |---|---|---|
 | `build_review_tree.sh <sha> <dir>` | 4 | the pinned commit as ONE history-less commit in a fresh repo with no remote; `bench/mutations/` removed |
-| `plant_seeds.py --tree --pristine --plan --sealed` | 4 | applies catalogue mutations and novel patches from a plan, writes the sealed record, keeps the tree at one commit |
-| `classify_claims.py --claims --review-tree --pristine-tree --sealed --out` | 6 | runs every reproduction against both trees in a fresh database each; classifies seed hit, candidate, not reproduced, inverted, hypothesis |
-| `pass_metrics.py --sealed --classified --verdicts ... --out` | 8, 10 | recall and precision before the count; writes the pass record under `docs/reviews/` |
+| `plant_seeds.py --tree --pristine --plan --sealed` | 4 | applies catalogue mutations and novel patches from a plan, writes the sealed record (with each seed's `side_effects`), keeps the tree at one commit |
+| `classify_claims.py --claims --review-tree --pristine-tree --sealed --out` | 6 | runs every reproduction (the verifier's `repro.verified.*` when present) against both trees in a fresh database each; classifies seed hit, candidate, not reproduced, inverted, invalid reproduction, hypothesis |
+| `pass_metrics.py --sealed --classified --verdicts ... --out` | 8, 10 | recall and precision before the count; writes the pass record under `docs/reviews/`, with the seed interactions to check |
+| `file_issues.py --groups --claims --verdicts --pinned --pass --out [--post]` | 10 | one issue body per root-cause group with its reproductions inline; `--post` files them, Tier 1 first, and writes `filed.json` |
 
 Each Python script has a `--selftest` that CI runs (`.github/workflows/lint.yml`, "Review tooling self-test").
 
@@ -20,8 +21,15 @@ One directory per claim, grouped by finder. The finder writes it; nothing else d
 
 ```text
 <claims>/<finder>/<claim-id>/claim.json
-<claims>/<finder>/<claim-id>/repro.sql        or repro.sh
+<claims>/<finder>/<claim-id>/repro.sql            or repro.sh
+<claims>/<finder>/<claim-id>/repro.verified.sql   or repro.verified.sh   (the verifier's, optional)
 ```
+
+The one exception to "nothing else writes it": a verifier that changed the fixture or the assertions
+stores its rebuilt reproduction as `repro.verified.sql` (or `.sh`) beside the finder's, which it never
+edits. When that file exists, `classify_claims.py` runs it instead of the finder's (recording which in
+each claim's `repro_used`), `file_issues.py` puts it in the issue, and so the closure run against the
+fixed `main` re-runs the sound version.
 
 ```json
 {"tier": 1, "file": "pgpm_core/install.sql", "line": 4671, "lens": "concurrency",
@@ -47,6 +55,14 @@ against the fixed `main`.
   `DB`, `CONTAINER`. Non-zero exit means present. Use this for two-session probes, `docker exec`
   against a second connection, or anything a single psql stream cannot express.
 
+Every reproduction holds **at least one `LIVENESS:` assertion**: a premise check that the state the
+defect needs was actually reached. Name premise checks `LIVENESS: ...` (other setup checks may be
+`GUARD: ...` or `fixture: ...`) and defect checks without a prefix. A failure of prefixed checks alone
+reads as "the fixture never ran", not as the defect, so a negative cannot pass (or fail) because
+nothing happened. In a `repro.sh`, echo the prefix on the line reporting the check. `classify_claims.py`
+scans the reproduction's text for `LIVENESS:` and classifies a reproduction without one as
+`invalid_repro` without running it.
+
 A reproduction that needs the finder's own environment, a hand edit to pgpm, or a state pgpm refuses
 to enter is not a reproduction; the verifier will record why it fell.
 
@@ -56,12 +72,51 @@ The verifier writes one JSON object keyed by claim id, which `pass_metrics.py` r
 
 ```json
 {"F3-07": {"verdict": "finding",    "tier": 1, "root_cause": "session TimeZone grid", "issue": 501},
+ "F2-04": {"verdict": "finding",    "tier": 2, "root_cause": "late rows skipped; fixture needed a frozen monolith",
+           "rebuilt": true, "repro": "repro.verified.sql"},
  "F2-01": {"verdict": "fell",       "reason": "documented behaviour; reference.md#set_retain"},
  "F1-04": {"verdict": "known_open", "issue": 439}}
 ```
 
 Only `candidate` claims need a verdict. A candidate without one is reported as unverified and is not a
 finding.
+
+`"rebuilt": true` and `"repro"` mean the verifier changed the fixture or the assertions and stored its
+version as `repro.verified.sql` (or `.sh`) in the claim directory. The rebuilt reproduction keeps the
+contract above (a `LIVENESS:` assertion, fails when present, passes when absent) and reaches the defect
+on the pristine commit on its own. It is the reproduction every later step uses.
+
+## Seed side effects
+
+A plan entry may carry `"side_effects"`, one string saying what the seed does to state other claims
+depend on (`"freezes the monolith: every table converted on the tree reads as frozen"`). `plant_seeds.py`
+copies it into `sealed.json` unchanged, and `--catalogue` prints a catalogue mutation's side effects
+when `bench/mutations/mutate.py` defines an optional `SIDE_EFFECTS` entry for it. `pass_metrics.py`
+prints each seed's side effects in the record's "Seeds" section and, under "Seed interactions to
+check" in its notes, lists every candidate whose pristine run failed only its liveness checks beside
+the side effects of every seed: those are the claims that may have reached their defect through
+another seed, and whose issue must carry the verifier's rebuilt reproduction.
+
+## Filing issues
+
+`file_issues.py` renders one issue per root-cause group from `groups.json`, a list of
+`{"id": "RC1", "title": "...", "tier": 1, "claims": ["F3-07", "F5-02"]}`:
+
+```bash
+scripts/review/file_issues.py --groups $WORK/groups.json --claims $WORK/claims \
+  --verdicts $WORK/verdicts.json --pinned $pinned --pass N --out $WORK/issues
+# read $WORK/issues/*.md, then file them:
+scripts/review/file_issues.py ... --out $WORK/issues --post   # --repo, --label bug by default
+```
+
+Each `<out>/<group id>.md` starts with `title: <group title> (pass N <group id>)`, then the tier, one
+section per claim (finder, `file:line`, lens, scenario, the verifier's root cause) with its reproduction
+inline, the verifier's rebuilt one when present and saying so, and the acceptance paragraph: the
+reproductions fail on the pinned commit and must pass on the fixing commit, and the fix carries a
+`bench/` guard and a `bench/mutations` entry proven by `./test.sh discriminate`. Every grouped claim
+must have a `finding` verdict and a reproduction, or nothing is written. `--post` files them with
+`gh issue create`, Tier 1 first, writing `<out>/filed.json` (`[{id, title, tier, claims, issue, url}]`)
+after each, and refuses to run when `filed.json` already exists.
 
 ## Metric definitions
 
