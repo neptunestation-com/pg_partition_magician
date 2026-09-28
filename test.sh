@@ -604,6 +604,10 @@ run_archive() {
   bash "$(dirname "$0")/bench/archive_parquet_scale_above_precision.sh" pgpm_test-archive pgpm_perf49 || fail=1
   echo "--- Parquet keyless parent guard (issue #597) ---"
   bash "$(dirname "$0")/bench/archive_parquet_keyless.sh" pgpm_test-archive pgpm_perf50 || fail=1
+  # The GZIP encoder's lock-table guard (#587) re-runs tests/archive/db/22 for the same reason: the
+  # clean-code half of the pair bench/discriminate.sh completes with the per-call temp table put back.
+  echo "--- GZIP encode lock-table entries guard (issue #587) ---"
+  bash "$(dirname "$0")/bench/archive_huffman_lock_entries.sh" pgpm_test-archive pgpm_perf72 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi

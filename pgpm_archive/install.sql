@@ -1002,8 +1002,10 @@ declare
   v_ncount int4;
   v_id1 int4; v_id2 int4;
   v_f1 bigint; v_f2 bigint;
-  v_m1 int4[]; v_m2 int4[];
-  v_sym int4;
+  v_freq bigint[];
+  v_alive boolean[];
+  v_group int4[];
+  v_j int4;
   v_max_len int4;
   v_bl_count int4[];
   v_overflow int4;
@@ -1015,17 +1017,26 @@ declare
   v_idx int4;
   v_l int4;
 begin
-  create temp table archive_huff_groups (node_id int4 primary key, freq bigint, members int4[])
-    on commit drop;
-
+  -- The merge queue lives in local arrays, indexed by node id: v_freq and v_alive per node, and
+  -- v_group[symbol] = the node that currently holds it (0 = unused). It used to be a temp table
+  -- created and dropped on every call, three calls per GZIP encode, and a dropped relation's locks
+  -- are held to transaction end: ~15 shared lock-table entries per call, so one maintain() tick
+  -- archiving enough compressed chunks exhausted the cluster's lock table (issue #587). Arrays take
+  -- no lock at all. Node ids are handed out in the same order the table's were and the minimum is
+  -- the same (freq, node_id), so the merge sequence, and every code, is unchanged.
+  v_freq := array_fill(0::bigint, array[2 * n]);
+  v_alive := array_fill(false, array[2 * n]);
+  v_group := array_fill(0, array[n]);
   for i in 1..n loop
     if p_freqs[i] > 0 then
       v_node_id := v_node_id + 1;
-      insert into archive_huff_groups values (v_node_id, p_freqs[i], array[i]);
+      v_freq[v_node_id] := p_freqs[i];
+      v_alive[v_node_id] := true;
+      v_group[i] := v_node_id;
     end if;
   end loop;
 
-  select count(*) into v_ncount from archive_huff_groups;
+  v_ncount := v_node_id;
 
   -- a length-limited prefix code for v_ncount symbols can only ever exist if
   -- v_ncount <= 2^p_max_bits (Kraft's inequality's own ceiling: v_ncount codes of
@@ -1039,38 +1050,43 @@ begin
   end if;
 
   if v_ncount = 0 then
-    drop table archive_huff_groups;
     return v_lengths;
   end if;
 
   if v_ncount = 1 then
-    select members into v_m1 from archive_huff_groups;
-    v_lengths[v_m1[1]] := 1;
-    drop table archive_huff_groups;
+    v_lengths[array_position(v_group, 1)] := 1;
     return v_lengths;
   end if;
 
   while v_ncount > 1 loop
-    select node_id, freq, members into v_id1, v_f1, v_m1
-      from archive_huff_groups order by freq, node_id limit 1;
-    select node_id, freq, members into v_id2, v_f2, v_m2
-      from archive_huff_groups where node_id <> v_id1 order by freq, node_id limit 1;
-
-    foreach v_sym in array v_m1 loop
-      v_lengths[v_sym] := v_lengths[v_sym] + 1;
+    -- the two live nodes with the smallest (freq, node_id): scanning ids in ascending order and
+    -- replacing only on a strictly smaller freq keeps the lower id on a tie.
+    v_id1 := null; v_id2 := null;
+    for v_j in 1..v_node_id loop
+      if v_alive[v_j] then
+        if v_id1 is null or v_freq[v_j] < v_f1 then
+          v_id2 := v_id1; v_f2 := v_f1;
+          v_id1 := v_j; v_f1 := v_freq[v_j];
+        elsif v_id2 is null or v_freq[v_j] < v_f2 then
+          v_id2 := v_j; v_f2 := v_freq[v_j];
+        end if;
+      end if;
     end loop;
-    foreach v_sym in array v_m2 loop
-      v_lengths[v_sym] := v_lengths[v_sym] + 1;
-    end loop;
 
-    delete from archive_huff_groups where node_id in (v_id1, v_id2);
     v_node_id := v_node_id + 1;
-    insert into archive_huff_groups values (v_node_id, v_f1 + v_f2, v_m1 || v_m2);
+    v_freq[v_node_id] := v_f1 + v_f2;
+    v_alive[v_node_id] := true;
+    v_alive[v_id1] := false;
+    v_alive[v_id2] := false;
+    for i in 1..n loop
+      if v_group[i] = v_id1 or v_group[i] = v_id2 then
+        v_lengths[i] := v_lengths[i] + 1;
+        v_group[i] := v_node_id;
+      end if;
+    end loop;
 
-    select count(*) into v_ncount from archive_huff_groups;
+    v_ncount := v_ncount - 1;
   end loop;
-
-  drop table archive_huff_groups;
 
   -- v_lengths now holds the UNBOUNDED assignment (always exactly complete: Kraft
   -- == 1 exactly, guaranteed by the merge construction above). Length-limit it.

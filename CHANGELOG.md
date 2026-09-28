@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- **A GZIP encode no longer takes lock-table entries, so one archive tick cannot exhaust the cluster's
+  lock table** (#587). `archive._pq_huffman_lengths`, which runs three times per dynamic-Huffman
+  encode, built its merge queue in a temp table it created and dropped on every call, and a dropped
+  relation's locks are held to transaction end: ~15 shared lock-table entries per call, ~44 per
+  encode. A `pgpm.maintain()` tick with `archive_batch` null archiving 25 partitions of a 29-column
+  compressed-Parquet table (~725 encodes in one transaction) failed with 53200 `out of shared memory`
+  at the default `max_locks_per_transaction`, for every session in the cluster while it lasted,
+  logged `skip_archive`, archived nothing and did the same again every tick; `archive.to_s3` with
+  `compress` on hit the same cliff at ~600 members. The queue is now local arrays, which take no
+  lock, and builds the same codes byte for byte. `tests/archive/db/22_huffman_lock_entries_test.sql`
+  counts this backend's lock entries across twenty Huffman builds and ten encodes in one transaction
+  and requires no growth, with a temp-table control that proves the instrument sees the mechanism and
+  known-answer vectors taken from the old implementation; `bench/archive_huffman_lock_entries.sh`
+  drives it against the `archive_huffman_temp_table` mutation, which `./test.sh discriminate`
+  requires it to fail.
 - **`untransmute` no longer validates a preserved incoming FK under its `ACCESS EXCLUSIVE`** (#577). It
   re-added each key `NOT VALID` and then ran `VALIDATE` in the same call, which is one transaction already
   holding `ACCESS EXCLUSIVE` on the restored table, so every reader and writer of it waited out a full scan

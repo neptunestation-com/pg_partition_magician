@@ -452,6 +452,153 @@ RETIRE_REGRAIN_CANCEL_WHOLE_PARENT = """    -- the source of an in-flight regrai
     perform pgpm.regrain_cancel(p_parent);
 """
 
+# archive._pq_huffman_lengths' merge queue (#587): local arrays now, a temp table created and dropped on
+# every call before, whose locks outlived the drop to transaction end. The mutant restores the old
+# declarations and the old queue, verbatim from db64096, so it reads as the function that shipped.
+ARCHIVE_HUFF_DECL_ARRAYS = """  v_f1 bigint; v_f2 bigint;
+  v_freq bigint[];
+  v_alive boolean[];
+  v_group int4[];
+  v_j int4;
+  v_max_len int4;
+"""
+
+ARCHIVE_HUFF_DECL_TEMP_TABLE = """  v_f1 bigint; v_f2 bigint;
+  v_m1 int4[]; v_m2 int4[];
+  v_sym int4;
+  v_max_len int4;
+"""
+
+ARCHIVE_HUFF_QUEUE_ARRAYS = """  -- The merge queue lives in local arrays, indexed by node id: v_freq and v_alive per node, and
+  -- v_group[symbol] = the node that currently holds it (0 = unused). It used to be a temp table
+  -- created and dropped on every call, three calls per GZIP encode, and a dropped relation's locks
+  -- are held to transaction end: ~15 shared lock-table entries per call, so one maintain() tick
+  -- archiving enough compressed chunks exhausted the cluster's lock table (issue #587). Arrays take
+  -- no lock at all. Node ids are handed out in the same order the table's were and the minimum is
+  -- the same (freq, node_id), so the merge sequence, and every code, is unchanged.
+  v_freq := array_fill(0::bigint, array[2 * n]);
+  v_alive := array_fill(false, array[2 * n]);
+  v_group := array_fill(0, array[n]);
+  for i in 1..n loop
+    if p_freqs[i] > 0 then
+      v_node_id := v_node_id + 1;
+      v_freq[v_node_id] := p_freqs[i];
+      v_alive[v_node_id] := true;
+      v_group[i] := v_node_id;
+    end if;
+  end loop;
+
+  v_ncount := v_node_id;
+
+  -- a length-limited prefix code for v_ncount symbols can only ever exist if
+  -- v_ncount <= 2^p_max_bits (Kraft's inequality's own ceiling: v_ncount codes of
+  -- exactly p_max_bits each already sum to v_ncount * 2^-p_max_bits, which must be
+  -- <= 1). Never reachable from a real DEFLATE call (max_bits is always 15 there,
+  -- alphabets max out at 286) -- guarded so a misuse fails loudly instead of
+  -- infinite-looping in the Kraft-restore pass below.
+  if v_ncount > power(2, p_max_bits)::bigint then
+    raise exception 'archive._pq_huffman_lengths: % distinct symbols cannot fit a %-bit-limited prefix code (needs <= % symbols)',
+      v_ncount, p_max_bits, power(2, p_max_bits)::bigint;
+  end if;
+
+  if v_ncount = 0 then
+    return v_lengths;
+  end if;
+
+  if v_ncount = 1 then
+    v_lengths[array_position(v_group, 1)] := 1;
+    return v_lengths;
+  end if;
+
+  while v_ncount > 1 loop
+    -- the two live nodes with the smallest (freq, node_id): scanning ids in ascending order and
+    -- replacing only on a strictly smaller freq keeps the lower id on a tie.
+    v_id1 := null; v_id2 := null;
+    for v_j in 1..v_node_id loop
+      if v_alive[v_j] then
+        if v_id1 is null or v_freq[v_j] < v_f1 then
+          v_id2 := v_id1; v_f2 := v_f1;
+          v_id1 := v_j; v_f1 := v_freq[v_j];
+        elsif v_id2 is null or v_freq[v_j] < v_f2 then
+          v_id2 := v_j; v_f2 := v_freq[v_j];
+        end if;
+      end if;
+    end loop;
+
+    v_node_id := v_node_id + 1;
+    v_freq[v_node_id] := v_f1 + v_f2;
+    v_alive[v_node_id] := true;
+    v_alive[v_id1] := false;
+    v_alive[v_id2] := false;
+    for i in 1..n loop
+      if v_group[i] = v_id1 or v_group[i] = v_id2 then
+        v_lengths[i] := v_lengths[i] + 1;
+        v_group[i] := v_node_id;
+      end if;
+    end loop;
+
+    v_ncount := v_ncount - 1;
+  end loop;
+"""
+
+ARCHIVE_HUFF_QUEUE_TEMP_TABLE = """  create temp table archive_huff_groups (node_id int4 primary key, freq bigint, members int4[])
+    on commit drop;
+
+  for i in 1..n loop
+    if p_freqs[i] > 0 then
+      v_node_id := v_node_id + 1;
+      insert into archive_huff_groups values (v_node_id, p_freqs[i], array[i]);
+    end if;
+  end loop;
+
+  select count(*) into v_ncount from archive_huff_groups;
+
+  -- a length-limited prefix code for v_ncount symbols can only ever exist if
+  -- v_ncount <= 2^p_max_bits (Kraft's inequality's own ceiling: v_ncount codes of
+  -- exactly p_max_bits each already sum to v_ncount * 2^-p_max_bits, which must be
+  -- <= 1). Never reachable from a real DEFLATE call (max_bits is always 15 there,
+  -- alphabets max out at 286) -- guarded so a misuse fails loudly instead of
+  -- infinite-looping in the Kraft-restore pass below.
+  if v_ncount > power(2, p_max_bits)::bigint then
+    raise exception 'archive._pq_huffman_lengths: % distinct symbols cannot fit a %-bit-limited prefix code (needs <= % symbols)',
+      v_ncount, p_max_bits, power(2, p_max_bits)::bigint;
+  end if;
+
+  if v_ncount = 0 then
+    drop table archive_huff_groups;
+    return v_lengths;
+  end if;
+
+  if v_ncount = 1 then
+    select members into v_m1 from archive_huff_groups;
+    v_lengths[v_m1[1]] := 1;
+    drop table archive_huff_groups;
+    return v_lengths;
+  end if;
+
+  while v_ncount > 1 loop
+    select node_id, freq, members into v_id1, v_f1, v_m1
+      from archive_huff_groups order by freq, node_id limit 1;
+    select node_id, freq, members into v_id2, v_f2, v_m2
+      from archive_huff_groups where node_id <> v_id1 order by freq, node_id limit 1;
+
+    foreach v_sym in array v_m1 loop
+      v_lengths[v_sym] := v_lengths[v_sym] + 1;
+    end loop;
+    foreach v_sym in array v_m2 loop
+      v_lengths[v_sym] := v_lengths[v_sym] + 1;
+    end loop;
+
+    delete from archive_huff_groups where node_id in (v_id1, v_id2);
+    v_node_id := v_node_id + 1;
+    insert into archive_huff_groups values (v_node_id, v_f1 + v_f2, v_m1 || v_m2);
+
+    select count(*) into v_ncount from archive_huff_groups;
+  end loop;
+
+  drop table archive_huff_groups;
+"""
+
 MUTATIONS = {
     "transmute_no_commits": (
         "bench/transmute_lock.sh",
@@ -2373,6 +2520,22 @@ $$;''',
              1),
         ],
     ),
+    "archive_huffman_temp_table": (
+        "bench/archive_huffman_lock_entries.sh",
+        "Pre-#587 archive._pq_huffman_lengths: its merge queue is a temp table created and dropped on "
+        "every call, three calls per GZIP encode (literal/length, distance, code-length codes). A dropped "
+        "relation's locks are held to transaction end, so each call leaves ~15 entries in the SHARED lock "
+        "table until commit, and one pgpm._archive_step transaction archiving 25 partitions of a "
+        "29-column compressed-Parquet table (~725 encodes) exhausts it at the default "
+        "max_locks_per_transaction: 53200 out of shared memory for every session in the cluster, "
+        "skip_archive, nothing archived, the same again every tick. The codes it builds are identical, "
+        "so every known-answer assertion in tests/archive/db/22 still passes; the two lock-growth zeros "
+        "are what name it. Two sites: the declarations and the queue, both restored verbatim.",
+        [
+            (ARCHIVE_HUFF_DECL_ARRAYS, ARCHIVE_HUFF_DECL_TEMP_TABLE, 1),
+            (ARCHIVE_HUFF_QUEUE_ARRAYS, ARCHIVE_HUFF_QUEUE_TEMP_TABLE, 1),
+        ],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
@@ -2403,6 +2566,7 @@ MUTATION_SRC = {
     "parquet_timestamp_no_infinity": "pgpm_archive/install.sql",
     "parquet_decimal_scale_above_precision": "pgpm_archive/install.sql",
     "parquet_range_refuses_keyless": "pgpm_archive/install.sql",
+    "archive_huffman_temp_table": "pgpm_archive/install.sql",
 }
 
 # name -> the CI track whose job runs it; anything not listed here belongs to the default `perf`
