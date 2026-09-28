@@ -2038,6 +2038,37 @@ $$;''',
         "flight and then finishes that regrain, is what names this mutant.",
         [(RETIRE_REGRAIN_RECLAIM, RETIRE_REGRAIN_CANCEL_WHOLE_PARENT, 1)],
     ),
+    "transmute_incoming_fk_clones_dropped": (
+        "bench/cutover_partitioned_referencer.sh",
+        "Pre-#576 transmute cutover: step 0c selects the incoming keys to drop and record by confrelid "
+        "alone, so a key declared on a PARTITIONED referencing table is iterated once per partition clone "
+        "as well. Dropping the declared key removes its clones, the next iteration raises 'constraint ... "
+        "does not exist', and the cutover rolls back every time, leaving the write-rejecting bound and the "
+        "claim. tests/142 never converts, so its plan dies at the transmute.",
+        [("        from pg_constraint c where c.confrelid = p_parent and c.contype = 'f' and c.conparentid = 0\n"
+          "       order by c.conname\n",
+          "        from pg_constraint c where c.confrelid = p_parent and c.contype = 'f'\n"
+          "       order by c.conname\n", 1)],
+    ),
+    "transmute_index_name_unchecked": (
+        "bench/carried_index_name_length.sh",
+        "Pre-#592 transmute: no length check on the <index>_pgpm name step 9b casts to name. A 63-byte "
+        "index name (PostgreSQL's own auto-name for a long table and column list) truncates back to "
+        "itself, and the #311 collision guard refuses it as a leftover of an interrupted run, telling the "
+        "operator to drop what is their own index. tests/143's refusal assertion sees that message.",
+        [("  if v_long_idx_q is not null then\n", "  if false then\n", 1)],
+    ),
+    "transmute_trigger_capture_unlocked": (
+        "bench/cutover_trigger_window.sh",
+        "Pre-#593 transmute cutover, in its essential part: the triggers are captured with nothing on the "
+        "table stronger than the staging LIKE's ACCESS SHARE, which does not exclude CREATE TRIGGER. The "
+        "explicit ACCESS EXCLUSIVE before the capture is removed, so a trigger another session commits "
+        "while the cutover waits on the incoming-FK drop's lock is never replayed and 7b drops it from the "
+        "monolith: the guard's ev_b is on no relation and every row carries 1, not 11.",
+        [("  execute format('lock table %s in access exclusive mode', p_parent::text);\n"
+          "  select coalesce(array_agg(pg_get_triggerdef(oid) order by tgname), '{}'),\n",
+          "  select coalesce(array_agg(pg_get_triggerdef(oid) order by tgname), '{}'),\n", 1)],
+    ),
     "throws_ok_null_pattern": (
         "bench/throws_pinned.sh",
         "Pre-#522 tests/72: the transition-table refusal asserted with throws_ok(..., NULL, desc). "
