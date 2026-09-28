@@ -1627,6 +1627,7 @@ declare
   cfg pgpm.config; v_nsp name; v_boundary text; r record;
   v_referenced boolean; v_child regclass; v_now regclass; v_why text;
   v_cross text[]; v_coltype text; v_lo_lit text; v_hi_lit text; v_deleted int; v_reason text;
+  v_chunks bigint;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
@@ -1707,6 +1708,28 @@ begin
                        v_nsp, p_child, coalesce(v_now::oid::text, 'nothing'), v_why));
       return false;
     end if;
+  end if;
+
+  -- COVERAGE FOUND WITHOUT ITS BLOCK IS DISCARDED HERE TOO (issue #564), before the block goes on.
+  -- _enforce_write_blocks makes the same discard (#452, where the reasoning lives), but only maintain()
+  -- is guaranteed to have run it, and a direct caller reaches this point on a child whose trigger may
+  -- have left by a path pgpm did not guard: dropped by hand, or lifted by a pgpm older than #452. The
+  -- install below would put the block back and _archive_fully_covered would then read the stale
+  -- watermark as full coverage, so the partition dropped with a row written while it was unblocked that
+  -- no strategy was ever handed. Discarding first makes the gate below read false; archiving starts
+  -- over from lo under the restored block, and a later call drops it once that coverage is complete.
+  -- Same order as _enforce_write_blocks and for the same reason: the ledger first, then the trigger, so
+  -- coverage found alongside a missing trigger was recorded before the trigger left. The identity check
+  -- above already refused a substituted name, so this cannot discard the coverage of a relation that
+  -- has merely been renamed aside (#518).
+  select count(*) into v_chunks from pgpm.archive_ledger
+   where parent_table = p_parent and child_name = p_child;
+  if v_chunks > 0 and not pgpm._is_write_blocked(p_parent, p_child) then
+    delete from pgpm.archive_ledger where parent_table = p_parent and child_name = p_child;
+    insert into pgpm.log (parent_table, action, lo, hi, rows, method)
+      values (p_parent, 'archive_coverage_reset', r.lo, r.hi, v_chunks,
+              format('%s archived chunk(s) were recorded for %I.%I under a write block that was no longer on it when retire() reached it, so they no longer describe its contents; discarded, and archiving starts over from %s under the block retire() puts back',
+                     v_chunks, v_nsp, p_child, r.lo));
   end if;
 
   perform pgpm._install_write_block(p_parent, p_child);
@@ -2393,8 +2416,8 @@ $$;
 -- [lo, hi)" -- the same watermark reasoning archive._file_watermark already relied on. That union
 -- describes the child's CONTENTS only because the write block has been on it throughout:
 -- _enforce_write_blocks keeps the block on a covered child even when retention stops reaching it, and
--- discards coverage it finds without one (issue #452), so a row present at the drop was handed to
--- the strategy.
+-- discards coverage it finds without one (issue #452), as does retire() before it puts a missing block
+-- back (issue #564), so a row present at the drop was handed to the strategy.
 create or replace function pgpm._archive_fully_covered(p_parent regclass, p_child name)
 returns boolean language plpgsql as $$
 declare cfg pgpm.config; v_child_hi text; v_watermark text;
