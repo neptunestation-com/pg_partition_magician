@@ -673,6 +673,7 @@ run_perf() {
     "bench/retire_unguarded_coverage.sh pgpm_perf43"
     "bench/regrain_restart_null_cursor.sh pgpm_perf52"
     "bench/regrain_reconcile_datestyle.sh pgpm_perf53"
+    "bench/hypertable_swap_order.sh pgpm_perf42"
   )
   local selected=()
   local n=${#guards[@]} idx

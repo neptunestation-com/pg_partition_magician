@@ -4908,6 +4908,15 @@ begin
   -- partition, a key that 7a below re-adds at the parent and clones down as inherited. Same transaction
   -- as the rename, so no session observes a record naming a relation that is no longer the table.
   update pgpm.dropped_fk set referencing_table = v_parent where referencing_table = p_parent;
+  -- 0e. The records in which THIS table is the REFERENCED side, written before this conversion (#563).
+  -- from_hypertable_cutover drops a hypertable's incoming keys in its swap and records them against the
+  -- plain table it puts in place, because the parent that will hold them does not exist until this
+  -- cutover; the same holds whether this is its own handoff or the operator's re-run after that handoff
+  -- refused. restore_incoming_fks reads records by parent_table, and the rename below makes p_parent
+  -- the monolith child, so a record left naming it would never be restored and the key would stay gone.
+  -- The records name the referenced table by NAME in their definition, and v_parent takes that name, so
+  -- moving the anchor is all a replay against the parent needs. Same transaction as the rename.
+  update pgpm.dropped_fk set parent_table = v_parent where parent_table = p_parent;
 
   -- 1. THE TWO RENAMES, BACK-TO-BACK (#344). The first is the ACCESS EXCLUSIVE-acquiring statement that
   -- starts the outage (the incoming-FK drop above shares that role when there is one); doing the second

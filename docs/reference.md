@@ -530,11 +530,22 @@ re-add the identity columns (which `CREATE TABLE LIKE` does not carry), then han
 the index builds happen before the lock, the blocking window is the catch-up, one `count(*)` over the source,
 and metadata: the count is the only step in it that reads the whole table, and it is a read, not a rebuild.
 It also preserves each identity
-sequence's exact position: `transmute` seeds past `max(id)`, but if the source sequence was further ahead
-(gaps from rollbacks, caching, or deleted high rows) the migrated sequence is advanced to the source's next
-value so those ids are not re-issued. The swap is one transaction: it
-commits whole or rolls back whole, leaving the source intact on any failure. Requires `from_hypertable_copy`
+sequence's exact position: the re-added identity is set to the source sequence's next value inside the swap,
+so ids the source had already moved past (gaps from rollbacks, caching, or deleted high rows) are not
+re-issued, and `transmute` seeds the migrated sequence from it. The swap is one transaction: it
+commits whole or rolls back whole, leaving the source intact on any failure in it. Requires `from_hypertable_copy`
 to have run (the destination must exist). Parameters past `p_interval` pass through to `transmute`.
+
+**The handoff runs after the swap has committed, and can still refuse.** `transmute` applies its own
+preconditions to the plain table (for example, the monolith name a long table name derives on a fine grid can
+exceed PostgreSQL's 63-byte limit). The cutover then errors with the swap in place: the table under its
+original name is an ordinary table holding every row, not a hypertable and not yet partitioned. Nothing the
+swap did is lost. Its identity already continues from the source sequence's position, and every incoming
+foreign key it dropped is recorded in `pgpm.dropped_fk` (and logged `drop_incoming_fk`) against that table.
+Fix what `transmute`'s message names and call `pgpm.transmute` on the table yourself (for the name case, a
+coarser `p_interval`, whose partition names are shorter). Its cutover moves those records onto the new
+parent, so [`restore_incoming_fks`](#restore_incoming_fks) re-adds the keys, on the next maintenance tick or
+when called directly.
 
 **The cutover refuses to swap unless the two sides agree.** Before anything is dropped, and still under the
 lock (so both numbers are exact), it compares `count(*)` over the source with the destination's row count
@@ -602,14 +613,18 @@ the copy becomes the monolith child with an already-validated key, the parent-le
 Logged `from_hypertable_carry_fk`, once per key, by the copy; the parent-level re-add is a step of the
 `transmute` the handoff runs, and writes no log row of its own.
 
-An **incoming** key (another table referencing the migrated one) is captured and dropped in the cutover,
-since the source hypertable cannot be dropped while one points at it, then re-added against the new parent
-afterwards through `pgpm.dropped_fk`, so
+An **incoming** key (another table referencing the migrated one) is captured, dropped and recorded in
+`pgpm.dropped_fk` in the cutover's swap transaction, since the source hypertable cannot be dropped while one
+points at it, then re-added against the new parent after the handoff. The record is written against the
+plain table the swap puts in place (the parent does not exist yet), and `transmute`'s cutover moves every
+record naming the table it converts onto the new parent, so
 [`restore_incoming_fks`](#restore_incoming_fks) and [`validate_incoming_fks`](#validate_incoming_fks) do the
 re-add and the validation with their usual reporting. Referential integrity is therefore **off on the
 referencing table** from the cutover's drop until that re-add, a window bounded by the swap plus one
 `transmute` and surfaced by `status().fks_suspended`. It cannot be closed by re-adding inside the cutover,
-because `transmute` refuses a table that still carries an incoming key.
+because `transmute` refuses a table that still carries an incoming key. Each drop is logged
+`drop_incoming_fk` by the swap, against the plain table it put in place: after a completed conversion that
+relation is the monolith child, so look for the row there, beside the parent's `restore_incoming_fk`.
 
 `from_hypertable_preflight` refuses an incoming key that references anything other than the key pgpm will
 reuse, before any copying happens.

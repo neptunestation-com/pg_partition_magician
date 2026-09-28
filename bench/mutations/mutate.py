@@ -123,6 +123,24 @@ HT_CUTOVER_CONSERVATION = """  execute format('select count(*) from %I.%I', v_ns
 # build, which sits at four; the count check below refuses to build the mutant if that ever changes.
 HT_CATCHUP_KEYED_BRANCH = "      if v_akey is not null then\n"
 
+# from_hypertable_cutover's two in-swap records (#563): the incoming keys it drops, and the source
+# sequence's position on the re-added identity. Each is deleted alone, so a guard failure names which.
+HT_SWAP_FK_RECORD = """    insert into pgpm.dropped_fk (parent_table, referencing_table, constraint_name, definition)
+      values (v_dest_oid, k.referencing, k.conname, k.def);
+    insert into pgpm.log (parent_table, action, method) values (v_dest_oid, 'drop_incoming_fk', k.conname);
+"""
+HT_SWAP_IDENTITY_POSITION = """      if v_ident_next[v_i] is not null then
+        v_pseq_q := pg_get_serial_sequence(format('%I.%I', v_nsp, v_rel), v_ident_cols[v_i]::text);
+        execute format('select setval(%L, %s, false)', v_pseq_q, v_ident_next[v_i]);
+      end if;
+    end loop;
+  end if;
+  commit;
+"""
+# transmute's carry of the records that name the table it converts as the REFERENCED side (#563).
+TRANSMUTE_DROPPED_FK_PARENT_CARRY = """  update pgpm.dropped_fk set parent_table = v_parent where parent_table = p_parent;
+"""
+
 RESTORE_INLINE = """    if v_readded and not v_is_part then
       begin
         execute format('alter table %s validate constraint %I', r.referencing_table::text, r.constraint_name);
@@ -815,6 +833,37 @@ MUTATIONS = {
         "message, which is the only thing that separates a refusal from a cutover that wrongly ran on to "
         "its COMMIT inside throws_like.",
         [(HT_CUTOVER_CONSERVATION, "", 1)],
+    ),
+    "hypertable_swap_fk_record_after_handoff": (
+        "bench/hypertable_swap_order.sh",
+        "Pre-#563 from_hypertable_cutover(): the swap drops each incoming foreign key and commits, and the "
+        "key's definition is held only in a plpgsql local until transmute returns. Deletes the in-swap "
+        "pgpm.dropped_fk and drop_incoming_fk log inserts, so when the handoff refuses (the guard's "
+        "45-byte table name derives a daily monolith name over 63 bytes) the key is gone from both "
+        "referencing tables and written nowhere, and the operator's re-run of transmute has nothing to "
+        "restore. The identity position is left in place, so only the record assertions fail.",
+        [(HT_SWAP_FK_RECORD, "", 1)],
+    ),
+    "hypertable_swap_identity_from_one": (
+        "bench/hypertable_swap_order.sh",
+        "Pre-#563 from_hypertable_cutover(): the swap re-adds identity on the plain table, which starts "
+        "its sequence at 1, and applies the source sequence's position only after transmute returns. "
+        "Deletes the in-swap setval, so when the handoff refuses the plain table hands out id 1 over "
+        "rows that already hold 1, 2 and 3 (a hypertable's key includes the time column, so nothing "
+        "rejects the duplicate); the guard's source sequence sits at 8 against max(id) 3, so neither "
+        "a restart (1) nor a reseed past max(id) (4) reads as the preserved position.",
+        [(HT_SWAP_IDENTITY_POSITION, "    end loop;\n  end if;\n  commit;\n", 1)],
+    ),
+    "transmute_dropped_fk_parent_not_carried": (
+        "bench/hypertable_swap_order.sh",
+        "transmute's cutover moves every pgpm.dropped_fk record whose referencing_table is the table it "
+        "converts onto the new parent (0d, #498), but not the records whose PARENT is that table. "
+        "Before #563 nothing wrote one ahead of a conversion; from_hypertable_cutover's swap now does, "
+        "against the plain table it puts in place, since the parent does not exist yet. Deleting the "
+        "carry leaves each record naming the monolith child after the rename, so restore_incoming_fks "
+        "on the parent finds nothing and the key never comes back: the guard's recovery half (the "
+        "operator re-runs transmute after the refused handoff) restores 0 keys where 2 are due.",
+        [(TRANSMUTE_DROPPED_FK_PARENT_CARRY, "", 1)],
     ),
     "transmute_no_lock_timeout": (
         "bench/transmute_lock_timeout.sh",
@@ -2167,6 +2216,8 @@ MUTATION_SRC = {
     "hypertable_cutover_unverified_dest": "pgpm_hypertable/install.sql",
     "hypertable_catchup_strict_watermark": "pgpm_hypertable/install.sql",
     "hypertable_cutover_no_conservation": "pgpm_hypertable/install.sql",
+    "hypertable_swap_fk_record_after_handoff": "pgpm_hypertable/install.sql",
+    "hypertable_swap_identity_from_one": "pgpm_hypertable/install.sql",
     "archive_lz77_hash_scratch": "pgpm_archive/install.sql",
     "archive_encode_array_agg_unnest": "pgpm_archive/install.sql",
     "archive_deflate_six_arrays": "pgpm_archive/install.sql",

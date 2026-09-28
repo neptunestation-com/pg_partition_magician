@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- **A `from_hypertable_cutover` whose handoff to `transmute` refuses no longer loses the incoming keys or
+  the identity position** (#563). The cutover commits its swap (hypertable dropped, incoming foreign keys
+  dropped, the copy renamed into place with identity re-added) before calling `transmute`, and it held the
+  dropped keys' definitions and the source sequence's position in plpgsql locals until `transmute` returned.
+  A refusal there (reproduced with a 45-byte table name, whose daily monolith name is over 63 bytes) left
+  the referencing tables with no key and nothing recording one, no `pgpm.dropped_fk` row and no log row,
+  and the plain table's identity restarting at 1, reissuing ids the table already held. The swap now
+  records each dropped key in `pgpm.dropped_fk` (logged `drop_incoming_fk`) against the table it puts in
+  place and sets the re-added identity to the source's position, both in the swap transaction, and
+  `transmute`'s cutover moves every `pgpm.dropped_fk` record naming the table it converts onto the new
+  parent, so the operator's re-run of `transmute` after the refusal brings the keys back through
+  `restore_incoming_fks`. The reference now says what a refused handoff leaves and how to finish it.
+  `tests/timescale/db/21_from_hypertable_swap_order_test.sql` pins on a real hypertable that the records
+  and log rows predate the handoff's `transmute` row, and the carry on its own;
+  `bench/hypertable_swap_order.sh` drives the refused handoff as a bare CALL and asserts both keys by name,
+  the next id (8 against a `max(id)` of 3) and the recovery, and fails against the
+  `hypertable_swap_fk_record_after_handoff`, `hypertable_swap_identity_from_one` and
+  `transmute_dropped_fk_parent_not_carried` mutations under `./test.sh discriminate`.
 - **A regrain whose change capture the janitor reaped restarts from the source instead of resuming from
   unreconciled copies** (#569). `regrain_step`'s prepare tick discards the copies made without capture
   behind them, but only when `config.regrain_cursor` was set. The capture janitor is documented as the
