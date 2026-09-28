@@ -230,7 +230,8 @@ control is missing any of `p_tt_prefix`/`p_tt_width`/`p_tt_radix`/`p_tt_unit`, h
 2-36 with no `p_tt_alphabet` supplied, a `p_tt_alphabet` whose length does not match `p_tt_radix` or that
 repeats a character, a non-positive `p_tt_width`, a negative `p_tt_discard_bits`, an alphabet the control
 column's collation does not order the way base-`p_tt_radix` place value does (KSUID's base62 on an
-`en_US` column; put the column on `collate "C"`, which `p_force_text_time` does not override), or
+`en_US` column, or any alphabet with digits under an ICU collation with numeric ordering such as
+`und-u-kn-true`; put the column on `collate "C"`, which `p_force_text_time` does not override), or
 samples as not matching the declared shape and `p_force_text_time` is not set; a `uuidv7` or `text_time` control's newest
 value decodes to more than one partition step plus one hour past `now()` and `p_force_frontier` is not set
 (a future-dated row would pin the monolith's permanent `hi` there); a non-PK `UNIQUE` secondary index does not include the
@@ -1769,11 +1770,12 @@ match the declared shape reports `null` rather than raising. Rows to delete or c
 
 Refuses, with the same message `transmute` gives, when the control column's collation does not order the
 declared alphabet the way base-`p_radix` place value does (a mixed-case alphabet such as KSUID's base62
-on an `en_US` column). That is not a heuristic and no fraction is reported: RANGE bounds on a `text`
+on an `en_US` column, or any alphabet with digits under an ICU collation with numeric ordering, which
+compares a run of digits by its value). That is not a heuristic and no fraction is reported: RANGE bounds on a `text`
 column compare under the column's collation, so any such column would route rows to the wrong
 partition. The message names the collation (the effective database locale when the column is on the
-default), the first misordered digit pair and the remedy, `alter table ... alter column ... type text
-collate "C"`.
+default), the first misordered digit pair, the two strings the collation put out of order, and the
+remedy, `alter table ... alter column ... type text collate "C"`.
 
 ### `check_time_monotonic`
 

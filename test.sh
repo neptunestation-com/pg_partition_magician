@@ -656,6 +656,7 @@ run_perf() {
     "bench/retain_interval_sign.sh pgpm_perf44"
     "bench/transmute_publication_membership.sh pgpm_perf45"
     "bench/transmute_serial_sequence_owner.sh pgpm_perf46"
+    "bench/text_time_numeric_collation.sh pgpm_perf51"
   )
   local selected=()
   local n=${#guards[@]} idx

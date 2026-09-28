@@ -1990,6 +1990,26 @@ $$;''',
              "  return p_retain::interval >= interval '0';\n", 1),
         ],
     ),
+    "text_time_collation_positional_only": (
+        "bench/text_time_numeric_collation.sh",
+        "Pre-#568 _check_text_time_collation: the probe keeps only its first shape per adjacent digit "
+        "pair, '<prefix><d><max>...' < '<prefix><d+1><zero>...', which proves the digits are separated "
+        "at the primary level for a collation that compares position by position and says nothing about "
+        "one that weighs a run of decimal digits by its value. An ICU collation with numeric ordering "
+        "('und-u-kn-true') passes it, since the zero padding extends the higher digit's run (1 < 2000...), "
+        "so transmute accepts a cuid column under it and RANGE routing disagrees with base-36 order: late "
+        "November rows land in the December partition and retain drops them a month early. The two "
+        "probe shapes the fix added (the opposite padding, and a lower cell's string extended by a "
+        "suffix digit against the next cell's bound) are removed and nothing else. tests/134's "
+        "refusals of a cuid and a decimal column on that collation are what catch it.",
+        [("      union all\n"
+          "      select x.i, x.c, y.c, 1, %3$L || x.c || %6$L, %3$L || y.c || %4$L\n"
+          "        from d x join d y on y.i = x.i + 1\n"
+          "      union all\n"
+          "      select x.i, x.c, y.c, 2 + s.i, %3$L || x.c || %4$L || s.c, %3$L || y.c || %6$L\n"
+          "        from d x join d y on y.i = x.i + 1 cross join d s\n",
+          "", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
