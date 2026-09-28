@@ -103,6 +103,8 @@ jobs:
           python3 scripts/review/plant_seeds.py --selftest
           python3 scripts/review/classify_claims.py --selftest
           python3 scripts/review/pass_metrics.py --selftest
+          python3 scripts/review/keep_both.py --selftest
+          python3 scripts/review/close_comments.py --selftest
 
   shellcheck:
     name: Shell scripts

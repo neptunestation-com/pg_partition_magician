@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **The fix phase has its own tooling and roles.** `scripts/review/land.sh` lands fix PRs through the
+  squash merge queue one at a time (rebase onto `main`, keep-both resolution of the three list files
+  with `keep_both.py`, the checks CI would fail on run first, known flakes retried once via
+  `flake_check.sh`); `closure.sh` re-runs every reproduction of a pass against the fixed `main` and
+  `close_comments.py` posts the evidence per issue, reopening one whose sound reproduction still
+  fails. A `fixer` agent and the `/fix-phase` coordinator skill give parallel fixers assigned test
+  numbers, guard databases and scratch, so the next wave does not collide (issue #558).
 - **`archive.to_s3` honours `archive.config.compress`** (#520). The synchronous NDJSON export never
   read the flag: with it on, it uploaded plain NDJSON at `<prefix><child>.ndjson`, while the module's
   README promised GZIP for either format and `archive.to_s3_parquet` and both `archive_fn` strategies
