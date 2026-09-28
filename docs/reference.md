@@ -57,7 +57,9 @@ is **time**.
 The grid is computed in the **zone of the session that runs the call**, recorded in
 `pgpm.config.partition_tz` and used for every boundary and partition name from then on, whatever zone
 maintenance's session runs in. Month and year boundaries fall at midnight on the 1st in that zone (at the
-first instant of that day where the zone's clocks skipped midnight); day and shorter steps are a fixed
+first instant of that day where the zone's clocks skipped midnight, and at the second of the two
+midnights where a fall-back repeated it, so the hour between belongs to the previous month's partition);
+day and shorter steps are a fixed
 number of seconds from the anchor, named by the UTC date or hour they start at. For UTC-aligned boundaries, run `set timezone = 'UTC'` first. The call refuses a session zone that is
 not a name in `pg_timezone_names` (a POSIX rule or a bare abbreviation), and the zone can be changed
 afterwards only with [`set_partition_tz`](#set_partition_tz).
@@ -1635,7 +1637,13 @@ decides how its bound literals are rendered and read, so a change would shift ev
 against the existing ones. A change is **refused** when the newest
 partition's upper bound is not a grid boundary in the new zone, because `obtain` would then skip every
 candidate that half-overlaps the current tail and create the first one past it, leaving a permanent
-hole. A day-denominated step is the same lattice in every zone and its partitions are named by UTC date,
+hole. It is refused too when any other attached bound that is a grid boundary in the recorded zone is not
+one in the new zone, and the message names the oldest such bound and its partition: two zones can agree
+at the top and disagree further down (UTC and `Europe/London` share every month edge from November to
+March and none from April to October), and a regrain in the new zone would clamp a sub-range to that
+bound, give it the name of the neighbouring cell, and refuse every swap. A bound that is not a grid
+boundary in the recorded zone, such as a day child left by a finer regrain, is not judged. A
+day-denominated step is the same lattice in every zone and its partitions are named by UTC date,
 so its zone can always change and nothing about the grid moves; a month or year step can only be moved to
 the zone the grid was in fact built in. Each accepted call writes a `set_partition_tz` row to `pgpm.log`
 with `old -> new` in `method`.
