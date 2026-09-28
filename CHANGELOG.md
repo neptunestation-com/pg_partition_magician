@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **`extend_to` refuses before it exhausts the shared lock table** (#591). It is a function, so every
+  partition one call creates holds its locks to that one transaction's end, and `p_max` (default 10000)
+  was its only bound: on a stock server a call about 5000 cells out passed its own dry count and died with
+  53200 `out of shared memory` after ~2100 partitions, filling the lock table every other session shares on
+  the way. Once two partitions exist the call now measures what one costs in non-fast-path `pg_locks` rows,
+  projects the rest of the walk, and refuses in its own words (creating nothing, since the raise rolls the
+  two back) when its partitions would hold more than half the nominal lock table,
+  `max_locks_per_transaction x (max_connections + max_prepared_transactions)`; the message names the measured cost and how many partitions one call can
+  create. `tests/156_extend_to_lock_budget_test.sql` pins the refusal, the untouched catalog by identity and
+  an in-budget call that still extends; `bench/extend_to_lock_budget.sh` is required to fail against the
+  `extend_to_no_lock_budget` mutation.
 - **`uninstall.sql` loses no pending foreign key and leaves no regrain copy behind** (#589). An incoming
   key `transmute(..., p_incoming_fks => 'preserve')` dropped waits in `pgpm.dropped_fk` for a maintenance
   tick to re-add it, and a paused table (the default) gets none, so an uninstall in that window dropped

@@ -262,9 +262,11 @@ the monolith), rename the table within the budget under
    ```
 
 2. If maintenance is healthy and you know the specific value that needs covering (a bulk import's high
-   ids, say), extend the grid directly to it. It is cheap: partitions are empty and creating one is pure
-   catalog work, and it is bounded up front (`p_max`, default 10000) so a typo'd value is refused loudly
-   rather than silently building far more than you meant:
+   ids, say), extend the grid directly to it. Partitions are empty and creating one is pure catalog work,
+   and it is bounded up front (`p_max`, default 10000) so a typo'd value is refused loudly rather than
+   silently building far more than you meant. Each partition holds its locks until the call's one
+   transaction ends, so a call that would fill more than half the shared lock table is refused too, with
+   the number of partitions one call can create; extend in steps of that size, one call per transaction:
 
    ```sql
    select pgpm.extend_to('public.events', '50000000');
