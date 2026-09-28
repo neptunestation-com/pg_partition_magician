@@ -135,8 +135,20 @@ You also need `pg_cron` enabled to run scheduled maintenance.
 registry, log, every function and view), its cron jobs, the write-block triggers on frozen children, and
 regrain's change capture, which lives in your schema rather than in `pgpm`: a `<table>_pgpm_regrain_delta`
 table, a `<table>_pgpm_regrain_capture()` trigger function, and the `pgpm_regrain_capture` trigger on a
-child being regrained. Left: every transmuted table, still a partitioned table under its original name,
-with all of its partitions and rows. Nothing else pgpm made remains in your schema.
+child being regrained. A regrain still in flight is abandoned first, as `pgpm.regrain_cancel` would: its
+not-yet-attached copies are dropped (the table being regrained still holds every row). Left: every
+transmuted table, still a partitioned table under its original name, with all of its partitions and rows.
+Nothing else pgpm made remains in your schema.
+
+Uninstall also puts back every incoming foreign key that `transmute(..., p_incoming_fks => 'preserve')`
+dropped and pgpm has not restored yet (a paused table's keys wait for a maintenance tick that never
+comes), the same way a tick would: `NOT VALID`, so it enforces every new write, and a `WARNING` gives the
+`validate constraint` statement for each key still unvalidated, since nothing runs it once pgpm is gone.
+pgpm holds the only record of such a key, so while any of them cannot be put back (an orphan row written
+while it was off, on a table Postgres only re-adds it to validating) uninstall **refuses** and removes
+nothing. The error gives each key's `alter table ... add constraint` statement and why it failed. Clear
+the cause and run it again, or add the key yourself, or accept losing it with
+`delete from pgpm.dropped_fk where constraint_name = '...'`, then run it again.
 
 ```bash
 psql "$DATABASE_URL" --single-transaction -f pgpm_core/uninstall.sql

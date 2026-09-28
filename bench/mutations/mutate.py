@@ -2678,6 +2678,34 @@ $$;''',
           "    v_lo := lpad(floor(p_lo_native::numeric)::text, 19, '0');\n"
           "    if v_coarse then v_hi := lpad(floor(p_hi_native::numeric)::text, 19, '0'); end if;\n", 1)],
     ),
+    # Issue #589, one mutation per defect, both of pgpm_core/uninstall.sql, so each is proven caught on
+    # its own by tests/155 through bench/uninstall_residue.sh.
+    "uninstall_drops_pending_fk": (
+        "bench/uninstall_residue.sh",
+        "Pre-#589 uninstall.sql: `drop schema pgpm cascade` takes pgpm.dropped_fk, the only record of an "
+        "incoming foreign key transmute(..., p_incoming_fks => 'preserve') dropped and pgpm has not "
+        "restored yet (a paused table's never are), with no restore, no refusal and no warning, so the key "
+        "is gone for good. Removes the whole restore-then-refuse step and leaves the bare schema drop, "
+        "which is the old script exactly. tests/155 catches it twice: the first uninstall raises nothing "
+        "where it must refuse on the key it cannot restore, and after the second the restorable key is "
+        "not back on its referencing table.",
+        [(re.compile(r"^  begin\n    select coalesce\(max\(id\), 0\) into v_mark from pgpm\.log;\n.*?"
+                     r"^    when undefined_table then null;\n  end;\n", re.MULTILINE | re.DOTALL),
+          "", 1)],
+    ),
+    "uninstall_keeps_regrain_copies": (
+        "bench/uninstall_residue.sh",
+        "Pre-#589 uninstall.sql during an in-flight regrain: the change capture is torn down but the "
+        "regrain is not abandoned, so its not-yet-attached fine copies (standalone tables holding copies "
+        "of rows the source still holds) stay in the operator's schema, and pgpm.part, the only record "
+        "that they are pgpm's staging copies, goes with the schema. Removes only the regrain_cancel "
+        "branch; the key half stays intact, so tests/155's section (B) is what catches it.",
+        [("""      if v_copies_q is not null
+         or exists (select 1 from pgpm.config where parent_table = r.parent_table and regrain_cursor is not null) then
+        perform pgpm.regrain_cancel(r.parent_table);
+      end if;
+""", "", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
@@ -2709,6 +2737,8 @@ MUTATION_SRC = {
     "parquet_decimal_scale_above_precision": "pgpm_archive/install.sql",
     "parquet_range_refuses_keyless": "pgpm_archive/install.sql",
     "archive_huffman_temp_table": "pgpm_archive/install.sql",
+    "uninstall_drops_pending_fk": "pgpm_core/uninstall.sql",
+    "uninstall_keeps_regrain_copies": "pgpm_core/uninstall.sql",
 }
 
 # name -> the CI track whose job runs it; anything not listed here belongs to the default `perf`
