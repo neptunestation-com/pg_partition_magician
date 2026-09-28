@@ -33,6 +33,14 @@ BOUNDARY_RE = re.compile(
 # Put the inline VALIDATE back where #265 removed it. Anchored on the comment block that replaced it, so
 # a stale pattern fails loudly rather than yielding an unmutated copy.
 RESTORE_MARKER = "    -- The VALIDATE deliberately does NOT happen here (#265)."
+# untransmute's operator notice, which took the place of its inline VALIDATE (#577). The mutation that
+# puts the VALIDATE back replaces exactly these two lines.
+UNTRANSMUTE_FK_NOTICE = (
+    "      raise notice 'pg_partition_magician: untransmute re-added % on % NOT VALID; validate it outside "
+    "this transaction with: ALTER TABLE % VALIDATE CONSTRAINT %',\n"
+    "        quote_ident(r.constraint_name), r.referencing_table::text, r.referencing_table::text, "
+    "quote_ident(r.constraint_name);\n"
+)
 # retire()'s identity check, whole (#407 widened by #428). Shared by three mutations that each take a
 # different bite out of it, so the exact text lives in one place: a block this long, duplicated, is a
 # block that drifts in one copy and silently stops matching in the other -- and a mutation that
@@ -2350,6 +2358,20 @@ $$;''',
           "      execute format(\n", 1),
          ("      into v_regrain_child;\n      v_batch := cfg.regrain_batch;   -- regrain's own microbatch size\n",
           "      into v_regrain_child;\n    begin\n      v_batch := cfg.regrain_batch;   -- regrain's own microbatch size\n", 1)],
+    ),
+    "untransmute_inline_validate": (
+        "bench/untransmute_fk_validate_lock.sh",
+        "Pre-#577 untransmute: each preserved incoming FK on an unpartitioned referencing table is "
+        "re-added NOT VALID and then VALIDATEd in the same call, which is one transaction already "
+        "holding ACCESS EXCLUSIVE on the restored table, so every reader and writer of it waits out a "
+        "full scan of the referencing table (and an orphan written while the key was suspended rolls "
+        "the whole reverse back). One site: the operator notice that replaced the VALIDATE becomes the "
+        "VALIDATE again, so the mutant is the shipped function exactly.",
+        [
+            (UNTRANSMUTE_FK_NOTICE,
+             "      execute format('alter table %s validate constraint %I', r.referencing_table::text, r.constraint_name);\n",
+             1),
+        ],
     ),
 }
 

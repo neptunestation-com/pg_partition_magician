@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **`untransmute` no longer validates a preserved incoming FK under its `ACCESS EXCLUSIVE`** (#577). It
+  re-added each key `NOT VALID` and then ran `VALIDATE` in the same call, which is one transaction already
+  holding `ACCESS EXCLUSIVE` on the restored table, so every reader and writer of it waited out a full scan
+  of the referencing table during what the reference calls a metadata-only reverse, and an orphan written while the key was suspended rolled the whole reverse back.
+  The key on an unpartitioned referencing table now comes back `NOT VALID`, enforcing every new write, and
+  a `NOTICE` names the `ALTER TABLE ... VALIDATE CONSTRAINT` to run afterwards, in its own transaction,
+  where it blocks neither table. `pgpm` forgets the table at the end of the call, so nothing validates it
+  for you. Guarded by `bench/untransmute_fk_validate_lock.sh` (locks held at the end of the call and the
+  referencing table's scan counters) and its mutation `untransmute_inline_validate`; tests/145 states the
+  contract.
 - **`maintain_all` visits the table whose turn is oldest first, so a backlog cannot starve the tables
   behind it** (#579). The scheduled sweep is one top-level statement, so `statement_timeout` runs
   across every table in it, and the cancellation escapes `maintain()`'s step handlers. The sweep went

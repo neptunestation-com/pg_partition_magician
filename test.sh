@@ -684,6 +684,7 @@ run_perf() {
     "bench/month_floor_doubled_midnight.sh pgpm_perf69"
     "bench/maintain_all_sweep_turns.sh pgpm_perf64"
     "bench/regrain_candidate_lock_race.sh pgpm_perf65"
+    "bench/untransmute_fk_validate_lock.sh pgpm_perf62"
   )
   local selected=()
   local n=${#guards[@]} idx

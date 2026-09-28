@@ -5532,8 +5532,9 @@ $$;
 --
 -- Fidelity notes: an identity column comes back in the form it had, ALWAYS or BY DEFAULT (#308), and the
 -- control column is left NOT NULL (transmute set it; a nullable partition key is a foot-gun, and we do
--- not record prior nullability). Everything else -- rows, PK, secondary indexes, their names -- is
--- byte-for-byte.
+-- not record prior nullability). A preserved incoming FK on an unpartitioned referencing table comes
+-- back NOT VALID (#577): validating it here would scan the referencing table under ACCESS EXCLUSIVE.
+-- Everything else -- rows, PK, secondary indexes, their names -- is byte-for-byte.
 create or replace function pgpm.untransmute(p_parent regclass)
 returns regclass language plpgsql as $$
 declare
@@ -5756,7 +5757,17 @@ begin
 
   -- re-add every preserved incoming FK against the restored table. The recorded definition names the
   -- parent, schema-qualified, whose name the restored table now carries again. Mirror restore_incoming_fks:
-  -- a partitioned referencer validates in one step (no NOT VALID), anything else NOT VALID + VALIDATE.
+  -- a partitioned referencer validates in one step (Postgres forbids NOT VALID there), anything else
+  -- comes back NOT VALID, which enforces every new write from this statement on.
+  --
+  -- And stays NOT VALID (#577). The VALIDATE used to follow here, and it scans the whole REFERENCING
+  -- table: this is a function, one transaction, holding ACCESS EXCLUSIVE on the restored table since the
+  -- second gate, so every reader and writer of it waited out an O(referencing rows) scan inside what is
+  -- otherwise a metadata-only reverse; and an orphan written while the key was suspended failed it and
+  -- rolled the whole reverse back. restore_incoming_fks stops at NOT VALID for the same reason (#265),
+  -- but there a later maintain() tick validates; here pgpm is forgetting the table, so the VALIDATE is
+  -- the operator's, run in its own transaction after this one, where it takes only SHARE UPDATE EXCLUSIVE
+  -- on the referencing table and ROW SHARE on this one and blocks neither. The notice names it.
   for r in select * from pgpm.dropped_fk where parent_table = p_parent order by id loop
     if (select relkind from pg_class where oid = r.referencing_table) = 'p' then
       execute format('alter table %s add constraint %I %s',
@@ -5764,7 +5775,8 @@ begin
     else
       execute format('alter table %s add constraint %I %s not valid',
                      r.referencing_table::text, r.constraint_name, r.definition);
-      execute format('alter table %s validate constraint %I', r.referencing_table::text, r.constraint_name);
+      raise notice 'pg_partition_magician: untransmute re-added % on % NOT VALID; validate it outside this transaction with: ALTER TABLE % VALIDATE CONSTRAINT %',
+        quote_ident(r.constraint_name), r.referencing_table::text, r.referencing_table::text, quote_ident(r.constraint_name);
     end if;
   end loop;
 
