@@ -2033,6 +2033,17 @@ $$;''',
              "  v_amz_date     := to_char(now() at time zone 'utc', 'YYYYMMDD\"T\"HH24MISS\"Z\"');\n", 2),
         ],
     ),
+    "obtain_ceiling_encode_only": (
+        "bench/obtain_int_ceiling.sh",
+        "Pre-#578 obtain(): the grid-ceiling guard only runs _encode on the candidate's upper bound, "
+        "and _encode is a passthrough for `id`, so it cannot see that an int column ends at 2^31-1. "
+        "The first inexpressible bound in the lookahead raises from CREATE TABLE ... PARTITION OF "
+        "instead, aborting the whole obtain and rolling back every partition built before it; "
+        "maintain_obtain logs skip_obtain every tick, the grid freezes, and a write of an id with a "
+        "perfectly expressible partition is refused. One site: the cast of the encoded bound to the "
+        "control column's own type.",
+        [("      execute format('select %L::%s', v_hi_lit, v_coltype);\n", "", 1)],
+    ),
     "to_s3_compress_unread": (
         "bench/archive_to_s3_compress.sh",
         "Pre-#520 archive.to_s3: the synchronous NDJSON export never read archive.config.compress. "
