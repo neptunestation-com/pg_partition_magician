@@ -59,7 +59,11 @@ Every reproduction holds **at least one `LIVENESS:` assertion**: a premise check
 defect needs was actually reached. Name premise checks `LIVENESS: ...` (other setup checks may be
 `GUARD: ...` or `fixture: ...`) and defect checks without a prefix. A failure of prefixed checks alone
 reads as "the fixture never ran", not as the defect, so a negative cannot pass (or fail) because
-nothing happened. In a `repro.sh`, echo the prefix on the line reporting the check. `classify_claims.py`
+nothing happened. The prefix is exactly one of those three, colon included and case as written: a
+defect check described "guard trigger is gone" is a defect check, and so is a `not ok` with no
+description at all. In a `repro.sh`, report each check on a line of its own (`ok - LIVENESS: ...`,
+`not ok - the rows are gone`): a non-zero exit whose every `not ok` line is a prefixed check reads as
+the fixture never ran, exactly as it does for a `repro.sql`. `classify_claims.py`
 scans the reproduction's text for `LIVENESS:` and classifies a reproduction without one as
 `invalid_repro` without running it.
 

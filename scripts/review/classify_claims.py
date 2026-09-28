@@ -28,7 +28,13 @@ test installed (every file in "install", piped through psql, so the tree need no
              non-zero or any output line begins with `not ok` (pgTAP is fine; create the extension in
              the file).
   repro.sh   runs on the host with PSQL (a command prefix that connects to the fresh database), TREE
-             (the tree under test), DB and CONTAINER in the environment. Non-zero exit means "fails".
+             (the tree under test), DB and CONTAINER in the environment. Non-zero exit means "fails",
+             unless every `not ok` line it printed reports a premise check (below): then its fixture
+             never ran, exactly as for a repro.sql.
+
+A premise check is one whose description begins with `LIVENESS:`, `GUARD:` or `fixture:`, colon
+included and case as written; anything else (an undescribed `not ok`, a check that merely starts with
+the word "guard") is a defect check.
 
 Classification, from the two runs:
   seed_hit        fails on the review tree, not on the pristine commit: the finder found a seed. It is
@@ -58,12 +64,20 @@ import sys
 # arrives as " not ok 3 - ..."; anchoring at column 0 missed every pgTAP failure in pass 2's first run
 # (18 claims read as not_reproduced). Leading whitespace is allowed; a `#` comment still is not.
 NOT_OK = re.compile(r"^\s*not ok\b", re.M)
-# A pgTAP failure whose description starts with LIVENESS, GUARD or fixture is the reproduction's own
-# setup check failing, not the defect: the run did not reach the defect and proves nothing either way.
-# Pass 2: five candidates "failed" on the pristine tree only this way, and each verifier had to rebuild
-# the setup by hand before it could rule.
-NOT_OK_LINE = re.compile(r"^\s*not ok\s+\d+\s*-\s*(.*)$", re.M)
-LIVENESS = re.compile(r"^(LIVENESS|GUARD|fixture|setup|precondition)\b", re.I)
+# A failure whose description starts with LIVENESS:, GUARD: or fixture: is the reproduction's own setup
+# check failing, not the defect: the run did not reach the defect and proves nothing either way. Pass 2:
+# five candidates "failed" on the pristine tree only this way, and each verifier had to rebuild the setup
+# by hand before it could rule.
+#
+# EVERY line beginning `not ok` is a failure, described or not (#600): pgTAP prints an assertion without a
+# description as `not ok 2` (psql adds a ` +` when a diagnostic follows), and demanding `- <description>`
+# read that as passing. The number is optional too, because a repro.sh echoes `not ok - ...`. The
+# description, when there is one, is the rest of the line; an undescribed failure has none, so it can
+# never read as a premise check.
+NOT_OK_LINE = re.compile(r"^\s*not ok\b[ \t]*\d*[ \t]*(?:-[ \t]*)?(.*)$", re.M)
+# The contract's prefixes exactly, colon included and case-sensitive (#600): a defect check described
+# "guard trigger is gone ..." or "Setup ..." is a defect check, not a premise.
+LIVENESS = re.compile(r"^(?:LIVENESS|GUARD|fixture):")
 # The contract's mandatory premise marker. Scanned for as text, so it serves a repro.sh (whose assertions
 # are echoed lines) as well as a pgTAP repro.sql.
 LIVENESS_MARK = "LIVENESS:"
@@ -91,6 +105,16 @@ def failure_kind(stdout, returncode):
     if not descs:
         return None
     return "liveness" if all(LIVENESS.match(d.strip()) for d in descs) else "defect"
+
+
+def script_failure_kind(output, returncode):
+    """failure_kind for a repro.sh (#600). Its exit status is its verdict, so exit 0 is None whatever it
+    printed; a non-zero exit is 'liveness' when it printed at least one `not ok` line and every one of them
+    reports a premise check, else 'defect' (a script that dies without printing a verdict included)."""
+    if returncode == 0:
+        return None
+    descs = NOT_OK_LINE.findall(output)
+    return "liveness" if descs and all(LIVENESS.match(d.strip()) for d in descs) else "defect"
 
 
 def load_claims(claims_dir, only=None, finders=None):
@@ -172,7 +196,10 @@ class Harness:
                        "TREE": tree, "DB": db, "CONTAINER": container}
                 r = subprocess.run(["bash", repro], env=env, capture_output=True, text=True, cwd=claim["dir"])
                 out = r.stdout + r.stderr
-                fails = r.returncode != 0
+                kind = script_failure_kind(r.stdout, r.returncode)
+                fails = kind == "defect"
+                if kind == "liveness":
+                    return {"fails": False, "liveness_failed": True, "exit": r.returncode, "tail": out[-1500:]}
             return {"fails": fails, "exit": r.returncode, "tail": out[-1500:]}
         finally:
             if not self.keep:
@@ -388,6 +415,28 @@ def selftest_verified_and_liveness():
         assert "F9-02: no LIVENESS: assertion" in text, text
 
 
+def selftest_script_liveness():
+    """End to end through Harness.run with the database calls stubbed: a repro.sh failing only its
+    LIVENESS: check is invalid_repro (#600), one failing its defect check is a candidate."""
+    import tempfile
+
+    class NoDb(Harness):
+        def psql(self, container, db, args, stdin=None, check=True):
+            return subprocess.CompletedProcess(args, 0, "", "")
+    with tempfile.TemporaryDirectory() as tmp:
+        got = {}
+        for cid, body in (("S1", "echo 'not ok - LIVENESS: the fixture never ran'\nexit 1\n"),
+                          ("S2", "echo 'ok - LIVENESS: ran'\necho 'not ok - rows lost'\nexit 1\n")):
+            d = os.path.join(tmp, cid)
+            os.makedirs(d)
+            with open(os.path.join(d, "repro.sh"), "w") as fh:
+                fh.write(body)
+            c = {"id": cid, "install": [], "fixtures": False, "dir": d, "repro": "repro.sh", "repro_used": "repro.sh"}
+            h = NoDb("c")
+            got[cid] = classify(h.run(tmp, c, "r"), h.run(tmp, c, "p"))
+        assert got == {"S1": "invalid_repro", "S2": "candidate"}, got
+
+
 def selftest():
     # classification truth table
     F, P = {"fails": True}, {"fails": False}
@@ -400,6 +449,22 @@ def selftest():
     assert failure_kind(" not ok 1 - LIVENESS: the tick ran\n ok 2 - rows\n", 0) == "liveness"
     assert failure_kind(" not ok 1 - LIVENESS: x\n not ok 2 - rows lost\n", 0) == "defect"
     assert failure_kind(" ok 1 - fine\n", 0) is None and failure_kind("", 3) == "defect"
+    # #600 (a): a failing assertion WITHOUT a description is a failure, and never a premise
+    assert failure_kind(" ok 1 - LIVENESS: ran\n not ok 2                               +\n", 0) == "defect"
+    assert failure_kind(" not ok 2\n", 0) == "defect"
+    assert NOT_OK_LINE.findall(" not ok 7 - LIVENESS: x\nnot ok - GUARD: y\n") == ["LIVENESS: x", "GUARD: y"]
+    # #600 (c): only the contract's prefixes, colon and case as written, mark a premise
+    for d in ("guard trigger is gone", "the guard trigger is gone", "Setup ran", "fixture rows lost",
+              "precondition held", "liveness: lower case", "LIVENESS without a colon"):
+        assert failure_kind(f" not ok 1 - {d}\n", 0) == "defect", d
+    for d in ("LIVENESS: the tick ran", "GUARD: the trigger exists", "fixture: the table exists"):
+        assert failure_kind(f" not ok 1 - {d}\n", 0) == "liveness", d
+    # #600 (b): a repro.sh's echoed verdict lines are read, not only its exit status
+    assert script_failure_kind("ok - fixture: a\nnot ok - LIVENESS: the tick never ran\n", 1) == "liveness"
+    assert script_failure_kind("ok - LIVENESS: ran\nnot ok - rows lost\n", 1) == "defect"
+    assert script_failure_kind("not ok - LIVENESS: x\nnot ok - rows lost\n", 1) == "defect"
+    assert script_failure_kind("ERROR: something died\n", 1) == "defect"      # died without a verdict
+    assert script_failure_kind("not ok - LIVENESS: x\n", 0) is None          # exit 0 is its verdict
     # `not ok` in TAP output is a failure even when psql exits 0
     assert NOT_OK.search("ok 1\nnot ok 2 - x\n") and not NOT_OK.search("ok 1\n# not ok in a comment\n")
     assert NOT_OK.search("        is        \n------------------\n not ok 9 - late key present +\n")   # psql's aligned rows
@@ -439,6 +504,7 @@ def selftest():
     assert res[0]["seed"] == "S1" and "seed" not in res[1]
     assert "candidate        1" in summary(res) and "seed_hit         1" in summary(res)
     selftest_verified_and_liveness()
+    selftest_script_liveness()
     print("classify_claims selftest: PASS")
     return 0
 
