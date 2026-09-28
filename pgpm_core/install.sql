@@ -1047,6 +1047,21 @@ begin
 end;
 $$;
 
+-- An id grid value as a label (#582). Zero-padded to 19 digits so the names of a bigint grid sort in
+-- grid order and keep the form they have always had; a longer value (a numeric key at or past 10^19, or at
+-- or below -10^18) is left WHOLE, because lpad truncates a string longer than its width and the
+-- cell at 10^19 rendered the cell at 10^18's name. A non-integral value (a regrain toward a fractional
+-- step on a numeric column) keeps its fraction as `_<digits>`, trailing zeros dropped so that one value has
+-- one label whatever scale its text was written at; floor() alone put 1 and 1.5 under one name. Injective:
+-- a padded label begins with 0 and an unpadded one never does, and the fraction is the only `_`.
+create or replace function pgpm._id_label(p_native text)
+returns text language sql immutable as $$
+  select case when length(i.whole) < 19 then lpad(i.whole, 19, '0') else i.whole end
+      || case when i.frac = 0 then '' else '_' || rtrim(substr(i.frac::text, 3), '0') end
+    from (select floor(p_native::numeric)::text as whole,
+                 p_native::numeric - floor(p_native::numeric) as frac) i
+$$;
+
 -- _part_name maps a partition's NATIVE [lo, hi) to its child table name. A one-step range (hi is the
 -- next grid value after lo, the common fine partition) keeps the historical name _p<lo>; a wider range
 -- (a coarse / monolith child, REDESIGN.md section 6) is named _p<lo>_to_<hi> so it can never collide
@@ -1077,6 +1092,14 @@ $$;
 -- and east of UTC with a local-midnight anchor that is exactly the UTC date of the cell after it. See
 -- _obtain_name. A one-step explicit name never equals a plain name (no `_to_`) nor a coarse one (its two
 -- labels are one step apart, a coarse child's at least two).
+-- And the label has to be fine enough for the step (#582). Two cells of a fixed step are at least one step
+-- apart, so a label at the step's own granularity (or finer) never repeats: a minute label for a step of
+-- a minute or more, a second label (HH24MISS) for a step under a minute, a microsecond label for a step
+-- under a second. The finest label used to be the minute, so the two cells of a 30-second step shared a
+-- name, obtain built every other cell and regrain copied the second cell's rows into the first cell's
+-- child. An id label is _id_label's: zero-padded to 19 digits and never cut, with a non-integral value's
+-- fraction appended. Every label that was already injective keeps its historical form, so no existing
+-- grid's names move.
 drop function if exists pgpm._part_name(name, text, text, text);
 drop function if exists pgpm._part_name(name, text, text, text, text, text);
 create or replace function pgpm._part_name(p_relname name, p_kind text, p_step text, p_lo_native text,
@@ -1096,13 +1119,15 @@ begin
     elsif v_months > 0                          then fmt := 'YYYY_MM';
     elsif v_secs  >= 86400                       then fmt := 'YYYY_MM_DD';
     elsif v_secs  >= 3600                        then fmt := 'YYYY_MM_DD_HH24';
-    else                                              fmt := 'YYYY_MM_DD_HH24MI';
+    elsif v_secs  >= 60                          then fmt := 'YYYY_MM_DD_HH24MI';
+    elsif v_secs  >= 1                           then fmt := 'YYYY_MM_DD_HH24MISS';
+    else                                              fmt := 'YYYY_MM_DD_HH24MISS_US';
     end if;
     v_lo := to_char(p_lo_native::timestamptz at time zone v_label_tz, fmt);
     if v_coarse then v_hi := to_char(p_hi_native::timestamptz at time zone v_label_tz, fmt); end if;
   else
-    v_lo := lpad(floor(p_lo_native::numeric)::text, 19, '0');
-    if v_coarse then v_hi := lpad(floor(p_hi_native::numeric)::text, 19, '0'); end if;
+    v_lo := pgpm._id_label(p_lo_native);
+    if v_coarse then v_hi := pgpm._id_label(p_hi_native); end if;
   end if;
   v_name := p_relname || '_p' || v_lo || case when v_coarse then '_to_' || v_hi else '' end;
 

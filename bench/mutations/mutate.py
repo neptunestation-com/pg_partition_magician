@@ -2650,6 +2650,34 @@ $$;''',
           "                         cfg.partition_anchor) then\n",
           "  if false then\n", 1)],
     ),
+    "part_name_minute_floor": (
+        "bench/part_name_labels_injective.sh",
+        "Pre-#582 _part_name: the finest time label is the minute (YYYY_MM_DD_HH24MI) whatever the step, "
+        "so the two cells of a 30-second step (and every sub-second cell of a second) render one name. "
+        "obtain skips the second cell as already existing, so every other forward cell is never built "
+        "(nothing logged, writes there refused with 'no partition of relation found'), and regrain toward "
+        "30 seconds copies the second cell's rows into the first cell's child, whose CHECK refuses them "
+        "with a raw 23514 on every attempt. The second and microsecond branches go, nothing else. "
+        "tests/150's sub-minute adapter pairs, its 30-second obtain grid and its uuidv7 regrain toward "
+        "30 seconds are what catch it.",
+        [("    elsif v_secs  >= 60                          then fmt := 'YYYY_MM_DD_HH24MI';\n"
+          "    elsif v_secs  >= 1                           then fmt := 'YYYY_MM_DD_HH24MISS';\n"
+          "    else                                              fmt := 'YYYY_MM_DD_HH24MISS_US';\n",
+          "    else                                              fmt := 'YYYY_MM_DD_HH24MI';\n", 1)],
+    ),
+    "part_name_id_label_truncated": (
+        "bench/part_name_labels_injective.sh",
+        "Pre-#582 _part_name: an id label is lpad(floor(lo)::text, 19, '0'). lpad TRUNCATES a longer "
+        "string, so on a numeric grid crossing 10^19 the cell at 10^19 renders the name of the cell at "
+        "10^18, obtain skips it as existing and writes into [10^19, 1.1*10^19) are refused; and floor() "
+        "drops a fraction, so a regrain toward 0.5 puts the cells at 1 and 1.5 under one name and the copy "
+        "fails 23514. Both _part_name call sites go back to the old expression. tests/150's id adapter "
+        "cases, its grid past 10^19 and its regrain toward 0.5 are what catch it.",
+        [("    v_lo := pgpm._id_label(p_lo_native);\n"
+          "    if v_coarse then v_hi := pgpm._id_label(p_hi_native); end if;\n",
+          "    v_lo := lpad(floor(p_lo_native::numeric)::text, 19, '0');\n"
+          "    if v_coarse then v_hi := lpad(floor(p_hi_native::numeric)::text, 19, '0'); end if;\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+- **Every cell a grid can produce gets its own partition name** (#582). `obtain`, `extend_to` and
+  `regrain_step` decide whether a cell's child already exists by its name, and three labels were not
+  injective. The finest time label was the minute, so the two cells of a 30-second step (which
+  `transmute`, `regrain` and `set_regrain` all accept) shared one: `obtain` built every other forward cell
+  with nothing logged, writes into the rest were refused with "no partition of relation found", and a
+  regrain toward 30 seconds copied the second cell's rows into the first cell's child and failed with a
+  raw 23514 on every attempt. An id label was `lpad(floor(lo)::text, 19, '0')`, and `lpad` truncates, so
+  on a `numeric` grid crossing 10^19 the cell at 10^19 took the name of the cell at 10^18 and was never
+  built; `floor` dropped a fraction, so a regrain toward 0.5 put 1 and 1.5 under one name. A step under a
+  minute is now labelled to the second and one under a second to the microsecond; an id label is padded
+  to 19 digits but never cut, and a non-integral one keeps its fraction (`_p0000000000000000001_5`).
+  Every label that was already unique keeps its form, so no existing grid's names move, and an existing
+  sub-minute grid's missing cells are built by the next `obtain`. `tests/150` pins the rule, and
+  `bench/part_name_labels_injective.sh` runs it against `part_name_minute_floor` and
+  `part_name_id_label_truncated`. The reference's label budget named 16 bytes for a minute label; it is
+  15.
 - **The synchronous `regrain()` no longer deadlocks with a write into the table it is regraining**
   (#580). It runs every `regrain_step` in one transaction, so the capture trigger's SHARE ROW EXCLUSIVE
   lock on the source was held for the whole copy. A write into the source's range took ROW EXCLUSIVE on

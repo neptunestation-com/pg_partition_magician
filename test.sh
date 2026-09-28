@@ -695,6 +695,7 @@ run_perf() {
     "bench/transmute_step_preflight.sh pgpm_perf58"
     "bench/regrain_parent_rename_midcopy.sh pgpm_perf70"
     "bench/regrain_step_positive.sh pgpm_perf71"
+    "bench/part_name_labels_injective.sh pgpm_perf67"
   )
   local selected=()
   local n=${#guards[@]} idx
