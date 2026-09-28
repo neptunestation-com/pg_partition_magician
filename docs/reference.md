@@ -1022,9 +1022,12 @@ Turning auto-regrain off with [`set_regrain`](#set_regrain)`(parent, null)` whil
 flight abandons that run through this same path, so the two cannot differ: the same teardown, one
 `regrain_cancel` log row. `maintain` also sweeps a capture trigger left on a child whose range the cursor no
 longer covers, logging `regrain_capture_orphan`, but that is a backstop for a cursor cleared by some other
-route, not a way to abandon a run: it drops no copies and clears no delta. To stop a run deliberately and get
-the disk back, or to clear one left half-done with auto-regrain already off (`config.regrain_cursor` set,
-`regrain_to` null), call this.
+route, not a way to abandon a run: it drops no copies and clears no delta. The copies it leaves are never
+resumed from: they were made while capture was off, so the next `regrain_step` on that child discards them
+at its prepare tick, whatever the cursor says, logs `regrain_restart` with `rows` counting the copies
+discarded, and copies the range again from the source. To stop a run deliberately and get the disk back, or
+to clear one left half-done with auto-regrain already off (`config.regrain_cursor` set, `regrain_to` null),
+call this.
 
 `retire` makes the same cancellation, scoped to the one source it is dropping, when retention drops the
 coarse child a regrain is splitting (see [`retire`](#retire)). That is logged `regrain_cancel` too, with
