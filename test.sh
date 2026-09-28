@@ -682,6 +682,8 @@ run_perf() {
     "bench/cutover_trigger_window.sh pgpm_perf61"
     "bench/set_partition_tz_every_bound.sh pgpm_perf68"
     "bench/month_floor_doubled_midnight.sh pgpm_perf69"
+    "bench/maintain_all_sweep_turns.sh pgpm_perf64"
+    "bench/regrain_candidate_lock_race.sh pgpm_perf65"
   )
   local selected=()
   local n=${#guards[@]} idx

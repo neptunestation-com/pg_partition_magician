@@ -1138,6 +1138,18 @@ call pgpm.maintain_all()
 
 A procedure that calls `maintain` for every managed table. This is what the `pgpm` scheduled job runs.
 
+The sweep is one top-level statement, so the maintaining session's `statement_timeout` runs across
+every table in it, not per table: the internal `COMMIT`s do not restart it. A sweep the timeout cuts
+short stops where it is (a cancellation is not a step failure, so no step defers it), and the tables
+after that point wait for the next tick. So that no table waits forever behind a slow one, the sweep
+visits the table whose turn is oldest first (`config.sweep_turn_at`, set when a table's `maintain`
+returns). A table cut short keeps its old turn and leads the next sweep; the first table of a sweep has
+its turn recorded as it starts, so even a table whose own tick overruns the timeout cannot lead, and be
+cancelled in, every sweep. Each sweep therefore moves its first table to the back, and every table that
+fits the timeout on its own completes at least once every N sweeps for N managed tables. With nothing cut
+short the order is the same every tick. Size `archive_byte_budget` so that one table's `maintain` fits
+the timeout; the whole sweep need not.
+
 ### `maintain_obtain`
 
 ```sql
@@ -1965,6 +1977,7 @@ One row per managed table (`parent_table` is the primary key). Columns:
 | `archive_fn` | `regprocedure` | the pluggable archive strategy (null = `none`); see [Archive strategy contract](#archive-strategy-contract) |
 | `archive_byte_budget` / `archive_probe_sample` | `bigint` / `int` | byte-budget chunking knobs for the built-in chunked archiver (see [Byte-budget chunked archiving](#byte-budget-chunked-archiving)) |
 | `archive_batch` | `int` | max partitions one `_archive_step` call touches, oldest first (default 1; null = unbounded -- see [Byte-budget chunked archiving](#byte-budget-chunked-archiving)) |
+| `sweep_turn_at` | `timestamptz` | when this table last had its turn in a `maintain_all` sweep, which visits the oldest turn first (null = never, and goes first); see [`maintain_all`](#maintain_all) |
 | `text_time_prefix` / `text_time_width` / `text_time_radix` / `text_time_unit` | `text` / `int` / `int` / `text` | the declared shape for a `text_time` control column (null for every other kind); see `p_tt_prefix` etc. above |
 | `text_time_alphabet` / `text_time_discard_bits` / `text_time_epoch` | `text` / `int` / `timestamptz` | non-default digit set, bits to discard, and epoch for a `text_time` column (null/0/Unix epoch for cuid/ULID-shaped ones; see `p_tt_alphabet` etc. above) |
 
