@@ -3899,6 +3899,8 @@ declare
   v_prev_lock_timeout text;   -- #309: so validating p_lock_timeout leaves the setting untouched
   v_trgdefs text[] := '{}'; v_grant text; v_g record;
   v_trgnames text[] := '{}'; v_trgstates text[] := '{}';   -- #499: tgname and tgenabled, index-aligned with v_trgdefs
+  v_bad_pub text; v_pub record;   -- #566: publication membership, refused or carried
+  v_sq record;                    -- #573: sequences the table owns through a column
 begin
   if p_control_kind not in ('time', 'id', 'uuidv7', 'text_time') then
     raise exception 'pg_partition_magician: unknown control_kind %', p_control_kind;
@@ -4321,6 +4323,23 @@ begin
   if v_bad_trg is not null then
     raise exception 'pg_partition_magician: cannot transmute % -- the row trigger(s) (%) use a transition table (REFERENCING OLD/NEW TABLE), which PostgreSQL does not allow on a partitioned table. Rewrite them as statement triggers (those DO carry a transition table) or drop them, then re-run transmute. pgpm refuses rather than converting and leaving the trigger behind on one child.',
       p_parent, v_bad_trg;
+  end if;
+
+  -- Publication membership (#566): the cutover adds the new parent to every publication that names this
+  -- table (step 7c), and PostgreSQL refuses a row filter or a column list on a PARTITIONED table in a
+  -- publication with publish_via_partition_root = false ("cannot use publication WHERE clause for
+  -- relation"). There is no faithful way to carry that shape: dropping the filter or the list would
+  -- start replicating rows or columns the operator excluded, and leaving the parent out is the defect
+  -- itself. So it is refused HERE, before anything is committed, rather than failing inside the cutover.
+  -- A publication FOR ALL TABLES or FOR TABLES IN SCHEMA needs nothing: the parent is covered by it the
+  -- moment it exists, in the same schema.
+  select string_agg(p.pubname::text, ', ' order by p.pubname) into v_bad_pub
+    from pg_publication_rel r join pg_publication p on p.oid = r.prpubid
+   where r.prrelid = p_parent and not p.pubviaroot
+     and (r.prqual is not null or r.prattrs is not null);
+  if v_bad_pub is not null then
+    raise exception 'pg_partition_magician: cannot transmute % -- the publication(s) (%) name it with a row filter or a column list and publish_via_partition_root = false, which PostgreSQL does not allow for a partitioned table, so the new parent could not take the table''s place in them. Set publish_via_partition_root = true on them (ALTER PUBLICATION ... SET (publish_via_partition_root = true)), or drop the filter and column list, then re-run transmute.',
+      p_parent, v_bad_pub;
   end if;
 
   -- 0. incoming FKs: the GATE, and only the gate. pgpm never rewrites the PK, so the referenced unique
@@ -4843,6 +4862,26 @@ begin
     end loop;
   end if;
   execute format('alter table %s alter column %I set not null', v_monreg::text, p_control);
+  -- 3b. hand every sequence the table OWNS through a column (a serial, or an explicit OWNED BY) to the
+  -- same column of the new parent (#573). CREATE TABLE ... LIKE INCLUDING DEFAULTS copied the column's
+  -- nextval() default onto the parent, but the ownership stayed with the oid the rename just made the
+  -- monolith, so DROP of the aged-out monolith took the sequence the parent's default still calls:
+  -- "cannot drop table ... because other objects depend on it", fail_retain_drop on every tick, and a
+  -- monolith that could never be retired. deptype 'a' is OWNED BY; an identity column's sequence is 'i'
+  -- and went with the drop identity above. After the renames, not before: ALTER SEQUENCE takes SHARE
+  -- ROW EXCLUSIVE on the sequence, which queues every nextval, and the rename's ACCESS EXCLUSIVE on the
+  -- table is what already stops those writers here.
+  for v_sq in
+    select d.objid::regclass as seq, a.attname
+      from pg_depend d
+      join pg_class s on s.oid = d.objid and s.relkind = 'S'
+      join pg_attribute a on a.attrelid = d.refobjid and a.attnum = d.refobjsubid
+     where d.classid = 'pg_class'::regclass and d.refclassid = 'pg_class'::regclass
+       and d.refobjid = p_parent and d.refobjsubid > 0 and d.deptype = 'a'
+     order by a.attnum
+  loop
+    execute format('alter sequence %s owned by %s.%I', v_sq.seq::text, v_parent::text, v_sq.attname);
+  end loop;
   -- only a reused PRIMARY KEY makes its other columns NOT NULL; a reused UNIQUE constraint legitimately
   -- permits nullable non-control columns, so leave those as they are (and never scan them).
   if v_add_pk and v_pkcols is not null then
@@ -4898,6 +4937,30 @@ begin
       end if;
     end loop;
   end if;
+
+  -- 7c. publication membership (#566). pg_publication_rel names a table by oid, and the rename made that
+  -- oid the monolith, so without this every publication FOR TABLE <this table> went on publishing the
+  -- monolith alone: the parent and every forward partition obtain creates were in none of them, and each
+  -- row written past the monolith was silently not replicated. Add the parent to each, with the same row
+  -- filter and column list (the up-front check refused the shapes a partitioned table cannot take), so
+  -- every partition present and future is covered through it. The monolith's own membership is KEPT on
+  -- purpose: it is what an untransmute hands back in its publications, and while it is a partition it
+  -- adds nothing (publish_via_partition_root = false publishes it as a leaf of the parent anyway; true
+  -- publishes it through the parent). Retention's drop of the monolith removes it with the table.
+  -- Column names, not prattrs' attnums: the parent's attnums are dense, the original's may have holes
+  -- where a column was dropped.
+  for v_pub in
+    select p.pubname, pg_get_expr(r.prqual, r.prrelid) as qual,
+           (select string_agg(quote_ident(a.attname), ', ' order by a.attnum)
+              from pg_attribute a where a.attrelid = r.prrelid and a.attnum = any(r.prattrs::int2[])) as cols_q
+      from pg_publication_rel r join pg_publication p on p.oid = r.prpubid
+     where r.prrelid = p_parent
+     order by p.pubname
+  loop
+    execute format('alter publication %I add table %s%s%s', v_pub.pubname, v_parent::text,
+                   case when v_pub.cols_q is not null then ' (' || v_pub.cols_q || ')' else '' end,
+                   case when v_pub.qual is not null then ' where (' || v_pub.qual || ')' else '' end);
+  end loop;
 
   -- 8. parent key -- adopts the monolith's kept constraint index (metadata-only, no rebuild): a PRIMARY
   -- KEY when the reused key was the PK, a UNIQUE constraint when it was a unique constraint.
@@ -5283,6 +5346,7 @@ declare
   r pgpm.dropped_fk%rowtype; v_cdelta name; v_cfn name;
   v_trgdefs text[] := '{}'; v_tdef text;   -- #277
   v_trgnames text[] := '{}'; v_trgstates text[] := '{}';   -- #499: tgname and tgenabled, index-aligned with v_trgdefs
+  v_sq record;   -- #573: serial sequences the parent owns, handed back before it is dropped
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then
@@ -5433,6 +5497,21 @@ begin
   -- takes the parent PK, the partitioned _pgpm indexes, and the parent's identity sequence with it.
   -- DETACH FIRST: dropping a partitioned parent cascades to its partitions, which would destroy the data.
   execute format('alter table %s detach partition %s', p_parent::text, v_monreg::text);
+  -- The mirror of transmute's 3b (#573): the parent owns the serial sequences the monolith's column
+  -- defaults still call, so dropping it would take them too ("other objects depend on it"). Hand each
+  -- back to the same column of the table being restored first. Identity sequences ('i') are not these:
+  -- they go with the parent and are re-created below.
+  for v_sq in
+    select d.objid::regclass as seq, a.attname
+      from pg_depend d
+      join pg_class s on s.oid = d.objid and s.relkind = 'S'
+      join pg_attribute a on a.attrelid = d.refobjid and a.attnum = d.refobjsubid
+     where d.classid = 'pg_class'::regclass and d.refclassid = 'pg_class'::regclass
+       and d.refobjid = p_parent and d.refobjsubid > 0 and d.deptype = 'a'
+     order by a.attnum
+  loop
+    execute format('alter sequence %s owned by %s.%I', v_sq.seq::text, v_monreg::text, v_sq.attname);
+  end loop;
   execute format('drop table %s', p_parent::text);
 
   -- re-establish identity on the restored monolith and reseed to the greater of max+1 and the parent

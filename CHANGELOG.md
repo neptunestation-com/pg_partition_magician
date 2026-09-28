@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+- **`transmute` puts the new parent in every publication that named the table** (#566). The #277
+  carry-over replayed owner, grants, RLS, policies, comments and triggers, but not publication membership.
+  `pg_publication_rel` records a table by oid, and the cutover renames that oid into the monolith, so a
+  publication `FOR TABLE` the table went on publishing the monolith alone. The new parent and every forward
+  partition were in no publication, and every row written past the monolith was silently not replicated
+  (logical subscribers, Supabase Realtime). The cutover now adds the parent to each of those publications
+  with the same row filter and column list. The monolith keeps its own membership, so an `untransmute`
+  hands the table back still published. A publication with `publish_via_partition_root = false` that names
+  the table with a row filter or a column list is refused up front, before anything is committed:
+  PostgreSQL does not allow either on a partitioned table in such a publication, and dropping them would
+  replicate what the operator excluded. `tests/132_transmute_publication_membership_test.sql` asserts the
+  exact set of publications, the carried filter and column list, and what `pg_publication_tables` offers a
+  subscriber. `bench/transmute_publication_membership.sh` runs the same file for `./test.sh discriminate`,
+  where the `transmute_publication_not_carried` mutation puts the defect back.
+
+- **A serial column's sequence follows the table through `transmute`, so retention can drop the
+  monolith** (#573). `CREATE TABLE ... LIKE INCLUDING DEFAULTS` copied the column's `nextval()` default onto
+  the new parent, but the sequence stayed `OWNED BY` the original oid, now the monolith. `DROP` of the
+  aged-out monolith then failed with "other objects depend on it" and logged `fail_retain_drop` on every
+  tick, so the monolith could never be retired. The cutover now moves every sequence the table owns through
+  a column onto the same column of the parent. `untransmute` moves it back before it drops the parent,
+  since the parent's drop would otherwise take the sequence the restored table's default still calls.
+  `tests/133_transmute_serial_sequence_owner_test.sql` covers two serial columns and a sequence the table
+  only calls, retention past the monolith, and the reversal. `bench/transmute_serial_sequence_owner.sh`
+  runs it for `./test.sh discriminate` against the `transmute_serial_owner_not_moved` and
+  `untransmute_serial_owner_not_returned` mutations, one per site.
 - **An interval retain is refused if any of its fields is negative, not only when it compares below zero**
   (#565). The sign check `pgpm.transmute` and `pgpm.set_retain` apply to `p_retain`, and the defence in
   depth in `_retain_boundary` and `regrain_step`, compared the interval with zero, which PostgreSQL does on
