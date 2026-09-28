@@ -3456,6 +3456,30 @@ begin
 end;
 $$;
 
+-- #588: refuse a regrain target step that does not move the grid forward. Every regrain precondition
+-- compares widths ("coarser than partition_step", "subdivides the child"), and a step of zero or below is
+-- narrower than anything, so it passed them all: '0' divides by zero in _grid_floor on every tick, and a
+-- negative step makes 'nosubdiv' (hi > lo + step) trivially true, mints a fine child with inverted bounds
+-- and walks the cursor BELOW lo, so auto-regrain churns prepare / orphan / restart forever and regrain()
+-- spins toward its iteration limit. "Forward" is asked of the grid itself, grid_next(step, anchor) past
+-- anchor, so the one test covers an id step, a fixed interval and a calendar one alike ('-1 month' has no
+-- positive month count and falls to the fixed branch with negative seconds). set_regrain calls it before
+-- storing a target, and regrain_step before anything else, which regrain(), regrain_history() and
+-- maintain all go through.
+create or replace function pgpm._regrain_step_forward(p_parent regclass, p_step text)
+returns void language plpgsql stable as $$
+declare cfg pgpm.config;
+begin
+  select * into cfg from pgpm.config where parent_table = p_parent;
+  if not pgpm._native_gt(cfg.control_kind,
+                         pgpm._grid_next(cfg.control_kind, p_step, cfg.partition_anchor, cfg.partition_tz),
+                         cfg.partition_anchor) then
+    raise exception 'pg_partition_magician: regrain target step % for % is not positive -- a step of zero or below cannot split anything (zero divides by zero on every tick, a negative one walks the copy cursor backwards); give a step greater than zero and no coarser than partition_step %',
+      p_step, p_parent, cfg.partition_step;
+  end if;
+end;
+$$;
+
 -- one resumable microbatch of regrain work on coarse child p_child toward target step p_target_step.
 -- Returns: 'copied:N' (copied N rows into the current fine child), 'swapped:K' (cursor reached hi -> detached
 -- the source, attached K fine children, dropped it: regrain done), or a soft no-progress status ('active' =
@@ -3479,6 +3503,7 @@ begin
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
   v_ncast := pgpm._native_type(cfg.control_kind);
   v_step  := coalesce(p_target_step, cfg.partition_step);
+  perform pgpm._regrain_step_forward(p_parent, v_step);   -- #588: before anything reads or mutates
 
   select lo, hi into v_lo, v_hi from pgpm.part
    where parent_table = p_parent and child_name = p_child and attached;
@@ -3729,7 +3754,20 @@ begin
   if pgpm._native_gt(cfg.control_kind, v_hi, v_cursor) then
     v_lo_lit := pgpm._encode(cfg.control_kind, v_sub_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz);
     v_hi_lit := pgpm._encode(cfg.control_kind, v_sub_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz);
-    v_sub_name := pgpm._part_name(v_rel, cfg.control_kind, v_step, v_sub_lo, v_sub_hi, cfg.partition_tz);
+    -- #585: a sub-range whose copy has already started is found by its BOUNDS in pgpm.part, never by
+    -- re-rendering its name. The name is rendered from the parent's CURRENT relname, so an ALTER TABLE
+    -- ... RENAME of the parent mid-regrain (harmless by contract, see #496) made the child the copy had
+    -- already filled invisible to a lookup by name: the next tick minted a second not-attached child for
+    -- the same [lo, hi) and the swap, which attaches from pgpm.part, failed "would overlap" on every tick.
+    -- pgpm.part is the swap's own authority (the same one _regrain_has_child and the reconcile, #446, ask),
+    -- so asking it here is "will the swap attach this child for this sub-range". A name is rendered only
+    -- to CREATE a child the sub-range does not have yet.
+    select p.child_name into v_sub_name from pgpm.part p
+     where p.parent_table = p_parent and not p.attached
+       and not pgpm._native_gt(cfg.control_kind, p.lo, v_sub_lo) and not pgpm._native_gt(cfg.control_kind, v_sub_lo, p.lo)
+       and not pgpm._native_gt(cfg.control_kind, p.hi, v_sub_hi) and not pgpm._native_gt(cfg.control_kind, v_sub_hi, p.hi);
+    v_sub_name := coalesce(v_sub_name,
+                           pgpm._part_name(v_rel, cfg.control_kind, v_step, v_sub_lo, v_sub_hi, cfg.partition_tz));
     -- invariant (#266): the rename above makes this unreachable. Assert it anyway -- when it was false the
     -- failure was silent row destruction, so a future change to _part_name must break loudly here.
     if v_sub_name = v_child_name then
@@ -5874,8 +5912,9 @@ drop function if exists pgpm.feathering_validation(regclass, interval, interval)
 -- bigint step as text for id) turns it on: each maintenance tick feathers the oldest frozen coarse child
 -- one budget-sized microbatch toward that granularity. null turns it off (regrain stays operator-driven via
 -- regrain()/regrain_history()). This only PACES regraining across ticks; regrain_step enforces its own
--- preconditions (frozen, default-clear), so enabling it is always safe: a target coarser than
--- partition_step is refused (issue #341, see the guard below), and maintain() only ever selects a child
+-- preconditions (frozen, default-clear), so enabling it is always safe: a zero or negative target (#588)
+-- and one coarser than partition_step (issue #341) are refused (see the guards below), and maintain() only
+-- ever selects a child
 -- the target subdivides (#515), so no target can wedge it.
 create or replace function pgpm.set_regrain(p_parent regclass, p_target_step text default null)
 returns void language plpgsql as $$
@@ -5884,6 +5923,10 @@ declare
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
+
+  -- #588: a zero or negative target is refused first. It is "finer" than any partition_step, so the #341
+  -- comparison below would pass it, and it wedges every tick (see _regrain_step_forward).
+  if p_target_step is not null then perform pgpm._regrain_step_forward(p_parent, p_target_step); end if;
 
   -- #341: a p_target_step COARSER than partition_step is refused at call time. maintain()'s auto-regrain
   -- candidate query calls a child "coarse" whenever it is wider than one partition_step, and regrain_step's
