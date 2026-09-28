@@ -950,6 +950,18 @@ anything.
 Only one regrain runs per parent at a time: a second one is refused with an error naming the one in
 flight. Let it finish, or stop it with [`regrain_cancel`](#regrain_cancel), then re-run.
 
+**Writes wait for the whole call.** Before its first step, `regrain` takes a `SHARE` lock on the parent
+(the parent only, not its partitions) and holds it until the call commits. Reads, and foreign-key checks
+against the table, carry on as normal. Every `INSERT`, `UPDATE` or `DELETE` through the parent waits
+instead, whichever partition it targets, and runs once the call has committed (a write into the regrained
+range then lands in the fine children). The
+lock is what keeps such a write from deadlocking with the swap: one transaction holds the change-capture
+trigger's lock on the source for the whole copy, and a write routed to the source would otherwise hold
+its lock on the parent while queuing there, the lock the swap's `DETACH` needs. A long transaction that
+already holds a write lock on the table delays the start of `regrain` until it ends. To regrain a table
+under live writes, use auto-regrain ([`set_regrain`](#set_regrain)), which commits every tick and takes
+no such lock.
+
 A child whose range is exactly one grid step wide carries the plain `_p<lo>` name, which is also what its
 own first fine sub-range would be called. Regrain renames such a child to its explicit-range form
 (`_p<lo>_to_<hi>`) before splitting it, logged as `regrain_rename`, so the sub-range names are free. The

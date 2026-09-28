@@ -156,7 +156,7 @@ cannot make progress yet.
 
    ```sql
    select pgpm.set_regrain('public.events', '1 month');   -- paced: one microbatch per maintain tick
-   -- or, synchronously now (atomic, one transaction):
+   -- or, synchronously now (atomic, one transaction; writes to the table wait until it commits):
    select pgpm.regrain_history('public.events');
    ```
 

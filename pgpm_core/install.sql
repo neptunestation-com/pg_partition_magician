@@ -3989,6 +3989,19 @@ begin
   -- copy phase (fine children stay attached = false until the swap), so the lookup is unambiguous.
   select lo into v_lo from pgpm.part
    where parent_table = p_parent and child_name = p_child and attached;
+  -- #580: take SHARE on the parent, and ONLY the parent, before the first step, so a writer waits at
+  -- the parent rather than deadlocking with the swap. Every step runs in this one transaction, so the
+  -- capture trigger's SHARE ROW EXCLUSIVE on the source (the prepare step's CREATE TRIGGER) is held to
+  -- the end of the call. Without this, a write into the source's range took ROW EXCLUSIVE on the parent
+  -- (nothing conflicted with it there), then queued on the source still holding it, and the swap's
+  -- DETACH, needing ACCESS EXCLUSIVE on the parent, waited on the writer that waited on it: 40P01,
+  -- aborting the write or the whole regrain after all its copying. Under SHARE the writer queues at the
+  -- parent holding nothing the swap needs, the swap's upgrade to ACCESS EXCLUSIVE goes ahead of it, and
+  -- the write lands in the fine children once this commits. Reads are unaffected (SHARE admits ACCESS
+  -- SHARE and ROW SHARE, so FK checks against the parent proceed too); every write to the table waits
+  -- for the call, which is the price of one transaction. Auto-regrain (maintain, one regrain_step per
+  -- committed tick) takes no such lock, and is the path for a table under live writes.
+  execute format('lock table only %s in share mode', p_parent::text);
   loop
     v_status := pgpm.regrain_step(p_parent, v_child, p_target_step, null);
     if v_status like 'swapped:%' then return split_part(v_status, ':', 2)::int; end if;
