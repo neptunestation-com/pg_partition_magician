@@ -18,6 +18,12 @@ Definitions used here:
                true report, so it counts for the finder; a hypothesis (no reproduction) is not a claim.
   cost       = budget-units / findings, and / Tier 1 findings
 
+Seed interactions. A seed that changes global state (its sealed record's optional "side_effects") can make
+another claim reproducible for the wrong reason: in pass 2 five candidates reached their defect only
+because a seed had frozen the monolith. The record's "Seeds" section prints each seed's side effects, and
+its notes carry "Seed interactions to check": every candidate whose pristine run failed only its liveness
+checks, beside the side effects of every seed, so the coordinator can say which claim leaned on which.
+
 Usage:
   pass_metrics.py --pass N --date YYYY-MM-DD --pinned <sha> --release <tag> --sealed s.json
                   --classified c.json --verdicts v.json --budget "8 finders x 2h, 6h wall" --budget-units 16
@@ -67,6 +73,15 @@ def compute(sealed, classified, verdicts, budget_units=None):
         d["precision"] = d["true"] / d["claims"] if d["claims"] else None
 
     blind = [s for s in seeds if s["id"] not in hit_ids]
+    hit_by = {}
+    for c in seed_hits:
+        if c.get("seed"):
+            hit_by.setdefault(c["seed"], []).append(c["id"])
+    seed_rows = [{"id": s["id"], "lens": s["lens"], "tier": s["tier"], "what": s.get("mutation") or s.get("patch"),
+                  "hit_by": hit_by.get(s["id"], []), "side_effects": s.get("side_effects")} for s in seeds]
+    interaction_candidates = [{"id": c["id"], "finder": c["finder"], "tier": c.get("tier"),
+                               "scenario": c.get("scenario", "")}
+                              for c in candidates if (c.get("pristine") or {}).get("liveness_failed")]
     cost = cost_t1 = None
     if budget_units:
         cost = budget_units / len(findings) if findings else None
@@ -85,6 +100,7 @@ def compute(sealed, classified, verdicts, budget_units=None):
         "fell_rows": [{"id": f["id"], "reason": f["verdict"].get("reason", "")} for f in fell],
         "known_rows": [{"id": f["id"], "issue": f["verdict"].get("issue")} for f in known],
         "hypothesis_rows": [{"id": h["id"], "finder": h["finder"], "scenario": h.get("scenario", "")} for h in hypotheses],
+        "seed_rows": seed_rows, "interaction_candidates": interaction_candidates,
     }
 
 
@@ -131,6 +147,13 @@ def record(m, a):
     for f in sorted(m["finding_rows"], key=lambda r: (r["tier"], r["id"])):
         issue = f"#{f['issue']}" if f["issue"] else ""
         lines.append(f"| {f['tier']} | {f['id']}: {md_cell(f['scenario'])} | {issue} | |")
+    lines += ["", "## Seeds", ""]
+    for r in m["seed_rows"]:
+        state = f"hit by {', '.join(r['hit_by'])}" if r["hit_by"] else "missed"
+        effects = f"; side effects: {md_cell(r['side_effects'])}" if r["side_effects"] else ""
+        lines.append(f"- {r['id']} {md_cell(r['what'])} ({r['lens']}, T{r['tier']}): {state}{effects}")
+    if not m["seed_rows"]:
+        lines.append("none")
     lines += ["", "## Null results (by lens)", "", "(from the finders' null-results files)", "",
               "## Fell in verification", ""]
     lines += [f"- {r['id']}: {r['reason']}" for r in m["fell_rows"]] or ["none"]
@@ -143,10 +166,56 @@ def record(m, a):
     if getattr(a, "root_causes_file", None):
         with open(a.root_causes_file) as fh:
             lines += ["", "## Root causes", "", fh.read().rstrip("\n")]
-    if getattr(a, "notes_file", None):
-        with open(a.notes_file) as fh:
-            lines += ["", "## Coordinator notes", "", fh.read().rstrip("\n")]
+    notes_file = getattr(a, "notes_file", None)
+    if notes_file or m["interaction_candidates"]:
+        lines += ["", "## Coordinator notes"]
+    if notes_file:
+        with open(notes_file) as fh:
+            lines += ["", fh.read().rstrip("\n")]
+    if m["interaction_candidates"]:
+        lines += ["", "### Seed interactions to check", "",
+                  "These candidates failed only their liveness checks on the pristine tree, so on the review tree "
+                  "they may have reached their defect through another seed's side effect. For each, say which seed "
+                  "it depended on, and file the verifier's rebuilt reproduction (`repro.verified.sql`), not the "
+                  "finder's.", ""]
+        lines += [f"- {c['id']} ({c['finder']}, T{c['tier']}): {md_cell(c['scenario'])}" for c in m["interaction_candidates"]]
+        lines += ["", "Seed side effects:", ""]
+        effects = [f"- {r['id']}: {md_cell(r['side_effects'])}" for r in m["seed_rows"] if r["side_effects"]]
+        lines += effects or ["- none declared in the sealed record; check the seeds by hand"]
     return "\n".join(lines) + "\n"
+
+
+def selftest_seed_interactions():
+    """A seed's side_effects is printed in the seeds section, and every candidate whose pristine run
+    failed only its liveness checks is listed under "Seed interactions to check" beside the side effects
+    of every seed (pass 2: five candidates reached their defect only through another seed's effect)."""
+    effect = "freezes the monolith: every table converted on the tree reads as frozen"
+    sealed = {"seeds": [{"id": "S1", "lens": "time", "tier": 1, "mutation": "frontier_data_only", "side_effects": effect},
+                        {"id": "S2", "lens": "boundary", "tier": 2, "patch": "novel.patch"},
+                        {"id": "S3", "lens": "retain", "tier": 2, "patch": "tick.patch", "side_effects": "disables the tick"}]}
+    classified = {"claims": [
+        {"id": "F1-01", "finder": "F1", "class": "seed_hit", "seed": "S2", "tier": 2},
+        {"id": "F2-04", "finder": "F2", "class": "candidate", "tier": 1, "scenario": "late rows",
+         "review": {"fails": True}, "pristine": {"fails": False, "liveness_failed": True}},
+        {"id": "F3-01", "finder": "F3", "class": "candidate", "tier": 2, "scenario": "real on both",
+         "review": {"fails": True}, "pristine": {"fails": True}},
+    ]}
+    verdicts = {"F2-04": {"verdict": "finding", "tier": 1, "root_cause": "r"},
+                "F3-01": {"verdict": "finding", "tier": 2, "root_cause": "q"}}
+    m = compute(sealed, classified, verdicts)
+    assert [c["id"] for c in m["interaction_candidates"]] == ["F2-04"], m["interaction_candidates"]
+
+    class A:
+        pass_n, date, pinned, release = 3, "2026-10-01", "abc", "0.7.0"
+        budget, lenses, previous_lenses, capture_recapture = "", "time", "none", "not attempted"
+        root_cause_groups, root_causes_file, notes_file = None, None, None
+    rec = record(m, A)
+    assert f"- S1 frontier\\_data\\_only (time, T1): missed; side effects: {effect}" in rec, rec
+    assert "- S2 novel.patch (boundary, T2): hit by F1-01\n" in rec, rec
+    head = rec.index("## Coordinator notes")
+    sec = rec[rec.index("### Seed interactions to check", head):]
+    assert "- F2-04 (F2, T1): late rows" in sec and "F3-01" not in sec, sec
+    assert f"- S1: {effect}" in sec and "- S3: disables the tick" in sec and "- S2" not in sec, sec
 
 
 def selftest():
@@ -186,6 +255,10 @@ def selftest():
     assert "S2 untransmute_no_recheck_under_lock (concurrency, T1)" in rec
     assert "root causes: 1 distinct verifier root-cause statements behind the findings; grouped into 1 classes below" in rec
     assert "- F2-02: #439" in rec and "- F2-03 (F2):" in rec
+    # no seed declares side effects and no candidate leaned on its pristine liveness: no interaction section
+    assert "Seed interactions to check" not in rec and "side effects" not in rec
+    assert "## Seeds" in rec and "- S2 untransmute\\_no\\_recheck\\_under\\_lock (concurrency, T1): missed" in rec, rec
+    selftest_seed_interactions()
     print("pass_metrics selftest: PASS")
     return 0
 
@@ -216,6 +289,12 @@ def main():
     m = compute(sealed, classified, verdicts, a.budget_units)
     print(f"seeds K={m['K']}  recall {fmt(m['recall'])}  precision {fmt(m['precision'])}   (read these first)")
     print(f"claims {m['claims']}  findings {m['findings']}  by tier {m['by_tier']}  unverified {m['unverified']}")
+    for r in m["seed_rows"]:
+        if r["side_effects"]:
+            print(f"seed {r['id']} side effects: {r['side_effects']}")
+    if m["interaction_candidates"]:
+        print("seed interactions to check (pristine liveness failed): "
+              + ", ".join(c["id"] for c in m["interaction_candidates"]))
     if m["unverified"]:
         print("WARNING: candidates without a verdict are not findings; run the verifier on them first", file=sys.stderr)
     with open(a.out, "w") as fh:

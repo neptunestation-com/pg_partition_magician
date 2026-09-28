@@ -14,6 +14,13 @@ Claims directory layout (one directory per claim, grouped by finder):
                                                  "fixtures": false,               # fixtures/demo.sql
                                                  "container": "pgpm_test-archive"}  # optional; default --container
   <claims>/<finder>/<claim-id>/repro.sql | repro.sh
+  <claims>/<finder>/<claim-id>/repro.verified.sql | repro.verified.sh   # optional, written by the verifier
+
+A verifier that had to change the fixture or the assertions stores its rebuilt reproduction beside the
+original as repro.verified.sql (or .sh). When one is present it is the reproduction that runs, here and in
+the closure run against the fixed main, and each output record names the file in "repro_used". Every
+reproduction must hold at least one `LIVENESS:` assertion (a premise check); one without is invalid_repro
+and is not run, because a negative with no liveness witness also passes when nothing happened at all.
 
 The reproduction contract. Each run gets a FRESH database in the harness container with the tree under
 test installed (every file in "install", piped through psql, so the tree need not be mounted).
@@ -30,7 +37,8 @@ Classification, from the two runs:
   not_reproduced  fails on neither: dropped.
   inverted        fails on the pristine commit only. Should not happen; look at the reproduction.
   invalid_repro   the reproduction's own LIVENESS/GUARD/fixture checks failed on the review tree, so it
-                  never reached the defect and proves nothing; back to the finder.
+                  never reached the defect and proves nothing, or it holds no `LIVENESS:` assertion at
+                  all (not run); back to the finder.
   not_run         the tree could not be installed in the claim's container (an environment problem, not
                   the claim's): fix the environment or the claim's "container" and re-run.
 
@@ -56,6 +64,22 @@ NOT_OK = re.compile(r"^\s*not ok\b", re.M)
 # the setup by hand before it could rule.
 NOT_OK_LINE = re.compile(r"^\s*not ok\s+\d+\s*-\s*(.*)$", re.M)
 LIVENESS = re.compile(r"^(LIVENESS|GUARD|fixture|setup|precondition)\b", re.I)
+# The contract's mandatory premise marker. Scanned for as text, so it serves a repro.sh (whose assertions
+# are echoed lines) as well as a pgTAP repro.sql.
+LIVENESS_MARK = "LIVENESS:"
+# The verifier's rebuilt reproduction supersedes the finder's; .sql before .sh when both exist.
+VERIFIED = ("repro.verified.sql", "repro.verified.sh")
+
+
+def pick_repro(cdir, declared):
+    """The reproduction to run for a claim directory: the verifier's rebuilt one when present, else the
+    finder's declared file. Returns the file name (relative to cdir) or None."""
+    for name in VERIFIED:
+        if os.path.isfile(os.path.join(cdir, name)):
+            return name
+    if declared and os.path.isfile(os.path.join(cdir, declared)):
+        return declared
+    return None
 
 
 def failure_kind(stdout, returncode):
@@ -89,9 +113,16 @@ def load_claims(claims_dir, only=None, finders=None):
             c["dir"] = cdir
             if only and c["id"] != only:
                 continue
-            repro = os.path.join(cdir, c.get("repro", ""))
-            if not c.get("repro") or not os.path.isfile(repro):
+            used = pick_repro(cdir, c.get("repro"))
+            if used is None:
                 c["error"] = "no reproduction file; a claim without one is a hypothesis, not a finding"
+            else:
+                c["repro_used"] = used
+                with open(os.path.join(cdir, used)) as fh:
+                    if LIVENESS_MARK not in fh.read():
+                        c["invalid"] = (f"no {LIVENESS_MARK} assertion in {used}; the reproduction contract "
+                                        "requires at least one, so a run that never reached the defect "
+                                        "cannot read as its absence")
             claims.append(c)
     return claims
 
@@ -126,7 +157,7 @@ class Harness:
                 # the environment, not the claim: recorded so the coordinator fixes it and re-runs
                 return {"fails": None, "exit": e.returncode, "tail": (e.stderr or "")[-1500:],
                         "error": f"install failed in {container}"}
-            repro = os.path.join(claim["dir"], claim["repro"])
+            repro = os.path.join(claim["dir"], claim.get("repro_used") or claim["repro"])
             if repro.endswith(".sql"):
                 with open(repro) as fh:
                     r = self.psql(container, db, ["-f", "-"], stdin=fh.read(), check=False)
@@ -232,8 +263,13 @@ def run_all(claims, review_tree, pristine_tree, seeds, runner, isolator=None):
     out = []
     for c in claims:
         rec = {k: c.get(k) for k in ("id", "finder", "tier", "file", "line", "lens", "scenario", "repro")}
+        rec["repro_used"] = c.get("repro_used") or c.get("repro")
         if c.get("error"):
             rec.update({"class": "hypothesis", "error": c["error"]})
+            out.append(rec)
+            continue
+        if c.get("invalid"):
+            rec.update({"class": "invalid_repro", "error": c["invalid"]})
             out.append(rec)
             continue
         rv = runner(review_tree, c, "r")
@@ -286,12 +322,70 @@ def summary(results):
         if r["class"] == "candidate" and r.get("note"):
             lines.append(f"  {r['id']}: pristine liveness failed (verifier must rebuild the setup)")
     for r in results:
+        if r["class"] == "invalid_repro" and r.get("error"):
+            lines.append(f"  {r['id']}: {r['error']}")
+    for r in results:
         if r["class"] == "not_run":
             lines.append(f"  {r['id']}: {(r.get('review') or {}).get('error') or (r.get('pristine') or {}).get('error')}")
     for r in results:
         if r["class"] == "seed_hit":
             lines.append(f"  {r['id']}: seed {r.get('seed') or '?'}" + (f"  ({r['note']})" if r.get("note") else ""))
+    verified = sum(1 for r in results if (r.get("repro_used") or "") in VERIFIED)
+    lines.append(f"verified reproduction used: {verified} of {len(results)} claims")
     return "\n".join(lines)
+
+
+def selftest_verified_and_liveness():
+    """A claim directory holding both repro.sql and repro.verified.sql runs ONLY the verified one (the
+    original is deliberately unrunnable and lacks a LIVENESS: assertion, so running it or scanning it
+    would both show); a reproduction without any LIVENESS: assertion is invalid_repro and never runs."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        claims_dir, tree = os.path.join(tmp, "claims"), os.path.join(tmp, "tree")
+        os.makedirs(tree)
+        with open(os.path.join(tree, "install.sql"), "w") as fh:
+            fh.write("-- install\n")
+        files = {
+            "F9-01": {"repro.sql": "THIS ORIGINAL MUST NEVER RUN;\n",
+                      "repro.verified.sql": "select 'ok 1 - LIVENESS: the rebuilt fixture ran';\n"
+                                            "select 'not ok 2 - the defect fired';\n"},
+            "F9-02": {"repro.sql": "select 'not ok 1 - rows lost';\n"},
+            "F9-03": {"repro.sql": "select 'ok 1 - LIVENESS: fixture ran';\nselect 'not ok 2 - rows lost';\n"},
+        }
+        for cid, repros in files.items():
+            cdir = os.path.join(claims_dir, "F9", cid)
+            os.makedirs(cdir)
+            with open(os.path.join(cdir, "claim.json"), "w") as fh:
+                json.dump({"tier": 1, "file": "a.sql", "line": 900, "repro": "repro.sql",
+                           "install": ["install.sql"]}, fh)
+            for name, text in repros.items():
+                with open(os.path.join(cdir, name), "w") as fh:
+                    fh.write(text)
+        claims = {c["id"]: c for c in load_claims(claims_dir)}
+        assert claims["F9-01"]["repro_used"] == "repro.verified.sql", claims["F9-01"]
+        assert claims["F9-03"]["repro_used"] == "repro.sql", claims["F9-03"]
+        assert claims["F9-02"].get("invalid") and "LIVENESS:" in claims["F9-02"]["invalid"], claims["F9-02"]
+        assert not claims["F9-01"].get("invalid") and not claims["F9-03"].get("invalid")
+
+        seen = []
+
+        class FakeHarness(Harness):
+            def psql(self, container, db, args, stdin=None, check=True):
+                if args == ["-f", "-"]:
+                    seen.append(stdin)
+                    assert "MUST NEVER RUN" not in (stdin or ""), "the superseded repro.sql was run"
+                    out = "\n".join(" " + ln.split("'")[1] for ln in stdin.splitlines() if "'" in ln) + "\n"
+                    return subprocess.CompletedProcess(args, 0, out, "")
+                return subprocess.CompletedProcess(args, 0, "", "")
+        res = {r["id"]: r for r in run_all(list(claims.values()), tree, tree, [], FakeHarness("c").run)}
+        assert res["F9-01"]["class"] == "candidate" and res["F9-01"]["repro_used"] == "repro.verified.sql", res["F9-01"]
+        assert res["F9-03"]["class"] == "candidate" and res["F9-03"]["repro_used"] == "repro.sql"
+        assert res["F9-02"]["class"] == "invalid_repro" and "review" not in res["F9-02"], res["F9-02"]
+        # two runs (review, pristine) each for F9-01 and F9-03; F9-02 never ran
+        assert len(seen) == 4 and sum("rebuilt fixture" in s for s in seen) == 2, seen
+        text = summary(list(res.values()))
+        assert "verified reproduction used: 1 of 3 claims" in text, text
+        assert "F9-02: no LIVENESS: assertion" in text, text
 
 
 def selftest():
@@ -344,6 +438,7 @@ def selftest():
     assert [r["class"] for r in res] == ["seed_hit", "candidate", "hypothesis"], res
     assert res[0]["seed"] == "S1" and "seed" not in res[1]
     assert "candidate        1" in summary(res) and "seed_hit         1" in summary(res)
+    selftest_verified_and_liveness()
     print("classify_claims selftest: PASS")
     return 0
 

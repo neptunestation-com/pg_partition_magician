@@ -8,8 +8,16 @@ sources, both named in a PLAN file the coordinator writes:
   {"seeds": [
      {"mutation": "untransmute_no_recheck_under_lock", "lens": "concurrency", "tier": 1},
      {"patch": "seeds/novel_grid_off_by_one.patch",      "lens": "boundary",    "tier": 1,
-      "file": "pgpm_core/install.sql", "why": "one-line description for the sealed record"}
+      "file": "pgpm_core/install.sql", "why": "one-line description for the sealed record",
+      "side_effects": "freezes the monolith: every table converted on the tree reads as frozen"}
   ]}
+
+"side_effects" is optional on either kind: what the seed does to state OTHER claims depend on (freezing
+the monolith, disabling a tick). Pass 2 had five candidates that reached their defect only because a
+seed had frozen the monolith, so it is carried into the sealed record unchanged, and pass_metrics.py
+lists it beside every candidate whose pristine run failed only its liveness checks. The catalogue itself
+(bench/mutations/mutate.py) may define an optional SIDE_EFFECTS dict keyed by mutation name; --catalogue
+prints it where present. The plan's field is what reaches the sealed record.
 
 A "mutation" entry is applied with the PRISTINE checkout's bench/mutations/mutate.py (the review tree
 has no catalogue), which refuses to write anything if its pattern has drifted. A "patch" entry is a
@@ -39,16 +47,25 @@ def load_mutate(pristine):
 
 
 def catalogue(mutate):
+    side = getattr(mutate, "SIDE_EFFECTS", {})
     rows = []
     for name, (guard, why, _edits) in mutate.MUTATIONS.items():
-        rows.append({
+        row = {
             "mutation": name,
             "guard": guard,
             "file": mutate.MUTATION_SRC.get(name, "pgpm_core/install.sql"),
             "track": mutate.MUTATION_TRACK.get(name, "perf"),
             "why": why,
-        })
+        }
+        if side.get(name):
+            row["side_effects"] = side[name]
+        rows.append(row)
     return rows
+
+
+def catalogue_line(r):
+    line = f"{r['mutation']}\t{r['file']}\t{r['track']}\t{r['guard']}"
+    return line + (f"\tside effects: {r['side_effects']}" if r.get("side_effects") else "")
 
 
 def touched_lines(text, edits):
@@ -91,6 +108,8 @@ def validate(plan):
         for k in ("lens", "tier"):
             if k not in entry:
                 raise SystemExit(f"plant_seeds: entry {i} lacks {k!r}; the sealed record needs it")
+        if "side_effects" in entry and not isinstance(entry["side_effects"], str):
+            raise SystemExit(f"plant_seeds: entry {i}'s side_effects must be one string describing the effect")
     if not plan.get("seeds"):
         raise SystemExit("plant_seeds: the plan has no seeds; a pass without seeds cannot measure its recall")
 
@@ -134,6 +153,8 @@ def plant(tree, pristine, plan, sealed_path, run=subprocess.run):
                 "lens": entry["lens"], "tier": entry["tier"], "why": entry.get("why", ""),
                 "lines": sorted({ln for lns in files.values() for ln in lns}),
             })
+        if entry.get("side_effects"):
+            sealed["seeds"][-1]["side_effects"] = entry["side_effects"]
 
     # keep the tree history-less: one commit, amended
     run(["git", "-C", tree, "-c", "user.name=review", "-c", "user.email=review@localhost", "add", "-A"], check=True)
@@ -147,6 +168,62 @@ def plant(tree, pristine, plan, sealed_path, run=subprocess.run):
     with open(sealed_path, "w") as fh:
         json.dump(sealed, fh, indent=2)
     return sealed
+
+
+def selftest_side_effects():
+    """A seed's side_effects string reaches sealed.json unchanged (end to end: a real plant of a patch
+    seed into a throwaway git tree), a seed without one gets no key, and the catalogue carries the
+    optional SIDE_EFFECTS entry only where the catalogue module defines one."""
+    import tempfile
+    import types
+    with tempfile.TemporaryDirectory() as tmp:
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@localhost"]
+        pristine, tree = os.path.join(tmp, "pristine"), os.path.join(tmp, "tree")
+        for d in (pristine, tree):
+            os.makedirs(os.path.join(d, "bench", "mutations"))
+            for f in ("x.sql", "y.sql"):
+                with open(os.path.join(d, f), "w") as fh:
+                    fh.write("line 1\nline 2\nline 3\n")
+            subprocess.run(["git", "init", "-q", d], check=True)
+        # the pristine side needs a catalogue module to import; this one is empty
+        with open(os.path.join(pristine, "bench", "mutations", "mutate.py"), "w") as fh:
+            fh.write("MUTATIONS = {}\nMUTATION_SRC = {}\nMUTATION_TRACK = {}\n")
+        for d in (pristine, tree):
+            subprocess.run(git + ["-C", d, "add", "-A"], check=True)
+            subprocess.run(git + ["-C", d, "commit", "-q", "-m", "one"], check=True)
+        patches = []
+        for f in ("x.sql", "y.sql"):
+            pp = os.path.join(tmp, f"{f}.patch")
+            with open(pp, "w") as fh:
+                fh.write(f"--- a/{f}\n+++ b/{f}\n@@ -1,3 +1,3 @@\n line 1\n-line 2\n+LINE 2\n line 3\n")
+            patches.append(pp)
+        effect = "freezes the monolith: every table converted on the tree reads as frozen"
+        plan = {"seeds": [{"patch": patches[0], "lens": "x", "tier": 1, "file": "x.sql", "side_effects": effect},
+                          {"patch": patches[1], "lens": "y", "tier": 2, "file": "y.sql"}]}
+        sealed_path = os.path.join(tmp, "sealed.json")
+        saved_path, saved_mod = list(sys.path), sys.modules.pop("mutate", None)
+        try:
+            plant(tree, pristine, plan, sealed_path,
+                  run=lambda cmd, **kw: subprocess.run(cmd, **{"capture_output": True, **kw}))
+        finally:
+            sys.path[:] = saved_path
+            sys.modules.pop("mutate", None)
+            if saved_mod is not None:
+                sys.modules["mutate"] = saved_mod
+        with open(sealed_path) as fh:
+            sealed = json.load(fh)
+        s1, s2 = sealed["seeds"]
+        assert s1["side_effects"] == effect, s1
+        assert "side_effects" not in s2, s2
+    fake = types.SimpleNamespace(
+        MUTATIONS={"a": ("g.sh", "why a", []), "b": ("h.sh", "why b", [])},
+        MUTATION_SRC={}, MUTATION_TRACK={}, SIDE_EFFECTS={"a": "disables the tick"})
+    rows = {r["mutation"]: r for r in catalogue(fake)}
+    assert rows["a"]["side_effects"] == "disables the tick" and "side_effects" not in rows["b"], rows
+    del fake.SIDE_EFFECTS
+    assert all("side_effects" not in r for r in catalogue(fake))
+    assert catalogue_line(rows["a"]).endswith("\tside effects: disables the tick"), catalogue_line(rows["a"])
+    assert "side effects" not in catalogue_line(rows["b"])
 
 
 def selftest():
@@ -168,6 +245,13 @@ def selftest():
             assert word in str(e), (word, str(e))
         else:
             raise AssertionError(f"accepted a bad plan: {bad}")
+    try:
+        validate({"seeds": [{"mutation": "m", "lens": "x", "tier": 1, "side_effects": ["not", "a", "string"]}]})
+    except SystemExit as e:
+        assert "side_effects" in str(e), str(e)
+    else:
+        raise AssertionError("accepted a non-string side_effects")
+    selftest_side_effects()
     print("plant_seeds selftest: PASS")
     return 0
 
@@ -186,7 +270,7 @@ def main():
     pristine = os.path.abspath(a.pristine)
     if a.catalogue:
         for r in catalogue(load_mutate(pristine)):
-            print(f"{r['mutation']}\t{r['file']}\t{r['track']}\t{r['guard']}")
+            print(catalogue_line(r))
         return 0
     if not (a.tree and a.plan and a.sealed):
         ap.error("--tree, --plan and --sealed are required to plant")

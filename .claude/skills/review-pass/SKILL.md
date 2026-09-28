@@ -28,6 +28,10 @@ Work in a scratch directory outside the repository (the session scratchpad). Ref
   **novel patches** you write for this pass in the catalogue's style (a quiet defect: a dropped
   re-check, an off-by-one at a boundary, a `%I` over a `_q` fragment). Save novel patches under
   `$WORK/seeds/`.
+- Give every seed that changes global state other claims depend on (freezes the monolith, disables a
+  tick, alters a default) a `"side_effects"` string in its plan entry. It is sealed with the seed and
+  `pass_metrics.py` sets it beside the candidates that may have leaned on it. Prefer planting such a
+  seed alone in a tree of its own when the budget allows.
 - `scripts/review/build_review_tree.sh $pinned $WORK/tree`
 - `scripts/review/plant_seeds.py --tree $WORK/tree --pristine . --plan $WORK/plan.json --sealed $WORK/sealed.json`
 - Never show `$WORK/sealed.json`, `$WORK/plan.json` or `$WORK/seeds/` to a finder, and never mention
@@ -63,14 +67,19 @@ scripts/review/classify_claims.py --claims $WORK/claims --review-tree $WORK/tree
 ```
 
 Read the summary. `inverted` or an unattributed `seed_hit` means a claim's location or the sealed
-record is wrong; look before going on.
+record is wrong; look before going on. A reproduction with no `LIVENESS:` assertion is
+`invalid_repro` and was not run; send it back to its finder. A candidate flagged "pristine liveness
+failed" may have reached its defect through another seed's side effect; its verifier must rebuild it.
 
 ## 6. Verify (one verifier per candidate)
 
 Export the open-issue list: `gh issue list --state open --label bug --limit 200 --json number,title,body > $WORK/open.json`.
 For every `candidate` in `$WORK/classified.json`, spawn one **`verifier`** agent with: the claim's
 directory, the two tree paths, its classifier record, `$WORK/open.json`, the container, and the verdict
-path `$WORK/verdicts/<id>.json`. Give it nothing from the finder's transcript. Then
+path `$WORK/verdicts/<id>.json`. Give it nothing from the finder's transcript. A verifier that changed
+the fixture or the assertions stores its version as `repro.verified.sql` (or `.sh`) in the claim
+directory and marks its verdict `"rebuilt": true`; check that every candidate flagged "pristine liveness
+failed" came back either rebuilt or `fell`. Then
 `jq -s 'add' $WORK/verdicts/*.json > $WORK/verdicts.json`.
 
 ## 7. Metrics and record
@@ -84,12 +93,26 @@ scripts/review/pass_metrics.py --pass N --date $(date +%F) --pinned $pinned --re
 
 **Report recall and precision before the count of findings, always.** Then the findings by tier, the
 blind spots (seeds missed, by lens), and the per-finder table including the model-tier split. If any
-candidate is unverified, say so and do not call it a finding.
+candidate is unverified, say so and do not call it a finding. Under "Seed interactions to check" the
+record lists the candidates whose pristine run failed only its liveness checks; replace that list, in
+the record, with which claim depended on which seed's side effect.
 
 ## 8. File, fix, close
 
-- One issue per finding or root-cause group, labelled `bug`, with the reproduction attached. Fill the
-  issue numbers into the record.
+- Write `$WORK/groups.json`, one entry per root-cause group
+  (`{"id": "RC1", "title": "...", "tier": 1, "claims": [...]}`), render the issues and read every one
+  before filing:
+
+  ```bash
+  scripts/review/file_issues.py --groups $WORK/groups.json --claims $WORK/claims \
+    --verdicts $WORK/verdicts.json --pinned $pinned --pass N --out $WORK/issues
+  scripts/review/file_issues.py --groups $WORK/groups.json --claims $WORK/claims \
+    --verdicts $WORK/verdicts.json --pinned $pinned --pass N --out $WORK/issues --post
+  ```
+
+  Each issue carries its claims' reproductions inline (the verifier's `repro.verified.*` when present)
+  and the acceptance paragraph; `--post` files them labelled `bug`, Tier 1 first, and writes
+  `$WORK/issues/filed.json`. Fill the issue numbers from it into the record.
 - Fixes are separate work under `CLAUDE.md`'s rules (guard plus mutation per fix), one PR each, merged
   in order with a rebase and fresh CI per PR. A finding closes when its own reproduction passes on the
   fixed `main`; the verifier's `classify_claims.py --only <id>` against the new `main` is that check.

@@ -38,10 +38,25 @@ claim fall.
      wording.
 3. **Decide.** `finding` (with tier and a one-phrase root cause), `fell` (with the reason, quoting the
    documentation or code that settles it), or `known_open` (with the issue number).
-4. **Write the verdict** as one JSON object to the given path:
+4. **Store the reproduction you rebuilt.** If you changed the finder's fixture or its assertions in any
+   way (a setup step the pristine tree needed, a premise another seed had supplied on the review tree,
+   a corrected assertion), write your version beside the original in the claim directory as
+   `repro.verified.sql` (or `repro.verified.sh`), whatever your verdict. Never edit the finder's file.
+   Your version keeps the reproduction contract in `scripts/review/README.md`: at least one
+   `LIVENESS:` assertion, `GUARD:`/fixture prefixes on every other premise check, and it **fails when
+   the defect is present and passes when it is absent**. Run it on the pristine commit and confirm it
+   reaches the defect there on its own (its liveness checks pass), since that tree is where the fix
+   will be written. `classify_claims.py` and `file_issues.py` prefer this file over the finder's, so it
+   is what the issue carries and what the closure run re-runs against the fixed `main`. Pass 2 shows
+   why: five candidates reached their defect only because another seed had frozen the monolith, their
+   verifiers rebuilt the fixtures but did not store them, and the issues shipped with reproductions
+   that could not close them.
+5. **Write the verdict** as one JSON object to the given path:
    `{"<id>": {"verdict": "finding", "tier": 1, "root_cause": "..."}}` or
    `{"<id>": {"verdict": "fell", "reason": "..."}}` or
    `{"<id>": {"verdict": "known_open", "issue": NNN}}`.
+   When you wrote a rebuilt reproduction in step 4, add `"rebuilt": true, "repro": "repro.verified.sql"`
+   (or `.sh`) to the object, and say in `root_cause` or `reason` what the original lacked.
 
 ## Standards
 
@@ -50,5 +65,6 @@ claim fall.
 - Do not soften a Tier 1 into a Tier 3 to make it easier to accept, and do not promote a Tier 3
   because the reproduction is dramatic. Tier by consequence.
 - Do not fix anything, and do not edit either tree. A verifier who has started designing the fix has
-  stopped verifying.
-- Keep the final message to five lines: the verdict, the decisive fact, and the path written.
+  stopped verifying. Writing `repro.verified.*` in the claim directory is not an edit to either tree.
+- Keep the final message to five lines: the verdict, the decisive fact, and the paths written
+  (the verdict, and the rebuilt reproduction if there is one).
