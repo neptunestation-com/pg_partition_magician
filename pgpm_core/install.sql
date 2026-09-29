@@ -499,6 +499,20 @@ begin
 end;
 $$;
 
+-- The exact integer floor of p_a / p_b, at any magnitude (#659). floor(p_a / p_b) is NOT this: general
+-- numeric division computes a non-terminating quotient to a bounded scale (about 16 digits), and double
+-- precision to 15 to 17 significant digits, so a quotient a hair below an integer rounds UP to it before
+-- floor() sees it, and the floor lands above its input (1799999999999999999 / 3e16 is 60.0000000000000000,
+-- and a KSUID payload whose random low bits are all ones divides to the NEXT second). div() and mod() are
+-- exact; div() truncates toward zero, so a quotient that is negative and inexact steps down one to be a
+-- floor. Every floor of a quotient that places a value on a grid goes through this: _grid_floor's id and
+-- fixed-step branches and _text_time_to_ts. The month branch divides month counts (a few thousand) by a
+-- step of a few months, whose quotient is never close enough to an integer to round, and keeps floor().
+create or replace function pgpm._floor_div(p_a numeric, p_b numeric)
+returns numeric language sql immutable strict parallel safe as $$
+  select case when mod(p_a, p_b) <> 0 and (p_a < 0) <> (p_b < 0) then div(p_a, p_b) - 1 else div(p_a, p_b) end
+$$;
+
 -- text_time codec: an opaque TEXT id shaped <constant prefix><fixed-width base-N encoded epoch>, the
 -- general form uuidv7 is one instance of (48 bits, base16-ish, embedded in a uuid type) and classic
 -- cuid is another (prefix 'c', 8 base36 digits, ms). _radix_decode/_radix_encode are the bottom
@@ -605,7 +619,7 @@ begin
   end if;
   v_digits := substr(p_value, length(p_prefix) + 1, p_width);
   v_wide := pgpm._radix_decode(v_digits, p_radix, p_alphabet);
-  v_count := floor(v_wide / power(2::numeric, p_discard_bits));
+  v_count := pgpm._floor_div(v_wide, power(2::numeric, p_discard_bits));   -- exact, not floor(a / b) (#659)
   if p_unit = 'ms' then return p_epoch + (v_count / 1000.0) * interval '1 second';
   else return p_epoch + v_count * interval '1 second'; end if;
 end;
@@ -896,7 +910,7 @@ drop function if exists pgpm._encode(text, text, text, int, int, text, text, int
 create or replace function pgpm._grid_floor(p_kind text, p_step text, p_anchor text, p_native text, p_tz text)
 returns text language plpgsql immutable as $$
 declare
-  v_months int; v_fixsecs double precision; v_secs double precision;
+  v_months int; v_fixsecs double precision; v_secs numeric;
   k bigint; ts timestamptz; anc timestamptz; ts_wall timestamp; anc_wall timestamp; v_out timestamptz;
 begin
   if p_kind in ('time', 'uuidv7', 'text_time') then
@@ -934,12 +948,14 @@ begin
       return pgpm._ts_text(v_out);
     else
       -- fixed step: an absolute lattice of v_secs from the anchor instant. Zone-free by construction,
-      -- and _grid_next's fixed branch adds the same v_secs, so the two can never disagree.
-      k := floor(extract(epoch from (ts - anc)) / v_secs)::bigint;
+      -- and _grid_next's fixed branch adds the same v_secs, so the two can never disagree. The count is
+      -- exact numeric (#659): in double precision a value one microsecond below a boundary far from the
+      -- anchor (an anchor in year 1, a daily step) divided to the boundary's own count, above its input.
+      k := pgpm._floor_div(extract(epoch from (ts - anc)), v_secs)::bigint;
       return pgpm._ts_text(anc + make_interval(secs => k * v_secs));
     end if;
   elsif p_kind = 'id' then
-    return (floor((p_native::numeric - p_anchor::numeric) / p_step::numeric) * p_step::numeric + p_anchor::numeric)::text;
+    return (pgpm._floor_div(p_native::numeric - p_anchor::numeric, p_step::numeric) * p_step::numeric + p_anchor::numeric)::text;
   else
     raise exception 'pg_partition_magician: unknown control_kind %', p_kind;
   end if;

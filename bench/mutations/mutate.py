@@ -3244,6 +3244,33 @@ $$;''',
           "  if false then\n"
           "    raise exception 'pg_partition_magician: cannot migrate hypertable % -- the working relation name", 1)],
     ),
+    "text_time_decode_rounded_floor": (
+        "bench/grid_floor_exact.sh",
+        "#659: _text_time_to_ts takes floor() of the general numeric quotient v_wide / 2^discard_bits again, "
+        "which rounds to a bounded scale before floor() sees it, so a KSUID whose 128 random low bits are near "
+        "all-ones decodes one second late (23:59:59 reads as the next day's 00:00:00) and, as the oldest row, "
+        "makes transmute's monolith CHECK exclude it. One site. tests/174's KSUID decode and conversion catch it.",
+        [("  v_count := pgpm._floor_div(v_wide, power(2::numeric, p_discard_bits));",
+          "  v_count := floor(v_wide / power(2::numeric, p_discard_bits));", 1)],
+    ),
+    "grid_floor_id_rounded_floor": (
+        "bench/grid_floor_exact.sh",
+        "#659: _grid_floor's id branch takes floor((x - anchor) / step) over general numeric division again, "
+        "so at a snowflake-scale step of 3e16 the id 1799999999999999999 floors to 1800000000000000000, above "
+        "itself, and transmute's monolith CHECK excludes the oldest row. One site. tests/174's id floor and "
+        "conversion catch it.",
+        [("    return (pgpm._floor_div(p_native::numeric - p_anchor::numeric, p_step::numeric) * p_step::numeric",
+          "    return (floor((p_native::numeric - p_anchor::numeric) / p_step::numeric) * p_step::numeric", 1)],
+    ),
+    "grid_floor_fixed_float_floor": (
+        "bench/grid_floor_exact.sh",
+        "#659: _grid_floor's fixed-step time branch counts steps in double precision again, "
+        "floor(epoch(ts - anchor) / secs), so with an anchor in year 1 the last microsecond before a day "
+        "boundary divides to the boundary's own count and floors above its input. One site. tests/174's "
+        "year-1 anchor floor and conversion catch it.",
+        [("      k := pgpm._floor_div(extract(epoch from (ts - anc)), v_secs)::bigint;",
+          "      k := floor(extract(epoch from (ts - anc)) / v_secs::float8)::bigint;", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
