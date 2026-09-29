@@ -21,8 +21,10 @@
 # the list files and must be rebased and re-checked before it can be queued (about 28 minutes per PR,
 # measured in pass 3). Under a MERGE-commit queue (this repository's since 2026-09-29) --batch takes up
 # to five PRs at once: each is rebased onto the previous one's head, all heads are pushed and checked in
-# parallel, all are enqueued in order, and the queue builds them as one group. The stack is what makes
-# it work: PR k's branch then contains PR k-1's commits, so the group's merges are clean.
+# parallel, then each is enqueued as its predecessor merges (the queue drops a PR stacked on another
+# queued PR's head, so they cannot all be queued at once). The stack is what makes it work: PR k's branch
+# contains PR k-1's commits, so once k-1 has merged, k needs no rebase and no new head checks. A batch
+# costs one head-check round plus one merge group per PR, against one of each per PR one at a time.
 #
 # Knobs, all environment: LAND_WAIT_CHECKS_MIN (60), LAND_WAIT_MERGE_MIN (60), LAND_WAIT_RUN_MIN (90),
 # LAND_MERGE_METHOD (merge; must match the ruleset's merge_method), LAND_TOOLING (the scripts/review
@@ -210,9 +212,16 @@ ensure_green() { # <pr>: wait for the head's checks, rerunning a known flake; ex
   done
 }
 
-enqueue() { # <pr>
-  say "  enqueueing #$1"
-  gh pr merge "$1" --repo "$REPO" "--$METHOD" 2>&1 | grep -v "merge strategy" || true
+enqueue() { # <pr>: enqueue and confirm the entry exists; one retry, because the first request can be dropped
+  local i s
+  for i in 1 2; do
+    say "  enqueueing #$1"
+    gh pr merge "$1" --repo "$REPO" "--$METHOD" 2>&1 | grep -v "merge strategy" || true
+    sleep 20
+    s=$(in_queue "$1")
+    case "$s" in "OPEN none") say "  #$1 is not in the queue after the request";; *) return 0;; esac
+  done
+  return 1
 }
 
 await_merge() { # <pr>: wait for the merge, re-enqueueing after a known flake; exits 3, 4 or 6 otherwise
@@ -251,7 +260,11 @@ else
   [ -n "$PUSHED" ] && sleep 30
   [ -n "$REBASE_ONLY" ] && { say "REBASED (stack): ${PRS[*]}"; exit 0; }
   for PR in "${PRS[@]}"; do ensure_green "$PR"; done
-  for PR in "${PRS[@]}"; do enqueue "$PR"; done
-  for PR in "${PRS[@]}"; do await_merge "$PR"; done
+  # In turn, not all at once: GitHub removes a queued PR whose head sits on another queued PR's head
+  # (2026-09-29, the first live batch: #647 was added and removed 12 s later, twice, with no group built,
+  # while #646 was AWAITING_CHECKS). Each PR is enqueued as its predecessor merges; its branch already
+  # contains the predecessor, so no rebase and no new head checks are needed. What the batch saves is
+  # the rebase and the head-check round per PR; each PR still gets its own merge group.
+  for PR in "${PRS[@]}"; do enqueue "$PR" || true; await_merge "$PR"; done
 fi
 say "ALL LANDED: ${PRS[*]}"

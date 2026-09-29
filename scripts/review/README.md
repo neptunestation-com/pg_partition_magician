@@ -170,8 +170,10 @@ conflict), and a plain `git rebase main` of a stacked PR replays its predecessor
 Measured in pass 2: about 24 minutes per PR, serial; in pass 3, a 28-minute median over 24 PRs. The
 queue was switched to merge commits on 2026-09-29, after pass 3's last PR. A merge-commit queue keeps a
 stacked PR's ancestry, and `land.sh --batch` uses that: up to five PRs rebased onto one another, pushed and
-checked in parallel, enqueued in order and built by the queue as one group, so a batch costs about one
-head-check round plus one merge group instead of five of each. `landq.sh --batch 5` drives it.
+checked in parallel, then enqueued in turn as each predecessor merges (the queue drops a PR stacked on
+another queued PR's head; the first live batch, #646 and #647, showed it), so a batch costs one
+head-check round plus one merge group per PR instead of a rebase and both per PR. `landq.sh --batch 5`
+drives it.
 
 Two more things pass 3's landing taught. `land.sh` runs `keep_both.py` and `flake_check.sh` from the
 checkout's `main` (or from `LAND_TOOLING`), so a PR that fixes the landing tooling cannot be landed by the

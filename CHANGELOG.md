@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- **`land.sh --batch` enqueues a stacked PR as its predecessor merges, and every enqueue is confirmed.**
+  The first live batch (#646 and #647) showed the merge queue dropping a PR whose head sits on another
+  queued PR's head, twelve seconds after each add and without building a group; the batch now keeps the
+  parallel head-check round and gives each PR its own merge group in turn, and `enqueue` re-reads the
+  queue entry and retries once when the request did not take.
 - **Pass 3's three novel seeds join the mutation catalogue** (`retire_straddles_horizon`,
   `archive_contract_no_overclaim`, `abort_owner_alive_by_pid_only`). Each was planted for the pass, found by
   the finders (recall 9 of 9) and is caught by an existing pgTAP file (tests/60, 115 and 101); the new

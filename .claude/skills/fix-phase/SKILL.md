@@ -1,6 +1,6 @@
 ---
 name: fix-phase
-description: Run the fix phase that follows an adversarial review pass, as its coordinator. Assigns non-colliding test numbers, guard databases and scratch to one fixer agent per issue, lands the PRs through the squash merge queue one at a time with scripts/review/land.sh, re-runs every reproduction against the fixed main, posts the closure evidence, and files the fixers' adjacent observations.
+description: Run the fix phase that follows an adversarial review pass, as its coordinator. Assigns non-colliding test numbers, guard databases and scratch to one fixer agent per issue, lands the PRs through the merge queue with scripts/review/landq.sh (one at a time, or stacked batches under a merge-commit queue), re-runs every reproduction against the fixed main, posts the closure evidence, and files the fixers' adjacent observations.
 argument-hint: "[issue ...] (default: every open issue from the latest pass record)"
 disable-model-invocation: true
 allowed-tools: Bash Read Write Agent
@@ -21,7 +21,8 @@ Parallel fixers collide on three things unless you hand them out:
   the next N, one per issue (two for an issue that needs a core and an archive file; archive tests
   number separately under `tests/archive/db/`). Write them down before spawning.
 - **Guard database names.** `grep -oE 'pgpm_perf[0-9]+' test.sh | sort -t f -k3 -n | tail -1` gives the
-  highest `pgpm_perfNN`; assign the next N.
+  highest `pgpm_perfNN`; assign one per GUARD the fixer will write, not one per issue (#601 needed five
+  for four issues and fell back to a scratch name), and say in the brief which is for which.
 - **Scratch.** `$WORK/fix/<issue>/` per fixer; nothing shared.
 
 Group issues that share a mechanism into one fixer when fixing them apart would mean the same conflict
