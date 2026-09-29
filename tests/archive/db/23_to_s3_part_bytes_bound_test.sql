@@ -64,13 +64,15 @@ select is((select (part_bytes, prefix)::text from archive.config where parent_ta
   '(8388608,pb23/)',
   'the refusals wrote nothing: the row keeps its part_bytes AND its prefix');
 
+-- The smallest size configure accepts is 5 MiB, S3's minimum non-final multipart part (#636, whose
+-- own file, tests/archive/db/28, asserts the sizes between 1 byte and 5 MiB are refused).
 select lives_ok(
   $$ select archive.configure('public.pb23', 'archive-test-bucket', p_endpoint => 'http://minio:9000',
-                              p_prefix => 'pb23/', p_part_bytes => 1) $$,
-  'LIVENESS: the smallest positive p_part_bytes is accepted');
+                              p_prefix => 'pb23/', p_part_bytes => 5242880) $$,
+  'LIVENESS: the smallest part size the store accepts, 5 MiB, is accepted');
 
-select is((select part_bytes from archive.config where parent_table = 'public.pb23'::regclass), 1::bigint,
-  'LIVENESS: and stored, so the bound is at zero and not somewhere above it');
+select is((select part_bytes from archive.config where parent_table = 'public.pb23'::regclass), 5242880::bigint,
+  'LIVENESS: and stored, so the refusals above are a bound and not a refusal of every value');
 
 -- --- archive.to_s3 refuses a row that holds one anyway, before it sends anything ------------------
 

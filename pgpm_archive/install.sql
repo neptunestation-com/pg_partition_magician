@@ -112,6 +112,18 @@ begin
   if p_part_bytes <= 0 then
     raise exception 'archive.configure: p_part_bytes must be a positive number of bytes, not %', p_part_bytes;
   end if;
+  -- And a positive size under 5 MiB is one the store cannot take: S3 and MinIO refuse every non-final
+  -- multipart part under 5 MiB, so an export spanning more than one part uploaded all of them and
+  -- then failed at CompleteMultipartUpload with EntityTooSmall (issue #636). Refused here, where the
+  -- value is chosen, rather than discovered after the upload.
+  if p_part_bytes < 5 * 1024 * 1024 then
+    raise exception 'archive.configure: p_part_bytes must be at least 5242880 bytes (5 MiB, the smallest multipart part S3 accepts), not %', p_part_bytes;
+  end if;
+  -- archive.to_s3 reads each page with LIMIT fetch_rows: 0 reads no page at all (and trips the
+  -- conservation check with a message about rows), and a negative one fails on LIMIT (#636).
+  if p_fetch_rows < 1 then
+    raise exception 'archive.configure: p_fetch_rows must be a positive number of rows, not %', p_fetch_rows;
+  end if;
   insert into archive.config
     (parent_table, bucket, region, endpoint, prefix, vault_key_id, vault_secret, compress, part_bytes, fetch_rows)
   values
@@ -188,9 +200,11 @@ $$;
 -- quoted-identifier table name landing in an S3 key, hit in production -- has to be
 -- percent-encoded, or the canonical request used for signing diverges from what actually goes
 -- out over the wire and S3 replies 403 SignatureDoesNotMatch.
+-- An empty key encodes to '' (not null), so a signed request can address the bucket itself, which
+-- is where ListMultipartUploads lives (archive._s3_abort_uploads_at).
 create or replace function archive._s3_encode_path(p_key text)
 returns text language sql immutable as $$
-  select string_agg(archive.s3_url_encode(seg), '/' order by ord)
+  select coalesce(string_agg(archive.s3_url_encode(seg), '/' order by ord), '')
     from unnest(string_to_array(p_key, '/')) with ordinality as t(seg, ord);
 $$;
 
@@ -2574,6 +2588,43 @@ begin
 end;
 $$;
 
+-- Aborts every multipart upload in flight at exactly p_key, returning how many it aborted. This is
+-- how archive.to_s3 cleans up after an initiate it never saw the answer to (issue #636): a cancel or
+-- an error inside the CreateMultipartUpload POST can land after the store created the upload and
+-- before its UploadId reached the caller, so there is no id to abort by, only the key. S3 lists
+-- uploads by key PREFIX, so the listing is filtered to the exact key: an upload at a longer key this
+-- one is a prefix of belongs to another object and is left alone. Any upload in flight at the key is
+-- taken, which also clears one an earlier failed export leaked there; a concurrent export of the
+-- SAME object from another session would lose its upload and fail loudly at its next part or at
+-- complete, never silently. One page of the listing (up to 1000 uploads at one key) is read.
+create or replace function archive._s3_abort_uploads_at(
+  p_endpoint text, p_bucket text, p_region text, p_key text, p_key_id text, p_secret text
+) returns int language plpgsql as $$
+declare v_resp http_response; r record; n int := 0;
+begin
+  v_resp := archive.s3_signed_request('GET', p_endpoint, p_bucket, p_region, '',
+                                     'prefix=' || archive.s3_url_encode(p_key) || '&uploads=',
+                                     'text/plain', '', p_key_id, p_secret);
+  if v_resp.status not between 200 and 299 then
+    raise exception 'archive._s3_abort_uploads_at: listing uploads at % failed: HTTP % %', p_key, v_resp.status, left(v_resp.content, 200);
+  end if;
+  -- xmltable, not xpath(): its text columns are the unescaped values, so a key holding & or < compares
+  for r in
+    select u.upload_id
+      from xmltable('//*[local-name()=''Upload'']' passing (v_resp.content::xml)
+                    columns upload_key text path '*[local-name()=''Key'']',
+                            upload_id  text path '*[local-name()=''UploadId'']') u
+     where u.upload_key = p_key
+  loop
+    perform archive.s3_signed_request('DELETE', p_endpoint, p_bucket, p_region, p_key,
+                                     'uploadId=' || archive.s3_url_encode(r.upload_id),
+                                     'text/plain', '', p_key_id, p_secret);
+    n := n + 1;
+  end loop;
+  return n;
+end;
+$$;
+
 -- Small partitions (one part's worth or less) take a plain single PUT; bigger ones stream
 -- through S3 multipart, holding at most one part in memory at a time. With archive.config.compress
 -- on, the same two paths carry a gzip stream instead of plain NDJSON (the fold inside the loop says
@@ -2588,6 +2639,7 @@ declare
   v_page_rows bigint; v_written bigint := 0; v_expected bigint;
   v_page_h numeric; v_written_h numeric := 0; v_expected_h numeric;   -- the rows' identity, not only their count (#673)
   v_upload_id text; v_part int := 0; v_etag text; v_parts_xml text := '';
+  v_initiating boolean := false;
   v_resp http_response; h http_header;
 begin
 -- The export runs in its own block so that a CANCEL can reach the multipart abort as well as an
@@ -2611,6 +2663,11 @@ begin
   if cfg.part_bytes <= 0 then
     raise exception 'archive.to_s3: % has archive.config.part_bytes %; it must be a positive number of bytes (set it with archive.configure)',
       p_parent, cfg.part_bytes;
+  end if;
+  -- the same for fetch_rows (#636): 0 would read no page and a negative value fails on LIMIT
+  if cfg.fetch_rows < 1 then
+    raise exception 'archive.to_s3: % has archive.config.fetch_rows %; it must be a positive number of rows (set it with archive.configure)',
+      p_parent, cfg.fetch_rows;
   end if;
 
   select decrypted_secret into v_key_id from vault.decrypted_secrets where name = cfg.vault_key_id;
@@ -2726,12 +2783,18 @@ begin
     end if;
 
     if v_part = 0 then
+      -- From here until v_upload_id is set, the store may hold an upload whose id this function has
+      -- not seen: a cancel or an error inside the POST, after the store acted on it, left that upload
+      -- with nothing to abort it (issue #636). v_initiating says so to both handlers, which then find
+      -- it by its key instead of by its id.
+      v_initiating := true;
       v_resp := archive.s3_signed_request('POST', cfg.endpoint, cfg.bucket, cfg.region, v_key, 'uploads=',
                                          v_ctype, '', v_key_id, v_secret);
       if v_resp.status not between 200 and 299 then
         raise exception 'archive.to_s3: initiate multipart for % failed: HTTP % %', p_child, v_resp.status, left(v_resp.content, 200);
       end if;
       v_upload_id := (xpath('//*[local-name()=''UploadId'']/text()', v_resp.content::xml))[1]::text;
+      v_initiating := false;
     end if;
 
     v_part := v_part + 1;
@@ -2773,6 +2836,12 @@ exception when others then
     -- attempted: the enclosing handler need not send it again. A cancel that cut this handler short
     -- never gets here, so the id is still set for that handler to abort.
     v_upload_id := null;
+  elsif v_initiating then
+    begin
+      perform archive._s3_abort_uploads_at(cfg.endpoint, cfg.bucket, cfg.region, v_key, v_key_id, v_secret);
+    exception when others then null;
+    end;
+    v_initiating := false;
   end if;
   raise;
 end export;
@@ -2784,6 +2853,11 @@ exception when query_canceled then
       perform archive.s3_signed_request('DELETE', cfg.endpoint, cfg.bucket, cfg.region, v_key,
                                        'uploadId=' || archive.s3_url_encode(v_upload_id),
                                        'text/plain', '', v_key_id, v_secret);
+    exception when others then null;
+    end;
+  elsif v_initiating then
+    begin
+      perform archive._s3_abort_uploads_at(cfg.endpoint, cfg.bucket, cfg.region, v_key, v_key_id, v_secret);
     exception when others then null;
     end;
   end if;

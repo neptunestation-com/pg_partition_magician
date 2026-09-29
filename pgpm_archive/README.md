@@ -31,9 +31,10 @@ That's it: `pgpm.maintain()` now archives every eligible partition automatically
 chunks, and `pgpm.retire()` won't drop one until it's fully archived. `archive.configure`'s other
 parameters (`p_region`, `p_endpoint` for S3-compatible stores like MinIO or Supabase Storage,
 `p_prefix`, `p_compress`, etc.) all have sensible defaults -- pass only what you need to override.
-`p_part_bytes` (the size of each `archive.to_s3` multipart part, 8 MiB by default) must be positive:
-`archive.configure` refuses zero or less, and `archive.to_s3` refuses such a row before it sends
-anything.
+`p_part_bytes` (the size of each `archive.to_s3` multipart part, 8 MiB by default) must be at least
+5 MiB, the smallest non-final multipart part S3 accepts: `archive.configure` refuses anything smaller,
+and `archive.to_s3` refuses a row holding zero or less before it sends anything. `p_fetch_rows` (rows
+per page, 20000 by default) must be at least 1, refused the same way by both.
 
 ## Automatic vs. manual
 
@@ -63,6 +64,10 @@ rows. The only thing that trips it is a write to the partition during the export
 partition nothing is still writing to, then drop. The check reads the partition once more after the
 last page, which costs about one more pass over it. The multipart abort runs whatever ends an export, an error or
 a cancel (`statement_timeout`, `pg_cancel_backend`), and the error or cancel still reaches the caller.
+One that lands inside the request that starts the upload, before the store's answer arrives, leaves no
+upload id to abort by, so the export then aborts every upload in flight at its own object key (at
+exactly that key, never one it is a prefix of); a second session exporting the same object at the same
+moment would lose its upload and fail.
 
 Both manual functions resolve `child` in the parent's schema, never through your session's
 `search_path`, and verify its identity the same way the automatic path does before reading it: if

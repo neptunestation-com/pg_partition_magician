@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **`archive.to_s3`'s three loud edges are refused up front or cleaned up** (#636). `archive.configure`
+  refused only a `p_part_bytes` of zero or less (#594), so a positive size under 5 MiB, S3's minimum for
+  a non-final multipart part, was stored and every export of more than one part uploaded all of them and
+  then failed at complete with `EntityTooSmall`; configure now refuses it, and 5 MiB exactly is accepted.
+  It also refuses a `p_fetch_rows` under 1, and `archive.to_s3` refuses a row holding one by name (0 read
+  no page and tripped the conservation check, a negative value failed on `LIMIT`). And an export broken
+  inside its initiate POST, after the store created the upload but before its `UploadId` reached the
+  function, left that upload in flight with nothing to abort it: both handlers now list the uploads at
+  the export's key and abort each one at exactly that key (`archive._s3_abort_uploads_at`), which also
+  clears one an earlier failed export leaked there. `tests/archive/db/28_to_s3_loud_edges_test.sql` pins
+  the bounds and, for a cancel and for a transport error inside the initiate, that the upload the store
+  created is gone while a bystander at a longer key survives; `bench/archive_to_s3_loud_edges.sh` is
+  required to fail against `to_s3_initiate_orphan_unaborted`, `configure_part_bytes_under_s3_min` and
+  `configure_fetch_rows_unbounded`.
 - **`transmute` carries a secondary index whose quoted name holds a space** (#669). The cutover renamed
   each carried index by a pattern (`\S+` for the name) that cannot match `"Body Lookup"`, so the rewrite
   did nothing, the original `CREATE INDEX` ran again and failed with a raw 42P07 after phases 1 and 2 had
