@@ -348,8 +348,10 @@ choice already made: the control column sits second because `tenant_id` is what 
 `transmute` is reversible until you commit to it: while the monolith is intact and holds the whole table,
 [`untransmute`](reference.md#untransmute) cleanly restores the original, taking the retention write block
 and any in-flight regrain off the monolith on the way (the regrain is abandoned as `regrain_cancel` would
-abandon it; the copy work is all that is lost). It becomes a one-way door once a row lands outside the
-monolith (the frontier crosses `B`) or a regrain swaps its fine children in.
+abandon it; the copy work is all that is lost). The table comes back with the grants, row security and
+policies you gave it after the conversion, not the ones it had before. It becomes a one-way door once a
+row lands outside the monolith (the frontier crosses `B`), a regrain swaps its fine children in, or
+retention retires the monolith.
 
 ## Run it
 

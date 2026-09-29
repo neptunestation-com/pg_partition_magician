@@ -37,7 +37,9 @@
 #      reads as unanchored -- so an upgrade that recreated the column and populated nothing would
 #      leave every partition an existing install already had permanently unprotected, with assertion
 #      2 perfectly green. Checked BY IDENTITY: each row's child_oid must be the oid its OWN name
-#      resolves to, so a backfill writing one plausible oid everywhere fails too.
+#      resolves to, so a backfill writing one plausible oid everywhere fails too. Likewise
+#      pgpm.config.monolith_oid (issue #672), which untransmute resolves the monolith through and refuses
+#      the table without: it must be the oid of the fixture's own monolith, taken before the degrade.
 #   4. Data survived BY IDENTITY, not by count. The fixture is asymmetric on purpose (3 inserted, 1
 #      deleted, 2 surviving) so that a lost insert and a resurrected delete cannot cancel out into a
 #      row count that still looks right.
@@ -107,6 +109,7 @@ pgpm.config:archive_byte_budget
 pgpm.config:archive_probe_sample
 pgpm.config:archive_batch
 pgpm.config:sweep_turn_at
+pgpm.config:monolith_oid
 pgpm.part:attached
 pgpm.part:retiring_at
 pgpm.part:retiring_oid
@@ -233,6 +236,8 @@ run "$DB" "call pgpm.maintain('public.up_t')" >/dev/null
 run "$DB" "insert into public.up_t (id, body) values (1500, 'freeze')" >/dev/null
 MONO=$(q "$DB" "select child_name from pgpm.part where parent_table = 'public.up_t'::regclass and attached
                  order by lo::numeric limit 1")
+# By oid, now: the regrain's first pass may rename it (#266), and the name is not what #672's anchor records.
+MONO_OID=$(q "$DB" "select to_regclass(format('public.%I', '$MONO'))::oid")
 check "LIVENESS: a regrain is in flight before the degrade" \
   "$(q "$DB" "select pgpm.regrain_step('public.up_t', '$MONO', '100', 50)")" "prepared"
 
@@ -288,6 +293,11 @@ ANCHORED=$(q "$DB" "select count(*) filter (where p.child_oid is not null
                       join pg_namespace n on n.oid = c.relnamespace
                      where p.parent_table = 'public.up_t'::regclass")
 check "the upgrade backfilled child_oid, to each child's own oid" "$ANCHORED" "$NPARTS/$NPARTS"
+# ASSERTION 3c (#672), by identity: the monolith anchor is the fixture's own monolith, whose oid was read
+# before the degrade. A backfill that wrote nothing reads null; one that adopted another partition, false.
+check "the upgrade backfilled monolith_oid, to the monolith's own oid" \
+  "$(q "$DB" "select coalesce((monolith_oid = '${MONO_OID:-0}'::oid)::text, 'null')
+                from pgpm.config where parent_table = 'public.up_t'::regclass")" "true"
 # ASSERTION 3b (#496), by identity: each anchor must be the relation its own derived name resolves to. A
 # backfill that wrote nothing reads null/null, one that wrote a plausible oid somewhere else reads false.
 check "the upgrade anchored the in-flight regrain's capture (delta/fn)" \

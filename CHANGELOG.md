@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+- **`untransmute` hands the table back with the parent's grants, row security and policies** (#667). It
+  replayed only the parent's triggers onto the restored table, which kept the ACL, RLS flags and policies
+  the monolith had at the conversion, so a `REVOKE`, `ENABLE ROW LEVEL SECURITY` or `CREATE POLICY` issued
+  on the managed table since was silently undone. It now captures the parent's table and column grants,
+  both RLS flags and its policies under the lock it already takes, resets the monolith's copy and replays
+  the parent's. Guarded by `tests/176` through `bench/untransmute_security_state.sh`
+  (`untransmute_security_not_restored`).
+- **`untransmute` finds the monolith by the identity `transmute` recorded, and refuses once it is gone**
+  (#672). It took the attached partition with the smallest `lo`, so after retention had retired the
+  original table, or a regrain's swap had replaced it, a forward partition or fine child holding every
+  remaining row was handed back under the table's name as the restored original. `transmute` now records
+  the original's oid in the new `pgpm.config.monolith_oid` (an upgrade adopts the one attached partition
+  older than its parent), and `untransmute` refuses when that relation is no longer an attached partition.
+  Guarded by `tests/177` through `bench/untransmute_monolith_identity.sh`
+  (`untransmute_monolith_by_position`) and by `bench/upgrade_in_place.sh`
+  (`upgrade_monolith_oid_backfill_noop`).
 - **A `time`-kind `transmute` accounts for a future-dated row before anything is committed** (#668). The
   monolith's `hi` was the grid boundary above `now()` and nothing compared the column's maximum with it, so
   a table holding one row dated past that boundary committed the write-rejecting bound and the claim in

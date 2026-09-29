@@ -187,6 +187,16 @@ alter table pgpm.config add column if not exists archive_batch int default 1;
 -- parents behind it were cancelled every time, never archived or retired. The sweep visits the parent
 -- whose turn is oldest first instead; see maintain_all. null = never had one, which goes first.
 alter table pgpm.config add column if not exists sweep_turn_at timestamptz;
+-- WHICH partition is the original table (#672): its oid, recorded by transmute's cutover, where the table
+-- becomes the monolith child. Nothing else marks the monolith. It is named on the same grid as every forward
+-- partition, and "the attached partition with the smallest lo", which untransmute used to take for it, is
+-- the original only while the original is still attached: after retention has retired it, or a regrain's
+-- swap has replaced it with finer children, that is some other relation, which untransmute then handed back
+-- under the table's name as though it were the original. A rename does not change an oid, so regrain's
+-- transitional rename of the monolith leaves this correct. Null means "not recorded": an install that
+-- predates the column, where the backfill below could not tell which partition it is. untransmute refuses
+-- such a table rather than guess.
+alter table pgpm.config add column if not exists monolith_oid oid;
 
 -- Registry of managed partitions (excludes the DEFAULT). lo/hi are NATIVE-grid
 -- values as text (timestamptz for time/uuidv7, numeric for id).
@@ -297,6 +307,19 @@ update pgpm.part p set child_oid = to_regclass(format('%I.%I', n.nspname, p.chil
 create table if not exists pgpm.regrain_lock (
   parent_table regclass not null primary key
 );
+-- Backfill config.monolith_oid (#672), once per row, from the one fact an older install still carries: the
+-- monolith is the only partition that EXISTED BEFORE ITS PARENT. transmute builds the parent in its cutover,
+-- from the table that becomes the monolith, and every forward partition and fine child is created after it,
+-- so the monolith is the one attached partition with an oid below the parent's. Adopted only when exactly
+-- one qualifies, so a table whose monolith retention has already retired, or a regrain has already replaced,
+-- is left null (no attached partition predates the parent) and untransmute refuses it. oids wrap at 2^32;
+-- a wrap between the table's creation and its conversion leaves this null as well, which fails closed.
+update pgpm.config c set monolith_oid = m.child_oid
+  from (select p.parent_table, min(p.child_oid) as child_oid
+          from pgpm.part p join pg_inherits i on i.inhrelid = p.child_oid and i.inhparent = p.parent_table
+         where p.attached and p.child_oid < p.parent_table::oid
+         group by p.parent_table having count(*) = 1) m
+ where m.parent_table = c.parent_table and c.monolith_oid is null;
 
 -- In-flight conversions (issue #275). transmute runs in three transactions -- add the bound, validate it,
 -- cut over -- so that the O(rows) validation scan is not held under the ACCESS EXCLUSIVE lock the ADD
@@ -5991,10 +6014,11 @@ begin
   insert into pgpm.config (parent_table, control_column, control_kind, partition_step, partition_anchor,
                            partition_tz, obtain, retain, regrain_batch, paused,
                            text_time_prefix, text_time_width, text_time_radix, text_time_unit,
-                           text_time_alphabet, text_time_discard_bits, text_time_epoch)
+                           text_time_alphabet, text_time_discard_bits, text_time_epoch, monolith_oid)
   values (v_parent, p_control, p_control_kind, p_step, p_anchor, v_tz, p_obtain, p_retain,
           p_regrain_batch, p_paused,
-          p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_tt_alphabet, p_tt_discard_bits, p_tt_epoch)
+          p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_tt_alphabet, p_tt_discard_bits, p_tt_epoch,
+          p_parent::oid)   -- #672: the original table, now the monolith (see the pgpm.part insert below)
   on conflict (parent_table) do update set
     control_column = excluded.control_column, control_kind = excluded.control_kind,
     partition_step = excluded.partition_step, partition_anchor = excluded.partition_anchor,
@@ -6003,7 +6027,7 @@ begin
     text_time_prefix = excluded.text_time_prefix, text_time_width = excluded.text_time_width,
     text_time_radix = excluded.text_time_radix, text_time_unit = excluded.text_time_unit,
     text_time_alphabet = excluded.text_time_alphabet, text_time_discard_bits = excluded.text_time_discard_bits,
-    text_time_epoch = excluded.text_time_epoch;
+    text_time_epoch = excluded.text_time_epoch, monolith_oid = excluded.monolith_oid;
 
   insert into pgpm.log (parent_table, action) values (v_parent, 'transmute');
   -- keyed on v_parent, not p_parent: after the rename p_parent's oid is the monolith's, so an operator
@@ -6337,20 +6361,24 @@ $$;
 -- maintenance may have put on it since (retention's write block, an in-flight regrain's change capture,
 -- #508). It is a one-way door the moment any row lives outside the monolith: once the frontier crosses its
 -- upper bound, live writes route into forward partitions, and a regrain's swap replaces the monolith with
--- its fine children -- untransmute then refuses. A regrain that has not swapped yet is abandoned instead,
--- as regrain_cancel would abandon it: the monolith still holds every row, so the reverse loses nothing.
--- Returns the restored table.
+-- its fine children -- untransmute then refuses. So it does once the monolith is gone at all, retired by
+-- retention or replaced by a swap (#672): the monolith is the relation transmute recorded
+-- (pgpm.config.monolith_oid), never whichever partition happens to have the smallest lo. A regrain that
+-- has not swapped yet is abandoned instead, as regrain_cancel would abandon it: the monolith still holds
+-- every row, so the reverse loses nothing. Returns the restored table.
 --
 -- Fidelity notes: an identity column comes back in the form it had, ALWAYS or BY DEFAULT (#308), and the
 -- control column is left NOT NULL (transmute set it; a nullable partition key is a foot-gun, and we do
 -- not record prior nullability). A preserved incoming FK on an unpartitioned referencing table comes
 -- back NOT VALID (#577): validating it here would scan the referencing table under ACCESS EXCLUSIVE.
+-- The table's privileges and row security come back as the PARENT had them, not as the monolith kept them
+-- from the conversion (#667): table and column grants, ENABLE / FORCE ROW LEVEL SECURITY, and policies.
 -- Everything else -- rows, PK, secondary indexes, their names -- is byte-for-byte.
 create or replace function pgpm.untransmute(p_parent regclass)
 returns regclass language plpgsql as $$
 declare
   cfg pgpm.config; v_nsp name; v_rel name; v_monreg regclass; v_restored regclass;
-  v_mon name; v_mon_lo text; v_mon_hi text; v_ncast text; v_outside boolean;
+  v_mon name; v_mon_lo text; v_mon_hi text; v_outside boolean;
   v_gate_q text; v_door text;   -- #443: the outside-rows check and its refusal, asked twice
   v_idcols name[]; v_idmax bigint[]; v_col name; v_m bigint; v_i int; v_idnext numeric[]; v_seq regclass;
   v_idmin bigint[]; v_mmin bigint; v_idopts text[];   -- #670: min(identity) and the sequence options, per column
@@ -6360,6 +6388,9 @@ declare
   v_trgdefs text[] := '{}'; v_tdef text;   -- #277
   v_trgnames text[] := '{}'; v_trgstates text[] := '{}';   -- #499: tgname and tgenabled, index-aligned with v_trgdefs
   v_sq record;   -- #573: serial sequences the parent owns, handed back before it is dropped
+  -- #667: the parent's grants and policies as statements naming the restored table, and its RLS flags
+  v_grantdefs text[] := '{}'; v_poldefs text[] := '{}'; v_rls boolean; v_rls_force boolean;
+  v_acl_default boolean; v_revoked boolean := false; v_g record;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then
@@ -6379,24 +6410,38 @@ begin
 
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
-  v_ncast := pgpm._native_type(cfg.control_kind);
   -- resolve the regrain change-capture names (#267) NOW, while the parent and its config row still exist:
   -- they come from the oids recorded there at prepare (#496), or failing that from the parent's own name,
   -- and both are gone by the time the drop below runs.
   select delta, fn into v_cdelta, v_cfn from pgpm._regrain_capture_names(p_parent);
 
   -- THE GATE (REDESIGN.md section 13): a clean (metadata-only) reverse needs the original table still
-  -- intact as the MONOLITH, holding the whole table, with nothing landed outside it. The monolith is the
-  -- attached partition with the smallest lo (it starts at grid_floor(min(control)), strictly below B,
-  -- while every forward partition starts at B or higher). The reverse is a one-way door once any row
-  -- lives outside the monolith's [lo, hi): a forward partition after the frontier crosses B, a backdated
-  -- stray in the DEFAULT, or finer children from a regraining (Tier 2 foldback / Tier 3 merge not built).
-  execute format('select child_name, lo, hi from pgpm.part where parent_table = %L::regclass and attached order by lo::%s asc limit 1',
-                 p_parent::text, v_ncast) into v_mon, v_mon_lo, v_mon_hi;
-  if v_mon is null then
-    raise exception 'pg_partition_magician: cannot untransmute % -- no managed partition found', p_parent;
+  -- intact as the MONOLITH, holding the whole table, with nothing landed outside it. The reverse is a
+  -- one-way door once any row lives outside the monolith's [lo, hi): a forward partition after the
+  -- frontier crosses B, a backdated stray in the DEFAULT, or finer children from a regraining (Tier 2
+  -- foldback / Tier 3 merge not built).
+  --
+  -- The monolith is the relation transmute RECORDED as the original table (#672), still an attached
+  -- partition of this parent and still in pgpm.part: found by oid, never by position. It used to be "the
+  -- attached partition with the smallest lo", which is the original only while the original is attached.
+  -- Once retention has retired it, that is a forward partition obtain minted; once a regrain has swapped,
+  -- the first fine child. With every remaining row inside the stand-in, the door below passed, and the
+  -- stand-in was handed back under the table's name as the restored original, with none of the table's
+  -- grants, comment or index names. The original gone is the door shut, so refuse.
+  if cfg.monolith_oid is null then
+    raise exception 'pg_partition_magician: cannot untransmute % -- pgpm has no record of which partition is the original table (the conversion predates pgpm.config.monolith_oid and the upgrade could not identify it), and it will not hand back a partition it cannot prove is the original',
+      p_parent;
   end if;
-  v_monreg := format('%I.%I', v_nsp, v_mon)::regclass;
+  select c.relname, p.lo, p.hi into v_mon, v_mon_lo, v_mon_hi
+    from pgpm.part p
+    join pg_inherits i on i.inhrelid = p.child_oid and i.inhparent = p_parent
+    join pg_class c on c.oid = p.child_oid
+   where p.parent_table = p_parent and p.attached and p.child_oid = cfg.monolith_oid;
+  if v_mon is null then
+    raise exception 'pg_partition_magician: cannot untransmute % -- the original table (the monolith transmute recorded, oid %) is no longer one of its partitions: retention retired it or a regrain replaced it with finer children, so there is no original to hand back. This is a one-way door.',
+      p_parent, cfg.monolith_oid;
+  end if;
+  v_monreg := cfg.monolith_oid::regclass;
   -- Built once and asked twice (#443): here, unlocked, as the cheap refusal that takes no lock a writer
   -- would feel when the door is already shut; and again under ACCESS EXCLUSIVE just before the DETACH,
   -- which is the answer that is acted on.
@@ -6488,6 +6533,50 @@ begin
       v_idnext[v_i] := v_ra.o_next; v_idmax[v_i] := v_ra.o_max; v_idmin[v_i] := v_ra.o_min;
     end loop;
   end if;
+  -- Capture the parent's privileges and row security (#667), here, under the lock: GRANT, REVOKE and the
+  -- RLS and policy DDL all change the parent, the table the application uses by name, and none of them
+  -- recurses to a partition, so the monolith still carries whatever the table had at the conversion. The
+  -- parent's state is what gets handed back, replayed below onto the restored table once it has the name
+  -- again, as statements built here with the name it will have (the monolith's own copy is reset first).
+  -- The shape is transmute's 7b, run the other way. v_acl_default: a NULL relacl is the owner's implicit
+  -- all-privileges default, which has no grant to replay.
+  select relrowsecurity, relforcerowsecurity, relacl is null into v_rls, v_rls_force, v_acl_default
+    from pg_class where oid = p_parent;
+  for v_g in
+    select a.privilege_type, a.is_grantable,
+           case when a.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(a.grantee)) end as role_q
+      from pg_class c, aclexplode(c.relacl) a where c.oid = p_parent and c.relacl is not null
+  loop
+    v_grantdefs := v_grantdefs || format('grant %s on %I.%I to %s%s', v_g.privilege_type, v_nsp, v_rel, v_g.role_q,
+                                         case when v_g.is_grantable then ' with grant option' else '' end);
+  end loop;
+  for v_g in
+    select att.attname, a.privilege_type, a.is_grantable,
+           case when a.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(a.grantee)) end as role_q
+      from pg_attribute att, aclexplode(att.attacl) a
+     where att.attrelid = p_parent and att.attnum > 0 and not att.attisdropped and att.attacl is not null
+  loop
+    v_grantdefs := v_grantdefs || format('grant %s (%I) on %I.%I to %s%s', v_g.privilege_type, v_g.attname, v_nsp, v_rel,
+                                         v_g.role_q, case when v_g.is_grantable then ' with grant option' else '' end);
+  end loop;
+  for v_g in
+    select polname, polcmd, polpermissive,
+           case when polroles = '{0}'::oid[] then 'public'
+                else (select string_agg(quote_ident(rolname), ', ' order by rolname)
+                        from pg_roles where oid = any(polroles)) end as roles_q,
+           pg_get_expr(polqual, polrelid)      as qual,
+           pg_get_expr(polwithcheck, polrelid) as withcheck
+      from pg_policy where polrelid = p_parent order by polname
+  loop
+    v_poldefs := v_poldefs || format('create policy %I on %I.%I as %s for %s to %s%s%s',
+      v_g.polname, v_nsp, v_rel,
+      case when v_g.polpermissive then 'permissive' else 'restrictive' end,
+      case v_g.polcmd when 'r' then 'select' when 'a' then 'insert' when 'w' then 'update'
+                      when 'd' then 'delete' else 'all' end,
+      v_g.roles_q,
+      case when v_g.qual is not null then ' using (' || v_g.qual || ')' else '' end,
+      case when v_g.withcheck is not null then ' with check (' || v_g.withcheck || ')' else '' end);
+  end loop;
 
   -- Strip what MAINTENANCE put on the monolith before handing it back (#508). The trigger capture above
   -- reads the PARENT's pg_trigger, and DETACH strips only the clones of the parent's triggers; pgpm's own
@@ -6586,6 +6675,42 @@ begin
                                            when 'R' then 'enable replica' end,
                      v_trgnames[v_i]);
     end if;
+  end loop;
+
+  -- Put the parent's privileges and row security on the restored table in place of the monolith's
+  -- conversion-time copy (#667; captured under the lock, above). First reset that copy: every role holding
+  -- anything on it, at table or column level, has it revoked (a table-level REVOKE takes the column grants
+  -- with it, and CASCADE the grants made through a grant option), and every policy on it is dropped. Then
+  -- the parent's grants, or with a default (NULL) ACL the owner's own privileges, which the revoke took;
+  -- then its RLS flags, both directions, and its policies.
+  for v_g in
+    select a.grantee
+      from pg_class c, aclexplode(c.relacl) a where c.oid = v_restored and c.relacl is not null
+    union
+    select a.grantee
+      from pg_attribute att, aclexplode(att.attacl) a
+     where att.attrelid = v_restored and att.attnum > 0 and not att.attisdropped and att.attacl is not null
+  loop
+    execute format('revoke all on %s from %s cascade', v_restored::text,
+                   case when v_g.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(v_g.grantee)) end);
+    v_revoked := true;
+  end loop;
+  if v_acl_default and v_revoked then
+    execute format('grant all on %s to %I', v_restored::text,
+                   (select pg_get_userbyid(relowner) from pg_class where oid = v_restored));
+  end if;
+  foreach v_tdef in array v_grantdefs loop
+    execute v_tdef;
+  end loop;
+  execute format('alter table %s %s row level security', v_restored::text,
+                 case when v_rls then 'enable' else 'disable' end);
+  execute format('alter table %s %s row level security', v_restored::text,
+                 case when v_rls_force then 'force' else 'no force' end);
+  for v_g in select polname from pg_policy where polrelid = v_restored loop
+    execute format('drop policy %I on %s', v_g.polname, v_restored::text);
+  end loop;
+  foreach v_tdef in array v_poldefs loop
+    execute v_tdef;
   end loop;
 
   -- re-add every preserved incoming FK against the restored table. The recorded definition names the
