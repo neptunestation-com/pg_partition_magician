@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+- **`transmute` carries a secondary index whose quoted name holds a space** (#669). The cutover renamed
+  each carried index by a pattern (`\S+` for the name) that cannot match `"Body Lookup"`, so the rewrite
+  did nothing, the original `CREATE INDEX` ran again and failed with a raw 42P07 after phases 1 and 2 had
+  committed the write-rejecting bound, and every re-run failed the same way. The prefix `pg_get_indexdef`
+  writes is now replaced by identity. `bench/carried_index_quoted_name.sh` runs tests/179 against the
+  mutation `carried_index_name_by_pattern`.
+- **`transmute` and `untransmute` keep an identity column's sequence options** (#670). Identity was re-added
+  with its kind alone, so the new sequence took the defaults: an `INCREMENT BY 2` identity (odd ids only)
+  handed out even ids after the conversion, a descending one failed the cutover on its reseed, and
+  `MINVALUE`/`MAXVALUE`, `CACHE` and `CYCLE` were dropped. The options are carried, and the reseed moves
+  along the sequence's own lattice, in its own direction, until it clears every existing id.
+  `bench/transmute_identity_options.sh` runs tests/180 against the mutation `transmute_identity_kind_only`.
+- **`transmute` refuses a type holding its staging or monolith name up front** (#671). Both guards asked
+  `to_regclass`, which cannot see an enum, domain or range type, although `CREATE TABLE` and `RENAME` need
+  the name free in `pg_type`; the cutover died with a raw 42710 after the bound and the claim were
+  committed. `bench/transmute_type_squatter.sh` runs tests/181 against the mutation
+  `transmute_name_guard_relations_only`.
 - **A regrain target step that mixes a month count with a duration is refused** (#674). `set_regrain` judged a
   target only through `_grid_next`, whose calendar branch keeps the months and drops the rest, so
   `'1 month 1 day'`, `'1 month -40 days'` (below zero by interval ordering) and `'-1 month 40 days'` were
