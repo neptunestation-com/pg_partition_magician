@@ -2934,6 +2934,24 @@ $$;''',
           "    return;\n"
           "  end if;\n", 1)],
     ),
+    "regrain_truncate_guard_no_upgrade": (
+        "bench/regrain_truncate_guard_upgrade.sh",
+        "Pre-#650 upgrade path: re-running install.sql over a regrain in flight since before #449 puts no "
+        "TRUNCATE guard on its source, so a TRUNCATE between the upgrade and the regrain's next tick goes "
+        "through and the swap attaches copies of every truncated row. One site: the upgrade loop's ensure "
+        "call, emptied. The resuming tick still ensures the guard, so tests/169 passes against this mutant "
+        "and only the guard's before-any-tick assertions catch it.",
+        [("    perform pgpm._regrain_truncate_guard_ensure(r.child);\n", "    null;\n", 1)],
+    ),
+    "regrain_truncate_guard_no_resume": (
+        "bench/regrain_truncate_guard_upgrade.sh",
+        "Pre-#650 regrain_step: a tick that resumes (capture present, so no prepare) does not put back a "
+        "missing TRUNCATE guard, so a source that lost it (dropped by hand, or a regrain begun before #449 "
+        "on an install whose upgrade step did not run) stays unguarded to its swap. One site: the ensure "
+        "call on the resume path, removed. The upgrade loop is intact, so the guard's section 2 still "
+        "passes; its section 4 and tests/169 section (A) catch it.",
+        [("  perform pgpm._regrain_truncate_guard_ensure(v_child);\n", "", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

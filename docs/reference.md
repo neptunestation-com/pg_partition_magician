@@ -1076,7 +1076,9 @@ partitions until the swap), so the swap would put every truncated row back. Whil
 `TRUNCATE` of the parent or of the coarse child fails with `pg_partition_magician: cannot TRUNCATE ... a
 regrain is in flight on it` before anything is truncated, including from a session with
 `session_replication_role = replica`. Cancel the regrain with `regrain_cancel` first, or truncate after the
-swap.
+swap. The refusal holds for a regrain already in flight when you upgrade from a release that did not have
+it: re-running `install.sql` puts it on every source still regraining, and each `regrain_step` tick that
+resumes a regrain puts it back if it is missing.
 
 The reconcile finds each captured key's fine child by its recorded **range** in `pgpm.part`, not by name,
 so a first sub-range that was clamped to the coarse child's own `lo` (a weekly target on a monthly monolith,

@@ -719,6 +719,7 @@ run_perf() {
     "bench/transmute_abort_owner.sh pgpm_perf83"
     "bench/set_retain_horizon.sh pgpm_perf84"
     "bench/text_time_default_collation.sh pgpm_perf85"
+    "bench/regrain_truncate_guard_upgrade.sh pgpm_perf103"
   )
   local selected=()
   local n=${#guards[@]} idx

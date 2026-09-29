@@ -2912,6 +2912,27 @@ begin
 end;
 $$;
 
+-- Put the #449 guard on an in-flight source that lacks it (issue #650), returning whether it did. The prepare
+-- tick installs the guard, but prepare runs only when the capture trigger is absent, so a source carrying
+-- capture and no guard stayed unguarded until its swap: a regrain begun under 0.6.0 (whose prepare installed
+-- none) and resumed after the upgrade, or a guard dropped by hand. TRUNCATE then went through and the swap
+-- attached copies of every truncated row. Called from the two places that meet such a source first:
+-- install.sql's upgrade path (below _regrain_capture_active), before any tick runs, and every resuming tick
+-- of regrain_step. Only when missing, so a steady tick issues no DDL and takes no SHARE ROW EXCLUSIVE on the
+-- source; installed exactly as _regrain_capture_install does it, ENABLE ALWAYS included.
+create or replace function pgpm._regrain_truncate_guard_ensure(p_child regclass)
+returns boolean language plpgsql as $$
+begin
+  if exists (select 1 from pg_trigger where tgrelid = p_child and tgname = 'pgpm_regrain_truncate_guard') then
+    return false;
+  end if;
+  execute format('create trigger pgpm_regrain_truncate_guard before truncate on %s for each statement execute function pgpm._regrain_truncate_guard()',
+                 p_child::text);
+  execute format('alter table %s enable always trigger pgpm_regrain_truncate_guard', p_child::text);
+  return true;
+end;
+$$;
+
 -- Give the parent's writers INSERT on the delta (#496). The capture trigger inserts into the delta with the
 -- WRITER's privileges: pgpm has no SECURITY DEFINER anywhere, and the delta used to be created by whoever
 -- ran the tick, with no grants, so every non-owner role holding DML on the parent got 42501 on every write
@@ -3085,6 +3106,24 @@ begin
                     and c.relnamespace = v_nsp_oid);
 end;
 $$;
+
+-- Upgrade path (#650): a regrain in flight across the upgrade has a source carrying the capture trigger and,
+-- from a release before #449, no TRUNCATE guard. Put the guard on every such source now, so a TRUNCATE
+-- between this upgrade and the regrain's next tick is refused too; the tick would put it back itself (see
+-- regrain_step), but only from that tick on. Only a managed, attached child with capture active is touched,
+-- and _regrain_truncate_guard_ensure leaves a present guard alone, so a re-run changes nothing.
+do $$
+declare r record;
+begin
+  for r in
+    select c.oid::regclass as child
+      from pgpm.part p join pg_class pc on pc.oid = p.parent_table
+      join pg_class c on c.relname = p.child_name and c.relnamespace = pc.relnamespace
+     where p.attached and pgpm._regrain_capture_active(p.parent_table, p.child_name)
+  loop
+    perform pgpm._regrain_truncate_guard_ensure(r.child);
+  end loop;
+end $$;
 
 -- how many captured changes are still outstanding (used by the swap gate and by status)
 create or replace function pgpm._regrain_delta_count(p_parent regclass)
@@ -3709,6 +3748,10 @@ begin
       values (p_parent, 'regrain_prepare', v_lo, v_hi, v_child_name);
     return 'prepared';
   end if;
+  -- #650: capture is up, so this tick resumes and prepare will not run again for this regrain. A source
+  -- that carries capture but no TRUNCATE guard (a regrain begun before #449, a guard dropped by hand) gets
+  -- it here, from the first tick that meets it. A no-op whenever the guard is present.
+  perform pgpm._regrain_truncate_guard_ensure(v_child);
   -- #496: a role granted DML on the parent after the prepare tick gets INSERT on the delta from the next
   -- tick on, rather than 42501 until the swap. Grants only what is missing, so this is a no-op most ticks.
   select delta into v_delta_name from pgpm._regrain_capture_names(p_parent);

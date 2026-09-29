@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **A regrain in flight across the upgrade refuses `TRUNCATE` too** (#650). The #449 guard was installed by
+  the prepare tick alone, and a regrain resumes without re-preparing whenever its capture trigger is up, so a
+  regrain begun under 0.6.0 kept a source with capture and no guard to its swap: a `TRUNCATE` of it went
+  through and the swap attached copies of every truncated row. Re-running `install.sql` now puts the guard on
+  every source still regraining, and every resuming `regrain_step` tick puts back a missing one (a no-op
+  when it is present). `tests/169` and `bench/regrain_truncate_guard_upgrade.sh` cover both, against the
+  mutations `regrain_truncate_guard_no_upgrade` and `regrain_truncate_guard_no_resume`.
 - **Pass 4's three novel seeds join the mutation catalogue** (`set_retain_strict_horizon`,
   `regrain_sync_share_update_exclusive`, `text_time_collation_default_trusted`). Each was planted for the
   pass, found by three finders (recall 9 of 9) and is caught by an existing pgTAP file (tests/98, 149 and 122);
