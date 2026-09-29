@@ -127,8 +127,8 @@ select is((select count(*)::int from ci_c), (select count(*)::int from ci_c_pgpm
 
 select throws_like(
   $$ call pgpm.from_hypertable_cutover('ci_c', 'ts', interval '1 month', p_predrain => false) $$,
-  '%refusing to swap: the source and the destination would both hold 50 rows after the change-tracking catch-up, but not the same rows%capture trigger%',
-  'C: the tracking cutover refuses a write the delta never saw, on equal counts');
+  '%refusing to swap: 1 source row%changed during the online window without firing the change-capture trigger%first key (9,%',
+  'C: the tracking cutover refuses a write the delta never saw, on equal counts (the #654 untracked-write refusal names the row; the fingerprint comparison behind it is what parts A and B pin)');
 
 select is((select count(*)::int from timescaledb_information.hypertables where hypertable_name = 'ci_c'), 1,
   'C: the source is still a hypertable');

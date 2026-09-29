@@ -1097,6 +1097,13 @@ begin
     -- destination carried in over the whole table through TimescaleDB's own decompression.
     execute format('select coalesce(sum(%s), 0) from %I.%I', v_fp_q, v_nsp, v_rel) into v_src_h;
   end if;
+  -- Two refusals guard the swap, the specific one first. A row the capture trigger never saw (#654) is named by
+  -- its key below; the count-and-fingerprint comparison after it (#460, #653) catches everything else, so a
+  -- write that bypassed the trigger is reported as what it is rather than as a fingerprint mismatch.
+  if v_unmatched > 0 then
+    raise exception 'pg_partition_magician: from_hypertable_cutover(%) refusing to swap: % source row(s) changed during the online window without firing the change-capture trigger, and the destination does not hold them as the source does (first key %). A write reached the source under session_replication_role = replica (a logical-replication apply worker, a loader silencing triggers) or with the trigger gone, and TimescaleDB cannot enable the trigger ALWAYS on a hypertable, so the delta never saw it. Nothing was dropped and the source is whole. Make every writer fire triggers for the whole window (pause the subscription, or run the loader as origin), then re-run from_hypertable_copy with p_track_changes => true.',
+      p_hypertable, v_unmatched, v_first_key;
+  end if;
   if v_src_n <> v_dest_n or v_src_h <> v_dest_h then
     raise exception 'pg_partition_magician: from_hypertable_cutover(%) refusing to swap: %. %',
       p_hypertable,
@@ -1112,10 +1119,6 @@ begin
         else format('Rows arrived during the online window with a control value at or below the copy watermark (out-of-order appends, a backfill, or an update or delete of a copied row), which the append-only catch-up cannot see. Nothing was dropped and the source is whole. Re-run from_hypertable_copy(%L, %L, p_track_changes => true), which needs a primary key or unique constraint; on a keyless table, pause writes to the source for the copy instead.',
                     p_hypertable::text, p_control)
       end;
-  end if;
-  if v_unmatched > 0 then
-    raise exception 'pg_partition_magician: from_hypertable_cutover(%) refusing to swap: % source row(s) changed during the online window without firing the change-capture trigger, and the destination does not hold them as the source does (first key %). A write reached the source under session_replication_role = replica (a logical-replication apply worker, a loader silencing triggers) or with the trigger gone, and TimescaleDB cannot enable the trigger ALWAYS on a hypertable, so the delta never saw it. Nothing was dropped and the source is whole. Make every writer fire triggers for the whole window (pause the subscription, or run the loader as origin), then re-run from_hypertable_copy with p_track_changes => true.',
-      p_hypertable, v_unmatched, v_first_key;
   end if;
   -- (the key constraints + secondary indexes were captured and pre-built on the destination above, before
   -- the lock; the swap below only adopts/renames them -- metadata-only.)
