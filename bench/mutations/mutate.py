@@ -2261,6 +2261,18 @@ $$;''',
           "  select coalesce(array_agg(pg_get_triggerdef(oid) order by tgname), '{}'),\n",
           "  select coalesce(array_agg(pg_get_triggerdef(oid) order by tgname), '{}'),\n", 1)],
     ),
+    "extend_to_no_lock_budget": (
+        "bench/extend_to_lock_budget.sh",
+        "Pre-#591 extend_to: nothing bounds the call by the lock table, only by p_max. It is a function, so "
+        "every partition it creates holds its locks (the table, its indexes, its TOAST table) to the one "
+        "transaction's end, and on a stock server (max_locks_per_transaction 64) a call a few thousand cells "
+        "out passes its own dry count and dies with 53200 `out of shared memory` after ~2100 partitions, "
+        "having filled the lock table every other backend shares on the way. One site: the refusal's "
+        "condition, made unreachable, so the measurement still runs and the walk goes on exactly as the old "
+        "function's did. tests/156's far call (budget + 1 cells, inside the default p_max, refused by pgpm "
+        "where the mutant reaches the server's resource error) is what catches it.",
+        [("        if v_projected > v_slots / 2 then\n", "        if false then\n", 1)],
+    ),
     "throws_ok_null_pattern": (
         "bench/throws_pinned.sh",
         "Pre-#522 tests/72: the transition-table refusal asserted with throws_ok(..., NULL, desc). "

@@ -697,6 +697,7 @@ run_perf() {
     "bench/regrain_step_positive.sh pgpm_perf71"
     "bench/part_name_labels_injective.sh pgpm_perf67"
     "bench/uninstall_residue.sh pgpm_perf73"
+    "bench/extend_to_lock_budget.sh pgpm_perf74"
   )
   local selected=()
   local n=${#guards[@]} idx

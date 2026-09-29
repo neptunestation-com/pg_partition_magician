@@ -768,6 +768,15 @@ NEW partitions one call may create, checked with a dry count before any DDL runs
 partitions short of the value actually asked for. Like `obtain`, it stops (here, raises) if the next grid
 boundary cannot be expressed (the `uuidv7`/`text_time` ceilings described above).
 
+It is a function, so every partition one call creates is created in one transaction and holds its locks
+(the table, its indexes, its TOAST table) until that transaction ends, in the lock table every session
+shares. So the call is also bounded by that table: once it has created two partitions it measures what one
+costs and refuses, creating nothing, if its partitions would hold more than half of
+`max_locks_per_transaction x (max_connections + max_prepared_transactions)`. The message gives the
+measured cost and about how many partitions one call can create; extend in steps of at most that many,
+each call in its own transaction, or raise `max_locks_per_transaction`. On stock settings (64 x 100) that
+is a few hundred partitions a call for a table with a primary key, fewer for a table with more indexes.
+
 ### `retain`
 
 ```sql

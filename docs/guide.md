@@ -414,6 +414,12 @@ already exist are left alone, and the return value is how many new ones it actua
 value that would need more than `p_max` is refused loudly, creating nothing, rather than silently stopping
 partway to the value you actually asked for. Raise `p_max` for a legitimately large jump.
 
+One call is one transaction, and every partition it creates holds its locks until that transaction ends,
+so a call is also refused, creating nothing, when its partitions would hold more than half the server's
+shared lock table (on stock settings, a few hundred partitions a call). The message says about how many
+one call can create: extend in steps of at most that many, each call in its own transaction, or raise
+`max_locks_per_transaction`.
+
 Extending forward is unrelated to your retention floor, so extending far ahead and then lowering `retain`
 can leave a wide grid above the frontier; that is harmless, just worth knowing.
 

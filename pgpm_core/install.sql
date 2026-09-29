@@ -1386,13 +1386,31 @@ $$;
 -- p_value (a typo, an off-by-a-few-zeros id) is refused loudly and immediately, creating nothing, rather
 -- than silently truncated to p_max partitions short of the requested value -- the house rule about not
 -- trading a loud failure for a silent one.
+--
+-- The lock budget (#591). extend_to is a function, so every partition it creates is created in ONE
+-- transaction, and each CREATE TABLE ... PARTITION OF holds its locks (the new table, its indexes, its
+-- TOAST table) to that transaction's end, in the lock table every backend shares. p_max alone did not
+-- bound that: on a stock server a call a few thousand cells out passed its own dry count and died with
+-- 53200 `out of shared memory` after ~2100 partitions, filling the shared table on the way. So once two
+-- partitions exist the call measures what one costs, in non-fast-path pg_locks rows (the fast-path slots
+-- live in the backend's own PGPROC, not the shared table), projects the rest of the walk, and refuses when
+-- the call's partitions would hold more than HALF the nominal table, max_locks_per_transaction x
+-- (max_connections + max_prepared_transactions), leaving the other half to every other session. Measured
+-- rather than estimated from the catalog, because the cost depends on the table (~8 slots a partition for
+-- a primary key and a TOASTable column, one more per index). Counted from the first CREATE, not from the
+-- call's start: the frontier read above locks every existing partition of the parent, and a table that
+-- simply has many partitions must still be extendable by a few. The refusal raises, so the two partitions
+-- that paid for the measurement roll back with the rest: a refused call creates nothing, as p_max's does.
 create or replace function pgpm.extend_to(p_parent regclass, p_value text, p_max int default 10000)
 returns int language plpgsql as $$
 declare
   cfg pgpm.config; v_nsp name; v_rel name;
   v_native text; v_target_lo text;
   v_frontier text; v_lo text; v_hi text; v_name name;
-  v_needed int := 0; v_made int := 0;
+  v_needed int := 0; v_made int := 0; v_walked int := 0;
+  v_slots bigint := current_setting('max_locks_per_transaction')::bigint
+                    * (current_setting('max_connections')::bigint + current_setting('max_prepared_transactions')::bigint);
+  v_locks0 bigint; v_locks1 bigint; v_locks2 bigint; v_projected bigint;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
@@ -1440,10 +1458,30 @@ begin
     then
       v_name := pgpm._obtain_name(p_parent, cfg, v_nsp, v_rel, v_lo, v_hi);
       if v_name is not null then
+        if v_made = 0 then
+          select count(*) into v_locks0 from pg_locks where pid = pg_backend_pid() and not fastpath;
+        end if;
         perform pgpm._create_partition(cfg, v_nsp, v_rel, null, v_name, v_lo, v_hi);
         v_made := v_made + 1;
+        if v_made = 1 then
+          select count(*) into v_locks1 from pg_locks where pid = pg_backend_pid() and not fastpath;
+        elsif v_made = 2 then
+          select count(*) into v_locks2 from pg_locks where pid = pg_backend_pid() and not fastpath;
+          -- the rest of the walk is at most v_needed + 1 cells (the dry count's steps plus the edge's own
+          -- cell) less the ones walked so far, each costing what the second partition did
+          v_projected := (v_locks2 - v_locks0)
+                         + greatest(v_locks2 - v_locks1, 1) * greatest(v_needed + 1 - (v_walked + 1), 0);
+          if v_projected > v_slots / 2 then
+            raise exception 'pg_partition_magician: extend_to(%, %) would hold about % lock-table slots in its one transaction (about % per partition), more than half the shared lock table''s % (max_locks_per_transaction % x (max_connections % + max_prepared_transactions %)); refusing rather than exhausting it for every other session. Extend in steps, each call in its own transaction, of at most about % partitions, or raise max_locks_per_transaction',
+              p_parent, p_value, v_projected, greatest(v_locks2 - v_locks1, 1), v_slots,
+              current_setting('max_locks_per_transaction'), current_setting('max_connections'),
+              current_setting('max_prepared_transactions'),
+              greatest((v_slots / 2 - (v_locks1 - v_locks0)) / greatest(v_locks2 - v_locks1, 1) + 1, 1);
+          end if;
+        end if;
       end if;
     end if;
+    v_walked := v_walked + 1;
     exit when not pgpm._native_gt(cfg.control_kind, v_target_lo, v_lo);
     v_lo := v_hi;
   end loop;
