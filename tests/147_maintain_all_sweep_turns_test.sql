@@ -18,7 +18,9 @@
 -- Two scenarios, one per half of the rule, each asserted tick by tick so the order is shown by WHICH
 -- parent did its work in which tick rather than by a total:
 --   1. A backlog ahead of a tail. A (lower oid) has a backlog of one-second archive chunks; B (higher
---      oid) needs one one-second chunk, then retires its aged partition. 1.5 s fits one chunk, not two.
+--      oid) needs one one-second chunk, then retires its aged partition. 1.9 s fits one chunk, not two,
+--      and leaves the sweep's own work 0.9 s before the second parent must have been ENTERED (a
+--      0.5 s margin was cut short by a loaded CI runner once; two chunks never fit whatever the load).
 --   2. A parent that overruns on its own. P (lower oid) has a three-second archive chunk, so its tick
 --      never fits; Q (higher oid) needs nothing but a drop.
 -- Each archive function counts its calls in a SEQUENCE, which a cancellation does not roll back, so
@@ -74,7 +76,7 @@ select child_name as blive from pgpm.part
 select ok('public.sw_a'::regclass::oid < 'public.sw_b'::regclass::oid,
   'LIVENESS: A precedes B in the fixed order the sweep used to follow');
 
-set statement_timeout = '1500ms';
+set statement_timeout = '1900ms';
 \set ON_ERROR_STOP 0
 call pgpm.maintain_all();
 \set ON_ERROR_STOP 1
@@ -87,7 +89,7 @@ select is((select last_value::int from s147.calls_b), 1,
 select ok(not exists (select 1 from pgpm.archive_ledger where parent_table = 'public.sw_b'::regclass),
   'LIVENESS: and the shared clock cut B short there (the starving the fix is about happened)');
 
-set statement_timeout = '1500ms';
+set statement_timeout = '1900ms';
 \set ON_ERROR_STOP 0
 call pgpm.maintain_all();
 \set ON_ERROR_STOP 1
@@ -109,7 +111,7 @@ select is((select last_value::int from s147.calls_a), 2,
 select is((select count(*)::int from pgpm.archive_ledger where parent_table = 'public.sw_a'::regclass), 1,
   'and it was A that the clock cut short this time');
 
-set statement_timeout = '1500ms';
+set statement_timeout = '1900ms';
 \set ON_ERROR_STOP 0
 call pgpm.maintain_all();
 \set ON_ERROR_STOP 1
@@ -146,7 +148,7 @@ select is((select string_agg(parent_table::text, ',' order by parent_table) from
   'sw_p,sw_q',
   'LIVENESS: P and Q are new to the sweep, so neither has had a turn');
 
-set statement_timeout = '1500ms';
+set statement_timeout = '1900ms';
 \set ON_ERROR_STOP 0
 call pgpm.maintain_all();
 \set ON_ERROR_STOP 1
@@ -159,7 +161,7 @@ select ok(not exists (select 1 from pgpm.archive_ledger where parent_table = 'pu
 select ok(to_regclass('public.' || quote_ident(:'qold')) is not null,
   'LIVENESS: tick 1 never reached Q, so its aged partition is still there');
 
-set statement_timeout = '1500ms';
+set statement_timeout = '1900ms';
 \set ON_ERROR_STOP 0
 call pgpm.maintain_all();
 \set ON_ERROR_STOP 1
