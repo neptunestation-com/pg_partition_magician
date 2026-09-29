@@ -721,6 +721,7 @@ run_perf() {
     "bench/text_time_default_collation.sh pgpm_perf85"
     "bench/regrain_truncate_guard_upgrade.sh pgpm_perf103"
     "bench/retire_detached_unreferenced.sh pgpm_perf105"
+    "bench/retain_nan.sh pgpm_perf102"
   )
   local selected=()
   local n=${#guards[@]} idx

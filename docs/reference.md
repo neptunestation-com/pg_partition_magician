@@ -1675,7 +1675,9 @@ pgpm.set_retain(p_parent regclass, p_retain text default null) returns void
 Change `config.retain`, the retention horizon `retain()` drops partitions past (`null` = keep forever).
 `p_retain` is validated against `control_kind` the same way `transmute` does: `numeric` for `id`, an
 interval for `time`/`uuidv7`/`text_time`, and, like `transmute`, it must not be negative, in any of an
-interval's fields (a mixed-sign value is refused as `transmute` refuses it). A negative
+interval's fields (a mixed-sign value is refused as `transmute` refuses it). An `id` retain of `NaN` is
+refused with the negative values: PostgreSQL orders `NaN` above every number, so its horizon is past every
+partition. A negative
 value is refused outright, whatever the current value: it puts the horizon past the partition taking
 writes, and the guard below compares boundaries, so on its own it cannot see a value that grid-floors to
 the current boundary. `'0'` is allowed and keeps only the partition taking writes.

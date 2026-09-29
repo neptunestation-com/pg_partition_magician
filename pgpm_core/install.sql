@@ -792,11 +792,15 @@ $$;
 -- from a 31-day month and two behind from February), while a value with no negative field moves the wall
 -- clock back, or leaves it, on every date. The mixed-sign values that happen to net positive ('1 mon -1 day')
 -- are refused with the rest; no retention policy needs one.
+--
+-- #649: numeric has a NaN, and PostgreSQL orders it ABOVE every number, so `>= 0` alone accepted 'NaN' as
+-- non-negative. Its horizon is frontier - NaN = NaN, every partition's hi sorts below that, and one tick
+-- dropped every partition, the one taking writes included. NaN is refused with the negative values.
 create or replace function pgpm._retain_nonnegative(p_kind text, p_retain text)
 returns boolean language plpgsql immutable as $$
 declare v_i interval;
 begin
-  if p_kind = 'id' then return p_retain::numeric >= 0; end if;
+  if p_kind = 'id' then return p_retain::numeric >= 0 and p_retain::numeric <> 'NaN'::numeric; end if;
   v_i := p_retain::interval;
   -- date_trunc keeps the months, then the months and days; the differences isolate one field each, and a
   -- single-field interval compares exactly
