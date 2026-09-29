@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- **`uninstall.sql` loses no pending foreign key and leaves no regrain copy behind** (#589). An incoming
+  key `transmute(..., p_incoming_fks => 'preserve')` dropped waits in `pgpm.dropped_fk` for a maintenance
+  tick to re-add it, and a paused table (the default) gets none, so an uninstall in that window dropped
+  the only record with the schema and the key was gone for good, silently. Uninstall now re-adds every
+  pending key through `restore_incoming_fks` first, as a tick would (`NOT VALID` on a plain referencer,
+  with a `WARNING` naming each key pgpm tracked that is still unvalidated), and while any key cannot be
+  restored it refuses and drops nothing, with each key's DDL and the reason in the message; deleting the
+  key's `pgpm.dropped_fk` row is how to accept losing it. The schema drop now sits in the same block as
+  that check, so a client that carries on past an error cannot reach it. An uninstall during a regrain
+  also left the regrain's not-yet-attached fine copies as standalone tables in the operator's schema,
+  with `pgpm.part`, the one record of what they were, gone; it now abandons the regrain through
+  `regrain_cancel` first, as `untransmute` does (the source still holds every row).
+  `tests/155_uninstall_residue_test.sql` stages both and runs the script twice (refused, then through);
+  `bench/uninstall_residue.sh` drives it against the `uninstall_drops_pending_fk` and
+  `uninstall_keeps_regrain_copies` mutants of `uninstall.sql` for `./test.sh discriminate`.
 - **Every cell a grid can produce gets its own partition name** (#582). `obtain`, `extend_to` and
   `regrain_step` decide whether a cell's child already exists by its name, and three labels were not
   injective. The finest time label was the minute, so the two cells of a 30-second step (which
