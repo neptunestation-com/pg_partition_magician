@@ -24,6 +24,13 @@ the lines the two appended entries SHARE out of the conflict hunk and into the t
      the same spot share their closing `\"\"\"` the same way; when both sides hold an odd number of
      `\"\"\"` and the line after the hunk is `\"\"\"`, give the first side its own closing line.
 
+Hunk shapes. git writes the two-way shape (<<<<<<< / ======= / >>>>>>>) under the default conflict
+style and a three-way one under diff3 and zdiff3, where a `||||||| <base>` section sits between the
+sides. A three-way hunk whose base section is EMPTY is an add/add conflict like any other and is resolved
+the same way (the base section is dropped: it held nothing). One whose base is NOT empty means both sides
+edited the same lines, which has no "keep both" answer, so it is refused (#598: the two-way pattern used
+to fold the base section into "ours" and exit 0 with the `|||||||` line left in the file).
+
 The result must parse (mutate.py) and must contain no marker. Duplicate mutation keys, duplicate
 `pgpm_perfNN` guard databases and "does every mutation still build" are the caller's checks
 (land.sh does them); this script only makes the text whole. Exit 0 on success, 1 on a file it cannot
@@ -35,7 +42,13 @@ import sys
 
 KNOWN = ("CHANGELOG.md", "bench/mutations/mutate.py", "test.sh",
          ".github/workflows/perf.yml", ".github/workflows/archive.yml", ".github/workflows/lint.yml")
-CONFLICT = re.compile(r"<<<<<<< [^\n]*\n(.*?)=======\n(.*?)>>>>>>> [^\n]*\n", re.S)
+# Either hunk shape, markers anchored at a line start: ours, the base section (None in a two-way hunk)
+# and theirs. Lazy groups, so a hunk never runs on into the next one.
+CONFLICT = re.compile(r"^<{7}(?: [^\n]*)?\n(.*?)^(?:\|{7}(?: [^\n]*)?\n(.*?)^)?={7}\n(.*?)^>{7}(?: [^\n]*)?\n",
+                      re.S | re.M)
+# Every marker line git writes, in either shape. The result is checked against all four, not only the
+# outer two, so a hunk shape the pattern does not know can never pass as resolved.
+MARKER = re.compile(r"^(?:<{7}|>{7}|\|{7})(?: |$)|^={7}$", re.M)
 ENTRY_OPEN = re.compile(r'^    "[A-Za-z0-9_]+": \($')
 ENTRY_CLOSE = re.compile(r"^    \),\s*$")
 
@@ -86,7 +99,11 @@ def resolve_text(s, path):
             out.append(s[pos:])
             break
         out.append(s[pos:m.start()])
-        ours, theirs = m.group(1), m.group(2)
+        ours, base, theirs = m.group(1), m.group(2), m.group(3)
+        if base:
+            line = s[:m.start()].count("\n") + 1
+            raise ValueError(f"{path}:{line}: a hunk whose base section is not empty: both sides edited the "
+                             "same lines, which is not an add/add conflict; resolve it by hand")
         first, second = (theirs, ours) if is_changelog else (ours, theirs)
         first, second = _nl(first), _nl(second)
         if is_mutate and first and second:
@@ -103,8 +120,11 @@ def resolve_text(s, path):
         out.append(first + second)
         pos = m.end()
     s2 = "".join(out)
-    if "<<<<<<<" in s2 or ">>>>>>>" in s2:
-        raise ValueError(f"{path}: conflict markers remain (a hunk the pattern did not match)")
+    left = MARKER.search(s2)
+    if left:
+        line = s2[:left.start()].count("\n") + 1
+        raise ValueError(f"{path}:{line}: conflict marker {left.group(0).strip()!r} remains "
+                         "(a hunk the pattern did not match)")
     if is_mutate:
         s2 = repair_mutate_closers(s2)
         ast.parse(s2)   # SyntaxError propagates: the caller must see it
@@ -217,7 +237,24 @@ MUTATIONS = {
     assert r == "A\nB\nC\nD\nE\nF\n", r
     r = resolve_text("          python3 a.py --selftest\n<<<<<<< HEAD\n          python3 b.py --selftest\n=======\n          python3 c.py --selftest\n>>>>>>> x\n", ".github/workflows/lint.yml")
     assert r.splitlines() == ["          python3 a.py --selftest", "          python3 b.py --selftest", "          python3 c.py --selftest"], r
-    print("keep_both selftest: PASS (3 mutate.py shapes, refusal cases, ordering rules)")
+    # diff3/zdiff3 (#598): an add/add hunk carries an EMPTY `||||||| <base>` section; it resolves exactly as
+    # the two-way hunk does and no marker of either shape survives
+    r = resolve_text("# C\n<<<<<<< HEAD\n- main\n||||||| 1a2b3c4\n=======\n- branch\n>>>>>>> x\n- older\n", "CHANGELOG.md")
+    assert r == "# C\n- branch\n- main\n- older\n", r
+    r = resolve_text("A\n<<<<<<< HEAD\nB\n||||||| merged common ancestors\n=======\nC\n>>>>>>> x\nD\n", "test.sh")
+    assert r == "A\nB\nC\nD\n", r
+    # a base section that holds a line means both sides edited it: refused, never kept as text
+    for text in ("<<<<<<< HEAD\n- main\n||||||| 1a2b3c4\n- older\n=======\n- branch\n>>>>>>> x\n",
+                 # a stray marker of any of the four kinds, the two inner ones included
+                 "- a\n||||||| 1a2b3c4\n- b\n", "- a\n=======\n- b\n"):
+        try:
+            resolve_text(text, "CHANGELOG.md")
+            raise SystemExit(f"accepted {text!r}")
+        except ValueError:
+            pass
+    # a line that merely starts with the marker characters is text, not a marker
+    assert resolve_text("========\n- x\n", "CHANGELOG.md") == "========\n- x\n"
+    print("keep_both selftest: PASS (3 mutate.py shapes, diff3 hunks, refusal cases, ordering rules)")
 
 
 if __name__ == "__main__":

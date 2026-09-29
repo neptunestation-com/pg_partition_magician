@@ -363,7 +363,11 @@ run_timescale() {
       # -tA gives clean TAP (no table chrome); no ON_ERROR_STOP so every assertion reports.
       out=$($DC "${px[@]}" -d "$db" -tAq -f "/repo/$f" 2>&1)
       echo "$out" | grep -E '^(ok|not ok|1\.\.|# )' || true
-      if echo "$out" | grep -qE '^not ok|^# Looks like you failed|ERROR:'; then
+      # pg_prove's verdict, which this runner does not use: a failed assertion, an error, or a file that
+      # ran a different number of assertions than it planned. pgTAP reports the last as "# Looks like you
+      # planned N tests but ran M", and missing it passed a file whose assertion silently never ran (#601).
+      # bench/tap_verdict.sh reads this condition back out and holds it to real pgTAP output.
+      if echo "$out" | grep -qE '^not ok|^# Looks like you (failed|planned)|ERROR:'; then
         echo "FAIL ($tag): $f"; fail=1
       fi
       $DC "${px[@]}" -d postgres -q -c "drop database if exists $db" >/dev/null
@@ -411,7 +415,8 @@ run_observe() {  # pg_flight_recorder observability track: impact_report correla
     echo "--- ${f##*/} (db: $db) ---"
     out=$($DC "${px[@]}" -d "$db" -tAq -f "$f" 2>&1)
     echo "$out" | grep -E '^(ok|not ok|1\.\.|# )' || true
-    if echo "$out" | grep -qE '^not ok|^# Looks like you failed|ERROR:'; then echo "FAIL: $f"; fail=1; fi
+    # The same verdict as run_timescale's, plan shortfall included (#601; bench/tap_verdict.sh).
+    if echo "$out" | grep -qE '^not ok|^# Looks like you (failed|planned)|ERROR:'; then echo "FAIL: $f"; fail=1; fi
   }
 
   # pg_flight_recorder requires pg_cron, which lives only in cron.database_name (postgres), so this runs in
@@ -705,6 +710,10 @@ run_perf() {
     "bench/part_name_labels_injective.sh pgpm_perf67"
     "bench/uninstall_residue.sh pgpm_perf73"
     "bench/extend_to_lock_budget.sh pgpm_perf74"
+    "bench/keep_both_diff3.sh pgpm_perf77"
+    "bench/doc_env_knobs.sh pgpm_perf78"
+    "bench/classify_claims_tap.sh pgpm_perf79"
+    "bench/tap_verdict.sh pgpm_perf80"
   )
   local selected=()
   local n=${#guards[@]} idx
@@ -752,6 +761,13 @@ run_discriminate() {
   $DC --profile "$aprof" up -d
   wait_pg "$aprof" "$asvc" 60
   local rc=0
+  # The instrument first (#601): discriminate.sh must refuse a mutant that does not install and must run
+  # every mutation it lists, or every PASS below is suspect. Its own guard runs here rather than in the
+  # perf track because it is a check of this track's machinery; once, on the first shard, since each run
+  # of it is the same. Its mutations are in the listing like every other guard's.
+  if [ "$SHARD_I" = 1 ]; then
+    bash "$(dirname "$0")/bench/discriminate_installs.sh" "$c" pgpm_discself || rc=1
+  fi
   bash "$(dirname "$0")/bench/discriminate.sh" "--shard=${SHARD_I}/${SHARD_N}" ${LIST_ONLY:+--list} "$c" "$ca" || rc=1
   $DC --profile "$aprof" down -v
   $DC --profile "$prof" down -v

@@ -19,9 +19,10 @@ psql, or other tooling needed on the host.
 ./test.sh 15        # PG 15: build a pg_cron+pgtap image, install each channel,
                     # load fixtures, run the pgTAP suite, verify uninstall
 ./test.sh           # the version matrix: PG 15, 16, 17, 18 (versions only, not the tracks below)
-./test.sh timescale # the from_hypertable track: TimescaleDB 2.9.1 + 2.16.1 / PG15
-                    # (the big fleet clusters), its own image, NOT in the default matrix
-                    # (TS_VERSIONS='2.9.1' ./test.sh timescale runs just one)
+./test.sh timescale # the from_hypertable track: TimescaleDB 2.16.1 / PG15 on the fleet image
+                    # supabase/postgres:15.14.1.127, NOT in the default matrix. One leg per
+                    # image tag, and each tag bundles one TimescaleDB: to add the 2.9.x
+                    # cluster, name a tag that ships it (TS_PG_TAGS='15.14.1.127 <tag>' ./test.sh timescale)
 ./test.sh observe   # the pg_flight_recorder correlation track: PG15 + a vendored PGFR install,
                     # NOT in the default matrix
 ./test.sh archive   # the pgpm_archive track: PG17 + pgsql-http against a MinIO stand-in

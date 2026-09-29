@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+- **`keep_both.py` resolves diff3 and zdiff3 conflict hunks, and refuses one it cannot** (#598). Its hunk
+  pattern knew only git's two-way shape, so under the diff3 or zdiff3 conflict style (a common global
+  setting) it folded the `||||||| <base>` section into one side and exited 0 with that marker line left in
+  the file, which `land.sh` then committed. A three-way hunk with an empty base is now resolved like any
+  add/add hunk, one whose base holds a line (both sides edited it) is refused, and the result is checked
+  for all four marker kinds. `bench/keep_both_diff3.sh` has git write the hunks under each style, with
+  the mutation `keep_both_two_way_only`.
+- **`ONBOARDING.md` names the timescale track's real knob** (#599). It told developers to run
+  `TS_VERSIONS='2.9.1' ./test.sh timescale`, a variable `test.sh` stopped reading in #155, so the command
+  silently ran the default 2.16.1 leg and reported PASS; it now documents `TS_PG_TAGS` (one leg per
+  supabase/postgres image tag) and no longer claims 2.9.1 coverage. `bench/doc_env_knobs.sh` checks
+  every `NAME=... ./test.sh <track>` command in the docs against the track that must read it, with the
+  mutation `onboarding_ts_versions`.
+- **`classify_claims.py` reads a reproduction's TAP as its contract says** (#600). A failing pgTAP
+  assertion without a description (psql prints `not ok 2` and exits 0) now reads as the defect rather than as passing; a
+  `repro.sh` whose only failing `not ok` lines are premise checks is `invalid_repro`, as a `repro.sql`
+  already was, instead of a candidate; and only the contract's prefixes (`LIVENESS:`, `GUARD:`,
+  `fixture:`, colon and case as written) mark a premise, so a defect check described "guard trigger is
+  gone" is no longer discarded. `bench/classify_claims_tap.sh` drives all three through real psql output,
+  with one mutation each (`classify_tap_needs_description`, `classify_sh_exit_code_only`,
+  `classify_premise_bare_word`).
+- **Three harness checks no longer pass for the wrong reason** (#601). `bench/throws_pinned.sh` splits
+  each `throws_*` call's arguments instead of pattern-matching them, so the one-argument
+  `throws_ok($$ call pgpm... $$)`, a single-quoted statement and a `format()`-built one are all judged
+  (mutation `throws_ok_one_argument`). The timescale and observe tracks now fail a pgTAP file that ran
+  fewer assertions than it planned, as pg_prove does (`bench/tap_verdict.sh`, mutation
+  `tap_verdict_misses_plan_shortfall`). And `bench/discriminate.sh` installs every mutant of an
+  `install.sql` before trusting its guard's failure, so a mutant that does not install no longer
+  certifies its guard; it also reads its listing on its own descriptor and checks it read every line,
+  because a guard's `docker exec -i` used to swallow the rest of the listing (on `main`, shard 4/4
+  counted 76 of 78 mutations). `bench/discriminate_installs.sh` runs first in the discriminate track,
+  with the mutations `discriminate_counts_uninstallable` and `discriminate_list_on_stdin`.
 - **`archive.configure` refuses a `p_part_bytes` of zero or less, and `archive.to_s3` refuses a row
   holding one before it sends anything** (#594). The knob had no lower bound, and `archive.to_s3`
   fills each multipart part until it holds `part_bytes`, so with 0 its read loop never read a row: it

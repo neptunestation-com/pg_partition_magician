@@ -2765,6 +2765,110 @@ $$;''',
         "handler, removed whole, so only the old `when others` handler is left.",
         [(TO_S3_CANCEL_HANDLER, "end export;\nend;\n$$;\n", 1)],
     ),
+    "keep_both_two_way_only": (
+        "bench/keep_both_diff3.sh",
+        "Pre-#598 scripts/review/keep_both.py: the hunk pattern knows only the two-way conflict shape and the "
+        "marker check looks only for <<<<<<< and >>>>>>>. Under git's diff3 or zdiff3 style a hunk carries a "
+        "`||||||| <base>` section, which the pattern folds into 'ours', so the script exits 0 with the "
+        "`|||||||` line (and any base lines) left in CHANGELOG.md, and a hunk whose base is NOT empty (both "
+        "sides edited the same line) is kept as text instead of refused. Three sites, the exact pre-#598 "
+        "text: the pattern, the base refusal disabled, the marker check.",
+        [
+            ('CONFLICT = re.compile(r"^<{7}(?: [^\\n]*)?\\n(.*?)^(?:\\|{7}(?: [^\\n]*)?\\n(.*?)^)?={7}\\n(.*?)^>{7}(?: [^\\n]*)?\\n",\n'
+             '                      re.S | re.M)\n',
+             'CONFLICT = re.compile(r"<<<<<<< [^\\n]*\\n(.*?)=======\\n(.*?)>>>>>>> [^\\n]*\\n", re.S)\n', 1),
+            ("        ours, base, theirs = m.group(1), m.group(2), m.group(3)\n        if base:\n",
+             "        ours, theirs = m.group(1), m.group(2)\n        if False:\n", 1),
+            ("    left = MARKER.search(s2)\n", '    left = re.search(r"<{7}|>{7}", s2)\n', 1),
+        ],
+    ),
+    "onboarding_ts_versions": (
+        "bench/doc_env_knobs.sh",
+        "Pre-#599 ONBOARDING.md: the timescale track's knob documented as TS_VERSIONS='2.9.1' ./test.sh "
+        "timescale, a variable test.sh stopped reading in #155 (run_timescale loops over TS_PG_TAGS, image "
+        "tags), so the documented command silently runs the default 2.16.1 leg and reports PASS. The exact "
+        "pre-#599 text, its stale '2.9.1 + 2.16.1' coverage claim included.",
+        [("./test.sh timescale # the from_hypertable track: TimescaleDB 2.16.1 / PG15 on the fleet image\n"
+          "                    # supabase/postgres:15.14.1.127, NOT in the default matrix. One leg per\n"
+          "                    # image tag, and each tag bundles one TimescaleDB: to add the 2.9.x\n"
+          "                    # cluster, name a tag that ships it (TS_PG_TAGS='15.14.1.127 <tag>' ./test.sh timescale)\n",
+          "./test.sh timescale # the from_hypertable track: TimescaleDB 2.9.1 + 2.16.1 / PG15\n"
+          "                    # (the big fleet clusters), its own image, NOT in the default matrix\n"
+          "                    # (TS_VERSIONS='2.9.1' ./test.sh timescale runs just one)\n", 1)],
+    ),
+    "classify_tap_needs_description": (
+        "bench/classify_claims_tap.sh",
+        "Pre-#600 classify_claims.py (a): only `not ok <n> - <description>` lines count as failures, so a "
+        "failing pgTAP assertion WITHOUT a description (psql prints ` not ok 2 +` and exits 0) reads as "
+        "passing: a true reproduction is classified not_reproduced and dropped, and a defect still present at "
+        "closure reads as closed. One site, the exact pre-#600 pattern.",
+        [('NOT_OK_LINE = re.compile(r"^\\s*not ok\\b[ \\t]*\\d*[ \\t]*(?:-[ \\t]*)?(.*)$", re.M)\n',
+          'NOT_OK_LINE = re.compile(r"^\\s*not ok\\s+\\d+\\s*-\\s*(.*)$", re.M)\n', 1)],
+    ),
+    "classify_sh_exit_code_only": (
+        "bench/classify_claims_tap.sh",
+        "Pre-#600 classify_claims.py (b): a repro.sh is judged by its exit code alone and its echoed "
+        "`not ok - LIVENESS: ...` lines are never read, so one whose only failing check is its premise is a "
+        "candidate on both trees instead of invalid_repro (a repro.sql already got this right). One site: "
+        "the repro.sh verdict put back to `fails = r.returncode != 0`.",
+        [('                kind = script_failure_kind(r.stdout, r.returncode)\n'
+          '                fails = kind == "defect"\n',
+          '                kind = None\n'
+          '                fails = r.returncode != 0\n', 1)],
+    ),
+    "classify_premise_bare_word": (
+        "bench/classify_claims_tap.sh",
+        "Pre-#600 classify_claims.py (c): the premise pattern matches the bare words LIVENESS, GUARD, "
+        "fixture, setup and precondition, case-insensitively and with no colon, so an unprefixed DEFECT check "
+        "described 'guard trigger is gone ...' is read as a premise and a real reproduction is classified "
+        "invalid_repro and never counted. One site, the exact pre-#600 pattern.",
+        [('LIVENESS = re.compile(r"^(?:LIVENESS|GUARD|fixture):")\n',
+          'LIVENESS = re.compile(r"^(LIVENESS|GUARD|fixture|setup|precondition)\\b", re.I)\n', 1)],
+    ),
+    "throws_ok_one_argument": (
+        "bench/throws_pinned.sh",
+        "A ONE-argument throws_ok($$ call pgpm.transmute(...) $$) added to tests/72 beside its pinned "
+        "throws_like. It accepts any error at all, the 2D000 of a transmute that did not refuse included. "
+        "Pre-#601 bench/throws_pinned.sh demanded a comma after the statement, so it never saw this form and "
+        "passed the file on the pinned neighbour alone ('1 pinned of 1'); the neighbour is deliberate, because "
+        "a file with NO site already fails the guard's 'found a site' check and could not show the blind spot.",
+        [("select throws_like($$ call pgpm.transmute('public.ev72t', 'id', 1000) $$,\n",
+          "select throws_ok($$ call pgpm.transmute('public.ev72t', 'id', 1000) $$);\n"
+          "select throws_like($$ call pgpm.transmute('public.ev72t', 'id', 1000) $$,\n", 1)],
+    ),
+    "tap_verdict_misses_plan_shortfall": (
+        "bench/tap_verdict.sh",
+        "Pre-#601 test.sh: the timescale and observe tracks call a pgTAP file failed on `not ok`, "
+        "'# Looks like you failed' or ERROR:, and not on '# Looks like you planned N tests but ran M', so a "
+        "file whose assertion silently never ran (over zero rows, or deleted without lowering plan()) passes "
+        "both tracks while pg_prove fails it. Two sites, one per track, the exact pre-#601 pattern.",
+        [("grep -qE '^not ok|^# Looks like you (failed|planned)|ERROR:'",
+          "grep -qE '^not ok|^# Looks like you failed|ERROR:'", 2)],
+    ),
+    "discriminate_counts_uninstallable": (
+        "bench/discriminate_installs.sh",
+        "Pre-#601 bench/discriminate.sh: a mutant is never installed before its guard runs, so a mutation "
+        "whose patched text no longer compiles certifies its guard as discriminating although the guard's "
+        "only failure is that the module did not install and it never reached an assertion. One site: the "
+        "mutant's install check removed (the unmutated source's check stays, and is harmless alone).",
+        [('      installs "$target_c" "$src" "$OUT/$name.sql" "${db}_install" "$OUT/$name.install.log" || installed=0\n',
+          "", 1)],
+    ),
+    "discriminate_list_on_stdin": (
+        "bench/discriminate_installs.sh",
+        "Pre-#601 bench/discriminate.sh: the mutation listing is read on stdin and the guards inherit it, so "
+        "the first `docker exec -i` a guard makes forwards the rest of the listing into the container and "
+        "the loop ends early, reporting PASS for the mutations it reached (on main at 8c1be7c shard 4/4 "
+        "counted 76 of 78). Four sites: the listing back on stdin, the guard's stdin no longer /dev/null, and "
+        "the read-count check disabled.",
+        [
+            ("while IFS=$'\\t' read -r name guard why src <&3; do\n",
+             "while IFS=$'\\t' read -r name guard why src; do\n", 1),
+            ('done 3< "$LIST"\n', 'done < "$LIST"\n', 1),
+            ('>"$OUT/$name.log" 2>&1 </dev/null; then', '>"$OUT/$name.log" 2>&1; then', 1),
+            ('if [ "$i" != "$listed" ]; then', "if false; then", 1),
+        ],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
@@ -2800,6 +2904,17 @@ MUTATION_SRC = {
     "uninstall_keeps_regrain_copies": "pgpm_core/uninstall.sql",
     "to_s3_part_bytes_unbounded": "pgpm_archive/install.sql",
     "to_s3_abort_misses_cancel": "pgpm_archive/install.sql",
+    # The harness and review tooling guard themselves too (#598 to #601): their defects live in the
+    # scripts, a doc and a test file, so that is what these mutate.
+    "keep_both_two_way_only": "scripts/review/keep_both.py",
+    "onboarding_ts_versions": "ONBOARDING.md",
+    "classify_tap_needs_description": "scripts/review/classify_claims.py",
+    "classify_sh_exit_code_only": "scripts/review/classify_claims.py",
+    "classify_premise_bare_word": "scripts/review/classify_claims.py",
+    "throws_ok_one_argument": "tests/72_transmute_attributes_test.sql",
+    "tap_verdict_misses_plan_shortfall": "test.sh",
+    "discriminate_counts_uninstallable": "bench/discriminate.sh",
+    "discriminate_list_on_stdin": "bench/discriminate.sh",
 }
 
 # name -> the CI track whose job runs it; anything not listed here belongs to the default `perf`

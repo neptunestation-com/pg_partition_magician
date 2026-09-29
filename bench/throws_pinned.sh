@@ -14,7 +14,8 @@
 # tests/timescale/db/08, 10 and 14); this keeps a fifth from landing.
 #
 # HOW. For every throws_(ok|like|matching|imatching) whose statement under test contains `call pgpm.`,
-# the SAME assertion is re-issued with that statement swapped for one that raises exactly that 2D000
+# however that statement is written (dollar-quoted, single-quoted, built by format()) and however many
+# arguments follow it (none included), the SAME assertion is re-issued with that statement swapped for one that raises exactly that 2D000
 # (`do $d$ begin commit; end $d$`), and it has to say `not ok`. Nothing here depends on pgpm's code
 # being right or wrong: the guard is about the assertions, which is why its mutation lives in a TEST
 # file (below). pgpm_core is still installed, so a pattern built from a pgpm helper evaluates
@@ -27,8 +28,13 @@
 # really accepts it) and a P0001-pinned one must say `not ok`. Either control failing FAILS the guard
 # before any site is judged.
 #
-# The mutation it is required to fail against (bench/mutations/mutate.py):
+# The mutations it is required to fail against (bench/mutations/mutate.py):
 #   throws_ok_null_pattern -- tests/72's refusal assertion put back to throws_ok(..., NULL, desc)
+#   throws_ok_one_argument -- a ONE-argument throws_ok($$ call pgpm... $$) beside tests/72's pinned one,
+#                             which accepts any error at all. The site pattern used to demand a comma after
+#                             the statement, so it never saw this form and passed the file on its pinned
+#                             neighbour alone (#601); the neighbour is what makes that failure mode visible
+#                             here, since a file with NO site already fails the "found a site" check
 #
 # Usage: throws_pinned.sh <container> <db> [test file]
 # With no third argument it probes every tests/**/*.sql in the repository. With one it probes THAT
@@ -58,10 +64,56 @@ work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 python3 - "$ROOT" "${FILES[@]}" > "$work/probe.sql" <<'PY' || { echo "FAIL  the probe could not be built"; exit 1; }
 import re, sys
 root, files = sys.argv[1], sys.argv[2:]
-# The same shape the issue's reproduction matches, so the two agree on what a site is: the call,
-# dollar-quoted with any tag, then everything up to the closing `);` as the assertion's own arguments.
-pat = re.compile(r"throws_(ok|like|matching|imatching)\(\s*\$(\w*)\$(.*?)\$\2\$\s*,(.*?)\);", re.S)
+# A site is a throws_* call whose FIRST argument (the statement under test, as written: dollar-quoted,
+# single-quoted or built by format()) contains `call pgpm.`; everything after that argument is the
+# assertion's own arguments, possibly none. The argument list is SPLIT, not pattern-matched (#601): a
+# pattern that demanded a comma after a dollar-quoted statement never saw the one-argument form, which
+# pins nothing at all, nor a single-quoted statement.
+CALL = re.compile(r"\bthrows_(ok|like|matching|imatching)\s*\(", re.I)
+DOLLAR = re.compile(r"\$([A-Za-z_]\w*)?\$")
 TAG = "$pr522$"
+
+
+def split_args(text, i):
+    """The top-level arguments of the call whose '(' ends just before i, as raw text, and the index after
+    its ')'. Quotes (single, dollar with any tag), nested parentheses and -- comments are respected. None
+    when the call never closes: a site the probe cannot delimit is a failure, not a skip."""
+    args, start, depth, n = [], i, 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "'":
+            i += 1
+            while i < n and not (text[i] == "'" and text[i + 1:i + 2] != "'"):
+                i += 2 if text.startswith("''", i) else 1
+            i += 1
+            continue
+        if c == "$":
+            d = DOLLAR.match(text, i)
+            if d:
+                close = text.find(d.group(0), d.end())
+                if close < 0:
+                    return None
+                i = close + len(d.group(0))
+                continue
+        if text.startswith("--", i):
+            i = text.find("\n", i)
+            if i < 0:
+                return None
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            if depth == 0:
+                args.append(text[start:i])
+                return args, i + 1
+            depth -= 1
+        elif c == "," and depth == 0:
+            args.append(text[start:i])
+            start = i + 1
+        i += 1
+    return None
+
+
 sites = 0
 print("create extension if not exists pgtap;")
 print("select no_plan();")
@@ -72,8 +124,9 @@ print("select no_plan();")
 print("""create function pg_temp.probe(kind text, rest text) returns text language plpgsql as $f$
 declare r text;
 begin
-  execute format('select throws_%s(%s, %s)', kind,
-                 '$sut$ do $d$ begin commit; end $d$ $sut$', rest) into r;
+  -- An empty rest is the one-argument form, re-issued with no arguments after the statement.
+  execute format('select throws_%s(%s%s)', kind,
+                 '$sut$ do $d$ begin commit; end $d$ $sut$', coalesce(', ' || nullif(btrim(rest), ''), '')) into r;
   return r;
 exception
   when undefined_table or undefined_column or undefined_function then
@@ -86,15 +139,30 @@ print(f"select 'CONTROL pinned => ' || pg_temp.probe('ok', {TAG} 'P0001', NULL, 
 for path in files:
     src = open(path).read()
     shown = path[len(root) + 1:] if path.startswith(root + "/") else path
-    for m in pat.finditer(src):
-        if not re.search(r"\bcall\s+pgpm\.", m.group(3), re.I):
+    for m in CALL.finditer(src):
+        line = src[:m.start()].count("\n") + 1
+        if "--" in src[src.rfind("\n", 0, m.start()) + 1:m.start()]:
+            continue   # named in a comment, not called
+        split = split_args(src, m.end())
+        if split is None:
+            sys.exit(f"probe: {shown}:{line}: cannot find where this throws_{m.group(1)}( call ends")
+        args, _end = split
+        if not re.search(r"\bcall\s+pgpm\.", args[0], re.I):
             continue
-        rest = m.group(4).strip()
+        rest = ",".join(args[1:]).strip()
         if TAG in rest:
             sys.exit(f"probe: {shown} contains the probe's own quoting tag {TAG}; pick another")
         sites += 1
-        line = src[:m.start()].count("\n") + 1
-        print(f"select '{shown}:{line} => ' || pg_temp.probe('{m.group(1)}', {TAG} {rest} {TAG});")
+        # A pattern that reads one of its file's own psql variables (:'rel60') is an expression this probe
+        # cannot evaluate, like one that reads its file's own table: reported, neither pass nor failure.
+        # Only the quoted forms are recognised, because they cannot be anything else; a bare :name that
+        # reaches the server is a syntax error, which FAILS as malformed rather than hiding.
+        psql_var = re.search(r""":(?:'\w+'|"\w+")""", rest)
+        if psql_var:
+            name = psql_var.group(0)[2:-1]
+            print(f"select '{shown}:{line} => unevaluable psql variable {name}: set by its own file';")
+            continue
+        print(f"select '{shown}:{line} => ' || pg_temp.probe('{m.group(1).lower()}', {TAG} {rest} {TAG});")
 print(f"\\echo SITES {sites}")
 PY
 

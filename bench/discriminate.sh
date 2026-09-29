@@ -25,6 +25,19 @@
 # passed as <container> (see bench/mutations/mutate.py's MUTATION_TRACK for why that track is
 # separate rather than simply skipped when eBPF is unavailable). The tracks are disjoint, so every
 # mutation is run by exactly one of them and none is silently left out.
+#
+# A MUTANT THAT DOES NOT INSTALL VERIFIES NOTHING (#601). A guard run against a mutant install.sql that
+# will not even load fails for a reason that has nothing to do with what it asserts, and this script used
+# to count that failure as discrimination: a mutation whose patched text stopped compiling certified its
+# guard while the guard never reached an assertion. So every mutant of an install.sql is installed here
+# first, the way its module is installed (prerequisites first) in a fresh scratch database, and one that
+# does not install FAILS this check with the error, whatever its guard then does (the guard still runs, so
+# its log shows how far it got). The unmutated source is installed the same way once per run, so an environment that cannot install anything reads as that
+# and not as a broken mutation. Mutants of other files (a test file, a script) have no install step;
+# their guards carry their own controls. bench/discriminate_installs.sh proves this check refuses.
+#
+# DISCRIMINATE_DB_PREFIX (default pgpm_mut) names the scratch databases, <prefix><n> and
+# <prefix><n>_install; bench/discriminate_installs.sh sets it so its nested runs share nothing with this one.
 set -uo pipefail
 TRACK="perf"
 SHARD_I=1
@@ -51,6 +64,44 @@ OUT="$ROOT/bench/results/mutants"       # gitignored
 mkdir -p "$OUT"
 fail=0
 i=0
+DBP="${DISCRIMINATE_DB_PREFIX:-pgpm_mut}"
+baseline_ok=" "      # the install.sql sources whose UNMUTATED copy installed in this run, space-delimited
+
+# installs <container> <src> <file> <db> <log>: install <file> into a fresh <db> the way <src>'s module is
+# installed, prerequisites first, then drop <db>. Exit 0 when every step succeeded. Files reach psql over
+# stdin, so this needs no mount.
+installs() {
+  local c="$1" src="$2" file="$3" idb="$4" log="$5" rc=0
+  local q=(docker exec -i "$c" psql -U postgres)
+  # The fleet image the timescale track runs on does not trust the local socket (see run_timescale).
+  case "$src" in pgpm_hypertable/*) q=(docker exec -i -e PGPASSWORD=postgres "$c" psql -h 127.0.0.1 -U postgres) ;; esac
+  "${q[@]}" -d postgres -q -c "drop database if exists $idb" >/dev/null 2>&1
+  {
+    "${q[@]}" -d postgres -q -c "create database $idb" &&
+    case "$src" in
+      pgpm_archive/install.sql)
+        "${q[@]}" -d "$idb" -v ON_ERROR_STOP=1 -q -c "create extension if not exists http; create extension if not exists pgcrypto;" &&
+        "${q[@]}" -d "$idb" -v ON_ERROR_STOP=1 -q --single-transaction -f - < "$ROOT/pgpm_core/install.sql" &&
+        "${q[@]}" -d "$idb" -v ON_ERROR_STOP=1 -q -f - < "$file" ;;
+      pgpm_hypertable/install.sql)
+        # The module installs on the plain core image too (its TimescaleDB checks run at call time, and the
+        # perf track's hypertable guards bring stand-in views), so the extension is created only where the
+        # image ships it: the fleet image of the timescale track. Without this the perf track's copy of
+        # every hypertable mutation read as "does not install" and the shard failed (#563 met #601).
+        "${q[@]}" -d "$idb" -v ON_ERROR_STOP=1 -q -c "do \$\$ begin
+            if exists (select 1 from pg_available_extensions where name = 'timescaledb') then
+              create extension if not exists timescaledb;
+            end if;
+          end \$\$;" &&
+        "${q[@]}" -d "$idb" -v ON_ERROR_STOP=1 -q --single-transaction -f - < "$ROOT/pgpm_core/install.sql" &&
+        "${q[@]}" -d "$idb" -v ON_ERROR_STOP=1 -q -f - < "$file" ;;
+      *)
+        "${q[@]}" -d "$idb" -v ON_ERROR_STOP=1 -q --single-transaction -f - < "$file" ;;
+    esac
+  } >"$log" 2>&1 || rc=1
+  "${q[@]}" -d postgres -q -c "drop database if exists $idb" >/dev/null 2>&1
+  return "$rc"
+} </dev/null   # `docker exec -i` forwards stdin; the -f steps redirect their own, the rest get nothing
 
 # Materialise the listing BEFORE the loop rather than piping it straight in. `done < <(cmd)` discards
 # cmd's exit status, so a mutate.py that refused to list anything -- an unknown track, a track whose
@@ -64,12 +115,18 @@ if ! python3 "$ROOT/bench/mutations/mutate.py" --list "--track=$TRACK" > "$LIST"
 fi
 
 ran=0
-while IFS=$'\t' read -r name guard why src; do
+# The listing is read on fd 3, never stdin, and every guard runs with stdin from /dev/null. `docker exec -i`
+# forwards its stdin into the container, so a guard (or a step here) that calls it inherited the rest of
+# the listing and swallowed it: the loop then ended early and reported PASS for the mutations it had run.
+# On main at 8c1be7c that is how shard 4/4 counted "of 76 mutations" while the others counted 78
+# (throws_pinned.sh's `docker exec -i` ate the last two lines). The count check after the loop backs this.
+listed=$(grep -c . "$LIST")
+while IFS=$'\t' read -r name guard why src <&3; do
   i=$((i + 1))
   if (( (i - 1) % SHARD_N != SHARD_I - 1 )); then continue; fi
   ran=$((ran + 1))
   if [ -n "$LIST_ONLY" ]; then printf '%s\t%s\t%s\n' "$name" "$guard" "$src"; continue; fi
-  db="pgpm_mut$i"
+  db="$DBP$i"
   printf '\n--- %s\n    breaks: %s\n    src: %s\n    defect: %s\n' "$name" "$guard" "$src" "$why"
 
   case "$src" in
@@ -88,8 +145,38 @@ while IFS=$'\t' read -r name guard why src; do
     fail=1; continue
   fi
 
+  # Only a mutant that installs can verify its guard (#601; see the header). The unmutated source first,
+  # once per run, so a failure below is the mutation's and not the environment's.
+  installed=1
+  case "$src" in
+    */install.sql)
+      if [[ "$baseline_ok" != *" $src "* ]]; then
+        if installs "$target_c" "$src" "$ROOT/$src" "${db}_install" "$OUT/baseline.install.log"; then
+          baseline_ok="$baseline_ok$src "
+        else
+          printf 'FAIL  the UNMUTATED %s does not install in %s; guard %s is unverified\n' "$src" "$target_c" "$guard"
+          grep -m3 'ERROR' "$OUT/baseline.install.log" | sed 's/^/      /'
+          fail=1; continue
+        fi
+      fi
+      installs "$target_c" "$src" "$OUT/$name.sql" "${db}_install" "$OUT/$name.install.log" || installed=0
+      ;;
+  esac
+
   # The repo is bind-mounted at /repo, so the mutant is reachable by the same relative path inside.
-  if bash "$ROOT/$guard" "$target_c" "$db" "/repo/bench/results/mutants/$name.sql" >"$OUT/$name.log" 2>&1; then
+  if bash "$ROOT/$guard" "$target_c" "$db" "/repo/bench/results/mutants/$name.sql" >"$OUT/$name.log" 2>&1 </dev/null; then
+    guard_rc=0
+  else
+    guard_rc=1
+  fi
+  if [ "$installed" = 0 ]; then
+    # Whatever the guard did: a failure against a mutant that never loaded says nothing about what the
+    # guard asserts, and a pass would be stranger still. Neither verifies it.
+    printf 'FAIL  the mutant does not install, so %s (exit %s) is unverified: its result has nothing to do with what it asserts\n' "$guard" "$guard_rc"
+    grep -m3 'ERROR' "$OUT/$name.install.log" | sed 's/^/      /'
+    grep '^FAIL' "$OUT/$name.log" | sed 's/^/      guard: /'
+    fail=1
+  elif [ "$guard_rc" = 0 ]; then
     printf 'FAIL  %s PASSED against its own defect: it does not discriminate\n' "$guard"
     sed 's/^/      /' "$OUT/$name.log"
     fail=1
@@ -98,7 +185,7 @@ while IFS=$'\t' read -r name guard why src; do
     grep '^FAIL' "$OUT/$name.log" | sed 's/^/      /'
   fi
   docker exec "$target_c" psql -U postgres -q -c "drop database if exists $db" >/dev/null 2>&1
-done < "$LIST"
+done 3< "$LIST"
 if [ -n "$LIST_ONLY" ]; then
   if [ "$ran" = 0 ]; then
     printf 'FAIL  track %s shard %s/%s selects no mutation; a slice that runs nothing verifies nothing
@@ -114,6 +201,12 @@ echo
 # and failed"; with i=0 it has no such evidence for anything.
 if [ "$ran" = 0 ]; then
   printf 'FAIL  track %s shard %s/%s ran no mutations at all; every guard it covers is unverified\n' "$TRACK" "$SHARD_I" "$SHARD_N"
+  fail=1
+fi
+# Every listed line was read. A loop that stopped early (its input swallowed, see above) has no evidence
+# for the mutations it never reached, whichever shard they belonged to.
+if [ "$i" != "$listed" ]; then
+  printf 'FAIL  read %s of the %s listed mutations; the rest were never run and their guards are unverified\n' "$i" "$listed"
   fail=1
 fi
 if [ "$fail" = 0 ]; then echo "discriminate: PASS ($ran guard(s) verified against their defects; shard ${SHARD_I}/${SHARD_N} of ${i} mutations)"
