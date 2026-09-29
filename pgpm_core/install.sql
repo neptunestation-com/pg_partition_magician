@@ -470,6 +470,48 @@ update pgpm.dropped_fk d
  where c.oid = d.parent_table
    and position(' REFERENCES ' || quote_ident(c.relname) || '(' in d.definition) > 0;
 
+-- _forget_dangling_fks(): reconcile p_parent's pgpm.dropped_fk records with the catalog (#658), and
+-- return how many it forgot. A record names its referencing table by oid, and nothing ties the two
+-- together afterwards: the application can drop the referencing table (ordinary DDL), or drop a restored
+-- key by hand, and the record goes on naming it. Every path that acts on the records then died on it,
+-- every time: untransmute's and suspend_incoming_fks's `alter table <referencing> drop constraint` with
+-- 42601 on the bare oid a dropped table's regclass renders as (or 42704 on the hand-dropped key), so the
+-- table could be neither reversed nor regrained, while restore_incoming_fks and validate_incoming_fks
+-- logged a failure for it on every tick for good. Each of those four calls this first.
+--
+-- Two cases, and only these. The referencing table is gone: nothing pgpm could do with the record has
+-- anything to act on. Or the record says the key is LIVE (restored_at set) and the referencing table has
+-- no foreign key of that name against this parent: the operator dropped it, and putting it back would
+-- overrule them. A SUSPENDED record (restored_at null) whose key is absent is the normal state between the
+-- cutover and the restore, not a dangling one, and is left alone. Each forget is logged
+-- forget_incoming_fk, `method` naming the key and why.
+create or replace function pgpm._forget_dangling_fks(p_parent regclass)
+returns int language plpgsql as $$
+declare r record; v_n int := 0;
+begin
+  for r in
+    delete from pgpm.dropped_fk d
+     where d.parent_table = p_parent
+       and (not exists (select 1 from pg_class c where c.oid = d.referencing_table)
+            or (d.restored_at is not null
+                and not exists (select 1 from pg_constraint k
+                                 where k.conrelid = d.referencing_table and k.conname = d.constraint_name
+                                   and k.contype = 'f' and k.confrelid = d.parent_table)))
+    returning d.referencing_table::oid as rel_oid, d.constraint_name,
+              exists (select 1 from pg_class c where c.oid = d.referencing_table) as rel_exists
+  loop
+    insert into pgpm.log (parent_table, action, method)
+      values (p_parent, 'forget_incoming_fk',
+              r.constraint_name || ': ' ||
+              case when r.rel_exists
+                   then format('recorded as re-added, but %s has no such key against this table any more', r.rel_oid::regclass)
+                   else format('its referencing table (oid %s) no longer exists', r.rel_oid) end);
+    v_n := v_n + 1;
+  end loop;
+  return v_n;
+end;
+$$;
+
 -- the lifecycle hook registry (issue #236's pre_drop event, superseded by config.archive_fn) is
 -- fully retired (issue #240): retire() stopped consulting it at all in #238, and #239 gave
 -- pgpm_archive's gate-only architecture (archive.file_gate, the registry's last real registrant) a
@@ -6191,7 +6233,9 @@ begin
 
   -- preserved incoming FKs: drop any currently LIVE on the parent so the parent can be dropped (an
   -- incoming FK is a constraint on the referencing table pointing AT the parent). All recorded FKs are
-  -- re-added against the restored table at the end.
+  -- re-added against the restored table at the end. A record the catalog no longer backs (its referencing
+  -- table dropped, or its key dropped by hand) is forgotten first (#658), or the drop dies on it.
+  perform pgpm._forget_dangling_fks(p_parent);
   for r in select * from pgpm.dropped_fk
             where parent_table = p_parent and restored_at is not null order by id loop
     execute format('alter table %s drop constraint %I', r.referencing_table::text, r.constraint_name);
@@ -7950,6 +7994,7 @@ declare
   cfg pgpm.config; v_nsp name; v_rel name; v_closed bigint; v_inflight name;
   r pgpm.dropped_fk%rowtype; v_n int := 0; v_is_part boolean; v_readded boolean;
 begin
+  perform pgpm._forget_dangling_fks(p_parent);   -- #658: a key whose table is gone is not re-added, ever
   if not exists (select 1 from pgpm.dropped_fk
                   where parent_table = p_parent and restored_at is null
                     and (p_ids is null or id = any(p_ids))) then
@@ -8059,6 +8104,7 @@ create or replace function pgpm.validate_incoming_fks(
 returns int language plpgsql as $$
 declare r pgpm.dropped_fk%rowtype; v_n int := 0;
 begin
+  perform pgpm._forget_dangling_fks(p_parent);   -- #658: nor validated
   for r in select * from pgpm.dropped_fk
             where parent_table = p_parent and restored_at is not null and validated_at is null
               and (not p_respect_backoff
@@ -8124,6 +8170,7 @@ create or replace function pgpm.suspend_incoming_fks(p_parent regclass, p_force 
 returns int language plpgsql as $$
 declare v_closed bigint; r pgpm.dropped_fk%rowtype; v_n int := 0;
 begin
+  perform pgpm._forget_dangling_fks(p_parent);   -- #658: nor dropped, which is what wedged regrain's swap
   if not exists (select 1 from pgpm.dropped_fk
                   where parent_table = p_parent and restored_at is not null) then
     return 0;

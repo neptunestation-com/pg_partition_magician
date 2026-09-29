@@ -753,6 +753,7 @@ run_perf() {
     "bench/reread_under_lock_tap.sh pgpm_perf89"
     "bench/frontier_malformed_max.sh pgpm_perf111"
     "bench/transmute_resume_control_column.sh pgpm_perf121"
+    "bench/dropped_fk_reconcile.sh pgpm_perf109"
   )
   local selected=()
   local n=${#guards[@]} idx

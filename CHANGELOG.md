@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **A preserved incoming key whose referencing table was dropped no longer wedges `untransmute` or regrain**
+  (#658). `pgpm.dropped_fk` was never reconciled with the catalog, so once the application dropped a
+  referencing table (or a restored key by hand) `untransmute` and regrain's swap died on the record every
+  time and the table could be neither reversed nor regrained. The four paths that act on the records now
+  forget one the catalog no longer backs first, logged `forget_incoming_fk`; `tests/173` is the acceptance,
+  guarded by `bench/dropped_fk_reconcile.sh` against the `dropped_fk_never_reconciled` mutation.
 - **A malformed `text_time` maximum no longer stops the forward grid** (#661). PostgreSQL routes a value
   whose timestamp field is not in the declared shape (a digit outside the alphabet, a field shorter than the
   width) into an existing partition by string order, and once it was `max(control)`, `_frontier_native`'s
