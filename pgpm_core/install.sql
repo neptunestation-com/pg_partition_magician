@@ -1855,6 +1855,26 @@ begin
     end if;
   end if;
 
+  -- DETACHED BY SOMETHING OTHER THAN RETIREMENT, ON EITHER PATH (issue #652), before any side effect.
+  -- pgpm.part.attached says what pgpm did, not what the catalog holds: an operator's own `DETACH
+  -- PARTITION` (to keep a table, or to archive it by hand) never touches it. Only a child that pgpm's
+  -- own retirement detached carries retiring_at, so a child that is no longer a partition of this parent
+  -- and has none is someone else's table now, and it is left alone: no write block, no DROP, logged
+  -- every call so status() counts it. This used to be asked only inside the referenced branch below,
+  -- so the one-step path, which every table without an incoming FK takes, write-blocked and DROPPED an
+  -- operator-detached table with its rows. One rule for both paths, and it is one-directional: a child
+  -- detached WITH retiring_at is this retirement's own and goes on to the DROP. By oid, through the
+  -- same name resolution the identity check above just vouched for.
+  if r.retiring_at is null and not exists (
+       select 1 from pg_inherits i
+        where i.inhparent = p_parent
+          and i.inhrelid = to_regclass(format('%I.%I', v_nsp, p_child))::oid) then
+    insert into pgpm.log (parent_table, action, lo, hi, method)
+      values (p_parent, 'fail_retain_drop', r.lo, r.hi,
+              'detached from the parent by something other than retirement; not dropping it');
+    return false;
+  end if;
+
   -- COVERAGE FOUND WITHOUT ITS BLOCK IS DISCARDED HERE TOO (issue #564), before the block goes on.
   -- _enforce_write_blocks makes the same discard (#452, where the reasoning lives), but only maintain()
   -- is guaranteed to have run it, and a direct caller reaches this point on a child whose trigger may
