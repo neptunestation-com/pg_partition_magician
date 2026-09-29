@@ -76,6 +76,21 @@
   `close_comments.py` posts the evidence per issue, reopening one whose sound reproduction still
   fails. A `fixer` agent and the `/fix-phase` coordinator skill give parallel fixers assigned test
   numbers, guard databases and scratch, so the next wave does not collide (issue #558).
+- **`text_time` refuses a collation that weighs a run of digits by its value** (#568). The #456 check
+  compared each adjacent digit pair as `'<d><max>...' < '<d+1><zero>...'`, which proves the digits are
+  separated at the primary level for a collation that compares position by position and says nothing
+  about one that does not. An ICU collation with numeric ordering (`und-u-kn-true`, or any locale
+  carrying `-u-kn-true`, possible as a database default on 15+) compares a run of decimal digits by its
+  numeric value, so `'ck9abcde'` sorts before `'ck10000'`, and it passed (1 is less than 2000...):
+  `transmute` accepted a cuid column under it, late-November rows landed in the December partition,
+  where retention drops them a month early, and some February rows were rejected with `no partition of
+  relation found for row`. The check now also probes the opposite padding (`'<d><zero>...' <
+  '<d+1><max>...'`) and a lower cell's string extended by each digit against the next cell's bound,
+  which is what catches a pure-decimal alphabet, whose paddings are digits either way. Both hold under
+  every collation the first probe accepts for the right reason, so cuid, ULID and ObjectId on `en_US`
+  or on ICU without numeric ordering still convert. The refusal message now also names the pair of
+  strings the collation misordered. New: `tests/134` and `bench/text_time_numeric_collation.sh`,
+  required to fail against the `text_time_collation_positional_only` mutation.
 - **`archive.to_s3` honours `archive.config.compress`** (#520). The synchronous NDJSON export never
   read the flag: with it on, it uploaded plain NDJSON at `<prefix><child>.ndjson`, while the module's
   README promised GZIP for either format and `archive.to_s3_parquet` and both `archive_fn` strategies

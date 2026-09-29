@@ -649,12 +649,25 @@ $$;
 -- rely on, that a string sorts before any longer string extending it, needs no check here: every
 -- collation PostgreSQL offers is deterministic unless created otherwise, and a deterministic collation
 -- breaks a tie at every level bytewise, where the shorter string is less.
+--
+-- That argument assumes the collation compares position by position. An ICU collation with numeric
+-- ordering ('und-u-kn-true', or any locale carrying -u-kn-true, possible as a database default on 15+)
+-- does not: it weighs a RUN of decimal digits by its value, so 'ck9abcde' < 'ck10000'. The probe above
+-- passes it (the zero padding extends the higher digit's run, and 1 < 2000...), and cuid rows were
+-- routed a month early (issue #568). Two more probes per adjacent pair catch a run weighed by value:
+-- the opposite padding, '<prefix>c[i]<zero>...' < '<prefix>c[i+1]<max>...' (a lower cell's bound
+-- against a higher cell's value; under numeric ordering 1000... > 2 when the max digit is a letter),
+-- and '<prefix>c[i]<max>...<s>' < '<prefix>c[i+1]<zero>...' for every digit s (a lower cell's value,
+-- which a real id always extends with more characters, against the next cell's bound; this is what
+-- catches a pure-decimal alphabet, whose paddings are digits either way). Both hold under any collation
+-- that compares position by position with the digits separated at the primary level, so neither can
+-- refuse a collation the first probe accepts for that reason.
 create or replace function pgpm._check_text_time_collation(
   p_table regclass, p_control name, p_prefix text, p_width int, p_radix int, p_alphabet text default null)
 returns void language plpgsql as $$
 declare
   v_alphabet text; v_collnsp name; v_collname name; v_coll_q text; v_dbloc text; v_coltype text; v_pad int;
-  v_bad_i int; v_bad_c1 text; v_bad_c2 text;
+  v_bad_i int; v_bad_c1 text; v_bad_c2 text; v_bad_lo text; v_bad_hi text;
 begin
   v_alphabet := coalesce(p_alphabet, substr('0123456789abcdefghijklmnopqrstuvwxyz', 1, p_radix));
   v_pad := greatest(coalesce(p_width, 1), 1) - 1;
@@ -676,20 +689,33 @@ begin
     select coalesce(j->>'datlocale', j->>'daticulocale', j->>'datcollate') into v_dbloc
       from (select to_jsonb(d) as j from pg_database d where d.datname = current_database()) x;
   end if;
+  -- %4$s is the max-digit padding, %6$s the zero-digit padding; each probe row is (pair, lower string,
+  -- higher string), and the first pair with any probe the collation does not order strictly is reported.
   execute format($q$
-    with d(i, c) as (select i, substr(%1$L, i, 1) from generate_series(1, %2$s) as i)
-    select x.i, x.c, y.c
-      from d x join d y on y.i = x.i + 1
-     where not (((%3$L || x.c || %4$L)::text collate %5$s) < ((%3$L || y.c || %6$L)::text collate %5$s))
-     order by x.i limit 1
+    with d(i, c) as (select i, substr(%1$L, i, 1) from generate_series(1, %2$s) as i),
+    probe(i, c1, c2, n, lo, hi) as (
+      select x.i, x.c, y.c, 0, %3$L || x.c || %4$L, %3$L || y.c || %6$L
+        from d x join d y on y.i = x.i + 1
+      union all
+      select x.i, x.c, y.c, 1, %3$L || x.c || %6$L, %3$L || y.c || %4$L
+        from d x join d y on y.i = x.i + 1
+      union all
+      select x.i, x.c, y.c, 2 + s.i, %3$L || x.c || %4$L || s.c, %3$L || y.c || %6$L
+        from d x join d y on y.i = x.i + 1 cross join d s
+    )
+    select i, c1, c2, lo, hi
+      from probe
+     where not ((lo::text collate %5$s) < (hi::text collate %5$s))
+     order by i, n limit 1
   $q$, v_alphabet, length(v_alphabet), coalesce(p_prefix, ''),
        repeat(substr(v_alphabet, length(v_alphabet), 1), v_pad), v_coll_q, repeat(substr(v_alphabet, 1, 1), v_pad))
-  into v_bad_i, v_bad_c1, v_bad_c2;
+  into v_bad_i, v_bad_c1, v_bad_c2, v_bad_lo, v_bad_hi;
   if v_bad_i is not null then
-    raise exception 'pg_partition_magician: column %.% has collation %, which does not order the text_time digit alphabet the way base-% place value does: digit % (value %) must sort before digit % (value %) in every position, and under that collation it does not. RANGE bounds on a text column compare under the column''s collation while the encoded timestamp orders bytewise, so rows would be routed to the wrong partition: the pgpm_monolith_bound check fails at VALIDATE, or on a table that passes it, rows land in a neighbouring partition and retention drops them early. Give the column a bytewise collation: alter table % alter column % type % collate "C" (rewrites the table), or create the column with collate "C" to begin with.',
+    raise exception 'pg_partition_magician: column %.% has collation %, which does not order the text_time digit alphabet the way base-% place value does: digit % (value %) must sort before digit % (value %) in every position, and under that collation it does not (% does not sort before %). RANGE bounds on a text column compare under the column''s collation while the encoded timestamp orders bytewise, so rows would be routed to the wrong partition: the pgpm_monolith_bound check fails at VALIDATE, or on a table that passes it, rows land in a neighbouring partition and retention drops them early. Give the column a bytewise collation: alter table % alter column % type % collate "C" (rewrites the table), or create the column with collate "C" to begin with.',
       p_table::text, quote_ident(p_control),
       case when v_dbloc is not null then format('"default" (the database default, %s)', v_dbloc) else quote_ident(v_collname) end,
       length(v_alphabet), quote_literal(v_bad_c1), v_bad_i - 1, quote_literal(v_bad_c2), v_bad_i,
+      quote_literal(v_bad_lo), quote_literal(v_bad_hi),
       p_table::text, quote_ident(p_control), v_coltype;
   end if;
 end;

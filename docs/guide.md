@@ -216,7 +216,10 @@ to pass, routes rows to the wrong month, where retention drops them early). `tra
 and refuse, naming the collation and the first misordered digit pair. The fix is a bytewise collation on
 the column: `alter table public.events alter column id type text collate "C"` (this rewrites the
 table), or declare the column `text collate "C"` when creating it. cuid, ULID-as-text and ObjectId use
-single-case alphabets, which every locale orders the way bytes do, so they need nothing.
+single-case alphabets, which every locale orders the way bytes do, so they need nothing, with one
+exception: an ICU collation with numeric ordering (`-u-kn-true`, such as `und-u-kn-true`) compares a run
+of digits by its value (`'ck9abcde'` sorts before `'ck10000'`), which misorders every alphabet that
+contains digits, and `transmute` refuses it the same way.
 
 `transmute` commits between its phases, so it has to be called at the **top level**, never inside a
 surrounding transaction. That rules out running it from a schema-migration tool that wraps each migration
