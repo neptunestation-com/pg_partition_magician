@@ -152,7 +152,10 @@ re-running its reproduction. `/fix-phase` is the coordinator checklist (`.claude
 
 | script | does | proof |
 |---|---|---|
-| `land.sh <pr> ...` | rebases each PR onto the current `main`, resolves the list files, verifies what CI would fail on (splices, `test.sh`, unique guard databases, every mutation builds), pushes, waits for the head checks, enqueues, waits for the merge; one PR at a time, Tier 1 first | `--rebase-only` dry path; exit codes in its header |
+| `land.sh [--batch] <pr> ...` | rebases each PR onto the current `main` (or, with `--batch`, onto the previous PR's new head: a stack of up to five for a merge-commit queue), resolves the list files, verifies what CI would fail on (splices, `test.sh`, unique guard databases, every mutation builds), pushes, waits for the head checks with flake retry, enqueues, waits for the merge with a `MERGED` re-check; wait caps and the merge method are environment knobs (`LAND_WAIT_*_MIN`, `LAND_MERGE_METHOD`), exit 6 means a wait timed out and the same command can be rerun | `--rebase-only` dry path; exit codes in its header |
+| `landq.sh <workdir> [--batch N]` | the landing loop: reads `<workdir>/landq.txt` (`<tier> <pr>` lines, appended while it runs), lands the lowest tier first through `land.sh`, up to N of one tier per batch, retries a wait timeout up to eight times, stops for a human on anything else; writes `landq.done` | pass 3 ran it in scratch form for 24 PRs |
+| `gate.sh <lockdir> -- <cmd>` | serialises the fixers' `./test.sh` runs on one machine: an mkdir mutex plus a wait for the fixed-name harness container to be gone before the holder starts (pass 3's mutex alone let five first runs fail at `compose up`) | logs holder and duration to `<lockdir>.log` |
+| `landing_stats.py <landq.log>` | per-PR landing measurements for the record: start, merge, minutes, enqueues, flakes, stops, hand fixes, list files resolved; median and total | `--selftest` |
 | `keep_both.py <file>` | keep-both resolution of an add/add conflict in `CHANGELOG.md`, `bench/mutations/mutate.py`, `test.sh` or the perf/archive workflows, with the three structural repairs `mutate.py` needs; refuses any other file | `--selftest` holds the three conflict shapes pass 2 met |
 | `flake_check.sh <run>` | says whether every failed job of a run matches a KNOWN flake signature (narrow: the lock guard's probe with its liveness green and no other failure; a third-party image pull refused by a quota with no test run) | each signature names its issue |
 | `closure.sh --claims <dir> --out <json>` | re-runs every reproduction against `main` in the harness, using a verifier's `repro.verified.sql` where one exists; refuses to run while a `fix/` PR is open | preconditions checked, not assumed |
@@ -165,8 +168,17 @@ once PR k-1 lands, PR k conflicts with `main` in those files and must be rebased
 it can be queued. Stacking PRs on each other does not help (the queue's three-way merge sees the same
 conflict), and a plain `git rebase main` of a stacked PR replays its predecessor onto its own squash.
 Measured in pass 2: about 24 minutes per PR, serial; in pass 3, a 28-minute median over 24 PRs. The
-queue was switched to merge commits on 2026-09-29, after pass 3's last PR; a merge-commit queue keeps a
-stacked PR's ancestry, so a batch mode for `land.sh` (up to five PRs per group) is the next step.
+queue was switched to merge commits on 2026-09-29, after pass 3's last PR. A merge-commit queue keeps a
+stacked PR's ancestry, and `land.sh --batch` uses that: up to five PRs rebased onto one another, pushed and
+checked in parallel, enqueued in order and built by the queue as one group, so a batch costs about one
+head-check round plus one merge group instead of five of each. `landq.sh --batch 5` drives it.
+
+Two more things pass 3's landing taught. `land.sh` runs `keep_both.py` and `flake_check.sh` from the
+checkout's `main` (or from `LAND_TOOLING`), so a PR that fixes the landing tooling cannot be landed by the
+copy it fixes: #623's `mutate.py` conflict was refused by the pre-#598 `keep_both.py` that `main` still
+held, and resolved cleanly by #623's own. And the PR workflows carry a `concurrency` group keyed by the
+PR number, so a rebase or a fix pushed to a PR cancels the superseded head's runs instead of queueing
+behind them; pushes to `main` and merge groups are keyed by sha and never cancel each other.
 
 Assign before spawning. Fixers working in parallel each take "the next free" test number and guard
 database unless the coordinator hands them out; pass 2 ended with seven files numbered 124. `land.sh`

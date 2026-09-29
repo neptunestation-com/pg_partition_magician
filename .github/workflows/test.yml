@@ -10,6 +10,13 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+# One run per PR head: a rebase or a fix pushed to a PR cancels the superseded head's runs, which is
+# what let pass 3's twenty-one fix heads queue about 90 runs behind the runner cap (#644). A push to
+# main or a merge group is keyed by its sha, so those never cancel or queue behind one another.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: PostgreSQL ${{ matrix.pg_version }}

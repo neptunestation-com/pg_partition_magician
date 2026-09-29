@@ -37,8 +37,12 @@ each PR the fixers report in `$WORK/prs.tsv` with its test, guard and mutation n
 ## 3. Gate, then land in order
 
 - Before landing, every PR must have passed `./test.sh 15 --channel=psql` on its own head (the fixer's
-  report says so; spot-check one). The merge queue runs every track on the exact tree it merges.
-- Land them with `scripts/review/land.sh <pr> <pr> ...`, Tier 1 first. It rebases each PR onto the
+  report says so; spot-check one), run through `scripts/review/gate.sh $WORK/gate.lock -- ./test.sh 15
+  --channel=psql` so parallel fixers do not fail each other at `compose up`. The merge queue runs every
+  track on the exact tree it merges.
+- Land them with `scripts/review/landq.sh $WORK --batch 5` reading `$WORK/landq.txt` (`<tier> <pr>` lines,
+  appended as the fixers report), or by hand with `scripts/review/land.sh [--batch] <pr> ...`, Tier 1
+  first. `land.sh` rebases each PR onto the
   current main, resolves the three list files, verifies what CI would fail on, waits for the head
   checks, enqueues, and waits for the merge; it retries only the flakes `flake_check.sh` knows and
   stops on anything else. Under a squash queue (passes 2 and 3) expect 25 to 30 minutes per PR, one at

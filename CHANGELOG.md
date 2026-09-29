@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **The landing tooling batches PRs through a merge-commit queue, and the PR workflows cancel a superseded
+  head's runs** (#644). `scripts/review/land.sh --batch` rebases up to five PRs onto one another, pushes and
+  checks the heads in parallel, enqueues them in order and lets the queue build them as one group; its wait
+  caps (`LAND_WAIT_*_MIN`), merge method (`LAND_MERGE_METHOD`) and tooling directory (`LAND_TOOLING`) are
+  environment knobs, a wait timeout is exit 6 and a rerun rather than a failure, a merge is re-checked
+  before it is read as a fall-out, and the rebase pins the two-way conflict style. `landq.sh` is the tier-
+  ordered landing loop pass 3 ran in scratch form, `gate.sh` serialises the fixers' harness runs and waits
+  for the fixed-name container to be gone first, and `landing_stats.py` renders the record's landing table
+  from the loop's log. The seven PR-triggered workflows carry a `concurrency` group keyed by the PR
+  number (pushes to `main` and merge groups by sha), so a rebase cancels the runs it supersedes instead of
+  queueing about ninety of them behind the runner cap, as pass 3's fix heads did.
 - **`keep_both.py` resolves diff3 and zdiff3 conflict hunks, and refuses one it cannot** (#598). Its hunk
   pattern knew only git's two-way shape, so under the diff3 or zdiff3 conflict style (a common global
   setting) it folded the `||||||| <base>` section into one side and exited 0 with that marker line left in
