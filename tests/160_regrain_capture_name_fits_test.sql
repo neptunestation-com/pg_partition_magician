@@ -56,7 +56,7 @@ alter table f655.ec rename to :C;
 
 select is(
   (select string_agg(c.relname || ':' || octet_length(c.relname) || ':' || c.relkind::text, ',' order by c.relname)
-     from pgpm.config g join pg_class c on c.oid = g.parent_table),
+     from pgpm.config g join pg_class c on c.oid = g.parent_table where c.relnamespace = 'f655'::regnamespace),
   :'A' || ':63:p,' || :'B' || ':63:p,' || :'C' || ':63:p',
   'LIVENESS: three managed partitioned parents with 63-byte names');
 select is(left(:'A' || '_pgpm_regrain_delta', 63), :'A',
