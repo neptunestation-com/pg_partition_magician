@@ -677,6 +677,9 @@ run_perf() {
     "bench/hypertable_swap_order.sh pgpm_perf42"
     "bench/obtain_int_ceiling.sh pgpm_perf63"
     "bench/legacy_day_labels.sh pgpm_perf55"
+    "bench/cutover_partitioned_referencer.sh pgpm_perf59"
+    "bench/carried_index_name_length.sh pgpm_perf60"
+    "bench/cutover_trigger_window.sh pgpm_perf61"
   )
   local selected=()
   local n=${#guards[@]} idx

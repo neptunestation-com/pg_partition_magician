@@ -94,7 +94,11 @@ membership as well, so an `untransmute` hands the table back still published). A
 **owns** through a column (a `serial`, or an explicit `OWNED BY`) is handed to the same column of the
 parent, so retention can drop the monolith like any other partition. All of it is
 captured before the rename and re-applied inside
-the same transaction as the cutover, so the parent is never reachable without its policies. Partitions
+the same transaction as the cutover, so the parent is never reachable without its policies. The triggers
+are captured under the table's `ACCESS EXCLUSIVE` lock, taken as the cutover's outage begins, so a
+trigger another session creates, drops, enables or disables while the conversion runs is either in place
+before the capture or waits until the cutover commits; the parent carries every trigger the table had at
+the rename. Partitions
 minted later, by `obtain` or a regrain, are given the parent's owner too rather than being
 owned by whichever role runs maintenance.
 
@@ -151,7 +155,9 @@ Parameters:
   the cutover, the last of the conversion's three transactions, in the same transaction that records the
   key, so a conversion that fails or is abandoned before then leaves every incoming FK exactly where it
   was, and one that fails in the cutover rolls the drop back with it. Referential integrity on the
-  referencing table is off only between a completed cutover and the restore.
+  referencing table is off only between a completed cutover and the restore. A key declared on a
+  partitioned referencing table is dropped, recorded and restored once, at that partitioned table; its
+  per-partition copies go and come back with it.
 - `p_force_uuidv7` -- skip the uuidv7 plausibility refusal (see below).
 - `p_tt_prefix`, `p_tt_width`, `p_tt_radix`, `p_tt_unit` -- **text_time only**, and all four are required
   together when the control column is `text`/`varchar`. They describe the column's shape: a constant
@@ -240,7 +246,10 @@ partition key (global uniqueness could not be enforced); an incoming FK exists a
 interrupted run); a name the conversion derives from the table's (the monolith's `<rel>_p<lo>_to_<hi>`, a
 fine cell's `<rel>_p<lo>`, the staging `<rel>_pgpm_new`) would exceed PostgreSQL's 63-byte identifier
 limit, which pgpm never truncates (the message names the offending name and says how many bytes to shorten
-the table name by; the budget is under [Partition naming](#partition-naming)); or a relation already
+the table name by; the budget is under [Partition naming](#partition-naming)); a secondary index's name is
+longer than 58 bytes, so the `<index>_pgpm` name of its partitioned copy would not fit (PostgreSQL's own
+auto-names reach 63; the message names each such index, and `ALTER INDEX ... RENAME TO` a shorter name
+clears it); or a relation already
 occupies one of the `<index>_pgpm` names the conversion needs for the partitioned copies of the table's
 secondary indexes (also usually a leftover from an interrupted run).
 
@@ -2085,7 +2094,8 @@ what keeps `transmute`'s orphan check from mistaking a monolith for a leftover o
 cells share a name, which `obtain`, `extend_to` and `regrain_step` read as "already exists" and skip: the
 forward grid would silently stop growing. So `transmute` refuses a table whose derived names (the
 monolith's, the fine cells', the `<rel>_pgpm_new` staging name) would not fit, naming the offending name
-and the bytes to shorten the table name by, and `set_regrain` refuses a target step whose wider labels
+and the bytes to shorten the table name by, refuses a secondary index whose `<index>_pgpm` copy would not
+fit (an index name of at most 58 bytes does), and `set_regrain` refuses a target step whose wider labels
 would not fit. The budget, in bytes: a fine name is `len(<rel>) + 2 + label`, the monolith's is
 `len(<rel>) + 6 + 2 * label`, the staging name is `len(<rel>) + 9`, where the label is 4 (year), 7 (month),
 10 (day), 13 (hour), 16 (minute) or 19 (id). A monthly grid therefore takes a table name of up to 43 bytes

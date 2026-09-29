@@ -4008,6 +4008,7 @@ declare
   v_idkinds text[];   -- #308: 'a' (ALWAYS) or 'd' (BY DEFAULT) per v_idcols entry, same order
   v_idx_names text[]; v_idx_defs text[]; v_ctl_attnum int; v_uniq_bad text; v_old name; v_new name; v_pdef_q text; j int;
   v_pgpm_clash_q text;   -- #311: existing relations occupying the <index>_pgpm names step 9b needs
+  v_long_idx_q text;     -- #592: carried secondary indexes whose <index>_pgpm name would exceed 63 bytes
   v_add_pk boolean := false; v_add_uniq boolean := false; v_reuse_idx oid; v_reuse_conname name;
   v_uq_cols text[]; v_bare_uq text;
   v_fk record; v_fk_eligible boolean;
@@ -4429,6 +4430,21 @@ begin
   --
   -- Names every collision at once: one per retry would make an operator with several re-run the
   -- conversion once per index to discover them.
+  --
+  -- First, the names that cannot exist at all (#592). <index>_pgpm is a name pgpm derives, so it is held
+  -- to the rule every derived name is (see _part_name and the staging-name check): never truncated. An
+  -- index name of 59 bytes or more leaves no room for the suffix, and the cast to name in step 9b cut it
+  -- back to 63 silently. At exactly 63 bytes, which is what PostgreSQL's own auto-naming produces for a
+  -- long table and column list, the cut name IS the index's own name, so the collision check below found
+  -- it taken and told the operator to drop it as a leftover: advice that drops their own index. Refused
+  -- here, before that check can misread it, and every offender named at once for the same reason.
+  select string_agg(quote_ident(n) || ' (' || octet_length(n) || ' bytes)', ', ' order by n) into v_long_idx_q
+    from unnest(coalesce(v_idx_names, '{}'::text[])) as n
+   where octet_length(n || '_pgpm') > 63;
+  if v_long_idx_q is not null then
+    raise exception 'pg_partition_magician: cannot transmute % -- the secondary index(es) (%) have names too long for their partitioned copies: transmute recreates each on the parent as <index>_pgpm, which would exceed PostgreSQL''s 63-byte identifier limit, and pgpm never truncates a name it derives (a truncated one names the index itself or collides with another). Give each a name of at most 58 bytes (ALTER INDEX ... RENAME), then re-run transmute.',
+      p_parent, v_long_idx_q;
+  end if;
   select string_agg(quote_ident(n || '_pgpm'), ', ' order by n) into v_pgpm_clash_q
     from unnest(coalesce(v_idx_names, '{}'::text[])) as n
    where to_regclass(format('%I.%I', v_nsp, n || '_pgpm')) is not null;
@@ -4792,27 +4808,17 @@ begin
   -- 0b. capture what CREATE TABLE ... LIKE will NOT carry (#277): owner, grants, RLS, policies, comments
   -- and triggers. Captured HERE, before either rename, and replayed below in this same transaction. Both
   -- halves have to be inside the cutover: a parent that is briefly reachable with RLS off is the same
-  -- security defect as one that never gets its policies, with a shorter fuse.
+  -- security defect as one that never gets its policies, with a shorter fuse. The triggers are the one
+  -- exception to "here": they are captured further down, under the table's ACCESS EXCLUSIVE (#593).
   --
   -- Trigger definitions get a free ride, but only once BOTH renames have happened (#344): pg_get_triggerdef
   -- emits "... ON public.<original name>", and that name only resolves to the new parent once the staging
   -- parent has taken it, so the captured text replays verbatim with no rewriting. Policies get no such
   -- help (there is no pg_get_policydef) and are rebuilt from pg_policy.
-  --
-  -- The free ride does not include the enabled state (#499): pg_get_triggerdef never emits tgenabled, so
-  -- the replayed CREATE TRIGGER leaves every trigger origin-only ('O') whatever it was. A DISABLED trigger
-  -- would fire again on the next write, and an ENABLE ALWAYS or ENABLE REPLICA one would silently change
-  -- when it fires under session_replication_role. So the name and the state ride alongside, index-aligned
-  -- by the same ORDER BY, and 7b re-applies every non-default state after the replay.
   select pg_get_userbyid(relowner), relacl, relrowsecurity, relforcerowsecurity
     into v_owner, v_acl, v_rls, v_rls_force
     from pg_class where oid = p_parent;
   v_comment := obj_description(p_parent, 'pg_class');
-  select coalesce(array_agg(pg_get_triggerdef(oid) order by tgname), '{}'),
-         coalesce(array_agg(tgname::text order by tgname), '{}'),
-         coalesce(array_agg(tgenabled::text order by tgname), '{}')
-    into v_trgdefs, v_trgnames, v_trgstates
-    from pg_trigger where tgrelid = p_parent and not tgisinternal;
 
   -- #344: everything below that only touches the NEW parent -- not the original/monolith relation -- runs
   -- BEFORE either rename, under a staging name (v_staging, collision-checked earlier alongside the
@@ -4916,6 +4922,33 @@ begin
     execute format('comment on column %s.%I is %L', v_parent::text, v_colcom.attname, v_colcom.c);
   end loop;
 
+  -- 0b (triggers). The outage starts HERE, and the triggers are captured under it (#593). They used to be
+  -- captured at 0b above, with nothing on the table stronger than the ACCESS SHARE the staging LIKE takes,
+  -- and CREATE TRIGGER needs only SHARE ROW EXCLUSIVE, which that does not exclude. A trigger another
+  -- session committed between the capture and the rename was therefore never replayed: 7b dropped it
+  -- from the monolith along with the triggers it had captured (or, with nothing captured, left it on the
+  -- monolith alone), and every row routed to a forward partition escaped it with nothing logged. ENABLE
+  -- and DISABLE TRIGGER take the same SHARE ROW EXCLUSIVE, so the captured states raced the same way.
+  --
+  -- The fix is the lock, not a re-read. ACCESS EXCLUSIVE is what the incoming-FK drop and the rename take
+  -- next anyway, so taking it one statement earlier, explicitly, starts the outage no sooner than before
+  -- in any sense that matters (a catalog read, then the same statements). From here to the commit nothing
+  -- can create, drop, enable or disable a trigger on the table, so what is captured is what the rename
+  -- carries. Under this phase's lock_timeout like every other wait in it. Still before the renames, so
+  -- pg_get_triggerdef names the ORIGINAL table and the text replays verbatim (see 0b).
+  --
+  -- The free ride does not include the enabled state (#499): pg_get_triggerdef never emits tgenabled, so
+  -- the replayed CREATE TRIGGER leaves every trigger origin-only ('O') whatever it was. A DISABLED trigger
+  -- would fire again on the next write, and an ENABLE ALWAYS or ENABLE REPLICA one would silently change
+  -- when it fires under session_replication_role. So the name and the state ride alongside, index-aligned
+  -- by the same ORDER BY, and 7b re-applies every non-default state after the replay.
+  execute format('lock table %s in access exclusive mode', p_parent::text);
+  select coalesce(array_agg(pg_get_triggerdef(oid) order by tgname), '{}'),
+         coalesce(array_agg(tgname::text order by tgname), '{}'),
+         coalesce(array_agg(tgenabled::text order by tgname), '{}')
+    into v_trgdefs, v_trgnames, v_trgstates
+    from pg_trigger where tgrelid = p_parent and not tgisinternal;
+
   -- 0c. drop the incoming FKs and record each, HERE (#444). Eligibility was settled by the gate at step 0,
   -- before anything was committed; this drops whatever is live NOW rather than replaying a list captured
   -- then, so a key the operator dropped during the validation scan is not recorded as ours to restore,
@@ -4936,8 +4969,8 @@ begin
   -- partition escaped it, and the log said restore_incoming_fk.
   --
   -- Immediately before the rename, not earlier in the phase. Dropping an FK takes ACCESS EXCLUSIVE on the
-  -- REFERENCED table too (measured on PG 17: AccessExclusiveLock on both relations), so when there is a
-  -- key to drop this is the statement that starts the outage on the live table; placed any earlier it
+  -- REFERENCED table too (measured on PG 17: AccessExclusiveLock on both relations), so it belongs inside
+  -- the outage the explicit lock above opens (#593) and no earlier; placed any earlier it
   -- would hold that lock across the staging work above, which #344 moved ahead of the rename precisely so
   -- that it would run under no such lock. Here it adds one metadata-only statement to the window. It also
   -- puts the wait for the referencing table's lock under this phase's lock_timeout, which the step 0 drop
@@ -4948,10 +4981,16 @@ begin
   -- phase 1: the parent did not exist yet. Sharing this transaction with the drop is the whole fix. A
   -- failure anywhere in the cutover rolls the drop back along with everything else, so a key is gone from
   -- the referencing table only in a database where pgpm.dropped_fk says so.
+  --
+  -- Top-level keys only (conparentid = 0, #576). A key declared on a PARTITIONED referencing table has one
+  -- pg_constraint row per partition as well, each a clone of the declared key, and dropping the declared
+  -- key drops its clones with it. Iterating them too failed the cutover at the first clone ("constraint
+  -- ... does not exist"), every time, leaving the bound and the claim behind; recording them would ask
+  -- restore_incoming_fks to re-add, on a partition, a key that the re-added parent key clones there itself.
   if p_incoming_fks <> 'error' then
     for v_fk in
       select c.conrelid::regclass as reltbl, c.conname, pgpm._fk_definition(c.oid) as def
-        from pg_constraint c where c.confrelid = p_parent and c.contype = 'f'
+        from pg_constraint c where c.confrelid = p_parent and c.contype = 'f' and c.conparentid = 0
        order by c.conname
     loop
       execute format('alter table %s drop constraint %I', v_fk.reltbl::text, v_fk.conname);
@@ -4980,8 +5019,8 @@ begin
   -- moving the anchor is all a replay against the parent needs. Same transaction as the rename.
   update pgpm.dropped_fk set parent_table = v_parent where parent_table = p_parent;
 
-  -- 1. THE TWO RENAMES, BACK-TO-BACK (#344). The first is the ACCESS EXCLUSIVE-acquiring statement that
-  -- starts the outage (the incoming-FK drop above shares that role when there is one); doing the second
+  -- 1. THE TWO RENAMES, BACK-TO-BACK (#344). The outage is already running: the explicit lock before the
+  -- trigger capture above took the ACCESS EXCLUSIVE these would otherwise acquire (#593); doing the second
   -- immediately after -- before anything else runs -- means the live
   -- name already resolves to the correctly-positioned parent by the time the trigger replay below (the one
   -- step that needs the literal name, not just the OID) executes.

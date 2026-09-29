@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+- **`transmute(p_incoming_fks => 'preserve')` of a table referenced from a partitioned table completes**
+  (#576). The cutover dropped every foreign key whose referenced table was the one being converted,
+  including the per-partition copies of a key declared on a partitioned referencing table. Dropping the
+  declared key removes those copies, so the next drop failed with `constraint ... does not exist`, the
+  cutover rolled back, and the table kept the write-rejecting `pgpm_monolith_bound` and a claim that every
+  re-run failed on the same way. The cutover now drops and records the top-level keys only, and
+  `restore_incoming_fks` re-adds each at the partitioned table, which copies it to every partition.
+
+- **`transmute` refuses a secondary index too long to carry, instead of calling it a leftover to drop**
+  (#592). The partitioned copy of each secondary index is named `<index>_pgpm`, and that name was cut to
+  63 bytes unchecked. For an index already at 63 bytes, which is what PostgreSQL's own auto-naming gives a
+  long table and column list, the cut name was the index's own, so the collision check refused it as a
+  leftover of an interrupted run and told the operator to drop it: their own index. `transmute` now
+  refuses up front, naming each index over 58 bytes and asking for a rename, with nothing committed.
+
+- **A trigger created while `transmute`'s cutover runs reaches the new parent** (#593). The cutover
+  captured the table's triggers before its staging work, under a lock that does not exclude
+  `CREATE TRIGGER`, and replayed only what it had captured; a trigger another session committed in
+  between stayed on the monolith alone, or was dropped from it, and rows routed to forward partitions
+  escaped it with nothing logged. The capture now happens under the table's `ACCESS EXCLUSIVE`, taken
+  explicitly as the outage begins (where the incoming-FK drop or the rename took it before), so the
+  outage is no longer than it was.
 - **An upgraded day grid builds the cell its old labels collide with** (#572). #503 relabelled day and
   week cells by the UTC date of their start and left existing partitions under their old names, the wall
   date of their start in `partition_tz`. East of UTC with the grid anchored at local midnight (Asia/Tokyo:
