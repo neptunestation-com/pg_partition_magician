@@ -86,8 +86,13 @@ the top), and a conversion that dies between transactions leaves the `CHECK` beh
 
 The new parent also takes over everything `CREATE TABLE ... LIKE` does not carry: the **owner**, table and
 **column-level grants**, **row level security** (both `ENABLE` and `FORCE`), every **policy**, table and
-column **comments**, and **row triggers**, each in the enabled state it had (`DISABLE`, `ENABLE ALWAYS`
-and `ENABLE REPLICA` are kept, on the parent and on the clone every partition receives). All of it is
+column **comments**, **row triggers**, each in the enabled state it had (`DISABLE`, `ENABLE ALWAYS`
+and `ENABLE REPLICA` are kept, on the parent and on the clone every partition receives), and
+**publication membership**: the parent is added to every publication that names the table, with the same
+row filter and column list, so every partition is published through it (the monolith keeps its own
+membership as well, so an `untransmute` hands the table back still published). A sequence the table
+**owns** through a column (a `serial`, or an explicit `OWNED BY`) is handed to the same column of the
+parent, so retention can drop the monolith like any other partition. All of it is
 captured before the rename and re-applied inside
 the same transaction as the cutover, so the parent is never reachable without its policies. Partitions
 minted later, by `obtain` or a regrain, are given the parent's owner too rather than being
@@ -98,7 +103,10 @@ partition, and reaching a partition directly needs grants that live on the paren
 
 One shape is refused rather than carried: a `FOR EACH ROW` trigger with a transition table
 (`REFERENCING OLD/NEW TABLE`), which PostgreSQL does not permit on a partitioned table. Rewrite it as a
-statement trigger, which can carry a transition table, or drop it. **Outgoing** foreign keys (this table
+statement trigger, which can carry a transition table, or drop it. So is membership in a publication with
+`publish_via_partition_root = false` that names the table with a row filter or a column list, which
+PostgreSQL does not allow on a partitioned table: set `publish_via_partition_root = true` on it, or drop
+the filter and column list, then re-run. **Outgoing** foreign keys (this table
 referencing another) are carried onto the new parent automatically, so they keep enforcing across every
 partition; a `NOT VALID` one is refused rather than carried, because re-adding it at the parent could not
 then be metadata-only. **Incoming** keys are governed by `p_incoming_fks` below. An identity column is
@@ -302,7 +310,8 @@ pgpm.untransmute(p_parent regclass) returns regclass
 Reverses a `transmute`, returning the restored ordinary table. It is a **clean, metadata-only reverse
 while the monolith is still intact and holds the whole table**: it detaches the monolith, drops the
 childless parent (cascading any empty forward partitions), renames the monolith
-back, restores identity, the row triggers (each in the enabled state the parent had) and any preserved
+back, restores identity, the ownership of any `serial` sequence, the row triggers (each in the enabled
+state the parent had) and any preserved
 incoming FKs, and clears `pgpm` state. The monolith is the
 attached partition with the smallest `lo`.
 

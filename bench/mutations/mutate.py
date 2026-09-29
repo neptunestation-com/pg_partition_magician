@@ -1660,6 +1660,42 @@ $$;''',
   end loop;
 """, "", 1)],
     ),
+    "transmute_publication_not_carried": (
+        "bench/transmute_publication_membership.sh",
+        "Pre-#566 transmute cutover: the new parent is never added to the publications that name the "
+        "table. pg_publication_rel records the table by oid, the rename makes that oid the monolith, "
+        "so every publication FOR TABLE <table> goes on publishing the monolith alone, and each row "
+        "written past it lands in a forward partition that is in no publication and is silently not "
+        "replicated. The up-front refusal of a filtered leaf-publishing membership is left in place, "
+        "so the mutant is exactly 'the membership is not carried', and tests/132's membership and "
+        "pg_publication_tables assertions are what catch it.",
+        [("""    execute format('alter publication %I add table %s%s%s', v_pub.pubname, v_parent::text,
+                   case when v_pub.cols_q is not null then ' (' || v_pub.cols_q || ')' else '' end,
+                   case when v_pub.qual is not null then ' where (' || v_pub.qual || ')' else '' end);
+""", "    null;\n", 1)],
+    ),
+    "transmute_serial_owner_not_moved": (
+        "bench/transmute_serial_sequence_owner.sh",
+        "Pre-#573 transmute cutover: a sequence the table owns through a column (a serial, or an "
+        "explicit OWNED BY) stays owned by the oid the rename makes the monolith, while the new "
+        "parent's copied default calls nextval on it. DROP of the aged-out monolith then fails with "
+        "'other objects depend on it', retention logs fail_retain_drop on every tick, and the "
+        "monolith can never be retired. The untransmute half is left intact (it finds nothing on the "
+        "parent to hand back), so tests/133's ownership and retention assertions are what catch it.",
+        [("    execute format('alter sequence %s owned by %s.%I', v_sq.seq::text, v_parent::text, v_sq.attname);\n",
+          "    null;\n", 1)],
+    ),
+    "untransmute_serial_owner_not_returned": (
+        "bench/transmute_serial_sequence_owner.sh",
+        "The reversal's half of #573: untransmute drops the parent without first handing the serial "
+        "sequences it owns back to the restored table, so the DROP takes (or, here, refuses to take) "
+        "the sequence the restored table's column default still calls, and the whole reversal rolls "
+        "back with 'other objects depend on it'. The transmute half is left intact, so this mutant is "
+        "caught by tests/133's reversal assertions and by nothing before them, which is what shows "
+        "that half of the file discriminates on its own.",
+        [("    execute format('alter sequence %s owned by %s.%I', v_sq.seq::text, v_monreg::text, v_sq.attname);\n",
+          "    null;\n", 1)],
+    ),
     "archive_encode_no_partition_tz": (
         "bench/archive_encode_partition_tz.sh",
         "Pre-#501 transports: archive._encode_upload_ndjson_single and archive._encode_upload_parquet "

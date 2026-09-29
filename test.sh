@@ -654,6 +654,8 @@ run_perf() {
     "bench/retire_regrain_source.sh pgpm_perf39"
     "bench/throws_pinned.sh pgpm_perf40"
     "bench/retain_interval_sign.sh pgpm_perf44"
+    "bench/transmute_publication_membership.sh pgpm_perf45"
+    "bench/transmute_serial_sequence_owner.sh pgpm_perf46"
   )
   local selected=()
   local n=${#guards[@]} idx
