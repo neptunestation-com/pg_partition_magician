@@ -2141,6 +2141,14 @@ is `<rel>_p<lo>_to_<hi>`, both bounds formatted at the step's granularity:
 - time/uuidv7/text_time: `events_p2026_03` (a fine month), `events_p2026_03_to_2026_07` (the monolith)
 - id: `events_p0000000000000010000`, `events_p0000000000000000000_to_0000000000000060000`
 
+Each label is fine enough for its step, so no two cells of a grid share a name: a year, month, day or
+hour step is labelled at that grain, a step of a minute or more to the minute (`events_p2026_03_01_0930`),
+a step under a minute to the second (`events_p2026_03_01_093030`) and a step under a second to the
+microsecond (`events_p2026_03_01_093030_500000`). An id label is zero-padded to 19 digits and never cut:
+a value of 20 digits or more (a `numeric` key at or past 10^19) keeps every digit
+(`events_p10000000000000000000`), and a non-integral value, which only a regrain toward a fractional step
+on a `numeric` column produces, carries its fraction (`events_p0000000000000000001_5` for 1.5).
+
 Month and year labels are rendered in `config.partition_tz`, the zone those calendar cells are defined
 in. Day and shorter labels are rendered in UTC: those steps are a fixed number of seconds from the anchor
 whatever the zone, and in a zone with daylight saving the day lattice drifts an hour against local
@@ -2167,14 +2175,14 @@ and the bytes to shorten the table name by, refuses a secondary index whose `<in
 fit (an index name of at most 58 bytes does), and `set_regrain` refuses a target step whose wider labels
 would not fit. The budget, in bytes: a fine name is `len(<rel>) + 2 + label`, the monolith's is
 `len(<rel>) + 6 + 2 * label`, the staging name is `len(<rel>) + 9`, where the label is 4 (year), 7 (month),
-10 (day), 13 (hour), 16 (minute) or 19 (id). A monthly grid therefore takes a table name of up to 43 bytes
-when the data spans more than one month (a coarse monolith) and 54 when it does not; an id grid, whose
-labels are 19 digits, takes 19 and 42.
+10 (day), 13 (hour), 15 (minute), 17 (second), 24 (microsecond) or 19 (id, longer past 19 digits or with a
+fraction). A monthly grid therefore takes a table name of up to 43 bytes when the data spans more than one
+month (a coarse monolith) and 54 when it does not; an id grid, whose labels are 19 digits, takes 19 and 42.
 
 ## Internal adapter layer
 
 Functions named `pgpm._*` are private and may change without notice. The kind-specific logic lives in a
-small adapter (`_grid_floor`, `_grid_next`, `_encode`, `_decode`, `_frontier_native`, `_part_name`,
+small adapter (`_grid_floor`, `_grid_next`, `_encode`, `_decode`, `_frontier_native`, `_part_name`/`_id_label`,
 `_native_gt`, `_native_type`), which is where a new partition kind would plug in; the rest (`_transmute`,
 `_create_partition`, `_uuid_to_ts`/`_ts_to_uuid`, `_time_literal`/`_col_to_native`/`_canonical_tz`,
 `_install_write_block`/`_remove_write_block`/`_enforce_write_blocks`/`_is_write_blocked`,
