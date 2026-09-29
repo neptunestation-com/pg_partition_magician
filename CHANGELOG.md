@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **`obtain()` stops at an `int` or `smallint` id column's type ceiling with what it built, instead of
+  building nothing** (#578). Its grid-ceiling check only ran `_encode` on the candidate's upper bound, and
+  `_encode` is a passthrough for `id`, so it could not see that an `int` column ends at 2147483647. On a
+  table whose frontier was within `obtain` steps of that, the first inexpressible bound raised from
+  `CREATE TABLE ... PARTITION OF`, rolling back every partition the call had built: `maintain_obtain`
+  logged `skip_obtain` every tick, the grid froze, and writes of ids with a perfectly expressible
+  partition were refused until an operator ran `extend_to` by hand. `transmute` of such a table failed
+  outright, since it calls `obtain`. The check now casts the encoded bound to the control column's own
+  type, the same coercion the partition bound gets, and exits the lookahead where that overflows.
+  Guarded by `tests/146_obtain_int_ceiling_test.sql` and `bench/obtain_int_ceiling.sh`, whose mutation
+  `obtain_ceiling_encode_only` removes the cast.
 - **A `from_hypertable_cutover` whose handoff to `transmute` refuses no longer loses the incoming keys or
   the identity position** (#563). The cutover commits its swap (hypertable dropped, incoming foreign keys
   dropped, the copy renamed into place with identity re-added) before calling `transmute`, and it held the

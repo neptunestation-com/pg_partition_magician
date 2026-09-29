@@ -1214,12 +1214,16 @@ returns int language plpgsql as $$
 declare
   cfg pgpm.config; v_nsp name; v_rel name;
   v_frontier text; v_lo text; v_hi text; v_name name;
+  v_coltype text; v_hi_lit text;
   v_made int := 0; k int;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+  -- the control column's own type, for the ceiling check below (#578)
+  select format_type(a.atttypid, a.atttypmod) into v_coltype
+    from pg_attribute a where a.attrelid = p_parent and a.attname = cfg.control_column;
 
   v_frontier := pgpm._frontier_native(p_parent);
   v_lo       := pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor, v_frontier, cfg.partition_tz);
@@ -1234,9 +1238,16 @@ begin
     -- legitimately advancing toward the ceiling over its lifetime. Deliberately NOT logged: obtain runs
     -- every tick and the condition is permanent, so logging it would bury real failures under identical
     -- rows forever. A write past the grid is already refused loudly by PostgreSQL.
+    --
+    -- The bound is checked against the CONTROL COLUMN'S TYPE, not just encoded (#578). _encode is a
+    -- passthrough for `id`, so it cannot see that an int or smallint column runs out at 2^31-1 or 2^15-1;
+    -- left to CREATE TABLE ... PARTITION OF, that out-of-range bound raised and rolled back every
+    -- partition this call had built, and every later tick failed the same way (skip_obtain). Casting the
+    -- literal is the same coercion the partition bound gets, so it fails exactly when CREATE TABLE would.
     begin
-      perform pgpm._encode(cfg.control_kind, v_hi,
+      v_hi_lit := pgpm._encode(cfg.control_kind, v_hi,
                             cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz);
+      execute format('select %L::%s', v_hi_lit, v_coltype);
     exception when datetime_field_overflow or numeric_value_out_of_range then
       exit;
     end;

@@ -694,7 +694,10 @@ existing attached partition, for example the monolith, which covers the current 
 It stops early, returning what it built, when the next grid boundary cannot be expressed: a `uuidv7` grid
 ends at the last instant a 48-bit millisecond prefix can carry, `10889-08-02 05:31:50.65504+00`; a
 `text_time` grid ends wherever the declared `p_tt_width` digits at `p_tt_radix` run out (classic cuid's
-8 base36 digits reach year 2059).
+8 base36 digits reach year 2059); an `id` grid ends at the last boundary the control column's own type can
+hold, so on an `int` column with a step of 10000 the last partition is `[2147470000, 2147480000)`, and
+ids from 2147480000 to 2147483647 have no partition to go to. Reaching a ceiling is not a failure: no
+`skip_obtain` is logged, and every tick keeps building what the grid can still express.
 
 This is the only thing standing between the workload and a write with nowhere to go, since a row outside
 the grid is refused rather than parked. `config.obtain x partition_step` is therefore both the slack if
