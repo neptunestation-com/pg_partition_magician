@@ -1166,6 +1166,14 @@ $$;
 -- partitions (by identity: pgpm.part.child_oid) over a DIFFERENT range, the cell is built under its
 -- explicit-range name instead, and the legacy child is left exactly as it is: no rename, no lock on it.
 -- A name held by anything else is left alone as before: that is a relation pgpm does not own.
+--
+-- #663: the explicit-range name is 14 bytes longer than a day or week cell's plain one (`_to_` and a second
+-- label), so for a table name that fits the plain label and not the explicit one (38 to 51 bytes on a day
+-- grid), _part_name refuses it (#510). That refusal used to escape from here, and obtain and
+-- extend_to are single functions, so it unwound every cell the call would have built: on every tick the
+-- whole forward grid stopped growing, not the one cell. The refusal is caught for exactly that name, and
+-- the cell is left unbuilt like one whose name a relation pgpm does not own holds: never truncated, and
+-- never taking the whole call down with it. Shortening the table name frees the cell.
 create or replace function pgpm._obtain_name(p_parent regclass, cfg pgpm.config, p_nsp name, p_rel name,
                                              p_lo text, p_hi text)
 returns name language plpgsql stable as $$
@@ -1181,7 +1189,12 @@ begin
                    and pgpm._native_gt(cfg.control_kind, p_hi, p.lo))) then
     return null;
   end if;
-  v_name := pgpm._part_name(p_rel, cfg.control_kind, cfg.partition_step, p_lo, p_hi, cfg.partition_tz, true);
+  begin
+    v_name := pgpm._part_name(p_rel, cfg.control_kind, cfg.partition_step, p_lo, p_hi, cfg.partition_tz, true);
+  exception when raise_exception then
+    if sqlerrm not like 'pg_partition_magician: cannot name a partition of %' then raise; end if;
+    return null;
+  end;
   if to_regclass(format('%I.%I', p_nsp, v_name)) is not null then return null; end if;
   return v_name;
 end;
@@ -2866,8 +2879,20 @@ $$;
 -- while the old delta was kept.
 
 -- The names this parent's capture relations are MINTED under: derived from the parent's current relname.
--- Only _regrain_capture_install creates under these (and the upgrade backfill below reads them); every
--- other caller goes through _regrain_capture_names, which prefers what pgpm.config recorded.
+-- Only _regrain_capture_install creates under these; every other caller goes through
+-- _regrain_capture_names, which prefers what pgpm.config recorded.
+--
+-- #655: never cut to 63 bytes. They used to be left(<rel> || suffix, 63), and for a parent named 63 bytes
+-- (an ALTER TABLE ... RENAME to anything that long lands there, since PostgreSQL cuts it) that is the
+-- PARENT'S OWN NAME. A parent that never regrained has nothing recorded, so the readers fell back to it:
+-- regrain_cancel TRUNCATEd the managed table, untransmute DROPped the restored one, and uninstall.sql
+-- DROPped it with every partition. When <rel>_pgpm_regrain_delta or <rel>_pgpm_regrain_capture does not
+-- fit, the name is pgpm_regrain_delta_<parent oid> or pgpm_regrain_capture_<parent oid> instead: whole, at
+-- most 31 bytes, one per parent, and never the name of the parent or of one of its partitions (the form is
+-- taken only for a parent name over 42 bytes, and theirs start with it). Refusing instead would have
+-- stopped every parent over 42 bytes from regraining at all, where the cut forms worked at every length
+-- but one; the readers find the relations by oid either way (#496), so the name only has to fit and be
+-- pgpm's.
 create or replace function pgpm._regrain_capture_derive(
   p_parent regclass, out nsp name, out delta name, out fn name
 ) returns record language plpgsql stable as $$
@@ -2875,8 +2900,11 @@ declare v_rel name;
 begin
   select n.nspname, c.relname into nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
-  delta := left(v_rel || '_pgpm_regrain_delta', 63)::name;
-  fn    := left(v_rel || '_pgpm_regrain_capture', 63)::name;
+  if v_rel is null then return; end if;   -- a parent dropped without untransmute: nothing to name
+  delta := case when octet_length(v_rel || '_pgpm_regrain_delta') <= 63 then v_rel || '_pgpm_regrain_delta'
+                else 'pgpm_regrain_delta_' || p_parent::oid end;
+  fn    := case when octet_length(v_rel || '_pgpm_regrain_capture') <= 63 then v_rel || '_pgpm_regrain_capture'
+                else 'pgpm_regrain_capture_' || p_parent::oid end;
 end;
 $$;
 
@@ -2912,15 +2940,26 @@ $$;
 -- alone. Record them now for every parent whose derived-name delta exists, so a regrain in flight across
 -- this upgrade is anchored from here on and a later prepare knows the delta it finds is this parent's own.
 -- Only rows with nothing recorded, so a re-run changes nothing.
+--
+-- The names looked for are the ones those releases MINTED under, left(<rel> || suffix, 63), not what
+-- _regrain_capture_derive says now (#655): for a parent over 44 bytes the two differ, and a regrain in
+-- flight across the upgrade has its trigger writing the cut name. Only a plain table that is not a
+-- partition is taken for a delta, because for a parent named 63 bytes the cut name is the parent itself,
+-- and recording it as its own delta is the defect #655 removed.
 do $$
-declare r record; v_nsp name; v_delta name; v_fn name;
+declare r record; v_nsp name; v_rel name; v_delta regclass;
 begin
   for r in select parent_table from pgpm.config where regrain_delta_oid is null loop
-    select d.nsp, d.delta, d.fn into v_nsp, v_delta, v_fn from pgpm._regrain_capture_derive(r.parent_table) d;
-    if v_nsp is null or to_regclass(format('%I.%I', v_nsp, v_delta)) is null then continue; end if;
+    select n.nspname, c.relname into v_nsp, v_rel
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = r.parent_table;
+    if v_nsp is null then continue; end if;
+    v_delta := to_regclass(format('%I.%I', v_nsp, left(v_rel || '_pgpm_regrain_delta', 63)::name));
+    if v_delta is null
+       or not exists (select 1 from pg_class c where c.oid = v_delta and c.relkind = 'r' and not c.relispartition)
+    then continue; end if;
     update pgpm.config
-       set regrain_delta_oid      = to_regclass(format('%I.%I', v_nsp, v_delta))::oid,
-           regrain_capture_fn_oid = to_regprocedure(format('%I.%I()', v_nsp, v_fn))::oid
+       set regrain_delta_oid      = v_delta::oid,
+           regrain_capture_fn_oid = to_regprocedure(format('%I.%I()', v_nsp, left(v_rel || '_pgpm_regrain_capture', 63)::name))::oid
      where parent_table = r.parent_table;
   end loop;
 end $$;

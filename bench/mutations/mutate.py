@@ -66,6 +66,27 @@ RETIRE_IDENTITY_BLOCK = """  if r.retiring_oid is not null or r.child_oid is not
   end if;
 """
 
+# The upgrade backfill of regrain's capture anchors (#496, reshaped by #655), whole. Shared by the mutation
+# that deletes it and the one that loosens it, for the reason RETIRE_IDENTITY_BLOCK is a constant.
+REGRAIN_CAPTURE_BACKFILL_BLOCK = """do $$
+declare r record; v_nsp name; v_rel name; v_delta regclass;
+begin
+  for r in select parent_table from pgpm.config where regrain_delta_oid is null loop
+    select n.nspname, c.relname into v_nsp, v_rel
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = r.parent_table;
+    if v_nsp is null then continue; end if;
+    v_delta := to_regclass(format('%I.%I', v_nsp, left(v_rel || '_pgpm_regrain_delta', 63)::name));
+    if v_delta is null
+       or not exists (select 1 from pg_class c where c.oid = v_delta and c.relkind = 'r' and not c.relispartition)
+    then continue; end if;
+    update pgpm.config
+       set regrain_delta_oid      = v_delta::oid,
+           regrain_capture_fn_oid = to_regprocedure(format('%I.%I()', v_nsp, left(v_rel || '_pgpm_regrain_capture', 63)::name))::oid
+     where parent_table = r.parent_table;
+  end loop;
+end $$;
+"""
+
 # _install_write_block's identity check (#429), and the whole of _remove_write_block, which is
 # deliberately NOT anchored. Both live here as constants for the same reason the retire block does.
 WRITE_BLOCK_IDENTITY_BLOCK = """  select p.lo, p.hi, p.child_oid into r
@@ -1167,19 +1188,7 @@ MUTATIONS = {
         "flight across the upgrade. Null anchors mean the readers fall back to the parent's current name, "
         "which is the pre-#496 rename hazard exactly, for precisely the regrain that was running. What "
         "must FAIL here is the anchor assertion by identity, not the catalog hash.",
-        [("""do $$
-declare r record; v_nsp name; v_delta name; v_fn name;
-begin
-  for r in select parent_table from pgpm.config where regrain_delta_oid is null loop
-    select d.nsp, d.delta, d.fn into v_nsp, v_delta, v_fn from pgpm._regrain_capture_derive(r.parent_table) d;
-    if v_nsp is null or to_regclass(format('%I.%I', v_nsp, v_delta)) is null then continue; end if;
-    update pgpm.config
-       set regrain_delta_oid      = to_regclass(format('%I.%I', v_nsp, v_delta))::oid,
-           regrain_capture_fn_oid = to_regprocedure(format('%I.%I()', v_nsp, v_fn))::oid
-     where parent_table = r.parent_table;
-  end loop;
-end $$;
-""", "", 1)],
+        [(REGRAIN_CAPTURE_BACKFILL_BLOCK, "", 1)],
     ),
     "upgrade_stale_overloads_kept": (
         "bench/upgrade_from_release.sh",
@@ -1645,7 +1654,12 @@ begin
         "built. Only the fallback is removed (the helper returns null where it would take the explicit "
         "name), so the mutant is exactly 'a taken name means built'. tests/138's Tokyo grids, relabelled "
         "the pre-#503 way, are what catch it: the collided cell is missing and the write into it refused.",
-        [("  v_name := pgpm._part_name(p_rel, cfg.control_kind, cfg.partition_step, p_lo, p_hi, cfg.partition_tz, true);\n"
+        [("  begin\n"
+          "    v_name := pgpm._part_name(p_rel, cfg.control_kind, cfg.partition_step, p_lo, p_hi, cfg.partition_tz, true);\n"
+          "  exception when raise_exception then\n"
+          "    if sqlerrm not like 'pg_partition_magician: cannot name a partition of %' then raise; end if;\n"
+          "    return null;\n"
+          "  end;\n"
           "  if to_regclass(format('%I.%I', p_nsp, v_name)) is not null then return null; end if;\n"
           "  return v_name;\n",
           "  return null;\n", 1)],
@@ -3037,6 +3051,67 @@ $$;''',
           "       and t.tgenabled = 'A'\n",
           "     where t.tgname = 'pgpm_write_block' and c.relname = p_child and c.relnamespace = v_nsp_oid\n", 1)],
     ),
+    "regrain_capture_name_cut": (
+        "bench/regrain_capture_name_fits.sh",
+        "Pre-#655 _regrain_capture_derive: the delta and trigger-function names are left(<rel> || suffix, 63) "
+        "again, whatever the length. For a parent named 63 bytes (an ALTER TABLE ... RENAME to anything that "
+        "long lands there) the delta name IS the parent's, and a parent that never regrained has nothing "
+        "recorded, so the resolver falls back to it: regrain_cancel TRUNCATEs the managed table, untransmute "
+        "DROPs the restored one and uninstall.sql DROPs it with every partition. tests/160's oid-form names, "
+        "its ids 1..45 after regrain_cancel and the untransmuted table's 46 rows are what catch it.",
+        [("""  delta := case when octet_length(v_rel || '_pgpm_regrain_delta') <= 63 then v_rel || '_pgpm_regrain_delta'
+                else 'pgpm_regrain_delta_' || p_parent::oid end;
+  fn    := case when octet_length(v_rel || '_pgpm_regrain_capture') <= 63 then v_rel || '_pgpm_regrain_capture'
+                else 'pgpm_regrain_capture_' || p_parent::oid end;
+""", """  delta := left(v_rel || '_pgpm_regrain_delta', 63)::name;
+  fn    := left(v_rel || '_pgpm_regrain_capture', 63)::name;
+""", 1)],
+    ),
+    "regrain_capture_backfill_adopts_parent": (
+        "bench/regrain_capture_name_fits.sh",
+        "The upgrade backfill (#496) takes whatever relation holds the name older releases minted a delta "
+        "under, left(<rel> || '_pgpm_regrain_delta', 63), for this parent's delta, with no check that it is "
+        "a plain table. For a 63-byte parent that name is the parent itself, so a re-run of install.sql "
+        "records the parent as its OWN delta by oid, and every reader then resolves it by identity: "
+        "regrain_cancel TRUNCATEs the managed table even with the derive fixed. tests/160 section (C), "
+        "which re-runs the install, is what catches it.",
+        [(REGRAIN_CAPTURE_BACKFILL_BLOCK,
+          REGRAIN_CAPTURE_BACKFILL_BLOCK.replace(
+              "    if v_delta is null\n"
+              "       or not exists (select 1 from pg_class c where c.oid = v_delta and c.relkind = 'r' and not c.relispartition)\n"
+              "    then continue; end if;\n",
+              "    if v_delta is null then continue; end if;\n"), 1)],
+    ),
+    "obtain_explicit_name_uncaught": (
+        "bench/obtain_explicit_name_too_long.sh",
+        "Pre-#663 _obtain_name: the #572 explicit-range fallback asks _part_name for the collided cell's "
+        "_p<lo>_to_<hi> name and lets its #510 over-63-byte refusal escape. obtain is one function, so on an "
+        "upgraded east-of-UTC day grid whose table name is 38 to 51 bytes the raise unwinds every cell the "
+        "tick would have built: maintain_obtain logs skip_obtain on every tick and the grid never grows "
+        "again. tests/161's obtained=N status, its no-skip_obtain check and the cells past the collided one "
+        "are what catch it.",
+        [("""  begin
+    v_name := pgpm._part_name(p_rel, cfg.control_kind, cfg.partition_step, p_lo, p_hi, cfg.partition_tz, true);
+  exception when raise_exception then
+    if sqlerrm not like 'pg_partition_magician: cannot name a partition of %' then raise; end if;
+    return null;
+  end;
+""", """  v_name := pgpm._part_name(p_rel, cfg.control_kind, cfg.partition_step, p_lo, p_hi, cfg.partition_tz, true);
+""", 1)],
+    ),
+    "hypertable_derived_names_unchecked": (
+        "bench/hypertable_derived_names.sh",
+        "Pre-#552 pgpm_hypertable: _from_hypertable_check_names refuses nothing, so the working names "
+        "<rel>_pgpm_dest, _pgpm_delta, _pgpm_delta_fn and _pgpm_delta_trg are cut to 63 bytes by the parser "
+        "again. At 55 bytes the destination and the delta cut to one name: the skeleton drops the delta and "
+        "takes its name, and the capture trigger on the live source inserts key-only rows into the "
+        "destination, failing every write. tests/timescale/db/23's pinned refusals (the copy, the "
+        "preflight, the cutover, both drains, the 49-byte boundary) are what catch it.",
+        [("  if v_long is not null then\n"
+          "    raise exception 'pg_partition_magician: cannot migrate hypertable % -- the working relation name",
+          "  if false then\n"
+          "    raise exception 'pg_partition_magician: cannot migrate hypertable % -- the working relation name", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
@@ -3053,6 +3128,7 @@ MUTATION_SRC = {
     "hypertable_cutover_no_conservation": "pgpm_hypertable/install.sql",
     "hypertable_swap_fk_record_after_handoff": "pgpm_hypertable/install.sql",
     "hypertable_swap_identity_from_one": "pgpm_hypertable/install.sql",
+    "hypertable_derived_names_unchecked": "pgpm_hypertable/install.sql",
     "archive_lz77_hash_scratch": "pgpm_archive/install.sql",
     "archive_encode_array_agg_unnest": "pgpm_archive/install.sql",
     "archive_deflate_six_arrays": "pgpm_archive/install.sql",
@@ -3106,6 +3182,7 @@ MUTATION_TRACK = {
     "hypertable_cutover_unverified_dest": "timescale",
     "hypertable_catchup_strict_watermark": "timescale",
     "hypertable_cutover_no_conservation": "timescale",
+    "hypertable_derived_names_unchecked": "timescale",
 }
 
 

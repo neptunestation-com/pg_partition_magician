@@ -134,7 +134,8 @@ You also need `pg_cron` enabled to run scheduled maintenance.
 **Uninstall** removes the manager and leaves your data. Gone: the `pgpm` schema (configuration,
 registry, log, every function and view), its cron jobs, the write-block triggers on frozen children, and
 regrain's change capture, which lives in your schema rather than in `pgpm`: a `<table>_pgpm_regrain_delta`
-table, a `<table>_pgpm_regrain_capture()` trigger function, and the `pgpm_regrain_capture` trigger on a
+table, a `<table>_pgpm_regrain_capture()` trigger function (`pgpm_regrain_delta_<oid>` and
+`pgpm_regrain_capture_<oid>()` for a table name too long for those), and the `pgpm_regrain_capture` trigger on a
 child being regrained. A regrain still in flight is abandoned first, as `pgpm.regrain_cancel` would: its
 not-yet-attached copies are dropped (the table being regrained still holds every row). Left: every
 transmuted table, still a partitioned table under its original name, with all of its partitions and rows.

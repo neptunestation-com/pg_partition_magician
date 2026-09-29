@@ -630,7 +630,12 @@ pgpm.from_hypertable_preflight(p_hypertable regclass, p_control name) returns vo
 The refusal gate, factored out so you can dry-run it inside a transaction. Raises a
 `pg_partition_magician:`-prefixed error when the hypertable cannot be migrated by this version, and returns
 normally otherwise. **Refuses** when: the `timescaledb` extension is absent; `p_hypertable` is not a
-hypertable; it has one or more **continuous aggregates** (no native-partition equivalent, and dropping them is
+hypertable; a **working name** the migration derives from the table's (`<rel>_pgpm_dest`, `<rel>_pgpm_delta`,
+`<rel>_pgpm_delta_fn`, `<rel>_pgpm_delta_trg`) would exceed PostgreSQL's 63-byte identifier limit, which pgpm
+never truncates (a hypertable name of at most 48 bytes fits; the message names the longest name and how many
+bytes to shorten the table name by, and the cutover and both online drains refuse the same way before any DDL,
+since a cut name could name another relation: from 55 bytes the destination and the delta cut to one); it has
+one or more **continuous aggregates** (no native-partition equivalent, and dropping them is
 data-destructive); it has more than one **dimension** (space partitioning); the `p_control` column does not
 exist; `p_control` is **not the time dimension** column (the copy is bounded chunk by chunk on the dimension's
 ranges, so on any other column it would silently lose rows; the message names the actual dimension); the
@@ -1067,7 +1072,10 @@ at `reconciling:N` rather than swapping: the source stays attached, reads are un
 work is done under the swap's lock.
 
 The delta table and its trigger function live in the parent's schema as `<table>_pgpm_regrain_delta` and
-`<table>_pgpm_regrain_capture()`. They are named from the parent when the prepare tick mints them and found
+`<table>_pgpm_regrain_capture()`, or, where that name would exceed 63 bytes (a table name over 44 or 42
+bytes), as `pgpm_regrain_delta_<oid>` and `pgpm_regrain_capture_<oid>()`, `<oid>` being the parent table's:
+pgpm never cuts one to 63 bytes, which for a 63-byte table name would be the table itself. They are named
+from the parent when the prepare tick mints them and found
 by **oid** from then on (`config.regrain_delta_oid`, `config.regrain_capture_fn_oid`), so renaming the parent
 mid-regrain changes nothing: the trigger keeps writing the delta it was given, and the reconcile, the swap
 gate and the swap read that same relation. The copy finds each sub-range's fine child by its bounds in
@@ -2200,7 +2208,9 @@ of the cell after it, so on such a grid the next cell's plain name is already ta
 `extend_to` finds a missing cell's plain name held by one of the same parent's partitions over a
 different range, it builds the cell under its explicit-range name (`events_p2026_10_02_to_2026_10_03`,
 one step wide) and leaves the older partition untouched. A name held by anything else still stops the
-cell from being built.
+cell from being built, and so does an explicit-range name that would exceed 63 bytes (it is 14 bytes longer
+than a day cell's plain name, so a table name of 38 to 51 bytes meets this): that one cell is left unbuilt,
+never under a cut name, and the cells after it are built. Renaming the table to a name that fits frees it.
 
 The name is a human-facing label; `pgpm.part` holds the authoritative bounds. The `_to_` form is also
 what keeps `transmute`'s orphan check from mistaking a monolith for a leftover of an interrupted regrain.
