@@ -1034,6 +1034,14 @@ and re-run under the new policy. Through `maintain` the refusal appears as a `sk
 the message. A sub-range that already has a fine child is never skipped, even once it ages: its copy is
 finished instead, so an attached partition always holds its whole range.
 
+A fine child is only ever copied into when this regrain created it. If a relation it did not create already
+bears the name a sub-range's fine child would take (a partition of another table that once had this table's
+name, say, since renaming a managed table leaves its partitions' names as they were), or the name of a copy
+in progress now resolves to a different relation than the one the regrain created, `regrain_step` refuses
+with an error naming that relation before a row is copied. Nothing has been written to it: rename or drop
+it and the next tick carries on, or [`regrain_cancel`](#regrain_cancel) the run. Through `maintain` the
+refusal appears as a `skip_regrain` row carrying the message.
+
 Returns `prepared` (the first tick, which installs change capture and copies nothing), `reconciled:N`,
 `copied:N`, `reconciling:N` (the swap is waiting for the captured backlog to clear), `swapped:K` (regrain
 complete, K children attached), or a soft no-progress status: `active` (not frozen yet) or `nosubdiv`
@@ -1108,7 +1116,9 @@ pgpm.regrain_cancel(p_parent regclass) returns int
 Stops an in-flight regrain and reclaims what it has built, returning the number of in-flight fine children
 dropped. It removes change capture (and with it the `TRUNCATE` refusal), clears the delta, drops every
 not-yet-attached copy, and resets
-`config.regrain_cursor`. The parent is untouched: the source child still holds every row, so this costs the
+`config.regrain_cursor`. A copy is dropped by the identity recorded when the regrain created it, not by
+its name, so a copy that was renamed is still the one dropped and a relation that has since taken its old
+name is left alone. The parent is untouched: the source child still holds every row, so this costs the
 copying work already done and nothing else.
 
 The copies are **dropped, not kept**. Keeping them would let a later regrain resume from copies made before

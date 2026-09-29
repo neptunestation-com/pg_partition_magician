@@ -2473,8 +2473,7 @@ $$;''',
       || ' and lo::%s >= %L::%s and hi::%s <= %L::%s',
       p_parent::text, v_ncast, v_lo, v_ncast, v_ncast, v_hi, v_ncast)
     loop
-      execute format('drop table if exists %I.%I', v_nsp, r.child_name);
-      delete from pgpm.part where parent_table = p_parent and child_name = r.child_name;
+      perform pgpm._regrain_drop_copy(p_parent, v_nsp, r.child_name);   -- #631: by recorded oid
       v_made := v_made + 1;
     end loop;
     if cfg.regrain_cursor is not null or v_made > 0 then
@@ -2487,8 +2486,7 @@ $$;''',
         || ' and lo::%s >= %L::%s and hi::%s <= %L::%s',
         p_parent::text, v_ncast, v_lo, v_ncast, v_ncast, v_hi, v_ncast)
       loop
-        execute format('drop table if exists %I.%I', v_nsp, r.child_name);
-        delete from pgpm.part where parent_table = p_parent and child_name = r.child_name;
+        perform pgpm._regrain_drop_copy(p_parent, v_nsp, r.child_name);   -- #631: by recorded oid
         v_made := v_made + 1;
       end loop;
       insert into pgpm.log (parent_table, action, lo, hi, rows, method)
@@ -2681,6 +2679,38 @@ $$;''',
           "    v_sub_name := coalesce(v_sub_name,\n"
           "                           pgpm._part_name(v_rel, cfg.control_kind, v_step, v_sub_lo, v_sub_hi, cfg.partition_tz));\n",
           "    v_sub_name := pgpm._part_name(v_rel, cfg.control_kind, v_step, v_sub_lo, v_sub_hi, cfg.partition_tz);\n", 1)],
+    ),
+    "regrain_copy_into_named_relation": (
+        "bench/regrain_copy_name_clash.sh",
+        "Pre-#631 regrain_step: the copy branch skips its CREATE whenever the sub-range's name resolves "
+        "and inserts into whatever relation it resolves to. A managed table renamed aside keeps its "
+        "partitions' names, so regraining a new table created under the old name copies its rows into "
+        "the old table's attached partition (49 rows in F3-05), and a copy whose name another table has "
+        "taken over is copied into the stranger. Both refusals become 'if false'. tests/172 catches it at "
+        "the refusals it pins and at the other table's rows, named one by one.",
+        [("    if v_sub_now is not null and not v_sub_known then\n", "    if false then\n", 1),
+         ("    if v_sub_now is not null and v_sub_oid is not null and v_sub_now::oid <> v_sub_oid then\n",
+          "    if false then\n", 1)],
+    ),
+    "regrain_copy_dropped_by_name": (
+        "bench/regrain_copy_name_clash.sh",
+        "Pre-#631 regrain_cancel: every not-attached copy is dropped with `drop table %I.%I` on its "
+        "recorded name, not by the child_oid regrain_step recorded, so a copy renamed aside survives the "
+        "cancel and the unrelated table that took its old name is the one dropped. One site: "
+        "_regrain_drop_copy's anchored branch is never taken. tests/172 (B) catches it: the recorded oid "
+        "is still in pg_class and the squatter's row is gone.",
+        [("  if v_oid is null then\n    execute format('drop table if exists %I.%I', p_nsp, p_child);\n",
+          "  if true then\n    execute format('drop table if exists %I.%I', p_nsp, p_child);\n", 1)],
+    ),
+    "regrain_recreated_copy_oid_stale": (
+        "bench/regrain_copy_name_clash.sh",
+        "#631's drop by recorded oid without the recreate's re-anchoring: a copy dropped by hand "
+        "mid-regrain is created again under its pgpm.part row, but the row keeps the dead oid, so "
+        "regrain_cancel drops nothing and the recreated copy is left on disk for good (the next regrain "
+        "then refuses its name as a relation it did not create). One site: the child_oid update becomes "
+        "'if false'. tests/172 (C) catches it: a relation is still under the copy's name after the cancel.",
+        [("      if v_sub_known then\n        update pgpm.part set child_oid",
+          "      if false then\n        update pgpm.part set child_oid", 1)],
     ),
     "regrain_step_sign_unchecked": (
         "bench/regrain_step_positive.sh",
