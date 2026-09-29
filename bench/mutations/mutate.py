@@ -3478,6 +3478,19 @@ $$;''',
           "      v_idmax := array_append(v_idmax, v_m);\n"
           "      v_idnext := array_append(v_idnext, pgpm._identity_resume_at(p_parent, v_col, v_m));\n", 1)],
     ),
+    "frontier_decodes_malformed_max": (
+        "bench/frontier_malformed_max.sh",
+        "Issue #661: _frontier_native decodes a text_time max(control) without first asking whether it has "
+        "the declared shape, so a maximum PostgreSQL routed into a partition by string order (a digit outside "
+        "the alphabet, a field shorter than the width) makes _decode raise, every obtain tick is logged as "
+        "skip_obtain and the forward grid stops growing. One site: the shape fallback to now(), removed "
+        "whole. tests/175's frontier, obtain and grid-identity assertions catch it.",
+        [("  if cfg.control_kind = 'text_time'\n"
+          "     and not pgpm._text_time_shaped(v_max, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix,\n"
+          "                                    cfg.text_time_alphabet) then\n"
+          "    return pgpm._ts_text(now());\n"
+          "  end if;\n", "", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

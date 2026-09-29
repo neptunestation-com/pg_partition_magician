@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **A malformed `text_time` maximum no longer stops the forward grid** (#661). PostgreSQL routes a value
+  whose timestamp field is not in the declared shape (a digit outside the alphabet, a field shorter than the
+  width) into an existing partition by string order, and once it was `max(control)`, `_frontier_native`'s
+  decode raised on every obtain tick, each was logged as `skip_obtain` and writes were refused once the
+  lookahead ran out. The frontier now falls back to `now()` for a maximum that does not have the shape, the
+  way `check_text_time` already reports one as null; a well-formed maximum ahead of the clock still leads.
 - **The Parquet writer archives a finite timestamp past 294247 AD** (#664). PostgreSQL's range runs
   about 30 years past the last instant INT64 microseconds since 1970 can hold, and #586 clamped only the
   infinities, so a `timestamptz` or `timestamp` after 294247-01-10 04:00:54.775806 UTC raised `bigint out

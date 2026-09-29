@@ -609,6 +609,22 @@ begin
 end;
 $$;
 
+-- Does p_value have the shape _text_time_to_ts decodes: the prefix, then at least p_width characters
+-- every one of which is a digit of the alphabet? The same test check_text_time applies to a sampled
+-- value and to the column's maximum before decoding either, as a predicate rather than a raise, for a
+-- caller that has a fallback for a value that does not decode (_frontier_native, #661). translate()
+-- rather than a regex character class: an alphabet is data, and a regex would read `]`, `^` or `-` in it
+-- as syntax. It is case-sensitive, exactly as _radix_decode's position() is.
+create or replace function pgpm._text_time_shaped(p_value text, p_prefix text, p_width int, p_radix int,
+                                                  p_alphabet text default null)
+returns boolean language sql immutable as $$
+  select p_value is not null
+     and left(p_value, length(p_prefix)) = p_prefix
+     and length(p_value) >= length(p_prefix) + p_width
+     and translate(substr(p_value, length(p_prefix) + 1, p_width),
+                   coalesce(p_alphabet, substr('0123456789abcdefghijklmnopqrstuvwxyz', 1, p_radix)), '') = ''
+$$;
+
 -- p_prefix is the CONSTANT literal characters before the timestamp field (e.g. 'c' for classic cuid),
 -- verified here rather than assumed: a value that does not start with it is refused, the same
 -- discipline as uuidv7's plausibility sampling but at the single-value level.
@@ -1253,6 +1269,18 @@ begin
                  cfg.control_column, p_parent::text, cfg.control_column) into v_max;
   if v_max is null then
     return case when cfg.control_kind = 'id' then cfg.partition_anchor else pgpm._ts_text(now()) end;
+  end if;
+  -- #661: a text_time maximum that does not have the declared shape cannot be decoded, and is the clock's
+  -- business rather than an error. The bounds are strings, so PostgreSQL routes such a value (a digit
+  -- outside the alphabet, a field shorter than the width) into an existing partition by string order, and
+  -- once it is max(control) a raising _decode made every obtain tick a skip_obtain: the forward grid
+  -- stopped growing and every write past the lookahead was refused, the stall #325 exists to prevent. The
+  -- frontier falls back to now(), the same greatest() below with nothing from the data, the way
+  -- check_text_time reports an undecodable maximum as null rather than raising.
+  if cfg.control_kind = 'text_time'
+     and not pgpm._text_time_shaped(v_max, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix,
+                                    cfg.text_time_alphabet) then
+    return pgpm._ts_text(now());
   end if;
   v_decoded := pgpm._decode(cfg.control_kind, v_max,
                              cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch);
