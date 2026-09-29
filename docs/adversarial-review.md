@@ -235,7 +235,8 @@ what follows.
   rule's `merge_method`), made by the maintainer, not by the tooling. Pass 3's fix phase (39 issues,
   24 PRs, 2026-09-28 to 2026-09-29) measured a 28-minute median per PR and 17.8 hours end to end under
   squash, with nine stops for a hand; the maintainer switched the queue to merge commits on 2026-09-29,
-  after its last PR merged. From pass 4 the landing can batch once `land.sh` has a batch mode.
+  after its last PR merged. `land.sh --batch` (up to five PRs stacked, checked in parallel, built as one
+  group) and `landq.sh --batch 5` are the tooling for it; pass 4 measures what it saves.
 - **Retry only a known flake, once.** `flake_check.sh` matches a failed run against narrow signatures
   (the failing assertion, its liveness witness green, nothing else red); anything else stops the
   landing for a human. A signature nobody can point at an issue for is a way of hiding a regression.

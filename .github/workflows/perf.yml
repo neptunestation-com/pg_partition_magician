@@ -33,6 +33,13 @@ on:
 #
 # `./test.sh perf` and `./test.sh discriminate` with no --shard still run everything, which is what
 # `./test.sh ci` does locally.
+# One run per PR head: a rebase or a fix pushed to a PR cancels the superseded head's runs, which is
+# what let pass 3's twenty-one fix heads queue about 90 runs behind the runner cap (#644). A push to
+# main or a merge group is keyed by its sha, so those never cancel or queue behind one another.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # The track names below are written literally, not as a matrix variable: scripts/check_track_filters.py
   # finds a workflow's tracks by reading `./test.sh <track>` out of its run steps, and a templated track
