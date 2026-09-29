@@ -353,8 +353,11 @@ both driven by `maintain` on pg_cron:
 - `retain()` drops whole materialized partitions older than the horizon (a `retain_drop` log row).
 So retention is **best-effort**: if the table is `paused`, or if `maintain_all` is not scheduled, aged
 data lingers and storage does not fall. It bounds storage only when maintenance actually runs.
-(Watch the unit, too: `retain` is an **interval** for `time`/`uuidv7` and a **count of intervals** for
-`id` -- a misread makes the horizon far longer than intended.)
+(Watch the unit, too: `retain` is an **interval** for `time`/`uuidv7`/`text_time` and a **count of ids**
+for `id`, subtracted from the highest id written. It is not a number of partitions: `retain => 2` on a
+1000-wide id grid keeps two ids of history, which in practice is only the partition taking writes, so
+size it as partitions times the grid width.
+A misread puts the horizon far from where you meant it.)
 
 Three more shapes look like this symptom but are working as designed: a `retain_batch` cap paces drops
 one batch per tick, so a large aged-out backlog takes several ticks to clear (`retain_backlog` falling

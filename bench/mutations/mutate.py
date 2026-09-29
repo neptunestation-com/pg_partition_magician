@@ -3157,6 +3157,20 @@ $$;''',
           "                    # (the big fleet clusters), its own image, NOT in the default matrix\n"
           "                    # (TS_VERSIONS='2.9.1' ./test.sh timescale runs just one)\n", 1)],
     ),
+    "runbook_retain_count_of_intervals": (
+        "bench/doc_retain_unit.sh",
+        "Pre-#676 docs/runbook.md: 'Storage is not dropping despite a retention policy' calls an id grid's "
+        "retain a count of intervals, while pgpm subtracts it from the frontier as a raw count of ids (as "
+        "reference.md and guide.md say), so an operator setting retain => 2 on a 1000-wide grid to keep two "
+        "partitions keeps only the partition taking writes. The exact pre-#676 text.",
+        [("(Watch the unit, too: `retain` is an **interval** for `time`/`uuidv7`/`text_time` and a **count of ids**\n"
+          "for `id`, subtracted from the highest id written. It is not a number of partitions: `retain => 2` on a\n"
+          "1000-wide id grid keeps two ids of history, which in practice is only the partition taking writes, so\n"
+          "size it as partitions times the grid width.\n"
+          "A misread puts the horizon far from where you meant it.)\n",
+          "(Watch the unit, too: `retain` is an **interval** for `time`/`uuidv7` and a **count of intervals** for\n"
+          "`id` -- a misread makes the horizon far longer than intended.)\n", 1)],
+    ),
     "classify_tap_needs_description": (
         "bench/classify_claims_tap.sh",
         "Pre-#600 classify_claims.py (a): only `not ok <n> - <description>` lines count as failures, so a "
@@ -3806,6 +3820,7 @@ MUTATION_SRC = {
     # scripts, a doc and a test file, so that is what these mutate.
     "keep_both_two_way_only": "scripts/review/keep_both.py",
     "onboarding_ts_versions": "ONBOARDING.md",
+    "runbook_retain_count_of_intervals": "docs/runbook.md",
     "classify_tap_needs_description": "scripts/review/classify_claims.py",
     "classify_sh_exit_code_only": "scripts/review/classify_claims.py",
     "classify_premise_bare_word": "scripts/review/classify_claims.py",
