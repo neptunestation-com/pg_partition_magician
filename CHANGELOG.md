@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+- **Regrain's change-capture names are never cut to 63 bytes, so they are never the table's own** (#655).
+  They were `left(<table> || '_pgpm_regrain_delta', 63)` and the same for the trigger function, which for a
+  table renamed to a 63-byte name IS the table: with nothing recorded (it had never regrained)
+  `regrain_cancel` truncated it, `untransmute` dropped the restored table and `uninstall.sql` dropped it with
+  every partition, and an upgrade recorded it as its own delta. A name that does not fit whole is now
+  `pgpm_regrain_delta_<oid>` / `pgpm_regrain_capture_<oid>` (the parent's oid), so such a table also
+  regrains, and the upgrade backfill takes only a plain non-partition table for a delta. Guard
+  `bench/regrain_capture_name_fits.sh` (tests/160).
+- **`obtain` builds past an upgraded day grid's collided cell whose explicit-range name cannot fit** (#663).
+  On a day grid labelled before #503 east of UTC, the cell a legacy label collides with is built under its
+  `_p<lo>_to_<hi>` name, 14 bytes longer; for a 38 to 51 byte table name that name is over 63 bytes, and
+  its refusal escaped and unwound the whole call, so every maintenance tick logged `skip_obtain` and the
+  grid stopped growing. That one cell is now left unbuilt, never under a cut name, and the cells after it
+  are built by `obtain` and `extend_to` alike. Guard `bench/obtain_explicit_name_too_long.sh` (tests/161).
+- **`from_hypertable` refuses a hypertable whose working names would not fit, before any DDL** (#552).
+  `<rel>_pgpm_dest`, `_pgpm_delta`, `_pgpm_delta_fn` and `_pgpm_delta_trg` were cut to 63 bytes silently,
+  and from 55 bytes the destination took the change-capture delta's name, so the capture trigger made
+  every write to the live hypertable fail on NOT NULL from the copy onward. The preflight, the copy, the
+  cutover and both online drains now refuse a name over 63 bytes (a hypertable name over 48 bytes), saying
+  by how much to shorten it. Guard `bench/hypertable_derived_names.sh` (tests/timescale/db/23).
+
 - **A write block counts only when it is enabled `ALWAYS`, so coverage recorded under an origin-only or
   disabled one is discarded instead of dropped on** (#651). `_is_write_blocked` asked only whether the
   trigger existed. A pre-#450 pgpm installed the block origin-only, which a `session_replication_role =

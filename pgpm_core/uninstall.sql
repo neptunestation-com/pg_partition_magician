@@ -11,7 +11,10 @@
 --   * regrain's change capture, which lives in the PARENT's schema and so is out of the
 --     schema drop's reach: the per-parent delta table <rel>_pgpm_regrain_delta (with its
 --     identity sequence and index), the trigger function <rel>_pgpm_regrain_capture(),
---     and the pgpm_regrain_capture row trigger it drives on a child being regrained
+--     and the pgpm_regrain_capture row trigger it drives on a child being regrained (a
+--     name that would exceed 63 bytes is pgpm_regrain_delta_<oid> or
+--     pgpm_regrain_capture_<oid>() instead, never cut to 63 bytes: for a 63-byte table
+--     name the cut one would be the table itself)
 --   * an in-flight regrain's not-yet-attached fine copies, abandoned through
 --     pgpm.regrain_cancel (the source still holds every row, so only the copy work is lost)
 --

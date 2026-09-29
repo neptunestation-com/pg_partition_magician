@@ -724,6 +724,8 @@ run_perf() {
     "bench/retain_nan.sh pgpm_perf102"
     "bench/regrain_copy_name_clash.sh pgpm_perf107"
     "bench/write_block_enabled_state.sh pgpm_perf104"
+    "bench/regrain_capture_name_fits.sh pgpm_perf91"
+    "bench/obtain_explicit_name_too_long.sh pgpm_perf92"
   )
   local selected=()
   local n=${#guards[@]} idx

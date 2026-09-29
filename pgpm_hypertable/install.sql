@@ -120,6 +120,34 @@ begin
   end if;
 end $$;
 
+-- _from_hypertable_check_names: the working relations this module derives from the hypertable's name must
+-- fit PostgreSQL's 63-byte identifier limit whole (#552). They are <rel>_pgpm_dest, <rel>_pgpm_delta, its
+-- trigger function <rel>_pgpm_delta_fn and its trigger <rel>_pgpm_delta_trg, and the parser used to cut
+-- each one to 63 bytes silently. From 55 bytes the destination and the delta cut to the SAME name: the copy
+-- created the delta, the destination skeleton's `drop table if exists` dropped it and took its name, and the
+-- capture trigger on the LIVE source then inserted key-only rows into the destination, so every write to
+-- the production hypertable failed on its first NOT NULL non-key column from the copy onward. Shorter than
+-- that the cut names were at least distinct, but each could name a relation this module did not make.
+-- Refused, never truncated, as core refuses its own derived names (#510): called by the preflight (so the
+-- copy refuses before it installs anything) and by every other entry point that derives the names (the
+-- cutover and the two online drains), before any DDL. The longest suffix is 15 bytes, so a hypertable
+-- name of up to 48 bytes fits. octet_length, not length: the limit is bytes.
+create or replace function pgpm._from_hypertable_check_names(p_hypertable regclass)
+returns void language plpgsql stable as $$
+declare v_rel name; v_long text;
+begin
+  select c.relname into v_rel from pg_class c where c.oid = p_hypertable;
+  select s.n into v_long
+    from unnest(array[v_rel || '_pgpm_dest', v_rel || '_pgpm_delta', v_rel || '_pgpm_delta_fn',
+                      v_rel || '_pgpm_delta_trg']) as s(n)
+   where octet_length(s.n) > 63
+   order by octet_length(s.n) desc limit 1;
+  if v_long is not null then
+    raise exception 'pg_partition_magician: cannot migrate hypertable % -- the working relation name % is % bytes, over PostgreSQL''s 63-byte identifier limit, and pgpm never truncates a name it derives from the table''s (a cut name can collide with another: from 55 bytes the destination and the change-capture delta cut to the same one). Shorten the table name by at least % byte(s) (ALTER TABLE ... RENAME), then re-run.',
+      p_hypertable, v_long, octet_length(v_long), octet_length(v_long) - 63;
+  end if;
+end $$;
+
 -- from_hypertable_preflight: the refusal checks, factored out so they are callable on their own (a
 -- dry-run gate) and unit-testable inside a transaction. Raises a pgpm-prefixed error on any blocker;
 -- returns normally when the hypertable is migratable by this version (with a NOTICE estimating the disk).
@@ -139,6 +167,9 @@ begin
                   where hypertable_schema = v_nsp and hypertable_name = v_rel) then
     raise exception 'pg_partition_magician: % is not a hypertable', p_hypertable;
   end if;
+
+  -- (0) the names the migration derives from the table's must fit whole (#552)
+  perform pgpm._from_hypertable_check_names(p_hypertable);
 
   -- (1) continuous aggregates: no native-partition equivalent, and dropping them is data-destructive.
   select string_agg(view_name, ', ') into v_cagg from timescaledb_information.continuous_aggregates
@@ -490,6 +521,7 @@ declare
   v_keycols_q text; v_dkey_q text; v_skey_q text; v_cols_q text;
   v_ctl_type text; v_min_ctl text; v_max_ctl text; v_watermark bigint; v_keys bigint;
 begin
+  perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   v_dest := v_rel || '_pgpm_dest';
@@ -564,6 +596,7 @@ declare
   v_nsp name; v_rel name; v_dest name; v_delta name;
   v_iter int := 0; v_more boolean;
 begin
+  perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   v_dest := v_rel || '_pgpm_dest';
@@ -611,6 +644,7 @@ create or replace function pgpm.from_hypertable_drain_appends_step(
 declare
   v_nsp name; v_rel name; v_dest name; v_cols_q text; v_ctl_type text; v_hi text;
 begin
+  perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   v_dest := v_rel || '_pgpm_dest';
@@ -647,6 +681,7 @@ create or replace procedure pgpm.from_hypertable_drain_appends(
 declare
   v_nsp name; v_rel name; v_dest name; v_ctl_type text; v_watermark text; v_more boolean; v_iter int := 0;
 begin
+  perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   v_dest := v_rel || '_pgpm_dest';
@@ -706,6 +741,7 @@ begin
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   v_dest := v_rel || '_pgpm_dest';
+  perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
   -- The dimension facts the copy depended on are re-checked HERE, in the irreversible phase (issue #458).
   -- This procedure used to require only that a destination exist, and a destination left by a copy that
   -- ran under an older version, or made by hand, reaches the DROP below without preflight ever having run.
