@@ -2555,6 +2555,7 @@ declare
   v_key_id text; v_secret text; v_nsp name; v_key text;
   v_part_payload text; v_chunk text; v_cursor text; v_cursor_tid tid; v_done boolean := false;
   v_page_rows bigint; v_written bigint := 0; v_expected bigint;
+  v_page_h numeric; v_written_h numeric := 0; v_expected_h numeric;   -- the rows' identity, not only their count (#673)
   v_upload_id text; v_part int := 0; v_etag text; v_parts_xml text := '';
   v_resp http_response; h http_header;
 begin
@@ -2603,10 +2604,16 @@ begin
     v_key := cfg.prefix || p_child || '.ndjson';    v_ctype := 'application/x-ndjson';
   end if;
 
-  -- Conservation baseline: the partition's row count as the export begins. Every page's rows are
-  -- summed against it, and the export is refused rather than completed when the two differ (below),
-  -- so a paging defect or a concurrent writer surfaces as an error, never as a 200 with rows missing.
-  execute format('select count(*) from %I.%I', v_nsp, p_child) into v_expected;
+  -- Conservation (#673): every page's rows are summed into a count AND a content fingerprint (a sum of
+  -- 64-bit hashes of each exported line, as numeric so it cannot overflow), and after the last page both
+  -- are compared with the partition as it stands then; the export is refused rather than completed when
+  -- they differ (below), so a paging defect or a concurrent writer surfaces as an error, never as a 200
+  -- with rows missing. It used to compare a row COUNT taken as the export began, and a count is
+  -- invariant under compensating writes: one UPDATE that moved a row not yet paged behind the cursor
+  -- (-1) and a paged row ahead of it (+1) passed it, and the object landed without a row the partition
+  -- held before and after. The fingerprint hashes the very text each line carries (row_to_json, rendered
+  -- by this session in both reads), so equal fingerprints mean the object holds exactly the rows the
+  -- partition holds after the last page, whatever order or snapshot each page was read in.
 
   v_part_payload := '';
   v_cursor := null; v_cursor_tid := null;
@@ -2626,25 +2633,34 @@ begin
         'select coalesce(string_agg(j, e''\n'' order by k, c), ''''),
                 (array_agg(k order by k desc, c desc))[1]::text,
                 (array_agg(c order by k desc, c desc))[1],
-                count(*)
+                count(*), coalesce(sum(hashtextextended(j, 0)), 0)
            from (select row_to_json(t)::text as j, t.%I as k, t.ctid as c from %I.%I t
                   where $1 is null or (t.%I, t.ctid) > ($1::%s, $2)
                   order by t.%I, t.ctid limit $3) s',
         pcfg.control_column, v_nsp, p_child, pcfg.control_column, v_ctltype, pcfg.control_column)
-        into v_chunk, v_cursor, v_cursor_tid, v_page_rows using v_cursor, v_cursor_tid, cfg.fetch_rows;
+        into v_chunk, v_cursor, v_cursor_tid, v_page_rows, v_page_h using v_cursor, v_cursor_tid, cfg.fetch_rows;
       if v_page_rows = 0 then v_done := true;
       else
-        v_written := v_written + v_page_rows;
+        v_written := v_written + v_page_rows; v_written_h := v_written_h + v_page_h;
         v_part_payload := v_part_payload || v_chunk || e'\n';
       end if;
     end loop;
 
     -- The last page has been read: everything past this point only uploads. Refuse here, before the
     -- single PUT or the final part, so a short export never becomes a complete object; the handler
-    -- below aborts an in-flight multipart upload on the way out.
-    if v_done and v_written <> v_expected then
-      raise exception 'pg_partition_magician: archive.to_s3 of %.% paged % rows but the partition held % when the export began; refusing to write an incomplete object',
-        v_nsp, p_child, v_written, v_expected;
+    -- below aborts an in-flight multipart upload on the way out. The partition is read once more, in a
+    -- snapshot later than every page's, and must hold exactly the rows that were paged (#673).
+    if v_done then
+      execute format('select count(*), coalesce(sum(hashtextextended(row_to_json(t)::text, 0)), 0) from %I.%I t',
+                     v_nsp, p_child) into v_expected, v_expected_h;
+      if v_written <> v_expected or v_written_h <> v_expected_h then
+        raise exception 'pg_partition_magician: archive.to_s3 of %.% %, after the last page; a write changed the partition during the export, so refusing to write an incomplete object',
+          v_nsp, p_child,
+          case when v_written <> v_expected
+            then format('paged %s rows but the partition holds %s', v_written, v_expected)
+            else format('paged %s rows and the partition holds %s, but not the same rows (their content fingerprints differ)', v_written, v_expected)
+          end;
+      end if;
     end if;
 
     -- Fold the text chunk into the outgoing part body. Plain, the body IS the chunk's bytes. Compressed,

@@ -597,21 +597,25 @@ coarser `p_interval`, whose partition names are shorter). Its cutover moves thos
 parent, so [`restore_incoming_fks`](#restore_incoming_fks) re-adds the keys, on the next maintenance tick or
 when called directly.
 
-**The cutover refuses to swap unless the two sides agree.** Before anything is dropped, and still under the
-lock (so both numbers are exact), it compares `count(*)` over the source with the destination's row count
-after the catch-up. On a mismatch it raises `pg_partition_magician: from_hypertable_cutover(...) refusing to
-swap: the source holds N rows but the destination would hold M ...`, naming both counts and the difference,
-and the whole cutover rolls back: the source is untouched and still a hypertable, the destination copy is
-intact, and nothing was handed to `transmute`. On the append-only path the cause is rows that arrived during
+**The cutover refuses to swap unless the two sides hold the same rows.** Before anything is dropped, and still
+under the lock (so both sides are exact), it compares the source with the destination after the catch-up by
+row count and by a content fingerprint of every row (a sum of 64-bit hashes of each row's text over the
+columns the copy moves), so changes that cancel in a count (a copied row deleted and a late row appended, or
+an update of a copied row) are refused too. When the counts differ it raises `pg_partition_magician:
+from_hypertable_cutover(...) refusing to swap: the source holds N rows but the destination would hold M ...`,
+naming both counts and the difference; when only the rows differ, `... refusing to swap: the source and the
+destination would both hold N rows after the ... catch-up, but not the same rows ...`. Either way the whole
+cutover rolls back: the source is untouched and still a hypertable, the destination copy is intact, and
+nothing was handed to `transmute`. On the append-only path the cause is rows that arrived during
 the online window with a control value at or below the copy watermark (out-of-order appends, a backfill, or
 an update or delete of a copied row). Those rows are below the watermark, so **re-running the cutover cannot
 find them**: re-run `from_hypertable_copy` with `p_track_changes => true` (it drops and rebuilds the
 destination), or, on a keyless table, pause writes to the source for the duration of the copy. On the
 tracking path a mismatch means a write reached the source without firing the capture trigger
 (`session_replication_role = replica`, or the trigger disabled); fix the writer and re-run the copy with
-tracking. The source's `count(*)` runs under the lock and is proportional to the table's size; the
-destination's count is taken before the lock and adjusted by exactly what the catch-up changed, so it adds
-nothing there.
+tracking. The source's read runs under the lock and is proportional to the table's size (a row rendering and
+a hash per row, on top of the count); the destination's side is taken before the lock and adjusted by exactly
+the rows the catch-up changed, so it adds nothing there.
 
 **On the tracking path the cutover also refuses a write the trigger missed that changes no count.** An
 `UPDATE` under `session_replication_role = replica` leaves both counts equal, and the swap used to install

@@ -132,15 +132,22 @@ HT_CUTOVER_DEST_VERIFY = """  execute format('lock table %s in access exclusive 
       coalesce(to_regclass(format('%I.%I', v_nsp, v_dest))::oid::text, 'nothing'), quote_ident(v_rel);
   end if;
 """
-# The cutover's conservation check (#460): the source's count under the lock compared with the
-# destination's carried-in count, and the refusal. Deleting it is the pre-#460 cutover exactly: the
-# catch-up runs, nothing compares the two sides, and the DROP goes ahead on a destination that is short.
-# The count itself is left in place: since #654 the tracking path takes it in the same per-relation scan
-# as the untracked-write check, so the comparison is the part that is the conservation check.
-HT_CUTOVER_CONSERVATION = """  if v_src_n <> v_dest_n then
-    raise exception 'pg_partition_magician: from_hypertable_cutover(%) refusing to swap: the source holds % rows but the destination would hold % after the % catch-up, a difference of %. %',
-      p_hypertable, v_src_n, v_dest_n, case when v_track then 'change-tracking' else 'append-only' end,
-      abs(v_src_n - v_dest_n),
+# The cutover's conservation check (#460, #653): the source's count and content fingerprint under the lock
+# compared with the destination's carried-in count and fingerprint, and the refusal. Deleting it is the
+# pre-#460 cutover exactly: the catch-up runs, nothing compares the two sides, and the DROP goes ahead on a
+# destination that is short. The reads themselves are left in place: since #654 the tracking path takes
+# the count in the same per-relation scan as the untracked-write check, and both paths read the fingerprint
+# before this block, so the comparison is the part that is the conservation check.
+HT_CUTOVER_CONSERVATION = """  if v_src_n <> v_dest_n or v_src_h <> v_dest_h then
+    raise exception 'pg_partition_magician: from_hypertable_cutover(%) refusing to swap: %. %',
+      p_hypertable,
+      case when v_src_n <> v_dest_n
+        then format('the source holds %s rows but the destination would hold %s after the %s catch-up, a difference of %s',
+                    v_src_n, v_dest_n, case when v_track then 'change-tracking' else 'append-only' end,
+                    abs(v_src_n - v_dest_n))
+        else format('the source and the destination would both hold %s rows after the %s catch-up, but not the same rows (their content fingerprints over every column differ)',
+                    v_src_n, case when v_track then 'change-tracking' else 'append-only' end)
+      end,
       case when v_track
         then 'A write reached the source without firing the change-capture trigger (session_replication_role = replica, or the trigger disabled), so the delta never saw it. Nothing was dropped and the source is whole. Make every writer fire triggers, then re-run from_hypertable_copy with p_track_changes => true.'
         else format('Rows arrived during the online window with a control value at or below the copy watermark (out-of-order appends, a backfill, or an update or delete of a copied row), which the append-only catch-up cannot see. Nothing was dropped and the source is whole. Re-run from_hypertable_copy(%L, %L, p_track_changes => true), which needs a primary key or unique constraint; on a keyless table, pause writes to the source for the copy instead.',
@@ -1058,6 +1065,19 @@ MUTATIONS = {
         "message, which is the only thing that separates a refusal from a cutover that wrongly ran on to "
         "its COMMIT inside throws_like.",
         [(HT_CUTOVER_CONSERVATION, "", 1)],
+    ),
+    "hypertable_cutover_conservation_by_count": (
+        "bench/hypertable_cutover_conservation.sh",
+        "Pre-#653 from_hypertable_cutover(): the conservation check compares count(*) of the source with "
+        "the destination's carried-in count and nothing else, so compensating changes during the online "
+        "window pass it. A copied row deleted plus a row appended behind the watermark left 72 = 72, the "
+        "swap went ahead, the late row was lost and the deleted row came back; an update of a copied row, "
+        "or one that bypassed the capture trigger, changes no count at all. Drops the fingerprint half of "
+        "the comparison and leaves the count half and its message, so tests/timescale/db/20 (whose "
+        "shortfalls are all count-visible) still passes and only parts A, B and C of "
+        "tests/timescale/db/22 catch this, through the refusal message that names equal counts.",
+        [("  if v_src_n <> v_dest_n or v_src_h <> v_dest_h then\n",
+          "  if v_src_n <> v_dest_n then   -- MUTANT: the pre-#653 count-only comparison\n", 1)],
     ),
     "hypertable_swap_fk_record_after_handoff": (
         "bench/hypertable_swap_order.sh",
@@ -2851,6 +2871,18 @@ $$;''',
         "handler, removed whole, so only the old `when others` handler is left.",
         [(TO_S3_CANCEL_HANDLER, "end export;\nend;\n$$;\n", 1)],
     ),
+    "to_s3_conservation_by_count": (
+        "bench/archive_to_s3_conservation.sh",
+        "Pre-#673 archive.to_s3: the conservation check compares the number of rows it paged with the "
+        "partition's row count and nothing else. The pages are read across many READ COMMITTED snapshots, "
+        "so one UPDATE that moves a row not yet paged behind the (control, ctid) cursor (-1) and a paged "
+        "row ahead of it (+1) keeps the count, and the export completes with an object that holds the "
+        "first row in neither form. Drops the fingerprint half of the comparison and leaves the count half "
+        "and its message, so the quiescent export of tests/archive/db/25 still passes and only its race "
+        "part catches this: no refusal, and an object at the key.",
+        [("      if v_written <> v_expected or v_written_h <> v_expected_h then\n",
+          "      if v_written <> v_expected then   -- MUTANT: the pre-#673 count-only comparison\n", 1)],
+    ),
     "keep_both_two_way_only": (
         "bench/keep_both_diff3.sh",
         "Pre-#598 scripts/review/keep_both.py: the hunk pattern knows only the two-way conflict shape and the "
@@ -3153,6 +3185,7 @@ MUTATION_SRC = {
     "hypertable_cutover_unverified_dest": "pgpm_hypertable/install.sql",
     "hypertable_catchup_strict_watermark": "pgpm_hypertable/install.sql",
     "hypertable_cutover_no_conservation": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_conservation_by_count": "pgpm_hypertable/install.sql",
     "hypertable_swap_fk_record_after_handoff": "pgpm_hypertable/install.sql",
     "hypertable_swap_identity_from_one": "pgpm_hypertable/install.sql",
     "hypertable_derived_names_unchecked": "pgpm_hypertable/install.sql",
@@ -3177,6 +3210,7 @@ MUTATION_SRC = {
     "uninstall_keeps_regrain_copies": "pgpm_core/uninstall.sql",
     "to_s3_part_bytes_unbounded": "pgpm_archive/install.sql",
     "to_s3_abort_misses_cancel": "pgpm_archive/install.sql",
+    "to_s3_conservation_by_count": "pgpm_archive/install.sql",
     # The harness and review tooling guard themselves too (#598 to #601): their defects live in the
     # scripts, a doc and a test file, so that is what these mutate.
     "keep_both_two_way_only": "scripts/review/keep_both.py",
@@ -3214,6 +3248,7 @@ MUTATION_TRACK = {
     "hypertable_derived_names_unchecked": "timescale",
     "hypertable_cutover_untracked_unchecked": "timescale",
     "hypertable_cutover_no_horizon_trusted": "timescale",
+    "hypertable_cutover_conservation_by_count": "timescale",
 }
 
 
