@@ -71,7 +71,7 @@ q "call pgpm.transmute('public.ev', 'id', 100::bigint, p_incoming_fks => 'preser
 q "select pgpm.restore_incoming_fks('public.ev')" >/dev/null
 
 # LIVENESS for the counters: they see a VALIDATE of items.
-read -r s_a t_a <<<"$(counters)"
+read -r _ t_a <<<"$(counters)"
 flushed "select pgpm.validate_incoming_fks('public.ev')"
 read -r s_b t_b <<<"$(counters)"
 check "LIVENESS: the counters see a VALIDATE's scan of items (tuples read >= $REF_ROWS)" \
