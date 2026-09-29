@@ -763,6 +763,7 @@ run_perf() {
     "bench/carried_index_quoted_name.sh pgpm_perf116"
     "bench/transmute_identity_options.sh pgpm_perf117"
     "bench/transmute_type_squatter.sh pgpm_perf118"
+    "bench/transmute_future_maximum.sh pgpm_perf115"
   )
   local selected=()
   local n=${#guards[@]} idx

@@ -968,11 +968,12 @@ For step-by-step procedures when an alert fires, see the [runbook](runbook.md). 
 - **Monotonicity is the precondition.** UUIDv7/ULID are ms-resolution monotonic with a small
   clock-skew/late-arrival window, and a straggler still lands in whichever partition already covers its
   key. Arbitrary backdated keys break it: with no `DEFAULT`, a key outside the grid is refused outright.
-- **A future-dated id pins the monolith.** For `uuidv7` and `text_time` the frontier is the newer of the
-  column's maximum and the clock, so one row minted by a client whose clock is years wrong would set the
-  monolith's permanent `hi` years out: every row written until then lands in the monolith, `status()` looks
+- **A future-dated id pins the monolith.** For `time`, `uuidv7` and `text_time` the frontier is the newer
+  of the column's maximum and the clock (for `time`, so the monolith covers a scheduled or future-dated
+  row rather than failing on it mid-conversion), so one row minted by a client whose clock is years wrong
+  would set the monolith's permanent `hi` years out: every row written until then lands in the monolith, `status()` looks
   normal, and nothing can be regrained or dropped until the clock really gets there. The plausibility
-  sampling does not see one bad row in hundreds. `transmute` therefore refuses a maximum more than one
+  sampling (for the id kinds) does not see one bad row in hundreds. `transmute` therefore refuses a maximum more than one
   partition step plus one hour ahead of `now()`, naming the value and its decoded timestamp; ordinary skew
   of minutes is always accepted. Delete or correct the rows and re-run, or accept the far `hi` knowingly
   with `p_force_frontier => true`. [`check_uuidv7`](reference.md#check_uuidv7) and

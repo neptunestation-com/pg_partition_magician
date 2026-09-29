@@ -219,6 +219,14 @@ UNTRANSMUTE_RECHECK_RE = re.compile(
     re.MULTILINE | re.DOTALL,
 )
 
+# #668's time-kind frontier block, matched from its marker comment through the frontier assignment, so the
+# mutant is the pre-#668 `v_frontier_native := now()` with no max(control) read at all.
+TIME_FRONTIER_BLOCK_RE = re.compile(
+    r"^    -- #668: the data maximum counts for `time` too\..*?"
+    r"^    v_frontier_native := pgpm\._ts_text\(greatest\(v_max_ts, now\(\)\)\);\n",
+    re.MULTILINE | re.DOTALL,
+)
+
 # name -> (guard it must break, why this is the right defect, [(find, replace, expected_count)])
 # #344's hoist: the new parent's CREATE TABLE ... PARTITION BY RANGE, identity, owner, grants,
 # RLS and policies, moved to run BEFORE either rename so none of it adds to the outage. (The comments
@@ -3633,6 +3641,15 @@ $$;''',
         "claim. One site, the helper both guards share. tests/181's enum and domain refusals catch it.",
         [("   where n.nspname = p_nsp and t.typname = p_name and t.typrelid = 0\n",
           "   where false and n.nspname = p_nsp and t.typname = p_name and t.typrelid = 0\n", 1)],
+    ),
+    "transmute_time_frontier_clock_only": (
+        "bench/transmute_future_maximum.sh",
+        "Issue #668 put back: the time kind's frontier is now() alone and max(control) is never read, so "
+        "the #457 allowance check never runs for it and a future-dated row is found only by phase 2's "
+        "VALIDATE (a raw 23514) after phase 1 committed the write-rejecting bound and the claim. One site, "
+        "the time branch of the frontier computation. tests/178's refusal, raised-hi and infinity "
+        "assertions catch it.",
+        [(TIME_FRONTIER_BLOCK_RE, "    v_frontier_native := pgpm._ts_text(now());\n", 1)],
     ),
 }
 
