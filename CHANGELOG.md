@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+- **`set_partition_tz` judges every bound of the grid, not only the newest** (#583). It refused a zone
+  whose lattice the newest attached bound was not on, and two zones can agree there and disagree
+  further down: UTC and `Europe/London` share every month edge from November to March and none from
+  April to October, so a UTC month grid whose monolith ended on October 1 and whose top was December 1
+  was moved to London. The monolith could then never be regrained: regrain clamps its sub-ranges to the
+  child's bounds, the last one, `[09-30 23:00Z, 10-01 00:00Z)`, rendered the name of the forward cell
+  at October 1 and got no fine child, and every swap refused, auto-regrain logging `skip_regrain` on
+  every tick with a message blaming retention. Every attached bound that is a grid boundary in the
+  recorded zone must now be one in the new zone too, and the refusal names the oldest one that is not
+  and its partition. A bound the recorded zone does not put on the lattice (a finer regrain's day
+  child, or a grid built in a zone pgpm never recorded) is not judged, so the upgrade case is still
+  accepted. `tests/151` pins it; `bench/set_partition_tz_every_bound.sh` runs it against
+  `set_partition_tz_newest_bound_only`.
+
+- **A month floor never exceeds its input where a fall-back repeats midnight on the 1st** (#584).
+  In `America/Havana` the clocks go back from 01:00 CDT to 00:00 CST on 2020-11-01 and again on
+  2026-11-01, and `at time zone` resolves the repeated 00:00 to its later occurrence, 05:00Z, which is
+  where every grid in such a zone has its November edge. `_grid_floor` returned that edge for a value in
+  the first occurrence of the hour, so the floor of 04:30Z was 05:00Z, above its input; `transmute` takes
+  the floor of the oldest value as the monolith's lower bound, so a table whose oldest row fell in that
+  hour got a bound CHECK excluding it and failed at VALIDATE on every run. The floor is now the greatest
+  grid point at or below its input: such a value floors to the October edge, the cell every existing
+  grid already routes it to. The lattice itself does not move, so no existing partition changes width.
+  `tests/152` pins it; `bench/month_floor_doubled_midnight.sh` runs it against
+  `grid_floor_month_later_midnight`.
 - **`transmute(p_incoming_fks => 'preserve')` of a table referenced from a partitioned table completes**
   (#576). The cutover dropped every foreign key whose referenced table was the one being converted,
   including the per-partition copies of a key declared on a partitioned referencing table. Dropping the

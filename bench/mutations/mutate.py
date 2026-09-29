@@ -2279,6 +2279,31 @@ $$;''',
                           else format('k.%I::text', cfg.control_column) end;
 """, 1)],
     ),
+    "set_partition_tz_newest_bound_only": (
+        "bench/set_partition_tz_every_bound.sh",
+        "Pre-#583 set_partition_tz: only the newest attached bound is checked against the new zone's "
+        "lattice. UTC and Europe/London agree on every month edge from November to March and on none "
+        "from April to October, so a UTC month grid whose monolith ends on October 1 and whose top is "
+        "December 1 is moved to London, and the monolith can then never be regrained: its last clamped "
+        "sub-range renders the label of the forward cell at October 1, gets no fine child, and every "
+        "swap refuses. The every-bound check is removed whole and the top check left as it was. "
+        "tests/151's refusal (named bound, partition_tz untouched, nothing logged) is what catches it.",
+        [("""  if found then
+    raise exception 'pg_partition_magician: set_partition_tz(%, %) refused -- partition % has a bound at %""",
+          """  if false then
+    raise exception 'pg_partition_magician: set_partition_tz(%, %) refused -- partition % has a bound at %""", 1)],
+    ),
+    "grid_floor_month_later_midnight": (
+        "bench/month_floor_doubled_midnight.sh",
+        "Pre-#584 _grid_floor: the month branch returns the boundary of the value's wall month even when "
+        "that boundary lies above the value. Where a fall-back repeats midnight on the 1st "
+        "(America/Havana on 2020-11-01 and 2026-11-01) the boundary is the later midnight, so a value in "
+        "the first occurrence of that hour floored to a point above itself; transmute took the floor of "
+        "the oldest row as the monolith's lo, its bound CHECK excluded that row, and VALIDATE failed on "
+        "every run. The step back to the previous boundary is disabled, and nothing else. tests/152's "
+        "hand-derived floors and its end-to-end conversion are what catch it.",
+        [("      if v_out > ts then\n        k := k - v_months;\n", "      if false then\n        k := k - v_months;\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

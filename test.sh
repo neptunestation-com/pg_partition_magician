@@ -680,6 +680,8 @@ run_perf() {
     "bench/cutover_partitioned_referencer.sh pgpm_perf59"
     "bench/carried_index_name_length.sh pgpm_perf60"
     "bench/cutover_trigger_window.sh pgpm_perf61"
+    "bench/set_partition_tz_every_bound.sh pgpm_perf68"
+    "bench/month_floor_doubled_midnight.sh pgpm_perf69"
   )
   local selected=()
   local n=${#guards[@]} idx

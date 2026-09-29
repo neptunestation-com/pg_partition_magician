@@ -886,7 +886,7 @@ create or replace function pgpm._grid_floor(p_kind text, p_step text, p_anchor t
 returns text language plpgsql immutable as $$
 declare
   v_months int; v_fixsecs double precision; v_secs double precision;
-  k bigint; ts timestamptz; anc timestamptz; ts_wall timestamp; anc_wall timestamp;
+  k bigint; ts timestamptz; anc timestamptz; ts_wall timestamp; anc_wall timestamp; v_out timestamptz;
 begin
   if p_kind in ('time', 'uuidv7', 'text_time') then
     anc := p_anchor::timestamptz; ts := p_native::timestamptz;
@@ -903,7 +903,24 @@ begin
       k := ((extract(year from ts_wall) - extract(year from anc_wall)) * 12
           + (extract(month from ts_wall) - extract(month from anc_wall)))::bigint;
       k := (floor(k::numeric / v_months) * v_months)::bigint;
-      return pgpm._ts_text((date_trunc('month', anc_wall) + make_interval(months => k::int)) at time zone p_tz);
+      v_out := (date_trunc('month', anc_wall) + make_interval(months => k::int)) at time zone p_tz;
+      -- #584: a floor never exceeds its input. Where a fall-back repeats midnight on the 1st (America/Havana
+      -- at 01:00 CDT back to 00:00 CST on 2020-11-01 and 2026-11-01), `at time zone` resolves the repeated
+      -- 00:00 to its LATER occurrence, and that is where the grid's boundary is: _grid_next converts the
+      -- same way, so every grid ever built in such a zone has its cell edge there. A value in the FIRST
+      -- occurrence of the hour reads November on the wall clock but lies before that edge, in the October
+      -- cell, and this used to return the November edge for it, above the value: transmute took it as the
+      -- monolith's lo, the bound CHECK excluded the oldest row, and VALIDATE failed on every run. So such
+      -- a value floors to the boundary before, the greatest grid point at or below it. Moving the
+      -- boundary to the earlier midnight instead would have moved it under every existing grid in such a
+      -- zone, leaving each existing cell that spans it an hour wider than one step of the moved lattice.
+      -- In a gap (#505) the boundary is the first instant after the gap and
+      -- no value reads that month before it, so this never fires there.
+      if v_out > ts then
+        k := k - v_months;
+        v_out := (date_trunc('month', anc_wall) + make_interval(months => k::int)) at time zone p_tz;
+      end if;
+      return pgpm._ts_text(v_out);
     else
       -- fixed step: an absolute lattice of v_secs from the anchor instant. Zone-free by construction,
       -- and _grid_next's fixed branch adds the same v_secs, so the two can never disagree.
@@ -5989,9 +6006,22 @@ $$;
 -- in every zone, so its zone can always change (only the names move); a month or year step is on a
 -- different lattice in every zone with a different offset, so changing it is only possible when the grid
 -- was in fact built in the new zone all along, which is exactly the upgrade case this exists for.
+--
+-- The newest bound alone does not establish that (#583). Two zones can agree at the top and disagree
+-- further down: UTC and Europe/London share every month edge from November to March and none from April
+-- to October, so a UTC grid whose monolith ends on October 1 and whose top is December 1 passed, and the
+-- monolith could then never be regrained. regrain_step clamps its sub-ranges to the child's own bounds,
+-- so the last one was [September 30 23:00Z, October 1 00:00Z), which renders the label of the forward
+-- cell that starts at October 1, gets no fine child, and makes the swap refuse on every attempt, blaming
+-- a retention change that never happened. So every attached bound that is a grid boundary in the zone
+-- the grid is recorded in must be one in the new zone too. Only those: a bound the recorded zone does not
+-- put on the lattice is either a finer regrain's (a day child inside a month grid, on no month lattice in
+-- any zone) or, in the upgrade case, one the recorded 'UTC' never described, and neither is evidence
+-- against the new zone. The top check above stays unconditional, since it is the one that judges a grid
+-- whose recorded zone is wrong.
 create or replace function pgpm.set_partition_tz(p_parent regclass, p_tz text)
 returns void language plpgsql as $$
-declare cfg pgpm.config; v_tz text; v_top text;
+declare cfg pgpm.config; v_tz text; v_top text; v_off_child name; v_off_bound text;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
@@ -6015,6 +6045,21 @@ begin
          <> v_top::timestamptz then
     raise exception 'pg_partition_magician: set_partition_tz(%, %) refused -- the grid built so far ends at %, which is not a % grid boundary in %; obtain() would skip every candidate that half-overlaps an existing partition and leave a permanent hole from there to the next boundary in the new zone. The zone is fixed by the grid already built: if that grid was built in a zone pgpm had not yet recorded (an upgrade), name THAT zone.',
       p_parent, p_tz, v_top, cfg.partition_step, v_tz;
+  end if;
+  -- #583: every recorded-zone boundary among the attached bounds, not just the newest; the oldest one off
+  -- the new lattice is named
+  select p.child_name, b.bound into v_off_child, v_off_bound
+    from pgpm.part p cross join lateral (values (p.lo), (p.hi)) b(bound)
+   where p.parent_table = p_parent and p.attached
+     and pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor, b.bound, cfg.partition_tz)::timestamptz
+         = b.bound::timestamptz
+     and pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor, b.bound, v_tz)::timestamptz
+         <> b.bound::timestamptz
+   order by b.bound::timestamptz, p.child_name
+   limit 1;
+  if found then
+    raise exception 'pg_partition_magician: set_partition_tz(%, %) refused -- partition % has a bound at %, which is a % grid boundary in % (the zone the grid is recorded in) but not in %. The newest bound agrees, and that is not enough: a regrain in the new zone clamps a sub-range to that bound, the clamped sub-range renders the label of the neighbouring cell, gets no fine child, and the swap refuses on every attempt. The zone is fixed by the grid already built: if that grid was built in a zone pgpm had not yet recorded (an upgrade), name THAT zone.',
+      p_parent, p_tz, v_off_child, v_off_bound, cfg.partition_step, cfg.partition_tz, v_tz;
   end if;
   update pgpm.config set partition_tz = v_tz where parent_table = p_parent;
   insert into pgpm.log (parent_table, action, method)
