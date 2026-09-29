@@ -107,6 +107,8 @@ if ! "$PY" -c 'import pyarrow.parquet, duckdb' >/dev/null 2>&1; then
   printf 'FAIL  %-58s %s\n' "the independent readers (pyarrow, DuckDB) are available" "no"
   fail=1
 else
+  # one label today (range); the loop shape is kept for the next encoder case, hence the disable
+  # shellcheck disable=SC2043
   for label in range; do
     hex="$OUT/pq_keyless_$label.hex"
     q -d "$DB" -Atq -c "select encode(bytes, 'hex') from t21.enc where label = '$label'" > "$hex" 2>/dev/null
