@@ -664,6 +664,7 @@ run_perf() {
     "bench/month_step_dst_gap.sh pgpm_perf22"
     "bench/transmute_resume_zone.sh pgpm_perf23"
     "bench/archive_chunk_ties.sh pgpm_perf38"
+    "bench/archive_chunk_uuidv7_ties.sh pgpm_perf54"
     "bench/retire_regrain_source.sh pgpm_perf39"
     "bench/throws_pinned.sh pgpm_perf40"
     "bench/retain_interval_sign.sh pgpm_perf44"
