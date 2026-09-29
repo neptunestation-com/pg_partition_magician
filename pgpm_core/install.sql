@@ -1046,15 +1046,24 @@ $$;
 -- skips a candidate whose name already exists, so a shared label was a permanent one-day hole, and it
 -- also meant set_partition_tz on a day grid moved every label onto its neighbour's. Labelled in UTC, a
 -- day grid's zone changes nothing about it at all: bounds and names are both absolute.
+--
+-- p_explicit asks for the explicit-range form _p<lo>_to_<hi> even for a one-step range (#572). No caller
+-- asks for it unless the plain name is taken by another range's partition of the same parent, which only
+-- an upgrade can arrange: a day or week child named before #503 carries its WALL date in partition_tz,
+-- and east of UTC with a local-midnight anchor that is exactly the UTC date of the cell after it. See
+-- _obtain_name. A one-step explicit name never equals a plain name (no `_to_`) nor a coarse one (its two
+-- labels are one step apart, a coarse child's at least two).
 drop function if exists pgpm._part_name(name, text, text, text);
+drop function if exists pgpm._part_name(name, text, text, text, text, text);
 create or replace function pgpm._part_name(p_relname name, p_kind text, p_step text, p_lo_native text,
-                                           p_hi_native text, p_tz text)
+                                           p_hi_native text, p_tz text, p_explicit boolean default false)
 returns name language plpgsql immutable as $$
 declare v_months int; v_secs double precision; fmt text; v_coarse boolean; v_lo text; v_hi text; v_label_tz text;
         v_name text;
 begin
   v_coarse := p_hi_native is not null
-          and pgpm._native_gt(p_kind, p_hi_native, pgpm._grid_next(p_kind, p_step, p_lo_native, p_tz));
+          and (p_explicit
+               or pgpm._native_gt(p_kind, p_hi_native, pgpm._grid_next(p_kind, p_step, p_lo_native, p_tz)));
   if p_kind in ('time', 'uuidv7', 'text_time') then
     v_months := (extract(year from p_step::interval) * 12 + extract(month from p_step::interval))::int;
     v_secs   := extract(epoch from p_step::interval);
@@ -1087,6 +1096,41 @@ begin
       p_relname, v_name, octet_length(v_name), octet_length(v_name) - 63;
   end if;
   return v_name::name;
+end;
+$$;
+
+-- _obtain_name: the name obtain and extend_to build a MISSING cell [p_lo, p_hi) under, or null to leave it
+-- unbuilt. Callers ask only after their overlap check has found no attached partition over the range, so
+-- a relation holding the plain name is never this cell.
+--
+-- #572: #503 relabelled day and week cells from the wall date of their start in partition_tz to the UTC
+-- date, and left the names of existing children alone. East of UTC with the grid anchored at local
+-- midnight (Asia/Tokyo: cells start 15:00Z), a cell's wall date is its UTC date plus one, so the new
+-- label of every cell is the old label of the cell before it, and on an upgraded grid the first cell
+-- past the last pre-#503 child renders the name that child carries. Both callers used to take that for
+-- "already built" and skip the cell: a one-day hole that refused every write into it, nothing logged,
+-- while the cells after it were built. So when the plain name belongs to one of THIS parent's own
+-- partitions (by identity: pgpm.part.child_oid) over a DIFFERENT range, the cell is built under its
+-- explicit-range name instead, and the legacy child is left exactly as it is: no rename, no lock on it.
+-- A name held by anything else is left alone as before: that is a relation pgpm does not own.
+create or replace function pgpm._obtain_name(p_parent regclass, cfg pgpm.config, p_nsp name, p_rel name,
+                                             p_lo text, p_hi text)
+returns name language plpgsql stable as $$
+declare v_name name; v_held regclass;
+begin
+  v_name := pgpm._part_name(p_rel, cfg.control_kind, cfg.partition_step, p_lo, p_hi, cfg.partition_tz);
+  v_held := to_regclass(format('%I.%I', p_nsp, v_name));
+  if v_held is null then return v_name; end if;
+  if not exists (
+       select 1 from pgpm.part p
+        where p.parent_table = p_parent and p.child_oid = v_held::oid
+          and not (pgpm._native_gt(cfg.control_kind, p.hi, p_lo)
+                   and pgpm._native_gt(cfg.control_kind, p_hi, p.lo))) then
+    return null;
+  end if;
+  v_name := pgpm._part_name(p_rel, cfg.control_kind, cfg.partition_step, p_lo, p_hi, cfg.partition_tz, true);
+  if to_regclass(format('%I.%I', p_nsp, v_name)) is not null then return null; end if;
+  return v_name;
 end;
 $$;
 
@@ -1251,17 +1295,18 @@ begin
     exception when datetime_field_overflow or numeric_value_out_of_range then
       exit;
     end;
-    v_name := pgpm._part_name(v_rel, cfg.control_kind, cfg.partition_step, v_lo, v_hi, cfg.partition_tz);
-    continue when to_regclass(format('%I.%I', v_nsp, v_name)) is not null;
     -- skip a candidate that overlaps an EXISTING attached partition (e.g. the coarse monolith that
     -- covers the active interval, REDESIGN.md section 7). Half-open [v_lo,v_hi) overlaps [p.lo,p.hi)
     -- iff p.hi > v_lo and v_hi > p.lo. Creating it would error on an overlapping partition; pgpm.part
-    -- is the source of truth, and the non-overlap invariant holds over attached rows only.
+    -- is the source of truth, and the non-overlap invariant holds over attached rows only. Asked BEFORE
+    -- the name (#572): a taken name does not mean the cell is built, see _obtain_name.
     continue when exists (
       select 1 from pgpm.part p
        where p.parent_table = p_parent and p.attached
          and pgpm._native_gt(cfg.control_kind, p.hi, v_lo)
          and pgpm._native_gt(cfg.control_kind, v_hi, p.lo));
+    v_name := pgpm._obtain_name(p_parent, cfg, v_nsp, v_rel, v_lo, v_hi);
+    continue when v_name is null;
 
     perform pgpm._create_partition(cfg, v_nsp, v_rel, null, v_name, v_lo, v_hi);
     v_made := v_made + 1;
@@ -1337,16 +1382,18 @@ begin
       raise exception 'pg_partition_magician: extend_to(%, %) reaches the % grid''s ceiling before covering it; cannot extend that far',
         p_parent, p_value, cfg.control_kind;
     end;
-    v_name := pgpm._part_name(v_rel, cfg.control_kind, cfg.partition_step, v_lo, v_hi, cfg.partition_tz);
-    if to_regclass(format('%I.%I', v_nsp, v_name)) is null
-       and not exists (
+    -- overlap first, then the name (#572, see _obtain_name), exactly as obtain asks
+    if not exists (
          select 1 from pgpm.part p
           where p.parent_table = p_parent and p.attached
             and pgpm._native_gt(cfg.control_kind, p.hi, v_lo)
             and pgpm._native_gt(cfg.control_kind, v_hi, p.lo))
     then
-      perform pgpm._create_partition(cfg, v_nsp, v_rel, null, v_name, v_lo, v_hi);
-      v_made := v_made + 1;
+      v_name := pgpm._obtain_name(p_parent, cfg, v_nsp, v_rel, v_lo, v_hi);
+      if v_name is not null then
+        perform pgpm._create_partition(cfg, v_nsp, v_rel, null, v_name, v_lo, v_hi);
+        v_made := v_made + 1;
+      end if;
     end if;
     exit when not pgpm._native_gt(cfg.control_kind, v_target_lo, v_lo);
     v_lo := v_hi;
