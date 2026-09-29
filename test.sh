@@ -714,6 +714,9 @@ run_perf() {
     "bench/doc_env_knobs.sh pgpm_perf78"
     "bench/classify_claims_tap.sh pgpm_perf79"
     "bench/tap_verdict.sh pgpm_perf80"
+    "bench/retire_straddle.sh pgpm_perf81"
+    "bench/archive_overclaim.sh pgpm_perf82"
+    "bench/transmute_abort_owner.sh pgpm_perf83"
   )
   local selected=()
   local n=${#guards[@]} idx
