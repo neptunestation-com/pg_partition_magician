@@ -180,6 +180,13 @@ alter table pgpm.config add column if not exists archive_probe_sample int not nu
 -- of a large backlog taking longer to fully catch up than fanning out would. Raise it (or set it
 -- null for the old unlimited behavior) if faster catch-up matters more than that bound.
 alter table pgpm.config add column if not exists archive_batch int default 1;
+-- maintain_all's turn order (#579): when this parent last had its turn in a sweep. A sweep is ONE
+-- top-level statement (`call pgpm.maintain_all()`), and statement_timeout runs from the start of the
+-- statement, not from each internal COMMIT, so every parent in a sweep shares one clock. In a fixed order
+-- a backlog early in the list (each of its ticks documented-size) spent that clock tick after tick and the
+-- parents behind it were cancelled every time, never archived or retired. The sweep visits the parent
+-- whose turn is oldest first instead; see maintain_all. null = never had one, which goes first.
+alter table pgpm.config add column if not exists sweep_turn_at timestamptz;
 
 -- Registry of managed partitions (excludes the DEFAULT). lo/hi are NATIVE-grid
 -- values as text (timestamptz for time/uuidv7, numeric for id).
@@ -6255,8 +6262,16 @@ begin
   -- on every later tick, forever, and the coarse children behind it were never reached. With the second
   -- predicate here a child the target cannot split is skipped, not reselected: it stays as it is, and
   -- stays counted in status().coarse_partitions. progress().coarse_frozen mirrors this test.
+  --
+  -- The search runs INSIDE the regrain step's handler (#590), not ahead of it: the grid floor below
+  -- comes from pgpm._frontier_native, which reads the parent under the 200 ms lock_timeout, so while
+  -- another session holds a lock on the parent the 55P03 surfaces here. Outside the handler it raised out
+  -- of maintain() into maintain_all(), which has no handler by design, and the sweep stopped before every
+  -- parent ordered after this one. Inside it, it is this step's deferral like any other: skip_regrain,
+  -- regrain=deferred, retried next tick. bench/regrain_candidate_lock_race.sh guards it.
   if cfg.regrain_to is not null then
-    execute format(
+    begin   -- #590: the candidate search is part of the regrain step
+      execute format(
       'select child_name from pgpm.part p where p.parent_table = %L::regclass and p.attached'
       || ' and pgpm._native_gt(%L, p.hi, pgpm._grid_next(%L, %L, p.lo, %L))'
       || ' and pgpm._native_gt(%L, p.hi, pgpm._grid_next(%L, %L, p.lo, %L))'   -- #515: the target subdivides it
@@ -6267,24 +6282,24 @@ begin
       pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor, pgpm._frontier_native(p_parent), cfg.partition_tz),
       pgpm._native_type(cfg.control_kind))
       into v_regrain_child;
-    v_batch := cfg.regrain_batch;   -- regrain's own microbatch size
-  end if;
+      v_batch := cfg.regrain_batch;   -- regrain's own microbatch size
 
-  -- Auto-regrain (REDESIGN.md sec 12): feather the oldest frozen coarse child (found up front as
-  -- v_regrain_child) one COPY microbatch (sized by regrain_batch) toward regrain_to per tick. Isolated in
-  -- its own subtransaction; a lock race or a soft status just retries next tick. regrain COPIES and never
-  -- deletes: the source stays whole and attached until the atomic swap, so it never moves a referenced row out of the parent, never opens the snapshot() gap, and
-  -- needs NO FK leash -- it is NOT gated on a live preserve FK and runs whether or not one is suspended.
-  if v_regrain_child is not null then
-    begin
-      v_regrain := pgpm.regrain_step(p_parent, v_regrain_child, cfg.regrain_to, v_batch);
+      -- Auto-regrain (REDESIGN.md sec 12): feather the oldest frozen coarse child (v_regrain_child, found
+      -- just above) one COPY microbatch (sized by regrain_batch) toward regrain_to per tick. Isolated in
+      -- its own subtransaction; a lock race or a soft status just retries next tick. regrain COPIES and
+      -- never deletes: the source stays whole and attached until the atomic swap, so it never moves a
+      -- referenced row out of the parent, never opens the snapshot() gap, and needs NO FK leash -- it is
+      -- NOT gated on a live preserve FK and runs whether or not one is suspended.
+      if v_regrain_child is not null then
+        v_regrain := pgpm.regrain_step(p_parent, v_regrain_child, cfg.regrain_to, v_batch);
+      else
+        v_regrain := 'none';   -- auto-regrain on, but no frozen coarse child to work
+      end if;
     exception when others then
       v_regrain := 'deferred';
       v_note := v_note || ' regrain_deferred';
       insert into pgpm.log (parent_table, action, method) values (p_parent, 'skip_regrain', left(sqlerrm, 200));
     end;
-  elsif cfg.regrain_to is not null then
-    v_regrain := 'none';   -- auto-regrain on, but no frozen coarse child to work
   end if;
 
   -- BOUNDARY (#279). regrain_step's swap is atomic within itself; this only stops its locks reaching
@@ -6333,7 +6348,7 @@ language plpgsql as $$
 -- v_status exists only to receive maintain()'s INOUT: PL/pgSQL requires a writable argument for an
 -- output parameter, so the parameter's default cannot be relied on here. The sweep discards it; the
 -- per-parent detail is already in pgpm.log.
-declare r record; v_status text; v_warn boolean;
+declare r record; v_status text; v_warn boolean; v_first boolean := true;
 begin
   -- #275: undo any conversion whose session died mid-way, before anything else. Independent of
   -- pgpm.config on purpose: a half-converted table is not registered yet.
@@ -6367,16 +6382,35 @@ begin
   -- every parent's locks accumulate until the last one is done, so a ten-table sweep ends holding ten
   -- tables' worth. Progress: a parent that raises no longer costs the parents before it their work.
   --
-  -- Ordered so a sweep is reproducible: same tables, same order, every tick, which makes pgpm.log
-  -- readable and a partial sweep's stopping point meaningful.
+  -- Ordered by whose turn is oldest (#579), not by a fixed key. The whole sweep is one top-level
+  -- statement, so statement_timeout runs across every parent in it, and the query_canceled that ends a
+  -- sweep escapes maintain()'s `when others` (by PostgreSQL's design, rightly). In a fixed order a parent
+  -- with a backlog near the front spent the shared clock on every tick and the parents behind it were
+  -- cancelled on every tick, though each one's own maintain() fits the timeout comfortably. A parent's
+  -- turn is stamped (config.sweep_turn_at) when its maintain() returns, so one cut short keeps its old
+  -- stamp and leads the next sweep. The FIRST parent of a sweep is stamped before it starts as well: it
+  -- runs on the whole clock, so if even that is not enough it has had its fair turn, and without the
+  -- early stamp a parent whose own tick overruns the timeout would lead, and cancel, every sweep. So each
+  -- sweep moves its first parent to the back, and within N sweeps (N managed parents) every parent has
+  -- led one with the whole clock to itself: one whose own tick fits the timeout is never starved. Still
+  -- reproducible: with nothing cut short the order is the same every tick (ties by oid), which keeps
+  -- pgpm.log readable and a partial sweep's stopping point meaningful. The order is read once, when the
+  -- loop opens, so the stamps below do not reorder the sweep in flight.
+  -- bench/maintain_all_sweep_turns.sh guards it.
   --
   -- Deliberately NO exception handler around the call. One would abort the whole sweep on the first
   -- failing parent -- and worse, transaction control is illegal anywhere below an EXCEPTION handler, so
   -- wrapping this would silently disable every COMMIT inside maintain() and put the locks straight back.
   -- maintain() already isolates each of its own steps, so the raises that reach here are the ones that
   -- should stop a sweep: a table that is not managed, or a config row pointing at something gone.
-  for r in select parent_table from pgpm.config order by parent_table loop
+  for r in select parent_table from pgpm.config order by sweep_turn_at asc nulls first, parent_table loop
+    if v_first then   -- #579: the sweep's first parent has had its turn once it starts
+      update pgpm.config set sweep_turn_at = clock_timestamp() where parent_table = r.parent_table;
+      commit;
+      v_first := false;
+    end if;
     call pgpm.maintain(r.parent_table, v_status);
+    update pgpm.config set sweep_turn_at = clock_timestamp() where parent_table = r.parent_table;
     commit;
   end loop;
 end;

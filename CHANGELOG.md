@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- **`maintain_all` visits the table whose turn is oldest first, so a backlog cannot starve the tables
+  behind it** (#579). The scheduled sweep is one top-level statement, so `statement_timeout` runs
+  across every table in it, and the cancellation escapes `maintain()`'s step handlers. The sweep went
+  `order by parent_table` every tick, so a table with a backlog of documented-size archive chunks near
+  the front spent the clock on every tick and every table behind it was cancelled on every tick, never
+  archived or retired. A new `config.sweep_turn_at` records each table's turn when its `maintain()`
+  returns, and for the sweep's first table as it starts; the sweep orders by it, oldest (or never) first.
+  A table cut short leads the next sweep, and one whose own tick overruns the timeout cannot lead every
+  sweep. Guarded by `tests/147` through `bench/maintain_all_sweep_turns.sh`, against the mutations
+  `maintain_all_fixed_sweep_order` and `maintain_all_no_first_turn_stamp`.
+
+- **A lock race in `maintain()`'s auto-regrain candidate search defers the regrain step instead of
+  ending the sweep** (#590). The candidate search reads the parent (through `_frontier_native`) under
+  the tick's 200 ms `lock_timeout`, and it ran ahead of the regrain step's exception handler, so while
+  another session held a lock on a table with `regrain_to` set the lock timeout raised out of
+  `maintain()` and `maintain_all()` stopped before every table ordered after it. The search now runs
+  inside the regrain step's handler: a `skip_regrain` row, `regrain=deferred`, retried next tick.
+  Guarded by `tests/148` through `bench/regrain_candidate_lock_race.sh`, against the mutation
+  `regrain_candidate_outside_handler`.
 - **`set_partition_tz` judges every bound of the grid, not only the newest** (#583). It refused a zone
   whose lattice the newest attached bound was not on, and two zones can agree there and disagree
   further down: UTC and `Europe/London` share every month edge from November to March and none from

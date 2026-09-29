@@ -106,6 +106,7 @@ pgpm.config:archive_fn
 pgpm.config:archive_byte_budget
 pgpm.config:archive_probe_sample
 pgpm.config:archive_batch
+pgpm.config:sweep_turn_at
 pgpm.part:attached
 pgpm.part:retiring_at
 pgpm.part:retiring_oid

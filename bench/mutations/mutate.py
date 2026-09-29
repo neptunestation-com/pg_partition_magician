@@ -294,8 +294,11 @@ TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the N
 # only apparently so.
 MAINTAIN_NO_COMMITS_EDITS = [
     (BOUNDARY_RE, "", 5),
-    ("    call pgpm.maintain(r.parent_table, v_status);\n    commit;\n",
-     "    call pgpm.maintain(r.parent_table, v_status);\n", 1),
+    ("    call pgpm.maintain(r.parent_table, v_status);\n"
+     "    update pgpm.config set sweep_turn_at = clock_timestamp() where parent_table = r.parent_table;\n"
+     "    commit;\n",
+     "    call pgpm.maintain(r.parent_table, v_status);\n"
+     "    update pgpm.config set sweep_turn_at = clock_timestamp() where parent_table = r.parent_table;\n", 1),
 ]
 
 # transmute's two #509 precondition blocks. Each is one contiguous block anchored on its opening comment
@@ -2303,6 +2306,50 @@ $$;''',
         "every run. The step back to the previous boundary is disabled, and nothing else. tests/152's "
         "hand-derived floors and its end-to-end conversion are what catch it.",
         [("      if v_out > ts then\n        k := k - v_months;\n", "      if false then\n        k := k - v_months;\n", 1)],
+    ),
+    "maintain_all_fixed_sweep_order": (
+        "bench/maintain_all_sweep_turns.sh",
+        "Pre-#579 maintain_all: the sweep visits the parents `order by parent_table`, the same fixed order "
+        "every tick. The whole sweep is one top-level statement, so statement_timeout runs across all of "
+        "it, and the query_canceled that ends it escapes maintain()'s `when others`: a parent with a "
+        "backlog near the front spends the shared clock on every tick and every parent behind it is cut "
+        "short on every tick, never archived or retired, although its own maintain() fits the timeout. "
+        "Only the ORDER BY goes back; the turn stamps are still written, so the mutant is exactly 'the "
+        "order ignores them'. tests/147's tick 2, which must lead with the parent tick 1 cut short, is "
+        "what catches it, in both of its scenarios.",
+        [("  for r in select parent_table from pgpm.config order by sweep_turn_at asc nulls first, parent_table loop\n",
+          "  for r in select parent_table from pgpm.config order by parent_table loop\n", 1)],
+    ),
+    "maintain_all_no_first_turn_stamp": (
+        "bench/maintain_all_sweep_turns.sh",
+        "The #579 fix without its second half: turns are stamped only when a parent's maintain() "
+        "returns, and the sweep's first parent is not stamped before it starts. A parent whose own tick "
+        "overruns the timeout then never gets a stamp at all, so it leads, and is cancelled in, every "
+        "sweep, and every other parent is cut short on every tick: the fixed-order starvation back, "
+        "now for everyone rather than for the tail. tests/147's second scenario (P overruns on its own, "
+        "Q must retire on tick 2) is what catches it; the first scenario passes against this mutant, "
+        "which is why it is a mutation of its own.",
+        [("    if v_first then   -- #579: the sweep's first parent has had its turn once it starts\n"
+          "      update pgpm.config set sweep_turn_at = clock_timestamp() where parent_table = r.parent_table;\n"
+          "      commit;\n"
+          "      v_first := false;\n"
+          "    end if;\n",
+          "", 1)],
+    ),
+    "regrain_candidate_outside_handler": (
+        "bench/regrain_candidate_lock_race.sh",
+        "Pre-#590 maintain(): the auto-regrain candidate is searched for BEFORE the regrain step's "
+        "exception handler. The search takes the grid floor from pgpm._frontier_native, which reads the "
+        "parent under the tick's 200 ms lock_timeout, so while another session holds a lock on a parent "
+        "with regrain_to set the 55P03 raises out of maintain() into maintain_all(), which has no "
+        "handler by design, and the sweep stops before every parent ordered after it: no write-block, "
+        "archive or retain for them while the lock lasts. Moves the handler's `begin` from above the "
+        "search to below it, which is the pre-fix block structure exactly: the search unguarded, the "
+        "regrain_step call still guarded.",
+        [("    begin   -- #590: the candidate search is part of the regrain step\n      execute format(\n",
+          "      execute format(\n", 1),
+         ("      into v_regrain_child;\n      v_batch := cfg.regrain_batch;   -- regrain's own microbatch size\n",
+          "      into v_regrain_child;\n    begin\n      v_batch := cfg.regrain_batch;   -- regrain's own microbatch size\n", 1)],
     ),
 }
 
