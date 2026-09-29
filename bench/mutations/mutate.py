@@ -3023,6 +3023,20 @@ $$;''',
           "  if not exists (\n"
           "       select 1 from pg_inherits i\n", 1)],
     ),
+    "write_block_presence_only": (
+        "bench/write_block_enabled_state.sh",
+        "Pre-#651 _is_write_blocked: true whenever the pgpm_write_block trigger EXISTS, whatever its enable "
+        "state, so a block that is present and does not fire (origin-only, as a pre-#450 pgpm installed it and "
+        "a session_replication_role = replica writer passes; or disabled by hand) reads as in force. The #452/#564 "
+        "discard in _enforce_write_blocks and retire() then keeps the coverage recorded under it, "
+        "_install_write_block repairs the trigger to ALWAYS, the stale watermark reads as full coverage, and "
+        "retire() drops the partition with a row no strategy was handed. One site, the tgenabled = 'A' "
+        "condition. tests/170 catches it on all three paths: maintain's step, a direct retire(), and "
+        "_archive_step archiving under an origin-only block.",
+        [("     where t.tgname = 'pgpm_write_block' and c.relname = p_child and c.relnamespace = v_nsp_oid\n"
+          "       and t.tgenabled = 'A'\n",
+          "     where t.tgname = 'pgpm_write_block' and c.relname = p_child and c.relnamespace = v_nsp_oid\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

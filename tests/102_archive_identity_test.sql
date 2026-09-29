@@ -98,9 +98,13 @@ select is((select count(*)::int from pg_inherits i
 -- the trigger behind before upgrading. That is precisely why the check below is still worth having
 -- and is not made redundant by #429: _is_write_blocked stays name-based on purpose, so a trigger
 -- from any source still makes a substituted name eligible, and this is the backstop for it.
+-- ENABLE ALWAYS as well (#651): _is_write_blocked counts only a block in force, so an origin-only
+-- trigger, as that pre-#429 pgpm left it, would not make the name a candidate at all. A block in force
+-- on the substitute (an operator enabling it ALWAYS, say) is the state the backstop still has to catch.
 select format($$ create trigger pgpm_write_block before insert or update or delete
                    on public.%I for each row execute function pgpm._write_block_raise() $$,
               :'ai_doomed') \gexec
+select format('alter table public.%I enable always trigger pgpm_write_block', :'ai_doomed') \gexec
 
 select ok(pgpm._is_write_blocked('public.ai102', :'ai_doomed'),
   'LIVENESS: the substitute is write-blocked, so it satisfies _archive_step''s eligibility test');
