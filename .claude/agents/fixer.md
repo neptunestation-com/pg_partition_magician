@@ -32,6 +32,13 @@ fragments; never prefix-match `pgpm.log.action`; `throws_*` pinned around commit
    mutation builds and your guard FAILS against it (`bench/discriminate.sh` or the guard with the mutant
    path); `bash -n test.sh`; every mutation still builds (`python3 bench/mutations/mutate.py <name>
    <src> <out>` for each). Markdown you touched: `npx -y markdownlint-cli2@0.13.0 <files>`.
+   Then the legs the PG 15 gate does not run, for what your diff touches: `shellcheck` at CI's version
+   (`ludeeus/action-shellcheck@master`, current stable) on every `bench/*.sh` you added or changed;
+   `bench/upgrade_in_place.sh <container> pgpm_perf8` when `install.sql` adds a column (its degrade list
+   must name the column); your new test file on PG 18 as well (`pgpm_test:18`) when it leans on session
+   settings (DateStyle, TimeZone, abbreviations, collation); and the discriminate install check when
+   your mutation targets a module on a track that did not carry that module before. Pass 3 lost five
+   landings to exactly these.
 5. Docs: `CHANGELOG.md` gets one bullet in the file's style; `docs/reference.md` or `docs/guide.md` when
    a contract or a log action changed (`scripts/check_living_docs.sh` will tell you). No em dashes.
 
