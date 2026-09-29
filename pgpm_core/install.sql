@@ -3804,6 +3804,50 @@ begin
 end;
 $$;
 
+-- #674, #641: refuse a regrain target step whose SHAPE the grid cannot place, with the rules transmute's
+-- preflight applies to a partition_step. _regrain_step_forward asks only "does grid_next move forward", and
+-- grid_next reads a step the way the grid does, so it cannot see a step the grid half-ignores:
+--   * a month count mixed with a duration ('1 month 1 day', '1 month -40 days', '-1 month 40 days').
+--     grid_next's calendar branch keeps the months and drops the rest, so it moved forward and the step
+--     passed, while _grid_floor raises 'mixed month + duration interval unsupported' on it, so every tick's
+--     regrain_step failed and logged skip_regrain once a coarse child froze. '1 month -40 days' is even below
+--     zero by interval ordering, which the forward test was meant to refuse. transmute refuses the shape.
+--   * a step finer than a day on a date column. The fine cells' bounds truncate to dates, as transmute's
+--     #581 date rule says of a partition_step: two consecutive cells read as one date.
+--   * a non-integral step on an integer column (int2, int4, int8). #582 made fractional labels distinct so
+--     a numeric column can regrain toward '0.5', but on a bigint column the first fine cell's bound
+--     ('0.0' rendered for a bigint) is invalid input and every tick logged skip_regrain with the capture
+--     trigger left on the source. transmute's id step is a bigint by signature, so the rule matches it.
+-- Called from _regrain_step_forward, so set_regrain (at call time) and regrain_step (which regrain(),
+-- regrain_history() and maintain go through) refuse it alike.
+create or replace function pgpm._regrain_step_shape(p_parent regclass, p_step text)
+returns void language plpgsql stable as $$
+declare cfg pgpm.config; v_typname name; v_months numeric; v_rest interval;
+begin
+  select * into cfg from pgpm.config where parent_table = p_parent;
+  select t.typname into v_typname
+    from pg_attribute a join pg_type t on t.oid = a.atttypid
+   where a.attrelid = p_parent and a.attname = cfg.control_column and not a.attisdropped;
+  if cfg.control_kind = 'id' then
+    if v_typname in ('int2', 'int4', 'int8') and p_step::numeric <> trunc(p_step::numeric) then
+      raise exception 'pg_partition_magician: regrain target step % for % is not a whole number, but its control column % is %, which holds whole numbers only -- the fine cells'' bounds could not be written as that type, so every tick would fail creating the first one; give a whole-number step (a fractional one is for a numeric column)',
+        p_step, p_parent, quote_ident(cfg.control_column), v_typname;
+    end if;
+  else
+    v_months := extract(year from p_step::interval) * 12 + extract(month from p_step::interval);
+    v_rest   := p_step::interval - make_interval(months => v_months::int);
+    if v_months <> 0 and v_rest <> interval '0' then
+      raise exception 'pg_partition_magician: regrain target step % for % mixes a month count with a duration (mixed month + duration interval unsupported) -- the grid steps by calendar months or by a fixed number of seconds, never both, so no tick could floor it, and transmute refuses the same shape as a partition_step; give a whole number of months or a pure duration',
+        p_step, p_parent;
+    end if;
+    if v_typname = 'date' and v_months = 0 and extract(epoch from p_step::interval)::numeric % 86400 <> 0 then
+      raise exception 'pg_partition_magician: regrain target step % for % is not a whole number of days, but its control column % is a date, which holds whole days -- the fine cells'' bounds would truncate to dates and two cells would read as one; give a whole number of days or months',
+        p_step, p_parent, quote_ident(cfg.control_column);
+    end if;
+  end if;
+end;
+$$;
+
 -- #588: refuse a regrain target step that does not move the grid forward. Every regrain precondition
 -- compares widths ("coarser than partition_step", "subdivides the child"), and a step of zero or below is
 -- narrower than anything, so it passed them all: '0' divides by zero in _grid_floor on every tick, and a
@@ -3825,6 +3869,7 @@ begin
     raise exception 'pg_partition_magician: regrain target step % for % is not positive -- a step of zero or below cannot split anything (zero divides by zero on every tick, a negative one walks the copy cursor backwards); give a step greater than zero and no coarser than partition_step %',
       p_step, p_parent, cfg.partition_step;
   end if;
+  perform pgpm._regrain_step_shape(p_parent, p_step);   -- #674, #641: and a step the grid can place
 end;
 $$;
 
@@ -6454,8 +6499,9 @@ drop function if exists pgpm.feathering_validation(regclass, interval, interval)
 -- bigint step as text for id) turns it on: each maintenance tick feathers the oldest frozen coarse child
 -- one budget-sized microbatch toward that granularity. null turns it off (regrain stays operator-driven via
 -- regrain()/regrain_history()). This only PACES regraining across ticks; regrain_step enforces its own
--- preconditions (frozen, default-clear), so enabling it is always safe: a zero or negative target (#588)
--- and one coarser than partition_step (issue #341) are refused (see the guards below), and maintain() only
+-- preconditions (frozen, default-clear), so enabling it is always safe: a zero or negative target (#588),
+-- one the grid cannot place (#674, #641) and one coarser than partition_step (issue #341) are refused (see
+-- the guards below), and maintain() only
 -- ever selects a child
 -- the target subdivides (#515), so no target can wedge it. Changing the target while a run is in flight
 -- is refused too (#554): the run's copies belong to the step it was started at.
@@ -6471,7 +6517,10 @@ begin
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
 
   -- #588: a zero or negative target is refused first. It is "finer" than any partition_step, so the #341
-  -- comparison below would pass it, and it wedges every tick (see _regrain_step_forward).
+  -- comparison below would pass it, and it wedges every tick (see _regrain_step_forward). The same call
+  -- refuses a shape the grid cannot place (#674, #641: a month count mixed with a duration, a sub-day step
+  -- on a date column, a fractional step on an integer column; see _regrain_step_shape), which both
+  -- comparisons below read through _grid_next and would pass just the same.
   if p_target_step is not null then perform pgpm._regrain_step_forward(p_parent, p_target_step); end if;
 
   -- #341: a p_target_step COARSER than partition_step is refused at call time. maintain()'s auto-regrain
@@ -6506,7 +6555,9 @@ begin
 
   -- #510: the fine sub-range names at the target step must fit PostgreSQL's 63-byte identifier limit, and
   -- _part_name refuses rather than truncates. Ask it here, at call time, for the anchor cell's name at the
-  -- target step (labels are fixed-width per granularity, so one cell stands for all of them), rather than
+  -- target step (a time label is fixed-width per granularity, so one cell stands for all of them; an id
+  -- label is not quite: #582 leaves a value at or past 10^19 unpadded and appends a fraction, so on such
+  -- a numeric key a later cell's name can still be refused at tick time; #641), rather than
   -- letting every later tick raise the same refusal from regrain_step and log skip_regrain forever: the
   -- #341 wedge again, one level down. A finer step has a wider label than partition_step's, so a table
   -- that passed transmute can still be refused here, and the message says by how many bytes.

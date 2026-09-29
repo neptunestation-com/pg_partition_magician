@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- **A regrain target step that mixes a month count with a duration is refused** (#674). `set_regrain` judged a
+  target only through `_grid_next`, whose calendar branch keeps the months and drops the rest, so
+  `'1 month 1 day'`, `'1 month -40 days'` (below zero by interval ordering) and `'-1 month 40 days'` were
+  stored, and once a coarse child froze every tick's `regrain_step` failed in `_grid_floor` ("mixed month +
+  duration interval unsupported") and logged `skip_regrain`. The new `_regrain_step_shape`, called from the
+  #588 forward check so `set_regrain`, `regrain_step`, `regrain()` and `regrain_history()` all refuse it,
+  applies the rules `transmute` applies to a `partition_step`, including its date rule: a step that is not
+  a whole number of days is refused on a `date` column. Guard `bench/regrain_target_shape.sh` (tests/164),
+  mutations `regrain_step_mixed_month_duration` and `regrain_step_date_subday`.
+- **A fractional regrain target on an integer control column is refused** (#641). `set_regrain('2.5')` on a
+  bigint grid passed every call-time check, and every tick after the prepare failed creating the first fine
+  child (invalid input syntax for type bigint) and logged `skip_regrain` with the capture trigger left on the
+  source. `_regrain_step_shape` refuses a step that is not a whole number on an `int2`, `int4` or `int8`
+  column (a `numeric` column still regrains toward `'0.5'`). Guard `bench/regrain_target_integral.sh`
+  (tests/165), mutation `regrain_step_fraction_on_integer`.
 - **A preserved incoming key whose referencing table was dropped no longer wedges `untransmute` or regrain**
   (#658). `pgpm.dropped_fk` was never reconciled with the catalog, so once the application dropped a
   referencing table (or a restored key by hand) `untransmute` and regrain's swap died on the record every
