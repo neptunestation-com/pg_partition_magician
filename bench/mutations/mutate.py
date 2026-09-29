@@ -1201,6 +1201,28 @@ MUTATIONS = {
         [(HT_CUTOVER_NO_HORIZON_FALLBACK,
           "      v_fresh := 'false';   -- MUTANT: no horizon read as nothing to check\n", 1)],
     ),
+    "hypertable_preflight_no_exclusion_check": (
+        "bench/hypertable_exclusion_refusal.sh",
+        "Pre-#675 from_hypertable_preflight(): nothing refuses an EXCLUDE constraint, and nothing in the "
+        "migration carries one (CREATE TABLE ... LIKE takes CHECK and NOT NULL only, the cutover re-adds "
+        "only p and u keys and skips constraint-backed indexes), so the migrated table accepts the rows "
+        "the hypertable rejected. Deletes the preflight's call, leaving the cutover's own, so the "
+        "preflight, from_hypertable and from_hypertable_copy assertions of tests/timescale/db/26 fail "
+        "(no exception, or the 2D000 of a first COMMIT, where the message naming both constraints is "
+        "pinned) and the cutover's still passes.",
+        [("  perform pgpm._from_hypertable_check_exclusion(p_hypertable);\n\n  -- (4) an outgoing FK",
+          "\n  -- (4) an outgoing FK", 1)],
+    ),
+    "hypertable_cutover_no_exclusion_check": (
+        "bench/hypertable_exclusion_refusal.sh",
+        "Pre-#675 from_hypertable_cutover(): the irreversible phase re-checks the dimension but not an "
+        "EXCLUDE constraint, so a destination left by an older version's copy, or made by hand, reaches "
+        "the swap and the constraint is dropped with the hypertable. Deletes the cutover's call only, so "
+        "only tests/timescale/db/26's cutover assertion fails (the 2D000 of the pre-drain-free "
+        "cutover's first COMMIT where the refusal naming both constraints is pinned).",
+        [("  perform pgpm._from_hypertable_check_exclusion(p_hypertable);\n  -- Keep the OID this check resolved",
+          "  -- Keep the OID this check resolved", 1)],
+    ),
     "transmute_dropped_fk_parent_not_carried": (
         "bench/hypertable_swap_order.sh",
         "transmute's cutover moves every pgpm.dropped_fk record whose referencing_table is the table it "
@@ -3752,6 +3774,8 @@ MUTATION_SRC = {
     "hypertable_cutover_untracked_unchecked": "pgpm_hypertable/install.sql",
     "hypertable_cutover_no_horizon_trusted": "pgpm_hypertable/install.sql",
     "hypertable_cutover_no_lock_timeout": "pgpm_hypertable/install.sql",
+    "hypertable_preflight_no_exclusion_check": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_no_exclusion_check": "pgpm_hypertable/install.sql",
     "archive_lz77_hash_scratch": "pgpm_archive/install.sql",
     "archive_encode_array_agg_unnest": "pgpm_archive/install.sql",
     "archive_deflate_six_arrays": "pgpm_archive/install.sql",
@@ -3816,6 +3840,8 @@ MUTATION_TRACK = {
     "hypertable_cutover_untracked_unchecked": "timescale",
     "hypertable_cutover_no_horizon_trusted": "timescale",
     "hypertable_cutover_conservation_by_count": "timescale",
+    "hypertable_preflight_no_exclusion_check": "timescale",
+    "hypertable_cutover_no_exclusion_check": "timescale",
 }
 
 

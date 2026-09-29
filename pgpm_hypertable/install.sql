@@ -21,8 +21,8 @@
 -- preserved (the copy omits them from its column list and they recompute on
 -- insert), and CHECK constraints, defaults, and NOT NULL are carried onto the
 -- partitioned parent by transmute. Refused up front: continuous aggregates, space
--- partitioning (>1 dimension), an integer-time dimension, and a p_control that is
--- not the dimension column; transmute also refuses a nullable control column, a
+-- partitioning (>1 dimension), an integer-time dimension, a p_control that is
+-- not the dimension column, and an exclusion constraint (#675); transmute also refuses a nullable control column, a
 -- key that excludes it, or a bare unique index.
 --
 -- Catch-up has two modes. By default the cutover catches up append-only: rows
@@ -149,6 +149,27 @@ begin
   end if;
 end $$;
 
+-- _from_hypertable_check_exclusion: an EXCLUDE constraint is refused, never dropped (issue #675). Nothing in
+-- the migration carries one: the copy's CREATE TABLE ... LIKE takes CHECK and NOT NULL only, the cutover
+-- re-adds only primary and unique keys, and its index loop skips every constraint-backed index. Nor could
+-- it be carried in general, since PostgreSQL before 17 allows no exclusion constraint on a partitioned table
+-- at all. So the migrated table used to accept the rows the constraint had rejected, with no error and no
+-- log row. Called by the preflight (and through it from_hypertable and from_hypertable_copy) and by the
+-- cutover in its own right, for the reason _from_hypertable_check_dimension gives: a destination left by an
+-- older version's copy, or made by hand, reaches the swap without the preflight ever having run. Names
+-- every such constraint at once, so an operator with several does not re-run once per constraint.
+create or replace function pgpm._from_hypertable_check_exclusion(p_hypertable regclass)
+returns void language plpgsql as $$
+declare v_excl_q text;
+begin
+  select string_agg(quote_ident(conname), ', ' order by conname) into v_excl_q
+    from pg_constraint where conrelid = p_hypertable and contype = 'x';
+  if v_excl_q is not null then
+    raise exception 'pg_partition_magician: cannot migrate hypertable % -- its exclusion constraint(s) (%) cannot be carried. from_hypertable rebuilds the table as a plain copy and hands it to transmute, and neither carries an EXCLUDE constraint (PostgreSQL before 17 allows none on a partitioned table), so the migrated table would silently accept the rows the constraint rejects. Drop the constraint(s) (ALTER TABLE % DROP CONSTRAINT <name>) if the table can do without them, then re-run from_hypertable.',
+      p_hypertable, v_excl_q, p_hypertable::text;
+  end if;
+end $$;
+
 -- from_hypertable_preflight: the refusal checks, factored out so they are callable on their own (a
 -- dry-run gate) and unit-testable inside a transaction. Raises a pgpm-prefixed error on any blocker;
 -- returns normally when the hypertable is migratable by this version (with a NOTICE estimating the disk).
@@ -203,6 +224,10 @@ begin
   -- bounded on the DIMENSION's chunk ranges; an integer dimension passes (3) and copies nothing, because its
   -- ranges are not in the column the copy reads. See _from_hypertable_check_dimension.
   perform pgpm._from_hypertable_check_dimension(p_hypertable, p_control);
+
+  -- (3c) an EXCLUDE constraint, which nothing in the migration carries (issue #675). See
+  -- _from_hypertable_check_exclusion.
+  perform pgpm._from_hypertable_check_exclusion(p_hypertable);
 
   -- (4) an outgoing FK the source never validated (issue #264). The migration carries outgoing FKs by
   -- replaying each definition verbatim on the private destination and then VALIDATEing it, so a NOT VALID
@@ -783,6 +808,8 @@ begin
   -- Only the two dimension checks, not the whole preflight: its disk and time NOTICEs describe a copy that
   -- has already happened, and its foreign-key eligibility was settled before that copy did any work.
   perform pgpm._from_hypertable_check_dimension(p_hypertable, p_control);
+  -- ...and an EXCLUDE constraint, for the same reason (issue #675): the swap below would drop it silently.
+  perform pgpm._from_hypertable_check_exclusion(p_hypertable);
   -- Keep the OID this check resolved, not just the fact that something answered (#422). The swap
   -- below renames this relation INTO the source's name, so it is the half of the swap that ends with
   -- a relation BECOMING the production table -- and between here and there the destination is
