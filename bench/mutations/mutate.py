@@ -336,10 +336,14 @@ TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the N
 MAINTAIN_NO_COMMITS_EDITS = [
     (BOUNDARY_RE, "", 5),
     ("    call pgpm.maintain(r.parent_table, v_status);\n"
-     "    update pgpm.config set sweep_turn_at = clock_timestamp() where parent_table = r.parent_table;\n"
+     "    if pgpm._config_try_lock(r.parent_table) then\n"
+     "      update pgpm.config set sweep_turn_at = clock_timestamp() where parent_table = r.parent_table;\n"
+     "    end if;\n"
      "    commit;\n",
      "    call pgpm.maintain(r.parent_table, v_status);\n"
-     "    update pgpm.config set sweep_turn_at = clock_timestamp() where parent_table = r.parent_table;\n", 1),
+     "    if pgpm._config_try_lock(r.parent_table) then\n"
+     "      update pgpm.config set sweep_turn_at = clock_timestamp() where parent_table = r.parent_table;\n"
+     "    end if;\n", 1),
 ]
 
 # transmute's two #509 precondition blocks. Each is one contiguous block anchored on its opening comment
@@ -2651,7 +2655,9 @@ $$;''',
         "Q must retire on tick 2) is what catches it; the first scenario passes against this mutant, "
         "which is why it is a mutation of its own.",
         [("    if v_first then   -- #579: the sweep's first parent has had its turn once it starts\n"
-          "      update pgpm.config set sweep_turn_at = clock_timestamp() where parent_table = r.parent_table;\n"
+          "      if pgpm._config_try_lock(r.parent_table) then\n"
+          "        update pgpm.config set sweep_turn_at = clock_timestamp() where parent_table = r.parent_table;\n"
+          "      end if;\n"
           "      commit;\n"
           "      v_first := false;\n"
           "    end if;\n",
@@ -3032,6 +3038,19 @@ $$;''',
         [("    if pgpm._native_gt(p_kind, p_covered_hi, p_hi) then\n"
           "      return 'covered_hi must not exceed hi: the strategy is claiming coverage of a range it was not handed';\n"
           "    end if;\n", "", 1)],
+    ),
+    "config_stamp_waits_on_row": (
+        "bench/config_stamp_lock.sh",
+        "Pre-#662 sweeps: the bookkeeping writes to a parent's pgpm.config row (maintain_all's two "
+        "sweep_turn_at stamps, maintain_obtain's clearing and arming of obtain_retry_after) WAIT for the row "
+        "instead of skipping it while another transaction holds it. Drops SKIP LOCKED from "
+        "_config_try_lock, the one site all four writes go through, so each waits exactly as the bare "
+        "UPDATE did: under a lock_timeout the 55P03 escapes the sweep, which has no handler, and the first "
+        "parent's stamp, with none, waits until the sweeper's statement_timeout. tests/167 catches it in "
+        "both parts: the sweeps return ERROR, and the parents behind the held one keep their aged "
+        "partitions and unbuilt lookahead.",
+        [("  perform 1 from pgpm.config where parent_table = p_parent for no key update skip locked;\n",
+          "  perform 1 from pgpm.config where parent_table = p_parent for no key update;\n", 1)],
     ),
     "abort_owner_alive_by_pid_only": (
         "bench/transmute_abort_owner.sh",

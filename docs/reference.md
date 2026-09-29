@@ -1265,7 +1265,10 @@ its turn recorded as it starts, so even a table whose own tick overruns the time
 cancelled in, every sweep. Each sweep therefore moves its first table to the back, and every table that
 fits the timeout on its own completes at least once every N sweeps for N managed tables. With nothing cut
 short the order is the same every tick. Size `archive_byte_budget` so that one table's `maintain` fits
-the timeout; the whole sweep need not.
+the timeout; the whole sweep need not. A turn is recorded only if the table's `pgpm.config` row is free:
+while another transaction holds it (an open transaction around a setter such as `set_obtain`, a
+synchronous `regrain()`), the sweep skips that one write rather than waiting on the row or stopping, and
+the table, whose own `maintain` still ran, leads the next sweep instead.
 
 ### `maintain_obtain`
 
@@ -1284,7 +1287,9 @@ turn a lost lock race into refused writes, so below that threshold obtain runs a
 notes `obtain_backoff_bypassed`. A no-op while paused, checked independently: it does not assume
 `maintain` ran first, or at all, in the same tick. Around `pgpm.obtain()` it is the same operational
 wrapper (lock timeout, back-off, exception handling, logging, transaction boundary) that `maintain`
-provides for its own steps.
+provides for its own steps. The back-off's own writes never stop `maintain_obtain_all`: while another
+transaction holds the table's `pgpm.config` row, clearing an expired back-off or arming a new one is
+skipped, so the next tick either finds the expired back-off again or retries `obtain` straight away.
 
 A procedure that commits, so like `maintain` it must be called at the **top level**, never inside a
 surrounding transaction; the scheduled path satisfies this for free.
