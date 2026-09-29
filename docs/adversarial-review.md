@@ -232,7 +232,10 @@ what follows.
   conflict. Measured: about 24 minutes per PR, a 10-hour landing for 24 PRs. The alternative is a
   merge-commit queue, which preserves ancestry and allows groups of five, at the cost of merge commits
   and the fixers' individual commits in `main`'s history. That is a ruleset decision (the merge queue
-  rule's `merge_method`, `SQUASH` today), made by the maintainer, not by the tooling.
+  rule's `merge_method`), made by the maintainer, not by the tooling. Pass 3's fix phase (39 issues,
+  24 PRs, 2026-09-28 to 2026-09-29) measured a 28-minute median per PR and 17.8 hours end to end under
+  squash, with nine stops for a hand; the maintainer switched the queue to merge commits on 2026-09-29,
+  after its last PR merged. From pass 4 the landing can batch once `land.sh` has a batch mode.
 - **Retry only a known flake, once.** `flake_check.sh` matches a failed run against narrow signatures
   (the failing assertion, its liveness witness green, nothing else red); anything else stops the
   landing for a human. A signature nobody can point at an issue for is a way of hiding a regression.
@@ -243,7 +246,10 @@ what follows.
   by construction, and #501's guard now rebuilds the pre-#504 legacy grid by hand, still discriminated.
 - **Pace the pushes.** A batch of heads pushed at once is a CI storm: pass 2's seventeen heads queued
   45 runs against a limit of 20 concurrent jobs and exhausted a registry's anonymous pull quota. Third-
-  party images are cached in the workflows; heads are pushed as the queue reaches them.
+  party images are cached in the workflows; heads are pushed as the queue reaches them. Pass 3's
+  twenty-one heads queued about 90 runs, and the cache never reached `main` (a merge group reads only
+  its own ref's caches and `main`'s, and `main`'s runs had met the quota): seed `main` deliberately, and
+  give the PR workflows a `concurrency` group so a rebase cancels the superseded head's runs.
 - **Close by re-running the reproductions.** `closure.sh` re-runs every reproduction of the pass against
   the fixed `main`, using the verifier's rebuilt version where one exists; `close_comments.py` posts
   the evidence on each issue and reopens one whose sound reproduction still fails. Every reproduction
@@ -312,7 +318,7 @@ blind spots (seeds missed, by lens): <list>
 |---|---|---|---|---|---|---|---|
 | 1 | 2026-09-24 | `a72c5bf` (0.6.0) | 76 (25 filed as T1: #441 to #465) | ~106 | not measured | none | eight finders plus a coordinator; no independent verifier; the 76 each had a reproduction but at least one premise (#441's version range) was later corrected, so precision is unknown. Fixed by #466 to #490, merged 2026-09-25. Baseline only. |
 | 2 | 2026-09-25 | `581e87a` (0.6.0 + 30) | 49 (7 T1; 44 distinct defects in 27 root-cause groups: #496 to #522) | 73 | 1.00 | 9 / 1.00 | ten finders (eight slices, two duplicated on a second model), one verifier per candidate, planted seeds, all under the method; five reproductions rebuilt by verifiers; five tooling defects found and fixed while running; fix phase closed all 27 root-cause groups by 2026-09-26 (PRs #525 to #549; 62 of 73 reproductions pass on `56b3b40`, the eleven others explained), follow-ups #550 to #558; see [the record](reviews/2026-09-25.md). |
-| 3 | 2026-09-28 | `db64096` (0.6.0 + 64) | 55 (9 T1; 46 distinct defects in 39 root-cause groups: #563 to #601) | 73 | 0.92 | 9 / 1.00 | ten finders (eight slices, S3 and S8 duplicated: opus primary, fable duplicate), one verifier per candidate plus one tie-breaker, three reproductions rebuilt and stored, four known-and-open re-finds recorded on their issues, two fell; 4.44M agent tokens, 1 h 35 min hunt to last verdict; see [the record](reviews/2026-09-28.md). |
+| 3 | 2026-09-28 | `db64096` (0.6.0 + 64) | 55 (9 T1; 46 distinct defects in 39 root-cause groups: #563 to #601) | 73 | 0.92 | 9 / 1.00 | ten finders (eight slices, S3 and S8 duplicated: opus primary, fable duplicate), one verifier per candidate plus one tie-breaker, three reproductions rebuilt and stored, four known-and-open re-finds recorded on their issues, two fell; 4.44M agent tokens, 1 h 35 min hunt to last verdict; fix phase closed all 39 root-cause groups by 2026-09-29 (PRs #603 to #626, 23 fixers, 28-minute median landing under squash, nine hand interventions; 65 of 73 reproductions pass on `46e1d45`, the eight others explained), follow-ups #627 to #644; the merge queue was switched to merge commits after its last PR; see [the record](reviews/2026-09-28.md). |
 
 Pass 1 predates this document and is recorded as the baseline it is: a high yield with no measured
 sensitivity or precision. Pass 2 was the first to run under the method above; its record is the first

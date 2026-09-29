@@ -41,8 +41,14 @@ each PR the fixers report in `$WORK/prs.tsv` with its test, guard and mutation n
 - Land them with `scripts/review/land.sh <pr> <pr> ...`, Tier 1 first. It rebases each PR onto the
   current main, resolves the three list files, verifies what CI would fail on, waits for the head
   checks, enqueues, and waits for the merge; it retries only the flakes `flake_check.sh` knows and
-  stops on anything else. Expect about 25 minutes per PR: under a squash queue the PRs cannot be
-  pipelined (the script's header says why).
+  stops on anything else. Under a squash queue (passes 2 and 3) expect 25 to 30 minutes per PR, one at
+  a time (the script's header says why); since 2026-09-29 the queue takes merge commits, which keep a
+  stacked PR's ancestry and allow groups of up to five once `land.sh` has a batch mode.
+- Before the first landing, make sure `main` holds the third-party image cache: a merge group can read
+  only its own ref's caches and `main`'s, and a `main` push run that met the registry quota saved
+  nothing. `gh workflow run timescale.yml --ref main` once seeds it. The fixers' pushes are a CI storm
+  (pass 3: 21 heads, about 90 queued runs, the first landing's checks still queued when `land.sh`'s
+  60-minute wait expired); a wait timeout is a restart, not a failure.
 - When it stops: read why. A non-list-file conflict is resolved by hand in the worktree it names, then
   pushed; a CI failure that is not a known flake is a real failure, so read the job log before doing
   anything. Never rebase-and-rerun a batch by hand; that is the queue's job.

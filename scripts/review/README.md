@@ -164,8 +164,9 @@ script can remove is the squash queue's shape: a squash commit has no ancestry l
 once PR k-1 lands, PR k conflicts with `main` in those files and must be rebased and re-checked before
 it can be queued. Stacking PRs on each other does not help (the queue's three-way merge sees the same
 conflict), and a plain `git rebase main` of a stacked PR replays its predecessor onto its own squash.
-Measured in pass 2: about 24 minutes per PR, serial. A merge-commit queue would allow groups of five;
-that is a repository ruleset decision, recorded in `docs/adversarial-review.md`.
+Measured in pass 2: about 24 minutes per PR, serial; in pass 3, a 28-minute median over 24 PRs. The
+queue was switched to merge commits on 2026-09-29, after pass 3's last PR; a merge-commit queue keeps a
+stacked PR's ancestry, so a batch mode for `land.sh` (up to five PRs per group) is the next step.
 
 Assign before spawning. Fixers working in parallel each take "the next free" test number and guard
 database unless the coordinator hands them out; pass 2 ended with seven files numbered 124. `land.sh`
