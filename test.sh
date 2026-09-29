@@ -717,6 +717,8 @@ run_perf() {
     "bench/retire_straddle.sh pgpm_perf81"
     "bench/archive_overclaim.sh pgpm_perf82"
     "bench/transmute_abort_owner.sh pgpm_perf83"
+    "bench/set_retain_horizon.sh pgpm_perf84"
+    "bench/text_time_default_collation.sh pgpm_perf85"
   )
   local selected=()
   local n=${#guards[@]} idx
