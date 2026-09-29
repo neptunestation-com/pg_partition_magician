@@ -2588,11 +2588,24 @@ $$;''',
         "site, the helper both timestamp branches call.",
         [
             ("  select case\n"
-             "    when isfinite(v) then round(extract(epoch from v) * 1000000)::int8\n"
+             "    when isfinite(v) then round(extract(epoch from least(v, '294247-01-10 04:00:54.775806+00'::timestamptz)) * 1000000)::int8\n"
              "    when v > 'epoch'::timestamptz then 9223372036854775807::int8\n"
              "    else -9223372036854775807::int8\n"
              "  end;\n",
              "  select round(extract(epoch from v) * 1000000)::int8;\n", 1),
+        ],
+    ),
+    "parquet_timestamp_no_ceiling": (
+        "bench/archive_parquet_timestamp_range.sh",
+        "Pre-#664 archive._pq_epoch_micros: the infinities are still the INT64 sentinels, but a FINITE value "
+        "is cast without the clamp at 294247-01-10 04:00:54.775806 UTC, so one past it (PostgreSQL's range "
+        "runs 30 years further) raises 'bigint out of range' on every encode of its chunk, and one just past "
+        "it comes out of extract(epoch)'s float8 fallback below its predecessor. maintain() logs skip_archive "
+        "each tick and the partition holding it is never archived or retired. One site, the helper both "
+        "timestamp branches call.",
+        [
+            ("    when isfinite(v) then round(extract(epoch from least(v, '294247-01-10 04:00:54.775806+00'::timestamptz)) * 1000000)::int8\n",
+             "    when isfinite(v) then round(extract(epoch from v) * 1000000)::int8\n", 1),
         ],
     ),
     "parquet_decimal_scale_above_precision": (
@@ -3500,6 +3513,7 @@ MUTATION_SRC = {
     "to_s3_compress_unread": "pgpm_archive/install.sql",
     "parquet_numeric_scale_unsigned": "pgpm_archive/install.sql",
     "parquet_timestamp_no_infinity": "pgpm_archive/install.sql",
+    "parquet_timestamp_no_ceiling": "pgpm_archive/install.sql",
     "parquet_decimal_scale_above_precision": "pgpm_archive/install.sql",
     "parquet_range_refuses_keyless": "pgpm_archive/install.sql",
     "archive_huffman_temp_table": "pgpm_archive/install.sql",

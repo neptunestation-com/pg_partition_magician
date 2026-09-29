@@ -497,12 +497,21 @@ $$;
 -- every tick and at archive_batch 1 nothing younger of the table was archived or retired (#586). They
 -- are written as INT64 max and minus INT64 max, the pair DuckDB's reader decodes as infinity and
 -- -infinity (INT64 min it decodes as a year-290309 BC date, which is why the negative sentinel is not
--- INT64 min, PostgreSQL's own internal one); pyarrow hands back the same two integers. No finite
--- value comes near either: PostgreSQL's range ends in 294276 AD, about 9.2e18 microseconds short.
+-- INT64 min, PostgreSQL's own internal one); pyarrow hands back the same two integers.
+--
+-- A FINITE value can pass the positive one (#664). PostgreSQL counts from 2000, not 1970, so its range
+-- ends in 294276 AD, about 30 years after 294247-01-10 04:00:54.775807 UTC, where INT64 microseconds
+-- since 1970 run out. Past that the cast raised 'bigint out of range', the #586 wedge again, and just
+-- before the cast overflowed extract(epoch) had already dropped to float8 precision and returned a
+-- number below the last exact instant's. So everything past 294247-01-10 04:00:54.775806 UTC (INT64 max
+-- minus 1 exactly) is written as INT64 max minus 1: DuckDB's largest finite timestamp, one below the
+-- +infinity sentinel, so it stays finite and in order for a reader. The clamp is on the timestamp,
+-- before extract, because extract's result is the thing that goes wrong. The far past needs none:
+-- PostgreSQL's range starts in 4714 BC, about -2.1e17 microseconds, nowhere near the negative sentinel.
 create or replace function archive._pq_epoch_micros(v timestamptz) returns int8
 language sql immutable as $$
   select case
-    when isfinite(v) then round(extract(epoch from v) * 1000000)::int8
+    when isfinite(v) then round(extract(epoch from least(v, '294247-01-10 04:00:54.775806+00'::timestamptz)) * 1000000)::int8
     when v > 'epoch'::timestamptz then 9223372036854775807::int8
     else -9223372036854775807::int8
   end;

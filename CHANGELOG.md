@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **The Parquet writer archives a finite timestamp past 294247 AD** (#664). PostgreSQL's range runs
+  about 30 years past the last instant INT64 microseconds since 1970 can hold, and #586 clamped only the
+  infinities, so a `timestamptz` or `timestamp` after 294247-01-10 04:00:54.775806 UTC raised `bigint out
+  of range` on every encode of its chunk (`skip_archive` every tick, the partition never archived or
+  retired), and one just after it came out below its predecessor. Such a value is now written as INT64
+  max minus 1, the largest timestamp DuckDB reads back as finite, one below the `infinity` sentinel.
+  `tests/archive/db/27_parquet_timestamp_range_test.sql` pins the values and bytes and runs the issue's
+  two ticks; `bench/archive_parquet_timestamp_range.sh` reads the files back with pyarrow and DuckDB and
+  is required to fail against the `parquet_timestamp_no_ceiling` mutation.
 - **transmute and untransmute resume an identity sequence past every id handed out before their lock**
   (#656). Both read `max(id)` and the sequence's position before the lock that stops writers (transmute in
   its preflight, untransmute before its second gate), so ids a writer took in between were issued again
