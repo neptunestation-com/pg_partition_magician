@@ -398,6 +398,16 @@ begin
     execute format('drop trigger if exists %I on %I.%I', v_trg, v_nsp, v_rel);
     execute format('create trigger %I after insert or update or delete on %I.%I for each row execute function %I.%I()',
                    v_trg, v_nsp, v_rel, v_nsp, v_trgfn);
+    -- The trigger is origin-only, and cannot be anything else: TimescaleDB refuses ENABLE ALWAYS on a
+    -- hypertable and on its chunks, so a write under session_replication_role = replica never reaches the
+    -- delta, and an UPDATE changes no count for the cutover's conservation check to see (#654). Record the
+    -- xmin horizon of a snapshot taken HERE, before any chunk is read: a source row version older than it
+    -- was committed before every chunk copy's snapshot, so the copy holds it as it is. The cutover checks
+    -- every row version at or past it against the reconciled destination and refuses the swap on one the
+    -- destination does not hold. Kept on the delta itself, which every copy drops and rebuilds, so the
+    -- horizon and the apparatus it vouches for always come from the same copy.
+    execute format('comment on table %I.%I is %L', v_nsp, v_delta,
+                   'pgpm from_hypertable horizon ' || pg_snapshot_xmin(pg_current_snapshot())::text);
     commit;   -- the apparatus must survive the phase boundary (copy commits, cutover reads the delta)
   end if;
 
@@ -737,6 +747,10 @@ declare
   v_dest_oid regclass;   -- which relation the destination check found, re-verified under lock (#422)
   v_akey oid;            -- the key the append-only catch-up anti-joins by; null on a keyless table (#460)
   v_src_n bigint; v_dest_n bigint; v_n bigint;   -- conservation: source count under lock vs dest baseline + catch-up (#460)
+  -- the untracked-write check on the tracking path (#654): the copy's recorded horizon, the predicates it
+  -- builds, the source and destination column rows it compares, and what it found
+  v_horizon bigint; v_fresh text; v_nomatch_q text; v_scols_q text; v_dcols_q text;
+  v_unmatched bigint; v_m bigint; v_kt text; v_first_key text; v_fresh_batch boolean;
 begin
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
@@ -992,7 +1006,72 @@ begin
   -- Refusing beats adapting. The missing rows are below the watermark, so re-running the cutover cannot
   -- find them either; only a copy that tracks changes (or one taken with writes paused) can, and the
   -- message says so. Without this check the loss was silent: no error, no log row, a source dropped short.
-  execute format('select count(*) from %I.%I', v_nsp, v_rel) into v_src_n;
+  if not v_track then
+    execute format('select count(*) from %I.%I', v_nsp, v_rel) into v_src_n;
+  else
+    -- UNTRACKED WRITES (#654). The capture trigger is origin-only (TimescaleDB refuses ENABLE ALWAYS on a
+    -- hypertable and on its chunks), so a write under session_replication_role = replica never reached the
+    -- delta. The count check below catches such an INSERT or DELETE; an UPDATE changes no count, and the swap
+    -- used to install the copy's stale row over it. The anchor is MVCC, not the trigger: a source row
+    -- version older than the horizon from_hypertable_copy recorded was committed before every chunk copy's
+    -- snapshot, so the copy holds it unchanged; any other must now sit in the reconciled destination
+    -- exactly as it sits in the source. One that does not was written without firing the trigger, and the
+    -- swap is refused. A delta without a horizon (built by an older release) has no anchor, so every row
+    -- is verified instead. Past 2^31 transactions age() no longer orders xids, so that falls back too.
+    --
+    -- The same scan counts the source, so the count check costs nothing extra; the destination probes run
+    -- only for row versions at or past the horizon, through the key index the copy built. Relation by
+    -- relation, because TimescaleDB refuses xmin on a compressed chunk ("transparent decompression only
+    -- supports tableoid system column"): a compressed chunk's heap holds the rows written since it was
+    -- compressed, and its compressed batches are checked for the same horizon, a fresh batch (compressed
+    -- during the window) sending the whole chunk through the decompressing verification. OFFSET 0 keeps
+    -- each subquery from being flattened into its aggregates, which would evaluate the probe once per
+    -- aggregate that reads kt (twice, measured) instead of once per row.
+    v_horizon := substring(obj_description(format('%I.%I', v_nsp, v_delta)::regclass, 'pg_class')
+                           from '^pgpm from_hypertable horizon ([0-9]+)$')::bigint;
+    if v_horizon is not null
+       and pg_snapshot_xmax(pg_current_snapshot())::text::bigint - v_horizon < 2000000000 then
+      v_fresh := format('age(s.xmin) <= age(%L::xid)', (v_horizon % 4294967296)::text);
+    else
+      v_fresh := 'true';
+    end if;
+    select string_agg('s.' || quote_ident(attname), ', ' order by attnum),
+           string_agg('d.' || quote_ident(attname), ', ' order by attnum)
+      into v_scols_q, v_dcols_q
+      from pg_attribute where attrelid = p_hypertable and attnum > 0 and not attisdropped and attgenerated = '';
+    v_nomatch_q := format('not exists (select 1 from %I.%I d where %s = %s and row(%s)::text = row(%s)::text)',
+                        v_nsp, v_dest, v_dkey_q, v_skey_q, v_dcols_q, v_scols_q);
+    v_src_n := 0; v_unmatched := 0;
+    for k in
+      select r.oid::regclass as rel,
+             (select format('%I.%I', z.schema_name, z.table_name)::regclass
+                from pg_class rc join pg_namespace rn on rn.oid = rc.relnamespace
+                join _timescaledb_catalog.chunk c on c.schema_name = rn.nspname and c.table_name = rc.relname
+                join _timescaledb_catalog.chunk z on z.id = c.compressed_chunk_id
+               where rc.oid = r.oid) as cmp
+        from (select p_hypertable::oid as oid
+              union all select inhrelid from pg_inherits where inhparent = p_hypertable) r
+    loop
+      v_fresh_batch := false;
+      if k.cmp is not null then
+        execute format('select exists (select 1 from %s s where %s)', k.cmp::text, v_fresh) into v_fresh_batch;
+      end if;
+      if k.cmp is null then
+        execute format('select count(*), count(x.kt), min(x.kt) from (select case when %s then case when %s then row%s::text end end as kt from only %s s offset 0) x',
+                       v_fresh, v_nomatch_q, v_skey_q, k.rel::text) into v_n, v_m, v_kt;
+      elsif v_fresh_batch then
+        execute format('select count(*), count(x.kt), min(x.kt) from (select case when %s then row%s::text end as kt from %s s offset 0) x',
+                       v_nomatch_q, v_skey_q, k.rel::text) into v_n, v_m, v_kt;
+      else
+        execute format('select count(*) from %s', k.rel::text) into v_n;
+        execute format('select count(x.kt), min(x.kt) from (select case when %s then case when %s then row%s::text end end as kt from only %s s offset 0) x',
+                       v_fresh, v_nomatch_q, v_skey_q, k.rel::text) into v_m, v_kt;
+      end if;
+      v_src_n := v_src_n + v_n;
+      v_unmatched := v_unmatched + v_m;
+      v_first_key := least(v_first_key, v_kt);
+    end loop;
+  end if;
   if v_src_n <> v_dest_n then
     raise exception 'pg_partition_magician: from_hypertable_cutover(%) refusing to swap: the source holds % rows but the destination would hold % after the % catch-up, a difference of %. %',
       p_hypertable, v_src_n, v_dest_n, case when v_track then 'change-tracking' else 'append-only' end,
@@ -1002,6 +1081,10 @@ begin
         else format('Rows arrived during the online window with a control value at or below the copy watermark (out-of-order appends, a backfill, or an update or delete of a copied row), which the append-only catch-up cannot see. Nothing was dropped and the source is whole. Re-run from_hypertable_copy(%L, %L, p_track_changes => true), which needs a primary key or unique constraint; on a keyless table, pause writes to the source for the copy instead.',
                     p_hypertable::text, p_control)
       end;
+  end if;
+  if v_unmatched > 0 then
+    raise exception 'pg_partition_magician: from_hypertable_cutover(%) refusing to swap: % source row(s) changed during the online window without firing the change-capture trigger, and the destination does not hold them as the source does (first key %). A write reached the source under session_replication_role = replica (a logical-replication apply worker, a loader silencing triggers) or with the trigger gone, and TimescaleDB cannot enable the trigger ALWAYS on a hypertable, so the delta never saw it. Nothing was dropped and the source is whole. Make every writer fire triggers for the whole window (pause the subscription, or run the loader as origin), then re-run from_hypertable_copy with p_track_changes => true.',
+      p_hypertable, v_unmatched, v_first_key;
   end if;
   -- (the key constraints + secondary indexes were captured and pre-built on the destination above, before
   -- the lock; the swap below only adopts/renames them -- metadata-only.)

@@ -483,6 +483,15 @@ session `TimeZone`; a hypertable on a dimension of any other type is refused her
   column** (a `NULL` key component can never be reconciled, so the change would be lost). Set it for any
   workload that updates or deletes rows, or can append out of order, during the migration window.
 
+  **The capture trigger does not fire under `session_replication_role = replica`.** The core's own
+  triggers are enabled `ALWAYS` for that reason, but TimescaleDB refuses `ENABLE ALWAYS` on a hypertable
+  and on each of its chunks, so a write applied by a logical-replication apply worker, or by a loader
+  running as `replica` to silence triggers, never reaches the delta. It is not lost silently: the copy
+  records on the delta table the transaction horizon of a snapshot taken before any chunk is read, and
+  the cutover refuses the swap if any source row written since then is missing from the reconciled
+  destination or differs from it there (see `from_hypertable_cutover`). Pause replica-role writers for the
+  window, or run them as `origin`, and the migration goes through.
+
 ### `from_hypertable_drain_delta` / `from_hypertable_drain_delta_step`
 
 ```sql
@@ -603,6 +612,19 @@ tracking path a mismatch means a write reached the source without firing the cap
 tracking. The source's `count(*)` runs under the lock and is proportional to the table's size; the
 destination's count is taken before the lock and adjusted by exactly what the catch-up changed, so it adds
 nothing there.
+
+**On the tracking path the cutover also refuses a write the trigger missed that changes no count.** An
+`UPDATE` under `session_replication_role = replica` leaves both counts equal, and the swap used to install
+the copy's stale row over it. The same scan that counts the source now also reads each row version's
+`xmin`: one older than the horizon `from_hypertable_copy` recorded was committed before every chunk was
+copied, so the copy holds it as it is, and every other one must sit in the reconciled destination exactly
+as it sits in the source (probed through the key index the copy built). If any does not, the cutover
+raises `pg_partition_magician: from_hypertable_cutover(...) refusing to swap: N source row(s) changed
+during the online window without firing the change-capture trigger ... (first key ...)` and rolls back
+whole, with the source untouched. The probes are proportional to the rows written during the window, not
+to the table. A delta built by an earlier release carries no horizon, and the cutover then verifies every
+source row. On a chunk compressed before the copy, only the rows written to it since are probed, and a
+chunk compressed during the window is verified in full.
 
 **Do not rename or replace either side of the swap while the cutover is preparing.** The source's name is
 resolved once at the start, and the index pre-builds above are deliberately outside the lock, so that is the

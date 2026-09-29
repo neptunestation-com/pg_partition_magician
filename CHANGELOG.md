@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **`from_hypertable_cutover` refuses to swap over a write its change capture missed, not only over one
+  that changed a count** (#654). The tracking copy's trigger is origin-only (TimescaleDB refuses
+  `ENABLE ALWAYS` on a hypertable and on its chunks), so an `UPDATE` under
+  `session_replication_role = replica` never reached the delta, left both counts equal, and was silently
+  reverted by the swap. The copy now records on the delta the xmin horizon of a snapshot taken before any
+  chunk is read, and under the lock the cutover requires every source row version at or past it to sit in
+  the reconciled destination exactly as in the source, refusing with the count and the first key
+  otherwise. The check shares the conservation count's scan, probes only the rows written during the
+  window, verifies every row for a delta built before this release, and handles compressed chunks.
 - **Regrain's change-capture names are never cut to 63 bytes, so they are never the table's own** (#655).
   They were `left(<table> || '_pgpm_regrain_delta', 63)` and the same for the trigger function, which for a
   table renamed to a 63-byte name IS the table: with nothing recorded (it had never regrained)

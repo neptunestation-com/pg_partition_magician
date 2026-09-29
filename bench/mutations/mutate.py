@@ -132,11 +132,12 @@ HT_CUTOVER_DEST_VERIFY = """  execute format('lock table %s in access exclusive 
       coalesce(to_regclass(format('%I.%I', v_nsp, v_dest))::oid::text, 'nothing'), quote_ident(v_rel);
   end if;
 """
-# The cutover's conservation check, whole (#460): the source counted under the lock, compared with the
+# The cutover's conservation check (#460): the source's count under the lock compared with the
 # destination's carried-in count, and the refusal. Deleting it is the pre-#460 cutover exactly: the
 # catch-up runs, nothing compares the two sides, and the DROP goes ahead on a destination that is short.
-HT_CUTOVER_CONSERVATION = """  execute format('select count(*) from %I.%I', v_nsp, v_rel) into v_src_n;
-  if v_src_n <> v_dest_n then
+# The count itself is left in place: since #654 the tracking path takes it in the same per-relation scan
+# as the untracked-write check, so the comparison is the part that is the conservation check.
+HT_CUTOVER_CONSERVATION = """  if v_src_n <> v_dest_n then
     raise exception 'pg_partition_magician: from_hypertable_cutover(%) refusing to swap: the source holds % rows but the destination would hold % after the % catch-up, a difference of %. %',
       p_hypertable, v_src_n, v_dest_n, case when v_track then 'change-tracking' else 'append-only' end,
       abs(v_src_n - v_dest_n),
@@ -147,6 +148,10 @@ HT_CUTOVER_CONSERVATION = """  execute format('select count(*) from %I.%I', v_ns
       end;
   end if;
 """
+# The cutover's untracked-write refusal (#654), by its condition alone, and the fallback that verifies
+# every row when the copy recorded no horizon, by its assignment alone.
+HT_CUTOVER_UNTRACKED_REFUSAL = "  if v_unmatched > 0 then\n"
+HT_CUTOVER_NO_HORIZON_FALLBACK = "      v_fresh := 'true';\n"
 # The under-lock append-only catch-up's keyed branch, by its condition alone. Six spaces of indentation
 # pick the UNDER-LOCK `if` (inside `if v_watermark is not null then`) and not the pre-lock key-column
 # build, which sits at four; the count check below refuses to build the mutant if that ever changes.
@@ -1073,6 +1078,28 @@ MUTATIONS = {
         "rejects the duplicate); the guard's source sequence sits at 8 against max(id) 3, so neither "
         "a restart (1) nor a reseed past max(id) (4) reads as the preserved position.",
         [(HT_SWAP_IDENTITY_POSITION, "    end loop;\n  end if;\n  commit;\n", 1)],
+    ),
+    "hypertable_cutover_untracked_unchecked": (
+        "bench/hypertable_replica_capture.sh",
+        "Pre-#654 from_hypertable_cutover(): on the tracking path nothing but the row count compares the "
+        "two sides, and the capture trigger is origin-only because TimescaleDB refuses ENABLE ALWAYS on a "
+        "hypertable and its chunks. An UPDATE made under session_replication_role = replica during the "
+        "online window never reaches the delta and changes no count, so the swap installs the copy's stale "
+        "row over it. Disables the refusal by its condition and leaves the scan, the horizon and the count "
+        "check in place, so parts A and B of tests/timescale/db/25 fail through their refusal messages "
+        "(the cutover runs on to its COMMIT inside throws_like) and parts C and D still pass.",
+        [(HT_CUTOVER_UNTRACKED_REFUSAL,
+          "  if false then   -- MUTANT: the pre-#654 cutover, count-only on the tracking path\n", 1)],
+    ),
+    "hypertable_cutover_no_horizon_trusted": (
+        "bench/hypertable_replica_capture.sh",
+        "The untracked-write check with its anchor missing: a delta built before #654 carries no recorded "
+        "horizon, and reading that absence as 'nothing to verify' rather than 'verify every row' puts the "
+        "silent revert back for exactly the copies taken before an upgrade. Turns the fallback predicate "
+        "from true into false, so part A of tests/timescale/db/25 (a horizon recorded) still refuses and "
+        "only part B (the horizon removed) fails, through its refusal message.",
+        [(HT_CUTOVER_NO_HORIZON_FALLBACK,
+          "      v_fresh := 'false';   -- MUTANT: no horizon read as nothing to check\n", 1)],
     ),
     "transmute_dropped_fk_parent_not_carried": (
         "bench/hypertable_swap_order.sh",
@@ -3129,6 +3156,8 @@ MUTATION_SRC = {
     "hypertable_swap_fk_record_after_handoff": "pgpm_hypertable/install.sql",
     "hypertable_swap_identity_from_one": "pgpm_hypertable/install.sql",
     "hypertable_derived_names_unchecked": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_untracked_unchecked": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_no_horizon_trusted": "pgpm_hypertable/install.sql",
     "archive_lz77_hash_scratch": "pgpm_archive/install.sql",
     "archive_encode_array_agg_unnest": "pgpm_archive/install.sql",
     "archive_deflate_six_arrays": "pgpm_archive/install.sql",
@@ -3183,6 +3212,8 @@ MUTATION_TRACK = {
     "hypertable_catchup_strict_watermark": "timescale",
     "hypertable_cutover_no_conservation": "timescale",
     "hypertable_derived_names_unchecked": "timescale",
+    "hypertable_cutover_untracked_unchecked": "timescale",
+    "hypertable_cutover_no_horizon_trusted": "timescale",
 }
 
 
