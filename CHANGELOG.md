@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **A regrain copies only into fine children it created, and `regrain_cancel` drops copies by identity**
+  (#631). `regrain_step` skipped its create whenever a sub-range's name already resolved and copied into
+  whatever relation bore it, so regraining a new table created under the name of a managed table renamed
+  aside put its rows into the old table's attached partition (49 rows in the review's reproduction), and
+  `regrain_cancel` dropped copies by name, so a copy renamed aside survived while the table that took its
+  name was dropped. The copy now refuses a name held by a relation its `pgpm.part` row does not record,
+  and every path that discards copies (cancel, the restart of copies that predate capture, and retire's
+  reclaim) drops the relation by its recorded `child_oid`. `tests/172_regrain_copy_name_clash_test.sql`
+  pins the refusals and the drop, and `bench/regrain_copy_name_clash.sh` drives it against the
+  `regrain_copy_into_named_relation`, `regrain_copy_dropped_by_name` and
+  `regrain_recreated_copy_oid_stale` mutations, which `./test.sh discriminate` requires it to fail.
 - **An `id` retain of `NaN` is refused like a negative one** (#649). `_retain_nonnegative` judged an id
   retain with `>= 0`, and PostgreSQL orders numeric `NaN` above every number, so a `config.retain` edited by
   hand to `'NaN'` passed the #451 defence: its horizon was `NaN`, every partition sorted below it, and one

@@ -3425,6 +3425,33 @@ begin
 end;
 $$;
 
+-- Drop one not-yet-attached regrain copy and its pgpm.part row (#631). The relation dropped is the one
+-- the row's child_oid recorded when regrain_step created it (#421), found by oid wherever it now sits and
+-- whatever it is now called, never whatever currently bears the row's name: a copy renamed aside and an
+-- unrelated table created under its old name made regrain_cancel's `drop table %I.%I` destroy the
+-- stranger and leave the copy behind. A recorded oid that names nothing any more drops nothing (the copy
+-- is already gone, and whatever holds the name is not it); a null child_oid predates the anchor and falls
+-- back to the name, as every other identity check here lets an unanchored row through. Every path that
+-- discards copies comes through here: regrain_cancel, regrain_step's restart of copies that predate
+-- capture, and _regrain_reclaim when retention drops the source.
+create or replace function pgpm._regrain_drop_copy(p_parent regclass, p_nsp name, p_child name)
+returns void language plpgsql as $$
+declare v_oid oid; v_rel regclass;
+begin
+  select child_oid into v_oid from pgpm.part
+   where parent_table = p_parent and child_name = p_child and not attached;
+  if v_oid is null then
+    execute format('drop table if exists %I.%I', p_nsp, p_child);
+  else
+    select c.oid::regclass into v_rel from pg_class c where c.oid = v_oid;
+    if v_rel is not null then
+      execute format('drop table %s', v_rel::text);
+    end if;
+  end if;
+  delete from pgpm.part where parent_table = p_parent and child_name = p_child and not attached;
+end;
+$$;
+
 -- Stop an in-flight regrain and reclaim what it has built. Returns the number of in-flight fine children
 -- dropped. The janitor above handles the silent abandonments; this is the operator's deliberate escape.
 --
@@ -3451,8 +3478,7 @@ begin
   end if;
 
   for r in select child_name from pgpm.part where parent_table = p_parent and not attached loop
-    execute format('drop table if exists %I.%I', v_nsp, r.child_name);
-    delete from pgpm.part where parent_table = p_parent and child_name = r.child_name;
+    perform pgpm._regrain_drop_copy(p_parent, v_nsp, r.child_name);   -- #631: by recorded oid
     v_dropped := v_dropped + 1;
   end loop;
 
@@ -3532,8 +3558,7 @@ begin
     || ' and lo::%s >= %L::%s and hi::%s <= %L::%s order by lo::%s',
     p_parent::text, v_ncast, p_lo, v_ncast, v_ncast, p_hi, v_ncast, v_ncast)
   loop
-    execute format('drop table if exists %I.%I', v_nsp, r.child_name);
-    delete from pgpm.part where parent_table = p_parent and child_name = r.child_name;
+    perform pgpm._regrain_drop_copy(p_parent, v_nsp, r.child_name);   -- #631: by recorded oid
     v_dropped := v_dropped + 1;
   end loop;
 
@@ -3621,7 +3646,7 @@ declare
   v_lo_lit text; v_hi_lit text; v_moved bigint := 0; v_aged boolean; v_made int := 0; v_fk int := 0; r record;
   v_fk_ids bigint[];
   v_child_name name; v_src_name name; v_rec int; v_delta_n bigint; v_delta_name name; v_busy name;
-  v_delta_reg regclass;
+  v_delta_reg regclass; v_sub_known boolean; v_sub_oid oid; v_sub_now regclass;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
@@ -3758,8 +3783,7 @@ begin
       || ' and lo::%s >= %L::%s and hi::%s <= %L::%s',
       p_parent::text, v_ncast, v_lo, v_ncast, v_ncast, v_hi, v_ncast)
     loop
-      execute format('drop table if exists %I.%I', v_nsp, r.child_name);
-      delete from pgpm.part where parent_table = p_parent and child_name = r.child_name;
+      perform pgpm._regrain_drop_copy(p_parent, v_nsp, r.child_name);   -- #631: by recorded oid
       v_made := v_made + 1;
     end loop;
     if cfg.regrain_cursor is not null or v_made > 0 then
@@ -3904,6 +3928,31 @@ begin
       raise exception 'pg_partition_magician: internal error regraining % -- sub-range [%, %) resolves to the source child itself; refusing rather than copying into the table about to be dropped.',
         v_child_name, v_sub_lo, v_sub_hi;
     end if;
+    -- #631: the relation under that name must be the copy THIS regrain made, or nothing. The create below
+    -- is skipped whenever the name resolves, and the copy then inserts into whatever it resolves to, so a
+    -- name held by some other relation took this table's rows: a managed table renamed aside keeps its
+    -- partitions' names, and regraining a new table created under the old name copied 49 of its rows into
+    -- the OLD table's attached partition (F3-05). Two ways to be the wrong relation, both refused before a
+    -- row moves. With no pgpm.part row for this sub-range, any relation at the name is one this regrain
+    -- did not create: only the create below mints a not-attached row (#94), in the same statement group
+    -- that creates the table. With a row, the name must still resolve to the oid it recorded (child_oid,
+    -- #421); a null child_oid predates the anchor and is not checked, as everywhere else. Refused rather
+    -- than renamed around, because the rename would be a label pgpm chose for someone else's relation; the
+    -- operator renames or drops it (nothing has been copied into it) and the next tick carries on.
+    select true, p.child_oid into v_sub_known, v_sub_oid from pgpm.part p
+     where p.parent_table = p_parent and not p.attached and p.child_name = v_sub_name
+       and not pgpm._native_gt(cfg.control_kind, p.lo, v_sub_lo) and not pgpm._native_gt(cfg.control_kind, v_sub_lo, p.lo)
+       and not pgpm._native_gt(cfg.control_kind, p.hi, v_sub_hi) and not pgpm._native_gt(cfg.control_kind, v_sub_hi, p.hi);
+    v_sub_known := coalesce(v_sub_known, false);
+    v_sub_now := to_regclass(format('%I.%I', v_nsp, v_sub_name));
+    if v_sub_now is not null and not v_sub_known then
+      raise exception 'pg_partition_magician: cannot regrain % -- the fine child for sub-range [%, %) would be %.%, but a relation named %.% already exists and this regrain did not create it (no pgpm.part row of % records it as that sub-range''s copy). Copying into it would put this table''s rows in a relation pgpm does not own. Nothing has been copied into it: rename or drop that relation and re-run, or abandon the regrain with pgpm.regrain_cancel(%).',
+        v_child_name, v_sub_lo, v_sub_hi, v_nsp, v_sub_name, v_nsp, v_sub_name, p_parent, p_parent;
+    end if;
+    if v_sub_now is not null and v_sub_oid is not null and v_sub_now::oid <> v_sub_oid then
+      raise exception 'pg_partition_magician: cannot regrain % -- %.% is oid % now, and no longer names the copy this regrain created for sub-range [%, %) (oid %). Copying into it would put this table''s rows in a relation pgpm does not own. Nothing has been copied into it: rename or drop that relation and re-run, or abandon the regrain with pgpm.regrain_cancel(%), which drops the copy by its recorded oid.',
+        v_child_name, v_nsp, v_sub_name, v_sub_now::oid, v_sub_lo, v_sub_hi, v_sub_oid, p_parent;
+    end if;
     if to_regclass(format('%I.%I', v_nsp, v_sub_name)) is null then
       execute format('create table %I.%I (like %I.%I including defaults including generated including storage including indexes including constraints excluding identity)',
                      v_nsp, v_sub_name, v_nsp, v_rel);
@@ -3935,6 +3984,12 @@ begin
         values (p_parent, v_sub_name, v_sub_lo, v_sub_hi, false,
                 format('%I.%I', v_nsp, v_sub_name)::regclass::oid)
         on conflict (parent_table, child_name) do nothing;
+      -- #631: a row that outlived its relation (the copy was dropped by hand) now names this one, so
+      -- regrain_cancel's drop by recorded oid reaches the table just created rather than nothing.
+      if v_sub_known then
+        update pgpm.part set child_oid = format('%I.%I', v_nsp, v_sub_name)::regclass::oid
+         where parent_table = p_parent and child_name = v_sub_name and not attached;
+      end if;
     end if;
     execute format($f$
       insert into %7$I.%8$I (%6$s)
