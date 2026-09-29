@@ -323,8 +323,8 @@ Reverses a `transmute`, returning the restored ordinary table. It is a **clean, 
 while the monolith is still intact and holds the whole table**: it detaches the monolith, drops the
 childless parent (cascading any empty forward partitions), renames the monolith
 back, restores identity, the ownership of any `serial` sequence, the row triggers (each in the enabled
-state the parent had) and any preserved
-incoming FKs, and clears `pgpm` state. The monolith is the
+state the parent had) and any preserved incoming FKs (`NOT VALID`, see below), and clears `pgpm` state. The
+monolith is the
 attached partition with the smallest `lo`.
 
 It also takes off the monolith whatever **maintenance** put there after the conversion, so the table handed
@@ -336,6 +336,26 @@ stays in `pgpm.archive_ledger`, as it does after a `retire`. And a **regrain sti
 monolith is abandoned exactly as [`regrain_cancel`](#regrain_cancel) would abandon it (capture trigger and
 `TRUNCATE` guard off, fine copies dropped, delta cleared, one `regrain_cancel` log row): before its swap the
 monolith still holds every row, so nothing is lost but the copy work.
+
+A **preserved incoming FK** (`p_incoming_fks => 'preserve'`) comes back against the restored table
+`NOT VALID` whenever its referencing table is an ordinary one: it enforces every new write at once, but
+`untransmute` does not validate it, because validating scans the whole referencing table and would do so
+under the `ACCESS EXCLUSIVE` the reverse holds on the restored table, stalling every reader and writer of it
+for the length of that scan. The same goes for a key whose referencing table picked up orphans while the key
+was suspended: it comes back `NOT VALID` rather than rolling the reverse back. `pgpm` forgets the table at
+the end of the call, so no maintenance tick will validate these keys; `untransmute` raises a `NOTICE` naming
+each one, and you validate it yourself afterwards, in its own transaction, where it takes only
+`SHARE UPDATE EXCLUSIVE` on the referencing table and `ROW SHARE` on the restored one, blocking neither:
+
+```sql
+select format('alter table %s validate constraint %I', conrelid::regclass, conname)
+  from pg_constraint
+ where confrelid = 'public.events'::regclass and contype = 'f' and not convalidated;
+-- run each statement it prints; one that fails names an orphan row to fix first
+```
+
+A partitioned referencing table cannot hold a `NOT VALID` key, so its key is re-added validated in one step,
+as `restore_incoming_fks` does.
 
 It is a **one-way door** once any row lives outside the monolith's range -- a forward partition after the
 frontier crosses `B`, or the finer children a regrain's swap has put in the monolith's place -- because a
