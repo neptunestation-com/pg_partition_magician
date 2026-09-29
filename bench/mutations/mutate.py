@@ -599,6 +599,27 @@ ARCHIVE_HUFF_QUEUE_TEMP_TABLE = """  create temp table archive_huff_groups (node
   drop table archive_huff_groups;
 """
 
+# #574's resume lattice check, whole (comment and code), so the mutant reads as a resume that never
+# had the rule rather than a comment describing a refusal that is no longer there.
+TRANSMUTE_RESUME_LATTICE_RE = re.compile(
+    r"  -- #574: and the bound has to lie on the grid THIS call registers\..*?"
+    r"      v_hi_native, pgpm\._grid_floor\(p_control_kind, p_step, p_anchor, v_hi_native, v_tz\), p_parent;\n"
+    r"  end if;\n",
+    re.DOTALL,
+)
+# #581's three transmute refusals: the step's sign and the lookahead's, which sit together after the
+# retain check, and the date column's whole-day rule, which sits in the control-type chain.
+TRANSMUTE_STEP_OBTAIN_PREFLIGHT_RE = re.compile(
+    r"  -- #581: the step must be positive, which nothing checked either\..*?"
+    r"    raise exception 'pg_partition_magician: p_obtain must be a non-negative integer \(got %\)', p_obtain;\n"
+    r"  end if;\n",
+    re.DOTALL,
+)
+TRANSMUTE_DATE_WHOLE_DAYS_RE = re.compile(
+    r"  elsif p_control_kind = 'time' and v_typname = 'date'\n.*?"
+    r"the cutover would fail on an empty partition range', quote_ident\(p_control\), p_step;\n",
+    re.DOTALL,
+)
 MUTATIONS = {
     "transmute_no_commits": (
         "bench/transmute_lock.sh",
@@ -2534,6 +2555,54 @@ $$;''',
         [
             (ARCHIVE_HUFF_DECL_ARRAYS, ARCHIVE_HUFF_DECL_TEMP_TABLE, 1),
             (ARCHIVE_HUFF_QUEUE_ARRAYS, ARCHIVE_HUFF_QUEUE_TEMP_TABLE, 1),
+        ],
+    ),
+    "transmute_resume_any_step": (
+        "bench/transmute_resume_lattice.sh",
+        "Pre-#574 _transmute: a resume reuses the claim's bound (and, since #506, its zone) whatever step "
+        "and anchor the re-run is given, and registers the NEW ones. The recorded bound sits on the first "
+        "attempt's grid, so a re-run with another step leaves the monolith's hi off the registered grid: "
+        "obtain skips the new grid's cell that overlaps the monolith and starts one cell later, a "
+        "permanent hole right past the monolith's hi where every write fails with no partition found. "
+        "The lattice check is removed whole, and nothing else. tests/139's step-7 and anchor-5 re-runs of "
+        "a claim recorded on the step-10 grid are what catch it: neither is refused, each dies at its "
+        "first COMMIT inside throws_like with 2D000, and the refusal's message is pinned.",
+        [(TRANSMUTE_RESUME_LATTICE_RE, "", 1)],
+    ),
+    "transmute_reap_by_name": (
+        "bench/transmute_reap_identity.sh",
+        "Pre-#575 _transmute_reap and transmute_abort: the half-converted table is resolved by the "
+        "schema and name the claim recorded (nsp, rel), not by the claim's oid. A table renamed or moved "
+        "to another schema after its conversion failed reads as gone: the reaper deletes the claim and "
+        "leaves the write-rejecting pgpm_monolith_bound CHECK with nothing recording it, and "
+        "transmute_abort, called by the new name, alters the old one, which no longer exists. Three "
+        "sites: the reaper's existence test and both ALTERs. tests/140's renamed and moved tables (bound "
+        "still there after the sweep, no transmute_reap logged under their oid) and its abort by the new "
+        "name are what catch it.",
+        [
+            ("    if not exists (select 1 from pg_class c where c.oid = r.parent_table) then\n",
+             "    if not exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace\n"
+             "                    where n.nspname = r.nsp and c.relname = r.rel) then\n", 1),
+            ("    execute format('alter table %s drop constraint if exists pgpm_monolith_bound', r.parent_table::text);\n",
+             "    execute format('alter table %I.%I drop constraint if exists pgpm_monolith_bound', r.nsp, r.rel);\n", 1),
+            ("  execute format('alter table %s drop constraint if exists pgpm_monolith_bound', p_parent::text);\n"
+             "  delete from pgpm.transmute_inflight where parent_table = p_parent;\n",
+             "  execute format('alter table %I.%I drop constraint if exists pgpm_monolith_bound', r.nsp, r.rel);\n"
+             "  delete from pgpm.transmute_inflight where parent_table = p_parent;\n", 1),
+        ],
+    ),
+    "transmute_no_step_obtain_preflight": (
+        "bench/transmute_step_preflight.sh",
+        "Pre-#581 _transmute: nothing checks the step's sign, a date column's step against whole days, or "
+        "p_obtain against the non-negative rule set_obtain applies. A negative step commits an "
+        "unsatisfiable pgpm_monolith_bound CHECK in phase 1 and the table rejects every write until an "
+        "abort; a sub-day step on a date column validates a CHECK of dt < current_date and dies in the "
+        "cutover on an empty-range hourly cell; p_obtain => -1 registers a grid obtain never extends. All "
+        "three refusals are removed, whole. tests/141 pins each refusal by its own message, so each call "
+        "that is not refused dies at its first COMMIT inside throws_like with 2D000 and fails there.",
+        [
+            (TRANSMUTE_STEP_OBTAIN_PREFLIGHT_RE, "", 1),
+            (TRANSMUTE_DATE_WHOLE_DAYS_RE, "", 1),
         ],
     ),
 }

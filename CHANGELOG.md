@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+- **A resumed `transmute` refuses a step or anchor its recorded bound is not on** (#574). The claim a
+  failed attempt leaves records the bound (and its zone) but not the step and anchor it was computed on,
+  so a re-run with another step reused the bound and registered the new step. The recorded `hi` was not
+  a boundary of the new grid: `obtain` skipped the new grid's cell that overlaps the monolith and started
+  one cell later, leaving a permanent hole right past the monolith's `hi` where every write failed with
+  "no partition of relation found for row". A resume now checks that the recorded `lo` and `hi` are
+  boundaries of the call's step and anchor in the claim's zone, and refuses before anything is committed
+  when they are not, naming both and what each floors to; the claim and its bound are left as they were,
+  for a re-run with the original step or `transmute_abort`. The check is on the lattice, not the
+  spelling, so a step the bound is flush with (5 after 10) still resumes. `tests/139` fails a step-10
+  cutover and re-runs it with step 7, anchor 5 and step 5; `bench/transmute_resume_lattice.sh` runs it
+  against `transmute_resume_any_step`.
+
+- **The transmute sweep and `transmute_abort` find a half-converted table by oid** (#575). Both resolved
+  the table by the schema and name its claim recorded, so a table renamed or moved to another schema
+  after its conversion failed read as gone: the sweep deleted the claim and left the write-rejecting
+  `pgpm_monolith_bound` `CHECK` with nothing recording it, and `transmute_abort`, called by the new
+  name, altered the old one, which no longer exists. Both now use the claim's `parent_table` oid, and the
+  sweep forgets a claim only when that oid names no relation at all. `tests/140` renames one failed
+  conversion, moves one, drops one and aborts a fourth by its new name;
+  `bench/transmute_reap_identity.sh` runs it against `transmute_reap_by_name`.
+
+- **`transmute` refuses a non-positive step, a date step that is not whole days, and a negative or null
+  `p_obtain`** (#581). None was checked. A negative step computed `lo > hi`, so phase 1 committed an
+  unsatisfiable bound `CHECK` and the table rejected every write until an abort (a corrected re-run
+  resumed the same bound and failed again), and a zero one divided by zero. A sub-day step on a `date`
+  column had its bounds truncated to dates, so phase 2 validated a `CHECK` of `dt < current_date` and the
+  cutover died on an empty hourly range, leaving every row dated today rejected. `p_obtain => -1`, which
+  `set_obtain` refuses as a silent no-op, registered a grid `obtain` never extends, so the first write
+  past the monolith failed. All three are now refused before anything is committed, `p_obtain` with
+  `set_obtain`'s own message. `tests/141` pins each refusal by its message and then converts every
+  fixture with the corrected argument; `bench/transmute_step_preflight.sh` runs it against
+  `transmute_no_step_obtain_preflight`.
 - **A GZIP encode no longer takes lock-table entries, so one archive tick cannot exhaust the cluster's
   lock table** (#587). `archive._pq_huffman_lengths`, which runs three times per dynamic-Huffman
   encode, built its merge queue in a temp table it created and dropped on every call, and a dropped

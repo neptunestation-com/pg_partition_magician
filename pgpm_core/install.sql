@@ -4070,6 +4070,27 @@ begin
   if p_retain is not null and not pgpm._retain_nonnegative(p_control_kind, p_retain) then
     raise exception 'pg_partition_magician: p_retain cannot be negative (got %) -- a negative retain puts the retention horizon past the partition taking writes, so the first maintenance tick would drop every partition, that one included; zero keeps only the partition taking writes, null keeps everything', p_retain;
   end if;
+  -- #581: the step must be positive, which nothing checked either. A negative one made _grid_floor and
+  -- _grid_next yield lo > hi, so phase 1 committed an unsatisfiable pgpm_monolith_bound CHECK, phase 2's
+  -- VALIDATE failed, and the live table rejected every write until an abort (a corrected re-run resumed
+  -- the same recorded bound and failed again); a zero one divided by zero. "Positive" is read the way the
+  -- grid functions read the step: a whole number of months (a calendar step), or else a duration whose
+  -- length in seconds is positive. A negative month count is refused whatever else the interval holds.
+  if p_control_kind = 'id' then
+    if p_step::numeric <= 0 then
+      raise exception 'pg_partition_magician: the partition step must be positive (got %) -- a step that is not makes every partition''s lower bound its upper one or past it, so the monolith''s bound CHECK could admit no row and the table would reject every write', p_step;
+    end if;
+  elsif (extract(year from p_step::interval) * 12 + extract(month from p_step::interval)) < 0
+     or ((extract(year from p_step::interval) * 12 + extract(month from p_step::interval)) = 0
+         and extract(epoch from p_step::interval) <= 0) then
+    raise exception 'pg_partition_magician: the partition step must be positive (got %) -- a step that is not makes every partition''s lower bound its upper one or past it, so the monolith''s bound CHECK could admit no row and the table would reject every write', p_step;
+  end if;
+  -- #581: and the lookahead cannot be negative or null, the rule set_obtain applies. obtain's
+  -- `for k in 0 .. cfg.obtain` never runs for a negative value, so the conversion completed with no forward
+  -- partition, no tick ever built one, and the first write past the monolith's hi failed.
+  if p_obtain is null or p_obtain < 0 then
+    raise exception 'pg_partition_magician: p_obtain must be a non-negative integer (got %)', p_obtain;
+  end if;
   -- #309: validate the lock timeout HERE, before anything is committed. set_config raises on a bad value
   -- anyway, but it would do so from inside phase 1 or, worse, phase 3 -- after the O(rows) validation
   -- scan the operator has already waited through. A typo should cost nothing.
@@ -4139,6 +4160,15 @@ begin
   end if;
   if p_control_kind = 'time' and v_typname not in ('timestamptz', 'timestamp', 'date') then
     raise exception 'pg_partition_magician: control_kind time needs a timestamp/date column (got %)', v_typname;
+  elsif p_control_kind = 'time' and v_typname = 'date'
+        and (extract(year from p_step::interval) * 12 + extract(month from p_step::interval)) = 0
+        and extract(epoch from p_step::interval)::numeric % 86400 <> 0 then
+    -- #581: a date holds whole days, and every bound literal a finer step renders is truncated to its date,
+    -- so the monolith's CHECK became dt < current_date (validated in phase 2) and the cutover died on the
+    -- first hourly cell, whose two bounds read as the same date, leaving the table rejecting every row
+    -- dated today. A calendar step (months) is whole days by construction; a duration has to be a whole
+    -- number of 86400 s days.
+    raise exception 'pg_partition_magician: the date column % holds whole days, so its partition step must be a whole number of days or months (got %) -- a finer step''s bounds truncate to dates, so the monolith''s bound CHECK would reject every row dated today and the cutover would fail on an empty partition range', quote_ident(p_control), p_step;
   elsif p_control_kind = 'id' then
     if v_typname in ('float4', 'float8') then
       raise exception 'pg_partition_magician: float/double control columns are unsupported (imprecise boundaries; NaN/Inf poison the frontier) -- use bigint or numeric';
@@ -4777,6 +4807,22 @@ begin
   if v_resumed then
     v_tz := coalesce(v_claim_tz, v_tz);
   end if;
+  -- #574: and the bound has to lie on the grid THIS call registers. The claim records the bound and its
+  -- zone but not the step and anchor it was computed on, and a re-run given another step reused the bound
+  -- and registered the new step: the recorded hi was not a boundary of the new grid, so obtain skipped the
+  -- new grid's cell overlapping the monolith and the forward grid started one cell later, a permanent hole
+  -- right past the monolith's hi where every write failed. What matters is the lattice, not the spelling,
+  -- so this asks whether lo and hi are boundaries of (p_step, p_anchor) in the claim's zone: a step the
+  -- bound is flush with resumes, one it is not is refused. A fresh claim's bound is computed on this grid,
+  -- so only a resume can fail it. Still the first transaction: the raise rolls the take-over back.
+  if v_resumed
+     and (pgpm._native_gt(p_control_kind, v_lo_native, pgpm._grid_floor(p_control_kind, p_step, p_anchor, v_lo_native, v_tz))
+          or pgpm._native_gt(p_control_kind, v_hi_native, pgpm._grid_floor(p_control_kind, p_step, p_anchor, v_hi_native, v_tz))) then
+    raise exception 'pg_partition_magician: cannot resume the transmute of % with step % and anchor %: the bound [%, %) an earlier attempt recorded (and put in the pgpm_monolith_bound CHECK) does not lie on that grid in % (floored to it, lo % is % and hi % is %), and registering it would leave a hole past the monolith''s hi that no partition covers. Re-run with the step and anchor of the attempt that recorded the bound, or call pgpm.transmute_abort(%) to drop the bound and start over.',
+      p_parent, p_step, p_anchor, v_lo_native, v_hi_native, v_tz,
+      v_lo_native, pgpm._grid_floor(p_control_kind, p_step, p_anchor, v_lo_native, v_tz),
+      v_hi_native, pgpm._grid_floor(p_control_kind, p_step, p_anchor, v_hi_native, v_tz), p_parent;
+  end if;
   v_monolith := pgpm._part_name(v_rel, p_control_kind, p_step, v_lo_native, v_hi_native, v_tz);
 
   -- #509: the cutover RENAMEs the table to this name, so the name has to be free, and nothing before this
@@ -5366,7 +5412,9 @@ begin
   if pgpm._session_alive(r.owner_pid, r.owner_backend_start) and r.owner_pid <> pg_backend_pid() then
     raise exception 'pg_partition_magician: cannot abort the transmute of % -- it is still running in another session', p_parent;
   end if;
-  execute format('alter table %I.%I drop constraint if exists pgpm_monolith_bound', r.nsp, r.rel);
+  -- #575: by the claim's oid (p_parent resolved to it, which is how the claim was found), not the name the
+  -- claim recorded: after a rename or a SET SCHEMA that name is another relation or none at all.
+  execute format('alter table %s drop constraint if exists pgpm_monolith_bound', p_parent::text);
   delete from pgpm.transmute_inflight where parent_table = p_parent;
   insert into pgpm.log (parent_table, action, lo, hi, method)
     values (p_parent, 'transmute_abort', r.lo, r.hi, 'bound dropped, table restored');
@@ -5392,9 +5440,11 @@ returns int language plpgsql as $$
 declare r pgpm.transmute_inflight%rowtype; v_n int := 0;
 begin
   for r in select * from pgpm.transmute_inflight loop
-    -- the relation itself is gone: nothing to undo, just forget it
-    if not exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
-                    where n.nspname = r.nsp and c.relname = r.rel) then
+    -- the relation itself is gone: nothing to undo, just forget it. Decided by the claim's oid (#575), not
+    -- by the schema and name it recorded: a half-converted table renamed or moved to another schema after
+    -- its conversion failed is still there under that oid, still carrying the bound, and reading it as
+    -- gone deleted the one row that recorded the bound and left the CHECK rejecting writes for good.
+    if not exists (select 1 from pg_class c where c.oid = r.parent_table) then
       delete from pgpm.transmute_inflight where parent_table = r.parent_table;
       v_n := v_n + 1;
       continue;
@@ -5402,7 +5452,7 @@ begin
     if pgpm._session_alive(r.owner_pid, r.owner_backend_start) then
       continue;   -- still running; leave it alone
     end if;
-    execute format('alter table %I.%I drop constraint if exists pgpm_monolith_bound', r.nsp, r.rel);
+    execute format('alter table %s drop constraint if exists pgpm_monolith_bound', r.parent_table::text);
     delete from pgpm.transmute_inflight where parent_table = r.parent_table;
     insert into pgpm.log (parent_table, action, lo, hi, method)
       values (r.parent_table, 'transmute_reap', r.lo, r.hi,

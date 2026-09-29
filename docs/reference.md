@@ -223,7 +223,12 @@ Parameters:
   [`check_text_time`](#check_text_time), whose `newest_decoded`/`newest_in_future` show the maximum before
   you convert.
 
-Refuses up front (leaving the table untouched) when: the table is already converted (it has a `pgpm.config`
+Refuses up front (leaving the table untouched) when: the step is not positive (a negative or zero
+interval or `bigint`), or is not a whole number of days or months on a `date` control column (a finer
+step's bounds truncate to dates); `p_obtain` is negative or null (the rule [`set_obtain`](#set_obtain)
+applies); the call resumes an earlier attempt's claim and that claim's recorded bound is not on this
+call's grid (its `lo` or `hi` is not a boundary of `p_step` and `p_anchor` in the zone the bound was
+computed in: re-run with the step and anchor of the attempt that recorded it, or abort it); the table is already converted (it has a `pgpm.config`
 row: `transmute` converts a table once, and a retry whose earlier cutover did commit has nothing to resume),
 is not a plain table (partitioned, a view, a foreign table), or is a partition, an inheritance child or an
 inheritance parent; a relation of any kind already holds the name the monolith will take
@@ -306,12 +311,17 @@ so a conversion that never got there left them in place, and there is nothing fo
 It **abandons; it does not resume**. Finishing a half-done conversion of a live table unattended is a
 larger action than pgpm will take on your behalf. To try again, call `transmute` again, from a session in
 any zone: it finds the recorded row and reuses the bound already on the table, and the zone that bound was
-computed in, rather than recomputing one against a frontier that has since moved.
+computed in, rather than recomputing one against a frontier that has since moved. Give it the same step and
+anchor as the attempt that recorded the bound (or any other step whose grid that bound lies on): a re-run
+whose grid the bound is not on is refused, since registering it would leave a hole past the monolith.
 
 You mostly will not need to call this. Every `maintain_all` tick sweeps for abandoned conversions and
 undoes them, and it decides "abandoned" from whether the session that claimed the conversion is still
 connected rather than from a timeout, so a long validation scan is never mistaken for a dead one and an
-operator whose session is still open keeps the right to retry.
+operator whose session is still open keeps the right to retry. Both this function and the sweep find the
+table by the identity the claim recorded, not by its name, so a half-converted table that was renamed or
+moved to another schema after its conversion failed is still found and has its bound dropped; the sweep
+forgets a claim without acting only when that table no longer exists at all.
 
 ### `untransmute`
 
