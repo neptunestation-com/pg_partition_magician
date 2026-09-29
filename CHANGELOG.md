@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **The synchronous `regrain()` no longer deadlocks with a write into the table it is regraining**
+  (#580). It runs every `regrain_step` in one transaction, so the capture trigger's SHARE ROW EXCLUSIVE
+  lock on the source was held for the whole copy. A write into the source's range took ROW EXCLUSIVE on
+  the parent, queued on the source still holding it, and the swap's `DETACH` then waited on that writer
+  for ACCESS EXCLUSIVE on the parent: PostgreSQL broke the cycle with 40P01, aborting the application's
+  write or the whole `regrain()` after all its copying. `regrain()` now takes SHARE on the parent (only
+  the parent) before its first step, so a writer waits at the parent for the call and then lands in the
+  fine children. Reads are unaffected; writes to the table wait for the call, which is the cost of one
+  transaction, and auto-regrain, which commits every tick, takes no such lock. Pinned by
+  `tests/149_regrain_writer_waits_test.sql`; `bench/regrain_writer_waits.sh` runs it against the
+  `regrain_sync_no_parent_lock` mutant, which puts the deadlock back.
 - **A parent renamed mid-regrain no longer wedges the regrain** (#585). `regrain_step` found the fine
   child of the sub-range it was copying by a name rendered from the parent's current relname, so after an
   `ALTER TABLE ... RENAME` of the parent (documented as harmless mid-regrain) the next tick did not find

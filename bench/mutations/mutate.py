@@ -1421,6 +1421,19 @@ begin
   end if;
 """, "", 1)],
     ),
+    "regrain_sync_no_parent_lock": (
+        "bench/regrain_writer_waits.sh",
+        "Pre-#580 regrain(): the synchronous driver loops regrain_step in one transaction without first "
+        "taking SHARE on the parent. The capture trigger's SHARE ROW EXCLUSIVE on the source is held to the "
+        "end of the call, so a write into the source's range takes ROW EXCLUSIVE on the parent and queues "
+        "on the source still holding it, and the swap's DETACH, needing ACCESS EXCLUSIVE on the parent, "
+        "waits on that writer in turn: PostgreSQL breaks the cycle with 40P01, aborting the write or the "
+        "whole regrain after all its copying. Removes only the LOCK statement and the comment explaining "
+        "it; tests/149's liveness witnesses (capture lock held mid-copy, the write waiting while regrain() "
+        "runs) still pass on the mutant, and its outcome and row-identity assertions are what catch it.",
+        [(re.compile(r"^  -- #580: take SHARE on the parent.*?\n  execute format\('lock table only %s in share mode', p_parent::text\);\n",
+                     re.MULTILINE | re.DOTALL), "", 1)],
+    ),
     "grid_session_timezone": (
         "bench/grid_timezone.sh",
         "Pre-#455 _grid_next: the calendar step is `p_lo::timestamptz + interval`, evaluated in the "

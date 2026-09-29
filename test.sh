@@ -670,6 +670,7 @@ run_perf() {
     "bench/archive_chunk_ties.sh pgpm_perf38"
     "bench/archive_chunk_uuidv7_ties.sh pgpm_perf54"
     "bench/retire_regrain_source.sh pgpm_perf39"
+    "bench/regrain_writer_waits.sh pgpm_perf66"
     "bench/throws_pinned.sh pgpm_perf40"
     "bench/retain_interval_sign.sh pgpm_perf44"
     "bench/transmute_publication_membership.sh pgpm_perf45"

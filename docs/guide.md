@@ -435,6 +435,10 @@ select pgpm.regrain_history('public.events');   -- split the oldest coarse child
 hierarchical split (monolith to per-year to per-month, to bound the transient disk on a tight volume),
 call `pgpm.regrain(parent, child, target_step)` with chosen steps.
 
+A regrain by hand holds a `SHARE` lock on the parent for the whole call: reads carry on, but every write
+through the parent waits until it commits. Run it in a quiet window, or use auto-regrain on a table
+taking live writes.
+
 **Auto-regrain** (paced across maintenance ticks):
 
 ```sql
