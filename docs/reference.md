@@ -768,6 +768,15 @@ write-blocked but not yet `pgpm._archive_fully_covered` -- chunked archiving sim
 Only a genuinely unexpected failure in the `DROP` itself is logged (`fail_retain_drop`) and returns
 `false`.
 
+Coverage `retire` finds on a partition with **no** write block on it (a trigger removed by hand, or lifted
+by a pgpm older than the rule [`maintain`](#maintain) applies) is discarded before `retire` puts the block
+back, exactly as a `maintain` tick would discard it, and logged as `archive_coverage_reset` with the
+number of chunks that went. The call then returns `false` with the partition untouched, because the
+coverage it would have trusted was recorded while nothing stopped a write landing in the partition, and a
+row written then was never handed to the archive strategy. Archiving starts over from the partition's
+`lo` under the restored block, and a later `retire` drops it once that coverage is complete. `maintain`
+is not a precondition: a direct caller gets the same answer whether or not a tick ran first.
+
 If the partition it drops is the coarse **source of an in-flight regrain**, `retire` takes that regrain's
 state with it, in the same transaction as the `DROP`: the not-yet-attached fine copies inside the
 partition's range (their tables and their `pgpm.part` rows), the captured changes in the delta when the
@@ -1970,7 +1979,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `drop_incoming_fk` / `suspend_incoming_fk` / `restore_incoming_fk` / `validate_incoming_fk` | preserve-FK lifecycle events |
 | `from_hypertable_carry_fk` | (`pgpm_hypertable` only) an outgoing FK re-added onto the migrated destination during `from_hypertable_copy` |
 | `forget_missing` | `forget_missing()` cleared a parent's registration because its relation no longer exists; `rows` carries how many partition rows were cleared with it |
-| `archive_coverage_reset` | `pgpm.archive_ledger` rows were discarded because the coverage they record cannot be vouched for; `rows` carries how many chunks and `method` says why. Three causes: the partition they were recorded for has no write block on it (coverage nothing has been guarding, see [`maintain`](#maintain)); they were recorded under a `child_name` that is no longer a tracked partition of the parent, over a range a tracked partition now holds (a partition renamed without carrying the ledger, see [the archive step](#byte-budget-chunked-archiving)); or a `regrain` swap dropped a partly archived source, whose chunks go with it (see [`regrain`](#regrain)). In every case the partition holding the range archives again from its own `lo` |
+| `archive_coverage_reset` | `pgpm.archive_ledger` rows were discarded because the coverage they record cannot be vouched for; `rows` carries how many chunks and `method` says why. Three causes: the partition they were recorded for has no write block on it (coverage nothing has been guarding, see [`maintain`](#maintain) and [`retire`](#retire)); they were recorded under a `child_name` that is no longer a tracked partition of the parent, over a range a tracked partition now holds (a partition renamed without carrying the ledger, see [the archive step](#byte-budget-chunked-archiving)); or a `regrain` swap dropped a partly archived source, whose chunks go with it (see [`regrain`](#regrain)). In every case the partition holding the range archives again from its own `lo` |
 | `warn_obtain_unscheduled` | logged at most once per `maintain_all` sweep, with a null `parent_table`, when the `pgpm` cron job exists but `pgpm_obtain` doesn't -- obtain is silently not running |
 | `skip_obtain` / `skip_retain` / `skip_regrain` / `skip_regrain_capture` / `skip_archive` / `skip_write_block` / `skip_restore_fk` / `skip_validate_fk` | a step deferred (lock race or transient error; `method` carries the reason) |
 | `skip_write_block_lift` | a partition retention no longer reaches kept its write block, because `pgpm.archive_ledger` already covers it and that coverage is only true while nothing can write to it. Logged once per partition, on the first tick that would otherwise have lifted the block; `method` says how to make the partition writable again (see [`maintain`](#maintain)) |

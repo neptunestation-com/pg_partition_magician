@@ -739,6 +739,33 @@ MUTATIONS = {
         [("      v_substituted := r.child_oid is not null and v_now is not null and v_now::oid <> r.child_oid;\n",
           "      v_substituted := v_now::oid is distinct from r.child_oid;\n", 1)],
     ),
+    "retire_trusts_unguarded_coverage": (
+        "bench/retire_unguarded_coverage.sh",
+        "Pre-#564 retire(): no discard of coverage found without its write block. retire() is documented "
+        "as independently callable and only maintain() is guaranteed to have run _enforce_write_blocks "
+        "(which does discard it, #452) first, so a direct caller reaches a fully archived child whose "
+        "trigger was dropped by hand, retire() re-installs the block, reads the stale watermark as full "
+        "coverage and DROPs the child with a row written while it was unblocked that no strategy was "
+        "ever handed. Removes the whole discard block, comment included, so the mutant is the pre-fix "
+        "function exactly. Part A of tests/130 catches it, by which rows survive and which ids the "
+        "strategy is handed before the drop.",
+        [(re.compile(r"^  -- COVERAGE FOUND WITHOUT ITS BLOCK IS DISCARDED HERE TOO \(issue #564\).*?\n  end if;\n\n"
+                     r"(?=  perform pgpm\._install_write_block\(p_parent, p_child\);\n)",
+                     re.MULTILINE | re.DOTALL), "", 1)],
+    ),
+    "retire_coverage_check_after_block": (
+        "bench/retire_unguarded_coverage.sh",
+        "The tempting reordering of #564's discard: install the write block first, then ask whether "
+        "coverage exists without one. The block is always on by the time the question is asked, so "
+        "nothing is ever discarded and the stale watermark licenses the drop exactly as before the fix. "
+        "Adds one install ahead of the ledger read (the original install below stays, and is idempotent), "
+        "which is the smallest edit that makes that mistake. Part A of tests/130 catches it.",
+        [("  select count(*) into v_chunks from pgpm.archive_ledger\n"
+          "   where parent_table = p_parent and child_name = p_child;\n",
+          "  perform pgpm._install_write_block(p_parent, p_child);\n"
+          "  select count(*) into v_chunks from pgpm.archive_ledger\n"
+          "   where parent_table = p_parent and child_name = p_child;\n", 1)],
+    ),
     "hypertable_cutover_unverified_source": (
         "bench/hypertable_cutover_identity.sh",
         "Pre-#422 from_hypertable_cutover(): it locks the SOURCE by the name it resolved at the top "

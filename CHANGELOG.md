@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- **`retire()` discards archive coverage it finds without its write block, instead of dropping on it**
+  (#564). `_enforce_write_blocks` has discarded ledger rows on an unblocked partition since #452 (a
+  trigger dropped by hand, or lifted by an older pgpm, leaves a watermark nothing has been guarding),
+  but `retire()` is documented as independently callable and only `maintain()` is guaranteed to run
+  that step first. Called directly on a fully archived partition whose block had gone, `retire()`
+  re-installed the block, read the stale watermark as full coverage and dropped the partition with a
+  row written while it was unblocked that no strategy was ever handed. It now makes the same discard
+  before it installs the block, logged as `archive_coverage_reset` with the number of chunks, and
+  returns `false`; archiving starts over from `lo` under the restored block and a later call drops the
+  partition once every row in it has been handed over. `tests/130_retire_unguarded_coverage_test.sql`
+  asserts by identity which ledger rows go, that the unguarded row survives and is archived before the
+  drop, that a guarded sibling is still dropped, and that no reset is logged where there was no
+  coverage; `bench/retire_unguarded_coverage.sh` drives the file against the
+  `retire_trusts_unguarded_coverage` and `retire_coverage_check_after_block` mutations, which
+  `./test.sh discriminate` requires it to fail.
 - **`transmute` puts the new parent in every publication that named the table** (#566). The #277
   carry-over replayed owner, grants, RLS, policies, comments and triggers, but not publication membership.
   `pg_publication_rel` records a table by oid, and the cutover renames that oid into the monolith, so a
