@@ -29,6 +29,11 @@
 -- key goes, the changes really were captured and really were reconciled in that session, and the swap
 -- really ran. bench/regrain_reconcile_datestyle.sh runs this file against a mutant with the bare
 -- ::text put back (regrain_reconcile_bare_text), so it is also required to FAIL there.
+--
+-- PostgreSQL 18 resolves an abbreviation the SESSION's own zone uses to that zone's offset before
+-- consulting timezone_abbreviations (pg_timezone_abbrevs shows IST as +05:30 under Asia/Kolkata there),
+-- so on 18 the bare round trip is the identity and the defect is unreachable in one session. The two
+-- round-trip witnesses below say so by version: 3.5 hours before 18, none on 18. The guard runs on 15.
 create extension if not exists pgtap;
 
 select plan(26);
@@ -131,11 +136,14 @@ set datestyle = 'SQL, MDY';
 set timezone = 'Asia/Kolkata';
 select ok((select ts::text from public.ev where id = 2) like '% IST',
   'LIVENESS: this session renders timestamptz with the IST abbreviation');
-select is((select (ts::text)::timestamptz - ts from public.ev where id = 2), interval '3 hours 30 minutes',
-  'LIVENESS: a bare ::text round trip in this session reads the instant 3.5 hours late');
+-- the abbreviation gap this session's bare round trip carries: 3.5 hours before PostgreSQL 18, none on 18
+select case when current_setting('server_version_num')::int >= 180000 then interval '0'
+            else interval '3 hours 30 minutes' end as gap \gset
+select is((select (ts::text)::timestamptz - ts from public.ev where id = 2), :'gap'::interval,
+  'LIVENESS: a bare ::text round trip in this session reads the instant late by the abbreviation gap (3.5 hours before PG 18, none on 18)');
 select is((select ((ts at time zone 'UTC')::text)::timestamptz - (ts at time zone 'UTC') from public.evn where id = 2),
-          interval '3 hours 30 minutes',
-  'LIVENESS: and so does the naive column''s wall time once converted to an instant');
+          :'gap'::interval,
+  'LIVENESS: and so does the naive column''s wall time once converted to an instant (same gap)');
 
 create temp table swap_err (tbl text, err text);
 do $$
