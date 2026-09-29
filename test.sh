@@ -752,6 +752,7 @@ run_perf() {
     "bench/cutover_reread_window.sh pgpm_perf88"
     "bench/reread_under_lock_tap.sh pgpm_perf89"
     "bench/frontier_malformed_max.sh pgpm_perf111"
+    "bench/transmute_resume_control_column.sh pgpm_perf121"
   )
   local selected=()
   local n=${#guards[@]} idx

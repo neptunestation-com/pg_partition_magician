@@ -691,6 +691,15 @@ TRANSMUTE_RESUME_LATTICE_RE = re.compile(
     r"  end if;\n",
     re.DOTALL,
 )
+# #628's resume control-column check, whole (comment and code). The claim still records control_attnum,
+# so the mutant is exactly "recorded but never compared", the half of the fix a refactor could drop.
+TRANSMUTE_RESUME_COLUMN_RE = re.compile(
+    r"  -- #628: and the bound has to be on the column THIS call partitions by\..*?"
+    r"               'a column since dropped'\),\n"
+    r"      p_parent;\n"
+    r"  end if;\n",
+    re.DOTALL,
+)
 # #581's three transmute refusals: the step's sign and the lookahead's, which sit together after the
 # retain check, and the date column's whole-day rule, which sits in the control-type chain.
 TRANSMUTE_STEP_OBTAIN_PREFLIGHT_RE = re.compile(
@@ -2806,6 +2815,17 @@ $$;''',
         "a claim recorded on the step-10 grid are what catch it: neither is refused, each dies at its "
         "first COMMIT inside throws_like with 2D000, and the refusal's message is pinned.",
         [(TRANSMUTE_RESUME_LATTICE_RE, "", 1)],
+    ),
+    "transmute_resume_any_column": (
+        "bench/transmute_resume_control_column.sh",
+        "Pre-#628 _transmute: a resume reuses the claim's bound whatever control column the re-run is "
+        "given. The bound and its validated pgpm_monolith_bound CHECK are on the first attempt's column, "
+        "phases 1 and 2 are skipped because a validated constraint by that name exists, and the cutover "
+        "partitions by the NEW column: the CHECK does not imply the new partition bound, so the ATTACH "
+        "scans the whole table under ACCESS EXCLUSIVE. The comparison is removed whole and the recording "
+        "kept. tests/182's re-run on b of a claim recorded on a is what catches it: it is not refused, "
+        "dies at its first COMMIT inside throws_like with 2D000, and the refusal's message is pinned.",
+        [(TRANSMUTE_RESUME_COLUMN_RE, "", 1)],
     ),
     "transmute_reap_by_name": (
         "bench/transmute_reap_identity.sh",

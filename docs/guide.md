@@ -297,8 +297,9 @@ need to: every `maintain_all` tick sweeps for abandoned conversions and undoes t
 from whether the session that claimed the conversion is still connected rather than from a timeout, so a
 long scan is never mistaken for a dead one. The sweep gives up on the table's lock after 5 s, like
 `transmute` itself, and retries next tick (a `skip_transmute_reap` row) rather than queue the table's
-traffic behind it. Re-running `transmute` resumes from the recorded bound, in the
-zone that bound was computed in, rather than recomputing one.
+traffic behind it. Re-running `transmute` resumes from the recorded bound, in the zone that bound was
+computed in, rather than recomputing one, so re-run it on the same control column: one on another
+column is refused, because the bound constrains the first.
 
 The one hard requirement is that the **control column be `NOT NULL`** (a partition key cannot be null, and
 `transmute` never scans to enforce it). A key is *not* required: if the table's **primary key** includes

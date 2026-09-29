@@ -114,6 +114,7 @@ pgpm.part:child_oid
 pgpm.transmute_inflight:owner_pid
 pgpm.transmute_inflight:owner_backend_start
 pgpm.transmute_inflight:partition_tz
+pgpm.transmute_inflight:control_attnum
 pgpm.dropped_fk:restored_at
 pgpm.dropped_fk:validated_at
 pgpm.dropped_fk:validate_retry_after

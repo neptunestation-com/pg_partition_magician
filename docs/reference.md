@@ -236,7 +236,10 @@ interval or `bigint`), or is not a whole number of days or months on a `date` co
 step's bounds truncate to dates); `p_obtain` is negative or null (the rule [`set_obtain`](#set_obtain)
 applies); the call resumes an earlier attempt's claim and that claim's recorded bound is not on this
 call's grid (its `lo` or `hi` is not a boundary of `p_step` and `p_anchor` in the zone the bound was
-computed in: re-run with the step and anchor of the attempt that recorded it, or abort it); the table is already converted (it has a `pgpm.config`
+computed in: re-run with the step and anchor of the attempt that recorded it, or abort it), or was
+recorded on another control column (the bound's `CHECK` is on that column, so it cannot certify this one's
+partition bound and the cutover would scan the whole table under `ACCESS EXCLUSIVE`: re-run on the column
+that attempt used, which a rename in between does not change, or abort it); the table is already converted (it has a `pgpm.config`
 row: `transmute` converts a table once, and a retry whose earlier cutover did commit has nothing to resume),
 is not a plain table (partitioned, a view, a foreign table), or is a partition, an inheritance child or an
 inheritance parent; a relation of any kind already holds the name the monolith will take
@@ -2252,6 +2255,7 @@ carries a `pgpm_monolith_bound` `CHECK` and is refusing writes outside `[lo, hi)
 | `control_kind` | `text` | `time`, `id`, `uuidv7` or `text_time` |
 | `lo` / `hi` | `text` | the native bounds the `CHECK` is enforcing; a retry reuses these rather than recomputing |
 | `partition_tz` | `text` | the zone `lo` and `hi` were computed in; a retry adopts it along with them, whatever zone its own session runs in (null on a row written before the column existed, which a retry reads as "keep this session's zone") |
+| `control_attnum` | `smallint` | the attribute number of the control column `lo` and `hi` were computed on, which the `CHECK` constrains; a retry on another column is refused, one on the same column under a new name resumes (null on a row written before the column existed, which a retry does not check) |
 | `started_at` | `timestamptz` | when the conversion added the bound |
 
 ### `pgpm.archive_ledger`
