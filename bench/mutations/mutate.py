@@ -1934,6 +1934,26 @@ $$;''',
             ("  v_gzip := cfg.compress;\n", "  v_gzip := false;\n", 1),
         ],
     ),
+    "retain_interval_normalised_compare": (
+        "bench/retain_interval_sign.sh",
+        "Pre-#565 _retain_nonnegative: an interval retain is judged with `>= interval '0'`, which "
+        "PostgreSQL evaluates on a 30-day-month / 360-day-year normalisation, while the horizon it "
+        "protects is calendar arithmetic on the wall clock. '-1 year 360 days' compares equal to zero, "
+        "so transmute and set_retain accept it and _retain_boundary computes a horizon five or six days "
+        "in the future from a hand-edited one, and the first tick drops every partition up to it, the one "
+        "taking writes included. One site, the function every entry point shares. tests/131: the field-"
+        "by-field refusals in (A), transmute's and set_retain's message pins in (B) and (C), and in (D) "
+        "the tick's exact skip actions, every partition by name and every row by identity.",
+        [
+            ("  v_i := p_retain::interval;\n"
+             "  -- date_trunc keeps the months, then the months and days; the differences isolate one field each, and a\n"
+             "  -- single-field interval compares exactly\n"
+             "  return date_trunc('month', v_i) >= interval '0'\n"
+             "     and date_trunc('day', v_i) - date_trunc('month', v_i) >= interval '0'\n"
+             "     and v_i - date_trunc('day', v_i) >= interval '0';\n",
+             "  return p_retain::interval >= interval '0';\n", 1),
+        ],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

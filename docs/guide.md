@@ -542,7 +542,9 @@ Set a policy at transmute time (`p_retain`) or later with `pgpm.set_retain(p_par
 maintenance drops partitions past it. Retain is an interval for `time`/`uuidv7`/`text_time` and a count
 of ids for `id` (it is subtracted from the frontier, the highest id written). It must not be negative: a
 negative value is refused by both, because it puts the horizon past the partition taking writes and the
-next maintenance tick would drop every partition. Zero keeps only the partition taking writes; `null`
+next maintenance tick would drop every partition. For an interval that means no field may be negative:
+`'-1 year 360 days'` compares equal to zero but is refused, because a calendar year is longer than 360
+days and its horizon would land in the future. Zero keeps only the partition taking writes; `null`
 keeps everything.
 
 ```sql

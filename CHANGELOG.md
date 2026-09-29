@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **An interval retain is refused if any of its fields is negative, not only when it compares below zero**
+  (#565). The sign check `pgpm.transmute` and `pgpm.set_retain` apply to `p_retain`, and the defence in
+  depth in `_retain_boundary` and `regrain_step`, compared the interval with zero, which PostgreSQL does on
+  a 30-day-month, 360-day-year normalisation; the horizon it protects is calendar arithmetic on the wall
+  clock. So `'-1 year 360 days'` compared equal to zero and was accepted, its horizon sat five or six days
+  in the FUTURE, and the first maintenance tick dropped every partition up to it, the one taking writes
+  included, with the rows written that day. `_retain_nonnegative` now judges the months, days and time
+  fields separately and refuses the value if any is negative, which every entry point inherits; a mixed-sign
+  value that happens to net positive (`'1 mon -1 day'`) is refused with the rest. A config already holding
+  one keeps every partition and logs `skip_write_block` and `skip_retain` until `pgpm.set_retain` repairs
+  it. `tests/131_retain_interval_sign_test.sql` pins the rule, each entry point and the tick;
+  `bench/retain_interval_sign.sh` runs it against the `retain_interval_normalised_compare` mutation.
+
 - **CI caches the third-party images, so a burst of PRs cannot spend a registry's anonymous quota**
   (#558). On 2026-09-26 seventeen PR heads pushed within twenty minutes spent ECR Public's anonymous
   data quota for `public.ecr.aws/supabase/postgres` (`toomanyrequests: Data limit exceeded`) and
