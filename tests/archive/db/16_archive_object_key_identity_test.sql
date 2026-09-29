@@ -107,10 +107,10 @@ select is(
   'LIVENESS: exactly ids 10000..10009 sit in [10000, 20000)');
 
 -- Both keys the tick could write: the one the two chunks used to share, and the negative chunk's own.
-select is(t16.clear_object('public.negk', 'negk/negk_10000.ndjson'), 404,
-  'LIVENESS: no object at negk/negk_10000.ndjson before the tick');
-select is(t16.clear_object('public.negk', 'negk/negk_-10000.ndjson'), 404,
-  'LIVENESS: no object at negk/negk_-10000.ndjson before the tick');
+select is(t16.clear_object('public.negk', 'negk/public.negk_10000.ndjson'), 404,
+  'LIVENESS: no object at negk/public.negk_10000.ndjson before the tick');
+select is(t16.clear_object('public.negk', 'negk/public.negk_-10000.ndjson'), 404,
+  'LIVENESS: no object at negk/public.negk_-10000.ndjson before the tick');
 
 call pgpm.maintain('public.negk');
 
@@ -174,10 +174,10 @@ select is(
   (select array_agg(g::bigint) from generate_series(10000, 10009) g),
   'LIVENESS: exactly ids 10000..10009 sit in the Parquet table''s [10000, 20000)');
 
-select is(t16.clear_object('public.negkp', 'negkp/negkp_10000.parquet'), 404,
-  'LIVENESS: no object at negkp/negkp_10000.parquet before the tick');
-select is(t16.clear_object('public.negkp', 'negkp/negkp_-10000.parquet'), 404,
-  'LIVENESS: no object at negkp/negkp_-10000.parquet before the tick');
+select is(t16.clear_object('public.negkp', 'negkp/public.negkp_10000.parquet'), 404,
+  'LIVENESS: no object at negkp/public.negkp_10000.parquet before the tick');
+select is(t16.clear_object('public.negkp', 'negkp/public.negkp_-10000.parquet'), 404,
+  'LIVENESS: no object at negkp/public.negkp_-10000.parquet before the tick');
 
 call pgpm.maintain('public.negkp');
 
@@ -216,11 +216,11 @@ select is(archive._object_stem('time', '2024-01-01 00:00:00+00'), '2024010100000
 
 select is(
   (select s3_key from pgpm.archive_ledger where parent_table = 'public.negk'::regclass and lo = '-10000'),
-  'negk/negk_-10000.ndjson',
-  'the ndjson key is <prefix><parent>_<stem>.ndjson, with the stem carrying the sign');
+  'negk/public.negk_-10000.ndjson',
+  'the ndjson key is <prefix><schema>.<table>_<stem>.ndjson, with the stem carrying the sign');
 select is(
   (select s3_key from pgpm.archive_ledger where parent_table = 'public.negkp'::regclass and lo = '-10000'),
-  'negkp/negkp_-10000.parquet',
-  'the parquet key is <prefix><parent>_<stem>.parquet, with the stem carrying the sign');
+  'negkp/public.negkp_-10000.parquet',
+  'the parquet key is <prefix><schema>.<table>_<stem>.parquet, with the stem carrying the sign');
 
 select * from finish();

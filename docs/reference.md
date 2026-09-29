@@ -1592,6 +1592,19 @@ either, since `pgpm._next_archive_chunk` bounds every call to `config.archive_by
 of ObjectId or KSUID ids, one millisecond of uuidv7, ULID or cuid ids) is never split, so a chunk
 that carries such a run is as large as the run.
 
+Each chunk is uploaded to `<prefix><schema>.<table>_<stem>.ndjson` (`.ndjson.gz` when compressed) or
+`<prefix><schema>.<table>_<stem>.parquet`, and the key does not depend on the session that runs the
+tick. The parent is always schema-qualified (each part quoted only when PostgreSQL would quote it), so
+two tables with one name in two schemas can share a bucket prefix without overwriting each other's
+objects. The stem is the chunk's `lo`: an `id` kind's numeric text whole (sign and decimal point
+included), and for every time kind the digits of `lo` rendered in UTC (`2024-01-01 00:00:00+00` becomes
+`2024010100000000`), whatever the session's `TimeZone`. Objects uploaded before this key shape stay where
+they are: each `pgpm.archive_ledger` row records the key its object was written to, and nothing derives a
+key from a chunk's bounds after the upload. A table whose ticks ran with its schema on the `search_path`
+(a `public` table under pg_cron, typically) had its earlier chunks keyed `<prefix><table>_<stem>`, so its
+bucket holds both shapes once upgraded; a time-kind chunk archived from a non-UTC session had its stem
+rendered in that session's zone.
+
 ## Scheduling
 
 ### `schedule`

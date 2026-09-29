@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **An archive object key names its parent and its `lo` the same in every session** (#551). The
+  `archive_fn` transports keyed each object on `p_parent::text`, which leaves the schema out whenever
+  the ticking session's search_path reaches the parent, so two tables named `evt` in two schemas sharing
+  a prefix (the default `events/` is shared by every table) wrote one object: the second PUT overwrote
+  the first while both ledger rows recorded it, and retire() dropped the first table's partition. A time
+  kind's stem was the digits of `lo` as the session rendered it, offset sign dropped, so a chunk rendered
+  at `+05` and another at `-05` shared a key the same way. `archive._object_key` now names the parent
+  `quote_ident(schema).quote_ident(table)` and `archive._object_stem` renders a time `lo` in UTC; keys
+  already in `pgpm.archive_ledger` stay as written. `tests/archive/db/26_archive_key_schema_zone_test.sql`
+  ticks two same-named parents from their own search_paths through both transports and archives two
+  chunks from opposite-sign zones, asserting exact keys and object contents;
+  `bench/archive_object_key_session.sh` runs it under `discriminate` against the
+  `archive_object_key_search_path_parent` and `archive_object_key_session_zone` mutations.
 - **`from_hypertable_cutover` refuses to swap unless both sides hold the same rows, not merely as many**
   (#653). The conservation check compared `count(*)` only, so a copied row deleted plus a row appended
   behind the watermark during the online window left 72 = 72, the swap went ahead, the late row was lost

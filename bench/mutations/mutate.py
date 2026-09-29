@@ -2084,8 +2084,35 @@ $$;''',
         "ledger rows record the shared key as archived, and retire() drops the first partition with its "
         "rows gone from the store. One site: both transports take the stem from the helper, which is "
         "what lets one edit put the defect back in the NDJSON and the Parquet path at once.",
-        [("  select case when p_kind = 'id' then p_lo else regexp_replace(p_lo, '[^0-9]', '', 'g') end;\n",
+        [("  select case when p_kind = 'id' then p_lo else regexp_replace(p_lo::timestamptz::text, '[^0-9]', '', 'g') end;\n",
           "  select regexp_replace(p_lo, '[^0-9]', '', 'g');\n", 1)],
+    ),
+    # #551, one mutation per session rendering the fix took out of the key, so a catch names which one
+    # came back. Both break bench/archive_object_key_session.sh through tests/archive/db/26.
+    "archive_object_key_search_path_parent": (
+        "bench/archive_object_key_session.sh",
+        "Pre-#551 object key: archive._object_key names the parent p_parent::text, regclass output, "
+        "which leaves the schema out whenever the calling session's search_path reaches the relation. "
+        "Two parents named `evt` in schemas t26a and t26b, sharing a prefix and each ticked under its "
+        "own search_path, both upload to <prefix>evt_0.ndjson (and <prefix>pq_0.parquet): the second "
+        "PUT overwrites the first while both ledger rows record the key as archived, and retire() has "
+        "already dropped the first table's partition. One site: both transports take the key from the "
+        "helper.",
+        [("  select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(c.relname)\n",
+          "  select p_prefix || p_parent::text\n", 1)],
+    ),
+    "archive_object_key_session_zone": (
+        "bench/archive_object_key_session.sh",
+        "Pre-#551 time stem: archive._object_stem takes the digits of a time kind's lo text as the "
+        "session rendered it, zone offset included and its sign dropped, instead of re-rendering the "
+        "instant in UTC. 2024-01-01 00:00Z rendered in Asia/Karachi (05:00:00+05) and 10:00Z rendered "
+        "in America/Bogota (05:00:00-05) are two chunks with one stem, so the second PUT overwrites the "
+        "first while each call reports its chunk covered, and one chunk archived from two zones lands "
+        "on two keys. The pre-#551 function exactly: immutable, no pinned TimeZone, digits of p_lo.",
+        [("returns text language sql stable set timezone = 'UTC' set datestyle = 'ISO, MDY' as $$\n"
+          "  select case when p_kind = 'id' then p_lo else regexp_replace(p_lo::timestamptz::text, '[^0-9]', '', 'g') end;\n",
+          "returns text language sql immutable as $$\n"
+          "  select case when p_kind = 'id' then p_lo else regexp_replace(p_lo, '[^0-9]', '', 'g') end;\n", 1)],
     # #498, one mutation per site of the fix, so a catch names which anchor went missing. All three break
     # bench/dropped_fk_identity.sh: the first two through tests/124's own assertions, the third through
     # the wrapper's upgrade half, which is the only place a second run of install.sql happens.
@@ -3199,6 +3226,8 @@ MUTATION_SRC = {
     "parquet_per_column_statements": "pgpm_archive/install.sql",
     "archive_encode_no_partition_tz": "pgpm_archive/install.sql",
     "archive_object_key_digits_only": "pgpm_archive/install.sql",
+    "archive_object_key_search_path_parent": "pgpm_archive/install.sql",
+    "archive_object_key_session_zone": "pgpm_archive/install.sql",
     "sigv4_transaction_start_stamp": "pgpm_archive/install.sql",
     "to_s3_compress_unread": "pgpm_archive/install.sql",
     "parquet_numeric_scale_unsigned": "pgpm_archive/install.sql",

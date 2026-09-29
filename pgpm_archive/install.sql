@@ -2357,8 +2357,8 @@ $$;
 -- structural fact about the format, not a gap (see README.md's Limits section, #211).
 -- ---------------------------------------------------------------------------
 
--- The stem of a chunk's object key: what sits between `<prefix><parent>_` and the extension. p_lo is
--- the chunk's NATIVE lo (pgpm._native_type): numeric text for the id kind, timestamptz text for every
+-- The stem of a chunk's object key: what sits between `<prefix><schema>.<table>_` and the extension. p_lo
+-- is the chunk's NATIVE lo (pgpm._native_type): numeric text for the id kind, timestamptz text for every
 -- other kind. Two chunks of one table must never share a key, because the store overwrites whatever
 -- object already sits at one while the ledger records both rows as archived (#502).
 --
@@ -2367,13 +2367,35 @@ $$;
 -- -10000 and lo 10000 collapsed onto one key, and on a numeric control so would 10.5 and 105. A
 -- non-negative integer lo produces the same stem as before, so an existing bucket's keys still match.
 --
--- A timestamptz text keeps the digits-only form (`2024-01-01 00:00:00+00` -> `2024010100000000`),
--- which every existing time-kind bucket holds. It was never ambiguous for the values one table
--- produces: the date and time fields are fixed-width and the offset is the recording zone's, so the
--- digits alone still name the instant.
+-- A timestamptz text is re-rendered IN UTC before its digits are taken (`2024-01-01 00:00:00+00` ->
+-- `2024010100000000`), which is why this function pins TimeZone and DateStyle (#551). Native time text
+-- is rendered by whichever session wrote it (pgpm._ts_text pins DateStyle, not the zone), so its digits
+-- used to carry the session's offset with the offset's SIGN dropped: 2024-01-01 00:00Z rendered in
+-- Asia/Karachi (05:00:00+05) and 10:00Z rendered in America/Bogota (05:00:00-05) both stemmed to
+-- 2024010105000005, and the second chunk's PUT overwrote the first. With the offset fixed at +00 the
+-- digits name one instant, the stem of a chunk no longer depends on who ticks it, and keys sort by time.
+-- A stem written from a UTC session (pg_cron's, usually) is unchanged.
 create or replace function archive._object_stem(p_kind text, p_lo text)
-returns text language sql immutable as $$
-  select case when p_kind = 'id' then p_lo else regexp_replace(p_lo, '[^0-9]', '', 'g') end;
+returns text language sql stable set timezone = 'UTC' set datestyle = 'ISO, MDY' as $$
+  select case when p_kind = 'id' then p_lo else regexp_replace(p_lo::timestamptz::text, '[^0-9]', '', 'g') end;
+$$;
+
+-- A chunk's object key: <prefix><schema>.<table>_<stem><ext>. The parent is named by IDENTITY,
+-- quote_ident(schema) || '.' || quote_ident(table), never by p_parent::text (#551). regclass output leaves
+-- the schema out whenever the calling session's search_path reaches the relation, so one table was keyed
+-- `events_...` from one session and `public.events_...` from another, and two parents named `evt` in two
+-- schemas, sharing a prefix (archive.configure's default `events/` is shared by every table) and each
+-- ticked under its own schema's search_path, wrote ONE object: the second PUT overwrote the first while
+-- both ledger rows recorded it, and retire() then dropped the first table's partition. The qualified name
+-- is what regclass::text already printed for a parent off the path, quoted the same way, so a key written
+-- from such a session is unchanged. Keys already in pgpm.archive_ledger stay as written: nothing derives
+-- a key from a chunk's bounds after the upload, so an existing object stays findable through its row.
+create or replace function archive._object_key(p_parent regclass, p_prefix text, p_kind text, p_lo text, p_ext text)
+returns text language sql stable as $$
+  select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(c.relname)
+         || '_' || archive._object_stem(p_kind, p_lo) || p_ext
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace
+   where c.oid = p_parent;
 $$;
 
 -- single read, single PUT (optionally one gzip member for the whole body). No pagination, so no
@@ -2418,7 +2440,7 @@ begin
     raise exception 'archive._encode_upload_ndjson_single: credentials missing from vault';
   end if;
 
-  v_key := cfg.prefix || p_parent::text || '_' || archive._object_stem(pcfg.control_kind, p_lo) || '.ndjson';
+  v_key := archive._object_key(p_parent, cfg.prefix, pcfg.control_kind, p_lo, '.ndjson');
   if p_compress then
     v_key := v_key || '.gz';
     v_body := archive._pq_gzip_compress_dynamic(convert_to(v_payload, 'UTF8'));
@@ -2482,7 +2504,7 @@ begin
     raise exception 'archive._encode_upload_parquet: credentials missing from vault';
   end if;
 
-  v_key := cfg.prefix || p_parent::text || '_' || archive._object_stem(pcfg.control_kind, p_lo) || '.parquet';
+  v_key := archive._object_key(p_parent, cfg.prefix, pcfg.control_kind, p_lo, '.parquet');
   v_resp := archive.s3_signed_request_bytea('PUT', cfg.endpoint, cfg.bucket, cfg.region, v_key, '',
                                             'application/vnd.apache.parquet', v_payload, v_key_id, v_secret);
   if v_resp.status not between 200 and 299 then
