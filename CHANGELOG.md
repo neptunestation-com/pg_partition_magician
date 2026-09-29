@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **`retire` leaves alone a partition an operator detached, on the one-step path too** (#652). It asked
+  `pg_inherits` whether the child was still a partition only when an incoming FK referenced the parent, so
+  on the ordinary path a table an operator `DETACH`ed to keep (still marked attached in `pgpm.part`) was
+  write-blocked and dropped with its rows by the next `retain`. Both paths now refuse up front, before any
+  side effect, a child that is no longer a partition and carries no `retiring_at`: `false`, logged
+  `fail_retain_drop`, no write block, no `DROP`; a child pgpm's own retirement detached is still dropped.
+  Guarded by `tests/171` and `bench/retire_detached_unreferenced.sh`, with the mutations
+  `retire_trusts_part_attached` and `retire_refuses_own_detach`.
 - **A regrain in flight across the upgrade refuses `TRUNCATE` too** (#650). The #449 guard was installed by
   the prepare tick alone, and a regrain resumes without re-preparing whenever its capture trigger is up, so a
   regrain begun under 0.6.0 kept a source with capture and no guard to its swap: a `TRUNCATE` of it went

@@ -720,6 +720,7 @@ run_perf() {
     "bench/set_retain_horizon.sh pgpm_perf84"
     "bench/text_time_default_collation.sh pgpm_perf85"
     "bench/regrain_truncate_guard_upgrade.sh pgpm_perf103"
+    "bench/retire_detached_unreferenced.sh pgpm_perf105"
   )
   local selected=()
   local n=${#guards[@]} idx

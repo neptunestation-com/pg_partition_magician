@@ -2952,6 +2952,32 @@ $$;''',
         "passes; its section 4 and tests/169 section (A) catch it.",
         [("  perform pgpm._regrain_truncate_guard_ensure(v_child);\n", "", 1)],
     ),
+    "retire_trusts_part_attached": (
+        "bench/retire_detached_unreferenced.sh",
+        "Issue #652: retire() stops asking pg_inherits whether the child is still a partition before its "
+        "first side effect, which is the pre-fix shape on the one-step path: pgpm.part.attached is trusted, "
+        "so a table an operator DETACHed to keep is write-blocked and dropped with its rows by the next "
+        "retain(). One site, the refusal right after the identity check, switched off. tests/171 part A "
+        "catches the drop, part B the write block the referenced path used to put on it.",
+        [("  if r.retiring_at is null and not exists (\n"
+          "       select 1 from pg_inherits i\n"
+          "        where i.inhparent = p_parent\n",
+          "  if false and not exists (\n"
+          "       select 1 from pg_inherits i\n"
+          "        where i.inhparent = p_parent\n", 1)],
+    ),
+    "retire_refuses_own_detach": (
+        "bench/retire_detached_unreferenced.sh",
+        "Issue #652, the plausible-but-wrong fix: refuse EVERY child that is no longer a partition, without "
+        "asking whether pgpm's own retirement detached it (retiring_at). A referenced partition's retirement "
+        "then never completes: the detach pgpm dispatched lands and retire() refuses the DROP it was waiting "
+        "for, forever. One site, the retiring_at clause of the same refusal. tests/171 part B's completion "
+        "of pgpm's own detach catches it.",
+        [("  if r.retiring_at is null and not exists (\n"
+          "       select 1 from pg_inherits i\n",
+          "  if not exists (\n"
+          "       select 1 from pg_inherits i\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

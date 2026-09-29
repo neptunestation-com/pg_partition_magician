@@ -836,6 +836,15 @@ write-blocked but not yet `pgpm._archive_fully_covered` -- chunked archiving sim
 Only a genuinely unexpected failure in the `DROP` itself is logged (`fail_retain_drop`) and returns
 `false`.
 
+A partition that is no longer attached to the parent but carries no `retiring_at` was detached by
+something other than pgpm (an operator's own `DETACH PARTITION`, to keep the table or to archive it by
+hand), and `retire` leaves it alone, whether or not anything references the parent: it returns `false`,
+logs `fail_retain_drop` for the partition's range with `method` saying why, and neither write-blocks nor
+drops the table. Its `pgpm.part` row stays, so every later `retain` refuses and logs it again and
+`status().retain_drop_failures` counts it. To end that, attach the table back to the parent or delete its
+`pgpm.part` row. A partition pgpm's own retirement detached carries `retiring_at` and is dropped as usual
+(see below).
+
 Coverage `retire` finds on a partition with **no** write block on it (a trigger removed by hand, or lifted
 by a pgpm older than the rule [`maintain`](#maintain) applies) is discarded before `retire` puts the block
 back, exactly as a `maintain` tick would discard it, and logged as `archive_coverage_reset` with the
@@ -884,7 +893,7 @@ The sequence, per partition:
 `fail_retain_crossing`, `fail_retain_detach` and `fail_retain_identity` all count in
 `status().retain_drop_failures`; in-flight detaches show in `status().retain_detaching`. A partition that
 is detached but carries no `retiring_at` was detached by something other than pgpm, and `retire` refuses to
-drop it.
+drop it, on this path as on the one-step one (see above).
 
 ##### What `retire` checks a partition's identity against
 
@@ -2094,7 +2103,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `skip_obtain` / `skip_retain` / `skip_regrain` / `skip_regrain_capture` / `skip_archive` / `skip_write_block` / `skip_restore_fk` / `skip_validate_fk` | a step deferred (lock race or transient error; `method` carries the reason) |
 | `skip_write_block_lift` | a partition retention no longer reaches kept its write block, because `pgpm.archive_ledger` already covers it and that coverage is only true while nothing can write to it. Logged once per partition, on the first tick that would otherwise have lifted the block; `method` says how to make the partition writable again (see [`maintain`](#maintain)) |
 | `fail_restore_incoming_fk` / `fail_validate_incoming_fk` | a preserve-FK re-add failed / a validation was blocked by an orphan |
-| `fail_retain_drop` / `fail_retain_detach` / `fail_retain_crossing` / `fail_detach_reap` | an unexpected `DROP` failure / no `pgpm_detach` job to dispatch the detach to (run `pgpm.schedule()`) / a `NO ACTION`/`RESTRICT` FK blocked the crossing delete / finalizing an abandoned detach failed. In every case the partition is left whole and `method` carries the error |
+| `fail_retain_drop` / `fail_retain_detach` / `fail_retain_crossing` / `fail_detach_reap` | an unexpected `DROP` failure, or a partition detached by something other than pgpm, which `retire` leaves alone / no `pgpm_detach` job to dispatch the detach to (run `pgpm.schedule()`) / a `NO ACTION`/`RESTRICT` FK blocked the crossing delete / finalizing an abandoned detach failed. In every case the partition is left whole and `method` carries the error |
 | `fail_retain_identity` / `fail_archive_identity` / `fail_write_block_identity` | a partition's name no longer resolves to the relation pgpm recorded for it, so `retire` refused to detach or drop it (see [identity](#what-retire-checks-a-partitions-identity-against)) / the archive step refused to read it (see [the archive step's identity check](#the-archive-steps-identity-check)) / the write-block step refused to put its trigger on it. `method` names the OIDs and, for the first, which anchor disagreed. None clears itself on a later tick |
 | `fail_archive_contract` | the archive step refused what the archive strategy returned: `covered_hi` was null, not above the chunk's `lo`, past its `hi`, or not a native value, so no ledger row was written and coverage did not advance (see [the archive step's contract check](#the-archive-steps-contract-check)). `method` names the strategy, the chunk, the value returned and the rule it broke. Repeats once per tick until the strategy is corrected, and clears itself once it is |
 
