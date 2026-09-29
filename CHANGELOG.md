@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+- **`archive.configure` refuses a `p_part_bytes` of zero or less, and `archive.to_s3` refuses a row
+  holding one before it sends anything** (#594). The knob had no lower bound, and `archive.to_s3`
+  fills each multipart part until it holds `part_bytes`, so with 0 its read loop never read a row: it
+  initiated a multipart upload and PUT empty parts until the store refused part 10001 (about 20 s
+  against MinIO, 10000 round trips against S3, all inside the caller's transaction). A row written
+  before the bound, or by a raw `UPDATE`, is refused by `archive.to_s3` itself.
+  `tests/archive/db/23_to_s3_part_bytes_bound_test.sql` asserts both refusals and, through a counting
+  stand-in for the http transport, that the refused export sent no request while the same export
+  sends its one PUT once the value is positive; `bench/archive_to_s3_part_bytes.sh` drives it against
+  the `to_s3_part_bytes_unbounded` mutation, which `./test.sh discriminate` requires it to fail.
+
+- **A cancelled `archive.to_s3` aborts its multipart upload** (#595). The abort ran only from an
+  `exception when others` handler, and `others` does not catch `query_canceled`, so a
+  `statement_timeout` or `pg_cancel_backend` mid-export left the upload and its parts in the bucket,
+  accruing storage, against the module README's promise. Naming the cancel in that handler is not
+  enough: a cancel that arrives while another error is being raised (pgsql-http's transfer aborted by
+  its interrupt callback) is taken at the handler's first statement, before the abort, and measured
+  against MinIO a handler that only named the cancel still leaked the upload under a real
+  `statement_timeout`. The export now runs in a block of its own, and an
+  enclosing `query_canceled` handler aborts whatever upload is still recorded as in flight, then
+  re-raises the cancel. `tests/archive/db/24_to_s3_cancel_aborts_multipart_test.sql` covers a cancel
+  raised inside the transport, a real `statement_timeout`, and a transport error with a cancel
+  pending, each witnessed with one upload in flight at the key before and none after;
+  `bench/archive_to_s3_cancel_abort.sh` drives it against the `to_s3_abort_misses_cancel` mutation,
+  which `./test.sh discriminate` requires it to fail.
 - **`extend_to` refuses before it exhausts the shared lock table** (#591). It is a function, so every
   partition one call creates holds its locks to that one transaction's end, and `p_max` (default 10000)
   was its only bound: on a stock server a call about 5000 cells out passed its own dry count and died with

@@ -608,6 +608,13 @@ run_archive() {
   # clean-code half of the pair bench/discriminate.sh completes with the per-call temp table put back.
   echo "--- GZIP encode lock-table entries guard (issue #587) ---"
   bash "$(dirname "$0")/bench/archive_huffman_lock_entries.sh" pgpm_test-archive pgpm_perf72 || fail=1
+  # The part_bytes bound guard (#594) and the cancel-abort guard (#595) re-run tests/archive/db/23 and
+  # 24 for the same reason: the clean-code halves of the pairs bench/discriminate.sh completes with
+  # their mutants.
+  echo "--- archive.to_s3 part_bytes bound guard (issue #594) ---"
+  bash "$(dirname "$0")/bench/archive_to_s3_part_bytes.sh" pgpm_test-archive pgpm_perf75 || fail=1
+  echo "--- archive.to_s3 cancel aborts multipart guard (issue #595) ---"
+  bash "$(dirname "$0")/bench/archive_to_s3_cancel_abort.sh" pgpm_test-archive pgpm_perf76 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi

@@ -107,6 +107,11 @@ begin
   if not exists (select 1 from pgpm.config where parent_table = p_parent) then
     raise exception 'archive.configure: % is not managed by pgpm; transmute() it first', p_parent;
   end if;
+  -- archive.to_s3 fills each multipart part until it holds part_bytes, so a size of zero or less
+  -- never reads a row and uploads empty parts until the store refuses part 10001 (issue #594).
+  if p_part_bytes <= 0 then
+    raise exception 'archive.configure: p_part_bytes must be a positive number of bytes, not %', p_part_bytes;
+  end if;
   insert into archive.config
     (parent_table, bucket, region, endpoint, prefix, vault_key_id, vault_secret, compress, part_bytes, fetch_rows)
   values
@@ -2553,10 +2558,28 @@ declare
   v_upload_id text; v_part int := 0; v_etag text; v_parts_xml text := '';
   v_resp http_response; h http_header;
 begin
+-- The export runs in its own block so that a CANCEL can reach the multipart abort as well as an
+-- error. `when others` does not catch query_canceled (57014), so a statement_timeout or a
+-- pg_cancel_backend used to leave the upload and its parts in the bucket (issue #595). Naming the
+-- cancel in the same handler is not enough: a cancel that arrives while another error is being raised
+-- stays pending into the handler and is taken at its first statement, outside any scope that catches
+-- it, and a statement_timeout landing inside a pgsql-http transfer was measured to arrive that way
+-- (a handler naming query_canceled still leaked the upload against MinIO). The enclosing block's
+-- handler catches the cancel wherever it surfaced, in the export or in the handler below, and aborts
+-- whatever upload is still recorded as in flight.
+<<export>>
+begin
   select * into cfg from archive.config where parent_table = p_parent;
   if not found then raise exception 'archive.to_s3: % has no archive.config row', p_parent; end if;
   select * into pcfg from pgpm.config where parent_table = p_parent;
   if not found then raise exception 'archive.to_s3: % is not managed', p_parent; end if;
+  -- archive.configure refuses this now (#594), but a row written before it did, or by a raw UPDATE,
+  -- still reaches here: with part_bytes <= 0 the read loop below never reads, and the part loop PUTs
+  -- empty parts until the store refuses part 10001. Refuse before anything is sent.
+  if cfg.part_bytes <= 0 then
+    raise exception 'archive.to_s3: % has archive.config.part_bytes %; it must be a positive number of bytes (set it with archive.configure)',
+      p_parent, cfg.part_bytes;
+  end if;
 
   select decrypted_secret into v_key_id from vault.decrypted_secrets where name = cfg.vault_key_id;
   select decrypted_secret into v_secret from vault.decrypted_secrets where name = cfg.vault_secret;
@@ -2693,6 +2716,22 @@ exception when others then
   -- abort the in-flight upload so no invisible incomplete parts accrue storage, then re-raise so
   -- retain() keeps the partition. (Belt and braces: also set a bucket lifecycle rule that expires
   -- incomplete multipart uploads, for the day even this abort cannot reach S3.)
+  if v_upload_id is not null then
+    begin
+      perform archive.s3_signed_request('DELETE', cfg.endpoint, cfg.bucket, cfg.region, v_key,
+                                       'uploadId=' || archive.s3_url_encode(v_upload_id),
+                                       'text/plain', '', v_key_id, v_secret);
+    exception when others then null;
+    end;
+    -- attempted: the enclosing handler need not send it again. A cancel that cut this handler short
+    -- never gets here, so the id is still set for that handler to abort.
+    v_upload_id := null;
+  end if;
+  raise;
+end export;
+exception when query_canceled then
+  -- a cancel, from the export or from the handler above before it could abort (see the top of the
+  -- body). It is taken by now, so this DELETE runs; the cancel is re-raised either way.
   if v_upload_id is not null then
     begin
       perform archive.s3_signed_request('DELETE', cfg.endpoint, cfg.bucket, cfg.region, v_key,

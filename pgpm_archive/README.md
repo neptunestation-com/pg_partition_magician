@@ -31,6 +31,9 @@ That's it: `pgpm.maintain()` now archives every eligible partition automatically
 chunks, and `pgpm.retire()` won't drop one until it's fully archived. `archive.configure`'s other
 parameters (`p_region`, `p_endpoint` for S3-compatible stores like MinIO or Supabase Storage,
 `p_prefix`, `p_compress`, etc.) all have sensible defaults -- pass only what you need to override.
+`p_part_bytes` (the size of each `archive.to_s3` multipart part, 8 MiB by default) must be positive:
+`archive.configure` refuses zero or less, and `archive.to_s3` refuses such a row before it sends
+anything.
 
 ## Automatic vs. manual
 
@@ -54,7 +57,8 @@ paged equal the partition's row count when the export began. On a mismatch it ra
 `pg_partition_magician: archive.to_s3 of ... paged N rows but the partition held M ...` and writes
 nothing (an in-flight multipart upload is aborted), so an object that does land is complete. The
 only thing that trips it is a write to the partition during the export: run it against a partition
-nothing is still writing to, then drop.
+nothing is still writing to, then drop. The multipart abort runs whatever ends an export, an error or
+a cancel (`statement_timeout`, `pg_cancel_backend`), and the error or cancel still reaches the caller.
 
 Both manual functions resolve `child` in the parent's schema, never through your session's
 `search_path`, and verify its identity the same way the automatic path does before reading it: if
