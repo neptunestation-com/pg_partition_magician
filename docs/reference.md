@@ -943,7 +943,9 @@ rows and all. It never deletes from the source, which is what keeps a read of th
 short mid-regrain; the fine children are insert-only, so the product has no bloat. The whole call runs in
 one transaction, so it is **atomic and gap-free**. Retention-aware: a sub-range entirely below the horizon
 is reclaimed, never materialized. Refuses (as an exception) when the child is not frozen, the target step
-does not subdivide it, or another regrain is already in flight on the same parent.
+does not subdivide it, the target step is zero or negative, or another regrain is already in flight on the
+same parent. `regrain_step` refuses a zero or negative step the same way, before it reads or changes
+anything.
 
 Only one regrain runs per parent at a time: a second one is refused with an error naming the one in
 flight. Let it finish, or stop it with [`regrain_cancel`](#regrain_cancel), then re-run.
@@ -1026,7 +1028,10 @@ The delta table and its trigger function live in the parent's schema as `<table>
 `<table>_pgpm_regrain_capture()`. They are named from the parent when the prepare tick mints them and found
 by **oid** from then on (`config.regrain_delta_oid`, `config.regrain_capture_fn_oid`), so renaming the parent
 mid-regrain changes nothing: the trigger keeps writing the delta it was given, and the reconcile, the swap
-gate and the swap read that same relation. Every prepare tick drops and re-mints the delta from the key as
+gate and the swap read that same relation. The copy finds each sub-range's fine child by its bounds in
+`pgpm.part`, never by a name rendered from the parent's current name, so the sub-range whose copy was in
+progress at the rename resumes into the child it had started (which keeps its pre-rename name), and only
+the sub-ranges begun after it are named from the new one. Every prepare tick drops and re-mints the delta from the key as
 it is then, so a key column renamed between two regrains is picked up rather than tripping every write into
 the source; a relation already holding the name it would mint under, other than the one this parent recorded,
 is refused rather than adopted. The trigger runs with the **writer's** privileges (pgpm has no
@@ -1604,11 +1609,12 @@ starts in February, on a monthly grid) is left alone rather than retried forever
 `status().coarse_partitions`. A `p_target_step` coarser than `partition_step` (compared at
 `partition_anchor`) is refused.
 
-Two targets are refused at call time rather than left to wedge every tick: a `p_target_step` coarser than
-`partition_step` (auto-regrain would reselect the same unsplittable child forever), and one whose fine
-names `<rel>_p<label>` would exceed PostgreSQL's 63-byte identifier limit. A finer step has a wider label,
-so a table whose monthly names fit can still be refused a daily target; the message names the offending
-name and says how many bytes to shorten the table name by (see [Partition naming](#partition-naming)).
+Three targets are refused at call time rather than left to wedge every tick: a `p_target_step` of zero or
+below (`'0'`, `'-100'`, `'0 days'`, `'-1 month'`: none moves the grid forward, so every tick would fail or
+churn), one coarser than `partition_step` (auto-regrain would reselect the same unsplittable child
+forever), and one whose fine names `<rel>_p<label>` would exceed PostgreSQL's 63-byte identifier limit.
+A finer step has a wider label, so a table whose monthly names fit can still be refused a daily target; the
+message names the offending name and says how many bytes to shorten the table name by (see [Partition naming](#partition-naming)).
 
 Turning it **off while the run it started is in flight** abandons that run, exactly as
 [`regrain_cancel`](#regrain_cancel) would: the capture trigger and the `TRUNCATE` refusal come off, the

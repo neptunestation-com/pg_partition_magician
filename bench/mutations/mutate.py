@@ -2605,6 +2605,38 @@ $$;''',
             (TRANSMUTE_DATE_WHOLE_DAYS_RE, "", 1),
         ],
     ),
+    "regrain_fine_child_by_name": (
+        "bench/regrain_parent_rename_midcopy.sh",
+        "Pre-#585 regrain_step: the copy branch finds the in-progress sub-range's fine child by a name "
+        "rendered from the parent's CURRENT relname (to_regclass(_part_name(v_rel, ...))) rather than by "
+        "its bounds in pgpm.part. After an ALTER TABLE ... RENAME of the parent mid-copy the rendered name "
+        "no longer matches the child the copy started, so the next tick mints a second not-attached child "
+        "for the same [lo, hi) and records it beside the first, and the swap fails 'would overlap' on "
+        "every tick until regrain_cancel. One site: the bounds lookup goes, the render stays. tests/153 "
+        "catches it at the first tick after the rename (the batch lands in a new rn2_p... child) and "
+        "again at the swap.",
+        [("    select p.child_name into v_sub_name from pgpm.part p\n"
+          "     where p.parent_table = p_parent and not p.attached\n"
+          "       and not pgpm._native_gt(cfg.control_kind, p.lo, v_sub_lo) and not pgpm._native_gt(cfg.control_kind, v_sub_lo, p.lo)\n"
+          "       and not pgpm._native_gt(cfg.control_kind, p.hi, v_sub_hi) and not pgpm._native_gt(cfg.control_kind, v_sub_hi, p.hi);\n"
+          "    v_sub_name := coalesce(v_sub_name,\n"
+          "                           pgpm._part_name(v_rel, cfg.control_kind, v_step, v_sub_lo, v_sub_hi, cfg.partition_tz));\n",
+          "    v_sub_name := pgpm._part_name(v_rel, cfg.control_kind, v_step, v_sub_lo, v_sub_hi, cfg.partition_tz);\n", 1)],
+    ),
+    "regrain_step_sign_unchecked": (
+        "bench/regrain_step_positive.sh",
+        "Pre-#588: nothing tests that a regrain target step moves the grid forward. set_regrain stores "
+        "'0' or '-100' (both are 'finer' than any partition_step, so the #341 comparison passes them), "
+        "and regrain_step runs with them: '0' divides by zero in _grid_floor on every tick, a negative "
+        "step makes 'nosubdiv' trivially false, mints a fine child with inverted bounds and walks the "
+        "cursor below lo, and pgpm.regrain() spins toward its 10,000,000-iteration limit. One site: "
+        "_regrain_step_forward's test, which both entry points call, becomes 'if false'. tests/154 "
+        "catches it at every refusal it pins, id and time grids alike.",
+        [("  if not pgpm._native_gt(cfg.control_kind,\n"
+          "                         pgpm._grid_next(cfg.control_kind, p_step, cfg.partition_anchor, cfg.partition_tz),\n"
+          "                         cfg.partition_anchor) then\n",
+          "  if false then\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

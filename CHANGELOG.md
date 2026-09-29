@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+- **A parent renamed mid-regrain no longer wedges the regrain** (#585). `regrain_step` found the fine
+  child of the sub-range it was copying by a name rendered from the parent's current relname, so after an
+  `ALTER TABLE ... RENAME` of the parent (documented as harmless mid-regrain) the next tick did not find
+  the child the copy had started, minted a second not-attached child for the same `[lo, hi)` and recorded
+  it beside the first; the swap then failed `would overlap` on every tick until `regrain_cancel`. It now
+  asks `pgpm.part` for a not-attached child with exactly the sub-range's bounds, the authority the swap
+  attaches from, and renders a name only to create one. `tests/153_regrain_parent_rename_midcopy_test.sql`
+  renames the parent with 4 of a sub-range's 10 rows copied, applies an update, a delete and two inserts,
+  and requires the next batch to land in the started child and the swap to attach that same relation (by
+  oid) with every row named; `bench/regrain_parent_rename_midcopy.sh` drives it against the
+  `regrain_fine_child_by_name` mutation, which `./test.sh discriminate` requires it to fail.
+
+- **A zero or negative regrain target step is refused** (#588). `set_regrain` refused only a target
+  coarser than `partition_step` and one with over-long names, and a step of zero or below is narrower than
+  anything, so it was stored: `'0'` then divided by zero on every tick (`skip_regrain` forever), and a
+  negative step minted a fine child with inverted bounds and walked the cursor below `lo`, so auto-regrain
+  churned `regrain_prepare` / `regrain_capture_orphan` / `regrain_restart` with the capture trigger left
+  on the source, and `pgpm.regrain()` spun toward its 10,000,000-iteration limit. `set_regrain` and
+  `regrain_step` (so `regrain()`, `regrain_history()` and `maintain` too) now refuse any step for which the
+  grid's next boundary past `partition_anchor` is not past it, which covers an id step, a fixed interval
+  and a calendar one. `tests/154_regrain_step_positive_test.sql` pins every refusal to its message on an
+  id and a time grid beside a valid step each entry accepts; `bench/regrain_step_positive.sh` drives it
+  against the `regrain_step_sign_unchecked` mutation, which `./test.sh discriminate` requires it to fail.
 - **A resumed `transmute` refuses a step or anchor its recorded bound is not on** (#574). The claim a
   failed attempt leaves records the bound (and its zone) but not the step and anchor it was computed on,
   so a re-run with another step reused the bound and registered the new step. The recorded `hi` was not

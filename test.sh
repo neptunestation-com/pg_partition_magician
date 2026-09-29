@@ -692,6 +692,8 @@ run_perf() {
     "bench/transmute_resume_lattice.sh pgpm_perf56"
     "bench/transmute_reap_identity.sh pgpm_perf57"
     "bench/transmute_step_preflight.sh pgpm_perf58"
+    "bench/regrain_parent_rename_midcopy.sh pgpm_perf70"
+    "bench/regrain_step_positive.sh pgpm_perf71"
   )
   local selected=()
   local n=${#guards[@]} idx
