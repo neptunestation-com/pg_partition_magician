@@ -308,9 +308,11 @@ def test_range_unique_constraint_fallback(conn):
     check("UNIQUE CONSTRAINT fallback (no primary key)", expected, arrow_rows, duck_rows)
 
 
-def test_range_bare_unique_index_refused(conn):
-    # A bare `create unique index`, never promoted to a constraint, must NOT be picked up --
-    # pg_constraint has no row for it, exactly like pgpm.regrain_step's own discovery query.
+def test_range_bare_unique_index_not_a_key(conn):
+    # A bare `create unique index`, never promoted to a constraint, must NOT be picked up as the
+    # tiebreak key -- pg_constraint has no row for it, exactly like pgpm.regrain_step's own discovery
+    # query. Since #597 a parent with no key is archived rather than refused, ordered by the control
+    # column alone, so the discovery's answer is asserted directly and the file must still read back.
     run(conn, "drop table if exists t_range_bare_index")
     run(
         conn,
@@ -325,22 +327,25 @@ def test_range_bare_unique_index_refused(conn):
     run(conn, "create table t_range_bare_index_p1 partition of t_range_bare_index "
               "for values from ('2026-01-01') to ('2026-02-01')")
     run(conn, "create unique index t_range_bare_index_uq_idx on t_range_bare_index (ts, id)")
-    run(conn, "insert into t_range_bare_index (id, ts, val) values (1, '2026-01-10', 'a')")
+    run(conn, "insert into t_range_bare_index (id, ts, val) values (1, '2026-01-10', 'a'), (2, '2026-01-20', 'b')")
     conn.commit()
-    try:
-        to_parquet_range_bytes(conn, "t_range_bare_index", "ts", "2026-01-01", "2026-02-01")
-        FAILURES.append("bare unique index: expected refusal, got a result")
-        print("FAIL: bare unique index (unbacked by a constraint) correctly refused")
-    except psycopg2.Error as e:
-        conn.rollback()
-        if "no primary key or predicate/expression-free unique constraint" in str(e):
-            print("PASS: bare unique index (unbacked by a constraint) correctly refused")
-        else:
-            FAILURES.append(f"bare unique index: wrong error: {e}")
-            print("FAIL: bare unique index (unbacked by a constraint) correctly refused")
+    key = run(conn, "select archive._key_columns('t_range_bare_index'::regclass)")[0][0]
+    ok = key is None
+    print(f"{'PASS' if ok else 'FAIL'}: bare unique index (unbacked by a constraint) is not taken as a key")
+    if not ok:
+        FAILURES.append(f"bare unique index: archive._key_columns returned {key!r}, expected none")
+    raw = to_parquet_range_bytes(conn, "t_range_bare_index", "ts", "2026-01-01", "2026-02-01")
+    arrow_rows, duck_rows = read_with_both_readers(raw)
+    expected = expected_rows(conn, "t_range_bare_index", "ts", "2026-01-01", "2026-02-01",
+                              ["ts"], ["id", "ts", "val"])
+    check("bare unique index: archived ordered by the control column", expected, arrow_rows, duck_rows)
 
 
-def test_range_keyless_refused(conn):
+def test_range_keyless_archived(conn):
+    # A genuinely keyless parent is archived, not refused (#597): every column is read from one
+    # snapshot numbered once, so rows tied on the control column keep their own values in every
+    # column. The tie is in the fixture on purpose; its order in the file is whichever the snapshot
+    # gave it, so both sides are compared in (ts, val) order.
     run(conn, "drop table if exists t_range_keyless")
     run(
         conn,
@@ -353,19 +358,19 @@ def test_range_keyless_refused(conn):
     )
     run(conn, "create table t_range_keyless_p1 partition of t_range_keyless "
               "for values from ('2026-01-01') to ('2026-02-01')")
-    run(conn, "insert into t_range_keyless (ts, val) values ('2026-01-10', 'a')")
+    run(conn, "insert into t_range_keyless (ts, val) values "
+              "('2026-01-10', 'b'), ('2026-01-10', 'a'), ('2026-01-20', 'c')")
     conn.commit()
-    try:
-        to_parquet_range_bytes(conn, "t_range_keyless", "ts", "2026-01-01", "2026-02-01")
-        FAILURES.append("keyless table: expected refusal, got a result")
-        print("FAIL: genuinely keyless table correctly refused")
-    except psycopg2.Error as e:
-        conn.rollback()
-        if "no primary key or predicate/expression-free unique constraint" in str(e):
-            print("PASS: genuinely keyless table correctly refused")
-        else:
-            FAILURES.append(f"keyless table: wrong error: {e}")
-            print("FAIL: genuinely keyless table correctly refused")
+    raw = to_parquet_range_bytes(conn, "t_range_keyless", "ts", "2026-01-01", "2026-02-01")
+    arrow_rows, duck_rows = read_with_both_readers(raw)
+
+    def by_ts_val(rows):
+        return sorted(rows, key=lambda r: (_norm(r["ts"]), r["val"]))
+
+    expected = expected_rows(conn, "t_range_keyless", "ts", "2026-01-01", "2026-02-01",
+                              ["ts", "val"], ["ts", "val"])
+    check("genuinely keyless table archived, tied rows intact", expected,
+          by_ts_val(arrow_rows), by_ts_val(duck_rows))
 
 
 def test_range_pruning_skips_untouched_partition(conn):
@@ -452,8 +457,8 @@ def main():
         test_range_empty_result,
         test_range_composite_key_two_cols,
         test_range_unique_constraint_fallback,
-        test_range_bare_unique_index_refused,
-        test_range_keyless_refused,
+        test_range_bare_unique_index_not_a_key,
+        test_range_keyless_archived,
         test_range_pruning_skips_untouched_partition,
         test_range_compressed_across_children,
         test_range_enum_and_array,

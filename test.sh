@@ -592,6 +592,19 @@ run_archive() {
   echo "--- SigV4 wall-clock stamp guard (issue #520) ---"
   bash "$(dirname "$0")/bench/archive_sigv4_wall_clock.sh" pgpm_test-archive pgpm_sigv4clock || fail=1
 
+  # The four Parquet column-type guards re-run tests/archive/db/18 to 21 for the same reason, and add
+  # the half those files cannot do from inside the database: pyarrow and DuckDB reading back the files
+  # each one left behind (a negative-scale numeric, infinite timestamps, a numeric scale above its
+  # precision, a keyless parent) and asserting the values by identity.
+  echo "--- Parquet negative numeric scale guard (issue #567) ---"
+  bash "$(dirname "$0")/bench/archive_parquet_negative_scale.sh" pgpm_test-archive pgpm_perf47 || fail=1
+  echo "--- Parquet infinite timestamp guard (issue #586) ---"
+  bash "$(dirname "$0")/bench/archive_parquet_timestamp_infinity.sh" pgpm_test-archive pgpm_perf48 || fail=1
+  echo "--- Parquet numeric scale above precision guard (issue #596) ---"
+  bash "$(dirname "$0")/bench/archive_parquet_scale_above_precision.sh" pgpm_test-archive pgpm_perf49 || fail=1
+  echo "--- Parquet keyless parent guard (issue #597) ---"
+  bash "$(dirname "$0")/bench/archive_parquet_keyless.sh" pgpm_test-archive pgpm_perf50 || fail=1
+
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi
   echo "archive track: PASS"

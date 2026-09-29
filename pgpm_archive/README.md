@@ -92,7 +92,11 @@ the budget past a few MiB with compression on.
   `timestamp`/`timestamptz`, `uuid` (as fixed-size binary, not a typed UUID -- readers get the raw
   16 bytes), `json`/`jsonb` (as text, tagged as JSON), and `numeric(p,s)` as a real DECIMAL --
   `numeric` with no declared precision/scale is refused, since Parquet DECIMAL needs one fixed
-  precision/scale for the whole column. PostgreSQL enums are UTF-8 strings; arrays are JSON-tagged
+  precision/scale for the whole column. Parquet requires `0 <= scale <= precision`, and PostgreSQL 15
+  and later accept columns outside that, so two shapes are declared differently with every value
+  unchanged: a negative scale, `numeric(p,-k)`, is written as `DECIMAL(p+k, 0)` (its values are whole
+  multiples of `10^k`), and a scale above the precision, `numeric(p,s)` with `s > p`, as
+  `DECIMAL(s, s)`. PostgreSQL enums are UTF-8 strings; arrays are JSON-tagged
   strings because this flat writer does not emit Parquet's nested `LIST` structure. Array dimensions
   and non-default lower bounds are not preserved. Composite types are refused outright. One row group,
   no dictionary encoding, no statistics.
@@ -103,7 +107,9 @@ the budget past a few MiB with compression on.
   `TIMESTAMP_MICROS`, the pair pyarrow itself writes for a naive timestamp, so DuckDB and pyarrow
   give back the same wall clock the NDJSON path emits, whatever `TimeZone` the archiving session ran
   under. A reader that predates Parquet's logical types sees only `TIMESTAMP_MICROS` and shows that
-  wall clock labelled UTC.
+  wall clock labelled UTC. `infinity` and `-infinity`, legal in both types, are written as INT64 max
+  and minus INT64 max, the pair DuckDB reads back as `infinity` and `-infinity`; pyarrow gives back
+  the two integers.
 - **Payload size**: `archive.to_s3` (NDJSON) streams through S3 multipart in bounded memory once a
   partition exceeds one ~8MiB part, so it handles any size. `archive.to_s3_parquet` has no
   multipart path and would not benefit from one -- a Parquet file's footer needs every row group's
