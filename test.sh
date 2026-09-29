@@ -744,6 +744,8 @@ run_perf() {
     "bench/transmute_reap_lock_timeout.sh pgpm_perf99"
     "bench/hypertable_cutover_lock_timeout.sh pgpm_perf100"
     "bench/grid_floor_exact.sh pgpm_perf110"
+    "bench/regrain_drivers_serialize.sh pgpm_perf94"
+    "bench/set_partition_tz_midflight.sh pgpm_perf95"
   )
   local selected=()
   local n=${#guards[@]} idx

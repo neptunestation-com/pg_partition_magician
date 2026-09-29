@@ -3271,6 +3271,46 @@ $$;''',
         [("      k := pgpm._floor_div(extract(epoch from (ts - anc)), v_secs)::bigint;",
           "      k := floor(extract(epoch from (ts - anc)) / v_secs::float8)::bigint;", 1)],
     ),
+    "regrain_lock_noop": (
+        "bench/regrain_drivers_serialize.sh",
+        "Pre-#554 regrain path: nothing serialises the calls that drive or reconfigure a regrain of one "
+        "parent. The body of pgpm._regrain_lock becomes a no-op, so regrain_step, regrain_cancel, regrain(), "
+        "set_regrain and set_partition_tz all still call it and take nothing. tests/162's two-session "
+        "sections catch it three ways: a second regrain_step reads the cursor around the first one's "
+        "uncommitted batch and dies on the fine child's key (C); set_regrain reads around an uncommitted "
+        "prepare, finds no run in flight and its UPDATE then lands on the committed one (D); and a step "
+        "issued behind an uncommitted regrain_cancel logs a regrain_restart of the run the cancel tore down (E). "
+        "Section (A), the single-session retarget refusal, passes on this mutant, which is why the refusal "
+        "has a mutation of its own.",
+        [("""  insert into pgpm.regrain_lock (parent_table)
+    select p_parent where exists (select 1 from pgpm.config where parent_table = p_parent)
+  on conflict (parent_table) do nothing;
+  perform 1 from pgpm.regrain_lock where parent_table = p_parent for update;
+""", "  null;\n", 1)],
+    ),
+    "set_regrain_retarget_midflight": (
+        "bench/regrain_drivers_serialize.sh",
+        "Pre-#554 set_regrain: a change of target while a run is in flight is accepted (pass-3 F8-02, pass-4 "
+        "F3-02 and F9-03). Nothing records the step the run was started at, so every later tick walks the "
+        "half-built run on the new grid against copies cut on the old one: a CHECK violation on the old "
+        "first child, or a swap re-check refusing as if retention had been loosened, on every tick. Removes "
+        "only the refusal; the lock stays, so tests/162's sections (A) and (B) are what catch it.",
+        [("""  if p_target_step is not null and p_target_step is distinct from cfg.regrain_to
+     and pgpm._regrain_in_flight(p_parent) then
+""", """  if false then
+""", 1)],
+    ),
+    "set_partition_tz_regrain_midflight": (
+        "bench/set_partition_tz_midflight.sh",
+        "Pre-#660 set_partition_tz: a zone change while a regrain is in flight is accepted, since the lattice "
+        "checks judge only attached bounds and the run's copies are not attached. The rest of the run is "
+        "computed in the new zone, overlaps the copies cut in the old one and leaves a hole the swap refuses "
+        "on every attempt. Removes only the refusal; the lock stays. tests/163's single-session refusal (A) "
+        "and its two-session one (B) both catch it.",
+        [("""  if v_tz is distinct from cfg.partition_tz and pgpm._regrain_in_flight(p_parent) then
+""", """  if false then
+""", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

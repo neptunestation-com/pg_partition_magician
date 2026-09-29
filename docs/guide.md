@@ -470,6 +470,8 @@ With auto-regrain on, each `maintain` tick advances one budget-sized microbatch 
 child toward the target step, sized by `config.regrain_batch`. It is off by default
 (`set_regrain(parent, null)` turns it back off, abandoning any run it has in flight as `regrain_cancel`
 would) and always safe to enable: it only paces regraining; it never starts on a child that is not frozen.
+A different target while a run is in flight is refused, since the run's copies belong to the step it
+started at: let it finish, or `regrain_cancel` it first.
 
 `set_regrain` refuses a target step **coarser** than `partition_step`: splitting toward it could only leave
 the history at a grain the grid does not have. Equal-or-finer targets are accepted, and `maintain` only ever
@@ -1011,4 +1013,4 @@ For step-by-step procedures when an alert fires, see the [runbook](runbook.md). 
   (recorded as `UTC`), so its days and hours are whole wall days and hours in the column's values, and
   its zone cannot be changed. For UTC boundaries on a `timestamptz` column, `set timezone = 'UTC'`
   before the call; change the zone afterwards only with `pgpm.set_partition_tz`, which refuses a change
-  the grid built so far is not on.
+  the grid built so far is not on, and any change while a regrain is in flight.
