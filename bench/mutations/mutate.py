@@ -221,7 +221,8 @@ UNTRANSMUTE_RECHECK_RE = re.compile(
 
 # name -> (guard it must break, why this is the right defect, [(find, replace, expected_count)])
 # #344's hoist: the new parent's CREATE TABLE ... PARTITION BY RANGE, identity, owner, grants,
-# RLS, policies and comments, moved to run BEFORE either rename so none of it adds to the outage.
+# RLS and policies, moved to run BEFORE either rename so none of it adds to the outage. (The comments
+# were in it too until #630 moved them under the cutover's ACCESS EXCLUSIVE, beside the triggers.)
 TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the NEW parent -- not the original/monolith relation -- runs
   -- BEFORE either rename, under a staging name (v_staging, collision-checked earlier alongside the
   -- orphan-name guard). None of it needs the original table's lock: CREATE TABLE ... LIKE only takes
@@ -240,6 +241,10 @@ TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the N
                  v_nsp, v_staging, p_parent::text, p_control);
   v_parent := format('%I.%I', v_nsp, v_staging)::regclass;
   execute format('alter table %s drop constraint if exists pgpm_monolith_bound', v_parent::text);
+  -- 0b (owner, RLS). After the LIKE, under its ACCESS SHARE (see 0b).
+  select pg_get_userbyid(relowner), relacl, relrowsecurity, relforcerowsecurity
+    into v_owner, v_acl, v_rls, v_rls_force
+    from pg_class where oid = p_parent;
 
   -- 6. re-establish identity on the parent, in the SAME form it had (#308). The kind is not cosmetic:
   -- ALWAYS rejects an insert that supplies the column, BY DEFAULT accepts it, so re-adding an ALWAYS
@@ -256,7 +261,8 @@ TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the N
 
   -- 7b (moved before the renames -- #344). Replay everything captured at 0b onto the staging parent,
   -- EXCEPT triggers: that is the one step that needs the LIVE name in place, not just the right OID (see
-  -- 0b), so it stays below, after both renames.
+  -- 0b), so it stays below, after both renames. And except comments, which only the table's ACCESS
+  -- EXCLUSIVE holds still (#630), so they are read and replayed below it, beside the triggers.
   execute format('alter table %s owner to %I', v_parent::text, v_owner);
 
   -- Grants. aclexplode turns relacl into (grantor, grantee, privilege, grantable) rows; a NULL relacl
@@ -312,6 +318,15 @@ TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the N
       case when v_pol.withcheck is not null then ' with check (' || v_pol.withcheck || ')' else '' end);
   end loop;
 
+"""
+
+# #630 and #666: the blocks the reread-under-the-lock fix placed after an ACCESS EXCLUSIVE, shared by the
+# mutations below that move each back to where it was read before the fix. Copied from the source verbatim,
+# so a rewording there fails the build of these mutants loudly instead of leaving the fix in place.
+TRANSMUTE_COMMENTS_UNDER_LOCK = """  -- 7b (comments). Read and replayed under the lock (see 0b): COMMENT takes only SHARE UPDATE EXCLUSIVE,
+  -- which the staging LIKE's ACCESS SHARE does not exclude. p_parent is the monolith's oid by now, which
+  -- is the table the comments are on.
+  v_comment := obj_description(p_parent, 'pg_class');
   if v_comment is not null then
     execute format('comment on table %s is %L', v_parent::text, v_comment);
   end if;
@@ -324,6 +339,38 @@ TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the N
     execute format('comment on column %s.%I is %L', v_parent::text, v_colcom.attname, v_colcom.c);
   end loop;
 
+"""
+TRANSMUTE_OWNER_RLS_AFTER_LIKE = """  -- 0b (owner, RLS). After the LIKE, under its ACCESS SHARE (see 0b).
+  select pg_get_userbyid(relowner), relacl, relrowsecurity, relforcerowsecurity
+    into v_owner, v_acl, v_rls, v_rls_force
+    from pg_class where oid = p_parent;
+"""
+UNTRANSMUTE_TRIGGER_CAPTURE_UNDER_LOCK = """  -- Capture the parent's triggers before it is dropped (#277). transmute dropped the monolith's own
+  -- originals in favour of the parent's, which clone down to every partition, and DETACH strips those
+  -- clones -- so without this the reversal silently returns a table with no triggers at all. As in
+  -- transmute, pg_get_triggerdef names the PARENT, and the restored table takes that name back below, so
+  -- the definitions replay verbatim. And as in transmute (#499), the text carries no tgenabled, so each
+  -- trigger's name and state are captured alongside, index-aligned, and re-applied after the replay.
+  --
+  -- Under the lock, not before it (#666, the mirror of transmute's #593). CREATE TRIGGER and ENABLE or
+  -- DISABLE TRIGGER need only SHARE ROW EXCLUSIVE, which the first check's ACCESS SHARE does not exclude,
+  -- so a trigger committed while the lock was queued was on neither the capture nor the restored table,
+  -- and a state changed then came back as it had been. From here nothing can change them.
+  select coalesce(array_agg(pg_get_triggerdef(oid) order by tgname), '{}'),
+         coalesce(array_agg(tgname::text order by tgname), '{}'),
+         coalesce(array_agg(tgenabled::text order by tgname), '{}')
+    into v_trgdefs, v_trgnames, v_trgstates
+    from pg_trigger where tgrelid = p_parent and not tgisinternal;
+
+"""
+UNTRANSMUTE_IDENTITY_UNDER_LOCK = """  -- Where each restored identity sequence resumes, read under the lock for the same reason (#656): an id a
+  -- writer took while the lock was queued is past any earlier read, and the restored sequence would hand
+  -- it out again. Before the DROP below, which takes the parent's sequence with it.
+  if v_idcols is not null then
+    for v_i in 1 .. array_length(v_idcols, 1) loop
+      v_idnext := array_append(v_idnext, pgpm._identity_resume_at(p_parent, v_idcols[v_i], v_idmax[v_i]));
+    end loop;
+  end if;
 """
 
 # The "no commits in the sweep" defect, shared BY REFERENCE by the two mutations that model it: one
@@ -3310,6 +3357,113 @@ $$;''',
         [("""  if v_tz is distinct from cfg.partition_tz and pgpm._regrain_in_flight(p_parent) then
 """, """  if false then
 """, 1)],
+    ),
+    "transmute_identity_reseed_preflight": (
+        "bench/cutover_reread_window.sh",
+        "Pre-#656 transmute: where each identity sequence resumes is read in the PREFLIGHT, before phase 1, "
+        "and 8b reseeds the parent from it. Writers run on until the cutover's ACCESS EXCLUSIVE, so every id "
+        "they take is issued again: the guard's writer takes 6, 7, 8 and 40 after the resume's preflight, "
+        "the parent's sequence resumes at 6, and the first insert fails with a duplicate key. The read is "
+        "moved, not removed: the same _identity_resume_at call, made in the preflight loop.",
+        [("  select o_names, o_defs into v_out_names, v_out_defs from pgpm._transmute_outgoing_fks(p_parent);\n"
+          "  if v_idcols is not null then\n"
+          "    v_idnext := '{}';\n"
+          "    for v_i in 1 .. array_length(v_idcols, 1) loop\n"
+          "      v_idnext := array_append(v_idnext, pgpm._identity_resume_at(p_parent, v_idcols[v_i], v_idmax[v_i]));\n"
+          "    end loop;\n"
+          "  end if;\n",
+          "  select o_names, o_defs into v_out_names, v_out_defs from pgpm._transmute_outgoing_fks(p_parent);\n", 1),
+         ("  -- scan here blocks no writer.\n"
+          "  if v_idcols is not null then\n"
+          "    foreach v_col in array v_idcols loop\n"
+          "      execute format('select coalesce(max(%I), 0)::bigint from %s', v_col, p_parent::text) into v_m;\n"
+          "      v_idmax := array_append(v_idmax, v_m);\n",
+          "  -- scan here blocks no writer.\n"
+          "  if v_idcols is not null then\n"
+          "    foreach v_col in array v_idcols loop\n"
+          "      execute format('select coalesce(max(%I), 0)::bigint from %s', v_col, p_parent::text) into v_m;\n"
+          "      v_idmax := array_append(v_idmax, v_m);\n"
+          "      v_idnext := array_append(v_idnext, pgpm._identity_resume_at(p_parent, v_col, v_m));\n", 1)],
+    ),
+    "transmute_carried_indexes_preflight": (
+        "bench/cutover_reread_window.sh",
+        "Pre-#630 transmute: step 9b carries the secondary-index list the PREFLIGHT read, and the cutover "
+        "never lists them again. CREATE INDEX takes only SHARE, so the unique index the guard's second "
+        "session commits while the cutover waits follows the rename onto the monolith alone, and a "
+        "duplicate routed to a forward partition goes in. One site: the cutover's second asking.",
+        [("  -- back to the resumable phase-2 state. Before the renames, so p_parent still resolves by its own name.\n"
+          "  select o_names, o_defs into v_idx_names, v_idx_defs\n"
+          "    from pgpm._transmute_carried_indexes(p_parent, v_nsp, p_control, v_ctl_attnum, v_reuse_idx);\n",
+          "  -- back to the resumable phase-2 state. Before the renames, so p_parent still resolves by its own name.\n", 1)],
+    ),
+    "transmute_outgoing_fks_preflight": (
+        "bench/cutover_reread_window.sh",
+        "Pre-#630 transmute: step 7a re-adds the outgoing-key list the PREFLIGHT read. ADD FOREIGN KEY takes "
+        "only SHARE ROW EXCLUSIVE, so the key the guard's second session commits while the cutover waits "
+        "stays on the monolith, and an orphan routed to a forward partition goes in. One site: the "
+        "cutover's second asking.",
+        [("  select o_names, o_defs into v_out_names, v_out_defs from pgpm._transmute_outgoing_fks(p_parent);\n"
+          "  if v_idcols is not null then\n"
+          "    v_idnext := '{}';\n",
+          "  if v_idcols is not null then\n"
+          "    v_idnext := '{}';\n", 1)],
+    ),
+    "transmute_comments_before_lock": (
+        "bench/cutover_reread_window.sh",
+        "Pre-#630 transmute: the table and column comments are read and replayed onto the staging parent "
+        "BEFORE the cutover's ACCESS EXCLUSIVE. COMMENT takes only SHARE UPDATE EXCLUSIVE, which the "
+        "staging LIKE's ACCESS SHARE does not exclude, so the comments the guard's second session commits "
+        "while the cutover waits are lost. The block is moved to just before the lock, which is later than "
+        "the pre-fix read and still misses them.",
+        [(TRANSMUTE_COMMENTS_UNDER_LOCK, "", 1),
+         ("  -- 0b (triggers). The outage starts HERE",
+          TRANSMUTE_COMMENTS_UNDER_LOCK + "  -- 0b (triggers). The outage starts HERE", 1)],
+    ),
+    "transmute_owner_rls_before_like": (
+        "bench/reread_under_lock_tap.sh",
+        "Pre-#630 transmute: the owner and the RLS flags are read at the start of phase 3, BEFORE the "
+        "staging LIKE whose ACCESS SHARE is what excludes ALTER OWNER and ENABLE ROW LEVEL SECURITY, so "
+        "a change committed between the read and the LIKE is not carried. No second session can land "
+        "there on cue; tests/159's event trigger on the staging CREATE TABLE changes both at the latest "
+        "point the window allows, and its parent keeps the old owner with RLS off.",
+        [(TRANSMUTE_OWNER_RLS_AFTER_LIKE, "", 1),
+         ("  -- #344: everything below that only touches the NEW parent",
+          TRANSMUTE_OWNER_RLS_AFTER_LIKE + "\n  -- #344: everything below that only touches the NEW parent", 1)],
+    ),
+    "untransmute_trigger_capture_before_lock": (
+        "bench/reread_under_lock_tap.sh",
+        "Pre-#666 untransmute: the parent's triggers are captured before its explicit ACCESS EXCLUSIVE "
+        "(#443's second gate), under only the first gate's ACCESS SHARE, which does not exclude CREATE "
+        "TRIGGER or DISABLE TRIGGER. tests/158's writer creates tg158_b and disables tg158_a while the lock "
+        "is queued; the restored table lacks the one and fires the other.",
+        [(UNTRANSMUTE_TRIGGER_CAPTURE_UNDER_LOCK, "", 1),
+         ("  -- THE GATE, AGAIN, UNDER THE LOCK (#443).",
+          UNTRANSMUTE_TRIGGER_CAPTURE_UNDER_LOCK + "  -- THE GATE, AGAIN, UNDER THE LOCK (#443).", 1)],
+    ),
+    "untransmute_identity_reseed_before_lock": (
+        "bench/reread_under_lock_tap.sh",
+        "Pre-#656 untransmute: where the restored identity sequence resumes is read before the explicit "
+        "ACCESS EXCLUSIVE, so the ids tests/157's writer takes while the lock is queued (6, 7 and 60) are "
+        "issued again and the first insert after the reversal collides. The same _identity_resume_at call, "
+        "moved into the pre-lock loop.",
+        [(UNTRANSMUTE_IDENTITY_UNDER_LOCK, "", 1),
+         ("  -- the max is re-read only when an index answers it.\n"
+          "  select array_agg(a.attname order by a.attnum), array_agg(a.attidentity::text order by a.attnum)\n"
+          "    into v_idcols, v_idkinds\n"
+          "    from pg_attribute a where a.attrelid = p_parent and a.attidentity in ('a', 'd') and not a.attisdropped;\n"
+          "  if v_idcols is not null then\n"
+          "    foreach v_col in array v_idcols loop\n"
+          "      execute format('select coalesce(max(%I), 0)::bigint from %s', v_col, p_parent::text) into v_m;\n"
+          "      v_idmax := array_append(v_idmax, v_m);\n",
+          "  -- the max is re-read only when an index answers it.\n"
+          "  select array_agg(a.attname order by a.attnum), array_agg(a.attidentity::text order by a.attnum)\n"
+          "    into v_idcols, v_idkinds\n"
+          "    from pg_attribute a where a.attrelid = p_parent and a.attidentity in ('a', 'd') and not a.attisdropped;\n"
+          "  if v_idcols is not null then\n"
+          "    foreach v_col in array v_idcols loop\n"
+          "      execute format('select coalesce(max(%I), 0)::bigint from %s', v_col, p_parent::text) into v_m;\n"
+          "      v_idmax := array_append(v_idmax, v_m);\n"
+          "      v_idnext := array_append(v_idnext, pgpm._identity_resume_at(p_parent, v_col, v_m));\n", 1)],
     ),
 }
 
