@@ -3054,9 +3054,17 @@ begin
   -- correctly this way because a UUIDv7 sorts by its embedded timestamp, which is why the copy can do it too.
   v_ctl_q   := quote_ident(cfg.control_column);
   -- how a delta row's control value reads as a native grid value, per row (#455): a naive column is wall
-  -- time in partition_tz (the rule _col_to_native applies one value at a time), anything else its own text
+  -- time in partition_tz (the rule _col_to_native applies one value at a time), anything else its own text.
+  -- An instant is rendered through _ts_text, never a bare ::text (#570): _grid_floor parses the text back
+  -- with ::timestamptz, and under a DateStyle that renders zone abbreviations (SQL, Postgres) that round
+  -- trip is not the identity. Asia/Kolkata renders 'IST', which the default timezone_abbreviations read
+  -- as Israel (+02), so every key read 3.5 hours late, a captured DELETE was applied to a fine child up
+  -- the range and consumed, and the swap attached the real child still holding the deleted row. The
+  -- other kinds' columns (numeric, uuid, text) render the same under every DateStyle and stay ::text.
   v_kctl_native_q := case when pgpm._control_naive(p_parent, cfg.control_column)
-                          then format('(k.%I::timestamp at time zone %L)::text', cfg.control_column, cfg.partition_tz)
+                          then format('pgpm._ts_text(k.%I::timestamp at time zone %L)', cfg.control_column, cfg.partition_tz)
+                          when cfg.control_kind = 'time'
+                          then format('pgpm._ts_text(k.%I)', cfg.control_column)
                           else format('k.%I::text', cfg.control_column) end;
   v_lo_lit  := pgpm._encode(cfg.control_kind, p_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz);
   v_hi_lit  := pgpm._encode(cfg.control_kind, p_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz);
@@ -3496,20 +3504,28 @@ begin
   -- ("cursor null => no child carries the trigger") true from the first tick, so it cannot tear down a
   -- regrain that is one tick old.
   if not pgpm._regrain_capture_active(p_parent, v_child_name) then
-    -- A cursor already set with no capture installed means copies exist that were made WITHOUT capture:
-    -- an interrupted regrain from before this apparatus, or one the janitor cleaned up mid-flight. Those
+    -- No capture installed means every copy of this source that exists was made WITHOUT capture: an
+    -- interrupted regrain from before this apparatus, or one the janitor cleaned up mid-flight. Those
     -- copies are unreconciled, so resuming from them would reintroduce exactly this bug. Discard and
     -- restart, which is cheap: the source still holds every row.
-    if cfg.regrain_cursor is not null then
-      for r in execute format(
-        'select child_name from pgpm.part where parent_table = %L::regclass and not attached'
-        || ' and lo::%s >= %L::%s and hi::%s <= %L::%s',
-        p_parent::text, v_ncast, v_lo, v_ncast, v_ncast, v_hi, v_ncast)
-      loop
-        execute format('drop table if exists %I.%I', v_nsp, r.child_name);
-        delete from pgpm.part where parent_table = p_parent and child_name = r.child_name;
-        v_made := v_made + 1;
-      end loop;
+    --
+    -- Decided by the copies, NOT by the cursor (#569). The janitor's documented backstop is a cursor
+    -- cleared by some other route (a hand edit): it tears the capture down and leaves the copies, so
+    -- the state this branch exists for arrives here with regrain_cursor NULL. Gated on the cursor, the
+    -- next run resumed from those copies and the swap attached them: every UPDATE made while capture
+    -- was off reverted, every DELETE came back, every INSERT vanished. Only regrain inserts a
+    -- not-attached pgpm.part row (#94), so a not-attached row inside this source's range is one of its
+    -- copies whatever the cursor says. A set cursor with no copies still restarts (and logs) as before.
+    for r in execute format(
+      'select child_name from pgpm.part where parent_table = %L::regclass and not attached'
+      || ' and lo::%s >= %L::%s and hi::%s <= %L::%s',
+      p_parent::text, v_ncast, v_lo, v_ncast, v_ncast, v_hi, v_ncast)
+    loop
+      execute format('drop table if exists %I.%I', v_nsp, r.child_name);
+      delete from pgpm.part where parent_table = p_parent and child_name = r.child_name;
+      v_made := v_made + 1;
+    end loop;
+    if cfg.regrain_cursor is not null or v_made > 0 then
       insert into pgpm.log (parent_table, action, lo, hi, rows, method)
         values (p_parent, 'regrain_restart', v_lo, v_hi, v_made, 'copies predate change capture');
     end if;

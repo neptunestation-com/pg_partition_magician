@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+- **A regrain whose change capture the janitor reaped restarts from the source instead of resuming from
+  unreconciled copies** (#569). `regrain_step`'s prepare tick discards the copies made without capture
+  behind them, but only when `config.regrain_cursor` was set. The capture janitor is documented as the
+  backstop for a cursor cleared by some other route (a hand edit): it tears down the capture the null
+  cursor does not cover and leaves the copies, so the next run re-installed capture, resumed from them,
+  and the swap attached rows that never saw the changes made while capture was off: a committed UPDATE
+  reverted, a committed DELETE came back, a committed INSERT vanished. The discard is now decided by the
+  copies, not the cursor: with no capture installed, every not-attached copy inside the source's range is
+  dropped, and `regrain_restart` is logged when one was (or, as before, when a cursor was set). The
+  reference now says so. `tests/135_regrain_restart_null_cursor_test.sql` witnesses the copy, the reaped
+  capture and the uncaptured changes, then asserts the restart row, the dropped copy and the rows through
+  the swap by identity; `bench/regrain_restart_null_cursor.sh` drives the same file for
+  `./test.sh discriminate`, where the `regrain_restart_needs_cursor` mutation puts the defect back.
+
+- **The regrain reconcile files each captured change by its instant in any session `DateStyle`** (#570).
+  `_regrain_reconcile` rendered each captured key's control value with a bare `::text`, in the session's
+  `DateStyle` and `TimeZone`, and parsed it back to pick the key's fine child. Under `SQL` `DateStyle` in
+  `Asia/Kolkata` the text reads `IST`, which the default `timezone_abbreviations` parse as Israel (+02), so
+  every key was filed 3.5 hours late: a captured DELETE was consumed against the wrong fine child and the
+  swap brought the deleted row back, and a captured UPDATE or INSERT was reinserted into a child whose
+  CHECK refused it, wedging the regrain. Both the timestamptz and the naive (`timestamp`, `date`) render
+  now go through `_ts_text`, which pins ISO. `tests/136_regrain_reconcile_datestyle_test.sql` copies in a
+  UTC session and reconciles and swaps from a `SQL, MDY` / `Asia/Kolkata` one, witnessing the `IST` render
+  and the 3.5-hour round trip, and asserts by identity which fine child serves each row;
+  `bench/regrain_reconcile_datestyle.sh` drives the same file for `./test.sh discriminate`, where the
+  `regrain_reconcile_bare_text` mutation puts the defect back.
 - **The Parquet writer reads a negative numeric scale as negative** (#567). Since PostgreSQL 15 a
   numeric typmod's scale is a signed 11-bit field, and both encoders read it as the unsigned low 16
   bits, so a `numeric(5,-2)` column was written at scale 2046: every value came out as zero and the

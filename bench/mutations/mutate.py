@@ -2094,6 +2094,65 @@ $$;''',
              "  v_order_cols := array[p_control] || v_key_cols;\n", 1),
         ],
     ),
+    "regrain_restart_needs_cursor": (
+        "bench/regrain_restart_null_cursor.sh",
+        "Pre-#569 regrain_step: the prepare tick discards the copies made without change capture only "
+        "when config.regrain_cursor IS NOT NULL. The janitor's documented backstop (a cursor cleared by "
+        "hand, then _enforce_regrain_capture reaping the capture it no longer covers) leaves the copies "
+        "with the cursor NULL, so the next run re-installs capture, resumes from them, and the swap "
+        "attaches rows that never saw the changes made while capture was off: an UPDATE reverts, a "
+        "DELETE comes back, an INSERT vanishes. Puts the cursor gate back around the discard and keeps "
+        "the log condition as it was, so the mutant is the old branch exactly. tests/135's restart row, "
+        "dropped copy and rows-through-the-swap identities are what catch it.",
+        [("""    for r in execute format(
+      'select child_name from pgpm.part where parent_table = %L::regclass and not attached'
+      || ' and lo::%s >= %L::%s and hi::%s <= %L::%s',
+      p_parent::text, v_ncast, v_lo, v_ncast, v_ncast, v_hi, v_ncast)
+    loop
+      execute format('drop table if exists %I.%I', v_nsp, r.child_name);
+      delete from pgpm.part where parent_table = p_parent and child_name = r.child_name;
+      v_made := v_made + 1;
+    end loop;
+    if cfg.regrain_cursor is not null or v_made > 0 then
+      insert into pgpm.log (parent_table, action, lo, hi, rows, method)
+        values (p_parent, 'regrain_restart', v_lo, v_hi, v_made, 'copies predate change capture');
+    end if;
+""", """    if cfg.regrain_cursor is not null then
+      for r in execute format(
+        'select child_name from pgpm.part where parent_table = %L::regclass and not attached'
+        || ' and lo::%s >= %L::%s and hi::%s <= %L::%s',
+        p_parent::text, v_ncast, v_lo, v_ncast, v_ncast, v_hi, v_ncast)
+      loop
+        execute format('drop table if exists %I.%I', v_nsp, r.child_name);
+        delete from pgpm.part where parent_table = p_parent and child_name = r.child_name;
+        v_made := v_made + 1;
+      end loop;
+      insert into pgpm.log (parent_table, action, lo, hi, rows, method)
+        values (p_parent, 'regrain_restart', v_lo, v_hi, v_made, 'copies predate change capture');
+    end if;
+""", 1)],
+    ),
+    "regrain_reconcile_bare_text": (
+        "bench/regrain_reconcile_datestyle.sh",
+        "Pre-#570 _regrain_reconcile: each captured key's control value is rendered with a bare ::text, "
+        "in the session's DateStyle and TimeZone, before _grid_floor parses it back to pick the key's "
+        "fine child. Under SQL DateStyle and Asia/Kolkata the text reads 'IST', which the default "
+        "timezone_abbreviations parse as Israel (+02), so every key is filed 3.5 hours late: a captured "
+        "DELETE is consumed against the wrong fine child and the swap brings the row back, and a "
+        "captured UPDATE or INSERT is reinserted into a child whose CHECK refuses it. Both branches of "
+        "the render are reverted (a timestamptz column's own text, a naive column's instant), which is "
+        "the old expression exactly; tests/136's evd identity catches the silent loss and its ev and "
+        "evn swaps catch the wedge.",
+        [("""  v_kctl_native_q := case when pgpm._control_naive(p_parent, cfg.control_column)
+                          then format('pgpm._ts_text(k.%I::timestamp at time zone %L)', cfg.control_column, cfg.partition_tz)
+                          when cfg.control_kind = 'time'
+                          then format('pgpm._ts_text(k.%I)', cfg.control_column)
+                          else format('k.%I::text', cfg.control_column) end;
+""", """  v_kctl_native_q := case when pgpm._control_naive(p_parent, cfg.control_column)
+                          then format('(k.%I::timestamp at time zone %L)::text', cfg.control_column, cfg.partition_tz)
+                          else format('k.%I::text', cfg.control_column) end;
+""", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
