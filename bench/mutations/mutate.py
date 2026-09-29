@@ -2898,6 +2898,42 @@ $$;''',
         [("  if pgpm._session_alive(r.owner_pid, r.owner_backend_start) and r.owner_pid <> pg_backend_pid() then\n",
           "  if pgpm._session_alive(r.owner_pid, null) and r.owner_pid <> pg_backend_pid() then\n", 1)],
     ),
+    "set_retain_strict_horizon": (
+        "bench/set_retain_horizon.sh",
+        "Pass 4 seed: set_retain's would-drop guard tests hi < new horizon instead of hi <= it, while retain() "
+        "drops hi <= horizon, so a partition whose hi lands exactly on the new horizon (the common case: horizons "
+        "are grid-floored, so they fall on partition edges) is not named, the tightening is accepted, and the "
+        "next retain() tick drops a partition the old value kept. One site, the guard's own predicate. tests/98's "
+        "tightening and arm-from-null refusals catch it.",
+        [("       and not pgpm._native_gt(cfg.control_kind, p.hi, v_new_boundary)\n",
+          "       and pgpm._native_gt(cfg.control_kind, v_new_boundary, p.hi)\n", 1)],
+    ),
+    "regrain_sync_share_update_exclusive": (
+        "bench/regrain_writer_waits.sh",
+        "Pass 4 seed: regrain() takes SHARE UPDATE EXCLUSIVE on the parent instead of SHARE (#580). That mode "
+        "admits a writer's ROW EXCLUSIVE, so the write into the source's range proceeds to the parent, queues on "
+        "the source behind the capture trigger's SHARE ROW EXCLUSIVE holding the parent lock, and the swap's "
+        "DETACH waits on it: the pre-#580 40P01 is back with a lock statement still in place. One site. "
+        "tests/149's completion-without-40P01 assertion catches it, as it catches the lock's removal.",
+        [("  execute format('lock table only %s in share mode', p_parent::text);\n",
+          "  execute format('lock table only %s in share update exclusive mode', p_parent::text);\n", 1)],
+    ),
+    "text_time_collation_default_trusted": (
+        "bench/text_time_default_collation.sh",
+        "Pass 4 seed: _check_text_time_collation returns early for a column carrying the database default "
+        "collation and judges only an explicit COLLATE, so a text_time column in a database whose default "
+        "collation does not order the digit alphabet bytewise (an ICU locale with numeric ordering, or any "
+        "locale that weighs digits by value) is accepted and its rows are routed by an order that disagrees "
+        "with the encoding. One site: the default-collation branch, which resolves the effective locale for "
+        "the message, becomes a return. tests/122's default-collation refusal catches it.",
+        [("  if v_collnsp = 'pg_catalog' and v_collname = 'default' then\n"
+          "    select coalesce(j->>'datlocale', j->>'daticulocale', j->>'datcollate') into v_dbloc\n"
+          "      from (select to_jsonb(d) as j from pg_database d where d.datname = current_database()) x;\n"
+          "  end if;\n",
+          "  if v_collnsp = 'pg_catalog' and v_collname = 'default' then\n"
+          "    return;\n"
+          "  end if;\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

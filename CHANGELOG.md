@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **Pass 4's three novel seeds join the mutation catalogue** (`set_retain_strict_horizon`,
+  `regrain_sync_share_update_exclusive`, `text_time_collation_default_trusted`). Each was planted for the
+  pass, found by three finders (recall 9 of 9) and is caught by an existing pgTAP file (tests/98, 149 and 122);
+  the new guards `bench/set_retain_horizon.sh` and `bench/text_time_default_collation.sh` run the first and
+  the last against the mutant, and `bench/regrain_writer_waits.sh` already runs tests/149, so
+  `./test.sh discriminate` proves all three, the way the method asks after every pass.
 - **`land.sh --batch` enqueues a stacked PR as its predecessor merges, and every enqueue is confirmed.**
   The first live batch (#646 and #647) showed the merge queue dropping a PR whose head sits on another
   queued PR's head, twelve seconds after each add and without building a group; the batch now keeps the
