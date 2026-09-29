@@ -1897,7 +1897,7 @@ begin
     delete from pgpm.archive_ledger where parent_table = p_parent and child_name = p_child;
     insert into pgpm.log (parent_table, action, lo, hi, rows, method)
       values (p_parent, 'archive_coverage_reset', r.lo, r.hi, v_chunks,
-              format('%s archived chunk(s) were recorded for %I.%I under a write block that was no longer on it when retire() reached it, so they no longer describe its contents; discarded, and archiving starts over from %s under the block retire() puts back',
+              format('%s archived chunk(s) were recorded for %I.%I under a write block that was no longer on it, or no longer enabled ALWAYS, when retire() reached it, so they no longer describe its contents; discarded, and archiving starts over from %s under the block retire() puts back',
                      v_chunks, v_nsp, p_child, r.lo));
   end if;
 
@@ -2305,7 +2305,7 @@ begin
         delete from pgpm.archive_ledger where parent_table = p_parent and child_name = r.child_name;
         insert into pgpm.log (parent_table, action, lo, hi, rows, method)
           values (p_parent, 'archive_coverage_reset', r.lo, r.hi, v_chunks,
-                  format('%s archived chunk(s) were recorded for %I.%I under a write block that is no longer on it, so they no longer describe its contents; discarded, and archiving starts over from %s once it is blocked again',
+                  format('%s archived chunk(s) were recorded for %I.%I under a write block that is no longer on it or no longer enabled ALWAYS, so they no longer describe its contents; discarded, and archiving starts over from %s once it is blocked again',
                          v_chunks, v_nsp, r.child_name, r.lo));
         v_chunks := 0;
       end if;
@@ -2336,6 +2336,17 @@ $$;
 -- against pg_trigger, not re-derived from the boundary formula) -- shared by _archive_step (issue
 -- #237, only ever archives an already-blocked child) and retire() (issue #238) below.
 --
+-- AND IN FORCE: enabled ALWAYS, tgenabled = 'A' (issue #651). A trigger that exists and does not fire
+-- is no block. A pre-#450 pgpm installed it origin-only, which a session running as
+-- session_replication_role = replica writes straight through, and an operator can disable it by hand.
+-- Presence alone let coverage recorded under either state survive the tick on which _install_write_block
+-- repaired the trigger to ALWAYS: the #452/#564 discard in _enforce_write_blocks and retire() asks this
+-- function, read the repaired-to-be block as a block, and kept a watermark over rows no strategy was
+-- handed. With the state in the test, both discard that coverage before the repair, and _archive_step
+-- never records coverage under a block that is not in force. The repair itself stays keyed on presence
+-- (_install_write_block's own pg_trigger lookup), so a block in any other state is fixed in place, not
+-- stacked.
+--
 -- The schema is matched by OID, never by name (#512). This used to select the parent's nspname and cast
 -- it back with `::regnamespace`, whose input parses its text as an SQL identifier: a schema whose name
 -- needs quoting ("Sales") was downcased, so the lookup raised `schema "sales" does not exist` on every
@@ -2349,6 +2360,7 @@ begin
   return exists (
     select 1 from pg_trigger t join pg_class c on c.oid = t.tgrelid
      where t.tgname = 'pgpm_write_block' and c.relname = p_child and c.relnamespace = v_nsp_oid
+       and t.tgenabled = 'A'
   );
 end;
 $$;

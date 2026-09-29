@@ -823,6 +823,9 @@ The write block is a trigger on the child, enabled `ALWAYS`, so it fires regardl
 `session_replication_role`: a logical-replication apply worker, or a loader running as `replica` to
 silence triggers, is refused exactly as an ordinary session is. A block an older pgpm installed in the
 origin-only state is brought up to `ALWAYS` by the first `maintain` tick after `install.sql` is re-run.
+Only a block enabled `ALWAYS` counts as a write block: one in any other state (origin-only, or disabled
+by hand) is treated as no block at all, so the coverage recorded under it is discarded as described
+below, and the archive step does not archive the partition until the block is `ALWAYS`.
 
 `retire` never widens what retention may drop -- a caller only picks **which** eligible partition and
 **when**. It refuses (raises) an unmanaged table, a table with no retention policy (`config.retain` is
@@ -845,8 +848,9 @@ drops the table. Its `pgpm.part` row stays, so every later `retain` refuses and 
 `pgpm.part` row. A partition pgpm's own retirement detached carries `retiring_at` and is dropped as usual
 (see below).
 
-Coverage `retire` finds on a partition with **no** write block on it (a trigger removed by hand, or lifted
-by a pgpm older than the rule [`maintain`](#maintain) applies) is discarded before `retire` puts the block
+Coverage `retire` finds on a partition with **no** write block in force on it (a trigger removed or
+disabled by hand, lifted by a pgpm older than the rule [`maintain`](#maintain) applies, or left
+origin-only by a pgpm older than the `ALWAYS` rule) is discarded before `retire` puts the block
 back, exactly as a `maintain` tick would discard it, and logged as `archive_coverage_reset` with the
 number of chunks that went. The call then returns `false` with the partition untouched, because the
 coverage it would have trusted was recorded while nothing stopped a write landing in the partition, and a
@@ -1193,9 +1197,11 @@ were deleted. It keeps being archived to completion under the block, and is drop
 reaches it again. The first tick that keeps a block it would otherwise have lifted logs
 `skip_write_block_lift` for that partition, once. To make the partition writable again, delete its
 `pgpm.archive_ledger` rows: the next tick lifts the block, and if the partition is ever blocked again
-archiving starts over from its `lo`. Coverage a tick finds on a partition that has **no** trigger (one
-removed by hand, or lifted by a pgpm older than this rule) is discarded for the same reason and logged
-as `archive_coverage_reset` with the number of chunks that went. That test is made of the relation
+archiving starts over from its `lo`. Coverage a tick finds on a partition that has **no** trigger in
+force (one removed or disabled by hand, lifted by a pgpm older than this rule, or left origin-only by a
+pgpm older than the `ALWAYS` rule, which a `session_replication_role = replica` writer passes) is
+discarded for the same reason, before the same tick repairs the trigger, and logged as
+`archive_coverage_reset` with the number of chunks that went. That test is made of the relation
 `pgpm.part.child_oid` records, never of whatever currently holds the name: when another relation has
 taken a partition's name, the tick refuses on identity (`fail_write_block_identity`, above) and leaves
 the real partition's coverage alone. Write-blocked is one of `retire()`'s drop preconditions (see
@@ -1357,8 +1363,8 @@ byte-budget chunker: never archive a whole large partition as one giant operatio
   that child reach its own `hi` (or the strategy is `none`) -- `retire()`'s archive-coverage drop
   precondition (see [`retire`](#retire)).
 - `pgpm._archive_step(p_parent)`, called once per `maintain()` tick, is the orchestrator: among
-  attached children that **already have the write-block trigger installed** (checked directly, not
-  re-derived from the boundary formula) and are not yet fully covered, it picks up to
+  attached children that **already have the write-block trigger installed and enabled `ALWAYS`**
+  (checked directly, not re-derived from the boundary formula) and are not yet fully covered, it picks up to
   `config.archive_batch` of them, **oldest first**, and for each picks the next chunk, runs
   `_run_archive_strategy`, checks the returned `covered_hi` against that chunk (see
   [the archive step's contract check](#the-archive-steps-contract-check)), and records the result in
@@ -2110,7 +2116,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `drop_incoming_fk` / `suspend_incoming_fk` / `restore_incoming_fk` / `validate_incoming_fk` | preserve-FK lifecycle events |
 | `from_hypertable_carry_fk` | (`pgpm_hypertable` only) an outgoing FK re-added onto the migrated destination during `from_hypertable_copy` |
 | `forget_missing` | `forget_missing()` cleared a parent's registration because its relation no longer exists; `rows` carries how many partition rows were cleared with it |
-| `archive_coverage_reset` | `pgpm.archive_ledger` rows were discarded because the coverage they record cannot be vouched for; `rows` carries how many chunks and `method` says why. Three causes: the partition they were recorded for has no write block on it (coverage nothing has been guarding, see [`maintain`](#maintain) and [`retire`](#retire)); they were recorded under a `child_name` that is no longer a tracked partition of the parent, over a range a tracked partition now holds (a partition renamed without carrying the ledger, see [the archive step](#byte-budget-chunked-archiving)); or a `regrain` swap dropped a partly archived source, whose chunks go with it (see [`regrain`](#regrain)). In every case the partition holding the range archives again from its own `lo` |
+| `archive_coverage_reset` | `pgpm.archive_ledger` rows were discarded because the coverage they record cannot be vouched for; `rows` carries how many chunks and `method` says why. Three causes: the partition they were recorded for has no write block in force on it (absent, disabled, or origin-only: coverage nothing has been guarding, see [`maintain`](#maintain) and [`retire`](#retire)); they were recorded under a `child_name` that is no longer a tracked partition of the parent, over a range a tracked partition now holds (a partition renamed without carrying the ledger, see [the archive step](#byte-budget-chunked-archiving)); or a `regrain` swap dropped a partly archived source, whose chunks go with it (see [`regrain`](#regrain)). In every case the partition holding the range archives again from its own `lo` |
 | `warn_obtain_unscheduled` | logged at most once per `maintain_all` sweep, with a null `parent_table`, when the `pgpm` cron job exists but `pgpm_obtain` doesn't -- obtain is silently not running |
 | `skip_obtain` / `skip_retain` / `skip_regrain` / `skip_regrain_capture` / `skip_archive` / `skip_write_block` / `skip_restore_fk` / `skip_validate_fk` | a step deferred (lock race or transient error; `method` carries the reason) |
 | `skip_write_block_lift` | a partition retention no longer reaches kept its write block, because `pgpm.archive_ledger` already covers it and that coverage is only true while nothing can write to it. Logged once per partition, on the first tick that would otherwise have lifted the block; `method` says how to make the partition writable again (see [`maintain`](#maintain)) |

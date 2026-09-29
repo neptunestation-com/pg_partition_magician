@@ -723,6 +723,7 @@ run_perf() {
     "bench/retire_detached_unreferenced.sh pgpm_perf105"
     "bench/retain_nan.sh pgpm_perf102"
     "bench/regrain_copy_name_clash.sh pgpm_perf107"
+    "bench/write_block_enabled_state.sh pgpm_perf104"
   )
   local selected=()
   local n=${#guards[@]} idx

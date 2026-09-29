@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- **A write block counts only when it is enabled `ALWAYS`, so coverage recorded under an origin-only or
+  disabled one is discarded instead of dropped on** (#651). `_is_write_blocked` asked only whether the
+  trigger existed. A pre-#450 pgpm installed the block origin-only, which a `session_replication_role =
+  replica` writer (an apply worker, a loader silencing triggers) passes, and an operator can disable it by
+  hand; the first tick after the upgrade repaired the trigger to `ALWAYS` but kept the coverage recorded
+  before, so `retire()` read the stale watermark as full coverage and dropped the partition with a
+  replica-written row no strategy was ever handed. The predicate now requires `tgenabled = 'A'`, so the
+  #452/#564 discard in `maintain`'s write-block step and in a direct `retire()` fires on either state
+  (logged as `archive_coverage_reset`) before the block is repaired, and the archive step no longer
+  records coverage under a block that is not in force. `tests/170_write_block_enabled_state_test.sql`
+  asserts by identity which ledger rows go, which row survives and what the strategy is handed before
+  the drop, on both paths and for both states, with an `ALWAYS` sibling as the positive;
+  `bench/write_block_enabled_state.sh` drives it against the `write_block_presence_only` mutation.
+  `tests/102` enables its hand-made stranded trigger `ALWAYS` so the substitute is still an archive
+  candidate, and `tests/104` reads its stranded trigger's presence from `pg_trigger`.
 - **A regrain copies only into fine children it created, and `regrain_cancel` drops copies by identity**
   (#631). `regrain_step` skipped its create whenever a sub-range's name already resolved and copied into
   whatever relation bore it, so regraining a new table created under the name of a managed table renamed

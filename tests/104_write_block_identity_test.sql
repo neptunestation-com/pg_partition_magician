@@ -141,7 +141,11 @@ select format($$ create trigger pgpm_write_block before insert or update or dele
                    on public.%I for each row execute function pgpm._write_block_raise() $$,
               :'wc_doomed') \gexec
 
-select ok(pgpm._is_write_blocked('public.wb104b', :'wc_doomed'),
+-- Presence, read from pg_trigger rather than _is_write_blocked: that counts only a block enabled ALWAYS
+-- (#651), and the trigger a pre-#429 pgpm left is origin-only, so it would read false here and, below,
+-- read "lifted" whether or not the removal arm touched it.
+select ok(exists (select 1 from pg_trigger where tgname = 'pgpm_write_block'
+                     and tgrelid = format('public.%I', :'wc_doomed')::regclass),
   'LIVENESS: the substitute carries a stranded write-block trigger, as a pre-#429 install would have left it');
 select throws_like(
   format($$ insert into public.%I (id, payload) values (9001, 'z') $$, :'wc_doomed'),
@@ -156,7 +160,8 @@ select pgpm._enforce_write_blocks('public.wb104b');
 
 select ok(not pgpm._is_write_blocked('public.wb104b', :'wc_sib'),
   'LIVENESS: the legitimate child is unblocked, so the removal arm of the pass really ran');
-select ok(not pgpm._is_write_blocked('public.wb104b', :'wc_doomed'),
+select ok(not exists (select 1 from pg_trigger where tgname = 'pgpm_write_block'
+                         and tgrelid = format('public.%I', :'wc_doomed')::regclass),
   'and the stranded trigger is lifted off the substitute too: removal is name-based on purpose');
 select lives_ok(
   format($$ insert into public.%I (id, payload) values (9002, 'z') $$, :'wc_doomed'),
