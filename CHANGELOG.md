@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+- **`maintain_all`'s reaper gives up on a table's lock after 5 s and retries next tick** (#657).
+  `_transmute_reap` runs first in every sweep, before any `lock_timeout` is set, and its `DROP CONSTRAINT
+  pgpm_monolith_bound` takes `ACCESS EXCLUSIVE` on the half-converted live table; under pg_cron's default of
+  no timeout one long reader parked it, and its pending request queued every read and write of the table,
+  and the rest of the sweep, behind that reader. The function now carries transmute's default bound as a
+  `SET lock_timeout` clause (the caller's setting is back when it returns), and a timeout skips that table
+  alone, logged `skip_transmute_reap`, with its bound and claim kept for the next tick. Guarded by
+  tests/166 and `bench/transmute_reap_lock_timeout.sh` (mutation `transmute_reap_no_lock_timeout`).
+- **`from_hypertable_cutover` bounds its wait for the source's lock with a new `p_lock_timeout`** (#665).
+  The cutover's `LOCK TABLE ... IN ACCESS EXCLUSIVE MODE` on the live hypertable ran under the session's
+  `lock_timeout`, by default none, so behind one long reader its pending request blocked every new read
+  and write of the production table for that reader's whole life. `p_lock_timeout` (default `'5s'`, as for
+  `transmute`) now bounds every wait in the swap transaction, is passed to the handoff's `transmute`, and is
+  validated before any work (in `from_hypertable` too, before its copy); a timeout rolls the swap back whole
+  and the cutover can be re-run. Guarded by tests/timescale/db/24 and
+  `bench/hypertable_cutover_lock_timeout.sh` (mutation `hypertable_cutover_no_lock_timeout`).
+
 - **A held `pgpm.config` row no longer aborts or hangs a sweep** (#662). `maintain_all`'s `sweep_turn_at`
   stamps and `maintain_obtain`'s `obtain_retry_after` writes (the clear after a successful obtain and the
   arming in its deferral handler) were plain UPDATEs outside any handler, so while another transaction

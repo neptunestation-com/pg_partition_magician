@@ -1155,6 +1155,33 @@ MUTATIONS = {
          ("  perform set_config('lock_timeout', p_lock_timeout, true);   -- `set local` did not survive the COMMIT\n",
           "", 2)],
     ),
+    "transmute_reap_no_lock_timeout": (
+        "bench/transmute_reap_lock_timeout.sh",
+        "Pre-#657 _transmute_reap(): no bound on the DROP CONSTRAINT's ACCESS EXCLUSIVE, so the reaper runs "
+        "under maintain_all's session default (pg_cron's 0: wait forever). One long reader of a half-converted "
+        "table parks it, its PENDING lock queues every later read and write of the table behind it, and the "
+        "sweep stalls for the reader's whole life. Strips only the function's SET lock_timeout clause and "
+        "keeps the lock_not_available handler, so the defect modelled is 'the wait is not bounded': the "
+        "guard's write times out behind the queued reaper, and the sweep outlives its ceiling.",
+        [("returns int language plpgsql\nset lock_timeout = '5s'\nas $$\n"
+          "declare r pgpm.transmute_inflight%rowtype; v_n int := 0;\n",
+          "returns int language plpgsql\nas $$\n"
+          "declare r pgpm.transmute_inflight%rowtype; v_n int := 0;\n", 1)],
+    ),
+    "hypertable_cutover_no_lock_timeout": (
+        "bench/hypertable_cutover_lock_timeout.sh",
+        "Pre-#665 from_hypertable_cutover(): the swap's LOCK TABLE ... ACCESS EXCLUSIVE on the live "
+        "hypertable runs under the session default (0: wait forever), so behind one long reader its "
+        "PENDING request blocks every later read and write of the production table for the reader's whole "
+        "life. Strips only the set_config that applies p_lock_timeout to the swap transaction, leaving the "
+        "parameter, its up-front validation and the handoff's pass-through in place: the defect modelled "
+        "is 'the bound is not applied', and the guard's bare CALL still resolves. Anchored on the comment "
+        "line before it, because the bare line is also a substring of the two (more-indented) validation "
+        "blocks, which must survive.",
+        [("  -- are as they were, and re-running the cutover costs only the index pre-builds.\n"
+          "  perform set_config('lock_timeout', p_lock_timeout, true);\n",
+          "  -- are as they were, and re-running the cutover costs only the index pre-builds.\n", 1)],
+    ),
     "transmute_cutover_late_build": (
         "bench/transmute_cutover_order.sh",
         "Pre-#344 transmute: the new parent's CREATE TABLE/identity/grants/RLS/policies/comments ran "
@@ -3237,6 +3264,7 @@ MUTATION_SRC = {
     "hypertable_derived_names_unchecked": "pgpm_hypertable/install.sql",
     "hypertable_cutover_untracked_unchecked": "pgpm_hypertable/install.sql",
     "hypertable_cutover_no_horizon_trusted": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_no_lock_timeout": "pgpm_hypertable/install.sql",
     "archive_lz77_hash_scratch": "pgpm_archive/install.sql",
     "archive_encode_array_agg_unnest": "pgpm_archive/install.sql",
     "archive_deflate_six_arrays": "pgpm_archive/install.sql",

@@ -321,7 +321,9 @@ connected rather than from a timeout, so a long validation scan is never mistake
 operator whose session is still open keeps the right to retry. Both this function and the sweep find the
 table by the identity the claim recorded, not by its name, so a half-converted table that was renamed or
 moved to another schema after its conversion failed is still found and has its bound dropped; the sweep
-forgets a claim without acting only when that table no longer exists at all.
+forgets a claim without acting only when that table no longer exists at all. The sweep waits at most 5 s
+for the table's lock: behind a longer transaction it logs `skip_transmute_reap` and tries again next tick,
+rather than queue every read and write of the table behind its own `ACCESS EXCLUSIVE` request.
 
 ### `untransmute`
 
@@ -427,15 +429,17 @@ pgpm.from_hypertable(
   p_hypertable regclass, p_control name, p_interval interval,
   p_obtain int default 30, p_retain interval default null,
   p_drain_batch int default 5000, p_anchor timestamptz default '2000-01-01 00:00:00+00',
-  p_paused boolean default true, p_track_changes boolean default false, p_predrain boolean default true
+  p_paused boolean default true, p_track_changes boolean default false, p_predrain boolean default true,
+  p_lock_timeout text default '5s'
 )
 ```
 
 The one-shot driver: runs `from_hypertable_copy` then `from_hypertable_cutover` back to back. Use it when the
 migration does not need to interleave application writes between the phases. `p_interval` and the
 `p_obtain`/`p_retain`/`p_anchor`/`p_paused` parameters pass straight through to `transmute`; `p_drain_batch` is this module's own
-to `transmute` (see there); `p_control` is the time dimension column; `p_track_changes` and `p_predrain` are described
-under `from_hypertable_copy` and `from_hypertable_cutover`. When `p_retain` is left `null`, the source's
+to `transmute` (see there); `p_control` is the time dimension column; `p_track_changes`, `p_predrain` and
+`p_lock_timeout` are described under `from_hypertable_copy` and `from_hypertable_cutover` (a bad
+`p_lock_timeout` is refused before the copy starts). When `p_retain` is left `null`, the source's
 `drop_chunks` policy interval (if any) is carried in.
 
 ```sql
@@ -558,7 +562,8 @@ pgpm.from_hypertable_cutover(
   p_hypertable regclass, p_control name, p_interval interval,
   p_obtain int default 30, p_retain interval default null,
   p_drain_batch int default 5000, p_anchor timestamptz default '2000-01-01 00:00:00+00',
-  p_paused boolean default true, p_predrain boolean default true
+  p_paused boolean default true, p_predrain boolean default true,
+  p_lock_timeout text default '5s'
 )
 ```
 
@@ -585,6 +590,16 @@ so ids the source had already moved past (gaps from rollbacks, caching, or delet
 re-issued, and `transmute` seeds the migrated sequence from it. The swap is one transaction: it
 commits whole or rolls back whole, leaving the source intact on any failure in it. Requires `from_hypertable_copy`
 to have run (the destination must exist). Parameters past `p_interval` pass through to `transmute`.
+
+**The wait for the lock is bounded.** `p_lock_timeout` (`'5s'` by default, the same default as
+`transmute`'s) bounds every lock wait in the swap transaction, the `ACCESS EXCLUSIVE` on the source above
+all. A pending `ACCESS EXCLUSIVE` request blocks every later read and write of the table, so an unbounded
+wait behind one long reader (an analytics query, `pg_dump`, an idle-in-transaction session) would take the
+production table offline for as long as that reader ran. When the timeout expires the cutover fails with
+`canceling statement due to lock timeout` and the swap rolls back whole: the source is still a hypertable,
+the copy and any drained batches are intact, and re-running the cutover costs only the index pre-builds.
+Retry when the reader has finished, or raise the value if a longer queue is acceptable. The same value is
+passed to the handoff's `transmute`. A bad value is refused before the pre-drain does any work.
 
 **The handoff runs after the swap has committed, and can still refuse.** `transmute` applies its own
 preconditions to the plain table (for example, the monolith name a long table name derives on a fine grid can
@@ -2171,6 +2186,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `archive_coverage_reset` | `pgpm.archive_ledger` rows were discarded because the coverage they record cannot be vouched for; `rows` carries how many chunks and `method` says why. Three causes: the partition they were recorded for has no write block in force on it (absent, disabled, or origin-only: coverage nothing has been guarding, see [`maintain`](#maintain) and [`retire`](#retire)); they were recorded under a `child_name` that is no longer a tracked partition of the parent, over a range a tracked partition now holds (a partition renamed without carrying the ledger, see [the archive step](#byte-budget-chunked-archiving)); or a `regrain` swap dropped a partly archived source, whose chunks go with it (see [`regrain`](#regrain)). In every case the partition holding the range archives again from its own `lo` |
 | `warn_obtain_unscheduled` | logged at most once per `maintain_all` sweep, with a null `parent_table`, when the `pgpm` cron job exists but `pgpm_obtain` doesn't -- obtain is silently not running |
 | `skip_obtain` / `skip_retain` / `skip_regrain` / `skip_regrain_capture` / `skip_archive` / `skip_write_block` / `skip_restore_fk` / `skip_validate_fk` | a step deferred (lock race or transient error; `method` carries the reason) |
+| `skip_transmute_reap` | `maintain_all`'s sweep found an abandoned conversion but could not take the table's lock within 5 s (a long transaction holds it), so it left the bound and the claim in place for the next tick rather than queue every read and write of the table behind it; `method` carries the lock timeout |
 | `skip_write_block_lift` | a partition retention no longer reaches kept its write block, because `pgpm.archive_ledger` already covers it and that coverage is only true while nothing can write to it. Logged once per partition, on the first tick that would otherwise have lifted the block; `method` says how to make the partition writable again (see [`maintain`](#maintain)) |
 | `fail_restore_incoming_fk` / `fail_validate_incoming_fk` | a preserve-FK re-add failed / a validation was blocked by an orphan |
 | `fail_retain_drop` / `fail_retain_detach` / `fail_retain_crossing` / `fail_detach_reap` | an unexpected `DROP` failure, or a partition detached by something other than pgpm, which `retire` leaves alone / no `pgpm_detach` job to dispatch the detach to (run `pgpm.schedule()`) / a `NO ACTION`/`RESTRICT` FK blocked the crossing delete / finalizing an abandoned detach failed. In every case the partition is left whole and `method` carries the error |
