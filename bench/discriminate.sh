@@ -84,7 +84,15 @@ installs() {
         "${q[@]}" -d "$idb" -v ON_ERROR_STOP=1 -q --single-transaction -f - < "$ROOT/pgpm_core/install.sql" &&
         "${q[@]}" -d "$idb" -v ON_ERROR_STOP=1 -q -f - < "$file" ;;
       pgpm_hypertable/install.sql)
-        "${q[@]}" -d "$idb" -v ON_ERROR_STOP=1 -q -c "create extension if not exists timescaledb;" &&
+        # The module installs on the plain core image too (its TimescaleDB checks run at call time, and the
+        # perf track's hypertable guards bring stand-in views), so the extension is created only where the
+        # image ships it: the fleet image of the timescale track. Without this the perf track's copy of
+        # every hypertable mutation read as "does not install" and the shard failed (#563 met #601).
+        "${q[@]}" -d "$idb" -v ON_ERROR_STOP=1 -q -c "do \$\$ begin
+            if exists (select 1 from pg_available_extensions where name = 'timescaledb') then
+              create extension if not exists timescaledb;
+            end if;
+          end \$\$;" &&
         "${q[@]}" -d "$idb" -v ON_ERROR_STOP=1 -q --single-transaction -f - < "$ROOT/pgpm_core/install.sql" &&
         "${q[@]}" -d "$idb" -v ON_ERROR_STOP=1 -q -f - < "$file" ;;
       *)
