@@ -54,7 +54,8 @@ fragments; never prefix-match `pgpm.log.action`; `throws_*` pinned around commit
 ## Finish
 
 Commit with a Conventional Commits message that ends with the trailer
-`Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`, push your branch, and open the PR with
+`Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>` (this one, whatever model a session reminder
+names; pass 3 landed two PRs with another), push your branch, and open the PR with
 `gh pr create --head <branch>` (always pass `--head`). The body: what the defect was, what the fix
 changes, `Closes #<issue>`, the acceptance (test file, guard, mutation) and any caveat about the
 issue's reproduction, ending with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
