@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **An `id` retain of `NaN` is refused like a negative one** (#649). `_retain_nonnegative` judged an id
+  retain with `>= 0`, and PostgreSQL orders numeric `NaN` above every number, so a `config.retain` edited by
+  hand to `'NaN'` passed the #451 defence: its horizon was `NaN`, every partition sorted below it, and one
+  maintenance tick dropped the whole table, the partition taking writes and every row included, while
+  `regrain_step` would have discarded every sub-range as aged. The rule now refuses `NaN`, so the tick logs
+  `skip_write_block` and `skip_retain` and keeps everything, `status()` reports `retain_backlog` as null,
+  and `set_retain` refuses it with the sign-rule message and can repair it. `tests/168_retain_nan_test.sql`
+  pins each site; `bench/retain_nan.sh` runs it against the `retain_nonnegative_admits_nan` mutation.
 - **`retire` leaves alone a partition an operator detached, on the one-step path too** (#652). It asked
   `pg_inherits` whether the child was still a partition only when an incoming FK referenced the parent, so
   on the ordinary path a table an operator `DETACH`ed to keep (still marked attached in `pgpm.part`) was

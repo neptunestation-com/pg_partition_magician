@@ -2366,6 +2366,21 @@ $$;''',
              "  return p_retain::interval >= interval '0';\n", 1),
         ],
     ),
+    "retain_nonnegative_admits_nan": (
+        "bench/retain_nan.sh",
+        "Pre-#649 _retain_nonnegative: the id branch is `p_retain::numeric >= 0` alone, and numeric "
+        "orders NaN above every number, so 'NaN' is accepted as non-negative. The #451 defence in "
+        "_retain_boundary then computes frontier - NaN = NaN, every partition's hi sorts below it, and "
+        "one tick against a hand-edited config.retain drops every partition, the one taking writes "
+        "included, with every row; regrain_step's own copy of the horizon marks every sub-range aged. "
+        "One site, the function every entry point shares. tests/168: the rule in (A), set_retain's "
+        "message pin in (B), the tick's exact skip actions with every partition by name and every row "
+        "by identity in (C), and regrain_step's refusal in (D).",
+        [
+            ("  if p_kind = 'id' then return p_retain::numeric >= 0 and p_retain::numeric <> 'NaN'::numeric; end if;\n",
+             "  if p_kind = 'id' then return p_retain::numeric >= 0; end if;\n", 1),
+        ],
+    ),
     "text_time_collation_positional_only": (
         "bench/text_time_numeric_collation.sh",
         "Pre-#568 _check_text_time_collation: the probe keeps only its first shape per adjacent digit "
