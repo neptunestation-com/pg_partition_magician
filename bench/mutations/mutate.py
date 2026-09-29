@@ -2869,6 +2869,35 @@ $$;''',
             ('if [ "$i" != "$listed" ]; then', "if false; then", 1),
         ],
     ),
+    "retire_straddles_horizon": (
+        "bench/retire_straddle.sh",
+        "Pass 3 seed: retire() compares the partition's LO, not its hi, with the retention horizon, so a "
+        "partition straddling the horizon (lo below it, hi above it) is judged entirely past it and dropped "
+        "with the rows above the horizon in it. One site, the refusal at the top of retire(). tests/60's "
+        "straddling-partition refusal catches it.",
+        [("  if pgpm._native_gt(cfg.control_kind, r.hi, v_boundary) then\n",
+          "  if pgpm._native_gt(cfg.control_kind, r.lo, v_boundary) then\n", 1)],
+    ),
+    "archive_contract_no_overclaim": (
+        "bench/archive_overclaim.sh",
+        "Pass 3 seed: _archive_contract_breach no longer refuses covered_hi > hi, so a strategy that "
+        "over-claims (says it covered a range above the chunk it was handed) records coverage retire() then "
+        "trusts, and rows the strategy never archived are dropped as archived. One site: the second range "
+        "check, removed whole. tests/115's over-claim refusal catches it.",
+        [("    if pgpm._native_gt(p_kind, p_covered_hi, p_hi) then\n"
+          "      return 'covered_hi must not exceed hi: the strategy is claiming coverage of a range it was not handed';\n"
+          "    end if;\n", "", 1)],
+    ),
+    "abort_owner_alive_by_pid_only": (
+        "bench/transmute_abort_owner.sh",
+        "Pass 3 seed: transmute_abort tests the claim owner's liveness by pid alone, passing null for the "
+        "recorded backend_start, so _session_alive never matches a live backend (backend_start = null is "
+        "null) and the owner reads as dead: any session can abort a conversion still running in another, and "
+        "a reused pid is never told apart from the original. One site. tests/101's live-owner refusal "
+        "catches it.",
+        [("  if pgpm._session_alive(r.owner_pid, r.owner_backend_start) and r.owner_pid <> pg_backend_pid() then\n",
+          "  if pgpm._session_alive(r.owner_pid, null) and r.owner_pid <> pg_backend_pid() then\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

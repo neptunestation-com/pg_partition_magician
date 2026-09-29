@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **Pass 3's three novel seeds join the mutation catalogue** (`retire_straddles_horizon`,
+  `archive_contract_no_overclaim`, `abort_owner_alive_by_pid_only`). Each was planted for the pass, found by
+  the finders (recall 9 of 9) and is caught by an existing pgTAP file (tests/60, 115 and 101); the new
+  guards `bench/retire_straddle.sh`, `bench/archive_overclaim.sh` and `bench/transmute_abort_owner.sh` run
+  those files against the mutant so `./test.sh discriminate` proves it, the way the method asks after
+  every pass.
 - **The landing tooling batches PRs through a merge-commit queue, and the PR workflows cancel a superseded
   head's runs** (#644). `scripts/review/land.sh --batch` rebases up to five PRs onto one another, pushes and
   checks the heads in parallel, enqueues them in order and lets the queue build them as one group; its wait
