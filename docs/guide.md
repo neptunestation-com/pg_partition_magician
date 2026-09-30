@@ -61,7 +61,10 @@ partition on a companion column instead.
 **The frontier.** For `time` the frontier is `now()`; for `id` it is `max(control)`, the newest point
 the data has reached. `uuidv7` and `text_time` are time grids fed by data: their frontier is
 `greatest(max(control), now())`, so it tracks the newest row while writes are current and falls
-back to the clock when they lag, rather than freezing wherever the data last landed. An interval is "open" while the frontier
+back to the clock when they lag, rather than freezing wherever the data last landed. A `text_time` maximum
+that does not have the declared shape (a digit outside the alphabet, or a timestamp field shorter than the
+width) cannot be decoded, and the frontier is then `now()` alone, so one malformed id does not stop the grid
+from growing; `check_text_time` reports such a maximum as a null `newest_decoded`. An interval is "open" while the frontier
 is inside it (still receiving writes) and "closed" once the frontier moves past its upper bound.
 
 **The monolith.** Conversion moves **no rows**. It renames your original table aside and attaches it,
