@@ -106,13 +106,17 @@ select is(
 -- 45 bytes: its minute cells fit (45 + 2 + 15 = 62), its readable capture names do not (64 and 66). uuidv7,
 -- whose frontier is its data, so a row past the monolith freezes it at once (as tests/150 section E does).
 create table f655.eu (id uuid primary key, payload text);
+-- One instant for every id below. Each statement is its own transaction, so a now() read per statement
+-- crosses a minute boundary about once in every sixty runs, and the row inserted during the regrain then
+-- sorts after the ones it should precede: the order-by-id assertions below flipped on a PG 16 merge group.
+select date_trunc('minute', now()) as t0 \gset
 insert into f655.eu values
-  (pgpm._ts_to_uuid(date_trunc('minute', now()) - interval '3 minutes' + interval '10 s'), 'one'),
-  (pgpm._ts_to_uuid(date_trunc('minute', now()) - interval '3 minutes' + interval '20 s'), 'two'),
-  (pgpm._ts_to_uuid(date_trunc('minute', now()) - interval '3 minutes' + interval '40 s'), 'three'),
-  (pgpm._ts_to_uuid(date_trunc('minute', now()) - interval '2 minutes' + interval '10 s'), 'four');
+  (pgpm._ts_to_uuid(:'t0'::timestamptz - interval '3 minutes' + interval '10 s'), 'one'),
+  (pgpm._ts_to_uuid(:'t0'::timestamptz - interval '3 minutes' + interval '20 s'), 'two'),
+  (pgpm._ts_to_uuid(:'t0'::timestamptz - interval '3 minutes' + interval '40 s'), 'three'),
+  (pgpm._ts_to_uuid(:'t0'::timestamptz - interval '2 minutes' + interval '10 s'), 'four');
 call pgpm.transmute('f655.eu', 'id', interval '1 minute', p_obtain => 6);
-insert into f655.eu values (pgpm._ts_to_uuid(date_trunc('minute', now()) + interval '4 minutes 5 s'), 'frontier');
+insert into f655.eu values (pgpm._ts_to_uuid(:'t0'::timestamptz + interval '4 minutes 5 s'), 'frontier');
 alter table f655.eu rename to :L;
 select child_name as mono from pgpm.part where parent_table = format('f655.%I', :'L')::regclass and attached
  order by lo::timestamptz limit 1 \gset
@@ -129,7 +133,7 @@ select is(
 
 update f655.:L set payload = 'one-updated' where payload = 'one';
 delete from f655.:L where payload = 'two';
-insert into f655.:L values (pgpm._ts_to_uuid(date_trunc('minute', now()) - interval '3 minutes' + interval '50 s'), 'five');
+insert into f655.:L values (pgpm._ts_to_uuid(:'t0'::timestamptz - interval '3 minutes' + interval '50 s'), 'five');
 select is(pgpm._regrain_delta_count(format('f655.%I', :'L')::regclass), 4::bigint,
   'LIVENESS: the capture saw the update (old and new), the delete and the insert made during the regrain');
 
