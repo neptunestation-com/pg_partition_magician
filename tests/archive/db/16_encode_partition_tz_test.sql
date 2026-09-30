@@ -55,10 +55,10 @@ select mk_archive_config('tz16', false);
 select p.child_name as child, p.lo, p.hi from pgpm.part p
  where p.parent_table = 'public.tz16'::regclass
    and exists (select 1 from public.tz16 t where t.id = 1 and t.tableoid = to_regclass(format('public.%I', p.child_name))) \gset
--- the keys the transports derive from the chunk: prefix, the parent's regclass text (which omits a schema
--- the search_path reaches, so `tz16` here), the digits of lo, the format
-select 'tz16/' || 'public.tz16'::regclass::text || '_' || regexp_replace(:'lo', '[^0-9]', '', 'g') || '.ndjson'  as nd_key,
-       'tz16/' || 'public.tz16'::regclass::text || '_' || regexp_replace(:'lo', '[^0-9]', '', 'g') || '.parquet' as pq_key \gset
+-- the keys the transports derive from the chunk: prefix, the parent schema-qualified (#551), the digits of
+-- lo rendered in UTC (#551; the session is UTC here, so _ts_text renders it so), the format
+select 'tz16/public.tz16_' || regexp_replace(pgpm._ts_text(:'lo'::timestamptz), '[^0-9]', '', 'g') || '.ndjson'  as nd_key,
+       'tz16/public.tz16_' || regexp_replace(pgpm._ts_text(:'lo'::timestamptz), '[^0-9]', '', 'g') || '.parquet' as pq_key \gset
 
 -- ---------------------------------------------------------------------------
 -- Witnesses: the conditions for the defect are present

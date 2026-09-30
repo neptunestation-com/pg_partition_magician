@@ -590,6 +590,10 @@ run_archive() {
   # the clean-code half of that pair has to run somewhere too.
   echo "--- archive object key identity guard (issue #502) ---"
   bash "$(dirname "$0")/bench/archive_object_key.sh" pgpm_test-archive pgpm_objkey || fail=1
+  # The session-independent key guard (#551) re-runs tests/archive/db/26 for the same reason: the
+  # clean-code half of the pair discriminate.sh completes with the search_path and session-zone mutants.
+  echo "--- archive object key names the parent and lo the same in every session guard (issue #551) ---"
+  bash "$(dirname "$0")/bench/archive_object_key_session.sh" pgpm_test-archive pgpm_perf108 || fail=1
 
   # The archive.to_s3 compress guard (#520) re-runs tests/archive/db/16_to_s3_compress for the same
   # reason, and adds the half that file cannot do from inside the database: Python's gzip inflating the
