@@ -384,6 +384,82 @@ returns text language sql immutable as $$
          end;
 $$;
 
+-- The non-relation TYPE, if any, holding a name transmute is about to give a table (#671), as an English
+-- noun with its article; null when no such type exists. CREATE TABLE and ALTER TABLE ... RENAME need the
+-- name free in pg_type as well as in pg_class, because every table has a row type of its own name, so an
+-- enum, domain, range or base type holding it makes either statement fail with a raw 42710. to_regclass, which the
+-- name guards asked, sees relations only. A relation's own row type (typrelid <> 0) is left to those
+-- guards, which already see the relation and say what it is. An implicit array type (the `_name` one
+-- PostgreSQL mints for every type) is not in the way: CREATE TABLE and RENAME move it aside themselves.
+create or replace function pgpm._type_squatter(p_nsp name, p_name name)
+returns text language sql stable as $$
+  select case t.typtype when 'e' then 'an enum type' when 'd' then 'a domain'
+                        when 'r' then 'a range type' when 'm' then 'a multirange type'
+                        when 'b' then 'a base type' when 'p' then 'a pseudo-type'
+                        else 'a type of kind ' || t.typtype::text end
+    from pg_type t join pg_namespace n on n.oid = t.typnamespace
+   where n.nspname = p_nsp and t.typname = p_name and t.typrelid = 0
+     and not (t.typelem <> 0 and exists (select 1 from pg_type e where e.oid = t.typelem and e.typarray = t.oid))
+   limit 1;
+$$;
+
+-- An identity column's sequence options, as the parenthesised clause ADD GENERATED ... AS IDENTITY takes
+-- (#670). Re-adding identity with its kind alone gave the new sequence the DEFAULT options, so an
+-- identity declared INCREMENT BY 2 (odd ids only, the usual two-writer interleave), a bounded
+-- MINVALUE/MAXVALUE, CYCLE or a CACHE came back as a plain ascending sequence and handed out ids the
+-- original never would. Everything pg_sequence records except the type, which ADD GENERATED takes from the
+-- column (it refuses an AS clause) and the column is the same one. START WITH is carried too: it is the
+-- lattice a positive or negative INCREMENT counts from, and what RESTART goes back to. Null for null.
+create or replace function pgpm._identity_options(p_seq regclass)
+returns text language sql stable as $$
+  select format('(increment by %s minvalue %s maxvalue %s start with %s cache %s %s)',
+                s.seqincrement, s.seqmin, s.seqmax, s.seqstart, s.seqcache,
+                case when s.seqcycle then 'cycle' else 'no cycle' end)
+    from pg_sequence s where s.seqrelid = p_seq;
+$$;
+
+-- The value a sequence would hand out next (#670): last_value until the first nextval, then last_value plus
+-- its INCREMENT, which is not always 1. Numeric, because one step past an exhausted bigint sequence is not
+-- a bigint. Null for a null sequence.
+create or replace function pgpm._seq_next(p_seq regclass)
+returns numeric language plpgsql stable as $$
+declare v_last bigint; v_called boolean;
+begin
+  if p_seq is null then return null; end if;
+  execute format('select last_value, is_called from %s', p_seq::text) into v_last, v_called;
+  return case when v_called
+              then v_last::numeric + (select seqincrement from pg_sequence where seqrelid = p_seq)
+              else v_last end;
+end;
+$$;
+
+-- Reseed an identity sequence that transmute or untransmute has just re-created with the original's options
+-- (#670), so the next id it hands out is the one the original would have: p_next (the original's next
+-- value, _seq_next), moved on along the sequence's OWN lattice (start + k * increment) until it clears every
+-- id already in the table, p_max for an ascending sequence and p_min for a descending one. It used to be
+-- greatest(max + 1, next), which is off the lattice for any increment but 1 and wrong in direction for a
+-- negative one. A value past the sequence's bound means the original was exhausted (or the rows are): the
+-- sequence is left AT the bound, called, so the next nextval does what the original's would, CYCLE or
+-- "reached maximum value". A null p_next (no original position) counts from START WITH.
+create or replace function pgpm._identity_reseed(p_seq regclass, p_next numeric, p_max bigint, p_min bigint)
+returns void language plpgsql as $$
+declare s record; v numeric;
+begin
+  select seqincrement, seqmin, seqmax, seqstart into s from pg_sequence where seqrelid = p_seq;
+  v := coalesce(p_next, s.seqstart);
+  if s.seqincrement > 0 and p_max is not null and v <= p_max then
+    v := v + ceil((p_max - v + 1) / s.seqincrement) * s.seqincrement;
+  elsif s.seqincrement < 0 and p_min is not null and v >= p_min then
+    v := v - ceil((v - p_min + 1) / -s.seqincrement) * -s.seqincrement;
+  end if;
+  if v > s.seqmax or v < s.seqmin then
+    perform setval(p_seq, case when s.seqincrement > 0 then s.seqmax else s.seqmin end, true);
+  else
+    perform setval(p_seq, v::bigint, false);
+  end if;
+end;
+$$;
+
 -- The audit trail. NAMING RULE for `action`: non-success events are PREFIXED, never suffixed --
 -- `skip_<mechanism>` for a deferral, `fail_<mechanism>` for a failure. So no non-success action is ever
 -- a prefix-extension of the success it corresponds to, and both query styles are safe: `action =
@@ -4587,35 +4663,39 @@ begin
 end;
 $$;
 
--- #656: where an identity sequence resumes so that it re-issues nothing: the greater of max(column) + 1 (no
--- collision with a row already there) and the sequence's own next value (no re-issue of an id it handed
--- out past that max: a rollback, the cache, a deleted high row). transmute's cutover and untransmute call
--- it under the ACCESS EXCLUSIVE that stops every writer of p_rel, which is what makes the answer final.
--- Both used to read these values before that lock, and an id handed out in between was handed out again
--- by the reseeded sequence: the next inserts failed with a duplicate key, one per re-issued id.
+-- #656: where an identity sequence resumes so that it re-issues nothing, read under the lock. transmute's
+-- cutover and untransmute call it under the ACCESS EXCLUSIVE that stops every writer of p_rel, which is
+-- what makes the answer final. Both used to read these values before that lock, and an id handed out in
+-- between was handed out again by the reseeded sequence: the next inserts failed with a duplicate key, one
+-- per re-issued id. It returns the three values _identity_reseed (#670) walks the sequence's lattice from:
+-- o_next, the sequence's own next value (last_value plus its INCREMENT, _seq_next), and o_max and o_min,
+-- the ids it has to clear (max for an ascending sequence, min for a descending one).
 --
--- The max is read here only when an index answers it in one descent (a valid, non-partial btree whose
--- leading key is the column), because an O(rows) scan under that lock is the data-coupled outage this
--- project refuses. Otherwise p_floor, the max the caller read before the lock, where a scan blocks no
--- writer, stands in for it. The sequence's position is read here either way, and it covers every id the
--- sequence issued, which is every id an insert did not supply itself.
-create or replace function pgpm._identity_resume_at(p_rel regclass, p_col name, p_floor bigint)
-returns bigint language plpgsql as $$
-declare v_m bigint := coalesce(p_floor, 0); v_seq text; v_n bigint;
+-- The max and min are read here only when an index answers them in one descent each (a valid, non-partial
+-- btree whose leading key is the column), because an O(rows) scan under that lock is the data-coupled
+-- outage this project refuses. Otherwise p_max and p_min, the ones the caller read before the lock, where
+-- a scan blocks no writer, stand in for them. The sequence's position is read here either way (p_next, the
+-- caller's earlier read, only when there is no sequence), and it covers every id the sequence issued, which
+-- is every id an insert did not supply itself.
+drop function if exists pgpm._identity_resume_at(regclass, name, bigint);   -- #670: the pre-lattice shape
+create or replace function pgpm._identity_resume_at(p_rel regclass, p_col name,
+                                                    p_next numeric, p_max bigint, p_min bigint,
+                                                    out o_next numeric, out o_max bigint, out o_min bigint)
+language plpgsql as $$
+declare v_max bigint; v_min bigint;
 begin
+  o_max := p_max;
+  o_min := p_min;
   if exists (select 1 from pg_index i
                join pg_class ic on ic.oid = i.indexrelid
                join pg_am am on am.oid = ic.relam and am.amname = 'btree'
                join pg_attribute a on a.attrelid = i.indrelid and a.attnum = i.indkey[0]
               where i.indrelid = p_rel and i.indisvalid and i.indpred is null and a.attname = p_col) then
-    execute format('select coalesce(max(%I), 0)::bigint from %s', p_col, p_rel::text) into v_m;
-    v_m := greatest(v_m, coalesce(p_floor, 0));
+    execute format('select max(%1$I)::bigint, min(%1$I)::bigint from %2$s', p_col, p_rel::text) into v_max, v_min;
+    o_max := greatest(v_max, p_max);   -- greatest/least ignore a null: an empty table clears nothing
+    o_min := least(v_min, p_min);
   end if;
-  v_seq := pg_get_serial_sequence(p_rel::text, p_col);
-  if v_seq is not null then
-    execute format('select case when is_called then last_value + 1 else last_value end from %s', v_seq) into v_n;
-  end if;
-  return greatest(v_m + 1, coalesce(v_n, 0));
+  o_next := coalesce(pgpm._seq_next(pg_get_serial_sequence(p_rel::text, p_col)::regclass), p_next);
 end;
 $$;
 
@@ -4660,12 +4740,15 @@ declare
   v_typname text; v_oldpk text[]; v_pkcols text[]; v_idcols name[]; v_pkname name; v_col name;
   v_idkinds text[];   -- #308: 'a' (ALWAYS) or 'd' (BY DEFAULT) per v_idcols entry, same order
   v_idx_names text[]; v_idx_defs text[]; v_ctl_attnum int; v_old name; v_new name; v_pdef_q text; j int;
+  v_ipfx_q text; v_upfx_q text;   -- #669: the two prefixes pg_get_indexdef can start a carried index's definition with
   v_add_pk boolean := false; v_add_uniq boolean := false; v_reuse_idx oid; v_reuse_conname name;
   v_uq_cols text[]; v_bare_uq text;
   v_fk record; v_fk_eligible boolean;
   v_out_names text[]; v_out_defs text[]; v_i2 int;   -- outgoing FKs (#263), listed by _transmute_outgoing_fks
   v_uchk_n bigint; v_uchk_frac numeric;
-  v_idmax bigint[]; v_m bigint; v_i int; v_idnext bigint[];   -- #656: v_idnext is read under the cutover's lock
+  v_idmax bigint[]; v_m bigint; v_i int; v_idnext numeric[];   -- #656: all three refreshed under the cutover's lock
+  v_idmin bigint[]; v_mmin bigint;   -- #670: min(identity), for a descending identity's reseed
+  v_ra record;                       -- #656/#670: one identity column's refreshed (next, max, min)
   v_monolith name; v_monreg regclass;
   v_tz text;   -- #455: the zone the grid is computed in, recorded in config.partition_tz
   v_claim_tz text;   -- #506: the zone recorded with the claim, which a resume adopts along with the bound
@@ -4912,6 +4995,13 @@ begin
     raise exception 'pg_partition_magician: %.% already exists, and transmute needs it as a staging name for the new parent. Most likely a leftover from an interrupted run. Drop it (drop table %.%) and retry transmute.',
       v_nsp, v_staging, quote_ident(v_nsp), quote_ident(v_staging);
   end if;
+  -- #671: and free as a TYPE name. The CREATE TABLE in phase 3 needs it free in pg_type too (a table's row
+  -- type takes its name), which to_regclass cannot see, so an enum or domain holding it passed this guard
+  -- and the cutover died on a raw 42710 after phases 1 and 2 had committed the bound and the claim.
+  if pgpm._type_squatter(v_nsp, v_staging) is not null then
+    raise exception 'pg_partition_magician: %.% already exists as %, and transmute needs that name as a staging name for the new parent (a table''s row type takes its name, so no type may hold it). Drop or rename the type, then retry transmute.',
+      v_nsp, v_staging, pgpm._type_squatter(v_nsp, v_staging);
+  end if;
 
   -- uuidv7 sanity check (issue #96): a uuid control column is TREATED as uuidv7 on assumption, so we
   -- sample it. Genuine UUIDv7/ULID decodes to plausible recent timestamps (~1.0); random UUIDv4 scores
@@ -4965,17 +5055,22 @@ begin
     into v_idcols, v_idkinds
     from pg_attribute a where a.attrelid = p_parent and a.attidentity in ('a','d') and not a.attisdropped;
 
-  -- Capture max(identity), the FLOOR of where the parent's freshly-recreated identity sequence resumes:
-  -- identity is moved from the table to the parent (whose sequence restarts at 1), so without it the next
-  -- insert would collide. Only the floor (#656): the value the reseed uses is read in the cutover, under
-  -- its ACCESS EXCLUSIVE, by _identity_resume_at, since writers run on between here and there and every id
-  -- they take would otherwise be issued again. That read takes the max again when an index answers it,
-  -- and the sequence's position always; this one is what stands in when no index does, read here because a
-  -- scan here blocks no writer.
+  -- Capture max(identity), min(identity) and the original sequence's next value: the FLOORS of where the
+  -- parent's freshly-recreated identity sequence resumes. Identity is moved from the table to the parent
+  -- (whose sequence restarts at START WITH), so without them the next insert would collide. Only floors
+  -- (#656): the values the reseed uses are read again in the cutover, under its ACCESS EXCLUSIVE, by
+  -- _identity_resume_at, since writers run on between here and there and every id they take would
+  -- otherwise be issued again. That read takes the max and min again when an index answers them, and the
+  -- sequence's position always; these are what stand in when no index does, read here because a scan here
+  -- blocks no writer. min() is for a DESCENDING identity (#670), whose next id has to clear the smallest
+  -- one instead; max and min are null for an empty table, which clears nothing.
   if v_idcols is not null then
     foreach v_col in array v_idcols loop
-      execute format('select coalesce(max(%I), 0)::bigint from %s', v_col, p_parent::text) into v_m;
+      execute format('select max(%1$I)::bigint, min(%1$I)::bigint from %2$s', v_col, p_parent::text) into v_m, v_mmin;
       v_idmax := array_append(v_idmax, v_m);
+      v_idmin := array_append(v_idmin, v_mmin);
+      -- the sequence's next value is last_value plus its INCREMENT, not plus 1 (#670)
+      v_idnext := array_append(v_idnext, pgpm._seq_next(pg_get_serial_sequence(p_parent::text, v_col)::regclass));
     end loop;
   end if;
 
@@ -5407,6 +5502,12 @@ begin
     raise exception 'pg_partition_magician: %.% already exists, and transmute needs that name for the monolith (the partition the converted table becomes, covering [%, %)). Most likely a leftover from an earlier conversion of a table by this name. Drop or rename it and retry transmute.',
       v_nsp, v_monolith, v_lo_native, v_hi_native;
   end if;
+  -- #671: the RENAME renames the table's row type with it, so the name has to be free in pg_type as well,
+  -- which to_regclass cannot see: a type holding it failed the cutover with a raw 42710, same as above.
+  if pgpm._type_squatter(v_nsp, v_monolith) is not null then
+    raise exception 'pg_partition_magician: %.% already exists as %, and transmute needs that name for the monolith (the partition the converted table becomes, covering [%, %)); a table''s row type takes its name, so no type may hold it. Drop or rename the type, then retry transmute.',
+      v_nsp, v_monolith, pgpm._type_squatter(v_nsp, v_monolith), v_lo_native, v_hi_native;
+  end if;
 
   -- #309: bound the wait for the ADD's ACCESS EXCLUSIVE. Re-applied per phase rather than set once,
   -- because `set local` does not survive a COMMIT -- the same caution maintain() records at its own
@@ -5489,11 +5590,16 @@ begin
   -- column BY DEFAULT silently starts accepting writes the operator's schema was written to refuse.
   -- The %s carries a keyword, not user input: v_idkinds comes from pg_attribute.attidentity, which
   -- Postgres constrains to 'a' or 'd'.
+  -- And with the same sequence options (#670): a bare ADD GENERATED gives the new sequence the defaults,
+  -- dropping an INCREMENT BY, MINVALUE/MAXVALUE, CYCLE or CACHE the operator declared. They are read off
+  -- the original's sequence, which still exists here (step 3 drops it, after the renames); the %s is
+  -- _identity_options' clause, numbers and keywords only.
   if v_idcols is not null then
     for v_i in 1 .. array_length(v_idcols, 1) loop
-      execute format('alter table %s alter column %I add generated %s as identity',
+      execute format('alter table %s alter column %I add generated %s as identity %s',
                      v_parent::text, v_idcols[v_i],
-                     case when v_idkinds[v_i] = 'a' then 'always' else 'by default' end);
+                     case when v_idkinds[v_i] = 'a' then 'always' else 'by default' end,
+                     coalesce(pgpm._identity_options(pg_get_serial_sequence(p_parent::text, v_idcols[v_i])::regclass), ''));
     end loop;
   end if;
 
@@ -5592,9 +5698,9 @@ begin
     from pgpm._transmute_carried_indexes(p_parent, v_nsp, p_control, v_ctl_attnum, v_reuse_idx);
   select o_names, o_defs into v_out_names, v_out_defs from pgpm._transmute_outgoing_fks(p_parent);
   if v_idcols is not null then
-    v_idnext := '{}';
     for v_i in 1 .. array_length(v_idcols, 1) loop
-      v_idnext := array_append(v_idnext, pgpm._identity_resume_at(p_parent, v_idcols[v_i], v_idmax[v_i]));
+      v_ra := pgpm._identity_resume_at(p_parent, v_idcols[v_i], v_idnext[v_i], v_idmax[v_i], v_idmin[v_i]);
+      v_idnext[v_i] := v_ra.o_next; v_idmax[v_i] := v_ra.o_max; v_idmin[v_i] := v_ra.o_min;
     end loop;
   end if;
 
@@ -5812,13 +5918,14 @@ begin
                    (select string_agg(quote_ident(x), ', ') from unnest(v_pkcols) x));
   end if;
 
-  -- 8b. advance each identity sequence to the greater of max(id)+1 (no collision with existing rows) and the
-  -- original sequence's own next value (no re-issue of ids it already handed out past max): v_idnext, read
-  -- under the lock at 0b by _identity_resume_at (#656), before step 3 dropped the original sequence.
+  -- 8b. advance each identity sequence to the original sequence's own next value (no re-issue of ids it
+  -- already handed out past max), moved on along its lattice until it clears every existing id (no
+  -- collision with existing rows): see _identity_reseed (#670). All three read under the lock at 0b by
+  -- _identity_resume_at (#656), before step 3 dropped the original sequence.
   if v_idcols is not null then
     for v_i in 1 .. array_length(v_idcols, 1) loop
-      execute format('select setval(pg_get_serial_sequence(%L, %L), %s, false)',
-                     v_parent::text, v_idcols[v_i], v_idnext[v_i]);
+      perform pgpm._identity_reseed(pg_get_serial_sequence(v_parent::text, v_idcols[v_i])::regclass,
+                                    v_idnext[v_i], v_idmax[v_i], v_idmin[v_i]);
     end loop;
   end if;
 
@@ -5827,8 +5934,22 @@ begin
     for j in 1 .. array_length(v_idx_names, 1) loop
       v_old  := v_idx_names[j]::name;
       v_new  := (v_old || '_pgpm')::name;
-      v_pdef_q := regexp_replace(v_idx_defs[j], '^CREATE (UNIQUE )?INDEX \S+ ON ',
-                                 'CREATE \1INDEX ' || quote_ident(v_new) || ' ON ONLY ');
+      -- #669: the name is spliced by identity, not matched by pattern. pg_get_indexdef spells it
+      -- quote_ident(relname), so the definition starts with exactly one of these two prefixes, and the
+      -- rewrite replaces that prefix whole. A pattern (`\S+` for the name) cannot match a quoted name holding
+      -- a space, and it no-oped silently: the cutover re-ran the ORIGINAL CREATE INDEX and died on a raw
+      -- 42P07 after phases 1 and 2 had committed the bound. A definition that starts with neither is refused
+      -- rather than executed as it stands, for the same reason.
+      v_ipfx_q := 'CREATE INDEX ' || quote_ident(v_old) || ' ON ';
+      v_upfx_q := 'CREATE UNIQUE INDEX ' || quote_ident(v_old) || ' ON ';
+      if starts_with(v_idx_defs[j], v_upfx_q) then
+        v_pdef_q := 'CREATE UNIQUE INDEX ' || quote_ident(v_new) || ' ON ONLY ' || substr(v_idx_defs[j], length(v_upfx_q) + 1);
+      elsif starts_with(v_idx_defs[j], v_ipfx_q) then
+        v_pdef_q := 'CREATE INDEX ' || quote_ident(v_new) || ' ON ONLY ' || substr(v_idx_defs[j], length(v_ipfx_q) + 1);
+      else
+        raise exception 'pg_partition_magician: cannot carry the index % of %: its definition (%) does not start with CREATE [UNIQUE] INDEX % ON, so its partitioned copy cannot be named',
+          quote_ident(v_old), p_parent, v_idx_defs[j], quote_ident(v_old);
+      end if;
       execute v_pdef_q;
       execute format('alter index %I.%I attach partition %I.%I', v_nsp, v_new, v_nsp, v_old);
     end loop;
@@ -6204,7 +6325,9 @@ declare
   cfg pgpm.config; v_nsp name; v_rel name; v_monreg regclass; v_restored regclass;
   v_mon name; v_mon_lo text; v_mon_hi text; v_ncast text; v_outside boolean;
   v_gate_q text; v_door text;   -- #443: the outside-rows check and its refusal, asked twice
-  v_idcols name[]; v_idmax bigint[]; v_col name; v_m bigint; v_i int; v_idnext bigint[];
+  v_idcols name[]; v_idmax bigint[]; v_col name; v_m bigint; v_i int; v_idnext numeric[]; v_seq regclass;
+  v_idmin bigint[]; v_mmin bigint; v_idopts text[];   -- #670: min(identity) and the sequence options, per column
+  v_ra record;                                        -- #656/#670: one identity column's refreshed (next, max, min)
   v_idkinds text[];   -- #308: 'a' (ALWAYS) or 'd' (BY DEFAULT) per v_idcols entry, same order
   r pgpm.dropped_fk%rowtype; v_cdelta name; v_cfn name;
   v_trgdefs text[] := '{}'; v_tdef text;   -- #277
@@ -6262,17 +6385,23 @@ begin
 
   -- capture the identity columns and their current max BEFORE dropping anything (transmute moved
   -- identity from the table to the parent; dropping the parent loses it, so we re-establish it on the
-  -- restored monolith). The max read here is only the FLOOR of where the restored sequence resumes (#656):
-  -- the value used is read under the lock below, by _identity_resume_at, because writers keep taking ids
-  -- until that lock is granted. Read here as well because a scan here blocks no writer, and under the lock
-  -- the max is re-read only when an index answers it.
+  -- restored monolith). The max, min and sequence position read here are only the FLOORS of where the
+  -- restored sequence resumes (#656): the values used are read under the lock below, by _identity_resume_at,
+  -- because writers keep taking ids until that lock is granted. Read here as well because a scan here blocks
+  -- no writer, and under the lock the max and min are re-read only when an index answers them.
   select array_agg(a.attname order by a.attnum), array_agg(a.attidentity::text order by a.attnum)
     into v_idcols, v_idkinds
     from pg_attribute a where a.attrelid = p_parent and a.attidentity in ('a', 'd') and not a.attisdropped;
   if v_idcols is not null then
     foreach v_col in array v_idcols loop
-      execute format('select coalesce(max(%I), 0)::bigint from %s', v_col, p_parent::text) into v_m;
+      execute format('select max(%1$I)::bigint, min(%1$I)::bigint from %2$s', v_col, p_parent::text) into v_m, v_mmin;
       v_idmax := array_append(v_idmax, v_m);
+      v_idmin := array_append(v_idmin, v_mmin);
+      -- the parent sequence's position too (it holds whatever transmute preserved), as a floor like the max,
+      -- and its options (#670), which go with the parent's sequence when the parent is dropped below.
+      v_seq := pg_get_serial_sequence(p_parent::text, v_col)::regclass;
+      v_idnext := array_append(v_idnext, pgpm._seq_next(v_seq));
+      v_idopts := array_append(v_idopts, pgpm._identity_options(v_seq));
     end loop;
   end if;
 
@@ -6328,7 +6457,8 @@ begin
   -- it out again. Before the DROP below, which takes the parent's sequence with it.
   if v_idcols is not null then
     for v_i in 1 .. array_length(v_idcols, 1) loop
-      v_idnext := array_append(v_idnext, pgpm._identity_resume_at(p_parent, v_idcols[v_i], v_idmax[v_i]));
+      v_ra := pgpm._identity_resume_at(p_parent, v_idcols[v_i], v_idnext[v_i], v_idmax[v_i], v_idmin[v_i]);
+      v_idnext[v_i] := v_ra.o_next; v_idmax[v_i] := v_ra.o_max; v_idmin[v_i] := v_ra.o_min;
     end loop;
   end if;
 
@@ -6388,16 +6518,18 @@ begin
   end loop;
   execute format('drop table %s', p_parent::text);
 
-  -- re-establish identity on the restored monolith and reseed to the greater of max+1 and the parent
-  -- sequence's preserved position (mirrors transmute's step 6/8b, applied back to the table), both read
-  -- under the lock above; without the reseed the next insert would collide at 1.
+  -- re-establish identity on the restored monolith, with the parent sequence's options (#670), and reseed
+  -- from the parent sequence's position, clearing every existing id on its lattice (mirrors transmute's
+  -- step 6/8b, applied back to the table), all read under the lock above; without the reseed the next
+  -- insert would collide.
   if v_idcols is not null then
     for v_i in 1 .. array_length(v_idcols, 1) loop
-      execute format('alter table %s alter column %I add generated %s as identity',
+      execute format('alter table %s alter column %I add generated %s as identity %s',
                      v_monreg::text, v_idcols[v_i],
-                     case when v_idkinds[v_i] = 'a' then 'always' else 'by default' end);
-      execute format('select setval(pg_get_serial_sequence(%L, %L), %s, false)',
-                     v_monreg::text, v_idcols[v_i], v_idnext[v_i]);
+                     case when v_idkinds[v_i] = 'a' then 'always' else 'by default' end,
+                     coalesce(v_idopts[v_i], ''));
+      perform pgpm._identity_reseed(pg_get_serial_sequence(v_monreg::text, v_idcols[v_i])::regclass,
+                                    v_idnext[v_i], v_idmax[v_i], v_idmin[v_i]);
     end loop;
   end if;
 

@@ -251,11 +251,16 @@ TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the N
   -- column BY DEFAULT silently starts accepting writes the operator's schema was written to refuse.
   -- The %s carries a keyword, not user input: v_idkinds comes from pg_attribute.attidentity, which
   -- Postgres constrains to 'a' or 'd'.
+  -- And with the same sequence options (#670): a bare ADD GENERATED gives the new sequence the defaults,
+  -- dropping an INCREMENT BY, MINVALUE/MAXVALUE, CYCLE or CACHE the operator declared. They are read off
+  -- the original's sequence, which still exists here (step 3 drops it, after the renames); the %s is
+  -- _identity_options' clause, numbers and keywords only.
   if v_idcols is not null then
     for v_i in 1 .. array_length(v_idcols, 1) loop
-      execute format('alter table %s alter column %I add generated %s as identity',
+      execute format('alter table %s alter column %I add generated %s as identity %s',
                      v_parent::text, v_idcols[v_i],
-                     case when v_idkinds[v_i] = 'a' then 'always' else 'by default' end);
+                     case when v_idkinds[v_i] = 'a' then 'always' else 'by default' end,
+                     coalesce(pgpm._identity_options(pg_get_serial_sequence(p_parent::text, v_idcols[v_i])::regclass), ''));
     end loop;
   end if;
 
@@ -368,7 +373,8 @@ UNTRANSMUTE_IDENTITY_UNDER_LOCK = """  -- Where each restored identity sequence 
   -- it out again. Before the DROP below, which takes the parent's sequence with it.
   if v_idcols is not null then
     for v_i in 1 .. array_length(v_idcols, 1) loop
-      v_idnext := array_append(v_idnext, pgpm._identity_resume_at(p_parent, v_idcols[v_i], v_idmax[v_i]));
+      v_ra := pgpm._identity_resume_at(p_parent, v_idcols[v_i], v_idnext[v_i], v_idmax[v_i], v_idmin[v_i]);
+      v_idnext[v_i] := v_ra.o_next; v_idmax[v_i] := v_ra.o_max; v_idmin[v_i] := v_ra.o_min;
     end loop;
   end if;
 """
@@ -3396,27 +3402,17 @@ $$;''',
         "Pre-#656 transmute: where each identity sequence resumes is read in the PREFLIGHT, before phase 1, "
         "and 8b reseeds the parent from it. Writers run on until the cutover's ACCESS EXCLUSIVE, so every id "
         "they take is issued again: the guard's writer takes 6, 7, 8 and 40 after the resume's preflight, "
-        "the parent's sequence resumes at 6, and the first insert fails with a duplicate key. The read is "
-        "moved, not removed: the same _identity_resume_at call, made in the preflight loop.",
+        "the parent's sequence resumes at 6, and the first insert fails with a duplicate key. The under-lock "
+        "refresh at 0b is removed, so 8b reseeds from the preflight's floors (max, min and _seq_next, which "
+        "the merged preflight reads anyway): exactly the pre-#656 values.",
         [("  select o_names, o_defs into v_out_names, v_out_defs from pgpm._transmute_outgoing_fks(p_parent);\n"
           "  if v_idcols is not null then\n"
-          "    v_idnext := '{}';\n"
           "    for v_i in 1 .. array_length(v_idcols, 1) loop\n"
-          "      v_idnext := array_append(v_idnext, pgpm._identity_resume_at(p_parent, v_idcols[v_i], v_idmax[v_i]));\n"
+          "      v_ra := pgpm._identity_resume_at(p_parent, v_idcols[v_i], v_idnext[v_i], v_idmax[v_i], v_idmin[v_i]);\n"
+          "      v_idnext[v_i] := v_ra.o_next; v_idmax[v_i] := v_ra.o_max; v_idmin[v_i] := v_ra.o_min;\n"
           "    end loop;\n"
           "  end if;\n",
-          "  select o_names, o_defs into v_out_names, v_out_defs from pgpm._transmute_outgoing_fks(p_parent);\n", 1),
-         ("  -- scan here blocks no writer.\n"
-          "  if v_idcols is not null then\n"
-          "    foreach v_col in array v_idcols loop\n"
-          "      execute format('select coalesce(max(%I), 0)::bigint from %s', v_col, p_parent::text) into v_m;\n"
-          "      v_idmax := array_append(v_idmax, v_m);\n",
-          "  -- scan here blocks no writer.\n"
-          "  if v_idcols is not null then\n"
-          "    foreach v_col in array v_idcols loop\n"
-          "      execute format('select coalesce(max(%I), 0)::bigint from %s', v_col, p_parent::text) into v_m;\n"
-          "      v_idmax := array_append(v_idmax, v_m);\n"
-          "      v_idnext := array_append(v_idnext, pgpm._identity_resume_at(p_parent, v_col, v_m));\n", 1)],
+          "  select o_names, o_defs into v_out_names, v_out_defs from pgpm._transmute_outgoing_fks(p_parent);\n", 1)],
     ),
     "transmute_carried_indexes_preflight": (
         "bench/cutover_reread_window.sh",
@@ -3437,9 +3433,11 @@ $$;''',
         "cutover's second asking.",
         [("  select o_names, o_defs into v_out_names, v_out_defs from pgpm._transmute_outgoing_fks(p_parent);\n"
           "  if v_idcols is not null then\n"
-          "    v_idnext := '{}';\n",
+          "    for v_i in 1 .. array_length(v_idcols, 1) loop\n"
+          "      v_ra := pgpm._identity_resume_at(",
           "  if v_idcols is not null then\n"
-          "    v_idnext := '{}';\n", 1)],
+          "    for v_i in 1 .. array_length(v_idcols, 1) loop\n"
+          "      v_ra := pgpm._identity_resume_at(", 1)],
     ),
     "transmute_comments_before_lock": (
         "bench/cutover_reread_window.sh",
@@ -3477,26 +3475,9 @@ $$;''',
         "bench/reread_under_lock_tap.sh",
         "Pre-#656 untransmute: where the restored identity sequence resumes is read before the explicit "
         "ACCESS EXCLUSIVE, so the ids tests/157's writer takes while the lock is queued (6, 7 and 60) are "
-        "issued again and the first insert after the reversal collides. The same _identity_resume_at call, "
-        "moved into the pre-lock loop.",
-        [(UNTRANSMUTE_IDENTITY_UNDER_LOCK, "", 1),
-         ("  -- the max is re-read only when an index answers it.\n"
-          "  select array_agg(a.attname order by a.attnum), array_agg(a.attidentity::text order by a.attnum)\n"
-          "    into v_idcols, v_idkinds\n"
-          "    from pg_attribute a where a.attrelid = p_parent and a.attidentity in ('a', 'd') and not a.attisdropped;\n"
-          "  if v_idcols is not null then\n"
-          "    foreach v_col in array v_idcols loop\n"
-          "      execute format('select coalesce(max(%I), 0)::bigint from %s', v_col, p_parent::text) into v_m;\n"
-          "      v_idmax := array_append(v_idmax, v_m);\n",
-          "  -- the max is re-read only when an index answers it.\n"
-          "  select array_agg(a.attname order by a.attnum), array_agg(a.attidentity::text order by a.attnum)\n"
-          "    into v_idcols, v_idkinds\n"
-          "    from pg_attribute a where a.attrelid = p_parent and a.attidentity in ('a', 'd') and not a.attisdropped;\n"
-          "  if v_idcols is not null then\n"
-          "    foreach v_col in array v_idcols loop\n"
-          "      execute format('select coalesce(max(%I), 0)::bigint from %s', v_col, p_parent::text) into v_m;\n"
-          "      v_idmax := array_append(v_idmax, v_m);\n"
-          "      v_idnext := array_append(v_idnext, pgpm._identity_resume_at(p_parent, v_col, v_m));\n", 1)],
+        "issued again and the first insert after the reversal collides. The under-lock refresh is removed, "
+        "so the reseed uses the pre-lock loop's floors (max, min and _seq_next), exactly the pre-#656 values.",
+        [(UNTRANSMUTE_IDENTITY_UNDER_LOCK, "", 1)],
     ),
     "frontier_decodes_malformed_max": (
         "bench/frontier_malformed_max.sh",
@@ -3553,6 +3534,48 @@ $$;''',
         "column's.",
         [("    if v_typname in ('int2', 'int4', 'int8') and p_step::numeric <> trunc(p_step::numeric) then\n",
           "    if false then\n", 1)],
+    ),
+    # #669-#671: three transmute contract gaps, each caught by its own pgTAP file through a wrapper in
+    # bench/transmute_abort_owner.sh's shape.
+    "carried_index_name_by_pattern": (
+        "bench/carried_index_quoted_name.sh",
+        "Issue #669 put back: step 9b renames each carried secondary index by regexp_replace over "
+        "'^CREATE (UNIQUE )?INDEX \\S+ ON ', which cannot match a quoted name holding a space, so the rewrite "
+        "no-ops and the cutover re-runs the ORIGINAL CREATE INDEX (a raw 42P07) after phases 1 and 2 committed "
+        "the bound. One site, the identity splice replaced whole by the pattern. tests/179's conversion of "
+        "\"Body Lookup\", \"by tag ON body\" and \"Uniq Id Body\" catches it.",
+        [("""      v_ipfx_q := 'CREATE INDEX ' || quote_ident(v_old) || ' ON ';
+      v_upfx_q := 'CREATE UNIQUE INDEX ' || quote_ident(v_old) || ' ON ';
+      if starts_with(v_idx_defs[j], v_upfx_q) then
+        v_pdef_q := 'CREATE UNIQUE INDEX ' || quote_ident(v_new) || ' ON ONLY ' || substr(v_idx_defs[j], length(v_upfx_q) + 1);
+      elsif starts_with(v_idx_defs[j], v_ipfx_q) then
+        v_pdef_q := 'CREATE INDEX ' || quote_ident(v_new) || ' ON ONLY ' || substr(v_idx_defs[j], length(v_ipfx_q) + 1);
+      else
+        raise exception 'pg_partition_magician: cannot carry the index % of %: its definition (%) does not start with CREATE [UNIQUE] INDEX % ON, so its partitioned copy cannot be named',
+          quote_ident(v_old), p_parent, v_idx_defs[j], quote_ident(v_old);
+      end if;
+""", """      v_pdef_q := regexp_replace(v_idx_defs[j], '^CREATE (UNIQUE )?INDEX \\S+ ON ',
+                                 'CREATE \\1INDEX ' || quote_ident(v_new) || ' ON ONLY ');
+""", 1)],
+    ),
+    "transmute_identity_kind_only": (
+        "bench/transmute_identity_options.sh",
+        "Issue #670 put back: _identity_options yields nothing, so transmute's step 6 and untransmute re-add "
+        "identity with its kind alone and the new sequence takes the defaults, dropping INCREMENT BY, "
+        "MINVALUE/MAXVALUE, CYCLE and CACHE. One site, the helper both callers share; the lattice-aware "
+        "reseed stays, so the mutant is exactly 'the options are not carried'. tests/180's increment, bounds "
+        "and next-id assertions catch it (an INCREMENT BY 2 identity hands out 10 after 9).",
+        [("    from pg_sequence s where s.seqrelid = p_seq;\n$$;\n",
+          "    from pg_sequence s where false;\n$$;\n", 1)],
+    ),
+    "transmute_name_guard_relations_only": (
+        "bench/transmute_type_squatter.sh",
+        "Issue #671 put back: _type_squatter never finds a type, so the staging-name and monolith-name guards "
+        "see relations only (to_regclass) and an enum or domain holding either name reaches the cutover, "
+        "whose CREATE TABLE or RENAME dies with a raw 42710 after phases 1 and 2 committed the bound and the "
+        "claim. One site, the helper both guards share. tests/181's enum and domain refusals catch it.",
+        [("   where n.nspname = p_nsp and t.typname = p_name and t.typrelid = 0\n",
+          "   where false and n.nspname = p_nsp and t.typname = p_name and t.typrelid = 0\n", 1)],
     ),
 }
 

@@ -120,14 +120,18 @@ referencing another) are carried onto the new parent automatically, so they keep
 partition; a `NOT VALID` one is refused rather than carried, because re-adding it at the parent could not
 then be metadata-only. That refusal, and the refusal of a `UNIQUE` index that cannot be carried (below), is
 asked again under the cutover's lock, so a key or index of that shape added while the conversion runs rolls
-the cutover back to the resumable state `transmute_abort` describes rather than being left on the monolith. **Incoming** keys are governed by `p_incoming_fks` below. An identity column is
-carried onto the parent and its sequence
-advanced to the greater of `max(id) + 1` and the original sequence's own next value, both read under the
-cutover's lock, so auto-generated ids never collide and never re-issue a value the sequence had already moved
-past, including one it handed a writer while the conversion ran (`untransmute` restores it the same way,
-under its own lock). The max is re-read there only when an index leading with the column answers it, which
-also covers an explicit id written meanwhile; otherwise the one read before phase 1 stands in, so no scan
-runs under the lock.
+the cutover back to the resumable state `transmute_abort` describes rather than being left on the monolith.
+**Incoming** keys are governed by `p_incoming_fks` below. An identity column is carried onto the parent in
+the form it had (`ALWAYS` or `BY DEFAULT`) and with its sequence's options (`INCREMENT BY`,
+`MINVALUE`/`MAXVALUE`, `START WITH`, `CACHE`, `CYCLE`). Its new sequence is set from three values read under
+the cutover's lock: the original sequence's own next value, and the column's largest and smallest ids. The
+largest and smallest are re-read there only when an index leading with the column answers them, which also
+covers an explicit id written meanwhile; otherwise the ones read before phase 1 stand in, so no scan runs
+under the lock. From the next value it moves along the sequence's lattice (`start + k * increment`, downward
+for a negative increment) until it clears every id already in the table, so auto-generated ids never
+collide, never re-issue a value the sequence had already moved past (including one it handed a writer while
+the conversion ran), and keep the spacing you declared. An exhausted sequence stays exhausted. `untransmute`
+restores it the same way, under its own lock.
 
 Parameters:
 
@@ -245,7 +249,9 @@ is not a plain table (partitioned, a view, a foreign table), or is a partition, 
 inheritance parent; a relation of any kind already holds the name the monolith will take
 (`<table>_p<lo>_to_<hi>`, typically a monolith detached from an earlier conversion of a table by that name)
 or a child-partition name (`<table>_p<digits>...`: an orphan from an interrupted regrain, or a sequence or
-view that happens to be named that way); a key (primary key or unique constraint) exists but
+view that happens to be named that way); a type that is not a table's row type (an enum, domain or range
+type) holds the monolith's name or the staging name `<table>_pgpm_new` (a table's row type takes its name,
+so the cutover's `CREATE TABLE` and `RENAME` need it free as a type too); a key (primary key or unique constraint) exists but
 excludes `p_control`, or only a *bare* unique index includes it (promote it to a constraint first); the
 control column is `float`/`double` (imprecise boundaries); a `time`-kind control column
 is not a timestamp/date, a `uuidv7` control is not `uuid`, or a `text_time` control is not `text`/`varchar`;

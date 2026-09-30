@@ -756,6 +756,9 @@ run_perf() {
     "bench/dropped_fk_reconcile.sh pgpm_perf109"
     "bench/regrain_target_shape.sh pgpm_perf97"
     "bench/regrain_target_integral.sh pgpm_perf98"
+    "bench/carried_index_quoted_name.sh pgpm_perf116"
+    "bench/transmute_identity_options.sh pgpm_perf117"
+    "bench/transmute_type_squatter.sh pgpm_perf118"
   )
   local selected=()
   local n=${#guards[@]} idx
