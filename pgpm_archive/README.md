@@ -117,7 +117,10 @@ the budget past a few MiB with compression on.
   under. A reader that predates Parquet's logical types sees only `TIMESTAMP_MICROS` and shows that
   wall clock labelled UTC. `infinity` and `-infinity`, legal in both types, are written as INT64 max
   and minus INT64 max, the pair DuckDB reads back as `infinity` and `-infinity`; pyarrow gives back
-  the two integers.
+  the two integers. PostgreSQL's range runs about 30 years past 294247-01-10 04:00:54.775806 UTC, the
+  last instant INT64 microseconds since 1970 can hold below that sentinel, so a finite value after it
+  is written as that instant (INT64 max minus 1, the largest timestamp DuckDB reads back as finite):
+  it is archived, and stays finite and in order, but at the ceiling rather than its own value.
 - **Payload size**: `archive.to_s3` (NDJSON) streams through S3 multipart in bounded memory once a
   partition exceeds one ~8MiB part, so it handles any size. `archive.to_s3_parquet` has no
   multipart path and would not benefit from one -- a Parquet file's footer needs every row group's

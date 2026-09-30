@@ -615,6 +615,9 @@ run_archive() {
   bash "$(dirname "$0")/bench/archive_parquet_negative_scale.sh" pgpm_test-archive pgpm_perf47 || fail=1
   echo "--- Parquet infinite timestamp guard (issue #586) ---"
   bash "$(dirname "$0")/bench/archive_parquet_timestamp_infinity.sh" pgpm_test-archive pgpm_perf48 || fail=1
+  # tests/archive/db/27 is the finite half of #586's boundary, and its guard has the same two halves.
+  echo "--- Parquet timestamp past the int64 microsecond range guard (issue #664) ---"
+  bash "$(dirname "$0")/bench/archive_parquet_timestamp_range.sh" pgpm_test-archive pgpm_perf112 || fail=1
   echo "--- Parquet numeric scale above precision guard (issue #596) ---"
   bash "$(dirname "$0")/bench/archive_parquet_scale_above_precision.sh" pgpm_test-archive pgpm_perf49 || fail=1
   echo "--- Parquet keyless parent guard (issue #597) ---"
