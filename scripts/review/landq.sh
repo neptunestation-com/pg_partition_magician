@@ -54,7 +54,9 @@ while :; do
   if [ $# -gt 1 ]; then say "===== landing batch $prs (tier $tier) ====="; opts=(--batch)
   else say "===== landing #$1 (tier $tier) ====="; opts=(); fi
   # shellcheck disable=SC2086
-  "$S/land.sh" "${opts[@]}" $prs; rc=$?
+  # ${opts[@]+"${opts[@]}"}: an EMPTY array is an unbound variable under `set -u` in bash 3.2 (macOS), and
+  # the one-PR case (a tier with a single PR) has no --batch, so the loop died there on its first single.
+  "$S/land.sh" ${opts[@]+"${opts[@]}"} $prs; rc=$?
   if [ $rc -eq 0 ]; then
     for p in "$@"; do echo "$p merged $(date -u +%H:%M:%SZ)" >> "$W/landq.done"; done
     continue
