@@ -76,10 +76,14 @@ begin
 end $$;
 
 -- Poll until p_pid has left pg_stat_activity: pg_terminate_backend returns before the backend is gone.
+-- pg_stat_activity is read once per transaction and then frozen (the documented snapshot; a function is
+-- one transaction), so without clearing it each turn this loop saw its first read 600 times and passed
+-- only when the backend had already gone: it ran out on a merge group (#713).
 create function pgpm_test116.gone(p_pid int)
 returns boolean language plpgsql as $$
 begin
   for i in 1 .. 600 loop
+    perform pg_stat_clear_snapshot();
     if not exists (select 1 from pg_stat_activity where pid = p_pid) then return true; end if;
     perform pg_sleep(0.05);
   end loop;
