@@ -733,6 +733,7 @@ run_perf() {
     "bench/extend_to_lock_budget.sh pgpm_perf74"
     "bench/keep_both_diff3.sh pgpm_perf77"
     "bench/doc_env_knobs.sh pgpm_perf78"
+    "bench/doc_retain_unit.sh pgpm_perf120"
     "bench/classify_claims_tap.sh pgpm_perf79"
     "bench/tap_verdict.sh pgpm_perf80"
     "bench/retire_straddle.sh pgpm_perf81"

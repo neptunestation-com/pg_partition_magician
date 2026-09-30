@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **The runbook states an id grid's `retain` in ids, as pgpm reads it** (#676). "Storage is not dropping
+  despite a retention policy" called it a count of intervals, while `_retain_boundary` subtracts it from
+  the frontier as a count of ids (as `reference.md` and `guide.md` say), so an operator setting
+  `retain => 2` on a 1000-wide grid to keep two partitions kept only the one taking writes. The runbook
+  now says count of ids, with that example. `bench/doc_retain_unit.sh` measures the unit from pgpm's own
+  `retain()` and checks every sentence of the docs that states it, with the mutation
+  `runbook_retain_count_of_intervals`.
 - **`from_hypertable` refuses a hypertable with an exclusion constraint instead of dropping it** (#675).
   The copy's `CREATE TABLE ... LIKE` carries CHECK and NOT NULL only, the cutover re-adds only primary and
   unique keys and skips every constraint-backed index, and preflight did not object, so an `EXCLUDE`
