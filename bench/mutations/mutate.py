@@ -3511,6 +3511,16 @@ $$;''',
           "    return pgpm._ts_text(now());\n"
           "  end if;\n", "", 1)],
     ),
+    "dropped_fk_never_reconciled": (
+        "bench/dropped_fk_reconcile.sh",
+        "Issue #658: _forget_dangling_fks forgets nothing, so a pgpm.dropped_fk record whose referencing table "
+        "was dropped (or whose restored key was dropped by hand) is acted on as if the catalog still backed "
+        "it: untransmute's and suspend_incoming_fks's DROP CONSTRAINT die on the bare oid every time (the "
+        "table can be neither reversed nor regrained), and restore/validate log a failure every tick. One "
+        "site, the helper's DELETE, which the four callers share. tests/173 catches it in every section.",
+        [("    delete from pgpm.dropped_fk d\n     where d.parent_table = p_parent\n",
+          "    delete from pgpm.dropped_fk d\n     where false and d.parent_table = p_parent\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

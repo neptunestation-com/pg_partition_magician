@@ -2216,6 +2216,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `drop_incoming_fk` / `suspend_incoming_fk` / `restore_incoming_fk` / `validate_incoming_fk` | preserve-FK lifecycle events |
 | `from_hypertable_carry_fk` | (`pgpm_hypertable` only) an outgoing FK re-added onto the migrated destination during `from_hypertable_copy` |
 | `forget_missing` | `forget_missing()` cleared a parent's registration because its relation no longer exists; `rows` carries how many partition rows were cleared with it |
+| `forget_incoming_fk` | a `pgpm.dropped_fk` record was forgotten because the catalog no longer backs it: its referencing table was dropped, or a key recorded as re-added is no longer on that table (see [`pgpm.dropped_fk`](#pgpmdropped_fk)). `method` names the key and which of the two it was |
 | `archive_coverage_reset` | `pgpm.archive_ledger` rows were discarded because the coverage they record cannot be vouched for; `rows` carries how many chunks and `method` says why. Three causes: the partition they were recorded for has no write block in force on it (absent, disabled, or origin-only: coverage nothing has been guarding, see [`maintain`](#maintain) and [`retire`](#retire)); they were recorded under a `child_name` that is no longer a tracked partition of the parent, over a range a tracked partition now holds (a partition renamed without carrying the ledger, see [the archive step](#byte-budget-chunked-archiving)); or a `regrain` swap dropped a partly archived source, whose chunks go with it (see [`regrain`](#regrain)). In every case the partition holding the range archives again from its own `lo` |
 | `warn_obtain_unscheduled` | logged at most once per `maintain_all` sweep, with a null `parent_table`, when the `pgpm` cron job exists but `pgpm_obtain` doesn't -- obtain is silently not running |
 | `skip_obtain` / `skip_retain` / `skip_regrain` / `skip_regrain_capture` / `skip_archive` / `skip_write_block` / `skip_restore_fk` / `skip_validate_fk` | a step deferred (lock race or transient error; `method` carries the reason) |
@@ -2240,6 +2241,15 @@ Preserve-managed incoming FKs and their lifecycle.
 | `restored_at` | `timestamptz` | null = dropped (RI off); set = re-added |
 | `validated_at` | `timestamptz` | set = fully validated; null with `restored_at` set = re-added `NOT VALID` (orphans pending) |
 | `dropped_at` | `timestamptz` | when the FK was captured and dropped |
+
+A record names its referencing table by OID, and nothing ties the two together after the capture, so
+`pgpm` reconciles the records with the catalog before it acts on them. `untransmute`, regrain's swap
+(through `suspend_incoming_fks`), `restore_incoming_fks` and `validate_incoming_fks` each first forget a
+record whose referencing table no longer exists, and a record marked re-added whose key is no longer on its
+referencing table, logging each as `forget_incoming_fk`, and then go on with the rest. So dropping a
+referencing table, or one of these keys, is ordinary DDL: the managed table can still be reversed and
+regrained, and the key you dropped is not put back. A key recorded as dropped (`restored_at` null) is absent
+by design until it is restored, and is kept.
 
 ### `pgpm.transmute_inflight`
 
