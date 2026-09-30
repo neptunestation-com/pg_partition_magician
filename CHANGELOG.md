@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+- **Every call that drives or reconfigures a regrain serialises on one per-parent lock, and `set_regrain`
+  refuses to retarget a run in flight** (#554). Nothing held a per-parent lock across a regrain step, so a
+  hand-driven `regrain_step` and a `maintain` tick copied the same rows into the same fine child (the
+  second died on its key), a step that had read the run before a `regrain_cancel` committed carried on
+  from the state the cancel tore down, and a setter read around another session's uncommitted prepare.
+  And `set_regrain(parent, <another step>)` mid-flight was accepted: nothing records the step a run
+  started at, so every later tick walked the half-built run on the new grid and wedged (`skip_regrain`
+  on every tick, a CHECK violation or a swap refusal blaming retention). `regrain_step` (so `maintain`,
+  `regrain()` and `regrain_history()`), `regrain_cancel`, `set_regrain` and `set_partition_tz` now take a
+  row lock on the new `pgpm.regrain_lock` first (pgpm-owned, not an advisory key any role could squat),
+  and `set_regrain` refuses a change of target while a run is in flight, naming `regrain_cancel`.
+  `tests/162_regrain_drivers_serialize_test.sql` pins both with two dblink sessions ordered by lock state;
+  `bench/regrain_drivers_serialize.sh` drives it against the `regrain_lock_noop` and
+  `set_regrain_retarget_midflight` mutations, which `./test.sh discriminate` requires it to fail.
+- **`set_partition_tz` refuses a zone change while a regrain is in flight** (#660). It judged only the
+  attached bounds, and a run's copies are not attached, so a UTC month grid switched to a zone that agrees
+  at every attached bound and disagrees inside the monolith was accepted mid-run; the rest of the run was
+  computed in the new zone, overlapped the copies and the swap refused on every attempt. The refusal names
+  `regrain_cancel`; re-stating the recorded zone still passes. `tests/163_set_partition_tz_midflight_test.sql`
+  pins it single-session and against another session's uncommitted prepare;
+  `bench/set_partition_tz_midflight.sh` drives it against the `set_partition_tz_regrain_midflight` mutation.
 - **A grid floor is exact at any magnitude, so it never lands above its input** (#659). Three sites
   took `floor()` of a quotient that had already been rounded: general numeric division keeps a bounded
   scale and double precision about 16 digits, so a quotient a hair below an integer rounded up to it.

@@ -1018,6 +1018,14 @@ anything.
 Only one regrain runs per parent at a time: a second one is refused with an error naming the one in
 flight. Let it finish, or stop it with [`regrain_cancel`](#regrain_cancel), then re-run.
 
+**Regrain calls on one parent take turns.** `regrain_step` (and so `regrain`, `regrain_history` and
+`maintain`'s auto-regrain), [`regrain_cancel`](#regrain_cancel), [`set_regrain`](#set_regrain) and
+[`set_partition_tz`](#set_partition_tz) each take one per-parent lock before they read anything, held until
+their transaction ends. A second call on the same parent waits for the first to commit and then acts on
+what it left: a hand-driven `regrain_step` beside a `maintain` tick copies the next batch rather than the
+same one, and a setter judges a run another session has just prepared. A `maintain` tick waits under its
+own `lock_timeout`, so while a long `regrain` holds the lock each tick logs `skip_regrain` and retries.
+
 **Writes wait for the whole call.** Before its first step, `regrain` takes a `SHARE` lock on the parent
 (the parent only, not its partitions) and holds it until the call commits. Reads, and foreign-key checks
 against the table, carry on as normal. Every `INSERT`, `UPDATE` or `DELETE` through the parent waits
@@ -1739,6 +1747,14 @@ work is lost. To keep that work, leave auto-regrain on until [`progress`](#progr
 turn it off. A call that finds auto-regrain already off changes nothing, so it never touches an
 operator-driven regrain.
 
+**Changing the target while a run is in flight is refused** (`config.regrain_cursor` set, a
+not-yet-attached copy, or change capture on a child). The run's copies and cursor belong to the step it was
+started at, which nothing else records, and the rest of the run would be computed on the new step's grid,
+collide with them and fail on every tick. Let the run finish (watch [`progress`](#progress)), or abandon it
+with [`regrain_cancel`](#regrain_cancel) and set the new target then. Re-stating the target already set is
+not a change and is accepted. With auto-regrain off and an operator-driven run in flight, any target is
+refused, since that run's step is not recorded.
+
 ### `set_obtain`
 
 ```sql
@@ -1810,7 +1826,11 @@ bound, give it the name of the neighbouring cell, and refuse every swap. A bound
 boundary in the recorded zone, such as a day child left by a finer regrain, is not judged. A
 day-denominated step is the same lattice in every zone and its partitions are named by UTC date,
 so its zone can always change and nothing about the grid moves; a month or year step can only be moved to
-the zone the grid was in fact built in. Each accepted call writes a `set_partition_tz` row to `pgpm.log`
+the zone the grid was in fact built in. A change is also refused while a regrain is in flight: its copies
+and cursor are not attached bounds, so the checks above cannot see them, and the rest of the run would be
+computed in the new zone, overlap them and fail every swap. Let the run finish, or abandon it with
+[`regrain_cancel`](#regrain_cancel), then change the zone. Naming the zone already recorded is not a change
+and is accepted. Each accepted call writes a `set_partition_tz` row to `pgpm.log`
 with `old -> new` in `method`.
 
 ## Observability

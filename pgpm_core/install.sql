@@ -285,6 +285,19 @@ update pgpm.part p set child_oid = to_regclass(format('%I.%I', n.nspname, p.chil
   from pg_class c join pg_namespace n on n.oid = c.relnamespace
  where c.oid = p.parent_table and not p.attached and p.child_oid is null;
 
+-- The per-parent regrain lock (#554): one row per managed parent, locked FOR UPDATE by every call that
+-- drives or reconfigures a regrain (see pgpm._regrain_lock). Nothing is ever written to it after the row
+-- exists; the ROW LOCK is the whole point. It is its own table rather than a lock on the pgpm.config row
+-- because the config row is also written by the obtain job (obtain_retry_after) and by maintain_all
+-- (sweep_turn_at), and holding that row across a regrain copy batch would make obtain, the one step
+-- standing between the workload and a write with nowhere to go, wait on a regrain. And it is a table
+-- rather than an advisory lock for the reason #405 retired transmute's: an advisory key is computable by
+-- any role that can connect, and carries no ACL, so any such role could take it and hold every regrain of
+-- the table hostage. This table is pgpm-owned and carries no GRANTs.
+create table if not exists pgpm.regrain_lock (
+  parent_table regclass not null primary key
+);
+
 -- In-flight conversions (issue #275). transmute runs in three transactions -- add the bound, validate it,
 -- cut over -- so that the O(rows) validation scan is not held under the ACCESS EXCLUSIVE lock the ADD
 -- takes. The cost of that split is that a failure between phases leaves a live `pgpm_monolith_bound` CHECK
@@ -3519,6 +3532,46 @@ begin
 end;
 $$;
 
+-- Serialise everything that drives or reconfigures a regrain of p_parent (#554): regrain_step (and so
+-- maintain's auto-regrain, regrain() and regrain_history()), regrain_cancel, set_regrain and
+-- set_partition_tz all call this FIRST, before they read pgpm.config, and hold it to the end of their
+-- transaction. Without it nothing in the regrain path held a per-parent lock across a step, so two
+-- drivers could act on one run: a hand-driven regrain_step and a maintain tick computed their batches
+-- from the same cursor and copied the same rows into the same fine child, the second dying on the
+-- child's key once the first committed; a step that had read the run's state before a regrain_cancel
+-- committed carried on from the state the cancel had torn down; and a setter judging "is a run in
+-- flight" read around a prepare another session had not committed yet, and let the change through. With
+-- it, the second caller waits for the first to commit and then reads what it left. A maintain tick waits
+-- under its own lock_timeout like any other lock, so a long operator regrain() defers the tick
+-- (skip_regrain, retried next tick) instead of racing it.
+--
+-- A row lock on pgpm.regrain_lock (see the table for why not the config row, and why not an advisory
+-- lock). The row is created on first use; nothing for a parent pgpm does not manage, so the caller's own
+-- "is not managed" refusal still speaks. Re-entrant: regrain() takes it and then calls regrain_step,
+-- which takes it again in the same transaction, and set_regrain's #516 path calls regrain_cancel.
+create or replace function pgpm._regrain_lock(p_parent regclass)
+returns void language plpgsql as $$
+begin
+  insert into pgpm.regrain_lock (parent_table)
+    select p_parent where exists (select 1 from pgpm.config where parent_table = p_parent)
+  on conflict (parent_table) do nothing;
+  perform 1 from pgpm.regrain_lock where parent_table = p_parent for update;
+end;
+$$;
+
+-- Is a regrain of p_parent in flight? The three places a run leaves a mark, any one of which is enough:
+-- the cursor, a not-yet-attached copy (only regrain inserts one, #94), or capture on a child. The same
+-- three tests set_regrain's #516 branch makes. Asked by the setters that refuse to change what an
+-- in-flight run was started under (#554, #660), after they have taken _regrain_lock, so a concurrent
+-- step has either committed its marks or not started.
+create or replace function pgpm._regrain_in_flight(p_parent regclass)
+returns boolean language sql stable as $$
+  select exists (select 1 from pgpm.config where parent_table = p_parent and regrain_cursor is not null)
+      or exists (select 1 from pgpm.part where parent_table = p_parent and not attached)
+      or exists (select 1 from pgpm.part p where p.parent_table = p_parent
+                  and pgpm._regrain_capture_active(p_parent, p.child_name));
+$$;
+
 -- Stop an in-flight regrain and reclaim what it has built. Returns the number of in-flight fine children
 -- dropped. The janitor above handles the silent abandonments; this is the operator's deliberate escape.
 --
@@ -3530,6 +3583,7 @@ returns int language plpgsql as $$
 declare
   cfg pgpm.config; v_nsp name; v_delta name; v_dropped int := 0; r record;
 begin
+  perform pgpm._regrain_lock(p_parent);   -- #554: waits for a step in flight, and holds the next one off
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
@@ -3715,6 +3769,9 @@ declare
   v_child_name name; v_src_name name; v_rec int; v_delta_n bigint; v_delta_name name; v_busy name;
   v_delta_reg regclass; v_sub_known boolean; v_sub_oid oid; v_sub_now regclass;
 begin
+  -- #554: before the config read below, so a second driver of this parent (a tick, a hand-driven step, a
+  -- cancel) waits for this step to commit and this step reads what the last one left
+  perform pgpm._regrain_lock(p_parent);
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   select n.nspname, c.relname into v_nsp, v_rel
@@ -4253,6 +4310,11 @@ begin
   -- SHARE and ROW SHARE, so FK checks against the parent proceed too); every write to the table waits
   -- for the call, which is the price of one transaction. Auto-regrain (maintain, one regrain_step per
   -- committed tick) takes no such lock, and is the path for a table under live writes.
+  --
+  -- #554: the regrain lock comes FIRST, before SHARE, so every regrain driver takes the two in one order.
+  -- Taken after, a regrain() queued behind a maintain tick's swap would hold SHARE on the parent while
+  -- the swap's DETACH waited on it for ACCESS EXCLUSIVE.
+  perform pgpm._regrain_lock(p_parent);
   execute format('lock table only %s in share mode', p_parent::text);
   loop
     v_status := pgpm.regrain_step(p_parent, v_child, p_target_step, null);
@@ -6161,6 +6223,7 @@ begin
   -- carries), and log the reversal against the restored table.
   delete from pgpm.dropped_fk where parent_table = p_parent;
   delete from pgpm.part where parent_table = p_parent;
+  delete from pgpm.regrain_lock where parent_table = p_parent;   -- #554
   delete from pgpm.config where parent_table = p_parent;
   insert into pgpm.log (parent_table, action) values (v_restored, 'untransmute');
 
@@ -6198,12 +6261,16 @@ drop function if exists pgpm.feathering_validation(regclass, interval, interval)
 -- preconditions (frozen, default-clear), so enabling it is always safe: a zero or negative target (#588)
 -- and one coarser than partition_step (issue #341) are refused (see the guards below), and maintain() only
 -- ever selects a child
--- the target subdivides (#515), so no target can wedge it.
+-- the target subdivides (#515), so no target can wedge it. Changing the target while a run is in flight
+-- is refused too (#554): the run's copies belong to the step it was started at.
 create or replace function pgpm.set_regrain(p_parent regclass, p_target_step text default null)
 returns void language plpgsql as $$
 declare
   cfg pgpm.config; v_rel name;
 begin
+  -- #554: a step of this parent in flight in another session commits (or aborts) before this call reads
+  -- config, so the in-flight test below judges a run's committed marks, never around an uncommitted prepare
+  perform pgpm._regrain_lock(p_parent);
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
 
@@ -6250,6 +6317,23 @@ begin
   if p_target_step is not null then
     select c.relname into v_rel from pg_class c where c.oid = p_parent;
     perform pgpm._part_name(v_rel, cfg.control_kind, p_target_step, cfg.partition_anchor, null, cfg.partition_tz);
+  end if;
+
+  -- #554: a CHANGE of target while a run is in flight is refused. Nothing records the step a run was started
+  -- at: its copies were cut on that step's grid and sit in pgpm.part with that grid's bounds and names, and
+  -- the cursor is one of its boundaries, while every later tick computes its sub-ranges from regrain_to.
+  -- Accepted, the rest of the run walked the half-built copy on the NEW grid: its first sub-range rendered
+  -- the old first copy's name and the copy violated that child's bound CHECK, or the swap's re-check found
+  -- no child with the new grid's bounds and refused as if retention had been loosened, on every tick until
+  -- the operator found regrain_cancel. Refused rather than abandoned (as #516 does for null): a new target
+  -- is a request for more regraining, and throwing away the copy work is the operator's call to make. The
+  -- target already set is not a change, so re-stating it passes; and with regrain_to null an
+  -- operator-driven run is in flight at a step pgpm does not know, so any target is a change.
+  if p_target_step is not null and p_target_step is distinct from cfg.regrain_to
+     and pgpm._regrain_in_flight(p_parent) then
+    raise exception 'pg_partition_magician: set_regrain(%, %) refused -- a regrain of % is in flight (config.regrain_cursor = %) at %, and its copies were cut on that step''s grid; the rest of the run would be computed on the new one, collide with them and wedge every tick. Let it finish, or abandon it with pgpm.regrain_cancel(%) (the source still holds every row) and set the new target then.',
+      p_parent, p_target_step, p_parent, coalesce(cfg.regrain_cursor, 'null'),
+      coalesce('regrain_to ' || cfg.regrain_to, 'a step it was started at by hand (regrain_to is null)'), p_parent;
   end if;
 
   -- #516: turning auto-regrain OFF abandons the run it had in flight. maintain dispatches regrain_step only
@@ -6418,6 +6502,7 @@ create or replace function pgpm.set_partition_tz(p_parent regclass, p_tz text)
 returns void language plpgsql as $$
 declare cfg pgpm.config; v_tz text; v_top text; v_off_child name; v_off_bound text;
 begin
+  perform pgpm._regrain_lock(p_parent);   -- #660: judge a regrain's committed marks, never around a step in flight
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   if cfg.control_kind = 'id' then
@@ -6433,6 +6518,18 @@ begin
   v_tz := pgpm._canonical_tz(p_tz);
   if v_tz is null then
     raise exception 'pg_partition_magician: % is not a time zone name in pg_timezone_names', p_tz;
+  end if;
+  -- #660: a zone CHANGE while a regrain is in flight is refused. The checks below judge only the ATTACHED
+  -- bounds; a run's copies are not attached, they sit in pgpm.part on the lattice of the zone the run was
+  -- started in, and its cursor is one of that lattice's boundaries, while every later step computes its
+  -- sub-ranges in whatever zone config holds by then. Accepted, a UTC month grid switched to a zone that
+  -- agrees with UTC at every attached bound and disagrees inside the monolith (Africa/Sao_Tome, UTC+1
+  -- through 2018) computed its next sub-range overlapping the last copy with a hole beside it, and the
+  -- swap refused on every attempt, blaming a retention change. Same rule as set_regrain's (#554): the run
+  -- belongs to what it was started under. Re-stating the recorded zone is not a change.
+  if v_tz is distinct from cfg.partition_tz and pgpm._regrain_in_flight(p_parent) then
+    raise exception 'pg_partition_magician: set_partition_tz(%, %) refused -- a regrain of % is in flight (config.regrain_cursor = %), and its copies and cursor sit on the grid as computed in %; the rest of the run would be computed in %, overlap them and leave a hole the swap refuses on every attempt. Let it finish, or abandon it with pgpm.regrain_cancel(%) (the source still holds every row) and change the zone then.',
+      p_parent, p_tz, p_parent, coalesce(cfg.regrain_cursor, 'null'), cfg.partition_tz, v_tz, p_parent;
   end if;
   select pgpm._ts_text(max(hi::timestamptz)) into v_top from pgpm.part where parent_table = p_parent and attached;
   if v_top is not null
@@ -7090,6 +7187,7 @@ begin
     delete from pgpm.archive_ledger     where parent_table = r.parent_table;
     delete from pgpm.dropped_fk         where parent_table = r.parent_table;
     delete from pgpm.part               where parent_table = r.parent_table;
+    delete from pgpm.regrain_lock       where parent_table = r.parent_table;   -- #554
     delete from pgpm.config             where parent_table = r.parent_table;
 
     insert into pgpm.log (parent_table, action, rows, method)
