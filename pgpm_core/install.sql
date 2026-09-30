@@ -5722,8 +5722,21 @@ $$;
 --
 -- Deliberately independent of pgpm.config: a half-converted table is not registered yet, because
 -- registration happens in the cutover. That is exactly why this lives in maintain_all rather than maintain.
+--
+-- The lock wait is bounded (#657). The DROP CONSTRAINT takes ACCESS EXCLUSIVE on the operator's live table,
+-- and this runs first in every maintain_all, before any lock_timeout is set, under pg_cron's session
+-- default of 0. One long reader of the table then parked the reaper, and its PENDING ACCESS EXCLUSIVE
+-- queued every other read and write of the table behind it for the reader's whole life, with the sweep
+-- stalled behind it too. So the function carries transmute's own default bound (p_lock_timeout, #309),
+-- for the lock that undoes the one transmute's phase 1 took: a SET clause, so it applies to every wait in
+-- here and the caller's setting is back the moment this returns (the _detach_reap after it is untouched).
+-- A timeout DEFERS that table alone: skip_transmute_reap is logged, the claim and the bound stay exactly
+-- as they were, and the next tick tries again. Any other error still propagates, as it always has.
+-- bench/transmute_reap_lock_timeout.sh guards it.
 create or replace function pgpm._transmute_reap()
-returns int language plpgsql as $$
+returns int language plpgsql
+set lock_timeout = '5s'
+as $$
 declare r pgpm.transmute_inflight%rowtype; v_n int := 0;
 begin
   for r in select * from pgpm.transmute_inflight loop
@@ -5739,12 +5752,17 @@ begin
     if pgpm._session_alive(r.owner_pid, r.owner_backend_start) then
       continue;   -- still running; leave it alone
     end if;
-    execute format('alter table %s drop constraint if exists pgpm_monolith_bound', r.parent_table::text);
-    delete from pgpm.transmute_inflight where parent_table = r.parent_table;
-    insert into pgpm.log (parent_table, action, lo, hi, method)
-      values (r.parent_table, 'transmute_reap', r.lo, r.hi,
-              'abandoned conversion undone: the bound was rejecting out-of-range writes');
-    v_n := v_n + 1;
+    begin
+      execute format('alter table %s drop constraint if exists pgpm_monolith_bound', r.parent_table::text);
+      delete from pgpm.transmute_inflight where parent_table = r.parent_table;
+      insert into pgpm.log (parent_table, action, lo, hi, method)
+        values (r.parent_table, 'transmute_reap', r.lo, r.hi,
+                'abandoned conversion undone: the bound was rejecting out-of-range writes');
+      v_n := v_n + 1;
+    exception when lock_not_available then   -- #657: defer this table to the next tick, never stall on it
+      insert into pgpm.log (parent_table, action, lo, hi, method)
+        values (r.parent_table, 'skip_transmute_reap', r.lo, r.hi, left(sqlerrm, 200));
+    end;
   end loop;
   return v_n;
 end;

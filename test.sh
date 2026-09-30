@@ -741,6 +741,8 @@ run_perf() {
     "bench/regrain_capture_name_fits.sh pgpm_perf91"
     "bench/obtain_explicit_name_too_long.sh pgpm_perf92"
     "bench/config_stamp_lock.sh pgpm_perf101"
+    "bench/transmute_reap_lock_timeout.sh pgpm_perf99"
+    "bench/hypertable_cutover_lock_timeout.sh pgpm_perf100"
   )
   local selected=()
   local n=${#guards[@]} idx

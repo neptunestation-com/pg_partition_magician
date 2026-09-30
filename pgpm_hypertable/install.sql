@@ -10,8 +10,9 @@
 -- plain table under the original name, then hand to transmute -- version- and
 -- catalog-agnostic, which is what the deprecated Apache builds need. The copy is
 -- online (source serves traffic, committed per chunk); only the cutover takes a
--- brief lock. Scope: a single time/RANGE dimension on a timestamptz, timestamp or
--- date column, migrated ON that column (p_control must be the dimension; see
+-- brief lock, and its wait for that lock is bounded by p_lock_timeout (#665).
+-- Scope: a single time/RANGE dimension on a timestamptz, timestamp or date
+-- column, migrated ON that column (p_control must be the dimension; see
 -- _from_hypertable_check_dimension for why); append-only catch-up at
 -- cutover. The control column's key is whatever transmute reuses -- a PRIMARY KEY
 -- or UNIQUE constraint that includes it, or keyless if it has neither (the common
@@ -719,7 +720,9 @@ begin
   end loop;
 end $$;
 
--- Phase 2: the cutover (the one non-online window). ACCESS EXCLUSIVE on the source; an append-only
+-- Phase 2: the cutover (the one non-online window). ACCESS EXCLUSIVE on the source, waited for no longer
+-- than p_lock_timeout (default '5s', transmute's own default, #309 and #665), so a long reader of the
+-- hypertable makes the cutover give up and leave everything as it was, to be re-run; an append-only
 -- catch-up of rows that arrived after the copy watermark (control >= max copied with a key anti-join on
 -- a keyed table, control > max copied on a keyless one); a conservation check that refuses the swap
 -- unless the source holds the same rows as the destination, by count AND by a content fingerprint of
@@ -730,11 +733,15 @@ end $$;
 -- whole). When the caller leaves p_retain null, the source's drop_chunks policy interval is carried into
 -- pgpm's retain. Requires from_hypertable_copy to have run (the destination must exist).
 drop procedure if exists pgpm.from_hypertable_cutover(regclass, name, interval, int, interval, boolean, int, timestamptz, boolean);
+-- #665 added p_lock_timeout, which CHANGES THE ARGUMENT COUNT: CREATE OR REPLACE does not replace across
+-- that, so the previous form must go or both overloads survive and every call becomes ambiguous.
+drop procedure if exists pgpm.from_hypertable_cutover(regclass, name, interval, int, interval, int, timestamptz, boolean, boolean);
 create or replace procedure pgpm.from_hypertable_cutover(
   p_hypertable regclass, p_control name, p_interval interval,
   p_obtain int default 30, p_retain interval default null,
   p_drain_batch int default 5000, p_anchor timestamptz default '2000-01-01 00:00:00+00',
-  p_paused boolean default true, p_predrain boolean default true
+  p_paused boolean default true, p_predrain boolean default true,
+  p_lock_timeout text default '5s'
 ) language plpgsql as $$
 declare
   v_nsp name; v_rel name; v_dest name; v_cols_q text; v_retain interval;
@@ -754,7 +761,18 @@ declare
   v_unmatched bigint; v_m bigint; v_kt text; v_first_key text; v_fresh_batch boolean;
   v_src_h numeric; v_dest_h numeric; v_h numeric; -- ...and the same for the content fingerprint, the rows' identity (#653)
   v_fp_q text;           -- the per-row fingerprint expression, over the quoted column list (#653)
+  v_prev_lock_timeout text;   -- #665: so validating p_lock_timeout leaves the setting untouched
 begin
+  -- #665: validate the lock timeout HERE, before the pre-drain commits anything or the index pre-builds
+  -- spend their O(rows), exactly as transmute validates its own (#309). The prior value is restored at
+  -- once, so the check has no side effect and the set_config at the swap is what applies the bound.
+  begin
+    v_prev_lock_timeout := current_setting('lock_timeout');
+    perform set_config('lock_timeout', p_lock_timeout, true);
+    perform set_config('lock_timeout', v_prev_lock_timeout, true);
+  exception when others then
+    raise exception 'pg_partition_magician: p_lock_timeout must be a valid lock_timeout value (got %): %', p_lock_timeout, sqlerrm;
+  end;
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   v_dest := v_rel || '_pgpm_dest';
@@ -815,6 +833,14 @@ begin
     call pgpm.from_hypertable_drain_appends(p_hypertable, p_control, p_drain_batch, p_drain_batch,
                                             1000000, p_best_effort => true);
   end if;
+  -- #665: bound every lock wait of the swap transaction, which starts here (the pre-drain's last COMMIT
+  -- ended the one before, and `set local` does not survive a COMMIT). The one that matters is the LOCK
+  -- TABLE ... ACCESS EXCLUSIVE on the live hypertable below: unbounded, it queued behind any long reader,
+  -- and a PENDING ACCESS EXCLUSIVE blocks every later read and write of the table for as long as that
+  -- reader lives. The same bound covers the incoming-FK drops' locks on each referencing table. A timeout
+  -- aborts the swap whole, before anything irreversible: the hypertable, the copy and every drained batch
+  -- are as they were, and re-running the cutover costs only the index pre-builds.
+  perform set_config('lock_timeout', p_lock_timeout, true);
   -- Read the destination BEFORE the lock. It is private and stable from here to the lock (only CREATE INDEX
   -- runs, which does not change rows), so what is read here is what the under-lock work would read -- but
   -- reading it here keeps an O(rows) seqscan of the dest OUT of the locked window (#174). Two things, one
@@ -1234,7 +1260,8 @@ begin
   -- p_drain_batch sizes THIS module's migration-delta drain, which still exists; transmute's own batch
   -- knob is regrain's now (#288), so the handoff names it explicitly rather than relying on position.
   call pgpm.transmute(v_orig, p_control, p_interval, p_obtain, v_retain,
-                      p_regrain_batch => p_drain_batch, p_anchor => p_anchor, p_paused => p_paused);
+                      p_regrain_batch => p_drain_batch, p_anchor => p_anchor, p_paused => p_paused,
+                      p_lock_timeout => p_lock_timeout);
 
   -- Re-add the incoming FKs the swap dropped, now against the new partitioned parent (issue #264). Handed
   -- to the CORE's existing state machine rather than re-implementing the dance: the swap recorded them in
@@ -1282,14 +1309,27 @@ drop procedure if exists pgpm.from_hypertable(regclass, name, interval, int, int
 -- #288 dropped p_keep_default, so the previous form must go or both overloads survive and every call
 -- becomes ambiguous.
 drop procedure if exists pgpm.from_hypertable(regclass, name, interval, int, interval, boolean, int, timestamptz, boolean, boolean, boolean);
+-- #665 added p_lock_timeout, passed through to the cutover: the same arg-count hazard as above.
+drop procedure if exists pgpm.from_hypertable(regclass, name, interval, int, interval, int, timestamptz, boolean, boolean, boolean);
 create or replace procedure pgpm.from_hypertable(
   p_hypertable regclass, p_control name, p_interval interval,
   p_obtain int default 30, p_retain interval default null,
   p_drain_batch int default 5000, p_anchor timestamptz default '2000-01-01 00:00:00+00',
-  p_paused boolean default true, p_track_changes boolean default false, p_predrain boolean default true
+  p_paused boolean default true, p_track_changes boolean default false, p_predrain boolean default true,
+  p_lock_timeout text default '5s'
 ) language plpgsql as $$
+declare v_prev_lock_timeout text;
 begin
+  -- #665: refuse a bad p_lock_timeout before the copy, not from inside the cutover once the whole online
+  -- copy has been paid for. No side effect: the prior value goes straight back.
+  begin
+    v_prev_lock_timeout := current_setting('lock_timeout');
+    perform set_config('lock_timeout', p_lock_timeout, true);
+    perform set_config('lock_timeout', v_prev_lock_timeout, true);
+  exception when others then
+    raise exception 'pg_partition_magician: p_lock_timeout must be a valid lock_timeout value (got %): %', p_lock_timeout, sqlerrm;
+  end;
   call pgpm.from_hypertable_copy(p_hypertable, p_control, p_track_changes);
   call pgpm.from_hypertable_cutover(p_hypertable, p_control, p_interval, p_obtain, p_retain,
-                                    p_drain_batch, p_anchor, p_paused, p_predrain);
+                                    p_drain_batch, p_anchor, p_paused, p_predrain, p_lock_timeout);
 end $$;

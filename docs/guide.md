@@ -292,7 +292,9 @@ same session or a new one.
 foreign keys were never touched, because those are dropped only by the cutover itself. You rarely
 need to: every `maintain_all` tick sweeps for abandoned conversions and undoes them, deciding "abandoned"
 from whether the session that claimed the conversion is still connected rather than from a timeout, so a
-long scan is never mistaken for a dead one. Re-running `transmute` resumes from the recorded bound, in the
+long scan is never mistaken for a dead one. The sweep gives up on the table's lock after 5 s, like
+`transmute` itself, and retries next tick (a `skip_transmute_reap` row) rather than queue the table's
+traffic behind it. Re-running `transmute` resumes from the recorded bound, in the
 zone that bound was computed in, rather than recomputing one.
 
 The one hard requirement is that the **control column be `NOT NULL`** (a partition key cannot be null, and
