@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **A grid floor is exact at any magnitude, so it never lands above its input** (#659). Three sites
+  took `floor()` of a quotient that had already been rounded: general numeric division keeps a bounded
+  scale and double precision about 16 digits, so a quotient a hair below an integer rounded up to it.
+  `_text_time_to_ts` decoded a KSUID stamped 2020-12-31 23:59:59Z whose random low bits are near all-ones
+  as the next second, `_grid_floor`'s id branch floored the id 1799999999999999999 at a step of 3e16 to
+  1800000000000000000, and its fixed-step time branch floored the last microsecond before a day boundary
+  to the boundary when the anchor was in year 1. `transmute` takes the floor of the oldest value as the
+  monolith's lower bound, so such a row made the bound CHECK exclude it and VALIDATE fail on every run.
+  All three now go through `pgpm._floor_div`, an exact integer floor built on `div()` and `mod()`, which
+  `_radix_encode` already used for the same reason. `tests/174` is the acceptance test, and
+  `bench/grid_floor_exact.sh` runs it against one mutation per site (`text_time_decode_rounded_floor`,
+  `grid_floor_id_rounded_floor`, `grid_floor_fixed_float_floor`).
 - **`maintain_all`'s reaper gives up on a table's lock after 5 s and retries next tick** (#657).
   `_transmute_reap` runs first in every sweep, before any `lock_timeout` is set, and its `DROP CONSTRAINT
   pgpm_monolith_bound` takes `ACCESS EXCLUSIVE` on the half-converted live table; under pg_cron's default of
