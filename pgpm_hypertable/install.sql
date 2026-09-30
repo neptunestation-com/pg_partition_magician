@@ -722,7 +722,8 @@ end $$;
 -- Phase 2: the cutover (the one non-online window). ACCESS EXCLUSIVE on the source; an append-only
 -- catch-up of rows that arrived after the copy watermark (control >= max copied with a key anti-join on
 -- a keyed table, control > max copied on a keyless one); a conservation check that refuses the swap
--- unless the source's count(*) matches the destination's (#460); drop the hypertable
+-- unless the source holds the same rows as the destination, by count AND by a content fingerprint of
+-- every row (#460, #653); drop the hypertable
 -- (Timescale's event trigger clears its chunks and catalog); rename the copy into place; rebuild the key,
 -- secondary indexes, and identity columns (CREATE TABLE LIKE carries none of those) with their original
 -- names; then hand off to transmute. The swap + rebuild is one transaction (commits whole or rolls back
@@ -751,6 +752,8 @@ declare
   -- builds, the source and destination column rows it compares, and what it found
   v_horizon bigint; v_fresh text; v_nomatch_q text; v_scols_q text; v_dcols_q text;
   v_unmatched bigint; v_m bigint; v_kt text; v_first_key text; v_fresh_batch boolean;
+  v_src_h numeric; v_dest_h numeric; v_h numeric; -- ...and the same for the content fingerprint, the rows' identity (#653)
+  v_fp_q text;           -- the per-row fingerprint expression, over the quoted column list (#653)
 begin
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
@@ -787,6 +790,15 @@ begin
   select string_agg(quote_ident(attname), ', ' order by attnum) into v_cols_q
     from pg_attribute where attrelid = p_hypertable and attnum > 0 and not attisdropped
       and attgenerated = '';   -- omit generated columns: they recompute on insert, never inserted into
+  -- The conservation check's per-row fingerprint (#653): a 64-bit hash of the row's text rendering over
+  -- exactly the columns the copy moves, summed (as numeric, so it cannot overflow) into an order-free
+  -- fingerprint of the multiset of rows. A count alone is invariant under compensating changes: a copied
+  -- row deleted and a row appended behind the watermark during the online window left 72 = 72, and the
+  -- swap dropped the late row and resurrected the deleted one. The sum moves by h(added) - h(removed), so
+  -- it cancels only on a 64-bit hash collision, and a keyless table's legitimate duplicate rows each count
+  -- (a sum, not an XOR). Both sides are rendered by this one session inside this one procedure call, so
+  -- the text of equal values is equal whatever DateStyle, TimeZone or extra_float_digits says.
+  v_fp_q := format('hashtextextended(row(%s)::text, 0)', v_cols_q);
 
   -- Pre-drain (#170): when change-tracking is on, reconcile the delta ONLINE in micro-batches before taking
   -- the lock, so the locked final reconcile below applies only a tiny residual instead of the whole
@@ -807,13 +819,15 @@ begin
   -- runs, which does not change rows), so what is read here is what the under-lock work would read -- but
   -- reading it here keeps an O(rows) seqscan of the dest OUT of the locked window (#174). Two things, one
   -- scan: the append-only catch-up watermark (max control; new appends after this read have a higher
-  -- control value and are still caught under the lock), and the CONSERVATION BASELINE (#460): count(*) of
-  -- the dest as it stands, which the catch-up below adjusts by exactly the rows it adds or removes
-  -- (row_count) so the check under the lock can compare the two sides without scanning the dest again.
+  -- control value and are still caught under the lock), and the CONSERVATION BASELINE (#460, #653):
+  -- count(*) and the content fingerprint of the dest as it stands, which the catch-up below adjusts by
+  -- exactly the rows it adds or removes (their RETURNING) so the check under the lock can compare the two
+  -- sides without scanning the dest again.
   if not v_track then
-    execute format('select count(*), max(%I) from %I.%I', p_control, v_nsp, v_dest) into v_dest_n, v_watermark;
+    execute format('select count(*), coalesce(sum(%s), 0), max(%I) from %I.%I', v_fp_q, p_control, v_nsp, v_dest)
+      into v_dest_n, v_dest_h, v_watermark;
   else
-    execute format('select count(*) from %I.%I', v_nsp, v_dest) into v_dest_n;
+    execute format('select count(*), coalesce(sum(%s), 0) from %I.%I', v_fp_q, v_nsp, v_dest) into v_dest_n, v_dest_h;
   end if;
   -- The key the append-only catch-up anti-joins by (#460): the PRIMARY KEY, else a UNIQUE constraint, and
   -- every one of its columns NOT NULL -- a row-constructor `=` never matches a NULL component, so a
@@ -942,19 +956,20 @@ begin
       from pg_attribute where attrelid = p_hypertable and attname = p_control and not attisdropped;
     execute format('select min(%I)::text, max(%I)::text from %I.%I', p_control, p_control, v_nsp, v_delta)
       into v_min_ctl, v_max_ctl;
-    execute format('delete from %I.%I d where %s in (%s)', v_nsp, v_dest, v_dkey_q, v_subsel_q);
-    get diagnostics v_n = row_count;
-    v_dest_n := v_dest_n - v_n;
+    -- Each write reports what it changed through RETURNING, so the conservation baseline follows the
+    -- destination by identity, not only by row_count (#653).
+    execute format('with w as (delete from %I.%I d where %s in (%s) returning %s as h) select count(*), coalesce(sum(h), 0) from w',
+                   v_nsp, v_dest, v_dkey_q, v_subsel_q, v_fp_q) into v_n, v_h;
+    v_dest_n := v_dest_n - v_n; v_dest_h := v_dest_h - v_h;
     if v_min_ctl is not null then
-      execute format('insert into %I.%I (%s) select %s from %I.%I s where %s in (%s) and %I >= %L::%s and %I <= %L::%s',
+      execute format('with w as (insert into %I.%I (%s) select %s from %I.%I s where %s in (%s) and %I >= %L::%s and %I <= %L::%s returning %s as h) select count(*), coalesce(sum(h), 0) from w',
                      v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel, v_skey_q, v_subsel_q,
-                     p_control, v_min_ctl, v_ctl_type, p_control, v_max_ctl, v_ctl_type);
+                     p_control, v_min_ctl, v_ctl_type, p_control, v_max_ctl, v_ctl_type, v_fp_q) into v_n, v_h;
     else
-      execute format('insert into %I.%I (%s) select %s from %I.%I s where %s in (%s)',
-                     v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel, v_skey_q, v_subsel_q);
+      execute format('with w as (insert into %I.%I (%s) select %s from %I.%I s where %s in (%s) returning %s as h) select count(*), coalesce(sum(h), 0) from w',
+                     v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel, v_skey_q, v_subsel_q, v_fp_q) into v_n, v_h;
     end if;
-    get diagnostics v_n = row_count;
-    v_dest_n := v_dest_n + v_n;
+    v_dest_n := v_dest_n + v_n; v_dest_h := v_dest_h + v_h;
   else
     -- append-only catch-up: insert the tail past the watermark (read pre-lock above, off the locked window;
     -- the pre-drain, if it ran, already advanced the dest to within one batch of the head, so this is small).
@@ -967,7 +982,7 @@ begin
     -- row is legitimate in a keyless table and it would refuse to copy one. Whatever either form cannot
     -- see -- a row behind the watermark on any table, a row at it on a keyless one -- the conservation
     -- check below refuses on, rather than dropping the source short.
-    v_n := 0;
+    v_n := 0; v_h := 0;
     if v_watermark is not null then
       if v_akey is not null then
         -- Materialise the tail first and ANALYZE it, as the tracking branch above does for its delta (#164):
@@ -981,33 +996,38 @@ begin
         execute format('create temp table pgpm_htail on commit drop as select %s from %I.%I where %I >= %L',
                        v_cols_q, v_nsp, v_rel, p_control, v_watermark);
         analyze pgpm_htail;
-        execute format('insert into %I.%I (%s) select %s from pgpm_htail s where not exists (select 1 from %I.%I d where %s = %s)',
-                       v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_dest, v_dkey_q, v_skey_q);
+        execute format('with w as (insert into %I.%I (%s) select %s from pgpm_htail s where not exists (select 1 from %I.%I d where %s = %s) returning %s as h) select count(*), coalesce(sum(h), 0) from w',
+                       v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_dest, v_dkey_q, v_skey_q, v_fp_q) into v_n, v_h;
       else
-        execute format('insert into %I.%I (%s) select %s from %I.%I where %I > %L',
-                       v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel, p_control, v_watermark);
+        execute format('with w as (insert into %I.%I (%s) select %s from %I.%I where %I > %L returning %s as h) select count(*), coalesce(sum(h), 0) from w',
+                       v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel, p_control, v_watermark, v_fp_q) into v_n, v_h;
       end if;
-      get diagnostics v_n = row_count;
     end if;
-    v_dest_n := v_dest_n + v_n;
+    v_dest_n := v_dest_n + v_n; v_dest_h := v_dest_h + v_h;
   end if;
 
-  -- CONSERVATION (#460): the one place the two sides of the swap are compared, and it happens BEFORE the
-  -- identity capture, the incoming-FK drops and the DROP TABLE below, so on a mismatch nothing outside the
-  -- private destination has been touched and the raise rolls the catch-up and the index pre-builds back
-  -- with it: the source is left whole and still a hypertable. Both numbers are exact. The source is frozen
+  -- CONSERVATION (#460, #653): the one place the two sides of the swap are compared, and it happens BEFORE
+  -- the identity capture, the incoming-FK drops and the DROP TABLE below, so on a mismatch nothing outside
+  -- the private destination has been touched and the raise rolls the catch-up and the index pre-builds back
+  -- with it: the source is left whole and still a hypertable. Both sides are exact. The source is frozen
   -- under the ACCESS EXCLUSIVE just taken, and the destination's is the pre-lock baseline plus exactly what
   -- the catch-up changed, on a table nothing else writes (the private-destination invariant the watermark
-  -- read already rests on). Counting the source is O(rows) under the lock, and there is no bounded read
+  -- read already rests on). Reading the source is O(rows) under the lock, and there is no bounded read
   -- that could replace it: the rows this exists to find are the ones that landed BELOW the watermark,
-  -- anywhere in the table, between the copy and this lock. Counting the destination here too would double
-  -- that cost for nothing, which is why its count is carried in rather than taken again.
+  -- anywhere in the table, between the copy and this lock. Reading the destination here too would double
+  -- that cost for nothing, which is why its side is carried in rather than taken again.
+  --
+  -- IDENTITY, not cardinality (#653): the two sides are compared by count AND by the content fingerprint
+  -- (v_fp_q above), so the check asks whether the destination holds the SAME rows, not merely as many. A
+  -- count alone passed a copied row deleted plus a row appended behind the watermark (72 = 72), and an
+  -- update of a copied row, which changes no count at all; the fingerprint refuses both. It costs the
+  -- source read a row rendering and a hash per row on top of the count it already paid for.
   --
   -- Refusing beats adapting. The missing rows are below the watermark, so re-running the cutover cannot
   -- find them either; only a copy that tracks changes (or one taken with writes paused) can, and the
   -- message says so. Without this check the loss was silent: no error, no log row, a source dropped short.
   if not v_track then
-    execute format('select count(*) from %I.%I', v_nsp, v_rel) into v_src_n;
+    execute format('select count(*), coalesce(sum(%s), 0) from %I.%I', v_fp_q, v_nsp, v_rel) into v_src_n, v_src_h;
   else
     -- UNTRACKED WRITES (#654). The capture trigger is origin-only (TimescaleDB refuses ENABLE ALWAYS on a
     -- hypertable and on its chunks), so a write under session_replication_role = replica never reached the
@@ -1071,20 +1091,34 @@ begin
       v_unmatched := v_unmatched + v_m;
       v_first_key := least(v_first_key, v_kt);
     end loop;
+    -- #653: the source's content fingerprint, the rows' identity, read after the per-relation scan. One more
+    -- scan under the lock on this path only (the append-only path takes it with its count above): the
+    -- scan above reads relation by relation for xmin's sake, and the fingerprint has to match the one the
+    -- destination carried in over the whole table through TimescaleDB's own decompression.
+    execute format('select coalesce(sum(%s), 0) from %I.%I', v_fp_q, v_nsp, v_rel) into v_src_h;
   end if;
-  if v_src_n <> v_dest_n then
-    raise exception 'pg_partition_magician: from_hypertable_cutover(%) refusing to swap: the source holds % rows but the destination would hold % after the % catch-up, a difference of %. %',
-      p_hypertable, v_src_n, v_dest_n, case when v_track then 'change-tracking' else 'append-only' end,
-      abs(v_src_n - v_dest_n),
+  -- Two refusals guard the swap, the specific one first. A row the capture trigger never saw (#654) is named by
+  -- its key below; the count-and-fingerprint comparison after it (#460, #653) catches everything else, so a
+  -- write that bypassed the trigger is reported as what it is rather than as a fingerprint mismatch.
+  if v_unmatched > 0 then
+    raise exception 'pg_partition_magician: from_hypertable_cutover(%) refusing to swap: % source row(s) changed during the online window without firing the change-capture trigger, and the destination does not hold them as the source does (first key %). A write reached the source under session_replication_role = replica (a logical-replication apply worker, a loader silencing triggers) or with the trigger gone, and TimescaleDB cannot enable the trigger ALWAYS on a hypertable, so the delta never saw it. Nothing was dropped and the source is whole. Make every writer fire triggers for the whole window (pause the subscription, or run the loader as origin), then re-run from_hypertable_copy with p_track_changes => true.',
+      p_hypertable, v_unmatched, v_first_key;
+  end if;
+  if v_src_n <> v_dest_n or v_src_h <> v_dest_h then
+    raise exception 'pg_partition_magician: from_hypertable_cutover(%) refusing to swap: %. %',
+      p_hypertable,
+      case when v_src_n <> v_dest_n
+        then format('the source holds %s rows but the destination would hold %s after the %s catch-up, a difference of %s',
+                    v_src_n, v_dest_n, case when v_track then 'change-tracking' else 'append-only' end,
+                    abs(v_src_n - v_dest_n))
+        else format('the source and the destination would both hold %s rows after the %s catch-up, but not the same rows (their content fingerprints over every column differ)',
+                    v_src_n, case when v_track then 'change-tracking' else 'append-only' end)
+      end,
       case when v_track
         then 'A write reached the source without firing the change-capture trigger (session_replication_role = replica, or the trigger disabled), so the delta never saw it. Nothing was dropped and the source is whole. Make every writer fire triggers, then re-run from_hypertable_copy with p_track_changes => true.'
         else format('Rows arrived during the online window with a control value at or below the copy watermark (out-of-order appends, a backfill, or an update or delete of a copied row), which the append-only catch-up cannot see. Nothing was dropped and the source is whole. Re-run from_hypertable_copy(%L, %L, p_track_changes => true), which needs a primary key or unique constraint; on a keyless table, pause writes to the source for the copy instead.',
                     p_hypertable::text, p_control)
       end;
-  end if;
-  if v_unmatched > 0 then
-    raise exception 'pg_partition_magician: from_hypertable_cutover(%) refusing to swap: % source row(s) changed during the online window without firing the change-capture trigger, and the destination does not hold them as the source does (first key %). A write reached the source under session_replication_role = replica (a logical-replication apply worker, a loader silencing triggers) or with the trigger gone, and TimescaleDB cannot enable the trigger ALWAYS on a hypertable, so the delta never saw it. Nothing was dropped and the source is whole. Make every writer fire triggers for the whole window (pause the subscription, or run the loader as origin), then re-run from_hypertable_copy with p_track_changes => true.',
-      p_hypertable, v_unmatched, v_first_key;
   end if;
   -- (the key constraints + secondary indexes were captured and pre-built on the destination above, before
   -- the lock; the swap below only adopts/renames them -- metadata-only.)

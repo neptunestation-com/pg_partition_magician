@@ -53,11 +53,15 @@ select pgpm.retire('public.events', 'events_p2024_01');
 ```
 
 `archive.to_s3` reads the partition in pages and, before writing the object, checks that the rows it
-paged equal the partition's row count when the export began. On a mismatch it raises
-`pg_partition_magician: archive.to_s3 of ... paged N rows but the partition held M ...` and writes
-nothing (an in-flight multipart upload is aborted), so an object that does land is complete. The
-only thing that trips it is a write to the partition during the export: run it against a partition
-nothing is still writing to, then drop. The multipart abort runs whatever ends an export, an error or
+paged are the rows the partition holds after the last page: the same count and the same content
+fingerprint (a sum of 64-bit hashes of each exported line), so writes that cancel in a count, such as
+one row moved behind the paging cursor and another ahead of it, are caught too. On a mismatch it
+raises `pg_partition_magician: archive.to_s3 of ... paged N rows but the partition holds M ...` (or
+`... paged N rows and the partition holds N, but not the same rows ...`) and writes nothing (an
+in-flight multipart upload is aborted), so an object that does land holds exactly the partition's
+rows. The only thing that trips it is a write to the partition during the export: run it against a
+partition nothing is still writing to, then drop. The check reads the partition once more after the
+last page, which costs about one more pass over it. The multipart abort runs whatever ends an export, an error or
 a cancel (`statement_timeout`, `pg_cancel_backend`), and the error or cancel still reaches the caller.
 
 Both manual functions resolve `child` in the parent's schema, never through your session's

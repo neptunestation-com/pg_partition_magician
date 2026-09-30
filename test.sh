@@ -378,6 +378,12 @@ run_timescale() {
     # mutations are registered under MUTATION_TRACK=timescale rather than the default track. Same
     # reasoning as locktrace: `./test.sh discriminate` has to stay runnable on a laptop without this
     # image. Run here, inside the tag loop, because this is where the container is already up.
+    # #653's conservation-by-identity guard re-runs tests/timescale/db/22, which the loop above already
+    # ran: this is the harness discriminate.sh drives that file through against its mutant, and a harness
+    # only ever pointed at mutants would stay green there even if it failed against everything.
+    echo "--- cutover conservation by identity guard (issue #653) ---"
+    bash "$(dirname "$0")/bench/hypertable_cutover_conservation.sh" pgpm_test-timescale pgpm_perf86 || fail=1
+
     echo "--- discriminate (timescale-scoped mutations) ---"
     bash "$(dirname "$0")/bench/discriminate.sh" --track=timescale pgpm_test-timescale || fail=1
 
@@ -620,6 +626,10 @@ run_archive() {
   bash "$(dirname "$0")/bench/archive_to_s3_part_bytes.sh" pgpm_test-archive pgpm_perf75 || fail=1
   echo "--- archive.to_s3 cancel aborts multipart guard (issue #595) ---"
   bash "$(dirname "$0")/bench/archive_to_s3_cancel_abort.sh" pgpm_test-archive pgpm_perf76 || fail=1
+  # The conservation-by-identity guard (#673) re-runs tests/archive/db/25 for the same reason: the
+  # clean-code half of the pair bench/discriminate.sh completes with the count-only check put back.
+  echo "--- archive.to_s3 conservation by identity guard (issue #673) ---"
+  bash "$(dirname "$0")/bench/archive_to_s3_conservation.sh" pgpm_test-archive pgpm_perf87 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi

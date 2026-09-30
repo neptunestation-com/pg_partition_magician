@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- **`from_hypertable_cutover` refuses to swap unless both sides hold the same rows, not merely as many**
+  (#653). The conservation check compared `count(*)` only, so a copied row deleted plus a row appended
+  behind the watermark during the online window left 72 = 72, the swap went ahead, the late row was lost
+  and the deleted row came back; an update of a copied row, or one that bypassed the capture trigger,
+  changed no count at all. It now also compares a content fingerprint (a sum of 64-bit hashes of each
+  row's text), carried through the catch-up by `RETURNING`, and refuses with `... both hold N rows ...,
+  but not the same rows`. tests/timescale/db/22 and `bench/hypertable_cutover_conservation.sh`, with the
+  mutation `hypertable_cutover_conservation_by_count`.
+- **`archive.to_s3` lands an object only when it holds the partition's rows by identity** (#673). Its
+  conservation check compared the paged row count with `count(*)` taken as the export began, so one
+  concurrent UPDATE moving an unpaged row behind the paging cursor and a paged row ahead of it cancelled,
+  and the object landed without a row the partition held before and after. It now sums a hash of every
+  exported line and compares count and fingerprint with the partition as it stands after the last page.
+  tests/archive/db/25 and `bench/archive_to_s3_conservation.sh`, with the mutation
+  `to_s3_conservation_by_count`.
 - **`from_hypertable_cutover` refuses to swap over a write its change capture missed, not only over one
   that changed a count** (#654). The tracking copy's trigger is origin-only (TimescaleDB refuses
   `ENABLE ALWAYS` on a hypertable and on its chunks), so an `UPDATE` under
