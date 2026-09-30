@@ -6697,6 +6697,24 @@ begin
 end;
 $$;
 
+-- A sweep's bookkeeping write to a parent's pgpm.config row goes through this (#662): it takes the row
+-- with SKIP LOCKED and says whether it has it. The row lock is then this transaction's own, so the UPDATE
+-- that follows cannot wait. While another transaction holds the row (an operator's open transaction around
+-- a setter, a synchronous regrain() advancing regrain_cursor), the answer is false and the caller skips the
+-- write: the stamps it guards are bookkeeping, and without this they were plain UPDATEs outside any
+-- handler, so a held row raised 55P03 out of the sweep under a lock_timeout, or with none (the first
+-- parent's turn stamp) waited for as long as the holder stayed open, and every parent behind it went
+-- unmaintained. Each caller says why its write may be skipped. FOR NO KEY UPDATE is the lock the UPDATE
+-- itself takes, so this conflicts with nothing that UPDATE would not (a foreign key's KEY SHARE, say).
+-- tests/167 and bench/config_stamp_lock.sh guard it.
+create or replace function pgpm._config_try_lock(p_parent regclass)
+returns boolean language plpgsql as $$
+begin
+  perform 1 from pgpm.config where parent_table = p_parent for no key update skip locked;
+  return found;
+end;
+$$;
+
 create or replace procedure pgpm.maintain_all()
 language plpgsql as $$
 -- v_status exists only to receive maintain()'s INOUT: PL/pgSQL requires a writable argument for an
@@ -6757,14 +6775,24 @@ begin
   -- wrapping this would silently disable every COMMIT inside maintain() and put the locks straight back.
   -- maintain() already isolates each of its own steps, so the raises that reach here are the ones that
   -- should stop a sweep: a table that is not managed, or a config row pointing at something gone.
+  --
+  -- The turn stamps are the one thing here that is not maintain()'s, so they are the one thing that must
+  -- not stop a sweep either (#662): each is taken through _config_try_lock and skipped while another
+  -- transaction holds the parent's config row. A skipped stamp costs only the order: a parent whose turn
+  -- was not stamped after its maintain() leads the next sweep, and one whose first-parent stamp was
+  -- skipped may lead it again, once per sweep that finds its row held.
   for r in select parent_table from pgpm.config order by sweep_turn_at asc nulls first, parent_table loop
     if v_first then   -- #579: the sweep's first parent has had its turn once it starts
-      update pgpm.config set sweep_turn_at = clock_timestamp() where parent_table = r.parent_table;
+      if pgpm._config_try_lock(r.parent_table) then
+        update pgpm.config set sweep_turn_at = clock_timestamp() where parent_table = r.parent_table;
+      end if;
       commit;
       v_first := false;
     end if;
     call pgpm.maintain(r.parent_table, v_status);
-    update pgpm.config set sweep_turn_at = clock_timestamp() where parent_table = r.parent_table;
+    if pgpm._config_try_lock(r.parent_table) then
+      update pgpm.config set sweep_turn_at = clock_timestamp() where parent_table = r.parent_table;
+    end if;
     commit;
   end loop;
 end;
@@ -6852,15 +6880,26 @@ begin
     -- exclusion-constraint dance and no phases -- so the wrapper is legal again, and a lock race here
     -- is deferred like any other step. This is the ONLY thing standing between the workload and a
     -- write with nowhere to go, so a deferral also starts the back-off rather than retrying every tick.
+    --
+    -- Both back-off writes go through _config_try_lock (#662) and are skipped while another transaction
+    -- holds this parent's config row. Unguarded, the clearing UPDATE hit the 200 ms lock_timeout, the
+    -- handler's own UPDATE hit it again with nothing around it, and the 55P03 escaped into
+    -- maintain_obtain_all(), which has no handler, so every parent behind this one was denied obtain. A
+    -- clear that is skipped leaves a back-off that has already expired or been bypassed; an arming that is
+    -- skipped means obtain retries on the next tick, the direction that protects the grid.
     begin
       v_made := pgpm.obtain(p_parent);
       if cfg.obtain_retry_after is not null then
-        update pgpm.config set obtain_retry_after = null where parent_table = p_parent;
+        if pgpm._config_try_lock(p_parent) then
+          update pgpm.config set obtain_retry_after = null where parent_table = p_parent;
+        end if;
       end if;
     exception when others then
       v_note := v_note || ' obtain_deferred';
-      update pgpm.config set obtain_retry_after = clock_timestamp() + interval '30 seconds'
-        where parent_table = p_parent;
+      if pgpm._config_try_lock(p_parent) then
+        update pgpm.config set obtain_retry_after = clock_timestamp() + interval '30 seconds'
+          where parent_table = p_parent;
+      end if;
       insert into pgpm.log (parent_table, action, method) values (p_parent, 'skip_obtain', left(sqlerrm, 200));
     end;
   else

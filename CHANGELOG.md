@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **A held `pgpm.config` row no longer aborts or hangs a sweep** (#662). `maintain_all`'s `sweep_turn_at`
+  stamps and `maintain_obtain`'s `obtain_retry_after` writes (the clear after a successful obtain and the
+  arming in its deferral handler) were plain UPDATEs outside any handler, so while another transaction
+  held a parent's config row the sweep raised 55P03, or for its first parent waited with no
+  `lock_timeout`, and every parent behind it went unmaintained or without obtain. All four now take the
+  row through `pgpm._config_try_lock` (`SKIP LOCKED`) and skip the write while it is held. tests/167 and
+  `bench/config_stamp_lock.sh` guard it, with the mutation `config_stamp_waits_on_row`.
 - **An archive object key names its parent and its `lo` the same in every session** (#551). The
   `archive_fn` transports keyed each object on `p_parent::text`, which leaves the schema out whenever
   the ticking session's search_path reaches the parent, so two tables named `evt` in two schemas sharing
