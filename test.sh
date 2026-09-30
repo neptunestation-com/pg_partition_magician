@@ -637,6 +637,10 @@ run_archive() {
   # clean-code half of the pair bench/discriminate.sh completes with the count-only check put back.
   echo "--- archive.to_s3 conservation by identity guard (issue #673) ---"
   bash "$(dirname "$0")/bench/archive_to_s3_conservation.sh" pgpm_test-archive pgpm_perf87 || fail=1
+  # The loud-edges guard (#636) re-runs tests/archive/db/28 for the same reason: the clean-code half of
+  # the pairs bench/discriminate.sh completes with its three mutants.
+  echo "--- archive.to_s3 loud edges guard (issue #636) ---"
+  bash "$(dirname "$0")/bench/archive_to_s3_loud_edges.sh" pgpm_test-archive pgpm_perf122 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi

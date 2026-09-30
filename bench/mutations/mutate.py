@@ -720,7 +720,8 @@ TRANSMUTE_DATE_WHOLE_DAYS_RE = re.compile(
     re.DOTALL,
 )
 # archive.to_s3's enclosing query_canceled handler (#595), whole, so the mutant reads as the function
-# before it: the labelled export block with its `when others` abort, and nothing around it.
+# before it: the labelled export block with its `when others` abort, and nothing around it. The
+# handler's #636 sweep of an initiate it never saw the id of goes with it.
 TO_S3_CANCEL_HANDLER = """end export;
 exception when query_canceled then
   -- a cancel, from the export or from the handler above before it could abort (see the top of the
@@ -730,6 +731,11 @@ exception when query_canceled then
       perform archive.s3_signed_request('DELETE', cfg.endpoint, cfg.bucket, cfg.region, v_key,
                                        'uploadId=' || archive.s3_url_encode(v_upload_id),
                                        'text/plain', '', v_key_id, v_secret);
+    exception when others then null;
+    end;
+  elsif v_initiating then
+    begin
+      perform archive._s3_abort_uploads_at(cfg.endpoint, cfg.bucket, cfg.region, v_key, v_key_id, v_secret);
     exception when others then null;
     end;
   end if;
@@ -3029,6 +3035,57 @@ $$;''',
         [("      if v_written <> v_expected or v_written_h <> v_expected_h then\n",
           "      if v_written <> v_expected then   -- MUTANT: the pre-#673 count-only comparison\n", 1)],
     ),
+    "to_s3_initiate_orphan_unaborted": (
+        "bench/archive_to_s3_loud_edges.sh",
+        "Pre-#636 archive.to_s3: both handlers abort only the upload whose UploadId they recorded, and "
+        "the id is recorded only once the initiate POST's response is parsed. A cancel or a transport "
+        "error inside that POST, after the store created the upload, leaves an upload in flight at the "
+        "key with nothing to abort it. Two sites, both sweeps by key, so neither handler finds the orphan.",
+        [
+            ("""  elsif v_initiating then
+    begin
+      perform archive._s3_abort_uploads_at(cfg.endpoint, cfg.bucket, cfg.region, v_key, v_key_id, v_secret);
+    exception when others then null;
+    end;
+    v_initiating := false;
+  end if;
+""", "  end if;\n", 1),
+            ("""  elsif v_initiating then
+    begin
+      perform archive._s3_abort_uploads_at(cfg.endpoint, cfg.bucket, cfg.region, v_key, v_key_id, v_secret);
+    exception when others then null;
+    end;
+  end if;
+""", "  end if;\n", 1),
+        ],
+    ),
+    "configure_part_bytes_under_s3_min": (
+        "bench/archive_to_s3_loud_edges.sh",
+        "Pre-#636 archive.configure: only p_part_bytes <= 0 is refused (#594), so a positive size under "
+        "S3's 5 MiB minimum for a non-final multipart part is stored, and every archive.to_s3 export of "
+        "more than one part uploads all of them and fails at CompleteMultipartUpload with EntityTooSmall.",
+        [("""  if p_part_bytes < 5 * 1024 * 1024 then
+    raise exception 'archive.configure: p_part_bytes must be at least 5242880 bytes (5 MiB, the smallest multipart part S3 accepts), not %', p_part_bytes;
+  end if;
+""", "", 1)],
+    ),
+    "configure_fetch_rows_unbounded": (
+        "bench/archive_to_s3_loud_edges.sh",
+        "Pre-#636 archive.configure and archive.to_s3: any p_fetch_rows is stored and read as each "
+        "page's LIMIT, so 0 reads no page and trips the conservation check with a message about rows, "
+        "and a negative value fails on LIMIT. Two sites, both bounds, so the mutant is the old code.",
+        [
+            ("""  if p_fetch_rows < 1 then
+    raise exception 'archive.configure: p_fetch_rows must be a positive number of rows, not %', p_fetch_rows;
+  end if;
+""", "", 1),
+            ("""  if cfg.fetch_rows < 1 then
+    raise exception 'archive.to_s3: % has archive.config.fetch_rows %; it must be a positive number of rows (set it with archive.configure)',
+      p_parent, cfg.fetch_rows;
+  end if;
+""", "", 1),
+        ],
+    ),
     "keep_both_two_way_only": (
         "bench/keep_both_diff3.sh",
         "Pre-#598 scripts/review/keep_both.py: the hunk pattern knows only the two-way conflict shape and the "
@@ -3621,6 +3678,9 @@ MUTATION_SRC = {
     "to_s3_part_bytes_unbounded": "pgpm_archive/install.sql",
     "to_s3_abort_misses_cancel": "pgpm_archive/install.sql",
     "to_s3_conservation_by_count": "pgpm_archive/install.sql",
+    "to_s3_initiate_orphan_unaborted": "pgpm_archive/install.sql",
+    "configure_part_bytes_under_s3_min": "pgpm_archive/install.sql",
+    "configure_fetch_rows_unbounded": "pgpm_archive/install.sql",
     # The harness and review tooling guard themselves too (#598 to #601): their defects live in the
     # scripts, a doc and a test file, so that is what these mutate.
     "keep_both_two_way_only": "scripts/review/keep_both.py",
