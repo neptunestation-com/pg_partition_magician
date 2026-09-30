@@ -1315,6 +1315,16 @@ MUTATIONS = {
           " where i.inhparent = p.parent_table and c.relname = p.child_name\n"
           "   and p.attached and p.child_oid is null;\n", "", 1)],
     ),
+    "upgrade_monolith_oid_backfill_noop": (
+        "bench/upgrade_in_place.sh",
+        "The upgrade adds pgpm.config.monolith_oid (#672) and populates nothing: the backfill UPDATE that "
+        "adopts the one attached partition older than its parent writes null instead, the `add column if not "
+        "exists` line left in place, so the catalog-shape assertion stays green and the column is there, "
+        "null, for every table an existing install had converted. untransmute refuses a null anchor rather "
+        "than guess, so every such table silently becomes irreversible on upgrade. What must FAIL here is "
+        "the monolith_oid assertion by identity, not the catalog hash.",
+        [("update pgpm.config c set monolith_oid = m.child_oid\n", "update pgpm.config c set monolith_oid = null\n", 1)],
+    ),
     "upgrade_degrade_list_drift": (
         "bench/upgrade_in_place.sh",
         "install.sql gains a backfilled column that bench/upgrade_in_place.sh's hardcoded DEGRADE_COLS "
@@ -3650,6 +3660,76 @@ $$;''',
         "the time branch of the frontier computation. tests/178's refusal, raised-hi and infinity "
         "assertions catch it.",
         [(TIME_FRONTIER_BLOCK_RE, "    v_frontier_native := pgpm._ts_text(now());\n", 1)],
+    ),
+    "untransmute_security_not_restored": (
+        "bench/untransmute_security_state.sh",
+        "Pre-#667 untransmute: the parent's grants, row-security flags and policies are captured but never "
+        "put on the restored table, so it comes back with the ACL, RLS state and policies the monolith kept "
+        "from the conversion: a REVOKE issued on the managed table since is undone (the revoked role reads "
+        "it again), row security enabled since comes off, and a policy dropped since comes back. Removes the "
+        "reset-and-replay after the rename whole, one site; tests/176's post-reversal assertions catch it, "
+        "and its LIVENESS witnesses show the monolith really carried the stale state into the reverse.",
+        [("""  for v_g in
+    select a.grantee
+      from pg_class c, aclexplode(c.relacl) a where c.oid = v_restored and c.relacl is not null
+    union
+    select a.grantee
+      from pg_attribute att, aclexplode(att.attacl) a
+     where att.attrelid = v_restored and att.attnum > 0 and not att.attisdropped and att.attacl is not null
+  loop
+    execute format('revoke all on %s from %s cascade', v_restored::text,
+                   case when v_g.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(v_g.grantee)) end);
+    v_revoked := true;
+  end loop;
+  if v_acl_default and v_revoked then
+    execute format('grant all on %s to %I', v_restored::text,
+                   (select pg_get_userbyid(relowner) from pg_class where oid = v_restored));
+  end if;
+  foreach v_tdef in array v_grantdefs loop
+    execute v_tdef;
+  end loop;
+  execute format('alter table %s %s row level security', v_restored::text,
+                 case when v_rls then 'enable' else 'disable' end);
+  execute format('alter table %s %s row level security', v_restored::text,
+                 case when v_rls_force then 'force' else 'no force' end);
+  for v_g in select polname from pg_policy where polrelid = v_restored loop
+    execute format('drop policy %I on %s', v_g.polname, v_restored::text);
+  end loop;
+  foreach v_tdef in array v_poldefs loop
+    execute v_tdef;
+  end loop;
+""", "", 1)],
+    ),
+    "untransmute_monolith_by_position": (
+        "bench/untransmute_monolith_identity.sh",
+        "Pre-#672 untransmute: the monolith is the attached partition with the smallest lo, not the relation "
+        "transmute recorded in pgpm.config.monolith_oid. Once retention has retired the original table, or a "
+        "regrain's swap has replaced it, that is a forward partition or the first fine child; with every "
+        "remaining row inside it the outside-rows door passes, and it is detached and handed back under the "
+        "table's name as the restored original instead of refused. One site, the lookup at the gate, put "
+        "back as it was (transmute still records the oid, so the mutant is exactly 'untransmute does not "
+        "use it'); tests/177's sections (A) and (B) catch it.",
+        [("""  if cfg.monolith_oid is null then
+    raise exception 'pg_partition_magician: cannot untransmute % -- pgpm has no record of which partition is the original table (the conversion predates pgpm.config.monolith_oid and the upgrade could not identify it), and it will not hand back a partition it cannot prove is the original',
+      p_parent;
+  end if;
+  select c.relname, p.lo, p.hi into v_mon, v_mon_lo, v_mon_hi
+    from pgpm.part p
+    join pg_inherits i on i.inhrelid = p.child_oid and i.inhparent = p_parent
+    join pg_class c on c.oid = p.child_oid
+   where p.parent_table = p_parent and p.attached and p.child_oid = cfg.monolith_oid;
+  if v_mon is null then
+    raise exception 'pg_partition_magician: cannot untransmute % -- the original table (the monolith transmute recorded, oid %) is no longer one of its partitions: retention retired it or a regrain replaced it with finer children, so there is no original to hand back. This is a one-way door.',
+      p_parent, cfg.monolith_oid;
+  end if;
+  v_monreg := cfg.monolith_oid::regclass;
+""", """  execute format('select child_name, lo, hi from pgpm.part where parent_table = %L::regclass and attached order by lo::%s asc limit 1',
+                 p_parent::text, pgpm._native_type(cfg.control_kind)) into v_mon, v_mon_lo, v_mon_hi;
+  if v_mon is null then
+    raise exception 'pg_partition_magician: cannot untransmute % -- no managed partition found', p_parent;
+  end if;
+  v_monreg := format('%I.%I', v_nsp, v_mon)::regclass;
+""", 1)],
     ),
 }
 

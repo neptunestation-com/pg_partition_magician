@@ -355,8 +355,16 @@ while the monolith is still intact and holds the whole table**: it detaches the 
 childless parent (cascading any empty forward partitions), renames the monolith
 back, restores identity, the ownership of any `serial` sequence, the row triggers (each in the enabled
 state the parent had) and any preserved incoming FKs (`NOT VALID`, see below), and clears `pgpm` state. The
-monolith is the
-attached partition with the smallest `lo`.
+monolith is the original table itself, found by the oid `transmute` recorded for it
+(`pgpm.config.monolith_oid`), never by its position in the grid.
+
+The table comes back with the **privileges and row security the managed table had at the reverse**, not
+the ones it had at the conversion. After a `transmute` the parent is the table, so a `GRANT` or `REVOKE`,
+an `ENABLE` or `FORCE ROW LEVEL SECURITY` (or their opposites) and a `CREATE` or `DROP POLICY` issued since
+all landed on the parent, and none of them reaches a partition. `untransmute` resets the monolith's own
+conversion-time copy (every grantee's privileges revoked, every policy dropped) and puts the parent's in
+its place: its table and column grants (or, with no grant ever made, the owner's default privileges), both
+row-security flags, and its policies.
 
 It also takes off the monolith whatever **maintenance** put there after the conversion, so the table handed
 back is the operator's again with none of pgpm's machinery on it. The retention **write block**
@@ -390,7 +398,12 @@ as `restore_incoming_fks` does.
 
 It is a **one-way door** once any row lives outside the monolith's range -- a forward partition after the
 frontier crosses `B`, or the finer children a regrain's swap has put in the monolith's place -- because a
-metadata-only reverse would lose those rows.
+metadata-only reverse would lose those rows. And it is one once the monolith is gone, whatever rows are
+left: after retention has retired the original table, or a regrain's swap has replaced it, `untransmute`
+refuses (`the original table ... is no longer one of its partitions`) rather than hand back a forward
+partition or a fine child under the table's name. A table converted before `monolith_oid` existed is
+anchored by the upgrade when exactly one attached partition predates its parent, which only the original
+can; one the upgrade cannot anchor is refused too.
 
 The door is checked twice. Once before anything is touched, under no lock a writer would feel, so a
 refusal never blocks anyone. And again under the **`ACCESS EXCLUSIVE` lock on the parent** that the
@@ -2176,6 +2189,7 @@ One row per managed table (`parent_table` is the primary key). Columns:
 | `archive_byte_budget` / `archive_probe_sample` | `bigint` / `int` | byte-budget chunking knobs for the built-in chunked archiver (see [Byte-budget chunked archiving](#byte-budget-chunked-archiving)) |
 | `archive_batch` | `int` | max partitions one `_archive_step` call touches, oldest first (default 1; null = unbounded -- see [Byte-budget chunked archiving](#byte-budget-chunked-archiving)) |
 | `sweep_turn_at` | `timestamptz` | when this table last had its turn in a `maintain_all` sweep, which visits the oldest turn first (null = never, and goes first); see [`maintain_all`](#maintain_all) |
+| `monolith_oid` | `oid` | the original table, now the monolith partition, by identity: recorded by `transmute`, and what [`untransmute`](#untransmute) resolves the monolith through (it refuses when that relation is no longer an attached partition, or when this is null: backfilled by an upgrade when exactly one attached partition predates the parent) |
 | `text_time_prefix` / `text_time_width` / `text_time_radix` / `text_time_unit` | `text` / `int` / `int` / `text` | the declared shape for a `text_time` control column (null for every other kind); see `p_tt_prefix` etc. above |
 | `text_time_alphabet` / `text_time_discard_bits` / `text_time_epoch` | `text` / `int` / `timestamptz` | non-default digit set, bits to discard, and epoch for a `text_time` column (null/0/Unix epoch for cuid/ULID-shaped ones; see `p_tt_alphabet` etc. above) |
 
