@@ -1024,9 +1024,9 @@ rows and all. It never deletes from the source, which is what keeps a read of th
 short mid-regrain; the fine children are insert-only, so the product has no bloat. The whole call runs in
 one transaction, so it is **atomic and gap-free**. Retention-aware: a sub-range entirely below the horizon
 is reclaimed, never materialized. Refuses (as an exception) when the child is not frozen, the target step
-does not subdivide it, the target step is zero or negative, or another regrain is already in flight on the
-same parent. `regrain_step` refuses a zero or negative step the same way, before it reads or changes
-anything.
+does not subdivide it, the target step is zero or negative or has a shape the grid cannot place (the
+rules [`set_regrain`](#set_regrain) lists), or another regrain is already in flight on the same parent.
+`regrain_step` refuses such a step the same way, before it reads or changes anything.
 
 Only one regrain runs per parent at a time: a second one is refused with an error naming the one in
 flight. Let it finish, or stop it with [`regrain_cancel`](#regrain_cancel), then re-run.
@@ -1745,10 +1745,14 @@ starts in February, on a monthly grid) is left alone rather than retried forever
 `status().coarse_partitions`. A `p_target_step` coarser than `partition_step` (compared at
 `partition_anchor`) is refused.
 
-Three targets are refused at call time rather than left to wedge every tick: a `p_target_step` of zero or
-below (`'0'`, `'-100'`, `'0 days'`, `'-1 month'`: none moves the grid forward, so every tick would fail or
-churn), one coarser than `partition_step` (auto-regrain would reselect the same unsplittable child
-forever), and one whose fine names `<rel>_p<label>` would exceed PostgreSQL's 63-byte identifier limit.
+Four kinds of target are refused at call time rather than left to wedge every tick: a `p_target_step` of
+zero or below (`'0'`, `'-100'`, `'0 days'`, `'-1 month'`: none moves the grid forward, so every tick would
+fail or churn), one whose shape the grid cannot place, by the rules `transmute` applies to a
+`partition_step` (a month count mixed with a duration such as `'1 month 1 day'` or `'1 month -40 days'`, a
+step that is not a whole number of days on a `date` column, a fractional step such as `'2.5'` on an
+`int2`/`int4`/`int8` column; a fractional step on a `numeric` column is allowed), one coarser than
+`partition_step` (auto-regrain would reselect the same unsplittable child forever), and one whose fine
+names `<rel>_p<label>` would exceed PostgreSQL's 63-byte identifier limit.
 A finer step has a wider label, so a table whose monthly names fit can still be refused a daily target; the
 message names the offending name and says how many bytes to shorten the table name by (see [Partition naming](#partition-naming)).
 

@@ -3521,6 +3521,39 @@ $$;''',
         [("    delete from pgpm.dropped_fk d\n     where d.parent_table = p_parent\n",
           "    delete from pgpm.dropped_fk d\n     where false and d.parent_table = p_parent\n", 1)],
     ),
+    "regrain_step_mixed_month_duration": (
+        "bench/regrain_target_shape.sh",
+        "Pre-#674: _regrain_step_shape does not refuse a month count mixed with a duration. _grid_next's "
+        "calendar branch keeps the months and drops the rest, so the #588 forward test and the #341 width "
+        "comparison both pass '1 month 1 day', '1 month -40 days' (below zero by interval ordering) and "
+        "'-1 month 40 days', set_regrain stores them, and once a coarse child freezes every tick's "
+        "regrain_step raises 'mixed month + duration interval unsupported' from _grid_floor and logs "
+        "skip_regrain. One site: the mixed-shape test becomes 'if false'. tests/164 catches it at every "
+        "mixed refusal it pins and at the valid target they must leave in place.",
+        [("    if v_months <> 0 and v_rest <> interval '0' then\n", "    if false then\n", 1)],
+    ),
+    "regrain_step_date_subday": (
+        "bench/regrain_target_shape.sh",
+        "Pre-#674: _regrain_step_shape does not apply transmute's #581 date rule to a regrain target, so "
+        "set_regrain stores '12 hours' or '36 hours' on a date column, whose fine cells' bounds truncate to "
+        "dates. One site: the date test becomes 'if false'. Part two of tests/164 catches it (both sub-day "
+        "refusals and the whole-day target they must leave in place).",
+        [("    if v_typname = 'date' and v_months = 0 and extract(epoch from p_step::interval)::numeric % 86400 <> 0 then\n",
+          "    if false then\n", 1)],
+    ),
+    "regrain_step_fraction_on_integer": (
+        "bench/regrain_target_integral.sh",
+        "Pre-#641 (F3-04): _regrain_step_shape does not refuse a fractional target on an integer control "
+        "column. set_regrain('2.5') on a bigint grid passes every other call-time check, and every tick "
+        "after the prepare fails creating the first fine child (invalid input syntax for type bigint: "
+        "\"0.0\") and logs skip_regrain with the capture trigger left on the source; regrain() raises the "
+        "same raw error. One site: the whole-number test becomes 'if false'. tests/165 catches it at the "
+        "bigint and int4 refusals, at regrain_step's and regrain()'s, and at the valid target the refused "
+        "calls must leave in place; its numeric case still passes, which is what shows the rule is the "
+        "column's.",
+        [("    if v_typname in ('int2', 'int4', 'int8') and p_step::numeric <> trunc(p_step::numeric) then\n",
+          "    if false then\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
