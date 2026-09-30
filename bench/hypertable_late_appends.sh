@@ -62,7 +62,7 @@ if [ "$fail" = 0 ]; then
   # assertions, which must NOT read the same as assertions that ran and failed -- discriminate.sh
   # treats any non-zero exit as "the guard caught the defect", so a harness broken enough to fail
   # against everything would otherwise be reported as proving the mutation.
-  if echo "$out" | grep -qE '^ERROR:|^psql:.*ERROR:'; then
+  if grep -qE '^ERROR:|^psql:.*ERROR:' <<<"$out"; then
     printf 'FAIL  %-58s %s\n' "the file ran without a raw error" "see below"
     echo "$out" | grep -E 'ERROR:' | head -5 | sed 's/^/      /'
     fail=1

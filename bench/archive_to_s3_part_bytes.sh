@@ -82,7 +82,7 @@ if [ "$fail" = 0 ]; then
   else printf 'FAIL  %-58s %s\n' "part_bytes <= 0 is refused before anything is sent" "$ran ran"; fail=1; fi
   # A failure is only evidence against the code when the setup it depends on held. Name any
   # LIVENESS witness that failed, so a mutant run that fails for the fixture's sake reads as that.
-  if echo "$out" | grep -qE '^not ok [0-9]+ - .*LIVENESS'; then
+  if grep -qE '^not ok [0-9]+ - .*LIVENESS' <<<"$out"; then
     printf 'FAIL  %-58s %s\n' "every LIVENESS witness held" "no (see above)"
     fail=1
   fi

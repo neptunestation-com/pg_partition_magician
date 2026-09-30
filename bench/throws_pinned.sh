@@ -187,13 +187,17 @@ fi
 
 # The instrument first. A tree with no unpinned site and a probe whose substituted statement no longer
 # raises inside the wrapper would print the same clean list, so both controls are asserted by name.
-if echo "$out" | grep -q '^CONTROL unpinned => ok '; then
+# Each control is read from a here-string, not `echo "$out" | grep -q`: grep -q exits at its first match and
+# closes the pipe, echo then dies of EPIPE on a large enough $out, and under pipefail that dead pipeline
+# reads as the control FAILING although the line it printed was the expected one (#688's head, 92 sites,
+# `line 196: echo: write error: Broken pipe`). A here-string is written whole before grep reads it.
+if grep -q '^CONTROL unpinned => ok ' <<<"$out"; then
   printf 'PASS  %-58s %s\n' "control: 2D000 is raised inside the wrapper and NULL accepts it" "ok"
 else
   printf 'FAIL  %-58s %s\n' "control: 2D000 is raised inside the wrapper and NULL accepts it" "$(echo "$out" | grep '^CONTROL unpinned' | head -1)"
   fail=1
 fi
-if echo "$out" | grep -q '^CONTROL pinned => not ok '; then
+if grep -q '^CONTROL pinned => not ok ' <<<"$out"; then
   printf 'PASS  %-58s %s\n' "control: a P0001 pin rejects that 2D000" "not ok"
 else
   printf 'FAIL  %-58s %s\n' "control: a P0001 pin rejects that 2D000" "$(echo "$out" | grep '^CONTROL pinned' | head -1)"
