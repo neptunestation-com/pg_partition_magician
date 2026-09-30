@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **`from_hypertable` refuses a hypertable with an exclusion constraint instead of dropping it** (#675).
+  The copy's `CREATE TABLE ... LIKE` carries CHECK and NOT NULL only, the cutover re-adds only primary and
+  unique keys and skips every constraint-backed index, and preflight did not object, so an `EXCLUDE`
+  constraint vanished in the migration and the partitioned table accepted the double booking the hypertable
+  had rejected. `from_hypertable_preflight` (and so `from_hypertable` and `from_hypertable_copy`) now refuses
+  it up front, naming every such constraint, and `from_hypertable_cutover` repeats the check in its own right.
+  `tests/timescale/db/26` pins each entry point's refusal; `bench/hypertable_exclusion_refusal.sh` proves it
+  against one mutation per call site.
 - **`untransmute` hands the table back with the parent's grants, row security and policies** (#667). It
   replayed only the parent's triggers onto the restored table, which kept the ACL, RLS flags and policies
   the monolith had at the conversion, so a `REVOKE`, `ENABLE ROW LEVEL SECURITY` or `CREATE POLICY` issued

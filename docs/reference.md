@@ -716,12 +716,15 @@ exist; `p_control` is **not the time dimension** column (the copy is bounded chu
 ranges, so on any other column it would silently lose rows; the message names the actual dimension); the
 dimension is **integer-time** (`smallint`, `integer` or `bigint`: only `timestamptz`, `timestamp` and `date`
 dimensions are supported, because an integer dimension's chunk ranges are not in the column the copy reads,
-so it would copy nothing); an **outgoing** foreign key is `NOT VALID`; or an **incoming** foreign key
-references anything other than the key pgpm will reuse. On success it raises a `NOTICE` estimating the
+so it would copy nothing); it has an **exclusion constraint** (`EXCLUDE`: nothing in the migration carries one,
+and PostgreSQL before 17 allows none on a partitioned table, so the migrated table would silently accept the
+rows it rejects; the message names every one); an **outgoing** foreign key is `NOT VALID`; or an **incoming**
+foreign key references anything other than the key pgpm will reuse. On success it raises a `NOTICE` estimating the
 transient extra disk the migration needs (see `from_hypertable_disk_estimate`) and a rough copy-time ETA (see
 `from_hypertable_time_estimate`). Both `from_hypertable_copy` and `from_hypertable` call it first, and
-`from_hypertable_cutover` repeats the two dimension checks in its own right, since a destination left by an
-earlier copy is enough to reach the cutover's drop without preflight having run.
+`from_hypertable_cutover` repeats the two dimension checks and the exclusion-constraint check in its own
+right, since a destination left by an earlier copy is enough to reach the cutover's drop without preflight
+having run.
 
 #### Foreign keys
 
