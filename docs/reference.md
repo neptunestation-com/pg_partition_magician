@@ -96,11 +96,14 @@ membership as well, so an `untransmute` hands the table back still published). A
 **owns** through a column (a `serial`, or an explicit `OWNED BY`) is handed to the same column of the
 parent, so retention can drop the monolith like any other partition. All of it is
 captured before the rename and re-applied inside
-the same transaction as the cutover, so the parent is never reachable without its policies. The triggers
-are captured under the table's `ACCESS EXCLUSIVE` lock, taken as the cutover's outage begins, so a
-trigger another session creates, drops, enables or disables while the conversion runs is either in place
-before the capture or waits until the cutover commits; the parent carries every trigger the table had at
-the rename. Partitions
+the same transaction as the cutover, so the parent is never reachable without its policies. Each is read
+under the lock that stops it changing before the rename. The owner, the RLS flags and the policies are read
+once the staging copy of the table holds `ACCESS SHARE`, which excludes changing any of them. The triggers,
+the comments, the secondary indexes and outgoing keys to carry, and where the identity sequence resumes are
+read under the table's `ACCESS EXCLUSIVE` lock, taken as the cutover's outage begins. So a trigger, index,
+key or comment another session creates, drops or changes while the conversion runs is either in place
+before the read or waits until the cutover commits, and an id the sequence hands a writer while the
+conversion runs is never issued again; the parent carries what the table had at the rename. Partitions
 minted later, by `obtain` or a regrain, are given the parent's owner too rather than being
 owned by whichever role runs maintenance.
 
@@ -115,11 +118,16 @@ PostgreSQL does not allow on a partitioned table: set `publish_via_partition_roo
 the filter and column list, then re-run. **Outgoing** foreign keys (this table
 referencing another) are carried onto the new parent automatically, so they keep enforcing across every
 partition; a `NOT VALID` one is refused rather than carried, because re-adding it at the parent could not
-then be metadata-only. **Incoming** keys are governed by `p_incoming_fks` below. An identity column is
+then be metadata-only. That refusal, and the refusal of a `UNIQUE` index that cannot be carried (below), is
+asked again under the cutover's lock, so a key or index of that shape added while the conversion runs rolls
+the cutover back to the resumable state `transmute_abort` describes rather than being left on the monolith. **Incoming** keys are governed by `p_incoming_fks` below. An identity column is
 carried onto the parent and its sequence
-advanced to the greater of `max(id) + 1` and the original sequence's own next value, so auto-generated ids
-never collide and never re-issue a value the sequence had already moved past (`untransmute` restores it the
-same way).
+advanced to the greater of `max(id) + 1` and the original sequence's own next value, both read under the
+cutover's lock, so auto-generated ids never collide and never re-issue a value the sequence had already moved
+past, including one it handed a writer while the conversion ran (`untransmute` restores it the same way,
+under its own lock). The max is re-read there only when an index leading with the column answers it, which
+also covers an explicit id written meanwhile; otherwise the one read before phase 1 stands in, so no scan
+runs under the lock.
 
 Parameters:
 
@@ -378,7 +386,9 @@ refusal never blocks anyone. And again under the **`ACCESS EXCLUSIVE` lock on th
 detach and drop need, taken explicitly just before them, so a row that commits into a forward partition
 while `untransmute` is waiting for that lock is refused rather than dropped with the parent. The wait is
 bounded by the caller's `lock_timeout`, and a refusal rolls the whole call back, leaving the table exactly
-as it was. `untransmute` must run in a `READ COMMITTED` transaction (the default): a stricter isolation
+as it was. The row triggers and their enabled states, and where the restored identity sequence resumes, are
+read under that same lock, so a trigger created or changed, or an id taken, while `untransmute` waits for it
+comes through to the restored table. `untransmute` must run in a `READ COMMITTED` transaction (the default): a stricter isolation
 level cannot give the under-lock check a snapshot taken after the lock, so it refuses up front rather than
 proceed on a stale one.
 

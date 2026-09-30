@@ -746,6 +746,8 @@ run_perf() {
     "bench/grid_floor_exact.sh pgpm_perf110"
     "bench/regrain_drivers_serialize.sh pgpm_perf94"
     "bench/set_partition_tz_midflight.sh pgpm_perf95"
+    "bench/cutover_reread_window.sh pgpm_perf88"
+    "bench/reread_under_lock_tap.sh pgpm_perf89"
   )
   local selected=()
   local n=${#guards[@]} idx

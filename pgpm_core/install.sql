@@ -4355,6 +4355,149 @@ begin
 end;
 $$;
 
+-- The secondary indexes transmute carries onto the new parent (step 9b recreates each as a partitioned
+-- index and attaches the monolith's), and the refusals for the ones it cannot carry. Asked twice by
+-- _transmute (#630): in the preflight, so that a shape it cannot carry is refused before anything is
+-- committed, and again in the cutover under the table's ACCESS EXCLUSIVE, whose answer is the list 9b
+-- carries. CREATE INDEX needs only SHARE, which nothing on the table excludes between the two, and an
+-- index committed there followed the rename onto the monolith alone: a UNIQUE one then enforced its
+-- uniqueness only for rows routed to the monolith, and none routed to a forward partition. A refusal from
+-- the second asking rolls the cutover back to the resumable phase-2 state, as any cutover failure does.
+create or replace function pgpm._transmute_carried_indexes(
+  p_parent regclass, p_nsp name, p_control name, p_ctl_attnum int, p_reuse_idx oid,
+  out o_names text[], out o_defs text[])
+language plpgsql as $$
+declare
+  v_uniq_bad text;
+  v_pgpm_clash_q text;   -- #311: existing relations occupying the <index>_pgpm names step 9b needs
+  v_long_idx_q text;     -- #592: carried secondary indexes whose <index>_pgpm name would exceed 63 bytes
+begin
+  select array_agg(c.relname::text), array_agg(pg_get_indexdef(i.indexrelid)) into o_names, o_defs
+    from pg_index i join pg_class c on c.oid = i.indexrelid
+   where i.indrelid = p_parent and i.indislive and not i.indisprimary
+     and i.indexrelid <> coalesce(p_reuse_idx, 0::oid)
+     and (not i.indisunique
+          or (i.indpred is null and i.indexprs is null
+              and p_ctl_attnum = any((string_to_array(i.indkey::text, ' ')::int2[])[1:i.indnkeyatts])));
+  -- Refuse any non-PK UNIQUE secondary that CANNOT be carried (its key omits the partition key, or it is
+  -- partial / on an expression): global uniqueness cannot be enforced on the partitioned table, so this
+  -- is the same refuse-with-guidance contract as the PK and incoming-FK cases, not a silent drop.
+  select string_agg(c.relname, ', ' order by c.relname) into v_uniq_bad
+    from pg_index i join pg_class c on c.oid = i.indexrelid
+   where i.indrelid = p_parent and i.indislive and i.indisunique and not i.indisprimary
+     and not (i.indpred is null and i.indexprs is null
+              and p_ctl_attnum = any((string_to_array(i.indkey::text, ' ')::int2[])[1:i.indnkeyatts]));
+  if v_uniq_bad is not null then
+    raise exception 'pg_partition_magician: cannot transmute % -- the UNIQUE secondary index(es) (%) do not include the partition key % in their key columns (or are partial/expression indexes), so global uniqueness cannot be enforced on a partitioned table. Add % to the key of each, or drop them, then re-run transmute. A unique index that already includes % is carried automatically.',
+      p_parent, v_uniq_bad, quote_ident(p_control), quote_ident(p_control), quote_ident(p_control);
+  end if;
+
+  -- Refuse a colliding <index>_pgpm name (#311). Step 9b recreates each carried secondary as a
+  -- PARTITIONED index on the parent named <original>_pgpm, then attaches the monolith's original under
+  -- it. Nothing checked that name was free, so a pre-existing relation by it -- a leftover from an
+  -- interrupted run, or an operator's own index that happens to be named that way -- made the CREATE
+  -- INDEX fail with a raw 42P07 from inside the cutover: no pgpm prefix, no guidance, and no hint that
+  -- the fix is `drop index ..._pgpm`.
+  --
+  -- The cutover is one transaction, so that failure rolled back rather than losing anything; the cost
+  -- was a confusing error and a conversion the operator then had to abort by hand. Every sibling shape
+  -- here (a key that excludes the control column, a bare unique index, an un-carryable UNIQUE secondary,
+  -- a transition-table trigger, an orphaned child table) refuses UP FRONT with the remedy. This was the
+  -- one hole in that contract.
+  --
+  -- Names every collision at once: one per retry would make an operator with several re-run the
+  -- conversion once per index to discover them.
+  --
+  -- First, the names that cannot exist at all (#592). <index>_pgpm is a name pgpm derives, so it is held
+  -- to the rule every derived name is (see _part_name and the staging-name check): never truncated. An
+  -- index name of 59 bytes or more leaves no room for the suffix, and the cast to name in step 9b cut it
+  -- back to 63 silently. At exactly 63 bytes, which is what PostgreSQL's own auto-naming produces for a
+  -- long table and column list, the cut name IS the index's own name, so the collision check below found
+  -- it taken and told the operator to drop it as a leftover: advice that drops their own index. Refused
+  -- here, before that check can misread it, and every offender named at once for the same reason.
+  select string_agg(quote_ident(n) || ' (' || octet_length(n) || ' bytes)', ', ' order by n) into v_long_idx_q
+    from unnest(coalesce(o_names, '{}'::text[])) as n
+   where octet_length(n || '_pgpm') > 63;
+  if v_long_idx_q is not null then
+    raise exception 'pg_partition_magician: cannot transmute % -- the secondary index(es) (%) have names too long for their partitioned copies: transmute recreates each on the parent as <index>_pgpm, which would exceed PostgreSQL''s 63-byte identifier limit, and pgpm never truncates a name it derives (a truncated one names the index itself or collides with another). Give each a name of at most 58 bytes (ALTER INDEX ... RENAME), then re-run transmute.',
+      p_parent, v_long_idx_q;
+  end if;
+  select string_agg(quote_ident(n || '_pgpm'), ', ' order by n) into v_pgpm_clash_q
+    from unnest(coalesce(o_names, '{}'::text[])) as n
+   where to_regclass(format('%I.%I', p_nsp, n || '_pgpm')) is not null;
+  if v_pgpm_clash_q is not null then
+    raise exception 'pg_partition_magician: cannot transmute % -- the name(s) (%) are already taken, and transmute needs them for the partitioned copies of this table''s secondary indexes. Most likely leftovers from an interrupted run. Drop them, then re-run transmute.',
+      p_parent, v_pgpm_clash_q;
+  end if;
+end;
+$$;
+
+-- transmute's OUTGOING foreign keys (#263): the validated ones step 7a re-adds at the new parent, and the
+-- refusal of a NOT VALID one. Asked twice by _transmute for the reason _transmute_carried_indexes is
+-- (#630): up front, and under the cutover's ACCESS EXCLUSIVE, since ADD FOREIGN KEY takes only SHARE ROW
+-- EXCLUSIVE and a key added in between would otherwise stay on the monolith, where every row routed to a
+-- forward partition escapes it.
+create or replace function pgpm._transmute_outgoing_fks(p_parent regclass, out o_names text[], out o_defs text[])
+language plpgsql as $$
+declare v_bad_out text;
+begin
+  select array_agg(c.conname::text order by c.conname),
+         array_agg(pg_get_constraintdef(c.oid) order by c.conname)
+    into o_names, o_defs
+    from pg_constraint c
+   where c.conrelid = p_parent and c.contype = 'f' and c.confrelid <> p_parent and c.conparentid = 0
+     and c.convalidated;
+
+  -- A NOT VALID outgoing key is refused, because re-adding it at the parent could not then be
+  -- metadata-only. Measured on PG 17.10: adopting a VALIDATED child constraint costs 0.8 ms against a
+  -- 200k-row monolith, while the same ADD over a NOT VALID one SCANS (seq_tup_read +400,000) and takes
+  -- 89 ms at 2M rows -- an O(rows) scan holding SHARE ROW EXCLUSIVE on the table AND on the referenced
+  -- table, which is the data-coupled blocking lock this project's acceptance rule forbids. Validating it
+  -- first is the operator's call, not ours: it would either fail on rows they never checked or silently
+  -- promote a constraint they deliberately left unvalidated.
+  select string_agg(conname, ', ') into v_bad_out
+    from pg_constraint
+   where conrelid = p_parent and contype = 'f' and confrelid <> p_parent and conparentid = 0
+     and not convalidated;
+  if v_bad_out is not null then
+    raise exception 'pg_partition_magician: cannot transmute % -- its outgoing foreign key(s) (%) are NOT VALID. pgpm re-adds an outgoing key on the new parent, which is metadata-only only when the key is already validated; over a NOT VALID one PostgreSQL would rescan the whole table under a lock that blocks writes on it and on the referenced table. Run ALTER TABLE % VALIDATE CONSTRAINT <name> first (or drop the constraint), then re-run transmute.',
+      p_parent, v_bad_out, p_parent::text;
+  end if;
+end;
+$$;
+
+-- #656: where an identity sequence resumes so that it re-issues nothing: the greater of max(column) + 1 (no
+-- collision with a row already there) and the sequence's own next value (no re-issue of an id it handed
+-- out past that max: a rollback, the cache, a deleted high row). transmute's cutover and untransmute call
+-- it under the ACCESS EXCLUSIVE that stops every writer of p_rel, which is what makes the answer final.
+-- Both used to read these values before that lock, and an id handed out in between was handed out again
+-- by the reseeded sequence: the next inserts failed with a duplicate key, one per re-issued id.
+--
+-- The max is read here only when an index answers it in one descent (a valid, non-partial btree whose
+-- leading key is the column), because an O(rows) scan under that lock is the data-coupled outage this
+-- project refuses. Otherwise p_floor, the max the caller read before the lock, where a scan blocks no
+-- writer, stands in for it. The sequence's position is read here either way, and it covers every id the
+-- sequence issued, which is every id an insert did not supply itself.
+create or replace function pgpm._identity_resume_at(p_rel regclass, p_col name, p_floor bigint)
+returns bigint language plpgsql as $$
+declare v_m bigint := coalesce(p_floor, 0); v_seq text; v_n bigint;
+begin
+  if exists (select 1 from pg_index i
+               join pg_class ic on ic.oid = i.indexrelid
+               join pg_am am on am.oid = ic.relam and am.amname = 'btree'
+               join pg_attribute a on a.attrelid = i.indrelid and a.attnum = i.indkey[0]
+              where i.indrelid = p_rel and i.indisvalid and i.indpred is null and a.attname = p_col) then
+    execute format('select coalesce(max(%I), 0)::bigint from %s', p_col, p_rel::text) into v_m;
+    v_m := greatest(v_m, coalesce(p_floor, 0));
+  end if;
+  v_seq := pg_get_serial_sequence(p_rel::text, p_col);
+  if v_seq is not null then
+    execute format('select case when is_called then last_value + 1 else last_value end from %s', v_seq) into v_n;
+  end if;
+  return greatest(v_m + 1, coalesce(v_n, 0));
+end;
+$$;
+
 -- ============================== transmute ==============================
 
 -- #275 turned these from FUNCTIONs into PROCEDUREs. CREATE OR REPLACE cannot change that, so the old
@@ -4395,15 +4538,13 @@ declare
   v_resumed boolean := false;
   v_typname text; v_oldpk text[]; v_pkcols text[]; v_idcols name[]; v_pkname name; v_col name;
   v_idkinds text[];   -- #308: 'a' (ALWAYS) or 'd' (BY DEFAULT) per v_idcols entry, same order
-  v_idx_names text[]; v_idx_defs text[]; v_ctl_attnum int; v_uniq_bad text; v_old name; v_new name; v_pdef_q text; j int;
-  v_pgpm_clash_q text;   -- #311: existing relations occupying the <index>_pgpm names step 9b needs
-  v_long_idx_q text;     -- #592: carried secondary indexes whose <index>_pgpm name would exceed 63 bytes
+  v_idx_names text[]; v_idx_defs text[]; v_ctl_attnum int; v_old name; v_new name; v_pdef_q text; j int;
   v_add_pk boolean := false; v_add_uniq boolean := false; v_reuse_idx oid; v_reuse_conname name;
   v_uq_cols text[]; v_bare_uq text;
   v_fk record; v_fk_eligible boolean;
-  v_out_names text[]; v_out_defs text[]; v_bad_out text; v_i2 int;   -- outgoing FKs (#263)
+  v_out_names text[]; v_out_defs text[]; v_i2 int;   -- outgoing FKs (#263), listed by _transmute_outgoing_fks
   v_uchk_n bigint; v_uchk_frac numeric;
-  v_idmax bigint[]; v_m bigint; v_i int; v_idnext bigint[]; v_seq text; v_n bigint;
+  v_idmax bigint[]; v_m bigint; v_i int; v_idnext bigint[];   -- #656: v_idnext is read under the cutover's lock
   v_monolith name; v_monreg regclass;
   v_tz text;   -- #455: the zone the grid is computed in, recorded in config.partition_tz
   v_claim_tz text;   -- #506: the zone recorded with the claim, which a resume adopts along with the bound
@@ -4702,23 +4843,17 @@ begin
     into v_idcols, v_idkinds
     from pg_attribute a where a.attrelid = p_parent and a.attidentity in ('a','d') and not a.attisdropped;
 
-  -- Capture max(identity) to seed the parent's freshly-recreated identity sequence below: identity is
-  -- moved from the default to the parent (whose sequence restarts at 1), so without this the next
-  -- insert would collide. The PK is kept (never dropped), so the id index is intact and this is an
-  -- index lookup, not a seq-scan, even on a large default.
+  -- Capture max(identity), the FLOOR of where the parent's freshly-recreated identity sequence resumes:
+  -- identity is moved from the table to the parent (whose sequence restarts at 1), so without it the next
+  -- insert would collide. Only the floor (#656): the value the reseed uses is read in the cutover, under
+  -- its ACCESS EXCLUSIVE, by _identity_resume_at, since writers run on between here and there and every id
+  -- they take would otherwise be issued again. That read takes the max again when an index answers it,
+  -- and the sequence's position always; this one is what stands in when no index does, read here because a
+  -- scan here blocks no writer.
   if v_idcols is not null then
     foreach v_col in array v_idcols loop
       execute format('select coalesce(max(%I), 0)::bigint from %s', v_col, p_parent::text) into v_m;
       v_idmax := array_append(v_idmax, v_m);
-      -- also capture the column's current sequence position, so the reseed below never moves the sequence
-      -- BACKWARD past ids it has already handed out (a gap above max from rollbacks, caching, or deleted
-      -- high rows). Captured now, while the original sequence still exists (step 3 drops it on the monolith).
-      v_seq := pg_get_serial_sequence(p_parent::text, v_col);
-      v_n := null;
-      if v_seq is not null then
-        execute format('select case when is_called then last_value + 1 else last_value end from %s', v_seq) into v_n;
-      end if;
-      v_idnext := array_append(v_idnext, v_n);
     end loop;
   end if;
 
@@ -4814,63 +4949,10 @@ begin
   -- carried either, so they fall to the refusal.
   -- (v_ctl_attnum was resolved with the key selection above). Exclude the reused unique-constraint index
   -- (v_reuse_idx): step 8 produces it via ADD UNIQUE, so it must not also be carried as a secondary.
-  select array_agg(c.relname::text), array_agg(pg_get_indexdef(i.indexrelid)) into v_idx_names, v_idx_defs
-    from pg_index i join pg_class c on c.oid = i.indexrelid
-   where i.indrelid = p_parent and i.indislive and not i.indisprimary
-     and i.indexrelid <> coalesce(v_reuse_idx, 0::oid)
-     and (not i.indisunique
-          or (i.indpred is null and i.indexprs is null
-              and v_ctl_attnum = any((string_to_array(i.indkey::text, ' ')::int2[])[1:i.indnkeyatts])));
-  -- Refuse any non-PK UNIQUE secondary that CANNOT be carried (its key omits the partition key, or it is
-  -- partial / on an expression): global uniqueness cannot be enforced on the partitioned table, so this
-  -- is the same refuse-with-guidance contract as the PK and incoming-FK cases, not a silent drop.
-  select string_agg(c.relname, ', ' order by c.relname) into v_uniq_bad
-    from pg_index i join pg_class c on c.oid = i.indexrelid
-   where i.indrelid = p_parent and i.indislive and i.indisunique and not i.indisprimary
-     and not (i.indpred is null and i.indexprs is null
-              and v_ctl_attnum = any((string_to_array(i.indkey::text, ' ')::int2[])[1:i.indnkeyatts]));
-  if v_uniq_bad is not null then
-    raise exception 'pg_partition_magician: cannot transmute % -- the UNIQUE secondary index(es) (%) do not include the partition key % in their key columns (or are partial/expression indexes), so global uniqueness cannot be enforced on a partitioned table. Add % to the key of each, or drop them, then re-run transmute. A unique index that already includes % is carried automatically.',
-      p_parent, v_uniq_bad, quote_ident(p_control), quote_ident(p_control), quote_ident(p_control);
-  end if;
-
-  -- Refuse a colliding <index>_pgpm name (#311). Step 9b recreates each carried secondary as a
-  -- PARTITIONED index on the parent named <original>_pgpm, then attaches the monolith's original under
-  -- it. Nothing checked that name was free, so a pre-existing relation by it -- a leftover from an
-  -- interrupted run, or an operator's own index that happens to be named that way -- made the CREATE
-  -- INDEX fail with a raw 42P07 from inside the cutover: no pgpm prefix, no guidance, and no hint that
-  -- the fix is `drop index ..._pgpm`.
-  --
-  -- The cutover is one transaction, so that failure rolled back rather than losing anything; the cost
-  -- was a confusing error and a conversion the operator then had to abort by hand. Every sibling shape
-  -- here (a key that excludes the control column, a bare unique index, an un-carryable UNIQUE secondary,
-  -- a transition-table trigger, an orphaned child table) refuses UP FRONT with the remedy. This was the
-  -- one hole in that contract.
-  --
-  -- Names every collision at once: one per retry would make an operator with several re-run the
-  -- conversion once per index to discover them.
-  --
-  -- First, the names that cannot exist at all (#592). <index>_pgpm is a name pgpm derives, so it is held
-  -- to the rule every derived name is (see _part_name and the staging-name check): never truncated. An
-  -- index name of 59 bytes or more leaves no room for the suffix, and the cast to name in step 9b cut it
-  -- back to 63 silently. At exactly 63 bytes, which is what PostgreSQL's own auto-naming produces for a
-  -- long table and column list, the cut name IS the index's own name, so the collision check below found
-  -- it taken and told the operator to drop it as a leftover: advice that drops their own index. Refused
-  -- here, before that check can misread it, and every offender named at once for the same reason.
-  select string_agg(quote_ident(n) || ' (' || octet_length(n) || ' bytes)', ', ' order by n) into v_long_idx_q
-    from unnest(coalesce(v_idx_names, '{}'::text[])) as n
-   where octet_length(n || '_pgpm') > 63;
-  if v_long_idx_q is not null then
-    raise exception 'pg_partition_magician: cannot transmute % -- the secondary index(es) (%) have names too long for their partitioned copies: transmute recreates each on the parent as <index>_pgpm, which would exceed PostgreSQL''s 63-byte identifier limit, and pgpm never truncates a name it derives (a truncated one names the index itself or collides with another). Give each a name of at most 58 bytes (ALTER INDEX ... RENAME), then re-run transmute.',
-      p_parent, v_long_idx_q;
-  end if;
-  select string_agg(quote_ident(n || '_pgpm'), ', ' order by n) into v_pgpm_clash_q
-    from unnest(coalesce(v_idx_names, '{}'::text[])) as n
-   where to_regclass(format('%I.%I', v_nsp, n || '_pgpm')) is not null;
-  if v_pgpm_clash_q is not null then
-    raise exception 'pg_partition_magician: cannot transmute % -- the name(s) (%) are already taken, and transmute needs them for the partitioned copies of this table''s secondary indexes. Most likely leftovers from an interrupted run. Drop them, then re-run transmute.',
-      p_parent, v_pgpm_clash_q;
-  end if;
+  -- The list and its refusals live in _transmute_carried_indexes, because the cutover asks again under
+  -- its ACCESS EXCLUSIVE (#630) and that answer is the one 9b carries; this one refuses up front.
+  select o_names, o_defs into v_idx_names, v_idx_defs
+    from pgpm._transmute_carried_indexes(p_parent, v_nsp, p_control, v_ctl_attnum, v_reuse_idx);
 
   -- Refuse the one trigger shape a partitioned table cannot host (#277). Measured on PG 17.10: this is
   -- the ONLY refusal needed. Constraint triggers, statement triggers, WHEN clauses, UPDATE OF, and even
@@ -4959,31 +5041,12 @@ begin
   -- ev263_p0000000000000030000 with no error and nothing in pgpm.log. Partial enforcement is worse than
   -- none, because the obvious post-conversion check ("is my foreign key still there?") passes.
   --
-  -- Captured here, re-added at the parent after the attach below. Self-referential keys are excluded on
-  -- purpose: confrelid = p_parent makes them INCOMING as well, so the incoming gate above has already
-  -- decided their fate (refuse, or drop-and-restore under 'preserve').
-  select array_agg(c.conname::text order by c.conname),
-         array_agg(pg_get_constraintdef(c.oid) order by c.conname)
-    into v_out_names, v_out_defs
-    from pg_constraint c
-   where c.conrelid = p_parent and c.contype = 'f' and c.confrelid <> p_parent and c.conparentid = 0
-     and c.convalidated;
-
-  -- A NOT VALID outgoing key is refused, because re-adding it at the parent could not then be
-  -- metadata-only. Measured on PG 17.10: adopting a VALIDATED child constraint costs 0.8 ms against a
-  -- 200k-row monolith, while the same ADD over a NOT VALID one SCANS (seq_tup_read +400,000) and takes
-  -- 89 ms at 2M rows -- an O(rows) scan holding SHARE ROW EXCLUSIVE on the table AND on the referenced
-  -- table, which is the data-coupled blocking lock this project's acceptance rule forbids. Validating it
-  -- first is the operator's call, not ours: it would either fail on rows they never checked or silently
-  -- promote a constraint they deliberately left unvalidated.
-  select string_agg(conname, ', ') into v_bad_out
-    from pg_constraint
-   where conrelid = p_parent and contype = 'f' and confrelid <> p_parent and conparentid = 0
-     and not convalidated;
-  if v_bad_out is not null then
-    raise exception 'pg_partition_magician: cannot transmute % -- its outgoing foreign key(s) (%) are NOT VALID. pgpm re-adds an outgoing key on the new parent, which is metadata-only only when the key is already validated; over a NOT VALID one PostgreSQL would rescan the whole table under a lock that blocks writes on it and on the referenced table. Run ALTER TABLE % VALIDATE CONSTRAINT <name> first (or drop the constraint), then re-run transmute.',
-      p_parent, v_bad_out, p_parent::text;
-  end if;
+  -- Listed here so a NOT VALID one is refused before anything is committed, and listed AGAIN in the cutover
+  -- under its ACCESS EXCLUSIVE, which is the list 7a re-adds at the parent (#630): ADD FOREIGN KEY takes
+  -- only SHARE ROW EXCLUSIVE, which nothing excludes between here and that lock. Self-referential keys are
+  -- excluded on purpose: confrelid = p_parent makes them INCOMING as well, so the incoming gate above has
+  -- already decided their fate (refuse, or drop-and-restore under 'preserve').
+  select o_names, o_defs into v_out_names, v_out_defs from pgpm._transmute_outgoing_fks(p_parent);
 
   -- ===== monolith cutover (REDESIGN.md sections 1, 2, 11) =====
   -- Bounds for the bounded coarse child the original table becomes: lo = grid_floor(min(control)),
@@ -5241,19 +5304,21 @@ begin
   perform set_config('lock_timeout', p_lock_timeout, true);   -- `set local` did not survive the COMMIT
 
   -- 0b. capture what CREATE TABLE ... LIKE will NOT carry (#277): owner, grants, RLS, policies, comments
-  -- and triggers. Captured HERE, before either rename, and replayed below in this same transaction. Both
-  -- halves have to be inside the cutover: a parent that is briefly reachable with RLS off is the same
-  -- security defect as one that never gets its policies, with a shorter fuse. The triggers are the one
-  -- exception to "here": they are captured further down, under the table's ACCESS EXCLUSIVE (#593).
+  -- and triggers, each replayed below in this same transaction. Both halves have to be inside the cutover:
+  -- a parent that is briefly reachable with RLS off is the same security defect as one that never gets its
+  -- policies, with a shorter fuse. And each is read under the lock that stops it changing before the
+  -- rename carries the table away (#630, the rule #593 set for the triggers): the owner, the RLS flags and
+  -- the policies just after the staging LIKE, whose ACCESS SHARE excludes ALTER OWNER, ENABLE/FORCE ROW
+  -- LEVEL SECURITY and CREATE/ALTER/DROP POLICY (all ACCESS EXCLUSIVE); the comments, the triggers, the
+  -- carried indexes, the outgoing keys and the identity reseed under the table's ACCESS EXCLUSIVE, further
+  -- down, since COMMENT (SHARE UPDATE EXCLUSIVE), CREATE TRIGGER and ADD FOREIGN KEY (SHARE ROW EXCLUSIVE),
+  -- CREATE INDEX (SHARE) and every writer's nextval are all compatible with ACCESS SHARE. They used to be
+  -- read here, before the LIKE, or in the preflight, and whatever changed in between was lost.
   --
   -- Trigger definitions get a free ride, but only once BOTH renames have happened (#344): pg_get_triggerdef
   -- emits "... ON public.<original name>", and that name only resolves to the new parent once the staging
   -- parent has taken it, so the captured text replays verbatim with no rewriting. Policies get no such
   -- help (there is no pg_get_policydef) and are rebuilt from pg_policy.
-  select pg_get_userbyid(relowner), relacl, relrowsecurity, relforcerowsecurity
-    into v_owner, v_acl, v_rls, v_rls_force
-    from pg_class where oid = p_parent;
-  v_comment := obj_description(p_parent, 'pg_class');
 
   -- #344: everything below that only touches the NEW parent -- not the original/monolith relation -- runs
   -- BEFORE either rename, under a staging name (v_staging, collision-checked earlier alongside the
@@ -5273,6 +5338,10 @@ begin
                  v_nsp, v_staging, p_parent::text, p_control);
   v_parent := format('%I.%I', v_nsp, v_staging)::regclass;
   execute format('alter table %s drop constraint if exists pgpm_monolith_bound', v_parent::text);
+  -- 0b (owner, RLS). After the LIKE, under its ACCESS SHARE (see 0b).
+  select pg_get_userbyid(relowner), relacl, relrowsecurity, relforcerowsecurity
+    into v_owner, v_acl, v_rls, v_rls_force
+    from pg_class where oid = p_parent;
 
   -- 6. re-establish identity on the parent, in the SAME form it had (#308). The kind is not cosmetic:
   -- ALWAYS rejects an insert that supplies the column, BY DEFAULT accepts it, so re-adding an ALWAYS
@@ -5289,7 +5358,8 @@ begin
 
   -- 7b (moved before the renames -- #344). Replay everything captured at 0b onto the staging parent,
   -- EXCEPT triggers: that is the one step that needs the LIVE name in place, not just the right OID (see
-  -- 0b), so it stays below, after both renames.
+  -- 0b), so it stays below, after both renames. And except comments, which only the table's ACCESS
+  -- EXCLUSIVE holds still (#630), so they are read and replayed below it, beside the triggers.
   execute format('alter table %s owner to %I', v_parent::text, v_owner);
 
   -- Grants. aclexplode turns relacl into (grantor, grantee, privilege, grantable) rows; a NULL relacl
@@ -5345,18 +5415,6 @@ begin
       case when v_pol.withcheck is not null then ' with check (' || v_pol.withcheck || ')' else '' end);
   end loop;
 
-  if v_comment is not null then
-    execute format('comment on table %s is %L', v_parent::text, v_comment);
-  end if;
-  for v_colcom in
-    select a.attname, col_description(p_parent, a.attnum) as c
-      from pg_attribute a
-     where a.attrelid = p_parent and a.attnum > 0 and not a.attisdropped
-       and col_description(p_parent, a.attnum) is not null
-  loop
-    execute format('comment on column %s.%I is %L', v_parent::text, v_colcom.attname, v_colcom.c);
-  end loop;
-
   -- 0b (triggers). The outage starts HERE, and the triggers are captured under it (#593). They used to be
   -- captured at 0b above, with nothing on the table stronger than the ACCESS SHARE the staging LIKE takes,
   -- and CREATE TRIGGER needs only SHARE ROW EXCLUSIVE, which that does not exclude. A trigger another
@@ -5383,6 +5441,21 @@ begin
          coalesce(array_agg(tgenabled::text order by tgname), '{}')
     into v_trgdefs, v_trgnames, v_trgstates
     from pg_trigger where tgrelid = p_parent and not tgisinternal;
+
+  -- 0b (under the lock, #630 and #656). What the preflight listed, listed again now that nothing can change
+  -- it: the secondary indexes 9b carries, the outgoing keys 7a re-adds, and where 8b resumes each identity
+  -- sequence. The preflight's lists were only its refusals' business; these are the ones carried. A shape
+  -- the preflight would have refused, created since, is refused here the same way and rolls the cutover
+  -- back to the resumable phase-2 state. Before the renames, so p_parent still resolves by its own name.
+  select o_names, o_defs into v_idx_names, v_idx_defs
+    from pgpm._transmute_carried_indexes(p_parent, v_nsp, p_control, v_ctl_attnum, v_reuse_idx);
+  select o_names, o_defs into v_out_names, v_out_defs from pgpm._transmute_outgoing_fks(p_parent);
+  if v_idcols is not null then
+    v_idnext := '{}';
+    for v_i in 1 .. array_length(v_idcols, 1) loop
+      v_idnext := array_append(v_idnext, pgpm._identity_resume_at(p_parent, v_idcols[v_i], v_idmax[v_i]));
+    end loop;
+  end if;
 
   -- 0c. drop the incoming FKs and record each, HERE (#444). Eligibility was settled by the gate at step 0,
   -- before anything was committed; this drops whatever is live NOW rather than replaying a list captured
@@ -5548,6 +5621,22 @@ begin
     end loop;
   end if;
 
+  -- 7b (comments). Read and replayed under the lock (see 0b): COMMENT takes only SHARE UPDATE EXCLUSIVE,
+  -- which the staging LIKE's ACCESS SHARE does not exclude. p_parent is the monolith's oid by now, which
+  -- is the table the comments are on.
+  v_comment := obj_description(p_parent, 'pg_class');
+  if v_comment is not null then
+    execute format('comment on table %s is %L', v_parent::text, v_comment);
+  end if;
+  for v_colcom in
+    select a.attname, col_description(p_parent, a.attnum) as c
+      from pg_attribute a
+     where a.attrelid = p_parent and a.attnum > 0 and not a.attisdropped
+       and col_description(p_parent, a.attnum) is not null
+  loop
+    execute format('comment on column %s.%I is %L', v_parent::text, v_colcom.attname, v_colcom.c);
+  end loop;
+
   -- 7c. publication membership (#566). pg_publication_rel names a table by oid, and the rename made that
   -- oid the monolith, so without this every publication FOR TABLE <this table> went on publishing the
   -- monolith alone: the parent and every forward partition obtain creates were in none of them, and each
@@ -5583,12 +5672,12 @@ begin
   end if;
 
   -- 8b. advance each identity sequence to the greater of max(id)+1 (no collision with existing rows) and the
-  -- original sequence's own next value (no re-issue of ids it already handed out past max). Both captured up
-  -- front; the max is an index lookup.
+  -- original sequence's own next value (no re-issue of ids it already handed out past max): v_idnext, read
+  -- under the lock at 0b by _identity_resume_at (#656), before step 3 dropped the original sequence.
   if v_idcols is not null then
     for v_i in 1 .. array_length(v_idcols, 1) loop
       execute format('select setval(pg_get_serial_sequence(%L, %L), %s, false)',
-                     v_parent::text, v_idcols[v_i], greatest(v_idmax[v_i] + 1, coalesce(v_idnext[v_i], 0)));
+                     v_parent::text, v_idcols[v_i], v_idnext[v_i]);
     end loop;
   end if;
 
@@ -5974,7 +6063,7 @@ declare
   cfg pgpm.config; v_nsp name; v_rel name; v_monreg regclass; v_restored regclass;
   v_mon name; v_mon_lo text; v_mon_hi text; v_ncast text; v_outside boolean;
   v_gate_q text; v_door text;   -- #443: the outside-rows check and its refusal, asked twice
-  v_idcols name[]; v_idmax bigint[]; v_col name; v_m bigint; v_i int; v_idnext bigint[]; v_seq text; v_n bigint;
+  v_idcols name[]; v_idmax bigint[]; v_col name; v_m bigint; v_i int; v_idnext bigint[];
   v_idkinds text[];   -- #308: 'a' (ALWAYS) or 'd' (BY DEFAULT) per v_idcols entry, same order
   r pgpm.dropped_fk%rowtype; v_cdelta name; v_cfn name;
   v_trgdefs text[] := '{}'; v_tdef text;   -- #277
@@ -6032,7 +6121,10 @@ begin
 
   -- capture the identity columns and their current max BEFORE dropping anything (transmute moved
   -- identity from the table to the parent; dropping the parent loses it, so we re-establish it on the
-  -- restored monolith). The max is an index lookup (the PK is intact), not a seq-scan.
+  -- restored monolith). The max read here is only the FLOOR of where the restored sequence resumes (#656):
+  -- the value used is read under the lock below, by _identity_resume_at, because writers keep taking ids
+  -- until that lock is granted. Read here as well because a scan here blocks no writer, and under the lock
+  -- the max is re-read only when an index answers it.
   select array_agg(a.attname order by a.attnum), array_agg(a.attidentity::text order by a.attnum)
     into v_idcols, v_idkinds
     from pg_attribute a where a.attrelid = p_parent and a.attidentity in ('a', 'd') and not a.attisdropped;
@@ -6040,14 +6132,6 @@ begin
     foreach v_col in array v_idcols loop
       execute format('select coalesce(max(%I), 0)::bigint from %s', v_col, p_parent::text) into v_m;
       v_idmax := array_append(v_idmax, v_m);
-      -- capture the parent sequence's position too (it holds whatever transmute preserved), so the reversal
-      -- does not reopen a gap above max that transmute had carried forward.
-      v_seq := pg_get_serial_sequence(p_parent::text, v_col);
-      v_n := null;
-      if v_seq is not null then
-        execute format('select case when is_called then last_value + 1 else last_value end from %s', v_seq) into v_n;
-      end if;
-      v_idnext := array_append(v_idnext, v_n);
     end loop;
   end if;
 
@@ -6058,18 +6142,6 @@ begin
             where parent_table = p_parent and restored_at is not null order by id loop
     execute format('alter table %s drop constraint %I', r.referencing_table::text, r.constraint_name);
   end loop;
-
-  -- Capture the parent's triggers before it is dropped (#277). transmute dropped the monolith's own
-  -- originals in favour of the parent's, which clone down to every partition, and DETACH strips those
-  -- clones -- so without this the reversal silently returns a table with no triggers at all. As in
-  -- transmute, pg_get_triggerdef names the PARENT, and the restored table takes that name back below, so
-  -- the definitions replay verbatim. And as in transmute (#499), the text carries no tgenabled, so each
-  -- trigger's name and state are captured alongside, index-aligned, and re-applied after the replay.
-  select coalesce(array_agg(pg_get_triggerdef(oid) order by tgname), '{}'),
-         coalesce(array_agg(tgname::text order by tgname), '{}'),
-         coalesce(array_agg(tgenabled::text order by tgname), '{}')
-    into v_trgdefs, v_trgnames, v_trgstates
-    from pg_trigger where tgrelid = p_parent and not tgisinternal;
 
   -- THE GATE, AGAIN, UNDER THE LOCK (#443). The check above ran under ACCESS SHARE, which excludes no
   -- writer: an insert into a forward partition that was uncommitted when it ran was invisible to it, and
@@ -6082,13 +6154,39 @@ begin
   --
   -- Locking HERE rather than before the first check is the choice that keeps the exclusive window
   -- where it was: it opens on the same line it always did (the DETACH took this very lock) and grows by
-  -- one probe of partitions that are empty whenever it passes, instead of also covering the identity,
-  -- FK and trigger capture above. Named through p_parent, whose ACCESS SHARE from the first check is
-  -- held to the end of this transaction and so pins the name against a concurrent rename.
+  -- one probe of partitions that are empty whenever it passes, the trigger capture and the identity read
+  -- below, all catalog reads or index descents. Named through p_parent, whose ACCESS SHARE from the first
+  -- check is held to the end of this transaction and so pins the name against a concurrent rename.
   execute format('lock table %s in access exclusive mode', p_parent::text);
   execute v_gate_q into v_outside;
   if v_outside then
     raise exception '%', v_door;
+  end if;
+
+  -- Capture the parent's triggers before it is dropped (#277). transmute dropped the monolith's own
+  -- originals in favour of the parent's, which clone down to every partition, and DETACH strips those
+  -- clones -- so without this the reversal silently returns a table with no triggers at all. As in
+  -- transmute, pg_get_triggerdef names the PARENT, and the restored table takes that name back below, so
+  -- the definitions replay verbatim. And as in transmute (#499), the text carries no tgenabled, so each
+  -- trigger's name and state are captured alongside, index-aligned, and re-applied after the replay.
+  --
+  -- Under the lock, not before it (#666, the mirror of transmute's #593). CREATE TRIGGER and ENABLE or
+  -- DISABLE TRIGGER need only SHARE ROW EXCLUSIVE, which the first check's ACCESS SHARE does not exclude,
+  -- so a trigger committed while the lock was queued was on neither the capture nor the restored table,
+  -- and a state changed then came back as it had been. From here nothing can change them.
+  select coalesce(array_agg(pg_get_triggerdef(oid) order by tgname), '{}'),
+         coalesce(array_agg(tgname::text order by tgname), '{}'),
+         coalesce(array_agg(tgenabled::text order by tgname), '{}')
+    into v_trgdefs, v_trgnames, v_trgstates
+    from pg_trigger where tgrelid = p_parent and not tgisinternal;
+
+  -- Where each restored identity sequence resumes, read under the lock for the same reason (#656): an id a
+  -- writer took while the lock was queued is past any earlier read, and the restored sequence would hand
+  -- it out again. Before the DROP below, which takes the parent's sequence with it.
+  if v_idcols is not null then
+    for v_i in 1 .. array_length(v_idcols, 1) loop
+      v_idnext := array_append(v_idnext, pgpm._identity_resume_at(p_parent, v_idcols[v_i], v_idmax[v_i]));
+    end loop;
   end if;
 
   -- Strip what MAINTENANCE put on the monolith before handing it back (#508). The trigger capture above
@@ -6148,15 +6246,15 @@ begin
   execute format('drop table %s', p_parent::text);
 
   -- re-establish identity on the restored monolith and reseed to the greater of max+1 and the parent
-  -- sequence's preserved position (mirrors transmute's step 6/8b, applied back to the table); without the
-  -- reseed the next insert would collide at 1.
+  -- sequence's preserved position (mirrors transmute's step 6/8b, applied back to the table), both read
+  -- under the lock above; without the reseed the next insert would collide at 1.
   if v_idcols is not null then
     for v_i in 1 .. array_length(v_idcols, 1) loop
       execute format('alter table %s alter column %I add generated %s as identity',
                      v_monreg::text, v_idcols[v_i],
                      case when v_idkinds[v_i] = 'a' then 'always' else 'by default' end);
       execute format('select setval(pg_get_serial_sequence(%L, %L), %s, false)',
-                     v_monreg::text, v_idcols[v_i], greatest(v_idmax[v_i] + 1, coalesce(v_idnext[v_i], 0)));
+                     v_monreg::text, v_idcols[v_i], v_idnext[v_i]);
     end loop;
   end if;
 

@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+- **transmute and untransmute resume an identity sequence past every id handed out before their lock**
+  (#656). Both read `max(id)` and the sequence's position before the lock that stops writers (transmute in
+  its preflight, untransmute before its second gate), so ids a writer took in between were issued again
+  and the first inserts after the conversion or the reversal failed with a duplicate key. Both now read
+  them under that ACCESS EXCLUSIVE through `pgpm._identity_resume_at`, which re-reads the max only when an
+  index answers it in one descent and otherwise keeps the earlier max as its floor, so no scan runs under
+  the lock. `tests/157` drives both windows with a dblink writer, and `bench/cutover_reread_window.sh`
+  and `bench/reread_under_lock_tap.sh` carry the mutations `transmute_identity_reseed_preflight` and
+  `untransmute_identity_reseed_before_lock`.
+- **untransmute captures the parent's triggers under its ACCESS EXCLUSIVE** (#666), the mirror of #593's
+  fix in transmute. Captured before the lock, a trigger created, or a state changed, while the lock was
+  queued was lost from the restored table. `tests/158` is the acceptance test, and
+  `bench/reread_under_lock_tap.sh` runs it against the mutation `untransmute_trigger_capture_before_lock`.
+- **The transmute cutover carries the secondary indexes, outgoing keys, owner, RLS flags and comments the
+  table has under the lock that protects each** (#630). The index and key lists were read in the preflight
+  and the owner, RLS flags and comments before the staging `LIKE`, so an index or key committed before the
+  cutover's lock stayed on the monolith (a unique index enforced nothing for rows routed to a forward
+  partition, a key checked none of them) and an owner, RLS or comment change was lost. The owner and RLS
+  flags are now read after the `LIKE`, whose ACCESS SHARE excludes changing them, and the index and key
+  lists (through `pgpm._transmute_carried_indexes` and `pgpm._transmute_outgoing_fks`) and the comments
+  under the cutover's ACCESS EXCLUSIVE, where the up-front refusals are asked again: an uncarryable unique
+  index or a NOT VALID key added in between rolls the cutover back to the resumable phase-2 state instead
+  of being left behind. `tests/159` and `bench/cutover_reread_window.sh` (a second session committing
+  mid-cutover) are the acceptance, with the mutations `transmute_carried_indexes_preflight`,
+  `transmute_outgoing_fks_preflight`, `transmute_comments_before_lock` and
+  `transmute_owner_rls_before_like`.
 - **Every call that drives or reconfigures a regrain serialises on one per-parent lock, and `set_regrain`
   refuses to retarget a run in flight** (#554). Nothing held a per-parent lock across a regrain step, so a
   hand-driven `regrain_step` and a `maintain` tick copied the same rows into the same fine child (the
