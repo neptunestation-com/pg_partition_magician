@@ -219,8 +219,9 @@ Parameters:
   `maintain_all`'s sweep handle; either way, re-run `transmute` to retry, from the same session or a new
   one. The claim a failed attempt leaves records your session as its owner, and that session may resume
   or abort it; only a conversion still running in a *different* live session is refused.
-- `p_force_frontier` -- **uuidv7 and text_time only.** For these kinds the frontier is the newer of the
-  column's maximum and `now()`, so one row minted by a client with a wrong clock sets the frontier, and with
+- `p_force_frontier` -- **time, uuidv7 and text_time.** For these kinds the frontier is the newer of the
+  column's maximum and `now()` (for `time`, so that `hi` lies past every row the table holds, a scheduled
+  or future-dated one included), so one row minted by a client with a wrong clock sets the frontier, and with
   it the monolith's permanent `hi`, as far ahead as that clock was wrong: every row written until then lands
   in the monolith, `status()` shows nothing abnormal, and the monolith cannot be regrained nor anything
   behind it dropped until the clock really passes `hi`. The plausibility sampling cannot see it (one bad row
@@ -262,9 +263,10 @@ repeats a character, a non-positive `p_tt_width`, a negative `p_tt_discard_bits`
 column's collation does not order the way base-`p_tt_radix` place value does (KSUID's base62 on an
 `en_US` column, or any alphabet with digits under an ICU collation with numeric ordering such as
 `und-u-kn-true`; put the column on `collate "C"`, which `p_force_text_time` does not override), or
-samples as not matching the declared shape and `p_force_text_time` is not set; a `uuidv7` or `text_time` control's newest
-value decodes to more than one partition step plus one hour past `now()` and `p_force_frontier` is not set
-(a future-dated row would pin the monolith's permanent `hi` there); a non-PK `UNIQUE` secondary index does not include the
+samples as not matching the declared shape and `p_force_text_time` is not set; a `time`, `uuidv7` or `text_time` control's newest
+value lies (or decodes to) more than one partition step plus one hour past `now()` and `p_force_frontier` is not set
+(a future-dated row would pin the monolith's permanent `hi` there); a `time` control's newest value is
+`infinity`, which no partition can hold (`p_force_frontier` does not override this); a non-PK `UNIQUE` secondary index does not include the
 partition key (global uniqueness could not be enforced); an incoming FK exists and `p_incoming_fks` is
 `'error'`; a standalone table matching the child-partition naming already exists (an orphan from an
 interrupted run); a name the conversion derives from the table's (the monolith's `<rel>_p<lo>_to_<hi>`, a

@@ -4729,8 +4729,8 @@ create or replace procedure pgpm._transmute(
   -- whole-payload base62 encoding, epoch 2014-05-13 16:53:20+00).
   p_tt_alphabet text default null, p_tt_discard_bits int default 0,
   p_tt_epoch timestamptz default '1970-01-01 00:00:00+00',
-  -- uuidv7/text_time only (#457): accept a data-driven frontier that sits far ahead of the clock, and
-  -- with it a monolith hi pinned that far out. False for every other kind's frontier, which cannot skew.
+  -- time/uuidv7/text_time (#457, time since #668): accept a data-driven frontier that sits far ahead of the
+  -- clock, and with it a monolith hi pinned that far out. Ignored for id, whose frontier has no clock.
   p_force_frontier boolean default false
 )
 language plpgsql as $$
@@ -5271,11 +5271,29 @@ begin
   -- current interval, so live writes keep landing in it until the frontier crosses B (then obtain's
   -- forward partitions take over and the monolith freezes). Every row satisfies [lo, B): lo <= min and
   -- B > frontier >= every row. An empty table anchors lo at the frontier's grid floor (empty monolith).
-  -- frontier (now() for time, max(control) for id, greatest(max(control), now()) for uuidv7 (#325))
-  -- and min(control), computed directly:
+  -- frontier (max(control) for id, greatest(max(control), now()) for uuidv7 (#325), text_time and time
+  -- (#668)) and min(control), computed directly:
   -- pgpm.config does not exist yet, so _frontier_native (which reads config) cannot be used here.
   if p_control_kind = 'time' then
-    v_frontier_native := pgpm._ts_text(now());
+    -- #668: the data maximum counts for `time` too. The frontier used to be now() alone, so a table holding
+    -- one future-dated row (a scheduled event, a client with a wrong clock) got a hi below that row: phase 1
+    -- committed a write-rejecting pgpm_monolith_bound CHECK and the claim, and only phase 2's VALIDATE
+    -- found the row, with a raw 23514. The newer of the maximum and the clock covers every row, and the
+    -- #457 refusal below keeps one far-future row from pinning hi where the clock is not going for years.
+    -- max(), not ORDER BY ... LIMIT 1: it skips nulls and still walks an index backward. A naive column's
+    -- reading is wall time in v_tz (UTC for such a column, #504), the rule v_min_raw follows below.
+    if v_typname in ('timestamp', 'date') then
+      execute format('select max(t.%I)::timestamp at time zone %L from %s t', p_control, v_tz, p_parent::text) into v_max_ts;
+    else
+      execute format('select max(t.%I) from %s t', p_control, p_parent::text) into v_max_ts;
+    end if;
+    if v_max_ts is not null and not isfinite(v_max_ts) then
+      -- no range bound covers it (the upper bound is exclusive), so there is nothing p_force_frontier could accept
+      raise exception 'pg_partition_magician: % cannot be partitioned on a time grid using %: its newest value is infinity, and no partition can hold it (a range partition''s upper bound is exclusive, and the monolith''s would have to lie past it). Delete or correct the rows whose % is infinity and re-run.',
+        p_parent, quote_ident(p_control), quote_ident(p_control);
+    end if;
+    v_max_raw := pgpm._ts_text(v_max_ts);
+    v_frontier_native := pgpm._ts_text(greatest(v_max_ts, now()));
   else
     execute format('select t.%I::text from %s t order by t.%I desc limit 1', p_control, p_parent::text, p_control)
       into v_max_raw;
@@ -5343,7 +5361,9 @@ begin
   -- with it the monolith's PERMANENT hi, as far out as that clock was wrong: every row written until then
   -- lands in the monolith, status() shows nothing abnormal, and the monolith cannot be regrained nor
   -- anything behind it dropped until now() really passes hi. The sampling gate above cannot see it (one bad
-  -- row in 402 is fraction 0.9975), and `time` is immune because its frontier IS now().
+  -- row in 402 is fraction 0.9975). `time` was thought immune because its frontier was now(), but that only
+  -- moved the failure to phase 2's VALIDATE, after the bound had been committed (#668); its frontier is
+  -- the newer of the data and the clock now, so the same allowance applies to it.
   --
   -- The allowance is one partition step plus one hour, measured from now() and NOT from the
   -- headroom-adjusted bound: p_bound_headroom is the operator asking for a farther hi on purpose, and it
@@ -5356,11 +5376,18 @@ begin
   -- accepts the bound knowingly, the same way p_bound_headroom asks for one. The check sits AFTER the
   -- ceiling refusal on purpose: a random (v4) column forced past the sampling gate decodes to year ~10000
   -- and must keep getting the ceiling's message, which names the real cause.
-  if p_control_kind in ('uuidv7', 'text_time') and v_max_raw is not null then
-    v_max_ts := pgpm._decode(p_control_kind, v_max_raw, p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_tt_alphabet, p_tt_discard_bits, p_tt_epoch)::timestamptz;
+  if p_control_kind in ('time', 'uuidv7', 'text_time') and v_max_raw is not null then
+    if p_control_kind <> 'time' then   -- the time kind's v_max_ts is the maximum itself, read above
+      v_max_ts := pgpm._decode(p_control_kind, v_max_raw, p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_tt_alphabet, p_tt_discard_bits, p_tt_epoch)::timestamptz;
+    end if;
     v_skew_limit := now() + p_step::interval + interval '1 hour';
     if v_max_ts > v_skew_limit then
-      if not p_force_frontier then
+      if not p_force_frontier and p_control_kind = 'time' then
+        raise exception 'pg_partition_magician: % cannot be partitioned on a time grid using %: its newest value is %, which is % ahead of now() (%). The monolith''s upper bound has to lie past every row, so that one value would fix the monolith''s permanent upper bound at % instead of %: every row written until then lands in the monolith, which cannot be regrained, and nothing behind it can be dropped, until the clock actually gets there. Delete or correct the rows whose % is after % (now() + one step + one hour, the most the newest row may lead the clock by) and re-run, or re-run with p_force_frontier => true to accept that bound.',
+          p_parent, quote_ident(p_control), v_max_ts, justify_interval(date_trunc('second', v_max_ts - now())), now(),
+          v_hi_native, pgpm._grid_next(p_control_kind, p_step, pgpm._grid_floor(p_control_kind, p_step, p_anchor, pgpm._ts_text(now()), v_tz), v_tz),
+          quote_ident(p_control), v_skew_limit;
+      elsif not p_force_frontier then
         raise exception 'pg_partition_magician: % cannot be partitioned on a % grid using %: its newest value % decodes to %, which is % ahead of now() (%). A time-ordered id dated that far ahead is almost always a client with a wrong clock, and because the frontier is the newer of the data and the clock, that one value would fix the monolith''s permanent upper bound at % instead of %: every row written until then lands in the monolith, which cannot be regrained, and nothing behind it can be dropped, until the clock actually gets there. Delete or correct the rows whose % sorts above % (the value encoding now() + one step + one hour, the most a maximum may lead the clock by) and re-run, or re-run with p_force_frontier => true to accept that bound.',
           p_parent, p_control_kind, quote_ident(p_control), v_max_raw, v_max_ts, justify_interval(date_trunc('second', v_max_ts - now())), now(),
           v_hi_native, pgpm._grid_next(p_control_kind, p_step, pgpm._grid_floor(p_control_kind, p_step, p_anchor, pgpm._ts_text(now()), v_tz), v_tz),

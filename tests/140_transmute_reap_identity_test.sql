@@ -14,13 +14,58 @@
 -- must only be forgotten. A fourth (ab), renamed, is aborted by hand by its new name before the sweep.
 --
 -- The failing conversions run in a dblink session (a committing procedure cannot run inside throws_ok, and
--- pg_prove runs this file under ON_ERROR_STOP); each fails in phase 2 on a row dated past any bound. The
+-- pg_prove runs this file under ON_ERROR_STOP); each fails in phase 2 on a row dated past any bound, which
+-- another session commits after the conversion read the table's maximum (phase2_stray, below). The
 -- claims' owner is cleared rather than polled for (tests/101's stand-in for a session that has ended).
 -- bench/transmute_reap_identity.sh runs this file against a mutant that resolves the table by name again
 -- (transmute_reap_by_name), so it is also required to FAIL there.
 create extension if not exists pgtap;
 create extension if not exists dblink;
-select plan(23);
+select plan(25);
+
+-- phase2_stray(rel, row_sql, call_sql, tz): make call_sql fail in phase 2 on a stray row, deterministically
+-- (#668). transmute now reads the table's maximum and refuses or covers a future-dated row before phase 1,
+-- so a stray already in the table no longer reaches VALIDATE. One that is committed AFTER that read does:
+-- session pw inserts row_sql and holds it uncommitted (its ROW EXCLUSIVE lock blocks phase 1's ADD), session
+-- pa starts call_sql, which reads the maximum without seeing the row and then waits on phase 1's ACCESS
+-- EXCLUSIVE; once pa is seen waiting, pw commits, the ADD ... NOT VALID proceeds without checking existing
+-- rows, and phase 2's VALIDATE finds the row. Returns whether pa was seen waiting when pw committed (the
+-- ordering witness: nothing of phase 1 had run yet, so VALIDATE could only come after the commit) and the
+-- error pa's CALL ended with. The poll reads pg_locks only, which takes no lock on the table.
+create function pg_temp.phase2_stray(p_rel regclass, p_row_sql text, p_call_sql text, p_tz text default 'UTC',
+                                     out waited boolean, out err_state text, out err_msg text)
+language plpgsql as $f$
+declare v_pid int;
+begin
+  perform dblink_connect('pw', 'dbname=' || current_database());
+  perform dblink_exec('pw', 'begin');
+  perform dblink_exec('pw', p_row_sql);
+  perform dblink_connect('pa', 'dbname=' || current_database());
+  perform dblink_exec('pa', format('set timezone = %L', p_tz));
+  select pid into v_pid from dblink('pa', 'select pg_backend_pid()') as t(pid int);
+  perform dblink_send_query('pa', p_call_sql);
+  waited := false;
+  err_state := 'none';
+  err_msg := 'the CALL did not fail';
+  for i in 1 .. 400 loop
+    if exists (select 1 from pg_locks where pid = v_pid and relation = p_rel
+                  and mode = 'AccessExclusiveLock' and not granted) then
+      waited := true;
+      exit;
+    end if;
+    perform pg_sleep(0.01);
+  end loop;
+  perform dblink_exec('pw', 'commit');
+  begin
+    perform * from dblink_get_result('pa') as t(r text);
+  exception when others then
+    err_state := sqlstate;
+    err_msg := sqlerrm;
+  end;
+  perform dblink_disconnect('pa');
+  perform dblink_disconnect('pw');
+end
+$f$;
 
 set timezone = 'UTC';
 create schema elsewhere;
@@ -32,27 +77,31 @@ insert into public.rn select g, now() - (g || ' days')::interval from generate_s
 insert into public.mv select g, now() - (g || ' days')::interval from generate_series(1, 12) g;
 insert into public.gone select g, now() - (g || ' days')::interval from generate_series(1, 5) g;
 insert into public.ab select g, now() - (g || ' days')::interval from generate_series(1, 7) g;
--- past any bound: phase 2's VALIDATE fails on each
-insert into public.rn values (100, now() + interval '3 months');
-insert into public.mv values (100, now() + interval '3 months');
-insert into public.gone values (100, now() + interval '3 months');
-insert into public.ab values (100, now() + interval '3 months');
 
-select dblink_connect('a', 'dbname=' || current_database());
-select dblink_exec('a', $$set timezone = 'UTC'$$);
-select throws_ok($$ select dblink_exec('a', $c$ call pgpm.transmute('public.rn', 'ts', interval '1 day') $c$) $$,
-  '23514', 'check constraint "pgpm_monolith_bound" of relation "rn" is violated by some row',
+select * from pg_temp.phase2_stray('public.rn', $$insert into public.rn values (100, now() + interval '3 months')$$,
+  $$call pgpm.transmute('public.rn', 'ts', interval '1 day')$$) \gset rn_
+select * from pg_temp.phase2_stray('public.mv', $$insert into public.mv values (100, now() + interval '3 months')$$,
+  $$call pgpm.transmute('public.mv', 'ts', interval '1 day')$$) \gset mv_
+select * from pg_temp.phase2_stray('public.gone', $$insert into public.gone values (100, now() + interval '3 months')$$,
+  $$call pgpm.transmute('public.gone', 'ts', interval '1 day')$$) \gset gone_
+select * from pg_temp.phase2_stray('public.ab', $$insert into public.ab values (100, now() + interval '3 months')$$,
+  $$call pgpm.transmute('public.ab', 'ts', interval '1 day')$$) \gset ab_
+select is(array[:'rn_waited', :'mv_waited', :'gone_waited', :'ab_waited']::boolean[], array[true, true, true, true],
+  'LIVENESS: each stray''s writer committed while its conversion waited on phase 1''s lock, before any VALIDATE');
+select is(:'rn_err_state' || ': ' || :'rn_err_msg', '23514: check constraint "pgpm_monolith_bound" of relation "rn" is violated by some row',
   'LIVENESS: rn''s conversion fails in phase 2');
-select throws_ok($$ select dblink_exec('a', $c$ call pgpm.transmute('public.mv', 'ts', interval '1 day') $c$) $$,
-  '23514', 'check constraint "pgpm_monolith_bound" of relation "mv" is violated by some row',
+select is(:'mv_err_state' || ': ' || :'mv_err_msg', '23514: check constraint "pgpm_monolith_bound" of relation "mv" is violated by some row',
   'LIVENESS: mv''s conversion fails in phase 2');
-select throws_ok($$ select dblink_exec('a', $c$ call pgpm.transmute('public.gone', 'ts', interval '1 day') $c$) $$,
-  '23514', 'check constraint "pgpm_monolith_bound" of relation "gone" is violated by some row',
+select is(:'gone_err_state' || ': ' || :'gone_err_msg', '23514: check constraint "pgpm_monolith_bound" of relation "gone" is violated by some row',
   'LIVENESS: gone''s conversion fails in phase 2');
-select throws_ok($$ select dblink_exec('a', $c$ call pgpm.transmute('public.ab', 'ts', interval '1 day') $c$) $$,
-  '23514', 'check constraint "pgpm_monolith_bound" of relation "ab" is violated by some row',
+select is(:'ab_err_state' || ': ' || :'ab_err_msg', '23514: check constraint "pgpm_monolith_bound" of relation "ab" is violated by some row',
   'LIVENESS: ab''s conversion fails in phase 2');
-select dblink_disconnect('a');
+select is((select string_agg(t, ',') from (select 'rn' from public.rn r join pgpm.transmute_inflight i on i.parent_table = 'public.rn'::regclass where r.id = 100 and r.ts >= i.hi::timestamptz
+                                            union all select 'mv' from public.mv r join pgpm.transmute_inflight i on i.parent_table = 'public.mv'::regclass where r.id = 100 and r.ts >= i.hi::timestamptz
+                                            union all select 'gone' from public.gone r join pgpm.transmute_inflight i on i.parent_table = 'public.gone'::regclass where r.id = 100 and r.ts >= i.hi::timestamptz
+                                            union all select 'ab' from public.ab r join pgpm.transmute_inflight i on i.parent_table = 'public.ab'::regclass where r.id = 100 and r.ts >= i.hi::timestamptz) w(t)),
+  'rn,mv,gone,ab',
+  'LIVENESS: each table holds its committed stray, id 100, past the hi its claim recorded (the bound was computed without it)');
 
 select 'public.rn'::regclass::oid as rn_oid, 'public.mv'::regclass::oid as mv_oid,
        'public.gone'::regclass::oid as gone_oid, 'public.ab'::regclass::oid as ab_oid \gset

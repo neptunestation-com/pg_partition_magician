@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **A `time`-kind `transmute` accounts for a future-dated row before anything is committed** (#668). The
+  monolith's `hi` was the grid boundary above `now()` and nothing compared the column's maximum with it, so
+  a table holding one row dated past that boundary committed the write-rejecting bound and the claim in
+  phase 1 and then failed phase 2's `VALIDATE` with a raw 23514. The time kind now takes the newer of the
+  maximum and the clock as its frontier, as uuidv7 and text_time do, under the same one-step-plus-one-hour
+  refusal and `p_force_frontier` override, and refuses an `infinity` maximum outright. tests/112, 128 and
+  140, which built their half-converted state on exactly that failure, now commit their stray row from a
+  second session after the conversion read the maximum, with a witness on the ordering.
+  `bench/transmute_future_maximum.sh` runs tests/178 against the mutation `transmute_time_frontier_clock_only`.
 - **`archive.to_s3`'s three loud edges are refused up front or cleaned up** (#636). `archive.configure`
   refused only a `p_part_bytes` of zero or less (#594), so a positive size under 5 MiB, S3's minimum for
   a non-final multipart part, was stored and every export of more than one part uploaded all of them and

@@ -28,15 +28,59 @@
 create extension if not exists pgtap;
 create extension if not exists dblink;
 
-select plan(35);
+select plan(39);
+
+-- phase2_stray(rel, row_sql, call_sql, tz): make call_sql fail in phase 2 on a stray row, deterministically
+-- (#668). transmute now reads the table's maximum and refuses or covers a future-dated row before phase 1,
+-- so a stray already in the table no longer reaches VALIDATE. One that is committed AFTER that read does:
+-- session pw inserts row_sql and holds it uncommitted (its ROW EXCLUSIVE lock blocks phase 1's ADD), session
+-- pa starts call_sql, which reads the maximum without seeing the row and then waits on phase 1's ACCESS
+-- EXCLUSIVE; once pa is seen waiting, pw commits, the ADD ... NOT VALID proceeds without checking existing
+-- rows, and phase 2's VALIDATE finds the row. Returns whether pa was seen waiting when pw committed (the
+-- ordering witness: nothing of phase 1 had run yet, so VALIDATE could only come after the commit) and the
+-- error pa's CALL ended with. The poll reads pg_locks only, which takes no lock on the table.
+create function pg_temp.phase2_stray(p_rel regclass, p_row_sql text, p_call_sql text, p_tz text default 'UTC',
+                                     out waited boolean, out err_state text, out err_msg text)
+language plpgsql as $f$
+declare v_pid int;
+begin
+  perform dblink_connect('pw', 'dbname=' || current_database());
+  perform dblink_exec('pw', 'begin');
+  perform dblink_exec('pw', p_row_sql);
+  perform dblink_connect('pa', 'dbname=' || current_database());
+  perform dblink_exec('pa', format('set timezone = %L', p_tz));
+  select pid into v_pid from dblink('pa', 'select pg_backend_pid()') as t(pid int);
+  perform dblink_send_query('pa', p_call_sql);
+  waited := false;
+  err_state := 'none';
+  err_msg := 'the CALL did not fail';
+  for i in 1 .. 400 loop
+    if exists (select 1 from pg_locks where pid = v_pid and relation = p_rel
+                  and mode = 'AccessExclusiveLock' and not granted) then
+      waited := true;
+      exit;
+    end if;
+    perform pg_sleep(0.01);
+  end loop;
+  perform dblink_exec('pw', 'commit');
+  begin
+    perform * from dblink_get_result('pa') as t(r text);
+  exception when others then
+    err_state := sqlstate;
+    err_msg := sqlerrm;
+  end;
+  perform dblink_disconnect('pa');
+  perform dblink_disconnect('pw');
+end
+$f$;
 
 -- ============================ A. phase 2 fails; abort; clean re-run ============================
--- The stray row 10 days out sits past the bound the conversion computes from now(), so phase 1's
--- ADD ... NOT VALID succeeds and phase 2's VALIDATE fails. Composite key, ON DELETE CASCADE.
+-- The stray row 10 days out sits past the bound the conversion computes from now(), and is committed by
+-- another session only after the conversion has read the table's maximum (phase2_stray, above), so phase
+-- 1's ADD ... NOT VALID succeeds and phase 2's VALIDATE fails. Composite key, ON DELETE CASCADE.
 create table public.pf (id bigint not null, created_at timestamptz not null, payload text,
                         primary key (id, created_at));
 insert into public.pf select g, now() - (g || ' hours')::interval, 'x' from generate_series(1, 100) g;
-insert into public.pf values (5000, now() + interval '10 days', 'stray');
 create table public.pf_child (cid bigint primary key, p_id bigint not null, p_at timestamptz not null,
   constraint pf_child_fk foreign key (p_id, p_at) references public.pf (id, created_at) on delete cascade);
 -- asymmetric: two children of parent 1, one each of parents 2 and 3, so a cascade can be told from a
@@ -46,11 +90,15 @@ insert into public.pf_child select 12, id, created_at from public.pf where id = 
 insert into public.pf_child select 21, id, created_at from public.pf where id = 2;
 insert into public.pf_child select 31, id, created_at from public.pf where id = 3;
 
-select throws_ok(
-  $$ select dblink_exec('dbname=' || current_database(),
-       $c$ call pgpm.transmute('public.pf', 'created_at', interval '1 day', p_incoming_fks => 'preserve') $c$) $$,
-  '23514', 'check constraint "pgpm_monolith_bound" of relation "pf" is violated by some row',
+select * from pg_temp.phase2_stray('public.pf', $$insert into public.pf values (5000, now() + interval '10 days', 'stray')$$,
+  $$call pgpm.transmute('public.pf', 'created_at', interval '1 day', p_incoming_fks => 'preserve')$$) \gset pf_
+select is(:'pf_waited'::boolean, true,
+  'A LIVENESS: the stray''s writer committed while the conversion waited on phase 1''s lock, before any VALIDATE');
+select is(:'pf_err_state' || ': ' || :'pf_err_msg', '23514: check constraint "pgpm_monolith_bound" of relation "pf" is violated by some row',
   'A: the conversion fails in phase 2, on the stray');
+select ok(exists (select 1 from public.pf r join pgpm.transmute_inflight i on i.parent_table = 'public.pf'::regclass
+                   where r.id = 5000 and r.created_at >= i.hi::timestamptz),
+  'A LIVENESS: the stray is committed, past the hi the claim recorded (the bound was computed without it)');
 
 select ok(exists (select 1 from pg_constraint
                    where conrelid = 'public.pf'::regclass and conname = 'pgpm_monolith_bound'
@@ -187,16 +235,19 @@ select is(pgpm.restore_incoming_fks('public.pfl'), 1, 'B: and restore_incoming_f
 create table public.pfr (id bigint not null, created_at timestamptz not null, payload text,
                          primary key (id, created_at));
 insert into public.pfr select g, now() - (g || ' hours')::interval, 'x' from generate_series(1, 100) g;
-insert into public.pfr values (5000, now() + interval '10 days', 'stray');
 create table public.pfr_child (cid bigint primary key, p_id bigint not null, p_at timestamptz not null,
   constraint pfr_child_fk foreign key (p_id, p_at) references public.pfr (id, created_at) on delete cascade);
 insert into public.pfr_child select 11, id, created_at from public.pfr where id = 1;
 
-select throws_ok(
-  $$ select dblink_exec('dbname=' || current_database(),
-       $c$ call pgpm.transmute('public.pfr', 'created_at', interval '1 day', p_incoming_fks => 'preserve') $c$) $$,
-  '23514', 'check constraint "pgpm_monolith_bound" of relation "pfr" is violated by some row',
+select * from pg_temp.phase2_stray('public.pfr', $$insert into public.pfr values (5000, now() + interval '10 days', 'stray')$$,
+  $$call pgpm.transmute('public.pfr', 'created_at', interval '1 day', p_incoming_fks => 'preserve')$$) \gset pfr_
+select is(:'pfr_waited'::boolean, true,
+  'C LIVENESS: the stray''s writer committed while the conversion waited on phase 1''s lock, before any VALIDATE');
+select is(:'pfr_err_state' || ': ' || :'pfr_err_msg', '23514: check constraint "pgpm_monolith_bound" of relation "pfr" is violated by some row',
   'C: the conversion fails in phase 2, on the stray');
+select ok(exists (select 1 from public.pfr r join pgpm.transmute_inflight i on i.parent_table = 'public.pfr'::regclass
+                   where r.id = 5000 and r.created_at >= i.hi::timestamptz),
+  'C LIVENESS: the stray is committed, past the hi the claim recorded (the bound was computed without it)');
 select is((select confrelid::regclass::text from pg_constraint
             where conrelid = 'public.pfr_child'::regclass and conname = 'pfr_child_fk' and contype = 'f'),
   'pfr', 'C: the incoming FK is still on the referencing table');
