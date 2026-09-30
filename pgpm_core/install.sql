@@ -322,6 +322,11 @@ create table if not exists pgpm.transmute_inflight (
   -- so it has to reuse this too, whatever zone the resuming session runs in; null on a claim recorded
   -- before the column existed, which a resume reads as "keep this session's zone", the old behaviour.
   partition_tz  text,
+  -- #628: the control column lo and hi were computed on (and the pgpm_monolith_bound CHECK constrains), by
+  -- attribute number so a rename between attempts is still the same column. A resume on another column is
+  -- refused; null on a claim recorded before the column existed, which a resume reads as "not checked",
+  -- the old behaviour.
+  control_attnum smallint,
   started_at    timestamptz not null default now(),
   owner_pid           int,
   owner_backend_start timestamptz
@@ -332,6 +337,7 @@ create table if not exists pgpm.transmute_inflight (
 alter table pgpm.transmute_inflight add column if not exists owner_pid int;
 alter table pgpm.transmute_inflight add column if not exists owner_backend_start timestamptz;
 alter table pgpm.transmute_inflight add column if not exists partition_tz text;
+alter table pgpm.transmute_inflight add column if not exists control_attnum smallint;
 
 -- Is the session that claimed a conversion still alive? (#405)
 --
@@ -4576,6 +4582,7 @@ declare
   v_monolith name; v_monreg regclass;
   v_tz text;   -- #455: the zone the grid is computed in, recorded in config.partition_tz
   v_claim_tz text;   -- #506: the zone recorded with the claim, which a resume adopts along with the bound
+  v_claim_attnum smallint;   -- #628: the control column recorded with the claim, which a resume must match
   v_frontier_native text; v_min_raw text; v_max_raw text; v_min_native text; v_lo_native text; v_hi_native text;
   v_max_ts timestamptz; v_skew_limit timestamptz;   -- #457: the decoded data maximum and how far ahead of now() it may sit
   -- #277: everything CREATE TABLE ... LIKE does NOT carry, captured before the rename and replayed onto
@@ -5234,8 +5241,8 @@ begin
   -- we are about to record; a recycled pid with an older backend_start fails the match and is caught by
   -- the first arm instead, because its owner is dead.
   insert into pgpm.transmute_inflight (parent_table, nsp, rel, control_kind, lo, hi, partition_tz,
-                                       owner_pid, owner_backend_start)
-  values (p_parent, v_nsp, v_rel, p_control_kind, v_lo_native, v_hi_native, v_tz,
+                                       control_attnum, owner_pid, owner_backend_start)
+  values (p_parent, v_nsp, v_rel, p_control_kind, v_lo_native, v_hi_native, v_tz, v_ctl_attnum,
           pg_backend_pid(), (select backend_start from pg_stat_activity where pid = pg_backend_pid()))
       on conflict (parent_table) do update
          set owner_pid           = excluded.owner_pid,
@@ -5243,7 +5250,8 @@ begin
        where not pgpm._session_alive(transmute_inflight.owner_pid, transmute_inflight.owner_backend_start)
           or (transmute_inflight.owner_pid = excluded.owner_pid
               and transmute_inflight.owner_backend_start = excluded.owner_backend_start)
-  returning lo, hi, partition_tz, (xmax <> 0) into v_lo_native, v_hi_native, v_claim_tz, v_resumed;
+  returning lo, hi, partition_tz, control_attnum, (xmax <> 0)
+       into v_lo_native, v_hi_native, v_claim_tz, v_claim_attnum, v_resumed;
 
   if not found then
     raise exception 'pg_partition_magician: a transmute of % is already in progress in another session', p_parent;
@@ -5262,6 +5270,24 @@ begin
   -- zone. A claim recorded before the column existed carries null and keeps this session's zone.
   if v_resumed then
     v_tz := coalesce(v_claim_tz, v_tz);
+  end if;
+  -- #628: and the bound has to be on the column THIS call partitions by. The claim records the bound and
+  -- its zone, and #574's check below holds a resume to its grid, but it did not record the column: a
+  -- re-run on another column took the claim over, skipped phase 1 (a constraint by that name exists) and
+  -- phase 2 (it is validated), and partitioned by the new column: the CHECK is on the old one, so it does
+  -- not imply the new partition bound, and the cutover's ATTACH scanned the whole table under ACCESS
+  -- EXCLUSIVE, the outage the phase split exists to avoid (or failed there, on a row outside the old
+  -- column's bound).
+  -- Compared by attribute number, the identity the CHECK itself holds: a column renamed between attempts
+  -- is still the column the bound constrains and resumes. A claim recorded before the column existed
+  -- carries null and is not checked. Still the first transaction: the raise rolls the take-over back.
+  if v_resumed and v_claim_attnum is not null and v_claim_attnum is distinct from v_ctl_attnum then
+    raise exception 'pg_partition_magician: cannot resume the transmute of % on %: the bound [%, %) an earlier attempt recorded (and put in the pgpm_monolith_bound CHECK) is on %, and a CHECK on another column cannot certify a partition bound on this one, so the cutover would scan the whole table under ACCESS EXCLUSIVE. Re-run on the column of the attempt that recorded the bound, or call pgpm.transmute_abort(%) to drop the bound and start over.',
+      p_parent, quote_ident(p_control), v_lo_native, v_hi_native,
+      coalesce((select quote_ident(a.attname) from pg_attribute a
+                 where a.attrelid = p_parent and a.attnum = v_claim_attnum and not a.attisdropped),
+               'a column since dropped'),
+      p_parent;
   end if;
   -- #574: and the bound has to lie on the grid THIS call registers. The claim records the bound and its
   -- zone but not the step and anchor it was computed on, and a re-run given another step reused the bound

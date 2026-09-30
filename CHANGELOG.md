@@ -368,6 +368,17 @@
   and a calendar one. `tests/154_regrain_step_positive_test.sql` pins every refusal to its message on an
   id and a time grid beside a valid step each entry accepts; `bench/regrain_step_positive.sh` drives it
   against the `regrain_step_sign_unchecked` mutation, which `./test.sh discriminate` requires it to fail.
+- **A resumed `transmute` refuses a control column other than the one its recorded bound is on** (#628).
+  The claim a failed attempt leaves records the bound and its zone, and #574 holds a resume to its grid, but
+  it did not record the control column, so a re-run on another column took the claim over, skipped phases 1 and 2 because a
+  validated `pgpm_monolith_bound` already existed, and partitioned by the new column: the `CHECK` is on the
+  old one and does not imply the new partition bound, so the cutover's `ATTACH` scanned the whole table under
+  `ACCESS EXCLUSIVE` (or failed there on a row outside the old column's bound). `pgpm.transmute_inflight`
+  gains `control_attnum`, and a resume on a different column is refused before anything is committed, naming
+  both columns, with the claim and its bound left as they were. The column is compared by attribute number,
+  the identity the `CHECK` holds, so the same column renamed in between still resumes; a claim recorded
+  before the column existed is not checked. `tests/182` fails a cutover on `a` and re-runs it on `b` and on
+  `a` renamed; `bench/transmute_resume_control_column.sh` runs it against `transmute_resume_any_column`.
 - **A resumed `transmute` refuses a step or anchor its recorded bound is not on** (#574). The claim a
   failed attempt leaves records the bound (and its zone) but not the step and anchor it was computed on,
   so a re-run with another step reused the bound and registered the new step. The recorded `hi` was not
