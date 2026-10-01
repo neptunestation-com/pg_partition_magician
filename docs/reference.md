@@ -506,8 +506,10 @@ pgpm.from_hypertable_copy(p_hypertable regclass, p_control name, p_track_changes
 
 Phase 1: build the plain destination (`<rel>_pgpm_dest`) and bulk-copy the existing chunks into it online, one
 chunk-range per transaction, clustered by the control column. The source keeps serving traffic. Run this, let
-the workload continue, then run `from_hypertable_cutover` when ready. Each chunk's bounds are applied in the
-dimension's own type (`timestamptz`, `timestamp` without time zone, or `date`), so the copy is exact under any
+the workload continue, then run `from_hypertable_cutover` when ready. The destination takes the source's
+columns, defaults and `CHECK` constraints as they stand now; schema changes to the hypertable before the
+cutover make it refuse (see `from_hypertable_cutover`), so re-run this after one. Each chunk's bounds are
+applied in the dimension's own type (`timestamptz`, `timestamp` without time zone, or `date`), so the copy is exact under any
 session `TimeZone`; a hypertable on a dimension of any other type is refused here.
 
 - `p_track_changes` -- capture in-flight **updates, deletes and out-of-order appends**, not just in-order
@@ -638,12 +640,14 @@ the copy (append-only, or a full delta replay when `from_hypertable_copy` ran wi
 destination hold the same number of rows** (below), drop the hypertable, rename the copy
 into place, **adopt** the pre-built unique indexes as the original `PRIMARY KEY`/`UNIQUE` constraints
 (`ALTER TABLE ... USING INDEX`, metadata-only) and rename the secondary indexes back to their original names,
-re-add the identity columns (which `CREATE TABLE LIKE` does not carry), then hand off to `transmute`. Because
+re-add the identity columns (which `CREATE TABLE LIKE` does not carry) in the kind they had on the source
+(`ALWAYS` or `BY DEFAULT`) and with their sequences' options (`INCREMENT BY`, `MINVALUE`/`MAXVALUE`,
+`START WITH`, `CACHE`, `CYCLE`), then hand off to `transmute`. Because
 the index builds happen before the lock, the blocking window is the catch-up, one `count(*)` over the source,
 and metadata: the count is the only step in it that reads the whole table, and it is a read, not a rebuild.
 It also preserves each identity
-sequence's exact position: the re-added identity is set to the source sequence's next value inside the swap,
-so ids the source had already moved past (gaps from rollbacks, caching, or deleted high rows) are not
+sequence's exact position: the re-added identity is set to the source sequence's next value (its last value
+plus its own increment, so on the same lattice) inside the swap, so ids the source had already moved past (gaps from rollbacks, caching, or deleted high rows) are not
 re-issued, and `transmute` seeds the migrated sequence from it. The swap is one transaction: it
 commits whole or rolls back whole, leaving the source intact on any failure in it. Requires `from_hypertable_copy`
 to have run (the destination must exist). Parameters past `p_interval` pass through to `transmute`.
@@ -709,6 +713,19 @@ whole, with the source untouched. The probes are proportional to the rows writte
 to the table. A delta built by an earlier release carries no horizon, and the cutover then verifies every
 source row. On a chunk compressed before the copy, only the rows written to it since are probed, and a
 chunk compressed during the window is verified in full.
+
+**The cutover refuses a copy whose shape is no longer the source's.** `from_hypertable_copy` fixed the
+destination's columns, defaults and `CHECK` constraints when it ran, so a schema change to the hypertable
+since (a column dropped or added, a default changed, a `CHECK` added) would be reverted by the swap. The
+cutover compares the two before the pre-drain and again under its lock (the source is unlocked until then, so
+DDL can land while it prepares): the set of columns, each column's type, `NOT NULL`, collation and default or
+generation expression, the `CHECK` constraints by name and definition, and the column order. Identity, keys
+and indexes are not compared, because the cutover rebuilds them from the source under the lock. On any
+difference it raises `pg_partition_magician: from_hypertable_cutover(...) refusing to swap: the copy ...
+no longer has the source's shape: ...`, naming every difference (for example `column v has default
+'new'::text on the source but default 'old'::text on the copy`), and rolls back whole: the source is
+untouched and still a hypertable. Re-run `from_hypertable_copy`, which rebuilds the copy in the source's
+current shape, then the cutover.
 
 **Do not rename or replace either side of the swap while the cutover is preparing.** The source's name is
 resolved once at the start, and the index pre-builds above are deliberately outside the lock, so that is the

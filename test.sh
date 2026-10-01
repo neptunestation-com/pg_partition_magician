@@ -391,6 +391,12 @@ run_timescale() {
     bash "$(dirname "$0")/bench/hypertable_index_names.sh" pgpm_test-timescale pgpm_perf136 || fail=1
     echo "--- empty-copy watermark guard (issue #736) ---"
     bash "$(dirname "$0")/bench/hypertable_empty_copy_watermark.sh" pgpm_test-timescale pgpm_perf137 || fail=1
+    # #640's and #738's guards, against the unmodified module, for the same reason. #738's PART B (DDL that
+    # lands while the cutover prepares, from a second session) is run nowhere else on correct code.
+    echo "--- cutover identity kind and options guard (issue #640) ---"
+    bash "$(dirname "$0")/bench/hypertable_cutover_identity_options.sh" pgpm_test-timescale pgpm_perf134 || fail=1
+    echo "--- cutover shape guard (issue #738) ---"
+    bash "$(dirname "$0")/bench/hypertable_cutover_shape.sh" pgpm_test-timescale pgpm_perf135 || fail=1
 
     echo "--- discriminate (timescale-scoped mutations) ---"
     bash "$(dirname "$0")/bench/discriminate.sh" --track=timescale pgpm_test-timescale || fail=1
