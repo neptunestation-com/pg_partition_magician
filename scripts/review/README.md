@@ -10,7 +10,7 @@ the two model roles.
 | `build_review_tree.sh <sha> <dir>` | 4 | the pinned commit as ONE history-less commit in a fresh repo with no remote; `bench/mutations/` removed |
 | `plant_seeds.py --tree --pristine --plan --sealed` | 4 | applies catalogue mutations and novel patches from a plan, writes the sealed record (with each seed's `side_effects`), keeps the tree at one commit |
 | `plant_seeds.py --suite --sealed --pristine --seeds-dir` | 4 | plants each sealed seed alone and runs its module's pgTAP suite against it in the harness; seals the files that caught it as `suite_caught` (empty: only reading finds it), so the record can split recall into suite-caught and read-caught |
-| `classify_claims.py --claims --review-tree --pristine-tree --sealed --out` | 6 | runs every reproduction (the verifier's `repro.verified.*` when present) against both trees in a fresh database each; classifies seed hit, candidate, not reproduced, inverted, invalid reproduction, hypothesis |
+| `classify_claims.py --claims --review-tree --pristine-tree --sealed --out` | 6 | runs every reproduction (the verifier's `repro.verified.*` when present) against both trees in a fresh database each, in the harness the claim's `install` list needs; classifies seed hit, candidate, not reproduced, inverted, invalid reproduction, invalid claim, hypothesis; `--only <id>` reads that one claim directory and needs no `--sealed` |
 | `pass_metrics.py --sealed --classified --verdicts ... --out` | 8, 10 | recall and precision before the count; writes the pass record under `docs/reviews/`, with the seed interactions to check |
 | `file_issues.py --groups --claims --verdicts --pinned --pass --out [--post]` | 10 | one issue body per root-cause group with its reproductions inline; `--post` files them, Tier 1 first, and writes `filed.json` |
 
@@ -39,8 +39,14 @@ fixed `main` re-runs the sound version.
 ```
 
 `install` lists the files to load into the fresh database before the reproduction (default: the core
-install); `fixtures: true` also loads `fixtures/demo.sql`. A claim directory without a reproduction file
-is recorded as a **hypothesis** and is never counted or filed.
+install); `fixtures: true` also loads `fixtures/demo.sql`. The harness follows `install`: a list with
+`pgpm_archive/install.sql` runs in the archive harness (`--archive-container`, default `pgpm_test-archive`),
+one with `pgpm_hypertable/install.sql` in the timescale harness (`--timescale-container`, default
+`pgpm_test-timescale`), anything else in `--container` (default `pgpm_test-15`); an optional `container`
+field overrides that. A claim directory without a reproduction file is recorded as a **hypothesis** and is
+never counted or filed; one whose `claim.json` is not valid JSON is an **invalid claim**, reported with its
+path and not run, and does not stop the run (`--only` and `--finders` never open a claim outside their
+selection at all).
 
 ## Reproduction contract
 

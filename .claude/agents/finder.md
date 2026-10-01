@@ -53,7 +53,9 @@ When the budget runs low, stop and write up rather than lower the bar.
 ## Deliverables
 
 1. Claim directories as above. `claim.json` fields: `tier`, `file`, `line`, `lens`, `scenario` (one
-   line: what happens and what should have happened), `repro`, optional `install` and `fixtures`.
+   line: what happens and what should have happened), `repro`, optional `install` and `fixtures`. The
+   harness follows `install`: a claim that installs `pgpm_archive/` or `pgpm_hypertable/` runs in that
+   module's own harness, so `container` is needed only to override that.
 2. `<claims>/<your id>/null-results.md`: for each lens, what you probed (functions, states, sequences),
    how, and that it held; then a "Hypotheses" list of suspicions without reproductions.
 3. A final message of at most ten lines: claims written (ids and tiers), lenses covered, budget used.

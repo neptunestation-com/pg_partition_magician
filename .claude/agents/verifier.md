@@ -20,9 +20,19 @@ claim fall.
 
 ## Procedure
 
-1. **Re-run it yourself** with `scripts/review/classify_claims.py --only <id>` from the pristine
-   checkout, or by hand against a fresh database in the container. If it does not fail on the pristine
-   commit for you, the verdict is `fell` with the reason.
+1. **Re-run it yourself** from the pristine checkout with the classifier, exactly as the coordinator's
+   brief gives it (the paths are the brief's; nothing else is needed, and no `--sealed`: attribution is
+   not needed for one candidate, and the sealed record is not yours to read):
+
+   ```bash
+   scripts/review/classify_claims.py --claims <claims dir> --review-tree <review tree> --pristine-tree . \
+     --only <id> --out <verdict dir>/<id>.classified.json
+   ```
+
+   `--only` names the claim's directory. The container follows the claim's install list (an archive claim
+   runs in the archive harness, a hypertable claim in the timescale one) unless its `claim.json` names
+   one. Or run the reproduction by hand against a fresh database in that container. If it does not fail on
+   the pristine commit for you, the verdict is `fell` with the reason.
 2. **Read the code the claim points at** in the pristine commit, and the documentation for it
    (`docs/reference.md`, `docs/guide.md`, `docs/runbook.md`, the function's own comments). Ask, in
    order:
