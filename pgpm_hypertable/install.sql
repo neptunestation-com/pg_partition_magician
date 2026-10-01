@@ -247,6 +247,96 @@ exception when others then
     p_hypertable, p_interval, regexp_replace(sqlerrm, '^pg_partition_magician: ', '');
 end $$;
 
+-- _from_hypertable_shape_diff: how the copy's shape differs from the source's, or null when it does not
+-- (issue #738). from_hypertable_copy fixes the destination's shape once, by CREATE TABLE ... LIKE, and the
+-- documented two-phase flow lets the workload run on between the copy and the cutover. DDL on the live
+-- hypertable in that window (a column dropped, a default changed, a CHECK added) changed only the source,
+-- and the swap renamed the stale copy into its place: the dropped column came back holding its old values,
+-- the default reverted and the CHECK was gone, all silently, because the cutover read its column list and
+-- its conservation fingerprint from the source alone. Compared here: the set of columns, and for each
+-- column its type, NOT NULL, collation and default or generation expression; the CHECK constraints by name
+-- and definition; and the column order, when the sets agree. NOT VALID is not compared, because LIKE copies
+-- a NOT VALID check as validated (the copy's rows were checked as they were inserted). Not compared,
+-- because the cutover carries them from the source under its lock: identity (re-added from the source),
+-- the primary and unique keys and the secondary indexes (rebuilt from the source's). Both sides are
+-- rendered by this one call, so an expression reads the same on both whatever the search_path.
+create or replace function pgpm._from_hypertable_shape_diff(p_src regclass, p_dest regclass)
+returns text language sql stable as $$
+  with cols as (
+    select a.attrelid as rel, a.attnum, a.attname::text as col,
+           format_type(a.atttypid, a.atttypmod) as typ,
+           case when a.attnotnull then 'NOT NULL' else 'nullable' end as nn,
+           coalesce((select 'collation ' || quote_ident(c.collname) from pg_collation c where c.oid = a.attcollation),
+                    'no collation') as coll,
+           case when a.attgenerated = 's' then 'generated always as (' || pg_get_expr(d.adbin, d.adrelid) || ') stored'
+                else coalesce('default ' || pg_get_expr(d.adbin, d.adrelid), 'no default') end as dflt
+      from pg_attribute a
+      left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
+     where a.attrelid in (p_src, p_dest) and a.attnum > 0 and not a.attisdropped),
+  s as (select * from cols where rel = p_src),
+  d as (select * from cols where rel = p_dest),
+  ck as (
+    select c.conrelid as rel, c.conname::text as name,
+           regexp_replace(pg_get_constraintdef(c.oid), ' NOT VALID$', '') as def
+      from pg_constraint c where c.conrelid in (p_src, p_dest) and c.contype = 'c'),
+  diffs (k, o, msg) as (
+    select 1, s.col, format('column %I is on the source but not on the copy', s.col)
+      from s where not exists (select 1 from d where d.col = s.col)
+    union all
+    select 1, d.col, format('column %I is on the copy but no longer on the source', d.col)
+      from d where not exists (select 1 from s where s.col = d.col)
+    union all
+    select 2, s.col, format('column %I has type %s on the source but %s on the copy', s.col, s.typ, d.typ)
+      from s join d using (col) where s.typ <> d.typ
+    union all
+    select 2, s.col, format('column %I is %s on the source but %s on the copy', s.col, s.nn, d.nn)
+      from s join d using (col) where s.nn <> d.nn
+    union all
+    select 2, s.col, format('column %I has %s on the source but %s on the copy', s.col, s.coll, d.coll)
+      from s join d using (col) where s.coll <> d.coll
+    union all
+    select 2, s.col, format('column %I has %s on the source but %s on the copy', s.col, s.dflt, d.dflt)
+      from s join d using (col) where s.dflt <> d.dflt
+    union all
+    select 3, cs.name, format('CHECK %I (%s) is on the source but not on the copy', cs.name, cs.def)
+      from ck cs where cs.rel = p_src
+       and not exists (select 1 from ck cd where cd.rel = p_dest and cd.name = cs.name)
+    union all
+    select 3, cd.name, format('CHECK %I is on the copy but no longer on the source', cd.name)
+      from ck cd where cd.rel = p_dest
+       and not exists (select 1 from ck cs where cs.rel = p_src and cs.name = cd.name)
+    union all
+    select 3, cs.name, format('CHECK %I is %s on the source but %s on the copy', cs.name, cs.def, cd.def)
+      from ck cs join ck cd on cd.name = cs.name and cd.rel = p_dest
+     where cs.rel = p_src and cs.def <> cd.def
+    union all
+    select 4, '', format('the columns are in a different order (source: %s; copy: %s)',
+                         (select string_agg(quote_ident(col), ', ' order by attnum) from s),
+                         (select string_agg(quote_ident(col), ', ' order by attnum) from d))
+     where (select array_agg(col order by col) from s) = (select array_agg(col order by col) from d)
+       and (select array_agg(col order by attnum) from s) <> (select array_agg(col order by attnum) from d))
+  select string_agg(msg, '; ' order by k, o, msg) from diffs;
+$$;
+
+-- _from_hypertable_check_shape: refuse the swap when the copy's shape is not the source's (issue #738).
+-- Called twice by the cutover. First up front, before the pre-drain or the index pre-builds spend anything,
+-- which catches DDL made before the call and names it (a column added since the copy would otherwise die
+-- raw in the pre-lock reads of the copy, which name it). Then again under the swap's ACCESS EXCLUSIVE on
+-- both relations, which is the call that decides: the source is unlocked until then, and DDL can land at
+-- any point before it.
+-- Refusing rather than adapting, because the copy's rows were written in the old shape and only a fresh
+-- copy can say what they are in the new one.
+create or replace function pgpm._from_hypertable_check_shape(p_hypertable regclass, p_dest regclass)
+returns void language plpgsql stable as $$
+declare v_diff text;
+begin
+  v_diff := pgpm._from_hypertable_shape_diff(p_hypertable, p_dest);
+  if v_diff is not null then
+    raise exception 'pg_partition_magician: from_hypertable_cutover(%) refusing to swap: the copy % no longer has the source''s shape: %. from_hypertable_copy fixed the copy''s columns, defaults and CHECK constraints when it ran, so the swap would put that shape back, reverting the DDL run on the hypertable since. Nothing was dropped and the source is whole. Re-run from_hypertable_copy, which rebuilds the copy in the source''s current shape, then the cutover.',
+      p_hypertable, p_dest, v_diff;
+  end if;
+end $$;
+
 -- from_hypertable_preflight: the refusal checks, factored out so they are callable on their own (a
 -- dry-run gate) and unit-testable inside a transaction. Raises a pgpm-prefixed error on any blocker;
 -- returns normally when the hypertable is migratable by this version (with a NOTICE estimating the disk).
@@ -871,8 +961,8 @@ declare
   v_watermark timestamptz; v_orig regclass; k record;
   v_delta name; v_trgfn name; v_track boolean; v_keycols_q text; v_dkey_q text; v_skey_q text; v_subsel_q text;
   v_ctl_type text; v_min_ctl text; v_max_ctl text;
-  v_ident_cols name[]; v_ident_next bigint[]; v_srcseq text; v_srcnext bigint;
-  v_pseq_q text; v_curnext bigint; v_i int;
+  v_ident_cols name[]; v_ident_kinds text[]; v_ident_opts text[]; v_ident_next numeric[]; v_srcseq regclass;
+  v_pseq regclass; v_i int;
   v_tmp text; v_key_names text[]; v_key_types text[]; v_key_tmps text[]; v_idx_orig text[]; v_idx_tmps text[];
   v_in_names text[];     -- incoming FKs the swap dropped and recorded (#264, #563)
   v_dest_oid regclass;   -- which relation the destination check found, re-verified under lock (#422)
@@ -920,6 +1010,9 @@ begin
     raise exception 'pg_partition_magician: from_hypertable_cutover(%) found no copy to cut over -- run from_hypertable_copy first',
       p_hypertable;
   end if;
+  -- #738: the copy's shape against the source's, up front, so DDL made since the copy is refused by name
+  -- before the pre-drain and the index pre-builds spend anything. Asked again under the lock below.
+  perform pgpm._from_hypertable_check_shape(p_hypertable, v_dest_oid);
   -- auto-detect change tracking: the copy phase leaves a <rel>_pgpm_delta table iff p_track_changes was set,
   -- so the two phases cannot disagree about the catch-up mode (no matching flag to pass through).
   v_delta := v_rel || '_pgpm_delta';
@@ -1081,6 +1174,10 @@ begin
       p_hypertable, quote_ident(v_nsp), quote_ident(v_dest), v_dest_oid::oid,
       coalesce(to_regclass(format('%I.%I', v_nsp, v_dest))::oid::text, 'nothing'), quote_ident(v_rel);
   end if;
+  -- THE SHAPE, UNDER THE LOCK (#738). The check up front saw the source as it was then, and the source has
+  -- been unlocked from there to here (the pre-drain's commits, the index pre-builds), so DDL can have landed
+  -- in between. Both relations are frozen now, and the column list read at the top must still describe both.
+  perform pgpm._from_hypertable_check_shape(p_hypertable, v_dest_oid);
   if v_track then
     -- change-tracking catch-up: reconcile every touched key against the now-frozen source. Delete each
     -- dirty key's copied version from the destination, then re-insert its current source row -- which is
@@ -1277,22 +1374,22 @@ begin
   -- (the key constraints + secondary indexes were captured and pre-built on the destination above, before
   -- the lock; the swap below only adopts/renames them -- metadata-only.)
   -- identity columns: CREATE TABLE (LIKE ...) does NOT carry identity, so the destination's column is a
-  -- plain (already-populated) column. Capture which columns were identity on the source so we can re-add
-  -- the property after the rename. Also capture each source sequence's NEXT value: transmute only reseeds
-  -- the new sequence past max(id), but a source sequence can sit AHEAD of max(id) (rolled-back inserts,
-  -- sequence caching, deleted high rows), so we advance the migrated sequence to the source's position
-  -- after the handoff -- otherwise those skipped-over ids would be handed back out. (transmute normalises
-  -- identity to GENERATED BY DEFAULT, so we re-add it that way to match the end state regardless of kind.)
-  for k in select attname from pg_attribute
+  -- plain (already-populated) column. Capture, under the lock, which columns are identity on the source, in
+  -- what KIND (ALWAYS or BY DEFAULT), with which sequence OPTIONS, and at which sequence position, so the
+  -- swap re-adds each one as it was (#640). It used to re-add every one BY DEFAULT with the default options
+  -- at last_value + 1: an ALWAYS column stopped refusing a supplied id, an INCREMENT BY 2 sequence stepped
+  -- by 1 from an id off its lattice, and a descending one could not be seeded at all. The same helpers carry
+  -- the same three things through transmute and untransmute (#308, #670). The position is the sequence's
+  -- own next value (_seq_next, last_value plus its INCREMENT), not max(id): a source sequence can sit AHEAD
+  -- of max(id) (rolled-back inserts, sequence caching, deleted high rows), and those ids must not be handed
+  -- back out.
+  for k in select attname, attidentity from pg_attribute
             where attrelid = p_hypertable and attidentity in ('a', 'd') and not attisdropped order by attnum loop
     v_ident_cols := array_append(v_ident_cols, k.attname);
-    v_srcseq := pg_get_serial_sequence(p_hypertable::text, k.attname::text);
-    v_srcnext := null;
-    if v_srcseq is not null then
-      execute format('select case when is_called then last_value + 1 else last_value end from %s', v_srcseq)
-        into v_srcnext;
-    end if;
-    v_ident_next := array_append(v_ident_next, v_srcnext);
+    v_ident_kinds := array_append(v_ident_kinds, k.attidentity::text);
+    v_srcseq := pg_get_serial_sequence(p_hypertable::text, k.attname::text)::regclass;
+    v_ident_opts := array_append(v_ident_opts, pgpm._identity_options(v_srcseq));
+    v_ident_next := array_append(v_ident_next, pgpm._seq_next(v_srcseq));
   end loop;
   -- OUTGOING foreign keys need no work here any more (#263). from_hypertable_copy already added them to
   -- the private destination and VALIDATED them there, off the lock; the destination then becomes the
@@ -1363,18 +1460,24 @@ begin
   for v_i in 1 .. coalesce(array_length(v_idx_orig, 1), 0) loop
     execute format('alter index %I.%I rename to %I', v_nsp, v_idx_tmps[v_i], v_idx_orig[v_i]);
   end loop;
-  -- ...at the SOURCE sequence's position, in this same transaction (#563). A freshly added identity starts
-  -- at 1, and the handoff below can still refuse after this commits; the position used to be applied only
-  -- once transmute had returned, so a refusal left the plain table reissuing 1, 2, 3 over ids it already
-  -- held (the source's key includes the time column, so nothing rejects the duplicates). transmute then
-  -- seeds the parent from this sequence, so the position survives the conversion as well.
+  -- Identity, re-added in the source's kind and with its sequence's options (#640), at the SOURCE sequence's
+  -- position, in this same transaction (#563). A freshly added identity starts at START WITH, and the
+  -- handoff below can still refuse after this commits; the position used to be applied only once transmute
+  -- had returned, so a refusal left the plain table reissuing 1, 2, 3 over ids it already held (the source's
+  -- key includes the time column, so nothing rejects the duplicates). transmute then seeds the parent from
+  -- this sequence, kind and options included, so all three survive the conversion as well. Set through
+  -- _identity_reseed, which leaves an exhausted sequence exhausted rather than failing the swap on an
+  -- out-of-range setval.
   if v_ident_cols is not null then
     for v_i in 1 .. array_length(v_ident_cols, 1) loop
-      execute format('alter table %I.%I alter column %I add generated by default as identity',
-                     v_nsp, v_rel, v_ident_cols[v_i]);
+      execute format('alter table %I.%I alter column %I add generated %s as identity %s',
+                     v_nsp, v_rel, v_ident_cols[v_i],
+                     case when v_ident_kinds[v_i] = 'a' then 'always' else 'by default' end,
+                     coalesce(v_ident_opts[v_i], ''));
       if v_ident_next[v_i] is not null then
-        v_pseq_q := pg_get_serial_sequence(format('%I.%I', v_nsp, v_rel), v_ident_cols[v_i]::text);
-        execute format('select setval(%L, %s, false)', v_pseq_q, v_ident_next[v_i]);
+        perform pgpm._identity_reseed(
+          pg_get_serial_sequence(format('%I.%I', v_nsp, v_rel), v_ident_cols[v_i]::text)::regclass,
+          v_ident_next[v_i], null, null);
       end if;
     end loop;
   end if;
@@ -1425,18 +1528,17 @@ begin
   -- preserve the source sequence's exact position. The swap already set the plain table's sequence to it
   -- (#563) and transmute seeds the parent from that sequence, so this only ever confirms it; it stays as
   -- the backstop that advances, never rewinds, the parent's sequence to the source's captured next value.
-  -- setval(..., false) makes the value the next handed out. (Re-resolve the parent by name: after
-  -- transmute, v_orig's oid is the monolith child, not the parent.)
+  -- "Advances" is in the sequence's own direction (#640): downward for a negative INCREMENT, which the swap
+  -- now carries. (Re-resolve the parent by name: after transmute, v_orig's oid is the monolith child, not
+  -- the parent.)
   if v_ident_cols is not null then
     for v_i in 1 .. array_length(v_ident_cols, 1) loop
       if v_ident_next[v_i] is not null then
-        v_pseq_q := pg_get_serial_sequence(format('%I.%I', v_nsp, v_rel), v_ident_cols[v_i]::text);
-        if v_pseq_q is not null then
-          execute format('select case when is_called then last_value + 1 else last_value end from %s', v_pseq_q)
-            into v_curnext;
-          if v_ident_next[v_i] > coalesce(v_curnext, 0) then
-            execute format('select setval(%L, %s, false)', v_pseq_q, v_ident_next[v_i]);
-          end if;
+        v_pseq := pg_get_serial_sequence(format('%I.%I', v_nsp, v_rel), v_ident_cols[v_i]::text)::regclass;
+        if v_pseq is not null
+           and sign((select seqincrement from pg_sequence where seqrelid = v_pseq))
+               * (v_ident_next[v_i] - pgpm._seq_next(v_pseq)) > 0 then
+          perform pgpm._identity_reseed(v_pseq, v_ident_next[v_i], null, null);
         end if;
       end if;
     end loop;
