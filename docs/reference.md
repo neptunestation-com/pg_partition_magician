@@ -1934,7 +1934,9 @@ zero or below (`'0'`, `'-100'`, `'0 days'`, `'-1 month'`: none moves the grid fo
 fail or churn), one whose shape the grid cannot place, by the rules `transmute` applies to a
 `partition_step` (a month count mixed with a duration such as `'1 month 1 day'` or `'1 month -40 days'`, a
 step that is not a whole number of days on a `date` column, a fractional step such as `'2.5'` on an
-`int2`/`int4`/`int8` column; a fractional step on a `numeric` column is allowed), one coarser than
+`int2`/`int4`/`int8` column, and on those columns a whole step written with a fraction such as `'10.0'`,
+whose fraction the grid would write into every bound, so the message says to write it as `'10'`; a
+fractional step on a `numeric` column is allowed), one coarser than
 `partition_step` (auto-regrain would reselect the same unsplittable child forever), and one whose fine
 names `<rel>_p<label>` would exceed PostgreSQL's 63-byte identifier limit.
 A finer step has a wider label, so a table whose monthly names fit can still be refused a daily target; the

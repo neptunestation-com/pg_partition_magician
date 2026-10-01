@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **A whole regrain target written with a fraction is refused on an integer control column** (#784).
+  `_regrain_step_shape` tested the step's value, which `'10.0'` passes, while the grid carries the step's
+  numeric scale into every bound it renders, so `set_regrain('10.0')` on a `bigint` key was stored and every
+  tick after the prepare failed creating the first fine cell (`invalid input syntax for type bigint: "0.0"`)
+  and logged `skip_regrain`, with the capture trigger left on the source. On `int2`, `int4` and `int8` a step
+  with any scale is now refused at every entry point (`set_regrain`, `regrain_step`, `regrain()`, and a tick
+  reading a target an older install stored), and the message names the spelling to use (`10`); `numeric`
+  columns are unchanged. `tests/165` asserted `'5.000'` was accepted and now asserts the refusal;
+  `tests/210` under `bench/regrain_target_step_spelling.sh`, with the mutation
+  `regrain_step_scale_on_integer`.
 - **Archived floats keep their exact value whatever `extra_float_digits` the archiving session has** (#781).
   Both NDJSON encoders (`archive._encode_upload_ndjson_single`, behind `pgpm.archive_to_s3_ndjson`, and
   `archive.to_s3`) rendered rows with `row_to_json` in the calling session, and the Parquet writer an array
