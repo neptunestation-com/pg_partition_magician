@@ -1964,6 +1964,41 @@ exception when others then
 end;
 $$;
 
+-- WHICH SCHEMA A PARTITION LIVES IN (issue #727): its own, read off the relation pgpm recorded. A
+-- partition's schema is not its parent's. ALTER TABLE <parent> SET SCHEMA moves the parent and leaves every
+-- partition where it was, and pgpm tracks the parent by oid, so the table stays managed. The lifecycle
+-- steps (the write block, the archive step, retire) used to resolve a partition as <the parent's CURRENT
+-- schema>.<child_name>, so after such a move none of them found an existing partition again: the write
+-- block was skipped as "does not exist", the archive step and retire() refused every aged partition as an
+-- identity mismatch ("oid nothing now"), and retention was wedged for good with every partition still
+-- attached under the oid pgpm recorded. Each of those steps takes its schema from here instead.
+--
+-- Only the SCHEMA comes from the anchor, never the relation. Every caller still resolves
+-- <schema>.<child_name> by name and, where it acts on what it finds, compares that against
+-- pgpm.part.child_oid, so the identity refusals (#421, #428, #429, #518) mean exactly what they did: a
+-- partition renamed aside keeps its schema, the name resolves there to whatever took it, and the step
+-- refuses. In order, when the anchor has nothing to say:
+--   child_oid           the schema of the relation pgpm recorded for this row (#421), wherever it is now.
+--   pg_inherits         an unanchored row (child_oid null: an install older than #421, or a backfill that
+--                       could not resolve it) takes the schema of the partition OF THIS PARENT that carries
+--                       the name, so a moved parent's legacy rows are reached too.
+--   the parent          a row whose relation is gone takes the parent's schema, the answer every step gave
+--                       before this, so a vanished partition is reported as the identity failure it is.
+create or replace function pgpm._child_nsp(p_parent regclass, p_child name)
+returns name language sql stable as $$
+  select coalesce(
+    (select n.nspname from pgpm.part p
+       join pg_class c on c.oid = p.child_oid
+       join pg_namespace n on n.oid = c.relnamespace
+      where p.parent_table = p_parent and p.child_name = p_child),
+    (select n.nspname from pg_inherits i
+       join pg_class c on c.oid = i.inhrelid
+       join pg_namespace n on n.oid = c.relnamespace
+      where i.inhparent = p_parent and c.relname = p_child
+      limit 1),
+    (select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent));
+$$;
+
 -- retire(): the sanctioned single-partition drop (issue #195) -- retain()'s per-partition body,
 -- public and claim-guarded, so an external assistant (e.g. an archive-then-drop scanner) or several
 -- cooperating ones can drive retirement themselves through the same protocol retain() uses: claim,
@@ -2028,7 +2063,7 @@ begin
     raise exception 'pg_partition_magician: % is not entirely past the retention horizon (hi %, horizon %)', p_child, r.hi, v_boundary;
   end if;
 
-  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+  v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #727: the partition's own schema, not the parent's
 
   -- IDENTITY, BEFORE ANY SIDE EFFECT (issues #407 and #428). Everything from here down acts on
   -- p_child by NAME -- installing the write block, deleting crossing keys, re-pointing the cron job,
@@ -2525,7 +2560,7 @@ create or replace function pgpm._install_write_block(p_parent regclass, p_child 
 returns void language plpgsql as $$
 declare v_nsp name; v_child regclass; v_now regclass; v_enabled "char"; r record;
 begin
-  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+  v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #727: the partition's own schema, not the parent's
 
   select p.lo, p.hi, p.child_oid into r
     from pgpm.part p where p.parent_table = p_parent and p.child_name = p_child;
@@ -2584,7 +2619,7 @@ create or replace function pgpm._remove_write_block(p_parent regclass, p_child n
 returns void language plpgsql as $$
 declare v_nsp name;
 begin
-  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+  v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #727: the partition's own schema, not the parent's
   execute format('drop trigger if exists pgpm_write_block on %I.%I', v_nsp, p_child);
 end;
 $$;
@@ -2661,12 +2696,12 @@ begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   v_boundary := pgpm._retain_boundary(cfg);
-  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
 
   for r in select child_name, lo, hi, child_oid from pgpm.part where parent_table = p_parent and attached
     order by hi asc
   loop
     begin
+      v_nsp := pgpm._child_nsp(p_parent, r.child_name);   -- #727: the partition's own schema, not the parent's
       v_eligible := v_boundary is not null and not pgpm._native_gt(cfg.control_kind, r.hi, v_boundary);
 
       -- identity first (#518): does the name still mean the relation pgpm recorded?
@@ -2721,16 +2756,19 @@ $$;
 -- (_install_write_block's own pg_trigger lookup), so a block in any other state is fixed in place, not
 -- stacked.
 --
--- The schema is matched by OID, never by name (#512). This used to select the parent's nspname and cast
--- it back with `::regnamespace`, whose input parses its text as an SQL identifier: a schema whose name
--- needs quoting ("Sales") was downcased, so the lookup raised `schema "sales" does not exist` on every
--- archive tick (nothing archived, the aged child never retired), or, once a lower-case twin existed,
--- silently answered for the twin's same-named child. _regrain_capture_active had the same shape.
+-- The schema is matched by OID, never parsed back out of its name (#512). This used to select the
+-- parent's nspname and cast it back with `::regnamespace`, whose input parses its text as an SQL
+-- identifier: a schema whose name needs quoting ("Sales") was downcased, so the lookup raised `schema
+-- "sales" does not exist` on every archive tick (nothing archived, the aged child never retired), or, once
+-- a lower-case twin existed, silently answered for the twin's same-named child. _regrain_capture_active
+-- had the same shape. And it is the CHILD's schema (#727), from pgpm._child_nsp, compared to pg_namespace
+-- by exact name equality, which parses nothing: a parent moved with SET SCHEMA leaves its partitions behind.
 create or replace function pgpm._is_write_blocked(p_parent regclass, p_child name)
 returns boolean language plpgsql as $$
 declare v_nsp_oid oid;
 begin
-  select c.relnamespace into v_nsp_oid from pg_class c where c.oid = p_parent;
+  -- #727: the partition's own schema, not the parent's; matched by name = name, never parsed (#512)
+  select n.oid into v_nsp_oid from pg_namespace n where n.nspname = pgpm._child_nsp(p_parent, p_child);
   return exists (
     select 1 from pg_trigger t join pg_class c on c.oid = t.tgrelid
      where t.tgname = 'pgpm_write_block' and c.relname = p_child and c.relnamespace = v_nsp_oid
@@ -2778,7 +2816,7 @@ declare cfg pgpm.config; v_nsp name; v_rows bigint; v_result pgpm.archive_result
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
-  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+  v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #727: the partition's own schema, not the parent's
   execute format('select count(*) from %I.%I where %I >= %L and %I < %L',
                  v_nsp, p_child, cfg.control_column, pgpm._encode(cfg.control_kind, p_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
                  cfg.control_column, pgpm._encode(cfg.control_kind, p_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz))
@@ -2869,7 +2907,7 @@ declare
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
-  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+  v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #727: the partition's own schema, not the parent's
   select p.lo, p.hi into v_child_lo, v_child_hi from pgpm.part p
    where p.parent_table = p_parent and p.child_name = p_child;
   if not found then raise exception 'pg_partition_magician: %.% is not a tracked partition', p_parent, p_child; end if;
@@ -3124,6 +3162,9 @@ begin
       limit %s',
     p_parent::text, p_parent::text, p_parent::text, v_ncast, coalesce(cfg.archive_batch::text, 'all'))
   loop
+    -- #727: the partition's own schema, not the parent's (the discard above names an untracked name, so
+    -- it can only guess the parent's)
+    v_nsp := pgpm._child_nsp(p_parent, r.child_name);
 
     -- Two independent facts have to agree, exactly as in retire()'s own identity check (#407): the
     -- name resolves, and it resolves to the OID recorded when this partition entered pgpm.part.

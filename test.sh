@@ -775,6 +775,7 @@ run_perf() {
     "bench/regrain_reconcile_identity.sh pgpm_perf123"
     "bench/regrain_child_oid_sites.sh pgpm_perf124"
     "bench/retain_recall_armed_detach.sh pgpm_perf145"
+    "bench/moved_parent_lifecycle.sh pgpm_perf148"
   )
   local selected=()
   local n=${#guards[@]} idx

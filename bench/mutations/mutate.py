@@ -108,7 +108,7 @@ REMOVE_WRITE_BLOCK_FN = """create or replace function pgpm._remove_write_block(p
 returns void language plpgsql as $$
 declare v_nsp name;
 begin
-  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+  v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #727: the partition's own schema, not the parent's
   execute format('drop trigger if exists pgpm_write_block on %I.%I', v_nsp, p_child);
 end;
 $$;
@@ -1031,8 +1031,7 @@ MUTATIONS = {
           "returns void language plpgsql as $$\n"
           "declare v_nsp name; v_oid oid;\n"
           "begin\n"
-          "  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = "
-          "c.relnamespace where c.oid = p_parent;\n"
+          "  v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #727: the partition's own schema, not the parent's\n"
           "  select p.child_oid into v_oid from pgpm.part p\n"
           "   where p.parent_table = p_parent and p.child_name = p_child;\n"
           "  if v_oid is not null and to_regclass(format('%I.%I', v_nsp, p_child))::oid is distinct "
@@ -1736,9 +1735,14 @@ begin
         "never retired; a regrain cannot prepare and the janitor logs skip_regrain_capture), and once a "
         "twin exists it silently answers for the twin's same-named child. Both sites go back, so the "
         "mutant is exactly the shipped shape and not one function patched around the other. tests/124's "
-        "quoted-schema archive, regrain and twin cases catch it.",
+        "quoted-schema archive, regrain and twin cases catch it. _is_write_blocked keeps #727's resolution "
+        "of the child's own schema in the mutant, so the cast is the only thing put back.",
         [("declare v_nsp_oid oid;\nbegin\n  select c.relnamespace into v_nsp_oid from pg_class c where c.oid = p_parent;\n",
-          "declare v_nsp name;\nbegin\n  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;\n", 2),
+          "declare v_nsp name;\nbegin\n  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;\n", 1),
+         ("declare v_nsp_oid oid;\nbegin\n"
+          "  -- #727: the partition's own schema, not the parent's; matched by name = name, never parsed (#512)\n"
+          "  select n.oid into v_nsp_oid from pg_namespace n where n.nspname = pgpm._child_nsp(p_parent, p_child);\n",
+          "declare v_nsp name;\nbegin\n  v_nsp := pgpm._child_nsp(p_parent, p_child);\n", 1),
          ("c.relnamespace = v_nsp_oid", "c.relnamespace = v_nsp::regnamespace", 2)],
     ),
     "part_name_silent_truncation": (
@@ -3519,6 +3523,28 @@ $$;''',
         [("    -- still reached: the retirement stands, and retire() finishes it\n"
           "    continue when v_boundary is not null and not pgpm._native_gt(cfg.control_kind, r.hi, v_boundary);\n",
           "", 1)],
+    ),
+    "child_nsp_parent_schema": (
+        "bench/moved_parent_lifecycle.sh",
+        "Issue #727: pgpm._child_nsp answers with the PARENT's current schema again, the pre-fix shape of "
+        "every lifecycle step at once (retire, _install_write_block, _remove_write_block, _is_write_blocked, "
+        "_enforce_write_blocks, _archive_step, _next_archive_chunk, _archive_noop). After ALTER TABLE <parent> "
+        "SET SCHEMA the partitions stay where they were, so no step finds one again: skip_write_block, "
+        "fail_retain_identity ('oid nothing now'), nothing archived, retention wedged. One site, the helper's "
+        "body. tests/197 parts A to D all catch it (D through its sibling's retirement, its liveness witness).",
+        [("""  select coalesce(
+    (select n.nspname from pgpm.part p
+       join pg_class c on c.oid = p.child_oid
+       join pg_namespace n on n.oid = c.relnamespace
+      where p.parent_table = p_parent and p.child_name = p_child),
+    (select n.nspname from pg_inherits i
+       join pg_class c on c.oid = i.inhrelid
+       join pg_namespace n on n.oid = c.relnamespace
+      where i.inhparent = p_parent and c.relname = p_child
+      limit 1),
+    (select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent));
+""", """  select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+""", 1)],
     ),
     "write_block_presence_only": (
         "bench/write_block_enabled_state.sh",
