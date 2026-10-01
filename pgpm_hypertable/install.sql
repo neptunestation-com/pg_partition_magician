@@ -170,6 +170,83 @@ begin
   end if;
 end $$;
 
+-- _from_hypertable_tmp_name: the name an index of the hypertable is pre-built under on the destination,
+-- before the swap renames it (a secondary index) or adopts it as its constraint (a key). Whole, never cut
+-- (#707, the #655 class): it used to be left(<name> || '_pgpm_new', 63), and for a 63-byte name that is the
+-- name ITSELF, which the source's index still holds. The tracked copy's key build then died on 'already
+-- exists', and the append-only cutover found the source's own index under the temp name, skipped its
+-- build, and failed adopting an index the DROP had just taken, after the whole online copy either way.
+-- When <name>_pgpm_new does not fit it is pgpm_new_<index oid>: whole, at most 19 bytes, one per index. The
+-- copy and the cutover both ask this for the same index and so agree on the name, which is how the cutover
+-- finds the key index the tracked copy built (#175).
+create or replace function pgpm._from_hypertable_tmp_name(p_name name, p_index oid)
+returns name language sql immutable as $$
+  select (case when octet_length(p_name || '_pgpm_new') <= 63 then p_name || '_pgpm_new'
+               else 'pgpm_new_' || p_index::text end)::name
+$$;
+
+-- _from_hypertable_index_ddl: the CREATE INDEX that builds index p_index of the hypertable on the destination
+-- p_nsp.p_dest under p_tmp (#735). The name and the table are spliced BY IDENTITY, not matched by pattern:
+-- pg_get_indexdef spells them quote_ident(index name) and quote_ident(schema).quote_ident(table), read here
+-- from the catalog by the index's oid, so the definition starts with exactly one of two prefixes, and the
+-- prefix is replaced whole. The pattern this replaces, '^(CREATE (UNIQUE )?INDEX )[^ ]+ ON [^ ]+', could not
+-- span a quoted name holding a space ("f6 metrics_pkey"), did not match, and the statement ran UNREWRITTEN:
+-- it tried to build a second "f6 metrics_pkey" on the SOURCE and failed with 'relation already exists' after
+-- the whole online copy, though the preflight had accepted the table. The same construction as the core's
+-- carried indexes (#669), and a definition that starts with neither prefix is refused rather than run.
+create or replace function pgpm._from_hypertable_index_ddl(p_index oid, p_tmp name, p_nsp name, p_dest name)
+returns text language plpgsql stable as $$
+declare
+  v_def text; v_idx name; v_tnsp name; v_trel name;
+  v_on_q text;     -- ' ON <schema>.<table> ', as pg_get_indexdef quotes the index's own table
+  v_ipfx_q text;   -- the two prefixes the definition can start with
+  v_upfx_q text;
+  v_to_q text;     -- '<temp name> ON <schema>.<destination> ', what replaces the name and the table
+begin
+  select pg_get_indexdef(i.indexrelid), ic.relname, tn.nspname, tc.relname into v_def, v_idx, v_tnsp, v_trel
+    from pg_index i
+    join pg_class ic on ic.oid = i.indexrelid
+    join pg_class tc on tc.oid = i.indrelid
+    join pg_namespace tn on tn.oid = tc.relnamespace
+   where i.indexrelid = p_index;
+  v_on_q := ' ON ' || quote_ident(v_tnsp) || '.' || quote_ident(v_trel) || ' ';
+  v_ipfx_q := 'CREATE INDEX ' || quote_ident(v_idx) || v_on_q;
+  v_upfx_q := 'CREATE UNIQUE INDEX ' || quote_ident(v_idx) || v_on_q;
+  v_to_q := quote_ident(p_tmp) || ' ON ' || quote_ident(p_nsp) || '.' || quote_ident(p_dest) || ' ';
+  if starts_with(v_def, v_upfx_q) then
+    return 'CREATE UNIQUE INDEX ' || v_to_q || substr(v_def, length(v_upfx_q) + 1);
+  elsif starts_with(v_def, v_ipfx_q) then
+    return 'CREATE INDEX ' || v_to_q || substr(v_def, length(v_ipfx_q) + 1);
+  end if;
+  raise exception 'pg_partition_magician: cannot rebuild the index % of %.% on the migration''s destination: its definition (%) does not start with CREATE [UNIQUE] INDEX % ON %.%, so it cannot be renamed onto the destination',
+    quote_ident(v_idx), quote_ident(v_tnsp), quote_ident(v_trel), v_def, quote_ident(v_idx),
+    quote_ident(v_tnsp), quote_ident(v_trel);
+end $$;
+
+-- _from_hypertable_check_handoff: the names transmute will derive from the table and p_interval must fit, asked
+-- BEFORE anything changes (#707). The cutover hands the plain table to transmute only after its swap has
+-- committed, and transmute names the monolith <rel>_p<lo>_to_<hi> at the grid's label granularity (26
+-- bytes past the name on a daily grid, so a 38 to 48 byte name, inside _from_hypertable_check_names' own
+-- budget, did not fit): its refusal came with the hypertable already dropped, leaving a plain table under
+-- the original name. The labels' width depends only on the step, so the explicit-range form of the anchor
+-- cell is exactly as long as the monolith's name, and _part_name, which transmute itself asks, is the one
+-- source of the rule. A monolith that happens to span a single step takes the shorter fine name, so this
+-- can refuse a grid transmute would have accepted for such a table; it cannot pass one transmute refuses.
+-- Called by from_hypertable before its copy and by the cutover before its pre-drain.
+create or replace function pgpm._from_hypertable_check_handoff(
+  p_hypertable regclass, p_interval interval, p_anchor timestamptz
+) returns void language plpgsql as $$
+declare v_rel name;
+begin
+  select c.relname into v_rel from pg_class c where c.oid = p_hypertable;
+  perform pgpm._part_name(v_rel, 'time', p_interval::text, pgpm._ts_text(p_anchor), pgpm._ts_text(p_anchor),
+                          'UTC', true);
+exception when others then
+  if sqlerrm not like 'pg_partition_magician: cannot name a partition of %' then raise; end if;
+  raise exception 'pg_partition_magician: cannot migrate hypertable % with p_interval % -- refused before anything is changed, because transmute, which takes the table over once the cutover''s swap has committed, would refuse it: %',
+    p_hypertable, p_interval, regexp_replace(sqlerrm, '^pg_partition_magician: ', '');
+end $$;
+
 -- from_hypertable_preflight: the refusal checks, factored out so they are callable on their own (a
 -- dry-run gate) and unit-testable inside a transaction. Raises a pgpm-prefixed error on any blocker;
 -- returns normally when the hypertable is migratable by this version (with a NOTICE estimating the disk).
@@ -518,16 +595,14 @@ begin
 
   -- #175: when change-tracking is on, build the reused-key index on the dest NOW -- off the lock, while the
   -- dest is still private -- with the SAME temp name and definition the cutover will ADOPT
-  -- (left(conname || '_pgpm_new', 63), via pg_get_indexdef). The online delta drain then uses it for its
-  -- per-batch key lookups (no separate throwaway index), and the cutover adopts it instead of rebuilding it
-  -- -- one key-index build instead of two. (v_keyidx was chosen above for tracking; tracking is refused on a
-  -- keyless table, so it is always set here.)
+  -- (_from_hypertable_tmp_name, built by _from_hypertable_index_ddl: #707, #735). The online delta drain then
+  -- uses it for its per-batch key lookups (no separate throwaway index), and the cutover adopts it instead of
+  -- rebuilding it -- one key-index build instead of two. (v_keyidx was chosen above for tracking; tracking is
+  -- refused on a keyless table, so it is always set here.)
   if p_track_changes then
     select conname into v_keyconname from pg_constraint where conindid = v_keyidx;
-    v_keytmp := left(v_keyconname || '_pgpm_new', 63);
-    execute regexp_replace(pg_get_indexdef(v_keyidx),
-      '^(CREATE (UNIQUE )?INDEX )[^ ]+ ON [^ ]+',
-      '\1' || quote_ident(v_keytmp) || ' ON ' || quote_ident(v_nsp) || '.' || quote_ident(v_dest));
+    v_keytmp := pgpm._from_hypertable_tmp_name(v_keyconname, v_keyidx);
+    execute pgpm._from_hypertable_index_ddl(v_keyidx, v_keytmp, v_nsp, v_dest);
     commit;
   end if;
 end $$;
@@ -669,16 +744,36 @@ end $$;
 -- workload that can append out of order. What arrives behind the watermark is invisible here and to the
 -- under-lock catch-up alike; the cutover's conservation check (#460) refuses the swap rather than lose it.
 
+-- _from_hypertable_past: the predicate "p_control is past the copy watermark", for the append-only catch-ups
+-- (the pre-drain, its step, and the cutover's own). p_type casts the watermark literal when given;
+-- p_inclusive makes the bound >= (the cutover's keyed catch-up, which anti-joins the tie at the watermark).
+-- A NULL watermark is what an EMPTY copy leaves (the hypertable had no rows at from_hypertable_copy), and it
+-- means every row is past it (#736). It used to read as "nothing to catch up": the pre-drain returned at
+-- once and the cutover skipped its catch-up, so every row appended in order after the copy stayed out of
+-- the destination, and the conservation check refused the swap, blaming rows at or below a watermark that
+-- does not exist. One helper, so the three catch-ups cannot disagree about it.
+create or replace function pgpm._from_hypertable_past(
+  p_control name, p_watermark text, p_type text default null, p_inclusive boolean default false
+) returns text language sql immutable as $$
+  select case when p_watermark is null then 'true'   -- #736: nothing was copied, so every row is past it
+              else format('%I %s %L%s', p_control, case when p_inclusive then '>=' else '>' end, p_watermark,
+                          coalesce('::' || p_type, ''))
+         end
+$$;
+
 -- from_hypertable_drain_appends_step copies ONE batch of appends past p_watermark and returns the new
 -- watermark (the batch's upper control bound, as text); no commit (the driver commits per batch). The batch
 -- is bounded to ~p_batch rows by the control value p_batch rows past the watermark, INCLUSIVE of ties at that
 -- bound (a row-count LIMIT with a strict > would drop ties straddling the boundary, the next pass skipping
--- them). Bounds are LITERAL constants so TimescaleDB excludes untouched chunks.
+-- them). Bounds are LITERAL constants so TimescaleDB excludes untouched chunks. A NULL p_watermark is the
+-- watermark of an empty copy (#736): nothing was copied, so every row is past it, and the batch starts at
+-- the source's first row.
 create or replace function pgpm.from_hypertable_drain_appends_step(
   p_hypertable regclass, p_control name, p_batch int, p_watermark text
 ) returns text language plpgsql as $$
 declare
   v_nsp name; v_rel name; v_dest name; v_cols_q text; v_ctl_type text; v_hi text;
+  v_past text;   -- the predicate "past the watermark", over p_control
 begin
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
   select n.nspname, c.relname into v_nsp, v_rel
@@ -689,18 +784,20 @@ begin
   select string_agg(quote_ident(attname), ', ' order by attnum) into v_cols_q
     from pg_attribute where attrelid = p_hypertable and attnum > 0 and not attisdropped and attgenerated = '';
 
+  v_past := pgpm._from_hypertable_past(p_control, p_watermark, v_ctl_type);
+
   -- the batch's upper control bound: the control value p_batch rows past the watermark (or the source's max
   -- past it when fewer remain). The <= insert below includes ALL rows at this value, so no tie is split.
   execute format('select coalesce(
-                    (select %I::text from %I.%I where %I > %L::%s order by %I offset %s limit 1),
-                    (select max(%I)::text from %I.%I where %I > %L::%s))',
-                 p_control, v_nsp, v_rel, p_control, p_watermark, v_ctl_type, p_control, greatest(p_batch - 1, 0),
-                 p_control, v_nsp, v_rel, p_control, p_watermark, v_ctl_type) into v_hi;
+                    (select %I::text from %I.%I where %s order by %I offset %s limit 1),
+                    (select max(%I)::text from %I.%I where %s))',
+                 p_control, v_nsp, v_rel, v_past, p_control, greatest(p_batch - 1, 0),
+                 p_control, v_nsp, v_rel, v_past) into v_hi;
   if v_hi is null then return p_watermark; end if;   -- nothing past the watermark
 
-  execute format('insert into %I.%I (%s) select %s from %I.%I where %I > %L::%s and %I <= %L::%s order by %I',
+  execute format('insert into %I.%I (%s) select %s from %I.%I where %s and %I <= %L::%s order by %I',
                  v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel,
-                 p_control, p_watermark, v_ctl_type, p_control, v_hi, v_ctl_type, p_control);
+                 v_past, p_control, v_hi, v_ctl_type, p_control);
   return v_hi;
 end $$;
 
@@ -727,12 +824,13 @@ begin
   select format_type(atttypid, atttypmod) into v_ctl_type
     from pg_attribute where attrelid = p_hypertable and attname = p_control and not attisdropped;
   -- the initial frontier: the copy watermark (max control in the dest). Read once; each step advances it.
+  -- NULL when nothing was copied, which puts every source row past it (#736, _from_hypertable_past).
   execute format('select max(%I)::text from %I.%I', p_control, v_nsp, v_dest) into v_watermark;
-  if v_watermark is null then return; end if;   -- nothing copied (empty dest)
   loop
     -- residual past the watermark <= threshold? EXISTS at offset (chunk-excluded by control > watermark)
-    execute format('select exists(select 1 from %I.%I where %I > %L::%s order by %I offset %s limit 1)',
-                   v_nsp, v_rel, p_control, v_watermark, v_ctl_type, p_control, p_threshold) into v_more;
+    execute format('select exists(select 1 from %I.%I where %s order by %I offset %s limit 1)',
+                   v_nsp, v_rel, pgpm._from_hypertable_past(p_control, v_watermark, v_ctl_type),
+                   p_control, p_threshold) into v_more;
     exit when not v_more;
     v_watermark := pgpm.from_hypertable_drain_appends_step(p_hypertable, p_control, p_batch, v_watermark);
     commit;
@@ -802,6 +900,8 @@ begin
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   v_dest := v_rel || '_pgpm_dest';
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
+  -- ...and the monolith name transmute will derive after the swap has committed (#707), before the pre-drain
+  perform pgpm._from_hypertable_check_handoff(p_hypertable, p_interval, p_anchor);
   -- The dimension facts the copy depended on are re-checked HERE, in the irreversible phase (issue #458).
   -- This procedure used to require only that a destination exist, and a destination left by a copy that
   -- ran under an older version, or made by hand, reaches the DROP below without preflight ever having run.
@@ -918,17 +1018,17 @@ begin
   -- original PK/UNIQUE constraints (ALTER TABLE ... USING INDEX -- metadata-only, and it renames the index to
   -- the constraint name) and RENAMES the remaining secondary indexes to their original names (metadata-only).
   -- Builds happen in the same transaction as the swap, so an aborted cutover rolls them back with everything.
+  -- Names and definitions come from _from_hypertable_tmp_name and _from_hypertable_index_ddl (#707, #735):
+  -- a temp name that fits whole, and the index's own name and table replaced by identity.
   for k in select conname, contype, conindid from pg_constraint
             where conrelid = p_hypertable and contype in ('p', 'u') loop
-    v_tmp := left(k.conname || '_pgpm_new', 63);
+    v_tmp := pgpm._from_hypertable_tmp_name(k.conname, k.conindid);
     -- #175: skip the build if it already exists -- from_hypertable_copy pre-builds the reused-key index
     -- under this same name when tracking, so the drain can use it and the swap below adopts it. Other
     -- constraints (and the append-only / non-tracking path) are built here as before. Always record the
     -- conname -> temp-name mapping so the swap adopts every key index, copy-built or built here.
     if to_regclass(format('%I.%I', v_nsp, v_tmp)) is null then
-      execute regexp_replace(pg_get_indexdef(k.conindid),
-        '^(CREATE (UNIQUE )?INDEX )[^ ]+ ON [^ ]+',
-        '\1' || quote_ident(v_tmp) || ' ON ' || quote_ident(v_nsp) || '.' || quote_ident(v_dest));
+      execute pgpm._from_hypertable_index_ddl(k.conindid, v_tmp, v_nsp, v_dest);
     end if;
     v_key_names := array_append(v_key_names, k.conname::text);
     v_key_types := array_append(v_key_types, k.contype::text);
@@ -937,10 +1037,8 @@ begin
   for k in select ic.relname as origname, i.indexrelid from pg_index i join pg_class ic on ic.oid = i.indexrelid
             where i.indrelid = p_hypertable and not i.indisprimary
               and not exists (select 1 from pg_constraint con where con.conindid = i.indexrelid) loop
-    v_tmp := left(k.origname || '_pgpm_new', 63);
-    execute regexp_replace(pg_get_indexdef(k.indexrelid),
-      '^(CREATE (UNIQUE )?INDEX )[^ ]+ ON [^ ]+',
-      '\1' || quote_ident(v_tmp) || ' ON ' || quote_ident(v_nsp) || '.' || quote_ident(v_dest));
+    v_tmp := pgpm._from_hypertable_tmp_name(k.origname, k.indexrelid);
+    execute pgpm._from_hypertable_index_ddl(k.indexrelid, v_tmp, v_nsp, v_dest);
     v_idx_orig := array_append(v_idx_orig, k.origname::text);
     v_idx_tmps := array_append(v_idx_tmps, v_tmp);
   end loop;
@@ -1035,26 +1133,29 @@ begin
     -- row is legitimate in a keyless table and it would refuse to copy one. Whatever either form cannot
     -- see -- a row behind the watermark on any table, a row at it on a keyless one -- the conservation
     -- check below refuses on, rather than dropping the source short.
+    --
+    -- A NULL watermark (an empty copy) puts every source row in the tail (#736, _from_hypertable_past): the
+    -- source had no rows when the copy ran, so everything it holds now arrived after it.
     v_n := 0; v_h := 0;
-    if v_watermark is not null then
-      if v_akey is not null then
-        -- Materialise the tail first and ANALYZE it, as the tracking branch above does for its delta (#164):
-        -- the anti-join must probe the destination's key index once per tail row, and the planner only
-        -- chooses that when it knows the tail is small. Estimated straight off the source, the tail is sized
-        -- from the newest chunk's statistics, and an overestimate there makes a hash anti-join that seqscans
-        -- the WHOLE destination look cheap -- O(rows) under the lock, on a plan nobody sees. Measured: even
-        -- at 20k rows the direct form planned a Seq Scan of the destination. On commit drop: the swap
-        -- transaction commits below, or rolls back on the refusal, and either ends the temp table.
-        execute 'drop table if exists pgpm_htail';
-        execute format('create temp table pgpm_htail on commit drop as select %s from %I.%I where %I >= %L',
-                       v_cols_q, v_nsp, v_rel, p_control, v_watermark);
-        analyze pgpm_htail;
-        execute format('with w as (insert into %I.%I (%s) select %s from pgpm_htail s where not exists (select 1 from %I.%I d where %s = %s) returning %s as h) select count(*), coalesce(sum(h), 0) from w',
-                       v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_dest, v_dkey_q, v_skey_q, v_fp_q) into v_n, v_h;
-      else
-        execute format('with w as (insert into %I.%I (%s) select %s from %I.%I where %I > %L returning %s as h) select count(*), coalesce(sum(h), 0) from w',
-                       v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel, p_control, v_watermark, v_fp_q) into v_n, v_h;
-      end if;
+    if v_akey is not null then
+      -- Materialise the tail first and ANALYZE it, as the tracking branch above does for its delta (#164):
+      -- the anti-join must probe the destination's key index once per tail row, and the planner only
+      -- chooses that when it knows the tail is small. Estimated straight off the source, the tail is sized
+      -- from the newest chunk's statistics, and an overestimate there makes a hash anti-join that seqscans
+      -- the WHOLE destination look cheap -- O(rows) under the lock, on a plan nobody sees. Measured: even
+      -- at 20k rows the direct form planned a Seq Scan of the destination. On commit drop: the swap
+      -- transaction commits below, or rolls back on the refusal, and either ends the temp table.
+      execute 'drop table if exists pgpm_htail';
+      execute format('create temp table pgpm_htail on commit drop as select %s from %I.%I where %s',
+                     v_cols_q, v_nsp, v_rel,
+                     pgpm._from_hypertable_past(p_control, v_watermark::text, p_inclusive => true));
+      analyze pgpm_htail;
+      execute format('with w as (insert into %I.%I (%s) select %s from pgpm_htail s where not exists (select 1 from %I.%I d where %s = %s) returning %s as h) select count(*), coalesce(sum(h), 0) from w',
+                     v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_dest, v_dkey_q, v_skey_q, v_fp_q) into v_n, v_h;
+    else
+      execute format('with w as (insert into %I.%I (%s) select %s from %I.%I where %s returning %s as h) select count(*), coalesce(sum(h), 0) from w',
+                     v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel,
+                     pgpm._from_hypertable_past(p_control, v_watermark::text), v_fp_q) into v_n, v_h;
     end if;
     v_dest_n := v_dest_n + v_n; v_dest_h := v_dest_h + v_h;
   end if;
@@ -1369,6 +1470,10 @@ begin
   exception when others then
     raise exception 'pg_partition_magician: p_lock_timeout must be a valid lock_timeout value (got %): %', p_lock_timeout, sqlerrm;
   end;
+  -- #707: likewise the monolith name transmute derives from p_interval, which the copy alone cannot check
+  -- (after the module's own names, #552, so a name too long for both is told the same thing as by the copy)
+  perform pgpm._from_hypertable_check_names(p_hypertable);
+  perform pgpm._from_hypertable_check_handoff(p_hypertable, p_interval, p_anchor);
   call pgpm.from_hypertable_copy(p_hypertable, p_control, p_track_changes);
   call pgpm.from_hypertable_cutover(p_hypertable, p_control, p_interval, p_obtain, p_retain,
                                     p_drain_batch, p_anchor, p_paused, p_predrain, p_lock_timeout);
