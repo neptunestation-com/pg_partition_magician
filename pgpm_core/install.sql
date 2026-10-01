@@ -3774,8 +3774,10 @@ $$;
 --
 -- The delta is ANALYZEd when it has never been, reltuples < 0, and not `<= 0` (#710): ANALYZE of an EMPTY
 -- delta records reltuples = 0, so the old test re-ANALYZEd it on every step for as long as it stayed empty,
--- each time taking SHARE UPDATE EXCLUSIVE on it. An analyzed empty delta plans well as it fills, because
--- with reltuples = 0 and relpages = 0 the planner scales its estimate from the delta's current size.
+-- each time taking SHARE UPDATE EXCLUSIVE on it. An analyzed empty delta is ANALYZEd once more when a row has
+-- arrived (reltuples = 0 and a row present): the planner scales its row count from the delta's size, but the
+-- empty table's column statistics misplan the first tick over a full delta into seq scans of it
+-- (bench/regrain_perf.sh); after that one ANALYZE the estimate keeps up as the delta grows.
 -- TRUNCATE (regrain_cancel) resets reltuples to -1, so each run still analyzes its delta once.
 --
 -- THE CONTRACT: for each captured key the SOURCE is the authority, not the recorded change. Delete the
@@ -3800,6 +3802,7 @@ declare
   v_sub_rel regclass;     -- the fine child pgpm.part recorded, never whatever bears its name (#723)
   v_kctl_native_q text;   -- a delta row's control value, read as a NATIVE grid value (#455)
   v_lo_lit text; v_hi_lit text; v_cur_lit text; v_sub_lo text; v_sub_hi text; v_boundary text;
+  v_reltuples real; v_delta_has_rows boolean;   -- the delta's row estimate, and whether it holds a row (#710)
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   select n.nspname into v_nsp
@@ -3824,8 +3827,16 @@ begin
   -- fixed for freshly minted children ("it sits at reltuples = -1 until autovacuum, and anything touching
   -- it misplans"), so it gets the same treatment. One-time: once analyzed the estimate stays good enough
   -- as the delta grows (47k estimated against 50k actual still planned correctly).
-  -- never analyzed is `< 0`, not `<= 0` (#710, see above)
-  if (select coalesce(reltuples, -1) from pg_class where oid = format('%I.%I', v_nsp, v_delta)::regclass) < 0 then
+  -- Never analyzed is `< 0`, not `<= 0` (#710, see above). Analyzed while EMPTY (reltuples = 0) is analyzed
+  -- once more when a row has arrived: the statistics of an empty table misplan the first tick over a full
+  -- delta into seq scans of it (bench/regrain_perf.sh measured five scans of a 50,000-row delta on the
+  -- `< 0` test alone), and after that one ANALYZE the estimate keeps up as the delta grows.
+  select coalesce(reltuples, -1) into v_reltuples
+    from pg_class where oid = format('%I.%I', v_nsp, v_delta)::regclass;
+  if v_reltuples = 0 then
+    execute format('select exists (select 1 from %I.%I)', v_nsp, v_delta) into v_delta_has_rows;
+  end if;
+  if v_reltuples < 0 or (v_reltuples = 0 and v_delta_has_rows) then
     perform pgpm._analyze(format('%I.%I', v_nsp, v_delta)::regclass);
   end if;
 

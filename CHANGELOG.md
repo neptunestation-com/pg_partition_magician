@@ -14,8 +14,8 @@
   call time. A write block put back `ENABLE ALWAYS` after an operator disabled it logs
   `write_block_reenable`, and a cell `obtain` or `extend_to` leaves unbuilt because its name is held
   elsewhere logs `fail_obtain_name`. A BC year's label carries `_bc`, so 1 BC and 1 AD no longer share
-  names. A regrain step re-ANALYZEs its change-capture delta only when it was never analyzed, not on every
-  step while it is empty. `_grid_floor` adds a fixed step's offset from the anchor exactly, so a
+  names. A regrain step re-ANALYZEs its change-capture delta only when it was never analyzed, or once when it has
+  filled after an ANALYZE found it empty, not on every step while it stays empty. `_grid_floor` adds a fixed step's offset from the anchor exactly, so a
   fractional-second step far from the anchor stays on its lattice. Guarded by `tests/189` and `tests/190`
   through `bench/transmute_refusal_edges.sh` and `bench/reverse_legibility_edges.sh`, with ten mutations
   (`transmute_exclude_not_refused`, `transmute_publication_owner_late`, `set_regrain_anchor_name_only`,

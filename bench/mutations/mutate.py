@@ -1439,7 +1439,12 @@ MUTATIONS = {
         "bench/regrain_perf.sh",
         "Pre-#272 regrain: the trigger-populated delta carries no row estimate, so the planner "
         "misplans a reconcile tick into a seq scan of the whole delta.",
-        [("""  if (select coalesce(reltuples, -1) from pg_class where oid = format('%I.%I', v_nsp, v_delta)::regclass) < 0 then
+        [("""  select coalesce(reltuples, -1) into v_reltuples
+    from pg_class where oid = format('%I.%I', v_nsp, v_delta)::regclass;
+  if v_reltuples = 0 then
+    execute format('select exists (select 1 from %I.%I)', v_nsp, v_delta) into v_delta_has_rows;
+  end if;
+  if v_reltuples < 0 or (v_reltuples = 0 and v_delta_has_rows) then
     perform pgpm._analyze(format('%I.%I', v_nsp, v_delta)::regclass);
   end if;
 """, "", 1)],
@@ -4335,8 +4340,8 @@ $$;''',
         "Pre-#710 _regrain_reconcile: the delta is re-ANALYZEd whenever reltuples <= 0, and ANALYZE of an "
         "empty delta records 0, so every regrain step re-ANALYZEs it while it stays empty, each time taking "
         "SHARE UPDATE EXCLUSIVE on it. One site; tests/190 E's lock probe on the later steps catches it.",
-        [("  if (select coalesce(reltuples, -1) from pg_class where oid = format('%I.%I', v_nsp, v_delta)::regclass) < 0 then",
-          "  if (select coalesce(reltuples, -1) from pg_class where oid = format('%I.%I', v_nsp, v_delta)::regclass) <= 0 then", 1)],
+        [("  if v_reltuples < 0 or (v_reltuples = 0 and v_delta_has_rows) then",
+          "  if v_reltuples <= 0 then", 1)],
     ),
     "grid_floor_offset_double": (
         "bench/reverse_legibility_edges.sh",
