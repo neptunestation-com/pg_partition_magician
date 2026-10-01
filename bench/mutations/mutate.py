@@ -3925,6 +3925,32 @@ $$;''',
           "    continue when v_boundary is not null and not pgpm._native_gt(cfg.control_kind, r.hi, v_boundary);\n",
           "", 1)],
     ),
+    "retain_recall_parent_schema": (
+        "bench/retain_recall_moved_parent.sh",
+        "Issue #778, the pre-fix shape: _retain_recall resolves a retiring partition in the PARENT's current "
+        "schema, the one lifecycle step #727 left there. After ALTER TABLE <parent> SET SCHEMA the partition "
+        "stays where it was, so a loosening logs fail_retain_identity ('oid nothing now'), its disarm names a "
+        "command the job does not hold, pg_cron detaches a partition the policy keeps, and no tick re-attaches "
+        "it. One site, the schema the loop resolves in. tests/204 parts A, B and C catch it.",
+        [("    v_nsp := pgpm._child_nsp(p_parent, r.child_name);\n"
+          "    v_now := to_regclass(format('%I.%I', v_nsp, r.child_name));\n"
+          "    v_cmd_q := pgpm._detach_cmd(p_parent, v_nsp, r.child_name);\n",
+          "    select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;\n"
+          "    v_now := to_regclass(format('%I.%I', v_nsp, r.child_name));\n"
+          "    v_cmd_q := pgpm._detach_cmd(p_parent, v_nsp, r.child_name);\n", 1)],
+    ),
+    "retain_recall_by_oid": (
+        "bench/retain_recall_moved_parent.sh",
+        "Issue #778, the plausible-but-wrong fix: find the retiring partition by the oid pgpm recorded instead "
+        "of by its name in its own schema. A moved parent's recall works, but the identity check compares the "
+        "recorded oid with itself, so a relation squatting on the partition's name is never refused: the "
+        "recall logs retain_recall over a command that now names the squatter, where it must log "
+        "fail_retain_identity. One site, how the loop resolves the name. tests/204 part C catches it.",
+        [("    v_nsp := pgpm._child_nsp(p_parent, r.child_name);\n"
+          "    v_now := to_regclass(format('%I.%I', v_nsp, r.child_name));\n",
+          "    v_nsp := pgpm._child_nsp(p_parent, r.child_name);\n"
+          "    v_now := coalesce(r.retiring_oid, r.child_oid)::regclass;\n", 1)],
+    ),
     "child_nsp_parent_schema": (
         "bench/moved_parent_lifecycle.sh",
         "Issue #727: pgpm._child_nsp answers with the PARENT's current schema again, the pre-fix shape of "

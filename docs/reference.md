@@ -1097,8 +1097,9 @@ column names whichever anchor disagreed, so a stale dispatch and a stale catalog
 The name is resolved in the partition's **own** schema, the schema of the relation `child_oid` records,
 not in the parent's. `ALTER TABLE <parent> SET SCHEMA` moves only the parent: the partitions it already
 has stay where they were, and the ones pgpm creates afterwards go in the parent's new schema. The
-write-block step, the archive step and `retire` all resolve a partition this way, so a table moved to
-another schema keeps being write-blocked, archived and retired. Only the schema comes from the recorded
+write-block step, the archive step, `retire` and the recall of a retirement retention no longer reaches
+all resolve a partition this way, so a table moved to another schema keeps being write-blocked, archived
+and retired, and a loosening still takes back a retirement under way. Only the schema comes from the recorded
 relation, never the relation itself, so a different relation holding the name in that schema is still
 refused as above. A row with a null `child_oid` takes the schema of the attached partition of that parent
 carrying the name, and a row whose relation is gone takes the parent's.

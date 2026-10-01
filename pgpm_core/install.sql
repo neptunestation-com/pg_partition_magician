@@ -2497,7 +2497,6 @@ begin
     return 0;
   end if;
   v_boundary := pgpm._retain_boundary(cfg);
-  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
 
   for r in select child_name, lo, hi, retiring_oid, child_oid from pgpm.part
             where parent_table = p_parent and attached and retiring_at is not null
@@ -2505,6 +2504,10 @@ begin
     -- still reached: the retirement stands, and retire() finishes it
     continue when v_boundary is not null and not pgpm._native_gt(cfg.control_kind, r.hi, v_boundary);
 
+    -- #778: the partition's own schema, not the parent's (#727). retire() armed the job with
+    -- <own schema>.<child>, so the identity check, the disarm, the ATTACH and the constraint drop below
+    -- all have to name it there, or a moved parent's recall finds nothing and leaves the detach armed.
+    v_nsp := pgpm._child_nsp(p_parent, r.child_name);
     v_now := to_regclass(format('%I.%I', v_nsp, r.child_name));
     v_cmd_q := pgpm._detach_cmd(p_parent, v_nsp, r.child_name);
     if (r.retiring_oid is not null and v_now::oid is distinct from r.retiring_oid)
