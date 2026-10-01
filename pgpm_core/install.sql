@@ -1089,7 +1089,11 @@ begin
       || case when v_us = '' then '' else '.' || v_us end
       || case when v_off < 0 then '-' else '+' end
       || lpad((abs(v_off) / 3600)::text, 2, '0') || ':' || lpad(((abs(v_off) % 3600) / 60)::text, 2, '0')
-      || case when abs(v_off) % 60 = 0 then '' else ':' || lpad((abs(v_off) % 60)::text, 2, '0') end;
+      || case when abs(v_off) % 60 = 0 then '' else ':' || lpad((abs(v_off) % 60)::text, 2, '0') end
+      -- #733: 'YYYY' prints the year without its era, so an instant before 1 AD read back as an AD year
+      -- about 2 x |year| later (100 BC became 0100, i.e. 100 AD). The era goes last, where PostgreSQL's
+      -- own output puts it and where every DateStyle's input reads it, for all three column types.
+      || case when v_wall < timestamp '0001-01-01 00:00:00' then ' BC' else '' end;
 end;
 $$;
 

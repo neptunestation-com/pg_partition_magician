@@ -4504,6 +4504,21 @@ $$;''',
          ("         m as (select t.%1$I::text as v from %2$s t where t.%1$I is not null order by t.%1$I desc limit 1),\n",
           "         m as (select t.%1$I::text as v from %2$s t order by t.%1$I desc limit 1),\n", 1)],
     ),
+    "time_literal_drops_era": (
+        "bench/time_literal_era.sh",
+        "Pre-#733 _time_literal: the wall time is rendered with to_char 'YYYY' and nothing else, so an instant "
+        "before 1 AD loses its era and reads back as an AD year (100 BC as 100 AD). One site, the era clause "
+        "removed whole with its comment, so the mutant is the function as it was. tests/199's round-trip "
+        "assertions catch it, and its transmute of a table holding a 100 BC row dies at phase 2's VALIDATE "
+        "with the monolith bound left on the live table.",
+        [("""      || case when abs(v_off) % 60 = 0 then '' else ':' || lpad((abs(v_off) % 60)::text, 2, '0') end
+      -- #733: 'YYYY' prints the year without its era, so an instant before 1 AD read back as an AD year
+      -- about 2 x |year| later (100 BC became 0100, i.e. 100 AD). The era goes last, where PostgreSQL's
+      -- own output puts it and where every DateStyle's input reads it, for all three column types.
+      || case when v_wall < timestamp '0001-01-01 00:00:00' then ' BC' else '' end;
+""", """      || case when abs(v_off) % 60 = 0 then '' else ':' || lpad((abs(v_off) % 60)::text, 2, '0') end;
+""", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
