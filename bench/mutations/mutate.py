@@ -1366,6 +1366,92 @@ MUTATIONS = {
         [(HT_SHAPE_UNDER_LOCK,
           "  -- in between. Both relations are frozen now, and the column list read at the top must still describe both.\n", 1)],
     ),
+    "hypertable_cutover_access_not_carried": (
+        "bench/hypertable_cutover_carries_access.sh",
+        "Pre-#787 from_hypertable_cutover(): the swap renames the LIKE-built copy into the hypertable's place "
+        "and puts nothing back on it, so transmute finds no grants, no row-level security, no policies, no "
+        "comment and no triggers to carry, and every grantee is refused once the migration completes. "
+        "Deletes the replay of the captured statements and leaves the capture; tests/timescale/db/33's "
+        "catalog comparison, its privilege checks and its reads as each role fail.",
+        [("""  foreach v_stmt in array v_carried_ddl loop
+    execute v_stmt;
+  end loop;
+""", "  -- MUTANT: the captured statements are not replayed\n", 1)],
+    ),
+    "hypertable_cutover_carries_insert_blocker": (
+        "bench/hypertable_cutover_carries_access.sh",
+        "#787 replaying every trigger on the hypertable: TimescaleDB's own ts_insert_blocker (its function "
+        "lives in _timescaledb_functions) is created on the plain table too, and transmute carries it onto "
+        "the parent. tests/timescale/db/33's count of the parent's own triggers fails on the extra one.",
+        [("       and fn.nspname not like '\\_timescaledb%'\n", "", 1)],
+    ),
+    "hypertable_cutover_carries_capture": (
+        "bench/hypertable_cutover_carries_access.sh",
+        "#787 replaying the tracked copy's change-capture trigger: the swap dropped its function with the "
+        "source, so the replay dies in the swap transaction and the cutover of tests/timescale/db/33's "
+        "tracked hypertable fails on a raw error, leaving it a hypertable.",
+        [("       and not (fn.nspname = v_nsp and f.proname = v_rel || '_pgpm_delta_fn')\n", "", 1)],
+    ),
+    "hypertable_key_unchecked": (
+        "bench/hypertable_handoff_refusals.sh",
+        "Pre-#792 pgpm_hypertable: nothing asks for a bare unique index as the key until transmute does, after "
+        "the cutover's swap has committed, so the hypertable is dropped and the table left plain and "
+        "unmanaged. _from_hypertable_check_key asks nothing; part A of tests/timescale/db/34 fails where the "
+        "preflight, from_hypertable, the copy and the cutover are pinned to refuse it by name.",
+        [("""  v_idx := pgpm._transmute_bare_unique(p_hypertable, p_control);
+  if v_idx is null then return; end if;""",
+          """  v_idx := null;   -- MUTANT: the bare unique index is not asked for
+  if v_idx is null then return; end if;""", 1)],
+    ),
+    "hypertable_cutover_key_unchecked_under_lock": (
+        "bench/hypertable_handoff_refusals.sh",
+        "#792 without the cutover's own key check: a destination left by an older version's copy, or made by "
+        "hand, reaches the swap without the preflight having run, and a bare unique index goes through to "
+        "transmute's refusal after it. Only tests/timescale/db/34's cutover assertion fails (the 2D000 of "
+        "the pre-drain-free cutover's swap COMMIT where the refusal is pinned).",
+        [("""  perform pgpm._from_hypertable_check_key(p_hypertable, p_control);
+  perform pgpm._from_hypertable_check_frontier(p_hypertable, p_control, p_interval, p_force_frontier);
+  if v_track then""",
+          """  perform pgpm._from_hypertable_check_frontier(p_hypertable, p_control, p_interval, p_force_frontier);
+  if v_track then""", 1)],
+    ),
+    "hypertable_frontier_unchecked_up_front": (
+        "bench/hypertable_handoff_refusals.sh",
+        "#792 without from_hypertable's up-front frontier check: the cutover still refuses under its lock, but "
+        "only after the whole online copy. tests/timescale/db/34's two from_hypertable refusals, pinned to "
+        "come before the copy, die on the copy's first COMMIT inside throws_like instead.",
+        [("""  perform pgpm._from_hypertable_check_frontier(p_hypertable, p_control, p_interval, p_force_frontier);
+  call pgpm.from_hypertable_copy(""",
+          """  call pgpm.from_hypertable_copy(""", 1)],
+    ),
+    "hypertable_cutover_frontier_unchecked": (
+        "bench/hypertable_handoff_refusals.sh",
+        "Pre-#792 from_hypertable_cutover(): nothing asks transmute's frontier bound before the swap, so a "
+        "hypertable whose newest row leads the clock by more than a step and an hour is dropped and "
+        "transmute refuses the plain table. Deletes the cutover's check under the lock; tests/timescale/db/34's "
+        "cutover refusal is pinned and fails on the 2D000 of the swap's COMMIT.",
+        [("""  perform pgpm._from_hypertable_check_frontier(p_hypertable, p_control, p_interval, p_force_frontier);
+  if v_track then""",
+          """  if v_track then""", 1)],
+    ),
+    "hypertable_cutover_force_frontier_dropped": (
+        "bench/hypertable_handoff_refusals.sh",
+        "#792 with p_force_frontier accepted by the cutover but not passed to transmute: the cutover skips its "
+        "own check, swaps, and transmute refuses the frontier the operator accepted, leaving the plain table. "
+        "tests/timescale/db/34's forced cutover, and the forced one-shot migration that reaches it, fail on "
+        "raw errors and on their by-value assertions.",
+        [("p_lock_timeout => p_lock_timeout, p_force_frontier => p_force_frontier);",
+          "p_lock_timeout => p_lock_timeout);   -- MUTANT: the override is not passed on", 1)],
+    ),
+    "hypertable_force_frontier_not_to_cutover": (
+        "bench/hypertable_handoff_refusals.sh",
+        "#792 with p_force_frontier accepted by from_hypertable but not passed to the cutover, which then "
+        "refuses the frontier under its lock after the whole copy. tests/timescale/db/34's forced one-shot "
+        "migration fails on a raw error and its by-value assertion after it.",
+        [("""                                    p_drain_batch, p_anchor, p_paused, p_predrain, p_lock_timeout,
+                                    p_force_frontier);""",
+          """                                    p_drain_batch, p_anchor, p_paused, p_predrain, p_lock_timeout);""", 1)],
+    ),
     "hypertable_cutover_untracked_unchecked": (
         "bench/hypertable_replica_capture.sh",
         "Pre-#654 from_hypertable_cutover(): on the tracking path nothing but the row count compares the "
@@ -5076,6 +5162,15 @@ MUTATION_SRC = {
     "hypertable_cutover_identity_by_default": "pgpm_hypertable/install.sql",
     "hypertable_cutover_shape_unchecked_up_front": "pgpm_hypertable/install.sql",
     "hypertable_cutover_shape_unchecked_under_lock": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_access_not_carried": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_carries_insert_blocker": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_carries_capture": "pgpm_hypertable/install.sql",
+    "hypertable_key_unchecked": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_key_unchecked_under_lock": "pgpm_hypertable/install.sql",
+    "hypertable_frontier_unchecked_up_front": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_frontier_unchecked": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_force_frontier_dropped": "pgpm_hypertable/install.sql",
+    "hypertable_force_frontier_not_to_cutover": "pgpm_hypertable/install.sql",
     "archive_lz77_hash_scratch": "pgpm_archive/install.sql",
     "archive_encode_array_agg_unnest": "pgpm_archive/install.sql",
     "archive_deflate_six_arrays": "pgpm_archive/install.sql",
@@ -5171,6 +5266,15 @@ MUTATION_TRACK = {
     "hypertable_cutover_identity_by_default": "timescale",
     "hypertable_cutover_shape_unchecked_up_front": "timescale",
     "hypertable_cutover_shape_unchecked_under_lock": "timescale",
+    "hypertable_cutover_access_not_carried": "timescale",
+    "hypertable_cutover_carries_insert_blocker": "timescale",
+    "hypertable_cutover_carries_capture": "timescale",
+    "hypertable_key_unchecked": "timescale",
+    "hypertable_cutover_key_unchecked_under_lock": "timescale",
+    "hypertable_frontier_unchecked_up_front": "timescale",
+    "hypertable_cutover_frontier_unchecked": "timescale",
+    "hypertable_cutover_force_frontier_dropped": "timescale",
+    "hypertable_force_frontier_not_to_cutover": "timescale",
     # A core uninstall.sql mutation on this track because the capture it must sweep exists only where
     # from_hypertable_copy can run, which needs a real TimescaleDB.
     "uninstall_keeps_hypertable_capture": "timescale",

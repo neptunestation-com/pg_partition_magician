@@ -497,8 +497,14 @@ Scope and caveats:
   front.
 - The control column's key is whatever `transmute` reuses: a primary key or unique constraint that includes
   it, else **keyless** (the common hypertable shape, since `create_hypertable` makes the time column
-  `NOT NULL` but adds no key). Identity columns, generated columns, `CHECK` constraints, defaults, and
-  `NOT NULL` are all preserved (see `transmute`).
+  `NOT NULL` but adds no key). A key that is only a bare `UNIQUE INDEX` is refused up front, as `transmute`
+  refuses it: TimescaleDB does not allow `ADD CONSTRAINT ... USING INDEX` on a hypertable, so the message
+  gives the `ALTER TABLE ... ADD CONSTRAINT ... UNIQUE (...)` and `DROP INDEX` that make it a constraint.
+  Identity columns, generated columns, `CHECK` constraints, defaults, and `NOT NULL` are all preserved (see
+  `transmute`), and so are the table's owner, its table and column grants, row-level security (`ENABLE` and
+  `FORCE`) and its policies, its comment and its triggers, which the swap puts back on the copy before
+  `transmute` carries them onto the parent. TimescaleDB's own insert-blocker trigger is not carried. The
+  replica identity and storage parameters are not carried, as `transmute` does not carry them.
 - The copy is **online** (the source serves traffic throughout), and so is the index rebuild: the
   destination's primary key and secondary indexes are built on the private copy **before** the cutover takes
   its lock. The cutover's `ACCESS EXCLUSIVE` window is therefore **brief and metadata-bound** -- it catches up
@@ -525,7 +531,7 @@ pgpm.from_hypertable(
   p_obtain int default 30, p_retain interval default null,
   p_drain_batch int default 5000, p_anchor timestamptz default '2000-01-01 00:00:00+00',
   p_paused boolean default true, p_track_changes boolean default false, p_predrain boolean default true,
-  p_lock_timeout text default '5s'
+  p_lock_timeout text default '5s', p_force_frontier boolean default false
 )
 ```
 
@@ -535,8 +541,9 @@ migration does not need to interleave application writes between the phases. `p_
 to `transmute` (see there); `p_control` is the time dimension column; `p_track_changes`, `p_predrain` and
 `p_lock_timeout` are described under `from_hypertable_copy` and `from_hypertable_cutover` (a bad
 `p_lock_timeout` is refused before the copy starts, and so is a `p_interval` whose monolith name would not
-fit, see `from_hypertable_cutover`). When `p_retain` is left `null`, the source's
-`drop_chunks` policy interval (if any) is carried in.
+fit, a key that is a bare unique index, and a newest row past `transmute`'s frontier bound, see
+`from_hypertable_cutover`). `p_force_frontier` is passed through to the cutover and on to `transmute`.
+When `p_retain` is left `null`, the source's `drop_chunks` policy interval (if any) is carried in.
 
 ```sql
 call pgpm.from_hypertable('public.metrics', 'ts', interval '1 day', p_paused => false);
@@ -664,7 +671,7 @@ pgpm.from_hypertable_cutover(
   p_obtain int default 30, p_retain interval default null,
   p_drain_batch int default 5000, p_anchor timestamptz default '2000-01-01 00:00:00+00',
   p_paused boolean default true, p_predrain boolean default true,
-  p_lock_timeout text default '5s'
+  p_lock_timeout text default '5s', p_force_frontier boolean default false
 )
 ```
 
@@ -686,7 +693,11 @@ into place, **adopt** the pre-built unique indexes as the original `PRIMARY KEY`
 (`ALTER TABLE ... USING INDEX`, metadata-only) and rename the secondary indexes back to their original names,
 re-add the identity columns (which `CREATE TABLE LIKE` does not carry) in the kind they had on the source
 (`ALWAYS` or `BY DEFAULT`) and with their sequences' options (`INCREMENT BY`, `MINVALUE`/`MAXVALUE`,
-`START WITH`, `CACHE`, `CYCLE`), then hand off to `transmute`. Because
+`START WITH`, `CACHE`, `CYCLE`), put back what `CREATE TABLE LIKE` left off the copy (the owner, the table
+and column grants, row-level security and its policies, the table's comment and its triggers, read off the
+source under the lock just before it is dropped), then hand off to `transmute`, which carries them onto the
+parent. A `GRANT` or `REVOKE` takes no lock on the table, so one committed in the instant between that read
+and the drop is not carried; make privilege changes before or after the cutover. Because
 the index builds happen before the lock, the blocking window is the catch-up, one `count(*)` over the source,
 and metadata: the count is the only step in it that reads the whole table, and it is a read, not a rebuild.
 It also preserves each identity
@@ -714,6 +725,18 @@ before its copy, ask for that name first and refuse with `pg_partition_magician:
 coarser `p_interval`, whose partition names are shorter, or shorten the table name. The check takes the
 longer two-label form, so a table whose rows all fall in one step can be refused on a grid `transmute`
 would have accepted for it.
+
+**A bare unique key and a far-future row are refused before the swap.** `transmute` reuses a primary key or
+a unique constraint as the key, never a bare `UNIQUE INDEX`, and refuses a table whose newest row is further
+ahead of `now()` than one step plus one hour unless `p_force_frontier` (see `transmute`). Both are visible on
+the hypertable, so both are asked before it is dropped, with `transmute`'s own rule, and refused with
+`pg_partition_magician: cannot migrate hypertable ... -- refused before anything is changed, ...`: the key
+by `from_hypertable_preflight` (so by `from_hypertable` and `from_hypertable_copy` before the copy), the
+frontier by `from_hypertable` before the copy, and both by the cutover under its lock, so a row or an index
+that arrived while it prepared is seen too. A refused cutover rolls back whole, though a pre-drain's batches
+stay in the copy. For the key, build the unique constraint and drop the bare index (the message gives both
+statements); for the frontier, correct the rows, or pass `p_force_frontier => true` to accept the farther
+monolith bound, which is skipped here and passed to `transmute`.
 
 **The handoff runs after the swap has committed, and can still refuse.** `transmute` applies its own
 preconditions to the plain table (for example, a secondary index whose name leaves no room for the `_pgpm`

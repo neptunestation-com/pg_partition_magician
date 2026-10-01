@@ -5468,6 +5468,37 @@ returns text language sql stable as $$
        from pg_attribute a where a.attrelid = p_parent and a.attname = p_control and not a.attisdropped));
 $$;
 
+-- The bare unique index transmute refuses to take as the key (#792): a live, non-partial, non-expression
+-- unique index, not the primary key and backing no constraint, whose key columns include the control
+-- column, on a table with no primary key and no unique constraint transmute would reuse instead (the
+-- branch of _transmute's key selection that raises "is a bare index, not a constraint"). Null when
+-- transmute would reuse a key, or partition the table keyless. Shared by _transmute and by pgpm_hypertable,
+-- whose cutover drops the hypertable before transmute asks, so it asks first.
+create or replace function pgpm._transmute_bare_unique(p_parent regclass, p_control name)
+returns name language sql stable as $$
+  select c.relname
+    from pg_index i join pg_class c on c.oid = i.indexrelid
+    join pg_attribute a on a.attrelid = i.indrelid and a.attname = p_control and not a.attisdropped
+   where i.indrelid = p_parent and i.indislive and i.indisunique and not i.indisprimary
+     and i.indpred is null and i.indexprs is null
+     and a.attnum = any((string_to_array(i.indkey::text, ' ')::int2[])[1:i.indnkeyatts])
+     and not exists (select 1 from pg_constraint con where con.conindid = i.indexrelid)
+     and not exists (select 1 from pg_constraint con where con.conrelid = p_parent and con.contype = 'p')
+     and not exists (select 1 from pg_constraint con join pg_index ui on ui.indexrelid = con.conindid
+                      where con.conrelid = p_parent and con.contype = 'u'
+                        and ui.indpred is null and ui.indexprs is null and a.attnum = any(con.conkey))
+   limit 1;
+$$;
+
+-- The latest a time-ordered table's newest row may sit before transmute refuses its frontier (#457): one
+-- step plus one hour past now() (the reasoning is at the check in _transmute). Shared with pgpm_hypertable,
+-- which asks it before its swap (#792). now() is the transaction's start, so a later transaction's limit is
+-- never earlier: a table that passes here passes transmute's own check too, unless a newer row arrives.
+create or replace function pgpm._frontier_skew_limit(p_step interval)
+returns timestamptz language sql stable as $$
+  select now() + p_step + interval '1 hour';
+$$;
+
 -- ============================== transmute ==============================
 
 -- #275 turned these from FUNCTIONs into PROCEDUREs. CREATE OR REPLACE cannot change that, so the old
@@ -5939,13 +5970,8 @@ begin
       v_add_uniq := true;
     else
       -- nothing reusable: give the operator a specific reason and the prep step that unblocks it.
-      select c.relname into v_bare_uq
-        from pg_index i join pg_class c on c.oid = i.indexrelid
-       where i.indrelid = p_parent and i.indislive and i.indisunique and not i.indisprimary
-         and i.indpred is null and i.indexprs is null
-         and v_ctl_attnum = any((string_to_array(i.indkey::text, ' ')::int2[])[1:i.indnkeyatts])
-         and not exists (select 1 from pg_constraint con where con.conindid = i.indexrelid)
-       limit 1;
+      -- (the rule is shared with pgpm_hypertable, which asks it of a hypertable before its swap, #792)
+      v_bare_uq := pgpm._transmute_bare_unique(p_parent, p_control);
       if v_bare_uq is not null then
         raise exception 'pg_partition_magician: cannot transmute % on % -- the unique index % includes the control column but is a bare index, not a constraint, so pgpm cannot adopt it without an O(rows) rebuild. Promote it to a constraint first: ALTER TABLE % ADD CONSTRAINT %_key UNIQUE USING INDEX %; then re-run transmute. (pgpm reuses a primary key or a unique constraint, never a bare index, to keep the conversion metadata-only.)',
           p_parent, p_control, v_bare_uq, p_parent::text, v_bare_uq, v_bare_uq;
@@ -6206,7 +6232,7 @@ begin
     if p_control_kind <> 'time' then   -- the time kind's v_max_ts is the maximum itself, read above
       v_max_ts := pgpm._decode(p_control_kind, v_max_raw, p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_tt_alphabet, p_tt_discard_bits, p_tt_epoch)::timestamptz;
     end if;
-    v_skew_limit := now() + p_step::interval + interval '1 hour';
+    v_skew_limit := pgpm._frontier_skew_limit(p_step::interval);   -- shared with pgpm_hypertable (#792)
     if v_max_ts > v_skew_limit then
       if not p_force_frontier and p_control_kind = 'time' then
         raise exception 'pg_partition_magician: % cannot be partitioned on a time grid using %: its newest value is %, which is % ahead of now() (%). The monolith''s upper bound has to lie past every row, so that one value would fix the monolith''s permanent upper bound at % instead of %: every row written until then lands in the monolith, which cannot be regrained, and nothing behind it can be dropped, until the clock actually gets there. Delete or correct the rows whose % is after % (now() + one step + one hour, the most the newest row may lead the clock by) and re-run, or re-run with p_force_frontier => true to accept that bound.',

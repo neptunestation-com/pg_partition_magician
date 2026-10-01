@@ -20,10 +20,14 @@
 -- handoff, since CREATE TABLE LIKE does not carry identity), generated columns are
 -- preserved (the copy omits them from its column list and they recompute on
 -- insert), and CHECK constraints, defaults, and NOT NULL are carried onto the
--- partitioned parent by transmute. Refused up front: continuous aggregates, space
--- partitioning (>1 dimension), an integer-time dimension, a p_control that is
--- not the dimension column, and an exclusion constraint (#675); transmute also refuses a nullable control column, a
--- key that excludes it, or a bare unique index.
+-- partitioned parent by transmute. The owner, grants, row-level security, policies,
+-- comment and triggers, which LIKE does not carry either, are put back on the copy
+-- in the swap (#787) and carried on by transmute. Refused up front: continuous
+-- aggregates, space partitioning (>1 dimension), an integer-time dimension, a
+-- p_control that is not the dimension column, an exclusion constraint (#675), and
+-- two shapes transmute refuses after the swap, a bare unique index as the key and a
+-- newest row past its frontier bound unless p_force_frontier (#792); transmute also
+-- refuses a nullable control column or a key that excludes it.
 --
 -- Catch-up has two modes. By default the cutover catches up append-only: rows
 -- whose control column is past the copy watermark. That is enough for time-series
@@ -223,6 +227,35 @@ begin
     quote_ident(v_tnsp), quote_ident(v_trel);
 end $$;
 
+-- _from_hypertable_check_key: the key transmute will refuse, asked of the hypertable BEFORE anything changes
+-- (#792). TimescaleDB's own documented way to add a unique key is CREATE UNIQUE INDEX, and transmute reuses
+-- a primary key or a unique CONSTRAINT as the key, never a bare index: it refused one with the hypertable
+-- already dropped by the committed swap, leaving a plain unmanaged table. The rule is transmute's own
+-- (pgpm._transmute_bare_unique); the message is this module's, because transmute's remedy (ADD CONSTRAINT
+-- ... USING INDEX) is one TimescaleDB refuses on a hypertable. A catalog read, which takes no lock on the
+-- table. Called by the preflight (and through it from_hypertable and from_hypertable_copy), and by the
+-- cutover under its ACCESS EXCLUSIVE, since a destination left by an older version's copy, or made by hand,
+-- reaches the swap without the preflight ever having run, and an index can be added after the copy.
+create or replace function pgpm._from_hypertable_check_key(p_hypertable regclass, p_control name)
+returns void language plpgsql stable as $$
+declare v_idx name; v_idx_oid regclass; v_keycols_q text; v_inccols_q text;
+begin
+  v_idx := pgpm._transmute_bare_unique(p_hypertable, p_control);
+  if v_idx is null then return; end if;
+  select i.indexrelid::regclass,
+         string_agg(quote_ident(a.attname), ', ' order by k.ord) filter (where k.ord <= i.indnkeyatts),
+         string_agg(quote_ident(a.attname), ', ' order by k.ord) filter (where k.ord > i.indnkeyatts)
+    into v_idx_oid, v_keycols_q, v_inccols_q
+    from pg_index i join pg_class c on c.oid = i.indexrelid
+    cross join lateral unnest(i.indkey) with ordinality as k(attnum, ord)
+    join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
+   where i.indrelid = p_hypertable and c.relname = v_idx
+   group by i.indexrelid;
+  raise exception 'pg_partition_magician: cannot migrate hypertable % -- refused before anything is changed, because transmute, which takes the table over once the cutover''s swap has committed, would refuse it: the unique index % includes the control column % but is a bare index, not a constraint, and pgpm reuses a primary key or a unique constraint as the key, never a bare index. TimescaleDB does not allow ADD CONSTRAINT ... USING INDEX on a hypertable, so build the constraint instead: ALTER TABLE % ADD CONSTRAINT % UNIQUE (%)%; then DROP INDEX %; and re-run from_hypertable.',
+    p_hypertable, v_idx_oid, quote_ident(p_control), p_hypertable, quote_ident(v_idx || '_key'), v_keycols_q,
+    coalesce(' INCLUDE (' || v_inccols_q || ')', ''), v_idx_oid;
+end $$;
+
 -- _from_hypertable_check_handoff: the names transmute will derive from the table and p_interval must fit, asked
 -- BEFORE anything changes (#707). The cutover hands the plain table to transmute only after its swap has
 -- committed, and transmute names the monolith <rel>_p<lo>_to_<hi> at the grid's label granularity (26
@@ -245,6 +278,127 @@ exception when others then
   if sqlerrm not like 'pg_partition_magician: cannot name a partition of %' then raise; end if;
   raise exception 'pg_partition_magician: cannot migrate hypertable % with p_interval % -- refused before anything is changed, because transmute, which takes the table over once the cutover''s swap has committed, would refuse it: %',
     p_hypertable, p_interval, regexp_replace(sqlerrm, '^pg_partition_magician: ', '');
+end $$;
+
+-- _from_hypertable_check_frontier: transmute's frontier refusal (#457), asked of the hypertable before the
+-- swap (#792). A newest row further ahead of now() than one step plus an hour (a device with a wrong clock)
+-- is refused by transmute unless p_force_frontier, and that came after the swap had committed, with the
+-- hypertable dropped and no way to pass the override through. The bound is transmute's own,
+-- pgpm._frontier_skew_limit, and p_force_frontier skips this exactly as it skips transmute's check, to which
+-- the cutover passes it. Asked only of a timestamp dimension the column really is: a column that is missing
+-- or of another type is the dimension check's to refuse, by name. It reads the table, so it is not asked
+-- where the read's ACCESS SHARE would outlive it into a window something else must stay able to write in:
+-- from_hypertable asks it before its copy (whose first COMMIT ends that transaction), and the cutover under
+-- its ACCESS EXCLUSIVE, where the source is frozen and a row written while the cutover prepared is seen.
+create or replace function pgpm._from_hypertable_check_frontier(
+  p_hypertable regclass, p_control name, p_interval interval, p_force_frontier boolean
+) returns void language plpgsql as $$
+declare v_typ regtype; v_max timestamptz; v_limit timestamptz;
+begin
+  if p_force_frontier then return; end if;
+  select a.atttypid into v_typ
+    from pg_attribute a where a.attrelid = p_hypertable and a.attname = p_control and not a.attisdropped;
+  if v_typ is null or v_typ not in ('timestamptz'::regtype, 'timestamp'::regtype, 'date'::regtype) then
+    return;
+  end if;
+  -- A naive (timestamp, date) value is read as UTC wall time, the zone transmute computes such a grid in (#504).
+  execute format('select max(t.%I)%s from %s t', p_control,
+                 case when v_typ = 'timestamptz'::regtype then '' else '::timestamp at time zone ''UTC''' end,
+                 p_hypertable::text)
+    into v_max;
+  v_limit := pgpm._frontier_skew_limit(p_interval);
+  if v_max > v_limit then
+    raise exception 'pg_partition_magician: cannot migrate hypertable % with p_interval % -- refused before anything is changed, because transmute, which takes the table over once the cutover''s swap has committed, would refuse it: its newest % is %, which is % ahead of now() (%), more than one step plus one hour (the most the newest row may lead the clock by, so after %). That one value would fix the monolith''s permanent upper bound past it, and every row written until the clock gets there would land in the monolith, which cannot be regrained. Delete or correct the rows whose % is after %, or re-run with p_force_frontier => true to accept that bound.',
+      p_hypertable, p_interval, quote_ident(p_control), v_max, justify_interval(date_trunc('second', v_max - now())),
+      now(), v_limit, quote_ident(p_control), v_limit;
+  end if;
+end $$;
+
+-- _from_hypertable_carried_ddl: what the swap has to put back on the table it renames into the hypertable's
+-- place (#787), as the statements that do it. The copy is made by CREATE TABLE ... LIKE, which carries none
+-- of the table's owner, its table and column grants, its row-level security (ENABLE and FORCE) and
+-- policies, its own comment or its triggers, and the swap drops the hypertable they were on. So none of them
+-- reached transmute, which carries exactly these from a plain table onto its parent (#277): every grantee got
+-- permission denied once the migration completed, the policies were gone, and the triggers stopped firing.
+-- Read off the source by the cutover under its ACCESS EXCLUSIVE, which holds every one of them still except a
+-- GRANT or REVOKE (those take no lock on the table), just before the DROP, and replayed in the swap
+-- transaction once the copy has the source's name: each statement names the table by that name, and
+-- pg_get_triggerdef's text names it the same way, so they replay verbatim, as transmute replays its triggers.
+-- Left out, by what they are: TimescaleDB's own insert-blocker trigger (its function lives in a
+-- _timescaledb_* schema) and this module's change-capture trigger (<rel>_pgpm_delta_fn, dropped with the
+-- source). No trigger state rides along, because TimescaleDB refuses ENABLE and DISABLE TRIGGER on a
+-- hypertable, so every user trigger is origin-enabled, which is what CREATE TRIGGER leaves. Not carried
+-- either, because transmute does not carry them onto its parent: the replica identity and the storage
+-- parameters.
+create or replace function pgpm._from_hypertable_carried_ddl(p_hypertable regclass)
+returns text[] language plpgsql stable as $$
+declare
+  v_nsp name; v_rel name; v_tbl_q text; v_ddl text[] := '{}'; r record;
+begin
+  select n.nspname, c.relname into v_nsp, v_rel
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
+  v_tbl_q := format('%I.%I', v_nsp, v_rel);
+  v_ddl := v_ddl || format('alter table %s owner to %I', v_tbl_q,
+                           (select pg_get_userbyid(c.relowner) from pg_class c where c.oid = p_hypertable));
+  -- Table grants. A NULL relacl is the owner's implicit default, which the copy has too. grantee 0 is PUBLIC.
+  for r in
+    select a.grantee, a.privilege_type, a.is_grantable
+      from pg_class c, aclexplode(c.relacl) a where c.oid = p_hypertable and c.relacl is not null
+     order by a.grantee, a.privilege_type
+  loop
+    v_ddl := v_ddl || format('grant %s on %s to %s%s', r.privilege_type, v_tbl_q,
+                             case when r.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(r.grantee)) end,
+                             case when r.is_grantable then ' with grant option' else '' end);
+  end loop;
+  -- Column grants, which live in pg_attribute.attacl, not relacl.
+  for r in
+    select att.attname, a.grantee, a.privilege_type, a.is_grantable
+      from pg_attribute att, aclexplode(att.attacl) a
+     where att.attrelid = p_hypertable and att.attnum > 0 and not att.attisdropped and att.attacl is not null
+     order by att.attnum, a.grantee, a.privilege_type
+  loop
+    v_ddl := v_ddl || format('grant %s (%I) on %s to %s%s', r.privilege_type, r.attname, v_tbl_q,
+                             case when r.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(r.grantee)) end,
+                             case when r.is_grantable then ' with grant option' else '' end);
+  end loop;
+  -- Row-level security. FORCE matters as much as ENABLE: without it the owner bypasses every policy.
+  if (select c.relrowsecurity from pg_class c where c.oid = p_hypertable) then
+    v_ddl := v_ddl || format('alter table %s enable row level security', v_tbl_q);
+  end if;
+  if (select c.relforcerowsecurity from pg_class c where c.oid = p_hypertable) then
+    v_ddl := v_ddl || format('alter table %s force row level security', v_tbl_q);
+  end if;
+  for r in
+    select polname, polcmd, polpermissive,
+           case when polroles = '{0}'::oid[] then 'public'
+                else (select string_agg(quote_ident(rolname), ', ' order by rolname)
+                        from pg_roles where oid = any(polroles)) end as roles_q,
+           pg_get_expr(polqual, polrelid) as qual, pg_get_expr(polwithcheck, polrelid) as withcheck
+      from pg_policy where polrelid = p_hypertable order by polname
+  loop
+    v_ddl := v_ddl || format('create policy %I on %s as %s for %s to %s%s%s', r.polname, v_tbl_q,
+      case when r.polpermissive then 'permissive' else 'restrictive' end,
+      case r.polcmd when 'r' then 'select' when 'a' then 'insert' when 'w' then 'update'
+                    when 'd' then 'delete' else 'all' end,
+      r.roles_q,
+      case when r.qual is not null then ' using (' || r.qual || ')' else '' end,
+      case when r.withcheck is not null then ' with check (' || r.withcheck || ')' else '' end);
+  end loop;
+  -- The table's own comment. LIKE ... INCLUDING COMMENTS carried the columns' and constraints', not this one.
+  if obj_description(p_hypertable, 'pg_class') is not null then
+    v_ddl := v_ddl || format('comment on table %s is %L', v_tbl_q, obj_description(p_hypertable, 'pg_class'));
+  end if;
+  for r in
+    select pg_get_triggerdef(t.oid) as def
+      from pg_trigger t join pg_proc f on f.oid = t.tgfoid join pg_namespace fn on fn.oid = f.pronamespace
+     where t.tgrelid = p_hypertable and not t.tgisinternal
+       and fn.nspname not like '\_timescaledb%'
+       and not (fn.nspname = v_nsp and f.proname = v_rel || '_pgpm_delta_fn')
+     order by t.tgname
+  loop
+    v_ddl := v_ddl || r.def;
+  end loop;
+  return v_ddl;
 end $$;
 
 -- _from_hypertable_shape_diff: how the copy's shape differs from the source's, or null when it does not
@@ -391,6 +545,10 @@ begin
   -- bounded on the DIMENSION's chunk ranges; an integer dimension passes (3) and copies nothing, because its
   -- ranges are not in the column the copy reads. See _from_hypertable_check_dimension.
   perform pgpm._from_hypertable_check_dimension(p_hypertable, p_control);
+
+  -- (3b2) a key transmute would refuse after the swap: a bare unique index (issue #792). See
+  -- _from_hypertable_check_key.
+  perform pgpm._from_hypertable_check_key(p_hypertable, p_control);
 
   -- (3c) an EXCLUDE constraint, which nothing in the migration carries (issue #675). See
   -- _from_hypertable_check_exclusion.
@@ -951,12 +1109,14 @@ drop procedure if exists pgpm.from_hypertable_cutover(regclass, name, interval, 
 -- #665 added p_lock_timeout, which CHANGES THE ARGUMENT COUNT: CREATE OR REPLACE does not replace across
 -- that, so the previous form must go or both overloads survive and every call becomes ambiguous.
 drop procedure if exists pgpm.from_hypertable_cutover(regclass, name, interval, int, interval, int, timestamptz, boolean, boolean);
+-- #792 added p_force_frontier, passed through to transmute: the same arg-count hazard again.
+drop procedure if exists pgpm.from_hypertable_cutover(regclass, name, interval, int, interval, int, timestamptz, boolean, boolean, text);
 create or replace procedure pgpm.from_hypertable_cutover(
   p_hypertable regclass, p_control name, p_interval interval,
   p_obtain int default 30, p_retain interval default null,
   p_drain_batch int default 5000, p_anchor timestamptz default '2000-01-01 00:00:00+00',
   p_paused boolean default true, p_predrain boolean default true,
-  p_lock_timeout text default '5s'
+  p_lock_timeout text default '5s', p_force_frontier boolean default false
 ) language plpgsql as $$
 declare
   v_nsp name; v_rel name; v_dest name; v_cols_q text; v_retain interval;
@@ -977,6 +1137,8 @@ declare
   v_src_h numeric; v_dest_h numeric; v_h numeric; -- ...and the same for the content fingerprint, the rows' identity (#653)
   v_fp_q text;           -- the per-row fingerprint expression, over the quoted column list (#653)
   v_prev_lock_timeout text;   -- #665: so validating p_lock_timeout leaves the setting untouched
+  v_carried_ddl text[];       -- #787: what LIKE left behind (owner, grants, RLS, policies, comment, triggers)
+  v_stmt text;
 begin
   -- #665: validate the lock timeout HERE, before the pre-drain commits anything or the index pre-builds
   -- spend their O(rows), exactly as transmute validates its own (#309). The prior value is restored at
@@ -1180,6 +1342,14 @@ begin
   -- been unlocked from there to here (the pre-drain's commits, the index pre-builds), so DDL can have landed
   -- in between. Both relations are frozen now, and the column list read at the top must still describe both.
   perform pgpm._from_hypertable_check_shape(p_hypertable, v_dest_oid);
+  -- ...and two of transmute's refusals the source already shows (#792). Asked here rather than up front, for
+  -- two reasons. Nothing can write the source now, so a row dated past the frontier bound, or a bare unique
+  -- index, that arrived while the cutover prepared (the pre-drain's commits, the index pre-builds) is refused
+  -- with the source whole, not by transmute after the swap. And the frontier's read of the source, made up
+  -- front, would hold its ACCESS SHARE from there to here, through the window the online flow keeps open.
+  -- The refusal rolls back the catch-up and the pre-builds with it; only a pre-drain's batches stay in the copy.
+  perform pgpm._from_hypertable_check_key(p_hypertable, p_control);
+  perform pgpm._from_hypertable_check_frontier(p_hypertable, p_control, p_interval, p_force_frontier);
   if v_track then
     -- change-tracking catch-up: reconcile every touched key against the now-frozen source. Delete each
     -- dirty key's copied version from the destination, then re-insert its current source row -- which is
@@ -1442,6 +1612,9 @@ begin
     insert into pgpm.log (parent_table, action, method) values (v_dest_oid, 'drop_incoming_fk', k.conname);
   end loop;
 
+  -- What CREATE TABLE ... LIKE left off the copy (#787), read here, under the ACCESS EXCLUSIVE and with the
+  -- source about to go, and replayed below once the copy has its name. See _from_hypertable_carried_ddl.
+  v_carried_ddl := pgpm._from_hypertable_carried_ddl(p_hypertable);
   execute format('drop table %I.%I', v_nsp, v_rel);   -- also drops the change-capture trigger, if any
   if v_track then
     -- the trigger went with the source; drop the now-orphaned delta table and trigger function. This is
@@ -1461,6 +1634,11 @@ begin
   -- rename the pre-built secondary indexes to their original names (metadata-only)
   for v_i in 1 .. coalesce(array_length(v_idx_orig, 1), 0) loop
     execute format('alter index %I.%I rename to %I', v_nsp, v_idx_tmps[v_i], v_idx_orig[v_i]);
+  end loop;
+  -- #787: the source's owner, grants, row-level security, policies, comment and triggers, onto the table now
+  -- under its name, in the swap transaction, so transmute finds them there and carries them onto its parent.
+  foreach v_stmt in array v_carried_ddl loop
+    execute v_stmt;
   end loop;
   -- Identity, re-added in the source's kind and with its sequence's options (#640), at the SOURCE sequence's
   -- position, in this same transaction (#563). A freshly added identity starts at START WITH, and the
@@ -1494,7 +1672,7 @@ begin
   -- knob is regrain's now (#288), so the handoff names it explicitly rather than relying on position.
   call pgpm.transmute(v_orig, p_control, p_interval, p_obtain, v_retain,
                       p_regrain_batch => p_drain_batch, p_anchor => p_anchor, p_paused => p_paused,
-                      p_lock_timeout => p_lock_timeout);
+                      p_lock_timeout => p_lock_timeout, p_force_frontier => p_force_frontier);
 
   -- Re-add the incoming FKs the swap dropped, now against the new partitioned parent (issue #264). Handed
   -- to the CORE's existing state machine rather than re-implementing the dance: the swap recorded them in
@@ -1556,12 +1734,14 @@ drop procedure if exists pgpm.from_hypertable(regclass, name, interval, int, int
 drop procedure if exists pgpm.from_hypertable(regclass, name, interval, int, interval, boolean, int, timestamptz, boolean, boolean, boolean);
 -- #665 added p_lock_timeout, passed through to the cutover: the same arg-count hazard as above.
 drop procedure if exists pgpm.from_hypertable(regclass, name, interval, int, interval, int, timestamptz, boolean, boolean, boolean);
+-- #792 added p_force_frontier, passed through to the cutover and on to transmute: the same hazard again.
+drop procedure if exists pgpm.from_hypertable(regclass, name, interval, int, interval, int, timestamptz, boolean, boolean, boolean, text);
 create or replace procedure pgpm.from_hypertable(
   p_hypertable regclass, p_control name, p_interval interval,
   p_obtain int default 30, p_retain interval default null,
   p_drain_batch int default 5000, p_anchor timestamptz default '2000-01-01 00:00:00+00',
   p_paused boolean default true, p_track_changes boolean default false, p_predrain boolean default true,
-  p_lock_timeout text default '5s'
+  p_lock_timeout text default '5s', p_force_frontier boolean default false
 ) language plpgsql as $$
 declare v_prev_lock_timeout text;
 begin
@@ -1578,7 +1758,10 @@ begin
   -- (after the module's own names, #552, so a name too long for both is told the same thing as by the copy)
   perform pgpm._from_hypertable_check_names(p_hypertable);
   perform pgpm._from_hypertable_check_handoff(p_hypertable, p_interval, p_anchor);
+  -- #792: and transmute's frontier bound, which needs p_interval too (the copy's preflight asks the key)
+  perform pgpm._from_hypertable_check_frontier(p_hypertable, p_control, p_interval, p_force_frontier);
   call pgpm.from_hypertable_copy(p_hypertable, p_control, p_track_changes);
   call pgpm.from_hypertable_cutover(p_hypertable, p_control, p_interval, p_obtain, p_retain,
-                                    p_drain_batch, p_anchor, p_paused, p_predrain, p_lock_timeout);
+                                    p_drain_batch, p_anchor, p_paused, p_predrain, p_lock_timeout,
+                                    p_force_frontier);
 end $$;
