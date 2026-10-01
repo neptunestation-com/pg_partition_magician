@@ -805,6 +805,7 @@ run_perf() {
     "bench/hypertable_handoff_fk_lock_timeout.sh pgpm_perf150"
     "bench/transmute_refusal_edges.sh pgpm_perf129"
     "bench/reverse_legibility_edges.sh pgpm_perf130"
+    "bench/check_newest_skips_nulls.sh pgpm_perf152"
   )
   local selected=()
   local n=${#guards[@]} idx

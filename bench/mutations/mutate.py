@@ -4492,6 +4492,18 @@ $$;''',
           "      v_idnext := array_append(v_idnext, pgpm._seq_next(v_seq));\n"
           "      v_idopts := array_append(v_idopts, pgpm._identity_options(v_seq));\n    end loop;\n", 1)],
     ),
+    "check_newest_nulls_first": (
+        "bench/check_newest_skips_nulls.sh",
+        "Issue #734 put back: check_uuidv7 and check_text_time read the column's maximum with ORDER BY "
+        "... DESC LIMIT 1 and no IS NOT NULL, so DESC's NULLS FIRST makes one NULL the maximum and "
+        "newest_decoded and newest_in_future come back null while a row years ahead is in the table. Two "
+        "sites, one per function. tests/200's future-row and past-row assertions catch it.",
+        [("         m as (select pgpm._uuid_to_ts(t.%1$I) as ts from %2$s t where t.%1$I is not null\n"
+          "                order by t.%1$I desc limit 1)\n",
+          "         m as (select pgpm._uuid_to_ts(t.%1$I) as ts from %2$s t order by t.%1$I desc limit 1)\n", 1),
+         ("         m as (select t.%1$I::text as v from %2$s t where t.%1$I is not null order by t.%1$I desc limit 1),\n",
+          "         m as (select t.%1$I::text as v from %2$s t order by t.%1$I desc limit 1),\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
