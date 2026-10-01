@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+- **`transmute` refuses up front three shapes its cutover could not convert** (#730). A `NOT VALID`
+  `CHECK` (or, on PostgreSQL 18, `NOT VALID` `NOT NULL`) constraint, a `CHECK ... NO INHERIT` constraint
+  and a generated control column passed every preflight check, so phases 1 and 2 committed the validated,
+  write-rejecting `pgpm_monolith_bound` and the claim, and the cutover then died raw on every retry
+  (the `ATTACH` refused the table under the parent's validated copy; PostgreSQL refuses a `NO INHERIT`
+  constraint on a partitioned table, and a generated column in a partition key), leaving writes past `hi`
+  rejected until `transmute_abort`. Each is now refused before anything is committed, naming the
+  constraint or column; pgpm's own `NOT VALID` bound on a resume is not. Guarded by `tests/187` through
+  `bench/transmute_uncarriable_shapes.sh`, one mutation per refusal (`transmute_carries_not_valid_check`,
+  `transmute_carries_no_inherit_check`, `transmute_generated_control`).
+- **`transmute` keeps a reused key's deferrability** (#731). The cutover re-created the reused primary key
+  or unique constraint on the parent as a bare `ADD PRIMARY KEY` / `ADD UNIQUE`, which still adopted a
+  `DEFERRABLE` monolith key, so the monolith kept its deferred check while every forward partition's clone
+  was immediate, and a one-statement key swap the table accepted before failed with a duplicate key past
+  the monolith. The parent's key now carries `DEFERRABLE` and `INITIALLY DEFERRED` as the original had
+  them, read under the cutover's lock, and still adopts the monolith's index in place. Guarded by
+  `tests/188` through `bench/transmute_key_deferrability.sh` (`transmute_key_immediate`).
 - **The runbook states an id grid's `retain` in ids, as pgpm reads it** (#676). "Storage is not dropping
   despite a retention policy" called it a count of intervals, while `_retain_boundary` subtracts it from
   the frontier as a count of ids (as `reference.md` and `guide.md` say), so an operator setting

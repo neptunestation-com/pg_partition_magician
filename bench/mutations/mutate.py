@@ -3767,6 +3767,44 @@ $$;''',
   v_monreg := format('%I.%I', v_nsp, v_mon)::regclass;
 """, 1)],
     ),
+    # #730: one mutation per refusal, all three judged by the same guard (tests/187), so each refusal is
+    # shown to be caught on its own rather than only all three together.
+    "transmute_carries_not_valid_check": (
+        "bench/transmute_uncarriable_shapes.sh",
+        "Issue #730 put back for a NOT VALID constraint: the preflight never finds one, so the cutover's "
+        "LIKE gives the parent a validated copy and its ATTACH dies raw ('conflicts with NOT VALID "
+        "constraint on child table') after phases 1 and 2 committed the bound and the claim. One site, the "
+        "NOT VALID query. tests/187's refusal of nvc_amt_pos (and, on 18, of nvn_amt_nn) catches it.",
+        [("   where conrelid = p_parent and contype in ('c', 'n') and not convalidated\n",
+          "   where false and conrelid = p_parent and contype in ('c', 'n') and not convalidated\n", 1)],
+    ),
+    "transmute_carries_no_inherit_check": (
+        "bench/transmute_uncarriable_shapes.sh",
+        "Issue #730 put back for a CHECK ... NO INHERIT: the preflight never finds one, so the cutover's "
+        "CREATE TABLE ... LIKE INCLUDING CONSTRAINTS dies raw ('cannot add NO INHERIT constraint to "
+        "partitioned table') after phases 1 and 2 committed the bound and the claim. One site, the NO "
+        "INHERIT query. tests/187's refusal of nic_amt_pos catches it.",
+        [("   where conrelid = p_parent and contype = 'c' and connoinherit;\n",
+          "   where false and conrelid = p_parent and contype = 'c' and connoinherit;\n", 1)],
+    ),
+    "transmute_generated_control": (
+        "bench/transmute_uncarriable_shapes.sh",
+        "Issue #730 put back for a GENERATED control column: the preflight reads its type only, so the "
+        "cutover's CREATE TABLE ... PARTITION BY RANGE dies raw ('cannot use generated column in partition "
+        "key') after phases 1 and 2 committed the bound and the claim. One site, the attgenerated lookup. "
+        "tests/187's refusal of gcc.d catches it.",
+        [("       where a.attrelid = p_parent and a.attname = p_control and not a.attisdropped) <> '' then\n",
+          "       where false and a.attrelid = p_parent and a.attname = p_control and not a.attisdropped) <> '' then\n", 1)],
+    ),
+    "transmute_key_immediate": (
+        "bench/transmute_key_deferrability.sh",
+        "Issue #731 put back: step 8 re-creates the reused key on the parent as a bare ADD PRIMARY KEY / "
+        "ADD UNIQUE, which still adopts a DEFERRABLE monolith key, so every forward partition's clone is "
+        "immediate and a one-statement key swap the table accepted before fails with a duplicate key. Both "
+        "branches (the primary key and the unique constraint) lose the clause, the one site that carries "
+        "it. tests/188's flag, forward-partition and swap assertions on dpk and duq catch it.",
+        [("coalesce(v_key_defer, '')", "''", 2)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

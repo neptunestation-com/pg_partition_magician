@@ -115,7 +115,13 @@ One shape is refused rather than carried: a `FOR EACH ROW` trigger with a transi
 statement trigger, which can carry a transition table, or drop it. So is membership in a publication with
 `publish_via_partition_root = false` that names the table with a row filter or a column list, which
 PostgreSQL does not allow on a partitioned table: set `publish_via_partition_root = true` on it, or drop
-the filter and column list, then re-run. **Outgoing** foreign keys (this table
+the filter and column list, then re-run. Three more shapes the cutover could not convert are refused the
+same way, before anything is committed, naming the constraint or column: a `NOT VALID` `CHECK` (or, on
+PostgreSQL 18, a `NOT VALID` `NOT NULL`) constraint, because the parent would get a validated copy the
+table cannot be attached under (`VALIDATE CONSTRAINT` it first, which blocks no reader or writer, or drop
+it); a `CHECK ... NO INHERIT` constraint, which PostgreSQL does not allow on a partitioned table (drop it,
+or re-create it without `NO INHERIT`); and a generated control column, which PostgreSQL cannot partition
+by (partition on a plain column). **Outgoing** foreign keys (this table
 referencing another) are carried onto the new parent automatically, so they keep enforcing across every
 partition; a `NOT VALID` one is refused rather than carried, because re-adding it at the parent could not
 then be metadata-only. That refusal, and the refusal of a `UNIQUE` index that cannot be carried (below), is
@@ -138,11 +144,12 @@ Parameters:
 - `p_control` -- the partition-key column. It **must be `NOT NULL`** (a partition key cannot be null;
   `pgpm` never scans to enforce it). A key is not required: if the **primary key** includes the control
   column, `pgpm` reuses it in place and never rewrites it; if there is no primary key and a **unique
-  constraint** includes the control column, that is reused instead; if there is neither, the table is
-  partitioned **keyless** (no key synthesized). A **primary key that *excludes* the control column is
-  refused** (no rewrite), whatever other unique constraints the table has: it could not be carried onto
-  the parent, and `pgpm` will not adopt a different key and leave it behind on the monolith, where it
-  would enforce nothing for new rows. The error names the constraint and the control column. A *bare*
+  constraint** includes the control column, that is reused instead (either way with its deferrability:
+  a `DEFERRABLE` or `INITIALLY DEFERRED` key stays so on the parent and on every partition, the forward
+  ones included); if there is neither, the table is partitioned **keyless** (no key synthesized). A
+  **primary key that *excludes* the control column is refused** (no rewrite), whatever other unique
+  constraints the table has: it could not be carried onto the parent, and `pgpm` will not adopt a
+  different key and leave it behind on the monolith, where it would enforce nothing for new rows. The error names the constraint and the control column. A *bare*
   unique index is refused too (promote it to a constraint first). Column **order** within the key
   is free: PostgreSQL requires only that the key *contain* the partition key, and `pgpm` reads the key for
   identity, never for ordering. Choose it for your own reads (see
