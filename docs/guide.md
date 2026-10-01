@@ -700,6 +700,13 @@ range the renamed partition holds, discards it (logged once as `archive_coverage
 old name in `method`) and archives the partition again from its `lo`. Nothing is lost either way;
 the difference is whether the chunks already exported are exported a second time.
 
+**Moving the table to another schema is safe.** `ALTER TABLE public.events SET SCHEMA history` moves
+the managed table only: its partitions stay in `public`, and the partitions pgpm creates afterwards go in
+`history`. pgpm tracks the table by identity, and every step of the retention lifecycle finds a partition
+in its own schema through the identity it recorded for it, so write blocks, archiving and retirement carry
+on across the move. A rename is still a rename, though: the steps look a partition up by name in that
+schema, so the advice above applies wherever the partition lives.
+
 `status().retain_backlog` tracks partitions still waiting on their turn to drop; it falling tick over
 tick is normal draining (either a paced backlog or archiving still catching up), while flat with
 `retain_drop_failures` climbing means something else is wrong -- an unexpected `DROP` failure, not

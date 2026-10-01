@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **A table moved with `ALTER TABLE ... SET SCHEMA` keeps being maintained** (#727). The write block, the
+  archive step and `retire` resolved every partition in the parent's current schema, but moving the parent
+  leaves its partitions where they were, so afterwards no step found one again: `skip_write_block` and
+  `fail_retain_identity` ("oid nothing now") on every tick, nothing archived, and retention wedged for good
+  with every partition still attached under its recorded oid. A new `pgpm._child_nsp` reads the schema off
+  the relation `pgpm.part.child_oid` records (falling back to the parent's attached partition of that name,
+  then to the parent's schema), and `retire`, `_install_write_block`, `_remove_write_block`,
+  `_is_write_blocked`, `_enforce_write_blocks`, `_archive_step`, `_next_archive_chunk` and `_archive_noop`
+  all resolve through it; each still compares the name against `child_oid`, so a squatter in that schema is
+  still refused. `tests/197` pins it through `bench/moved_parent_lifecycle.sh` (`child_nsp_parent_schema`).
 - **Loosening retention takes back a retirement it no longer reaches** (#724). A referenced partition's
   retirement dispatches a concurrent detach to the `pgpm_detach` cron job, and when `set_retain` loosened
   retention (or an `id` frontier moved back) before it ran, nothing recalled it: cron detached a partition
