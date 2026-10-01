@@ -781,6 +781,7 @@ run_perf() {
     "bench/set_partition_tz_grid_lock.sh pgpm_perf146"
     "bench/cutover_reread_window.sh pgpm_perf88"
     "bench/reread_under_lock_tap.sh pgpm_perf89"
+    "bench/reread_under_lock_remaining_tap.sh pgpm_perf125"
     "bench/frontier_malformed_max.sh pgpm_perf111"
     "bench/transmute_resume_control_column.sh pgpm_perf121"
     "bench/dropped_fk_reconcile.sh pgpm_perf109"

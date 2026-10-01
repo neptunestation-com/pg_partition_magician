@@ -441,6 +441,24 @@ returns text language sql stable as $$
     from pg_sequence s where s.seqrelid = p_seq;
 $$;
 
+-- The same clause, read under a lock on the sequence that ALTER SEQUENCE has to wait for (#732), and held to
+-- the end of the caller's transaction. No lock on the TABLE stops an ALTER SEQUENCE on its identity
+-- sequence: that statement takes SHARE ROW EXCLUSIVE on the sequence alone, so transmute's cutover and
+-- untransmute, which read the options and then carry them onto a sequence they create, lost an INCREMENT BY
+-- committed after the read even with the table's ACCESS EXCLUSIVE held. LOCK TABLE refuses a sequence, and
+-- pg_sequence_last_value is the side-effect-free statement that takes ROW EXCLUSIVE on one (the lock nextval
+-- takes, measured on PG 15 to 18), which conflicts with SHARE ROW EXCLUSIVE and with nothing a writer takes.
+-- So an ALTER SEQUENCE committed before this call is in what it returns, and one that has not committed by
+-- then waits for the caller. Null for null.
+create or replace function pgpm._identity_options_locked(p_seq regclass)
+returns text language plpgsql volatile as $$
+begin
+  if p_seq is null then return null; end if;
+  perform pg_sequence_last_value(p_seq);
+  return pgpm._identity_options(p_seq);
+end;
+$$;
+
 -- The value a sequence would hand out next (#670): last_value until the first nextval, then last_value plus
 -- its INCREMENT, which is not always 1. Numeric, because one step past an exhausted bigint sequence is not
 -- a bigint. Null for a null sequence.
@@ -3990,6 +4008,19 @@ create or replace function pgpm._enforce_regrain_capture(p_parent regclass)
 returns void language plpgsql as $$
 declare cfg pgpm.config; v_nsp name; v_keep boolean; r record;
 begin
+  -- #706: judge only a regrain's COMMITTED marks, under the lock every regrain driver takes first (#554).
+  -- Read without it, the cursor could predate a prepare that committed before the capture check below, and
+  -- the janitor tore that live capture down as orphaned (logged regrain_capture_orphan), forcing a restart.
+  -- Tried, not waited for: a driver holding the lock is a live regrain whose marks are its own, so this tick
+  -- leaves them to it and logs the skip, and maintain's write blocks, done in the same step, are not lost to
+  -- a lock wait.
+  if not pgpm._regrain_try_lock(p_parent) then
+    if exists (select 1 from pgpm.config where parent_table = p_parent) then
+      insert into pgpm.log (parent_table, action, method)
+        values (p_parent, 'skip_regrain_capture', 'a regrain driver holds pgpm.regrain_lock for this table; its capture is judged on a later tick');
+    end if;
+    return;
+  end if;
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then return; end if;
   select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
@@ -4099,6 +4130,24 @@ begin
     select p_parent where exists (select 1 from pgpm.config where parent_table = p_parent)
   on conflict (parent_table) do nothing;
   perform 1 from pgpm.regrain_lock where parent_table = p_parent for update;
+end;
+$$;
+
+-- _regrain_lock, tried rather than waited for (#706): true when this transaction holds it (taken now, or
+-- already), false when another one does. For the janitor, which runs inside maintain's write-block step:
+-- a wait there could only end in that step's lock_timeout and roll the write blocks back with it, and a
+-- regrain holding the lock is live, so there is nothing for the janitor to judge until it lets go. The
+-- row's first-use insert can itself wait on another session inserting it; that wait is the same "held".
+create or replace function pgpm._regrain_try_lock(p_parent regclass)
+returns boolean language plpgsql as $$
+begin
+  insert into pgpm.regrain_lock (parent_table)
+    select p_parent where exists (select 1 from pgpm.config where parent_table = p_parent)
+  on conflict (parent_table) do nothing;
+  perform 1 from pgpm.regrain_lock where parent_table = p_parent for update skip locked;
+  return found;
+exception when lock_not_available then
+  return false;
 end;
 $$;
 
@@ -4217,6 +4266,13 @@ declare
   cfg pgpm.config; v_nsp name; v_ncast text; v_delta name; v_capture boolean; v_cursor_in boolean;
   v_dropped int := 0; v_purged bigint := 0; r record;
 begin
+  -- #706: under the lock every regrain driver takes first (#554), before the cursor and the copies are read.
+  -- Without it a step in flight could commit a new copy, or move the cursor, after this read and before the
+  -- DROP of the source that follows (which waits on the step's lock on the source and then proceeds), and
+  -- what that step left outlived the source with nothing to reclaim it: the #519 leftovers. Waited for under
+  -- the caller's lock_timeout; in a maintenance tick a wait that runs out fails this retirement's DROP
+  -- subtransaction (fail_retain_drop) and the next tick retries it.
+  perform pgpm._regrain_lock(p_parent);
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then return 0; end if;
   select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
@@ -5148,6 +5204,94 @@ begin
 end;
 $$;
 
+-- transmute's gate on incoming foreign keys (step 0), asked twice by _transmute (#706): in the preflight, so
+-- that a key it cannot keep is refused before anything is committed, and again in the cutover under the
+-- table's ACCESS EXCLUSIVE, just before 0c acts on what is live. ADD FOREIGN KEY takes only SHARE ROW
+-- EXCLUSIVE on the referenced table, which nothing on it excludes between the two, so with p_incoming_fks
+-- => 'error' a key committed there was neither refused nor dropped (0c runs for 'preserve' only) and
+-- followed the rename onto the monolith: the referencing table was left keyed against ONE PARTITION, and a
+-- reference to a row routed to a forward partition was refused. A refusal from the second asking rolls the
+-- cutover back to the resumable phase-2 state, as any cutover failure does. p_keycols is the reused key
+-- (null for a keyless table), which an incoming key must reference exactly to be preserved.
+create or replace function pgpm._transmute_incoming_gate(p_parent regclass, p_incoming_fks text, p_keycols text[])
+returns void language plpgsql stable as $$
+declare v_fk record;
+begin
+  if not exists (select 1 from pg_constraint where confrelid = p_parent and contype = 'f') then
+    return;
+  end if;
+  if p_incoming_fks = 'error' then
+    raise exception
+      'pg_partition_magician: % has incoming foreign key(s) (%). Re-run with p_incoming_fks => ''preserve'' to keep them: pgpm drops each for the conversion and re-adds it against the new parent on a later maintenance tick (or call pgpm.restore_incoming_fks to do it now).',
+      p_parent,
+      (select string_agg(conname || ' on ' || conrelid::regclass::text, ', ')
+         from pg_constraint where confrelid = p_parent and contype = 'f');
+  end if;
+  -- 'preserve' (and 'drop'): preservable iff the parent keeps a unique key on EXACTLY this FK's referenced
+  -- columns. pgpm reuses the existing key verbatim (the PK, or a unique constraint when there is no usable
+  -- PK), so the FK must reference that reused key -- both a PK and a unique constraint are valid FK
+  -- targets. The only way it can't is an FK referencing a different unique key that cannot survive
+  -- partitioning (one not including the partition key) -- refuse with guidance.
+  for v_fk in
+    select c.conrelid::regclass as reltbl, c.conname,
+           (select array_agg(a.attname::text order by k.ord) from unnest(c.confkey) with ordinality as k(attnum, ord)
+              join pg_attribute a on a.attrelid = c.confrelid and a.attnum = k.attnum) as rcols
+      from pg_constraint c where c.confrelid = p_parent and c.contype = 'f'
+  loop
+    if not (p_keycols is not null
+            and (select array_agg(x order by x) from unnest(v_fk.rcols) x)
+              = (select array_agg(x order by x) from unnest(p_keycols) x)) then
+      raise exception 'pg_partition_magician: cannot preserve incoming FK % on % -- it references (%), but the parent''s reused key is (%). An incoming FK must reference the reused primary key or unique constraint to be preserved.',
+        v_fk.conname, v_fk.reltbl, array_to_string(v_fk.rcols, ', '), array_to_string(coalesce(p_keycols, '{}'), ', ');
+    end if;
+  end loop;
+end;
+$$;
+
+-- The one trigger shape a partitioned table cannot host (#277), refused. Asked twice by _transmute (#706):
+-- in the preflight, and again in the cutover under the table's ACCESS EXCLUSIVE, beside the trigger capture.
+-- CREATE TRIGGER takes only SHARE ROW EXCLUSIVE, so a row trigger with a transition table committed in
+-- between was captured and replayed onto the parent, where PostgreSQL refused it with a raw error naming
+-- neither pgpm nor the remedy.
+create or replace function pgpm._transmute_refuse_transition_triggers(p_parent regclass)
+returns void language plpgsql stable as $$
+declare v_bad_trg text;
+begin
+  -- Measured on PG 17.10: this is the ONLY refusal needed. Constraint triggers, statement triggers, WHEN
+  -- clauses, UPDATE OF, and even statement triggers WITH transition tables all transfer to a partitioned
+  -- parent; only a FOR EACH ROW trigger with a transition table is rejected. Refusing beats converting and
+  -- dropping it, which is the silent-loss failure this whole issue is about.
+  select string_agg(tgname, ', ' order by tgname) into v_bad_trg
+    from pg_trigger
+   where tgrelid = p_parent and not tgisinternal
+     and (tgoldtable is not null or tgnewtable is not null)
+     and (tgtype & 1) = 1;   -- TRIGGER_TYPE_ROW
+  if v_bad_trg is not null then
+    raise exception 'pg_partition_magician: cannot transmute % -- the row trigger(s) (%) use a transition table (REFERENCING OLD/NEW TABLE), which PostgreSQL does not allow on a partitioned table. Rewrite them as statement triggers (those DO carry a transition table) or drop them, then re-run transmute. pgpm refuses rather than converting and leaving the trigger behind on one child.',
+      p_parent, v_bad_trg;
+  end if;
+end;
+$$;
+
+-- What transmute's preflight plans the key and the identity from (#706): the primary key and unique
+-- constraints (columns and backing index), the identity columns and their kinds, and whether the control
+-- column is NOT NULL. Compared by _transmute after the staging LIKE, whose ACCESS SHARE excludes every
+-- statement that changes any of it (ADD/DROP CONSTRAINT, ADD/SET/DROP IDENTITY, SET/DROP NOT NULL all take
+-- ACCESS EXCLUSIVE). Between the preflight and that LIKE, phases 1 and 2 commit and let go of the table, so
+-- a key replaced or an identity re-declared there was unseen: step 6 re-added identity in the preflight's
+-- form (an identity made ALWAYS came back BY DEFAULT) and step 8 declared the preflight's key, building an
+-- index on the monolith under the outage for a key the table no longer had.
+create or replace function pgpm._transmute_key_shape(p_parent regclass, p_control name)
+returns text language sql stable as $$
+  select concat_ws(' / ',
+    (select string_agg(c.contype::text || '(' || c.conkey::text || ')@' || c.conindid::text, ',' order by c.contype, c.conkey::text, c.conindid)
+       from pg_constraint c where c.conrelid = p_parent and c.contype in ('p', 'u')),
+    (select string_agg(a.attnum::text || ':' || a.attidentity::text, ',' order by a.attnum)
+       from pg_attribute a where a.attrelid = p_parent and a.attidentity in ('a', 'd') and not a.attisdropped),
+    (select 'notnull:' || a.attnotnull::text
+       from pg_attribute a where a.attrelid = p_parent and a.attname = p_control and not a.attisdropped));
+$$;
+
 -- ============================== transmute ==============================
 
 -- #275 turned these from FUNCTIONs into PROCEDUREs. CREATE OR REPLACE cannot change that, so the old
@@ -5200,11 +5344,13 @@ declare
   v_ipfx_q text; v_upfx_q text;   -- #669: the two prefixes pg_get_indexdef can start a carried index's definition with
   v_add_pk boolean := false; v_add_uniq boolean := false; v_reuse_idx oid; v_reuse_conname name;
   v_uq_cols text[]; v_bare_uq text;
-  v_fk record; v_fk_eligible boolean;
+  v_fk record;
   v_out_names text[]; v_out_defs text[]; v_i2 int;   -- outgoing FKs (#263), listed by _transmute_outgoing_fks
   v_uchk_n bigint; v_uchk_frac numeric;
   v_idmax bigint[]; v_m bigint; v_i int; v_idnext numeric[];   -- #656: all three refreshed under the cutover's lock
   v_idmin bigint[]; v_mmin bigint;   -- #670: min(identity), for a descending identity's reseed
+  v_idopts text[]; v_opt text;      -- #732: the sequence options step 6 used, and their re-read under the lock
+  v_keyshape text;                  -- #706: what the preflight planned the key and identity from
   v_ra record;                       -- #656/#670: one identity column's refreshed (next, max, min)
   v_monolith name; v_monreg regclass;
   v_tz text;   -- #455: the zone the grid is computed in, recorded in config.partition_tz
@@ -5215,7 +5361,7 @@ declare
   -- #277: everything CREATE TABLE ... LIKE does NOT carry, captured before the rename and replayed onto
   -- the new parent inside the cutover transaction.
   v_owner name; v_acl aclitem[]; v_rls boolean; v_rls_force boolean;
-  v_comment text; v_colcom record; v_pol record; v_trg record; v_bad_trg text;
+  v_comment text; v_colcom record; v_pol record; v_trg record;
   v_prev_lock_timeout text;   -- #309: so validating p_lock_timeout leaves the setting untouched
   v_trgdefs text[] := '{}'; v_grant text; v_g record;
   v_trgnames text[] := '{}'; v_trgstates text[] := '{}';   -- #499: tgname and tgenabled, index-aligned with v_trgdefs
@@ -5526,6 +5672,10 @@ begin
     end if;
   end if;
 
+  -- #706: what the key and identity reads below plan from, taken FIRST, so a change landing between it and
+  -- them makes the cutover's comparison refuse rather than pass. Compared again after the staging LIKE.
+  v_keyshape := pgpm._transmute_key_shape(p_parent, p_control);
+
   -- existing PK columns and identity columns
   select array_agg(a.attname::text order by k.ord) into v_oldpk
     from pg_constraint con
@@ -5656,20 +5806,9 @@ begin
   select o_names, o_defs into v_idx_names, v_idx_defs
     from pgpm._transmute_carried_indexes(p_parent, v_nsp, p_control, v_ctl_attnum, v_reuse_idx);
 
-  -- Refuse the one trigger shape a partitioned table cannot host (#277). Measured on PG 17.10: this is
-  -- the ONLY refusal needed. Constraint triggers, statement triggers, WHEN clauses, UPDATE OF, and even
-  -- statement triggers WITH transition tables all transfer to a partitioned parent; only a FOR EACH ROW
-  -- trigger with a transition table is rejected. Refusing beats converting and dropping it, which is the
-  -- silent-loss failure this whole issue is about.
-  select string_agg(tgname, ', ' order by tgname) into v_bad_trg
-    from pg_trigger
-   where tgrelid = p_parent and not tgisinternal
-     and (tgoldtable is not null or tgnewtable is not null)
-     and (tgtype & 1) = 1;   -- TRIGGER_TYPE_ROW
-  if v_bad_trg is not null then
-    raise exception 'pg_partition_magician: cannot transmute % -- the row trigger(s) (%) use a transition table (REFERENCING OLD/NEW TABLE), which PostgreSQL does not allow on a partitioned table. Rewrite them as statement triggers (those DO carry a transition table) or drop them, then re-run transmute. pgpm refuses rather than converting and leaving the trigger behind on one child.',
-      p_parent, v_bad_trg;
-  end if;
+  -- Refuse the one trigger shape a partitioned table cannot host (#277): a row trigger with a transition
+  -- table. Asked again in the cutover under its ACCESS EXCLUSIVE (#706), beside the trigger capture.
+  perform pgpm._transmute_refuse_transition_triggers(p_parent);
 
   -- Publication membership (#566): the cutover adds the new parent to every publication that names this
   -- table (step 7c), and PostgreSQL refuses a row filter or a column list on a PARTITIONED table in a
@@ -5743,35 +5882,10 @@ begin
   -- then reported the table restored, the referencing table accepted orphans, and a clean re-run found no
   -- key to record. Nothing in phase 1 or 2 needs the key gone -- ADD CONSTRAINT NOT VALID and VALIDATE
   -- touch only this table -- so there was never a reason for it to be early.
-  if exists (select 1 from pg_constraint where confrelid = p_parent and contype = 'f') then
-    if p_incoming_fks = 'error' then
-      raise exception
-        'pg_partition_magician: % has incoming foreign key(s) (%). Re-run with p_incoming_fks => ''preserve'' to keep them: pgpm drops each for the conversion and re-adds it against the new parent on a later maintenance tick (or call pgpm.restore_incoming_fks to do it now).',
-        p_parent,
-        (select string_agg(conname || ' on ' || conrelid::regclass::text, ', ')
-           from pg_constraint where confrelid = p_parent and contype = 'f');
-    else   -- 'preserve'
-      for v_fk in
-        select c.conrelid::regclass as reltbl, c.conname,
-               (select array_agg(a.attname::text order by k.ord) from unnest(c.confkey) with ordinality as k(attnum, ord)
-                  join pg_attribute a on a.attrelid = c.confrelid and a.attnum = k.attnum) as rcols
-          from pg_constraint c where c.confrelid = p_parent and c.contype = 'f'
-      loop
-        -- Preservable iff the parent keeps a unique key on EXACTLY this FK's referenced columns.
-        -- pgpm reuses the existing key verbatim (the PK, or a unique constraint when there is no usable
-        -- PK), so the FK must reference that reused key -- both a PK and a unique constraint are valid FK
-        -- targets. The only way it can't is an FK referencing a different unique key that cannot survive
-        -- partitioning (one not including the partition key) -- refuse with guidance.
-        v_fk_eligible := v_pkcols is not null
-          and (select array_agg(x order by x) from unnest(v_fk.rcols) x)
-            = (select array_agg(x order by x) from unnest(v_pkcols) x);
-        if not v_fk_eligible then
-          raise exception 'pg_partition_magician: cannot preserve incoming FK % on % -- it references (%), but the parent''s reused key is (%). An incoming FK must reference the reused primary key or unique constraint to be preserved.',
-            v_fk.conname, v_fk.reltbl, array_to_string(v_fk.rcols, ', '), array_to_string(coalesce(v_pkcols, '{}'), ', ');
-        end if;
-      end loop;
-    end if;
-  end if;
+  --
+  -- The gate lives in _transmute_incoming_gate because the cutover asks it again under its ACCESS
+  -- EXCLUSIVE, just before 0c (#706): a key added in between is refused there, not carried into the monolith.
+  perform pgpm._transmute_incoming_gate(p_parent, p_incoming_fks, v_pkcols);
 
   -- OUTGOING foreign keys (issue #263). The conversion renames the original table aside to become the
   -- monolith child, and a foreign key follows the table it is defined ON, so the constraint lands on the
@@ -6134,6 +6248,16 @@ begin
   select pg_get_userbyid(relowner), relacl, relrowsecurity, relforcerowsecurity
     into v_owner, v_acl, v_rls, v_rls_force
     from pg_class where oid = p_parent;
+  -- The key and the identity the preflight planned from (#706), checked here, under the same ACCESS SHARE,
+  -- which excludes every statement that changes them (see _transmute_key_shape). Steps 6 and 8 act on the
+  -- preflight's v_idcols, v_idkinds and v_pkcols, and a change committed while phases 1 and 2 had let go of
+  -- the table went unseen: an identity re-declared ALWAYS came back BY DEFAULT, a replaced key was declared
+  -- on the parent as it had been. A change refuses, which rolls the cutover back to the resumable phase-2
+  -- state; the re-run plans afresh from the table as it is and resumes from the recorded bound.
+  if pgpm._transmute_key_shape(p_parent, p_control) is distinct from v_keyshape then
+    raise exception 'pg_partition_magician: the primary key, a unique constraint, an identity column or the NOT NULL of % on % changed while this transmute ran (after its preflight read them and before its cutover), so the cutover would carry a key or identity the table no longer has. Nothing was converted: re-run transmute, which plans from the table as it is now and resumes from the recorded bound. (was: %; now: %)',
+      quote_ident(p_control), p_parent, v_keyshape, pgpm._transmute_key_shape(p_parent, p_control);
+  end if;
 
   -- 6. re-establish identity on the parent, in the SAME form it had (#308). The kind is not cosmetic:
   -- ALWAYS rejects an insert that supplies the column, BY DEFAULT accepts it, so re-adding an ALWAYS
@@ -6143,43 +6267,24 @@ begin
   -- And with the same sequence options (#670): a bare ADD GENERATED gives the new sequence the defaults,
   -- dropping an INCREMENT BY, MINVALUE/MAXVALUE, CYCLE or CACHE the operator declared. They are read off
   -- the original's sequence, which still exists here (step 3 drops it, after the renames); the %s is
-  -- _identity_options' clause, numbers and keywords only.
+  -- _identity_options' clause, numbers and keywords only. Read here to build the sequence outside the
+  -- outage, and read again under the lock (0b, #732), which is the read the parent keeps.
   if v_idcols is not null then
     for v_i in 1 .. array_length(v_idcols, 1) loop
+      v_idopts[v_i] := pgpm._identity_options(pg_get_serial_sequence(p_parent::text, v_idcols[v_i])::regclass);
       execute format('alter table %s alter column %I add generated %s as identity %s',
                      v_parent::text, v_idcols[v_i],
                      case when v_idkinds[v_i] = 'a' then 'always' else 'by default' end,
-                     coalesce(pgpm._identity_options(pg_get_serial_sequence(p_parent::text, v_idcols[v_i])::regclass), ''));
+                     coalesce(v_idopts[v_i], ''));
     end loop;
   end if;
 
   -- 7b (moved before the renames -- #344). Replay everything captured at 0b onto the staging parent,
   -- EXCEPT triggers: that is the one step that needs the LIVE name in place, not just the right OID (see
   -- 0b), so it stays below, after both renames. And except comments, which only the table's ACCESS
-  -- EXCLUSIVE holds still (#630), so they are read and replayed below it, beside the triggers.
+  -- EXCLUSIVE holds still (#630), so they are read and replayed below it, beside the triggers; and except
+  -- grants, which no lock on the table holds still (#706), so they are read and replayed after the attach.
   execute format('alter table %s owner to %I', v_parent::text, v_owner);
-
-  -- Grants. aclexplode turns relacl into (grantor, grantee, privilege, grantable) rows; a NULL relacl
-  -- means the owner's implicit defaults, which the OWNER TO above already restores. grantee = 0 is
-  -- PUBLIC, which has no role name.
-  for v_g in
-    select a.grantee, a.privilege_type, a.is_grantable
-      from pg_class c, aclexplode(c.relacl) a where c.oid = p_parent and c.relacl is not null
-  loop
-    execute format('grant %s on %s to %s%s', v_g.privilege_type, v_parent::text,
-                   case when v_g.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(v_g.grantee)) end,
-                   case when v_g.is_grantable then ' with grant option' else '' end);
-  end loop;
-  -- COLUMN-level grants, which relacl does not carry at all: they live in pg_attribute.attacl.
-  for v_g in
-    select att.attname, a.grantee, a.privilege_type, a.is_grantable
-      from pg_attribute att, aclexplode(att.attacl) a
-     where att.attrelid = p_parent and att.attnum > 0 and not att.attisdropped and att.attacl is not null
-  loop
-    execute format('grant %s (%I) on %s to %s%s', v_g.privilege_type, v_g.attname, v_parent::text,
-                   case when v_g.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(v_g.grantee)) end,
-                   case when v_g.is_grantable then ' with grant option' else '' end);
-  end loop;
 
   -- RLS. FORCE matters as much as ENABLE: without it the table owner bypasses every policy, so an
   -- owner-run query would see all rows and the isolation would be silently absent for exactly the role
@@ -6238,6 +6343,9 @@ begin
          coalesce(array_agg(tgenabled::text order by tgname), '{}')
     into v_trgdefs, v_trgnames, v_trgstates
     from pg_trigger where tgrelid = p_parent and not tgisinternal;
+  -- and the one trigger shape the parent cannot take, refused again now that none can be created (#706):
+  -- one committed since the preflight would otherwise reach the replay in 7b and fail it with a raw error.
+  perform pgpm._transmute_refuse_transition_triggers(p_parent);
 
   -- 0b (under the lock, #630 and #656). What the preflight listed, listed again now that nothing can change
   -- it: the secondary indexes 9b carries, the outgoing keys 7a re-adds, and where 8b resumes each identity
@@ -6251,6 +6359,21 @@ begin
     for v_i in 1 .. array_length(v_idcols, 1) loop
       v_ra := pgpm._identity_resume_at(p_parent, v_idcols[v_i], v_idnext[v_i], v_idmax[v_i], v_idmin[v_i]);
       v_idnext[v_i] := v_ra.o_next; v_idmax[v_i] := v_ra.o_max; v_idmin[v_i] := v_ra.o_min;
+    end loop;
+  end if;
+  -- #732: and each identity sequence's options. ALTER SEQUENCE takes no lock on the table, so the table's
+  -- ACCESS EXCLUSIVE does not hold them still; _identity_options_locked takes the lock on the sequence that
+  -- does, held to the commit. An INCREMENT BY (or a bound, CACHE or CYCLE) committed since step 6 read them
+  -- is put on the parent's sequence here, before 8b reseeds it on that lattice; RESTART only puts the fresh
+  -- sequence back at its new START, which 8b moves past anyway. The clause is _identity_options' own,
+  -- unwrapped from its parentheses: numbers and keywords only.
+  if v_idcols is not null then
+    for v_i in 1 .. array_length(v_idcols, 1) loop
+      v_opt := pgpm._identity_options_locked(pg_get_serial_sequence(p_parent::text, v_idcols[v_i])::regclass);
+      if v_opt is distinct from v_idopts[v_i] then
+        execute format('alter sequence %s %s restart', pg_get_serial_sequence(v_parent::text, v_idcols[v_i]),
+                       substr(v_opt, 2, length(v_opt) - 2));
+      end if;
     end loop;
   end if;
 
@@ -6292,6 +6415,13 @@ begin
   -- key drops its clones with it. Iterating them too failed the cutover at the first clone ("constraint
   -- ... does not exist"), every time, leaving the bound and the claim behind; recording them would ask
   -- restore_incoming_fks to re-add, on a partition, a key that the re-added parent key clones there itself.
+  --
+  -- The gate is asked again first, here under the lock (#706). With p_incoming_fks => 'error' the loop below
+  -- does not run, so a key added since the preflight (ADD FOREIGN KEY takes only SHARE ROW EXCLUSIVE, which
+  -- nothing excluded until the lock above) used to follow the rename onto the monolith, keyed against one
+  -- partition. Now it is refused, and under 'preserve' a key added since is held to the same eligibility
+  -- rule before it is dropped and recorded.
+  perform pgpm._transmute_incoming_gate(p_parent, p_incoming_fks, v_pkcols);
   if p_incoming_fks <> 'error' then
     for v_fk in
       select c.conrelid::regclass as reltbl, c.conname, pgpm._fk_definition(c.oid) as def
@@ -6376,6 +6506,39 @@ begin
                  v_parent::text, v_monreg::text,
                  pgpm._encode(p_control_kind, v_lo_native, p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_tt_alphabet, p_tt_discard_bits, p_tt_epoch, v_tz), pgpm._encode(p_control_kind, v_hi_native, p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_tt_alphabet, p_tt_discard_bits, p_tt_epoch, v_tz));
   execute format('alter table %s drop constraint pgpm_monolith_bound', v_monreg::text);
+
+  -- 7b (grants), HERE, after the rename and the attach (#706). GRANT and REVOKE take no lock on the table at
+  -- all, so no lock this cutover holds stops one, and the grants used to be read before the rename (with the
+  -- staging work, under only the LIKE's ACCESS SHARE): a REVOKE or GRANT committed after that read landed
+  -- on the original table alone, now the monolith, and the parent every query names kept the privilege
+  -- that was revoked, or lacked the one that was granted. What serialises them is the catalog row each
+  -- rewrites. A table-level GRANT or REVOKE rewrites the table's pg_class row, which the rename has just
+  -- rewritten in this transaction; a column-level one rewrites the column's pg_attribute row, which the
+  -- attach has just rewritten (it marks every column inherited). So one committed before this point is in
+  -- what is read here, and one that has not committed cannot commit before the cutover does: it waits on
+  -- this transaction and then fails with "tuple concurrently updated". p_parent is the monolith's oid by
+  -- now, which is the table the grants are on.
+  -- aclexplode turns relacl into (grantor, grantee, privilege, grantable) rows; a NULL relacl
+  -- means the owner's implicit defaults, which the OWNER TO above already restores. grantee = 0 is
+  -- PUBLIC, which has no role name.
+  for v_g in
+    select a.grantee, a.privilege_type, a.is_grantable
+      from pg_class c, aclexplode(c.relacl) a where c.oid = p_parent and c.relacl is not null
+  loop
+    execute format('grant %s on %s to %s%s', v_g.privilege_type, v_parent::text,
+                   case when v_g.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(v_g.grantee)) end,
+                   case when v_g.is_grantable then ' with grant option' else '' end);
+  end loop;
+  -- COLUMN-level grants, which relacl does not carry at all: they live in pg_attribute.attacl.
+  for v_g in
+    select att.attname, a.grantee, a.privilege_type, a.is_grantable
+      from pg_attribute att, aclexplode(att.attacl) a
+     where att.attrelid = p_parent and att.attnum > 0 and not att.attisdropped and att.attacl is not null
+  loop
+    execute format('grant %s (%I) on %s to %s%s', v_g.privilege_type, v_g.attname, v_parent::text,
+                   case when v_g.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(v_g.grantee)) end,
+                   case when v_g.is_grantable then ' with grant option' else '' end);
+  end loop;
 
   -- 7a. re-add the outgoing foreign keys at the PARENT (#263), so they cover every partition instead of
   -- only the monolith. This is metadata-only: PostgreSQL ADOPTS a partition's equivalent already-validated
@@ -7033,11 +7196,10 @@ begin
       execute format('select max(%1$I)::bigint, min(%1$I)::bigint from %2$s', v_col, p_parent::text) into v_m, v_mmin;
       v_idmax := array_append(v_idmax, v_m);
       v_idmin := array_append(v_idmin, v_mmin);
-      -- the parent sequence's position too (it holds whatever transmute preserved), as a floor like the max,
-      -- and its options (#670), which go with the parent's sequence when the parent is dropped below.
+      -- the parent sequence's position too (it holds whatever transmute preserved), as a floor like the max.
+      -- Its options (#670) are read under the lock below (#732).
       v_seq := pg_get_serial_sequence(p_parent::text, v_col)::regclass;
       v_idnext := array_append(v_idnext, pgpm._seq_next(v_seq));
-      v_idopts := array_append(v_idopts, pgpm._identity_options(v_seq));
     end loop;
   end if;
 
@@ -7095,6 +7257,16 @@ begin
     for v_i in 1 .. array_length(v_idcols, 1) loop
       v_ra := pgpm._identity_resume_at(p_parent, v_idcols[v_i], v_idnext[v_i], v_idmax[v_i], v_idmin[v_i]);
       v_idnext[v_i] := v_ra.o_next; v_idmax[v_i] := v_ra.o_max; v_idmin[v_i] := v_ra.o_min;
+    end loop;
+  end if;
+  -- And each parent sequence's options (#670), which go with the parent's sequence when the parent is
+  -- dropped below, read here (#732) under a lock on the sequence itself: ALTER SEQUENCE takes no lock on the
+  -- table, so the table's ACCESS EXCLUSIVE does not hold them still, and an INCREMENT BY committed while the
+  -- lock above was queued, read before it, was lost with the parent. _identity_options_locked's lock is held
+  -- to the commit, so one that has not committed by now waits for this reversal.
+  if v_idcols is not null then
+    for v_i in 1 .. array_length(v_idcols, 1) loop
+      v_idopts[v_i] := pgpm._identity_options_locked(pg_get_serial_sequence(p_parent::text, v_idcols[v_i])::regclass);
     end loop;
   end if;
   -- Capture the parent's privileges and row security (#667), here, under the lock: GRANT, REVOKE and the

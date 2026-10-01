@@ -103,7 +103,15 @@ the comments, the secondary indexes and outgoing keys to carry, and where the id
 read under the table's `ACCESS EXCLUSIVE` lock, taken as the cutover's outage begins. So a trigger, index,
 key or comment another session creates, drops or changes while the conversion runs is either in place
 before the read or waits until the cutover commits, and an id the sequence hands a writer while the
-conversion runs is never issued again; the parent carries what the table had at the rename. Partitions
+conversion runs is never issued again; the parent carries what the table had at the rename. The grants
+are the one thing no lock on the table holds still, because `GRANT` and `REVOKE` take none, so they are read
+after the rename and the attach instead: those rewrite the catalog rows every `GRANT` or `REVOKE` on the
+table must rewrite too, so one committed before that is carried, and one that has not committed waits for
+the cutover and then fails with `tuple concurrently updated` rather than landing on the monolith alone. The
+primary key, unique constraints, identity columns and the control column's `NOT NULL` the conversion
+planned from are checked again once the staging copy holds `ACCESS SHARE`; if any changed while the
+conversion ran, the cutover refuses and rolls back to the resumable state `transmute_abort` describes, and
+a re-run plans from the table as it is. Partitions
 minted later, by `obtain` or a regrain, are given the parent's owner too rather than being
 owned by whichever role runs maintenance.
 
@@ -126,7 +134,8 @@ PostgreSQL 18, a `NOT VALID` `NOT NULL`) constraint, because the parent would ge
 table cannot be attached under (`VALIDATE CONSTRAINT` it first, which blocks no reader or writer, or drop
 it); a `CHECK ... NO INHERIT` constraint, which PostgreSQL does not allow on a partitioned table (drop it,
 or re-create it without `NO INHERIT`); and a generated control column, which PostgreSQL cannot partition
-by (partition on a plain column). **Outgoing** foreign keys (this table
+by (partition on a plain column). The trigger refusal is asked again under the cutover's lock, so a
+trigger of that shape created while the conversion runs is refused the same way. **Outgoing** foreign keys (this table
 referencing another) are carried onto the new parent automatically, so they keep enforcing across every
 partition; a `NOT VALID` one is refused rather than carried, because re-adding it at the parent could not
 then be metadata-only. That refusal, and the refusals of a `UNIQUE` index that cannot be carried (below)
@@ -134,7 +143,10 @@ and of an exclusion constraint, are asked again under the cutover's lock, so a k
 the cutover back to the resumable state `transmute_abort` describes rather than being left on the monolith.
 **Incoming** keys are governed by `p_incoming_fks` below. An identity column is carried onto the parent in
 the form it had (`ALWAYS` or `BY DEFAULT`) and with its sequence's options (`INCREMENT BY`,
-`MINVALUE`/`MAXVALUE`, `START WITH`, `CACHE`, `CYCLE`). Its new sequence is set from three values read under
+`MINVALUE`/`MAXVALUE`, `START WITH`, `CACHE`, `CYCLE`), read under the cutover's lock and under a lock on
+the sequence itself, which `ALTER SEQUENCE` has to wait for (it takes no lock on the table), so a change
+committed while the conversion runs is either carried or waits until the cutover commits. Its new sequence
+is set from three values read under
 the cutover's lock: the original sequence's own next value, and the column's largest and smallest ids. The
 largest and smallest are re-read there only when an index leading with the column answers them, which also
 covers an explicit id written meanwhile; otherwise the ones read before phase 1 stand in, so no scan runs
@@ -142,7 +154,7 @@ under the lock. From the next value it moves along the sequence's lattice (`star
 for a negative increment) until it clears every id already in the table, so auto-generated ids never
 collide, never re-issue a value the sequence had already moved past (including one it handed a writer while
 the conversion ran), and keep the spacing you declared. An exhausted sequence stays exhausted. `untransmute`
-restores it the same way, under its own lock.
+restores it the same way, under its own lock and the sequence's.
 
 Parameters:
 
@@ -174,7 +186,9 @@ Parameters:
 - `p_anchor` -- the grid origin the boundaries align to (month and year steps count from its month in
   the session's zone; day and shorter steps count seconds from the instant).
 - `p_paused` -- register paused (the default); `false` goes live immediately.
-- `p_incoming_fks` -- `'error'` (the default: refuse if any incoming FK exists) or `'preserve'` (drop each
+- `p_incoming_fks` -- `'error'` (the default: refuse if any incoming FK exists, asked again under the
+  cutover's lock, so a key added while the conversion runs is refused there rather than left referencing
+  the monolith) or `'preserve'` (drop each
   for the conversion and re-add it against the new parent, which `maintain` does on a later tick, or
   `restore_incoming_fks` does now). `'drop'` is also accepted, but it is **not** a third behavior: it takes
   the same path as `'preserve'`, so the keys are recorded and restored just the same. The drop happens in
@@ -1017,7 +1031,10 @@ left to win, and the copies hold nothing the archive does not (the drop is gated
 always). A regrain in flight on a **different** child of the same parent is untouched, and a `retire`
 that returns `false` reclaims nothing. Without this the copies, the cursor and the delta outlived their
 source with no tick able to reclaim them: auto-regrain reports `none` once no coarse child remains, and
-the capture sweep only tears down what the cursor does not cover.
+the capture sweep only tears down what the cursor does not cover. The regrain's state is read under the
+regrain lock every regrain driver takes, so `retire` waits for a step in flight on the same table instead
+of reading around it (and leaving behind what that step commits): in a maintenance tick the wait is bounded
+by the tick's `lock_timeout`, and one that runs out is logged `fail_retain_drop` and retried next tick.
 
 #### Retiring a partition an incoming FK references
 
@@ -1323,7 +1340,9 @@ Turning auto-regrain off with [`set_regrain`](#set_regrain)`(parent, null)` whil
 flight abandons that run through this same path, so the two cannot differ: the same teardown, one
 `regrain_cancel` log row. `maintain` also sweeps a capture trigger left on a child whose range the cursor no
 longer covers, logging `regrain_capture_orphan`, but that is a backstop for a cursor cleared by some other
-route, not a way to abandon a run: it drops no copies and clears no delta. The copies it leaves are never
+route, not a way to abandon a run. It judges only under the regrain lock every regrain driver takes, so it
+never reads a cursor older than a prepare that committed around it: while a `regrain_step`, `regrain()` or
+`regrain_cancel` holds that lock, the tick leaves capture alone and logs `skip_regrain_capture`. And it drops no copies and clears no delta. The copies it leaves are never
 resumed from: they were made while capture was off, so the next `regrain_step` on that child discards them
 at its prepare tick, whatever the cursor says, logs `regrain_restart` with `rows` counting the copies
 discarded, and copies the range again from the source. To stop a run deliberately and get the disk back, or
