@@ -42,10 +42,44 @@ jobs:
           VER=$(awk -F"'" '/default_version/ {print $2}' pgpm_core/extension.control)
           DBDEV_PKG="dist/pg_partition_magician--${VER}.sql"
           scripts/build_install_bundle.sh pgpm_core/install.sql dist/pg_partition_magician-bundle.sql
-          scripts/build_dbdev_package.sh  pgpm_core/install.sql "$DBDEV_PKG"
+          # The package must build and lex; its SIZE against database.dev's column is the dbdev-cap job's,
+          # below, which is deliberately not required for merge.
+          PGPM_DBDEV_CAP=warn scripts/build_dbdev_package.sh pgpm_core/install.sql "$DBDEV_PKG"
           # bundle must be free of psql metacommands (dashboard SQL editor target)
           if grep -nE '^\\' dist/pg_partition_magician-bundle.sql "$DBDEV_PKG"; then
             echo "ERROR: a package still contains psql metacommands"; exit 1
+          fi
+
+  # database.dev stores a package version's SQL in a varchar(250000) column (supabase/dbdev,
+  # supabase/migrations/20220117142137_package_tables.sql); its documentation does not say so, and
+  # pg_flight_recorder met the limit by publishing. The minified core install crossed the cap in pass 5's
+  # fix phase (2026-10-01, #765), and a fix must not wait on the registry's column, so this job never
+  # fails and is NOT in the Test Summary's needs: it builds with PGPM_DBDEV_CAP=warn, writes the size to
+  # its job summary, and raises a ::warning:: annotation while the package is over. The publish workflow
+  # runs the same build strictly and refuses to publish until it fits. RELEASING.md carries the decision.
+  dbdev-cap:
+    name: dbdev package size (informational)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report whether the minified package fits database.dev's 250,000-character column
+        run: |
+          VER=$(awk -F"'" '/default_version/ {print $2}' pgpm_core/extension.control)
+          OUT="dist/pg_partition_magician--${VER}.sql"
+          PGPM_DBDEV_CAP=warn scripts/build_dbdev_package.sh pgpm_core/install.sql "$OUT" 2>build.err
+          cat build.err >&2
+          SIZE=$(wc -c < "$OUT" | tr -d ' ')
+          {
+            echo "### dbdev package size"
+            echo
+            if grep -q '^WARNING:' build.err; then
+              echo ":warning: **${SIZE} characters**, $((SIZE - 250000)) over database.dev's 250,000-character column. The package installs through psql; it cannot be published to database.dev until it is under the cap (#765)."
+            else
+              echo "${SIZE} characters, $((250000 - SIZE)) under database.dev's 250,000-character column."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if grep -q '^WARNING:' build.err; then
+            echo "::warning file=pgpm_core/install.sql,title=dbdev package over the 250,000-character cap::${SIZE} characters minified, $((SIZE - 250000)) over database.dev's column; it installs through psql but cannot be published to database.dev until it is under the cap (#765)"
           fi
 
   # The from_hypertable / TimescaleDB track, a first-class member of the default suite. It runs on a separate
