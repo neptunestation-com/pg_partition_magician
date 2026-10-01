@@ -33,7 +33,9 @@ parameters (`p_region`, `p_endpoint` for S3-compatible stores like MinIO or Supa
 `p_prefix`, `p_compress`, etc.) all have sensible defaults -- pass only what you need to override.
 `p_part_bytes` (the size of each `archive.to_s3` multipart part, 8 MiB by default) must be at least
 5 MiB, the smallest non-final multipart part S3 accepts: `archive.configure` refuses anything smaller,
-and `archive.to_s3` refuses a row holding zero or less before it sends anything. `p_fetch_rows` (rows
+and `archive.to_s3` refuses a row holding zero or less before it sends anything. A positive size under
+5 MiB written into the row by hand is not refused there: an export that fits in one part succeeds, and
+one that needs more fails at complete with `EntityTooSmall`, its upload aborted and nothing written. `p_fetch_rows` (rows
 per page, 20000 by default) must be at least 1, refused the same way by both.
 
 ## Automatic vs. manual
@@ -53,6 +55,10 @@ select archive.to_s3('public.events', 'events_p2024_01', '2024-01-01', '2024-02-
 select pgpm.retire('public.events', 'events_p2024_01');
 ```
 
+The object is named after the partition with its parent's schema: `<prefix>public.events_p2024_01.ndjson`
+here (`.ndjson.gz` compressed), and `<prefix><schema>.<child>.parquet` from `archive.to_s3_parquet`, so
+same-named tables in two schemas can share a prefix.
+
 `archive.to_s3` reads the partition in pages and, before writing the object, checks that the rows it
 paged are the rows the partition holds after the last page: the same count and the same content
 fingerprint (a sum of 64-bit hashes of each exported line), so writes that cancel in a count, such as
@@ -67,7 +73,7 @@ a cancel (`statement_timeout`, `pg_cancel_backend`), and the error or cancel sti
 One that lands inside the request that starts the upload, before the store's answer arrives, leaves no
 upload id to abort by, so the export then aborts every upload in flight at its own object key (at
 exactly that key, never one it is a prefix of); a second session exporting the same object at the same
-moment would lose its upload and fail.
+moment would lose its upload and fail. That sweep reads every page of the store's listing.
 
 Both manual functions resolve `child` in the parent's schema, never through your session's
 `search_path`, and verify its identity the same way the automatic path does before reading it: if
@@ -82,14 +88,14 @@ contract and the [guide](../docs/guide.md#archiving-before-a-drop) for the opera
 ## NDJSON or Parquet
 
 - **NDJSON** (`pgpm.archive_to_s3_ndjson` / `archive.to_s3`): universal, human-readable, round-trips
-  any column type.
+  any column type. The object is UTF-8 whatever the database's server encoding.
 - **Parquet** (`pgpm.archive_to_s3_parquet` / `archive.to_s3_parquet`): columnar, directly queryable
   by DuckDB, Athena, Redshift Spectrum, Spark, Trino, and Snowflake with no conversion step -- a
   from-scratch, zero-dependency writer with real limits (see below).
 
 GZIP compression applies to either format (`archive.config.compress`, off by default). With it on, an
 NDJSON object takes the `.ndjson.gz` suffix and Content-Type `application/gzip`: `archive.to_s3`
-writes `<prefix><child>.ndjson.gz` (nothing at the plain key) and the automatic strategy adds the same
+writes `<prefix><schema>.<child>.ndjson.gz` (nothing at the plain key) and the automatic strategy adds the same
 suffix to its own keys. A large `archive.to_s3` export is a stream of gzip members, one per
 `part_bytes` of NDJSON, which `gunzip`, `zcat`, Python's `gzip`, DuckDB and Hadoop all read as one
 file. A Parquet object keeps its `.parquet` name and compresses its pages internally. It's not
@@ -109,12 +115,15 @@ the budget past a few MiB with compression on.
   and later accept columns outside that, so two shapes are declared differently with every value
   unchanged: a negative scale, `numeric(p,-k)`, is written as `DECIMAL(p+k, 0)` (its values are whole
   multiples of `10^k`), and a scale above the precision, `numeric(p,s)` with `s > p`, as
-  `DECIMAL(s, s)`. PostgreSQL enums are UTF-8 strings; arrays are JSON-tagged
+  `DECIMAL(s, s)`. `NaN`, also legal in `numeric(p,s)`, has no DECIMAL form and is written as null (a
+  `NOT NULL` column holding one is declared optional in that file); the NDJSON formats keep it as
+  `"NaN"`. PostgreSQL enums are UTF-8 strings; arrays are JSON-tagged
   strings because this flat writer does not emit Parquet's nested `LIST` structure. Array dimensions
   and non-default lower bounds are not preserved. Composite types are refused outright. One row group,
   no dictionary encoding, no statistics.
 - **Timestamps**: `timestamptz` is an instant, written as microseconds since the Unix epoch and
-  annotated `TIMESTAMP_MICROS` (UTC-adjusted), so a reader shows it in its own zone. `timestamp`
+  annotated `TIMESTAMP(isAdjustedToUTC=true)` beside the legacy `TIMESTAMP_MICROS`, so DuckDB and
+  pyarrow read it as an instant and show it in their own zone. `timestamp`
   (without time zone) is a wall clock with no instant of its own: it is written as that wall clock
   read as if it were UTC and annotated `TIMESTAMP(isAdjustedToUTC=false)` beside the legacy
   `TIMESTAMP_MICROS`, the pair pyarrow itself writes for a naive timestamp, so DuckDB and pyarrow

@@ -1717,6 +1717,12 @@ key from a chunk's bounds after the upload. A table whose ticks ran with its sch
 bucket holds both shapes once upgraded; a time-kind chunk archived from a non-UTC session had its stem
 rendered in that session's zone.
 
+The synchronous functions write one object per call, named after the partition with its parent's
+schema: `archive.to_s3` to `<prefix><schema>.<child>.ndjson` (`.ndjson.gz` when compressed) and
+`archive.to_s3_parquet` to `<prefix><schema>.<child>.parquet`, quoted the same way, so two parents with
+one name in two schemas sharing a prefix export their same-named partitions to two objects. They used to
+write `<prefix><child>.<ext>`, and an object written under that shape stays where it is.
+
 ## Scheduling
 
 ### `schedule`

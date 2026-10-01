@@ -262,12 +262,18 @@ begin
 
   perform http_set_curlopt('CURLOPT_TIMEOUT_MS', '300000');   -- default is 5s; size for real parts
 
+  -- The body on the wire is the very bytes v_payload_hash was computed over: the payload's UTF-8
+  -- encoding, crossed to text the way the bytea signer below crosses it (bytea_to_text, a raw copy).
+  -- The text itself would go out in the SERVER encoding, which is those bytes only in a UTF8 database:
+  -- in a LATIN1 one every body holding a non-ASCII character was refused (400
+  -- XAmzContentSHA256Mismatch), and the uncompressed NDJSON strategy, which sends a chunk through this
+  -- signer, wedged its table on every tick (#728).
   select * into v_resp from http((
     p_method::http_method, v_url,
     array[ http_header('x-amz-date', v_amz_date),
            http_header('x-amz-content-sha256', v_payload_hash),
            http_header('authorization', v_auth) ],
-    p_ctype, p_payload)::http_request);
+    p_ctype, bytea_to_text(convert_to(p_payload, 'UTF8')))::http_request);
   return v_resp;
 end;
 $$;
@@ -1636,14 +1642,16 @@ $$;
 
 -- The Thrift `union LogicalType` (parquet.thrift) selecting TIMESTAMP with the given adjustment flag
 -- and a MICROS unit, as a struct payload for _pq_build_schema_leaf's p_logical_type. The writer emits
--- it for `timestamp` (without time zone) columns only, with p_adjusted_to_utc => false: the legacy
--- ConvertedType TIMESTAMP_MICROS that every timestamp column also carries has no way to say "this is
--- a wall clock, not an instant" (readers take it as isAdjustedToUTC=true), and a wall clock is what a
--- `timestamp` is (issue #465). It goes BESIDE the ConvertedType rather than replacing it, which is
--- what pyarrow does for a naive timestamp (ARROW-5878): a reader that knows logical types prefers
--- this one and hands back a naive timestamp, and one that predates them still sees a timestamp,
--- labelled UTC, rather than a bare INT64. A timestamptz leaf keeps its ConvertedType alone; readers
--- already take that as an instant, which it is.
+-- it for both timestamp types. For `timestamp` (without time zone) p_adjusted_to_utc is false: the
+-- legacy ConvertedType TIMESTAMP_MICROS that every timestamp column also carries has no way to say
+-- "this is a wall clock, not an instant" (readers take it as isAdjustedToUTC=true), and a wall clock is
+-- what a `timestamp` is (issue #465). For `timestamptz` it is true, an instant. That leaf used to keep
+-- its ConvertedType alone on the theory that readers already take it as an instant, and pyarrow does
+-- (tz=UTC), but DuckDB does not: it read the column as a naive TIMESTAMP, not TIMESTAMP WITH TIME ZONE,
+-- against the README's promise that a reader shows the instant in its own zone (#711). Either way the
+-- annotation goes BESIDE the ConvertedType rather than replacing it, which is what pyarrow writes
+-- (ARROW-5878): a reader that knows logical types prefers this one, and one that predates them still
+-- sees a timestamp rather than a bare INT64.
 create or replace function archive._pq_logical_timestamp_micros(p_adjusted_to_utc boolean) returns bytea
 language sql immutable as $$
   select archive._pq_write_struct(0, 8,                                          -- LogicalType.TIMESTAMP
@@ -1659,7 +1667,7 @@ $$;
 -- p_type_length (FIXED_LEN_BYTE_ARRAY's declared byte width -- uuid's fixed 16, or a decimal
 -- column's own computed width), p_scale/p_precision (DECIMAL's schema-level annotation) and
 -- p_logical_type (an already-encoded `union LogicalType` payload, today only
--- _pq_logical_timestamp_micros(false) for a `timestamp` column) are all optional trailing params,
+-- _pq_logical_timestamp_micros for a `timestamp` or `timestamptz` column) are all optional trailing params,
 -- each omitted from the Thrift struct when null -- byte-for-byte unchanged for the six original
 -- types, which pass none of them. Field-id deltas are tracked via v_last rather than hardcoded
 -- literals, since which fields actually get written now varies.
@@ -1778,6 +1786,20 @@ $$;
 -- Column data extraction (server-side aggregation, ctid-ordered by default so
 -- every column's array lines up on the same row order)
 -- ---------------------------------------------------------------------------
+
+-- Whether a numeric column of the snapshot an encoder is about to write holds a NaN (#635). NaN is
+-- written as null (see the numeric branch of _pq_encode_column_data), so a NOT NULL numeric(p,s) column
+-- holding one needs an OPTIONAL leaf in that file; both encoders ask this before they encode such a
+-- column, and only for such a column: a nullable leaf is OPTIONAL already, and a file whose NOT NULL
+-- column holds no NaN keeps its REQUIRED leaf, byte for byte as before.
+create or replace function archive._pq_has_nan(p_schema name, p_table name, p_col name)
+returns boolean language plpgsql stable as $$
+declare v boolean;
+begin
+  execute format('select exists (select 1 from %I.%I where %I = ''NaN''::numeric)', p_schema, p_table, p_col) into v;
+  return v;
+end;
+$$;
 
 -- archive._pq_from_item builds the FROM item every read in this section runs against, and is the
 -- ONLY place in the module that builds one. Both shapes come out of %I/%L over typed inputs: a
@@ -1954,11 +1976,17 @@ begin
       p_col, v_order_q, p_col, v_order_q, p_col, v_from_q)
       into is_present, values_payload;
   elsif p_pgtype = 'numeric' then
+    -- NaN, a legal value of numeric(p,s), has no DECIMAL representation (an unscaled integer), and
+    -- reaching archive._pq_plain_decimal it raised 'cannot convert NaN to integer' on every encode of its
+    -- chunk: skip_archive every tick, the partition never covered or retired, the #586 wedge on the
+    -- DECIMAL leaf (#635). It is written as null instead, Spark's reading of a NaN cast to DECIMAL: absent
+    -- from the values, false in is_present. A NOT NULL column holding one gets an OPTIONAL leaf in that
+    -- file (archive._pq_has_nan, in both encoders), so the definition levels that carry the null exist.
     execute format(
-      'select coalesce(array_agg(%I is not null order by %s), ''{}''::boolean[]),
-              coalesce(string_agg(archive._pq_plain_decimal(%I::numeric, %L, %L), ''''::bytea order by %s) filter (where %I is not null), ''''::bytea)
+      'select coalesce(array_agg(%I is not null and %I <> ''NaN''::numeric order by %s), ''{}''::boolean[]),
+              coalesce(string_agg(archive._pq_plain_decimal(%I::numeric, %L, %L), ''''::bytea order by %s) filter (where %I is not null and %I <> ''NaN''::numeric), ''''::bytea)
          from %s',
-      p_col, v_order_q, p_col, p_decimal_scale, p_decimal_bytes, v_order_q, p_col, v_from_q)
+      p_col, p_col, v_order_q, p_col, p_decimal_scale, p_decimal_bytes, v_order_q, p_col, p_col, v_from_q)
       into is_present, values_payload;
   else
     raise exception 'archive._pq_encode_column_data: unsupported column type % for column %', p_pgtype, p_col;
@@ -2147,6 +2175,11 @@ begin
 
   v_body := v_magic;
   for i in 1..v_ncols loop
+    -- a NaN is written as null, so a NOT NULL numeric column holding one is OPTIONAL in this file (#635)
+    if v_col_pgtypes[i] = 'numeric' and not v_col_nullable[i]
+       and archive._pq_has_nan('pg_temp', 'archive_pq_snapshot', v_col_names[i]) then
+      v_col_nullable[i] := true;
+    end if;
     -- named notation, and not just for length: it is what makes the absence of a SQL-carrying
     -- argument legible at the call site, which is the whole point of #408's signature.
     v_data := archive._pq_encode_column_data(
@@ -2171,8 +2204,10 @@ begin
           case when p_compress then length(v_page_header) + length(v_page_bytes) else null end));
     v_schema_elements := v_schema_elements || archive._pq_build_schema_leaf(v_col_names[i], v_col_ptypes[i], v_col_converted[i], v_col_nullable[i],
       v_col_typelen[i], v_col_scale[i], v_col_precision[i],
-      -- a `timestamp` is a wall clock, not an instant: say so, or readers take TIMESTAMP_MICROS as UTC-adjusted (#465)
-      p_logical_type => case when v_col_pgtypes[i] = 'timestamp' then archive._pq_logical_timestamp_micros(false) end);
+      -- a `timestamp` is a wall clock, not an instant: say so, or readers take TIMESTAMP_MICROS as UTC-adjusted (#465);
+      -- a `timestamptz` is an instant: say that too, or DuckDB reads it as a naive TIMESTAMP (#711)
+      p_logical_type => case when v_col_pgtypes[i] = 'timestamp' then archive._pq_logical_timestamp_micros(false)
+                             when v_col_pgtypes[i] = 'timestamptz' then archive._pq_logical_timestamp_micros(true) end);
   end loop;
 
   v_row_group := archive._pq_build_row_group(v_column_chunks, length(v_body) - length(v_magic), v_num_rows);
@@ -2317,6 +2352,11 @@ begin
 
   v_body := v_magic;
   for i in 1..v_ncols loop
+    -- a NaN is written as null, so a NOT NULL numeric column holding one is OPTIONAL in this file (#635)
+    if v_col_pgtypes[i] = 'numeric' and not v_col_nullable[i]
+       and archive._pq_has_nan('pg_temp', 'archive_pq_snapshot', v_col_names[i]) then
+      v_col_nullable[i] := true;
+    end if;
     v_data := archive._pq_encode_column_data(
       p_schema => 'pg_temp', p_table => 'archive_pq_snapshot',
       p_col => v_col_names[i], p_pgtype => v_col_pgtypes[i], p_nullable => v_col_nullable[i],
@@ -2339,8 +2379,10 @@ begin
           case when p_compress then length(v_page_header) + length(v_page_bytes) else null end));
     v_schema_elements := v_schema_elements || archive._pq_build_schema_leaf(v_col_names[i], v_col_ptypes[i], v_col_converted[i], v_col_nullable[i],
       v_col_typelen[i], v_col_scale[i], v_col_precision[i],
-      -- a `timestamp` is a wall clock, not an instant: say so, or readers take TIMESTAMP_MICROS as UTC-adjusted (#465)
-      p_logical_type => case when v_col_pgtypes[i] = 'timestamp' then archive._pq_logical_timestamp_micros(false) end);
+      -- a `timestamp` is a wall clock, not an instant: say so, or readers take TIMESTAMP_MICROS as UTC-adjusted (#465);
+      -- a `timestamptz` is an instant: say that too, or DuckDB reads it as a naive TIMESTAMP (#711)
+      p_logical_type => case when v_col_pgtypes[i] = 'timestamp' then archive._pq_logical_timestamp_micros(false)
+                             when v_col_pgtypes[i] = 'timestamptz' then archive._pq_logical_timestamp_micros(true) end);
   end loop;
 
   v_row_group := archive._pq_build_row_group(v_column_chunks, length(v_body) - length(v_magic), v_num_rows);
@@ -2588,6 +2630,22 @@ begin
 end;
 $$;
 
+-- The object key of a synchronous export, <prefix><schema>.<child><ext>. The child is named by
+-- IDENTITY, quote_ident(schema) || '.' || quote_ident(child), the way archive._object_key names the
+-- parent for the archive_fn transports (#551), and the schema is p_parent's, the one _resolve_child
+-- read the child from. archive.to_s3 and archive.to_s3_parquet keyed on <prefix><child><ext>, the bare
+-- name, and pgpm names a child after its parent's relname, so two parents named `evt` in two schemas
+-- sharing a prefix (archive.configure's default `events/` is shared by every table) exported their
+-- [0, 10000) partitions to ONE key: the second export replaced the first, and after the documented
+-- to_s3-then-drop workflow the first table's rows existed nowhere (#711). Both functions take their key
+-- from here and nowhere else.
+create or replace function archive._child_object_key(p_parent regclass, p_prefix text, p_child name, p_ext text)
+returns text language sql stable as $$
+  select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(p_child) || p_ext
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace
+   where c.oid = p_parent;
+$$;
+
 -- Aborts every multipart upload in flight at exactly p_key, returning how many it aborted. This is
 -- how archive.to_s3 cleans up after an initiate it never saw the answer to (issue #636): a cancel or
 -- an error inside the CreateMultipartUpload POST can land after the store created the upload and
@@ -2596,28 +2654,67 @@ $$;
 -- one is a prefix of belongs to another object and is left alone. Any upload in flight at the key is
 -- taken, which also clears one an earlier failed export leaked there; a concurrent export of the
 -- SAME object from another session would lose its upload and fail loudly at its next part or at
--- complete, never silently. One page of the listing (up to 1000 uploads at one key) is read.
+-- complete, never silently.
+--
+-- Every page of the listing is read, p_page_size uploads at a time (S3's own maximum, 1000, by
+-- default), following the key and upload-id markers while the store says the listing is truncated
+-- (#711). It used to read the first page only, so past the thousandth upload under the prefix an
+-- orphan at the key could be left in flight. The ids are collected first and aborted after the last
+-- page, so no abort moves the listing under the markers. MinIO leaves NextKeyMarker empty, so the last
+-- listed upload's key stands in for it; a page that does not move the markers ends the read rather
+-- than repeating it.
 create or replace function archive._s3_abort_uploads_at(
-  p_endpoint text, p_bucket text, p_region text, p_key text, p_key_id text, p_secret text
+  p_endpoint text, p_bucket text, p_region text, p_key text, p_key_id text, p_secret text,
+  p_page_size int default 1000
 ) returns int language plpgsql as $$
-declare v_resp http_response; r record; n int := 0;
+declare
+  v_resp http_response; v_doc xml; v_ids text[] := '{}'; v_page_ids text[]; v_id text; n int := 0;
+  v_key_marker text; v_id_marker text; v_truncated text; v_next_key text; v_next_id text; v_last_key text;
 begin
-  v_resp := archive.s3_signed_request('GET', p_endpoint, p_bucket, p_region, '',
-                                     'prefix=' || archive.s3_url_encode(p_key) || '&uploads=',
-                                     'text/plain', '', p_key_id, p_secret);
-  if v_resp.status not between 200 and 299 then
-    raise exception 'archive._s3_abort_uploads_at: listing uploads at % failed: HTTP % %', p_key, v_resp.status, left(v_resp.content, 200);
+  if p_page_size is null or p_page_size < 1 then
+    raise exception 'archive._s3_abort_uploads_at: p_page_size must be a positive number of uploads, not %', p_page_size;
   end if;
-  -- xmltable, not xpath(): its text columns are the unescaped values, so a key holding & or < compares
-  for r in
-    select u.upload_id
-      from xmltable('//*[local-name()=''Upload'']' passing (v_resp.content::xml)
-                    columns upload_key text path '*[local-name()=''Key'']',
+  loop
+    -- the canonical query string: keys in byte order, values percent-encoded
+    v_resp := archive.s3_signed_request('GET', p_endpoint, p_bucket, p_region, '',
+                case when v_key_marker is null then '' else 'key-marker=' || archive.s3_url_encode(v_key_marker) || '&' end
+             || 'max-uploads=' || p_page_size || '&prefix=' || archive.s3_url_encode(p_key)
+             || case when v_id_marker is null then '' else '&upload-id-marker=' || archive.s3_url_encode(v_id_marker) end
+             || '&uploads=',
+                'text/plain', '', p_key_id, p_secret);
+    if v_resp.status not between 200 and 299 then
+      raise exception 'archive._s3_abort_uploads_at: listing uploads at % failed: HTTP % %', p_key, v_resp.status, left(v_resp.content, 200);
+    end if;
+    v_doc := v_resp.content::xml;
+    -- xmltable, not xpath(): its text columns are the unescaped values, so a key holding & or < compares
+    select coalesce(array_agg(u.upload_id order by u.ord), '{}')
+      into v_page_ids
+      from xmltable('//*[local-name()=''Upload'']' passing v_doc
+                    columns ord for ordinality,
+                            upload_key text path '*[local-name()=''Key'']',
                             upload_id  text path '*[local-name()=''UploadId'']') u
      where u.upload_key = p_key
-  loop
+    ;
+    v_ids := v_ids || v_page_ids;
+    select x.truncated, nullif(x.next_key, ''), nullif(x.next_id, '')
+      into v_truncated, v_next_key, v_next_id
+      from xmltable('/*' passing v_doc
+                    columns truncated text path '*[local-name()=''IsTruncated'']',
+                            next_key  text path '*[local-name()=''NextKeyMarker'']',
+                            next_id   text path '*[local-name()=''NextUploadIdMarker'']') x;
+    exit when v_truncated is distinct from 'true';
+    select u.upload_key into v_last_key
+      from xmltable('//*[local-name()=''Upload'']' passing v_doc
+                    columns ord for ordinality, upload_key text path '*[local-name()=''Key'']') u
+     order by u.ord desc limit 1;
+    v_next_key := coalesce(v_next_key, v_last_key);
+    exit when v_next_key is null
+           or (v_next_key is not distinct from v_key_marker and v_next_id is not distinct from v_id_marker);
+    v_key_marker := v_next_key; v_id_marker := v_next_id;
+  end loop;
+  foreach v_id in array v_ids loop
     perform archive.s3_signed_request('DELETE', p_endpoint, p_bucket, p_region, p_key,
-                                     'uploadId=' || archive.s3_url_encode(r.upload_id),
+                                     'uploadId=' || archive.s3_url_encode(v_id),
                                      'text/plain', '', p_key_id, p_secret);
     n := n + 1;
   end loop;
@@ -2628,7 +2725,7 @@ $$;
 -- Small partitions (one part's worth or less) take a plain single PUT; bigger ones stream
 -- through S3 multipart, holding at most one part in memory at a time. With archive.config.compress
 -- on, the same two paths carry a gzip stream instead of plain NDJSON (the fold inside the loop says
--- how), at <prefix><child>.ndjson.gz.
+-- how), at <prefix><schema>.<child>.ndjson.gz.
 create or replace function archive.to_s3(p_parent regclass, p_child name, p_lo text, p_hi text)
 returns void language plpgsql as $$
 declare
@@ -2682,14 +2779,15 @@ begin
   select a.atttypid::regtype::text into v_ctltype
     from pg_attribute a where a.attrelid = p_parent and a.attname = pcfg.control_column;
   -- The object's form follows archive.config.compress, as it does on every other path this module
-  -- ships (#520): plain NDJSON at <prefix><child>.ndjson or, with the flag on, a GZIP stream at
-  -- <prefix><child>.ndjson.gz, the key the automatic NDJSON strategy already uses for a compressed
-  -- object. The flag is read here, once, and nowhere else in this function.
+  -- ships (#520): plain NDJSON at <prefix><schema>.<child>.ndjson or, with the flag on, a GZIP stream
+  -- at <prefix><schema>.<child>.ndjson.gz, the suffix the automatic NDJSON strategy already uses for a
+  -- compressed object. The flag is read here, once, and nowhere else in this function. The key names
+  -- the child with its schema (archive._child_object_key, #711).
   v_gzip := cfg.compress;
   if v_gzip then
-    v_key := cfg.prefix || p_child || '.ndjson.gz'; v_ctype := 'application/gzip';
+    v_key := archive._child_object_key(p_parent, cfg.prefix, p_child, '.ndjson.gz'); v_ctype := 'application/gzip';
   else
-    v_key := cfg.prefix || p_child || '.ndjson';    v_ctype := 'application/x-ndjson';
+    v_key := archive._child_object_key(p_parent, cfg.prefix, p_child, '.ndjson');    v_ctype := 'application/x-ndjson';
   end if;
 
   -- Conservation (#673): every page's rows are summed into a count AND a content fingerprint (a sum of
@@ -2893,7 +2991,7 @@ begin
   -- which resolved the bare name through the caller's search_path
   v_child := archive._resolve_child(p_parent, p_child, 'archive.to_s3_parquet');
   v_payload := archive._pq_to_parquet(v_child, cfg.compress);
-  v_key := cfg.prefix || p_child || '.parquet';
+  v_key := archive._child_object_key(p_parent, cfg.prefix, p_child, '.parquet');   -- named with its schema (#711)
 
   v_resp := archive.s3_signed_request_bytea('PUT', cfg.endpoint, cfg.bucket, cfg.region, v_key, '',
                                             'application/vnd.apache.parquet', v_payload, v_key_id, v_secret);
@@ -2996,3 +3094,6 @@ drop function if exists archive._pq_encode_column_data(text, text, text, boolean
 -- (p_logical_type), so its 7-arg version goes the same way. With both installed, a call passing only
 -- the four required arguments matches both and is refused as "not unique".
 drop function if exists archive._pq_build_schema_leaf(text, int4, int4, boolean, int4, int4, int4);
+-- archive._s3_abort_uploads_at grew a trailing optional p_page_size (#711). With the 6-arg version still
+-- installed, archive.to_s3's 6-argument calls would match both and be refused as "not unique".
+drop function if exists archive._s3_abort_uploads_at(text, text, text, text, text, text);

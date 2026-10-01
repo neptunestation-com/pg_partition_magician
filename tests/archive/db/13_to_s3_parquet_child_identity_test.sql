@@ -32,8 +32,8 @@ select archive.configure('app.evts'::regclass, 'archive-test-bucket',
 
 select child_name as child, lo, hi from pgpm.part where parent_table = 'app.evts'::regclass and lo = '0' \gset
 select format('app.%I', :'child')::regclass::oid as real_oid \gset
-select 'a13_child_identity/' || :'child' || '.parquet' as pq_key,
-       'a13_child_identity/' || :'child' || '.ndjson'  as nd_key \gset
+select 'a13_child_identity/app.' || :'child' || '.parquet' as pq_key,
+       'a13_child_identity/app.' || :'child' || '.ndjson'  as nd_key \gset
 
 create schema pgpm_test13;
 

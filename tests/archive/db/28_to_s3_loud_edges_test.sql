@@ -21,6 +21,17 @@
 -- breaks the export right after the initiate's real response arrived, so the store HAS the upload and
 -- archive.to_s3 never saw its id. The id escapes the rolled-back export in the error message itself,
 -- which is how the file can say WHICH upload must be gone, not only how many are left.
+--
+-- The stand-in also answers the sweep's ListMultipartUploads the way S3 does, by key PREFIX (#711).
+-- MinIO lists only the exact key, so passed through, the listing never offered the sweep the bystander
+-- at the longer key, and the bystander assertions held with archive._s3_abort_uploads_at's exact-key
+-- filter deleted: the one line that keeps an S3 sweep off another object's upload went unwatched. The
+-- answer is built from MinIO's whole-bucket listing, every upload whose key begins with the export's
+-- key, and the stand-in counts what it offered beyond the exact key, which is the witness that the
+-- filter had something to filter. An abort is sent to the export's own key, and MinIO, like S3, refuses
+-- an UploadId that is not an upload at that key (NoSuchUpload), so the bystander would survive even a
+-- sweep without the filter: what such a sweep does is SEND an abort naming the bystander's upload. The
+-- stand-in therefore sorts the aborts it forwards by the UploadId they name, the bystander's or any other.
 select plan(29);
 
 create schema t28;
@@ -38,7 +49,8 @@ end $$;
 
 -- The uploads MinIO lists as in flight under a key PREFIX, (key, UploadId), signed here and sent
 -- through public.http by its qualified name, independent of the code under test (the same instrument
--- as tests/archive/db/24, which also reads the keys).
+-- as tests/archive/db/24, which also reads the keys). MinIO answers a prefix listing with the exact key
+-- only; with p_prefix null this lists the whole bucket, which MinIO does answer in full.
 create function t28.list(p_parent regclass, p_prefix text) returns table(k text, id text)
 language plpgsql as $$
 declare cfg archive.config; v_key_id text; v_secret text; r http_response;
@@ -49,7 +61,7 @@ begin
   select decrypted_secret into v_secret from vault.decrypted_secrets where name = cfg.vault_secret;
   v_host := regexp_replace(cfg.endpoint, '^https?://([^/]+).*$', '\1');
   v_uri := '/' || cfg.bucket || '/';
-  v_q := 'prefix=' || archive.s3_url_encode(p_prefix) || '&uploads=';
+  v_q := case when p_prefix is null then 'uploads=' else 'prefix=' || archive.s3_url_encode(p_prefix) || '&uploads=' end;
   v_amz := to_char(clock_timestamp() at time zone 'utc', 'YYYYMMDD"T"HH24MISS"Z"');
   v_date := substr(v_amz, 1, 8);
   v_ph := encode(digest('', 'sha256'), 'hex');
@@ -93,6 +105,8 @@ end $$;
 create sequence t28.initiated;
 create sequence t28.parts;
 create sequence t28.aborts;
+create sequence t28.offered;
+create sequence t28.bystander_aborts;
 create function t28.n(p_seq regclass) returns bigint language plpgsql as $$
 declare v bigint; c boolean;
 begin
@@ -100,7 +114,8 @@ begin
   return case when c then v else 0 end;
 end $$;
 create function t28.reset() returns void language sql as $$
-  select setval('t28.initiated', 1, false), setval('t28.parts', 1, false), setval('t28.aborts', 1, false)
+  select setval('t28.initiated', 1, false), setval('t28.parts', 1, false), setval('t28.aborts', 1, false),
+         setval('t28.offered', 1, false), setval('t28.bystander_aborts', 1, false)
 $$;
 
 -- The stand-in. t28.mode 'cancel' raises query_canceled, 'error' an ordinary error, in both cases
@@ -108,11 +123,27 @@ $$;
 -- UploadId, which the message carries out, never reaches archive.to_s3. The message also says whether
 -- the upload was listed in flight at the key at that moment.
 create function t28.http(r http_request) returns http_response language plpgsql as $$
-declare v_resp http_response; v_id text; v_listed boolean;
+declare v_resp http_response; v_id text; v_listed boolean; v_key text := current_setting('t28.key'); v_xml xml;
 begin
+  -- the sweep's listing of uploads at the export's key, answered with S3's prefix semantics (see the top)
+  if r.method::text = 'GET' and r.uri like '%&uploads='
+     and position('prefix=' || archive.s3_url_encode(v_key) || '&' in r.uri) > 0 then
+    select xmlelement(name "ListMultipartUploadsResult",
+             xmlelement(name "IsTruncated", 'false'),
+             xmlagg(xmlelement(name "Upload", xmlelement(name "Key", l.k), xmlelement(name "UploadId", l.id))))
+      into v_xml
+      from t28.list(current_setting('t28.parent')::regclass, null) l
+     where starts_with(l.k, v_key);
+    perform nextval('t28.offered') from xpath('//Upload/Key/text()', v_xml) k where k::text <> v_key;
+    return (200, 'application/xml', '{}'::http_header[], v_xml::text)::http_response;
+  end if;
   if r.method::text = 'POST' and r.uri like '%?uploads=%' then perform nextval('t28.initiated');
   elsif r.method::text = 'PUT' and r.uri like '%?partNumber=%' then perform nextval('t28.parts');
-  elsif r.method::text = 'DELETE' and r.uri like '%?uploadId=%' then perform nextval('t28.aborts');
+  elsif r.method::text = 'DELETE' and r.uri like '%?uploadId=%' then
+    -- the abort's UploadId is the last thing in its URI; t28.other is the bystander's, once it exists
+    perform nextval(case when right(r.uri, length('uploadId=' || archive.s3_url_encode(coalesce(current_setting('t28.other', true), ''))))
+                              = 'uploadId=' || archive.s3_url_encode(coalesce(current_setting('t28.other', true), ''))
+                         then 't28.bystander_aborts' else 't28.aborts' end);
   end if;
   v_resp := public.http(r);
   if r.method::text = 'POST' and r.uri like '%?uploads=%' then
@@ -231,8 +262,8 @@ select is(t28.try(format($$ select archive.to_s3('public.le28', %L, '0', '100000
 -- one row per page and per part, so each export initiates a multipart upload after its first page
 update archive.config set part_bytes = 1, fetch_rows = 1, prefix = current_database() || '/' || (parent_table::text) || '/'
  where parent_table in ('public.la28'::regclass, 'public.lb28'::regclass);
-select current_database() || '/la28/' || (select child_name from pgpm.part where parent_table = 'public.la28'::regclass order by lo::numeric limit 1) || '.ndjson' as ka,
-       current_database() || '/lb28/' || (select child_name from pgpm.part where parent_table = 'public.lb28'::regclass order by lo::numeric limit 1) || '.ndjson' as kb
+select current_database() || '/la28/public.' || (select child_name from pgpm.part where parent_table = 'public.la28'::regclass order by lo::numeric limit 1) || '.ndjson' as ka,
+       current_database() || '/lb28/public.' || (select child_name from pgpm.part where parent_table = 'public.lb28'::regclass order by lo::numeric limit 1) || '.ndjson' as kb
 \gset
 
 select ok(t28.abort_all('public.la28', :'ka') >= 0 and t28.inflight('public.la28', :'ka') = '{}'
@@ -241,13 +272,15 @@ select ok(t28.abort_all('public.la28', :'ka') >= 0 and t28.inflight('public.la28
   'LIVENESS: no multipart upload is in flight at either key, or at the bystander''s, before the exports');
 
 -- A bystander at a key la28's key is a prefix of. S3 lists uploads by key PREFIX, so a sweep that
--- matched the prefix alone would abort it; MinIO lists only the exact key (measured: a prefix listing
--- of la28's key does not show it), so here the bystander witnesses that the sweep reached no other
--- key, and the exact-key filter in archive._s3_abort_uploads_at is what keeps S3 to the same.
+-- matched the prefix alone would abort it. MinIO lists only the exact key (measured: a prefix listing
+-- of la28's key does not show it), which is why the stand-in answers the sweep's listing itself, with
+-- the bystander in it; the exact-key filter in archive._s3_abort_uploads_at is then all that keeps the
+-- sweep off it, here as against S3.
 select (xpath('//*[local-name()=''UploadId'']/text()',
         (t28.req('public.la28', 'POST', :'ka' || '.other', 'uploads=')).content::xml))[1]::text as other_id \gset
 select is(t28.inflight('public.la28', :'ka' || '.other'), array[:'other_id'],
   'LIVENESS: the bystander upload is in flight at la28''s key || ''.other''');
+select set_config('t28.other', :'other_id', false);
 
 -- A: a cancel inside the initiate
 
@@ -264,10 +297,14 @@ select is(array[t28.n('t28.initiated'), t28.n('t28.parts')], array[1, 0]::bigint
   'A LIVENESS: one initiate and no part: the cancel landed before archive.to_s3 knew the upload''s id');
 select ok(not (:'a_id' = any(t28.inflight('public.la28', :'ka'))),
   'A: the upload the cancelled initiate created is no longer in flight');
-select is(format('%s | %s', t28.inflight('public.la28', :'ka'), t28.inflight('public.la28', :'ka' || '.other')), '{} | {' || :'other_id' || '}',
-  'A: nothing is left in flight at the key, and the bystander at the longer key is untouched');
+-- the bystander's half pairs the negative with its witness: the listing the sweep read OFFERED it the
+-- bystander (as S3's would), and no abort named it
+select is(format('%s | %s | offered %s, named %s', t28.inflight('public.la28', :'ka'), t28.inflight('public.la28', :'ka' || '.other'),
+                 t28.n('t28.offered'), t28.n('t28.bystander_aborts')),
+  '{} | {' || :'other_id' || '} | offered 1, named 0',
+  'A: nothing is left in flight at the key, and the bystander at the longer key is untouched: the sweep''s listing offered it, and no abort named it');
 select is(t28.n('t28.aborts'), 1::bigint,
-  'A: archive.to_s3 sent exactly one abort: the orphan at its key, not the bystander');
+  'A: archive.to_s3 sent exactly one abort naming an upload other than the bystander''s: the orphan at its key');
 
 -- B: an ordinary transport error inside the initiate (the `when others` path)
 

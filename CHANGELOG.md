@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+- **The text SigV4 signer sends the bytes it hashed, so a non-UTF8 database archives non-ASCII NDJSON**
+  (#728). `archive.s3_signed_request` hashed `convert_to(payload, 'UTF8')` but put the payload on the wire
+  in the server encoding, so in a LATIN1 database every body holding a non-ASCII character was refused
+  with `XAmzContentSHA256Mismatch`, and the uncompressed NDJSON strategy, which signs its chunk there,
+  logged `skip_archive` every tick and never covered or retired the partition. The signer now sends the
+  UTF-8 bytes through `bytea_to_text`, as the bytea signer does. `tests/archive/db/29` drives the strategy
+  in a LATIN1 sibling database it builds through dblink; `bench/archive_signer_non_utf8.sh` is required to
+  fail against `signer_text_sends_server_encoding`.
+- **pgpm_archive's pass-4 edges** (#711). `archive.to_s3` and `archive.to_s3_parquet` keyed their object
+  `<prefix><child>.<ext>`, so same-named parents in two schemas sharing a prefix overwrote each other's
+  export; the key is now `<prefix><schema>.<child>.<ext>` (`archive._child_object_key`). A `timestamptz`
+  Parquet leaf now carries `LogicalType TIMESTAMP(isAdjustedToUTC=true)` beside `TIMESTAMP_MICROS`, which
+  DuckDB read alone as a naive `TIMESTAMP`. `archive._s3_abort_uploads_at` follows the listing's markers
+  to its last page instead of reading one, and `tests/archive/db/28`'s stand-in now answers the sweep's
+  listing by key prefix as S3 does, so the exact-key filter is watched against MinIO too. Guarded by
+  `tests/archive/db/30` through `bench/archive_edges_pass5.sh` (`to_s3_sync_key_bare_child`,
+  `parquet_tstz_no_logical_type`, `abort_sweep_one_page`, with DuckDB and pyarrow reading the files) and
+  by `bench/archive_to_s3_loud_edges.sh` (`abort_sweep_no_exact_key_filter`).
+- **A `NaN` in a `numeric(p,s)` column no longer wedges Parquet archiving** (#635). Parquet DECIMAL cannot
+  hold it, and `archive._pq_plain_decimal` raised `cannot convert NaN to integer` on every encode of its
+  chunk, so the Parquet strategy logged `skip_archive` every tick and the partition was never covered or
+  retired. `NaN` is now written as null, and a `NOT NULL` column holding one gets an optional leaf in that
+  file. `tests/archive/db/31` pins each file byte for byte against the same rows with null in place of
+  `NaN`; `bench/archive_parquet_decimal_nan.sh` reads them back with pyarrow and DuckDB and is required to
+  fail against `parquet_decimal_nan_raises`.
 - **`set_partition_tz` takes turns with `obtain` and `extend_to`** (#725). It judged the grid from committed
   `pgpm.part` and shared no lock with either, so a zone change accepted while another session's extension
   had built cells on the old lattice and not yet committed them, or one an extension had read around before

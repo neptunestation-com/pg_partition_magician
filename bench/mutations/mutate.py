@@ -3247,6 +3247,69 @@ $$;''',
 """, "", 1),
         ],
     ),
+    "signer_text_sends_server_encoding": (
+        "bench/archive_signer_non_utf8.sh",
+        "Pre-#728 archive.s3_signed_request: x-amz-content-sha256 is the hash of convert_to(p_payload, "
+        "'UTF8') but the body on the wire is p_payload itself, text in the SERVER encoding. In a LATIN1 "
+        "database every body holding a non-ASCII character is refused (400 XAmzContentSHA256Mismatch), so "
+        "the uncompressed NDJSON strategy, which signs its chunk through this signer, logs skip_archive "
+        "every tick and the partition is never covered or retired. One site, the signer's one send.",
+        [("    p_ctype, bytea_to_text(convert_to(p_payload, 'UTF8')))::http_request);\n",
+          "    p_ctype, p_payload)::http_request);   -- MUTANT: the pre-#728 send, server-encoding bytes\n", 1)],
+    ),
+    "to_s3_sync_key_bare_child": (
+        "bench/archive_edges_pass5.sh",
+        "Pre-#711 archive.to_s3 and archive.to_s3_parquet: the object key is <prefix><child><ext>, the "
+        "child's bare relname. Two parents named evt in two schemas sharing a prefix export their [0, 10000) "
+        "partitions to one key, and the second export replaces the first. One site, the helper both "
+        "functions take their key from.",
+        [("  select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(p_child) || p_ext\n",
+          "  select p_prefix || p_child || p_ext   -- MUTANT: the pre-#711 bare-child key\n", 1)],
+    ),
+    "parquet_tstz_no_logical_type": (
+        "bench/archive_edges_pass5.sh",
+        "Pre-#711 Parquet writer: only a `timestamp` leaf carries a LogicalType; a `timestamptz` leaf has "
+        "the legacy ConvertedType TIMESTAMP_MICROS alone, which DuckDB reads as a naive TIMESTAMP rather "
+        "than TIMESTAMP WITH TIME ZONE. Two sites, one per encoder, so neither annotates the instant.",
+        [("      p_logical_type => case when v_col_pgtypes[i] = 'timestamp' then archive._pq_logical_timestamp_micros(false)\n"
+          "                             when v_col_pgtypes[i] = 'timestamptz' then archive._pq_logical_timestamp_micros(true) end);\n",
+          "      p_logical_type => case when v_col_pgtypes[i] = 'timestamp' then archive._pq_logical_timestamp_micros(false) end);   -- MUTANT\n",
+          2)],
+    ),
+    "abort_sweep_one_page": (
+        "bench/archive_edges_pass5.sh",
+        "Pre-#711 archive._s3_abort_uploads_at: one page of ListMultipartUploads is read and the IsTruncated "
+        "flag ignored, so an upload in flight at the key past the first page is never aborted. One site, "
+        "the loop's exit: the mutant leaves after the first page whatever the store says.",
+        [("    exit when v_truncated is distinct from 'true';\n",
+          "    exit;   -- MUTANT: the pre-#711 single page\n", 1)],
+    ),
+    "abort_sweep_no_exact_key_filter": (
+        "bench/archive_to_s3_loud_edges.sh",
+        "archive._s3_abort_uploads_at without its exact-key filter: S3 lists in-flight uploads by key "
+        "PREFIX, so the sweep sends an abort naming every upload at a longer key the export's key is a "
+        "prefix of, another object's upload. Against MinIO, which lists the exact key, tests/archive/db/28 "
+        "could not see the line go (#711); its stand-in now answers the listing with S3's semantics. One "
+        "site, the filter line, deleted exactly as the issue's reproduction deletes it.",
+        [("     where u.upload_key = p_key\n", "", 1)],
+    ),
+    "parquet_decimal_nan_raises": (
+        "bench/archive_parquet_decimal_nan.sh",
+        "Pre-#635 Parquet DECIMAL encode: a NaN in a numeric(p,s) column reaches archive._pq_plain_decimal, "
+        "which raises 'cannot convert NaN to integer' on every encode of the chunk holding it, so the "
+        "Parquet strategy fails, maintain() logs skip_archive every tick and the partition is never "
+        "covered or retired. One site, the numeric branch of archive._pq_encode_column_data, put back as "
+        "it was: present and encoded whenever not null.",
+        [("""      'select coalesce(array_agg(%I is not null and %I <> ''NaN''::numeric order by %s), ''{}''::boolean[]),
+              coalesce(string_agg(archive._pq_plain_decimal(%I::numeric, %L, %L), ''''::bytea order by %s) filter (where %I is not null and %I <> ''NaN''::numeric), ''''::bytea)
+         from %s',
+      p_col, p_col, v_order_q, p_col, p_decimal_scale, p_decimal_bytes, v_order_q, p_col, p_col, v_from_q)
+""", """      'select coalesce(array_agg(%I is not null order by %s), ''{}''::boolean[]),
+              coalesce(string_agg(archive._pq_plain_decimal(%I::numeric, %L, %L), ''''::bytea order by %s) filter (where %I is not null), ''''::bytea)
+         from %s',
+      p_col, v_order_q, p_col, p_decimal_scale, p_decimal_bytes, v_order_q, p_col, v_from_q)   -- MUTANT: pre-#635
+""", 1)],
+    ),
     "keep_both_two_way_only": (
         "bench/keep_both_diff3.sh",
         "Pre-#598 scripts/review/keep_both.py: the hunk pattern knows only the two-way conflict shape and the "
@@ -4098,6 +4161,12 @@ MUTATION_SRC = {
     "to_s3_initiate_orphan_unaborted": "pgpm_archive/install.sql",
     "configure_part_bytes_under_s3_min": "pgpm_archive/install.sql",
     "configure_fetch_rows_unbounded": "pgpm_archive/install.sql",
+    "signer_text_sends_server_encoding": "pgpm_archive/install.sql",
+    "to_s3_sync_key_bare_child": "pgpm_archive/install.sql",
+    "parquet_tstz_no_logical_type": "pgpm_archive/install.sql",
+    "abort_sweep_one_page": "pgpm_archive/install.sql",
+    "abort_sweep_no_exact_key_filter": "pgpm_archive/install.sql",
+    "parquet_decimal_nan_raises": "pgpm_archive/install.sql",
     # The harness and review tooling guard themselves too (#598 to #601): their defects live in the
     # scripts, a doc and a test file, so that is what these mutate.
     "keep_both_two_way_only": "scripts/review/keep_both.py",

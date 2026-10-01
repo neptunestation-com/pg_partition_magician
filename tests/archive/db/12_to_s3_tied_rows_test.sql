@@ -78,7 +78,7 @@ end;
 $$;
 
 select is(
-  pgpm_test12.clear_object('public.tie_evts', 'tie_evts/' || :'child' || '.ndjson'), 404,
+  pgpm_test12.clear_object('public.tie_evts', 'tie_evts/public.' || :'child' || '.ndjson'), 404,
   'setup: no object at the key before the export, so what is read back below came from THIS export');
 
 select lives_ok(
@@ -86,7 +86,7 @@ select lives_ok(
   'archive.to_s3 exports the partition');
 
 create temporary table tie_object as
-select doc from pgpm_test12.fetch_ndjson_lines('public.tie_evts', 'tie_evts/' || :'child' || '.ndjson') doc;
+select doc from pgpm_test12.fetch_ndjson_lines('public.tie_evts', 'tie_evts/public.' || :'child' || '.ndjson') doc;
 
 select is((select count(*)::int from tie_object), 40,
   'the object holds 40 lines: the partition''s 30 tied rows plus its 10 later rows');

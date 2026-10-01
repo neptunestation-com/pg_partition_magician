@@ -1,9 +1,9 @@
 -- archive.to_s3, the synchronous NDJSON export, never read archive.config.compress. With the flag on
 -- it uploaded plain NDJSON at <prefix><child>.ndjson, while pgpm_archive/README.md promises GZIP for
 -- either format and archive.to_s3_parquet and both archive_fn strategies honour the flag (issue
--- #520). It now writes a GZIP stream at <prefix><child>.ndjson.gz with Content-Type application/gzip,
--- the key the automatic NDJSON strategy already uses for a compressed object, and nothing at the
--- plain key.
+-- #520). It now writes a GZIP stream at <prefix><schema>.<child>.ndjson.gz (the schema since #711) with
+-- Content-Type application/gzip, the suffix the automatic NDJSON strategy already uses for a compressed
+-- object, and nothing at the plain key.
 --
 -- Two compressed exports, because the function has two upload paths and the flag has to reach both.
 -- A small partition takes the single PUT. Its object is one gzip member, and a member ends with the
@@ -127,9 +127,9 @@ select lo as gz_lo, hi as gz_hi from pgpm.part where parent_table = 'public.gz':
 
 select is((select count(distinct tableoid)::int from public.gz), 1,
   'setup: all 40 rows sit in the one partition being exported');
-select is(t16.clear_object('public.gz', 'gz/' || :'gz_child' || '.ndjson'), 404,
+select is(t16.clear_object('public.gz', 'gz/public.' || :'gz_child' || '.ndjson'), 404,
   'setup: no object at the plain key before the export');
-select is(t16.clear_object('public.gz', 'gz/' || :'gz_child' || '.ndjson.gz'), 404,
+select is(t16.clear_object('public.gz', 'gz/public.' || :'gz_child' || '.ndjson.gz'), 404,
   'setup: no object at the .gz key before the export');
 
 -- the other synchronous function honours the flag on this same table, so the flag reaches the synchronous
@@ -143,11 +143,11 @@ select lives_ok(
   format($$ select archive.to_s3('public.gz', %L, %L, %L) $$, :'gz_child', :'gz_lo', :'gz_hi'),
   'archive.to_s3 exports the 40-row partition with compress on');
 
-create temporary table gz_obj as select * from t16.fetch('public.gz', 'gz/' || :'gz_child' || '.ndjson.gz');
+create temporary table gz_obj as select * from t16.fetch('public.gz', 'gz/public.' || :'gz_child' || '.ndjson.gz');
 create temporary table gz_expect as
   select convert_to(t16.expected_text(format('public.%I', :'gz_child')::regclass), 'UTF8') as bytes;
 
-select is((select status from gz_obj), 200, 'the object lands at <prefix><child>.ndjson.gz');
+select is((select status from gz_obj), 200, 'the object lands at <prefix><schema>.<child>.ndjson.gz');
 select is((select encode(substring(bytes from 1 for 3), 'hex') from gz_obj), '1f8b08',
   'and it is a gzip member: magic 1f 8b, compression method 08 (deflate)');
 select is((select ctype from gz_obj), 'application/gzip', 'stored with Content-Type application/gzip');
@@ -165,7 +165,7 @@ select is((select t16.le32(o.bytes, octet_length(o.bytes) - 4) from gz_obj o), (
 select is((select t16.le32(o.bytes, octet_length(o.bytes) - 8) from gz_obj o), (select archive._pq_crc32(bytes) from gz_expect),
   'and its CRC-32 is the CRC-32 of that NDJSON: the member holds exactly these 40 rows');
 
-select is(t16.object_status('public.gz', 'gz/' || :'gz_child' || '.ndjson'), 404,
+select is(t16.object_status('public.gz', 'gz/public.' || :'gz_child' || '.ndjson'), 404,
   'nothing was written at the plain .ndjson key');
 
 insert into t16.obj (label, bytes, expected_md5, expected_ids)
@@ -176,12 +176,12 @@ insert into t16.obj (label, bytes, expected_md5, expected_ids)
 select child_name as empty_child from pgpm.part where parent_table = 'public.gz'::regclass and lo = '60' \gset
 select is((select count(*)::int from public.gz where id >= 60 and id < 70), 0,
   'setup: the [60, 70) partition holds no rows');
-select is(t16.clear_object('public.gz', 'gz/' || :'empty_child' || '.ndjson.gz'), 404,
+select is(t16.clear_object('public.gz', 'gz/public.' || :'empty_child' || '.ndjson.gz'), 404,
   'setup: no object at its .gz key before the export');
 select lives_ok(
   format($$ select archive.to_s3('public.gz', %L, '60', '70') $$, :'empty_child'),
   'archive.to_s3 exports the empty partition with compress on');
-create temporary table empty_obj as select * from t16.fetch('public.gz', 'gz/' || :'empty_child' || '.ndjson.gz');
+create temporary table empty_obj as select * from t16.fetch('public.gz', 'gz/public.' || :'empty_child' || '.ndjson.gz');
 select is((select status || ' ' || encode(substring(bytes from 1 for 3), 'hex') from empty_obj), '200 1f8b08',
   'the empty export is a gzip member at the .gz key: HTTP 200, magic 1f 8b, method 08');
 select is((select t16.le32(bytes, octet_length(bytes) - 8) || ' ' || t16.le32(bytes, octet_length(bytes) - 4) from empty_obj), '0 0',
@@ -208,24 +208,24 @@ create temporary table gzm_expect as
 select cmp_ok((select octet_length(bytes) from gzm_expect), '>=', 3 * 5 * 1024 * 1024,
   'LIVENESS: the partition''s NDJSON spans at least three 5 MiB text chunks, so the export compresses several members and must fill more than one part');
 
-select is(t16.clear_object('public.gzm', 'gzm/' || :'gzm_child' || '.ndjson'), 404,
+select is(t16.clear_object('public.gzm', 'gzm/public.' || :'gzm_child' || '.ndjson'), 404,
   'setup: no object at the plain key before the export');
-select is(t16.clear_object('public.gzm', 'gzm/' || :'gzm_child' || '.ndjson.gz'), 404,
+select is(t16.clear_object('public.gzm', 'gzm/public.' || :'gzm_child' || '.ndjson.gz'), 404,
   'setup: no object at the .gz key before the export');
 
 select lives_ok(
   format($$ select archive.to_s3('public.gzm', %L, %L, %L) $$, :'gzm_child', :'gzm_lo', :'gzm_hi'),
   'archive.to_s3 exports the 16000-row partition with compress on');
 
-create temporary table gzm_obj as select * from t16.fetch('public.gzm', 'gzm/' || :'gzm_child' || '.ndjson.gz');
+create temporary table gzm_obj as select * from t16.fetch('public.gzm', 'gzm/public.' || :'gzm_child' || '.ndjson.gz');
 
-select is((select status from gzm_obj), 200, 'the object lands at <prefix><child>.ndjson.gz');
+select is((select status from gzm_obj), 200, 'the object lands at <prefix><schema>.<child>.ndjson.gz');
 select cmp_ok((select substring(etag from '-([0-9]+)"?$')::int from gzm_obj), '>=', 2,
   'LIVENESS: the ETag carries a part count of two or more, so this object came through multipart');
 select is((select encode(substring(bytes from 1 for 3), 'hex') from gzm_obj), '1f8b08',
   'and it starts with a gzip member: magic 1f 8b, compression method 08 (deflate)');
 select is((select ctype from gzm_obj), 'application/gzip', 'stored with Content-Type application/gzip');
-select is(t16.object_status('public.gzm', 'gzm/' || :'gzm_child' || '.ndjson'), 404,
+select is(t16.object_status('public.gzm', 'gzm/public.' || :'gzm_child' || '.ndjson'), 404,
   'nothing was written at the plain .ndjson key');
 select ok((select o.status = 200 and octet_length(o.bytes) < (select octet_length(bytes) from gzm_expect) from gzm_obj o),
   'the object is smaller than the NDJSON it holds: compressed, not plain text under a .gz name');
@@ -246,16 +246,16 @@ select ok(not (select compress from archive.config where parent_table = 'public.
 select c.relname as ctl_child from public.gz t join pg_class c on c.oid = t.tableoid where t.id = 55 \gset
 select lo as ctl_lo, hi as ctl_hi from pgpm.part where parent_table = 'public.gz'::regclass and child_name = :'ctl_child' \gset
 
-select is(t16.clear_object('public.gz', 'gz/' || :'ctl_child' || '.ndjson'), 404,
+select is(t16.clear_object('public.gz', 'gz/public.' || :'ctl_child' || '.ndjson'), 404,
   'setup: no object at the plain key before the control export');
-select is(t16.clear_object('public.gz', 'gz/' || :'ctl_child' || '.ndjson.gz'), 404,
+select is(t16.clear_object('public.gz', 'gz/public.' || :'ctl_child' || '.ndjson.gz'), 404,
   'setup: no object at the .gz key before the control export');
 
 select lives_ok(
   format($$ select archive.to_s3('public.gz', %L, %L, %L) $$, :'ctl_child', :'ctl_lo', :'ctl_hi'),
   'control: archive.to_s3 exports the 2-row partition with compress off');
 
-create temporary table ctl_obj as select * from t16.fetch('public.gz', 'gz/' || :'ctl_child' || '.ndjson');
+create temporary table ctl_obj as select * from t16.fetch('public.gz', 'gz/public.' || :'ctl_child' || '.ndjson');
 
 select is((select status from ctl_obj), 200, 'control: the object lands at the plain .ndjson key');
 select is(
@@ -264,7 +264,7 @@ select is(
   array[55, 56],
   'control: it is plain NDJSON naming ids 55 and 56');
 select is((select ctype from ctl_obj), 'application/x-ndjson', 'control: stored with Content-Type application/x-ndjson');
-select is(t16.object_status('public.gz', 'gz/' || :'ctl_child' || '.ndjson.gz'), 404,
+select is(t16.object_status('public.gz', 'gz/public.' || :'ctl_child' || '.ndjson.gz'), 404,
   'control: nothing at the .gz key');
 
 select * from finish();
