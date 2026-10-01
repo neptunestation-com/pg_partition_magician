@@ -1891,7 +1891,12 @@ create or replace function archive._pq_encode_column_data(
   p_decimal_scale int4 default null, p_decimal_bytes int4 default null,
   p_control name default null, p_lo text default null, p_hi text default null
 ) returns bytea
-language plpgsql as $$
+-- extra_float_digits is pinned because an array column is written as array_to_json TEXT, and a float in
+-- that text follows the session's setting: under 0 (the pre-PG12 default, still set by ALTER ROLE or ALTER
+-- DATABASE on some clusters and inherited by a tick) a float8[] element was written to 15 significant
+-- digits, a value the row never held (#781). 1 is shortest-exact (any value above 0 is), the PostgreSQL 12+
+-- default, so a file written from a default session is unchanged. The scalar float8 leaf is binary.
+language plpgsql set extra_float_digits = 1 as $$
 declare
   values_payload bytea := ''::bytea;
   is_present boolean[] := '{}';
@@ -2465,9 +2470,16 @@ $$;
 
 -- single read, single PUT (optionally one gzip member for the whole body). No pagination, so no
 -- tiebreak is needed: a plain `order by` with no LIMIT never splits a run of ties across pages.
+--
+-- extra_float_digits is pinned for the same reason _object_stem pins TimeZone and DateStyle (#551): the
+-- payload is row_to_json text, and a float in it follows the session's setting. Under 0, which ALTER ROLE
+-- or ALTER DATABASE can give the tick, every float8 was archived to 15 significant digits and every float4
+-- to 6 (123456789.12345679 -> 123456789.123457), the ledger recorded the chunk and retire() then dropped
+-- the only exact copy (#781). 1 is shortest-exact, the PostgreSQL 12+ default, so the bytes a default
+-- session wrote are unchanged; the SET clause restores the caller's setting on return.
 create or replace function archive._encode_upload_ndjson_single(p_parent regclass, p_lo text, p_hi text, p_compress boolean default false)
 returns table(s3_key text, etag text, rows_archived bigint)
-language plpgsql as $$
+language plpgsql set extra_float_digits = 1 as $$
 declare
   cfg archive.config; pcfg pgpm.config; v_nsp name; v_rel name;
   v_payload text; v_body bytea; v_key text;
@@ -2725,9 +2737,12 @@ $$;
 -- Small partitions (one part's worth or less) take a plain single PUT; bigger ones stream
 -- through S3 multipart, holding at most one part in memory at a time. With archive.config.compress
 -- on, the same two paths carry a gzip stream instead of plain NDJSON (the fold inside the loop says
--- how), at <prefix><schema>.<child>.ndjson.gz.
+-- how), at <prefix><schema>.<child>.ndjson.gz. extra_float_digits is pinned to shortest-exact for the
+-- reason given at archive._encode_upload_ndjson_single (#781): row_to_json renders a float by the session's
+-- setting, and the conservation fingerprint below hashes that same text on both sides, so it could not see
+-- a float rounded to 15 digits.
 create or replace function archive.to_s3(p_parent regclass, p_child name, p_lo text, p_hi text)
-returns void language plpgsql as $$
+returns void language plpgsql set extra_float_digits = 1 as $$
 declare
   cfg archive.config; pcfg pgpm.config; v_ctltype text;
   v_gzip boolean; v_ctype text; v_body bytea := '';

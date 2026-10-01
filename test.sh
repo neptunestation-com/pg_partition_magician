@@ -670,6 +670,10 @@ run_archive() {
   bash "$(dirname "$0")/bench/archive_edges_pass5.sh" pgpm_test-archive pgpm_perf132 || fail=1
   echo "--- Parquet numeric NaN guard (issue #635) ---"
   bash "$(dirname "$0")/bench/archive_parquet_decimal_nan.sh" pgpm_test-archive pgpm_perf133 || fail=1
+  # The float-digits guard (#781) re-runs tests/archive/db/32 for the same reason: the clean-code half
+  # of the pairs bench/discriminate.sh completes with each encoder's extra_float_digits pin taken out.
+  echo "--- archive floats under extra_float_digits = 0 guard (issue #781) ---"
+  bash "$(dirname "$0")/bench/archive_float_digits_pinned.sh" pgpm_test-archive pgpm_perf160 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi
