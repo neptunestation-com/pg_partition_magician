@@ -115,8 +115,13 @@ select is((select x from dblink('t163_a',
             format('select pgpm.regrain_step(%L, %L, %L)', 'public.tz163b', :'monob', '1 month')) as t(x text)),
   'prepared', 'LIVENESS (B): session A prepared a month run and holds its transaction open');
 select dblink_send_query('t163_b', $q$select pgpm.set_partition_tz('public.tz163b', 'Africa/Sao_Tome')::text$q$);
+-- pg_stat_activity is read once per transaction and then frozen (the documented snapshot; a DO block is
+-- one transaction), so without clearing it each turn this loop saw its first read 6000 times and could
+-- pass only when B was already waiting at that read: measured on PG 15, 400 turns never saw a wait a
+-- fresh transaction saw at once (#713).
 do $$ begin
   for i in 1 .. 6000 loop
+    perform pg_stat_clear_snapshot();
     exit when exists (select 1 from pg_stat_activity where pid = current_setting('t163.bpid')::int
                        and wait_event_type = 'Lock');
     perform pg_sleep(0.005);

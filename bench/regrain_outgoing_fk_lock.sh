@@ -103,6 +103,12 @@ BG=$!
 # COMMIT after every attempt. Locks are held to transaction end and a DO block is ONE transaction, so
 # a probe that just loops pins its own lock and blocks the very ATTACH it is trying to observe, which
 # makes the run prove nothing. Learned on bench/maintain_lock.sh.
+#
+# pg_stat_activity is read once per transaction and then frozen (the documented snapshot). The COMMIT
+# after every turn of the wait loop below therefore does double duty: it releases the probe's own lock
+# (the point just made) AND ends the transaction, so the next turn reads a fresh view and the loop is a
+# poll that can wait. Measured on PG 15 (#713): the same loop in one transaction never saw the tick start
+# in 400 turns; with a COMMIT per turn it saw it on the second. Do not fold the loop into one transaction.
 docker exec "$C" psql -U postgres -d "$DB" -qtA -c "
 do \$p\$
 declare n int := 0; t int := 0; saw boolean := false;

@@ -128,6 +128,12 @@ BG=$!
 #    any lock at the start of the tick suppresses the very step whose lock is under test. Wait for the
 #    tick, give it a window, and only then start reading -- by which point a pre-fix run is still holding
 #    a lock from an earlier step into the regrain copy, and a post-fix run has committed and released it.
+#
+# pg_stat_activity is read once per transaction and then frozen (the documented snapshot). The COMMIT
+# after every turn of the wait loop below therefore does double duty: it releases the probe's own lock
+# (the point made above) AND ends the transaction, so the next turn reads a fresh view and the loop is a
+# poll that can wait. Measured on PG 15 (#713): the same loop in one transaction never saw the tick start
+# in 400 turns; with a COMMIT per turn it saw it on the second. Do not fold the loop into one transaction.
 docker exec "$C" psql -U postgres -d "$DB" -qtA -c "
 do \$p\$
 declare n int := 0; t int := 0; na int := 0; ta int := 0; saw boolean := false;
