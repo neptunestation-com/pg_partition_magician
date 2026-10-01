@@ -6610,7 +6610,8 @@ begin
   -- row written past the monolith was silently not replicated. Add the parent to each, with the same row
   -- filter and column list (the up-front check refused the shapes a partitioned table cannot take), so
   -- every partition present and future is covered through it. The monolith's own membership is KEPT on
-  -- purpose: it is what an untransmute hands back in its publications, and while it is a partition it
+  -- purpose: an untransmute hands back the parent's memberships and touches only the ones that differ
+  -- from it (#780), so an unchanged table comes back published with no DDL, and while it is a partition it
   -- adds nothing (publish_via_partition_root = false publishes it as a leaf of the parent anyway; true
   -- publishes it through the parent). Retention's drop of the monolith removes it with the table.
   -- Column names, not prattrs' attnums: the parent's attnums are dense, the original's may have holes
@@ -7075,6 +7076,27 @@ begin
 end;
 $$;
 
+-- One ALTER PUBLICATION ... ADD TABLE per publication that names p_of explicitly (pg_publication_rel), naming
+-- p_nsp.p_name instead, with the same column list and row filter (#780). untransmute builds these off the
+-- parent under its lock, as the memberships to hand back, and off the restored table, as the ones it already
+-- has; equal text means an equal membership, so only the ones that differ cost any DDL. Column names, not
+-- prattrs' attnums, as in transmute's 7c: the two tables' attnums differ where a column was dropped.
+create or replace function pgpm._publication_adds(p_of regclass, p_nsp name, p_name name)
+returns table (o_pub name, o_def text) language sql stable as $$
+  select p.pubname,
+         format('alter publication %I add table %I.%I%s%s', p.pubname, p_nsp, p_name,
+                case when m.cols_q is not null then ' (' || m.cols_q || ')' else '' end,
+                case when m.qual is not null then ' where (' || m.qual || ')' else '' end)
+    from pg_publication_rel r
+    join pg_publication p on p.oid = r.prpubid
+    cross join lateral (
+      select pg_get_expr(r.prqual, r.prrelid) as qual,
+             (select string_agg(quote_ident(a.attname), ', ' order by a.attnum)
+                from pg_attribute a where a.attrelid = r.prrelid and a.attnum = any(r.prattrs::int2[])) as cols_q) m
+   where r.prrelid = p_of
+   order by p.pubname;
+$$;
+
 -- Reverse a transmute, exactly while it is still reversible. transmute's cutover moves no data: the
 -- original table is attached intact as the monolith, merely renamed. As long as every row still lives
 -- inside the monolith's [lo, hi), untransmute exploits that: detach the monolith (it is a complete
@@ -7107,6 +7129,13 @@ $$;
 -- The owner is applied first, so that the reset below works on the
 -- ACL the new owner holds (ALTER OWNER moves the old owner's entries to the new one) and a default ACL is
 -- re-granted to the right role. Only when it differs: the same owner needs no DDL and no privilege.
+-- And its PUBLICATION memberships (#780), for the same reason once more: ALTER PUBLICATION ... ADD, DROP or
+-- SET TABLE naming the managed table lands on the parent's pg_publication_rel rows, which the DROP takes
+-- with it, and the monolith's date from the conversion. A publication the table joined since stopped
+-- publishing it at the reverse (every later write missing at its subscribers, #566's consequence) and one
+-- it left published it again. The restored table leaves each publication it is in that the parent was not
+-- in with the same column list and row filter, and joins each the parent was in that it is not; a
+-- membership that matches costs no DDL, so a reverse with nothing changed needs no publication's owner.
 create or replace function pgpm.untransmute(p_parent regclass)
 returns regclass language plpgsql as $$
 declare
@@ -7125,6 +7154,7 @@ declare
   v_grantdefs text[] := '{}'; v_poldefs text[] := '{}'; v_rls boolean; v_rls_force boolean;
   v_acl_default boolean; v_revoked boolean := false; v_g record;
   v_owner oid; v_comdefs text[] := '{}';
+  v_pubdefs text[] := '{}';   -- #780: the parent's publication memberships, as ADD TABLEs naming the restored table
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then
@@ -7332,6 +7362,13 @@ begin
       case when v_g.withcheck is not null then ' with check (' || v_g.withcheck || ')' else '' end);
   end loop;
 
+  -- and its publication memberships (#780, see above), under the lock for the same reason: ALTER PUBLICATION
+  -- ... ADD or DROP TABLE takes SHARE UPDATE EXCLUSIVE on the table, which the first gate's ACCESS SHARE does
+  -- not exclude, so one committed while the lock was queued was in neither a capture read before it nor the
+  -- monolith's rows. From here none can commit.
+  select coalesce(array_agg(o_def order by o_pub), '{}') into v_pubdefs
+    from pgpm._publication_adds(p_parent, v_nsp, v_rel);
+
   -- Strip what MAINTENANCE put on the monolith before handing it back (#508). The trigger capture above
   -- reads the PARENT's pg_trigger, and DETACH strips only the clones of the parent's triggers; pgpm's own
   -- triggers sit on the CHILD, so without this the restored table carried them out of pgpm's reach:
@@ -7472,6 +7509,22 @@ begin
     execute format('drop policy %I on %s', v_g.polname, v_restored::text);
   end loop;
   foreach v_tdef in array v_poldefs loop
+    execute v_tdef;
+  end loop;
+
+  -- Put the parent's publication memberships on the restored table in place of the monolith's (#780;
+  -- captured under the lock, above). The two are compared as the statements that would create them: one the
+  -- restored table has and the parent did not, or has with another column list or row filter, is dropped;
+  -- one the parent had is then added, unless the restored table already has it exactly. FOR ALL TABLES and
+  -- FOR TABLES IN SCHEMA name no table, so they cover the restored table as they covered the parent.
+  for v_g in select o_pub, o_def from pgpm._publication_adds(v_restored, v_nsp, v_rel) loop
+    if v_g.o_def = any(v_pubdefs) then
+      v_pubdefs := array_remove(v_pubdefs, v_g.o_def);
+    else
+      execute format('alter publication %I drop table %s', v_g.o_pub, v_restored::text);
+    end if;
+  end loop;
+  foreach v_tdef in array v_pubdefs loop
     execute v_tdef;
   end loop;
 

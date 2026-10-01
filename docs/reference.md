@@ -92,7 +92,7 @@ column **comments**, **row triggers**, each in the enabled state it had (`DISABL
 and `ENABLE REPLICA` are kept, on the parent and on the clone every partition receives), and
 **publication membership**: the parent is added to every publication that names the table, with the same
 row filter and column list, so every partition is published through it (the monolith keeps its own
-membership as well, so an `untransmute` hands the table back still published). A sequence the table
+membership as well; `untransmute` hands back the managed table's, see below). A sequence the table
 **owns** through a column (a `serial`, or an explicit `OWNED BY`) is handed to the same column of the
 parent, so retention can drop the monolith like any other partition. All of it is
 captured before the rename and re-applied inside
@@ -403,7 +403,13 @@ its place: its table and column grants (or, with no grant ever made, the owner's
 row-security flags, and its policies. The same holds for its **owner** and its table and column
 **comments**: `ALTER TABLE ... OWNER TO` and `COMMENT ON` the managed table do not reach its partitions
 either, so the restored table takes the parent's owner (the role that owned the managed table keeps it)
-and the parent's comments, a comment removed since the conversion staying removed.
+and the parent's comments, a comment removed since the conversion staying removed. And for its
+**publication membership**: `ALTER PUBLICATION ... ADD`, `DROP` or `SET TABLE` naming the managed table
+changes the parent's membership, not the monolith's, so the restored table joins every publication the
+parent was in, with the parent's row filter and column list, and leaves every one it was not in. A
+membership that already matches is left alone, so a reverse with no membership changed since the
+conversion issues no `ALTER PUBLICATION` at all. A publication `FOR ALL TABLES` or `FOR TABLES IN SCHEMA`
+names no table and covers the restored table as it covered the parent.
 
 It also takes off the monolith whatever **maintenance** put there after the conversion, so the table handed
 back is the operator's again with none of pgpm's machinery on it. The retention **write block**
@@ -449,9 +455,9 @@ refusal never blocks anyone. And again under the **`ACCESS EXCLUSIVE` lock on th
 detach and drop need, taken explicitly just before them, so a row that commits into a forward partition
 while `untransmute` is waiting for that lock is refused rather than dropped with the parent. The wait is
 bounded by the caller's `lock_timeout`, and a refusal rolls the whole call back, leaving the table exactly
-as it was. The row triggers and their enabled states, and where the restored identity sequence resumes, are
-read under that same lock, so a trigger created or changed, or an id taken, while `untransmute` waits for it
-comes through to the restored table. `untransmute` must run in a `READ COMMITTED` transaction (the default): a stricter isolation
+as it was. The row triggers and their enabled states, the publication memberships, and where the restored
+identity sequence resumes, are read under that same lock, so a trigger created or changed, a publication
+joined or left, or an id taken, while `untransmute` waits for it comes through to the restored table. `untransmute` must run in a `READ COMMITTED` transaction (the default): a stricter isolation
 level cannot give the under-lock check a snapshot taken after the lock, so it refuses up front rather than
 proceed on a stale one.
 

@@ -821,6 +821,7 @@ run_perf() {
     "bench/schedule_without_pg_cron.sh pgpm_perf155"
     "bench/untransmute_acl_capture_under_lock.sh pgpm_perf156"
     "bench/retain_recall_moved_parent.sh pgpm_perf157"
+    "bench/untransmute_publication_membership.sh pgpm_perf159"
   )
   local selected=()
   local n=${#guards[@]} idx
