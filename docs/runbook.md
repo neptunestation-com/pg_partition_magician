@@ -487,8 +487,10 @@ maintenance actually runs.
 the swap. A standalone child has no dependency on the parent, so a `DROP TABLE <parent> CASCADE` does
 **not** remove an un-attached child -- it survives the cascade. If the parent is then recreated and
 re-transmuted, the new conversion would collide with that orphan by name. So `transmute` refuses when it
-finds a standalone table matching the parent's child-partition naming (`<rel>_p<digits>`), rather than
-silently adopting stale data. An in-flight child is also tracked in `pgpm.part` with `attached = false`.
+finds a standalone table matching the parent's child-partition naming (`<rel>_p<label>`, any label pgpm
+could give a fine child, such as `events_p2026_03`, `n_p0000000000000000100`, a 20-digit id label past
+10^19 or one with a `_<fraction>` tail), rather than silently adopting stale data. An in-flight child is
+also tracked in `pgpm.part` with `attached = false`.
 
 Two sibling refusals share this shape. `... already exists as a sequence matching this parent's partition
 naming ...` means a relation that is not a table holds a child-partition name; the message says what kind it

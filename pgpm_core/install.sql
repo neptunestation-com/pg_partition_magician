@@ -1258,6 +1258,38 @@ returns text language sql immutable as $$
                  p_native::numeric - floor(p_native::numeric) as frac) i
 $$;
 
+-- Is p_suffix (a relation's name with its "<rel>_p" prefix cut off) the label of one FINE child of a grid
+-- of this kind? transmute's orphan guard and restore_incoming_fks's in-flight gate both ask, and both
+-- call this, so the two cannot drift apart (#726). An id suffix is recognised by the round trip through
+-- _id_label itself, not by a pattern of its shape: both sites matched '^[0-9]{19}$', the label before
+-- #582, so an orphan named for a cell at or past 10^19 (20 or more digits), for a fractional cell
+-- (`_<frac>`) or for a short negative one (lpad puts the zeros before the sign) passed the guard, the
+-- conversion completed, obtain left that cell unbuilt with nothing logged, and every write into it was
+-- refused. Read back as the value it names (zeros, sign, whole, fraction) and relabelled, a suffix is a
+-- label exactly when it comes back unchanged, so whatever _id_label produces is recognised and a string
+-- it never produces (a trailing zero in the fraction, an extra leading zero) is not. The pattern below
+-- only keeps the cast to numeric safe; it decides nothing. A time label is digits in groups, the first
+-- of four (the year); the coarse and explicit-range forms (_to_) are neither, and are checked elsewhere.
+create or replace function pgpm._is_fine_child_label(p_kind text, p_suffix text)
+returns boolean language plpgsql immutable as $$
+declare v_whole text; v_frac text;
+begin
+  if p_kind <> 'id' then
+    return p_suffix ~ '^[0-9]{4}(_[0-9]+)*$';
+  end if;
+  if p_suffix !~ '^(0*-)?[0-9]+(_[0-9]+)?$' then
+    return false;
+  end if;
+  v_whole := split_part(p_suffix, '_', 1);
+  v_frac  := split_part(p_suffix, '_', 2);
+  if position('-' in v_whole) > 0 then
+    v_whole := '-' || split_part(v_whole, '-', 2);
+  end if;
+  return pgpm._id_label((v_whole::numeric
+                         + case when v_frac = '' then 0 else ('0.' || v_frac)::numeric end)::text) = p_suffix;
+end;
+$$;
+
 -- _part_name maps a partition's NATIVE [lo, hi) to its child table name. A one-step range (hi is the
 -- next grid value after lo, the common fine partition) keeps the historical name _p<lo>; a wider range
 -- (a coarse / monolith child, REDESIGN.md section 6) is named _p<lo>_to_<hi> so it can never collide
@@ -5265,8 +5297,9 @@ begin
   -- and re-transmuted, the next regrain reuses the orphan by name and INSERTs rows whose keys
   -- already live in it: a cryptic mid-regrain "duplicate key" deep inside regrain_step.
   -- Refuse up front -- any standalone (un-attached) table in this schema whose name matches this
-  -- parent's child-partition naming (<rel>_p<digits...>) is an orphan. starts_with handles the
-  -- (un-escaped) rel prefix; the regex only constrains the data-independent suffix.
+  -- parent's child-partition naming (<rel>_p<label>) is an orphan. starts_with handles the
+  -- (un-escaped) rel prefix; _is_fine_child_label decides whether the suffix is a fine child's label,
+  -- the same helper restore_incoming_fks's in-flight gate asks (#726).
   --
   -- Any relkind, not tables only (#509): a sequence, view or index holding a child's name occupies that
   -- name just the same, and the relkind filter this once had let it through to obtain, which skips any
@@ -5283,10 +5316,7 @@ begin
       from pg_class c
      where c.relnamespace = (select n.oid from pg_namespace n where n.nspname = v_nsp)
        and starts_with(c.relname, v_rel || '_p')
-       and case when p_control_kind = 'id'
-                then substr(c.relname, length(v_rel) + 3) ~ '^[0-9]{19}$'
-                else substr(c.relname, length(v_rel) + 3) ~ '^[0-9]{4}(_[0-9]+)*$'
-           end
+       and pgpm._is_fine_child_label(p_control_kind, substr(c.relname, length(v_rel) + 3))
        and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid)
      limit 1;
     if v_orphan is not null and v_orphan_kind = 'r' then
@@ -8742,8 +8772,9 @@ begin
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
 
   -- gate 1 (the drained-closed-tail gate) is gone with the DEFAULT (#288): there is no tail to drain.
-  -- gate 2: no in-flight (un-attached) child mid-regrain (same shape as transmute's orphan guard). A
-  -- regrain copy-child is EXCLUDED (its range is contained in an attached partition): regrain copies without
+  -- gate 2: no in-flight (un-attached) child mid-regrain, recognised by _is_fine_child_label, the helper
+  -- transmute's orphan guard asks too, so the two cannot drift (#726). A regrain copy-child is
+  -- EXCLUDED (its range is contained in an attached partition): regrain copies without
   -- deleting, so the referenced rows never leave the visible parent, and a copy-regrain never needs the FK
   -- suspended -- so it must not hold the FK off either (that would reopen the RI window the copy design
   -- closes). Only an un-attached child in no attached partition's range (an orphan) blocks the re-add.
@@ -8752,10 +8783,7 @@ begin
    where c.relnamespace = (select n.oid from pg_namespace n where n.nspname = v_nsp)
      and c.relkind = 'r'
      and starts_with(c.relname, v_rel || '_p')
-     and case when cfg.control_kind = 'id'
-              then substr(c.relname, length(v_rel) + 3) ~ '^[0-9]{19}$'
-              else substr(c.relname, length(v_rel) + 3) ~ '^[0-9]{4}(_[0-9]+)*$'
-         end
+     and pgpm._is_fine_child_label(cfg.control_kind, substr(c.relname, length(v_rel) + 3))
      and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid)
      and not exists (                                            -- a regrain copy is not an absent-row child
            select 1 from pgpm.part cp
