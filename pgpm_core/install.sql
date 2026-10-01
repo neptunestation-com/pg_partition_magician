@@ -5280,6 +5280,65 @@ begin
 end;
 $$;
 
+-- Objects that name a table by its OID, refused (#779). A view's query, a materialized view's, a rule's
+-- action, a SQL-standard function body (BEGIN ATOMIC) and a policy's expression are stored as parse
+-- trees that name each relation by oid, not by name. transmute's cutover renames the original table, and
+-- with it that oid, into the monolith partition, so every one of them followed it there: a view over the
+-- table read the monolith's rows alone and missed every row routed to a forward partition, with no error
+-- and nothing logged, and a materialized view refreshed to the same narrowed answer. A rule on the table
+-- itself stayed on the monolith and stopped firing for writes through the parent.
+--
+-- Refused rather than carried. Re-pointing them would mean replaying each definition against the parent
+-- inside the cutover's lock: in dependency order across chains of views, with a materialized view dropped,
+-- re-created and refreshed (a scan of the whole table under ACCESS EXCLUSIVE), and its indexes, grants and
+-- comments rebuilt, and a function or a policy on another table re-created by hand. Each of those is a
+-- shape that could be wrong without failing. A refusal names them all and changes nothing.
+--
+-- Asked by transmute in the preflight, before anything is committed, and again in the cutover under the
+-- table's ACCESS EXCLUSIVE, which every one of these statements has to wait for (each takes at least
+-- ACCESS SHARE on the table it parses), so one created in between is refused there and rolls the cutover
+-- back to the resumable phase-2 state. Asked by untransmute for the symmetric case: an object created over
+-- the PARENT after the conversion names the parent's oid, and untransmute drops the parent, which either
+-- fails raw on it ("other objects depend on it") or, for a rule on the parent, takes it along silently.
+--
+-- A policy on the table itself is not one of these: both directions carry the table's own policies by
+-- re-parsing their text against the table that takes the name. Nor is one on p_staging, the cutover's new
+-- parent, which holds those carried copies by the time the cutover asks.
+create or replace function pgpm._refuse_oid_bound_dependants(p_rel regclass, p_untransmute boolean,
+                                                             p_staging regclass default null)
+returns void language plpgsql stable as $$
+declare v_deps_q text;
+begin
+  select string_agg(o.what_q, ', ' order by o.what_q) into v_deps_q
+    from (select distinct
+                 case d.classid
+                   when 'pg_rewrite'::regclass then
+                     (select case when c.relkind = 'v' then 'view ' || c.oid::regclass::text
+                                  when c.relkind = 'm' then 'materialized view ' || c.oid::regclass::text
+                                  else 'rule ' || quote_ident(r.rulename) || ' on ' || c.oid::regclass::text end
+                        from pg_rewrite r join pg_class c on c.oid = r.ev_class where r.oid = d.objid)
+                   when 'pg_proc'::regclass then 'function ' || d.objid::regprocedure::text
+                   when 'pg_policy'::regclass then
+                     (select 'policy ' || quote_ident(p.polname) || ' on ' || p.polrelid::regclass::text
+                        from pg_policy p where p.oid = d.objid and p.polrelid <> p_rel
+                         and p.polrelid is distinct from p_staging)
+                 end as what_q
+            from pg_depend d
+           where d.refclassid = 'pg_class'::regclass and d.refobjid = p_rel
+             and d.classid in ('pg_rewrite'::regclass, 'pg_proc'::regclass, 'pg_policy'::regclass)) o
+   where o.what_q is not null;
+  if v_deps_q is null then
+    return;
+  end if;
+  if p_untransmute then
+    raise exception 'pg_partition_magician: cannot untransmute % -- the object(s) (%) name the partitioned table by its oid, and untransmute drops that table to hand the original back under its name, so the DROP would fail on them, or take a rule on the table along with it. Drop them, run untransmute, then re-create them against the restored table.',
+      p_rel, v_deps_q;
+  end if;
+  raise exception 'pg_partition_magician: cannot transmute % -- the object(s) (%) name it by its oid, and the conversion hands that oid to the monolith partition, so each would go on reading or writing the monolith alone and silently miss every row routed to a forward partition. Drop them, run transmute, then re-create them against the converted table, where they name the new parent and see every partition (pg_get_viewdef, pg_get_ruledef and pg_get_functiondef give their definitions). pgpm refuses rather than leaving them bound to one partition.',
+    p_rel, v_deps_q;
+end;
+$$;
+
 -- What transmute's preflight plans the key and the identity from (#706): the primary key and unique
 -- constraints (columns and backing index), the identity columns and their kinds, and whether the control
 -- column is NOT NULL. Compared by _transmute after the staging LIKE, whose ACCESS SHARE excludes every
@@ -5817,6 +5876,11 @@ begin
   -- table. Asked again in the cutover under its ACCESS EXCLUSIVE (#706), beside the trigger capture.
   perform pgpm._transmute_refuse_transition_triggers(p_parent);
 
+  -- Objects that name the table by its oid (#779): views, materialized views, rules, SQL-standard function
+  -- bodies, other tables' policies. The rename hands that oid to the monolith, so each would silently
+  -- narrow to it. Asked again in the cutover under its ACCESS EXCLUSIVE, which no CREATE VIEW can pass.
+  perform pgpm._refuse_oid_bound_dependants(p_parent, false);
+
   -- Publication membership (#566): the cutover adds the new parent to every publication that names this
   -- table (step 7c), and PostgreSQL refuses a row filter or a column list on a PARTITIONED table in a
   -- publication with publish_via_partition_root = false ("cannot use publication WHERE clause for
@@ -6353,6 +6417,10 @@ begin
   -- and the one trigger shape the parent cannot take, refused again now that none can be created (#706):
   -- one committed since the preflight would otherwise reach the replay in 7b and fail it with a raw error.
   perform pgpm._transmute_refuse_transition_triggers(p_parent);
+  -- and the objects that name the table by its oid (#779), refused again now that none can be created: one
+  -- committed since the preflight would otherwise follow the rename into the monolith. The new parent's
+  -- policies, carried above, are pgpm's own and exempt.
+  perform pgpm._refuse_oid_bound_dependants(p_parent, false, v_parent);
 
   -- 0b (under the lock, #630 and #656). What the preflight listed, listed again now that nothing can change
   -- it: the secondary indexes 9b carries, the outgoing keys 7a re-adds, and where 8b resumes each identity
@@ -7218,6 +7286,9 @@ begin
   if v_outside then
     raise exception '%', v_door;
   end if;
+  -- An object over the parent that names it by its oid (#779) would stop the DROP below, or ride it out of
+  -- existence. Refused here, unlocked, as the cheap answer; and again under the lock, as the final one.
+  perform pgpm._refuse_oid_bound_dependants(p_parent, true);
 
   -- capture the identity columns and their current max BEFORE dropping anything (transmute moved
   -- identity from the table to the parent; dropping the parent loses it, so we re-establish it on the
@@ -7269,6 +7340,7 @@ begin
   if v_outside then
     raise exception '%', v_door;
   end if;
+  perform pgpm._refuse_oid_bound_dependants(p_parent, true);   -- #779, final: no CREATE VIEW passes this lock
 
   -- Capture the parent's triggers before it is dropped (#277). transmute dropped the monolith's own
   -- originals in favour of the parent's, which clone down to every partition, and DETACH strips those

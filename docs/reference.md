@@ -135,7 +135,16 @@ table cannot be attached under (`VALIDATE CONSTRAINT` it first, which blocks no 
 it); a `CHECK ... NO INHERIT` constraint, which PostgreSQL does not allow on a partitioned table (drop it,
 or re-create it without `NO INHERIT`); and a generated control column, which PostgreSQL cannot partition
 by (partition on a plain column). The trigger refusal is asked again under the cutover's lock, so a
-trigger of that shape created while the conversion runs is refused the same way. **Outgoing** foreign keys (this table
+trigger of that shape created while the conversion runs is refused the same way. So is every object that
+names the table by its oid rather than its name: a **view** or **materialized view** over it, a **rule** whose
+action uses it (on the table itself or on another), a SQL-standard function body (`BEGIN ATOMIC`) that reads
+it, and another table's **policy** that queries it. The cutover renames the original table, and that oid with
+it, into the monolith partition, so each of them would follow it there and silently see the monolith's rows
+alone, missing every row written to a forward partition. The refusal names them all at once. Drop them,
+convert, then re-create them against the converted table (`pg_get_viewdef`, `pg_get_ruledef` and
+`pg_get_functiondef` give their definitions), where they name the new parent and see every partition. The
+table's own policies are not among them: they are carried. This one too is asked before anything is
+committed and again under the cutover's lock, which `CREATE VIEW` (and the rest) has to wait for. **Outgoing** foreign keys (this table
 referencing another) are carried onto the new parent automatically, so they keep enforcing across every
 partition; a `NOT VALID` one is refused rather than carried, because re-adding it at the parent could not
 then be metadata-only. That refusal, and the refusals of a `UNIQUE` index that cannot be carried (below)
@@ -460,6 +469,12 @@ identity sequence resumes, are read under that same lock, so a trigger created o
 joined or left, or an id taken, while `untransmute` waits for it comes through to the restored table. `untransmute` must run in a `READ COMMITTED` transaction (the default): a stricter isolation
 level cannot give the under-lock check a snapshot taken after the lock, so it refuses up front rather than
 proceed on a stale one.
+
+It refuses, the same two ways, while an object names the managed table by its oid: a view, materialized
+view, rule, `BEGIN ATOMIC` function or another table's policy created over the parent since the conversion.
+The reverse drops the parent, which would fail on all but a rule and take a rule on the parent with it
+silently. Drop them, run `untransmute`, then re-create them against the restored table. An object over the
+monolith partition itself needs nothing: it follows the original table back.
 
 ## Migrating from TimescaleDB (`from_hypertable`)
 

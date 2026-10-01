@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **`transmute` refuses a table that views and other objects name by its oid** (#779). A view's query, a
+  materialized view's, a rule's action, a `BEGIN ATOMIC` function body and a policy's expression name each
+  relation by oid, and the cutover renames the original table, oid and all, into the monolith partition, so a
+  view over the table silently read the monolith alone after the conversion and missed every row routed to a
+  forward partition. They are now refused, all named at once, before anything is committed and again under
+  the cutover's lock (the table's own policies stay carried), and `untransmute` refuses the same objects over
+  the parent rather than failing raw on its `DROP` or dropping a rule on the parent with it. Re-pointing them
+  inside the cutover was rejected: a materialized view would be re-created and refreshed under
+  `ACCESS EXCLUSIVE`, losing its indexes and grants. `tests/205` under
+  `bench/transmute_oid_bound_dependants.sh`, with one mutation per refusal site.
 - **`untransmute` hands back the managed table's publication membership, not the conversion's** (#780).
   After a `transmute` the parent is the table, so `ALTER PUBLICATION ... ADD`, `DROP` or `SET TABLE` naming
   it changes the parent's `pg_publication_rel` rows; `untransmute` dropped those with the parent and kept the

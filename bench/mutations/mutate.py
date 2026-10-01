@@ -4897,6 +4897,52 @@ select is(
 """, """      execute format('alter publication %I drop table %s', v_g.o_pub, v_restored::text);
 """, 1)],
     ),
+    # #779: one mutation per refusal site of _refuse_oid_bound_dependants, all judged by tests/205, so each
+    # site is shown to be caught on its own rather than only all of them together.
+    "oid_bound_dependants_unrefused": (
+        "bench/transmute_oid_bound_dependants.sh",
+        "Issue #779 put back, the pre-fix shape: nothing refuses an object that names the table by its oid. A "
+        "view over the table follows the cutover's rename into the monolith and silently reads its rows alone, "
+        "missing every row routed to a forward partition, and untransmute's DROP fails raw on a view over the "
+        "parent or takes a rule on it silently. One site, the helper made to find nothing. tests/205 parts A, "
+        "B and C catch it.",
+        [("  if v_deps_q is null then\n    return;\n  end if;\n  if p_untransmute then\n",
+          "  if v_deps_q is null or true then\n    return;\n  end if;\n  if p_untransmute then\n", 1)],
+    ),
+    "oid_bound_dependants_cutover_only": (
+        "bench/transmute_oid_bound_dependants.sh",
+        "Issue #779, the late refusal: the objects are refused only by the cutover, under its lock, after "
+        "phases 1 and 2 committed the write-rejecting bound and the claim, so every retry fails the same way "
+        "with the table fenced. One site, the preflight's call. tests/205 part A's pinned refusal catches it: "
+        "the call, wrapped by pgTAP, now reaches phase 1's COMMIT and dies there with 2D000 instead.",
+        [("  perform pgpm._refuse_oid_bound_dependants(p_parent, false);\n", "", 1)],
+    ),
+    "oid_bound_dependants_preflight_only": (
+        "bench/transmute_oid_bound_dependants.sh",
+        "Issue #779, asked once: the preflight refuses, but a view created between it and the cutover's "
+        "ACCESS EXCLUSIVE (phases 1 and 2 let go of the table) follows the rename into the monolith. One "
+        "site, the cutover's re-check. tests/205 part B, whose event trigger creates the view in that window, "
+        "catches it.",
+        [("  perform pgpm._refuse_oid_bound_dependants(p_parent, false, v_parent);\n", "", 1)],
+    ),
+    "oid_bound_dependants_no_staging_exemption": (
+        "bench/transmute_oid_bound_dependants.sh",
+        "Issue #779, overreach: the cutover's re-check counts the policies it has just carried onto the new "
+        "parent, so a table whose own policy queries the table itself is refused under the lock, after phases "
+        "1 and 2 committed the bound, though the preflight let it through. One site, the staging exemption. "
+        "tests/205 part A's conversion of dv205 (policy dv205_self) catches it.",
+        [("from pg_policy p where p.oid = d.objid and p.polrelid <> p_rel\n"
+          "                         and p.polrelid is distinct from p_staging)",
+          "from pg_policy p where p.oid = d.objid and p.polrelid <> p_rel)", 1)],
+    ),
+    "untransmute_oid_bound_dependants_unrefused": (
+        "bench/transmute_oid_bound_dependants.sh",
+        "Issue #779's symmetric case put back: untransmute asks nothing about objects over the parent, so its "
+        "DROP fails raw ('cannot drop table ... because other objects depend on it') on a view, and drops a "
+        "rule on the parent along with it without a word. Both sites, the unlocked ask and the one under the "
+        "lock. tests/205 part C catches it.",
+        [("  perform pgpm._refuse_oid_bound_dependants(p_parent, true);", "  null;", 2)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
