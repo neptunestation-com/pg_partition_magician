@@ -115,8 +115,9 @@ For workloads that update or delete during the copy, pass `p_track_changes => tr
 it needs one; keyless tables migrate append-only). Either way the catch-up backlog is drained **online before
 the cutover**, so the lock applies only a tiny residual.
 
-One keyless caveat: a translated `drop_chunks` retention stays dormant until you add a key and `regrain` the
-history (`retain` drops fine partitions, not the monolith).
+One keyless caveat: a translated `drop_chunks` retention reaches the migrated history all at once. `retain`
+drops the monolith whole, in one step, once its entire range is past the horizon, and without a key the
+history cannot be regrained into fine partitions that would age out one at a time.
 
 It is an optional add-on, loaded only where the `timescaledb` extension exists:
 

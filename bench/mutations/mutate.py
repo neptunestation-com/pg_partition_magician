@@ -3582,6 +3582,55 @@ $$;''',
           "(Watch the unit, too: `retain` is an **interval** for `time`/`uuidv7` and a **count of intervals** for\n"
           "`id` -- a misread makes the horizon far longer than intended.)\n", 1)],
     ),
+    "reference_archive_identity_forget_missing": (
+        "bench/doc_archive_identity_recovery.sh",
+        "Pre-#739 docs/reference.md: the archive step's identity check tells an operator facing a "
+        "fail_archive_identity wedge to clear the stale row with forget_missing, which clears only a parent "
+        "whose relation is gone, while fail_archive_identity is only ever logged for a live one: the advice "
+        "clears nothing and the wedge (at archive_batch 1, the table's whole archiving and retention) stays. "
+        "The exact pre-#739 text.",
+        [("relation back under that name, or delete the stale `pgpm.part` row (`delete from pgpm.part where\n"
+          "parent_table = ... and child_name = ...`), after which the archive step moves on to the next partition.\n"
+          "[`forget_missing`](#forget_missing) is not the tool here: it clears only a parent whose relation no longer\n"
+          "exists, and this check only ever runs for a live one. At `archive_batch`'s default of `1` a wedged\n"
+          "partition also holds up that parent's other partitions, which is deliberate: pgpm's catalog is\n"
+          "demonstrably wrong about which relation is which, and retention should not march on past that.",
+          "relation back under that name, or clear the stale row with\n"
+          "[`forget_missing`](#forget_missing). At `archive_batch`'s default of `1` a wedged partition also\n"
+          "holds up that parent's other partitions, which is deliberate: pgpm's catalog is demonstrably wrong\n"
+          "about which relation is which, and retention should not march on past that.", 1)],
+    ),
+    "reference_fks_suspended_dead_swap": (
+        "bench/doc_fks_suspended_meaning.sh",
+        "Pre-#740 docs/reference.md: status() reads a standing non-zero fks_suspended as a regrain swap that "
+        "died mid-flight, while a paused transmute with p_incoming_fks => 'preserve' leaves it standing by "
+        "design, with no swap anywhere, until restore_incoming_fks re-adds the key; the operator hunts a dead "
+        "swap instead of running the restore. The exact pre-#740 text.",
+        [("  re-added `NOT VALID` but blocked from full validation by pre-existing orphans. A standing non-zero\n"
+          "  `fks_suspended` is a `transmute` cutover's preserve drop that\n"
+          "  [`restore_incoming_fks`](#restore_incoming_fks) has not re-added yet: `maintain` re-adds it on the next\n"
+          "  tick, but a paused table (the default after `transmute`) is not maintained, so there it stands until you\n"
+          "  call `restore_incoming_fks` or [`resume`](#resume--pause) the table. A regrain swap drops and re-adds its\n"
+          "  keys inside one transaction, so no other session ever sees it counted here.\n",
+          "  re-added `NOT VALID` but blocked from full validation by pre-existing orphans. `fks_suspended` is a\n"
+          "  transient state inside a regrain swap now, so a standing non-zero value means a swap died mid-flight.\n", 1)],
+    ),
+    "reference_keyless_monolith_dormant": (
+        "bench/doc_monolith_retention.sh",
+        "Pre-#741 docs/reference.md: the from_hypertable notes call retention over an unregrained (keyless) "
+        "monolith dormant and say a keyless migration will not reclaim disk until it is regrained, while "
+        "retain() drops the monolith whole, in one step, once its range is past the horizon, so the operator "
+        "meets the cliff they were told could not happen. The exact pre-#741 text.",
+        [("- A carried-over `drop_chunks` retention policy is auto-translated into `pgpm`'s `retain`, and it covers the\n"
+          "  unregrained monolith too: the monolith is **not exempt**, and drops whole, in one step, once its entire range\n"
+          "  is past the horizon (see [`retain`](#retain)). What `regrain` changes is only the granularity, and `regrain`\n"
+          "  is unavailable on a keyless monolith, so a keyless migration reclaims its migrated history in that one cliff\n"
+          "  unless a key is added and the monolith is regrained first.\n",
+          "- A carried-over `drop_chunks` retention policy is auto-translated into `pgpm`'s `retain`, but retention over\n"
+          "  the unregrained **monolith is dormant** until you `regrain` it (`retain` only drops attached fine partitions),\n"
+          "  and `regrain` is unavailable on a keyless monolith. So a keyless migration that relied on `drop_chunks` will\n"
+          "  not reclaim disk until a key is added and the monolith is regrained.\n", 1)],
+    ),
     "classify_tap_needs_description": (
         "bench/classify_claims_tap.sh",
         "Pre-#600 classify_claims.py (a): only `not ok <n> - <description>` lines count as failures, so a "
@@ -4618,6 +4667,9 @@ MUTATION_SRC = {
     "keep_both_two_way_only": "scripts/review/keep_both.py",
     "onboarding_ts_versions": "ONBOARDING.md",
     "runbook_retain_count_of_intervals": "docs/runbook.md",
+    "reference_archive_identity_forget_missing": "docs/reference.md",
+    "reference_fks_suspended_dead_swap": "docs/reference.md",
+    "reference_keyless_monolith_dormant": "docs/reference.md",
     "classify_tap_needs_description": "scripts/review/classify_claims.py",
     "classify_sh_exit_code_only": "scripts/review/classify_claims.py",
     "classify_premise_bare_word": "scripts/review/classify_claims.py",

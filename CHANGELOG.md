@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+- **The reference's recovery for a `fail_archive_identity` wedge works on the table that has one** (#739).
+  It said to clear the stale row with `forget_missing`, which clears only a parent whose relation is gone,
+  while the archive step's identity check only ever runs for a live one, so following it cleared nothing and
+  the wedge (at `archive_batch` 1, the table's whole archiving and retention) stayed. It now says to delete
+  the `pgpm.part` row, as the runbook does. `bench/doc_archive_identity_recovery.sh` measures both repairs
+  on a real wedge and checks every sentence that offers `forget_missing` for one, with the mutation
+  `reference_archive_identity_forget_missing`.
+- **A standing `status().fks_suspended` is read as the cutover's dropped key, not a dead swap** (#740). The
+  reference said a standing non-zero value means a regrain swap died mid-flight, and the runbook that a move
+  was still in flight, while a paused `transmute` with `p_incoming_fks => 'preserve'` leaves it standing by
+  design until `restore_incoming_fks` re-adds the key (`maintain` does nothing on a paused table). Both now
+  say so. `bench/doc_fks_suspended_meaning.sh` measures it on a paused and an unpaused conversion and checks
+  every sentence that reads the value, with the mutation `reference_fks_suspended_dead_swap`.
+- **The docs no longer call retention over an unregrained keyless monolith dormant** (#741). `README.md`
+  and the reference's `from_hypertable` notes said `retain` drops only fine partitions until the monolith is
+  regrained, while `retain()` drops the monolith whole, in one step, once its range is past the horizon (as
+  the reference's own `retain` section and the guide say), so the migrated history goes in the one cliff the
+  operator was told could not happen. Both now say so. `bench/doc_monolith_retention.sh` measures the drop on
+  a keyless monolith and checks every sentence about monolith retention, with the mutation
+  `reference_keyless_monolith_dormant`.
 - **`uninstall.sql` removes `from_hypertable`'s change capture too** (#737). It swept only regrain's, so
   after a `from_hypertable_copy(..., p_track_changes => true)` that was never cut over, the
   `<rel>_pgpm_delta` table, its `<rel>_pgpm_delta_fn()` and the `<rel>_pgpm_delta_trg` trigger on the live

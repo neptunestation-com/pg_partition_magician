@@ -490,10 +490,11 @@ Scope and caveats:
 - The copy writes a **full second table**, so the migration transiently needs roughly the source's current
   size in extra disk until cutover drops the old hypertable. `from_hypertable_preflight` raises a `NOTICE`
   with the estimate; `from_hypertable_disk_estimate` returns it for sizing a volume ahead of time.
-- A carried-over `drop_chunks` retention policy is auto-translated into `pgpm`'s `retain`, but retention over
-  the unregrained **monolith is dormant** until you `regrain` it (`retain` only drops attached fine partitions),
-  and `regrain` is unavailable on a keyless monolith. So a keyless migration that relied on `drop_chunks` will
-  not reclaim disk until a key is added and the monolith is regrained.
+- A carried-over `drop_chunks` retention policy is auto-translated into `pgpm`'s `retain`, and it covers the
+  unregrained monolith too: the monolith is **not exempt**, and drops whole, in one step, once its entire range
+  is past the horizon (see [`retain`](#retain)). What `regrain` changes is only the granularity, and `regrain`
+  is unavailable on a keyless monolith, so a keyless migration reclaims its migrated history in that one cliff
+  unless a key is added and the monolith is regrained first.
 
 ### `from_hypertable`
 
@@ -1658,10 +1659,12 @@ substituted relation.
 Like `fail_retain_identity`, the refusal is permanent rather than retryable: no later tick makes the
 name mean the right relation again. It counts in `status().retain_drop_failures`, and shows up as
 `retain_backlog` flat while that count climbs. Recovery is an operator decision -- put the intended
-relation back under that name, or clear the stale row with
-[`forget_missing`](#forget_missing). At `archive_batch`'s default of `1` a wedged partition also
-holds up that parent's other partitions, which is deliberate: pgpm's catalog is demonstrably wrong
-about which relation is which, and retention should not march on past that. A null `child_oid` (a
+relation back under that name, or delete the stale `pgpm.part` row (`delete from pgpm.part where
+parent_table = ... and child_name = ...`), after which the archive step moves on to the next partition.
+[`forget_missing`](#forget_missing) is not the tool here: it clears only a parent whose relation no longer
+exists, and this check only ever runs for a live one. At `archive_batch`'s default of `1` a wedged
+partition also holds up that parent's other partitions, which is deliberate: pgpm's catalog is
+demonstrably wrong about which relation is which, and retention should not march on past that. A null `child_oid` (a
 partition recorded before the column existed, whose name no longer resolved at upgrade time) is
 unanchored and skips the check entirely.
 
@@ -2047,8 +2050,12 @@ One row per managed table. Beyond the static config it surfaces:
 - `newest_bound` -- the top of the forward grid. This is the write-ahead ceiling: an insert past it is
   refused, since there is no `DEFAULT` to catch it.
 - `fks_suspended` / `fks_unvalidated` -- preserve-managed incoming FKs currently dropped (RI off) versus
-  re-added `NOT VALID` but blocked from full validation by pre-existing orphans. `fks_suspended` is a
-  transient state inside a regrain swap now, so a standing non-zero value means a swap died mid-flight.
+  re-added `NOT VALID` but blocked from full validation by pre-existing orphans. A standing non-zero
+  `fks_suspended` is a `transmute` cutover's preserve drop that
+  [`restore_incoming_fks`](#restore_incoming_fks) has not re-added yet: `maintain` re-adds it on the next
+  tick, but a paused table (the default after `transmute`) is not maintained, so there it stands until you
+  call `restore_incoming_fks` or [`resume`](#resume--pause) the table. A regrain swap drops and re-adds its
+  keys inside one transaction, so no other session ever sees it counted here.
 - `retain_drop_failures` -- unexpected `DROP` failures since the last successful drop (not a
   child whose chunked archiving simply hasn't caught up yet -- see `retire`). Non-zero means a partition
   is genuinely stuck. Counts `fail_retain_drop`, `fail_retain_crossing` (a live row references an aged

@@ -60,8 +60,9 @@ when `archive_fn` is unset; the reconciliation below applies unchanged.
    ```
 
    `fks_unvalidated > 0` for a parent means an incoming FK was re-added but is blocked from validation. (If
-   instead `fks_suspended > 0`, a move is still in flight and the FK is currently fully dropped: let it
-   finish, or bound it, before reconciling -- see **Prevent**.)
+   instead `fks_suspended > 0`, the cutover's drop has not been restored yet and the FK is currently fully
+   dropped: on a paused table no tick will restore it, so call `pgpm.restore_incoming_fks` before
+   reconciling -- see **Prevent**.)
 
 2. List the blocked foreign keys and how many orphan rows each has:
 
