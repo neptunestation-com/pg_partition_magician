@@ -548,11 +548,12 @@ run_archive() {
   # Independent-reader verification (pyarrow + DuckDB, scripts/verify_parquet*.py): runs on the
   # host against the archive service's published port (5520), not inside the container like the
   # pgTAP suite above -- these are plain psycopg2 scripts, not psql. Reuses a venv across runs
-  # (only (re)installs requirements the first time) since pyarrow/DuckDB are not instant to
+  # (installs requirements the first time, and again whenever one of them will not import, so a venv
+  # built before a requirement was added picks it up) since pyarrow/DuckDB are not instant to
   # install; safe to delete .venv-verify to force a clean reinstall.
   echo "--- independent-reader verification (pyarrow + DuckDB) ---"
-  if [ ! -d .venv-verify ]; then
-    python3 -m venv .venv-verify
+  if ! .venv-verify/bin/python -c 'import psycopg2, pyarrow, duckdb, pytz' >/dev/null 2>&1; then
+    [ -d .venv-verify ] || python3 -m venv .venv-verify
     .venv-verify/bin/pip install -q -r scripts/requirements-verify.txt
   fi
   .venv-verify/bin/python scripts/verify_parquet.py "postgresql://postgres:postgres@localhost:5520/postgres" \
@@ -643,6 +644,15 @@ run_archive() {
   # the pairs bench/discriminate.sh completes with its three mutants.
   echo "--- archive.to_s3 loud edges guard (issue #636) ---"
   bash "$(dirname "$0")/bench/archive_to_s3_loud_edges.sh" pgpm_test-archive pgpm_perf122 || fail=1
+  # The non-UTF8 signer guard (#728), the pass-5 edges guard (#711) and the decimal NaN guard (#635)
+  # re-run tests/archive/db/29, 30 and 31 for the same reason; the last two add the readers' half
+  # (DuckDB and pyarrow on the files those tests leave behind).
+  echo "--- archive signer in a non-UTF8 database guard (issue #728) ---"
+  bash "$(dirname "$0")/bench/archive_signer_non_utf8.sh" pgpm_test-archive pgpm_perf131 || fail=1
+  echo "--- archive sync keys, tstz annotation and paged orphan sweep guard (issue #711) ---"
+  bash "$(dirname "$0")/bench/archive_edges_pass5.sh" pgpm_test-archive pgpm_perf132 || fail=1
+  echo "--- Parquet numeric NaN guard (issue #635) ---"
+  bash "$(dirname "$0")/bench/archive_parquet_decimal_nan.sh" pgpm_test-archive pgpm_perf133 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi

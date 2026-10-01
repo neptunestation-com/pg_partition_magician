@@ -149,9 +149,9 @@ call mk_archive_table('cc24', 60, 100000, null, true);
 select mk_archive_config('ca24'); select mk_archive_config('cb24'); select mk_archive_config('cc24');
 update archive.config set part_bytes = 1, fetch_rows = 1, prefix = current_database() || '/' || (parent_table::text) || '/'
  where parent_table in ('public.ca24'::regclass, 'public.cb24'::regclass, 'public.cc24'::regclass);
-select current_database() || '/ca24/' || (select child_name from pgpm.part where parent_table = 'public.ca24'::regclass order by lo::numeric limit 1) || '.ndjson' as ka,
-       current_database() || '/cb24/' || (select child_name from pgpm.part where parent_table = 'public.cb24'::regclass order by lo::numeric limit 1) || '.ndjson' as kb,
-       current_database() || '/cc24/' || (select child_name from pgpm.part where parent_table = 'public.cc24'::regclass order by lo::numeric limit 1) || '.ndjson' as kc
+select current_database() || '/ca24/public.' || (select child_name from pgpm.part where parent_table = 'public.ca24'::regclass order by lo::numeric limit 1) || '.ndjson' as ka,
+       current_database() || '/cb24/public.' || (select child_name from pgpm.part where parent_table = 'public.cb24'::regclass order by lo::numeric limit 1) || '.ndjson' as kb,
+       current_database() || '/cc24/public.' || (select child_name from pgpm.part where parent_table = 'public.cc24'::regclass order by lo::numeric limit 1) || '.ndjson' as kc
 \gset
 
 select ok(t24.abort_all('public.ca24', :'ka') >= 0 and t24.inflight('public.ca24', :'ka') = '{}'

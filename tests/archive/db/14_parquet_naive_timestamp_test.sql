@@ -130,16 +130,17 @@ select is((select row_to_json(n)->>'ts' from public.naive14 n where id = 1), '20
 -- (25 00), 4 name (18 <len> <utf8>), 6 converted_type=TIMESTAMP_MICROS (25 14), then for ts only 10
 -- logicalType (4c) = union LogicalType field 8 TIMESTAMP (8c) { 1 isAdjustedToUTC=false (12),
 -- 2 unit (1c) = union TimeUnit field 2 MICROS (2c) {} (00) } (00) } (00) } (00), and the element's own
--- stop (00).
+-- stop (00). Since #711 the tstz leaf carries the same LogicalType with isAdjustedToUTC=true (11): it is
+-- an instant, and with the ConvertedType alone DuckDB read it as a naive timestamp.
 select is(
   archive._pq_build_schema_leaf('ts', 2, 10, false, p_logical_type => archive._pq_logical_timestamp_micros(false)),
   '\x150425001802747325144c8c121c2c0000000000'::bytea,
   'the ts leaf carries LogicalType TIMESTAMP(isAdjustedToUTC=false, MICROS) after ConvertedType TIMESTAMP_MICROS');
 
 select is(
-  archive._pq_build_schema_leaf('tstz', 2, 10, false),
-  '\x1504250018047473747a251400'::bytea,
-  'and a tstz leaf is byte-for-byte what it was: ConvertedType TIMESTAMP_MICROS alone, an instant');
+  archive._pq_build_schema_leaf('tstz', 2, 10, false, p_logical_type => archive._pq_logical_timestamp_micros(true)),
+  '\x1504250018047473747a25144c8c111c2c0000000000'::bytea,
+  'and a tstz leaf carries LogicalType TIMESTAMP(isAdjustedToUTC=true, MICROS), an instant (#711)');
 
 select cmp_ok(
   (select position('\x150425001802747325144c8c121c2c0000000000'::bytea in bytes) from pq14 where label = 'whole_utc'),
@@ -152,9 +153,9 @@ select cmp_ok(
   'and so does archive._pq_to_parquet_range''s');
 
 select cmp_ok(
-  (select position('\x1504250018047473747a251400'::bytea in bytes) from pq14 where label = 'whole_utc'),
+  (select position('\x1504250018047473747a25144c8c111c2c0000000000'::bytea in bytes) from pq14 where label = 'whole_utc'),
   '>', 0,
-  'the tstz leaf is in the footer unchanged');
+  'the tstz leaf, annotated as an instant, is in the footer');
 
 -- The old ts leaf (ConvertedType alone, which readers take as isAdjustedToUTC=true) is gone. Its witness
 -- is the presence assertion above: the ts leaf IS in the footer, just not this one.

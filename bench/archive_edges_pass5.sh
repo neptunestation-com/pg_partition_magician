@@ -1,39 +1,39 @@
 #!/usr/bin/env bash
-# Run tests/archive/db/27_parquet_timestamp_range_test.sql against an ARBITRARY copy of
-# pgpm_archive/install.sql, so bench/discriminate.sh can point it at a mutant, and then read the files
-# that test leaves behind with two independent Parquet readers. The shape is
-# bench/archive_parquet_timestamp_infinity.sh's, for the finite half of the same boundary (issue #664).
+# Run tests/archive/db/30_archive_edges_pass5_test.sql against an ARBITRARY copy of
+# pgpm_archive/install.sql, so bench/discriminate.sh can point it at a mutant, and then read the two
+# Parquet files that test leaves behind with two independent readers.
 #
-# WHY A WRAPPER EXISTS AT ALL. Test 27 is a plain pgTAP file and the archive track already runs it, so
+# WHY A WRAPPER EXISTS AT ALL. Test 30 is a plain pgTAP file and the archive track already runs it, so
 # on correct code the first half of this script adds nothing. What it adds is the standing proof that
-# the file DISCRIMINATES. Its tick half ends in a negative ("no tick skipped the archive step") that an
-# execution which never reached the far-future row would satisfy as well; the file pins it with a
-# witness (the older partition holds a finite 294250 AD value, archive_batch is 1) and an identity
-# (which partitions were archived, with how many rows), and pointing the same file at a mutant every CI
-# run is what checks that those would fail with the defect back.
+# the file DISCRIMINATES, for the three edges of #711 it pins: the synchronous exports' keys (asserted
+# as exact keys holding each table's own rows, with "nothing at the bare key" witnessed absent first),
+# the timestamptz leaf's LogicalType (by its bytes in both encoders' footers), and the orphan sweep's
+# pagination (three uploads at one key, a store witnessed to truncate at one per page, none left).
 #
-# The second half is what the file cannot do from inside the database: pyarrow reads each file back
-# and must give INT64 max minus 1 for the far-future values, next to INT64 max for the infinity, and
-# DuckDB, the reader whose range the ceiling follows, must decode the far-future values as FINITE
-# timestamps later than the 2024 ones, and only the infinity as infinity. The venv is the one
-# run_archive builds for scripts/verify_parquet*.py; under `./test.sh discriminate` it may not exist
-# yet, so it is created here the same way. No reader is a FAIL, not a skip: a reader that did not run
-# verified nothing.
+# The second half is what the file cannot do from inside the database: the annotation exists so that
+# a reader shows a timestamptz as an instant, and DuckDB, which read the ConvertedType alone as a naive
+# TIMESTAMP, must now type the column TIMESTAMP WITH TIME ZONE and give back both instants; pyarrow must
+# give back the same two instants, UTC-adjusted. The venv is the one run_archive builds for
+# scripts/verify_parquet*.py; under `./test.sh discriminate` it may not exist yet, so it is created here
+# the same way. No reader is a FAIL, not a skip: a reader that did not run verified nothing.
 #
-# The mutation it is required to fail against (bench/mutations/mutate.py):
-#   parquet_timestamp_no_ceiling -- archive._pq_epoch_micros loses its clamp at the int64 microsecond
-#                                   ceiling, the pre-#664 cast exactly: a finite value past 294247 AD
-#                                   raises 'bigint out of range' and its partition is never archived
+# The mutations it is required to fail against (bench/mutations/mutate.py):
+#   to_s3_sync_key_bare_child    -- archive.to_s3 and archive.to_s3_parquet key <prefix><child><ext>,
+#                                   so two same-named parents in two schemas share one object
+#   parquet_tstz_no_logical_type -- a timestamptz leaf carries the ConvertedType alone, which DuckDB
+#                                   reads as a naive TIMESTAMP
+#   abort_sweep_one_page         -- archive._s3_abort_uploads_at reads the first page of the listing
+#                                   only, so an orphan past it stays in flight
 #
-# Usage: archive_parquet_timestamp_range.sh <container> <db> [archive install.sql]
+# Usage: archive_edges_pass5.sh <container> <db> [archive install.sql]
 # Needs the archive image (pgsql-http + pgtap + pg_prove) AND MinIO on the same compose network: the
-# file's tick half PUTs two Parquet objects. run_archive creates the bucket before any test runs;
-# run_discriminate does not, so it is created here too, idempotently and the same way (a SigV4 PUT from
-# the curl image; 200 is created, 409 is already there), after waiting for MinIO to report ready.
+# file exports to MinIO and starts multipart uploads there. run_archive creates the bucket before any
+# test runs; run_discriminate does not, so it is created here too, idempotently and the same way (a
+# SigV4 PUT from the curl image; 200 is created, 409 is already there), after waiting for MinIO.
 set -uo pipefail
 C="${1:?container}"; DB="${2:?db}"; ARCHIVE_INSTALL="${3:-/repo/pgpm_archive/install.sql}"
 # Overridable so a worktree's copy of this guard can be pointed at its own copy of the test file.
-TEST_FILE="${PGPM_TSRANGE_TEST_FILE:-/repo/tests/archive/db/27_parquet_timestamp_range_test.sql}"
+TEST_FILE="${PGPM_EDGES5_TEST_FILE:-/repo/tests/archive/db/30_archive_edges_pass5_test.sql}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/bench/results"       # gitignored
 NET="${PGPM_TEST_NET:-pgpm_test_net}"
@@ -90,8 +90,14 @@ if [ "$fail" = 0 ]; then
   # failure from a run that never reached the database, which discriminate.sh would otherwise read as
   # "the guard caught the defect".
   ran=$(echo "$out" | grep -cE '^(not )?ok [0-9]+ -')
-  if [ "$rc" = 0 ]; then printf 'PASS  %-58s %s\n' "timestamps past 294247 AD are archived, at the INT64 ceiling" "$ran ran"
-  else printf 'FAIL  %-58s %s\n' "timestamps past 294247 AD are archived, at the INT64 ceiling" "$ran ran"; fail=1; fi
+  if [ "$rc" = 0 ]; then printf 'PASS  %-58s %s\n' "sync keys, tstz annotation, every listing page (#711)" "$ran ran"
+  else printf 'FAIL  %-58s %s\n' "sync keys, tstz annotation, every listing page (#711)" "$ran ran"; fail=1; fi
+  # A failure is only evidence against the code when the setup it depends on held. Name any
+  # LIVENESS witness that failed, so a mutant run that fails for the fixture's sake reads as that.
+  if echo "$out" | grep -qE '^not ok [0-9]+ - .*LIVENESS'; then
+    printf 'FAIL  %-58s %s\n' "every LIVENESS witness held" "no (see above)"
+    fail=1
+  fi
   if [ "$ran" -eq 0 ]; then
     printf 'FAIL  %-58s %s\n' "the assertions were reached at all" "0 ran"
     echo "$out" | tail -20 | sed 's/^/      /'
@@ -99,7 +105,7 @@ if [ "$fail" = 0 ]; then
   fi
 fi
 
-# --- half 2: two independent readers, on the files the pgTAP half left in t27.enc ----------------
+# --- half 2: two independent readers, on the files the pgTAP half left in t30.pq ----------------
 PY="$ROOT/.venv-verify/bin/python"
 if [ ! -x "$PY" ]; then
   python3 -m venv "$ROOT/.venv-verify" >/dev/null 2>&1 \
@@ -110,13 +116,13 @@ if ! "$PY" -c 'import pyarrow.parquet, duckdb' >/dev/null 2>&1; then
   fail=1
 else
   for label in whole range; do
-    hex="$OUT/pq_tsrange_$label.hex"
-    q -d "$DB" -Atq -c "select encode(bytes, 'hex') from t27.enc where label = '$label'" > "$hex" 2>/dev/null
+    hex="$OUT/pq_tstz_$label.hex"
+    q -d "$DB" -Atq -c "select encode(bytes, 'hex') from t30.pq where label = '$label'" > "$hex" 2>/dev/null
     if [ ! -s "$hex" ]; then
-      printf 'FAIL  %-58s %s\n' "$label: the file was produced" "no bytes in t27.enc"
+      printf 'FAIL  %-58s %s\n' "$label: the file was produced" "no bytes in t30.pq"
       fail=1; continue
     fi
-    if ! "$PY" - "$hex" "$label" "$OUT/pq_tsrange_$label.parquet" <<'PYEOF'
+    if ! "$PY" - "$hex" "$label" "$OUT/pq_tstz_$label.parquet" <<'PYEOF'
 import sys
 
 import duckdb
@@ -135,31 +141,20 @@ def check(name, detail, cond):
     ok = ok and cond
 
 
-M = 2**63 - 1
+WANT = [1705343400000000, 1721068200000000]   # 2024-01-15 and 2024-07-15, 18:30 UTC
 try:
-    t = pq.read_table(path)
-    ts = t.column("ts").cast(pa.int64()).to_pylist()
-    tstz = t.column("tstz").cast(pa.int64()).to_pylist()
-    check("pyarrow: ts is INT64 max - 1, the wall clock, INT64 max - 2", str(ts), ts == [M - 1, 1705320000000000, M - 2])
-    check("pyarrow: tstz is the instant, INT64 max - 1, INT64 max", str(tstz), tstz == [1705343400000000, M - 1, M])
+    t = pq.read_table(path).sort_by("id")
+    typ = t.schema.field("tstz").type
+    got = t.column("tstz").cast(pa.int64()).to_pylist()
+    check("pyarrow: tstz is a UTC-adjusted instant", str(typ), pa.types.is_timestamp(typ) and typ.tz is not None)
+    check("pyarrow: the two instants", str(got), got == WANT)
 except Exception as e:  # a reader refusing the file is the defect, not an error in the guard
     check("pyarrow reads the file", f"refused: {e}", False)
 try:
-    # The decoded value, not a comparison with a timestamptz literal: that casts the leaf through ICU in
-    # the local zone, which overflows at the ceiling whatever this module wrote. ts by its text; tstz,
-    # which DuckDB types TIMESTAMP WITH TIME ZONE since its leaf says it is an instant (#711), by its
-    # microseconds since the epoch, because rendering a TIMESTAMPTZ as text goes through ICU too, and at
-    # year 294247 ICU's text is a millisecond off the value DuckDB holds. The zone is pinned all the same.
-    con = duckdb.connect()
-    con.execute("set TimeZone = 'UTC'")
-    got = con.sql(
-        f"select isfinite(ts), ts::varchar, isfinite(tstz), case when isfinite(tstz) then epoch_us(tstz) end "
-        f"from '{path}' order by id").fetchall()
-    ceil = "294247-01-10 04:00:54.775806"
-    want = [(True, ceil, True, 1705343400000000),
-            (True, "2024-01-15 12:00:00", True, M - 1),
-            (True, "294247-01-10 04:00:54.775805", False, None)]
-    check("DuckDB: far-future values decode as the finite ceiling", str(got), got == want)
+    typ = duckdb.sql(f"select typeof(tstz) from '{path}' limit 1").fetchone()[0]
+    check("DuckDB: tstz is TIMESTAMP WITH TIME ZONE", typ, typ == "TIMESTAMP WITH TIME ZONE")
+    got = [r[0] for r in duckdb.sql(f"select epoch_us(tstz) from '{path}' order by id").fetchall()]
+    check("DuckDB: the two instants", str(got), got == WANT)
 except Exception as e:
     check("DuckDB reads the file", f"refused: {e}", False)
 sys.exit(0 if ok else 1)

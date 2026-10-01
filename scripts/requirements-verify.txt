@@ -4,3 +4,6 @@
 psycopg2-binary
 pyarrow
 duckdb
+# DuckDB's Python client hands back a TIMESTAMP WITH TIME ZONE value as an aware datetime and needs pytz
+# to build one; a timestamptz leaf reads as that type since it carries LogicalType TIMESTAMP(isAdjustedToUTC=true).
+pytz

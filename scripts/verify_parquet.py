@@ -298,19 +298,25 @@ def test_timestamp_naive(conn):
         ok = False
     if "isAdjustedToUTC=true" not in str(leaves["tstz"].logical_type) or leaves["tstz"].converted_type != "TIMESTAMP_MICROS":
         FAILURES.append(f"timestamp naive: pyarrow reads the tstz leaf as {leaves['tstz'].logical_type} / {leaves['tstz'].converted_type}, "
-                        "expected the UTC-adjusted TIMESTAMP_MICROS it always had")
+                        "expected the UTC-adjusted TIMESTAMP_MICROS")
         ok = False
     if duck_types.get("ts") != "TIMESTAMP":
         FAILURES.append(f"timestamp naive: duckdb types ts as {duck_types.get('ts')}, expected TIMESTAMP")
         ok = False
-    # what the leaves physically CARRY: ts both annotations, tstz the legacy one alone
+    # DuckDB read the tstz leaf as a naive TIMESTAMP while it carried the ConvertedType alone (#711)
+    if duck_types.get("tstz") != "TIMESTAMP WITH TIME ZONE":
+        FAILURES.append(f"timestamp naive: duckdb types tstz as {duck_types.get('tstz')}, expected TIMESTAMP WITH TIME ZONE")
+        ok = False
+    # what the leaves physically CARRY: both annotations each, isAdjustedToUTC false for ts and true for tstz
     ts_conv, ts_logi = raw_leaves["ts"]
     if ts_conv != "TIMESTAMP_MICROS" or "isAdjustedToUTC=0" not in str(ts_logi) or "MICROS=MicroSeconds()" not in str(ts_logi):
         FAILURES.append(f"timestamp naive: ts leaf carries converted_type={ts_conv!r} logical_type={ts_logi!r}, "
                         "expected TIMESTAMP_MICROS beside TIMESTAMP(isAdjustedToUTC=false, MICROS)")
         ok = False
-    if raw_leaves["tstz"] != ("TIMESTAMP_MICROS", None):
-        FAILURES.append(f"timestamp naive: tstz leaf carries {raw_leaves['tstz']!r}, expected ('TIMESTAMP_MICROS', None), unchanged")
+    tstz_conv, tstz_logi = raw_leaves["tstz"]
+    if tstz_conv != "TIMESTAMP_MICROS" or "isAdjustedToUTC=1" not in str(tstz_logi) or "MICROS=MicroSeconds()" not in str(tstz_logi):
+        FAILURES.append(f"timestamp naive: tstz leaf carries converted_type={tstz_conv!r} logical_type={tstz_logi!r}, "
+                        "expected TIMESTAMP_MICROS beside TIMESTAMP(isAdjustedToUTC=true, MICROS) (#711)")
         ok = False
 
     arrow_rows, duck_rows = read_with_both_readers(raw)
@@ -326,7 +332,7 @@ def test_timestamp_naive(conn):
         if a_tstz.tzinfo is None or a_tstz.astimezone(utc) != exp_tstz:
             FAILURES.append(f"timestamp naive: row {i} pyarrow tstz={a_tstz!r} expected {exp_tstz!r}")
             ok = False
-        # DuckDB gives a naive UTC wall clock for a converted-type-only TIMESTAMP_MICROS (see test_timestamptz)
+        # an aware instant since #711; before it, DuckDB gave a naive UTC wall clock (see test_timestamptz)
         d_tstz_utc = d_tstz if d_tstz.tzinfo else d_tstz.replace(tzinfo=utc)
         if d_tstz_utc != exp_tstz:
             FAILURES.append(f"timestamp naive: row {i} duckdb tstz={d_tstz!r} expected {exp_tstz!r}")

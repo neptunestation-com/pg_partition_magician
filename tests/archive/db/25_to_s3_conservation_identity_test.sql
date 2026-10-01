@@ -40,7 +40,7 @@ select archive.configure('public.t25_u', 'archive-test-bucket', p_endpoint => 'h
 
 select c.relname as child from public.t25_u t join pg_class c on c.oid = t.tableoid where t.id = 1 \gset
 select lo, hi from pgpm.part where parent_table = 'public.t25_u'::regclass and child_name = :'child' \gset
-select 't25/' || :'child' || '.ndjson' as key \gset
+select 't25/public.' || :'child' || '.ndjson' as key \gset
 
 -- one signed S3 request against the test bucket, and the object's lines as jsonb
 create function t25.s3(p_method text, p_key text) returns http_response language sql as $$

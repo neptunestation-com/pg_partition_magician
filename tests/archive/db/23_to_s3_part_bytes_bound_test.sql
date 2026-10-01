@@ -103,7 +103,7 @@ select is(t23.sent() - :sent_before, 1::bigint,
   'LIVENESS: the same counter saw that export''s one request, so a 0 above was a refusal and not a dead counter');
 
 select is((select array_agg(method || ' ' || uri order by n) from t23.req),
-  array['PUT http://minio:9000/archive-test-bucket/pb23/' || :'child' || '.ndjson'],
+  array['PUT http://minio:9000/archive-test-bucket/pb23/public.' || :'child' || '.ndjson'],
   'LIVENESS: and that request is the single PUT of this child''s key');
 
 reset search_path;

@@ -75,11 +75,11 @@ def read_with_both_readers(raw):
 
 
 def _norm(v):
-    # DuckDB's Parquet reader returns a naive datetime for a TIMESTAMP_MICROS column (no
-    # timezone concept in the Parquet type itself); psycopg2 and pyarrow both give back a
-    # tz-aware one for what postgres sent as timestamptz. Same value, so treat a naive
-    # datetime as UTC before comparing rather than failing on a tzinfo difference (see
-    # verify_parquet.py's test_timestamptz, which hits the identical divergence).
+    # DuckDB's Parquet reader returned a naive datetime for a timestamptz leaf while it carried
+    # the legacy TIMESTAMP_MICROS alone (before #711 annotated it isAdjustedToUTC=true); psycopg2
+    # and pyarrow both give back a tz-aware one for what postgres sent as timestamptz. Same value,
+    # so a naive datetime is still read as UTC before comparing rather than failing on a tzinfo
+    # difference (see verify_parquet.py's test_timestamptz).
     if isinstance(v, datetime.datetime) and v.tzinfo is None:
         return v.replace(tzinfo=datetime.timezone.utc)
     return v
