@@ -29,15 +29,19 @@
 # RELEASING.md makes the action vocabulary part of the version contract because operators build alerts on
 # the exact strings, so a documented action nothing writes is an alert that can never fire (the reference
 # went on promising `from_hypertable_adopt_fk` after its only writer was deleted). The reference's
-# `pgpm.log` vocabulary table and every "logged `x`" sentence in the operator docs are held to the
-# single-quoted literals on non-comment lines of the three install.sql files. Actions are always written as
-# literals there (nothing composes one from a prefix), which is what makes a literal grep sound.
+# `pgpm.log` vocabulary table, every "logged `x`" sentence in the operator docs, AND every single-quoted
+# literal the operator docs compare `action` with in SQL (`action = 'x'`, `action in ('x', 'y')`, a list
+# that may span lines) are held to the single-quoted literals on non-comment lines of the three install.sql
+# files. The SQL is where an alert is actually written: the runbook's queries are what an operator copies
+# into one, and before they were read a phantom action in them passed this check. Actions are always
+# written as literals in install.sql (nothing composes one from a prefix), which is what makes a literal
+# grep sound.
 #
-# `--selftest` re-breaks a scratch copy of the docs four ways (the stale pin; the phantom action, once in
-# prose and once as a table row; and the vocabulary heading moved so the extractor sees nothing) and
-# requires checks 5 and 6 to FAIL against each, after first passing against the unbroken copy. A check
-# that stays green on its own re-break guards nothing. CI runs the self-test before the check, as it does
-# for check_quoted_splices.py.
+# `--selftest` re-breaks a scratch copy of the docs six ways (the stale pin; the phantom action in prose,
+# as a table row, in a runbook `action in (...)` list and in a runbook `action = '...'` comparison; and the
+# vocabulary heading moved so the extractor sees nothing) and requires checks 5 and 6 to FAIL against
+# each, after first passing against the unbroken copy. A check that stays green on its own re-break guards
+# nothing. CI runs the self-test before the check, as it does for check_quoted_splices.py.
 #
 # CHANGELOG.md is excluded from ALL of these: its entries are historical by design and must keep naming the
 # machinery, versions and actions they removed.
@@ -114,7 +118,7 @@ check_version_pins() {  # <root>
 
 # CHECK 6. Takes the tree root so --selftest can point it at a re-broken copy.
 check_log_actions() {  # <root>
-  local root="$1" f a n=0 n_table bad=0 named stripped ref
+  local root="$1" f a n=0 n_table n_sql bad=0 named stripped sqlnamed ref
   ref="$root/docs/reference.md"
   echo "== check 6: every log action the operator docs name must be written by an install.sql =="
   for f in "${INSTALLS[@]}"; do
@@ -123,7 +127,7 @@ check_log_actions() {  # <root>
       return 1
     fi
   done
-  named=$(mktemp); stripped=$(mktemp)
+  named=$(mktemp); stripped=$(mktemp); sqlnamed=$(mktemp)
   # The literals pgpm can write: every non-comment line of the three install files, gathered once. Built to
   # a file rather than piped per action because `grep -q` closing a pipe early reads as a failure under
   # pipefail, which would make a written action look unwritten.
@@ -137,7 +141,7 @@ check_log_actions() {  # <root>
   if [ "$n_table" = 0 ]; then
     # The liveness witness: with the heading moved this check would otherwise compare nothing and pass.
     printf 'FAIL  found no action vocabulary table under "### `pgpm.log`" in docs/reference.md; the heading moved and this check is looking at nothing\n'
-    rm -f "$named" "$stripped"; return 1
+    rm -f "$named" "$stripped" "$sqlnamed"; return 1
   fi
   # (b) Prose in the operator docs: "Logged `x` and `y`", "logged `x`", "logs `x` / `y` / `z`". Only the
   # backticked names in that chain, so a trailing "`method`" or a `skip_<mechanism>` placeholder is not read.
@@ -146,20 +150,49 @@ check_log_actions() {  # <root>
     grep -oE '[Ll]og(ged|s) `[a-z][a-z0-9_]*`(( and | / |, | or )`[a-z][a-z0-9_]*`)*' "$root/$f" \
       | grep -oE '`[a-z][a-z0-9_]*`' | tr -d '`' >> "$named"
   done
+  # (c) The SQL the operator docs tell an operator to type: every single-quoted literal compared with
+  # `action` by =, <> or !=, or listed in an `action in (...)` or `action not in (...)` that may span
+  # lines, in a fenced block or in inline code alike. These are the strings an alert is built on, so they
+  # are held to the same standard as the table and the prose. `action like 'skip_%'` is a pattern, not a
+  # name, and is deliberately not read.
+  if ! python3 - "$root" "${OPERATOR[@]}" > "$sqlnamed" <<'PY'
+import os, re, sys
+root, docs = sys.argv[1], sys.argv[2:]
+CMP = re.compile(r"\baction\s*(?:(?:=|<>|!=)\s*'([^']*)'|(?:not\s+)?in\s*\(([^)]*)\))", re.I)
+for rel in docs:
+    path = os.path.join(root, rel)
+    if not os.path.isfile(path):
+        continue
+    for m in CMP.finditer(open(path).read()):
+        for lit in ([m.group(1)] if m.group(1) is not None else re.findall(r"'([^']*)'", m.group(2))):
+            print(lit)
+PY
+  then
+    printf 'FAIL  could not read the action literals in the operator docs SQL (python3 failed)\n'
+    rm -f "$named" "$stripped" "$sqlnamed"; return 1
+  fi
+  n_sql=$(grep -c . "$sqlnamed")
+  if [ "$n_sql" = 0 ]; then
+    # The same witness as the table's: the runbook's alert queries compare `action` with literals, so
+    # reading none means the extractor stopped matching them, not that the docs are clean.
+    printf 'FAIL  found no action literal (action = ..., action in (...)) in the operator docs SQL; the extractor is looking at nothing\n'
+    rm -f "$named" "$stripped" "$sqlnamed"; return 1
+  fi
+  cat "$sqlnamed" >> "$named"
   while IFS= read -r a; do
     [ -n "$a" ] || continue
     n=$((n + 1))
     if ! grep -qF -- "'$a'" "$stripped"; then
       printf "FAIL  the operator docs name pgpm.log.action '%s', but no install.sql writes it, so an alert on it can never fire\n" "$a"
       for f in "${OPERATOR[@]}"; do
-        [ -f "$root/$f" ] && grep -nF -- "\`$a\`" "$root/$f" | sed "s|^|        $f:|"
+        [ -f "$root/$f" ] && grep -nF -e "\`$a\`" -e "'$a'" -- "$root/$f" | sed "s|^|        $f:|"
       done
       bad=1
     fi
   done < <(sort -u "$named")
-  rm -f "$named" "$stripped"
+  rm -f "$named" "$stripped" "$sqlnamed"
   [ "$bad" = 0 ] || return 1
-  echo "PASS  all $n log actions the operator docs name ($n_table in the vocabulary table) are written by an install.sql"
+  echo "PASS  all $n log actions the operator docs name ($n_table in the vocabulary table, $n_sql literal(s) in their SQL) are written by an install.sql"
 }
 
 # --selftest helpers. A re-break is applied to a scratch copy, never to the tree, and refuses to apply when
@@ -246,6 +279,20 @@ selftest() {
   else rc=1; fi
   cp docs/reference.md "$tmp/docs/reference.md"
 
+  # Re-break 5, the defect as shipped: a phantom action in the runbook's step-2 alert query, on the
+  # continuation line of a multi-line `action in (...)` list, the SQL an operator copies into an alert.
+  if rebreak "$tmp/docs/runbook.md" "'retain_detach', 'retain_crossing')" \
+             "'retain_detach', 'retain_crossing', 'fail_retain_phantom')" 1; then
+    expect_fail "check 6 against the phantom action in an action in (...) query" "fail_retain_phantom" check_log_actions "$tmp" || rc=1
+  else rc=1; fi
+  cp docs/runbook.md "$tmp/docs/runbook.md"
+
+  # Re-break 6: the same in the other SQL form, an `action = '...'` comparison.
+  if rebreak "$tmp/docs/runbook.md" "where action = 'skip_obtain'" "where action = 'skip_obtain_phantom'" 1; then
+    expect_fail "check 6 against the phantom action in an action = '...' query" "skip_obtain_phantom" check_log_actions "$tmp" || rc=1
+  else rc=1; fi
+  cp docs/runbook.md "$tmp/docs/runbook.md"
+
   # Re-break 4: the vocabulary heading moved. The extractor then finds nothing, and "nothing is missing"
   # must read as a failure of the check, not a pass of the docs.
   if rebreak "$tmp/docs/reference.md" '### `pgpm.log`' '### `pgpm.logs`' 1; then
@@ -253,7 +300,7 @@ selftest() {
   else rc=1; fi
 
   rm -rf "$tmp"
-  if [ "$rc" = 0 ]; then echo "selftest: PASS (checks 5 and 6 fail against each of their four re-breaks)"
+  if [ "$rc" = 0 ]; then echo "selftest: PASS (checks 5 and 6 fail against each of their six re-breaks)"
   else echo "selftest: FAIL"; fi
   return "$rc"
 }

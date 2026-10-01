@@ -56,10 +56,12 @@ select is(
   'KSUID-scale round trip: encode then decode a 160-bit-wide value returns the exact same instant'
 );
 
--- an alphabet with fewer characters than the declared radix is refused, not silently misdecoded
+-- an alphabet with fewer characters than the declared radix is refused, not silently misdecoded. The
+-- digit is INSIDE the alphabet, so nothing but the length check can refuse it (a digit outside it raises
+-- the invalid-digit 22P02 with or without that check), and the SQLSTATE and message are both pinned.
 select throws_ok(
-  $$ select pgpm._radix_decode('5', 10, '01234') $$,
-  NULL, NULL,
+  $$ select pgpm._radix_decode('3', 10, '01234') $$,
+  'P0001', 'pg_partition_magician: alphabet 01234 has length 5, which does not match radix 10',
   'radix_decode refuses when the alphabet length does not match the declared radix'
 );
 

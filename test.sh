@@ -228,6 +228,7 @@ SQL
 reset_demo() {  # <profile> <service> -- drop fixture tables so the next channel is clean
   psql_run "$1" "$2" -c "
     drop table if exists public.messages, public.events_id, public.events_uuid cascade;
+    drop table if exists public.events_id_seeded, public.events_uuid_seeded;
     drop function if exists public.generate_messages(int, int);" >/dev/null
 }
 
@@ -814,6 +815,8 @@ run_perf() {
     "bench/reverse_legibility_edges.sh pgpm_perf130"
     "bench/check_newest_skips_nulls.sh pgpm_perf152"
     "bench/time_literal_era.sh pgpm_perf151"
+    "bench/doc_log_actions.sh pgpm_perf140"
+    "bench/tests_fail_on_defect.sh pgpm_perf141"
   )
   local selected=()
   local n=${#guards[@]} idx

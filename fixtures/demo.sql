@@ -61,6 +61,12 @@ create table public.events_id (
 insert into public.events_id (payload)
   select 'evt ' || g from generate_series(1, coalesce(current_setting('poc.events_count', true)::int, 45000)) g;
 analyze public.events_id;
+-- The seeded rows, captured BEFORE the migration, so tests/11 can hold the converted table to them by
+-- identity. A snapshot taken after this file runs is a snapshot of the migration's output, and comparing
+-- the table to that compares it to itself. Dropped first because test.sh's reset_demo and the review
+-- harness drop only the three demo tables between loads.
+drop table if exists public.events_id_seeded;
+create table public.events_id_seeded as select id, payload from public.events_id;
 call pgpm.transmute('public.events_id', 'id', 10000, p_obtain => 2, p_regrain_batch => 5000);
 select pgpm.obtain('public.events_id');
 
@@ -85,5 +91,8 @@ from (
   from generate_series(1, coalesce(current_setting('poc.events_count', true)::int, 45000)) g
 ) s;
 analyze public.events_uuid;
+-- The seeded rows, captured before the migration, for tests/12 (see events_id_seeded above).
+drop table if exists public.events_uuid_seeded;
+create table public.events_uuid_seeded as select id, payload from public.events_uuid;
 call pgpm.transmute('public.events_uuid', 'id', interval '1 month', p_obtain => 2, p_regrain_batch => 5000);
 select pgpm.obtain('public.events_uuid');

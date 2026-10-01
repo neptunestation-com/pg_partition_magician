@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+- **The living-docs check reads the log actions in the operator docs' SQL** (#742). Check 6 of
+  `scripts/check_living_docs.sh` held only the reference's vocabulary table and "logged `x`" prose to the
+  actions an `install.sql` writes, so a phantom action in a runbook alert query (`and action in (...)`, the
+  text an operator copies into an alert) passed it. It now also reads every literal the operator docs
+  compare `action` with (`=`, `<>`, `!=`, `in (...)` over any number of lines), fails when it reads none,
+  and its `--selftest` re-breaks both SQL forms. `bench/doc_log_actions.sh` runs the check over a copy of
+  the tree, with the mutation `runbook_phantom_alert_action`.
+- **`tests/18` and `tests/90` pin the refusals they exist for** (#743). `tests/18` pinned the orphaned-child
+  refusal by SQLSTATE alone, and in its fixture the monolith's name is the orphan's, so the monolith-name
+  guard's own P0001 satisfied it with the orphan guard deleted; it now pins the message. `tests/90` asserted
+  `_radix_decode`'s alphabet-length refusal with `throws_ok(sql, NULL, NULL)` on a digit outside the
+  alphabet, which raises the invalid-digit error anyway; it now decodes a digit inside the alphabet and pins
+  the SQLSTATE and message. `bench/tests_fail_on_defect.sh` runs each file against its defect put back, with
+  the mutations `orphan_refusal_sqlstate_only` and `radix_length_refusal_unpinned`.
+- **`tests/11` and `tests/12` hold the migrated rows to the seeded ones, by identity** (#744). Each took its
+  "before" count after `fixtures/demo.sql` had already run the migration and compared the table's count
+  with it, so the check passed with seeded rows lost. `fixtures/demo.sql` now snapshots the seeded rows
+  before it transmutes (`public.events_id_seeded`, `public.events_uuid_seeded`), and each file compares the
+  count and the bag of `(id, payload)` with that snapshot. `bench/tests_fail_on_defect.sh` replaces two
+  seeded rows with strangers under the same ids, which a count cannot see, with the mutations
+  `id_conservation_after_migration` and `uuid_conservation_after_migration`.
 - **The reference's recovery for a `fail_archive_identity` wedge works on the table that has one** (#739).
   It said to clear the stale row with `forget_missing`, which clears only a parent whose relation is gone,
   while the archive step's identity check only ever runs for a live one, so following it cleared nothing and
