@@ -9,6 +9,7 @@ the two model roles.
 |---|---|---|
 | `build_review_tree.sh <sha> <dir>` | 4 | the pinned commit as ONE history-less commit in a fresh repo with no remote; `bench/mutations/` removed |
 | `plant_seeds.py --tree --pristine --plan --sealed` | 4 | applies catalogue mutations and novel patches from a plan, writes the sealed record (with each seed's `side_effects`), keeps the tree at one commit |
+| `plant_seeds.py --suite --sealed --pristine --seeds-dir` | 4 | plants each sealed seed alone and runs its module's pgTAP suite against it in the harness; seals the files that caught it as `suite_caught` (empty: only reading finds it), so the record can split recall into suite-caught and read-caught |
 | `classify_claims.py --claims --review-tree --pristine-tree --sealed --out` | 6 | runs every reproduction (the verifier's `repro.verified.*` when present) against both trees in a fresh database each; classifies seed hit, candidate, not reproduced, inverted, invalid reproduction, hypothesis |
 | `pass_metrics.py --sealed --classified --verdicts ... --out` | 8, 10 | recall and precision before the count; writes the pass record under `docs/reviews/`, with the seed interactions to check |
 | `file_issues.py --groups --claims --verdicts --pinned --pass --out [--post]` | 10 | one issue body per root-cause group with its reproductions inline; `--post` files them, Tier 1 first, and writes `filed.json` |
@@ -101,6 +102,25 @@ check" in its notes, lists every candidate whose pristine run failed only its li
 the side effects of every seed: those are the claims that may have reached their defect through
 another seed, and whose issue must carry the verifier's rebuilt reproduction.
 
+## Seed suite check
+
+`plant_seeds.py --suite --sealed $WORK/sealed.json --pristine . --seeds-dir $WORK/seeds` plants each seed
+alone in a copy of the pristine tree's suite directories and runs that tree's pgTAP files against it, each
+in a fresh database the way `test.sh` runs them (a template with the module installed and the fixtures
+loaded, cloned per file; the two files that need the cron database `postgres` are installed into it and
+uninstalled after, or skipped and sealed as `suite_skipped` when pgpm is already there). The suite is
+chosen by the seed's file: `pgpm_archive/` runs `tests/archive/db/` in the archive harness (its MinIO
+bucket up), `pgpm_hypertable/` runs `tests/timescale/db/` in the timescale harness, anything else runs
+`tests/` in the core harness. The verdict per file is `pg_prove`'s where the image has it (core and
+archive, as `test.sh` judges them), else `test.sh`'s own reading for the timescale track. Before any seed,
+the UNSEEDED tree's suite runs once per track as a control, sealed as `suite_baseline`: a file that fails
+there (its first smoke run met a provoked statement timeout and an expected uninstall refusal, read as
+`ERROR` lines) is noise, not a catch, and is taken out of every seed's result and reported as
+`suite_noise`. Each seed is sealed with `suite_track`, `suite_ran` and `suite_caught`, the list of files
+that failed and the baseline did not; `--only S1,S4` re-measures replacements against the sealed baseline,
+`--rebaseline` runs the control again. `pass_metrics.py` reports the split only when every seed carries
+`suite_caught`.
+
 ## Filing issues
 
 `file_issues.py` renders one issue per root-cause group from `groups.json`, a list of
@@ -124,7 +144,10 @@ after each, and refuses to run when `filed.json` already exists.
 
 ## Metric definitions
 
-- recall: seeds attributed to at least one claim, over `K`.
+- recall: seeds attributed to at least one claim, over `K`. When `plant_seeds.py --suite` measured every
+  seed, also split into suite-caught (the seeded tree's own pgTAP suite fails, so running the tests finds
+  it) and read-caught (it does not), each as hits over count; the read-caught half is the recall the
+  stopping criteria read from pass 5 on.
 - precision: findings plus seed hits, over claims that had a reproduction. A correctly reported seed
   is a true report; a hypothesis is not a claim.
 - cost: budget units over findings, and over Tier 1 findings.

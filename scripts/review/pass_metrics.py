@@ -13,7 +13,11 @@ Inputs:
   --budget-units, --budget  a number (agent-hours or tokens) for cost per finding, and its text form
 
 Definitions used here:
-  recall     = seeds attributed to at least one claim / K
+  recall     = seeds attributed to at least one claim / K; when plant_seeds.py --suite measured every seed,
+               also split into suite-caught (the pgTAP suite on the seeded tree fails: a finder that ran the
+               tests found it) and read-caught (it does not: only reading finds it), each hits / count. Pass 4's
+               9/9 was all suite-caught and measured that the suite was run; the read-caught half is the
+               recall the stopping criteria read from pass 5 on.
   precision  = (findings + seed hits) / claims that had a reproduction. A correctly reported seed is a
                true report, so it counts for the finder; a hypothesis (no reproduction) is not a claim.
   cost       = budget-units / findings, and / Tier 1 findings
@@ -46,6 +50,14 @@ def compute(sealed, classified, verdicts, budget_units=None):
     hit_ids = {c.get("seed") for c in seed_hits if c.get("seed")}
     K = len(seeds)
     recall = (len([s for s in seeds if s["id"] in hit_ids]) / K) if K else None
+    measured = [s for s in seeds if "suite_caught" in s]
+    split = None
+    if K and len(measured) == K:
+        suite_ids = {s["id"] for s in seeds if s["suite_caught"]}
+        read_ids = {s["id"] for s in seeds} - suite_ids
+        split = {"suite_K": len(suite_ids), "suite_hit": len(suite_ids & hit_ids),
+                 "read_K": len(read_ids), "read_hit": len(read_ids & hit_ids)}
+        split["read_recall"] = (split["read_hit"] / split["read_K"]) if split["read_K"] else None
 
     findings, fell, known = [], [], []
     for c in candidates:
@@ -78,7 +90,9 @@ def compute(sealed, classified, verdicts, budget_units=None):
         if c.get("seed"):
             hit_by.setdefault(c["seed"], []).append(c["id"])
     seed_rows = [{"id": s["id"], "lens": s["lens"], "tier": s["tier"], "what": s.get("mutation") or s.get("patch"),
-                  "hit_by": hit_by.get(s["id"], []), "side_effects": s.get("side_effects")} for s in seeds]
+                  "hit_by": hit_by.get(s["id"], []), "side_effects": s.get("side_effects"),
+                  "suite": s.get("suite_caught") if "suite_caught" in s else None,
+                  "suite_skipped": s.get("suite_skipped")} for s in seeds]
     interaction_candidates = [{"id": c["id"], "finder": c["finder"], "tier": c.get("tier"),
                                "scenario": c.get("scenario", "")}
                               for c in candidates if (c.get("pristine") or {}).get("liveness_failed")]
@@ -101,6 +115,7 @@ def compute(sealed, classified, verdicts, budget_units=None):
         "known_rows": [{"id": f["id"], "issue": f["verdict"].get("issue")} for f in known],
         "hypothesis_rows": [{"id": h["id"], "finder": h["finder"], "scenario": h.get("scenario", "")} for h in hypotheses],
         "seed_rows": seed_rows, "interaction_candidates": interaction_candidates,
+        "suite_split": split, "suite_unmeasured": K - len(measured),
     }
 
 
@@ -111,6 +126,10 @@ def stopping_status(m):
         ("seed recall >= 0.8", m["recall"] is not None and m["recall"] >= 0.8),
         ("precision >= 0.7", m["precision"] is not None and m["precision"] >= 0.7),
     ]
+    if m.get("suite_split"):
+        rr = m["suite_split"]["read_recall"]
+        rows.insert(2, ("read-caught seed recall >= 0.8 (the seeds the suite does not catch; none planted reads as NOT met)",
+                        rr is not None and rr >= 0.8))
     return rows
 
 
@@ -124,13 +143,21 @@ def fmt(x, nd=2):
     return "n/a" if x is None else (f"{x:.{nd}f}" if isinstance(x, float) else str(x))
 
 
+def split_text(m):
+    """The recall split for the record's summary line, or nothing when --suite did not measure every seed."""
+    s = m.get("suite_split")
+    if not s:
+        return ""
+    return f" (suite-caught {s['suite_hit']}/{s['suite_K']}, read-caught {s['read_hit']}/{s['read_K']})"
+
+
 def record(m, a):
     t = m["by_tier"]
     lines = [
         f"# Review pass {a.pass_n}: {a.date}", "",
         f"pinned: `{a.pinned}` ({a.release}) | budget: {a.budget}",
         f"lenses: {a.lenses} | previous pass lenses: {a.previous_lenses}",
-        f"seeds K={m['K']}, recall {fmt(m['recall'])}; claims {m['claims']}; findings {m['findings']}; precision {fmt(m['precision'])}",
+        f"seeds K={m['K']}, recall {fmt(m['recall'])}{split_text(m)}; claims {m['claims']}; findings {m['findings']}; precision {fmt(m['precision'])}",
         f"findings by tier: T1 {t[1]} T2 {t[2]} T3 {t[3]} T4 {t[4]} T5 {t[5]}",
         f"cost per finding: {fmt(m['cost_per_finding'], 1)}; per Tier 1 finding: {fmt(m['cost_per_t1'], 1)}",
         f"root causes: {len(m['root_causes'])} distinct verifier root-cause statements behind the findings"
@@ -151,7 +178,12 @@ def record(m, a):
     for r in m["seed_rows"]:
         state = f"hit by {', '.join(r['hit_by'])}" if r["hit_by"] else "missed"
         effects = f"; side effects: {md_cell(r['side_effects'])}" if r["side_effects"] else ""
-        lines.append(f"- {r['id']} {md_cell(r['what'])} ({r['lens']}, T{r['tier']}): {state}{effects}")
+        suite = ""
+        if r.get("suite") is not None:
+            suite = ("; suite: caught by " + ", ".join(md_cell(f) for f in r["suite"])) if r["suite"] else "; suite: not caught (read-caught seed)"
+            if r.get("suite_skipped"):
+                suite += " (not run: " + ", ".join(md_cell(f) for f in r["suite_skipped"]) + ")"
+        lines.append(f"- {r['id']} {md_cell(r['what'])} ({r['lens']}, T{r['tier']}): {state}{effects}{suite}")
     if not m["seed_rows"]:
         lines.append("none")
     lines += ["", "## Null results (by lens)", "", "(from the finders' null-results files)", "",
@@ -218,6 +250,50 @@ def selftest_seed_interactions():
     assert f"- S1: {effect}" in sec and "- S3: disables the tick" in sec and "- S2" not in sec, sec
 
 
+def selftest_suite_split():
+    """When every seed carries plant_seeds.py --suite's suite_caught, recall is reported split into
+    suite-caught and read-caught, each seed's line says which files caught it, and the stopping status
+    gains the read-caught row; when any seed is unmeasured nothing about the record changes."""
+    sealed = {"seeds": [{"id": "S1", "lens": "time", "tier": 1, "mutation": "a", "suite_caught": ["tests/122_x_test.sql", "tests/149_y_test.sql"]},
+                        {"id": "S2", "lens": "names", "tier": 2, "patch": "n.patch", "suite_caught": []},
+                        {"id": "S3", "lens": "docs", "tier": 3, "patch": "d.patch", "suite_caught": [], "suite_skipped": ["tests/31_schedule_test.sql"]},
+                        {"id": "S4", "lens": "upgrade", "tier": 1, "mutation": "u", "suite_caught": ["tests/9_z_test.sql"]}]}
+    classified = {"claims": [{"id": "F1-01", "finder": "F1", "class": "seed_hit", "seed": "S1", "tier": 1},
+                             {"id": "F2-01", "finder": "F2", "class": "seed_hit", "seed": "S2", "tier": 2},
+                             {"id": "F2-02", "finder": "F2", "class": "seed_hit", "seed": "S4", "tier": 1}]}
+    m = compute(sealed, classified, {})
+    assert m["recall"] == 0.75 and m["suite_split"] == {"suite_K": 2, "suite_hit": 2, "read_K": 2, "read_hit": 1, "read_recall": 0.5}, m["suite_split"]
+    assert m["suite_unmeasured"] == 0
+
+    class A:
+        pass_n, date, pinned, release = 5, "2026-10-01", "abc", "0.7.0"
+        budget, lenses, previous_lenses, capture_recapture = "", "time", "none", "not attempted"
+        root_cause_groups, root_causes_file, notes_file = None, None, None
+    rec = record(m, A)
+    assert "seeds K=4, recall 0.75 (suite-caught 2/2, read-caught 1/2); claims 3;" in rec, rec
+    assert "- S1 a (time, T1): hit by F1-01; suite: caught by tests/122\\_x\\_test.sql, tests/149\\_y\\_test.sql\n" in rec, rec
+    assert "- S2 n.patch (names, T2): hit by F2-01; suite: not caught (read-caught seed)\n" in rec, rec
+    assert "- S3 d.patch (docs, T3): missed; suite: not caught (read-caught seed) (not run: tests/31\\_schedule\\_test.sql)\n" in rec, rec
+    st = dict(stopping_status(m))
+    assert st["seed recall >= 0.8"] is False and st["read-caught seed recall >= 0.8 (the seeds the suite does not catch; none planted reads as NOT met)"] is False, st
+    assert [name for name, _ in stopping_status(m)][2].startswith("read-caught"), stopping_status(m)
+    # the read-caught row reads NOT met when no read-caught seed was planted at all
+    all_caught = {"seeds": [{"id": "S1", "lens": "t", "tier": 1, "mutation": "a", "suite_caught": ["tests/1_test.sql"]}]}
+    m2 = compute(all_caught, {"claims": [{"id": "F1-01", "finder": "F1", "class": "seed_hit", "seed": "S1", "tier": 1}]}, {})
+    assert m2["recall"] == 1.0 and m2["suite_split"]["read_K"] == 0 and dict(stopping_status(m2))["seed recall >= 0.8"] is True
+    assert [ok for name, ok in stopping_status(m2) if name.startswith("read-caught")] == [False]
+    # one seed unmeasured: no split, no row, the summary line as before
+    sealed["seeds"][1].pop("suite_caught")
+    m3 = compute(sealed, classified, {})
+    assert m3["suite_split"] is None and m3["suite_unmeasured"] == 1
+    rec3 = record(m3, A)
+    # the summary line carries no split and the stopping status no read-caught row; the seeds that WERE measured
+    # still say what caught them, and the unmeasured one says nothing
+    assert "seeds K=4, recall 0.75; claims 3;" in rec3 and "(suite-caught" not in rec3, rec3
+    assert "- S2 n.patch (names, T2): hit by F2-01\n" in rec3 and "S1 a (time, T1): hit by F1-01; suite: caught by" in rec3, rec3
+    assert len(stopping_status(m3)) == 3 and not any(n.startswith("read-caught") for n, _ in stopping_status(m3))
+
+
 def selftest():
     sealed = {"seeds": [{"id": "S1", "lens": "time", "tier": 1, "mutation": "grid_session_timezone"},
                         {"id": "S2", "lens": "concurrency", "tier": 1, "mutation": "untransmute_no_recheck_under_lock"}]}
@@ -259,6 +335,7 @@ def selftest():
     assert "Seed interactions to check" not in rec and "side effects" not in rec
     assert "## Seeds" in rec and "- S2 untransmute\\_no\\_recheck\\_under\\_lock (concurrency, T1): missed" in rec, rec
     selftest_seed_interactions()
+    selftest_suite_split()
     print("pass_metrics selftest: PASS")
     return 0
 
@@ -287,7 +364,10 @@ def main():
     with open(a.verdicts) as fh:
         verdicts = json.load(fh)
     m = compute(sealed, classified, verdicts, a.budget_units)
-    print(f"seeds K={m['K']}  recall {fmt(m['recall'])}  precision {fmt(m['precision'])}   (read these first)")
+    print(f"seeds K={m['K']}  recall {fmt(m['recall'])}{split_text(m)}  precision {fmt(m['precision'])}   (read these first)")
+    if m["suite_unmeasured"]:
+        print(f"WARNING: {m['suite_unmeasured']} seed(s) carry no suite_caught, so recall is not split into suite-caught / "
+              "read-caught; run plant_seeds.py --suite before the hunt next time", file=sys.stderr)
     print(f"claims {m['claims']}  findings {m['findings']}  by tier {m['by_tier']}  unverified {m['unverified']}")
     for r in m["seed_rows"]:
         if r["side_effects"]:
