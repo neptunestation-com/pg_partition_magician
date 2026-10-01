@@ -243,9 +243,10 @@ TIME_FRONTIER_BLOCK_RE = re.compile(
 )
 
 # name -> (guard it must break, why this is the right defect, [(find, replace, expected_count)])
-# #344's hoist: the new parent's CREATE TABLE ... PARTITION BY RANGE, identity, owner, grants,
-# RLS and policies, moved to run BEFORE either rename so none of it adds to the outage. (The comments
-# were in it too until #630 moved them under the cutover's ACCESS EXCLUSIVE, beside the triggers.)
+# #344's hoist: the new parent's CREATE TABLE ... PARTITION BY RANGE, identity, owner, RLS and
+# policies, moved to run BEFORE either rename so none of it adds to the outage. (The comments were in it
+# too until #630 moved them under the cutover's ACCESS EXCLUSIVE, beside the triggers, and the grants
+# until #706 moved them after the attach, which is what serialises a GRANT or REVOKE against the cutover.)
 TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the NEW parent -- not the original/monolith relation -- runs
   -- BEFORE either rename, under a staging name (v_staging, collision-checked earlier alongside the
   -- orphan-name guard). None of it needs the original table's lock: CREATE TABLE ... LIKE only takes
@@ -268,6 +269,16 @@ TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the N
   select pg_get_userbyid(relowner), relacl, relrowsecurity, relforcerowsecurity
     into v_owner, v_acl, v_rls, v_rls_force
     from pg_class where oid = p_parent;
+  -- The key and the identity the preflight planned from (#706), checked here, under the same ACCESS SHARE,
+  -- which excludes every statement that changes them (see _transmute_key_shape). Steps 6 and 8 act on the
+  -- preflight's v_idcols, v_idkinds and v_pkcols, and a change committed while phases 1 and 2 had let go of
+  -- the table went unseen: an identity re-declared ALWAYS came back BY DEFAULT, a replaced key was declared
+  -- on the parent as it had been. A change refuses, which rolls the cutover back to the resumable phase-2
+  -- state; the re-run plans afresh from the table as it is and resumes from the recorded bound.
+  if pgpm._transmute_key_shape(p_parent, p_control) is distinct from v_keyshape then
+    raise exception 'pg_partition_magician: the primary key, a unique constraint, an identity column or the NOT NULL of % on % changed while this transmute ran (after its preflight read them and before its cutover), so the cutover would carry a key or identity the table no longer has. Nothing was converted: re-run transmute, which plans from the table as it is now and resumes from the recorded bound. (was: %; now: %)',
+      quote_ident(p_control), p_parent, v_keyshape, pgpm._transmute_key_shape(p_parent, p_control);
+  end if;
 
   -- 6. re-establish identity on the parent, in the SAME form it had (#308). The kind is not cosmetic:
   -- ALWAYS rejects an insert that supplies the column, BY DEFAULT accepts it, so re-adding an ALWAYS
@@ -277,43 +288,24 @@ TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the N
   -- And with the same sequence options (#670): a bare ADD GENERATED gives the new sequence the defaults,
   -- dropping an INCREMENT BY, MINVALUE/MAXVALUE, CYCLE or CACHE the operator declared. They are read off
   -- the original's sequence, which still exists here (step 3 drops it, after the renames); the %s is
-  -- _identity_options' clause, numbers and keywords only.
+  -- _identity_options' clause, numbers and keywords only. Read here to build the sequence outside the
+  -- outage, and read again under the lock (0b, #732), which is the read the parent keeps.
   if v_idcols is not null then
     for v_i in 1 .. array_length(v_idcols, 1) loop
+      v_idopts[v_i] := pgpm._identity_options(pg_get_serial_sequence(p_parent::text, v_idcols[v_i])::regclass);
       execute format('alter table %s alter column %I add generated %s as identity %s',
                      v_parent::text, v_idcols[v_i],
                      case when v_idkinds[v_i] = 'a' then 'always' else 'by default' end,
-                     coalesce(pgpm._identity_options(pg_get_serial_sequence(p_parent::text, v_idcols[v_i])::regclass), ''));
+                     coalesce(v_idopts[v_i], ''));
     end loop;
   end if;
 
   -- 7b (moved before the renames -- #344). Replay everything captured at 0b onto the staging parent,
   -- EXCEPT triggers: that is the one step that needs the LIVE name in place, not just the right OID (see
   -- 0b), so it stays below, after both renames. And except comments, which only the table's ACCESS
-  -- EXCLUSIVE holds still (#630), so they are read and replayed below it, beside the triggers.
+  -- EXCLUSIVE holds still (#630), so they are read and replayed below it, beside the triggers; and except
+  -- grants, which no lock on the table holds still (#706), so they are read and replayed after the attach.
   execute format('alter table %s owner to %I', v_parent::text, v_owner);
-
-  -- Grants. aclexplode turns relacl into (grantor, grantee, privilege, grantable) rows; a NULL relacl
-  -- means the owner's implicit defaults, which the OWNER TO above already restores. grantee = 0 is
-  -- PUBLIC, which has no role name.
-  for v_g in
-    select a.grantee, a.privilege_type, a.is_grantable
-      from pg_class c, aclexplode(c.relacl) a where c.oid = p_parent and c.relacl is not null
-  loop
-    execute format('grant %s on %s to %s%s', v_g.privilege_type, v_parent::text,
-                   case when v_g.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(v_g.grantee)) end,
-                   case when v_g.is_grantable then ' with grant option' else '' end);
-  end loop;
-  -- COLUMN-level grants, which relacl does not carry at all: they live in pg_attribute.attacl.
-  for v_g in
-    select att.attname, a.grantee, a.privilege_type, a.is_grantable
-      from pg_attribute att, aclexplode(att.attacl) a
-     where att.attrelid = p_parent and att.attnum > 0 and not att.attisdropped and att.attacl is not null
-  loop
-    execute format('grant %s (%I) on %s to %s%s', v_g.privilege_type, v_g.attname, v_parent::text,
-                   case when v_g.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(v_g.grantee)) end,
-                   case when v_g.is_grantable then ' with grant option' else '' end);
-  end loop;
 
   -- RLS. FORCE matters as much as ENABLE: without it the table owner bypasses every policy, so an
   -- owner-run query would see all rows and the isolation would be silently absent for exactly the role
@@ -765,6 +757,71 @@ exception when query_canceled then
   raise;
 end;
 $$;
+"""
+
+# #706 and #732: blocks the reread-under-the-lock fix placed where the protecting lock is held, shared by
+# the mutations below that put each back where it was read before the fix. Copied from the source verbatim,
+# so a rewording there fails the build of these mutants loudly instead of leaving the fix in place.
+TRANSMUTE_GRANTS_AFTER_ATTACH = """  -- 7b (grants), HERE, after the rename and the attach (#706). GRANT and REVOKE take no lock on the table at
+  -- all, so no lock this cutover holds stops one, and the grants used to be read before the rename (with the
+  -- staging work, under only the LIKE's ACCESS SHARE): a REVOKE or GRANT committed after that read landed
+  -- on the original table alone, now the monolith, and the parent every query names kept the privilege
+  -- that was revoked, or lacked the one that was granted. What serialises them is the catalog row each
+  -- rewrites. A table-level GRANT or REVOKE rewrites the table's pg_class row, which the rename has just
+  -- rewritten in this transaction; a column-level one rewrites the column's pg_attribute row, which the
+  -- attach has just rewritten (it marks every column inherited). So one committed before this point is in
+  -- what is read here, and one that has not committed cannot commit before the cutover does: it waits on
+  -- this transaction and then fails with "tuple concurrently updated". p_parent is the monolith's oid by
+  -- now, which is the table the grants are on.
+  -- aclexplode turns relacl into (grantor, grantee, privilege, grantable) rows; a NULL relacl
+  -- means the owner's implicit defaults, which the OWNER TO above already restores. grantee = 0 is
+  -- PUBLIC, which has no role name.
+  for v_g in
+    select a.grantee, a.privilege_type, a.is_grantable
+      from pg_class c, aclexplode(c.relacl) a where c.oid = p_parent and c.relacl is not null
+  loop
+    execute format('grant %s on %s to %s%s', v_g.privilege_type, v_parent::text,
+                   case when v_g.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(v_g.grantee)) end,
+                   case when v_g.is_grantable then ' with grant option' else '' end);
+  end loop;
+  -- COLUMN-level grants, which relacl does not carry at all: they live in pg_attribute.attacl.
+  for v_g in
+    select att.attname, a.grantee, a.privilege_type, a.is_grantable
+      from pg_attribute att, aclexplode(att.attacl) a
+     where att.attrelid = p_parent and att.attnum > 0 and not att.attisdropped and att.attacl is not null
+  loop
+    execute format('grant %s (%I) on %s to %s%s', v_g.privilege_type, v_g.attname, v_parent::text,
+                   case when v_g.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(v_g.grantee)) end,
+                   case when v_g.is_grantable then ' with grant option' else '' end);
+  end loop;
+
+"""
+TRANSMUTE_IDENTITY_OPTIONS_UNDER_LOCK = """  -- #732: and each identity sequence's options. ALTER SEQUENCE takes no lock on the table, so the table's
+  -- ACCESS EXCLUSIVE does not hold them still; _identity_options_locked takes the lock on the sequence that
+  -- does, held to the commit. An INCREMENT BY (or a bound, CACHE or CYCLE) committed since step 6 read them
+  -- is put on the parent's sequence here, before 8b reseeds it on that lattice; RESTART only puts the fresh
+  -- sequence back at its new START, which 8b moves past anyway. The clause is _identity_options' own,
+  -- unwrapped from its parentheses: numbers and keywords only.
+  if v_idcols is not null then
+    for v_i in 1 .. array_length(v_idcols, 1) loop
+      v_opt := pgpm._identity_options_locked(pg_get_serial_sequence(p_parent::text, v_idcols[v_i])::regclass);
+      if v_opt is distinct from v_idopts[v_i] then
+        execute format('alter sequence %s %s restart', pg_get_serial_sequence(v_parent::text, v_idcols[v_i]),
+                       substr(v_opt, 2, length(v_opt) - 2));
+      end if;
+    end loop;
+  end if;
+"""
+UNTRANSMUTE_IDENTITY_OPTIONS_UNDER_LOCK = """  -- And each parent sequence's options (#670), which go with the parent's sequence when the parent is
+  -- dropped below, read here (#732) under a lock on the sequence itself: ALTER SEQUENCE takes no lock on the
+  -- table, so the table's ACCESS EXCLUSIVE does not hold them still, and an INCREMENT BY committed while the
+  -- lock above was queued, read before it, was lost with the parent. _identity_options_locked's lock is held
+  -- to the commit, so one that has not committed by now waits for this reversal.
+  if v_idcols is not null then
+    for v_i in 1 .. array_length(v_idcols, 1) loop
+      v_idopts[v_i] := pgpm._identity_options_locked(pg_get_serial_sequence(p_parent::text, v_idcols[v_i])::regclass);
+    end loop;
+  end if;
 """
 
 MUTATIONS = {
@@ -4354,6 +4411,86 @@ $$;''',
                                                secs => ((v_us - v_h * 3600000000) / 1000000)::double precision));
 """, """      return pgpm._ts_text(anc + make_interval(secs => k * v_secs));
 """, 1)],
+    ),
+    "transmute_grants_before_lock": (
+        "bench/reread_under_lock_remaining_tap.sh",
+        "Pre-#706 transmute: the grants are read and replayed onto the staging parent with the rest of the "
+        "#344 staging work, before the cutover's ACCESS EXCLUSIVE and long before the rename. GRANT and REVOKE "
+        "take no lock on the table, so the REVOKE and two GRANTs tests/185 (A)'s second session commits after "
+        "that read land on the monolith alone: the parent keeps t185_r1's SELECT and lacks t185_r2's INSERT "
+        "and UPDATE (note). The block is moved back to where it was, just before the RLS replay.",
+        [(TRANSMUTE_GRANTS_AFTER_ATTACH, "", 1),
+         ("  -- RLS. FORCE matters as much as ENABLE", TRANSMUTE_GRANTS_AFTER_ATTACH + "  -- RLS. FORCE matters as much as ENABLE", 1)],
+    ),
+    "transmute_incoming_gate_preflight_only": (
+        "bench/reread_under_lock_remaining_tap.sh",
+        "Pre-#706 transmute: the incoming-key gate is asked in the preflight only, and 0c runs for 'preserve' "
+        "alone, so under p_incoming_fks => 'error' the key tests/185 (B) adds after the preflight follows the "
+        "rename onto the monolith and the conversion completes. One site: the cutover's second asking.",
+        [("  perform pgpm._transmute_incoming_gate(p_parent, p_incoming_fks, v_pkcols);\n"
+          "  if p_incoming_fks <> 'error' then\n",
+          "  if p_incoming_fks <> 'error' then\n", 1)],
+    ),
+    "transmute_transition_refusal_preflight_only": (
+        "bench/reread_under_lock_remaining_tap.sh",
+        "Pre-#706 transmute: the transition-table trigger refusal is asked in the preflight only, so the row "
+        "trigger tests/185 (C) creates after it is captured and replayed onto the parent, which fails the "
+        "cutover with PostgreSQL's raw error instead of pgpm's refusal. One site: the cutover's second asking.",
+        [("  -- one committed since the preflight would otherwise reach the replay in 7b and fail it with a raw error.\n"
+          "  perform pgpm._transmute_refuse_transition_triggers(p_parent);\n",
+          "  -- one committed since the preflight would otherwise reach the replay in 7b and fail it with a raw error.\n", 1)],
+    ),
+    "transmute_key_shape_unchecked": (
+        "bench/reread_under_lock_remaining_tap.sh",
+        "Pre-#706 transmute: steps 6 and 8 act on the key and identity the preflight read, and nothing checks "
+        "them again once the staging LIKE's ACCESS SHARE holds them still. tests/185 (D) re-declares the "
+        "identity ALWAYS after the preflight, and the parent comes back BY DEFAULT. The comparison is made "
+        "never true; the preflight's read stays.",
+        [("  if pgpm._transmute_key_shape(p_parent, p_control) is distinct from v_keyshape then\n",
+          "  if false then\n", 1)],
+    ),
+    "regrain_janitor_without_lock": (
+        "bench/reread_under_lock_remaining_tap.sh",
+        "Pre-#706 _enforce_regrain_capture: the janitor reads the cursor without pgpm.regrain_lock, so it judges "
+        "a regrain's marks around a driver in flight. tests/185 (E) holds the lock in a second session over an "
+        "orphaned capture, and the janitor tears it down instead of skipping. The try-lock is made to succeed.",
+        [("  if not pgpm._regrain_try_lock(p_parent) then\n", "  if false then\n", 1)],
+    ),
+    "regrain_reclaim_without_lock": (
+        "bench/reread_under_lock_remaining_tap.sh",
+        "Pre-#706 _regrain_reclaim: retire's reclaim reads the cursor and the copies, and clears them, without "
+        "pgpm.regrain_lock, so it runs around a step in flight. tests/185 (F) holds the lock in a second "
+        "session, and reclaim clears the cursor and drops the copy instead of waiting out its lock_timeout.",
+        [("  -- subtransaction (fail_retain_drop) and the next tick retries it.\n"
+          "  perform pgpm._regrain_lock(p_parent);\n",
+          "  -- subtransaction (fail_retain_drop) and the next tick retries it.\n", 1)],
+    ),
+    "transmute_identity_options_before_lock": (
+        "bench/reread_under_lock_remaining_tap.sh",
+        "Issue #732 put back in transmute: the parent's identity sequence keeps the options step 6 read before "
+        "the cutover's lock, so the INCREMENT BY 7 tests/186 (A)'s second session commits after that read is "
+        "lost: the parent has INCREMENT BY 1 and hands out 12, 13. The under-lock re-read is removed whole.",
+        [(TRANSMUTE_IDENTITY_OPTIONS_UNDER_LOCK, "", 1)],
+    ),
+    "identity_options_unlocked": (
+        "bench/reread_under_lock_remaining_tap.sh",
+        "Issue #732, the half a re-read alone misses: the options are read under the table's lock but with no "
+        "lock on the sequence, and ALTER SEQUENCE takes none on the table, so one committed after the read and "
+        "before the commit is still lost. _identity_options_locked takes no lock: tests/186's late ALTER "
+        "SEQUENCE, in transmute's cutover and in untransmute, commits instead of waiting.",
+        [("  if p_seq is null then return null; end if;\n  perform pg_sequence_last_value(p_seq);\n",
+          "  if p_seq is null then return null; end if;\n", 1)],
+    ),
+    "untransmute_identity_options_before_lock": (
+        "bench/reread_under_lock_remaining_tap.sh",
+        "Issue #732 put back in untransmute: the parent sequence's options are read in the pre-lock loop, before "
+        "the explicit ACCESS EXCLUSIVE, so the INCREMENT BY 7 tests/186 (B)'s second session commits while the "
+        "reversal is under way is lost with the parent: the restored table has INCREMENT BY 1 and hands out 6, "
+        "7. The under-lock read is removed and the pre-lock one put back, unlocked, as it was.",
+        [(UNTRANSMUTE_IDENTITY_OPTIONS_UNDER_LOCK, "", 1),
+         ("      v_idnext := array_append(v_idnext, pgpm._seq_next(v_seq));\n    end loop;\n",
+          "      v_idnext := array_append(v_idnext, pgpm._seq_next(v_seq));\n"
+          "      v_idopts := array_append(v_idopts, pgpm._identity_options(v_seq));\n    end loop;\n", 1)],
     ),
 }
 

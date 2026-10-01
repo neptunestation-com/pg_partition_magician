@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+- **transmute and the regrain janitor and reclaim read what they act on under the lock that holds it still**
+  (#706). The cutover replayed the table's grants before its rename, and `GRANT` and `REVOKE` take no lock
+  on the table, so one committed after that read landed on the monolith alone and the parent kept a revoked
+  privilege or lacked a granted one; the grants are now read after the rename and the attach, which rewrite
+  the catalog rows a `GRANT` or `REVOKE` must rewrite too, so a later one waits for the cutover. With
+  `p_incoming_fks => 'error'` a key added before the cutover's lock followed the rename onto the monolith;
+  the gate, and the transition-table trigger refusal, are asked again under the lock. The key and identity
+  the preflight planned from are checked again after the staging `LIKE` (an identity made `ALWAYS`
+  meanwhile came back `BY DEFAULT`), and refuse on a change. The regrain janitor and `retire`'s reclaim now
+  take `pgpm.regrain_lock`: the janitor skips (`skip_regrain_capture`) while a driver holds it, and reclaim
+  waits. `tests/185` through `bench/reread_under_lock_remaining_tap.sh`, with one mutation per site. Not
+  closed here: `_transmute` still reads the minimum and maximum before phase 1's lock.
+- **An identity sequence's options are carried as they are at the cutover, not as an earlier read saw them**
+  (#732). `transmute`'s cutover and `untransmute` read `INCREMENT BY`, the bounds, `START`, `CACHE` and
+  `CYCLE` before their `ACCESS EXCLUSIVE`, and `ALTER SEQUENCE` takes no lock on the table anyway, so an
+  `INCREMENT BY` committed while either ran was lost and the parent (or the restored table) handed out ids
+  on the old spacing. Both now read them under the table's lock and under a lock on the sequence that
+  `ALTER SEQUENCE` waits for (`_identity_options_locked`). `tests/186` through
+  `bench/reread_under_lock_remaining_tap.sh` (`transmute_identity_options_before_lock`,
+  `untransmute_identity_options_before_lock`, `identity_options_unlocked`).
 - **Refusal and legibility edges: `transmute` refuses an `EXCLUDE` constraint and an unowned publication up
   front, `untransmute` carries back the owner and comments, and maintenance logs what it used to do
   silently** (#710). A table with an exclusion constraint, or a publication naming it that the converting

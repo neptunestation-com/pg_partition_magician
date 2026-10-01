@@ -36,6 +36,6 @@ PARTITION_POS=$(q    "select strpos(lower(($SRC_QUERY)), 'partition by range')")
 RLS_POS=$(q          "select strpos(lower(($SRC_QUERY)), 'enable row level security')")
 
 check "the new parent's CREATE TABLE runs before the first rename" "$PARTITION_POS" "$RENAME_POS"
-check "the RLS/grants/policies/comments replay runs before the first rename" "$RLS_POS" "$RENAME_POS"
+check "the RLS and policies replay runs before the first rename" "$RLS_POS" "$RENAME_POS"   # grants follow the attach (#706)
 
 exit "$fail"
