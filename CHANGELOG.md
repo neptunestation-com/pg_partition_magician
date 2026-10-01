@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **`transmute`'s orphan guard and `restore_incoming_fks`'s in-flight gate know every id label** (#726).
+  Both matched an id grid's child names with `^[0-9]{19}$`, the label before #582, so an orphan an
+  interrupted regrain left under a 20-digit label (a cell at or past 10^19), a `_<frac>` label or a padded
+  negative one passed: the conversion completed, `obtain` left that cell unbuilt with nothing logged and
+  every write into it was refused, and the gate re-added a suspended FK while that child was out of the
+  parent. Both now ask one helper, `_is_fine_child_label`, which recognises an id suffix by its round trip
+  through `_id_label` itself. `bench/orphan_guard_id_labels.sh` runs tests/196 against the mutations
+  `orphan_guard_id_label_19_digits` and `fk_gate_id_label_19_digits`.
 - **A table moved with `ALTER TABLE ... SET SCHEMA` keeps being maintained** (#727). The write block, the
   archive step and `retire` resolved every partition in the parent's current schema, but moving the parent
   leaves its partitions where they were, so afterwards no step found one again: `skip_write_block` and

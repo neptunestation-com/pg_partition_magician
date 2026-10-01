@@ -256,7 +256,8 @@ row: `transmute` converts a table once, and a retry whose earlier cutover did co
 is not a plain table (partitioned, a view, a foreign table), or is a partition, an inheritance child or an
 inheritance parent; a relation of any kind already holds the name the monolith will take
 (`<table>_p<lo>_to_<hi>`, typically a monolith detached from an earlier conversion of a table by that name)
-or a child-partition name (`<table>_p<digits>...`: an orphan from an interrupted regrain, or a sequence or
+or a child-partition name (`<table>_p<label>`, any name pgpm could give a fine child, an id label past 19
+digits or with a fraction included: an orphan from an interrupted regrain, or a sequence or
 view that happens to be named that way); a type that is not a table's row type (an enum, domain or range
 type) holds the monolith's name, the staging name `<table>_pgpm_new` or a child-partition name (a table's
 row type takes its name, so the cutover's `CREATE TABLE` and `RENAME`, and every later partition's
@@ -2161,7 +2162,8 @@ pgpm.restore_incoming_fks(p_parent regclass, p_ids bigint[] default null) return
 ```
 
 Re-adds each dropped preserve-managed FK against the new parent, returning the number re-added. Self-gates
-on quiescence: a no-op while an in-flight, not-yet-attached regrain child remains.
+on quiescence: a no-op while an in-flight, not-yet-attached regrain child remains (a standalone table
+named like a fine child, recognised exactly as `transmute`'s orphan guard recognises one).
 
 `p_ids` restricts the re-add to specific `pgpm.dropped_fk.id` values instead of every not-yet-restored row
 for the parent. Operators calling this directly should leave it at the default (`null`, restore

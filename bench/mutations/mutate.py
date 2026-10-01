@@ -3985,6 +3985,38 @@ $$;''',
         "it. tests/188's flag, forward-partition and swap assertions on dpk and duq catch it.",
         [("coalesce(v_key_defer, '')", "''", 2)],
     ),
+    # Issue #726, one mutation per site the helper serves, so each is proven caught on its own.
+    "orphan_guard_id_label_19_digits": (
+        "bench/orphan_guard_id_labels.sh",
+        "Pre-#726 _is_fine_child_label: an id suffix is a fine child's label when it is 19 digits, the "
+        "label before #582. An orphan named for a cell at or past 10^19 (20 digits), a fractional cell "
+        "(`_<frac>`) or a short negative one passes transmute's guard and restore_incoming_fks's gate: the "
+        "conversion completes, obtain leaves that cell unbuilt with nothing logged, and the FK is re-added "
+        "while a child is still out of the parent. The helper's id branch goes back to the old pattern, "
+        "which reaches both sites; tests/196's three refusals and its two gate zeros catch it.",
+        [("""  if p_suffix !~ '^(0*-)?[0-9]+(_[0-9]+)?$' then
+    return false;
+  end if;
+""", """  return p_suffix ~ '^[0-9]{19}$';
+  if p_suffix !~ '^(0*-)?[0-9]+(_[0-9]+)?$' then
+    return false;
+  end if;
+""", 1)],
+    ),
+    "fk_gate_id_label_19_digits": (
+        "bench/orphan_guard_id_labels.sh",
+        "The drift #726 closes: restore_incoming_fks's in-flight gate matches an id child's suffix with its "
+        "own '^[0-9]{19}$' again instead of asking the helper transmute's orphan guard asks. The guard is "
+        "correct and the gate is not, so a suspended FK is re-added while a 20-digit or fraction-labelled "
+        "child is still out of the parent. Only the gate's call goes back; tests/196's two gate zeros, and "
+        "the 1 the gate returns once the orphans are gone, catch it.",
+        [("""     and pgpm._is_fine_child_label(cfg.control_kind, substr(c.relname, length(v_rel) + 3))
+""", """     and case when cfg.control_kind = 'id'
+              then substr(c.relname, length(v_rel) + 3) ~ '^[0-9]{19}$'
+              else substr(c.relname, length(v_rel) + 3) ~ '^[0-9]{4}(_[0-9]+)*$'
+         end
+""", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
