@@ -5,9 +5,11 @@
 #
 #   1. check it out detached in a throwaway worktree and rebase it onto its target: origin/main, or in
 #      --batch mode the previous PR's new head, so the batch is a stack the queue can build as one group;
-#   2. resolve the add/add conflicts in the LIST FILES (CHANGELOG.md, bench/mutations/mutate.py,
-#      test.sh, the perf, archive and lint workflows) with keep_both.py; any other conflict stops the run
-#      and leaves the worktree for a human;
+#   2. resolve the same-spot add/add conflicts with keep_both.py, in the LIST FILES (CHANGELOG.md,
+#      bench/mutations/mutate.py, test.sh, the perf, archive and lint workflows) and, since pass 4 (#713),
+#      in any other file: the rebase runs under the diff3 conflict style, whose base section tells an
+#      add/add hunk from one both sides edited, and only the latter stops the run with the worktree left
+#      for a human;
 #   3. verify the result the way CI would before spending a CI run on it: every `_q` splice marked,
 #      test.sh parses with unique pgpm_perfNN guard databases (the branch's duplicate is renumbered),
 #      mutate.py has unique keys and EVERY mutation still builds against its source;
@@ -21,10 +23,13 @@
 # the list files and must be rebased and re-checked before it can be queued (about 28 minutes per PR,
 # measured in pass 3). Under a MERGE-commit queue (this repository's since 2026-09-29) --batch takes up
 # to five PRs at once: each is rebased onto the previous one's head, all heads are pushed and checked in
-# parallel, then each is enqueued as its predecessor merges (the queue drops a PR stacked on another
-# queued PR's head, so they cannot all be queued at once). The stack is what makes it work: PR k's branch
-# contains PR k-1's commits, so once k-1 has merged, k needs no rebase and no new head checks. A batch
-# costs one head-check round plus one merge group per PR, against one of each per PR one at a time.
+# parallel, then each is enqueued as soon as ITS head is green and its predecessor has merged (the queue
+# drops a PR stacked on another queued PR's head, so they cannot all be queued at once; and waiting for
+# the whole batch's heads first gained nothing, #713: #691 sat green for 26 minutes while #704's checks
+# ran). The stack is what makes it work: PR k's branch contains PR k-1's commits, so once k-1 has merged,
+# k needs no rebase and no new head checks. A batch costs one head-check round plus one merge group per
+# PR, against one of each per PR one at a time. A PR that has already merged when the run starts is
+# skipped, so a batch that stopped after some of its PRs had merged is rerun with the same command.
 #
 # Knobs, all environment: LAND_WAIT_CHECKS_MIN (60), LAND_WAIT_MERGE_MIN (60), LAND_WAIT_RUN_MIN (90),
 # LAND_MERGE_METHOD (merge; must match the ruleset's merge_method), LAND_TOOLING (the scripts/review
@@ -33,7 +38,8 @@
 #
 # Exit codes: 0 every PR merged; 3 a conflict or verification needs a hand (the worktree path is printed
 # and kept); 4 a CI failure that is not a known flake, or the queue refused; 5 gh/git failure; 6 a wait
-# timed out (checks, a run, or the queue): nothing is wrong, rerun the same command.
+# timed out (checks, a run, or the queue) or an enqueue that never took after five requests (GitHub
+# answered "Something went wrong" to #703's twice): nothing is wrong, rerun the same command.
 # Run it from the repository root of a clean checkout. It never touches the checkout's own branch.
 set -uo pipefail
 MIN=20; REBASE_ONLY=""; BATCH=""
@@ -105,16 +111,23 @@ rebase_pr() { # <worktree> <target>: rebase detached HEAD onto <target>, resolvi
     git fetch -q origin main || exit 5
     if git merge-base --is-ancestor "$target" HEAD; then say "  already contains $target"; exit 0; fi
     say "  rebasing onto $target ($(git rev-parse --short "$target"))"
-    # the two-way conflict style, whatever the user's git config says: keep_both.py handles diff3 and
-    # zdiff3 too since #598, but one shape is one less thing to reason about when a hunk needs a hand
-    if ! git -c merge.conflictstyle=merge -c rerere.enabled=false rebase "$target" >/dev/null 2>&1; then
+    # The diff3 conflict style, whatever the user's git config says: its base section is what lets
+    # keep_both.py resolve a same-spot add/add hunk in ANY file (empty base) while refusing one both sides
+    # edited (base not empty), which under the two-way style look the same. Pass 4 used the two-way style
+    # and resolved the list files alone; six of its nine hand stops were add/add hunks elsewhere (#713).
+    if ! git -c merge.conflictstyle=diff3 -c rerere.enabled=false rebase "$target" >/dev/null 2>&1; then
       while git status | grep -q "rebase in progress"; do
         for f in $(git diff --name-only --diff-filter=U); do
-          case " $LIST_FILES " in
-            *" $f "*) python3 "$S/keep_both.py" "$f" || { echo "  MANUAL: $f (keep_both could not make it whole)"; exit 3; }
-                      git add "$f"; say "  auto-resolved $f (kept both sides)";;
-            *) echo "  MANUAL: $f is not a list file; resolve it in $wt and rerun"; exit 3;;
-          esac
+          if python3 "$S/keep_both.py" "$f"; then
+            git add "$f"
+            case " $LIST_FILES " in
+              *" $f "*) say "  auto-resolved $f (kept both sides)";;
+              *) say "  auto-resolved $f (not a list file: same-spot add/add, both sides kept, main's first; the head checks are the proof)";;
+            esac
+          else
+            echo "  MANUAL: $f (keep_both refused it: both sides edited the same lines, or a hunk it does not know); resolve it in $wt and rerun"
+            exit 3
+          fi
         done
         GIT_EDITOR=true git -c rerere.enabled=false rebase --continue >/dev/null 2>&1 || true
       done
@@ -212,14 +225,20 @@ ensure_green() { # <pr>: wait for the head's checks, rerunning a known flake; ex
   done
 }
 
-enqueue() { # <pr>: enqueue and confirm the entry exists; one retry, because the first request can be dropped
-  local i s
-  for i in 1 2; do
-    say "  enqueueing #$1"
-    gh pr merge "$1" --repo "$REPO" "--$METHOD" 2>&1 | grep -v "merge strategy" || true
-    sleep 20
+enqueue() { # <pr>: request the enqueue and confirm the entry exists; up to five requests, with a growing
+            # pause, because a request can be dropped without a word (the first live batch, #647) or answered
+            # "Something went wrong" (a GraphQL error: #703 got two in a row and sat unqueued, #713)
+  local i s out
+  for i in 1 2 3 4 5; do
+    say "  enqueueing #$1 (request $i of 5)"
+    out=$(gh pr merge "$1" --repo "$REPO" "--$METHOD" 2>&1) || true
+    grep -v "merge strategy" <<<"$out" | grep -v '^$' || true
+    sleep $((10 + 10 * i))
     s=$(in_queue "$1")
-    case "$s" in "OPEN none") say "  #$1 is not in the queue after the request";; *) return 0;; esac
+    case "$s" in
+      "OPEN none"|query-failed) say "  #$1 is not in the queue after the request ($s)";;
+      *) return 0;;
+    esac
   done
   return 1
 }
@@ -234,7 +253,9 @@ await_merge() { # <pr>: wait for the merge, re-enqueueing after a known flake; e
                  --jq ".[] | select(.headBranch | test(\"pr-$PR-\")) | select(.conclusion==\"failure\") | .databaseId" | head -1)
          retries=$((retries + 1)); [ $retries -le 2 ] || { echo "STOPPED at #$PR: fell out of the queue twice"; exit 4; }
          if [ -n "$run" ]; then "$S/flake_check.sh" "$run" --repo "$REPO" || { echo "STOPPED at #$PR: merge group $run is not a known flake"; exit 4; }; fi
-         say "  re-enqueueing #$PR (known flake, retry $retries)"; enqueue "$PR"; continue;;
+         say "  re-enqueueing #$PR (known flake, retry $retries)"
+         enqueue "$PR" || { echo "STOPPED at #$PR: the re-enqueue never took after five requests (rerun)"; exit 6; }
+         continue;;
       8) echo "STOPPED at #$PR: main moved under it (DIRTY); rerun land.sh $PR"; exit 3;;
       *) echo "STOPPED at #$PR: queue wait timed out after ${LAND_WAIT_MERGE_MIN:-60} min (rerun)"; exit 6;;
     esac
@@ -242,13 +263,26 @@ await_merge() { # <pr>: wait for the merge, re-enqueueing after a known flake; e
 }
 
 git fetch -q origin main || exit 5
+# A PR that merged already (a batch rerun after a stop, #713: #685 and #697 each stopped their rerun with
+# "is not an open PR") is skipped; one closed without merging is a mistake in the list and stops the run.
+open_prs=()
+for PR in "${PRS[@]}"; do
+  st=$(gh pr view "$PR" --repo "$REPO" --json state --jq .state) || exit 5
+  case "$st" in
+    OPEN) open_prs+=("$PR");;
+    MERGED) say "skipping #$PR: already merged";;
+    *) echo "#$PR is $st (closed without merging); take it off the list"; exit 4;;
+  esac
+done
+PRS=(${open_prs[@]+"${open_prs[@]}"})
+[ ${#PRS[@]} -gt 0 ] || { say "ALL LANDED: every PR given had already merged"; exit 0; }
 if [ -z "$BATCH" ]; then
   for PR in "${PRS[@]}"; do
     PUSHED=""; prepare_pr "$PR" origin/main
     [ -n "$PUSHED" ] && sleep 30   # let GitHub register the new head before the check waiter reads an empty list
     [ -n "$REBASE_ONLY" ] && continue
     ensure_green "$PR"
-    enqueue "$PR"
+    enqueue "$PR" || { echo "STOPPED at #$PR: the enqueue never took after five requests (rerun)"; exit 6; }
     await_merge "$PR"
   done
 else
@@ -259,12 +293,17 @@ else
   done
   [ -n "$PUSHED" ] && sleep 30
   [ -n "$REBASE_ONLY" ] && { say "REBASED (stack): ${PRS[*]}"; exit 0; }
-  for PR in "${PRS[@]}"; do ensure_green "$PR"; done
   # In turn, not all at once: GitHub removes a queued PR whose head sits on another queued PR's head
   # (2026-09-29, the first live batch: #647 was added and removed 12 s later, twice, with no group built,
-  # while #646 was AWAITING_CHECKS). Each PR is enqueued as its predecessor merges; its branch already
-  # contains the predecessor, so no rebase and no new head checks are needed. What the batch saves is
-  # the rebase and the head-check round per PR; each PR still gets its own merge group.
-  for PR in "${PRS[@]}"; do enqueue "$PR" || true; await_merge "$PR"; done
+  # while #646 was AWAITING_CHECKS). Each PR is enqueued as soon as ITS head is green and its predecessor
+  # has merged, while the later heads go on checking (pass 4 waited for every head first, and #691 sat
+  # green for 26 minutes behind #704's checks, #713). A PR's branch already contains its predecessor, so
+  # no rebase and no new head checks are needed. What the batch saves is the rebase and the head-check
+  # round per PR; each PR still gets its own merge group.
+  for PR in "${PRS[@]}"; do
+    ensure_green "$PR"
+    enqueue "$PR" || { echo "STOPPED at #$PR: the enqueue never took after five requests (rerun)"; exit 6; }
+    await_merge "$PR"
+  done
 fi
 say "ALL LANDED: ${PRS[*]}"
