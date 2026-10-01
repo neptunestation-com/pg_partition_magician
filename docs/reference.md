@@ -326,7 +326,7 @@ call pgpm.transmute('public.events', 'id', 10000000, p_obtain => 2);
 ### `transmute_abort`
 
 ```sql
-pgpm.transmute_abort(p_parent regclass) returns boolean
+pgpm.transmute_abort(p_parent regclass, p_lock_timeout text default '5s') returns boolean
 ```
 
 Abandons a conversion that died between transactions, dropping the `pgpm_monolith_bound` `CHECK` it left
@@ -335,6 +335,14 @@ conversion to abandon, and raises if one is still running in another session. Yo
 attempt is always yours to abort: the claim it left records your session as its owner, which is not
 "another session". That is all there is to undo: incoming foreign keys are dropped only by the cutover,
 so a conversion that never got there left them in place, and there is nothing for this to re-add.
+
+**The wait for the table's lock is bounded.** Dropping the bound takes `ACCESS EXCLUSIVE` on your live
+table, and a pending request for it blocks every later read and write of the table, so `p_lock_timeout`
+(`'5s'` by default, the same default as `transmute`'s) bounds the wait. When it expires the call raises
+`pg_partition_magician: transmute_abort(...) could not take ACCESS EXCLUSIVE on ... within ...`, SQLSTATE
+`55P03` (`lock_not_available`), and changes nothing: the bound and the claim are as they were. Retry when
+the transaction holding the table has finished, or pass a longer value. A bad value is refused before
+anything is read.
 
 It **abandons; it does not resume**. Finishing a half-done conversion of a live table unattended is a
 larger action than pgpm will take on your behalf. To try again, call `transmute` again, from a session in
@@ -759,6 +767,12 @@ because `transmute` refuses a table that still carries an incoming key. Each dro
 `drop_incoming_fk` by the swap, against the plain table it put in place: after a completed conversion that
 relation is the monolith child, so look for the row there, beside the parent's `restore_incoming_fk`.
 
+The re-add and the validation wait for their locks under `p_lock_timeout`, like every other lock wait in
+the cutover. A key whose referencing table's lock is not had in time is logged `fail_restore_incoming_fk`
+or `fail_validate_incoming_fk`, its `method` naming the key and the lock timeout, and stays recorded; the
+cutover itself completes, and `maintain` finishes the key on a later tick (on a paused table, call
+`restore_incoming_fks` or `validate_incoming_fks` yourself).
+
 `from_hypertable_preflight` refuses an incoming key that references anything other than the key pgpm will
 reuse, before any copying happens.
 
@@ -1067,6 +1081,12 @@ tick, never finalizing a detach that is still running.
 
 It drops nothing: `retire` completes pgpm's own retirements on the normal path, and an operator's hand-run
 detach that was interrupted is finished and then left alone.
+
+The wait for the partition's lock is bounded at 5 s, `transmute`'s default. `FINALIZE` takes `ACCESS
+EXCLUSIVE` on the partition, so behind one long reader of it (a report, a `pg_dump`) an unbounded request
+would hold up the whole sweep, and every later access to the partition with it. A timeout leaves that
+partition pending, logs `fail_detach_reap` with the lock timeout as its `method`, reaps the others, and the
+next tick tries again. The caller's own `lock_timeout` is back when the function returns.
 
 ### `regrain`
 
@@ -2320,8 +2340,8 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `skip_obtain` / `skip_retain` / `skip_regrain` / `skip_regrain_capture` / `skip_archive` / `skip_write_block` / `skip_restore_fk` / `skip_validate_fk` | a step deferred (lock race or transient error; `method` carries the reason) |
 | `skip_transmute_reap` | `maintain_all`'s sweep found an abandoned conversion but could not take the table's lock within 5 s (a long transaction holds it), so it left the bound and the claim in place for the next tick rather than queue every read and write of the table behind it; `method` carries the lock timeout |
 | `skip_write_block_lift` | a partition retention no longer reaches kept its write block, because `pgpm.archive_ledger` already covers it and that coverage is only true while nothing can write to it. Logged once per partition, on the first tick that would otherwise have lifted the block; `method` says how to make the partition writable again (see [`maintain`](#maintain)) |
-| `fail_restore_incoming_fk` / `fail_validate_incoming_fk` | a preserve-FK re-add failed / a validation was blocked by an orphan |
-| `fail_retain_drop` / `fail_retain_detach` / `fail_retain_crossing` / `fail_detach_reap` | an unexpected `DROP` failure, or a partition detached by something other than pgpm, which `retire` leaves alone / no `pgpm_detach` job to dispatch the detach to (run `pgpm.schedule()`) / a `NO ACTION`/`RESTRICT` FK blocked the crossing delete / finalizing an abandoned detach failed. In every case the partition is left whole and `method` carries the error |
+| `fail_restore_incoming_fk` / `fail_validate_incoming_fk` | a preserve-FK re-add failed / a validation was blocked by an orphan, or either did not get its table's lock in time |
+| `fail_retain_drop` / `fail_retain_detach` / `fail_retain_crossing` / `fail_detach_reap` | an unexpected `DROP` failure, or a partition detached by something other than pgpm, which `retire` leaves alone / no `pgpm_detach` job to dispatch the detach to (run `pgpm.schedule()`) / a `NO ACTION`/`RESTRICT` FK blocked the crossing delete / finalizing an abandoned detach failed (including its 5 s lock wait running out behind a reader of the partition, retried next tick). In every case the partition is left whole and `method` carries the error |
 | `fail_retain_reattach` | a partition retention no longer reaches, which its dispatched detach had already taken out of the parent, could not be re-attached (a lock timeout, or something else now holds its range). The table and its rows are left whole, `method` carries the error, and the next tick tries again. Counts in `status().retain_drop_failures` |
 | `fail_retain_identity` / `fail_archive_identity` / `fail_write_block_identity` | a partition's name no longer resolves to the relation pgpm recorded for it, so `retire` refused to detach or drop it (see [identity](#what-retire-checks-a-partitions-identity-against)) / the archive step refused to read it (see [the archive step's identity check](#the-archive-steps-identity-check)) / the write-block step refused to put its trigger on it. `method` names the OIDs and, for the first, which anchor disagreed. None clears itself on a later tick |
 | `fail_archive_contract` | the archive step refused what the archive strategy returned: `covered_hi` was null, not above the chunk's `lo`, past its `hi`, or not a native value, so no ledger row was written and coverage did not advance (see [the archive step's contract check](#the-archive-steps-contract-check)). `method` names the strategy, the chunk, the value returned and the rule it broke. Repeats once per tick until the strategy is corrected, and clears itself once it is |
