@@ -817,6 +817,9 @@ run_perf() {
     "bench/time_literal_era.sh pgpm_perf151"
     "bench/doc_log_actions.sh pgpm_perf140"
     "bench/tests_fail_on_defect.sh pgpm_perf141"
+    "bench/transmute_type_squatter_other_schema.sh pgpm_perf154"
+    "bench/schedule_without_pg_cron.sh pgpm_perf155"
+    "bench/untransmute_acl_capture_under_lock.sh pgpm_perf156"
   )
   local selected=()
   local n=${#guards[@]} idx

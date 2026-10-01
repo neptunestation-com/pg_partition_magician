@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **Pass 5's novel seeds join the mutation catalogue** (`type_squatter_any_schema`,
+  `schedule_without_cron_silent`, `throws_ok_null_pattern_113`, `untransmute_acl_capture_before_lock`,
+  `hypertable_cutover_refusals_reordered`). Three were caught by nothing, so each gets the test that was
+  missing and a wrapper that runs it: `tests/201` (a type of the same name in another schema does not make
+  `transmute` refuse) under `bench/transmute_type_squatter_other_schema.sh`, `tests/202` (`schedule()`
+  refuses by name where pg_cron is not installed) under `bench/schedule_without_pg_cron.sh`, and
+  `tests/203` (a GRANT committed while `untransmute` waits for its lock is kept) under
+  `bench/untransmute_acl_capture_under_lock.sh`. The loosened `tests/113` assertion is a second test-file
+  mutation on `bench/throws_pinned.sh`, and the reordered hypertable refusals a third mutation on
+  `bench/hypertable_replica_capture.sh`, whose `tests/timescale/db/25` refusal messages catch it. The
+  runbook seed (S4) was already catalogued by #749 as `runbook_phantom_alert_action`, the identical edit,
+  which `bench/doc_log_actions.sh` fails. The sixth seed, a bench identity assertion
+  weakened to a count (S5), is not catalogued: an earlier assertion in the same guard fails first, so the
+  guard still discriminates and no mechanical guard for it exists (#775).
 - **The living-docs check reads the log actions in the operator docs' SQL** (#742). Check 6 of
   `scripts/check_living_docs.sh` held only the reference's vocabulary table and "logged `x`" prose to the
   actions an `install.sql` writes, so a phantom action in a runbook alert query (`and action in (...)`, the

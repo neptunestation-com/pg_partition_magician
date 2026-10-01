@@ -35,6 +35,8 @@
 #                             the statement, so it never saw this form and passed the file on its pinned
 #                             neighbour alone (#601); the neighbour is what makes that failure mode visible
 #                             here, since a file with NO site already fails the "found a site" check
+#   throws_ok_null_pattern_113 -- tests/113's refusal assertion loosened the same way (review pass 5 seed S6),
+#                             on a statement written across lines, the shape the first mutation lacks
 #
 # Usage: throws_pinned.sh <container> <db> [test file]
 # With no third argument it probes every tests/**/*.sql in the repository. With one it probes THAT
