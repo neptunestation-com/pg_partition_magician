@@ -1925,8 +1925,12 @@ so its zone can always change and nothing about the grid moves; a month or year 
 the zone the grid was in fact built in. A change is also refused while a regrain is in flight: its copies
 and cursor are not attached bounds, so the checks above cannot see them, and the rest of the run would be
 computed in the new zone, overlap them and fail every swap. Let the run finish, or abandon it with
-[`regrain_cancel`](#regrain_cancel), then change the zone. Naming the zone already recorded is not a change
-and is accepted. Each accepted call writes a `set_partition_tz` row to `pgpm.log`
+[`regrain_cancel`](#regrain_cancel), then change the zone. The call also takes turns with
+[`obtain`](#obtain) and [`extend_to`](#extend_to) on the same parent: it waits for one in flight to commit
+and then judges the grid that call built, and one that starts while a change is uncommitted waits for it
+and then builds in the new zone, so neither can leave the grid off the zone it is recorded in. A
+`maintain_obtain` tick waits under its own `lock_timeout` and logs `skip_obtain` if the change outlasts it.
+Naming the zone already recorded is not a change and is accepted. Each accepted call writes a `set_partition_tz` row to `pgpm.log`
 with `old -> new` in `method`.
 
 ## Observability

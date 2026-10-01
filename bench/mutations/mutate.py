@@ -3688,6 +3688,38 @@ $$;''',
 """, """  if false then
 """, 1)],
     ),
+    "set_partition_tz_config_unlocked": (
+        "bench/set_partition_tz_grid_lock.sh",
+        "Pre-#725 set_partition_tz: it reads its config row without FOR UPDATE, so nothing it holds conflicts "
+        "with the FOR KEY SHARE obtain() and extend_to() take (its own UPDATE takes FOR NO KEY UPDATE, which "
+        "does not). It judges committed pgpm.part around another session's uncommitted cells and accepts a "
+        "zone change that leaves the grid's top off the new lattice, and an extension already past its read "
+        "builds on the old one. One site. tests/195's four sections all catch it.",
+        [("  select * into cfg from pgpm.config where parent_table = p_parent for update;\n",
+          "  select * into cfg from pgpm.config where parent_table = p_parent;\n", 1)],
+    ),
+    "extend_to_config_unlocked": (
+        "bench/set_partition_tz_grid_lock.sh",
+        "Pre-#725 extend_to: it reads its config row without FOR KEY SHARE, so a zone change neither waits for "
+        "its uncommitted cells nor holds it off while the change is uncommitted. Only extend_to's read; "
+        "obtain's and the setter's locks stay. tests/195's sections (A) and (B) catch it.",
+        [("""  -- change under it, and set_partition_tz cannot judge the grid around the cells it has not committed.
+  select * into cfg from pgpm.config where parent_table = p_parent for key share;
+""", """  -- change under it, and set_partition_tz cannot judge the grid around the cells it has not committed.
+  select * into cfg from pgpm.config where parent_table = p_parent;
+""", 1)],
+    ),
+    "obtain_config_unlocked": (
+        "bench/set_partition_tz_grid_lock.sh",
+        "Pre-#725 obtain: it reads its config row without FOR KEY SHARE, so a maintain tick's obtain and a zone "
+        "change neither wait for the other. Only obtain's read; extend_to's and the setter's locks stay. "
+        "tests/195's sections (C) and (D) catch it.",
+        [("""  -- waits for a zone change in flight and then sees the zone it committed. See pgpm.set_partition_tz.
+  select * into cfg from pgpm.config where parent_table = p_parent for key share;
+""", """  -- waits for a zone change in flight and then sees the zone it committed. See pgpm.set_partition_tz.
+  select * into cfg from pgpm.config where parent_table = p_parent;
+""", 1)],
+    ),
     "transmute_identity_reseed_preflight": (
         "bench/cutover_reread_window.sh",
         "Pre-#656 transmute: where each identity sequence resumes is read in the PREFLIGHT, before phase 1, "
