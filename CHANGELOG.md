@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **A `time` bound keeps its era, so a table holding a row before 1 AD converts** (#733). `_time_literal`
+  rendered the year with `to_char` `YYYY`, which drops the era, so an instant before 1 AD read back as an
+  AD year: `transmute` on a table whose oldest row was 100 BC committed a write-rejecting
+  `pgpm_monolith_bound` starting in 101 AD and failed phase 2's `VALIDATE` with a raw 23514, the bound
+  left on the live table. The literal now carries the era (a trailing `BC`) when its wall time is before
+  1 AD, which every DateStyle reads back as the same instant for timestamptz, timestamp and date.
+  `bench/time_literal_era.sh` runs tests/199 against the mutation `time_literal_drops_era`.
 - **`check_uuidv7` and `check_text_time` report the column's maximum past a NULL** (#734). Both read
   `newest_decoded` with `ORDER BY ... DESC LIMIT 1`, and `DESC` sorts NULLs first, so one NULL in a still
   nullable column was "the maximum": `newest_decoded` and `newest_in_future` came back null while a row
