@@ -159,10 +159,11 @@ HT_CUTOVER_CONSERVATION = """  if v_src_n <> v_dest_n or v_src_h <> v_dest_h the
 # every row when the copy recorded no horizon, by its assignment alone.
 HT_CUTOVER_UNTRACKED_REFUSAL = "  if v_unmatched > 0 then\n"
 HT_CUTOVER_NO_HORIZON_FALLBACK = "      v_fresh := 'true';\n"
-# The under-lock append-only catch-up's keyed branch, by its condition alone. Six spaces of indentation
-# pick the UNDER-LOCK `if` (inside `if v_watermark is not null then`) and not the pre-lock key-column
-# build, which sits at four; the count check below refuses to build the mutant if that ever changes.
-HT_CATCHUP_KEYED_BRANCH = "      if v_akey is not null then\n"
+# The under-lock append-only catch-up's keyed branch, by its condition and the comment that opens it: the
+# pre-lock key-column build tests the same condition at the same indentation (since #736 took away the
+# `if v_watermark is not null` both used to differ by), and the count check below refuses to build the
+# mutant if the pair ever stops being unique.
+HT_CATCHUP_KEYED_BRANCH = "    if v_akey is not null then\n      -- Materialise the tail first"
 
 # from_hypertable_cutover's two in-swap records (#563): the incoming keys it drops, and the source
 # sequence's position on the re-added identity. Each is deleted alone, so a guard failure names which.
@@ -1131,7 +1132,8 @@ MUTATIONS = {
         "have gone forward against 242), and part B's refusal names 241 where 242 is asserted. It fails "
         "on the lost row, never on a missing refusal -- that is the other mutation's job.",
         [(HT_CATCHUP_KEYED_BRANCH,
-          "      if false then   -- MUTANT: the pre-#460 strict > on every table, keyed or not\n", 1)],
+          "    if false then   -- MUTANT: the pre-#460 strict > on every table, keyed or not\n"
+          "      -- Materialise the tail first", 1)],
     ),
     "hypertable_cutover_no_conservation": (
         "bench/hypertable_late_appends.sh",
@@ -1163,7 +1165,7 @@ MUTATIONS = {
         "Pre-#563 from_hypertable_cutover(): the swap drops each incoming foreign key and commits, and the "
         "key's definition is held only in a plpgsql local until transmute returns. Deletes the in-swap "
         "pgpm.dropped_fk and drop_incoming_fk log inserts, so when the handoff refuses (the guard's "
-        "45-byte table name derives a daily monolith name over 63 bytes) the key is gone from both "
+        "carried index needs a name a squatter holds) the key is gone from both "
         "referencing tables and written nowhere, and the operator's re-run of transmute has nothing to "
         "restore. The identity position is left in place, so only the record assertions fail.",
         [(HT_SWAP_FK_RECORD, "", 1)],
@@ -1221,6 +1223,54 @@ MUTATIONS = {
         "cutover's first COMMIT where the refusal naming both constraints is pinned).",
         [("  perform pgpm._from_hypertable_check_exclusion(p_hypertable);\n  -- Keep the OID this check resolved",
           "  -- Keep the OID this check resolved", 1)],
+    ),
+    "hypertable_index_ddl_by_pattern": (
+        "bench/hypertable_index_names.sh",
+        "Pre-#735 pgpm_hypertable: the index pre-builds rewrite pg_get_indexdef with "
+        "'^(CREATE (UNIQUE )?INDEX )[^ ]+ ON [^ ]+' instead of replacing the index's own quoted name and "
+        "table by identity. A quoted name holding a space does not match, the statement runs unrewritten, "
+        "and it tries to build a second \"f6 metrics_pkey\" on the SOURCE: 'relation already exists' after "
+        "the whole online copy. Part A of tests/timescale/db/29 (the append-only cutover and the tracked "
+        "copy of a hypertable whose names hold a space) fails on the raw error and on relkind.",
+        [("""  if starts_with(v_def, v_upfx_q) then
+    return 'CREATE UNIQUE INDEX ' || v_to_q || substr(v_def, length(v_upfx_q) + 1);""",
+          """  return regexp_replace(v_def, '^(CREATE (UNIQUE )?INDEX )[^ ]+ ON [^ ]+',   -- MUTANT: by pattern
+    '\\1' || quote_ident(p_tmp) || ' ON ' || quote_ident(p_nsp) || '.' || quote_ident(p_dest));
+  if starts_with(v_def, v_upfx_q) then
+    return 'CREATE UNIQUE INDEX ' || v_to_q || substr(v_def, length(v_upfx_q) + 1);""", 1)],
+    ),
+    "hypertable_tmp_name_cut": (
+        "bench/hypertable_index_names.sh",
+        "Pre-#707 pgpm_hypertable: an index's pre-build temp name is left(<name> || '_pgpm_new', 63), and "
+        "for a 63-byte key name that cut IS the key's own name. The tracked copy's key build dies on "
+        "'already exists', and the append-only cutover finds the source's own index under the temp name, "
+        "skips its build, and fails adopting an index the DROP took. Part B of tests/timescale/db/29 fails.",
+        [("""  select (case when octet_length(p_name || '_pgpm_new') <= 63 then p_name || '_pgpm_new'
+               else 'pgpm_new_' || p_index::text end)::name""",
+          """  select left(p_name || '_pgpm_new', 63)::name   -- MUTANT: cut to 63 bytes""", 1)],
+    ),
+    "hypertable_handoff_unchecked": (
+        "bench/hypertable_index_names.sh",
+        "Pre-#707 pgpm_hypertable: nothing asks for the monolith name transmute will derive from p_interval "
+        "until transmute does, after the cutover's swap has committed, so a 38 to 48 byte hypertable name "
+        "on a daily grid is refused with the hypertable already dropped. _from_hypertable_check_handoff "
+        "returns at once; part C of tests/timescale/db/29 fails where from_hypertable and the cutover are "
+        "pinned to refuse up front (they die on the 2D000 of their first COMMIT inside throws_like).",
+        [("""  select c.relname into v_rel from pg_class c where c.oid = p_hypertable;
+  perform pgpm._part_name(v_rel, 'time', p_interval::text,""",
+          """  select c.relname into v_rel from pg_class c where c.oid = p_hypertable;
+  return;   -- MUTANT: the handoff's names are not asked for up front
+  perform pgpm._part_name(v_rel, 'time', p_interval::text,""", 1)],
+    ),
+    "hypertable_empty_watermark_nothing_past": (
+        "bench/hypertable_empty_copy_watermark.sh",
+        "Pre-#736 pgpm_hypertable: the NULL watermark of an empty copy reads as 'nothing to catch up', so "
+        "the pre-drain, its step and the cutover's own catch-up take no row, and the conservation check "
+        "refuses the swap, blaming rows at or below a watermark that does not exist. Turns "
+        "_from_hypertable_past's NULL case from true into false, which is the old behaviour at all three "
+        "sites; every part of tests/timescale/db/30 fails.",
+        [("then 'true'   -- #736: nothing was copied, so every row is past it",
+          "then 'false'   -- MUTANT: a NULL watermark has nothing past it", 1)],
     ),
     "transmute_dropped_fk_parent_not_carried": (
         "bench/hypertable_swap_order.sh",
@@ -4175,6 +4225,10 @@ MUTATION_SRC = {
     "hypertable_handoff_validate_no_lock_timeout": "pgpm_hypertable/install.sql",
     "hypertable_preflight_no_exclusion_check": "pgpm_hypertable/install.sql",
     "hypertable_cutover_no_exclusion_check": "pgpm_hypertable/install.sql",
+    "hypertable_index_ddl_by_pattern": "pgpm_hypertable/install.sql",
+    "hypertable_tmp_name_cut": "pgpm_hypertable/install.sql",
+    "hypertable_handoff_unchecked": "pgpm_hypertable/install.sql",
+    "hypertable_empty_watermark_nothing_past": "pgpm_hypertable/install.sql",
     "archive_lz77_hash_scratch": "pgpm_archive/install.sql",
     "archive_encode_array_agg_unnest": "pgpm_archive/install.sql",
     "archive_deflate_six_arrays": "pgpm_archive/install.sql",
@@ -4248,6 +4302,10 @@ MUTATION_TRACK = {
     "hypertable_cutover_conservation_by_count": "timescale",
     "hypertable_preflight_no_exclusion_check": "timescale",
     "hypertable_cutover_no_exclusion_check": "timescale",
+    "hypertable_index_ddl_by_pattern": "timescale",
+    "hypertable_tmp_name_cut": "timescale",
+    "hypertable_handoff_unchecked": "timescale",
+    "hypertable_empty_watermark_nothing_past": "timescale",
 }
 
 

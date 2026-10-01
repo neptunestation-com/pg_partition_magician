@@ -490,7 +490,8 @@ migration does not need to interleave application writes between the phases. `p_
 `p_obtain`/`p_retain`/`p_anchor`/`p_paused` parameters pass straight through to `transmute`; `p_drain_batch` is this module's own
 to `transmute` (see there); `p_control` is the time dimension column; `p_track_changes`, `p_predrain` and
 `p_lock_timeout` are described under `from_hypertable_copy` and `from_hypertable_cutover` (a bad
-`p_lock_timeout` is refused before the copy starts). When `p_retain` is left `null`, the source's
+`p_lock_timeout` is refused before the copy starts, and so is a `p_interval` whose monolith name would not
+fit, see `from_hypertable_cutover`). When `p_retain` is left `null`, the source's
 `drop_chunks` policy interval (if any) is carried in.
 
 ```sql
@@ -512,6 +513,7 @@ session `TimeZone`; a hypertable on a dimension of any other type is refused her
 - `p_track_changes` -- capture in-flight **updates, deletes and out-of-order appends**, not just in-order
   appends. When `false` (the default), the cutover catches up **append-only**: it takes the rows whose
   control column is at or past the copy watermark (`max(control)` in the destination) and nothing else.
+  When the hypertable was empty at the copy there is no watermark, and every row the source holds is taken.
   That is correct only for a workload whose rows arrive in control order and are never changed afterwards.
   It **cannot see updates and deletes** to already-copied rows, and it **cannot see a row that arrives
   during the window with a control value below the watermark**: multi-writer clock skew, batched device
@@ -601,7 +603,9 @@ batch copies the rows in `(watermark, hi]` where `hi` is the control value `p_ba
 it then advances the watermark to `hi`. The driver carries the watermark across batches (read once up front,
 never re-scanning the destination for `max()`) and **commits per batch**; `_step` does one batch (no commit,
 returns the advanced watermark). `p_threshold`, `p_max_iter`, and `p_best_effort` behave as in
-`from_hypertable_drain_delta`. Assumes the append-only contract (no updates or deletes to copied rows, and
+`from_hypertable_drain_delta`. When nothing was copied (the hypertable was empty at `from_hypertable_copy`)
+the watermark is `NULL` and every source row is past it; `_step` reads a `NULL` `p_watermark` the same way,
+so its first batch starts at the source's first row. Assumes the append-only contract (no updates or deletes to copied rows, and
 appends arriving in control order), exactly as the under-lock catch-up does. A row that arrives behind the
 watermark is invisible to both; the cutover's conservation check refuses the swap rather than lose it. Use
 `p_track_changes` for update/delete workloads and for any workload that can append out of order.
@@ -623,7 +627,9 @@ online** (best-effort, using `p_drain_batch` as the batch size and residual thre
 (`from_hypertable_drain_delta`) when tracking is on, else the appended-rows tail
 (`from_hypertable_drain_appends`) -- so only a tiny residual is left for the lock. Then it **pre-builds the
 destination's primary key and secondary indexes online** (on the private copy, before any lock -- this is the
-O(rows) work, deliberately kept out of the blocking window). For the append-only path the catch-up watermark
+O(rows) work, deliberately kept out of the blocking window). Each is built from the source index's own
+definition under `<index>_pgpm_new`, or `pgpm_new_<index oid>` when that name would exceed 63 bytes (pgpm
+never cuts it), so index and table names holding spaces or other quoted characters migrate as they are. For the append-only path the catch-up watermark
 (`max(control)` on the destination) is also read here, before the lock, so an `O(rows)` `max()` seqscan on a
 keyless destination is not in the blocking window.
 Then it takes the **`ACCESS EXCLUSIVE` window**: catch up the writes that arrived during
@@ -652,14 +658,22 @@ the copy and any drained batches are intact, and re-running the cutover costs on
 Retry when the reader has finished, or raise the value if a longer queue is acceptable. The same value is
 passed to the handoff's `transmute`. A bad value is refused before the pre-drain does any work.
 
+**The monolith's name is checked before anything changes.** `transmute` names the monolith
+`<rel>_p<lo>_to_<hi>`, which on a fine grid can exceed PostgreSQL's 63-byte limit for a name this module
+otherwise accepts (on a daily grid, a hypertable name of 38 to 48 bytes). The cutover, and `from_hypertable`
+before its copy, ask for that name first and refuse with `pg_partition_magician: cannot migrate hypertable
+... with p_interval ... -- refused before anything is changed, ...`, naming the name and its length. Pass a
+coarser `p_interval`, whose partition names are shorter, or shorten the table name. The check takes the
+longer two-label form, so a table whose rows all fall in one step can be refused on a grid `transmute`
+would have accepted for it.
+
 **The handoff runs after the swap has committed, and can still refuse.** `transmute` applies its own
-preconditions to the plain table (for example, the monolith name a long table name derives on a fine grid can
-exceed PostgreSQL's 63-byte limit). The cutover then errors with the swap in place: the table under its
+preconditions to the plain table (for example, a secondary index whose name leaves no room for the `_pgpm`
+suffix of its partitioned copy). The cutover then errors with the swap in place: the table under its
 original name is an ordinary table holding every row, not a hypertable and not yet partitioned. Nothing the
 swap did is lost. Its identity already continues from the source sequence's position, and every incoming
 foreign key it dropped is recorded in `pgpm.dropped_fk` (and logged `drop_incoming_fk`) against that table.
-Fix what `transmute`'s message names and call `pgpm.transmute` on the table yourself (for the name case, a
-coarser `p_interval`, whose partition names are shorter). Its cutover moves those records onto the new
+Fix what `transmute`'s message names and call `pgpm.transmute` on the table yourself. Its cutover moves those records onto the new
 parent, so [`restore_incoming_fks`](#restore_incoming_fks) re-adds the keys, on the next maintenance tick or
 when called directly.
 

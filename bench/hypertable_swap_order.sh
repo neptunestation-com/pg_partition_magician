@@ -4,8 +4,11 @@
 #
 # The cutover commits the irreversible swap (hypertable dropped, incoming foreign keys dropped, the plain
 # copy renamed into place with its identity re-added) and only then calls transmute, which can still refuse:
-# here, on the monolith name a daily grid derives from a 45-byte table name, which is over PostgreSQL's
-# 63-byte limit (#510). Before #563 the dropped keys' definitions and the source sequence's position lived
+# here, because the name its carried secondary index needs on the new parent (<index>_pgpm) is already
+# taken (#311). This guard used to drive the refusal with the monolith name a daily grid derives from a
+# 45-byte table name, over PostgreSQL's 63-byte limit (#510); the cutover now asks for that name before
+# anything changes (#707), so a refusal after the swap needs a precondition the cutover does not check.
+# Before #563 the dropped keys' definitions and the source sequence's position lived
 # only in plpgsql locals until transmute returned, so that refusal left the referencing tables with no key
 # and nothing anywhere recording one (no pgpm.dropped_fk row, no log row), and the plain table's identity
 # restarting at 1, reissuing ids the table already held (a hypertable's key includes the time column, so
@@ -76,9 +79,8 @@ if [ "$fail" != 0 ]; then
   exit 1
 fi
 
-check "fixture: the daily monolith name is over 63 bytes, the swap's own names are not" \
-  "$(q "select octet_length('$REL' || '_p2024_01_01_to_2024_01_04') > 63
-             and octet_length('$REL' || '_pgpm_delta') <= 63
+check "fixture: the swap's own names and the yearly monolith name all fit" \
+  "$(q "select octet_length('$REL' || '_pgpm_delta') <= 63
              and octet_length('$REL' || '_p2024_to_2030') <= 63")" "t"
 
 q "create schema app;
@@ -93,6 +95,8 @@ q "create schema app;
                            constraint ref_b_fk foreign key (h_id, h_ts) references app.$REL (id, ts));
    insert into app.ref_a values (1, 2, '2024-01-02 01:00+00');
    insert into app.ref_b values (1, 3, '2024-01-03 01:00+00'), (2, 1, '2024-01-01 01:00+00');
+   create index hso_v_idx on app.$REL (v);
+   create table app.hso_v_idx_pgpm (squatter int);   -- takes the name transmute's carried index needs
    create schema timescaledb_information;
    create view timescaledb_information.dimensions as
      select 'app'::name as hypertable_schema, '$REL'::name as hypertable_name, 1 as dimension_number,
@@ -115,10 +119,10 @@ check "LIVENESS: nothing is recorded before the cutover" \
   "$(q "select (select count(*) from pgpm.dropped_fk) + (select count(*) from pgpm.log)")" "0"
 
 out=$(docker exec -i "$C" psql -U postgres -d "$DB" -q -c \
-  "call pgpm.from_hypertable_cutover('app.$REL', 'ts', interval '1 day', p_retain => interval '30 days')" 2>&1)
+  "call pgpm.from_hypertable_cutover('app.$REL', 'ts', interval '1 year', p_retain => interval '30 days')" 2>&1)
 rc=$?
-check "LIVENESS: the cutover failed, on transmute's monolith-name refusal (rc $rc)" \
-  "$(echo "$out" | grep -c 'ERROR:  pg_partition_magician: cannot name a partition of')" "1"
+check "LIVENESS: the cutover failed, on transmute's taken-index-name refusal (rc $rc)" \
+  "$(echo "$out" | grep -c 'ERROR:  pg_partition_magician: cannot transmute .* the name(s) (hso_v_idx_pgpm) are already taken')" "1"
 check "LIVENESS: the swap committed before the refusal (the copy was renamed into place)" \
   "$(q "select coalesce(to_regclass('app.${REL}_pgpm_dest')::text, 'gone') || '/' || (select relkind::text from pg_class where oid = 'app.$REL'::regclass)")" \
   "gone/r"
@@ -143,8 +147,9 @@ check "and each drop is logged, action drop_incoming_fk exactly" \
 newid=$(q "insert into app.$REL (ts, v) values ('2024-01-04 01:00+00', 'd') returning id")
 check "the next default id is the source sequence's next value (8)" "$newid" "8"
 
-# THE REMEDY: shorten what the refusal named (a yearly grid here, whose monolith name fits) and re-run
-# transmute. The records must follow the table onto the new parent, so the keys come back against it.
+# THE REMEDY: clear what the refusal named (drop the squatter) and re-run transmute. The records must
+# follow the table onto the new parent, so the keys come back against it.
+q "drop table app.hso_v_idx_pgpm" >/dev/null
 out=$(docker exec -i "$C" psql -U postgres -d "$DB" -q -c \
   "call pgpm.transmute('app.$REL', 'ts', interval '1 year', p_paused => true)" 2>&1)
 check "LIVENESS: the operator's re-run of transmute succeeds and converts the table" \

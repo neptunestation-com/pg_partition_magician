@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+- **`from_hypertable` migrates a hypertable whose index or table names hold a space** (#735). The index
+  pre-builds rewrote `pg_get_indexdef` with a pattern that stops at the first space, so for a hypertable
+  named `"f6 metrics"` the statement ran unrewritten, tried to build a second `"f6 metrics_pkey"` on the
+  source, and the cutover failed with `relation already exists` after the whole online copy, though the
+  preflight had accepted the table. The copy's tracked key build and the cutover's key and secondary builds
+  now replace the index's own name and table by identity, as `transmute` does for its carried indexes.
+  Guarded by `tests/timescale/db/29` through `bench/hypertable_index_names.sh`
+  (`hypertable_index_ddl_by_pattern`).
+- **`from_hypertable` keeps an index's temp name whole, and refuses a monolith name `transmute` would refuse
+  before the swap** (#707). The temp names were cut to 63 bytes, which for a 63-byte key name is the key's
+  own name: the tracked copy died on `already exists` and the append-only cutover failed adopting an index
+  the drop had taken. A name that does not fit is now `pgpm_new_<index oid>`. And the cutover handed the
+  table to `transmute` only after its swap had committed, so a 38 to 48 byte name on a daily grid, whose
+  monolith name is over 63 bytes, was refused with the hypertable already gone; the cutover, and
+  `from_hypertable` before its copy, now ask for that name first. Guarded by `tests/timescale/db/29`
+  through `bench/hypertable_index_names.sh` (`hypertable_tmp_name_cut`, `hypertable_handoff_unchecked`).
+- **An append-only `from_hypertable` of a hypertable that was empty at the copy catches up its appends**
+  (#736). The empty copy's watermark is `NULL`, and the pre-drain, its step function and the cutover's
+  catch-up all read that as nothing to catch up, so every row appended after the copy stayed out of the
+  destination and the conservation check refused the swap, blaming rows at or below a watermark that does
+  not exist. A `NULL` watermark now puts every row past it. Guarded by `tests/timescale/db/30` through
+  `bench/hypertable_empty_copy_watermark.sh` (`hypertable_empty_watermark_nothing_past`).
 - **The last unbounded lock waits #657 and #665 left behind give up after 5 s** (#708). `maintain_all`'s
   `_detach_reap` finalized an abandoned detach under pg_cron's default of no `lock_timeout`, so one reader
   of the abandoned partition parked the sweep before it reached any parent, with every later access to the

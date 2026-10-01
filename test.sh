@@ -385,6 +385,12 @@ run_timescale() {
     # only ever pointed at mutants would stay green there even if it failed against everything.
     echo "--- cutover conservation by identity guard (issue #653) ---"
     bash "$(dirname "$0")/bench/hypertable_cutover_conservation.sh" pgpm_test-timescale pgpm_perf86 || fail=1
+    # The same reasoning for #735/#707's index-name harness and #736's empty-copy-watermark harness: each
+    # re-runs a file the loop above ran, so it is proven against the real install, not only against mutants.
+    echo "--- index names by identity, whole temp names, handoff names up front (issues #735, #707) ---"
+    bash "$(dirname "$0")/bench/hypertable_index_names.sh" pgpm_test-timescale pgpm_perf136 || fail=1
+    echo "--- empty-copy watermark guard (issue #736) ---"
+    bash "$(dirname "$0")/bench/hypertable_empty_copy_watermark.sh" pgpm_test-timescale pgpm_perf137 || fail=1
 
     echo "--- discriminate (timescale-scoped mutations) ---"
     bash "$(dirname "$0")/bench/discriminate.sh" --track=timescale pgpm_test-timescale || fail=1
