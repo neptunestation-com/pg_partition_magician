@@ -14,8 +14,7 @@
 #      test.sh parses with unique pgpm_perfNN guard databases (the branch's duplicate is renumbered),
 #      mutate.py has unique keys and EVERY mutation still builds against its source;
 #   4. push with a lease, wait for the head's own checks (a known flake is rerun, see flake_check.sh;
-#      a check whose name says `(informational)` is neither waited for nor read as a failure, see
-#      #765; anything else stops the run), enqueue, and wait for the queue to merge it (a PR that leaves the
+#      anything else stops the run), enqueue, and wait for the queue to merge it (a PR that leaves the
 #      queue unmerged on a known flake is re-enqueued; a merge is re-checked before it is read as a
 #      fall-out, because the queue entry reads empty for a few seconds after the merge).
 #
@@ -154,11 +153,7 @@ wait_run() { # <run_id>: until the run's latest attempt completes; 1 on timeout
 wait_checks() { # <pr>: 0 green, 5 a check failed (prints the failing run id to $FAILED_RUN), 1 timeout
   local pr=$1 json s n i
   for i in $(seq 1 "$WAIT_CHECKS"); do
-    # a check whose name says "(informational)" is dropped before anything is read from the list: the
-    # dbdev package size job (#765) is red on purpose while the package is over database.dev's column,
-    # and it is in no summary's `needs`, so the queue merges past it; this waiter must too
-    json=$(gh pr checks "$pr" --repo "$REPO" --json bucket,link,name 2>/dev/null \
-           | jq '[.[] | select(.name | test("\\(informational\\)") | not)]') || json="[]"
+    json=$(gh pr checks "$pr" --repo "$REPO" --json bucket,link 2>/dev/null) || json="[]"
     n=$(jq 'length' <<<"$json")
     s=$(jq -r 'map(.bucket) | group_by(.) | map("\(.[0]):\(length)") | join(" ")' <<<"$json")
     say "  #$pr checks n=$n $s"

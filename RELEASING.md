@@ -125,9 +125,10 @@ Three install channels exist, and they are not equally exercised:
   its documentation does not mention the limit, and pg_flight_recorder met it by publishing. The
   minified core install reached the cap during pass 5's fix phase (2026-10-01). The merge gate does not
   enforce it: `test.sh` and the Lint minifier job build the package with `PGPM_DBDEV_CAP=warn`, and the
-  Test Suite's `dbdev package size (informational)` job runs the strict check off the required path, so
-  `main` shows red there while it is over the cap. `publish-dbdev.yml` builds strictly and refuses to
-  publish until the package is under 250,000 characters again. The remedy (split the extension into two
+  Test Suite's `dbdev package size (informational)` job, off the required path and always green, reports
+  the size in its job summary and raises a `::warning::` annotation while it is over the cap.
+  `publish-dbdev.yml` builds strictly and refuses to publish until the package is under 250,000
+  characters again. The remedy (split the extension into two
   TLE packages, or cut the package by about 20,000 characters, most of it raise-message text) is a
   release decision; nobody has installed from database.dev yet, for pgfr or for pgpm.
 - **database.dev / TLE.** Published at release time. `ALTER EXTENSION ... UPDATE` is *not* wired up:
