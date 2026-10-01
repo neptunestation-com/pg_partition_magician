@@ -608,8 +608,8 @@ ARCHIVE_CHUNK_TIES_BLOCK = """    if not pgpm._native_gt(cfg.control_kind, v_sto
                   when 'uuidv7' then '1 millisecond'
                   when 'time' then '1 microsecond'
                   else '1' end;
-      execute format('select t.%I::text from %I.%I t where t.%I >= %L order by t.%I asc limit 1',
-                     cfg.control_column, v_nsp, p_child, cfg.control_column,
+      execute format('select %s from %I.%I t where t.%I >= %L order by t.%I asc limit 1',
+                     v_cval_q, v_nsp, p_child, cfg.control_column,
                      pgpm._encode(cfg.control_kind, pgpm._grid_next(cfg.control_kind, v_unit, v_lo, cfg.partition_tz),
                                   cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
                                   cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
@@ -2660,9 +2660,9 @@ $$;''',
         "_archive_fully_covered stays false and retain() never drops the aged partition. tests/125 "
         "catches it twice: the direct _next_archive_chunk call on the frozen monolith dies, and part (C) "
         "finds skip_archive rows where the ledger should cover the aged month.",
-        [("    'with w as (select t.%I as c from %I.%I t where t.%I >= %L order by t.%I limit %s)\n"
-          "     select (select count(*) from w), (select w.c::text from w order by w.c desc limit 1)',\n"
-          "    cfg.control_column, v_nsp, p_child, cfg.control_column,\n",
+        [("    'with w as (select t.%I as c, %s as c_text from %I.%I t where t.%I >= %L order by t.%I limit %s)\n"
+          "     select (select count(*) from w), (select w.c_text from w order by w.c desc limit 1)',\n"
+          "    cfg.control_column, v_cval_q, v_nsp, p_child, cfg.control_column,\n",
           "    'select count(*), max(%I)::text from (select %I from %I.%I t where t.%I >= %L order by t.%I limit %s) s',\n"
           "    cfg.control_column, cfg.control_column, v_nsp, p_child, cfg.control_column,\n", 1)],
     ),
@@ -2673,8 +2673,8 @@ $$;''',
         "budget, so a fixture whose partitions each fit one chunk never gets here and a guard would "
         "pass with the defect present; tests/125 part (C) forces the aged month through a 400-byte "
         "budget, asserts that it took several chunks, and so finds the skip_archive rows this puts back.",
-        [("    execute format('select t.%I::text from %I.%I t where t.%I > %L order by t.%I asc limit 1',\n"
-          "                   cfg.control_column, v_nsp, p_child, cfg.control_column, v_probe_hi_col, cfg.control_column)\n",
+        [("    execute format('select %s from %I.%I t where t.%I > %L order by t.%I asc limit 1',\n"
+          "                   v_cval_q, v_nsp, p_child, cfg.control_column, v_probe_hi_col, cfg.control_column)\n",
           "    execute format('select min(%I)::text from %I.%I t where t.%I > %L',\n"
           "                   cfg.control_column, v_nsp, p_child, cfg.control_column, v_probe_hi_col)\n", 1)],
     ),
@@ -2732,8 +2732,10 @@ $$;''',
         "millisecond, which tests/125_uuidv7_regrain_archive never builds; tests/137's direct pick, its "
         "ledger identity (three chunks, the burst whole in the second) and its retire assertions are what "
         "catch it, through bench/archive_chunk_uuidv7_ties.sh, on PostgreSQL 17.",
-        [("      execute format('select t.%I::text from %I.%I t where t.%I >= %L order by t.%I asc limit 1',\n",
-          "      execute format('select min(%I)::text from %I.%I t where t.%I >= %L',\n", 1),
+        [("      execute format('select %s from %I.%I t where t.%I >= %L order by t.%I asc limit 1',\n"
+          "                     v_cval_q, v_nsp, p_child, cfg.control_column,\n",
+          "      execute format('select min(%I)::text from %I.%I t where t.%I >= %L',\n"
+          "                     cfg.control_column, v_nsp, p_child, cfg.control_column,\n", 1),
          ("                                  cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),\n"
           "                     cfg.control_column)\n"
           "        into v_next_distinct_col;\n",
@@ -5011,6 +5013,35 @@ select is(
           "      values (p_parent, 'regrain_restart', v_lo, v_hi, v_made,\n",
           "    insert into pgpm.log (parent_table, action, lo, hi, rows, method)\n"
           "      values (p_parent, 'regrain_restart', v_lo, v_hi, v_made,\n", 1)],
+    ),
+    "archive_chunk_bare_text": (
+        "bench/ts_text_archive_chunk_transmute_min.sh",
+        "Pre-#788 _next_archive_chunk: the window's newest value, the next distinct value past it and the "
+        "tie extension are read with a bare ::text, in the session's DateStyle and TimeZone, and parsed back "
+        "by _col_to_native (and, as a literal, by the next-distinct probe) in the same session. Under SQL "
+        "DateStyle and Europe/Dublin the summer text reads 'IST', which the default timezone_abbreviations "
+        "parse as Israel (+02), so every value reads an hour early, the stop falls below lo and no chunk is "
+        "returned: the aged child is never archived and so never retired, with nothing logged. The one "
+        "render the three reads share is reverted to the old expression; tests/213's SQL/Dublin pick, its "
+        "two ledger chunks and the retire catch it.",
+        [("""  v_cval_q := case when cfg.control_kind = 'time' and not pgpm._control_naive(p_parent, cfg.control_column)
+                   then format('pgpm._ts_text(t.%I)', cfg.control_column)
+                   else format('t.%I::text', cfg.control_column) end;
+""", """  v_cval_q := format('t.%I::text', cfg.control_column);
+""", 1)],
+    ),
+    "transmute_min_bare_text": (
+        "bench/ts_text_archive_chunk_transmute_min.sh",
+        "Pre-#788 _transmute: min(control) is read with a bare t.col::text, in the session's DateStyle and "
+        "TimeZone, and parsed back with ::timestamptz in the same session. Under SQL DateStyle and "
+        "Asia/Kolkata the text reads 'IST', which parses as Israel (+02), so the minimum reads 3.5 hours "
+        "late, an oldest row in the last hour of March floors the monolith's lo into April, phase 2's "
+        "VALIDATE fails on that row and the NOT VALID bound is left behind. The read is reverted to the "
+        "old expression; tests/213's SQL/Kolkata conversion, its lo and its bound catch it.",
+        [("""                 case when p_control_kind = 'time' and v_typname not in ('timestamp', 'date')
+                      then format('pgpm._ts_text(t.%I)', p_control) else format('t.%I::text', p_control) end,
+""", """                 format('t.%I::text', p_control),
+""", 1)],
     ),
 }
 

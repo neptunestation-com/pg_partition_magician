@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **The archive picker and `transmute`'s monolith lo read a timestamptz the same from every DateStyle**
+  (#788). Two more sites rendered a control value with a bare `::text` and parsed it back in the same
+  session, the class `_ts_text` exists for (#500, #570). `_next_archive_chunk` read the window's newest
+  value, the next distinct value and the tie extension that way, so from a session in DateStyle SQL and
+  Europe/Dublin (whose summer `IST` the default abbreviations read as Israel) every value read an hour early,
+  no chunk was returned and the aged partition was never archived or retired, with nothing logged.
+  `_transmute` read min(control) that way, so from DateStyle SQL in Asia/Kolkata an oldest row in a month's
+  last 3.5 hours floored the monolith's lo into the next month, phase 2's VALIDATE failed on it and the
+  NOT VALID bound was left behind. Both now render through `_ts_text`. `tests/213` pins the chunk, the
+  ledger and the retire from a SQL/Dublin session and the conversion from a SQL/Kolkata one, and
+  `bench/ts_text_archive_chunk_transmute_min.sh` runs it with the mutations `archive_chunk_bare_text` and
+  `transmute_min_bare_text`, one per site.
 - **A regrain survives `ALTER TABLE` on its parent** (#785). The fine copies are made `LIKE` the parent when
   each is created and never saw later DDL, while the copy, the reconcile and the swap's `ATTACH` list the
   parent's current columns, so an `ADD COLUMN` mid-regrain failed every later tick with `skip_regrain`
