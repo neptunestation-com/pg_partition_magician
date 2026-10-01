@@ -2291,6 +2291,147 @@ begin
 end;
 $$;
 
+-- _retain_recall(): take back a retirement retention no longer reaches (issue #724).
+--
+-- retire() marks a referenced partition (retiring_at) and arms the standing pgpm_detach job with its
+-- concurrent detach, and a later retire() call finishes it with a DROP. Retention can stop reaching the
+-- partition in between: set_retain loosens it (a longer value, or null), or an id table's frontier, which
+-- is max(control), moves back when its newest rows are deleted. retire() is then never called on it again,
+-- because retain() walks only what the horizon reaches, so nothing ever looked at the armed command: cron
+-- ran it, the partition left the parent with every row the policy now keeps, writes into its range were
+-- refused for want of a partition, pgpm.part still said attached and status() counted no failure. The
+-- retirement belongs to the policy that started it, so when the policy no longer reaches the partition
+-- the retirement is undone, from whichever of its three states it is in:
+--
+--   ARMED, still attached: the job is returned to idle, conditionally on still holding THIS partition's
+--   command (the #407 rule: never clobber another parent's dispatch), logged retain_recall. The marker is
+--   KEPT by that call and cleared only by a later one that finds the job no longer armed with it and no
+--   detach of it running. A detach pg_cron had already picked up when the recall landed still runs, and a
+--   marker cleared in the same transaction as the recall would leave it landing on a partition that looks
+--   detached by an operator, which this function and retire() both leave alone (#652). Keeping the marker
+--   one call longer is what lets the next branch recognise the late detach as this retirement's own.
+--
+--   DETACHED by this retirement (marker set, no longer a partition of the parent): re-attached on its own
+--   bounds, logged retain_reattach. The job is disarmed first, or its next run would detach it again. The
+--   CHECK constraint DETACH ... CONCURRENTLY leaves on the detached table is dropped once the partition
+--   bound enforces the same thing again, as transmute does with the monolith's: identified as exactly the
+--   partition constraint, which is what the detach adds. A re-attach that fails (a lock timeout in the
+--   tick, something else now holding the range) is logged fail_retain_reattach and counted in
+--   status().retain_drop_failures; the table and its rows are left whole and the next call tries again.
+--
+--   PENDING (inhdetachpending): a detach in its wait phase, or one _detach_reap will finalize. Left for a
+--   later call, silently, as _detach_reap leaves a live one.
+--
+-- A name that no longer resolves to the relation either anchor recorded is not acted on beyond disarming
+-- its own command: logged fail_retain_identity, as retire() does for the same mismatch.
+--
+-- p_reattach false is set_retain's call: recall only. set_retain is an operator's call with no
+-- lock_timeout of its own, and an ATTACH there would queue behind whatever holds the parent; the tick
+-- that follows re-attaches under maintain's 200 ms lock_timeout, and confirms the recall.
+create or replace function pgpm._retain_recall(p_parent regclass, p_reattach boolean)
+returns int language plpgsql as $$
+declare
+  cfg pgpm.config; v_boundary text; v_nsp name; r record; v_now regclass; v_cmd_q text;
+  v_armed boolean; v_pending boolean; v_check name; v_n int := 0;
+  v_db oid := (select oid from pg_database where datname = current_database());
+begin
+  select * into cfg from pgpm.config where parent_table = p_parent;
+  if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
+  -- nothing under way, nothing to take back: the ordinary tick reads no frontier here
+  if not exists (select 1 from pgpm.part where parent_table = p_parent and attached and retiring_at is not null) then
+    return 0;
+  end if;
+  v_boundary := pgpm._retain_boundary(cfg);
+  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+
+  for r in select child_name, lo, hi, retiring_oid, child_oid from pgpm.part
+            where parent_table = p_parent and attached and retiring_at is not null
+  loop
+    -- still reached: the retirement stands, and retire() finishes it
+    continue when v_boundary is not null and not pgpm._native_gt(cfg.control_kind, r.hi, v_boundary);
+
+    v_now := to_regclass(format('%I.%I', v_nsp, r.child_name));
+    v_cmd_q := pgpm._detach_cmd(p_parent, v_nsp, r.child_name);
+    if (r.retiring_oid is not null and v_now::oid is distinct from r.retiring_oid)
+       or (r.child_oid is not null and v_now::oid is distinct from r.child_oid) then
+      perform pgpm._idle_detach_job(v_cmd_q);
+      insert into pgpm.log (parent_table, action, lo, hi, method)
+        values (p_parent, 'fail_retain_identity', r.lo, r.hi,
+                format('%I.%I is oid %s now, not the relation whose retirement retention no longer reaches; refusing to re-attach it',
+                       v_nsp, r.child_name, coalesce(v_now::oid::text, 'nothing')));
+      continue;
+    end if;
+
+    begin
+      execute 'select exists (select 1 from cron.job where jobname = ''pgpm_detach'''
+           || ' and database = current_database() and command = $1)'
+        into v_armed using v_cmd_q;
+    exception when others then
+      v_armed := false;   -- no pg_cron, or no such job: nothing can be armed
+    end;
+
+    select i.inhdetachpending into v_pending
+      from pg_inherits i where i.inhparent = p_parent and i.inhrelid = v_now;
+    if found then
+      continue when v_pending;
+      if v_armed then
+        perform pgpm._idle_detach_job(v_cmd_q);
+        insert into pgpm.log (parent_table, action, lo, hi, method)
+          values (p_parent, 'retain_recall', r.lo, r.hi,
+                  format('retention no longer reaches %I.%I (horizon %s); its dispatched concurrent detach was recalled and the partition stays attached',
+                         v_nsp, r.child_name, coalesce(v_boundary, 'none')));
+        v_n := v_n + 1;
+        continue;
+      end if;
+      -- not armed: clear the marker unless a detach of it is still on its way (_detach_reap's signals 1
+      -- and 2: a lock on the partition held or awaited, or the statement itself)
+      continue when p_reattach is not true
+        or exists (select 1 from pg_locks l
+                    where l.locktype = 'relation' and l.database = v_db and l.relation = v_now::oid
+                      and l.mode in ('ShareUpdateExclusiveLock', 'AccessExclusiveLock')
+                      and l.pid <> pg_backend_pid())
+        or exists (select 1 from pg_stat_activity a
+                    where a.datname = current_database() and a.pid <> pg_backend_pid() and a.state = 'active'
+                      and a.query ~* 'detach[[:space:]]+partition' and a.query ~* 'concurrently'
+                      and position(lower(r.child_name) in lower(a.query)) > 0);
+      update pgpm.part set retiring_at = null, retiring_oid = null
+       where parent_table = p_parent and child_name = r.child_name;
+      continue;
+    end if;
+
+    -- the dispatched detach landed
+    continue when p_reattach is not true or v_now is null;
+    perform pgpm._idle_detach_job(v_cmd_q);
+    begin
+      execute format('alter table %s attach partition %I.%I for values from (%L) to (%L)',
+                     p_parent::text, v_nsp, r.child_name,
+                     pgpm._encode(cfg.control_kind, r.lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
+                     pgpm._encode(cfg.control_kind, r.hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));
+      for v_check in
+        select c.conname from pg_constraint c
+         where c.conrelid = v_now and c.contype = 'c' and c.conislocal and c.coninhcount = 0
+           and pg_get_constraintdef(c.oid) = format('CHECK (%s)', pg_get_partition_constraintdef(v_now))
+      loop
+        execute format('alter table %I.%I drop constraint %I', v_nsp, r.child_name, v_check);
+      end loop;
+      update pgpm.part set retiring_at = null, retiring_oid = null
+       where parent_table = p_parent and child_name = r.child_name;
+      insert into pgpm.log (parent_table, action, lo, hi, method)
+        values (p_parent, 'retain_reattach', r.lo, r.hi,
+                format('retention no longer reaches %I.%I (horizon %s), but its dispatched detach had already landed; re-attached',
+                       v_nsp, r.child_name, coalesce(v_boundary, 'none')));
+      v_n := v_n + 1;
+    exception when others then
+      insert into pgpm.log (parent_table, action, lo, hi, method)
+        values (p_parent, 'fail_retain_reattach', r.lo, r.hi,
+                left(format('retention no longer reaches %I.%I, which its dispatched detach took out of the parent, and re-attaching it failed: %s',
+                            v_nsp, r.child_name, sqlerrm), 200));
+    end;
+  end loop;
+  return v_n;
+end;
+$$;
+
 create or replace function pgpm.retain(p_parent regclass)
 returns int language plpgsql as $$
 declare
@@ -2298,6 +2439,10 @@ declare
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
+  -- #724: first, take back any retirement this horizon no longer reaches (recall its armed detach, or
+  -- re-attach the partition it already took out of the parent). Ahead of the null check, because null
+  -- (keep everything) is the widest loosening of all.
+  perform pgpm._retain_recall(p_parent, true);
   if cfg.retain is null then return 0; end if;
 
   v_boundary := pgpm._retain_boundary(cfg);
@@ -7164,6 +7309,11 @@ begin
   end if;
 
   update pgpm.config set retain = p_retain where parent_table = p_parent;
+
+  -- #724: a loosening that stops reaching a partition whose retirement is under way recalls its armed
+  -- detach NOW, before pg_cron's next run can take the partition out of the parent; the next tick
+  -- re-attaches one that a run already in flight took out anyway. See _retain_recall.
+  perform pgpm._retain_recall(p_parent, false);
 end;
 $$;
 
@@ -8163,11 +8313,14 @@ begin
     -- value), so no ledger row is written and coverage does not advance. Retention is stalled the
     -- same way, on every tick until the strategy is corrected, which is the one thing that separates
     -- it from the identity refusals: it clears itself once a correct strategy is handed the same chunk.
+    -- `fail_retain_reattach` (issue #724) is a retirement retention no longer reaches whose detach had
+    -- already landed and could not be put back: the partition's rows are out of the parent until it is,
+    -- which is louder than any stall, so it is counted with them.
     select count(*) into v_drop_fails from pgpm.log
       where parent_table = r.parent_table
         and action in ('fail_retain_drop', 'fail_retain_crossing', 'fail_retain_detach',
                        'fail_retain_identity', 'fail_archive_identity', 'fail_write_block_identity',
-                       'fail_archive_contract')
+                       'fail_archive_contract', 'fail_retain_reattach')
         and id > coalesce(v_last_retain_id, 0);
     -- Partitions whose concurrent detach has been dispatched and not yet completed (issue #268).
     -- Non-zero is normal for a tick or two while cron performs the detach; persistently non-zero with

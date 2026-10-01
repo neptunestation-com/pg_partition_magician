@@ -3483,6 +3483,43 @@ $$;''',
           "  if not exists (\n"
           "       select 1 from pg_inherits i\n", 1)],
     ),
+    "retain_recall_never": (
+        "bench/retain_recall_armed_detach.sh",
+        "Issue #724, the pre-fix shape: nothing takes back a retirement retention no longer reaches. A "
+        "referenced partition's dispatched detach stays armed after set_retain loosens retention (or an id "
+        "frontier moves back), pg_cron detaches it, retire() is never called on it again and nothing "
+        "re-attaches it, so its rows vanish from every read of the parent with nothing logged. One site, "
+        "_retain_recall's loop, made to select nothing. tests/194 parts A, B and C catch it.",
+        [("  for r in select child_name, lo, hi, retiring_oid, child_oid from pgpm.part\n"
+          "            where parent_table = p_parent and attached and retiring_at is not null\n",
+          "  for r in select child_name, lo, hi, retiring_oid, child_oid from pgpm.part\n"
+          "            where parent_table = p_parent and attached and retiring_at is not null and false\n", 1)],
+    ),
+    "retain_recall_clears_at_once": (
+        "bench/retain_recall_armed_detach.sh",
+        "Issue #724, the plausible-but-wrong fix: the recall clears the retiring marker in the same call that "
+        "returns the job to idle. A detach pg_cron had already picked up still runs, and lands on a partition "
+        "with no marker, which reads as detached by an operator, so nothing re-attaches it and its rows stay "
+        "out of the parent. One site, the marker cleared in the recall branch. tests/194 part B catches it.",
+        [("                         v_nsp, r.child_name, coalesce(v_boundary, 'none')));\n"
+          "        v_n := v_n + 1;\n"
+          "        continue;\n",
+          "                         v_nsp, r.child_name, coalesce(v_boundary, 'none')));\n"
+          "        update pgpm.part set retiring_at = null, retiring_oid = null\n"
+          "         where parent_table = p_parent and child_name = r.child_name;\n"
+          "        v_n := v_n + 1;\n"
+          "        continue;\n", 1)],
+    ),
+    "retain_recall_ignores_horizon": (
+        "bench/retain_recall_armed_detach.sh",
+        "Issue #724, overreach in the other direction: every retirement under way is taken back, whether or "
+        "not retention still reaches the partition. A loosening that still reaches it (or any tick) recalls "
+        "the detach retire() just armed, so a referenced partition's retirement never completes. One site, "
+        "the horizon check at the top of _retain_recall's loop, removed. tests/194 part D catches it.",
+        [("    -- still reached: the retirement stands, and retire() finishes it\n"
+          "    continue when v_boundary is not null and not pgpm._native_gt(cfg.control_kind, r.hi, v_boundary);\n",
+          "", 1)],
+    ),
     "write_block_presence_only": (
         "bench/write_block_enabled_state.sh",
         "Pre-#651 _is_write_blocked: true whenever the pgpm_write_block trigger EXISTS, whatever its enable "
