@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- **`scripts/review/closure.sh` starts the timescale harness when a claim needs it.** Pass 5 was the first
+  pass with hypertable reproductions in its claim set; `classify_claims.py` routes those to `pgpm_test-timescale`
+  and the closure script had never started that service, so its first run died on its first claim. It now reads
+  the claims' install lists, brings the service up and waits for it, as it does for the archive service.
 - **Pass 5's novel seeds join the mutation catalogue** (`type_squatter_any_schema`,
   `schedule_without_cron_silent`, `throws_ok_null_pattern_113`, `untransmute_acl_capture_before_lock`,
   `hypertable_cutover_refusals_reordered`). Three were caught by nothing, so each gets the test that was
