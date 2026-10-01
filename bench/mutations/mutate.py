@@ -5153,6 +5153,64 @@ select is(
         "held) are what catch it.",
         [("    exit when v_made >= 2\n", "    exit when false and v_made >= 2\n", 1)],
     ),
+    # Issue #782, one mutation per site that carries the replica identity, so each is proven caught on its own.
+    "cutover_replica_identity_parent_dropped": (
+        "bench/cutover_replica_identity.sh",
+        "Issue #782 put back at the cutover: 9d reads the table's replica identity as the default, so the "
+        "parent gets none of FULL, NOTHING or USING INDEX, and every partition minted from it takes the "
+        "parent's default. A keyless FULL table in a publication fails every UPDATE and DELETE routed to a "
+        "forward partition with 55000. tests/207's parent and partition identity assertions in every part, "
+        "and its UPDATE and DELETE in part A, catch it.",
+        [("  select c.relreplident into v_replident from pg_class c where c.oid = p_parent;\n",
+          "  v_replident := 'd';\n", 1)],
+    ),
+    "create_partition_replica_identity_dropped": (
+        "bench/cutover_replica_identity.sh",
+        "Issue #782 put back where obtain and extend_to mint: _create_partition gives the new partition "
+        "nothing of the parent's replica identity, which PostgreSQL does not give it either, so the parent "
+        "is right and every forward partition has the default. tests/207's forward-partition assertions in "
+        "parts A to D catch it.",
+        [("  perform pgpm._replica_identity_like_parent(format('%I.%I', p_nsp, p_rel)::regclass,\n"
+          "                                             format('%I.%I', p_nsp, p_name)::regclass);   -- #782\n",
+          "", 1)],
+    ),
+    "regrain_swap_replica_identity_dropped": (
+        "bench/cutover_replica_identity.sh",
+        "Issue #782 put back where a regrain's swap attaches its fine children: a LIKE copy has the default "
+        "identity whatever the parent's, and nothing gives it the parent's, so a FULL table's regrained range "
+        "publishes its key. tests/207's part F catches it.",
+        [("    perform pgpm._replica_identity_like_parent(p_parent, v_copy);\n", "", 1)],
+    ),
+    # Issue #789, one mutation per site.
+    "cutover_key_anonymous": (
+        "bench/cutover_key_name.sh",
+        "Issue #789 put back: step 8 leaves the monolith's key under its own name and declares the parent's "
+        "key anonymously, so it comes back auto-named (t_pkey1, or <t>_pkey for a named key) and every "
+        "INSERT ... ON CONFLICT ON CONSTRAINT <the key's name> fails with 42704. Both branches, the primary "
+        "key and the reused unique constraint. tests/208's name, upsert and adoption assertions in parts A "
+        "to D catch it.",
+        [("    execute format('alter table %s rename constraint %I to %I', v_monreg::text, v_key_name, 'pgpm_key_' || v_key_idx);\n",
+          "    null;\n", 1),
+         ("add constraint %I primary key (%s)%s', v_parent::text, v_key_name,",
+          "add primary key (%s)%s', v_parent::text,", 1),
+         ("add constraint %I unique (%s)%s', v_parent::text, v_key_name,",
+          "add unique (%s)%s', v_parent::text,", 1)],
+    ),
+    "untransmute_key_name_kept": (
+        "bench/cutover_key_name.sh",
+        "Issue #789's reverse left out: untransmute drops the parent, which carried the key's name, and leaves "
+        "the restored table's key under the pgpm_key_<index oid> name step 8 gave the monolith's copy, so "
+        "the upsert naming the key fails with 42704 after the reverse instead. tests/208's part E catches it.",
+        [("    execute format('alter table %s rename constraint %I to %I', v_monreg::text, v_key_mon, v_key_name);\n",
+          "    null;\n", 1)],
+    ),
+    "transmute_key_clash_unchecked": (
+        "bench/cutover_key_name.sh",
+        "Issue #789's refusal left out: nothing asks whether pgpm_key_<index oid>, the name step 8 renames the "
+        "monolith's key to, is free, so a relation holding it fails the rename raw inside the cutover after "
+        "phases 1 and 2 committed the bound and the claim. tests/208's pinned refusal in part F catches it.",
+        [("  if v_key_clash is not null then\n", "  if false and v_key_clash is not null then\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

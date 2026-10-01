@@ -1024,7 +1024,10 @@ For step-by-step procedures when an alert fires, see the [runbook](runbook.md). 
   refused, or captured, exactly as an ordinary write is.
 - **Unique secondary indexes** are carried when their key includes the partition key; otherwise refused.
 - **The key is never rewritten;** a primary key or unique constraint that includes the control column is
-  reused in place, and a keyless table is partitioned keyless. The control column must be `NOT NULL`.
+  reused in place, under its own constraint name on the parent, and a keyless table is partitioned
+  keyless. The control column must be `NOT NULL`.
+- **Replica identity** is carried to the parent and to every partition pgpm mints, so a published table
+  keeps accepting `UPDATE` and `DELETE` past the monolith.
 - **Incoming foreign keys** are refused by default, or preserved (dropped for the conversion, re-added
   against the new parent) with `p_incoming_fks => 'preserve'`.
 - **There is no read gap.** A `SELECT` against the parent always sees every row, on the paced path as much

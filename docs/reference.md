@@ -92,7 +92,15 @@ column **comments**, **row triggers**, each in the enabled state it had (`DISABL
 and `ENABLE REPLICA` are kept, on the parent and on the clone every partition receives), and
 **publication membership**: the parent is added to every publication that names the table, with the same
 row filter and column list, so every partition is published through it (the monolith keeps its own
-membership as well; `untransmute` hands back the managed table's, see below). A sequence the table
+membership as well; `untransmute` hands back the managed table's, see below). The parent takes the
+table's **replica identity** too (`FULL`, `NOTHING`, or `USING INDEX`, mapped to the parent's index that
+the original index is attached under), and every partition pgpm mints afterwards (obtain's, `extend_to`'s,
+a regrain's fine children) takes the parent's as it is then, because PostgreSQL gives a new partition none
+of its parent's: without it a keyless `FULL` table in a publication fails every `UPDATE` and `DELETE` of a
+row past the monolith. A change to the parent's identity made later reaches the partitions minted after
+it, not the ones that already exist. The reused **key keeps its constraint name** on the parent, so
+`INSERT ... ON CONFLICT ON CONSTRAINT <name>` and DDL naming the key keep working; the monolith's copy is
+renamed `pgpm_key_<index oid>` to make way, and an `untransmute` hands the original name back. A sequence the table
 **owns** through a column (a `serial`, or an explicit `OWNED BY`) is handed to the same column of the
 parent, so retention can drop the monolith like any other partition. All of it is
 captured before the rename and re-applied inside
@@ -314,7 +322,8 @@ longer than 58 bytes, so the `<index>_pgpm` name of its partitioned copy would n
 auto-names reach 63; the message names each such index, and `ALTER INDEX ... RENAME TO` a shorter name
 clears it); or a relation already
 occupies one of the `<index>_pgpm` names the conversion needs for the partitioned copies of the table's
-secondary indexes (also usually a leftover from an interrupted run).
+secondary indexes (also usually a leftover from an interrupted run), or the `pgpm_key_<index oid>` name the
+monolith's copy of the key takes.
 
 ```sql
 call pgpm.transmute('public.search_history', 'id', interval '1 month',
@@ -398,7 +407,8 @@ pgpm.untransmute(p_parent regclass) returns regclass
 Reverses a `transmute`, returning the restored ordinary table. It is a **clean, metadata-only reverse
 while the monolith is still intact and holds the whole table**: it detaches the monolith, drops the
 childless parent (cascading any empty forward partitions), renames the monolith
-back, restores identity, the ownership of any `serial` sequence, the row triggers (each in the enabled
+back and hands its key the name the parent's carried (the conversion had renamed the monolith's copy
+`pgpm_key_<index oid>`), restores identity, the ownership of any `serial` sequence, the row triggers (each in the enabled
 state the parent had) and any preserved incoming FKs (`NOT VALID`, see below), and clears `pgpm` state. The
 monolith is the original table itself, found by the oid `transmute` recorded for it
 (`pgpm.config.monolith_oid`), never by its position in the grid.
@@ -2609,7 +2619,8 @@ cells share a name, which `obtain`, `extend_to` and `regrain_step` read as "alre
 forward grid would silently stop growing. So `transmute` refuses a table whose derived names (the
 monolith's, the fine cells', the `<rel>_pgpm_new` staging name) would not fit, naming the offending name
 and the bytes to shorten the table name by, refuses a secondary index whose `<index>_pgpm` copy would not
-fit (an index name of at most 58 bytes does), and `set_regrain` refuses a target step whose wider labels
+fit (an index name of at most 58 bytes does; the key's name needs no room, because the monolith's copy of
+the key takes `pgpm_key_<index oid>`, which always fits), and `set_regrain` refuses a target step whose wider labels
 would not fit. The budget, in bytes: a fine name is `len(<rel>) + 2 + label`, the monolith's is
 `len(<rel>) + 6 + 2 * label`, the staging name is `len(<rel>) + 9`, where the label is 4 (year), 7 (month),
 10 (day), 13 (hour), 15 (minute), 17 (second), 24 (microsecond) or 19 (id, longer past 19 digits or with a
