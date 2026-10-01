@@ -127,6 +127,11 @@ look the same.
   `%I` where a `_q` fragment is spliced. Loud seeds (a raise in a hot path) measure nothing.
 - **Count.** `K` between 6 and 10 for a pass of six to eight finders. Fewer gives recall too coarse to
   read; more starts to shape what finders look at.
+- **Suite check.** Before the hunt, every seed is planted alone and the tree's own pgTAP suite run against
+  it (`plant_seeds.py --suite`); the files that catch it are sealed with the seed. A seed the suite catches
+  measures that a finder ran the tests, not that a lens saw the defect: in pass 4 every seed had a
+  test-file guard, and one finder found all nine by running the suite before reading a line. Plant most
+  seeds where no test catches them, and read recall by its read-caught half.
 - **Blindness.** Finders never see the seed list, `bench/mutations/`, or any diff. The review tree has one
   commit and no remote. Novel seeds are kept in a sealed file the coordinator alone reads until the pass
   closes.
@@ -140,7 +145,7 @@ Recorded per pass, in this order, so the count of findings is never read alone.
 | metric | definition |
 |---|---|
 | budget | finders, agent-hours or tokens per finder, wall-clock |
-| seeds `K`, recall | seeds planted; fraction reported by at least one finder |
+| seeds `K`, recall | seeds planted; fraction reported by at least one finder; from pass 5 also split into suite-caught (the pgTAP suite run on the seeded tree fails, so a finder that ran the tests found it) and read-caught (it does not, so only reading finds it), each as hits over count |
 | claims | total claims across finders |
 | findings | claims that survived verification |
 | per finder | claims and precision for each finder, with the model it ran on when the pass split model tiers |
@@ -162,7 +167,8 @@ signature of a reviewer reaching; it means change the method, not push harder.
 The deep-hunt mode ends when ALL of the following hold, judged on the two most recent passes:
 
 1. **Zero Tier 1 findings** in each of two consecutive passes, and
-2. **seed recall of at least 0.8** in each of those passes (so the zero was earned), and
+2. **seed recall of at least 0.8** in each of those passes (so the zero was earned); from pass 5, the
+   read-caught recall when the suite check measured the split, and
 3. **precision of at least 0.7** in each (so the passes were not reaching), and
 4. **the capture-recapture estimate for Tier 1 rounds to zero**, when two independent hunts were run, or
    the estimate was not attempted and criteria 1 to 3 hold for three passes instead of two.
@@ -296,7 +302,7 @@ One file per pass, committed under `docs/reviews/` as `YYYY-MM-DD.md`, in this s
 
 pinned: <sha> (<release>) | budget: <finders> x <hours or tokens>, <wall-clock>
 lenses: <list> | previous pass lenses: <list>
-seeds K=<n>, recall <r>; claims <c>; findings <f>; precision <p>
+seeds K=<n>, recall <r> (suite-caught <a>/<b>, read-caught <c>/<d>); claims <c>; findings <f>; precision <p>
 findings by tier: T1 <n> T2 <n> T3 <n> T4 <n> T5 <n>
 cost per finding: <x>; per Tier 1 finding: <y>
 root causes: <n> behind the findings, <m> closed as a class by the fix phase

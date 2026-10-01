@@ -34,6 +34,14 @@ Work in a scratch directory outside the repository (the session scratchpad). Ref
   seed alone in a tree of its own when the budget allows.
 - `scripts/review/build_review_tree.sh $pinned $WORK/tree`
 - `scripts/review/plant_seeds.py --tree $WORK/tree --pristine . --plan $WORK/plan.json --sealed $WORK/sealed.json`
+- `scripts/review/plant_seeds.py --suite --sealed $WORK/sealed.json --pristine . --seeds-dir $WORK/seeds`
+  with the core harness up (and the archive or timescale harness when a seed sits in that module). It
+  runs the unseeded tree's suite once as a control (a file that fails there is noise, not a catch), then
+  plants each seed alone and runs that tree's own pgTAP suite against it, sealing the files that catch it
+  as `suite_caught`. Read the table: a seed the suite catches will be found by any finder that runs the
+  tests (pass 4's F8 found all nine that way in twelve minutes), so replace seeds until the split is the
+  one the pass wants, and re-run `--suite --only` for the replacements. The record then reports recall as
+  suite-caught / read-caught.
 - Never show `$WORK/sealed.json`, `$WORK/plan.json` or `$WORK/seeds/` to a finder, and never mention
   which functions were seeded.
 
@@ -91,7 +99,8 @@ scripts/review/pass_metrics.py --pass N --date $(date +%F) --pinned $pinned --re
   --out docs/reviews/$(date +%F).md
 ```
 
-**Report recall and precision before the count of findings, always.** Then the findings by tier, the
+**Report recall and precision before the count of findings, always**, recall with its suite-caught /
+read-caught split (the stopping criteria read the read-caught half). Then the findings by tier, the
 blind spots (seeds missed, by lens), and the per-finder table including the model-tier split. If any
 candidate is unverified, say so and do not call it a finding. Under "Seed interactions to check" the
 record lists the candidates whose pristine run failed only its liveness checks; replace that list, in
