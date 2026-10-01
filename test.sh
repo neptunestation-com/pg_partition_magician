@@ -835,6 +835,7 @@ run_perf() {
     "bench/regrain_target_step_spelling.sh pgpm_perf164"
     "bench/regrain_survives_parent_ddl.sh pgpm_perf165"
     "bench/ts_text_archive_chunk_transmute_min.sh pgpm_perf169"
+    "bench/obtain_lock_budget.sh pgpm_perf166"
   )
   local selected=()
   local n=${#guards[@]} idx

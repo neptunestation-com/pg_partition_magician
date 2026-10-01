@@ -5129,6 +5129,18 @@ select is(
 """, """                 format('t.%I::text', p_control),
 """, 1)],
     ),
+    "obtain_no_lock_budget": (
+        "bench/obtain_lock_budget.sh",
+        "Pre-#786 obtain: nothing bounds a call by the lock table, only by config.obtain, which set_obtain "
+        "bounds only by sign. obtain is a function, so every partition one call creates holds its locks to "
+        "the transaction's end, and a lookahead past ~2000 missing cells on a stock server dies with 53200 "
+        "`out of shared memory` on every tick, rolling back every cell it built: maintain_obtain logs "
+        "skip_obtain and the grid never advances. One site: the budget's stop, made unreachable, so the "
+        "measurement still runs and the walk goes on exactly as the old function's did. tests/212's tick "
+        "(no skip_obtain, a contiguous run of cells built) and its direct call (no more than half the table "
+        "held) are what catch it.",
+        [("    exit when v_made >= 2\n", "    exit when false and v_made >= 2\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

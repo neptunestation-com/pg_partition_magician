@@ -946,6 +946,16 @@ hold, so on an `int` column with a step of 10000 the last partition is `[2147470
 ids from 2147480000 to 2147483647 have no partition to go to. Reaching a ceiling is not a failure: no
 `skip_obtain` is logged, and every tick keeps building what the grid can still express.
 
+It also stops early when the next partition would take the call past half the server's shared lock table,
+`max_locks_per_transaction x (max_connections + max_prepared_transactions)`. One call is one transaction,
+and every partition it creates holds its locks (the table, its indexes, its TOAST table) until that
+transaction ends; the call measures what its first two partitions cost and builds only as many as fit, a few
+hundred on stock settings for a table with a primary key and a TOASTable column. The rest of the lookahead
+is left to the next call, which carries on from where this one stopped, so a lookahead larger than that is
+reached over several ticks rather than failing on every one. The frontier read's locks on the partitions
+that already exist are not counted against this budget. Nothing is logged for the stop either: it is not a
+failure, and the cells it built are logged as usual.
+
 This is the only thing standing between the workload and a write with nowhere to go, since a row outside
 the grid is refused rather than parked. `config.obtain x partition_step` is therefore both the slack if
 maintenance stalls and a ceiling on how far ahead an application may write.
@@ -2007,7 +2017,10 @@ pgpm.set_obtain(p_parent regclass, p_obtain int) returns void
 
 Change `config.obtain`, the number of partitions `obtain` keeps built ahead of the write frontier.
 Refuses a negative `p_obtain`, which would otherwise silently and permanently disable lookahead with
-nothing raised. `0` is allowed (no lookahead beyond the partition the frontier is already in).
+nothing raised. `0` is allowed (no lookahead beyond the partition the frontier is already in). A value
+larger than one transaction can build is accepted: each [`obtain`](#obtain) call builds what fits in half
+the shared lock table and the next tick builds on from there, so raising the lookahead by thousands of
+partitions takes several ticks to fill.
 
 ### `set_retain`
 

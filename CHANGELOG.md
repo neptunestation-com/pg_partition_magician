@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **`obtain` builds what fits in half the shared lock table and leaves the rest to the next tick** (#786).
+  It is a function, so every partition one call creates holds its locks to that transaction's end, and
+  `set_obtain` bounds only the sign of the lookahead: a lookahead past about 2000 missing cells on a stock
+  server died with 53200 `out of shared memory` on every tick, rolled back every cell it had built, logged
+  `skip_obtain`, and the forward grid never advanced. `obtain` now takes `extend_to`'s measurement (#591):
+  once two partitions exist it projects what the next would hold, in non-fast-path `pg_locks` rows counted
+  from just after the frontier read, and stops before its partitions would pass half of
+  `max_locks_per_transaction x (max_connections + max_prepared_transactions)`. It stops rather than refuses,
+  since its lookahead is opportunistic: the call returns what it built and the next tick carries on, so a
+  large `set_obtain` is reached over several ticks. `tests/212_obtain_lock_budget_test.sql` pins the tick
+  (no `skip_obtain`, the contiguous run it built by lower bound) and a direct call's held slots against the
+  half; `bench/obtain_lock_budget.sh` is required to fail against the `obtain_no_lock_budget` mutation.
 - **`from_hypertable`'s swap keeps the table's grants, owner, row-level security, policies, comment and
   triggers** (#787). The cutover renamed the copy, built by `CREATE TABLE ... LIKE`, which carries none of
   them, into the dropped hypertable's place, so `transmute` found nothing to carry and every grantee was

@@ -280,6 +280,10 @@ the monolith), rename the table within the budget under
    select pgpm.obtain('public.events');
    ```
 
+   One `obtain` call builds only as many partitions as fit in half the shared lock table (a few hundred on
+   stock settings), so a lookahead raised by more than that fills over several ticks of the obtain job, or
+   over several `obtain` calls, each in its own transaction.
+
 3. For a one-off bulk load with known-high ids, extend before loading rather than raising the standing
    lookahead.
 
