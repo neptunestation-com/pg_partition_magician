@@ -828,6 +828,7 @@ run_perf() {
     "bench/untransmute_publication_membership.sh pgpm_perf159"
     "bench/transmute_oid_bound_dependants.sh pgpm_perf158"
     "bench/regrain_target_step_spelling.sh pgpm_perf164"
+    "bench/regrain_survives_parent_ddl.sh pgpm_perf165"
   )
   local selected=()
   local n=${#guards[@]} idx

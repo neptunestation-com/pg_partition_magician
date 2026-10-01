@@ -4989,6 +4989,29 @@ select is(
         "lock. tests/205 part C catches it.",
         [("  perform pgpm._refuse_oid_bound_dependants(p_parent, true);", "  null;", 2)],
     ),
+    "regrain_shape_drift_ignored": (
+        "bench/regrain_survives_parent_ddl.sh",
+        "Issue #785, the pre-fix shape: regrain_step never compares its copies' columns with the parent's. "
+        "An ADD COLUMN on the parent mid-regrain fails every later copy and reconcile ('column ... does not "
+        "exist'), a DROP COLUMN or a TYPE change fails the swap's ATTACH, and the run never moves again. One "
+        "site, the restart branch, switched off. tests/211 parts A and B catch it.",
+        [("  if v_drift is not null then\n"
+          "    for r in execute format(\n",
+          "  if false then\n"
+          "    for r in execute format(\n", 1)],
+    ),
+    "regrain_shape_restart_keeps_cursor": (
+        "bench/regrain_survives_parent_ddl.sh",
+        "Issue #785, the plausible-but-wrong fix: the drifted copies are discarded but regrain_cursor is left "
+        "where it was. The sub-ranges behind it then have no copy and are not aged, so the swap refuses every "
+        "tick and the run is wedged again. One site, the cursor reset in the restart branch. tests/211 parts A "
+        "and B catch it.",
+        [("    update pgpm.config set regrain_cursor = v_lo where parent_table = p_parent;\n"
+          "    insert into pgpm.log (parent_table, action, lo, hi, rows, method)\n"
+          "      values (p_parent, 'regrain_restart', v_lo, v_hi, v_made,\n",
+          "    insert into pgpm.log (parent_table, action, lo, hi, rows, method)\n"
+          "      values (p_parent, 'regrain_restart', v_lo, v_hi, v_made,\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

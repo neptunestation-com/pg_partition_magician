@@ -4080,6 +4080,45 @@ begin
 end;
 $$;
 
+-- How the first of a regrain's copies whose columns differ from its parent's differs (#785), or null when
+-- every copy matches. Each side's columns are compared as name, type, collation (when not the type's
+-- own), NOT NULL and generated: the properties regrain_step's copy and reconcile statements and the
+-- swap's ATTACH PARTITION depend on. Defaults, statistics targets and storage are not compared: the
+-- copy's rows are inserted with explicit values and ATTACH does not ask. A copy is made LIKE its parent,
+-- so the two differ only when the parent has been altered since; regrain_step restarts the run when they
+-- do. One statement over every copy, comparing each relation's column list as one string, and the
+-- difference spelt out for the first that differs only: asked on every resumed tick, and a run toward a
+-- daily grid on a yearly partition has 365 copies (measured 4 ms for those, against 32 ms asking them
+-- one call at a time). A recorded oid that names nothing has no columns here and is not compared.
+create or replace function pgpm._regrain_shape_drift(p_parent regclass, p_copies oid[])
+returns text language sql stable as $$
+  with cols as (
+    select a.attrelid,
+           format('%I %s%s%s%s', a.attname, format_type(a.atttypid, a.atttypmod),
+                  case when a.attcollation <> 0 and a.attcollation <> t.typcollation
+                       then ' collate ' || a.attcollation::regcollation::text else '' end,
+                  case when a.attnotnull then ' not null' else '' end,
+                  case when a.attgenerated <> '' then ' generated' else '' end) as col
+      from pg_attribute a join pg_type t on t.oid = a.atttypid
+     where (a.attrelid = p_parent or a.attrelid = any(p_copies)) and a.attnum > 0 and not a.attisdropped
+  ),
+  sig as (select attrelid, string_agg(col, ', ' order by col) as s from cols group by attrelid),
+  drifted as (
+    select c.attrelid from sig c join sig p on p.attrelid = p_parent
+     where c.attrelid <> p_parent and c.s is distinct from p.s
+     order by c.attrelid limit 1
+  )
+  select concat_ws('; ', 'the parent has ' || g.s || ' and the copy ' || d.attrelid::regclass::text || ' does not',
+                         'the copy ' || d.attrelid::regclass::text || ' has ' || l.s || ' and the parent does not')
+    from drifted d
+    cross join lateral (select string_agg(col, ', ' order by col) as s
+                          from (select col from cols where attrelid = p_parent
+                                except select col from cols where attrelid = d.attrelid) x) g
+    cross join lateral (select string_agg(col, ', ' order by col) as s
+                          from (select col from cols where attrelid = d.attrelid
+                                except select col from cols where attrelid = p_parent) x) l;
+$$;
+
 -- Resolve one regrain copy, a not-attached pgpm.part row of p_parent named p_child, to the relation its
 -- child_oid recorded when regrain_step created it (#421), refusing when the name no longer resolves to
 -- that relation (#723, #707). The copy branch has checked this since #631; the reconcile and the swap
@@ -4439,7 +4478,7 @@ declare
   v_fk_ids bigint[];
   v_child_name name; v_src_name name; v_rec int; v_delta_n bigint; v_delta_name name; v_busy name;
   v_delta_reg regclass; v_sub_known boolean; v_sub_oid oid; v_sub_now regclass; v_copy regclass;
-  v_held_lo text; v_held_hi text;
+  v_held_lo text; v_held_hi text; v_drift text; v_copies oid[];
 begin
   -- #554: before the config read below, so a second driver of this parent (a tick, a hand-driven step, a
   -- cancel) waits for this step to commit and this step reads what the last one left
@@ -4601,6 +4640,52 @@ begin
   select delta into v_delta_name from pgpm._regrain_capture_names(p_parent);
   v_delta_reg := to_regclass(format('%I.%I', v_nsp, v_delta_name));
   if v_delta_reg is not null then perform pgpm._regrain_capture_grant(p_parent, v_delta_reg); end if;
+
+  -- #785: the copies must still have the parent's columns. They are standalone tables made LIKE the
+  -- parent as it stood when each was created, and ALTER TABLE on the parent reaches the attached source
+  -- but never them, while the copy and the reconcile below list the parent's CURRENT columns and the
+  -- swap's ATTACH requires the same columns, types and NOT NULLs. An ADD COLUMN mid-regrain therefore
+  -- failed every later tick ('column ... does not exist', logged skip_regrain), a DROP COLUMN or a TYPE
+  -- change failed at the swap, and the run never moved again. Asked before the reconcile, the copy and
+  -- the swap, so every one of them meets copies of the parent's current shape.
+  --
+  -- A drifted run restarts from the source, as the prepare tick restarts copies that predate capture:
+  -- the copies are discarded and the range is copied again, LIKE the parent as it is now. Not an ADD
+  -- COLUMN on each copy instead, because that is right only for a constant default: the source's rows
+  -- got the new column's value when the ALTER ran (a volatile default rewrote them with one value per
+  -- row, now() was evaluated once at that instant), and re-evaluating the default in the copy gives its
+  -- rows different values, which the swap would then attach. Only rereading every copied row from the
+  -- source gets them right, and that is what the restart does. Capture stays on and its delta is kept:
+  -- every captured key is at or past the reset cursor now, so it waits until the copy has passed it and
+  -- is then applied from the source, which is harmless for a row the copy already took because the
+  -- reconcile deletes and reinserts it from the source.
+  -- Each copy by the oid regrain_step recorded (#421); a null child_oid predates the anchor and is read by
+  -- name.
+  v_copies := '{}';
+  for r in execute format(
+    'select child_name, child_oid from pgpm.part where parent_table = %L::regclass and not attached'
+    || ' and lo::%s >= %L::%s and hi::%s <= %L::%s',
+    p_parent::text, v_ncast, v_lo, v_ncast, v_ncast, v_hi, v_ncast)
+  loop
+    v_copies := v_copies || coalesce(r.child_oid, to_regclass(format('%I.%I', v_nsp, r.child_name))::oid);
+  end loop;
+  v_drift := pgpm._regrain_shape_drift(p_parent, v_copies);
+  if v_drift is not null then
+    for r in execute format(
+      'select child_name from pgpm.part where parent_table = %L::regclass and not attached'
+      || ' and lo::%s >= %L::%s and hi::%s <= %L::%s',
+      p_parent::text, v_ncast, v_lo, v_ncast, v_ncast, v_hi, v_ncast)
+    loop
+      perform pgpm._regrain_drop_copy(p_parent, v_nsp, r.child_name);   -- #631: by recorded oid
+      v_made := v_made + 1;
+    end loop;
+    update pgpm.config set regrain_cursor = v_lo where parent_table = p_parent;
+    insert into pgpm.log (parent_table, action, lo, hi, rows, method)
+      values (p_parent, 'regrain_restart', v_lo, v_hi, v_made,
+              format('the parent''s columns changed since the copies were made (%s); the copies are discarded and the range is copied again from the source',
+                     v_drift));
+    return 'restarted:' || v_made;
+  end if;
 
   -- retention horizon (matches retain(), issue #91)
   if cfg.retain is not null then
