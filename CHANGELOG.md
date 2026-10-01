@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **`uninstall.sql` removes `from_hypertable`'s change capture too** (#737). It swept only regrain's, so
+  after a `from_hypertable_copy(..., p_track_changes => true)` that was never cut over, the
+  `<rel>_pgpm_delta` table, its `<rel>_pgpm_delta_fn()` and the `<rel>_pgpm_delta_trg` trigger on the live
+  hypertable and its chunks survived the uninstall, and the trigger went on logging every write into a
+  delta nothing would drain. Beside the schema drop (so a refused uninstall leaves it in place), uninstall
+  now finds each such copy by the record it keeps on its delta (the `pgpm from_hypertable horizon`
+  comment), never by a name pattern, and drops the function (taking the trigger with it) and the delta; an
+  operator's table that only shares the name is left alone. `tests/timescale/db/32` pins both halves; `bench/uninstall_hypertable_capture.sh`
+  proves them against `uninstall_keeps_hypertable_capture` and `uninstall_hypertable_capture_by_name`.
 - **A `time` bound keeps its era, so a table holding a row before 1 AD converts** (#733). `_time_literal`
   rendered the year with `to_char` `YYYY`, which drops the era, so an instant before 1 AD read back as an
   AD year: `transmute` on a table whose oldest row was 100 BC committed a write-rejecting

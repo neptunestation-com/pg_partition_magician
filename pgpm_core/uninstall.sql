@@ -17,6 +17,11 @@
 --     name the cut one would be the table itself)
 --   * an in-flight regrain's not-yet-attached fine copies, abandoned through
 --     pgpm.regrain_cancel (the source still holds every row, so only the copy work is lost)
+--   * from_hypertable's change capture, left in the hypertable's schema by a
+--     from_hypertable_copy(..., p_track_changes => true) that was never cut over: the delta
+--     <rel>_pgpm_delta, the trigger function <rel>_pgpm_delta_fn(), and the <rel>_pgpm_delta_trg
+--     row trigger it drives on the live hypertable and its chunks (found by the record the copy
+--     keeps on its delta; see the schema drop's block)
 --
 -- Put back first:
 --   * every incoming foreign key transmute(..., p_incoming_fks => 'preserve') dropped and
@@ -137,7 +142,7 @@ $$;
 -- refusal.
 do $$
 declare
-  r record; v_mark bigint; v_left_q text; v_unvalidated_q text;
+  r record; v_mark bigint; v_left_q text; v_unvalidated_q text; v_fn name;
 begin
   if to_regnamespace('pgpm') is null then return; end if;          -- a re-run: nothing left to remove
   begin
@@ -186,6 +191,49 @@ begin
     -- An install that predates pgpm.dropped_fk has no key to put back.
     when undefined_table then null;
   end;
+
+  -- Drop from_hypertable's change capture (#737). A from_hypertable_copy(..., p_track_changes => true) puts
+  -- three objects in the HYPERTABLE's schema, out of the schema drop's reach: the delta <rel>_pgpm_delta,
+  -- its trigger function <rel>_pgpm_delta_fn(), and the row trigger <rel>_pgpm_delta_trg on the live
+  -- hypertable (TimescaleDB clones it onto every chunk). The cutover drops all three; a copy never cut over
+  -- keeps them, and the trigger goes on logging every write of the production table into a delta nothing
+  -- will drain.
+  --
+  -- Found by the module's own record, never by a name pattern (an operator's table can end in
+  -- _pgpm_delta): the copy comments its delta `pgpm from_hypertable horizon <xid>` in the transaction that
+  -- creates the function and the trigger, so a delta carrying it is the module's, and so is the function
+  -- the copy created beside it under the derived name. Dropping that function cascades to the trigger on
+  -- the hypertable and on each chunk. Here, past the refusal and beside the schema drop, for the same
+  -- reason the drop is: a refused uninstall must leave a copy that can still be cut over with its capture.
+  -- A tracking copy made by a release that wrote no such comment (0.6.0 and earlier) has no record; drop
+  -- its three objects by hand.
+  for r in
+    select n.nspname as nsp, c.relname as delta
+      from pg_description d
+      join pg_class c on c.oid = d.objoid
+      join pg_namespace n on n.oid = c.relnamespace
+     where d.classoid = 'pg_class'::regclass and d.objsubid = 0
+       and d.description ~ '^pgpm from_hypertable horizon [0-9]+$'
+       and c.relkind = 'r' and right(c.relname, 11) = '_pgpm_delta'
+     order by n.nspname, c.relname
+  loop
+    v_fn := left(r.delta, -11) || '_pgpm_delta_fn';
+    begin
+      -- Existence first only to spare a "does not exist, skipping" notice; the delta depends on nothing.
+      if to_regprocedure(format('%I.%I()', r.nsp, v_fn)) is not null then
+        execute format('drop function %I.%I() cascade', r.nsp, v_fn);
+      end if;
+      execute format('drop table %I.%I', r.nsp, r.delta);
+    exception
+      -- Best-effort per copy, as the regrain sweep above: the objects belong to whoever ran the copy, and
+      -- the role running this script may not be allowed to drop them. Say what is left.
+      when insufficient_privilege then
+        raise warning 'pg_partition_magician: could not drop the from_hypertable change capture %.% (%). Left behind: table %.%, function %.%() and the row trigger it drives on the hypertable and its chunks, which logs every write. Drop them as their owner.',
+          quote_ident(r.nsp), quote_ident(r.delta), sqlerrm, quote_ident(r.nsp), quote_ident(r.delta),
+          quote_ident(r.nsp), quote_ident(v_fn);
+    end;
+  end loop;
+
   drop schema if exists pgpm cascade;
 end;
 $$;

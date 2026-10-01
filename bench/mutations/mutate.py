@@ -3354,6 +3354,35 @@ $$;''',
       end if;
 """, "", 1)],
     ),
+    "uninstall_keeps_hypertable_capture": (
+        "bench/uninstall_hypertable_capture.sh",
+        "Pre-#737 uninstall.sql after a from_hypertable_copy(p_track_changes => true) that was never cut "
+        "over: only regrain's change capture is swept, so the module's <rel>_pgpm_delta, "
+        "<rel>_pgpm_delta_fn() and the <rel>_pgpm_delta_trg trigger on the live hypertable and its chunks "
+        "survive the uninstall and go on logging every write. Deletes the sweep (its comment through its "
+        "loop) from the schema drop's block, which is the old script's behaviour, so tests/timescale/db/32's "
+        "five removal assertions fail and its look-alike ones still pass.",
+        [(re.compile(r"^  -- Drop from_hypertable's change capture \(#737\)\..*?^  end loop;\n\n",
+                     re.MULTILINE | re.DOTALL), "", 1)],
+    ),
+    "uninstall_hypertable_capture_by_name": (
+        "bench/uninstall_hypertable_capture.sh",
+        "#737's sweep keyed on a name pattern instead of the module's record: every table ending in "
+        "_pgpm_delta, with the function beside it, is dropped whether the copy made it or the operator "
+        "did. Removes the pg_description join and the record predicate, so the copies' capture still goes "
+        "and tests/timescale/db/32's look-alike (the module's names, no record) is dropped with its "
+        "trigger: the two assertions that it survives and still fires fail.",
+        [("""      from pg_description d
+      join pg_class c on c.oid = d.objoid
+      join pg_namespace n on n.oid = c.relnamespace
+     where d.classoid = 'pg_class'::regclass and d.objsubid = 0
+       and d.description ~ '^pgpm from_hypertable horizon [0-9]+$'
+       and c.relkind = 'r' and right(c.relname, 11) = '_pgpm_delta'
+""", """      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+     where c.relkind = 'r' and right(c.relname, 11) = '_pgpm_delta'
+""", 1)],
+    ),
     "to_s3_part_bytes_unbounded": (
         "bench/archive_to_s3_part_bytes.sh",
         "Pre-#594 archive.configure and archive.to_s3: configure stores any p_part_bytes, and to_s3 reads "
@@ -4570,6 +4599,8 @@ MUTATION_SRC = {
     "archive_huffman_temp_table": "pgpm_archive/install.sql",
     "uninstall_drops_pending_fk": "pgpm_core/uninstall.sql",
     "uninstall_keeps_regrain_copies": "pgpm_core/uninstall.sql",
+    "uninstall_keeps_hypertable_capture": "pgpm_core/uninstall.sql",
+    "uninstall_hypertable_capture_by_name": "pgpm_core/uninstall.sql",
     "to_s3_part_bytes_unbounded": "pgpm_archive/install.sql",
     "to_s3_abort_misses_cancel": "pgpm_archive/install.sql",
     "to_s3_conservation_by_count": "pgpm_archive/install.sql",
@@ -4630,6 +4661,10 @@ MUTATION_TRACK = {
     "hypertable_cutover_identity_by_default": "timescale",
     "hypertable_cutover_shape_unchecked_up_front": "timescale",
     "hypertable_cutover_shape_unchecked_under_lock": "timescale",
+    # A core uninstall.sql mutation on this track because the capture it must sweep exists only where
+    # from_hypertable_copy can run, which needs a real TimescaleDB.
+    "uninstall_keeps_hypertable_capture": "timescale",
+    "uninstall_hypertable_capture_by_name": "timescale",
 }
 
 

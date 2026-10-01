@@ -397,6 +397,10 @@ run_timescale() {
     bash "$(dirname "$0")/bench/hypertable_cutover_identity_options.sh" pgpm_test-timescale pgpm_perf134 || fail=1
     echo "--- cutover shape guard (issue #738) ---"
     bash "$(dirname "$0")/bench/hypertable_cutover_shape.sh" pgpm_test-timescale pgpm_perf135 || fail=1
+    # #737's uninstall guard, the same way: the clean-code half of the pairs discriminate.sh completes with
+    # its two mutants of uninstall.sql.
+    echo "--- uninstall sweeps from_hypertable's change capture guard (issue #737) ---"
+    bash "$(dirname "$0")/bench/uninstall_hypertable_capture.sh" pgpm_test-timescale pgpm_perf153 || fail=1
 
     echo "--- discriminate (timescale-scoped mutations) ---"
     bash "$(dirname "$0")/bench/discriminate.sh" --track=timescale pgpm_test-timescale || fail=1

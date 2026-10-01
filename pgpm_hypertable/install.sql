@@ -598,7 +598,9 @@ begin
     -- was committed before every chunk copy's snapshot, so the copy holds it as it is. The cutover checks
     -- every row version at or past it against the reconciled destination and refuses the swap on one the
     -- destination does not hold. Kept on the delta itself, which every copy drops and rebuilds, so the
-    -- horizon and the apparatus it vouches for always come from the same copy.
+    -- horizon and the apparatus it vouches for always come from the same copy. It is also the module's
+    -- record that this delta, its function and its trigger are pgpm's: pgpm_core/uninstall.sql finds a
+    -- copy that was never cut over by this comment, not by a name pattern (#737), so keep the two in step.
     execute format('comment on table %I.%I is %L', v_nsp, v_delta,
                    'pgpm from_hypertable horizon ' || pg_snapshot_xmin(pg_current_snapshot())::text);
     commit;   -- the apparatus must survive the phase boundary (copy commits, cutover reads the delta)
