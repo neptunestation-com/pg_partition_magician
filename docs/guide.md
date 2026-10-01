@@ -140,7 +140,11 @@ regrain's change capture, which lives in your schema rather than in `pgpm`: a `<
 table, a `<table>_pgpm_regrain_capture()` trigger function (`pgpm_regrain_delta_<oid>` and
 `pgpm_regrain_capture_<oid>()` for a table name too long for those), and the `pgpm_regrain_capture` trigger on a
 child being regrained. A regrain still in flight is abandoned first, as `pgpm.regrain_cancel` would: its
-not-yet-attached copies are dropped (the table being regrained still holds every row). Left: every
+not-yet-attached copies are dropped (the table being regrained still holds every row). Also gone:
+`from_hypertable`'s change capture from a `from_hypertable_copy(..., p_track_changes => true)` that was
+never cut over (the `<table>_pgpm_delta` table, the `<table>_pgpm_delta_fn()` function and the
+`<table>_pgpm_delta_trg` trigger on the live hypertable and its chunks), found by the record the copy keeps
+on its delta table, so a table of yours that merely shares the name is left alone. Left: every
 transmuted table, still a partitioned table under its original name, with all of its partitions and rows.
 Nothing else pgpm made remains in your schema.
 
