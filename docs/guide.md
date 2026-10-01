@@ -349,8 +349,8 @@ choice already made: the control column sits second because `tenant_id` is what 
 `transmute` is reversible until you commit to it: while the monolith is intact and holds the whole table,
 [`untransmute`](reference.md#untransmute) cleanly restores the original, taking the retention write block
 and any in-flight regrain off the monolith on the way (the regrain is abandoned as `regrain_cancel` would
-abandon it; the copy work is all that is lost). The table comes back with the grants, row security and
-policies you gave it after the conversion, not the ones it had before. It becomes a one-way door once a
+abandon it; the copy work is all that is lost). The table comes back with the owner, grants, row security,
+policies and comments you gave it after the conversion, not the ones it had before. It becomes a one-way door once a
 row lands outside the monolith (the frontier crosses `B`), a regrain swaps its fine children in, or
 retention retires the monolith.
 
@@ -871,7 +871,9 @@ stays right, which is exactly what `regrain`'s own transitional rename does.
 fine children that regrain creates. A unique secondary index is carried the same way **when its key
 includes the partition key** (so global uniqueness is genuinely preserved). One whose key excludes the
 partition key cannot be a partitioned unique index, so `transmute` **refuses** rather than silently
-dropping the guarantee: add the partition key to that index, or drop it, then re-transmute.
+dropping the guarantee: add the partition key to that index, or drop it, then re-transmute. An exclusion
+constraint (`EXCLUDE`) is refused for the same reason: its index cannot be carried onto a partitioned
+table, so drop the constraint if the table can do without it.
 
 ## How the conversion avoids a rewrite
 
