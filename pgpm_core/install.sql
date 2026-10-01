@@ -298,9 +298,9 @@ update pgpm.part p set child_oid = to_regclass(format('%I.%I', n.nspname, p.chil
 -- The per-parent regrain lock (#554): one row per managed parent, locked FOR UPDATE by every call that
 -- drives or reconfigures a regrain (see pgpm._regrain_lock). Nothing is ever written to it after the row
 -- exists; the ROW LOCK is the whole point. It is its own table rather than a lock on the pgpm.config row
--- because the config row is also written by the obtain job (obtain_retry_after) and by maintain_all
--- (sweep_turn_at), and holding that row across a regrain copy batch would make obtain, the one step
--- standing between the workload and a write with nowhere to go, wait on a regrain. And it is a table
+-- because the config row is also written by the obtain job (obtain_retry_after, sweep_turn_at) and by
+-- maintain_all (sweep_turn_at), and holding that row across a regrain copy batch would make obtain, the
+-- one step standing between the workload and a write with nowhere to go, wait on a regrain. And it is a table
 -- rather than an advisory lock for the reason #405 retired transmute's: an advisory key is computable by
 -- any role that can connect, and carries no ACL, so any such role could take it and hold every regrain of
 -- the table hostage. This table is pgpm-owned and carries no GRANTs.
@@ -7246,6 +7246,7 @@ declare
   v_regrain text := 'skipped'; v_regrain_child name; v_validated int := 0;
   v_note text := '';
   v_batch int := null;
+  v_regrain_to text;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
@@ -7340,19 +7341,36 @@ begin
   -- of maintain() into maintain_all(), which has no handler by design, and the sweep stopped before every
   -- parent ordered after this one. Inside it, it is this step's deferral like any other: skip_regrain,
   -- regrain=deferred, retried next tick. bench/regrain_candidate_lock_race.sh guards it.
+  --
+  -- The target is the one in force once the regrain lock is held (#729), not cfg.regrain_to: that was read
+  -- at the top of the tick, three COMMITs ago, and an operator's set_regrain(p, null) may have committed
+  -- since (the archive step alone can take seconds). Dispatched from the stale read, the tick prepared a
+  -- new run (capture trigger, TRUNCATE guard, cursor) on a table whose auto-regrain was now off, which
+  -- nothing drives and which a second set_regrain(p, null), finding auto-regrain already off, by design
+  -- does not cancel. regrain_step re-checks nothing (it is also the operator's own entry point, for any
+  -- target), so the re-read is here, under the lock set_regrain takes before it reads: a set_regrain that
+  -- committed first is seen below, and one that comes after waits for this tick to commit and then cancels
+  -- the run it finds (#516). The lock is regrain_step's own (re-entrant), taken a few statements earlier,
+  -- and inside the handler so a holder defers the step like any other lock race. Only while the top-of-tick
+  -- read had auto-regrain on: a parent that never had it takes no regrain lock, and one turned on mid-tick
+  -- starts next tick. tests/191 and bench/maintain_sweep_reads_tap.sh guard it.
   if cfg.regrain_to is not null then
     begin   -- #590: the candidate search is part of the regrain step
-      execute format(
-      'select child_name from pgpm.part p where p.parent_table = %L::regclass and p.attached'
-      || ' and pgpm._native_gt(%L, p.hi, pgpm._grid_next(%L, %L, p.lo, %L))'
-      || ' and pgpm._native_gt(%L, p.hi, pgpm._grid_next(%L, %L, p.lo, %L))'   -- #515: the target subdivides it
-      || ' and not pgpm._native_gt(%L, p.hi, %L) order by p.lo::%s asc limit 1',
-      p_parent::text, cfg.control_kind, cfg.control_kind, cfg.partition_step, cfg.partition_tz,
-      cfg.control_kind, cfg.control_kind, cfg.regrain_to, cfg.partition_tz,
-      cfg.control_kind,
-      pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor, pgpm._frontier_native(p_parent), cfg.partition_tz),
-      pgpm._native_type(cfg.control_kind))
-      into v_regrain_child;
+      perform pgpm._regrain_lock(p_parent);   -- #729: before the re-read
+      select regrain_to into v_regrain_to from pgpm.config where parent_table = p_parent;
+      if v_regrain_to is not null then   -- #729: off since the top of the tick, so no candidate either
+        execute format(
+        'select child_name from pgpm.part p where p.parent_table = %L::regclass and p.attached'
+        || ' and pgpm._native_gt(%L, p.hi, pgpm._grid_next(%L, %L, p.lo, %L))'
+        || ' and pgpm._native_gt(%L, p.hi, pgpm._grid_next(%L, %L, p.lo, %L))'   -- #515: the target subdivides it
+        || ' and not pgpm._native_gt(%L, p.hi, %L) order by p.lo::%s asc limit 1',
+        p_parent::text, cfg.control_kind, cfg.control_kind, cfg.partition_step, cfg.partition_tz,
+        cfg.control_kind, cfg.control_kind, v_regrain_to, cfg.partition_tz,
+        cfg.control_kind,
+        pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor, pgpm._frontier_native(p_parent), cfg.partition_tz),
+        pgpm._native_type(cfg.control_kind))
+        into v_regrain_child;
+      end if;
       v_batch := cfg.regrain_batch;   -- regrain's own microbatch size
 
       -- Auto-regrain (REDESIGN.md sec 12): feather the oldest frozen coarse child (v_regrain_child, found
@@ -7361,8 +7379,10 @@ begin
       -- never deletes: the source stays whole and attached until the atomic swap, so it never moves a
       -- referenced row out of the parent, never opens the snapshot() gap, and needs NO FK leash -- it is
       -- NOT gated on a live preserve FK and runs whether or not one is suspended.
-      if v_regrain_child is not null then
-        v_regrain := pgpm.regrain_step(p_parent, v_regrain_child, cfg.regrain_to, v_batch);
+      if v_regrain_to is null then
+        v_regrain := 'skipped';   -- #729: auto-regrain was turned off during this tick
+      elsif v_regrain_child is not null then
+        v_regrain := pgpm.regrain_step(p_parent, v_regrain_child, v_regrain_to, v_batch);
       else
         v_regrain := 'none';   -- auto-regrain on, but no frozen coarse child to work
       end if;
@@ -7633,15 +7653,38 @@ $$;
 
 create or replace procedure pgpm.maintain_obtain_all()
 language plpgsql as $$
--- Mirrors maintain_all()'s loop shape exactly (ordered for reproducibility, no exception handler
--- around the call -- maintain_obtain() already isolates its own failure). Deliberately does NOT
--- duplicate maintain_all()'s crash-recovery reaping (_transmute_reap()/_detach_reap()): obtain does
--- not depend on either having run, and the main maintain_all() job still performs them on its own
--- cadence regardless of whether this job also runs.
-declare r record; v_status text;
+-- Mirrors maintain_all()'s loop shape exactly (no exception handler around the call --
+-- maintain_obtain() already isolates its own failure). Deliberately does NOT duplicate maintain_all()'s
+-- crash-recovery reaping (_transmute_reap()/_detach_reap()): obtain does not depend on either having
+-- run, and the main maintain_all() job still performs them on its own cadence regardless of whether this
+-- job also runs.
+--
+-- And in maintain_all()'s turn order, with its turn stamps (#634): oldest config.sweep_turn_at first, the
+-- sweep's first parent stamped before it starts, every parent stamped when its maintain_obtain() returns,
+-- each stamp through _config_try_lock (#662). This sweep is one top-level statement too, so
+-- statement_timeout runs across every parent in it and the query_canceled that ends it escapes
+-- maintain_obtain()'s `when others`. In the fixed `order by parent_table` it used to follow, a parent
+-- whose obtain overran the clock was first on every sweep and every parent behind it was denied obtain on
+-- every sweep, and a late obtain is the one late step that refuses writes. See maintain_all() for why
+-- the rule starves no parent whose own step fits the timeout. The two sweeps share the one turn record
+-- on purpose: a sweep that completes stamps every parent in the order it visited them, which leaves the
+-- order as it found it, so only a sweep that was cut short moves anyone, and a parent either sweep cut
+-- short leads the next sweep of both. tests/192 and bench/maintain_sweep_reads_tap.sh guard it.
+declare r record; v_status text; v_first boolean := true;
 begin
-  for r in select parent_table from pgpm.config order by parent_table loop
+  for r in select parent_table from pgpm.config
+            order by sweep_turn_at asc nulls first, parent_table loop   -- #634: maintain_all()'s order
+    if v_first then   -- #634: as in maintain_all(), the first parent has had its turn once it starts
+      if pgpm._config_try_lock(r.parent_table) then
+        update pgpm.config set sweep_turn_at = clock_timestamp() where parent_table = r.parent_table;
+      end if;
+      commit;
+      v_first := false;
+    end if;
     call pgpm.maintain_obtain(r.parent_table, v_status);
+    if pgpm._config_try_lock(r.parent_table) then
+      update pgpm.config set sweep_turn_at = clock_timestamp() where parent_table = r.parent_table;
+    end if;
     commit;
   end loop;
 end;

@@ -1372,7 +1372,16 @@ call pgpm.maintain_obtain_all()
 ```
 
 A procedure that calls `maintain_obtain` for every managed table, in the same table order as
-`maintain_all`. This is what the `pgpm_obtain` scheduled job runs. Unlike `maintain_all`, it does not
+`maintain_all`: the table whose turn is oldest first (`config.sweep_turn_at`). This is what the
+`pgpm_obtain` scheduled job runs. Its sweep is one top-level statement too, so the session's
+`statement_timeout` runs across every table in it, and it takes turns exactly as `maintain_all` does: the
+sweep's first table has its turn recorded as it starts, every table has it recorded when its
+`maintain_obtain` returns, and a table the timeout cut short keeps its old turn and leads the next sweep,
+so a table whose own `obtain` overruns the timeout cannot deny `obtain` to every table behind it. Both
+sweeps record turns in the same column. A sweep that is not cut short records them in the order it
+visited the tables, which leaves the order as it was, so only a sweep that was cut short changes it, and
+a table either sweep cut short leads the next sweep of both. A turn is skipped, never waited for, while
+another transaction holds the table's `pgpm.config` row. Unlike `maintain_all`, it does not
 run the crash-recovery reaping (`_transmute_reap`/`_detach_reap`) -- `obtain` does not depend on either
 having run, and the `pgpm` job still performs them on its own cadence regardless of whether this job
 also runs.
@@ -1769,7 +1778,9 @@ pgpm.set_regrain(p_parent regclass, p_target_step text default null) returns voi
 
 Turn auto-regrain on or off. A non-null `p_target_step` (an interval as text for time/uuidv7/text_time, a `bigint`
 step as text for id) lets each `maintain` tick feather the oldest frozen coarse child one microbatch
-toward that granularity; `null` turns it off (regrain stays operator-driven). Enabling it is always safe:
+toward that granularity; `null` turns it off (regrain stays operator-driven). A tick reads the target
+again when it reaches its regrain step, under the lock `set_regrain` takes, so turning auto-regrain off
+while a tick is in an earlier step (archiving, say) stops that tick from starting a regrain. Enabling it is always safe:
 `regrain_step` enforces its own preconditions, so an un-meetable tick simply retries, and `maintain` selects
 only a frozen coarse child the target subdivides, so a child the target cannot split (a 30-day cell that
 starts in February, on a monthly grid) is left alone rather than retried forever; it stays counted in
@@ -2198,7 +2209,7 @@ One row per managed table (`parent_table` is the primary key). Columns:
 | `archive_fn` | `regprocedure` | the pluggable archive strategy (null = `none`); see [Archive strategy contract](#archive-strategy-contract) |
 | `archive_byte_budget` / `archive_probe_sample` | `bigint` / `int` | byte-budget chunking knobs for the built-in chunked archiver (see [Byte-budget chunked archiving](#byte-budget-chunked-archiving)) |
 | `archive_batch` | `int` | max partitions one `_archive_step` call touches, oldest first (default 1; null = unbounded -- see [Byte-budget chunked archiving](#byte-budget-chunked-archiving)) |
-| `sweep_turn_at` | `timestamptz` | when this table last had its turn in a `maintain_all` sweep, which visits the oldest turn first (null = never, and goes first); see [`maintain_all`](#maintain_all) |
+| `sweep_turn_at` | `timestamptz` | when this table last had its turn in a `maintain_all` or `maintain_obtain_all` sweep, each of which visits the oldest turn first (null = never, and goes first); see [`maintain_all`](#maintain_all) |
 | `monolith_oid` | `oid` | the original table, now the monolith partition, by identity: recorded by `transmute`, and what [`untransmute`](#untransmute) resolves the monolith through (it refuses when that relation is no longer an attached partition, or when this is null: backfilled by an upgrade when exactly one attached partition predates the parent) |
 | `text_time_prefix` / `text_time_width` / `text_time_radix` / `text_time_unit` | `text` / `int` / `int` / `text` | the declared shape for a `text_time` control column (null for every other kind); see `p_tt_prefix` etc. above |
 | `text_time_alphabet` / `text_time_discard_bits` / `text_time_epoch` | `text` / `int` / `timestamptz` | non-default digit set, bits to discard, and epoch for a `text_time` column (null/0/Unix epoch for cuid/ULID-shaped ones; see `p_tt_alphabet` etc. above) |
