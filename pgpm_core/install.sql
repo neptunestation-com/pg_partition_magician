@@ -1425,6 +1425,62 @@ begin
 end;
 $$;
 
+-- _regrain_sub_name: the name regrain_step creates the fine child for sub-range [p_lo, p_hi) of target step
+-- p_step under (#783). A sub-range whose lo is ON the target's lattice is a lattice cell and takes the name
+-- _part_name gives every cell of that step, unchanged. One whose lo is OFF the lattice is CLAMPED to a
+-- child's own lo (only the first sub-range of a child can be), and _part_name's label for it is the label
+-- of the lattice cell it sits in, which can be the next cell's: a fixed step is labelled by the UTC reading
+-- of its start at the step's granularity (#503, #582), and that reading is the floor of the instant, not
+-- the instant. On a monthly grid in America/New_York regrained to '1 day', January's last cell
+-- [02-01 00:00Z, 05:00Z) and February's clamped first cell [02-01 05:00Z, 02-02 00:00Z) both read 2024_02_01,
+-- so after January was split, every regrain of February was refused for a name January held; a monthly Los
+-- Angeles monolith anchored at local midnight clamped [07:00Z, 08:00Z) under the name of the cell after it
+-- and wedged auto-regrain the same way, capture left on.
+--
+-- So a clamped sub-range is labelled at the coarsest granularity, no coarser than the step's own, at which
+-- BOTH its bounds read exactly (an hour for a whole-hour zone offset, a minute for Asia/Kolkata, down to the
+-- microsecond, which always does), in the plain _p<lo> form. No name of another partition of the parent can
+-- equal it unless that partition overlaps it, so none can coexist with it: a name with the same label has
+-- its lo in [lo, lo + one unit of that granularity), and since hi also reads exactly, hi is at least one unit
+-- past lo, so that lo lies inside [lo, hi). A label of another granularity has another length, and an
+-- explicit or coarse name has `_to_`. The one partition a copy overlaps is its own source, which the #266
+-- rename in regrain_step already handles through this same function.
+--
+-- When the step's own granularity already reads both bounds exactly, this IS _part_name's name, so every
+-- name that was already injective keeps its form and no existing grid's names move (#582): a weekly
+-- regrain of a UTC monthly grid still clamps [2024-03-01, 2024-03-02) under _p2024_03_01. A calendar step
+-- (month, year) is left to _part_name, since a child edge of a calendar grid is a calendar edge of the
+-- same zone and anchor; and an id label is exact already (_id_label never rounds).
+create or replace function pgpm._regrain_sub_name(p_relname name, cfg pgpm.config, p_step text, p_lo text, p_hi text)
+returns name language plpgsql stable as $$
+declare v_units text[] := array['day', 'hour', 'minute', 'second', 'microseconds'];
+        v_label_steps text[] := array['1 day', '1 hour', '1 minute', '1 second', '1 microsecond'];
+        v_secs numeric; v_from int; v_lo timestamp; v_hi timestamp;
+begin
+  if cfg.control_kind not in ('time', 'uuidv7', 'text_time')
+     or extract(year from p_step::interval) * 12 + extract(month from p_step::interval) <> 0
+     or not pgpm._native_gt(cfg.control_kind, p_lo,
+                            pgpm._grid_floor(cfg.control_kind, p_step, cfg.partition_anchor, p_lo, cfg.partition_tz)) then
+    return pgpm._part_name(p_relname, cfg.control_kind, p_step, p_lo, p_hi, cfg.partition_tz);
+  end if;
+  v_secs := extract(epoch from p_step::interval);
+  v_from := case when v_secs >= 86400 then 1 when v_secs >= 3600 then 2 when v_secs >= 60 then 3
+                 when v_secs >= 1 then 4 else 5 end;   -- _part_name's label granularity for the step
+  v_lo := p_lo::timestamptz at time zone 'UTC';
+  v_hi := p_hi::timestamptz at time zone 'UTC';
+  for i in v_from .. 5 loop
+    if date_trunc(v_units[i], v_lo) = v_lo and date_trunc(v_units[i], v_hi) = v_hi then
+      if i = v_from then
+        return pgpm._part_name(p_relname, cfg.control_kind, p_step, p_lo, p_hi, cfg.partition_tz);
+      end if;
+      return pgpm._part_name(p_relname, cfg.control_kind, v_label_steps[i], p_lo, null, cfg.partition_tz);
+    end if;
+  end loop;
+  raise exception 'pg_partition_magician: internal error naming sub-range [%, %) of % -- no label granularity reads its bounds exactly',
+    p_lo, p_hi, p_relname;
+end;
+$$;
+
 -- _obtain_name: the name obtain and extend_to build a MISSING cell [p_lo, p_hi) under, or null to leave it
 -- unbuilt. Callers ask only after their overlap check has found no attached partition over the range, so
 -- a relation holding the plain name is never this cell.
@@ -4614,7 +4670,7 @@ begin
   v_sub_lo  := case when pgpm._native_gt(cfg.control_kind, v_lo, v_grid_lo) then v_lo else v_grid_lo end;
   v_sub_hi  := pgpm._grid_next(cfg.control_kind, v_step, v_grid_lo, cfg.partition_tz);
   if pgpm._native_gt(cfg.control_kind, v_sub_hi, v_hi) then v_sub_hi := v_hi; end if;
-  if pgpm._part_name(v_rel, cfg.control_kind, v_step, v_sub_lo, v_sub_hi, cfg.partition_tz) = v_child_name then
+  if pgpm._regrain_sub_name(v_rel, cfg, v_step, v_sub_lo, v_sub_hi) = v_child_name then   -- #783: as named below
     v_src_name := pgpm._part_name(v_rel, cfg.control_kind, v_step, v_lo, v_hi, cfg.partition_tz);
     if to_regclass(format('%I.%I', v_nsp, v_src_name)) is not null then
       raise exception 'pg_partition_magician: cannot regrain % at target step % -- splitting it needs the transitional name %, which is already taken by another relation. Drop or rename that relation, then re-run.',
@@ -4847,7 +4903,7 @@ begin
        and not pgpm._native_gt(cfg.control_kind, p.lo, v_sub_lo) and not pgpm._native_gt(cfg.control_kind, v_sub_lo, p.lo)
        and not pgpm._native_gt(cfg.control_kind, p.hi, v_sub_hi) and not pgpm._native_gt(cfg.control_kind, v_sub_hi, p.hi);
     v_sub_name := coalesce(v_sub_name,
-                           pgpm._part_name(v_rel, cfg.control_kind, v_step, v_sub_lo, v_sub_hi, cfg.partition_tz));
+                           pgpm._regrain_sub_name(v_rel, cfg, v_step, v_sub_lo, v_sub_hi));   -- #783
     -- invariant (#266): the rename above makes this unreachable. Assert it anyway -- when it was false the
     -- failure was silent row destruction, so a future change to _part_name must break loudly here.
     if v_sub_name = v_child_name then
