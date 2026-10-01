@@ -2313,12 +2313,12 @@ $$;''',
         "mutant is self-consistent (it counted by the grid's step alone too) and tests/125's mirror "
         "assertion fails for the same reason rather than by accident. tests/125's second coarse year, "
         "never reached, is what catches it.",
-        [("      || ' and pgpm._native_gt(%L, p.hi, pgpm._grid_next(%L, %L, p.lo, %L))'   -- #515: the target subdivides it\n"
-          "      || ' and not pgpm._native_gt(%L, p.hi, %L) order by p.lo::%s asc limit 1',\n"
-          "      p_parent::text, cfg.control_kind, cfg.control_kind, cfg.partition_step, cfg.partition_tz,\n"
-          "      cfg.control_kind, cfg.control_kind, cfg.regrain_to, cfg.partition_tz,\n",
-          "      || ' and not pgpm._native_gt(%L, p.hi, %L) order by p.lo::%s asc limit 1',\n"
-          "      p_parent::text, cfg.control_kind, cfg.control_kind, cfg.partition_step, cfg.partition_tz,\n", 1),
+        [("        || ' and pgpm._native_gt(%L, p.hi, pgpm._grid_next(%L, %L, p.lo, %L))'   -- #515: the target subdivides it\n"
+          "        || ' and not pgpm._native_gt(%L, p.hi, %L) order by p.lo::%s asc limit 1',\n"
+          "        p_parent::text, cfg.control_kind, cfg.control_kind, cfg.partition_step, cfg.partition_tz,\n"
+          "        cfg.control_kind, cfg.control_kind, v_regrain_to, cfg.partition_tz,\n",
+          "        || ' and not pgpm._native_gt(%L, p.hi, %L) order by p.lo::%s asc limit 1',\n"
+          "        p_parent::text, cfg.control_kind, cfg.control_kind, cfg.partition_step, cfg.partition_tz,\n", 1),
          ("         and pgpm._native_gt(r.control_kind, p.hi, pgpm._grid_next(r.control_kind, coalesce(r.regrain_to, r.partition_step), p.lo, r.partition_tz))\n",
           "", 1)],
     ),
@@ -2811,6 +2811,62 @@ $$;''',
           "    end if;\n",
           "", 1)],
     ),
+    "maintain_regrain_stale_target": (
+        "bench/maintain_sweep_reads_tap.sh",
+        "Pre-#729 maintain(): auto-regrain is dispatched from the regrain_to the tick read at its top, "
+        "three COMMITs before its regrain block, never re-read under the per-parent regrain lock. A "
+        "set_regrain(t, null) committed mid-tick (inside the archive step, say) is overridden: the tick "
+        "prepares a new run (capture trigger, TRUNCATE guard, cursor) that nothing drives, and a second "
+        "set_regrain(t, null) by design changes nothing. One site: the re-read under the lock becomes the "
+        "stale value, so the lock is still taken and only what is read under it is wrong. tests/191's rg_off "
+        "tick, whose operator turns auto-regrain off from inside the archive step, is what catches it.",
+        [("      select regrain_to into v_regrain_to from pgpm.config where parent_table = p_parent;\n",
+          "      v_regrain_to := cfg.regrain_to;\n", 1)],
+    ),
+    "maintain_obtain_all_fixed_order": (
+        "bench/maintain_sweep_reads_tap.sh",
+        "Pre-#634 maintain_obtain_all: the obtain sweep visits the parents `order by parent_table` and "
+        "stamps no turns, though docs/reference.md says it runs in maintain_all's order. The sweep is one "
+        "top-level statement, so statement_timeout runs across all of it and the query_canceled that ends "
+        "it escapes maintain_obtain's `when others`: a parent whose obtain overruns the clock is first on "
+        "every sweep and every parent behind it is denied obtain on every sweep. The loop goes back to the "
+        "pre-fix one exactly. tests/192's part A (oa obtained first) and part C (sb starved behind sa on "
+        "the second sweep) both catch it.",
+        [("  for r in select parent_table from pgpm.config\n"
+          "            order by sweep_turn_at asc nulls first, parent_table loop   -- #634: maintain_all()'s order\n"
+          "    if v_first then   -- #634: as in maintain_all(), the first parent has had its turn once it starts\n"
+          "      if pgpm._config_try_lock(r.parent_table) then\n"
+          "        update pgpm.config set sweep_turn_at = clock_timestamp() where parent_table = r.parent_table;\n"
+          "      end if;\n"
+          "      commit;\n"
+          "      v_first := false;\n"
+          "    end if;\n"
+          "    call pgpm.maintain_obtain(r.parent_table, v_status);\n"
+          "    if pgpm._config_try_lock(r.parent_table) then\n"
+          "      update pgpm.config set sweep_turn_at = clock_timestamp() where parent_table = r.parent_table;\n"
+          "    end if;\n"
+          "    commit;\n",
+          "  for r in select parent_table from pgpm.config order by parent_table loop\n"
+          "    call pgpm.maintain_obtain(r.parent_table, v_status);\n"
+          "    commit;\n", 1)],
+    ),
+    "maintain_obtain_all_no_first_turn_stamp": (
+        "bench/maintain_sweep_reads_tap.sh",
+        "The #634 fix without its second half, as maintain_all_no_first_turn_stamp is for #579: the obtain "
+        "sweep follows the turn order and stamps a parent when its maintain_obtain returns, but does not "
+        "stamp the sweep's first parent before it starts. A parent whose own obtain overruns the timeout is "
+        "then never stamped, so it leads, and is cancelled in, every obtain sweep, and every parent behind "
+        "it is denied obtain. tests/192's part C (sa overruns, sb must obtain on the second sweep) catches "
+        "it; parts A and B pass against it, which is why it is a mutation of its own.",
+        [("    if v_first then   -- #634: as in maintain_all(), the first parent has had its turn once it starts\n"
+          "      if pgpm._config_try_lock(r.parent_table) then\n"
+          "        update pgpm.config set sweep_turn_at = clock_timestamp() where parent_table = r.parent_table;\n"
+          "      end if;\n"
+          "      commit;\n"
+          "      v_first := false;\n"
+          "    end if;\n",
+          "", 1)],
+    ),
     "regrain_candidate_outside_handler": (
         "bench/regrain_candidate_lock_race.sh",
         "Pre-#590 maintain(): the auto-regrain candidate is searched for BEFORE the regrain step's "
@@ -2820,11 +2876,13 @@ $$;''',
         "handler by design, and the sweep stops before every parent ordered after it: no write-block, "
         "archive or retain for them while the lock lasts. Moves the handler's `begin` from above the "
         "search to below it, which is the pre-fix block structure exactly: the search unguarded, the "
-        "regrain_step call still guarded.",
-        [("    begin   -- #590: the candidate search is part of the regrain step\n      execute format(\n",
-          "      execute format(\n", 1),
-         ("      into v_regrain_child;\n      v_batch := cfg.regrain_batch;   -- regrain's own microbatch size\n",
-          "      into v_regrain_child;\n    begin\n      v_batch := cfg.regrain_batch;   -- regrain's own microbatch size\n", 1)],
+        "regrain_step call still guarded. (#729's lock and re-read of regrain_to, which open the search, "
+        "move out of the handler with it.)",
+        [("    begin   -- #590: the candidate search is part of the regrain step\n"
+          "      perform pgpm._regrain_lock(p_parent);   -- #729: before the re-read\n",
+          "      perform pgpm._regrain_lock(p_parent);   -- #729: before the re-read\n", 1),
+         ("        into v_regrain_child;\n      end if;\n      v_batch := cfg.regrain_batch;   -- regrain's own microbatch size\n",
+          "        into v_regrain_child;\n      end if;\n    begin\n      v_batch := cfg.regrain_batch;   -- regrain's own microbatch size\n", 1)],
     ),
     "untransmute_inline_validate": (
         "bench/untransmute_fk_validate_lock.sh",

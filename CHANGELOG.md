@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **`set_regrain(t, null)` stops a `maintain` tick already in flight from starting a regrain** (#729).
+  `maintain` dispatched auto-regrain with the `regrain_to` it read at the top of the tick, three commits
+  before its regrain step, so turning auto-regrain off while the tick was archiving was overridden: the
+  tick prepared a new run (capture trigger, `TRUNCATE` guard, cursor) that nothing would drive, and a second
+  `set_regrain(t, null)`, finding auto-regrain already off, changed nothing. The regrain step now takes the
+  per-parent regrain lock and reads `regrain_to` again under it before choosing or dispatching anything.
+  Guarded by `tests/191` through `bench/maintain_sweep_reads_tap.sh` (`maintain_regrain_stale_target`).
+- **`maintain_obtain_all` sweeps in `maintain_all`'s turn order** (#634). It visited the tables in fixed
+  `parent_table` order under one shared `statement_timeout`, so a table whose `obtain` overran the clock was
+  first on every sweep and every table behind it was denied `obtain`, the one step whose lateness refuses
+  writes. It now orders by `config.sweep_turn_at` and records turns exactly as `maintain_all` does (the
+  first table before it starts, each table when its `maintain_obtain` returns, skipped while the row is
+  held). Guarded by `tests/192` through `bench/maintain_sweep_reads_tap.sh`
+  (`maintain_obtain_all_fixed_order`, `maintain_obtain_all_no_first_turn_stamp`).
 - **`transmute` refuses up front three shapes its cutover could not convert** (#730). A `NOT VALID`
   `CHECK` (or, on PostgreSQL 18, `NOT VALID` `NOT NULL`) constraint, a `CHECK ... NO INHERIT` constraint
   and a generated control column passed every preflight check, so phases 1 and 2 committed the validated,
