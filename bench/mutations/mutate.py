@@ -1265,6 +1265,44 @@ MUTATIONS = {
           "returns int language plpgsql\nas $$\n"
           "declare r pgpm.transmute_inflight%rowtype; v_n int := 0;\n", 1)],
     ),
+    "detach_reap_no_lock_timeout": (
+        "bench/reap_and_abort_lock_timeout.sh",
+        "Pre-#708 _detach_reap(): no bound on the FINALIZE's ACCESS EXCLUSIVE on the abandoned partition, so "
+        "the reaper runs under maintain_all's session default (pg_cron's 0: wait forever). One reader of the "
+        "partition parks it, its PENDING lock queues every later access to the partition behind it, and the "
+        "sweep never reaches a parent. Strips only the function's SET lock_timeout clause and keeps the "
+        "per-row handler, so the defect modelled is 'the wait is not bounded': the guard's read of the "
+        "partition times out behind the queued reaper, and the sweep outlives its ceiling.",
+        [("returns int language plpgsql\nset lock_timeout = '5s'\nas $$\ndeclare\n  r record; v_n int := 0;\n",
+          "returns int language plpgsql\nas $$\ndeclare\n  r record; v_n int := 0;\n", 1)],
+    ),
+    "transmute_abort_no_lock_timeout": (
+        "bench/reap_and_abort_lock_timeout.sh",
+        "Pre-#708 transmute_abort(): the DROP CONSTRAINT's ACCESS EXCLUSIVE waits under the operator's session "
+        "setting (0 by default: forever), so behind one long reader its PENDING request blocks every later "
+        "read and write of the live table for the reader's whole life. Strips only the set_config that "
+        "applies p_lock_timeout to the DROP, leaving the parameter, its up-front validation and the "
+        "lock_not_available refusal in place: the defect modelled is 'the bound is not applied', and the "
+        "guard's bare call still resolves. Anchored on the #708 comment, because the bare line is also a "
+        "substring of the (more-indented) validation block, which must survive.",
+        [("  -- #708: under p_lock_timeout, and the caller's own setting back the moment the lock is had.\n"
+          "  v_prev_lock_timeout := current_setting('lock_timeout');\n"
+          "  perform set_config('lock_timeout', p_lock_timeout, true);\n",
+          "  -- #708: under p_lock_timeout, and the caller's own setting back the moment the lock is had.\n"
+          "  v_prev_lock_timeout := current_setting('lock_timeout');\n", 1)],
+    ),
+    "hypertable_handoff_validate_no_lock_timeout": (
+        "bench/hypertable_handoff_fk_lock_timeout.sh",
+        "Pre-#708 from_hypertable_cutover(): after the handoff's COMMIT, validate_incoming_fks runs under the "
+        "session default (0: wait forever), so its VALIDATE's SHARE UPDATE EXCLUSIVE on a referencing table "
+        "waits as long as any VACUUM, ANALYZE or other holder of that lock lives, and the operator's cutover "
+        "with it. Strips only the set_config before the VALIDATE (the restore's, which transmute's own leftover "
+        "bound masks anyway, stays), so the defect modelled is 'the VALIDATE is not bounded': the guard's "
+        "cutover outlives its ceiling and logs no fail_validate_incoming_fk.",
+        [("    perform set_config('lock_timeout', p_lock_timeout, true);   -- `set local` did not survive the COMMIT\n"
+          "    perform pgpm.validate_incoming_fks(",
+          "    perform pgpm.validate_incoming_fks(", 1)],
+    ),
     "hypertable_cutover_no_lock_timeout": (
         "bench/hypertable_cutover_lock_timeout.sh",
         "Pre-#665 from_hypertable_cutover(): the swap's LOCK TABLE ... ACCESS EXCLUSIVE on the live "
@@ -2958,10 +2996,11 @@ $$;''',
              "                    where n.nspname = r.nsp and c.relname = r.rel) then\n", 1),
             ("    execute format('alter table %s drop constraint if exists pgpm_monolith_bound', r.parent_table::text);\n",
              "    execute format('alter table %I.%I drop constraint if exists pgpm_monolith_bound', r.nsp, r.rel);\n", 1),
-            ("  execute format('alter table %s drop constraint if exists pgpm_monolith_bound', p_parent::text);\n"
-             "  delete from pgpm.transmute_inflight where parent_table = p_parent;\n",
-             "  execute format('alter table %I.%I drop constraint if exists pgpm_monolith_bound', r.nsp, r.rel);\n"
-             "  delete from pgpm.transmute_inflight where parent_table = p_parent;\n", 1),
+            # transmute_abort's, inside the lock_not_available block #708 put around it
+            ("    execute format('alter table %s drop constraint if exists pgpm_monolith_bound', p_parent::text);\n"
+             "  exception when lock_not_available then\n",
+             "    execute format('alter table %I.%I drop constraint if exists pgpm_monolith_bound', r.nsp, r.rel);\n"
+             "  exception when lock_not_available then\n", 1),
         ],
     ),
     "transmute_no_step_obtain_preflight": (
@@ -4133,6 +4172,7 @@ MUTATION_SRC = {
     "hypertable_cutover_untracked_unchecked": "pgpm_hypertable/install.sql",
     "hypertable_cutover_no_horizon_trusted": "pgpm_hypertable/install.sql",
     "hypertable_cutover_no_lock_timeout": "pgpm_hypertable/install.sql",
+    "hypertable_handoff_validate_no_lock_timeout": "pgpm_hypertable/install.sql",
     "hypertable_preflight_no_exclusion_check": "pgpm_hypertable/install.sql",
     "hypertable_cutover_no_exclusion_check": "pgpm_hypertable/install.sql",
     "archive_lz77_hash_scratch": "pgpm_archive/install.sql",

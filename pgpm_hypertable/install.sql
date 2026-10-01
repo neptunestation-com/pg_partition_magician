@@ -1301,9 +1301,22 @@ begin
   -- The window from the drop above to this re-add is real and bounded by the swap plus one transmute. It
   -- cannot be closed by re-adding inside the cutover -- transmute would then refuse the incoming key -- so
   -- it is surfaced rather than hidden, which is what pgpm.dropped_fk and status().fks_suspended are for.
+  --
+  -- Both waits are bounded by p_lock_timeout (#708), like every other lock this procedure waits for. The
+  -- re-add takes SHARE ROW EXCLUSIVE on each referencing table, so behind one open writer there its
+  -- PENDING request queued every later write of that table; the VALIDATE takes SHARE UPDATE EXCLUSIVE,
+  -- which a running VACUUM, ANALYZE or index build holds. The re-add happens to run in transmute's last
+  -- transaction, under the bound transmute set, but the VALIDATE runs after a COMMIT, where `set local`
+  -- is gone and the session's own setting (none, by default) applied: the operator's call then waited as
+  -- long as the holder lived. Each function already isolates every key in its own handler, so a timeout
+  -- is a fail_restore_incoming_fk or fail_validate_incoming_fk row with the lock timeout as its reason,
+  -- the key left recorded in pgpm.dropped_fk, and the cutover goes on; maintain's every-tick restore and
+  -- validate (or a direct call) finish it. bench/hypertable_handoff_fk_lock_timeout.sh guards the VALIDATE.
   if v_in_names is not null then
+    perform set_config('lock_timeout', p_lock_timeout, true);
     perform pgpm.restore_incoming_fks(format('%I.%I', v_nsp, v_rel)::regclass);
     commit;
+    perform set_config('lock_timeout', p_lock_timeout, true);   -- `set local` did not survive the COMMIT
     perform pgpm.validate_incoming_fks(format('%I.%I', v_nsp, v_rel)::regclass);
     commit;
   end if;

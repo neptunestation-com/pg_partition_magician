@@ -6544,10 +6544,27 @@ $$;
 -- It ABANDONS, it does not resume: finishing someone's half-done conversion of a production table
 -- unattended is too large an action to take on their behalf. Re-run transmute to try again; it will resume
 -- from the recorded bound.
-create or replace function pgpm.transmute_abort(p_parent regclass)
+--
+-- The lock wait is bounded (#708), with transmute's own parameter and default (p_lock_timeout, #309). The
+-- DROP CONSTRAINT takes ACCESS EXCLUSIVE on the operator's live table, and under a session with no
+-- lock_timeout one long reader of the table parked it, with its PENDING request queueing every other read
+-- and write of the table behind it for the reader's whole life. A timeout refuses with lock_not_available
+-- and changes nothing: the bound and the claim stay, and the call can simply be repeated.
+-- p_lock_timeout CHANGES THE ARGUMENT COUNT, so the one-argument form has to go first or both survive and
+-- every one-argument call becomes ambiguous (the #209/#210 hazard transmute's own p_lock_timeout met).
+drop function if exists pgpm.transmute_abort(regclass);
+create or replace function pgpm.transmute_abort(p_parent regclass, p_lock_timeout text default '5s')
 returns boolean language plpgsql as $$
-declare r pgpm.transmute_inflight%rowtype;
+declare r pgpm.transmute_inflight%rowtype; v_prev_lock_timeout text;
 begin
+  -- a bad p_lock_timeout is refused before anything is read or changed, and leaves the setting untouched
+  begin
+    v_prev_lock_timeout := current_setting('lock_timeout');
+    perform set_config('lock_timeout', p_lock_timeout, true);
+    perform set_config('lock_timeout', v_prev_lock_timeout, true);
+  exception when others then
+    raise exception 'pg_partition_magician: p_lock_timeout must be a valid lock_timeout value (got %): %', p_lock_timeout, sqlerrm;
+  end;
   select * into r from pgpm.transmute_inflight where parent_table = p_parent;
   if not found then return false; end if;
   -- #405: the claim's recorded session decides this, not an advisory lock anyone could have taken. When that
@@ -6566,7 +6583,17 @@ begin
   end if;
   -- #575: by the claim's oid (p_parent resolved to it, which is how the claim was found), not the name the
   -- claim recorded: after a rename or a SET SCHEMA that name is another relation or none at all.
-  execute format('alter table %s drop constraint if exists pgpm_monolith_bound', p_parent::text);
+  -- #708: under p_lock_timeout, and the caller's own setting back the moment the lock is had.
+  v_prev_lock_timeout := current_setting('lock_timeout');
+  perform set_config('lock_timeout', p_lock_timeout, true);
+  begin
+    execute format('alter table %s drop constraint if exists pgpm_monolith_bound', p_parent::text);
+  exception when lock_not_available then
+    raise exception 'pg_partition_magician: transmute_abort(%) could not take ACCESS EXCLUSIVE on % within % (another transaction holds a lock on it); nothing was changed, the bound and the claim are as they were. Retry when that transaction has finished, or pass a longer p_lock_timeout.',
+      p_parent, p_parent, p_lock_timeout
+      using errcode = 'lock_not_available';
+  end;
+  perform set_config('lock_timeout', v_prev_lock_timeout, true);
   delete from pgpm.transmute_inflight where parent_table = p_parent;
   insert into pgpm.log (parent_table, action, lo, hi, method)
     values (p_parent, 'transmute_abort', r.lo, r.hi, 'bound dropped, table restored');
@@ -6594,7 +6621,7 @@ $$;
 -- queued every other read and write of the table behind it for the reader's whole life, with the sweep
 -- stalled behind it too. So the function carries transmute's own default bound (p_lock_timeout, #309),
 -- for the lock that undoes the one transmute's phase 1 took: a SET clause, so it applies to every wait in
--- here and the caller's setting is back the moment this returns (the _detach_reap after it is untouched).
+-- here and the caller's setting is back the moment this returns (the _detach_reap after it carries its own, #708).
 -- A timeout DEFERS that table alone: skip_transmute_reap is logged, the claim and the bound stay exactly
 -- as they were, and the next tick tries again. Any other error still propagates, as it always has.
 -- bench/transmute_reap_lock_timeout.sh guards it.
@@ -6678,8 +6705,20 @@ $$;
 -- transaction on the parent. A deferral row is for work pgpm wanted to do and could not; here there is
 -- no work of pgpm's, the detach belongs to the session running it, and status().retain_detaching
 -- already counts pgpm's own in-flight retirements.
+--
+-- The FINALIZE's lock wait is bounded (#708), exactly as _transmute_reap's is (#657) and for the same
+-- reason. It takes ACCESS EXCLUSIVE on the partition, and this runs in every maintain_all before any
+-- lock_timeout is set, under pg_cron's session default of 0. One ordinary reader of the abandoned
+-- partition (a report, a pg_dump) then parked the reaper for that reader's whole life: the sweep never
+-- reached a single parent, and every later access to the partition queued behind the pending request. So
+-- the function carries transmute's default bound as a SET clause, which applies to every wait in here and
+-- puts the caller's setting back the moment this returns. A timeout lands in the per-row handler below:
+-- fail_detach_reap with the lock timeout as its reason, that partition left pending, the other rows still
+-- reaped, and the next tick tries again. bench/reap_and_abort_lock_timeout.sh guards it.
 create or replace function pgpm._detach_reap()
-returns int language plpgsql as $$
+returns int language plpgsql
+set lock_timeout = '5s'
+as $$
 declare
   r record; v_n int := 0;
   v_db oid := (select oid from pg_database where datname = current_database());

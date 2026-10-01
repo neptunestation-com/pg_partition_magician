@@ -292,7 +292,8 @@ same session or a new one.
 
 **If a conversion dies partway, the bound outlives it** and the table goes on refusing those writes.
 `pgpm.transmute_abort('public.events')` drops it and puts the table back exactly as it was; its incoming
-foreign keys were never touched, because those are dropped only by the cutover itself. You rarely
+foreign keys were never touched, because those are dropped only by the cutover itself. It waits at most
+`p_lock_timeout` (5 s by default) for the table's lock, and otherwise refuses with nothing changed. You rarely
 need to: every `maintain_all` tick sweeps for abandoned conversions and undoes them, deciding "abandoned"
 from whether the session that claimed the conversion is still connected rather than from a timeout, so a
 long scan is never mistaken for a dead one. The sweep gives up on the table's lock after 5 s, like

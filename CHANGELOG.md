@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **The last unbounded lock waits #657 and #665 left behind give up after 5 s** (#708). `maintain_all`'s
+  `_detach_reap` finalized an abandoned detach under pg_cron's default of no `lock_timeout`, so one reader
+  of the abandoned partition parked the sweep before it reached any parent, with every later access to the
+  partition queued behind its `ACCESS EXCLUSIVE` request; it now carries transmute's default bound as a
+  `SET lock_timeout` clause, and a timeout is logged `fail_detach_reap` and retried next tick.
+  `transmute_abort` takes a new `p_lock_timeout` (default `'5s'`, as `transmute`) for its `DROP
+  CONSTRAINT`, and refuses with `lock_not_available`, changing nothing, when the table's lock is not had in
+  time. `from_hypertable_cutover` applies its `p_lock_timeout` to the incoming keys' re-add and `VALIDATE`
+  after the handoff, where the `VALIDATE` waited under the session's setting; a timeout leaves the key for
+  `maintain`, logged `fail_validate_incoming_fk`. Guarded by tests/198, `bench/reap_and_abort_lock_timeout.sh`
+  (`detach_reap_no_lock_timeout`, `transmute_abort_no_lock_timeout`) and
+  `bench/hypertable_handoff_fk_lock_timeout.sh` (`hypertable_handoff_validate_no_lock_timeout`).
 - **The text SigV4 signer sends the bytes it hashed, so a non-UTF8 database archives non-ASCII NDJSON**
   (#728). `archive.s3_signed_request` hashed `convert_to(payload, 'UTF8')` but put the payload on the wire
   in the server encoding, so in a LATIN1 database every body holding a non-ASCII character was refused
