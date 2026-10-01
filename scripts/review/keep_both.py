@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 """keep_both.py <file> | --selftest
 
-Resolve an add/add conflict in one of the fix phase's LIST FILES by keeping both sides. Every fix PR
-appends to the same three spots (a bullet at the top of CHANGELOG.md, an entry at the end of
-bench/mutations/mutate.py's MUTATIONS dict, a guard line at the end of a run_* list in test.sh, a
-self-test line in the lint workflow), so
-every rebase of one fix onto another conflicts there, and "keep both" is always the right answer.
-Anything else is left to a human: this script refuses a file it does not know.
+Resolve a same-spot add/add conflict by keeping both sides. Every fix PR appends to the same spots of the
+LIST FILES (a bullet at the top of CHANGELOG.md, an entry at the end of bench/mutations/mutate.py's
+MUTATIONS dict, a guard line at the end of a run_* list in test.sh, a self-test line in the lint
+workflow), so every rebase of one fix onto another conflicts there, and "keep both" is always the right
+answer. Since pass 4 the same holds for ANY file (#713): six of that fix phase's nine hand stops were two
+fixes inserting at the same spot of one file (a declaration block, a paragraph, a table row, the point
+where new functions go), each resolved by hand as keep-both, each costing a batch stop and a full
+re-check. So a file this script does not know is resolved the same way, main's side first, on ONE
+condition: the hunk must carry a base section (git's diff3 or zdiff3 conflict style, which land.sh
+rebases under), because that is what tells an add/add hunk (empty base) from both sides editing the same
+lines (base not empty, refused as before). Under the two-way style the two are indistinguishable, so a
+two-way hunk in a file that is not a list file is refused rather than guessed at. The head checks the
+rebased PR then runs are the proof that keeping both was right: a doubled declaration or statement fails
+there, exactly as a hand resolution would have.
 
-Order: CHANGELOG.md puts the BRANCH's bullet first (newest on top); the others keep main's side first.
+Order: CHANGELOG.md puts the BRANCH's bullet first (newest on top); every other file keeps main's side
+first.
 
 mutate.py needs three structural repairs on top of the textual keep-both, all caused by git factoring
 the lines the two appended entries SHARE out of the conflict hunk and into the text after it:
@@ -33,15 +42,17 @@ to fold the base section into "ours" and exit 0 with the `|||||||` line left in 
 
 The result must parse (mutate.py) and must contain no marker. Duplicate mutation keys, duplicate
 `pgpm_perfNN` guard databases and "does every mutation still build" are the caller's checks
-(land.sh does them); this script only makes the text whole. Exit 0 on success, 1 on a file it cannot
+(land.sh does them); this script only makes the text whole. Exit 0 on success, 1 on a hunk it cannot
 resolve, 2 on usage.
 """
 import ast
 import re
 import sys
 
-KNOWN = ("CHANGELOG.md", "bench/mutations/mutate.py", "test.sh",
-         ".github/workflows/perf.yml", ".github/workflows/archive.yml", ".github/workflows/lint.yml")
+# The append-only files every fix PR touches at the same spot. A two-way hunk (no base section) is accepted
+# in these alone: their conflicts are add/add by construction.
+LIST_FILES = ("CHANGELOG.md", "bench/mutations/mutate.py", "test.sh",
+              ".github/workflows/perf.yml", ".github/workflows/archive.yml", ".github/workflows/lint.yml")
 # Either hunk shape, markers anchored at a line start: ours, the base section (None in a two-way hunk)
 # and theirs. Lazy groups, so a hunk never runs on into the next one.
 CONFLICT = re.compile(r"^<{7}(?: [^\n]*)?\n(.*?)^(?:\|{7}(?: [^\n]*)?\n(.*?)^)?={7}\n(.*?)^>{7}(?: [^\n]*)?\n",
@@ -88,10 +99,9 @@ def repair_mutate_closers(src):
 
 
 def resolve_text(s, path):
-    if not any(path.endswith(k) for k in KNOWN):
-        raise ValueError(f"{path}: not a list file this resolver knows; resolve it by hand")
     is_changelog = path.endswith("CHANGELOG.md")
     is_mutate = path.endswith("mutate.py")
+    is_list = any(path.endswith(k) for k in LIST_FILES)
     pos, out = 0, []
     while True:
         m = CONFLICT.search(s, pos)
@@ -104,6 +114,11 @@ def resolve_text(s, path):
             line = s[:m.start()].count("\n") + 1
             raise ValueError(f"{path}:{line}: a hunk whose base section is not empty: both sides edited the "
                              "same lines, which is not an add/add conflict; resolve it by hand")
+        if m.group(2) is None and not is_list:
+            line = s[:m.start()].count("\n") + 1
+            raise ValueError(f"{path}:{line}: a two-way hunk in a file that is not a list file: without a base "
+                             "section, both sides editing the same lines cannot be told from an add/add; rebase "
+                             "under merge.conflictstyle=diff3 (land.sh does) and rerun")
         first, second = (theirs, ours) if is_changelog else (ours, theirs)
         first, second = _nl(first), _nl(second)
         if is_mutate and first and second:
@@ -223,13 +238,27 @@ MUTATIONS = {
         raise SystemExit("accepted an unparseable result")
     except SyntaxError:
         pass
-    # dangling markers and unknown files are refused
+    # dangling markers are refused; so is a TWO-WAY hunk in a file that is not a list file (no base section,
+    # so an edit of the same lines on both sides would read as add/add)
     for text, path in (("<<<<<<< HEAD\nfoo\n", "test.sh"), ("<<<<<<< HEAD\na\n=======\nb\n>>>>>>> x\n", "pgpm_core/install.sql")):
         try:
             resolve_text(text, path)
             raise SystemExit(f"accepted {path}")
         except ValueError:
             pass
+    # any file under diff3 (#713): two declarations added at the same spot of install.sql, main's first; two
+    # paragraphs in a doc; two rows of a table; and a hunk whose base holds a line is refused there too
+    r = resolve_text("declare\n<<<<<<< HEAD\n  v_a int;\n||||||| 1a2b3c4\n=======\n  v_b text;\n>>>>>>> x\nbegin\n", "pgpm_core/install.sql")
+    assert r == "declare\n  v_a int;\n  v_b text;\nbegin\n", r
+    r = resolve_text("P0\n\n<<<<<<< HEAD\nP main.\n\n||||||| base\n=======\nP branch.\n\n>>>>>>> x\nP9\n", "docs/reference.md")
+    assert r == "P0\n\nP main.\n\nP branch.\n\nP9\n", r
+    r = resolve_text("| a | b |\n<<<<<<< HEAD\n| m | 1 |\n||||||| base\n=======\n| n | 2 |\n>>>>>>> x\n", "docs/guide.md")
+    assert r == "| a | b |\n| m | 1 |\n| n | 2 |\n", r
+    try:
+        resolve_text("<<<<<<< HEAD\n  v_a int;\n||||||| base\n  v_old int;\n=======\n  v_b int;\n>>>>>>> x\n", "pgpm_core/install.sql")
+        raise SystemExit("accepted a two-sided edit of install.sql")
+    except ValueError:
+        pass
     # CHANGELOG puts the branch's bullet first; test.sh keeps main's line first; multiple hunks resolve
     r = resolve_text("<<<<<<< HEAD\n- main\n=======\n- branch\n>>>>>>> x\n", "CHANGELOG.md")
     assert r == "- branch\n- main\n", r
@@ -254,7 +283,7 @@ MUTATIONS = {
             pass
     # a line that merely starts with the marker characters is text, not a marker
     assert resolve_text("========\n- x\n", "CHANGELOG.md") == "========\n- x\n"
-    print("keep_both selftest: PASS (3 mutate.py shapes, diff3 hunks, refusal cases, ordering rules)")
+    print("keep_both selftest: PASS (3 mutate.py shapes, diff3 hunks in list files and any file, refusal cases, ordering rules)")
 
 
 if __name__ == "__main__":

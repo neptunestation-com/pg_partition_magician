@@ -5,7 +5,8 @@
 # own after a wait timeout, stopped for a human on anything else. <workdir> holds:
 #
 #   landq.txt   one line per PR: `<tier> <pr>`; append while the loop runs, it re-reads the file each turn
-#   landq.done  written by the loop: `<pr> merged <time>` or `<pr> FAILED rc=<n> <time>`
+#   landq.done  written by the loop: `<pr> merged <time>` or `<pr> FAILED rc=<n> <time>`; when a batch stops,
+#               a PR of it that had already merged gets its merged line, not a FAILED one (#713)
 #   landq.log   land.sh's output, prefixed by the loop's own lines (`===== landing ...`, `keeper: ...`)
 #
 # Each turn takes the lowest tier's lowest-numbered PRs not yet in landq.done: one at a time by default,
@@ -70,7 +71,15 @@ while :; do
     fi
     say "keeper: STOPPED #$1 timed out 8 times, leaving it"
   fi
-  for p in "$@"; do echo "$p FAILED rc=$rc $(date -u +%H:%M:%SZ)" >> "$W/landq.done"; done
+  # a batch stops as a whole, but the PRs ahead of the stop may have merged (#685, #697 in pass 4): record
+  # each as it stands, so the rerun does not try to land a merged PR and the stats do not count it a failure
+  for p in "$@"; do
+    if [ "$(gh pr view "$p" --json state --jq .state 2>/dev/null)" = MERGED ]; then
+      echo "$p merged $(date -u +%H:%M:%SZ)" >> "$W/landq.done"
+    else
+      echo "$p FAILED rc=$rc $(date -u +%H:%M:%SZ)" >> "$W/landq.done"
+    fi
+  done
   say "STOPPED: land.sh exited $rc on $prs; read the log, fix, delete the FAILED line(s) from landq.done and rerun landq.sh"
   exit "$rc"
 done

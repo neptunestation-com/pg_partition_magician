@@ -44,7 +44,8 @@ each PR the fixers report in `$WORK/prs.tsv` with its test, guard and mutation n
 - Land them with `scripts/review/landq.sh $WORK --batch 5` reading `$WORK/landq.txt` (`<tier> <pr>` lines,
   appended as the fixers report), or by hand with `scripts/review/land.sh [--batch] <pr> ...`, Tier 1
   first. `land.sh` rebases each PR onto the
-  current main, resolves the three list files, verifies what CI would fail on, waits for the head
+  current main under the diff3 conflict style, resolves every same-spot add/add conflict (any file;
+  a hunk both sides edited stops for a hand), verifies what CI would fail on, waits for the head
   checks, enqueues, and waits for the merge; it retries only the flakes `flake_check.sh` knows and
   stops on anything else. Under a squash queue (passes 2 and 3) expect 25 to 30 minutes per PR, one at
   a time (the script's header says why); since 2026-09-29 the queue takes merge commits, which keep a
@@ -54,8 +55,8 @@ each PR the fixers report in `$WORK/prs.tsv` with its test, guard and mutation n
   nothing. `gh workflow run timescale.yml --ref main` once seeds it. The fixers' pushes are a CI storm
   (pass 3: 21 heads, about 90 queued runs, the first landing's checks still queued when `land.sh`'s
   60-minute wait expired); a wait timeout is a restart, not a failure.
-- When it stops: read why. A non-list-file conflict is resolved by hand in the worktree it names, then
-  pushed; a CI failure that is not a known flake is a real failure, so read the job log before doing
+- When it stops: read why. A conflict `keep_both.py` refused (both sides edited the same lines) is
+  resolved by hand in the worktree it names, then pushed; a CI failure that is not a known flake is a real failure, so read the job log before doing
   anything. Never rebase-and-rerun a batch by hand; that is the queue's job.
 - When two fixes interact (one changes what a configuration can be, another's guard depends on that
   configuration), the guard is not retired until someone shows the state is unreachable on upgraded
