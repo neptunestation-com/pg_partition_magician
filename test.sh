@@ -845,6 +845,7 @@ run_perf() {
     "bench/cutover_key_name.sh pgpm_perf162"
     "bench/unbuilt_cell_type_holder.sh pgpm_perf170"
     "bench/orphan_type_guard_id_labels.sh pgpm_perf171"
+    "bench/wrapper_tap_verdicts.sh pgpm_perf174"
   )
   local selected=()
   local n=${#guards[@]} idx

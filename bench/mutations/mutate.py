@@ -1688,6 +1688,20 @@ MUTATIONS = {
         [(TRANSMUTE_CUTOVER_HOIST, "", 1),
          ("  -- 7b (triggers).", TRANSMUTE_CUTOVER_HOIST + "  -- 7b (triggers).", 1)],
     ),
+    "transmute_cutover_late_create_table": (
+        "bench/transmute_cutover_order.sh",
+        "The #344 defect at its narrowest (#796): only the new parent's CREATE TABLE ... PARTITION BY RANGE "
+        "statement moved to after both renames, everything else hoisted in place. The guard used to anchor on "
+        "the FIRST 'partition by range' in _transmute's source, which is a preamble comment, so it passed this "
+        "copy (12231 < 96413); transmute_cutover_late_build moves the RLS replay too and so never tested that "
+        "check. The copy installs (plpgsql bodies are not resolved at CREATE), which is all the guard reads.",
+        [("  execute format('create table %I.%I (like %s including defaults including generated including storage including constraints) partition by range (%I)',\n"
+          "                 v_nsp, v_staging, p_parent::text, p_control);\n", "", 1),
+         ("  execute format('alter table %s rename to %I', v_parent::text, v_rel);\n",
+          "  execute format('alter table %s rename to %I', v_parent::text, v_rel);\n"
+          "  execute format('create table %I.%I (like %s including defaults including generated including storage including constraints) partition by range (%I)',\n"
+          "                 v_nsp, v_staging, p_parent::text, p_control);\n", 1)],
+    ),
     "untransmute_no_recheck_under_lock": (
         "bench/untransmute_race.sh",
         "Pre-#443 untransmute: the outside-rows check runs once, under ACCESS SHARE, and the DETACH and "
@@ -3922,6 +3936,31 @@ $$;''',
         [("grep -qE '^not ok|^# Looks like you (failed|planned)|ERROR:'",
           "grep -qE '^not ok|^# Looks like you failed|ERROR:'", 2)],
     ),
+    "wrapper_verdict_reads_finish_only": (
+        "bench/wrapper_tap_verdicts.sh",
+        "Pre-#795 timescale wrapper verdict (hypertable_index_names.sh and seven siblings): a plan shortfall is "
+        "read only from finish()'s '# Looks like you planned' line and psql's exit status is never captured, so "
+        "a file whose session dies part-way (FATAL, no ERROR:) never reaches finish() and is PASSED after 1 of "
+        "its 3 planned assertions. Two sites in one wrapper: the exit status dropped, the plan comparison put "
+        "back to the finish() line.",
+        [('  out=$(q -d "$DB" -tAq -f "$TEST_FILE" 2>&1); rc=$?\n', '  out=$(q -d "$DB" -tAq -f "$TEST_FILE" 2>&1); rc=0\n', 1),
+         ('  if [ -z "$planned" ] || [ "$ran" != "$planned" ]; then\n', "  if echo \"$out\" | grep -qE '^# Looks like you planned'; then\n", 1)],
+    ),
+    "wrapper_verdict_no_shortfall_check": (
+        "bench/wrapper_tap_verdicts.sh",
+        "Pre-#712 hypertable_late_appends.sh (and cutover_identity, replica_capture): no plan shortfall check "
+        "at all and psql's exit ignored, so a file whose third assertion ran over zero rows is PASSED after 2 "
+        "of 3. Two sites in one wrapper: the exit status dropped, the plan comparison never true.",
+        [('  out=$(q -d "$DB" -tAq -f "$TEST_FILE" 2>&1); rc=$?\n', '  out=$(q -d "$DB" -tAq -f "$TEST_FILE" 2>&1); rc=0\n', 1),
+         ('  if [ -z "$planned" ] || [ "$ran" != "$planned" ]; then\n', "  if false; then\n", 1)],
+    ),
+    "wrapper_verdict_ignores_exit": (
+        "bench/wrapper_tap_verdicts.sh",
+        "The exit half of #795's verdict alone: hypertable_cutover_identity.sh compares the assertions that ran "
+        "with the plan but no longer captures psql's exit status, so a file whose session is lost after its "
+        "plan completed (psql exits 2, no ERROR:, nothing short) is PASSED where pg_prove fails it. One site.",
+        [('  out=$(q -d "$DB" -tAq -f "$TEST_FILE" 2>&1); rc=$?\n', '  out=$(q -d "$DB" -tAq -f "$TEST_FILE" 2>&1); rc=0\n', 1)],
+    ),
     "discriminate_counts_uninstallable": (
         "bench/discriminate_installs.sh",
         "Pre-#601 bench/discriminate.sh: a mutant is never installed before its guard runs, so a mutation "
@@ -5370,6 +5409,10 @@ MUTATION_SRC = {
     "classify_premise_bare_word": "scripts/review/classify_claims.py",
     "throws_ok_one_argument": "tests/72_transmute_attributes_test.sql",
     "tap_verdict_misses_plan_shortfall": "test.sh",
+    # #795 and #712: a timescale wrapper's own verdict block, judged by the guard that evaluates it.
+    "wrapper_verdict_reads_finish_only": "bench/hypertable_index_names.sh",
+    "wrapper_verdict_no_shortfall_check": "bench/hypertable_late_appends.sh",
+    "wrapper_verdict_ignores_exit": "bench/hypertable_cutover_identity.sh",
     "discriminate_counts_uninstallable": "bench/discriminate.sh",
     "discriminate_list_on_stdin": "bench/discriminate.sh",
     # #742 to #744: a lint's document and three test files, each judged by the guard that runs it.
