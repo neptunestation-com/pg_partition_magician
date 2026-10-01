@@ -837,6 +837,10 @@ Three things follow, and none of them are optional:
   scheduled pgpm before upgrading, re-run `pgpm.schedule()` once to create that job.
 - **Retirement spans at least one extra tick.** `status().retain_detaching` counts partitions whose
   detach is in flight. Retention was already eventual, so this lengthens a delay rather than adding one.
+  If retention stops reaching the partition in that window (you loosen it with `set_retain`, or the
+  newest rows of an `id` table are deleted and its frontier moves back), the retirement is taken back:
+  the detach is recalled before it runs (`retain_recall`), or, if it had already started, the partition
+  is re-attached on the next tick (`retain_reattach`). The partition keeps its rows either way.
 - **Writes to the *referencing* table are blocked while the detach runs**, once per retirement, for a
   duration set by that table's size. Reads of it, and your managed table entirely, are unaffected. This is
   irreducible: it is PostgreSQL proving the foreign key still holds. An index on the referencing column is

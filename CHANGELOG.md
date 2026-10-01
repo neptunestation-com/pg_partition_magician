@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **Loosening retention takes back a retirement it no longer reaches** (#724). A referenced partition's
+  retirement dispatches a concurrent detach to the `pgpm_detach` cron job, and when `set_retain` loosened
+  retention (or an `id` frontier moved back) before it ran, nothing recalled it: cron detached a partition
+  the policy now keeps, `retire()` was never called on it again, and its rows vanished from every read of
+  the parent while `status()` reported no failure. `set_retain` now returns the job to idle at once
+  (`retain_recall`), and each tick's `retain()` recalls an armed detach the horizon no longer reaches and
+  re-attaches a partition whose detach had already landed (`retain_reattach`, or `fail_retain_reattach`,
+  counted in `retain_drop_failures`). Guarded by `tests/194` through `bench/retain_recall_armed_detach.sh`,
+  with the mutations `retain_recall_never`, `retain_recall_clears_at_once` and
+  `retain_recall_ignores_horizon`.
 - **A regrain reconciles captured changes only into the fine child it created** (#723). `_regrain_reconcile`
   deleted from and inserted into a completed sub-range's copy by the name `pgpm.part` records, never checking
   the `child_oid` the copy branch checks since #631, so once that copy was renamed aside and an unrelated
