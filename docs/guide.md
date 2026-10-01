@@ -557,10 +557,10 @@ select * from pgpm.check_text_time('public.events', 'id', 'c', 8, 36, 'ms');
 
 A low `fraction` means the values do not match the shape or do not decode to plausible timestamps, and
 the table should not be partitioned on that column. Both also report `newest_decoded`, the column's actual
-maximum decoded, and `newest_in_future`, true when it sits more than an hour ahead of the clock: a single
-future-dated row leaves `fraction` near `1.0` yet would pin the monolith's permanent upper bound at its
-date, which `transmute` refuses (see [Caveats](#caveats-and-v1-scope)). For an `id`-partitioned table
-where you want calendar retention, check that a timestamp column rises with the id:
+maximum decoded (NULLs skipped), and `newest_in_future`, true when it sits more than an hour ahead of the
+clock: a single future-dated row leaves `fraction` near `1.0` yet would pin the monolith's permanent upper
+bound at its date, which `transmute` refuses (see [Caveats](#caveats-and-v1-scope)). For an
+`id`-partitioned table where you want calendar retention, check that a timestamp column rises with the id:
 
 ```sql
 select * from pgpm.check_time_monotonic('public.events', 'id', 'created_at');

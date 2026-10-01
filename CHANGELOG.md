@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **`check_uuidv7` and `check_text_time` report the column's maximum past a NULL** (#734). Both read
+  `newest_decoded` with `ORDER BY ... DESC LIMIT 1`, and `DESC` sorts NULLs first, so one NULL in a still
+  nullable column was "the maximum": `newest_decoded` and `newest_in_future` came back null while a row
+  five years ahead sat in the table, the very row the pair exists to show (#457). The read now skips NULLs
+  in its `WHERE` clause, which keeps the backward index scan (`max()` has no `uuid` form before
+  PostgreSQL 18, and `NULLS LAST` would sort). Guarded by `tests/200` through
+  `bench/check_newest_skips_nulls.sh` (`check_newest_nulls_first`).
 - **transmute and the regrain janitor and reclaim read what they act on under the lock that holds it still**
   (#706). The cutover replayed the table's grants before its rename, and `GRANT` and `REVOKE` take no lock
   on the table, so one committed after that read landed on the monolith alone and the parent kept a revoked

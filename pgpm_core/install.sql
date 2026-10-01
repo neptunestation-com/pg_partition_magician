@@ -8614,6 +8614,10 @@ $$;
 -- transmute finds its frontier (ORDER BY ... DESC LIMIT 1, an index scan when the control column is the
 -- key), decoded. That is the value one future-dated row hides behind a passing fraction (#457): 1 bad row
 -- in 402 samples at 0.9975, and the sample max only sees it if the row happened to be in the sample.
+-- #734: the read skips NULLs in its WHERE clause. DESC sorts NULLs FIRST, so one NULL in the column (it is
+-- sampled before converting, when it may still be nullable) was "the maximum", and both columns came back
+-- null with a row years ahead in the table. Not max(): there is no max(uuid) before PostgreSQL 18, and
+-- `IS NOT NULL` is an index condition, so the backward index scan survives where NULLS LAST would sort.
 -- newest_in_future is that maximum more than one hour past now(), the fixed clock-skew tolerance transmute
 -- also applies; transmute additionally allows one partition step, which this function does not know.
 drop function if exists pgpm.check_uuidv7(regclass, name, int);
@@ -8624,7 +8628,8 @@ language plpgsql as $$
 begin
   return query execute format($q$
     with s as (select pgpm._uuid_to_ts(%1$I) as ts from %2$s limit %3$s),
-         m as (select pgpm._uuid_to_ts(t.%1$I) as ts from %2$s t order by t.%1$I desc limit 1)
+         m as (select pgpm._uuid_to_ts(t.%1$I) as ts from %2$s t where t.%1$I is not null
+                order by t.%1$I desc limit 1)
     select count(*)::bigint,
            count(*) filter (where ts between timestamptz '2015-01-01' and now() + interval '1 day')::bigint,
            round(coalesce(count(*) filter (where ts between timestamptz '2015-01-01' and now() + interval '1 day')::numeric
@@ -8649,7 +8654,8 @@ $$;
 -- newest_decoded / newest_in_future are check_uuidv7's (#457): the column's ACTUAL maximum (not the
 -- sample's), found the way transmute finds its frontier and decoded, and whether it sits more than one hour
 -- past now(). A maximum that does not match the declared shape reports null rather than raising, for the
--- same reason a malformed sampled row counts as implausible rather than aborting the sample.
+-- same reason a malformed sampled row counts as implausible rather than aborting the sample. NULLs are
+-- skipped in the read's WHERE clause, as in check_uuidv7 and for its reason (#734).
 drop function if exists pgpm.check_text_time(regclass, name, text, int, int, text, int, text, int, timestamptz);
 create or replace function pgpm.check_text_time(
   p_table regclass, p_control name, p_prefix text, p_width int, p_radix int, p_unit text,
@@ -8687,7 +8693,7 @@ begin
          decoded as (
            select pgpm._text_time_to_ts(v, %4$L, %5$s, %7$s, %8$L, %9$L, %10$s, %11$L) as ts from shaped
          ),
-         m as (select t.%1$I::text as v from %2$s t order by t.%1$I desc limit 1),
+         m as (select t.%1$I::text as v from %2$s t where t.%1$I is not null order by t.%1$I desc limit 1),
          m_decoded as (
            select case when left(v, length(%4$L)) = %4$L
                         and length(v) >= length(%4$L) + %5$s

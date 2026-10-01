@@ -2161,11 +2161,13 @@ recent time. Genuine UUIDv7/ULID scores `~1.0`; random UUIDv4 scores `~0`. A heu
 is the check `transmute` runs to gate the uuidv7 kind.
 
 `sampled`, `plausible`, `fraction`, `oldest` and `newest` describe the **sample**. `newest_decoded` does
-not: it is the column's actual maximum, found the way `transmute` finds its frontier and decoded, and
-`newest_in_future` is whether that maximum sits more than one hour past `now()`. Look at these before
-converting: a single future-dated row (a client with a wrong clock) leaves `fraction` at `0.99+` and can
-still pin the monolith's permanent `hi` years out, which is why `transmute` refuses one that leads the clock
-by more than one partition step plus one hour (see [`p_force_frontier`](#transmute-time--uuidv7--text_time-grid)).
+not: it is the column's actual maximum (its greatest non-null value, however many NULLs the column holds),
+found the way `transmute` finds its frontier and decoded, and `newest_in_future` is whether that maximum
+sits more than one hour past `now()`. Both are null only when the column holds no non-null value. Look
+at these before converting: a single future-dated row (a client with a wrong clock) leaves `fraction` at
+`0.99+` and can still pin the monolith's permanent `hi` years out, which is why `transmute` refuses one that
+leads the clock by more than one partition step plus one hour (see
+[`p_force_frontier`](#transmute-time--uuidv7--text_time-grid)).
 Rows to delete or correct are the ones sorting above `pgpm._ts_to_uuid(now() + <step> + interval '1 hour')`.
 
 ### `check_text_time`
@@ -2186,9 +2188,9 @@ shape counts as implausible directly, rather than raising -- one malformed row m
 A heuristic, not a proof; this is the check `transmute` runs to gate the text_time kind.
 
 `newest_decoded` and `newest_in_future` are [`check_uuidv7`](#check_uuidv7)'s: the column's actual maximum
-(not the sample's), decoded, and whether it sits more than one hour past `now()`. A maximum that does not
-match the declared shape reports `null` rather than raising. Rows to delete or correct before a refused
-`transmute` are the ones sorting above
+(not the sample's, and NULLs skipped), decoded, and whether it sits more than one hour past `now()`. A
+maximum that does not match the declared shape reports `null` rather than raising. Rows to delete or
+correct before a refused `transmute` are the ones sorting above
 `pgpm._ts_to_text_time(now() + <step> + interval '1 hour', <prefix>, <width>, <radix>, <unit>, ...)`.
 
 Refuses, with the same message `transmute` gives, when the control column's collation does not order the
