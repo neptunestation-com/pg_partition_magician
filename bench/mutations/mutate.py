@@ -1544,6 +1544,45 @@ MUTATIONS = {
         [("then 'true'   -- #736: nothing was copied, so every row is past it",
           "then 'false'   -- MUTANT: a NULL watermark has nothing past it", 1)],
     ),
+    "hypertable_cutover_watermark_timestamptz": (
+        "bench/hypertable_time_rendering.sh",
+        "Pre-#791 from_hypertable_cutover(): the append-only watermark max(control) of the destination is "
+        "held in a timestamptz local and spliced back through ::text, so a naive timestamp watermark goes "
+        "through the session TimeZone. Inside America/New_York's spring-forward gap the conversion moves it "
+        "an hour forward, the in-order appends below that hour are not caught up, and the conservation "
+        "check refuses the swap: both cutovers of tests/timescale/db/35 fail, keyless and keyed.",
+        [("  v_watermark text;   -- the column's own text (#791), never a timestamptz: see _from_hypertable_ctl_text\n",
+          "  v_watermark timestamptz;   -- MUTANT: a naive watermark goes through the session TimeZone\n", 1),
+         ("coalesce(sum(%s), 0), pgpm._from_hypertable_ctl_text(max(%I)) from %I.%I', v_fp_q, p_control",
+          "coalesce(sum(%s), 0), max(%I) from %I.%I', v_fp_q, p_control", 1),
+         ("pgpm._from_hypertable_past(p_control, v_watermark, p_inclusive => true)",
+          "pgpm._from_hypertable_past(p_control, v_watermark::text, p_inclusive => true)", 1),
+         ("pgpm._from_hypertable_past(p_control, v_watermark), v_fp_q)",
+          "pgpm._from_hypertable_past(p_control, v_watermark::text), v_fp_q)", 1)],
+    ),
+    "hypertable_chunk_bounds_session_datestyle": (
+        "bench/hypertable_time_rendering.sh",
+        "Pre-#793 from_hypertable_copy(): each chunk's range_start/range_end is spliced with a bare %L, in "
+        "the session's DateStyle. Under 'SQL, DMY' in Asia/Shanghai the bound renders with the abbreviation "
+        "CST, which reads back as US Central, so every chunk predicate moves 14 hours later and the oldest "
+        "14 hours are not copied: tests/timescale/db/36 part A fails for timestamptz and naive alike.",
+        [("    v_lo := format(v_bound_tpl, pgpm._ts_text(r.range_start));   -- #793: never the session DateStyle\n"
+          "    v_hi := format(v_bound_tpl, pgpm._ts_text(r.range_end));\n",
+          "    v_lo := format(v_bound_tpl, r.range_start);   -- MUTANT: the session DateStyle\n"
+          "    v_hi := format(v_bound_tpl, r.range_end);\n", 1)],
+    ),
+    "hypertable_ctl_text_session_datestyle": (
+        "bench/hypertable_time_rendering.sh",
+        "Pre-#793 drains and catch-ups: _from_hypertable_ctl_text renders a control value in the session's "
+        "DateStyle (a bare ::text, as max(ts)::text did), so under 'SQL, DMY' in Asia/Shanghai every "
+        "watermark and reconcile range the pre-drain, its step, the change drain and the cutover carry "
+        "reads back 14 hours later. The copy itself is exact (its bounds go through pgpm._ts_text), so "
+        "this isolates the other five sites: tests/timescale/db/36 parts B, C and D fail.",
+        [("create or replace function pgpm._from_hypertable_ctl_text(p_value anyelement)\n"
+          "returns text language sql stable set datestyle = 'ISO, MDY' as $$\n",
+          "create or replace function pgpm._from_hypertable_ctl_text(p_value anyelement)\n"
+          "returns text language sql stable as $$   -- MUTANT: the session DateStyle\n", 1)],
+    ),
     "transmute_dropped_fk_parent_not_carried": (
         "bench/hypertable_swap_order.sh",
         "transmute's cutover moves every pgpm.dropped_fk record whose referencing_table is the table it "
@@ -5241,6 +5280,9 @@ MUTATION_SRC = {
     "hypertable_tmp_name_cut": "pgpm_hypertable/install.sql",
     "hypertable_handoff_unchecked": "pgpm_hypertable/install.sql",
     "hypertable_empty_watermark_nothing_past": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_watermark_timestamptz": "pgpm_hypertable/install.sql",
+    "hypertable_chunk_bounds_session_datestyle": "pgpm_hypertable/install.sql",
+    "hypertable_ctl_text_session_datestyle": "pgpm_hypertable/install.sql",
     "hypertable_cutover_identity_by_default": "pgpm_hypertable/install.sql",
     "hypertable_cutover_shape_unchecked_up_front": "pgpm_hypertable/install.sql",
     "hypertable_cutover_shape_unchecked_under_lock": "pgpm_hypertable/install.sql",
@@ -5345,6 +5387,9 @@ MUTATION_TRACK = {
     "hypertable_tmp_name_cut": "timescale",
     "hypertable_handoff_unchecked": "timescale",
     "hypertable_empty_watermark_nothing_past": "timescale",
+    "hypertable_cutover_watermark_timestamptz": "timescale",
+    "hypertable_chunk_bounds_session_datestyle": "timescale",
+    "hypertable_ctl_text_session_datestyle": "timescale",
     "hypertable_cutover_identity_by_default": "timescale",
     "hypertable_cutover_shape_unchecked_up_front": "timescale",
     "hypertable_cutover_shape_unchecked_under_lock": "timescale",

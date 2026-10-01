@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- **`from_hypertable_cutover` keeps a naive watermark in the column's own type** (#791). The append-only
+  catch-up's watermark, `max(control)` of the destination, was held in a `timestamptz` local, so a
+  `timestamp` (no tz) value went through the session `TimeZone`; inside that zone's spring-forward gap
+  (America/New_York, 2024-03-10 02:30) it moved an hour forward, the in-order appends below that hour were
+  not caught up, and the conservation check refused the swap, blaming out-of-order appends. It is now
+  carried as text through the new `pgpm._from_hypertable_ctl_text`, as the online drain already carried
+  it. `tests/timescale/db/35` pins it keyless and keyed; `bench/hypertable_time_rendering.sh` proves it
+  against `hypertable_cutover_watermark_timestamptz`.
+- **`from_hypertable` renders its chunk bounds and watermarks independently of the session's `DateStyle`**
+  (#793). The copy spliced each chunk bound with a bare `%L`, and the drains and the cutover carried their
+  watermarks and reconcile ranges as a bare `::text`, all in the session's `DateStyle`. Under `SQL`,
+  `Postgres` or `German` that names the zone by abbreviation, and `CST` (Asia/Shanghai) reads back as US
+  Central: the copy skipped its oldest 14 hours and every catch-up started 14 hours late, so the cutover
+  refused the swap after the whole online copy. The bounds now go through `pgpm._ts_text` and every
+  control value through `pgpm._from_hypertable_ctl_text`, both pinned to ISO. `tests/timescale/db/36`
+  reaches every site (the copy, the pre-drain and its step, the change drain, and the cutover's keyless, keyed and tracked
+  catch-ups); `bench/hypertable_time_rendering.sh` proves it against `hypertable_chunk_bounds_session_datestyle`
+  and `hypertable_ctl_text_session_datestyle`.
 - **`transmute` carries the table's replica identity** (#782). The cutover carried publication membership
   (#566) but not `REPLICA IDENTITY`, and PostgreSQL gives a new partition none of its parent's, so a keyless
   `REPLICA IDENTITY FULL` table in a publication got forward partitions with none and every `UPDATE` and

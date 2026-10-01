@@ -407,6 +407,10 @@ run_timescale() {
     # its two mutants of uninstall.sql.
     echo "--- uninstall sweeps from_hypertable's change capture guard (issue #737) ---"
     bash "$(dirname "$0")/bench/uninstall_hypertable_capture.sh" pgpm_test-timescale pgpm_perf153 || fail=1
+    # #791's and #793's time-rendering guard, the same way: it re-runs tests/timescale/db/35 and 36 against
+    # the real install, the clean-code half of the pairs discriminate.sh completes with its three mutants.
+    echo "--- bounds and watermarks independent of the session's DateStyle and TimeZone guard (issues #791, #793) ---"
+    bash "$(dirname "$0")/bench/hypertable_time_rendering.sh" pgpm_test-timescale pgpm_perf172 || fail=1
 
     echo "--- discriminate (timescale-scoped mutations) ---"
     bash "$(dirname "$0")/bench/discriminate.sh" --track=timescale pgpm_test-timescale || fail=1
