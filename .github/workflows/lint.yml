@@ -77,7 +77,9 @@ jobs:
       - name: The minifier must know where a line sits before deciding what it is
         run: |
           python3 scripts/minify_sql.py --selftest
-          scripts/build_dbdev_package.sh pgpm_core/install.sql dist/minifier-check.sql
+          # warn mode: this job proves the minifier lexes the file end to end; the package's size against
+          # database.dev's column is the Test Suite's informational dbdev-cap job
+          PGPM_DBDEV_CAP=warn scripts/build_dbdev_package.sh pgpm_core/install.sql dist/minifier-check.sql
 
   track-filters:
     name: Track path filters

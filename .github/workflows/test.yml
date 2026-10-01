@@ -42,11 +42,30 @@ jobs:
           VER=$(awk -F"'" '/default_version/ {print $2}' pgpm_core/extension.control)
           DBDEV_PKG="dist/pg_partition_magician--${VER}.sql"
           scripts/build_install_bundle.sh pgpm_core/install.sql dist/pg_partition_magician-bundle.sql
-          scripts/build_dbdev_package.sh  pgpm_core/install.sql "$DBDEV_PKG"
+          # The package must build and lex; its SIZE against database.dev's column is the dbdev-cap job's,
+          # below, which is deliberately not required for merge.
+          PGPM_DBDEV_CAP=warn scripts/build_dbdev_package.sh pgpm_core/install.sql "$DBDEV_PKG"
           # bundle must be free of psql metacommands (dashboard SQL editor target)
           if grep -nE '^\\' dist/pg_partition_magician-bundle.sql "$DBDEV_PKG"; then
             echo "ERROR: a package still contains psql metacommands"; exit 1
           fi
+
+  # database.dev stores a package version's SQL in a varchar(250000) column (supabase/dbdev,
+  # supabase/migrations/20220117142137_package_tables.sql); its documentation does not say so, and
+  # pg_flight_recorder met the limit by publishing. The minified core install sits at the cap, so this
+  # job is the loud, TRUE record of whether main can be published to dbdev today, and it is NOT in the
+  # Test Summary's needs: a fix must not wait on the registry's column (2026-10-01, pass 5's fix phase,
+  # whose five core fixes took the package to about 268,000). The publish workflow runs the same build
+  # strictly and refuses to publish while this is red. RELEASING.md carries the decision.
+  dbdev-cap:
+    name: dbdev package size (informational)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The minified package must fit database.dev's 250,000-character column to be publishable
+        run: |
+          VER=$(awk -F"'" '/default_version/ {print $2}' pgpm_core/extension.control)
+          scripts/build_dbdev_package.sh pgpm_core/install.sql "dist/pg_partition_magician--${VER}.sql"
 
   # The from_hypertable / TimescaleDB track, a first-class member of the default suite. It runs on a separate
   # image (Apache TimescaleDB on supabase/postgres, PG15) so it lives in its own reusable workflow rather than

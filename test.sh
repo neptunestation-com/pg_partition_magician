@@ -102,7 +102,9 @@ BUNDLE="dist/pg_partition_magician-bundle.sql"
 # Build the channel artifacts on the host (version-independent).
 echo ">>> Building install artifacts..."
 scripts/build_install_bundle.sh pgpm_core/install.sql "$BUNDLE"
-scripts/build_dbdev_package.sh  pgpm_core/install.sql "$DBDEV_PKG"
+# warn, do not fail, over database.dev's 250,000-char column: the dbdev channel below installs the
+# file through psql, where its size does not matter, and the strict check has its own CI job
+PGPM_DBDEV_CAP=warn scripts/build_dbdev_package.sh pgpm_core/install.sql "$DBDEV_PKG"
 if grep -nE '^\\' "$BUNDLE" "$DBDEV_PKG"; then
   echo "ERROR: a packaged artifact still contains psql metacommands"; exit 1
 fi
