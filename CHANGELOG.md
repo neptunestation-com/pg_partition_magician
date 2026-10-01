@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **`untransmute` hands back the managed table's publication membership, not the conversion's** (#780).
+  After a `transmute` the parent is the table, so `ALTER PUBLICATION ... ADD`, `DROP` or `SET TABLE` naming
+  it changes the parent's `pg_publication_rel` rows; `untransmute` dropped those with the parent and kept the
+  monolith's, so a publication the table had joined since stopped publishing it at the reverse (every later
+  write missing at its subscribers) and one it had left published it again. The reversal now reads the
+  parent's memberships under its `ACCESS EXCLUSIVE`, beside the grants and comments, and puts them on the
+  restored table with their row filters and column lists, issuing DDL only for the memberships that differ.
+  `tests/206` runs under `bench/untransmute_publication_membership.sh`, with the mutations
+  `untransmute_publication_not_restored`, `untransmute_publication_capture_before_lock` and
+  `untransmute_publication_always_readd`.
 - **Loosened retention takes back a retirement on a table moved to another schema** (#778). `_retain_recall`
   (#724) still resolved a retiring partition in the parent's current schema, the one lifecycle step #727
   left there, so after `ALTER TABLE <parent> SET SCHEMA` a loosening `set_retain` logged

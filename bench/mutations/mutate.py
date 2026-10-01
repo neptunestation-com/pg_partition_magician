@@ -456,6 +456,26 @@ UNTRANSMUTE_ACL_CAPTURE_BODY = """  for v_g in
 
 """
 
+# untransmute's publication-membership capture (#780), under the lock, and its apply after the rename.
+UNTRANSMUTE_PUB_CAPTURE = """  -- and its publication memberships (#780, see above), under the lock for the same reason: ALTER PUBLICATION
+  -- ... ADD or DROP TABLE takes SHARE UPDATE EXCLUSIVE on the table, which the first gate's ACCESS SHARE does
+  -- not exclude, so one committed while the lock was queued was in neither a capture read before it nor the
+  -- monolith's rows. From here none can commit.
+  select coalesce(array_agg(o_def order by o_pub), '{}') into v_pubdefs
+    from pgpm._publication_adds(p_parent, v_nsp, v_rel);
+"""
+UNTRANSMUTE_PUB_APPLY = """  for v_g in select o_pub, o_def from pgpm._publication_adds(v_restored, v_nsp, v_rel) loop
+    if v_g.o_def = any(v_pubdefs) then
+      v_pubdefs := array_remove(v_pubdefs, v_g.o_def);
+    else
+      execute format('alter publication %I drop table %s', v_g.o_pub, v_restored::text);
+    end if;
+  end loop;
+  foreach v_tdef in array v_pubdefs loop
+    execute v_tdef;
+  end loop;
+"""
+
 # The "no commits in the sweep" defect, shared BY REFERENCE by the two mutations that model it: one
 # for the reader-probe guard (bench/maintain_lock.sh) and one for the trace guard
 # (bench/lock_trace.sh). Not copied, on purpose. This pattern's expected count has already drifted
@@ -4840,6 +4860,42 @@ select is(
         "tests/timescale/db/25's refusal-message assertions in parts A and B catch it.",
         [(HT_CUTOVER_UNTRACKED_BLOCK, "", 1),
          (HT_CUTOVER_CONSERVATION, HT_CUTOVER_CONSERVATION + HT_CUTOVER_UNTRACKED_BLOCK, 1)],
+    ),
+    "untransmute_publication_not_restored": (
+        "bench/untransmute_publication_membership.sh",
+        "Pre-#780 untransmute: the parent's publication memberships are dropped with the parent and the "
+        "restored table keeps the monolith's, which date from the conversion, so a publication the managed "
+        "table joined since stops publishing it at the reverse (every later write missing at its "
+        "subscribers) and one it left publishes it again. Removes the apply after the rename whole, one "
+        "site; tests/206's Part A membership, filter and column-list assertions and Part B's late join "
+        "catch it, and its LIVENESS witnesses show the monolith really carried the stale set.",
+        [(UNTRANSMUTE_PUB_APPLY, "", 1)],
+    ),
+    "untransmute_publication_capture_before_lock": (
+        "bench/untransmute_publication_membership.sh",
+        "Issue #780's placement undone: untransmute reads the parent's publication memberships above its "
+        "explicit ACCESS EXCLUSIVE (#443's second gate), under only the first gate's ACCESS SHARE, which "
+        "does not exclude ALTER PUBLICATION ... ADD or DROP TABLE (SHARE UPDATE EXCLUSIVE). tests/206 Part "
+        "B's writer adds the table to pub206_late and removes it from pub206_gone while the lock is queued; "
+        "the restored table comes back in pub206_gone and not in pub206_late. One block, moved.",
+        [(UNTRANSMUTE_PUB_CAPTURE, "", 1),
+         ("  -- THE GATE, AGAIN, UNDER THE LOCK (#443).",
+          UNTRANSMUTE_PUB_CAPTURE + "\n  -- THE GATE, AGAIN, UNDER THE LOCK (#443).", 1)],
+    ),
+    "untransmute_publication_always_readd": (
+        "bench/untransmute_publication_membership.sh",
+        "Issue #780's apply without its comparison: every membership the restored table has is dropped and "
+        "every one the parent had is re-added, matching or not. The memberships come out right, but a "
+        "reverse with nothing changed issues an ALTER PUBLICATION per publication, so it needs every "
+        "publication's owner where it needed none. tests/206's event-trigger record catches it: pub206_kept "
+        "is re-added in Part A, and Part A2's unchanged reverse issues an ADD TABLE. One site.",
+        [("""    if v_g.o_def = any(v_pubdefs) then
+      v_pubdefs := array_remove(v_pubdefs, v_g.o_def);
+    else
+      execute format('alter publication %I drop table %s', v_g.o_pub, v_restored::text);
+    end if;
+""", """      execute format('alter publication %I drop table %s', v_g.o_pub, v_restored::text);
+""", 1)],
     ),
 }
 
