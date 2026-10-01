@@ -18,9 +18,13 @@ create table public.og_p0000000000000000000 (like public.og);
 select has_table('public', 'og_p0000000000000000000',
   'precondition: an orphaned child-partition-named table exists standalone');
 
-select throws_ok(
+-- Pinned by MESSAGE, not by SQLSTATE alone. In this fixture (300 ids, step 100000) the monolith is the
+-- one-step cell [0, 100000), whose name is og_p0000000000000000000, the orphan's own name, so with the
+-- orphan guard gone transmute is STILL refused with P0001, by the monolith-name guard. A bare 'P0001'
+-- accepted that refusal and certified a guard that was not there; only the orphan guard says this.
+select throws_like(
   $$ call pgpm.transmute('public.og', 'id', 100000) $$,
-  'P0001', null,
+  'pg_partition_magician: public.og_p0000000000000000000 already exists as a standalone table matching this parent''s partition naming%',
   'transmute refuses when an orphaned child-partition table already exists (no cryptic later dup-key)');
 
 select is(

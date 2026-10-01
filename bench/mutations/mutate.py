@@ -4597,6 +4597,100 @@ $$;''',
 """, """      || case when abs(v_off) % 60 = 0 then '' else ':' || lpad((abs(v_off) % 60)::text, 2, '0') end;
 """, 1)],
     ),
+    "runbook_phantom_alert_action": (
+        "bench/doc_log_actions.sh",
+        "Pre-#742 blind spot, as a document: docs/runbook.md's step-2 alert query (`and action in (...)`, the "
+        "SQL an operator copies into an alert) names 'fail_retire_identity', an action no install.sql writes "
+        "(pgpm logs fail_retain_identity), so the alert can never fire. Check 6 of "
+        "scripts/check_living_docs.sh read only the reference's vocabulary table and 'logged `x`' prose, so it "
+        "passed this; it now reads the docs' SQL literals too and fails it. One site.",
+        [("      and action in ('fail_retain_detach', 'fail_retain_crossing', 'fail_retain_identity',\n",
+          "      and action in ('fail_retain_detach', 'fail_retain_crossing', 'fail_retire_identity',\n", 1)],
+    ),
+    "orphan_refusal_sqlstate_only": (
+        "bench/tests_fail_on_defect.sh",
+        "Pre-#743 tests/18: the orphaned-child refusal pinned by SQLSTATE alone, throws_ok(..., 'P0001', null, "
+        "desc). In its own fixture the one-step monolith's name IS the planted orphan's name, so with the orphan "
+        "guard deleted transmute is still refused with P0001, by the monolith-name guard, and the whole file "
+        "passes against a pgpm with no orphan guard. The exact pre-#743 assertion.",
+        [("""select throws_like(
+  $$ call pgpm.transmute('public.og', 'id', 100000) $$,
+  'pg_partition_magician: public.og_p0000000000000000000 already exists as a standalone table matching this parent''s partition naming%',
+""", """select throws_ok(
+  $$ call pgpm.transmute('public.og', 'id', 100000) $$,
+  'P0001', null,
+""", 1)],
+    ),
+    "radix_length_refusal_unpinned": (
+        "bench/tests_fail_on_defect.sh",
+        "Pre-#743 tests/90: _radix_decode's alphabet-length refusal asserted with throws_ok(sql, NULL, NULL) on "
+        "_radix_decode('5', 10, '01234'), whose digit '5' is outside the alphabet, so the invalid-digit 22P02 "
+        "satisfies it and the assertion passes with the length check deleted. The exact pre-#743 assertion.",
+        [("""  $$ select pgpm._radix_decode('3', 10, '01234') $$,
+  'P0001', 'pg_partition_magician: alphabet 01234 has length 5, which does not match radix 10',
+""", """  $$ select pgpm._radix_decode('5', 10, '01234') $$,
+  NULL, NULL,
+""", 1)],
+    ),
+    "id_conservation_after_migration": (
+        "bench/tests_fail_on_defect.sh",
+        "Pre-#744 tests/11: the 'before' row count is taken AFTER fixtures/demo.sql has already run the "
+        "migration and compared with the table's count in the next statement, count = count, which passes "
+        "whatever the migration lost. The exact pre-#744 text, plan included.",
+        [("select plan(6);\n", "select plan(5);\n", 1),
+         ("""-- Conservation is judged against the rows fixtures/demo.sql seeded BEFORE it ran the migration
+-- (public.events_id_seeded). A count taken here, after the migration, is the migration's own output, and
+-- comparing the table to it compares the count to itself. Identity, not only cardinality: a lost row
+-- and a stray one cancel in a count, never in the bag of (id, payload).
+select is(
+  (select count(*) from public.events_id)::bigint,
+  (select count(*) from public.events_id_seeded)::bigint,
+  'row count conserved across the id migration (against the count seeded before it)'
+);
+
+select bag_eq(
+  'select id, payload from public.events_id',
+  'select id, payload from public.events_id_seeded',
+  'every seeded events_id row survives the migration by identity: none lost, none added, none altered'
+);
+""", """create temporary table _before_id as select count(*) as n from public.events_id;
+
+
+select is(
+  (select count(*) from public.events_id)::bigint,
+  (select n from _before_id)::bigint, 'row count conserved across the id migration'
+);
+""", 1)],
+    ),
+    "uuid_conservation_after_migration": (
+        "bench/tests_fail_on_defect.sh",
+        "Pre-#744 tests/12: as id_conservation_after_migration, for events_uuid. The exact pre-#744 text, "
+        "plan included.",
+        [("select plan(7);\n", "select plan(6);\n", 1),
+         ("""-- Conservation is judged against the rows fixtures/demo.sql seeded BEFORE it ran the migration
+-- (public.events_uuid_seeded). A count taken here, after the migration, is the migration's own output, and
+-- comparing the table to it compares the count to itself. Identity, not only cardinality: a lost row
+-- and a stray one cancel in a count, never in the bag of (id, payload).
+select is(
+  (select count(*) from public.events_uuid)::bigint,
+  (select count(*) from public.events_uuid_seeded)::bigint,
+  'row count conserved across the uuid migration (against the count seeded before it)'
+);
+
+select bag_eq(
+  'select id, payload from public.events_uuid',
+  'select id, payload from public.events_uuid_seeded',
+  'every seeded events_uuid row survives the migration by identity: none lost, none added, none altered'
+);
+""", """create temporary table _before_uuid as select count(*) as n from public.events_uuid;
+
+
+select is(
+  (select count(*) from public.events_uuid)::bigint,
+  (select n from _before_uuid)::bigint, 'row count conserved across the uuid migration'
+);
+""", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
@@ -4677,6 +4771,12 @@ MUTATION_SRC = {
     "tap_verdict_misses_plan_shortfall": "test.sh",
     "discriminate_counts_uninstallable": "bench/discriminate.sh",
     "discriminate_list_on_stdin": "bench/discriminate.sh",
+    # #742 to #744: a lint's document and three test files, each judged by the guard that runs it.
+    "runbook_phantom_alert_action": "docs/runbook.md",
+    "orphan_refusal_sqlstate_only": "tests/18_orphan_child_guard_test.sql",
+    "radix_length_refusal_unpinned": "tests/90_text_time_alphabet_codec_test.sql",
+    "id_conservation_after_migration": "tests/11_id_kind_test.sql",
+    "uuid_conservation_after_migration": "tests/12_uuidv7_kind_test.sql",
 }
 
 # name -> the CI track whose job runs it; anything not listed here belongs to the default `perf`
