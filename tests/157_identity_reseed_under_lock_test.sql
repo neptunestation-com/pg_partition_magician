@@ -51,9 +51,13 @@ select dblink_send_query('t157',
   $$call pgpm.transmute('public.id157', 'id', 100::bigint, p_obtain => 2, p_lock_timeout => '60s')$$);
 
 -- Poll for the WAIT (phase 1's ADD CONSTRAINT), bounded at 30 s so a broken fixture fails, not hangs.
+-- pg_stat_activity is read once per transaction and then frozen (the documented snapshot; a DO block is
+-- one transaction), so the loop clears it each turn (#713). It happened to work without that: pg_locks is
+-- live, and the backend it joins was in the first snapshot with its application_name already set.
 do $$
 begin
   for i in 1 .. 600 loop
+    perform pg_stat_clear_snapshot();
     exit when exists (select 1 from pg_locks l join pg_stat_activity a on a.pid = l.pid
                        where a.application_name = 'id157_transmute' and l.locktype = 'relation'
                          and l.relation = 'public.id157'::regclass
@@ -111,9 +115,11 @@ select dblink_exec('u157', $$set application_name = 'iu157_untransmute'$$);
 select dblink_exec('u157', $$set lock_timeout = '60s'$$);
 select dblink_send_query('u157', $$select pgpm.untransmute('public.iu157')::text$$);
 
+-- The same poll as (A)'s, snapshot cleared each turn for the same reason.
 do $$
 begin
   for i in 1 .. 600 loop
+    perform pg_stat_clear_snapshot();
     exit when exists (select 1 from pg_locks l join pg_stat_activity a on a.pid = l.pid
                        where a.application_name = 'iu157_untransmute' and l.locktype = 'relation'
                          and l.relation = 'public.iu157'::regclass

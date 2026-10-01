@@ -143,8 +143,13 @@ select is((select x from dblink('c162_a',
 -- B: a second driver on the same parent, one step of 500
 select dblink_send_query('c162_b',
   format('select pgpm.regrain_step(%L, %L, %L, 500)', 'public.rd', :'mon_c', '5000'));
+-- pg_stat_activity is read once per transaction and then frozen (the documented snapshot; a DO block is
+-- one transaction), so without clearing it each turn this loop saw its first read 6000 times and could
+-- pass only when B was already waiting at that read: measured on PG 15, 400 turns never saw a wait a
+-- fresh transaction saw at once (#713).
 do $$ begin
   for i in 1 .. 6000 loop
+    perform pg_stat_clear_snapshot();
     exit when exists (select 1 from pg_stat_activity where pid = current_setting('c162.bpid')::int
                        and wait_event_type = 'Lock');
     perform pg_sleep(0.005);
@@ -191,6 +196,7 @@ select is((select x from dblink('c162_a',
 select dblink_send_query('c162_b', $q$select pgpm.set_regrain('public.rp', '2500')::text$q$);
 do $$ begin
   for i in 1 .. 6000 loop
+    perform pg_stat_clear_snapshot();   -- see (C)
     exit when exists (select 1 from pg_stat_activity where pid = current_setting('c162.bpid')::int
                        and wait_event_type = 'Lock');
     perform pg_sleep(0.005);
@@ -251,6 +257,7 @@ select dblink_send_query('c162_b',
   format('select pgpm.regrain_step(%L, %L, %L, 1000)', 'public.rc', :'mon_e', '5000'));
 do $$ begin
   for i in 1 .. 6000 loop
+    perform pg_stat_clear_snapshot();   -- see (C)
     exit when exists (select 1 from pg_stat_activity where pid = current_setting('c162.bpid')::int
                        and wait_event_type = 'Lock');
     perform pg_sleep(0.005);

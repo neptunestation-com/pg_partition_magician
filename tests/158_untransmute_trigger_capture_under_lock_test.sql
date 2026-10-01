@@ -42,9 +42,14 @@ select dblink_exec('u158', $$set application_name = 'tg158_untransmute'$$);
 select dblink_exec('u158', $$set lock_timeout = '60s'$$);
 select dblink_send_query('u158', $$select pgpm.untransmute('public.tg158')::text$$);
 
+-- Poll for the WAIT, bounded at 30 s so a broken fixture fails rather than hangs.
+-- pg_stat_activity is read once per transaction and then frozen (the documented snapshot; a DO block is
+-- one transaction), so the loop clears it each turn (#713). It happened to work without that: pg_locks is
+-- live, and the backend it joins was in the first snapshot with its application_name already set.
 do $$
 begin
   for i in 1 .. 600 loop
+    perform pg_stat_clear_snapshot();
     exit when exists (select 1 from pg_locks l join pg_stat_activity a on a.pid = l.pid
                        where a.application_name = 'tg158_untransmute' and l.locktype = 'relation'
                          and l.relation = 'public.tg158'::regclass
