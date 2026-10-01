@@ -83,8 +83,17 @@ failed" may have reached its defect through another seed's side effect; its veri
 
 Export the open-issue list: `gh issue list --state open --label bug --limit 200 --json number,title,body > $WORK/open.json`.
 For every `candidate` in `$WORK/classified.json`, spawn one **`verifier`** agent with: the claim's
-directory, the two tree paths, its classifier record, `$WORK/open.json`, the container, and the verdict
-path `$WORK/verdicts/<id>.json`. Give it nothing from the finder's transcript. A verifier that changed
+directory, the two tree paths, its classifier record, `$WORK/open.json`, the container, the verdict
+path `$WORK/verdicts/<id>.json`, and the exact classifier command for its claim:
+
+```bash
+scripts/review/classify_claims.py --claims $WORK/claims --review-tree $WORK/tree --pristine-tree . \
+  --only <id> --out $WORK/verify/<id>.classified.json
+```
+
+No `--sealed` (one candidate needs no attribution, and the sealed record is not a verifier's to read); the
+container follows the claim's install list unless its `claim.json` names one. Pass 4's F7-03 verifier had
+to guess the arguments (#679). Give it nothing from the finder's transcript. A verifier that changed
 the fixture or the assertions stores its version as `repro.verified.sql` (or `.sh`) in the claim
 directory and marks its verdict `"rebuilt": true`; check that every candidate flagged "pristine liveness
 failed" came back either rebuilt or `fell`. Then

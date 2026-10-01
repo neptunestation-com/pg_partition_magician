@@ -12,7 +12,7 @@ Claims directory layout (one directory per claim, grouped by finder):
                                                  "repro": "repro.sql",            # or repro.sh
                                                  "install": ["pgpm_core/install.sql"],   # default
                                                  "fixtures": false,               # fixtures/demo.sql
-                                                 "container": "pgpm_test-archive"}  # optional; default --container
+                                                 "container": "pgpm_test-archive"}  # optional; see Harness below
   <claims>/<finder>/<claim-id>/repro.sql | repro.sh
   <claims>/<finder>/<claim-id>/repro.verified.sql | repro.verified.sh   # optional, written by the verifier
 
@@ -47,10 +47,26 @@ Classification, from the two runs:
                   all (not run); back to the finder.
   not_run         the tree could not be installed in the claim's container (an environment problem, not
                   the claim's): fix the environment or the claim's "container" and re-run.
+  invalid_claim   claim.json is not valid JSON (a finder still writing it, a file cut short): recorded with
+                  the path and not run; nothing else in the run is affected.
+
+Harness. Each claim runs in the container its install list needs: pgpm_archive/install.sql in the archive
+harness (--archive-container, default pgpm_test-archive: the http extension lives only in that image),
+pgpm_hypertable/install.sql in the timescale harness (--timescale-container, default pgpm_test-timescale,
+reached over TCP with the fleet image's password, the timescaledb extension created first), anything else
+in --container (default pgpm_test-15). A claim's own "container" overrides the inference. Pass 4 (#679):
+three archive claims classified not_run because their finders had not named the archive harness.
+
+Only the selected claims are read. --only <claim-id> names ONE claim directory and --finders a set of
+finder directories; nothing outside the selection is opened, so a half-written claim.json in a finder still
+at work cannot stop a verifier's run on another finder's claim (#679). With --only, --sealed may be left
+out: attribution is not needed for one candidate, and the sealed record is not a verifier's to read.
 
 Usage:
-  classify_claims.py --claims <dir> --review-tree <dir> --pristine-tree <dir> --sealed <json>
-                     --out <json> [--container pgpm_test-15] [--only <claim-id>] [--keep-dbs]
+  classify_claims.py --claims <dir> --review-tree <dir> --pristine-tree <dir> --sealed <json> --out <json>
+                     [--container pgpm_test-15] [--archive-container ...] [--timescale-container ...]
+                     [--finders F1,F2] [--seeds-dir <dir>] [--keep-dbs]
+  classify_claims.py --claims <dir> --review-tree <dir> --pristine-tree <dir> --only <claim-id> --out <json>
   classify_claims.py --selftest
 """
 import argparse
@@ -118,25 +134,36 @@ def script_failure_kind(output, returncode):
 
 
 def load_claims(claims_dir, only=None, finders=None):
+    """The claims under <claims>/<finder>/<claim-id>/, each read only when selected: `only` names one
+    claim directory and `finders` a set of finder directories, and nothing outside the selection is opened
+    (#679: a half-written claim.json in a finder still at work crashed a verifier's --only run on another
+    finder's claim, with a bare JSONDecodeError and no file name). A claim.json that is not valid JSON, or
+    cannot be read, is returned as an invalid_claim carrying its path, and the rest of the run goes on."""
     claims = []
     for finder in sorted(os.listdir(claims_dir)):
         fdir = os.path.join(claims_dir, finder)
         if not os.path.isdir(fdir) or (finders and finder not in finders):
             continue
         for cid in sorted(os.listdir(fdir)):
+            if only and cid != only:
+                continue
             cdir = os.path.join(fdir, cid)
             cj = os.path.join(cdir, "claim.json")
             if not os.path.isfile(cj):
                 continue
-            with open(cj) as fh:
-                c = json.load(fh)
+            try:
+                with open(cj) as fh:
+                    c = json.load(fh)
+                if not isinstance(c, dict):
+                    raise ValueError("the top level is not a JSON object")
+            except (ValueError, OSError) as e:   # json.JSONDecodeError is a ValueError
+                claims.append({"id": cid, "finder": finder, "dir": cdir, "invalid_claim": f"{cj}: {e}"})
+                continue
             c.setdefault("id", cid)
             c.setdefault("finder", finder)
             c.setdefault("install", ["pgpm_core/install.sql"])
             c.setdefault("fixtures", False)
             c["dir"] = cdir
-            if only and c["id"] != only:
-                continue
             used = pick_repro(cdir, c.get("repro"))
             if used is None:
                 c["error"] = "no reproduction file; a claim without one is a hypothesis, not a finding"
@@ -151,26 +178,57 @@ def load_claims(claims_dir, only=None, finders=None):
     return claims
 
 
-class Harness:
-    """Fresh database per run in a running harness container; files reach psql through stdin."""
+HARNESS_DEFAULTS = {"core": "pgpm_test-15", "archive": "pgpm_test-archive", "timescale": "pgpm_test-timescale"}
 
-    def __init__(self, container, keep=False):
-        self.container = container
+
+def harness_for(install):
+    """Which harness a claim's install list needs: 'archive' when it installs pgpm_archive (the http
+    extension lives only in the archive image), 'timescale' when it installs pgpm_hypertable (a real
+    TimescaleDB, in the fleet image), else 'core'."""
+    tops = {rel.replace("\\", "/").split("/", 1)[0] for rel in (install or [])}
+    if "pgpm_archive" in tops:
+        return "archive"
+    if "pgpm_hypertable" in tops:
+        return "timescale"
+    return "core"
+
+
+class Harness:
+    """Fresh database per run in a running harness container; files reach psql through stdin. The container
+    is the claim's own when it names one, else the one its install list needs (harness_for)."""
+
+    def __init__(self, container, keep=False, archive=None, timescale=None):
+        self.containers = {"core": container or HARNESS_DEFAULTS["core"],
+                           "archive": archive or HARNESS_DEFAULTS["archive"],
+                           "timescale": timescale or HARNESS_DEFAULTS["timescale"]}
+        self.container = self.containers["core"]
         self.keep = keep
 
+    def container_for(self, claim):
+        return claim.get("container") or self.containers[harness_for(claim.get("install"))]
+
+    def psql_prefix(self, container, db):
+        """The command that reaches `db` in `container`. The timescale harness is the fleet image, which does
+        not trust the local socket: TCP with its password, as test.sh's run_timescale connects."""
+        if container == self.containers["timescale"]:
+            return ["docker", "exec", "-i", "-e", "PGPASSWORD=postgres", container, "psql", "-h", "127.0.0.1",
+                    "-U", "postgres", "-d", db, "-v", "ON_ERROR_STOP=1"]
+        return ["docker", "exec", "-i", container, "psql", "-U", "postgres", "-d", db, "-v", "ON_ERROR_STOP=1"]
+
     def psql(self, container, db, args, stdin=None, check=True):
-        cmd = ["docker", "exec", "-i", container, "psql", "-U", "postgres", "-d", db,
-               "-v", "ON_ERROR_STOP=1", *args]
+        cmd = self.psql_prefix(container, db) + list(args)
         return subprocess.run(cmd, input=stdin, capture_output=True, text=True, check=check)
 
     def run(self, tree, claim, tag):
-        # a claim may name the container it needs (the archive module needs pgsql-http); else the default
-        container = claim.get("container") or self.container
+        container = self.container_for(claim)
         db = re.sub(r"[^a-z0-9_]", "_", f"rv_{claim['id']}_{tag}".lower())
         self.psql(container, "postgres", ["-qc", f'drop database if exists "{db}"'])
         self.psql(container, "postgres", ["-qc", f'create database "{db}"'])
         try:
             try:
+                if container == self.containers["timescale"]:
+                    # the module's own TimescaleDB checks run at call time; a hypertable needs the extension
+                    self.psql(container, db, ["-qc", "create extension if not exists timescaledb"])
                 for rel in claim["install"]:
                     with open(os.path.join(tree, rel)) as fh:
                         self.psql(container, db, ["-q", "--single-transaction", "-f", "-"], stdin=fh.read())
@@ -192,7 +250,7 @@ class Harness:
                     return {"fails": False, "liveness_failed": True, "exit": r.returncode, "tail": out[-1500:]}
             else:
                 env = {**os.environ,
-                       "PSQL": f"docker exec -i {container} psql -U postgres -d {db} -v ON_ERROR_STOP=1",
+                       "PSQL": " ".join(self.psql_prefix(container, db)),
                        "TREE": tree, "DB": db, "CONTAINER": container}
                 r = subprocess.run(["bash", repro], env=env, capture_output=True, text=True, cwd=claim["dir"])
                 out = r.stdout + r.stderr
@@ -291,6 +349,10 @@ def run_all(claims, review_tree, pristine_tree, seeds, runner, isolator=None):
     for c in claims:
         rec = {k: c.get(k) for k in ("id", "finder", "tier", "file", "line", "lens", "scenario", "repro")}
         rec["repro_used"] = c.get("repro_used") or c.get("repro")
+        if c.get("invalid_claim"):
+            rec.update({"class": "invalid_claim", "error": c["invalid_claim"]})
+            out.append(rec)
+            continue
         if c.get("error"):
             rec.update({"class": "hypothesis", "error": c["error"]})
             out.append(rec)
@@ -307,7 +369,11 @@ def run_all(claims, review_tree, pristine_tree, seeds, runner, isolator=None):
             rec["note"] = ("the pristine run failed only its liveness/guard checks, so it never reached the "
                            "defect; the verifier must rebuild the setup before ruling")
         if cls == "seed_hit":
-            resolve_seed(rec, c, seeds, isolator, runner)
+            if seeds:
+                resolve_seed(rec, c, seeds, isolator, runner)
+            else:
+                rec["seed"] = None
+                rec["note"] = "no sealed record was given (--sealed), so this seed hit is not attributed"
         out.append(rec)
     return out
 
@@ -342,7 +408,7 @@ def summary(results):
     for r in results:
         counts[r["class"]] = counts.get(r["class"], 0) + 1
     lines = ["class           n", "--------------  --"]
-    for k in ("candidate", "seed_hit", "not_reproduced", "inverted", "invalid_repro", "not_run", "hypothesis"):
+    for k in ("candidate", "seed_hit", "not_reproduced", "inverted", "invalid_repro", "not_run", "hypothesis", "invalid_claim"):
         if k in counts:
             lines.append(f"{k:<15} {counts[k]:>2}")
     for r in results:
@@ -351,6 +417,9 @@ def summary(results):
     for r in results:
         if r["class"] == "invalid_repro" and r.get("error"):
             lines.append(f"  {r['id']}: {r['error']}")
+    for r in results:
+        if r["class"] == "invalid_claim":
+            lines.append(f"  {r['id']}: invalid claim.json, not run: {r['error']}")
     for r in results:
         if r["class"] == "not_run":
             lines.append(f"  {r['id']}: {(r.get('review') or {}).get('error') or (r.get('pristine') or {}).get('error')}")
@@ -437,6 +506,58 @@ def selftest_script_liveness():
         assert got == {"S1": "invalid_repro", "S2": "candidate"}, got
 
 
+def selftest_scoped_loading_and_harness():
+    """--only reads one claim directory and nothing else, so a half-written claim.json in another finder is
+    never opened (#679); in a full run that file is invalid_claim with its path and the run goes on; the
+    harness follows the install list unless the claim names its container; a seed hit with no sealed record
+    is kept, unattributed."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        good, bad = os.path.join(tmp, "F7", "F7-03"), os.path.join(tmp, "F8", "F8-07")
+        os.makedirs(good)
+        os.makedirs(bad)
+        with open(os.path.join(good, "claim.json"), "w") as fh:
+            json.dump({"tier": 2, "file": "a.sql", "line": 10, "repro": "repro.sql"}, fh)
+        with open(os.path.join(good, "repro.sql"), "w") as fh:
+            fh.write("select 'ok 1 - LIVENESS: ran';\n")
+        with open(os.path.join(bad, "claim.json"), "w") as fh:
+            fh.write('{"tier": 1, "file": "a.sql", "scenario": "cut mid-str')     # 568 bytes of F8-07, in spirit
+        # the proof that --only never opens the other file: make it unreadable, so opening it would raise
+        os.chmod(os.path.join(bad, "claim.json"), 0)
+        try:
+            only = load_claims(tmp, only="F7-03")
+        finally:
+            os.chmod(os.path.join(bad, "claim.json"), 0o644)
+        assert [c["id"] for c in only] == ["F7-03"] and only[0]["repro_used"] == "repro.sql", only
+        assert [c["id"] for c in load_claims(tmp, finders={"F7"})] == ["F7-03"]
+        both = {c["id"]: c for c in load_claims(tmp)}
+        bad_path = os.path.join(bad, "claim.json")
+        assert both["F8-07"]["invalid_claim"].startswith(bad_path + ": "), both["F8-07"]
+        assert "repro_used" in both["F7-03"] and "invalid_claim" not in both["F7-03"]
+        res = {r["id"]: r for r in run_all(list(both.values()), "r", "p", [],
+                                           lambda tree, c, tag: {"fails": False, "exit": 0, "tail": ""})}
+        assert res["F8-07"]["class"] == "invalid_claim" and res["F7-03"]["class"] == "not_reproduced", res
+        text = summary(list(res.values()))
+        assert "invalid_claim    1" in text and f"F8-07: invalid claim.json, not run: {bad_path}" in text, text
+    # the harness follows the install list; the claim's own container wins; the timescale image is reached over TCP
+    assert harness_for(["pgpm_core/install.sql"]) == "core" and harness_for([]) == "core" and harness_for(None) == "core"
+    assert harness_for(["pgpm_core/install.sql", "pgpm_archive/install.sql"]) == "archive"
+    assert harness_for(["pgpm_core/install.sql", "pgpm_hypertable/install.sql"]) == "timescale"
+    h = Harness("core-c", archive="arch-c", timescale="ts-c")
+    assert h.container_for({"install": ["pgpm_core/install.sql", "pgpm_archive/install.sql"]}) == "arch-c"
+    assert h.container_for({"install": ["pgpm_archive/install.sql"], "container": "mine"}) == "mine"
+    assert h.container_for({"install": ["pgpm_hypertable/install.sql"]}) == "ts-c"
+    assert h.container_for({}) == "core-c" and Harness("x").containers["archive"] == "pgpm_test-archive"
+    ts = h.psql_prefix("ts-c", "d")
+    assert ts[:5] == ["docker", "exec", "-i", "-e", "PGPASSWORD=postgres"] and "-h" in ts and ts[-1] == "ON_ERROR_STOP=1", ts
+    assert "-h" not in h.psql_prefix("core-c", "d") and "PGPASSWORD=postgres" not in h.psql_prefix("arch-c", "d")
+    # a seed hit classified with no sealed record (a verifier's --only run) is a seed hit still, unattributed
+    hit = run_all([{"id": "F1-01", "finder": "F1", "file": "a.sql", "line": 105, "repro": "r.sql", "dir": "."}],
+                  "review", "pristine", [],
+                  lambda tree, c, tag: {"fails": tree == "review", "exit": 1, "tail": ""})
+    assert hit[0]["class"] == "seed_hit" and hit[0]["seed"] is None and "--sealed" in hit[0]["note"], hit
+
+
 def selftest():
     # classification truth table
     F, P = {"fails": True}, {"fails": False}
@@ -505,6 +626,7 @@ def selftest():
     assert "candidate        1" in summary(res) and "seed_hit         1" in summary(res)
     selftest_verified_and_liveness()
     selftest_script_liveness()
+    selftest_scoped_loading_and_harness()
     print("classify_claims selftest: PASS")
     return 0
 
@@ -514,10 +636,14 @@ def main():
     ap.add_argument("--claims")
     ap.add_argument("--review-tree")
     ap.add_argument("--pristine-tree")
-    ap.add_argument("--sealed")
+    ap.add_argument("--sealed", help="plant_seeds.py's sealed record; required unless --only classifies one claim")
     ap.add_argument("--out")
-    ap.add_argument("--container", default="pgpm_test-15")
-    ap.add_argument("--only")
+    ap.add_argument("--container", default=HARNESS_DEFAULTS["core"], help="the core harness (default pgpm_test-15)")
+    ap.add_argument("--archive-container", default=HARNESS_DEFAULTS["archive"],
+                    help="the harness for a claim whose install list has pgpm_archive (default pgpm_test-archive)")
+    ap.add_argument("--timescale-container", default=HARNESS_DEFAULTS["timescale"],
+                    help="the harness for a claim whose install list has pgpm_hypertable (default pgpm_test-timescale)")
+    ap.add_argument("--only", help="one claim id (its directory name); only that directory is read")
     ap.add_argument("--finders", help="comma-separated finder ids to include (default all)")
     ap.add_argument("--seeds-dir", help="directory holding the novel seed patches; enables attribution by isolation")
     ap.add_argument("--reattribute", help="re-attribute the seed hits of an existing classified JSON in place (no re-runs of the classification)")
@@ -534,7 +660,7 @@ def main():
         with open(a.reattribute) as fh:
             data = json.load(fh)
         claims = {c["id"]: c for c in load_claims(a.claims)}
-        h = Harness(a.container, keep=a.keep_dbs)
+        h = Harness(a.container, keep=a.keep_dbs, archive=a.archive_container, timescale=a.timescale_container)
         iso = Isolator(os.path.abspath(a.pristine_tree), seeds, os.path.abspath(a.seeds_dir),
                        os.path.dirname(os.path.abspath(a.reattribute)))
         for rec in data["claims"]:
@@ -546,15 +672,20 @@ def main():
         with open(a.reattribute, "w") as fh:
             json.dump(data, fh, indent=2)
         return 0
-    if not (a.claims and a.review_tree and a.pristine_tree and a.sealed and a.out):
-        ap.error("--claims, --review-tree, --pristine-tree, --sealed and --out are required")
-    with open(a.sealed) as fh:
-        seeds = json.load(fh)["seeds"]
+    if not (a.claims and a.review_tree and a.pristine_tree and a.out):
+        ap.error("--claims, --review-tree, --pristine-tree and --out are required")
+    if not a.sealed and not a.only:
+        ap.error("--sealed is required for a full run (seed hits are attributed to it); with --only it may be left out")
+    seeds = []
+    if a.sealed:
+        with open(a.sealed) as fh:
+            seeds = json.load(fh)["seeds"]
     claims = load_claims(a.claims, a.only, set(a.finders.split(",")) if a.finders else None)
     if not claims:
-        print("classify_claims: no claims found", file=sys.stderr)
+        print("classify_claims: no claims found" + (f" for --only {a.only} (a claim id is its directory name)" if a.only else ""),
+              file=sys.stderr)
         return 1
-    h = Harness(a.container, keep=a.keep_dbs)
+    h = Harness(a.container, keep=a.keep_dbs, archive=a.archive_container, timescale=a.timescale_container)
     iso = None
     if a.seeds_dir:
         iso = Isolator(os.path.abspath(a.pristine_tree), seeds, os.path.abspath(a.seeds_dir),
