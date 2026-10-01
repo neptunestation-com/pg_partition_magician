@@ -32,7 +32,10 @@ four times (pass 2's zone class, #503 to #506, was one PR). Record the grouping 
 
 One `fixer` agent per issue (or group), `isolation: worktree`, at most as many at once as the concurrency
 cap allows. The brief carries: the issue number and body, the assigned numbers, the scratch path, and
-the reminder that the issue's reproductions are the acceptance test unless they prove unsound. Record
+the reminder that the issue's reproductions are the acceptance test unless they prove unsound. Its harness line is
+`docker run -d --name pgpm_fix_<id> --network pgpm_test_net -e POSTGRES_PASSWORD=postgres -v "$PWD:/repo:ro" pgpm_test:15`;
+without `-e POSTGRES_PASSWORD` the container exits at once (pass 5's wave-1 briefs lacked it and every
+fixer worked around it). Record
 each PR the fixers report in `$WORK/prs.tsv` with its test, guard and mutation names.
 
 ## 3. Gate, then land in order

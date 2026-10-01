@@ -13,10 +13,12 @@
 # run if the wait ends with any still open, because closure against an incomplete main proves nothing
 # (pass 2's first closure run fell through an 8-hour timeout that way).
 #
-# The harness: the PG15 service (default container pgpm_test-15) and, unless --no-archive, the archive
-# service with MinIO (claims that name "container": "pgpm_test-archive" need it), brought up from this
-# checkout's docker-compose.yml. Containers are left running for a rerun; `docker compose --profile pg15
-# --profile archive down -v` removes them.
+# The harness: the PG15 service (default container pgpm_test-15), unless --no-archive the archive service
+# with MinIO (claims that name "container": "pgpm_test-archive" need it), and the timescale service when any
+# claim's install list names pgpm_hypertable/install.sql (classify_claims.py routes such a claim to
+# pgpm_test-timescale, #719; pass 5's first closure run died on its first claim because nothing had started
+# it), all brought up from this checkout's docker-compose.yml. Containers are left running for a rerun;
+# `docker compose --profile pg15 --profile archive --profile timescale down -v` removes them.
 set -uo pipefail
 CLAIMS=""; OUT=""; WAIT=""; CONTAINER="pgpm_test-15"; ARCHIVE=1
 while [ $# -gt 0 ]; do
@@ -54,10 +56,13 @@ git fetch -q origin main && git merge -q --ff-only origin/main || { echo "STOPPE
 SHA=$(git rev-parse --short HEAD); say "main $SHA"
 
 profiles=(--profile pg15); [ -n "$ARCHIVE" ] && profiles+=(--profile archive)
+TIMESCALE=""; grep -rlq 'pgpm_hypertable/install.sql' "$CLAIMS" --include=claim.json 2>/dev/null && TIMESCALE=1
+[ -n "$TIMESCALE" ] && profiles+=(--profile timescale)
 docker compose "${profiles[@]}" up -d >/dev/null 2>&1 || { echo "STOPPED: docker compose up failed"; exit 5; }
 for _ in $(seq 1 90); do
   docker exec -e PGPASSWORD=postgres "$CONTAINER" psql -h 127.0.0.1 -U postgres -tAc 'select 1' >/dev/null 2>&1 \
-    && { [ -z "$ARCHIVE" ] || docker exec -e PGPASSWORD=postgres pgpm_test-archive psql -h 127.0.0.1 -U postgres -tAc 'select 1' >/dev/null 2>&1; } && break
+    && { [ -z "$ARCHIVE" ] || docker exec -e PGPASSWORD=postgres pgpm_test-archive psql -h 127.0.0.1 -U postgres -tAc 'select 1' >/dev/null 2>&1; } \
+    && { [ -z "$TIMESCALE" ] || docker exec -e PGPASSWORD=postgres pgpm_test-timescale psql -h 127.0.0.1 -U postgres -tAc 'select 1' >/dev/null 2>&1; } && break
   sleep 1
 done
 if [ -n "$ARCHIVE" ]; then
