@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **`set_partition_tz` takes turns with `obtain` and `extend_to`** (#725). It judged the grid from committed
+  `pgpm.part` and shared no lock with either, so a zone change accepted while another session's extension
+  had built cells on the old lattice and not yet committed them, or one an extension had read around before
+  it committed, left the grid's top off the recorded zone's lattice and a one-hour hole past it that
+  refused writes; run one after the other, the same change is refused. `obtain` and `extend_to` now read
+  the parent's config row `FOR KEY SHARE` and `set_partition_tz` reads it `FOR UPDATE`, so each waits for
+  the other to commit. `tests/195` pins both orders for both callers, and
+  `bench/set_partition_tz_grid_lock.sh` proves it against one mutation per lock (`set_partition_tz_config_unlocked`,
+  `extend_to_config_unlocked`, `obtain_config_unlocked`).
 - **`transmute`'s orphan guard and `restore_incoming_fks`'s in-flight gate know every id label** (#726).
   Both matched an id grid's child names with `^[0-9]{19}$`, the label before #582, so an orphan an
   interrupted regrain left under a 20-digit label (a cell at or past 10^19), a `_<frac>` label or a padded

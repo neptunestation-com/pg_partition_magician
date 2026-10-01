@@ -1575,7 +1575,10 @@ declare
   v_coltype text; v_hi_lit text;
   v_made int := 0; k int;
 begin
-  select * into cfg from pgpm.config where parent_table = p_parent;
+  -- FOR KEY SHARE (#725): held to the end of this transaction, so set_partition_tz (which reads the row
+  -- FOR UPDATE before it judges the grid) waits for the cells this call builds to commit, and this read
+  -- waits for a zone change in flight and then sees the zone it committed. See pgpm.set_partition_tz.
+  select * into cfg from pgpm.config where parent_table = p_parent for key share;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
@@ -1677,7 +1680,9 @@ declare
                     * (current_setting('max_connections')::bigint + current_setting('max_prepared_transactions')::bigint);
   v_locks0 bigint; v_locks1 bigint; v_locks2 bigint; v_projected bigint;
 begin
-  select * into cfg from pgpm.config where parent_table = p_parent;
+  -- FOR KEY SHARE (#725), for the reason obtain() takes it: the zone this walk is computed in cannot
+  -- change under it, and set_partition_tz cannot judge the grid around the cells it has not committed.
+  select * into cfg from pgpm.config where parent_table = p_parent for key share;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
@@ -7414,12 +7419,24 @@ $$;
 -- any zone) or, in the upgrade case, one the recorded 'UTC' never described, and neither is evidence
 -- against the new zone. The top check above stays unconditional, since it is the one that judges a grid
 -- whose recorded zone is wrong.
+--
+-- Every check judges COMMITTED pgpm.part, so the setter serialises against what builds it (#725). Without
+-- a lock both sides take, a change accepted while another session's obtain() or extend_to() had built
+-- cells on the old lattice and not yet committed them, or one those calls read around before it
+-- committed, left the grid's top off the new zone's lattice: the one-hour hole above, which serially is
+-- refused. obtain() and extend_to() read the config row FOR KEY SHARE and this reads it FOR UPDATE, the
+-- one row lock that conflicts with KEY SHARE, so each waits for the other's transaction. KEY SHARE, not
+-- SHARE, so neither ever waits on the plain UPDATEs other setters and a sweep's _config_try_lock make.
+-- tests/195 and bench/set_partition_tz_grid_lock.sh guard both orders.
 create or replace function pgpm.set_partition_tz(p_parent regclass, p_tz text)
 returns void language plpgsql as $$
 declare cfg pgpm.config; v_tz text; v_top text; v_off_child name; v_off_bound text;
 begin
   perform pgpm._regrain_lock(p_parent);   -- #660: judge a regrain's committed marks, never around a step in flight
-  select * into cfg from pgpm.config where parent_table = p_parent;
+  -- #725: and never around an obtain() or extend_to() in flight. Both read this row FOR KEY SHARE and hold
+  -- it to their transaction's end, which FOR UPDATE waits for, so the grid judged below includes every
+  -- cell they built; and while this holds it, they wait and then compute in the zone it committed.
+  select * into cfg from pgpm.config where parent_table = p_parent for update;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   if cfg.control_kind = 'id' then
     raise exception 'pg_partition_magician: % is an id grid, which has no calendar; partition_tz is never consulted for it and stays ''UTC''', p_parent;
