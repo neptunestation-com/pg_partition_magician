@@ -38,8 +38,9 @@
 #
 # Exit codes: 0 every PR merged; 3 a conflict or verification needs a hand (the worktree path is printed
 # and kept); 4 a CI failure that is not a known flake, or the queue refused; 5 gh/git failure; 6 a wait
-# timed out (checks, a run, or the queue) or an enqueue that never took after five requests (GitHub
-# answered "Something went wrong" to #703's twice): nothing is wrong, rerun the same command.
+# timed out (checks, a run, or the queue), an enqueue that never took after five requests (GitHub
+# answered "Something went wrong" to #703's twice), or main moved under a queued PR and made it DIRTY
+# (the rerun's rebase repairs it): nothing is wrong, rerun the same command.
 # Run it from the repository root of a clean checkout. It never touches the checkout's own branch.
 set -uo pipefail
 MIN=20; REBASE_ONLY=""; BATCH=""
@@ -169,7 +170,7 @@ wait_checks() { # <pr>: 0 green, 5 a check failed (prints the failing run id to 
 in_queue() { gh api graphql -f query="{repository(owner:\"${REPO%/*}\",name:\"${REPO#*/}\"){pullRequest(number:$1){state mergeQueueEntry{state}}}}" \
              --jq '.data.repository.pullRequest | "\(.state) \(.mergeQueueEntry.state // "none")"' 2>/dev/null || echo "query-failed"; }
 
-wait_merge() { # <pr>: 0 merged, 6 fell out of the queue, 8 dirty (needs rebase), 1 timeout
+wait_merge() { # <pr>: 0 merged, 6 fell out of the queue, 8 dirty (main moved under it), 1 timeout
   local pr=$1 s i
   for i in $(seq 1 "$WAIT_MERGE"); do
     s=$(in_queue "$pr")
@@ -180,6 +181,10 @@ wait_merge() { # <pr>: 0 merged, 6 fell out of the queue, 8 dirty (needs rebase)
           # the entry reads empty for a few seconds after the merge too (#609 in pass 3): look again
           sleep 15; s=$(in_queue "$pr")
           case "$s" in MERGED*) return 0;; esac
+          # DIRTY before "fell out": a PR the queue dropped because another merge made it conflict with
+          # main is not a flake to re-enqueue (the request is refused five times over), it needs the
+          # rebase a rerun does (#719: #722 merged under it while it waited, 2026-10-01)
+          [ "$(gh pr view "$pr" --repo "$REPO" --json mergeStateStatus --jq .mergeStateStatus)" = "DIRTY" ] && return 8
           say "  #$pr left the queue unmerged"; return 6
         fi;;
     esac
@@ -256,7 +261,7 @@ await_merge() { # <pr>: wait for the merge, re-enqueueing after a known flake; e
          say "  re-enqueueing #$PR (known flake, retry $retries)"
          enqueue "$PR" || { echo "STOPPED at #$PR: the re-enqueue never took after five requests (rerun)"; exit 6; }
          continue;;
-      8) echo "STOPPED at #$PR: main moved under it (DIRTY); rerun land.sh $PR"; exit 3;;
+      8) echo "STOPPED at #$PR: main moved under it while it waited (DIRTY); nothing is wrong, the rerun rebases it"; exit 6;;
       *) echo "STOPPED at #$PR: queue wait timed out after ${LAND_WAIT_MERGE_MIN:-60} min (rerun)"; exit 6;;
     esac
   done
