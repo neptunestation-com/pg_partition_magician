@@ -1439,7 +1439,7 @@ MUTATIONS = {
         "bench/regrain_perf.sh",
         "Pre-#272 regrain: the trigger-populated delta carries no row estimate, so the planner "
         "misplans a reconcile tick into a seq scan of the whole delta.",
-        [("""  if (select coalesce(reltuples, -1) from pg_class where oid = format('%I.%I', v_nsp, v_delta)::regclass) <= 0 then
+        [("""  if (select coalesce(reltuples, -1) from pg_class where oid = format('%I.%I', v_nsp, v_delta)::regclass) < 0 then
     perform pgpm._analyze(format('%I.%I', v_nsp, v_delta)::regclass);
   end if;
 """, "", 1)],
@@ -4246,6 +4246,108 @@ $$;''',
               then substr(c.relname, length(v_rel) + 3) ~ '^[0-9]{19}$'
               else substr(c.relname, length(v_rel) + 3) ~ '^[0-9]{4}(_[0-9]+)*$'
          end
+""", 1)],
+    ),
+    "transmute_exclude_not_refused": (
+        "bench/transmute_refusal_edges.sh",
+        "Pre-#710 transmute: nothing refuses an EXCLUDE constraint. Its index is not unique, so it is listed "
+        "as a plain secondary to carry, phases 1 and 2 commit the validated bound and the claim, and step "
+        "9b's ATTACH of the constraint's index under a plain partitioned copy dies with a raw 'index "
+        "definitions do not match': the table rejects every write past hi until a transmute_abort. The "
+        "refusal in _transmute_carried_indexes is disarmed, one site; tests/189 A's pinned refusal, its "
+        "no-claim and no-bound checks and its write past hi catch it (the conversion runs over dblink, so "
+        "the mutant really commits).",
+        [("  if v_excl_q is not null then\n", "  if false then\n", 1)],
+    ),
+    "transmute_publication_owner_late": (
+        "bench/transmute_refusal_edges.sh",
+        "Pre-#710 transmute: a role that owns the table but not a publication naming it is not refused up "
+        "front, so the cutover's ALTER PUBLICATION ... ADD TABLE fails with a raw 'must be owner of "
+        "publication' after phases 1 and 2 committed the bound and the claim. The up-front refusal is "
+        "disarmed, one site; tests/189 B's pinned refusal and its state checks catch it.",
+        [("  if v_unowned_pub_q is not null then\n", "  if false then\n", 1)],
+    ),
+    "set_regrain_anchor_name_only": (
+        "bench/transmute_refusal_edges.sh",
+        "Pre-#710 set_regrain: only the anchor cell's name is asked about at the target step, so a numeric "
+        "key's later cells, whose labels carry a fraction, can be refused at tick time by regrain_step on "
+        "every tick (skip_regrain). The _regrain_names_fit call is removed, one site; tests/189 C's 1e-23 "
+        "target, accepted by the mutant, catches it.",
+        [("""  if p_target_step is not null then
+    perform pgpm._regrain_names_fit(p_parent, cfg, v_rel, p_target_step);
+  end if;
+""", "", 1)],
+    ),
+    "untransmute_owner_not_restored": (
+        "bench/reverse_legibility_edges.sh",
+        "Pre-#710 untransmute: the parent's owner is not carried back, so after ALTER TABLE ... OWNER TO on "
+        "the managed table (which does not reach its partitions) the restored table is owned by the "
+        "conversion-time owner and the role that owned the managed table has no privilege on it. The owner "
+        "change after the rename is removed, one site; tests/190 A catches it.",
+        [("""  if (select relowner from pg_class where oid = v_restored) <> v_owner then
+    execute format('alter table %s owner to %I', v_restored::text, pg_get_userbyid(v_owner));
+  end if;
+""", "", 1)],
+    ),
+    "untransmute_comments_not_restored": (
+        "bench/reverse_legibility_edges.sh",
+        "Pre-#710 untransmute: the parent's table and column comments are captured and never replayed, so "
+        "the restored table comes back with the comments it had at the conversion. The replay loop is "
+        "removed, one site; tests/190 A's comment assertions catch it.",
+        [("""  foreach v_tdef in array v_comdefs loop
+    execute v_tdef;
+  end loop;
+""", "", 1)],
+    ),
+    "write_block_reenable_unlogged": (
+        "bench/reverse_legibility_edges.sh",
+        "Pre-#710 _install_write_block: a write block an operator disabled is put back ENABLE ALWAYS on the "
+        "next revisit with no log row, so the partition goes read-only again and pgpm.log says nothing. "
+        "The insert is removed, one site; tests/190 B's write_block_reenable row catches it.",
+        [("""      insert into pgpm.log (parent_table, action, lo, hi, method)
+        values (p_parent, 'write_block_reenable', r.lo, r.hi,
+                format('%I.%I: pgpm_write_block was %s and is ENABLE ALWAYS again (retention''s fence)',
+                       v_nsp, p_child,
+                       case v_enabled when 'D' then 'disabled' when 'R' then 'replica-only' else 'origin-only' end));
+""", "", 1)],
+    ),
+    "obtain_unbuilt_cell_unlogged": (
+        "bench/reverse_legibility_edges.sh",
+        "Pre-#710 obtain and extend_to: a cell _obtain_name leaves unbuilt (its name held by a relation that "
+        "is not this table's partition) is skipped with nothing logged, a hole the operator finds through "
+        "refused writes. Both _log_unbuilt_cell calls are removed, two sites; tests/190 C's "
+        "fail_obtain_name rows catch it.",
+        # extend_to's (deeper) call first: obtain's six-space line is a substring of it
+        [("        perform pgpm._log_unbuilt_cell(p_parent, cfg, v_nsp, v_rel, v_lo, v_hi);\n", "        null;\n", 1),
+         ("      perform pgpm._log_unbuilt_cell(p_parent, cfg, v_nsp, v_rel, v_lo, v_hi);\n", "      null;\n", 1)],
+    ),
+    "part_name_bc_unmarked": (
+        "bench/reverse_legibility_edges.sh",
+        "Pre-#710 _part_name: a time label is to_char's YYYY... alone, which drops the era, so year N BC "
+        "and year N AD share every label. Both `_bc` suffixes go, two sites; tests/190 D catches it.",
+        [("         || case when extract(year from p_lo_native::timestamptz at time zone v_label_tz) < 0 then '_bc' else '' end;\n",
+          "         || '';\n", 1),
+         ("           || case when extract(year from p_hi_native::timestamptz at time zone v_label_tz) < 0 then '_bc' else '' end;\n",
+          "           || '';\n", 1)],
+    ),
+    "regrain_delta_reanalyzed": (
+        "bench/reverse_legibility_edges.sh",
+        "Pre-#710 _regrain_reconcile: the delta is re-ANALYZEd whenever reltuples <= 0, and ANALYZE of an "
+        "empty delta records 0, so every regrain step re-ANALYZEs it while it stays empty, each time taking "
+        "SHARE UPDATE EXCLUSIVE on it. One site; tests/190 E's lock probe on the later steps catches it.",
+        [("  if (select coalesce(reltuples, -1) from pg_class where oid = format('%I.%I', v_nsp, v_delta)::regclass) < 0 then",
+          "  if (select coalesce(reltuples, -1) from pg_class where oid = format('%I.%I', v_nsp, v_delta)::regclass) <= 0 then", 1)],
+    ),
+    "grid_floor_offset_double": (
+        "bench/reverse_legibility_edges.sh",
+        "Pre-#710 _grid_floor: the fixed step's offset from the anchor is make_interval(secs => k * v_secs), "
+        "through double precision, so a fractional-second step far from the anchor ('1.000001 seconds' "
+        "from a year-1 anchor) floors microseconds off its lattice and the next cell's floor is not the "
+        "previous cell's next. One site; tests/190 F catches it.",
+        [("""      return pgpm._ts_text(anc + make_interval(hours => trunc(v_h / 2)::int)
+                               + make_interval(hours => (v_h - trunc(v_h / 2))::int,
+                                               secs => ((v_us - v_h * 3600000000) / 1000000)::double precision));
+""", """      return pgpm._ts_text(anc + make_interval(secs => k * v_secs));
 """, 1)],
     ),
 }

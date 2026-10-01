@@ -115,7 +115,12 @@ One shape is refused rather than carried: a `FOR EACH ROW` trigger with a transi
 statement trigger, which can carry a transition table, or drop it. So is membership in a publication with
 `publish_via_partition_root = false` that names the table with a row filter or a column list, which
 PostgreSQL does not allow on a partitioned table: set `publish_via_partition_root = true` on it, or drop
-the filter and column list, then re-run. Three more shapes the cutover could not convert are refused the
+the filter and column list, then re-run. So is a publication naming the table that the role running
+`transmute` does not own (the cutover has to add the new parent to it, which only its owner may do): run
+the conversion as a role that owns it, or have its owner hand it over. So is an **exclusion constraint**
+(`EXCLUDE`): its index cannot be attached under a partitioned copy, and PostgreSQL before 17 allows no
+exclusion constraint on a partitioned table at all, so drop it if the table can do without it. All three are
+refused before anything is committed. Three more shapes the cutover could not convert are refused the
 same way, before anything is committed, naming the constraint or column: a `NOT VALID` `CHECK` (or, on
 PostgreSQL 18, a `NOT VALID` `NOT NULL`) constraint, because the parent would get a validated copy the
 table cannot be attached under (`VALIDATE CONSTRAINT` it first, which blocks no reader or writer, or drop
@@ -124,8 +129,8 @@ or re-create it without `NO INHERIT`); and a generated control column, which Pos
 by (partition on a plain column). **Outgoing** foreign keys (this table
 referencing another) are carried onto the new parent automatically, so they keep enforcing across every
 partition; a `NOT VALID` one is refused rather than carried, because re-adding it at the parent could not
-then be metadata-only. That refusal, and the refusal of a `UNIQUE` index that cannot be carried (below), is
-asked again under the cutover's lock, so a key or index of that shape added while the conversion runs rolls
+then be metadata-only. That refusal, and the refusals of a `UNIQUE` index that cannot be carried (below)
+and of an exclusion constraint, are asked again under the cutover's lock, so a key or index of that shape added while the conversion runs rolls
 the cutover back to the resumable state `transmute_abort` describes rather than being left on the monolith.
 **Incoming** keys are governed by `p_incoming_fks` below. An identity column is carried onto the parent in
 the form it had (`ALWAYS` or `BY DEFAULT`) and with its sequence's options (`INCREMENT BY`,
@@ -381,7 +386,10 @@ an `ENABLE` or `FORCE ROW LEVEL SECURITY` (or their opposites) and a `CREATE` or
 all landed on the parent, and none of them reaches a partition. `untransmute` resets the monolith's own
 conversion-time copy (every grantee's privileges revoked, every policy dropped) and puts the parent's in
 its place: its table and column grants (or, with no grant ever made, the owner's default privileges), both
-row-security flags, and its policies.
+row-security flags, and its policies. The same holds for its **owner** and its table and column
+**comments**: `ALTER TABLE ... OWNER TO` and `COMMENT ON` the managed table do not reach its partitions
+either, so the restored table takes the parent's owner (the role that owned the managed table keeps it)
+and the parent's comments, a comment removed since the conversion staying removed.
 
 It also takes off the monolith whatever **maintenance** put there after the conversion, so the table handed
 back is the operator's again with none of pgpm's machinery on it. The retention **write block**
@@ -1384,7 +1392,9 @@ archiving starts over from its `lo`. Coverage a tick finds on a partition that h
 force (one removed or disabled by hand, lifted by a pgpm older than this rule, or left origin-only by a
 pgpm older than the `ALWAYS` rule, which a `session_replication_role = replica` writer passes) is
 discarded for the same reason, before the same tick repairs the trigger, and logged as
-`archive_coverage_reset` with the number of chunks that went. That test is made of the relation
+`archive_coverage_reset` with the number of chunks that went. The repair itself is logged too: a tick that
+finds the trigger disabled, `ENABLE REPLICA` or origin-only puts it back `ENABLE ALWAYS` and logs
+`write_block_reenable`, naming the partition and the state it found. That test is made of the relation
 `pgpm.part.child_oid` records, never of whatever currently holds the name: when another relation has
 taken a partition's name, the tick refuses on identity (`fail_write_block_identity`, above) and leaves
 the real partition's coverage alone. Write-blocked is one of `retire()`'s drop preconditions (see
@@ -1885,6 +1895,9 @@ step that is not a whole number of days on a `date` column, a fractional step su
 names `<rel>_p<label>` would exceed PostgreSQL's 63-byte identifier limit.
 A finer step has a wider label, so a table whose monthly names fit can still be refused a daily target; the
 message names the offending name and says how many bytes to shorten the table name by (see [Partition naming](#partition-naming)).
+The names asked about are the ones auto-regrain would render for every child it would split, at both ends
+of each, not only the anchor's: on a `numeric` key a cell's label grows with a fractional target's digits,
+so the cell after the anchor can need a longer name than the anchor itself.
 
 Turning it **off while the run it started is in flight** abandons that run, exactly as
 [`regrain_cancel`](#regrain_cancel) would: the capture trigger and the `TRUNCATE` refusal come off, the
@@ -2370,11 +2383,13 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `warn_obtain_unscheduled` | logged at most once per `maintain_all` sweep, with a null `parent_table`, when the `pgpm` cron job exists but `pgpm_obtain` doesn't -- obtain is silently not running |
 | `skip_obtain` / `skip_retain` / `skip_regrain` / `skip_regrain_capture` / `skip_archive` / `skip_write_block` / `skip_restore_fk` / `skip_validate_fk` | a step deferred (lock race or transient error; `method` carries the reason) |
 | `skip_transmute_reap` | `maintain_all`'s sweep found an abandoned conversion but could not take the table's lock within 5 s (a long transaction holds it), so it left the bound and the claim in place for the next tick rather than queue every read and write of the table behind it; `method` carries the lock timeout |
+| `write_block_reenable` | a partition's retention write block was found disabled, `ENABLE REPLICA` or origin-only and was put back `ENABLE ALWAYS` (see [`maintain`](#maintain)); `method` names the partition and the state it found. Logged once per re-enable |
 | `skip_write_block_lift` | a partition retention no longer reaches kept its write block, because `pgpm.archive_ledger` already covers it and that coverage is only true while nothing can write to it. Logged once per partition, on the first tick that would otherwise have lifted the block; `method` says how to make the partition writable again (see [`maintain`](#maintain)) |
 | `fail_restore_incoming_fk` / `fail_validate_incoming_fk` | a preserve-FK re-add failed / a validation was blocked by an orphan, or either did not get its table's lock in time |
 | `fail_retain_drop` / `fail_retain_detach` / `fail_retain_crossing` / `fail_detach_reap` | an unexpected `DROP` failure, or a partition detached by something other than pgpm, which `retire` leaves alone / no `pgpm_detach` job to dispatch the detach to (run `pgpm.schedule()`) / a `NO ACTION`/`RESTRICT` FK blocked the crossing delete / finalizing an abandoned detach failed (including its 5 s lock wait running out behind a reader of the partition, retried next tick). In every case the partition is left whole and `method` carries the error |
 | `fail_retain_reattach` | a partition retention no longer reaches, which its dispatched detach had already taken out of the parent, could not be re-attached (a lock timeout, or something else now holds its range). The table and its rows are left whole, `method` carries the error, and the next tick tries again. Counts in `status().retain_drop_failures` |
 | `fail_retain_identity` / `fail_archive_identity` / `fail_write_block_identity` | a partition's name no longer resolves to the relation pgpm recorded for it, so `retire` refused to detach or drop it (see [identity](#what-retire-checks-a-partitions-identity-against)) / the archive step refused to read it (see [the archive step's identity check](#the-archive-steps-identity-check)) / the write-block step refused to put its trigger on it. `method` names the OIDs and, for the first, which anchor disagreed. None clears itself on a later tick |
+| `fail_obtain_name` | `obtain` or `extend_to` left the cell `[lo, hi)` unbuilt because its name is held by a relation that is not one of the table's partitions, or its explicit-range stand-in is taken or over 63 bytes (see [Partition naming](#partition-naming)); every write into the range is refused until the name is freed. `method` names what holds it. Repeats once per tick until the cell is built |
 | `fail_archive_contract` | the archive step refused what the archive strategy returned: `covered_hi` was null, not above the chunk's `lo`, past its `hi`, or not a native value, so no ledger row was written and coverage did not advance (see [the archive step's contract check](#the-archive-steps-contract-check)). `method` names the strategy, the chunk, the value returned and the rule it broke. Repeats once per tick until the strategy is corrected, and clears itself once it is |
 
 ### `pgpm.dropped_fk`
@@ -2447,7 +2462,9 @@ a step under a minute to the second (`events_p2026_03_01_093030`) and a step und
 microsecond (`events_p2026_03_01_093030_500000`). An id label is zero-padded to 19 digits and never cut:
 a value of 20 digits or more (a `numeric` key at or past 10^19) keeps every digit
 (`events_p10000000000000000000`), and a non-integral value, which only a regrain toward a fractional step
-on a `numeric` column produces, carries its fraction (`events_p0000000000000000001_5` for 1.5).
+on a `numeric` column produces, carries its fraction (`events_p0000000000000000001_5` for 1.5). A time
+label in a year before the common era carries `_bc` (`events_p0001_06_01_bc`), so year N BC and year N AD
+never share one.
 
 Month and year labels are rendered in `config.partition_tz`, the zone those calendar cells are defined
 in. Day and shorter labels are rendered in UTC: those steps are a fixed number of seconds from the anchor
@@ -2466,6 +2483,8 @@ cell from being built (a relation, or a type such as an enum or domain, since a 
 its name), and so does an explicit-range name that would exceed 63 bytes (it is 14 bytes longer
 than a day cell's plain name, so a table name of 38 to 51 bytes meets this): that one cell is left unbuilt,
 never under a cut name, and the cells after it are built. Renaming the table to a name that fits frees it.
+Each time `obtain` or `extend_to` leaves a cell unbuilt this way it logs `fail_obtain_name` for the cell's
+range, naming what holds the name, so the hole shows in `pgpm.log` before a write into it is refused.
 
 The name is a human-facing label; `pgpm.part` holds the authoritative bounds. The `_to_` form is also
 what keeps `transmute`'s orphan check from mistaking a monolith for a leftover of an interrupted regrain.

@@ -802,6 +802,8 @@ run_perf() {
     "bench/orphan_guard_id_labels.sh pgpm_perf147"
     "bench/reap_and_abort_lock_timeout.sh pgpm_perf149"
     "bench/hypertable_handoff_fk_lock_timeout.sh pgpm_perf150"
+    "bench/transmute_refusal_edges.sh pgpm_perf129"
+    "bench/reverse_legibility_edges.sh pgpm_perf130"
   )
   local selected=()
   local n=${#guards[@]} idx

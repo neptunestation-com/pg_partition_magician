@@ -1083,11 +1083,21 @@ drop function if exists pgpm._part_name(name, text, text, text, text);
 drop function if exists pgpm._encode(text, text, text, int, int, text, text, int, timestamptz);
 
 -- floor a native value to the partition-grid lower bound, computed in p_tz
+--
+-- The fixed branch adds the offset k steps from the anchor exactly (#710). make_interval(secs => k * v_secs)
+-- converted the product to double precision, which carries a microsecond exactly only below 2^53 us (about
+-- 285 years): exact for a whole-second step at any distance, but a fractional-second step far from the
+-- anchor ('1.000001 seconds' from a year-1 anchor) came back microseconds off the lattice, so _grid_next of
+-- one cell missed the floor of the next. Whole hours carry the bulk as integers (in two halves, so the
+-- full timestamp range fits make_interval's int), and only the sub-hour remainder, under 3.6e9 us, goes
+-- through double precision. An absolute offset like the old one, never days (a day added to a timestamptz
+-- is a calendar day in the session's zone).
 create or replace function pgpm._grid_floor(p_kind text, p_step text, p_anchor text, p_native text, p_tz text)
 returns text language plpgsql immutable as $$
 declare
   v_months int; v_fixsecs double precision; v_secs numeric;
   k bigint; ts timestamptz; anc timestamptz; ts_wall timestamp; anc_wall timestamp; v_out timestamptz;
+  v_us numeric; v_h numeric;
 begin
   if p_kind in ('time', 'uuidv7', 'text_time') then
     anc := p_anchor::timestamptz; ts := p_native::timestamptz;
@@ -1128,7 +1138,12 @@ begin
       -- exact numeric (#659): in double precision a value one microsecond below a boundary far from the
       -- anchor (an anchor in year 1, a daily step) divided to the boundary's own count, above its input.
       k := pgpm._floor_div(extract(epoch from (ts - anc)), v_secs)::bigint;
-      return pgpm._ts_text(anc + make_interval(secs => k * v_secs));
+      -- and the offset added exactly (#710, see above)
+      v_us := k * v_secs * 1000000;
+      v_h  := floor(v_us / 3600000000);
+      return pgpm._ts_text(anc + make_interval(hours => trunc(v_h / 2)::int)
+                               + make_interval(hours => (v_h - trunc(v_h / 2))::int,
+                                               secs => ((v_us - v_h * 3600000000) / 1000000)::double precision));
     end if;
   elsif p_kind = 'id' then
     return (pgpm._floor_div(p_native::numeric - p_anchor::numeric, p_step::numeric) * p_step::numeric + p_anchor::numeric)::text;
@@ -1328,6 +1343,10 @@ $$;
 -- child. An id label is _id_label's: zero-padded to 19 digits and never cut, with a non-integral value's
 -- fraction appended. Every label that was already injective keeps its historical form, so no existing
 -- grid's names move.
+-- And a BC year is marked (#710). to_char's YYYY renders the year's number without its era, so year N BC
+-- and year N AD read alike: 1 BC and 1 AD shared every label at every granularity, and on a grid whose data
+-- crosses the era the second cell found the first's name taken. A BC label carries a `_bc` suffix; an AD
+-- label, which is every label any existing grid has, is unchanged.
 drop function if exists pgpm._part_name(name, text, text, text);
 drop function if exists pgpm._part_name(name, text, text, text, text, text);
 create or replace function pgpm._part_name(p_relname name, p_kind text, p_step text, p_lo_native text,
@@ -1351,8 +1370,13 @@ begin
     elsif v_secs  >= 1                           then fmt := 'YYYY_MM_DD_HH24MISS';
     else                                              fmt := 'YYYY_MM_DD_HH24MISS_US';
     end if;
-    v_lo := to_char(p_lo_native::timestamptz at time zone v_label_tz, fmt);
-    if v_coarse then v_hi := to_char(p_hi_native::timestamptz at time zone v_label_tz, fmt); end if;
+    -- a BC year is marked (#710, see above)
+    v_lo := to_char(p_lo_native::timestamptz at time zone v_label_tz, fmt)
+         || case when extract(year from p_lo_native::timestamptz at time zone v_label_tz) < 0 then '_bc' else '' end;
+    if v_coarse then
+      v_hi := to_char(p_hi_native::timestamptz at time zone v_label_tz, fmt)
+           || case when extract(year from p_hi_native::timestamptz at time zone v_label_tz) < 0 then '_bc' else '' end;
+    end if;
   else
     v_lo := pgpm._id_label(p_lo_native);
     if v_coarse then v_hi := pgpm._id_label(p_hi_native); end if;
@@ -1406,6 +1430,9 @@ $$;
 -- as a relation pgpm does not own: that one cell is left unbuilt, the rest are built. transmute's
 -- orphan-child guard refuses such a type up front (_type_squatter, #671), so only one created after the
 -- conversion gets here.
+--
+-- A null here is a hole in the forward grid, so both callers log it (fail_obtain_name, #710) through
+-- _log_unbuilt_cell; this function stays a stable one that only decides.
 create or replace function pgpm._obtain_name(p_parent regclass, cfg pgpm.config, p_nsp name, p_rel name,
                                              p_lo text, p_hi text)
 returns name language plpgsql stable as $$
@@ -1433,6 +1460,32 @@ begin
   if to_regclass(format('%I.%I', p_nsp, v_name)) is not null then return null; end if;
   if pgpm._type_squatter(p_nsp, v_name) is not null then return null; end if;   -- #707
   return v_name;
+end;
+$$;
+
+-- _log_unbuilt_cell: what obtain and extend_to log when _obtain_name leaves a cell unbuilt (#710). The cell
+-- is a hole in the forward grid: every write into [p_lo, p_hi) is refused with "no partition of relation
+-- found for row" until its name is freed, and nothing used to say so, so the operator found it through the
+-- refused writes. Logged as fail_obtain_name, because no later tick clears it on its own, naming what holds
+-- the cell's plain name: a relation that is not one of this table's partitions, or one of its partitions
+-- over another range, in which case the explicit-range name that would have stood in was taken or over 63
+-- bytes (see _obtain_name). _obtain_name itself stays a STABLE function that decides and writes nothing; the
+-- two callers log, both through this one function. Repeats once per tick while the cell stays unbuilt, the
+-- way every other refusal a tick meets does.
+create or replace function pgpm._log_unbuilt_cell(p_parent regclass, cfg pgpm.config, p_nsp name, p_rel name,
+                                                  p_lo text, p_hi text)
+returns void language plpgsql as $$
+declare v_name name := pgpm._part_name(p_rel, cfg.control_kind, cfg.partition_step, p_lo, p_hi, cfg.partition_tz);
+        v_held regclass := to_regclass(format('%I.%I', p_nsp, v_name));
+begin
+  insert into pgpm.log (parent_table, action, lo, hi, method)
+    values (p_parent, 'fail_obtain_name', p_lo, p_hi,
+            format('left unbuilt, so writes into it are refused: its name %I.%I is held by %s',
+                   p_nsp, v_name,
+                   case when exists (select 1 from pgpm.part p where p.parent_table = p_parent and p.child_oid = v_held::oid)
+                        then 'another of this table''s partitions, and its explicit-range name is taken or over 63 bytes'
+                        else (select pgpm._relkind_noun(c.relkind) from pg_class c where c.oid = v_held) || ' ' || v_held::text
+                             || ', which is not a partition of this table' end));
 end;
 $$;
 
@@ -1623,6 +1676,10 @@ begin
          and pgpm._native_gt(cfg.control_kind, p.hi, v_lo)
          and pgpm._native_gt(cfg.control_kind, v_hi, p.lo));
     v_name := pgpm._obtain_name(p_parent, cfg, v_nsp, v_rel, v_lo, v_hi);
+    -- a hole in the grid, so it is logged (#710)
+    if v_name is null then
+      perform pgpm._log_unbuilt_cell(p_parent, cfg, v_nsp, v_rel, v_lo, v_hi);
+    end if;
     continue when v_name is null;
 
     perform pgpm._create_partition(cfg, v_nsp, v_rel, null, v_name, v_lo, v_hi);
@@ -1727,6 +1784,10 @@ begin
             and pgpm._native_gt(cfg.control_kind, v_hi, p.lo))
     then
       v_name := pgpm._obtain_name(p_parent, cfg, v_nsp, v_rel, v_lo, v_hi);
+      -- a hole in the grid, so it is logged (#710), as obtain does
+      if v_name is null then
+        perform pgpm._log_unbuilt_cell(p_parent, cfg, v_nsp, v_rel, v_lo, v_hi);
+      end if;
       if v_name is not null then
         if v_made = 0 then
           select count(*) into v_locks0 from pg_locks where pid = pg_backend_pid() and not fastpath;
@@ -2593,6 +2654,13 @@ $$;
 -- replace a tested, accurate report with a misleading one -- this refusal means "something else
 -- holds the name", which is not what a dropped partition is. A pgpm.part row whose relation is gone
 -- is forget_missing's business, and retire() already counts it via fail_retain_identity.
+--
+-- A block found not ENABLE ALWAYS is put back, and LOGGED (#710): the same ALTER that upgrades a pre-#450
+-- origin-only block also re-enables one an operator DISABLEd (or set to ENABLE REPLICA), and that used to
+-- happen with nothing logged, so the partition went read-only again on the next tick and pgpm.log had
+-- nothing to say why. Re-enabling stays right, since the block is retention's fence and archive coverage is
+-- only true while it holds, but it overrides a change made by hand, so write_block_reenable records it,
+-- once per re-enable, naming the state it found.
 create or replace function pgpm._install_write_block(p_parent regclass, p_child name)
 returns void language plpgsql as $$
 declare v_nsp name; v_child regclass; v_now regclass; v_enabled "char"; r record;
@@ -2618,8 +2686,14 @@ begin
     -- The upgrade path for #450. A block installed by an older pgpm is origin-only, and re-running
     -- install.sql touches no trigger, so the revisit every tick already makes is where it gets fixed:
     -- one ALTER, once, on the first tick after the upgrade.
+    -- And logged (#710, see above).
     if v_enabled <> 'A' then
       execute format('alter table %I.%I enable always trigger pgpm_write_block', v_nsp, p_child);
+      insert into pgpm.log (parent_table, action, lo, hi, method)
+        values (p_parent, 'write_block_reenable', r.lo, r.hi,
+                format('%I.%I: pgpm_write_block was %s and is ENABLE ALWAYS again (retention''s fence)',
+                       v_nsp, p_child,
+                       case v_enabled when 'D' then 'disabled' when 'R' then 'replica-only' else 'origin-only' end));
     end if;
     return;
   end if;
@@ -3698,6 +3772,12 @@ $$;
 
 -- Reconcile up to p_batch captured keys, returning how many were consumed.
 --
+-- The delta is ANALYZEd when it has never been, reltuples < 0, and not `<= 0` (#710): ANALYZE of an EMPTY
+-- delta records reltuples = 0, so the old test re-ANALYZEd it on every step for as long as it stayed empty,
+-- each time taking SHARE UPDATE EXCLUSIVE on it. An analyzed empty delta plans well as it fills, because
+-- with reltuples = 0 and relpages = 0 the planner scales its estimate from the delta's current size.
+-- TRUNCATE (regrain_cancel) resets reltuples to -1, so each run still analyzes its delta once.
+--
 -- THE CONTRACT: for each captured key the SOURCE is the authority, not the recorded change. Delete the
 -- key's row from its fine child, then reinsert the source's current row for that key if it still exists.
 -- One rule covers all three defects, and critically it covers keys the copy has NEVER SEEN, which the
@@ -3744,7 +3824,8 @@ begin
   -- fixed for freshly minted children ("it sits at reltuples = -1 until autovacuum, and anything touching
   -- it misplans"), so it gets the same treatment. One-time: once analyzed the estimate stays good enough
   -- as the delta grows (47k estimated against 50k actual still planned correctly).
-  if (select coalesce(reltuples, -1) from pg_class where oid = format('%I.%I', v_nsp, v_delta)::regclass) <= 0 then
+  -- never analyzed is `< 0`, not `<= 0` (#710, see above)
+  if (select coalesce(reltuples, -1) from pg_class where oid = format('%I.%I', v_nsp, v_delta)::regclass) < 0 then
     perform pgpm._analyze(format('%I.%I', v_nsp, v_delta)::regclass);
   end if;
 
@@ -4897,6 +4978,17 @@ $$;
 -- index committed there followed the rename onto the monolith alone: a UNIQUE one then enforced its
 -- uniqueness only for rows routed to the monolith, and none routed to a forward partition. A refusal from
 -- the second asking rolls the cutover back to the resumable phase-2 state, as any cutover failure does.
+--
+-- Refuse an EXCLUDE constraint (#710). Its index is not unique, so the list below took it for a plain
+-- secondary to carry, and step 9b rebuilt it as a plain partitioned index and tried to attach the
+-- constraint's own index under it: PostgreSQL refused ("index definitions do not match") inside the
+-- cutover, after phases 1 and 2 had committed the validated pgpm_monolith_bound CHECK and the claim, so
+-- the table rejected every write past hi until a transmute_abort. Nothing in the conversion can carry
+-- the constraint either: PostgreSQL before 17 allows no exclusion constraint on a partitioned table, and
+-- the shapes 17 allows are not ones transmute builds. So it is refused HERE, up front and again under the
+-- cutover's lock like every other shape this function refuses, the way from_hypertable already refuses
+-- it (#675), and the way an un-carryable UNIQUE secondary is refused just below: with the remedy, before
+-- anything is committed.
 create or replace function pgpm._transmute_carried_indexes(
   p_parent regclass, p_nsp name, p_control name, p_ctl_attnum int, p_reuse_idx oid,
   out o_names text[], out o_defs text[])
@@ -4905,7 +4997,16 @@ declare
   v_uniq_bad text;
   v_pgpm_clash_q text;   -- #311: existing relations occupying the <index>_pgpm names step 9b needs
   v_long_idx_q text;     -- #592: carried secondary indexes whose <index>_pgpm name would exceed 63 bytes
+  v_excl_q text;
 begin
+  -- an EXCLUDE constraint is refused (#710, see above)
+  select string_agg(quote_ident(conname), ', ' order by conname) into v_excl_q
+    from pg_constraint where conrelid = p_parent and contype = 'x';
+  if v_excl_q is not null then
+    raise exception 'pg_partition_magician: cannot transmute % -- its exclusion constraint(s) (%) cannot be carried onto a partitioned table (an EXCLUDE constraint''s index cannot be attached under a partitioned index). Drop them (ALTER TABLE % DROP CONSTRAINT <name>) if the table can do without them, then re-run transmute.',
+      p_parent, v_excl_q, p_parent;
+  end if;
+
   select array_agg(c.relname::text), array_agg(pg_get_indexdef(i.indexrelid)) into o_names, o_defs
     from pg_index i join pg_class c on c.oid = i.indexrelid
    where i.indrelid = p_parent and i.indislive and not i.indisprimary
@@ -5049,6 +5150,14 @@ drop procedure if exists pgpm.transmute(regclass, name, interval, int, interval,
 drop procedure if exists pgpm.transmute(regclass, name, bigint, int, bigint, boolean, int, bigint, boolean, text, boolean, int);
 drop procedure if exists pgpm._transmute(regclass, name, text, text, text, int, text, boolean, int, boolean, text, boolean, boolean, int);
 
+-- _transmute: a publication naming the table that the caller does not own is refused up front. The
+-- cutover's ALTER PUBLICATION ... ADD TABLE needs the caller to own each of those publications
+-- (#710). A role that may convert the table (it owns the table) but not alter a publication naming it,
+-- one a replication administrator created, failed there with a raw "must be owner of publication",
+-- after phases 1 and 2 had committed the validated bound and the claim, so the table rejected every
+-- write past hi until a transmute_abort. Leaving the parent out of the publication is the #566 defect
+-- itself, so this is a refusal, not a skip, and it costs nothing here. pg_has_role(..., 'USAGE') is the
+-- test PostgreSQL's ownership check applies: superuser, or the owner role's privileges by inheritance.
 create or replace procedure pgpm._transmute(
   p_parent regclass, p_control name, p_control_kind text,
   p_step text, p_anchor text, p_obtain int, p_retain text,
@@ -5102,6 +5211,7 @@ declare
   v_bad_pub text; v_pub record;   -- #566: publication membership, refused or carried
   v_bad_con text;                 -- #730: constraints the cutover cannot carry (NOT VALID, NO INHERIT)
   v_key_defer text := '';         -- #731: the reused key's DEFERRABLE / INITIALLY DEFERRED, carried onto the parent
+  v_unowned_pub_q text;
   v_sq record;                    -- #573: sequences the table owns through a column
 begin
   if p_control_kind not in ('time', 'id', 'uuidv7', 'text_time') then
@@ -5565,6 +5675,14 @@ begin
   if v_bad_pub is not null then
     raise exception 'pg_partition_magician: cannot transmute % -- the publication(s) (%) name it with a row filter or a column list and publish_via_partition_root = false, which PostgreSQL does not allow for a partitioned table, so the new parent could not take the table''s place in them. Set publish_via_partition_root = true on them (ALTER PUBLICATION ... SET (publish_via_partition_root = true)), or drop the filter and column list, then re-run transmute.',
       p_parent, v_bad_pub;
+  end if;
+  -- and a publication the caller cannot alter is refused (#710, see above _transmute)
+  select string_agg(quote_ident(p.pubname), ', ' order by p.pubname) into v_unowned_pub_q
+    from pg_publication_rel r join pg_publication p on p.oid = r.prpubid
+   where r.prrelid = p_parent and not pg_has_role(current_user, p.pubowner, 'USAGE');
+  if v_unowned_pub_q is not null then
+    raise exception 'pg_partition_magician: cannot transmute % as % -- the publication(s) (%) name it, and adding the new parent to them (ALTER PUBLICATION ... ADD TABLE) needs their owner. Run transmute as a role that owns them, or have their owner hand them over (ALTER PUBLICATION ... OWNER TO), then re-run transmute.',
+      p_parent, quote_ident(current_user), v_unowned_pub_q;
   end if;
 
   -- Constraints the cutover cannot carry (#730). Its CREATE TABLE ... LIKE INCLUDING CONSTRAINTS copies
@@ -6798,6 +6916,16 @@ $$;
 -- The table's privileges and row security come back as the PARENT had them, not as the monolith kept them
 -- from the conversion (#667): table and column grants, ENABLE / FORCE ROW LEVEL SECURITY, and policies.
 -- Everything else -- rows, PK, secondary indexes, their names -- is byte-for-byte.
+-- untransmute carries back the parent's OWNER and COMMENTs as well as its grants (#710), for the same reason: ALTER TABLE ... OWNER TO and COMMENT ON a
+-- partitioned table do not reach its partitions, so after either the monolith still carries the
+-- conversion-time owner and comments, and the reverse handed the table back to an owner the operator had
+-- replaced (the role that owned the managed table was left with no privilege on it at all) with the
+-- comments it had before. Every column of the parent gets a statement, a null comment included, so a
+-- comment removed since the conversion is removed from the restored table too; columns are matched by
+-- name, which ALTER TABLE ... RENAME COLUMN on the parent keeps in step on every partition.
+-- The owner is applied first, so that the reset below works on the
+-- ACL the new owner holds (ALTER OWNER moves the old owner's entries to the new one) and a default ACL is
+-- re-granted to the right role. Only when it differs: the same owner needs no DDL and no privilege.
 create or replace function pgpm.untransmute(p_parent regclass)
 returns regclass language plpgsql as $$
 declare
@@ -6815,6 +6943,7 @@ declare
   -- #667: the parent's grants and policies as statements naming the restored table, and its RLS flags
   v_grantdefs text[] := '{}'; v_poldefs text[] := '{}'; v_rls boolean; v_rls_force boolean;
   v_acl_default boolean; v_revoked boolean := false; v_g record;
+  v_owner oid; v_comdefs text[] := '{}';
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then
@@ -6966,6 +7095,17 @@ begin
   -- all-privileges default, which has no grant to replay.
   select relrowsecurity, relforcerowsecurity, relacl is null into v_rls, v_rls_force, v_acl_default
     from pg_class where oid = p_parent;
+  -- and its owner and comments (#710, see above)
+  select relowner into v_owner from pg_class where oid = p_parent;
+  v_comdefs := v_comdefs || format('comment on table %I.%I is %L', v_nsp, v_rel, obj_description(p_parent, 'pg_class'));
+  for v_g in
+    select a.attname, col_description(p_parent, a.attnum) as c
+      from pg_attribute a
+     where a.attrelid = p_parent and a.attnum > 0 and not a.attisdropped
+     order by a.attnum
+  loop
+    v_comdefs := v_comdefs || format('comment on column %I.%I.%I is %L', v_nsp, v_rel, v_g.attname, v_g.c);
+  end loop;
   for v_g in
     select a.privilege_type, a.is_grantable,
            case when a.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(a.grantee)) end as role_q
@@ -7101,6 +7241,14 @@ begin
     end if;
   end loop;
 
+  -- the parent's owner before the ACL reset, and its comments (#710, see above)
+  if (select relowner from pg_class where oid = v_restored) <> v_owner then
+    execute format('alter table %s owner to %I', v_restored::text, pg_get_userbyid(v_owner));
+  end if;
+  foreach v_tdef in array v_comdefs loop
+    execute v_tdef;
+  end loop;
+
   -- Put the parent's privileges and row security on the restored table in place of the monolith's
   -- conversion-time copy (#667; captured under the lock, above). First reset that copy: every role holding
   -- anything on it, at table or column level, has it revoked (a table-level REVOKE takes the column grants
@@ -7203,6 +7351,55 @@ drop function if exists pgpm.feathering_validation(regclass, interval, interval)
 -- paced by row volume: regrain has its own fixed batch, and obtain is pure metadata.
 
 
+-- _regrain_names_fit: refuse, at set_regrain time, a target step whose fine names would not fit for a
+-- child auto-regrain will split (#710). set_regrain's #510 check asked _part_name for the ANCHOR cell's name
+-- only, which stands for every cell of a time grid (a time label is fixed-width per granularity) but not of
+-- an id grid: _id_label leaves a value at or past 10^19 unpadded and appends a fraction, so a later cell's
+-- name could still be refused at tick time, by regrain_step, logged skip_regrain on every tick (#641's
+-- note). A fractional target on a numeric key is the reachable case: the anchor 0 has no fraction, the
+-- cell after it has every digit of the step's.
+--
+-- The children are the ones maintain() would pick (attached, wider than one partition_step, and the target
+-- subdivides them), and for each the names regrain_step will render for its FIRST TWO and LAST TWO
+-- sub-ranges, cut the way it cuts them. That is every name's width: an id label's whole part is widest at
+-- one end of the range, and of any two consecutive cells one carries the fraction's full width (the last
+-- fractional digit of anchor + k * step is zero for at most one of k and k + 1), so the widest label is
+-- among those four; a time label's width only changes with the year, at an end as well. The value just
+-- below hi is hi less one microsecond (time) or less a unit finer than any grid value's last digit (id),
+-- so its floor is the last cell starting below hi. _part_name raises its own refusal for a name that does
+-- not fit, so this returns nothing and only ever raises.
+create or replace function pgpm._regrain_names_fit(p_parent regclass, cfg pgpm.config, p_rel name, p_step text)
+returns void language plpgsql stable as $$
+declare r record; f text; l text; v text; k text := cfg.control_kind; z text := cfg.partition_tz;
+begin
+  for r in select p.lo, p.hi from pgpm.part p where p.parent_table = p_parent and p.attached
+              and pgpm._native_gt(k, p.hi, pgpm._grid_next(k, cfg.partition_step, p.lo, z))
+              and pgpm._native_gt(k, p.hi, pgpm._grid_next(k, p_step, p.lo, z)) loop
+    f := pgpm._grid_floor(k, p_step, cfg.partition_anchor, r.lo, z);
+    l := pgpm._grid_floor(k, p_step, cfg.partition_anchor, pgpm._native_below(k, r.hi, p_step, cfg.partition_anchor), z);
+    foreach v in array array[case when pgpm._native_gt(k, r.lo, f) then r.lo else f end, pgpm._grid_next(k, p_step, f, z),
+        pgpm._grid_floor(k, p_step, cfg.partition_anchor, pgpm._native_below(k, l, p_step, cfg.partition_anchor), z), l] loop
+      if not pgpm._native_gt(k, r.lo, v) and pgpm._native_gt(k, r.hi, v) then
+        perform pgpm._part_name(p_rel, k, p_step, v, null, z);
+      end if;
+    end loop;
+  end loop;
+end;
+$$;
+
+-- the greatest value below p_native that no grid value lies between: p_native less one microsecond for the
+-- time kinds (every grid value is a whole microsecond), and for id less a unit one digit finer than the
+-- finest of p_native, the step and the anchor (a grid value below p_native is at least a unit of that finest
+-- digit below it). Its _grid_floor is the last grid value strictly below p_native. #710.
+create or replace function pgpm._native_below(p_kind text, p_native text, p_step text, p_anchor text)
+returns text language sql immutable as $$
+  select case when p_kind = 'id'
+              then (p_native::numeric
+                    - power(10::numeric, -(greatest(scale(p_native::numeric), scale(p_step::numeric),
+                                                    scale(p_anchor::numeric)) + 1)))::text
+              else pgpm._ts_text(p_native::timestamptz - interval '1 microsecond') end
+$$;
+
 -- Operator switch for auto-regrain (REDESIGN.md sec 12). p_target_step (an interval for time/uuidv7, a
 -- bigint step as text for id) turns it on: each maintenance tick feathers the oldest frozen coarse child
 -- one budget-sized microbatch toward that granularity. null turns it off (regrain stays operator-driven via
@@ -7265,13 +7462,18 @@ begin
   -- _part_name refuses rather than truncates. Ask it here, at call time, for the anchor cell's name at the
   -- target step (a time label is fixed-width per granularity, so one cell stands for all of them; an id
   -- label is not quite: #582 leaves a value at or past 10^19 unpadded and appends a fraction, so on such
-  -- a numeric key a later cell's name can still be refused at tick time; #641), rather than
+  -- a numeric key a later cell's name could still be refused at tick time, which _regrain_names_fit below
+  -- asks about, #710), rather than
   -- letting every later tick raise the same refusal from regrain_step and log skip_regrain forever: the
   -- #341 wedge again, one level down. A finer step has a wider label than partition_step's, so a table
   -- that passed transmute can still be refused here, and the message says by how many bytes.
   if p_target_step is not null then
     select c.relname into v_rel from pg_class c where c.oid = p_parent;
     perform pgpm._part_name(v_rel, cfg.control_kind, p_target_step, cfg.partition_anchor, null, cfg.partition_tz);
+  end if;
+  -- ...and every name the children auto-regrain will split can need, not only the anchor's (#710)
+  if p_target_step is not null then
+    perform pgpm._regrain_names_fit(p_parent, cfg, v_rel, p_target_step);
   end if;
 
   -- #554: a CHANGE of target while a run is in flight is refused. Nothing records the step a run was started
