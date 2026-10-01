@@ -1548,9 +1548,10 @@ $$;
 -- is a hole in the forward grid: every write into [p_lo, p_hi) is refused with "no partition of relation
 -- found for row" until its name is freed, and nothing used to say so, so the operator found it through the
 -- refused writes. Logged as fail_obtain_name, because no later tick clears it on its own, naming what holds
--- the cell's plain name: a relation that is not one of this table's partitions, or one of its partitions
--- over another range, in which case the explicit-range name that would have stood in was taken or over 63
--- bytes (see _obtain_name). _obtain_name itself stays a STABLE function that decides and writes nothing; the
+-- the cell's plain name: a relation that is not one of this table's partitions, a type (an enum, a domain,
+-- named by _type_squatter's noun: to_regclass sees relations only, so for a type the holder clause was null
+-- and the method stopped at "is held by ", #790), or one of its partitions over another range, in which
+-- case the explicit-range name that would have stood in was taken or over 63 bytes (see _obtain_name). _obtain_name itself stays a STABLE function that decides and writes nothing; the
 -- two callers log, both through this one function. Repeats once per tick while the cell stays unbuilt, the
 -- way every other refusal a tick meets does.
 create or replace function pgpm._log_unbuilt_cell(p_parent regclass, cfg pgpm.config, p_nsp name, p_rel name,
@@ -1563,7 +1564,11 @@ begin
     values (p_parent, 'fail_obtain_name', p_lo, p_hi,
             format('left unbuilt, so writes into it are refused: its name %I.%I is held by %s',
                    p_nsp, v_name,
-                   case when exists (select 1 from pgpm.part p where p.parent_table = p_parent and p.child_oid = v_held::oid)
+                   case when v_held is null
+                        then coalesce(pgpm._type_squatter(p_nsp, v_name) || format(' %I.%I', p_nsp, v_name)
+                                        || ' (a partition''s row type takes its name, so no type may hold it)',
+                                      'a relation or type that has since released it')
+                        when exists (select 1 from pgpm.part p where p.parent_table = p_parent and p.child_oid = v_held::oid)
                         then 'another of this table''s partitions, and its explicit-range name is taken or over 63 bytes'
                         else (select pgpm._relkind_noun(c.relkind) from pg_class c where c.oid = v_held) || ' ' || v_held::text
                              || ', which is not a partition of this table' end));
@@ -5954,15 +5959,15 @@ begin
     -- #707: and in pg_type. A partition's CREATE TABLE needs its name free there too (a table's row type
     -- takes its name), which pg_class cannot show, so an enum or domain named like a child passed this
     -- guard and obtain's CREATE TABLE met it with 42710. The same name shape, asked of _type_squatter
-    -- (#671), which leaves a relation's own row type and an implicit array type alone.
+    -- (#671), which leaves a relation's own row type and an implicit array type alone. The suffix is
+    -- recognised by _is_fine_child_label, as in pg_class above (#794): this half kept '^[0-9]{19}$' when
+    -- #726 moved that one, so a type under a 20-digit, fractional or short negative cell's name passed
+    -- and obtain left that cell unbuilt.
     select t.typname into v_orphan
       from pg_type t
      where t.typnamespace = (select n.oid from pg_namespace n where n.nspname = v_nsp)
        and starts_with(t.typname, v_rel || '_p')
-       and case when p_control_kind = 'id'
-                then substr(t.typname, length(v_rel) + 3) ~ '^[0-9]{19}$'
-                else substr(t.typname, length(v_rel) + 3) ~ '^[0-9]{4}(_[0-9]+)*$'
-           end
+       and pgpm._is_fine_child_label(p_control_kind, substr(t.typname, length(v_rel) + 3))
        and pgpm._type_squatter(v_nsp, t.typname) is not null
      limit 1;
     if v_orphan is not null then

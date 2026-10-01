@@ -5250,6 +5250,31 @@ select is(
         "phases 1 and 2 committed the bound and the claim. tests/208's pinned refusal in part F catches it.",
         [("  if v_key_clash is not null then\n", "  if false and v_key_clash is not null then\n", 1)],
     ),
+    "unbuilt_cell_type_holder_unnamed": (
+        "bench/unbuilt_cell_type_holder.sh",
+        "Pre-#790 _log_unbuilt_cell: the holder is resolved through to_regclass alone, so when a type (an "
+        "enum, a domain, a range type) holds an unbuilt cell's name the holder clause is null and "
+        "fail_obtain_name's method stops at 'is held by ', naming nothing. One site, the type branch of the "
+        "holder clause switched off, which leaves exactly the pre-fix expression; tests/214's enum, domain "
+        "and range-type methods (obtain's and extend_to's) catch it.",
+        [("                   case when v_held is null\n"
+          "                        then coalesce(pgpm._type_squatter(p_nsp, v_name)",
+          "                   case when false\n"
+          "                        then coalesce(pgpm._type_squatter(p_nsp, v_name)", 1)],
+    ),
+    "orphan_type_guard_id_label_19_digits": (
+        "bench/orphan_type_guard_id_labels.sh",
+        "Pre-#794 transmute: the pg_type half of the orphan-child guard (#707) matches an id suffix with "
+        "'^[0-9]{19}$', the label before #582, instead of asking _is_fine_child_label as its pg_class half "
+        "does (#726). A type under a 20-digit, fractional or short negative cell's name passes, the "
+        "conversion completes, and obtain leaves that cell unbuilt. One site, the pg_type query's label "
+        "test; tests/215's three refusals catch it, while its 19-digit control still passes.",
+        [("       and pgpm._is_fine_child_label(p_control_kind, substr(t.typname, length(v_rel) + 3))\n",
+          "       and case when p_control_kind = 'id'\n"
+          "                then substr(t.typname, length(v_rel) + 3) ~ '^[0-9]{19}$'\n"
+          "                else substr(t.typname, length(v_rel) + 3) ~ '^[0-9]{4}(_[0-9]+)*$'\n"
+          "           end\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

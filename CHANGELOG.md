@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **`fail_obtain_name` names a type that holds an unbuilt cell's name** (#790). `_log_unbuilt_cell`
+  resolved the holder through `to_regclass` alone, which sees relations only, so when an enum, domain or
+  range type held a forward cell's name (the cell `obtain` and `extend_to` leave unbuilt since #707) the
+  holder clause was null and the method stopped at "is held by ", naming nothing. It now names the type
+  with `_type_squatter`'s noun (`an enum type public.x`). `tests/214` under
+  `bench/unbuilt_cell_type_holder.sh`, with the mutation `unbuilt_cell_type_holder_unnamed`.
+- **`transmute` refuses a type under any fine child's name, not only a 19-digit one** (#794). The pg_type half
+  of the orphan-child guard (#707) still matched an id suffix with `'^[0-9]{19}$'` after #726 moved its
+  pg_class half to `_is_fine_child_label`, so a type holding a 20-digit, fractional or short negative cell's
+  name passed, the conversion completed and `obtain` left that cell unbuilt. Both halves now ask the same
+  helper. `tests/215` under `bench/orphan_type_guard_id_labels.sh`, with the mutation
+  `orphan_type_guard_id_label_19_digits`.
 - **`from_hypertable_cutover` keeps a naive watermark in the column's own type** (#791). The append-only
   catch-up's watermark, `max(control)` of the destination, was held in a `timestamptz` local, so a
   `timestamp` (no tz) value went through the session `TimeZone`; inside that zone's spring-forward gap
