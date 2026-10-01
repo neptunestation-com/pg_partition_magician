@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **Loosened retention takes back a retirement on a table moved to another schema** (#778). `_retain_recall`
+  (#724) still resolved a retiring partition in the parent's current schema, the one lifecycle step #727
+  left there, so after `ALTER TABLE <parent> SET SCHEMA` a loosening `set_retain` logged
+  `fail_retain_identity` ("oid nothing now") and its conditional disarm named a command the `pgpm_detach`
+  job did not hold: cron detached a partition the loosened policy keeps, and no tick re-attached it. It now
+  resolves each partition through `pgpm._child_nsp`, so the identity check, the disarm, the `ATTACH` and the
+  constraint drop name it in its own schema, and a squatter on the name there is still refused.
+  `tests/204` pins it through `bench/retain_recall_moved_parent.sh` (`retain_recall_parent_schema`,
+  `retain_recall_by_oid`).
 - **`scripts/review/closure.sh` starts the timescale harness when a claim needs it.** Pass 5 was the first
   pass with hypertable reproductions in its claim set; `classify_claims.py` routes those to `pgpm_test-timescale`
   and the closure script had never started that service, so its first run died on its first claim. It now reads

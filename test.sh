@@ -820,6 +820,7 @@ run_perf() {
     "bench/transmute_type_squatter_other_schema.sh pgpm_perf154"
     "bench/schedule_without_pg_cron.sh pgpm_perf155"
     "bench/untransmute_acl_capture_under_lock.sh pgpm_perf156"
+    "bench/retain_recall_moved_parent.sh pgpm_perf157"
   )
   local selected=()
   local n=${#guards[@]} idx
