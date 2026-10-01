@@ -1366,6 +1366,14 @@ $$;
 -- whole forward grid stopped growing, not the one cell. The refusal is caught for exactly that name, and
 -- the cell is left unbuilt like one whose name a relation pgpm does not own holds: never truncated, and
 -- never taking the whole call down with it. Shortening the table name frees the cell.
+--
+-- #707: a TYPE holding the name is in the way too. CREATE TABLE needs the name free in pg_type as well as
+-- in pg_class (a table's row type takes its name), and to_regclass sees relations only, so an enum or
+-- domain under a cell's name passed the check and the CREATE died with 42710, unwinding every other cell
+-- of the call on every tick: the whole forward grid stopped growing. A type holding the name is treated
+-- as a relation pgpm does not own: that one cell is left unbuilt, the rest are built. transmute's
+-- orphan-child guard refuses such a type up front (_type_squatter, #671), so only one created after the
+-- conversion gets here.
 create or replace function pgpm._obtain_name(p_parent regclass, cfg pgpm.config, p_nsp name, p_rel name,
                                              p_lo text, p_hi text)
 returns name language plpgsql stable as $$
@@ -1373,7 +1381,10 @@ declare v_name name; v_held regclass;
 begin
   v_name := pgpm._part_name(p_rel, cfg.control_kind, cfg.partition_step, p_lo, p_hi, cfg.partition_tz);
   v_held := to_regclass(format('%I.%I', p_nsp, v_name));
-  if v_held is null then return v_name; end if;
+  if v_held is null then
+    if pgpm._type_squatter(p_nsp, v_name) is not null then return null; end if;   -- #707
+    return v_name;
+  end if;
   if not exists (
        select 1 from pgpm.part p
         where p.parent_table = p_parent and p.child_oid = v_held::oid
@@ -1388,6 +1399,7 @@ begin
     return null;
   end;
   if to_regclass(format('%I.%I', p_nsp, v_name)) is not null then return null; end if;
+  if pgpm._type_squatter(p_nsp, v_name) is not null then return null; end if;   -- #707
   return v_name;
 end;
 $$;
@@ -3482,6 +3494,7 @@ create or replace function pgpm._regrain_reconcile(
 declare
   cfg pgpm.config; v_nsp name; v_delta name; v_ncast text; v_keycols_q text; v_dkey_q text;
   v_skey_q text; v_cols_q text; v_seqs bigint[]; v_elig text; v_ctl_q text; v_sub_name name; v_n int := 0; r record;
+  v_sub_rel regclass;     -- the fine child pgpm.part recorded, never whatever bears its name (#723)
   v_kctl_native_q text;   -- a delta row's control value, read as a NATIVE grid value (#455)
   v_lo_lit text; v_hi_lit text; v_cur_lit text; v_sub_lo text; v_sub_hi text; v_boundary text;
 begin
@@ -3604,18 +3617,25 @@ begin
         values (p_parent, 'regrain_reconcile_aged', v_sub_lo, v_sub_hi);
       continue;
     end if;
+    -- #723: the relation written is the one pgpm.part recorded for this fine child (child_oid, #421), and
+    -- the tick refuses when its name now resolves to anything else. Both statements below used to write
+    -- `%I.%I` of the name, so a completed copy renamed aside and an unrelated table created under its
+    -- old name lost its row with a captured key and gained the managed table's. The refusal raises
+    -- before either statement and before the delta is consumed, so every captured key waits for the
+    -- tick after the copy has its name back.
+    v_sub_rel := pgpm._regrain_copy_rel(p_parent, v_nsp, v_sub_name, 'reconcile captured changes into');
     execute format(
-      'delete from %I.%I d where %s in (select %s from %I.%I k where k.pgpm_seq = any($1)
+      'delete from %s d where %s in (select %s from %I.%I k where k.pgpm_seq = any($1)
           and pgpm._grid_floor(%L, %L, %L, pgpm._decode(%L, %s, %L, %L, %L, %L, %L, %L, %L), %L) = %L)',
-      v_nsp, v_sub_name, v_dkey_q, v_keycols_q, v_nsp, v_delta,
+      v_sub_rel::text, v_dkey_q, v_keycols_q, v_nsp, v_delta,
       cfg.control_kind, p_step, cfg.partition_anchor, cfg.control_kind, v_kctl_native_q,
       cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
       cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz, r.sub_lo)
       using v_seqs;
     execute format(
-      'insert into %I.%I (%s) select %s from %I.%I s where %s in (select %s from %I.%I k where k.pgpm_seq = any($1)
+      'insert into %s (%s) select %s from %I.%I s where %s in (select %s from %I.%I k where k.pgpm_seq = any($1)
           and pgpm._grid_floor(%L, %L, %L, pgpm._decode(%L, %s, %L, %L, %L, %L, %L, %L, %L), %L) = %L)',
-      v_nsp, v_sub_name, v_cols_q, v_cols_q, v_nsp, p_child, v_skey_q, v_keycols_q, v_nsp, v_delta,
+      v_sub_rel::text, v_cols_q, v_cols_q, v_nsp, p_child, v_skey_q, v_keycols_q, v_nsp, v_delta,
       cfg.control_kind, p_step, cfg.partition_anchor, cfg.control_kind, v_kctl_native_q,
       cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
       cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz, r.sub_lo)
@@ -3707,6 +3727,39 @@ begin
 end;
 $$;
 
+-- Resolve one regrain copy, a not-attached pgpm.part row of p_parent named p_child, to the relation its
+-- child_oid recorded when regrain_step created it (#421), refusing when the name no longer resolves to
+-- that relation (#723, #707). The copy branch has checked this since #631; the reconcile and the swap
+-- wrote and attached `%I.%I` of the recorded name, so a completed copy renamed aside and an unrelated
+-- table created under its old name had a captured key's delete-and-reinsert applied to the stranger
+-- (#723), and was attached in the copy's place while the source and its rows were dropped (#707: with
+-- the squatter built LIKE the copy INCLUDING ALL it carries the `_ck` and the ATTACH goes through).
+-- Refused rather than followed to wherever the oid now sits: attaching a relation under a name pgpm.part
+-- does not record would leave the row describing something else, and renaming it back is the operator's
+-- call, as in the copy branch. Every caller asks before it writes or attaches (the swap before its FK
+-- suspend and DETACH, so before it locks anything), so the source stays attached and the delta keeps
+-- every captured key. A null child_oid predates the anchor and
+-- is resolved by name, as every other identity check here lets an unanchored row through. p_doing names
+-- the step for the message.
+create or replace function pgpm._regrain_copy_rel(p_parent regclass, p_nsp name, p_child name, p_doing text)
+returns regclass language plpgsql stable as $$
+declare v_oid oid; v_lo text; v_hi text; v_now regclass; v_parent_q text; v_was_q text;
+begin
+  select child_oid, lo, hi into v_oid, v_lo, v_hi from pgpm.part
+   where parent_table = p_parent and child_name = p_child and not attached;
+  v_now := to_regclass(format('%I.%I', p_nsp, p_child));
+  if v_now is not null and (v_oid is null or v_now::oid = v_oid) then return v_now; end if;
+  select format('%I.%I', n.nspname, c.relname) into v_parent_q
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+  select format('%I.%I', n.nspname, c.relname) into v_was_q
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_oid;
+  raise exception 'pg_partition_magician: cannot % the regrain copy %.% of % for [%, %) -- that name resolves to %, and no longer names the copy this regrain created (oid %, now %). Writing into or attaching it would put this table''s rows in a relation pgpm does not own, so nothing was changed: the source stays attached and every captured change is kept. Give the copy its name back (rename or drop whatever holds the name first) and the next tick carries on, or abandon the regrain with pgpm.regrain_cancel(%), which drops the copy by its recorded oid.',
+    p_doing, p_nsp, p_child, v_parent_q, v_lo, v_hi,
+    coalesce('oid ' || v_now::oid::text, 'no relation'), coalesce(v_oid::text, 'not recorded'),
+    coalesce(v_was_q, 'gone'), v_parent_q;
+end;
+$$;
+
 -- Serialise everything that drives or reconfigures a regrain of p_parent (#554): regrain_step (and so
 -- maintain's auto-regrain, regrain() and regrain_history()), regrain_cancel, set_regrain and
 -- set_partition_tz all call this FIRST, before they read pgpm.config, and hold it to the end of their
@@ -3756,16 +3809,27 @@ $$;
 create or replace function pgpm.regrain_cancel(p_parent regclass)
 returns int language plpgsql as $$
 declare
-  cfg pgpm.config; v_nsp name; v_delta name; v_dropped int := 0; r record;
+  cfg pgpm.config; v_nsp name; v_delta name; v_dropped int := 0; r record; v_rel regclass;
 begin
   perform pgpm._regrain_lock(p_parent);   -- #554: waits for a step in flight, and holds the next one off
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
 
-  for r in select child_name from pgpm.part where parent_table = p_parent loop
-    execute format('drop trigger if exists pgpm_regrain_capture on %I.%I', v_nsp, r.child_name);
-    execute format('drop trigger if exists pgpm_regrain_truncate_guard on %I.%I', v_nsp, r.child_name);   -- #449
+  -- #707: from the relation each row's child_oid recorded (#421), wherever it now sits and whatever it is
+  -- called, never from whatever bears the row's name. By name, a source renamed aside kept its capture
+  -- trigger and TRUNCATE guard for good, and a relation that took its name lost its own triggers of
+  -- those names. A recorded oid that names nothing any more has nothing to drop; a null child_oid
+  -- predates the anchor and falls back to the name, as _regrain_drop_copy does.
+  for r in select child_name, child_oid from pgpm.part where parent_table = p_parent loop
+    if r.child_oid is null then
+      v_rel := to_regclass(format('%I.%I', v_nsp, r.child_name));
+    else
+      select c.oid::regclass into v_rel from pg_class c where c.oid = r.child_oid;
+    end if;
+    continue when v_rel is null;
+    execute format('drop trigger if exists pgpm_regrain_capture on %s', v_rel::text);
+    execute format('drop trigger if exists pgpm_regrain_truncate_guard on %s', v_rel::text);   -- #449
   end loop;
 
   select delta into v_delta from pgpm._regrain_capture_names(p_parent);
@@ -3987,7 +4051,8 @@ declare
   v_lo_lit text; v_hi_lit text; v_moved bigint := 0; v_aged boolean; v_made int := 0; v_fk int := 0; r record;
   v_fk_ids bigint[];
   v_child_name name; v_src_name name; v_rec int; v_delta_n bigint; v_delta_name name; v_busy name;
-  v_delta_reg regclass; v_sub_known boolean; v_sub_oid oid; v_sub_now regclass;
+  v_delta_reg regclass; v_sub_known boolean; v_sub_oid oid; v_sub_now regclass; v_copy regclass;
+  v_held_lo text; v_held_hi text;
 begin
   -- #554: before the config read below, so a second driver of this parent (a tick, a hand-driven step, a
   -- cancel) waits for this step to commit and this step reads what the last one left
@@ -4297,6 +4362,19 @@ begin
       raise exception 'pg_partition_magician: cannot regrain % -- %.% is oid % now, and no longer names the copy this regrain created for sub-range [%, %) (oid %). Copying into it would put this table''s rows in a relation pgpm does not own. Nothing has been copied into it: rename or drop that relation and re-run, or abandon the regrain with pgpm.regrain_cancel(%), which drops the copy by its recorded oid.',
         v_child_name, v_nsp, v_sub_name, v_sub_now::oid, v_sub_lo, v_sub_hi, v_sub_oid, p_parent;
     end if;
+    -- #707: and no other pgpm.part row of this parent may hold the name. The create below records the new
+    -- copy `on conflict do nothing`, which is right only for the row this sub-range already has (a copy
+    -- dropped by hand and recreated, re-anchored just after); against a row over OTHER bounds it left that
+    -- row describing a different range while the copy filled the new table, and the swap then attached it
+    -- with the wrong bounds or found the sub-range childless. Refused before anything is created.
+    if not v_sub_known then
+      select p.lo, p.hi into v_held_lo, v_held_hi from pgpm.part p
+       where p.parent_table = p_parent and p.child_name = v_sub_name;
+      if found then
+        raise exception 'pg_partition_magician: cannot regrain % -- the fine child for sub-range [%, %) would be %.%, but pgpm.part already records that name for %.% over [%, %), so the copy''s row could not be recorded. Nothing has been created or copied: remove or correct that pgpm.part row and re-run, or abandon the regrain with pgpm.regrain_cancel(%).',
+          v_child_name, v_sub_lo, v_sub_hi, v_nsp, v_sub_name, v_nsp, v_rel, v_held_lo, v_held_hi, p_parent;
+      end if;
+    end if;
     if to_regclass(format('%I.%I', v_nsp, v_sub_name)) is null then
       execute format('create table %I.%I (like %I.%I including defaults including generated including storage including indexes including constraints excluding identity)',
                      v_nsp, v_sub_name, v_nsp, v_rel);
@@ -4405,6 +4483,18 @@ begin
     end if;
     v_walk := v_sub_hi;
   end loop;
+  -- #707: and every copy about to be attached must still be the relation pgpm.part recorded for it. The
+  -- attach loop below used to ATTACH `%I.%I` of each recorded name, so a completed copy renamed aside and
+  -- a table created under its old name LIKE it INCLUDING ALL (which carries the `_ck`) was attached in
+  -- its place, the source was dropped, and that sub-range's rows left the managed table. Asked here,
+  -- before the incoming-FK suspend and the DETACH, so a refused swap takes no ACCESS EXCLUSIVE and
+  -- mutates nothing; the attach loop then attaches the relation resolved by the same helper.
+  for r in execute format(
+    'select child_name from pgpm.part where parent_table = %L::regclass and not attached and lo::%s >= %L::%s and hi::%s <= %L::%s',
+    p_parent::text, v_ncast, v_lo, v_ncast, v_ncast, v_hi, v_ncast)
+  loop
+    perform pgpm._regrain_copy_rel(p_parent, v_nsp, r.child_name, 'attach');
+  end loop;
 
   -- cursor reached hi: every sub-range is copied (or aged and skipped). Swap atomically -- detach the source,
   -- attach every not-yet-attached fine child within its range (metadata-only via each child's validated
@@ -4455,10 +4545,11 @@ begin
     'select child_name, lo, hi from pgpm.part where parent_table = %L::regclass and not attached and lo::%s >= %L::%s and hi::%s <= %L::%s order by lo::%s',
     p_parent::text, v_ncast, v_lo, v_ncast, v_ncast, v_hi, v_ncast, v_ncast)
   loop
-    execute format('alter table %s attach partition %I.%I for values from (%L) to (%L)',
-                   p_parent::text, v_nsp, r.child_name,
+    v_copy := pgpm._regrain_copy_rel(p_parent, v_nsp, r.child_name, 'attach');   -- #707: by recorded oid
+    execute format('alter table %s attach partition %s for values from (%L) to (%L)',
+                   p_parent::text, v_copy::text,
                    pgpm._encode(cfg.control_kind, r.lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz), pgpm._encode(cfg.control_kind, r.hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));
-    execute format('alter table %I.%I drop constraint %I', v_nsp, r.child_name, (r.child_name || '_ck'));
+    execute format('alter table %s drop constraint %I', v_copy::text, (r.child_name || '_ck'));
     update pgpm.part set attached = true where parent_table = p_parent and child_name = r.child_name;
     insert into pgpm.log (parent_table, action, lo, hi, method) values (p_parent, 'regrain_attach', r.lo, r.hi, 'check_skip');
     v_made := v_made + 1;
@@ -5018,6 +5109,24 @@ begin
     elsif v_orphan is not null then
       raise exception 'pg_partition_magician: %.% already exists as a % matching this parent''s partition naming, and the conversion would collide with it when it creates that partition. Drop or rename it and retry transmute.',
         v_nsp, v_orphan, pgpm._relkind_noun(v_orphan_kind);
+    end if;
+    -- #707: and in pg_type. A partition's CREATE TABLE needs its name free there too (a table's row type
+    -- takes its name), which pg_class cannot show, so an enum or domain named like a child passed this
+    -- guard and obtain's CREATE TABLE met it with 42710. The same name shape, asked of _type_squatter
+    -- (#671), which leaves a relation's own row type and an implicit array type alone.
+    select t.typname into v_orphan
+      from pg_type t
+     where t.typnamespace = (select n.oid from pg_namespace n where n.nspname = v_nsp)
+       and starts_with(t.typname, v_rel || '_p')
+       and case when p_control_kind = 'id'
+                then substr(t.typname, length(v_rel) + 3) ~ '^[0-9]{19}$'
+                else substr(t.typname, length(v_rel) + 3) ~ '^[0-9]{4}(_[0-9]+)*$'
+           end
+       and pgpm._type_squatter(v_nsp, t.typname) is not null
+     limit 1;
+    if v_orphan is not null then
+      raise exception 'pg_partition_magician: %.% already exists as % matching this parent''s partition naming, and the conversion would collide with it when it creates that partition (a table''s row type takes its name, so no type may hold it). Drop or rename the type, then retry transmute.',
+        v_nsp, v_orphan, pgpm._type_squatter(v_nsp, v_orphan);
     end if;
   end;
 

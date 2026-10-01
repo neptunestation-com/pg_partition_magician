@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+- **A regrain reconciles captured changes only into the fine child it created** (#723). `_regrain_reconcile`
+  deleted from and inserted into a completed sub-range's copy by the name `pgpm.part` records, never checking
+  the `child_oid` the copy branch checks since #631, so once that copy was renamed aside and an unrelated
+  table took its name, a captured key's delete-and-reinsert removed the stranger's row and put the managed
+  table's row in its place. The reconcile now resolves the copy through the new `_regrain_copy_rel`, which
+  refuses when the name no longer resolves to the recorded oid, before anything is written or the delta is
+  consumed. `tests/183` through `bench/regrain_reconcile_identity.sh`
+  (`regrain_reconcile_into_named_relation`).
+- **The regrain swap attaches only the copies it created, and the other name-keyed sites go by identity
+  too** (#707). The swap attached each copy by its recorded name, so a completed copy renamed aside and a
+  table created `LIKE` it `INCLUDING ALL` under its old name (which carries the `_ck`) was attached in its
+  place, the source was dropped, and that sub-range's rows left the managed table. It now resolves every copy
+  through `_regrain_copy_rel` before the FK suspend and the `DETACH`, refusing with nothing locked, and
+  attaches the resolved relation. `regrain_cancel` drops the capture trigger and `TRUNCATE` guard from the
+  relation each row's `child_oid` records rather than from whatever bears its name; `regrain_step` refuses to
+  create a fine child whose name `pgpm.part` already records for another range, instead of recording it
+  `on conflict do nothing`; `obtain` and `extend_to` leave a cell whose name a type holds unbuilt rather than
+  failing the whole call with 42710 on every tick; and `transmute`'s orphan-child guard refuses a type named
+  like a child, through `_type_squatter`. `tests/184` through `bench/regrain_child_oid_sites.sh`, one
+  mutation per site (`regrain_swap_attaches_named_relation`, `regrain_cancel_triggers_by_name`,
+  `regrain_copy_row_other_bounds`, `obtain_name_relations_only`, `transmute_orphan_guard_relations_only`).
 - **`set_regrain(t, null)` stops a `maintain` tick already in flight from starting a regrain** (#729).
   `maintain` dispatched auto-regrain with the `regrain_to` it read at the top of the tick, three commits
   before its regrain step, so turning auto-regrain off while the tick was archiving was overridden: the

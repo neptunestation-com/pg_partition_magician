@@ -1847,6 +1847,7 @@ begin
           "    return null;\n"
           "  end;\n"
           "  if to_regclass(format('%I.%I', p_nsp, v_name)) is not null then return null; end if;\n"
+          "  if pgpm._type_squatter(p_nsp, v_name) is not null then return null; end if;   -- #707\n"
           "  return v_name;\n",
           "  return null;\n", 1)],
     ),
@@ -3022,6 +3023,64 @@ $$;''',
         "'if false'. tests/172 (C) catches it: a relation is still under the copy's name after the cancel.",
         [("      if v_sub_known then\n        update pgpm.part set child_oid",
           "      if false then\n        update pgpm.part set child_oid", 1)],
+    ),
+    "regrain_reconcile_into_named_relation": (
+        "bench/regrain_reconcile_identity.sh",
+        "Issue #723 put back: _regrain_reconcile writes a completed sub-range's captured changes into "
+        "whatever relation bears the fine child's recorded NAME, never asking child_oid. A copy renamed "
+        "aside and an unrelated table created under its old name then loses its row with a captured key "
+        "and gains the managed table's row. One site: the fine child resolves by name, not through "
+        "_regrain_copy_rel. tests/183 catches it at the refusal it pins and at the stranger's rows, named "
+        "one by one.",
+        [("    v_sub_rel := pgpm._regrain_copy_rel(p_parent, v_nsp, v_sub_name, 'reconcile captured changes into');\n",
+          "    v_sub_rel := format('%I.%I', v_nsp, v_sub_name)::regclass;\n", 1)],
+    ),
+    "regrain_swap_attaches_named_relation": (
+        "bench/regrain_child_oid_sites.sh",
+        "Issue #707 (the swap) put back: the swap attaches each copy by its recorded NAME and drops that "
+        "relation's _ck, never asking child_oid. A completed copy renamed aside and a table created LIKE it "
+        "INCLUDING ALL under its old name is attached in its place, the source is dropped, and the copied "
+        "rows leave the managed table. Two sites: the pre-DETACH identity check goes, and the attach loop "
+        "resolves by name. tests/184 (A) catches it at the refusal and at rows 10, 20, 30.",
+        [("    perform pgpm._regrain_copy_rel(p_parent, v_nsp, r.child_name, 'attach');\n", "    null;\n", 1),
+         ("    v_copy := pgpm._regrain_copy_rel(p_parent, v_nsp, r.child_name, 'attach');   -- #707: by recorded oid\n",
+          "    v_copy := format('%I.%I', v_nsp, r.child_name)::regclass;\n", 1)],
+    ),
+    "regrain_cancel_triggers_by_name": (
+        "bench/regrain_child_oid_sites.sh",
+        "Issue #707 (regrain_cancel) put back: the capture and TRUNCATE-guard triggers are dropped `on` each "
+        "pgpm.part row's NAME, so a source renamed aside keeps both for good and a relation that took its "
+        "name loses its own triggers of those names. One site: the recorded-oid branch is never taken. "
+        "tests/184 (B) catches it on both relations' trigger lists.",
+        [("    if r.child_oid is null then\n      v_rel := to_regclass(format('%I.%I', v_nsp, r.child_name));\n",
+          "    if true then\n      v_rel := to_regclass(format('%I.%I', v_nsp, r.child_name));\n", 1)],
+    ),
+    "regrain_copy_row_other_bounds": (
+        "bench/regrain_child_oid_sites.sh",
+        "Issue #707 (the create branch) put back: a pgpm.part row already holding the rendered name over "
+        "OTHER bounds is not refused, so the copy is created and filled while `on conflict do nothing` "
+        "leaves that row describing a different range. One site: the refusal becomes 'if false'. "
+        "tests/184 (C) catches it at the refusal and at the relation created under the name.",
+        [("    if not v_sub_known then\n      select p.lo, p.hi into v_held_lo, v_held_hi from pgpm.part p\n",
+          "    if false then\n      select p.lo, p.hi into v_held_lo, v_held_hi from pgpm.part p\n", 1)],
+    ),
+    "obtain_name_relations_only": (
+        "bench/regrain_child_oid_sites.sh",
+        "Issue #707 (obtain) put back: _obtain_name asks to_regclass alone whether a cell's name is free, so "
+        "a TYPE holding it reaches CREATE TABLE, which dies with 42710 and unwinds every other cell of the "
+        "call, on every tick. Two sites, the plain name and the explicit-range one. tests/184 (D) catches "
+        "it: obtain raises instead of building the three cells around the squatted one.",
+        [("    if pgpm._type_squatter(p_nsp, v_name) is not null then return null; end if;   -- #707\n", "", 1),
+         ("is not null then return null; end if;\n  if pgpm._type_squatter(p_nsp, v_name) is not null then return null; end if;   -- #707\n",
+          "is not null then return null; end if;\n", 1)],
+    ),
+    "transmute_orphan_guard_relations_only": (
+        "bench/regrain_child_oid_sites.sh",
+        "Issue #707 (transmute) put back: the orphan-child guard looks in pg_class alone, so a domain or enum "
+        "named like one of the parent's children passes the conversion and obtain meets it later. One site: "
+        "the pg_type half of the guard matches nothing. tests/184 (E) catches it: the call is not refused.",
+        [("       and pgpm._type_squatter(v_nsp, t.typname) is not null\n     limit 1;\n",
+          "       and false\n     limit 1;\n", 1)],
     ),
     "regrain_step_sign_unchecked": (
         "bench/regrain_step_positive.sh",

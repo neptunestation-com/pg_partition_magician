@@ -258,8 +258,9 @@ inheritance parent; a relation of any kind already holds the name the monolith w
 (`<table>_p<lo>_to_<hi>`, typically a monolith detached from an earlier conversion of a table by that name)
 or a child-partition name (`<table>_p<digits>...`: an orphan from an interrupted regrain, or a sequence or
 view that happens to be named that way); a type that is not a table's row type (an enum, domain or range
-type) holds the monolith's name or the staging name `<table>_pgpm_new` (a table's row type takes its name,
-so the cutover's `CREATE TABLE` and `RENAME` need it free as a type too); a key (primary key or unique constraint) exists but
+type) holds the monolith's name, the staging name `<table>_pgpm_new` or a child-partition name (a table's
+row type takes its name, so the cutover's `CREATE TABLE` and `RENAME`, and every later partition's
+`CREATE TABLE`, need it free as a type too); a key (primary key or unique constraint) exists but
 excludes `p_control`, or only a *bare* unique index includes it (promote it to a constraint first); the
 control column is `float`/`double` (imprecise boundaries); a `time`-kind control column
 is not a timestamp/date, a `uuidv7` control is not `uuid`, or a `text_time` control is not `text`/`varchar`;
@@ -820,7 +821,9 @@ pgpm.obtain(p_parent regclass) returns int
 Creates empty partitions ahead of the frontier so live writes always land in a real partition, keeping
 `config.obtain` of them ready, and returns how many it created. Pure catalog work: the partitions are
 created empty, so nothing is scanned and nothing is moved. It skips any candidate range that overlaps an
-existing attached partition, for example the monolith, which covers the current interval.
+existing attached partition, for example the monolith, which covers the current interval, and leaves
+unbuilt a cell whose name something it does not own already holds, a relation or a type (see
+[Partition naming](#partition-naming)), building the cells around it.
 
 It stops early, returning what it built, when the next grid boundary cannot be expressed: a `uuidv7` grid
 ends at the last instant a 48-bit millisecond prefix can carry, `10889-08-02 05:31:50.65504+00`; a
@@ -1136,13 +1139,17 @@ and re-run under the new policy. Through `maintain` the refusal appears as a `sk
 the message. A sub-range that already has a fine child is never skipped, even once it ages: its copy is
 finished instead, so an attached partition always holds its whole range.
 
-A fine child is only ever copied into when this regrain created it. If a relation it did not create already
-bears the name a sub-range's fine child would take (a partition of another table that once had this table's
-name, say, since renaming a managed table leaves its partitions' names as they were), or the name of a copy
-in progress now resolves to a different relation than the one the regrain created, `regrain_step` refuses
-with an error naming that relation before a row is copied. Nothing has been written to it: rename or drop
-it and the next tick carries on, or [`regrain_cancel`](#regrain_cancel) the run. Through `maintain` the
-refusal appears as a `skip_regrain` row carrying the message.
+A fine child is only ever copied into, reconciled into or attached when this regrain created it. If a
+relation it did not create already bears the name a sub-range's fine child would take (a partition of
+another table that once had this table's name, say, since renaming a managed table leaves its partitions'
+names as they were), or the name of a copy (in progress or finished) now resolves to a different relation
+than the one the regrain created, `regrain_step` refuses with an error naming that relation before a row is
+copied, before a captured change is applied, and at the swap before anything is locked or detached.
+Nothing has been written to it and nothing is lost: the source stays attached and the captured changes stay
+in the delta. Give the copy its name back (rename or drop whatever holds it) and the next tick carries on,
+or [`regrain_cancel`](#regrain_cancel) the run. It refuses the same way, before creating anything, when
+`pgpm.part` already records the name a new fine child would take for a different range. Through `maintain`
+each refusal appears as a `skip_regrain` row carrying the message.
 
 Returns `prepared` (the first tick, which installs change capture and copies nothing), `reconciled:N`,
 `copied:N`, `reconciling:N` (the swap is waiting for the captured backlog to clear), `swapped:K` (regrain
@@ -1221,8 +1228,9 @@ pgpm.regrain_cancel(p_parent regclass) returns int
 Stops an in-flight regrain and reclaims what it has built, returning the number of in-flight fine children
 dropped. It removes change capture (and with it the `TRUNCATE` refusal), clears the delta, drops every
 not-yet-attached copy, and resets
-`config.regrain_cursor`. A copy is dropped by the identity recorded when the regrain created it, not by
-its name, so a copy that was renamed is still the one dropped and a relation that has since taken its old
+`config.regrain_cursor`. A copy is dropped, and the capture trigger and `TRUNCATE` refusal are taken off a
+child, by the identity recorded when the regrain created it (or when the child entered the catalog), not by
+its name, so a renamed copy or source is still the one reclaimed and a relation that has since taken its old
 name is left alone. The parent is untouched: the source child still holds every row, so this costs the
 copying work already done and nothing else.
 
@@ -2359,7 +2367,8 @@ of the cell after it, so on such a grid the next cell's plain name is already ta
 `extend_to` finds a missing cell's plain name held by one of the same parent's partitions over a
 different range, it builds the cell under its explicit-range name (`events_p2026_10_02_to_2026_10_03`,
 one step wide) and leaves the older partition untouched. A name held by anything else still stops the
-cell from being built, and so does an explicit-range name that would exceed 63 bytes (it is 14 bytes longer
+cell from being built (a relation, or a type such as an enum or domain, since a table's row type takes
+its name), and so does an explicit-range name that would exceed 63 bytes (it is 14 bytes longer
 than a day cell's plain name, so a table name of 38 to 51 bytes meets this): that one cell is left unbuilt,
 never under a cut name, and the cells after it are built. Renaming the table to a name that fits frees it.
 
