@@ -158,6 +158,16 @@ HT_CUTOVER_CONSERVATION = """  if v_src_n <> v_dest_n or v_src_h <> v_dest_h the
 # The cutover's untracked-write refusal (#654), by its condition alone, and the fallback that verifies
 # every row when the copy recorded no horizon, by its assignment alone.
 HT_CUTOVER_UNTRACKED_REFUSAL = "  if v_unmatched > 0 then\n"
+# The same refusal whole, with the comment that says why it comes first: pass 5 seed S9 moves it after the
+# conservation check, so a write the trigger never saw is reported as a count or fingerprint mismatch.
+HT_CUTOVER_UNTRACKED_BLOCK = """  -- Two refusals guard the swap, the specific one first. A row the capture trigger never saw (#654) is named by
+  -- its key below; the count-and-fingerprint comparison after it (#460, #653) catches everything else, so a
+  -- write that bypassed the trigger is reported as what it is rather than as a fingerprint mismatch.
+  if v_unmatched > 0 then
+    raise exception 'pg_partition_magician: from_hypertable_cutover(%) refusing to swap: % source row(s) changed during the online window without firing the change-capture trigger, and the destination does not hold them as the source does (first key %). A write reached the source under session_replication_role = replica (a logical-replication apply worker, a loader silencing triggers) or with the trigger gone, and TimescaleDB cannot enable the trigger ALWAYS on a hypertable, so the delta never saw it. Nothing was dropped and the source is whole. Make every writer fire triggers for the whole window (pause the subscription, or run the loader as origin), then re-run from_hypertable_copy with p_track_changes => true.',
+      p_hypertable, v_unmatched, v_first_key;
+  end if;
+"""
 HT_CUTOVER_NO_HORIZON_FALLBACK = "      v_fresh := 'true';\n"
 # The under-lock append-only catch-up's keyed branch, by its condition and the comment that opens it: the
 # pre-lock key-column build tests the same condition at the same indentation (since #736 took away the
@@ -392,6 +402,58 @@ UNTRANSMUTE_IDENTITY_UNDER_LOCK = """  -- Where each restored identity sequence 
       v_idnext[v_i] := v_ra.o_next; v_idmax[v_i] := v_ra.o_max; v_idmin[v_i] := v_ra.o_min;
     end loop;
   end if;
+"""
+
+# untransmute's privileges and row-security capture (#667), under the lock, in two pieces (pass 5 seed
+# S8 moves both above the gate). The first is the comment and the RLS flags read.
+UNTRANSMUTE_ACL_CAPTURE_HEAD = """  -- Capture the parent's privileges and row security (#667), here, under the lock: GRANT, REVOKE and the
+  -- RLS and policy DDL all change the parent, the table the application uses by name, and none of them
+  -- recurses to a partition, so the monolith still carries whatever the table had at the conversion. The
+  -- parent's state is what gets handed back, replayed below onto the restored table once it has the name
+  -- again, as statements built here with the name it will have (the monolith's own copy is reset first).
+  -- The shape is transmute's 7b, run the other way. v_acl_default: a NULL relacl is the owner's implicit
+  -- all-privileges default, which has no grant to replay.
+  select relrowsecurity, relforcerowsecurity, relacl is null into v_rls, v_rls_force, v_acl_default
+    from pg_class where oid = p_parent;
+"""
+# The rest of the #667 capture: the table and column grants and the policies. A piece of its own because
+# #710 (PR #753) inserts the owner and comment capture between the two, under the lock, where it stays.
+UNTRANSMUTE_ACL_CAPTURE_BODY = """  for v_g in
+    select a.privilege_type, a.is_grantable,
+           case when a.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(a.grantee)) end as role_q
+      from pg_class c, aclexplode(c.relacl) a where c.oid = p_parent and c.relacl is not null
+  loop
+    v_grantdefs := v_grantdefs || format('grant %s on %I.%I to %s%s', v_g.privilege_type, v_nsp, v_rel, v_g.role_q,
+                                         case when v_g.is_grantable then ' with grant option' else '' end);
+  end loop;
+  for v_g in
+    select att.attname, a.privilege_type, a.is_grantable,
+           case when a.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(a.grantee)) end as role_q
+      from pg_attribute att, aclexplode(att.attacl) a
+     where att.attrelid = p_parent and att.attnum > 0 and not att.attisdropped and att.attacl is not null
+  loop
+    v_grantdefs := v_grantdefs || format('grant %s (%I) on %I.%I to %s%s', v_g.privilege_type, v_g.attname, v_nsp, v_rel,
+                                         v_g.role_q, case when v_g.is_grantable then ' with grant option' else '' end);
+  end loop;
+  for v_g in
+    select polname, polcmd, polpermissive,
+           case when polroles = '{0}'::oid[] then 'public'
+                else (select string_agg(quote_ident(rolname), ', ' order by rolname)
+                        from pg_roles where oid = any(polroles)) end as roles_q,
+           pg_get_expr(polqual, polrelid)      as qual,
+           pg_get_expr(polwithcheck, polrelid) as withcheck
+      from pg_policy where polrelid = p_parent order by polname
+  loop
+    v_poldefs := v_poldefs || format('create policy %I on %I.%I as %s for %s to %s%s%s',
+      v_g.polname, v_nsp, v_rel,
+      case when v_g.polpermissive then 'permissive' else 'restrictive' end,
+      case v_g.polcmd when 'r' then 'select' when 'a' then 'insert' when 'w' then 'update'
+                      when 'd' then 'delete' else 'all' end,
+      v_g.roles_q,
+      case when v_g.qual is not null then ' using (' || v_g.qual || ')' else '' end,
+      case when v_g.withcheck is not null then ' with check (' || v_g.withcheck || ')' else '' end);
+  end loop;
+
 """
 
 # The "no commits in the sweep" defect, shared BY REFERENCE by the two mutations that model it: one
@@ -4691,6 +4753,68 @@ select is(
 );
 """, 1)],
     ),
+    # Review pass 5's novel seeds (S1, S3, S6, S8, S9): each was planted for the pass, and the suite check
+    # showed what caught it, if anything. These put each back so its guard is proven to fail against it.
+    "type_squatter_any_schema": (
+        "bench/transmute_type_squatter_other_schema.sh",
+        "Pass 5 seed S1: _type_squatter loses its n.nspname = p_nsp filter, so a type named like the staging "
+        "or monolith name in ANY schema counts, and transmute refuses a conversion whose names are free in the "
+        "table's own schema (the only one a table's row type can collide in). One site, the lookup's WHERE. "
+        "tests/181 has no other-schema case; tests/201's _type_squatter assertions on the s201 enum and domain "
+        "fail, and its conversion of tyo is refused.",
+        [("   where n.nspname = p_nsp and t.typname = p_name and t.typrelid = 0\n",
+          "   where t.typname = p_name and t.typrelid = 0\n", 1)],
+    ),
+    "schedule_without_cron_silent": (
+        "bench/schedule_without_pg_cron.sh",
+        "Pass 5 seed S3: pgpm.schedule() returns null instead of raising when pg_cron is not installed, so the "
+        "call that turns the scheduled lifecycle on succeeds while nothing is scheduled, and the grid stops "
+        "extending until a late write is rejected. One site, the absence branch's raise. No pgTAP file pinned "
+        "the refusal (tests/31 runs where pg_cron lives); tests/202's two throws_like refusals catch it.",
+        [("    raise exception 'pg_partition_magician: pg_cron is not installed in this database; enable it "
+          "(create extension pg_cron) to schedule maintenance, or call pgpm.maintain_all() and "
+          "pgpm.maintain_obtain_all() by hand';\n",
+          "    return null;\n", 1)],
+    ),
+    "throws_ok_null_pattern_113": (
+        "bench/throws_pinned.sh",
+        "Pass 5 seed S6: tests/113's refusal of a primary key that excludes the control column loosened from "
+        "throws_like to throws_ok(sql, NULL, desc), which pins neither SQLSTATE nor message and so also accepts "
+        "the 2D000 a transmute that did NOT refuse raises at its first COMMIT inside pgTAP's wrapper; the "
+        "relkind check after it passes then too, because the statement rolled back. The second test-file "
+        "mutation of this shape (throws_ok_null_pattern is tests/72), on a statement written across lines. "
+        "One site: the assertion's opening and its pattern line.",
+        [("select throws_like(\n"
+          "  $$ call pgpm.transmute('public.t1', 'created_at', interval '1 day', p_obtain => 5) $$,\n"
+          "  'pg_partition_magician: cannot partition %t1 on created_at%the primary key t1_pkey (id) does not include created_at%',\n",
+          "select throws_ok(\n"
+          "  $$ call pgpm.transmute('public.t1', 'created_at', interval '1 day', p_obtain => 5) $$,\n"
+          "  NULL,\n", 1)],
+    ),
+    "untransmute_acl_capture_before_lock": (
+        "bench/untransmute_acl_capture_under_lock.sh",
+        "Pass 5 seed S8: untransmute captures the parent's privileges and row security (#667) above its "
+        "explicit ACCESS EXCLUSIVE (#443's second gate), under only the first gate's ACCESS SHARE, which does "
+        "not exclude a GRANT. tests/158 covers the trigger capture (#666) under that lock and nothing covered "
+        "this one. tests/203's writer grants SELECT to acl203_late while the lock is queued; the restored "
+        "table carries acl203_early's grant and not acl203_late's. Both pieces of the capture move above the "
+        "gate, the one anchor the trigger-capture mutation uses too.",
+        [(UNTRANSMUTE_ACL_CAPTURE_HEAD, "", 1),
+         (UNTRANSMUTE_ACL_CAPTURE_BODY, "", 1),
+         ("  -- THE GATE, AGAIN, UNDER THE LOCK (#443).",
+          UNTRANSMUTE_ACL_CAPTURE_HEAD + UNTRANSMUTE_ACL_CAPTURE_BODY + "\n  -- THE GATE, AGAIN, UNDER THE LOCK (#443).", 1)],
+    ),
+    "hypertable_cutover_refusals_reordered": (
+        "bench/hypertable_replica_capture.sh",
+        "Pass 5 seed S9: from_hypertable_cutover's untracked-write refusal (#654) moved AFTER the count-and-"
+        "fingerprint comparison (#460, #653). The swap is still refused, so nothing is lost, but a write that "
+        "reached the source under session_replication_role = replica is reported as a fingerprint mismatch "
+        "that names no key, and the operator is sent after the wrong cause. Both refusals stay whole; only "
+        "their order changes, anchored on the conservation block other mutations already use. "
+        "tests/timescale/db/25's refusal-message assertions in parts A and B catch it.",
+        [(HT_CUTOVER_UNTRACKED_BLOCK, "", 1),
+         (HT_CUTOVER_CONSERVATION, HT_CUTOVER_CONSERVATION + HT_CUTOVER_UNTRACKED_BLOCK, 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
@@ -4701,6 +4825,7 @@ select is(
 # exactly as it hands the others theirs.
 MUTATION_SRC = {
     "throws_ok_null_pattern": "tests/72_transmute_attributes_test.sql",
+    "throws_ok_null_pattern_113": "tests/113_pk_excluding_control_refused_test.sql",
     "hypertable_cutover_unverified_source": "pgpm_hypertable/install.sql",
     "hypertable_cutover_unverified_dest": "pgpm_hypertable/install.sql",
     "hypertable_catchup_strict_watermark": "pgpm_hypertable/install.sql",
@@ -4711,6 +4836,7 @@ MUTATION_SRC = {
     "hypertable_derived_names_unchecked": "pgpm_hypertable/install.sql",
     "hypertable_cutover_untracked_unchecked": "pgpm_hypertable/install.sql",
     "hypertable_cutover_no_horizon_trusted": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_refusals_reordered": "pgpm_hypertable/install.sql",
     "hypertable_cutover_no_lock_timeout": "pgpm_hypertable/install.sql",
     "hypertable_handoff_validate_no_lock_timeout": "pgpm_hypertable/install.sql",
     "hypertable_preflight_no_exclusion_check": "pgpm_hypertable/install.sql",
@@ -4803,6 +4929,7 @@ MUTATION_TRACK = {
     "hypertable_derived_names_unchecked": "timescale",
     "hypertable_cutover_untracked_unchecked": "timescale",
     "hypertable_cutover_no_horizon_trusted": "timescale",
+    "hypertable_cutover_refusals_reordered": "timescale",
     "hypertable_cutover_conservation_by_count": "timescale",
     "hypertable_preflight_no_exclusion_check": "timescale",
     "hypertable_cutover_no_exclusion_check": "timescale",

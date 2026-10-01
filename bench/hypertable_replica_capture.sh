@@ -11,12 +11,17 @@
 # assertion is load-bearing. Parts C and D are positive assertions (every origin write survives by
 # identity, no false refusal), which a mutant can only fail honestly.
 #
-# TWO mutations are required to fail against it, one per half of the #654 fix (bench/mutations/mutate.py):
+# THREE mutations are required to fail against it, one per half of the #654 fix and one for its order
+# (bench/mutations/mutate.py):
 #   hypertable_cutover_untracked_unchecked -- the refusal disabled: the pre-#654 count-only cutover on the
 #                                             tracking path. Breaks PARTS A and B (no refusal; the
 #                                             replica-role update is reverted by the swap).
 #   hypertable_cutover_no_horizon_trusted  -- a delta with no recorded horizon read as nothing to check.
 #                                             Breaks PART B only.
+#   hypertable_cutover_refusals_reordered  -- the refusal moved after the count-and-fingerprint check
+#                                             (review pass 5 seed S9): still refused, but as a fingerprint
+#                                             mismatch naming no key. Breaks the refusal-message
+#                                             assertions of PARTS A and B.
 #
 # Usage: hypertable_replica_capture.sh <container> <db> [pgpm_hypertable/install.sql]
 #   e.g. hypertable_replica_capture.sh pgpm_test-timescale pgpm_perf106
