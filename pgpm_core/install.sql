@@ -4786,6 +4786,8 @@ declare
   v_trgdefs text[] := '{}'; v_grant text; v_g record;
   v_trgnames text[] := '{}'; v_trgstates text[] := '{}';   -- #499: tgname and tgenabled, index-aligned with v_trgdefs
   v_bad_pub text; v_pub record;   -- #566: publication membership, refused or carried
+  v_bad_con text;                 -- #730: constraints the cutover cannot carry (NOT VALID, NO INHERIT)
+  v_key_defer text := '';         -- #731: the reused key's DEFERRABLE / INITIALLY DEFERRED, carried onto the parent
   v_sq record;                    -- #573: sequences the table owns through a column
 begin
   if p_control_kind not in ('time', 'id', 'uuidv7', 'text_time') then
@@ -4891,6 +4893,15 @@ begin
    where a.attrelid = p_parent and a.attname = p_control and not a.attisdropped;
   if v_typname is null then
     raise exception 'pg_partition_magician: column % not found on %', p_control, p_parent;
+  end if;
+  -- #730: and a column PostgreSQL can partition by at all. A GENERATED one (STORED, or VIRTUAL on 18)
+  -- passed the type check below, phases 1 and 2 committed the validated bound on it and the claim, and the
+  -- cutover's CREATE TABLE ... PARTITION BY RANGE died with a raw "cannot use generated column in partition
+  -- key", on every retry, leaving the table rejecting each write past hi until an abort or the sweep.
+  if (select a.attgenerated from pg_attribute a
+       where a.attrelid = p_parent and a.attname = p_control and not a.attisdropped) <> '' then
+    raise exception 'pg_partition_magician: cannot partition % on % -- it is a generated column, and PostgreSQL cannot use a generated column in a partition key. Partition on a plain column instead (the one it is computed from, when that is time-ordered), then re-run transmute.',
+      p_parent, quote_ident(p_control);
   end if;
   if p_control_kind = 'time' and v_typname not in ('timestamptz', 'timestamp', 'date') then
     raise exception 'pg_partition_magician: control_kind time needs a timestamp/date column (got %)', v_typname;
@@ -5224,6 +5235,36 @@ begin
   if v_bad_pub is not null then
     raise exception 'pg_partition_magician: cannot transmute % -- the publication(s) (%) name it with a row filter or a column list and publish_via_partition_root = false, which PostgreSQL does not allow for a partitioned table, so the new parent could not take the table''s place in them. Set publish_via_partition_root = true on them (ALTER PUBLICATION ... SET (publish_via_partition_root = true)), or drop the filter and column list, then re-run transmute.',
       p_parent, v_bad_pub;
+  end if;
+
+  -- Constraints the cutover cannot carry (#730). Its CREATE TABLE ... LIKE INCLUDING CONSTRAINTS copies
+  -- every CHECK (and, on 18, every NOT NULL constraint) onto the new parent, and two shapes cannot make
+  -- that trip. Neither was checked, so each surfaced as a raw error from inside the cutover, after phases
+  -- 1 and 2 had committed the validated, write-rejecting bound and the claim, and every retry failed the
+  -- same way. Both cost nothing to refuse here, before anything is committed, as #509 does for every other
+  -- shape the cutover cannot convert.
+  --
+  -- A NOT VALID one: LIKE gives the parent a VALIDATED copy, and the ATTACH then refuses the table under
+  -- it ("conflicts with NOT VALID constraint on child table"). pgpm's own bound is excluded by name: a
+  -- resume after phase 1 committed and phase 2 did not finds it NOT VALID, and phase 2 validates it.
+  select string_agg(conname, ', ' order by conname) into v_bad_con
+    from pg_constraint
+   where conrelid = p_parent and contype in ('c', 'n') and not convalidated
+     and conname <> 'pgpm_monolith_bound';
+  if v_bad_con is not null then
+    raise exception 'pg_partition_magician: cannot transmute % -- its constraint(s) (%) are NOT VALID, and the cutover cannot carry a NOT VALID constraint: the new parent gets a validated copy, under which PostgreSQL refuses to attach the table. Validate them first (ALTER TABLE % VALIDATE CONSTRAINT <name>, which takes SHARE UPDATE EXCLUSIVE and so blocks no reader or writer), or drop them, then re-run transmute.',
+      p_parent, v_bad_con, p_parent::text;
+  end if;
+  -- A CHECK ... NO INHERIT: PostgreSQL does not allow one on a partitioned table ("cannot add NO INHERIT
+  -- constraint to partitioned table"), and leaving it on the monolith alone would check only the rows
+  -- routed there. CHECK only: a NOT NULL constraint the LIKE does not copy as NO INHERIT, and 18 marks a
+  -- primary key connoinherit too.
+  select string_agg(conname, ', ' order by conname) into v_bad_con
+    from pg_constraint
+   where conrelid = p_parent and contype = 'c' and connoinherit;
+  if v_bad_con is not null then
+    raise exception 'pg_partition_magician: cannot transmute % -- its CHECK constraint(s) (%) are NO INHERIT, which PostgreSQL does not allow on a partitioned table, and left on the original table alone they would check only the rows routed into it. Drop them, or re-create them without NO INHERIT (ADD CONSTRAINT ... CHECK (...) NOT VALID, then VALIDATE CONSTRAINT), then re-run transmute.',
+      p_parent, v_bad_con;
   end if;
 
   -- 0. incoming FKs: the GATE, and only the gate. pgpm never rewrites the PK, so the referenced unique
@@ -5960,12 +6001,26 @@ begin
 
   -- 8. parent key -- adopts the monolith's kept constraint index (metadata-only, no rebuild): a PRIMARY
   -- KEY when the reused key was the PK, a UNIQUE constraint when it was a unique constraint.
+  --
+  -- With the key's deferrability (#731). A bare ADD PRIMARY KEY / ADD UNIQUE is immediate, and it still
+  -- adopted a DEFERRABLE monolith key, so the monolith kept its deferred check while every forward
+  -- partition got an immediate clone of the parent's: a key swap inside one statement, which the table
+  -- accepted before, failed with a duplicate key once its rows were past the monolith. The flags are
+  -- read off the monolith's own constraint here, under the cutover's lock (p_parent is the monolith's oid
+  -- by now), and the adopted index is the same one either way. The %s carries keywords only.
+  select case when c.condeferrable and c.condeferred then ' deferrable initially deferred'
+              when c.condeferrable then ' deferrable'
+              else '' end
+    into v_key_defer
+    from pg_constraint c
+   where c.conrelid = p_parent
+     and ((v_add_pk and c.contype = 'p') or (v_add_uniq and c.contype = 'u' and c.conindid = v_reuse_idx));
   if v_add_pk then
-    execute format('alter table %s add primary key (%s)', v_parent::text,
-                   (select string_agg(quote_ident(x), ', ') from unnest(v_pkcols) x));
+    execute format('alter table %s add primary key (%s)%s', v_parent::text,
+                   (select string_agg(quote_ident(x), ', ') from unnest(v_pkcols) x), coalesce(v_key_defer, ''));
   elsif v_add_uniq then
-    execute format('alter table %s add unique (%s)', v_parent::text,
-                   (select string_agg(quote_ident(x), ', ') from unnest(v_pkcols) x));
+    execute format('alter table %s add unique (%s)%s', v_parent::text,
+                   (select string_agg(quote_ident(x), ', ') from unnest(v_pkcols) x), coalesce(v_key_defer, ''));
   end if;
 
   -- 8b. advance each identity sequence to the original sequence's own next value (no re-issue of ids it
