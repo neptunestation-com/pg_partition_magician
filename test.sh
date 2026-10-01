@@ -772,6 +772,8 @@ run_perf() {
     "bench/transmute_uncarriable_shapes.sh pgpm_perf127"
     "bench/transmute_key_deferrability.sh pgpm_perf128"
     "bench/maintain_sweep_reads_tap.sh pgpm_perf138"
+    "bench/regrain_reconcile_identity.sh pgpm_perf123"
+    "bench/regrain_child_oid_sites.sh pgpm_perf124"
   )
   local selected=()
   local n=${#guards[@]} idx
