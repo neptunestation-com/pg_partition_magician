@@ -1964,7 +1964,7 @@ declare
   cfg pgpm.config; v_nsp name; v_rel name;
   v_native text; v_target_lo text;
   v_frontier text; v_lo text; v_hi text; v_name name;
-  v_needed int := 0; v_made int := 0; v_walked int := 0;
+  v_needed int := 0; v_edge int := 0; v_made int := 0; v_walked int := 0;
   v_slots bigint := current_setting('max_locks_per_transaction')::bigint
                     * (current_setting('max_connections')::bigint + current_setting('max_prepared_transactions')::bigint);
   v_locks0 bigint; v_locks1 bigint; v_locks2 bigint; v_projected bigint;
@@ -1986,12 +1986,27 @@ begin
   -- count-only dry run: how many grid steps stand between the current forward edge and the target.
   -- Deliberately ignorant of which of those already exist (a conservative, cheap upper bound) -- the
   -- point is refusing BEFORE touching the catalog, not computing the tightest possible cap.
+  --
+  -- PLUS THE EDGE'S OWN CELL WHEN IT IS MISSING (issue #836). The walk below starts AT the edge's floor, so
+  -- it visits v_needed + 1 cells and builds the first of them too when nothing attached overlaps it: a
+  -- 1-second time grid with a lookahead of 0, a few seconds after its last obtain, has no cell under now().
+  -- Counting steps alone let p_max => 1 create two partitions. The edge is asked exactly as the walk asks
+  -- it (overlap with an attached partition), so the dry count still never undercounts what the walk builds.
+  if not exists (
+       select 1 from pgpm.part p
+        where p.parent_table = p_parent and p.attached
+          and pgpm._native_gt(cfg.control_kind, p.hi, v_lo)
+          and pgpm._native_gt(cfg.control_kind,
+                              pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_lo, cfg.partition_tz), p.lo))
+  then
+    v_edge := 1;
+  end if;
   while pgpm._native_gt(cfg.control_kind, v_target_lo, v_lo) loop
     v_lo := pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_lo, cfg.partition_tz);
     v_needed := v_needed + 1;
-    exit when v_needed > p_max;
+    exit when v_needed + v_edge > p_max;
   end loop;
-  if v_needed > p_max then
+  if v_needed + v_edge > p_max then
     raise exception 'pg_partition_magician: extend_to(%, %) would need more than % new partitions to reach it; refusing rather than partially extending (raise p_max, or check p_value for a typo)',
       p_parent, p_value, p_max;
   end if;
@@ -2167,7 +2182,7 @@ create or replace function pgpm._crossing_keys(p_parent regclass, p_lo text, p_h
 returns text[] language plpgsql as $$
 declare
   cfg pgpm.config; r record;
-  v_ctrl_attnum smallint; v_refcol name; v_pos int;
+  v_ctrl_attnum smallint; v_refcol name; v_reftype regtype; v_refval_q text; v_pos int;
   v_lo_lit text; v_hi_lit text; v_vals text[] := '{}'; v_more text[];
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
@@ -2197,14 +2212,25 @@ begin
       raise exception 'pg_partition_magician: foreign key % on % references % without its control column %, so pgpm cannot tell which rows cross the retention horizon',
         r.conname, r.referencing, p_parent, cfg.control_column;
     end if;
-    select a.attname into v_refcol from pg_attribute a
+    select a.attname, a.atttypid::regtype into v_refcol, v_reftype from pg_attribute a
      where a.attrelid = r.referencing and a.attnum = (r.conkey)[v_pos];
+
+    -- How a referencing key is read back as text (the #788 rule, #814): retire()'s crossing DELETE parses
+    -- every value returned here again, as %L::text[]::<control type>[], and only an instant rendered
+    -- through _ts_text round-trips under every DateStyle. A bare ::text under one that renders zone
+    -- abbreviations (SQL, Postgres) can name another zone: Asia/Kolkata's 'IST' reads as Israel (+02) on
+    -- PostgreSQL before 18, so every key parsed 3.5 hours off, the DELETE matched nothing, the FK's
+    -- declared ON DELETE was never applied and the dispatched DETACH could never succeed. Every other
+    -- type a key can have here (an integer, a uuid, text, a naive timestamp parsed back in the session
+    -- that rendered it) round-trips as ::text.
+    v_refval_q := case when v_reftype = 'timestamptz'::regtype then format('pgpm._ts_text(%I)', v_refcol)
+                       else format('%I::text', v_refcol) end;
 
     -- A plain range predicate: a row whose key falls in [lo, hi) references a row in THIS partition,
     -- by the definition of range partitioning, whatever else the key carries.
     execute format(
-      'select coalesce(array_agg(distinct %I::text), ''{}''::text[]) from %s where %I >= %L and %I < %L',
-      v_refcol, r.referencing::text, v_refcol, v_lo_lit, v_refcol, v_hi_lit)
+      'select coalesce(array_agg(distinct %s), ''{}''::text[]) from %s where %I >= %L and %I < %L',
+      v_refval_q, r.referencing::text, v_refcol, v_lo_lit, v_refcol, v_hi_lit)
       into v_more;
     v_vals := v_vals || v_more;
   end loop;
@@ -2635,6 +2661,17 @@ begin
     -- tick forever, and the identity check has just proved the name means what it meant, so the
     -- detach that landed was this retirement's and the armed command is its own.
     perform pgpm._idle_detach_job(null);
+  elsif r.retiring_at is not null then
+    -- A RETIREMENT THAT DISPATCHED A DETACH AND ENDS IN THE ONE-STEP DROP (issue #835). retiring_at says an
+    -- earlier call took the referenced path and armed the job with this partition's detach; its incoming
+    -- FK has gone since (an operator dropped it before pg_cron ran the detach), so the bare DROP below
+    -- finishes the retirement on a still-attached partition. The job still carries the detach and, left
+    -- armed, ran `DETACH PARTITION` of the dropped name every tick until some later dispatch overwrote it.
+    -- Disarmed here, before the drop and outside its subtransaction, for the reason the branch above gives.
+    -- CONDITIONALLY, unlike that branch: no detach landed, so nothing proves the job still holds this
+    -- retirement's command rather than another parent's later dispatch, and the #407 rule is never to
+    -- clobber that. A mismatch skips the disarm, the safe direction.
+    perform pgpm._idle_detach_job(pgpm._detach_cmd(p_parent, v_nsp, p_child));
   end if;
 
   begin
@@ -3532,61 +3569,77 @@ begin
       limit %s',
     p_parent::text, p_parent::text, p_parent::text, v_ncast, coalesce(cfg.archive_batch::text, 'all'))
   loop
-    -- #727: the partition's own schema, not the parent's (the discard above names an untracked name, so
-    -- it can only guess the parent's)
-    v_nsp := pgpm._child_nsp(p_parent, r.child_name);
+    -- ONE CANDIDATE AT A TIME (issue #833), in its own subtransaction, the per-child shape
+    -- _enforce_write_blocks has. A strategy that cannot make progress is told to RAISE (see
+    -- pgpm.archive_result), and so can _next_archive_chunk or the ledger INSERT; without this block that
+    -- raise unwound the whole step into maintain()'s one exception handler, so with archive_batch > 1 every
+    -- other partition archived in the same call lost its ledger row after the strategy had already run for
+    -- it (a transport strategy had uploaded the chunk, and uploaded it again next tick), and while one
+    -- partition kept failing no partition of the parent recorded coverage or retired. Now only the
+    -- partition that raised is deferred: its subtransaction rolls back, so its coverage stays where it was
+    -- and retire()'s drop gate stays shut, it is logged skip_archive over its own [lo, hi), and the
+    -- next tick hands it the same chunk, while the rest of the batch records what it archived. Fail-closed
+    -- as before: a deferral only ever withholds coverage, never claims it.
+    begin
+      -- #727: the partition's own schema, not the parent's (the discard above names an untracked name, so
+      -- it can only guess the parent's)
+      v_nsp := pgpm._child_nsp(p_parent, r.child_name);
 
-    -- Two independent facts have to agree, exactly as in retire()'s own identity check (#407): the
-    -- name resolves, and it resolves to the OID recorded when this partition entered pgpm.part.
-    -- `is distinct from` so a name that resolves to nothing at all trips this too. A null child_oid
-    -- is unanchored (see the column's own note) and is left to behave as it did before.
-    --
-    -- `continue`, not a raise or a return: one partition whose name has stopped meaning what it
-    -- meant is not a reason to abandon the tick, and the loop above is already the per-candidate
-    -- shape that makes skipping one of them the natural thing to do. It is still fail-CLOSED for the
-    -- partition itself -- no chunk is read, no ledger row is written, so _archive_fully_covered
-    -- stays false and retire()'s drop precondition stays shut -- and it stays closed, because there
-    -- is no later tick on which the name goes back to meaning the right relation. That makes it a
-    -- wedge an operator has to resolve (pgpm.forget_missing, or putting the name back), which is why
-    -- it is logged as a prefixed non-success action and counted by status() alongside the other
-    -- things that stall retention. At archive_batch's default of 1 it also stops this parent's
-    -- archiving behind it, which is the correct reading: pgpm's catalog is provably wrong about
-    -- which relation is which, and retention should not march on past that.
-    v_now := to_regclass(format('%I.%I', v_nsp, r.child_name));
-    if r.child_oid is not null and v_now::oid is distinct from r.child_oid then
+      -- Two independent facts have to agree, exactly as in retire()'s own identity check (#407): the
+      -- name resolves, and it resolves to the OID recorded when this partition entered pgpm.part.
+      -- `is distinct from` so a name that resolves to nothing at all trips this too. A null child_oid
+      -- is unanchored (see the column's own note) and is left to behave as it did before.
+      --
+      -- `continue`, not a raise or a return: one partition whose name has stopped meaning what it
+      -- meant is not a reason to abandon the tick, and the loop above is already the per-candidate
+      -- shape that makes skipping one of them the natural thing to do. It is still fail-CLOSED for the
+      -- partition itself -- no chunk is read, no ledger row is written, so _archive_fully_covered
+      -- stays false and retire()'s drop precondition stays shut -- and it stays closed, because there
+      -- is no later tick on which the name goes back to meaning the right relation. That makes it a
+      -- wedge an operator has to resolve (pgpm.forget_missing, or putting the name back), which is why
+      -- it is logged as a prefixed non-success action and counted by status() alongside the other
+      -- things that stall retention. At archive_batch's default of 1 it also stops this parent's
+      -- archiving behind it, which is the correct reading: pgpm's catalog is provably wrong about
+      -- which relation is which, and retention should not march on past that.
+      v_now := to_regclass(format('%I.%I', v_nsp, r.child_name));
+      if r.child_oid is not null and v_now::oid is distinct from r.child_oid then
+        insert into pgpm.log (parent_table, action, lo, hi, method)
+          values (p_parent, 'fail_archive_identity', r.lo, r.hi,
+                  format('%I.%I is oid %s now, not the oid %s recorded for this partition; refusing to archive it',
+                         v_nsp, r.child_name, coalesce(v_now::oid::text, 'nothing'), r.child_oid));
+        continue;
+      end if;
+
+      select * into v_range from pgpm._next_archive_chunk(p_parent, r.child_name);
+      if not found then continue; end if;
+
+      v_result := pgpm._run_archive_strategy(p_parent, r.child_name, v_range.lo, v_range.hi);
+
+      -- Hold the return to the chunk it was handed (issue #454; the rules are _archive_contract_breach's
+      -- own comment). Same shape as the identity refusal above: `continue`, and no ledger row, so the
+      -- child's coverage stays exactly where it was and retire()'s drop precondition stays shut. Unlike
+      -- that refusal this one IS retryable, and by construction: nothing advanced, so the next tick hands
+      -- the strategy the very same chunk, and a corrected strategy (pgpm.set_archive_fn) resumes from
+      -- where the ledger honestly stands. Until then it logs once per tick, counts in
+      -- status().retain_drop_failures, and at archive_batch's default of 1 holds up this parent's other
+      -- partitions, which is right: the strategy is provably wrong about what it archived.
+      v_breach := pgpm._archive_contract_breach(cfg.control_kind, v_range.lo, v_range.hi, v_result.covered_hi);
+      if v_breach is not null then
+        insert into pgpm.log (parent_table, action, lo, hi, method)
+          values (p_parent, 'fail_archive_contract', v_range.lo, v_range.hi,
+                  format('%s returned covered_hi %s for %I.%I chunk [%s, %s): %s; refusing to record it',
+                         cfg.archive_fn::text, coalesce(quote_literal(v_result.covered_hi), 'null'),
+                         v_nsp, r.child_name, v_range.lo, v_range.hi, v_breach));
+        continue;
+      end if;
+
+      insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, s3_key, etag, rows_archived)
+      values (p_parent, v_range.lo, v_result.covered_hi, r.child_name, v_result.s3_key, v_result.etag, v_result.rows_archived);
+      v_count := v_count + 1;
+    exception when others then
       insert into pgpm.log (parent_table, action, lo, hi, method)
-        values (p_parent, 'fail_archive_identity', r.lo, r.hi,
-                format('%I.%I is oid %s now, not the oid %s recorded for this partition; refusing to archive it',
-                       v_nsp, r.child_name, coalesce(v_now::oid::text, 'nothing'), r.child_oid));
-      continue;
-    end if;
-
-    select * into v_range from pgpm._next_archive_chunk(p_parent, r.child_name);
-    if not found then continue; end if;
-
-    v_result := pgpm._run_archive_strategy(p_parent, r.child_name, v_range.lo, v_range.hi);
-
-    -- Hold the return to the chunk it was handed (issue #454; the rules are _archive_contract_breach's
-    -- own comment). Same shape as the identity refusal above: `continue`, and no ledger row, so the
-    -- child's coverage stays exactly where it was and retire()'s drop precondition stays shut. Unlike
-    -- that refusal this one IS retryable, and by construction: nothing advanced, so the next tick hands
-    -- the strategy the very same chunk, and a corrected strategy (pgpm.set_archive_fn) resumes from
-    -- where the ledger honestly stands. Until then it logs once per tick, counts in
-    -- status().retain_drop_failures, and at archive_batch's default of 1 holds up this parent's other
-    -- partitions, which is right: the strategy is provably wrong about what it archived.
-    v_breach := pgpm._archive_contract_breach(cfg.control_kind, v_range.lo, v_range.hi, v_result.covered_hi);
-    if v_breach is not null then
-      insert into pgpm.log (parent_table, action, lo, hi, method)
-        values (p_parent, 'fail_archive_contract', v_range.lo, v_range.hi,
-                format('%s returned covered_hi %s for %I.%I chunk [%s, %s): %s; refusing to record it',
-                       cfg.archive_fn::text, coalesce(quote_literal(v_result.covered_hi), 'null'),
-                       v_nsp, r.child_name, v_range.lo, v_range.hi, v_breach));
-      continue;
-    end if;
-
-    insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, s3_key, etag, rows_archived)
-    values (p_parent, v_range.lo, v_result.covered_hi, r.child_name, v_result.s3_key, v_result.etag, v_result.rows_archived);
-    v_count := v_count + 1;
+        values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 200));
+    end;
   end loop;
   return v_count;
 end;

@@ -1045,7 +1045,9 @@ It never moves the frontier or touches data, only creates empty partitions, and 
 that already exist (or overlap an attached one, like the monolith) are left alone. `p_max` bounds how many
 NEW partitions one call may create, checked with a dry count before any DDL runs, so a wildly-off
 `p_value` is refused loudly and immediately -- creating nothing -- rather than silently stopping `p_max`
-partitions short of the value actually asked for. Like `obtain`, it stops (here, raises) if the next grid
+partitions short of the value actually asked for. The count includes the forward edge's own cell when
+nothing attached covers it (on a fine `time` grid with a short lookahead, the cell `now()` has moved
+into since the last `obtain`), because the call builds that cell too. Like `obtain`, it stops (here, raises) if the next grid
 boundary cannot be expressed (the `uuidv7`/`text_time` ceilings described above).
 
 It is a function, so every partition one call creates is created in one transaction and holds its locks
@@ -1175,7 +1177,10 @@ The sequence, per partition:
    concurrent detach, in one transaction, logged `retain_detach`. With no such job, `fail_retain_detach`
    is logged instead.
 3. On a later call, with the partition detached, return the cron job to idle, `DROP` the partition, delete
-   the catalog row and log `retain_drop`.
+   the catalog row and log `retain_drop`. If the incoming FK has been dropped in the meantime, before the
+   detach ran, the later call finishes the retirement with the one-step `DROP` of the still-attached
+   partition instead; it returns the job to idle first too, provided the job still holds this
+   partition's detach (another retirement's dispatch is left alone).
 
 `fail_retain_crossing`, `fail_retain_detach` and `fail_retain_identity` all count in
 `status().retain_drop_failures`; in-flight detaches show in `status().retain_detaching`. A partition that
@@ -1691,7 +1696,10 @@ refusal in `status().retain_drop_failures`; see
 [the archive step's contract check](#the-archive-steps-contract-check). A strategy that cannot make
 progress on a call (the object store is unreachable, say) should **raise** rather than return:
 `maintain()` records that as a `skip_archive` deferral and hands it the same chunk next tick, which
-is the retry path. Returning `p_lo` as `covered_hi` is not.
+is the retry path. Returning `p_lo` as `covered_hi` is not. The deferral is per partition: the
+`skip_archive` row carries that partition's `lo` and `hi` and the raised message in `method`, and the
+other partitions of the same `archive_batch` record what the strategy archived for them, as if the raise
+had not happened.
 
 `pgpm._run_archive_strategy(p_parent, p_child, p_lo, p_hi)` is the dispatch stub: it looks up
 `config.archive_fn` and calls it, or, for a `null` (`none`) strategy, returns `(p_hi, null)` directly

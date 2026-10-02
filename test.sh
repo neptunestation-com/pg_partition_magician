@@ -891,6 +891,10 @@ run_perf() {
     "bench/check_text_time_alphabet_syntax.sh pgpm_perf197"
     "bench/grid_floor_across_era.sh pgpm_perf198"
     "bench/fine_child_label_bc_wide_year.sh pgpm_perf199"
+    "bench/archive_step_child_isolation.sh pgpm_perf191"
+    "bench/retire_one_step_disarm.sh pgpm_perf192"
+    "bench/extend_to_edge_cell_count.sh pgpm_perf193"
+    "bench/crossing_keys_datestyle.sh pgpm_perf194"
   )
   local selected=()
   local n=${#guards[@]} idx
