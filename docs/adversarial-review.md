@@ -149,7 +149,8 @@ Recorded per pass, in this order, so the count of findings is never read alone.
 | claims | total claims across finders |
 | findings | claims that survived verification |
 | per finder | claims and precision for each finder, with the model it ran on when the pass split model tiers |
-| precision | (findings + seed hits) / claims that had a reproduction; a correctly reported seed is a true report, and a hypothesis is not a claim |
+| precision | (findings + seed hits + verified known-and-open re-finds) / claims that had a reproduction; a correctly reported seed is a true report, and so is a reproduced defect an earlier pass's issue already names; a hypothesis is not a claim. Reported with the **strict** figure, (findings + seed hits) / claims, beside it: the share of true reports that were new |
+| fell rate | claims that fell in verification / claims that had a reproduction: the reaching alarm. A claim that falls is the one shape a reviewer pushed for defects produces when there are none; a re-find is not |
 | findings by tier | Tier 1 through Tier 5 |
 | root causes | distinct root causes behind the findings, and how many the fix phase closed as a class rather than an instance |
 | known and open | re-found findings from earlier passes still unfixed |
@@ -159,8 +160,11 @@ Recorded per pass, in this order, so the count of findings is never read alone.
 | blind spots | seeds missed, by lens |
 
 The curve the metrics are meant to draw across passes: findings and Tier 1 findings falling, cost per
-finding rising, recall staying high, precision staying high. Precision falling while yield falls is the
-signature of a reviewer reaching; it means change the method, not push harder.
+finding rising, recall staying high, precision staying high, the fell rate staying low. The fell rate
+rising while yield falls is the signature of a reviewer reaching; it means change the method, not push
+harder. The strict figure falling on its own is a different signal, the size of the backlog finders
+cannot see (pass 7: 23 of 69 claims re-found nine open issues, 19 of them for the first time with a
+reproduction, while 2 claims fell), and its remedy is the "backlog verified before the pin" rule below.
 
 ## Stopping criteria
 
@@ -169,7 +173,8 @@ The deep-hunt mode ends when ALL of the following hold, judged on the two most r
 1. **Zero Tier 1 findings** in each of two consecutive passes, and
 2. **seed recall of at least 0.8** in each of those passes (so the zero was earned); from pass 5, the
    read-caught recall when the suite check measured the split, and
-3. **precision of at least 0.7** in each (so the passes were not reaching), and
+3. **precision of at least 0.7** in each, counting verified known-and-open re-finds as true reports, and
+   **a fell rate of at most 0.3** (so the passes were not reaching), and
 4. **the capture-recapture estimate for Tier 1 rounds to zero**, when two independent hunts were run, or
    the estimate was not attempted and criteria 1 to 3 hold for three passes instead of two.
 
@@ -181,7 +186,7 @@ Stopping does not mean no scrutiny. It means the standing mode changes to:
 - **a full pass after any release, and after any merge batch of more than five PRs**, since a batch of
   fixes is new surface with new interactions.
 
-A pass is also **abandoned early**, and the method revised, if precision drops below 0.5 mid-pass.
+A pass is also **abandoned early**, and the method revised, if the fell rate exceeds 0.5 mid-pass.
 
 ## Between passes
 
@@ -193,7 +198,19 @@ meant to draw says nothing. The rules that keep the loop honest:
   finding of pass N. Lower tiers may be deferred, but each deferred finding stays open as an issue.
 - **Known and open is a class, not a finding.** The verifier, and only the verifier, holds the list of
   issues still open from earlier passes. A re-found one is classified **known and open** and recorded
-  against its issue. Finders never see the list, so it cannot steer what they look at.
+  against its issue, with its reproduction (for most of the backlog's bullets, the first one). Finders
+  never see the list, so it cannot steer what they look at. It is a true report for precision, since it
+  is a reproduced defect; it is not a finding, since it is not new. An open issue that gained a
+  reproduction this way joins the next fix phase's list beside the pass's own issues: the reproduction
+  is its acceptance test now.
+- **The backlog is verified before the pin.** A fix phase ends with the fixers' adjacent observations,
+  filed as issues marked unverified. Before the next pass is pinned, each bullet of those issues gets a
+  verifier (one `verifier` agent per bullet, against `main`, about 40k tokens): a bullet that reproduces
+  gets its reproduction and a tier on the issue, one that does not is struck out, and an issue with
+  nothing left is closed. Left unverified at the pin, those bullets become the next pass's re-finds
+  (pass 7's 23 came almost entirely from #766 to #775 and #813 to #819, filed one to three days before),
+  which costs a verifier run each to re-discover and leaves Tier-1-shaped mechanisms sitting unmeasured
+  in the tree that the finders are reviewing.
 - **A fix is a guard and a mutation, or it is a patch.** Per `CLAUDE.md`, every fix PR carries a guard
   that would fail with the defect present and a mutation in `bench/mutations/` that puts the defect
   back, proven by `./test.sh discriminate`. The guard keeps the fix honest now; the mutation keeps a
@@ -264,7 +281,9 @@ what follows.
   that still fails is either explained in a caveat that says why it is unsound, or it is a reopen.
 - **Record it.** The pass record gets a fix-phase section: PRs, landing measurements, hand-resolved
   conflicts, flakes and their signatures, interactions, the closure table and the explained failures,
-  root causes closed. The fixers' adjacent observations are filed as issues, marked unverified.
+  root causes closed. The fixers' adjacent observations are filed as issues, marked unverified, and
+  verified bullet by bullet before the next pass is pinned ("The backlog is verified before the pin",
+  above).
 
 ## Lenses
 
@@ -302,7 +321,7 @@ One file per pass, committed under `docs/reviews/` as `YYYY-MM-DD.md`, in this s
 
 pinned: <sha> (<release>) | budget: <finders> x <hours or tokens>, <wall-clock>
 lenses: <list> | previous pass lenses: <list>
-seeds K=<n>, recall <r> (suite-caught <a>/<b>, read-caught <c>/<d>); claims <c>; findings <f>; precision <p>
+seeds K=<n>, recall <r> (suite-caught <a>/<b>, read-caught <c>/<d>); claims <c>; findings <f>; precision <p> (strict <s>, fell rate <e>)
 findings by tier: T1 <n> T2 <n> T3 <n> T4 <n> T5 <n>
 cost per finding: <x>; per Tier 1 finding: <y>
 root causes: <n> behind the findings, <m> closed as a class by the fix phase
@@ -330,7 +349,13 @@ blind spots (seeds missed, by lens): <list>
 | 4 | 2026-09-29 | `b52a0d9` (0.6.0 + 97) | 32 (7 T1; 28 root-cause groups: #649 to #676) | 69 | 0.86 | 9 / 1.00 | ten finders (eight slices, S3 and S8 duplicated: opus primary, fable duplicate), one verifier per candidate; the eight lenses were pass 3's, unchanged, by the maintainer's decision to measure the fixes under a fixed method (a recorded deviation from the rotation rule); one reproduction rebuilt; ten claims re-found eight open issues and are recorded on them with reproductions; nothing fell; 3.68M agent tokens, 32 min from hunt start to last verdict; every seed had a test-file guard, so the finder that ran the suite found all nine before reading; fix phase closed all 28 root-cause groups and the eight open issues that completed their classes by 2026-09-30 (PRs #680 to #704, 24 fixers, batches of up to five under the merge-commit queue; 127-minute median per PR that is mostly queue position, 39 minutes per PR of wall clock against pass 3's 27; nine hand-resolved conflicts, two code interactions, three instrument defects fixed as #714, #716 and #717; 66 of 69 reproductions pass on `ff01584`, the three others explained), follow-ups #705 to #713; see [the record](reviews/2026-09-29.md). |
 | 5 | 2026-10-01 | `47a293a` (0.6.0 + 173) | 27 (2 T1; 22 root-cause groups: #723 to #744) | 59 | 0.80 | 9 / 0.89 (suite-caught 2/2, read-caught 6/7) | ten finders (eight slices, S1 and S8 duplicated: opus primary, fable duplicate), one verifier per candidate; six lenses, three of them new (identity and names, contracts versus documentation, tests that pass for the wrong reason) beside fresh surface, upgrade and install paths, concurrency and locks; seven of nine seeds novel and planted where the pgTAP suite does not look, measured by the new suite check before the hunt; the one miss was a bench guard's assertion weakened to a count, under the lens that owned it, whose finder ran out of budget before the guards; one reproduction rebuilt (a seed found through an unsound script); twelve claims re-found eight open issues (#634, #635, #640, #706, #707, #708, #710, #711) and are recorded on them with built reproductions, five of those issues' first; nothing fell; on the duplicated slices the fable finder found six new Tier 3 defects and no seed on S1 while the opus finder found four seeds and no new defect; 3.88M agent tokens, 26 min from hunt start to last verdict; fix phase closed all 22 root-cause groups and the eight open issues that completed their classes on 2026-10-01 (PRs #746 to #763 and the workflow PR #764, 18 fixers, batches of up to five under the merge-commit queue; 99-minute median per PR that is mostly queue position and restarted head-check rounds, 39 minutes per PR of wall clock as in pass 4; three hand-resolved conflicts in one paragraph of the reference, one real CI failure repaired at landing, a GitHub-side push-event stall; 58 of 59 reproductions pass on `d2faa7d`, the one other explained), follow-ups #766 to #775, the novel seeds catalogued in #776; see [the record](reviews/2026-10-01.md). |
 | 6 | 2026-10-01 | `ae5dddc` (0.6.0 + 220) | 23 (5 T1 claims in 4 groups; 19 root-cause groups: #778 to #796) | 41 | 0.78 | 9 / 0.56 (suite-caught 2/2, read-caught 3/7) | ten finders (eight slices, S7 and S8 duplicated: opus primary, fable duplicate), one verifier per candidate; six lenses, four rotated back in after two passes out (time and zones, boundary arithmetic and types, operator error, failure injection) beside fresh surface and the carried tests-that-pass-for-the-wrong-reason; the bench guards got a slice of their own, duplicated across both models; all nine seeds novel and seven planted where the suite does not look; the first pass whose recall is below the criteria's 0.8: three of the four missed seeds were noticed by a finder and written up as hypotheses rather than built, one (a count where identity was the claim, in tests/194) was read by three finders and judged sound; one reproduction rebuilt (a tick count too short); nine claims re-found seven open issues (#712, #713, #766, #767, #768, #769, #773) and are recorded on them with built reproductions, five of them first ones; nothing fell; on the duplicated fresh-surface slice both models found the same Tier 1 (RC1) and nothing else at that tier, so the capture-recapture estimate is zero there while three Tier 1 groups came from single-finder slices; 3.31M agent tokens, 35 min from hunt start to last verdict; the archive harness came up without its MinIO bucket and the suite check's archive control failed 19 of 27 files before the bucket was created by hand (two tooling lessons in the record); fix phase closed all 19 root-cause groups on 2026-10-02 (PRs #799 to #812, 14 fixers in one wave, 58 minutes to the last PR; batches of up to five under the merge-commit queue; 93-minute median per PR from landing start to merge, 42 minutes per PR of wall clock, 9.7 h for 14; one hand-resolved conflict in the reference's transmute entry, two real CI failures repaired at landing (a `throws_like` pattern `bench/throws_pinned.sh` could not probe, and the two timescale wrappers #806 added without #807's shared verdict block: a fix-fix interaction the new guard caught), one known flake, two false stops from check runs shared across two PRs' SHAs; 33 of 41 reproductions pass on `107da01`, every finding's among them, the eight others the re-finds of open issues this phase did not take), follow-ups #813 to #819; see [the record](reviews/2026-10-01-pass6.md). |
-| 7 | 2026-10-02 | `4060f6b` (0.6.0 + 254) | 35 (6 T1 claims in 5 groups; 28 root-cause groups: #821 to #848) | 69 | 0.64 (0.97 counting the 23 known-open re-finds as true reports) | 9 / 0.56 (suite-caught 0/0, read-caught 5/9) | ten finders (eight slices, S7 and S8 duplicated: opus primary, fable duplicate), one verifier per candidate; six lenses, three rotated back in (identity and names, concurrency and locks, resource cliffs) beside fresh surface and the two carried blind-spot lenses; nine seeds all planted where the suite does not look: four of them pass 6's missed novel patches re-planted verbatim, and all four were missed again (two not reached, two read and judged sound), while every novel seed written for this pass was found; one method addition, a bounded round 2 in which each finder built its own hypotheses (24 claims, 14 findings of which 3 Tier 1, 8 re-finds, 2 fell, 0 seeds, about 1.05M tokens); 23 claims re-found nine open issues (#555, #632, #768, #769, #814, #815, #816, #817, #819) and are recorded on them with built reproductions, 19 of them the issue's first, which is why strict precision reads 0.64 against 0.97 counting them; three claims fell, one of them a seed whose unsound pristine assertion a verifier rebuilt (then a hit); five reproductions rebuilt; 4.96M agent tokens, 51 min from hunt start to last verdict; a fleet-image segfault on `grant ... to current_user` restarted the timescale harness once; method lessons #849; see [the record](reviews/2026-10-02-pass7.md). |
+| 7 | 2026-10-02 | `4060f6b` (0.6.0 + 254) | 35 (6 T1 claims in 5 groups; 28 root-cause groups: #821 to #848) | 69 | 0.97 (strict 0.64; fell rate 0.03) | 9 / 0.56 (suite-caught 0/0, read-caught 5/9) | ten finders (eight slices, S7 and S8 duplicated: opus primary, fable duplicate), one verifier per candidate; six lenses, three rotated back in (identity and names, concurrency and locks, resource cliffs) beside fresh surface and the two carried blind-spot lenses; nine seeds all planted where the suite does not look: four of them pass 6's missed novel patches re-planted verbatim, and all four were missed again (two not reached, two read and judged sound), while every novel seed written for this pass was found; one method addition, a bounded round 2 in which each finder built its own hypotheses (24 claims, 14 findings of which 3 Tier 1, 8 re-finds, 2 fell, 0 seeds, about 1.05M tokens); 23 claims re-found nine open issues (#555, #632, #768, #769, #814, #815, #816, #817, #819) and are recorded on them with built reproductions, 19 of them the issue's first, which is why strict precision reads 0.64 against 0.97 counting them; three claims fell, one of them a seed whose unsound pristine assertion a verifier rebuilt (then a hit); five reproductions rebuilt; 4.96M agent tokens, 51 min from hunt start to last verdict; a fleet-image segfault on `grant ... to current_user` restarted the timescale harness once; method lessons #849; see [the record](reviews/2026-10-02-pass7.md). |
+
+From pass 7 the precision column counts verified re-finds of open issues as true reports and gives the
+strict figure beside it. Passes 2 to 6 recorded the strict figure; recomputed under the current definition
+from their records (findings, seed-hit claims, re-finds and fallen claims over claims) they read 1.00,
+0.97, 1.00, 1.00 and 1.00, with fell rates of 0, 0.03, 0, 0 and 0: the slide from 1.00 to 0.78 was the
+known-and-open share of claims rising from 0 to 22 percent, not reaching.
 
 Pass 1 predates this document and is recorded as the baseline it is: a high yield with no measured
 sensitivity or precision. Pass 2 was the first to run under the method above; its record is the first

@@ -154,8 +154,12 @@ after each, and refuses to run when `filed.json` already exists.
   seed, also split into suite-caught (the seeded tree's own pgTAP suite fails, so running the tests finds
   it) and read-caught (it does not), each as hits over count; the read-caught half is the recall the
   stopping criteria read from pass 5 on.
-- precision: findings plus seed hits, over claims that had a reproduction. A correctly reported seed
-  is a true report; a hypothesis is not a claim.
+- precision: findings plus seed hits plus verified known-and-open re-finds, over claims that had a
+  reproduction. A correctly reported seed is a true report, and so is a reproduced defect an earlier
+  pass's issue already names; a hypothesis is not a claim. The strict figure (findings plus seed hits
+  over claims) is reported beside it.
+- fell rate: claims that fell in verification over claims that had a reproduction; the stopping
+  criteria's reaching alarm (at most 0.3).
 - cost: budget units over findings, and over Tier 1 findings.
 
 ## Smoke test

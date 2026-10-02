@@ -9,7 +9,9 @@ allowed-tools: Bash Read Write Agent
 You are the **coordinator** of a fix phase. You do not fix anything yourself. Read
 `docs/adversarial-review.md` (the "Between passes" and "Fix phase" sections) and `scripts/review/README.md`
 ("Fix phase tooling") before step 1. Arguments: `$ARGUMENTS`, the issues to fix; default to every open
-issue the latest `docs/reviews/*.md` filed. Work in a scratch directory outside the repository (the
+issue the latest `docs/reviews/*.md` filed, plus the open issues from earlier passes that this pass
+re-found with a reproduction (the record's "Known and open" section): those reproductions are their
+acceptance tests now, and leaving them open makes them the next pass's re-finds again. Work in a scratch directory outside the repository (the
 session scratchpad, `$WORK`), and keep the PR table there (`$WORK/prs.tsv`, columns
 `issue pr test guard mutation`, tab-separated, header first).
 
@@ -83,6 +85,11 @@ each PR the fixers report in `$WORK/prs.tsv` with its test, guard and mutation n
   pass history table: PRs, landing measurements, hand-resolved conflicts, flakes, interactions, the
   closure table and the explained failures, root causes closed. Open it as a docs PR.
 - File the fixers' adjacent observations as issues, grouped by mechanism, marked as unverified; method
-  lessons go in one methodology follow-up issue. Add the fixed defects' mutations to the next pass's
+  lessons go in one methodology follow-up issue. Then, before the next pass is pinned, verify them: one
+  `verifier` agent per bullet against `main` (about 40k tokens each), with the bullet's text as the
+  claim and no finder reasoning. A bullet that reproduces gets its reproduction and a tier posted on the
+  issue; one that does not is struck out with the reason; an issue with nothing left is closed. Record
+  the count verified, confirmed and struck in the record's fix-phase section. The next pass's
+  coordinator pins only after this (pass 7's 23 re-finds were this backlog, unverified at the pin). Add the fixed defects' mutations to the next pass's
   seed pool (they are already in `bench/mutations/`; the record just needs to say so).
 - Remove the fixers' worktrees and their merged local branches; leave the record pointing at the PRs.

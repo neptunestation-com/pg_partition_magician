@@ -18,8 +18,15 @@ Definitions used here:
                tests found it) and read-caught (it does not: only reading finds it), each hits / count. Pass 4's
                9/9 was all suite-caught and measured that the suite was run; the read-caught half is the
                recall the stopping criteria read from pass 5 on.
-  precision  = (findings + seed hits) / claims that had a reproduction. A correctly reported seed is a
-               true report, so it counts for the finder; a hypothesis (no reproduction) is not a claim.
+  precision  = (findings + seed hits + verified known-and-open re-finds) / claims that had a reproduction.
+               A correctly reported seed is a true report, and so is a reproduced defect that an earlier
+               pass's issue already names (pass 7 made that explicit: 23 of 69 claims re-found nine open
+               issues and the strict figure read 0.64 while only 3 claims had fallen); a hypothesis (no
+               reproduction) is not a claim. The strict figure, (findings + seed hits) / claims, is kept
+               beside it as the novelty rate.
+  fell rate  = claims that fell in verification / claims that had a reproduction: the reaching alarm the
+               stopping criteria read (at most 0.3), since a fallen claim is the one shape a reviewer
+               pushed for defects produces when there are none.
   cost       = budget-units / findings, and / Tier 1 findings
 
 Seed interactions. A seed that changes global state (its sealed record's optional "side_effects") can make
@@ -74,15 +81,22 @@ def compute(sealed, classified, verdicts, budget_units=None):
     root_causes = {f["verdict"].get("root_cause") for f in findings if f["verdict"].get("root_cause")}
 
     n_claims = len(claims)
-    precision = ((len(findings) + len(seed_hits)) / n_claims) if n_claims else None
+    precision_strict = ((len(findings) + len(seed_hits)) / n_claims) if n_claims else None
+    precision = ((len(findings) + len(seed_hits) + len(known)) / n_claims) if n_claims else None
+    fell_rate = (len(fell) / n_claims) if n_claims else None
+    known_ids = {k["id"] for k in known}
     per_finder = {}
     for c in claims:
-        d = per_finder.setdefault(c["finder"], {"claims": 0, "true": 0})
+        d = per_finder.setdefault(c["finder"], {"claims": 0, "true": 0, "strict": 0})
         d["claims"] += 1
         if c["class"] == "seed_hit" or any(f["id"] == c["id"] for f in findings):
             d["true"] += 1
+            d["strict"] += 1
+        elif c["id"] in known_ids:
+            d["true"] += 1
     for d in per_finder.values():
         d["precision"] = d["true"] / d["claims"] if d["claims"] else None
+        d["precision_strict"] = d["strict"] / d["claims"] if d["claims"] else None
 
     blind = [s for s in seeds if s["id"] not in hit_ids]
     hit_by = {}
@@ -104,7 +118,8 @@ def compute(sealed, classified, verdicts, budget_units=None):
     return {
         "K": K, "recall": recall, "claims": n_claims, "hypotheses": len(hypotheses),
         "seed_hits": len(seed_hits), "candidates": len(candidates), "findings": len(findings),
-        "precision": precision, "by_tier": by_tier, "root_causes": sorted(root_causes),
+        "precision": precision, "precision_strict": precision_strict, "fell_rate": fell_rate,
+        "by_tier": by_tier, "root_causes": sorted(root_causes),
         "known_open": len(known), "fell": len(fell), "unverified": len(unverified),
         "cost_per_finding": cost, "cost_per_t1": cost_t1, "per_finder": per_finder,
         "blind_spots": [{"id": s["id"], "lens": s["lens"], "tier": s["tier"],
@@ -124,7 +139,9 @@ def stopping_status(m):
     rows = [
         ("zero Tier 1 findings", m["by_tier"][1] == 0),
         ("seed recall >= 0.8", m["recall"] is not None and m["recall"] >= 0.8),
-        ("precision >= 0.7", m["precision"] is not None and m["precision"] >= 0.7),
+        ("precision >= 0.7 (verified re-finds of open issues counted as true reports)",
+         m["precision"] is not None and m["precision"] >= 0.7),
+        ("fell rate <= 0.3", m["fell_rate"] is not None and m["fell_rate"] <= 0.3),
     ]
     if m.get("suite_split"):
         rr = m["suite_split"]["read_recall"]
@@ -157,7 +174,8 @@ def record(m, a):
         f"# Review pass {a.pass_n}: {a.date}", "",
         f"pinned: `{a.pinned}` ({a.release}) | budget: {a.budget}",
         f"lenses: {a.lenses} | previous pass lenses: {a.previous_lenses}",
-        f"seeds K={m['K']}, recall {fmt(m['recall'])}{split_text(m)}; claims {m['claims']}; findings {m['findings']}; precision {fmt(m['precision'])}",
+        f"seeds K={m['K']}, recall {fmt(m['recall'])}{split_text(m)}; claims {m['claims']}; findings {m['findings']}; "
+        f"precision {fmt(m['precision'])} (strict {fmt(m['precision_strict'])}, fell rate {fmt(m['fell_rate'])})",
         f"findings by tier: T1 {t[1]} T2 {t[2]} T3 {t[3]} T4 {t[4]} T5 {t[5]}",
         f"cost per finding: {fmt(m['cost_per_finding'], 1)}; per Tier 1 finding: {fmt(m['cost_per_t1'], 1)}",
         f"root causes: {len(m['root_causes'])} distinct verifier root-cause statements behind the findings"
@@ -167,7 +185,7 @@ def record(m, a):
         f"capture-recapture (T1): {a.capture_recapture}",
         "blind spots (seeds missed, by lens): " + (", ".join(f"{b['id']} {b['what']} ({b['lens']}, T{b['tier']})" for b in m["blind_spots"]) or "none"),
         "",
-        f"Per finder (claims, precision): " + ", ".join(f"{k} ({v['claims']}, {fmt(v['precision'])})" for k, v in sorted(m["per_finder"].items())),
+        f"Per finder (claims, precision, strict): " + ", ".join(f"{k} ({v['claims']}, {fmt(v['precision'])}, {fmt(v['precision_strict'])})" for k, v in sorted(m["per_finder"].items())),
         f"Seed hits {m['seed_hits']}, candidates {m['candidates']}, fell {m['fell']}, unverified {m['unverified']}, hypotheses {m['hypotheses']}.",
         "", "## Findings", "", "| tier | finding | issue | fix PR |", "|---|---|---|---|",
     ]
@@ -291,7 +309,7 @@ def selftest_suite_split():
     # still say what caught them, and the unmeasured one says nothing
     assert "seeds K=4, recall 0.75; claims 3;" in rec3 and "(suite-caught" not in rec3, rec3
     assert "- S2 n.patch (names, T2): hit by F2-01\n" in rec3 and "S1 a (time, T1): hit by F1-01; suite: caught by" in rec3, rec3
-    assert len(stopping_status(m3)) == 3 and not any(n.startswith("read-caught") for n, _ in stopping_status(m3))
+    assert len(stopping_status(m3)) == 4 and not any(n.startswith("read-caught") for n, _ in stopping_status(m3))
 
 
 def selftest():
@@ -312,20 +330,26 @@ def selftest():
     assert m["K"] == 2 and m["recall"] == 0.5, m
     assert m["claims"] == 5 and m["hypotheses"] == 1
     assert m["findings"] == 1 and m["by_tier"][1] == 1
-    assert abs(m["precision"] - 2 / 5) < 1e-9          # one finding + one seed hit over five claims
+    assert abs(m["precision_strict"] - 2 / 5) < 1e-9   # one finding + one seed hit over five claims
+    assert abs(m["precision"] - 3 / 5) < 1e-9          # ... plus the verified known-open re-find; the not_reproduced claim still counts
+    assert abs(m["fell_rate"] - 1 / 5) < 1e-9
     assert m["known_open"] == 1 and m["fell"] == 1 and m["unverified"] == 0
-    assert m["per_finder"]["F1"]["precision"] == 2 / 3 and m["per_finder"]["F2"]["precision"] == 0
+    assert m["per_finder"]["F1"]["precision"] == 2 / 3 and m["per_finder"]["F1"]["precision_strict"] == 2 / 3
+    assert m["per_finder"]["F2"]["precision"] == 1 / 2 and m["per_finder"]["F2"]["precision_strict"] == 0
     assert m["cost_per_finding"] == 16 and m["cost_per_t1"] == 16
     assert [b["id"] for b in m["blind_spots"]] == ["S2"]
     st = dict(stopping_status(m))
     assert st["zero Tier 1 findings"] is False and st["seed recall >= 0.8"] is False
+    assert st["precision >= 0.7 (verified re-finds of open issues counted as true reports)"] is False   # 3 of 5
+    assert st["fell rate <= 0.3"] is True
 
     class A:
         pass_n, date, pinned, release = 2, "2026-10-01", "c5a60df", "0.6.0+"
         budget, lenses, previous_lenses, capture_recapture = "2 x 1h", "time", "none", "not attempted"
         root_cause_groups, root_causes_file, notes_file = 1, None, None
     rec = record(m, A)
-    assert "recall 0.50; claims 5; findings 1; precision 0.40" in rec, rec
+    assert "recall 0.50; claims 5; findings 1; precision 0.60 (strict 0.40, fell rate 0.20)" in rec, rec
+    assert "Per finder (claims, precision, strict): F1 (3, 0.67, 0.67), F2 (2, 0.50, 0.00)" in rec, rec
     assert "| 1 | F1-02: rows lost | #500 | |" in rec
     assert md_cell("a _grid_next | b") == "a \\_grid\\_next \\| b"
     assert "S2 untransmute_no_recheck_under_lock (concurrency, T1)" in rec
@@ -364,7 +388,8 @@ def main():
     with open(a.verdicts) as fh:
         verdicts = json.load(fh)
     m = compute(sealed, classified, verdicts, a.budget_units)
-    print(f"seeds K={m['K']}  recall {fmt(m['recall'])}{split_text(m)}  precision {fmt(m['precision'])}   (read these first)")
+    print(f"seeds K={m['K']}  recall {fmt(m['recall'])}{split_text(m)}  precision {fmt(m['precision'])} "
+          f"(strict {fmt(m['precision_strict'])}, fell rate {fmt(m['fell_rate'])})   (read these first)")
     if m["suite_unmeasured"]:
         print(f"WARNING: {m['suite_unmeasured']} seed(s) carry no suite_caught, so recall is not split into suite-caught / "
               "read-caught; run plant_seeds.py --suite before the hunt next time", file=sys.stderr)
