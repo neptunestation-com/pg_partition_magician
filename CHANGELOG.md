@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **Archived floats keep their exact value whatever `extra_float_digits` the archiving session has** (#781).
+  Both NDJSON encoders (`archive._encode_upload_ndjson_single`, behind `pgpm.archive_to_s3_ndjson`, and
+  `archive.to_s3`) rendered rows with `row_to_json` in the calling session, and the Parquet writer an array
+  column with `array_to_json`, so under `extra_float_digits = 0` (set by `ALTER ROLE` or `ALTER DATABASE` and
+  inherited by a tick) every float8 was archived to 15 significant digits and every float4 to 6, a value the
+  row never held, while the ledger recorded the chunk and `to_s3`'s fingerprint, hashing the same rounded
+  text on both sides, passed. The three functions now pin `extra_float_digits = 1` (shortest-exact, the
+  PostgreSQL 12+ default, so objects written from a default session are unchanged), as `_object_stem` pins
+  `TimeZone` and `DateStyle`. `tests/archive/db/32` reads every object back value by value under
+  `bench/archive_float_digits_pinned.sh`, with one mutation per site (`archive_ndjson_single_float_digits_unpinned`,
+  `to_s3_float_digits_unpinned`, `parquet_array_float_digits_unpinned`).
 - **`transmute` refuses a table that views and other objects name by its oid** (#779). A view's query, a
   materialized view's, a rule's action, a `BEGIN ATOMIC` function body and a policy's expression name each
   relation by oid, and the cutover renames the original table, oid and all, into the monolith partition, so a

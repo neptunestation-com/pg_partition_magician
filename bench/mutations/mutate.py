@@ -3619,6 +3619,39 @@ $$;''',
       p_col, v_order_q, p_col, p_decimal_scale, p_decimal_bytes, v_order_q, p_col, v_from_q)   -- MUTANT: pre-#635
 """, 1)],
     ),
+    "archive_ndjson_single_float_digits_unpinned": (
+        "bench/archive_float_digits_pinned.sh",
+        "Pre-#781 archive._encode_upload_ndjson_single: the automatic NDJSON strategy's row_to_json renders "
+        "floats by the calling session's extra_float_digits, so under 0 (ALTER ROLE / ALTER DATABASE, "
+        "inherited by a tick) every float8 lands in the object rounded to 15 significant digits and every "
+        "float4 to 6 while the ledger records the chunk archived. One site, the function's SET clause.",
+        [("returns table(s3_key text, etag text, rows_archived bigint)\n"
+          "language plpgsql set extra_float_digits = 1 as $$\n"
+          "declare\n  cfg archive.config; pcfg pgpm.config; v_nsp name; v_rel name;\n",
+          "returns table(s3_key text, etag text, rows_archived bigint)\n"
+          "language plpgsql as $$   -- MUTANT: pre-#781, the caller's extra_float_digits\n"
+          "declare\n  cfg archive.config; pcfg pgpm.config; v_nsp name; v_rel name;\n", 1)],
+    ),
+    "to_s3_float_digits_unpinned": (
+        "bench/archive_float_digits_pinned.sh",
+        "Pre-#781 archive.to_s3: its row_to_json pages, and the conservation fingerprint that hashes the "
+        "same text on both sides, render floats by the calling session's extra_float_digits, so under 0 the "
+        "object holds 15-digit float8 values and the fingerprint passes. One site, the function's SET clause.",
+        [("create or replace function archive.to_s3(p_parent regclass, p_child name, p_lo text, p_hi text)\n"
+          "returns void language plpgsql set extra_float_digits = 1 as $$\n",
+          "create or replace function archive.to_s3(p_parent regclass, p_child name, p_lo text, p_hi text)\n"
+          "returns void language plpgsql as $$   -- MUTANT: pre-#781, the caller's extra_float_digits\n", 1)],
+    ),
+    "parquet_array_float_digits_unpinned": (
+        "bench/archive_float_digits_pinned.sh",
+        "Pre-#781 archive._pq_encode_column_data: an array column is written as array_to_json text, which "
+        "renders a float8[] element by the calling session's extra_float_digits, so under 0 both Parquet "
+        "encoders write 15-digit elements. One site, the function's SET clause.",
+        [("default, so a file written from a default session is unchanged. The scalar float8 leaf is binary.\n"
+          "language plpgsql set extra_float_digits = 1 as $$\n",
+          "default, so a file written from a default session is unchanged. The scalar float8 leaf is binary.\n"
+          "language plpgsql as $$   -- MUTANT: pre-#781, the caller's extra_float_digits\n", 1)],
+    ),
     "keep_both_two_way_only": (
         "bench/keep_both_diff3.sh",
         "Pre-#598 scripts/review/keep_both.py: the hunk pattern knows only the two-way conflict shape and the "
@@ -5010,6 +5043,9 @@ MUTATION_SRC = {
     "abort_sweep_one_page": "pgpm_archive/install.sql",
     "abort_sweep_no_exact_key_filter": "pgpm_archive/install.sql",
     "parquet_decimal_nan_raises": "pgpm_archive/install.sql",
+    "archive_ndjson_single_float_digits_unpinned": "pgpm_archive/install.sql",
+    "to_s3_float_digits_unpinned": "pgpm_archive/install.sql",
+    "parquet_array_float_digits_unpinned": "pgpm_archive/install.sql",
     # The harness and review tooling guard themselves too (#598 to #601): their defects live in the
     # scripts, a doc and a test file, so that is what these mutate.
     "keep_both_two_way_only": "scripts/review/keep_both.py",

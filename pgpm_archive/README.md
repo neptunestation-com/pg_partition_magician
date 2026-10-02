@@ -88,7 +88,10 @@ contract and the [guide](../docs/guide.md#archiving-before-a-drop) for the opera
 ## NDJSON or Parquet
 
 - **NDJSON** (`pgpm.archive_to_s3_ndjson` / `archive.to_s3`): universal, human-readable, round-trips
-  any column type. The object is UTF-8 whatever the database's server encoding.
+  any column type. The object is UTF-8 whatever the database's server encoding. A `float8` or `float4`
+  is written as the shortest text that reads back as exactly the stored value (`0.30000000000000004`,
+  not `0.3`), whatever `extra_float_digits` the archiving session has: the encoders pin it, as the
+  Parquet writer does for an array column's JSON text.
 - **Parquet** (`pgpm.archive_to_s3_parquet` / `archive.to_s3_parquet`): columnar, directly queryable
   by DuckDB, Athena, Redshift Spectrum, Spark, Trino, and Snowflake with no conversion step -- a
   from-scratch, zero-dependency writer with real limits (see below).
