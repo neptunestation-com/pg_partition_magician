@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **A converted table holds exactly the original's grants, not those plus its creator's default privileges**
+  (#838). transmute's parent and from_hypertable's `CREATE TABLE ... LIKE` copy are new tables, born with the
+  creating role's `ALTER DEFAULT PRIVILEGES` (on Supabase, `anon` and `authenticated` in `public`), and both
+  grant carries only added the original's grants onto them, so a privilege REVOKEd on the table or hypertable
+  was held by the converted table readers query. Both now go through one lever, `pgpm._acl_carry_ddl`, whose
+  first statement (`pgpm._acl_reset`) revokes everything the new table holds, its owner's privileges included,
+  before the original's table and column grants are replayed; an original with a `NULL` ACL gives its owner
+  ALL and nobody else anything. `tests/235` under `bench/transmute_grant_carry_resets_acl.sh`, with the
+  mutations `acl_carry_additive`, `acl_reset_no_owner_default` and `acl_reset_spares_owner`, and
+  `tests/timescale/db/38` under `bench/hypertable_grant_carry_resets_acl.sh`, with
+  `hypertable_acl_carry_unreset`.
 - **One partition's archive raise defers that partition alone** (#833). `_archive_step`'s per-candidate loop had
   no exception block of its own, so with `archive_batch` above 1 a strategy that raised for one partition (the
   documented `skip_archive` retry path) unwound the whole step and discarded the ledger rows of every other

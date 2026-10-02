@@ -132,6 +132,13 @@ a re-run plans from the table as it is. Partitions
 minted later, by `obtain` or a regrain, are given the parent's owner too rather than being
 owned by whichever role runs maintenance.
 
+The parent ends with **exactly the table's grants**, not more. It is a new table, created by the role
+running the conversion, so it is born with that role's `ALTER DEFAULT PRIVILEGES` (on Supabase, privileges
+for `anon` and `authenticated` in `public`). The cutover revokes everything the parent was born holding,
+from every role and its owner, before it replays the table's table and column grants, so a privilege
+revoked on the table is not held on the parent. A table no grant was ever made on (a `NULL` ACL) gives the
+parent its owner's full privileges and nothing for anyone else.
+
 Policies live on the parent, and only on the parent: a parent policy governs parent-routed reads into a
 partition, and reaching a partition directly needs grants that live on the parent anyway.
 
@@ -753,8 +760,9 @@ re-add the identity columns (which `CREATE TABLE LIKE` does not carry) in the ki
 (`ALWAYS` or `BY DEFAULT`) and with their sequences' options (`INCREMENT BY`, `MINVALUE`/`MAXVALUE`,
 `START WITH`, `CACHE`, `CYCLE`), put back what `CREATE TABLE LIKE` left off the copy (the owner, the table
 and column grants, row-level security and its policies, the table's comment and its triggers, read off the
-source under the lock just before it is dropped), then hand off to `transmute`, which carries them onto the
-parent. A `GRANT` or `REVOKE` takes no lock on the table, so one committed in the instant between that read
+source under the lock just before it is dropped; the copy is born with the migrating role's
+`ALTER DEFAULT PRIVILEGES`, so its ACL is reset before the source's grants are replayed and it holds exactly
+those), then hand off to `transmute`, which carries them onto the parent the same way. A `GRANT` or `REVOKE` takes no lock on the table, so one committed in the instant between that read
 and the drop is not carried; make privilege changes before or after the cutover. Because
 the index builds happen before the lock, the blocking window is the catch-up, one `count(*)` over the source,
 and metadata: the count is the only step in it that reads the whole table, and it is a read, not a rebuild.

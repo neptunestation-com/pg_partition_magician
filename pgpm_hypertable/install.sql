@@ -343,27 +343,9 @@ begin
   v_tbl_q := format('%I.%I', v_nsp, v_rel);
   v_ddl := v_ddl || format('alter table %s owner to %I', v_tbl_q,
                            (select pg_get_userbyid(c.relowner) from pg_class c where c.oid = p_hypertable));
-  -- Table grants. A NULL relacl is the owner's implicit default, which the copy has too. grantee 0 is PUBLIC.
-  for r in
-    select a.grantee, a.privilege_type, a.is_grantable
-      from pg_class c, aclexplode(c.relacl) a where c.oid = p_hypertable and c.relacl is not null
-     order by a.grantee, a.privilege_type
-  loop
-    v_ddl := v_ddl || format('grant %s on %s to %s%s', r.privilege_type, v_tbl_q,
-                             case when r.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(r.grantee)) end,
-                             case when r.is_grantable then ' with grant option' else '' end);
-  end loop;
-  -- Column grants, which live in pg_attribute.attacl, not relacl.
-  for r in
-    select att.attname, a.grantee, a.privilege_type, a.is_grantable
-      from pg_attribute att, aclexplode(att.attacl) a
-     where att.attrelid = p_hypertable and att.attnum > 0 and not att.attisdropped and att.attacl is not null
-     order by att.attnum, a.grantee, a.privilege_type
-  loop
-    v_ddl := v_ddl || format('grant %s (%I) on %s to %s%s', r.privilege_type, r.attname, v_tbl_q,
-                             case when r.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(r.grantee)) end,
-                             case when r.is_grantable then ' with grant option' else '' end);
-  end loop;
+  -- Table and column grants, after the OWNER TO, as transmute carries them (#838): a reset of the copy's
+  -- ACL first, which the migrating role's ALTER DEFAULT PRIVILEGES gave it at the LIKE, then the source's.
+  v_ddl := v_ddl || pgpm._acl_carry_ddl(p_hypertable, v_tbl_q);
   -- Row-level security. FORCE matters as much as ENABLE: without it the owner bypasses every policy.
   if (select c.relrowsecurity from pg_class c where c.oid = p_hypertable) then
     v_ddl := v_ddl || format('alter table %s enable row level security', v_tbl_q);

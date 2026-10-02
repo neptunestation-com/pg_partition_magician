@@ -401,6 +401,8 @@ run_timescale() {
     # #787's and #792's harnesses, against the unmodified module, the clean-code half of their mutants' pairs.
     echo "--- the swap carries the source's access and triggers (issue #787) ---"
     bash "$(dirname "$0")/bench/hypertable_cutover_carries_access.sh" pgpm_test-timescale pgpm_perf167 || fail=1
+    echo "--- the migrated table holds exactly the hypertable's grants (issue #838) ---"
+    bash "$(dirname "$0")/bench/hypertable_grant_carry_resets_acl.sh" pgpm_test-timescale pgpm_perf201 || fail=1
     echo "--- transmute's key and frontier refusals before the swap (issue #792) ---"
     bash "$(dirname "$0")/bench/hypertable_handoff_refusals.sh" pgpm_test-timescale pgpm_perf168 || fail=1
     # #737's uninstall guard, the same way: the clean-code half of the pairs discriminate.sh completes with
@@ -895,6 +897,7 @@ run_perf() {
     "bench/retire_one_step_disarm.sh pgpm_perf192"
     "bench/extend_to_edge_cell_count.sh pgpm_perf193"
     "bench/crossing_keys_datestyle.sh pgpm_perf194"
+    "bench/transmute_grant_carry_resets_acl.sh pgpm_perf200"
   )
   local selected=()
   local n=${#guards[@]} idx
