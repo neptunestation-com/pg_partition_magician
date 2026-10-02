@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+- **The timescale wrapper guards fail a file that ran fewer assertions than it planned, however it stopped**
+  (#795, #712). The eleven `bench/hypertable_*.sh` and `bench/uninstall_hypertable_capture.sh` wrappers judge
+  their pgTAP file from `psql -tAq` output. Eight read a plan shortfall only from finish()'s "# Looks like you
+  planned" line and ignored psql's exit status, so a file whose session died part-way (FATAL, no `ERROR:`) never
+  reached finish() and was passed after 1 of 3 planned assertions; three (`late_appends`, `cutover_identity`,
+  `replica_capture`) had no shortfall check at all. All eleven now share one verdict block: the assertions that
+  ran are counted against the `1..N` plan line, and any psql exit other than 0 fails the file.
+  `bench/wrapper_tap_verdicts.sh` evaluates each wrapper's block, as written, against six real pgTAP outputs
+  (clean, failed, short of its plan, session lost mid-file, session lost after its plan, raw error) that pg_prove
+  is shown to pass or fail, with the mutations `wrapper_verdict_reads_finish_only`,
+  `wrapper_verdict_no_shortfall_check` and `wrapper_verdict_ignores_exit`.
+- **`bench/transmute_cutover_order.sh` finds the statements it orders, not the first mention of them** (#796).
+  It located the new parent's CREATE TABLE by the first `partition by range` in `_transmute`'s source, which is a
+  comment in the procedure's preamble, so it passed a copy whose real CREATE TABLE ran after both renames, the
+  #344 defect it exists for. The CREATE TABLE, the renames and the RLS replay are each found as the
+  `execute format('...` that issues them, and the guard requires each to be found the expected number of times.
+  The new mutation `transmute_cutover_late_create_table` moves that one statement alone.
 - **`fail_obtain_name` names a type that holds an unbuilt cell's name** (#790). `_log_unbuilt_cell`
   resolved the holder through `to_regclass` alone, which sees relations only, so when an enum, domain or
   range type held a forward cell's name (the cell `obtain` and `extend_to` leave unbuilt since #707) the

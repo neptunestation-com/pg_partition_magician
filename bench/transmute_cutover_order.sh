@@ -27,13 +27,33 @@ docker exec "$C" psql -U postgres -q -c "drop database if exists $DB" >/dev/null
 docker exec "$C" psql -U postgres -q -c "create database $DB" >/dev/null 2>&1
 docker exec "$C" psql -U postgres -d "$DB" -q -f "$INSTALL" >/dev/null 2>&1
 
-# position()/strpos() are 1-based and 0 means "not found" -- either failure mode is caught by check()'s
-# "> 0" requirement, so a marker that goes missing entirely fails loudly instead of comparing 0 < 0.
-SRC_QUERY="select prosrc from pg_proc where proname = '_transmute' and pronamespace = 'pgpm'::regnamespace"
+# Each position is that of a STATEMENT, never of the first occurrence of its phrase (#796). The source is
+# also prose: its preamble discusses "the cutover's CREATE TABLE ... PARTITION BY RANGE" thousands of
+# characters ahead of the cutover, so strpos() of 'partition by range' found that comment and the check
+# passed with the real CREATE TABLE moved after both renames, the #344 defect this guard exists for. A
+# statement is matched as the `execute format('...` that issues it, which a comment or a message string
+# cannot be. regexp_instr() is 1-based and 0 means "not found": check()'s "> 0" requirement catches a
+# statement that goes missing entirely instead of comparing 0 < 0, and the LIVENESS counts below catch
+# one that is matched more than once, where "the first" would again be a guess.
+SRC_QUERY="select lower(prosrc) from pg_proc where proname = '_transmute' and pronamespace = 'pgpm'::regnamespace"
+CREATE_RE="execute format\\('create table [^']* partition by range "
+RENAME_RE="execute format\\('alter table %s rename to "
+RLS_RE="execute format\\('alter table %s enable row level security'"
+# The pattern goes in dollar-quoted: it holds a single quote, and its backslashes must reach the regex.
+stmt_pos()   { q "select regexp_instr(($SRC_QUERY), \$re\$$1\$re\$)"; }
+stmt_count() { q "select regexp_count(($SRC_QUERY), \$re\$$1\$re\$)"; }
+count_is() { # <label> <actual> <expected>
+  if [ "$2" = "$3" ]; then printf 'PASS  %-62s %s\n' "$1" "$2"
+  else printf 'FAIL  %-62s got %s, want %s\n' "$1" "$2" "$3"; fail=1; fi
+}
 
-RENAME_POS=$(q       "select strpos(lower(($SRC_QUERY)), 'rename to')")
-PARTITION_POS=$(q    "select strpos(lower(($SRC_QUERY)), 'partition by range')")
-RLS_POS=$(q          "select strpos(lower(($SRC_QUERY)), 'enable row level security')")
+count_is "LIVENESS: _transmute issues one CREATE TABLE ... PARTITION BY RANGE" "$(stmt_count "$CREATE_RE")" 1
+count_is "LIVENESS: _transmute issues the two cutover renames" "$(stmt_count "$RENAME_RE")" 2
+count_is "LIVENESS: _transmute issues one ENABLE ROW LEVEL SECURITY" "$(stmt_count "$RLS_RE")" 1
+
+RENAME_POS=$(stmt_pos "$RENAME_RE")
+PARTITION_POS=$(stmt_pos "$CREATE_RE")
+RLS_POS=$(stmt_pos "$RLS_RE")
 
 check "the new parent's CREATE TABLE runs before the first rename" "$PARTITION_POS" "$RENAME_POS"
 check "the RLS and policies replay runs before the first rename" "$RLS_POS" "$RENAME_POS"   # grants follow the attach (#706)

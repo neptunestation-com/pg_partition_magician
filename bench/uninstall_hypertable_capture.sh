@@ -28,6 +28,7 @@
 set -uo pipefail
 C="${1:?container}"; DB="${2:?db}"; UNINSTALL="${3:-/repo/pgpm_core/uninstall.sql}"
 TEST_FILE=/repo/tests/timescale/db/32_uninstall_hypertable_capture_test.sql
+LABEL="uninstall sweeps the copies' capture and only theirs"
 fail=0
 
 q() { docker exec -e PGPASSWORD=postgres "$C" psql -h 127.0.0.1 -U postgres "$@"; }
@@ -58,34 +59,40 @@ if ! docker exec "$C" test -r "$UNINSTALL"; then
 fi
 
 if [ "$fail" = 0 ]; then
-  out=$(q -d "$DB" -tAq -v "uninstall=$UNINSTALL" -f "$TEST_FILE" 2>&1)
+  # >>> pgTAP verdict: the same in every timescale wrapper; bench/wrapper_tap_verdicts.sh evaluates it.
+  out=$(q -d "$DB" -tAq -v "uninstall=$UNINSTALL" -f "$TEST_FILE" 2>&1); rc=$?
   # grep -E, not a sed alternation: this half runs on the HOST, and BSD sed has no `\|`.
-  echo "$out" | grep -E '^not ok [0-9]+ -' | sed 's/^/    /' | head -20
-  ran=$(echo "$out" | grep -cE '^(not )?ok [0-9]+ -')
-  bad=$(echo "$out" | grep -cE '^not ok [0-9]+ -')
-  # Two failure shapes, reported apart. A file that died early leaves a raw ERROR: or a plan shortfall,
-  # which must NOT read the same as assertions that ran and failed: discriminate.sh treats any non-zero
-  # exit as "the guard caught the defect", so a harness broken enough to fail against everything would
-  # otherwise be reported as proving the mutation.
+  echo "$out" | grep -E '^not ok [0-9]+' | sed 's/^/    /' | head -20
+  planned=$(echo "$out" | sed -nE 's/^1\.\.([0-9]+)$/\1/p' | head -1)
+  ran=$(echo "$out" | grep -cE '^(not )?ok [0-9]+( |$)')
+  bad=$(echo "$out" | grep -cE '^not ok [0-9]+( |$)')
+  # pg_prove's verdict, which this runner has to apply itself. Three ways a file fails with no `not ok`,
+  # each reported apart from assertions that ran and failed (discriminate.sh reads any non-zero exit as
+  # "the guard caught the defect", so a harness that fails everything must say why): a raw ERROR:; a
+  # psql exit other than 0, which is how a session that died part-way (FATAL, no ERROR:) shows, since it
+  # never reaches finish() to print "# Looks like you planned" (#795); and a count of assertions
+  # that is not the 1..N plan's, which a silently skipped assertion leaves (#601, #712).
   if echo "$out" | grep -qE '^ERROR:|^psql:.*ERROR:'; then
     printf 'FAIL  %-58s %s\n' "the file ran without a raw error" "see below"
     echo "$out" | grep -E 'ERROR:' | head -5 | sed 's/^/      /'
     fail=1
   fi
-  if echo "$out" | grep -qE '^# Looks like you planned'; then
-    printf 'FAIL  %-58s %s\n' "the file ran every assertion it planned" "$(echo "$out" | grep -E '^# Looks like you planned')"
+  if [ "$rc" != 0 ]; then
+    printf 'FAIL  %-58s %s\n' "psql ran the file to its end" "exit $rc"
+    echo "$out" | grep -E 'FATAL:|connection' | head -5 | sed 's/^/      /'
     fail=1
   fi
-  if [ "$bad" = 0 ] && [ "$fail" = 0 ]; then
-    printf 'PASS  %-58s %s\n' "uninstall sweeps the copies' capture and only theirs" "$ran ran"
-  else
-    printf 'FAIL  %-58s %s\n' "uninstall sweeps the copies' capture and only theirs" "$ran ran, $bad failed"; fail=1
-  fi
-  if [ "$ran" -eq 0 ]; then
-    printf 'FAIL  %-58s %s\n' "the assertions were reached at all" "0 ran"
+  if [ -z "$planned" ] || [ "$ran" != "$planned" ]; then
+    printf 'FAIL  %-58s %s\n' "the file ran every assertion it planned" "planned ${planned:-nothing}, $ran ran"
     echo "$out" | tail -20 | sed 's/^/      /'
     fail=1
   fi
+  if [ "$bad" = 0 ] && [ "$fail" = 0 ]; then
+    printf 'PASS  %-58s %s\n' "$LABEL" "$ran ran"
+  else
+    printf 'FAIL  %-58s %s\n' "$LABEL" "$ran ran, $bad failed"; fail=1
+  fi
+  # <<< pgTAP verdict
 fi
 
 q -d postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
