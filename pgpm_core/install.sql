@@ -4374,6 +4374,15 @@ begin
       raise exception 'pg_partition_magician: regrain target step % for % is not a whole number, but its control column % is %, which holds whole numbers only -- the fine cells'' bounds could not be written as that type, so every tick would fail creating the first one; give a whole-number step (a fractional one is for a numeric column)',
         p_step, p_parent, quote_ident(cfg.control_column), v_typname;
     end if;
+    -- #784: and a whole step must be SPELLED whole. The test above is of the value, which '10.0' passes,
+    -- but the grid's arithmetic is numeric and carries the step's scale into every bound it renders, so a
+    -- '10.0' grid writes its fine cells' bounds as '0.0', '10.0', ...: the same invalid bigint input, the
+    -- same skip_regrain on every tick. Refused rather than rewritten, so every entry point (set_regrain,
+    -- regrain_step, and a target an older install stored) behaves alike.
+    if v_typname in ('int2', 'int4', 'int8') and p_step::numeric = trunc(p_step::numeric) and scale(p_step::numeric) > 0 then
+      raise exception 'pg_partition_magician: regrain target step % for % is a whole number written with a fractional part, but its control column % is %, which holds whole numbers only -- the grid would write every fine cell''s bound with that fraction, which is not valid input for that type, so every tick would fail creating the first one; write it as %',
+        p_step, p_parent, quote_ident(cfg.control_column), v_typname, trunc(p_step::numeric);
+    end if;
   else
     v_months := extract(year from p_step::interval) * 12 + extract(month from p_step::interval);
     v_rest   := p_step::interval - make_interval(months => v_months::int);

@@ -40,8 +40,11 @@ select throws_like($$ select pgpm.set_regrain('public.fib', '0.5') $$,
   'set_regrain refuses a fractional step below one');
 select is((select regrain_to from pgpm.config where parent_table = 'public.fib'::regclass), '5',
   'the refused calls left the valid target in place');
-select lives_ok($$ select pgpm.set_regrain('public.fib', '5.000') $$,
-  'LIVENESS: a whole step written with a zero fraction is a whole number, and is accepted');
+-- #784: this used to assert '5.000' was accepted, as a whole number; it is, but the grid carries its scale
+-- into every bound ('0.000' for a bigint), so it wedged the ticks exactly as '2.5' did. tests/210 owns it.
+select throws_like($$ select pgpm.set_regrain('public.fib', '5.000') $$,
+  'pg_partition_magician: regrain target step 5.000 for fib is a whole number written with a fractional part%write it as 5%',
+  'a whole step written with a zero fraction is refused too, naming the spelling to use (#784)');
 
 -- the operator-driven entry points go through the same check
 select throws_like($$ select pgpm.regrain_step('public.fib', 'fib_p0000000000000000000_to_0000000000000000040', '2.5') $$,

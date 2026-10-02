@@ -4338,6 +4338,19 @@ $$;''',
         [("    if v_typname in ('int2', 'int4', 'int8') and p_step::numeric <> trunc(p_step::numeric) then\n",
           "    if false then\n", 1)],
     ),
+    "regrain_step_scale_on_integer": (
+        "bench/regrain_target_step_spelling.sh",
+        "Pre-#784 (pass 6 F3-02): _regrain_step_shape tests a regrain target's VALUE on an integer control "
+        "column and not its spelling, so set_regrain('10.0') on a bigint grid is stored, the grid carries the "
+        "step's scale into every bound ('0.0'), and every tick after the prepare fails creating the first fine "
+        "cell (invalid input syntax for type bigint) and logs skip_regrain with the capture trigger left on "
+        "the source; regrain_step and regrain() raise the same raw error. One site: the scale check becomes "
+        "'if false'. tests/210 catches it at the bigint, int2 and int4 refusals, at regrain_step's, regrain()'s "
+        "and the tick's, and at the valid target a refused call must leave in place; its numeric case and "
+        "the separate #641 refusal of '2.5' still pass, which is what shows the mutant is this rule alone.",
+        [("    if v_typname in ('int2', 'int4', 'int8') and p_step::numeric = trunc(p_step::numeric) and scale(p_step::numeric) > 0 then\n",
+          "    if false then\n", 1)],
+    ),
     # #669-#671: three transmute contract gaps, each caught by its own pgTAP file through a wrapper in
     # bench/transmute_abort_owner.sh's shape.
     "carried_index_name_by_pattern": (
