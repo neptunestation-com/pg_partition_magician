@@ -1658,6 +1658,45 @@ begin
 end;
 $$;
 
+-- Give a freshly minted partition the PARENT's replica identity (#782). PostgreSQL neither recurses ALTER
+-- TABLE ... REPLICA IDENTITY on a partitioned table to its partitions nor gives a new partition its
+-- parent's, and a published partition is what UPDATE and DELETE check: a keyless FULL table's partitions
+-- were left with none, so every UPDATE and DELETE routed to one failed with 55000, and a keyed FULL (or
+-- NOTHING) table's published the key instead. The parent is the source of truth, as it is for the owner
+-- above: transmute's cutover gives it the original table's identity, and every child minted afterwards
+-- takes the parent's as it is at that moment. USING INDEX names an index, so the child's is its own index
+-- attached under the parent's identity index, found by identity in pg_inherits. A child that already
+-- matches gets no DDL, so the default identity costs nothing. The child is freshly created or just
+-- attached by the caller, which holds ACCESS EXCLUSIVE on it already: this takes no new lock.
+create or replace function pgpm._replica_identity_like_parent(p_parent regclass, p_child regclass)
+returns void language plpgsql as $$
+declare v_want "char"; v_have "char"; v_idx name;
+begin
+  select relreplident into v_want from pg_class where oid = p_parent;
+  select relreplident into v_have from pg_class where oid = p_child;
+  if v_want = 'i' then
+    select ci.relname into v_idx
+      from pg_index pi
+      join pg_inherits h on h.inhparent = pi.indexrelid
+      join pg_index i on i.indexrelid = h.inhrelid and i.indrelid = p_child
+      join pg_class ci on ci.oid = i.indexrelid
+     where pi.indrelid = p_parent and pi.indisreplident;
+    if v_idx is null then
+      raise exception 'pg_partition_magician: cannot give % the replica identity of %: the parent''s identity is USING INDEX, and % has no index attached under it',
+        p_child, p_parent, p_child;
+    end if;
+    if v_have = 'i' and exists (select 1 from pg_index i join pg_class ci on ci.oid = i.indexrelid
+                                 where i.indrelid = p_child and i.indisreplident and ci.relname = v_idx) then
+      return;
+    end if;
+    execute format('alter table %s replica identity using index %I', p_child::text, v_idx);
+  elsif v_want is distinct from v_have then
+    execute format('alter table %s replica identity %s', p_child::text,
+                   case v_want when 'f' then 'full' when 'n' then 'nothing' else 'default' end);
+  end if;
+end;
+$$;
+
 -- Create an EMPTY partition for native [p_lo, p_hi).
 --
 -- One statement. With the DEFAULT gone (#288) there is nothing to prove empty, so the whole
@@ -1679,6 +1718,8 @@ begin
                  p_nsp, p_name, p_nsp, p_rel, v_lo_lit, v_hi_lit);
   perform pgpm._own_like_parent(format('%I.%I', p_nsp, p_rel)::regclass,
                                 format('%I.%I', p_nsp, p_name)::regclass);
+  perform pgpm._replica_identity_like_parent(format('%I.%I', p_nsp, p_rel)::regclass,
+                                             format('%I.%I', p_nsp, p_name)::regclass);   -- #782
   -- child_oid: WHICH relation this row is about (#421), recorded in the same statement that first
   -- names it, resolved from the CREATE TABLE two lines up rather than trusted from anywhere else.
   insert into pgpm.part (parent_table, child_name, lo, hi, child_oid)
@@ -5123,6 +5164,9 @@ begin
                    p_parent::text, v_copy::text,
                    pgpm._encode(cfg.control_kind, r.lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz), pgpm._encode(cfg.control_kind, r.hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));
     execute format('alter table %s drop constraint %I', v_copy::text, (r.child_name || '_ck'));
+    -- #782: a LIKE copy has the default identity whatever the parent's; after the attach, so a USING INDEX
+    -- identity maps to the copy's own index under the parent's
+    perform pgpm._replica_identity_like_parent(p_parent, v_copy);
     update pgpm.part set attached = true where parent_table = p_parent and child_name = r.child_name;
     insert into pgpm.log (parent_table, action, lo, hi, method) values (p_parent, 'regrain_attach', r.lo, r.hi, 'check_skip');
     v_made := v_made + 1;
@@ -5266,6 +5310,7 @@ declare
   v_uniq_bad text;
   v_pgpm_clash_q text;   -- #311: existing relations occupying the <index>_pgpm names step 9b needs
   v_long_idx_q text;     -- #592: carried secondary indexes whose <index>_pgpm name would exceed 63 bytes
+  v_key_clash text;      -- #789: pgpm_key_<index oid>, the monolith key's name in step 8, when already taken
   v_excl_q text;
 begin
   -- an EXCLUDE constraint is refused (#710, see above)
@@ -5332,6 +5377,20 @@ begin
   if v_pgpm_clash_q is not null then
     raise exception 'pg_partition_magician: cannot transmute % -- the name(s) (%) are already taken, and transmute needs them for the partitioned copies of this table''s secondary indexes. Most likely leftovers from an interrupted run. Drop them, then re-run transmute.',
       p_parent, v_pgpm_clash_q;
+  end if;
+  -- And the name step 8 gives the monolith's copy of the reused key (#789): the parent takes the key's own
+  -- name, so the monolith's is renamed pgpm_key_<its index oid> first. Taken, that rename would fail raw
+  -- inside the cutover, after phases 1 and 2 committed the bound and the claim. The primary key, else the
+  -- reused unique constraint's index; none on a keyless table.
+  select k.n into v_key_clash
+    from (select 'pgpm_key_' || i.indexrelid::text as n
+            from pg_index i
+           where i.indrelid = p_parent and (i.indisprimary or i.indexrelid = coalesce(p_reuse_idx, 0::oid))) k
+   where to_regclass(format('%I.%I', p_nsp, k.n)) is not null
+   limit 1;
+  if v_key_clash is not null then
+    raise exception 'pg_partition_magician: cannot transmute % -- the name % is already taken, and transmute needs it for the monolith''s copy of this table''s key (the partitioned parent takes the key''s own name, so that every statement naming the key keeps working). Rename or drop %, then re-run transmute.',
+      p_parent, v_key_clash, v_key_clash;
   end if;
 end;
 $$;
@@ -5660,6 +5719,8 @@ declare
   v_bad_pub text; v_pub record;   -- #566: publication membership, refused or carried
   v_bad_con text;                 -- #730: constraints the cutover cannot carry (NOT VALID, NO INHERIT)
   v_key_defer text := '';         -- #731: the reused key's DEFERRABLE / INITIALLY DEFERRED, carried onto the parent
+  v_key_name name; v_key_idx oid; -- #789: the reused key's constraint name, which the parent takes, and its index
+  v_replident "char"; v_ri_idx name;   -- #782: the table's replica identity, and the parent index it maps to
   v_unowned_pub_q text;
   v_sq record;                    -- #573: sequences the table owns through a column
 begin
@@ -6935,18 +6996,33 @@ begin
   -- accepted before, failed with a duplicate key once its rows were past the monolith. The flags are
   -- read off the monolith's own constraint here, under the cutover's lock (p_parent is the monolith's oid
   -- by now), and the adopted index is the same one either way. The %s carries keywords only.
-  select case when c.condeferrable and c.condeferred then ' deferrable initially deferred'
+  --
+  -- Under the table's own constraint name (#789). Declared anonymously, the parent's key took an
+  -- auto-name (t_pkey came back as t_pkey1, since the monolith's index still held t_pkey, and a named
+  -- ev_pk as ev_pkey), so every statement naming the key failed with 42704 on the managed table: INSERT
+  -- ... ON CONFLICT ON CONSTRAINT, and migrations that ALTER, COMMENT ON or DROP it. The parent is what
+  -- every statement names, so it takes the name, and the monolith's copy is renamed out of its way first
+  -- (the name is also the index's, and an index name is unique in the schema). Its new name is
+  -- pgpm_key_<its index oid>: whole at any key length, where <name>_pgpm cannot fit beside a 59 to 63
+  -- byte name (from_hypertable hands such keys to this cutover), and recognisable by identity, which is
+  -- how untransmute knows to hand the original name back. _transmute_carried_indexes refused it up front
+  -- if taken. Name, index and flags are read together, off the monolith's constraint, under the lock.
+  select c.conname, c.conindid,
+         case when c.condeferrable and c.condeferred then ' deferrable initially deferred'
               when c.condeferrable then ' deferrable'
               else '' end
-    into v_key_defer
+    into v_key_name, v_key_idx, v_key_defer
     from pg_constraint c
    where c.conrelid = p_parent
      and ((v_add_pk and c.contype = 'p') or (v_add_uniq and c.contype = 'u' and c.conindid = v_reuse_idx));
+  if v_add_pk or v_add_uniq then
+    execute format('alter table %s rename constraint %I to %I', v_monreg::text, v_key_name, 'pgpm_key_' || v_key_idx);
+  end if;
   if v_add_pk then
-    execute format('alter table %s add primary key (%s)%s', v_parent::text,
+    execute format('alter table %s add constraint %I primary key (%s)%s', v_parent::text, v_key_name,
                    (select string_agg(quote_ident(x), ', ') from unnest(v_pkcols) x), coalesce(v_key_defer, ''));
   elsif v_add_uniq then
-    execute format('alter table %s add unique (%s)%s', v_parent::text,
+    execute format('alter table %s add constraint %I unique (%s)%s', v_parent::text, v_key_name,
                    (select string_agg(quote_ident(x), ', ') from unnest(v_pkcols) x), coalesce(v_key_defer, ''));
   end if;
 
@@ -6985,6 +7061,34 @@ begin
       execute v_pdef_q;
       execute format('alter index %I.%I attach partition %I.%I', v_nsp, v_new, v_nsp, v_old);
     end loop;
+  end if;
+
+  -- 9d. REPLICA IDENTITY (#782), after 8 and 9b, so that every index it can name is on the parent. 7c
+  -- carried the table's publication membership and nothing carried its replica identity, which a
+  -- partitioned table's partitions do not inherit: a keyless REPLICA IDENTITY FULL table in a publication
+  -- of updates and deletes got forward partitions with none, and every UPDATE and DELETE routed to one
+  -- failed with 55000; a keyed one published key-only before-images instead. The parent takes the table's
+  -- identity here, and every partition minted from it on (obtain below, extend_to, a regrain's fine
+  -- children) takes the parent's through _replica_identity_like_parent. USING INDEX names an index: the
+  -- parent's is the one the original's identity index is attached under (the key 8 adopted, or a 9b
+  -- copy; an identity index is unique and plain, and _transmute_carried_indexes refuses every unique
+  -- index it would not carry). The monolith is the original table and keeps its own. ALTER ... REPLICA
+  -- IDENTITY takes ACCESS EXCLUSIVE, which this cutover holds, so the value read is the one carried.
+  select c.relreplident into v_replident from pg_class c where c.oid = p_parent;
+  if v_replident = 'i' then
+    select pc.relname into v_ri_idx
+      from pg_index i
+      join pg_inherits h on h.inhrelid = i.indexrelid
+      join pg_class pc on pc.oid = h.inhparent
+     where i.indrelid = p_parent and i.indisreplident;
+    if v_ri_idx is null then
+      raise exception 'pg_partition_magician: cannot transmute % -- its replica identity is USING INDEX, and that index was not carried onto the partitioned parent, so the identity cannot be carried either. Set the table''s REPLICA IDENTITY to DEFAULT, FULL or an index transmute carries, then re-run transmute.',
+        v_parent;
+    end if;
+    execute format('alter table %s replica identity using index %I', v_parent::text, v_ri_idx);
+  elsif v_replident in ('f', 'n') then
+    execute format('alter table %s replica identity %s', v_parent::text,
+                   case v_replident when 'f' then 'full' else 'nothing' end);
   end if;
 
   -- 9c. NO default partition (#288). It used to sit here as the leading-edge safety net, and the drain
@@ -7452,6 +7556,7 @@ declare
   v_acl_default boolean; v_revoked boolean := false; v_g record;
   v_owner oid; v_comdefs text[] := '{}';
   v_pubdefs text[] := '{}';   -- #780: the parent's publication memberships, as ADD TABLEs naming the restored table
+  v_key_name name; v_key_mon name;   -- #789: the parent's key name, and the monolith copy's pgpm_key_<oid>
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then
@@ -7708,6 +7813,14 @@ begin
   -- drop the childless parent -- which cascades the empty DEFAULT and any empty forward partitions, and
   -- takes the parent PK, the partitioned _pgpm indexes, and the parent's identity sequence with it.
   -- DETACH FIRST: dropping a partitioned parent cascades to its partitions, which would destroy the data.
+  --
+  -- The key's name first (#789): the parent carries it, and transmute's step 8 renamed the monolith's copy
+  -- pgpm_key_<its index oid> out of its way. Found by that identity (the name embeds the index's own oid)
+  -- under the parent's key it is attached to, so a conversion from before the fix, whose monolith kept the
+  -- original name while the parent took an auto-name, matches nothing and keeps its name as it was.
+  select p.conname, c.conname into v_key_name, v_key_mon
+    from pg_constraint c join pg_constraint p on p.oid = c.conparentid
+   where c.conrelid = v_monreg and c.contype in ('p', 'u') and c.conname = 'pgpm_key_' || c.conindid::text;
   execute format('alter table %s detach partition %s', p_parent::text, v_monreg::text);
   -- The mirror of transmute's 3b (#573): the parent owns the serial sequences the monolith's column
   -- defaults still call, so dropping it would take them too ("other objects depend on it"). Hand each
@@ -7725,6 +7838,10 @@ begin
     execute format('alter sequence %s owned by %s.%I', v_sq.seq::text, v_monreg::text, v_sq.attname);
   end loop;
   execute format('drop table %s', p_parent::text);
+  -- the parent's key went with it, which frees its name for the table's own key again (#789)
+  if v_key_mon is not null then
+    execute format('alter table %s rename constraint %I to %I', v_monreg::text, v_key_mon, v_key_name);
+  end if;
 
   -- re-establish identity on the restored monolith, with the parent sequence's options (#670), and reseed
   -- from the parent sequence's position, clearing every existing id on its lattice (mirrors transmute's
@@ -7741,8 +7858,8 @@ begin
     end loop;
   end if;
 
-  -- rename the monolith back to the original table name. (transmute never renamed the kept PK or
-  -- secondary indexes, so those names are already the originals.)
+  -- rename the monolith back to the original table name. (transmute never renamed the secondary
+  -- indexes, so those names are already the originals; the key's was handed back above.)
   execute format('alter table %s rename to %I', v_monreg::text, v_rel);
   v_restored := format('%I.%I', v_nsp, v_rel)::regclass;
 

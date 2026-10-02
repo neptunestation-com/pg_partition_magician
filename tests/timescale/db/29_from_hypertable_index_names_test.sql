@@ -93,10 +93,13 @@ select is((select relkind::text from pg_class where oid = 'public.c5b_wide'::reg
 select is((select array_agg(device_id || ':' || v order by device_id) from public.c5b_wide),
   (select array_agg(g || ':w' || g order by g) from generate_series(1, 13) g),
   'with its 12 copied rows and the one appended in the window');
+-- The migrated table is the partitioned parent, which carries the key under its own name since #789; the
+-- monolith's copy, the index the cutover built, is the one attached under it.
 select is(
-  (select count(*)::int from pg_constraint where conname = :'k63a' and contype = 'u'
-      and conrelid in (select inhrelid from pg_inherits where inhparent = 'public.c5b_wide'::regclass)),
-  1, 'and the key is adopted under its own 63-byte name on the migrated table');
+  (select p.conname::text from pg_constraint p join pg_constraint c on c.conparentid = p.oid
+    where p.conrelid = 'public.c5b_wide'::regclass and p.contype = 'u'
+      and c.conrelid = (select monolith_oid from pgpm.config where parent_table = 'public.c5b_wide'::regclass)),
+  :'k63a', 'and the key is adopted under its own 63-byte name on the migrated table');
 
 create table public.c5b_wide_t (device_id bigint not null, ts timestamptz not null, v text,
                                 constraint :"k63t" unique (device_id, ts));

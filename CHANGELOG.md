@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **`transmute` carries the table's replica identity** (#782). The cutover carried publication membership
+  (#566) but not `REPLICA IDENTITY`, and PostgreSQL gives a new partition none of its parent's, so a keyless
+  `REPLICA IDENTITY FULL` table in a publication got forward partitions with none and every `UPDATE` and
+  `DELETE` of a row past the monolith failed with 55000 (a keyed `FULL` or `NOTHING` table published its
+  key instead). The parent now takes the table's identity (`USING INDEX` mapped to the parent's index the
+  original is attached under), and every partition pgpm mints from it, obtain's, `extend_to`'s and a
+  regrain's fine children, takes the parent's. `tests/207` under `bench/cutover_replica_identity.sh`, one
+  mutation per site.
+- **`transmute`'s parent keeps the key's constraint name** (#789). Step 8 declared the parent's key
+  anonymously, so it came back auto-named (`t_pkey1`, or `<t>_pkey` for a named key) and every
+  `INSERT ... ON CONFLICT ON CONSTRAINT <name>` failed with 42704 on the converted table. The parent now
+  declares it under the original name (with its deferrability, #731) after renaming the monolith's copy
+  `pgpm_key_<index oid>`, which fits at any key length; `untransmute` hands the original name back, and a
+  relation already holding that name is refused up front. `tests/208` under `bench/cutover_key_name.sh`.
 - **A regrain names a clamped first cell by its own start, so a day regrain of a monthly grid in a non-UTC
   zone completes** (#783). A regrain toward a fixed step clamps a child's first cell to the child's lower
   bound when that bound is off the target's lattice, and named it by the UTC date of that bound, which is
