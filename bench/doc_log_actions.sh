@@ -10,6 +10,11 @@
 # passed. The check now reads every single-quoted literal compared with `action` in the operator docs
 # (`=`, `<>`, `!=`, `in (...)` over any number of lines), and this guard holds it to that.
 #
+# AND THE ACTION POSITION (issue #848). "Written" used to mean the quoted literal was on some non-comment
+# install.sql line, so an alert on `action = 'copy_swap_drop'` passed: that literal is the METHOD regrain's
+# swap logs under action 'regrain', and no pgpm.log row ever carries it as its action. Check 6 now reads
+# the action each pgpm.log write names, and this guard holds it to that too.
+#
 # HOW. Each step copies the files check 6 reads (the three operator docs, the three install.sql files,
 # extension.control and the checker itself) into a scratch tree and runs the checker there; only check
 # 6's section of its output is read.
@@ -17,12 +22,17 @@
 #             from the docs' SQL, so a clean result is not a scan of nothing;
 #   CONTROL   a phantom action planted in the first `action in (` list of the runbook makes check 6
 #             FAIL, naming it: the instrument can fail at all, and on exactly the SQL form at issue;
+#   CONTROL   a literal an install.sql writes only as a METHOD ('copy_swap_drop'), planted in the same
+#             list, makes check 6 FAIL, naming it, after first showing that literal IS on a non-comment
+#             install line (so a line match would have passed it): "written" means written as an action;
 #   JUDGED    with a third argument, the copy with THAT document in place of its tree original must
 #             PASS check 6. With none, the LIVENESS run is the judgment of the tree.
 #
 # The mutation it is required to fail against (bench/mutations/mutate.py):
 #   runbook_phantom_alert_action -- the runbook's step-2 alert query names 'fail_retire_identity', an
 #                                   action nothing writes (pgpm logs fail_retain_identity)
+#   runbook_alert_on_method      -- the runbook's regrain query names 'copy_swap_drop', regrain's METHOD,
+#                                   as an action, so it can never match a row
 #
 # Usage: doc_log_actions.sh <container> <db> [doc]
 # A doc is docs/guide.md, docs/reference.md or docs/runbook.md, recognised by its file name or, for a
@@ -81,13 +91,8 @@ else
   fail=1
 fi
 
-# CONTROL: a phantom in an `action in (` list must be named by a FAIL.
-PH=fail_retain_phantom_control
-if grep -qF "'$PH'" "$ROOT/pgpm_core/install.sql" "$ROOT/pgpm_hypertable/install.sql" "$ROOT/pgpm_archive/install.sql"; then
-  say FAIL "CONTROL: the planted action is one no install.sql writes" "$PH is written"; exit 1
-fi
-mk "$work/control"
-if PH="$PH" python3 - "$work/control/docs/runbook.md" <<'PY'
+plant() {  # <runbook> <literal>: put '<literal>' first in the runbook's first `action in (` list
+  PH="$2" python3 - "$1" <<'PY'
 import os, re, sys
 p = sys.argv[1]
 t = open(p).read()
@@ -96,7 +101,15 @@ if not m:
     sys.exit(1)
 open(p, "w").write(t[:m.end()] + "'" + os.environ["PH"] + "', " + t[m.end():])
 PY
-then
+}
+
+# CONTROL: a phantom in an `action in (` list must be named by a FAIL.
+PH=fail_retain_phantom_control
+if grep -qF "'$PH'" "$ROOT/pgpm_core/install.sql" "$ROOT/pgpm_hypertable/install.sql" "$ROOT/pgpm_archive/install.sql"; then
+  say FAIL "CONTROL: the planted action is one no install.sql writes" "$PH is written"; exit 1
+fi
+mk "$work/control"
+if plant "$work/control/docs/runbook.md" "$PH"; then
   out=$(check6 "$work/control")
   if grep -qE "^FAIL .*'$PH'" <<<"$out"; then
     say PASS "CONTROL: a phantom in a runbook action in (...) list fails" "named $PH"
@@ -106,6 +119,33 @@ then
   fi
 else
   say FAIL "CONTROL: planted a phantom in a runbook action in (...) list" "no 'action in (' in docs/runbook.md"
+  fail=1
+fi
+
+# CONTROL (#848): a literal written only as a METHOD, named as an action, must be named by a FAIL. Its
+# premise first: the literal is on a non-comment install line, written as the method of an action
+# 'regrain' row, so a check that matched lines rather than the action position would pass it.
+MH=copy_swap_drop
+# (one grep, anchored at the INSERT so a comment cannot match: `grep -q` closing a pipe early reads as a
+# failure under pipefail)
+if grep -qE "^[[:space:]]*insert into pgpm\.log \(parent_table, action, .*method\) values \(p_parent, 'regrain', .*, '$MH'\);" \
+     "$ROOT/pgpm_core/install.sql"; then
+  say PASS "LIVENESS: install.sql writes '$MH', as the method of a regrain" "on a non-comment line"
+else
+  say FAIL "LIVENESS: install.sql writes '$MH', as the method of a regrain" "the regrain swap's log write moved; pick the method literal again"
+  fail=1
+fi
+mk "$work/method"
+if plant "$work/method/docs/runbook.md" "$MH"; then
+  out=$(check6 "$work/method")
+  if grep -qE "^FAIL .*'$MH'.*as an action" <<<"$out"; then
+    say PASS "CONTROL: a method value named as an action fails" "named $MH"
+  else
+    say FAIL "CONTROL: a method value named as an action fails" "$(grep -E '^(PASS|FAIL)' <<<"$out" | head -3 | tr '\n' ' ')"
+    fail=1
+  fi
+else
+  say FAIL "CONTROL: planted a method value in a runbook action in (...) list" "no 'action in (' in docs/runbook.md"
   fail=1
 fi
 
