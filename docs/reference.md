@@ -1410,7 +1410,10 @@ pgpm never cuts one to 63 bytes, which for a 63-byte table name would be the tab
 from the parent when the prepare tick mints them and found
 by **oid** from then on (`config.regrain_delta_oid`, `config.regrain_capture_fn_oid`), so renaming the parent
 mid-regrain changes nothing: the trigger keeps writing the delta it was given, and the reconcile, the swap
-gate and the swap read that same relation. The copy finds each sub-range's fine child by its bounds in
+gate and the swap read that same relation, in the schema it is in. The source is likewise the relation
+`pgpm.part.child_oid` recorded, in its own schema, so a parent moved by `ALTER TABLE ... SET SCHEMA` before
+its regrain begins, or after the prepare tick and before the first copy, regrains as if it had stayed; the
+delta is minted in the parent's schema as of the prepare tick. The copy finds each sub-range's fine child by its bounds in
 `pgpm.part`, never by a name rendered from the parent's current name, so the sub-range whose copy was in
 progress at the rename resumes into the child it had started (which keeps its pre-rename name), and only
 the sub-ranges begun after it are named from the new one. Every prepare tick drops and re-mints the delta from the key as
@@ -1418,8 +1421,9 @@ it is then, so a key column renamed between two regrains is picked up rather tha
 the source; a relation already holding the name it would mint under, other than the one this parent recorded,
 is refused rather than adopted. The trigger runs with the **writer's** privileges (pgpm has no
 `SECURITY DEFINER`), so the delta is owned like the parent and every role holding `INSERT`, `UPDATE` or
-`DELETE` on the parent is granted `INSERT` on it, re-synced on every tick: a role granted mid-regrain can
-write from the next tick on, and nothing beyond the grants on the parent is needed.
+`DELETE` on the parent, or on the regraining partition itself (which PostgreSQL lets a role write directly
+with no grant on the parent), table- or column-level, is granted `INSERT` on it, re-synced on every tick: a
+role granted mid-regrain can write from the next tick on, and nothing beyond those grants is needed.
 
 The swap has the same contract. Whatever is captured between that gate and the moment the `DETACH` takes
 its lock is reconciled under the lock until nothing is left, and the source is dropped only once no
@@ -2708,8 +2712,10 @@ coarsest grain, no coarser than the step's, at which both its bounds read exactl
 `events_p2024_01_31_1830` for a month edge in `Asia/Kolkata`, down to the microsecond. A clamped cell
 whose bounds already read exactly at the step's grain (a weekly regrain of a UTC monthly grid) keeps the
 plain name, and every cell on the lattice keeps its name. The finer label makes the name up to 14 bytes
-longer; one that would exceed 63 bytes is refused like any other (see below): `regrain` raises, and
-auto-regrain logs `skip_regrain` on each tick until the table is renamed to a shorter name.
+longer; one that would exceed 63 bytes is refused like any other (see below): `set_regrain` refuses the
+target at call time when a partition auto-regrain would split needs it, `regrain` raises, and auto-regrain
+(for a table renamed after `set_regrain` accepted its target) logs `skip_regrain` on each tick until the
+table is renamed to a shorter name.
 
 A day or week partition created before that rule keeps the name it was given, the wall date of its start
 in `partition_tz`. East of UTC, with the grid anchored at local midnight, that is exactly the UTC date

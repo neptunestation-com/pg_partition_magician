@@ -1795,12 +1795,12 @@ MUTATIONS = {
         "Pre-#272 regrain: the trigger-populated delta carries no row estimate, so the planner "
         "misplans a reconcile tick into a seq scan of the whole delta.",
         [("""  select coalesce(reltuples, -1) into v_reltuples
-    from pg_class where oid = format('%I.%I', v_nsp, v_delta)::regclass;
+    from pg_class where oid = format('%I.%I', v_dnsp, v_delta)::regclass;
   if v_reltuples = 0 then
-    execute format('select exists (select 1 from %I.%I)', v_nsp, v_delta) into v_delta_has_rows;
+    execute format('select exists (select 1 from %I.%I)', v_dnsp, v_delta) into v_delta_has_rows;
   end if;
   if v_reltuples < 0 or (v_reltuples = 0 and v_delta_has_rows) then
-    perform pgpm._analyze(format('%I.%I', v_nsp, v_delta)::regclass);
+    perform pgpm._analyze(format('%I.%I', v_dnsp, v_delta)::regclass);
   end if;
 """, "", 1)],
     ),
@@ -1979,8 +1979,8 @@ MUTATIONS = {
         "final delete, and gone unapplied. The fine child keeps the pre-change row and the swap "
         "attaches it. tests/124 fails against this on id 150000 reading 'orig' after a clean swap, on "
         "the witness that T1's capture survived the tick, and on the tick's consumed-row count.",
-        [("  execute format('delete from %I.%I where pgpm_seq = any($1)', v_nsp, v_delta) using v_seqs;\n",
-          "  execute format('delete from %I.%I where pgpm_seq <= %s and %s', v_nsp, v_delta,\n"
+        [("  execute format('delete from %I.%I where pgpm_seq = any($1)', v_dnsp, v_delta) using v_seqs;\n",
+          "  execute format('delete from %I.%I where pgpm_seq <= %s and %s', v_dnsp, v_delta,\n"
           "                 (select max(s) from unnest(v_seqs) s), v_elig);\n", 1)],
     ),
     "set_archive_fn_no_return_type_check": (
@@ -2218,8 +2218,8 @@ begin
         "tests/124 section (C)'s owner and has_table_privilege checks and its lives_ok writes as those "
         "roles are what catch it.",
         [("  perform pgpm._own_like_parent(p_parent, v_delta_reg);\n"
-          "  perform pgpm._regrain_capture_grant(p_parent, v_delta_reg);\n", "", 1),
-         ("  if v_delta_reg is not null then perform pgpm._regrain_capture_grant(p_parent, v_delta_reg); end if;\n", "", 1)],
+          "  perform pgpm._regrain_capture_grant(p_parent, v_delta_reg, v_src);\n", "", 1),
+         ("  if v_delta_reg is not null then perform pgpm._regrain_capture_grant(p_parent, v_delta_reg, v_child); end if;\n", "", 1)],
     ),
     "schema_name_regnamespace_cast": (
         "bench/quoted_schema.sh",
@@ -2231,14 +2231,23 @@ begin
         "twin exists it silently answers for the twin's same-named child. Both sites go back, so the "
         "mutant is exactly the shipped shape and not one function patched around the other. tests/124's "
         "quoted-schema archive, regrain and twin cases catch it. _is_write_blocked keeps #727's resolution "
-        "of the child's own schema in the mutant, so the cast is the only thing put back.",
-        [("declare v_nsp_oid oid;\nbegin\n  select c.relnamespace into v_nsp_oid from pg_class c where c.oid = p_parent;\n",
-          "declare v_nsp name;\nbegin\n  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;\n", 1),
+        "of the child's own schema in the mutant, so the cast is the only thing put back there. "
+        "_regrain_capture_active has no schema lookup left since #768 (it asks the relation pgpm.part "
+        "recorded), so its edit puts back its whole pre-#512 body, parent's schema and cast both.",
+        [("returns boolean language plpgsql stable as $$\nbegin\n"
+          "  return exists (select 1 from pg_trigger t\n"
+          "                  where t.tgname = 'pgpm_regrain_capture'\n"
+          "                    and t.tgrelid = pgpm._regrain_child_rel(p_parent, p_child));\n",
+          "returns boolean language plpgsql stable as $$\n"
+          "declare v_nsp name;\nbegin\n  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;\n"
+          "  return exists (select 1 from pg_trigger t join pg_class c on c.oid = t.tgrelid\n"
+          "                  where t.tgname = 'pgpm_regrain_capture' and c.relname = p_child\n"
+          "                    and c.relnamespace = v_nsp::regnamespace);\n", 1),
          ("declare v_nsp_oid oid;\nbegin\n"
           "  -- #727: the partition's own schema, not the parent's; matched by name = name, never parsed (#512)\n"
           "  select n.oid into v_nsp_oid from pg_namespace n where n.nspname = pgpm._child_nsp(p_parent, p_child);\n",
           "declare v_nsp name;\nbegin\n  v_nsp := pgpm._child_nsp(p_parent, p_child);\n", 1),
-         ("c.relnamespace = v_nsp_oid", "c.relnamespace = v_nsp::regnamespace", 2)],
+         ("c.relnamespace = v_nsp_oid", "c.relnamespace = v_nsp::regnamespace", 1)],
     ),
     "part_name_silent_truncation": (
         "bench/part_name_length.sh",
@@ -3593,8 +3602,8 @@ $$;''',
         "pgpm.part row's NAME, so a source renamed aside keeps both for good and a relation that took its "
         "name loses its own triggers of those names. One site: the recorded-oid branch is never taken. "
         "tests/184 (B) catches it on both relations' trigger lists.",
-        [("    if r.child_oid is null then\n      v_rel := to_regclass(format('%I.%I', v_nsp, r.child_name));\n",
-          "    if true then\n      v_rel := to_regclass(format('%I.%I', v_nsp, r.child_name));\n", 1)],
+        [("    v_rel := pgpm._regrain_child_rel(p_parent, r.child_name);   -- #768: a null child_oid in its own schema\n",
+          "    v_rel := to_regclass(format('%I.%I', v_nsp, r.child_name));\n", 1)],
     ),
     "regrain_copy_row_other_bounds": (
         "bench/regrain_child_oid_sites.sh",
@@ -5908,6 +5917,70 @@ select is(
         "part C catches it.",
         [("    select c.relowner as grantee from pg_class c where c.oid = p_rel\n"
           "    union\n", "", 1)],
+    ),
+    "regrain_capture_grant_parent_only": (
+        "bench/regrain_capture_source_grantees.sh",
+        "Pre-#843 _regrain_capture_grant: INSERT on the delta goes to the grantees of DML on the PARENT "
+        "only. The capture trigger runs as the writer, so a role granted UPDATE or DELETE directly on the "
+        "regraining partition (which PostgreSQL lets write it with no grant on the parent) gets 42501 on "
+        "the delta on every write into the source until the swap. Both halves of the grantee query, the "
+        "table ACL and the column ACLs, read the parent alone again. tests/236 catches it at the delta's "
+        "grantee list and at every write of the three partition-level writers.",
+        [("             where c.oid in (p_parent, p_source) and c.relacl is not null\n",
+          "             where c.oid = p_parent and c.relacl is not null\n", 1),
+         ("             where att.attrelid in (p_parent, p_source) and att.attnum > 0 and not att.attisdropped\n",
+          "             where att.attrelid = p_parent and att.attnum > 0 and not att.attisdropped\n", 1)],
+    ),
+    "regrain_step_source_parent_schema": (
+        "bench/regrain_moved_parent_identity.sh",
+        "Issue #768 (F3-04) put back at regrain_step's read of the source: <the parent's current "
+        "schema>.<p_child>, not the relation pgpm.part recorded. After ALTER TABLE <parent> SET SCHEMA "
+        "(safe by contract, the partitions stay) every auto-regrain tick fails 'relation <new schema>."
+        "<monolith> does not exist' and the monolith is never regrained. One site; the capture install and "
+        "_regrain_capture_active keep the fix, so only the step itself is wrong. tests/237 parts A and B "
+        "catch it.",
+        [("  v_child      := pgpm._regrain_child_rel(p_parent, p_child);\n",
+          "  v_child      := format('%I.%I', v_nsp, p_child)::regclass;\n", 1)],
+    ),
+    "regrain_cancel_delta_parent_schema": (
+        "bench/regrain_moved_parent_identity.sh",
+        "Issue #555 (F3-11) put back at regrain_cancel: the delta is truncated as <the parent's current "
+        "schema>.<the recorded delta's name>, not in the schema the recorded regrain_delta_oid is in. After "
+        "the parent moves mid-regrain the cancel empties an unrelated relation of that name in the new "
+        "schema and leaves the real delta holding its captured changes. One site. tests/237 part C catches "
+        "it on both tables.",
+        [("  select nsp, delta into v_dnsp, v_delta from pgpm._regrain_capture_names(p_parent);\n"
+          "  if to_regclass(format('%I.%I', v_dnsp, v_delta)) is not null then\n"
+          "    execute format('truncate %I.%I', v_dnsp, v_delta);\n",
+          "  select delta into v_delta from pgpm._regrain_capture_names(p_parent);\n"
+          "  if to_regclass(format('%I.%I', v_nsp, v_delta)) is not null then\n"
+          "    execute format('truncate %I.%I', v_nsp, v_delta);\n", 1)],
+    ),
+    "regrain_upgrade_guard_parent_schema": (
+        "bench/regrain_moved_parent_identity.sh",
+        "Issue #768 (F3-12) put back at install.sql's #650 upgrade block: an in-flight source is found by "
+        "relname in the PARENT's schema, so after ALTER TABLE <parent> SET SCHEMA a source that lost its "
+        "TRUNCATE guard is not found, re-running install.sql leaves it unguarded, and a TRUNCATE of the "
+        "regraining source goes through. One site, the block's join; _regrain_capture_active keeps the "
+        "fix. The guard's second half (the re-run of install.sql) catches it; tests/237 does not, since a "
+        "pgTAP file cannot re-run install.sql.",
+        [("    select pgpm._regrain_child_rel(p.parent_table, p.child_name) as child\n"
+          "      from pgpm.part p\n"
+          "     where p.attached and pgpm._regrain_capture_active(p.parent_table, p.child_name)\n",
+          "    select c.oid::regclass as child\n"
+          "      from pgpm.part p join pg_class pc on pc.oid = p.parent_table\n"
+          "      join pg_class c on c.relname = p.child_name and c.relnamespace = pc.relnamespace\n"
+          "     where p.attached and pgpm._regrain_capture_active(p.parent_table, p.child_name)\n", 1)],
+    ),
+    "regrain_names_fit_part_name": (
+        "bench/regrain_names_fit_clamped_cell.sh",
+        "Pre-#815 (F3-06) _regrain_names_fit: each sub-range is named with _part_name at the target step's "
+        "granularity, not through _regrain_sub_name as regrain_step names it, so a clamped first cell's "
+        "finer (longer) label is never checked: a table name that fits the day label but not the hour one "
+        "passes set_regrain and every auto-regrain tick then fails the 63-byte limit. One site. tests/238 "
+        "catches it at the call-time refusal and at the regrain_to it leaves set.",
+        [("        perform pgpm._regrain_sub_name(p_rel, cfg, p_step, v, h);\n",
+          "        perform pgpm._part_name(p_rel, k, p_step, v, null, z);\n", 1)],
     ),
 }
 
