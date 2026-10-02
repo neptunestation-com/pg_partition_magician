@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+- **`untransmute` hands back a table moved with `ALTER TABLE ... SET SCHEMA`** (#827). Moving the managed
+  table leaves its partitions, the monolith among them, where they were (#727), but the reverse resolved the
+  restored table and built its comment, grant, policy and publication statements as `<the parent's
+  schema>.<name>`, where nothing of that name exists once the parent is dropped, so every reverse of a moved
+  table died raw with 42P01. The restored table is now named by the oid `transmute` recorded and moved into the
+  parent's schema, where the application has been finding it, after its preserved incoming FKs are re-added.
+  `tests/220` under `bench/untransmute_moved_parent.sh`, with the mutations
+  `untransmute_moved_parent_resolved_by_name` and `untransmute_moved_parent_not_moved`.
+- **`untransmute` hands back the names of indexes and constraints made since the conversion** (#830). A
+  `UNIQUE` constraint or index created on the managed table clones onto the monolith under an auto-name of the
+  partition's, which the DETACH kept, and only the key was renamed back (#789), so after a reverse
+  `ON CONFLICT ON CONSTRAINT <name>` failed with 42704 and `DROP INDEX <name>` found nothing. Each copy is now
+  found by the parent index it is attached under and given that index's name; a carried secondary index keeps
+  the table's own name, and a pre-#789 conversion's primary key keeps the name it had. `tests/221` under
+  `bench/untransmute_index_names.sh`, one mutation per rule.
+- **`untransmute` hands back the managed table's replica identity** (#815, F1-06). `ALTER TABLE ... REPLICA
+  IDENTITY` on the managed table lands on the parent only, so the restored table took the monolith's
+  conversion-time identity: a table set `FULL` since came back `DEFAULT`, publishing key-only before-images,
+  and one set `DEFAULT` came back `FULL`. It now takes the parent's, `USING INDEX` mapped to its own index
+  attached under the parent's identity index, and only when the two differ. `tests/222` under
+  `bench/untransmute_replica_identity.sh`, with the mutations `untransmute_replica_identity_not_restored` and
+  `untransmute_replica_identity_kind_only`.
 - **A preserved incoming key re-added by hand while still recorded as dropped is adopted** (#832).
   `_forget_dangling_fks` reconciled only a record marked re-added whose key is gone, never the opposite: a
   record still marked dropped (`restored_at` null) whose key the operator had put back, the remedy uninstall's

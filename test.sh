@@ -868,6 +868,9 @@ run_perf() {
     "bench/untransmute_drop_dependants.sh pgpm_perf186"
     "bench/transmute_row_type_dependants.sh pgpm_perf187"
     "bench/restore_fk_adopts_live_key.sh pgpm_perf190"
+    "bench/untransmute_moved_parent.sh pgpm_perf183"
+    "bench/untransmute_index_names.sh pgpm_perf184"
+    "bench/untransmute_replica_identity.sh pgpm_perf185"
   )
   local selected=()
   local n=${#guards[@]} idx
