@@ -5514,6 +5514,39 @@ begin
 end;
 $$;
 
+-- pgpm reads every row of the table it converts, and reads it as the caller (#825). transmute sizes the
+-- monolith's bound from min() and max() of the control column; from_hypertable copies the hypertable chunk
+-- by chunk and then checks the copy against the source by count and by content. All of those are ordinary
+-- queries, so row-level security filters them like any other: on a table with FORCE ROW LEVEL SECURITY a
+-- non-superuser owner without BYPASSRLS sees only the rows its policies admit. transmute then committed a
+-- bound above the rows it could not see and died at phase 2's VALIDATE (which checks every row) with a raw
+-- 23514, leaving that bound rejecting every write below it; from_hypertable copied the visible rows, its
+-- conservation check read the source through the same policies and agreed, and the swap dropped the
+-- hidden rows with the hypertable.
+--
+-- Refused, not worked around. pgpm cannot read past the policies on the caller's behalf: SET row_security
+-- = off does not lift them, it turns the filtered read into an error, and pgpm has no SECURITY DEFINER
+-- function to read as anyone else. row_security_active() is PostgreSQL's own answer to "would this role's
+-- query of this table be filtered", from the same check the executor makes (superuser, BYPASSRLS, owner
+-- without FORCE, the row_security setting), so the refusal holds exactly where a read would be filtered:
+-- a BYPASSRLS role, a superuser, and an owner on a table that is ENABLEd but not FORCEd all pass, and the
+-- table keeps its FORCE, which both conversions carry onto the result. Asked before anything is read or
+-- committed, by transmute and by each phase of from_hypertable (its preflight, so the copy, and its cutover).
+create or replace function pgpm._refuse_filtered_reads(p_table regclass, p_doing text, p_consequence text)
+returns void language plpgsql stable as $$
+begin
+  if row_security_active(p_table) then
+    raise exception 'pg_partition_magician: cannot % % as % -- row-level security is active on it for that role (%), so pgpm''s own reads of the table would see only the rows its policies admit, and %. Run it as a role with BYPASSRLS (or a superuser); nothing was changed.',
+      p_doing, p_table, quote_ident(current_user::text),
+      case when (select c.relforcerowsecurity and pg_has_role(current_user, c.relowner, 'USAGE')
+                   from pg_class c where c.oid = p_table)
+           then 'FORCE ROW LEVEL SECURITY holds even the table''s owner to the policies, and the role has no BYPASSRLS'
+           else 'the role is not the table''s owner and has no BYPASSRLS' end,
+      p_consequence;
+  end if;
+end;
+$$;
+
 -- The one trigger shape a partitioned table cannot host (#277), refused. Asked twice by _transmute (#706):
 -- in the preflight, and again in the cutover under the table's ACCESS EXCLUSIVE, beside the trigger capture.
 -- CREATE TRIGGER takes only SHARE ROW EXCLUSIVE, so a row trigger with a transition table committed in
@@ -5813,6 +5846,11 @@ begin
     raise exception 'pg_partition_magician: % has inheritance children (%). transmute converts a standalone table only: its cutover attaches the table to a new parent, and PostgreSQL refuses to attach an inheritance parent as a partition.',
       p_parent, (select string_agg(inhrelid::regclass::text, ', ' order by inhrelid) from pg_inherits where inhparent = p_parent);
   end if;
+
+  -- #825: every read below (the bound's min and max, the plausibility samples, the identity maxima) has to
+  -- see every row, and under row-level security that filters this caller none of them would.
+  perform pgpm._refuse_filtered_reads(p_parent, 'transmute',
+    'the monolith''s bound would be sized from those rows alone and reject the others');
 
   v_default := (v_rel || '_default')::name;
   -- #510: the staging name is held to the same rule as every partition name (see _part_name): never
