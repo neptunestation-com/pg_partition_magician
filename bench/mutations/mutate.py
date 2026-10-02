@@ -3793,6 +3793,33 @@ $$;''',
           "default, so a file written from a default session is unchanged. The scalar float8 leaf is binary.\n"
           "language plpgsql as $$   -- MUTANT: pre-#781, the caller's extra_float_digits\n", 1)],
     ),
+    "archive_ndjson_single_row_alias_shadowed": (
+        "bench/archive_ndjson_row_alias.sh",
+        "Pre-#821 archive._encode_upload_ndjson_single: the automatic NDJSON strategy renders each row as "
+        "row_to_json(t) over the table alias t, which a column named t shadows, so a composite column t is "
+        "archived in place of the row (no id, no payload) while the ledger records the chunk and retire() "
+        "drops the only full copy, and a timestamptz column t raises on every tick. One site.",
+        [("    'select coalesce(string_agg(row_to_json(t.*)::text, e''\\n'' order by t.%I), ''''), count(*)\n",
+          "    'select coalesce(string_agg(row_to_json(t)::text, e''\\n'' order by t.%I), ''''), count(*)   -- MUTANT: pre-#821\n", 1)],
+    ),
+    "to_s3_row_alias_shadowed": (
+        "bench/archive_ndjson_row_alias.sh",
+        "Pre-#821 archive.to_s3: its pages render row_to_json(t) and its conservation fingerprint hashes the "
+        "same text, so on a table with a composite column t both sides agree on that column alone and the "
+        "object lands without the rows' other columns; a timestamptz column t raises. Both sites.",
+        [("           from (select row_to_json(t.*)::text as j, t.%I as k, t.ctid as c from %I.%I t\n",
+          "           from (select row_to_json(t)::text as j, t.%I as k, t.ctid as c from %I.%I t   -- MUTANT: pre-#821\n", 1),
+         ("coalesce(sum(hashtextextended(row_to_json(t.*)::text, 0)), 0) from %I.%I t',\n",
+          "coalesce(sum(hashtextextended(row_to_json(t)::text, 0)), 0) from %I.%I t',   -- MUTANT: pre-#821\n", 1)],
+    ),
+    "to_s3_fingerprint_row_alias_shadowed": (
+        "bench/archive_ndjson_row_alias.sh",
+        "A partial #821 fix: archive.to_s3's pages render row_to_json(t.*) but the after-the-last-page "
+        "fingerprint still hashes row_to_json(t), so on a table with a column named t the two never agree "
+        "and every export of it is refused (or raises, on a timestamptz t). One site, the fingerprint.",
+        [("coalesce(sum(hashtextextended(row_to_json(t.*)::text, 0)), 0) from %I.%I t',\n",
+          "coalesce(sum(hashtextextended(row_to_json(t)::text, 0)), 0) from %I.%I t',   -- MUTANT: partial #821\n", 1)],
+    ),
     "keep_both_two_way_only": (
         "bench/keep_both_diff3.sh",
         "Pre-#598 scripts/review/keep_both.py: the hunk pattern knows only the two-way conflict shape and the "
@@ -5396,6 +5423,9 @@ MUTATION_SRC = {
     "archive_ndjson_single_float_digits_unpinned": "pgpm_archive/install.sql",
     "to_s3_float_digits_unpinned": "pgpm_archive/install.sql",
     "parquet_array_float_digits_unpinned": "pgpm_archive/install.sql",
+    "archive_ndjson_single_row_alias_shadowed": "pgpm_archive/install.sql",
+    "to_s3_row_alias_shadowed": "pgpm_archive/install.sql",
+    "to_s3_fingerprint_row_alias_shadowed": "pgpm_archive/install.sql",
     # The harness and review tooling guard themselves too (#598 to #601): their defects live in the
     # scripts, a doc and a test file, so that is what these mutate.
     "keep_both_two_way_only": "scripts/review/keep_both.py",

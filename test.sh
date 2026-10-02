@@ -683,6 +683,10 @@ run_archive() {
   # of the pairs bench/discriminate.sh completes with each encoder's extra_float_digits pin taken out.
   echo "--- archive floats under extra_float_digits = 0 guard (issue #781) ---"
   bash "$(dirname "$0")/bench/archive_float_digits_pinned.sh" pgpm_test-archive pgpm_perf160 || fail=1
+  # The row-alias guard (#821) re-runs tests/archive/db/33 for the same reason: the clean-code half of the
+  # pairs bench/discriminate.sh completes with each NDJSON render site put back to row_to_json(t).
+  echo "--- NDJSON whole row over a column named t guard (issue #821) ---"
+  bash "$(dirname "$0")/bench/archive_ndjson_row_alias.sh" pgpm_test-archive pgpm_perf175 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi
