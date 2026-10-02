@@ -160,8 +160,11 @@ end $$;
 -- at all. So the migrated table used to accept the rows the constraint had rejected, with no error and no
 -- log row. Called by the preflight (and through it from_hypertable and from_hypertable_copy) and by the
 -- cutover in its own right, for the reason _from_hypertable_check_dimension gives: a destination left by an
--- older version's copy, or made by hand, reaches the swap without the preflight ever having run. Names
--- every such constraint at once, so an operator with several does not re-run once per constraint.
+-- older version's copy, or made by hand, reaches the swap without the preflight ever having run. The cutover
+-- asks it twice, like the shape (#738): up front, before the pre-drain and the index pre-builds spend
+-- anything, and again under its ACCESS EXCLUSIVE (#841), because the source is unlocked from there to the
+-- lock and a constraint added in between was dropped by the swap. Names every such constraint at once, so
+-- an operator with several does not re-run once per constraint.
 create or replace function pgpm._from_hypertable_check_exclusion(p_hypertable regclass)
 returns void language plpgsql as $$
 declare v_excl_q text;
@@ -409,8 +412,13 @@ end $$;
 -- the default reverted and the CHECK was gone, all silently, because the cutover read its column list and
 -- its conservation fingerprint from the source alone. Compared here: the set of columns, and for each
 -- column its type, NOT NULL, collation and default or generation expression; the CHECK constraints by name
--- and definition; and the column order, when the sets agree. NOT VALID is not compared, because LIKE copies
--- a NOT VALID check as validated (the copy's rows were checked as they were inserted). Not compared,
+-- and definition; the outgoing foreign keys by name and definition (#840); and the column order, when the
+-- sets agree. NOT VALID is not compared for a CHECK, because LIKE copies a NOT VALID check as validated
+-- (the copy's rows were checked as they were inserted). It is for a foreign key, which only the copy itself
+-- carries (it replays each on the destination and validates it there), and the swap carries none: a key
+-- added to the hypertable after the copy was dropped with it, and the migrated table accepted orphans; a
+-- key dropped since came back; and a copy stopped between its ADD and its VALIDATE would hand transmute an
+-- unvalidated one. A self-referencing key is left out on both sides, as the copy leaves it. Not compared,
 -- because the cutover carries them from the source under its lock: identity (re-added from the source),
 -- the primary and unique keys and the secondary indexes (rebuilt from the source's). Both sides are
 -- rendered by this one call, so an expression reads the same on both whatever the search_path.
@@ -433,6 +441,10 @@ returns text language sql stable as $$
     select c.conrelid as rel, c.conname::text as name,
            regexp_replace(pg_get_constraintdef(c.oid), ' NOT VALID$', '') as def
       from pg_constraint c where c.conrelid in (p_src, p_dest) and c.contype = 'c'),
+  fk as (
+    select c.conrelid as rel, c.conname::text as name, pg_get_constraintdef(c.oid) as def
+      from pg_constraint c
+     where c.conrelid in (p_src, p_dest) and c.contype = 'f' and c.confrelid <> c.conrelid),
   diffs (k, o, msg) as (
     select 1, s.col, format('column %I is on the source but not on the copy', s.col)
       from s where not exists (select 1 from d where d.col = s.col)
@@ -464,7 +476,19 @@ returns text language sql stable as $$
       from ck cs join ck cd on cd.name = cs.name and cd.rel = p_dest
      where cs.rel = p_src and cs.def <> cd.def
     union all
-    select 4, '', format('the columns are in a different order (source: %s; copy: %s)',
+    select 4, fs.name, format('FOREIGN KEY %I (%s) is on the source but not on the copy', fs.name, fs.def)
+      from fk fs where fs.rel = p_src
+       and not exists (select 1 from fk fd where fd.rel = p_dest and fd.name = fs.name)
+    union all
+    select 4, fd.name, format('FOREIGN KEY %I is on the copy but no longer on the source', fd.name)
+      from fk fd where fd.rel = p_dest
+       and not exists (select 1 from fk fs where fs.rel = p_src and fs.name = fd.name)
+    union all
+    select 4, fs.name, format('FOREIGN KEY %I is %s on the source but %s on the copy', fs.name, fs.def, fd.def)
+      from fk fs join fk fd on fd.name = fs.name and fd.rel = p_dest
+     where fs.rel = p_src and fs.def <> fd.def
+    union all
+    select 5, '', format('the columns are in a different order (source: %s; copy: %s)',
                          (select string_agg(quote_ident(col), ', ' order by attnum) from s),
                          (select string_agg(quote_ident(col), ', ' order by attnum) from d))
      where (select array_agg(col order by col) from s) = (select array_agg(col order by col) from d)
@@ -486,7 +510,7 @@ declare v_diff text;
 begin
   v_diff := pgpm._from_hypertable_shape_diff(p_hypertable, p_dest);
   if v_diff is not null then
-    raise exception 'pg_partition_magician: from_hypertable_cutover(%) refusing to swap: the copy % no longer has the source''s shape: %. from_hypertable_copy fixed the copy''s columns, defaults and CHECK constraints when it ran, so the swap would put that shape back, reverting the DDL run on the hypertable since. Nothing was dropped and the source is whole. Re-run from_hypertable_copy, which rebuilds the copy in the source''s current shape, then the cutover.',
+    raise exception 'pg_partition_magician: from_hypertable_cutover(%) refusing to swap: the copy % no longer has the source''s shape: %. from_hypertable_copy fixed the copy''s columns, defaults, CHECK constraints and outgoing foreign keys when it ran, so the swap would put that shape back, reverting the DDL run on the hypertable since. Nothing was dropped and the source is whole. Re-run from_hypertable_copy, which rebuilds the copy in the source''s current shape, then the cutover.',
       p_hypertable, p_dest, v_diff;
   end if;
 end $$;
@@ -1152,6 +1176,7 @@ declare
   v_ctl_type text; v_min_ctl text; v_max_ctl text;
   v_ident_cols name[]; v_ident_kinds text[]; v_ident_opts text[]; v_ident_next numeric[]; v_srcseq regclass;
   v_pseq regclass; v_i int;
+  v_own_seqs regclass[]; v_own_cols name[];   -- #839: the sequences the source owns, and through which column
   v_tmp text; v_key_names text[]; v_key_types text[]; v_key_tmps text[]; v_idx_orig text[]; v_idx_tmps text[];
   v_in_names text[];     -- incoming FKs the swap dropped and recorded (#264, #563)
   v_dest_oid regclass;   -- which relation the destination check found, re-verified under lock (#422)
@@ -1198,6 +1223,7 @@ begin
   -- has already happened, and its foreign-key eligibility was settled before that copy did any work.
   perform pgpm._from_hypertable_check_dimension(p_hypertable, p_control);
   -- ...and an EXCLUDE constraint, for the same reason (issue #675): the swap below would drop it silently.
+  -- Asked again under the lock (#841), as the shape is, for a constraint added while the cutover prepares.
   perform pgpm._from_hypertable_check_exclusion(p_hypertable);
   -- Keep the OID this check resolved, not just the fact that something answered (#422). The swap
   -- below renames this relation INTO the source's name, so it is the half of the swap that ends with
@@ -1377,6 +1403,9 @@ begin
   -- been unlocked from there to here (the pre-drain's commits, the index pre-builds), so DDL can have landed
   -- in between. Both relations are frozen now, and the column list read at the top must still describe both.
   perform pgpm._from_hypertable_check_shape(p_hypertable, v_dest_oid);
+  -- ...and an EXCLUDE constraint, for the same reason (#841). The check up front saw none, but one added while
+  -- the cutover prepared is on the frozen source now, and the swap below would drop it with the hypertable.
+  perform pgpm._from_hypertable_check_exclusion(p_hypertable);
   -- ...and two of transmute's refusals the source already shows (#792). Asked here rather than up front, for
   -- two reasons. Nothing can write the source now, so a row dated past the frontier bound, or a bare unique
   -- index, that arrived while the cutover prepared (the pre-drain's commits, the index pre-builds) is refused
@@ -1599,6 +1628,30 @@ begin
     v_ident_opts := array_append(v_ident_opts, pgpm._identity_options(v_srcseq));
     v_ident_next := array_append(v_ident_next, pgpm._seq_next(v_srcseq));
   end loop;
+  -- SERIAL SEQUENCES (#839): every sequence the source OWNS through a column (a serial, or an explicit OWNED
+  -- BY) is let go of here, before the DROP, and handed to the same column of the table renamed into the
+  -- source's place once the swap has carried the source's owner onto it, below. CREATE TABLE ... LIKE
+  -- INCLUDING DEFAULTS gave the copy the column's nextval() default, a dependency on a sequence the SOURCE
+  -- owns, so the DROP failed ("cannot drop table ... because other objects depend on it") after the whole
+  -- online copy, every time: a hypertable with a serial column could not be migrated. An owned sequence that
+  -- no default named was worse: the DROP took it silently. The same sequence object goes across, so its
+  -- position, options and grants are kept and the migrated table issues the source's next value. In two
+  -- steps because OWNED BY needs the sequence and the table to have the same owner, and the copy belongs to
+  -- the migrating role until the swap carries the owner. deptype 'a' is OWNED BY; an identity column's
+  -- sequence is 'i' and is re-added from the capture above. transmute then hands these to its parent (#573).
+  for k in
+    select d.objid::regclass as seq, a.attname
+      from pg_depend d
+      join pg_class s on s.oid = d.objid and s.relkind = 'S'
+      join pg_attribute a on a.attrelid = d.refobjid and a.attnum = d.refobjsubid
+     where d.classid = 'pg_class'::regclass and d.refclassid = 'pg_class'::regclass
+       and d.refobjid = p_hypertable and d.refobjsubid > 0 and d.deptype = 'a'
+     order by a.attnum, d.objid
+  loop
+    v_own_seqs := array_append(v_own_seqs, k.seq);
+    v_own_cols := array_append(v_own_cols, k.attname);
+    execute format('alter sequence %s owned by none', k.seq::text);
+  end loop;
   -- OUTGOING foreign keys need no work here any more (#263). from_hypertable_copy already added them to
   -- the private destination and VALIDATED them there, off the lock; the destination then becomes the
   -- monolith child, and transmute re-adds every validated outgoing key at the new parent as part of its own
@@ -1697,6 +1750,11 @@ begin
       end if;
     end loop;
   end if;
+  -- #839: the sequences let go of before the DROP, owned by the same columns of the table now in its place,
+  -- whose owner the swap has just made the source's (the sequences always had it).
+  for v_i in 1 .. coalesce(array_length(v_own_seqs, 1), 0) loop
+    execute format('alter sequence %s owned by %I.%I.%I', v_own_seqs[v_i]::text, v_nsp, v_rel, v_own_cols[v_i]);
+  end loop;
   commit;
 
   -- handoff: an ordinary plain table under the original name is exactly transmute's input.

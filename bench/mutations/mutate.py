@@ -188,7 +188,6 @@ HT_SWAP_IDENTITY_POSITION = """      if v_ident_next[v_i] is not null then
       end if;
     end loop;
   end if;
-  commit;
 """
 # The swap's identity re-add, kind and options (#640). The mutation that puts the pre-#640 re-add back
 # replaces exactly these two argument lines.
@@ -202,6 +201,28 @@ HT_SHAPE_UP_FRONT = """  -- before the pre-drain and the index pre-builds spend 
 """
 HT_SHAPE_UNDER_LOCK = """  -- in between. Both relations are frozen now, and the column list read at the top must still describe both.
   perform pgpm._from_hypertable_check_shape(p_hypertable, v_dest_oid);
+"""
+# The cutover's exclusion check under its lock (#841), anchored on its own comment.
+HT_EXCLUSION_UNDER_LOCK = """  -- ...and an EXCLUDE constraint, for the same reason (#841). The check up front saw none, but one added while
+  -- the cutover prepared is on the frozen source now, and the swap below would drop it with the hypertable.
+  perform pgpm._from_hypertable_check_exclusion(p_hypertable);
+"""
+# The swap letting go of the sequences the source owns, before its DROP (#839).
+HT_SERIAL_LET_GO = """    execute format('alter sequence %s owned by none', k.seq::text);
+"""
+# The shape diff's three outgoing-foreign-key arms (#840).
+HT_SHAPE_FK_ARMS = """    union all
+    select 4, fs.name, format('FOREIGN KEY %I (%s) is on the source but not on the copy', fs.name, fs.def)
+      from fk fs where fs.rel = p_src
+       and not exists (select 1 from fk fd where fd.rel = p_dest and fd.name = fs.name)
+    union all
+    select 4, fd.name, format('FOREIGN KEY %I is on the copy but no longer on the source', fd.name)
+      from fk fd where fd.rel = p_dest
+       and not exists (select 1 from fk fs where fs.rel = p_src and fs.name = fd.name)
+    union all
+    select 4, fs.name, format('FOREIGN KEY %I is %s on the source but %s on the copy', fs.name, fs.def, fd.def)
+      from fk fs join fk fd on fd.name = fs.name and fd.rel = p_dest
+     where fs.rel = p_src and fs.def <> fd.def
 """
 # transmute's carry of the records that name the table it converts as the REFERENCED side (#563).
 TRANSMUTE_DROPPED_FK_PARENT_CARRY = """  update pgpm.dropped_fk set parent_table = v_parent where parent_table = p_parent;
@@ -1339,7 +1360,7 @@ MUTATIONS = {
         "rows that already hold 1, 2 and 3 (a hypertable's key includes the time column, so nothing "
         "rejects the duplicate); the guard's source sequence sits at 8 against max(id) 3, so neither "
         "a restart (1) nor a reseed past max(id) (4) reads as the preserved position.",
-        [(HT_SWAP_IDENTITY_POSITION, "    end loop;\n  end if;\n  commit;\n", 1)],
+        [(HT_SWAP_IDENTITY_POSITION, "    end loop;\n  end if;\n", 1)],
     ),
     "hypertable_cutover_identity_by_default": (
         "bench/hypertable_cutover_identity_options.sh",
@@ -1495,14 +1516,53 @@ MUTATIONS = {
           "\n  -- (4) an outgoing FK", 1)],
     ),
     "hypertable_cutover_no_exclusion_check": (
-        "bench/hypertable_exclusion_refusal.sh",
+        "bench/hypertable_cutover_exclusion_window.sh",
         "Pre-#675 from_hypertable_cutover(): the irreversible phase re-checks the dimension but not an "
-        "EXCLUDE constraint, so a destination left by an older version's copy, or made by hand, reaches "
-        "the swap and the constraint is dropped with the hypertable. Deletes the cutover's call only, so "
-        "only tests/timescale/db/26's cutover assertion fails (the 2D000 of the pre-drain-free "
-        "cutover's first COMMIT where the refusal naming both constraints is pinned).",
+        "EXCLUDE constraint up front. Deletes the cutover's up-front call only. Since #841 the call under "
+        "the lock still refuses before the swap, so tests/timescale/db/26's pre-drain-free cutover still "
+        "passes; what is lost is the refusal BEFORE the pre-drain commits anything, which PART A of the "
+        "guard (tests/timescale/db/41: four rows past the watermark, a one-row batch) pins: the pre-drain "
+        "reaches its first COMMIT inside throws_like and dies with 2D000 where the refusal naming the "
+        "constraint is pinned.",
         [("  perform pgpm._from_hypertable_check_exclusion(p_hypertable);\n  -- Keep the OID this check resolved",
           "  -- Keep the OID this check resolved", 1)],
+    ),
+    "hypertable_cutover_exclusion_unchecked_under_lock": (
+        "bench/hypertable_cutover_exclusion_window.sh",
+        "Pre-#841 from_hypertable_cutover(): the exclusion check is asked up front only, not again under "
+        "the ACCESS EXCLUSIVE, so an EXCLUDE constraint added while the cutover prepares (after the "
+        "up-front check, before the LOCK TABLE) is dropped by the swap. PART B adds one while the cutover "
+        "is queued on the copy, and the mutant converts the table without it; PART A still passes, its "
+        "constraint being refused up front.",
+        [(HT_EXCLUSION_UNDER_LOCK, "", 1)],
+    ),
+    "hypertable_cutover_serial_sequence_kept_by_source": (
+        "bench/hypertable_cutover_serial_sequences.sh",
+        "Pre-#839 from_hypertable_cutover(): nothing lets go of the sequences the source owns through a "
+        "column, so the copy's nextval() default (CREATE TABLE ... LIKE INCLUDING DEFAULTS) depends on a "
+        "sequence the DROP TABLE of the source would take, and the DROP fails with 2BP01 after the whole "
+        "online copy. tests/timescale/db/39's migration raises the raw error and its assertions on the "
+        "migrated table fail.",
+        [(HT_SERIAL_LET_GO, "    -- MUTANT: the source keeps the sequences it owns\n", 1)],
+    ),
+    "hypertable_cutover_serial_owned_before_carry": (
+        "bench/hypertable_cutover_serial_sequences.sh",
+        "The plausible one-step #839 fix: hand each owned sequence to the copy's column (OWNED BY) before "
+        "the DROP, while the copy still belongs to the migrating role. PostgreSQL refuses OWNED BY across "
+        "owners ('sequence must have same owner as table it is linked to'), so tests/timescale/db/39, whose "
+        "hypertable a third role owns, fails on that raw error and on its assertions after it.",
+        [(HT_SERIAL_LET_GO,
+          "    execute format('alter sequence %s owned by %I.%I.%I', k.seq::text, v_nsp, v_dest, k.attname);"
+          "   -- MUTANT: one step\n", 1)],
+    ),
+    "hypertable_shape_ignores_foreign_keys": (
+        "bench/hypertable_cutover_foreign_keys.sh",
+        "Pre-#840 _from_hypertable_shape_diff: columns, defaults and CHECKs are compared, outgoing foreign "
+        "keys are not, so a key added to the hypertable between the copy and the cutover is dropped with "
+        "the source (orphans accepted afterwards) and a key dropped in that window comes back. Deletes the "
+        "three foreign-key arms; tests/timescale/db/40's refusal assertion fails (the cutover runs on to "
+        "its COMMIT inside throws_like), its invariants and its remedy pass.",
+        [(HT_SHAPE_FK_ARMS, "", 1)],
     ),
     "hypertable_index_ddl_by_pattern": (
         "bench/hypertable_index_names.sh",
@@ -5741,6 +5801,10 @@ MUTATION_SRC = {
     "hypertable_handoff_validate_no_lock_timeout": "pgpm_hypertable/install.sql",
     "hypertable_preflight_no_exclusion_check": "pgpm_hypertable/install.sql",
     "hypertable_cutover_no_exclusion_check": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_exclusion_unchecked_under_lock": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_serial_sequence_kept_by_source": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_serial_owned_before_carry": "pgpm_hypertable/install.sql",
+    "hypertable_shape_ignores_foreign_keys": "pgpm_hypertable/install.sql",
     "hypertable_index_ddl_by_pattern": "pgpm_hypertable/install.sql",
     "hypertable_tmp_name_cut": "pgpm_hypertable/install.sql",
     "hypertable_handoff_unchecked": "pgpm_hypertable/install.sql",
@@ -5860,6 +5924,10 @@ MUTATION_TRACK = {
     "hypertable_cutover_conservation_by_count": "timescale",
     "hypertable_preflight_no_exclusion_check": "timescale",
     "hypertable_cutover_no_exclusion_check": "timescale",
+    "hypertable_cutover_exclusion_unchecked_under_lock": "timescale",
+    "hypertable_cutover_serial_sequence_kept_by_source": "timescale",
+    "hypertable_cutover_serial_owned_before_carry": "timescale",
+    "hypertable_shape_ignores_foreign_keys": "timescale",
     "hypertable_index_ddl_by_pattern": "timescale",
     "hypertable_tmp_name_cut": "timescale",
     "hypertable_handoff_unchecked": "timescale",

@@ -415,6 +415,14 @@ run_timescale() {
     # half of the pairs discriminate.sh completes with its two mutants.
     echo "--- a caller whose reads row-level security filters is refused (issue #825) ---"
     bash "$(dirname "$0")/bench/hypertable_reads_caller_rls.sh" pgpm_test-timescale pgpm_perf181 || fail=1
+    # #839's, #840's and #841's harnesses, against the unmodified module, the clean-code half of their mutants'
+    # pairs. #841's PART B (a constraint that lands while the cutover prepares) is run nowhere else on correct code.
+    echo "--- the swap keeps the sequences the source owns (issue #839) ---"
+    bash "$(dirname "$0")/bench/hypertable_cutover_serial_sequences.sh" pgpm_test-timescale pgpm_perf202 || fail=1
+    echo "--- the cutover refuses outgoing keys changed since the copy (issue #840) ---"
+    bash "$(dirname "$0")/bench/hypertable_cutover_foreign_keys.sh" pgpm_test-timescale pgpm_perf203 || fail=1
+    echo "--- the cutover asks the exclusion check again under its lock (issue #841) ---"
+    bash "$(dirname "$0")/bench/hypertable_cutover_exclusion_window.sh" pgpm_test-timescale pgpm_perf204 || fail=1
 
     echo "--- discriminate (timescale-scoped mutations) ---"
     bash "$(dirname "$0")/bench/discriminate.sh" --track=timescale pgpm_test-timescale || fail=1

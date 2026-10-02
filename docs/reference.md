@@ -549,7 +549,9 @@ Scope and caveats:
   refuses it: TimescaleDB does not allow `ADD CONSTRAINT ... USING INDEX` on a hypertable, so the message
   gives the `ALTER TABLE ... ADD CONSTRAINT ... UNIQUE (...)` and `DROP INDEX` that make it a constraint.
   Identity columns, generated columns, `CHECK` constraints, defaults, and `NOT NULL` are all preserved (see
-  `transmute`), and so are the table's owner, its table and column grants, row-level security (`ENABLE` and
+  `transmute`), and so is every sequence the hypertable **owns** through a column (a `serial`, or an explicit
+  `OWNED BY`): the same sequence, at its own position, owned by the same column of the migrated table. So are
+  the table's owner, its table and column grants, row-level security (`ENABLE` and
   `FORCE`) and its policies, its comment and its triggers, which the swap puts back on the copy before
   `transmute` carries them onto the parent. TimescaleDB's own insert-blocker trigger is not carried. The
   replica identity and storage parameters are not carried, as `transmute` does not carry them.
@@ -838,11 +840,14 @@ source row. On a chunk compressed before the copy, only the rows written to it s
 chunk compressed during the window is verified in full.
 
 **The cutover refuses a copy whose shape is no longer the source's.** `from_hypertable_copy` fixed the
-destination's columns, defaults and `CHECK` constraints when it ran, so a schema change to the hypertable
-since (a column dropped or added, a default changed, a `CHECK` added) would be reverted by the swap. The
+destination's columns, defaults, `CHECK` constraints and outgoing foreign keys when it ran, so a schema
+change to the hypertable since (a column dropped or added, a default changed, a `CHECK` or a foreign key
+added or dropped) would be reverted by the swap. The
 cutover compares the two before the pre-drain and again under its lock (the source is unlocked until then, so
 DDL can land while it prepares): the set of columns, each column's type, `NOT NULL`, collation and default or
-generation expression, the `CHECK` constraints by name and definition, and the column order. Identity, keys
+generation expression, the `CHECK` constraints by name and definition, the outgoing foreign keys by name and
+definition (a key the copy holds `NOT VALID` differs from the source's validated one), and the column order.
+Identity, keys
 and indexes are not compared, because the cutover rebuilds them from the source under the lock. On any
 difference it raises `pg_partition_magician: from_hypertable_cutover(...) refusing to swap: the copy ...
 no longer has the source's shape: ...`, naming every difference (for example `column v has default
@@ -895,11 +900,14 @@ transient extra disk the migration needs (see `from_hypertable_disk_estimate`) a
 `from_hypertable_time_estimate`). Both `from_hypertable_copy` and `from_hypertable` call it first, and
 `from_hypertable_cutover` repeats the two dimension checks and the exclusion-constraint check in its own
 right, since a destination left by an earlier copy is enough to reach the cutover's drop without preflight
-having run.
+having run. It asks the exclusion-constraint check twice, before the pre-drain and again under its lock, so a
+constraint added while it prepares is refused too, with the source untouched.
 
 #### Foreign keys
 
-Both directions are carried across the migration.
+Both directions are carried across the migration. An outgoing key added to or dropped from the hypertable
+between `from_hypertable_copy` and the cutover is refused by the cutover's shape check (above): re-run the
+copy, which carries the keys the source has then.
 
 An **outgoing** key (the migrated table referencing another table) is replayed verbatim on the private copy
 during `from_hypertable_copy` as `NOT VALID`, validated there in its own transaction, and re-added at the new
