@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+- **`from_hypertable`'s swap keeps the table's grants, owner, row-level security, policies, comment and
+  triggers** (#787). The cutover renamed the copy, built by `CREATE TABLE ... LIKE`, which carries none of
+  them, into the dropped hypertable's place, so `transmute` found nothing to carry and every grantee was
+  refused once the migration completed. The cutover now reads them off the source under its lock, just
+  before the drop (`_from_hypertable_carried_ddl`), and replays them in the swap transaction, leaving out
+  TimescaleDB's insert blocker and the module's own capture trigger. `tests/timescale/db/33` under
+  `bench/hypertable_cutover_carries_access.sh`, with the mutations `hypertable_cutover_access_not_carried`,
+  `hypertable_cutover_carries_insert_blocker` and `hypertable_cutover_carries_capture`.
+- **`from_hypertable` asks `transmute`'s key and frontier refusals before the swap, and takes
+  `p_force_frontier`** (#792). A hypertable keyed by a bare unique index, or holding a row more than a step
+  and an hour ahead of `now()`, passed every pre-swap check, so the swap dropped the hypertable and
+  `transmute` then refused, leaving a plain unmanaged table. The preflight asks the key, `from_hypertable`
+  the frontier before its copy, and the cutover both under its lock, with `transmute`'s own rule (the core's
+  new `_transmute_bare_unique` and `_frontier_skew_limit`, which `transmute` now calls too);
+  `from_hypertable` and `from_hypertable_cutover` pass `p_force_frontier` through. `tests/timescale/db/34`
+  under `bench/hypertable_handoff_refusals.sh`, with six mutations, one per check and per pass-through.
 - **The archive picker and `transmute`'s monolith lo read a timestamptz the same from every DateStyle**
   (#788). Two more sites rendered a control value with a bare `::text` and parsed it back in the same
   session, the class `_ts_text` exists for (#500, #570). `_next_archive_chunk` read the window's newest

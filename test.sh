@@ -398,6 +398,11 @@ run_timescale() {
     bash "$(dirname "$0")/bench/hypertable_cutover_identity_options.sh" pgpm_test-timescale pgpm_perf134 || fail=1
     echo "--- cutover shape guard (issue #738) ---"
     bash "$(dirname "$0")/bench/hypertable_cutover_shape.sh" pgpm_test-timescale pgpm_perf135 || fail=1
+    # #787's and #792's harnesses, against the unmodified module, the clean-code half of their mutants' pairs.
+    echo "--- the swap carries the source's access and triggers (issue #787) ---"
+    bash "$(dirname "$0")/bench/hypertable_cutover_carries_access.sh" pgpm_test-timescale pgpm_perf167 || fail=1
+    echo "--- transmute's key and frontier refusals before the swap (issue #792) ---"
+    bash "$(dirname "$0")/bench/hypertable_handoff_refusals.sh" pgpm_test-timescale pgpm_perf168 || fail=1
     # #737's uninstall guard, the same way: the clean-code half of the pairs discriminate.sh completes with
     # its two mutants of uninstall.sql.
     echo "--- uninstall sweeps from_hypertable's change capture guard (issue #737) ---"
