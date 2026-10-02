@@ -559,9 +559,14 @@ Scope and caveats:
   `transmute`), and so is every sequence the hypertable **owns** through a column (a `serial`, or an explicit
   `OWNED BY`): the same sequence, at its own position, owned by the same column of the migrated table. So are
   the table's owner, its table and column grants, row-level security (`ENABLE` and
-  `FORCE`) and its policies, its comment and its triggers, which the swap puts back on the copy before
-  `transmute` carries them onto the parent. TimescaleDB's own insert-blocker trigger is not carried. The
-  replica identity and storage parameters are not carried, as `transmute` does not carry them.
+  `FORCE`) and its policies, its comment, its triggers, its replica identity and its publication
+  membership (with each row filter and column list), which the swap puts back on the copy before
+  `transmute` carries them onto the parent and every partition. TimescaleDB's own insert-blocker trigger is
+  not carried, nor is the change-capture trigger of a tracking copy that was never cut over, which the swap
+  recognises by the horizon comment on its delta, so a moved or renamed table does not take it along. A
+  membership with a row filter or a column list in a publication with `publish_via_partition_root = false`
+  is refused up front, by the preflight and by the cutover under its lock, because `transmute` refuses it
+  on a partitioned table. Storage parameters are not carried, as `transmute` does not carry them.
 - The migration reads every row as the **caller**, so a caller whose reads row-level security would filter
   is refused before anything is copied or committed, by `from_hypertable_preflight` (so by
   `from_hypertable` and `from_hypertable_copy`) and again by `from_hypertable_cutover`: on a hypertable
