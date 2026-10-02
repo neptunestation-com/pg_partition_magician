@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- **`untransmute` refuses an object typed by the parent's row type, rather than dying on its `DROP`** (#831).
+  `_refuse_oid_bound_dependants` (#779) asked `pg_depend` about the parent's `pg_class` row alone, so a
+  function taking the managed table's row type (or an array of it), or a column of that type, created since
+  the conversion passed the refusal and the reverse died raw at `drop table` with 2BP01 ("other objects depend
+  on it"). The helper now asks about the parent's row type and its array type as well, and names each
+  function, column or domain with the rest. `tests/223` part A under `bench/untransmute_drop_dependants.sh`,
+  with the mutations `untransmute_dependants_monolith_counted` and `oid_bound_dependants_row_type_unasked`.
+- **`transmute` refuses what is typed by the table's row type, and `untransmute` what sits over a partition
+  its `DROP` takes** (#815, F1-02 and F10-06). The cutover hands the table's row type to the monolith with
+  its oid, so a function taking the table's rows, another table's column of that type or a domain over it
+  followed the rename: `f(t)` stopped taking the table's rows (42883), the column rejected them (42804), and
+  the monolith could never be dropped. They are refused now, named with the views and rules, before anything
+  is committed and again under the cutover's lock. `untransmute`'s `DROP` cascades to the empty forward
+  partitions and any `DEFAULT`, and it asked about the parent alone, so a view over one of them died raw
+  after the detach; it now asks about every partition but the monolith, oid and row type, leaving out a
+  partition's own rules and policies, which go with it. `tests/224` under
+  `bench/transmute_row_type_dependants.sh` (mutations `oid_bound_dependants_row_type_unasked`,
+  `oid_bound_dependants_array_type_unasked`) and `tests/223` part B under `bench/untransmute_drop_dependants.sh`
+  (`untransmute_dependants_parent_only`, `untransmute_dependants_partition_rules_named`).
 - **A renamed control column is followed, not lost** (#826). `pgpm.config.control_column` records the column
   by name, and every reader resolved it by that name, so after `ALTER TABLE ... RENAME COLUMN` of the
   partition key (which PostgreSQL allows, the table routing on) obtain's ceiling check ran `select

@@ -5760,6 +5760,13 @@ $$;
 -- and nothing logged, and a materialized view refreshed to the same narrowed answer. A rule on the table
 -- itself stayed on the monolith and stopped firing for writes through the parent.
 --
+-- The table's ROW TYPE goes with the oid too (#815): its pg_type, and that type's array type, are the
+-- relation's, so a function taking the table's row type (or an array of it), another table's column of
+-- that type and a domain over it followed the rename as well. After the conversion f(t) no longer took the
+-- table's rows (42883), the column rejected them (42804), and the monolith could never be dropped, by
+-- retention or by hand, because each of them depends on its type. Those are asked about here as well:
+-- every normal dependant of the type or the array type, named by kind.
+--
 -- Refused rather than carried. Re-pointing them would mean replaying each definition against the parent
 -- inside the cutover's lock: in dependency order across chains of views, with a materialized view dropped,
 -- re-created and refreshed (a scan of the whole table under ACCESS EXCLUSIVE), and its indexes, grants and
@@ -5767,20 +5774,45 @@ $$;
 -- shape that could be wrong without failing. A refusal names them all and changes nothing.
 --
 -- Asked by transmute in the preflight, before anything is committed, and again in the cutover under the
--- table's ACCESS EXCLUSIVE, which every one of these statements has to wait for (each takes at least
+-- table's ACCESS EXCLUSIVE, which every one of the parse-tree objects has to wait for (each takes at least
 -- ACCESS SHARE on the table it parses), so one created in between is refused there and rolls the cutover
--- back to the resumable phase-2 state. Asked by untransmute for the symmetric case: an object created over
--- the PARENT after the conversion names the parent's oid, and untransmute drops the parent, which either
--- fails raw on it ("other objects depend on it") or, for a rule on the parent, takes it along silently.
+-- back to the resumable phase-2 state. A function or a column typed by the row type takes no lock on the
+-- table, so for those the second ask narrows the window rather than closing it.
+--
+-- Asked by untransmute for the symmetric case. untransmute detaches the monolith and drops the parent,
+-- and the DROP cascades to every other partition: the empty forward partitions and any DEFAULT. So the
+-- relations asked about there are the parent and every partition in its tree but the monolith (#831,
+-- #815): an object created since the conversion over the parent's oid or its row type, or over one of
+-- those partitions' oids or row types, either fails the DROP raw ("other objects depend on it") or, for a
+-- rule on the parent, rides it out of existence. The monolith is not asked about: it is the original
+-- table, detached and handed back, so whatever names it names the restored table.
 --
 -- A policy on the table itself is not one of these: both directions carry the table's own policies by
 -- re-parsing their text against the table that takes the name. Nor is one on p_staging, the cutover's new
--- parent, which holds those carried copies by the time the cutover asks.
+-- parent, which holds those carried copies by the time the cutover asks, nor a policy or a rule on one of
+-- the partitions untransmute drops, which goes with its partition, without an error.
 create or replace function pgpm._refuse_oid_bound_dependants(p_rel regclass, p_untransmute boolean,
                                                              p_staging regclass default null)
 returns void language plpgsql stable as $$
-declare v_deps_q text;
+declare v_deps_q text; v_mon oid;
 begin
+  if p_untransmute then
+    select monolith_oid into v_mon from pgpm.config where parent_table = p_rel;
+  end if;
+  with rel as (
+    -- the relations whose oid and row type the operation hands away, or drops
+    select p_rel::oid as oid
+    union
+    select t.relid from pg_partition_tree(p_rel) t
+     where p_untransmute and t.relid <> p_rel and t.relid is distinct from v_mon
+  ), ref as (
+    select 'pg_class'::regclass as refclassid, r.oid as refobjid from rel r
+    union all
+    select 'pg_type'::regclass, x.typ
+      from rel r join pg_type ty on ty.typrelid = r.oid
+      cross join lateral (values (ty.oid), (ty.typarray)) x(typ)
+     where x.typ <> 0
+  )
   select string_agg(o.what_q, ', ' order by o.what_q) into v_deps_q
     from (select distinct
                  case d.classid
@@ -5788,25 +5820,33 @@ begin
                      (select case when c.relkind = 'v' then 'view ' || c.oid::regclass::text
                                   when c.relkind = 'm' then 'materialized view ' || c.oid::regclass::text
                                   else 'rule ' || quote_ident(r.rulename) || ' on ' || c.oid::regclass::text end
-                        from pg_rewrite r join pg_class c on c.oid = r.ev_class where r.oid = d.objid)
+                        from pg_rewrite r join pg_class c on c.oid = r.ev_class where r.oid = d.objid
+                         and (r.ev_class = p_rel or r.ev_class not in (select oid from rel)))
                    when 'pg_proc'::regclass then 'function ' || d.objid::regprocedure::text
                    when 'pg_policy'::regclass then
                      (select 'policy ' || quote_ident(p.polname) || ' on ' || p.polrelid::regclass::text
-                        from pg_policy p where p.oid = d.objid and p.polrelid <> p_rel
+                        from pg_policy p where p.oid = d.objid and p.polrelid not in (select oid from rel)
                          and p.polrelid is distinct from p_staging)
+                   when 'pg_class'::regclass then
+                     (select 'column ' || d.objid::regclass::text || '.' || quote_ident(a.attname)
+                        from pg_attribute a where a.attrelid = d.objid and a.attnum = d.objsubid)
+                   when 'pg_type'::regclass then 'type ' || d.objid::regtype::text
+                   else pg_describe_object(d.classid, d.objid, d.objsubid)
                  end as what_q
-            from pg_depend d
-           where d.refclassid = 'pg_class'::regclass and d.refobjid = p_rel
-             and d.classid in ('pg_rewrite'::regclass, 'pg_proc'::regclass, 'pg_policy'::regclass)) o
+            from pg_depend d join ref f on f.refclassid = d.refclassid and f.refobjid = d.refobjid
+           where (d.refclassid = 'pg_class'::regclass
+                  and d.classid in ('pg_rewrite'::regclass, 'pg_proc'::regclass, 'pg_policy'::regclass))
+              or (d.refclassid = 'pg_type'::regclass and d.deptype = 'n'
+                  and not (d.classid = 'pg_class'::regclass and d.objid in (select oid from rel)))) o
    where o.what_q is not null;
   if v_deps_q is null then
     return;
   end if;
   if p_untransmute then
-    raise exception 'pg_partition_magician: cannot untransmute % -- the object(s) (%) name the partitioned table by its oid, and untransmute drops that table to hand the original back under its name, so the DROP would fail on them, or take a rule on the table along with it. Drop them, run untransmute, then re-create them against the restored table.',
+    raise exception 'pg_partition_magician: cannot untransmute % -- the object(s) (%) name the partitioned table by its oid, directly, through its row type, or through a partition other than the original table, and untransmute drops that table and those partitions to hand the original back under its name, so the DROP would fail on them, or take a rule on the table along with it. Drop them, run untransmute, then re-create them against the restored table.',
       p_rel, v_deps_q;
   end if;
-  raise exception 'pg_partition_magician: cannot transmute % -- the object(s) (%) name it by its oid, and the conversion hands that oid to the monolith partition, so each would go on reading or writing the monolith alone and silently miss every row routed to a forward partition. Drop them, run transmute, then re-create them against the converted table, where they name the new parent and see every partition (pg_get_viewdef, pg_get_ruledef and pg_get_functiondef give their definitions). pgpm refuses rather than leaving them bound to one partition.',
+  raise exception 'pg_partition_magician: cannot transmute % -- the object(s) (%) name it by its oid, directly or through its row type, and the conversion hands that oid and that row type to the monolith partition, so each would stay bound to the monolith alone: a view, a rule or a function body would silently miss every row routed to a forward partition, and a function or a column typed by the row type would stop taking the table''s rows and keep the monolith from ever being dropped. Drop them, run transmute, then re-create them against the converted table, where they name the new parent and see every partition (pg_get_viewdef, pg_get_ruledef and pg_get_functiondef give their definitions). pgpm refuses rather than leaving them bound to one partition.',
     p_rel, v_deps_q;
 end;
 $$;
@@ -6382,8 +6422,9 @@ begin
   perform pgpm._transmute_refuse_transition_triggers(p_parent);
 
   -- Objects that name the table by its oid (#779): views, materialized views, rules, SQL-standard function
-  -- bodies, other tables' policies. The rename hands that oid to the monolith, so each would silently
-  -- narrow to it. Asked again in the cutover under its ACCESS EXCLUSIVE, which no CREATE VIEW can pass.
+  -- bodies, other tables' policies, and what is typed by its row type (#815). The rename hands that oid
+  -- and that type to the monolith, so each would stay bound to it. Asked again in the cutover under its
+  -- ACCESS EXCLUSIVE, which no CREATE VIEW can pass.
   perform pgpm._refuse_oid_bound_dependants(p_parent, false);
 
   -- Publication membership (#566): the cutover adds the new parent to every publication that names this
@@ -7844,8 +7885,9 @@ begin
   if v_outside then
     raise exception '%', v_door;
   end if;
-  -- An object over the parent that names it by its oid (#779) would stop the DROP below, or ride it out of
-  -- existence. Refused here, unlocked, as the cheap answer; and again under the lock, as the final one.
+  -- An object over the parent that names it by its oid (#779) or its row type (#831), or over a partition
+  -- the DROP below cascades to (#815), would stop that DROP, or ride it out of existence. Refused here,
+  -- unlocked, as the cheap answer; and again under the lock, as the final one.
   perform pgpm._refuse_oid_bound_dependants(p_parent, true);
 
   -- capture the identity columns and their current max BEFORE dropping anything (transmute moved

@@ -5269,9 +5269,9 @@ select is(
         "parent, so a table whose own policy queries the table itself is refused under the lock, after phases "
         "1 and 2 committed the bound, though the preflight let it through. One site, the staging exemption. "
         "tests/205 part A's conversion of dv205 (policy dv205_self) catches it.",
-        [("from pg_policy p where p.oid = d.objid and p.polrelid <> p_rel\n"
+        [("from pg_policy p where p.oid = d.objid and p.polrelid not in (select oid from rel)\n"
           "                         and p.polrelid is distinct from p_staging)",
-          "from pg_policy p where p.oid = d.objid and p.polrelid <> p_rel)", 1)],
+          "from pg_policy p where p.oid = d.objid and p.polrelid not in (select oid from rel))", 1)],
     ),
     "untransmute_oid_bound_dependants_unrefused": (
         "bench/transmute_oid_bound_dependants.sh",
@@ -5280,6 +5280,52 @@ select is(
         "rule on the parent along with it without a word. Both sites, the unlocked ask and the one under the "
         "lock. tests/205 part C catches it.",
         [("  perform pgpm._refuse_oid_bound_dependants(p_parent, true);", "  null;", 2)],
+    ),
+    # #831 and #815 (F1-02, F10-06): the dependants _refuse_oid_bound_dependants asks about beyond the pg_class
+    # row of the table itself. Two guards: the transmute direction (tests/224) and untransmute's (tests/223).
+    "oid_bound_dependants_row_type_unasked": (
+        "bench/transmute_row_type_dependants.sh",
+        "Issue #815's F1-02 put back, the pre-fix shape: the helper asks pg_depend about the table's pg_class "
+        "row only, never its row type. A function taking the table's row type, a column of that type and a "
+        "domain over it follow the cutover's rename into the monolith: f(t) stops taking the table's rows "
+        "(42883), the column rejects them (42804), and the monolith can never be dropped. untransmute meets a "
+        "function over the parent's row type raw at its DROP (#831). One site, the row-type arm of the "
+        "helper's targets. tests/224 catches it (and tests/223 part A).",
+        [("     where x.typ <> 0\n  )", "     where x.typ <> 0 and false\n  )", 1)],
+    ),
+    "oid_bound_dependants_array_type_unasked": (
+        "bench/transmute_row_type_dependants.sh",
+        "Issue #815's F1-02, half fixed: the helper asks about the table's row type but not that type's array "
+        "type, so a function taking an array of the table's rows (or a column of that array type) still "
+        "follows the rename into the monolith. One site, the array type in the helper's targets. tests/224's "
+        "pinned refusal, which names arr224(rt224[]), catches it.",
+        [("cross join lateral (values (ty.oid), (ty.typarray)) x(typ)",
+          "cross join lateral (values (ty.oid)) x(typ)", 1)],
+    ),
+    "untransmute_dependants_parent_only": (
+        "bench/untransmute_drop_dependants.sh",
+        "Issue #815's F10-06 put back: untransmute asks about the parent alone, though its DROP cascades to "
+        "every partition but the monolith, so a view over an empty forward partition (or a DEFAULT), or a "
+        "function typed by one's row type, makes the reverse die raw with 2BP01 after the detach. One site, "
+        "the partitions in the helper's relation set. tests/223 part B catches it.",
+        [("     where p_untransmute and t.relid <> p_rel and t.relid is distinct from v_mon\n",
+          "     where false and p_untransmute and t.relid <> p_rel and t.relid is distinct from v_mon\n", 1)],
+    ),
+    "untransmute_dependants_monolith_counted": (
+        "bench/untransmute_drop_dependants.sh",
+        "Issues #831 and F10-06, overreach: untransmute counts the MONOLITH among the partitions its DROP "
+        "takes, so a view over the monolith or a function typed by its row type is refused, though the "
+        "monolith is detached and handed back as the table and both go on working against it. One site, the "
+        "monolith's exemption. tests/223 parts A and B (mono223, ut223_mono_v, fv223_mono_v) catch it.",
+        [(" and t.relid is distinct from v_mon\n", "\n", 1)],
+    ),
+    "untransmute_dependants_partition_rules_named": (
+        "bench/untransmute_drop_dependants.sh",
+        "Issue F10-06, overreach: a rule ON one of the partitions untransmute drops is refused, though it goes "
+        "with its partition, without an error (only a rule on the parent is refused, because writes through "
+        "the table stop firing it). One site, the rule exemption. tests/223 part B (fv223_fwd_r) catches it.",
+        [("where r.oid = d.objid\n                         and (r.ev_class = p_rel or r.ev_class not in (select oid from rel)))",
+          "where r.oid = d.objid)", 1)],
     ),
     "regrain_shape_drift_ignored": (
         "bench/regrain_survives_parent_ddl.sh",
