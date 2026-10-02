@@ -2498,8 +2498,13 @@ begin
   -- what the predicate compares, so it has to be the wall clock in the zone the grid was recorded in:
   -- left to pgpm._encode's UTC default, a New York grid had its chunk read five hours late here while
   -- covered_hi = p_hi still opened retire()'s drop gate for the rows that were never read.
+  --
+  -- The row is rendered as row_to_json(t.*), never row_to_json(t): PostgreSQL resolves a bare name as a
+  -- COLUMN before it tries a whole-row reference, so on a table with a column named t the bare form was
+  -- that column (a composite's fields alone, archived in place of the row, or a raise on a timestamptz),
+  -- while `t.*` resolves against the FROM item's alias only (#821). archive.to_s3 renders the same way.
   execute format(
-    'select coalesce(string_agg(row_to_json(t)::text, e''\n'' order by t.%I), ''''), count(*)
+    'select coalesce(string_agg(row_to_json(t.*)::text, e''\n'' order by t.%I), ''''), count(*)
        from %I.%I t where t.%I >= %L and t.%I < %L',
     pcfg.control_column, v_nsp, v_rel, pcfg.control_column,
     pgpm._encode(pcfg.control_kind, p_lo, pcfg.text_time_prefix, pcfg.text_time_width,
@@ -2814,7 +2819,9 @@ begin
   -- (-1) and a paged row ahead of it (+1) passed it, and the object landed without a row the partition
   -- held before and after. The fingerprint hashes the very text each line carries (row_to_json, rendered
   -- by this session in both reads), so equal fingerprints mean the object holds exactly the rows the
-  -- partition holds after the last page, whatever order or snapshot each page was read in.
+  -- partition holds after the last page, whatever order or snapshot each page was read in. Both reads
+  -- render the row as row_to_json(t.*), the whole-row reference a column named t cannot shadow (#821, see
+  -- archive._encode_upload_ndjson_single).
 
   v_part_payload := '';
   v_cursor := null; v_cursor_tid := null;
@@ -2835,7 +2842,7 @@ begin
                 (array_agg(k order by k desc, c desc))[1]::text,
                 (array_agg(c order by k desc, c desc))[1],
                 count(*), coalesce(sum(hashtextextended(j, 0)), 0)
-           from (select row_to_json(t)::text as j, t.%I as k, t.ctid as c from %I.%I t
+           from (select row_to_json(t.*)::text as j, t.%I as k, t.ctid as c from %I.%I t
                   where $1 is null or (t.%I, t.ctid) > ($1::%s, $2)
                   order by t.%I, t.ctid limit $3) s',
         pcfg.control_column, v_nsp, p_child, pcfg.control_column, v_ctltype, pcfg.control_column)
@@ -2852,7 +2859,7 @@ begin
     -- below aborts an in-flight multipart upload on the way out. The partition is read once more, in a
     -- snapshot later than every page's, and must hold exactly the rows that were paged (#673).
     if v_done then
-      execute format('select count(*), coalesce(sum(hashtextextended(row_to_json(t)::text, 0)), 0) from %I.%I t',
+      execute format('select count(*), coalesce(sum(hashtextextended(row_to_json(t.*)::text, 0)), 0) from %I.%I t',
                      v_nsp, p_child) into v_expected, v_expected_h;
       if v_written <> v_expected or v_written_h <> v_expected_h then
         raise exception 'pg_partition_magician: archive.to_s3 of %.% %, after the last page; a write changed the partition during the export, so refusing to write an incomplete object',

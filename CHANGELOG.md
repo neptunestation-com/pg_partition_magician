@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **The NDJSON encoders archive the whole row on a table with a column named `t`** (#821). Both
+  (`archive._encode_upload_ndjson_single`, behind `pgpm.archive_to_s3_ndjson`, and `archive.to_s3`, in its pages
+  and its conservation fingerprint) aliased the table `t` and rendered `row_to_json(t)`, and PostgreSQL binds a
+  bare name to a column before a whole-row reference. With a composite column `t` each line held only that
+  column's fields, no id and no payload, while the ledger recorded the chunk and `retire()` dropped the only
+  complete copy; a `timestamptz` column `t` raised on every tick instead. All three sites now render
+  `row_to_json(t.*)`, which only the FROM item's alias can satisfy, so every other table's objects are byte for
+  byte what they were. `tests/archive/db/33` checks each object's lines by identity (exactly the table's columns,
+  each row's own values) under `bench/archive_ndjson_row_alias.sh`, with the mutations
+  `archive_ndjson_single_row_alias_shadowed`, `to_s3_row_alias_shadowed` and `to_s3_fingerprint_row_alias_shadowed`.
 - **The timescale wrapper guards fail a file that ran fewer assertions than it planned, however it stopped**
   (#795, #712). The eleven `bench/hypertable_*.sh` and `bench/uninstall_hypertable_capture.sh` wrappers judge
   their pgTAP file from `psql -tAq` output. Eight read a plan shortfall only from finish()'s "# Looks like you
