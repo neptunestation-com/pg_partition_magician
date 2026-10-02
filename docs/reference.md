@@ -1331,6 +1331,21 @@ swap. The refusal holds for a regrain already in flight when you upgrade from a 
 it: re-running `install.sql` puts it on every source still regraining, and each `regrain_step` tick that
 resumes a regrain puts it back if it is missing.
 
+`ALTER TABLE` on the parent while a regrain is in flight **restarts** the run rather than wedging it. The
+copies are standalone tables made `LIKE` the parent when each was created, so a column added, dropped,
+retyped or renamed afterwards, or a `NOT NULL` set or dropped, reaches the source but not them, while the
+copy, the reconcile and the swap's `ATTACH` all need the parent's current columns. Every tick that resumes a
+run compares each copy's columns (name, type, collation, `NOT NULL`, generated) with the parent's first,
+and when one differs it discards the copies, puts the cursor back at the source's `lo` and logs
+`regrain_restart`, with `rows` counting the copies discarded and `method` naming the columns that differ;
+the next ticks copy the range again from the source. Capture stays on throughout, so DML committed across
+the restart is honoured as above. The copies are copied again rather than altered because only the source
+holds the values its rows took for a new column: a volatile default (`nextval`, `clock_timestamp()`) gave
+each row its own, and `now()` the instant of the `ALTER`, which re-evaluating the default in a copy would
+not reproduce. A restart costs the copying done so far, so schedule such migrations between regrains of a
+large partition when you can. Defaults, statistics targets, storage and indexes are not compared: the copy
+inserts explicit values, and `ATTACH` builds an index the parent gained.
+
 The reconcile finds each captured key's fine child by its recorded **range** in `pgpm.part`, not by name,
 so a first sub-range that was clamped to the coarse child's own `lo` (a weekly target on a monthly monolith,
 whose `lo` is not on the weekly grid) is reconciled into the child that actually exists. A captured key
@@ -2426,7 +2441,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `retain_detach` / `retain_crossing` / `detach_reap` | a concurrent detach dispatched for a referenced partition / rows deleted to honour a crossing FK's declared `ON DELETE` / an abandoned concurrent detach finalized |
 | `retain_recall` / `retain_reattach` | retention stopped reaching a partition whose retirement was under way: its dispatched detach was recalled and the `pgpm_detach` job returned to idle / the detach had already landed, and the partition was re-attached on its own bounds (see [`retire`](#retire)) |
 | `regrain_copy` / `regrain_aged` / `regrain_attach` / `regrain` | a regrain microbatch copied rows into a fine child / skipped a below-horizon sub-range that has no fine child yet (only when `archive_fn` is unset; discarded with the source, never copied, once the swap has re-checked that it is still below the horizon) / attached a fine child (`method` = `check_skip`) / completed (`method` = `copy_swap_drop`) |
-| `regrain_prepare` / `regrain_capture_orphan` / `regrain_reconcile` / `regrain_reconcile_aged` / `regrain_rename` / `regrain_restart` / `regrain_cancel` | the cross-tick regrain's own steps: change capture installed / a leftover capture table cleared / the source-is-authority reconcile before the swap (and its below-horizon counterpart) / the source renamed onto the target grid / a stale run restarted / a run cancelled by `regrain_cancel()`, or by `retire` dropping the run's source whole (`method` names `retire`, `rows` counts the copies discarded) |
+| `regrain_prepare` / `regrain_capture_orphan` / `regrain_reconcile` / `regrain_reconcile_aged` / `regrain_rename` / `regrain_restart` / `regrain_cancel` | the cross-tick regrain's own steps: change capture installed / a leftover capture table cleared / the source-is-authority reconcile before the swap (and its below-horizon counterpart) / the source renamed onto the target grid / a stale run restarted (copies that predate capture, or copies whose columns no longer match a parent altered mid-regrain) / a run cancelled by `regrain_cancel()`, or by `retire` dropping the run's source whole (`method` names `retire`, `rows` counts the copies discarded) |
 | `drop_incoming_fk` / `suspend_incoming_fk` / `restore_incoming_fk` / `validate_incoming_fk` | preserve-FK lifecycle events |
 | `from_hypertable_carry_fk` | (`pgpm_hypertable` only) an outgoing FK re-added onto the migrated destination during `from_hypertable_copy` |
 | `forget_missing` | `forget_missing()` cleared a parent's registration because its relation no longer exists; `rows` carries how many partition rows were cleared with it |

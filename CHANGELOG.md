@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **A regrain survives `ALTER TABLE` on its parent** (#785). The fine copies are made `LIKE` the parent when
+  each is created and never saw later DDL, while the copy, the reconcile and the swap's `ATTACH` list the
+  parent's current columns, so an `ADD COLUMN` mid-regrain failed every later tick with `skip_regrain`
+  ('column ... does not exist'), and a `DROP COLUMN` or a type change failed the swap, leaving capture on and
+  the monolith unsplit until someone found `regrain_cancel`. Each resumed tick now compares every copy's
+  columns with the parent's and, when they differ, discards the copies and copies the range again from the
+  source (logged `regrain_restart`, naming the columns). Copied again rather than altered, because a
+  volatile default gave each source row a value a copy cannot re-derive. `tests/211` under
+  `bench/regrain_survives_parent_ddl.sh`, with the mutations `regrain_shape_drift_ignored` and
+  `regrain_shape_restart_keeps_cursor`.
 - **A whole regrain target written with a fraction is refused on an integer control column** (#784).
   `_regrain_step_shape` tested the step's value, which `'10.0'` passes, while the grid carries the step's
   numeric scale into every bound it renders, so `set_regrain('10.0')` on a `bigint` key was stored and every
