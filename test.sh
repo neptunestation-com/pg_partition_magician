@@ -843,6 +843,8 @@ run_perf() {
     "bench/regrain_clamped_subrange_names.sh pgpm_perf163"
     "bench/cutover_replica_identity.sh pgpm_perf161"
     "bench/cutover_key_name.sh pgpm_perf162"
+    "bench/unbuilt_cell_type_holder.sh pgpm_perf170"
+    "bench/orphan_type_guard_id_labels.sh pgpm_perf171"
   )
   local selected=()
   local n=${#guards[@]} idx
