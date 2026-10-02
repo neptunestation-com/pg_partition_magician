@@ -151,6 +151,10 @@ it, into the monolith partition, so each of them would follow it there and silen
 alone, missing every row written to a forward partition. The refusal names them all at once. Drop them,
 convert, then re-create them against the converted table (`pg_get_viewdef`, `pg_get_ruledef` and
 `pg_get_functiondef` give their definitions), where they name the new parent and see every partition. The
+table's **row type** goes with the oid as well, so an object typed by it is refused the same way and named
+with the rest: a function taking a row of the table (or an array of rows), another table's column of that
+type, or a domain over it. Converted, each would stay bound to the monolith: the function would stop taking
+the table's rows, the column would reject them, and the monolith could never be dropped. The
 table's own policies are not among them: they are carried. This one too is asked before anything is
 committed and again under the cutover's lock, which `CREATE VIEW` (and the rest) has to wait for. **Outgoing** foreign keys (this table
 referencing another) are carried onto the new parent automatically, so they keep enforcing across every
@@ -485,9 +489,12 @@ level cannot give the under-lock check a snapshot taken after the lock, so it re
 proceed on a stale one.
 
 It refuses, the same two ways, while an object names the managed table by its oid: a view, materialized
-view, rule, `BEGIN ATOMIC` function or another table's policy created over the parent since the conversion.
-The reverse drops the parent, which would fail on all but a rule and take a rule on the parent with it
-silently. Drop them, run `untransmute`, then re-create them against the restored table. An object over the
+view, rule, `BEGIN ATOMIC` function or another table's policy created over the parent since the conversion,
+or a function, column or domain typed by the parent's row type. The reverse drops the parent, which would
+fail on all but a rule and take a rule on the parent with it silently. The drop takes every other partition
+too (the empty forward partitions and any `DEFAULT`), so the same objects over one of those, or typed by one's
+row type, are refused as well, all named at once; a partition's own rules and policies go with it and are not.
+Drop them, run `untransmute`, then re-create them against the restored table. An object over the
 monolith partition itself needs nothing: it follows the original table back.
 
 ## Migrating from TimescaleDB (`from_hypertable`)
