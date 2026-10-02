@@ -38,6 +38,13 @@ and `archive.to_s3` refuses a row holding zero or less before it sends anything.
 one that needs more fails at complete with `EntityTooSmall`, its upload aborted and nothing written. `p_fetch_rows` (rows
 per page, 20000 by default) must be at least 1, refused the same way by both.
 
+Each chunk the automatic path archives lands at `<prefix><schema>.<table>_<stem>.ndjson` (or `.parquet`),
+the stem being the chunk's `lo` (`2024010100000000` for 2024-01-01 00:00 UTC, `2024010100000000BC` for the
+same day BC). A key is never reused by a different relation: if a new table later takes the name of one
+that archived under the same prefix (after a drop and `pgpm.forget_missing()`, or a rename), its chunks
+carry its oid, `<prefix><schema>.<table>.<oid>_<stem>.ndjson`, and the first table's objects are left as
+they are. See the [reference](../docs/reference.md#real-s3-archive-strategies) for the full layout.
+
 ## Automatic vs. manual
 
 |             | Automatic                                       | Manual                                                                |

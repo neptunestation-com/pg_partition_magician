@@ -1904,12 +1904,27 @@ tick. The parent is always schema-qualified (each part quoted only when PostgreS
 two tables with one name in two schemas can share a bucket prefix without overwriting each other's
 objects. The stem is the chunk's `lo`: an `id` kind's numeric text whole (sign and decimal point
 included), and for every time kind the digits of `lo` rendered in UTC (`2024-01-01 00:00:00+00` becomes
-`2024010100000000`), whatever the session's `TimeZone`. Objects uploaded before this key shape stay where
-they are: each `pgpm.archive_ledger` row records the key its object was written to, and nothing derives a
-key from a chunk's bounds after the upload. A table whose ticks ran with its schema on the `search_path`
+`2024010100000000`), whatever the session's `TimeZone`, keeping the decimal point of a fractional second
+(`2024-01-01 00:00:00.1+00` becomes `20240101000000.100`) and ending `BC` for a BC instant
+(`2024-01-01 00:00:00+00 BC` becomes `2024010100000000BC`), so a BC chunk and an AD chunk of one calendar
+day, or a fraction of a second and a five-digit year, never share a key. Objects uploaded before this key
+shape stay where they are: each `pgpm.archive_ledger` row records the key its object was written to, and
+nothing derives a key from a chunk's bounds after the upload. A table whose ticks ran with its schema on the `search_path`
 (a `public` table under pg_cron, typically) had its earlier chunks keyed `<prefix><table>_<stem>`, so its
 bucket holds both shapes once upgraded; a time-kind chunk archived from a non-UTC session had its stem
-rendered in that session's zone.
+rendered in that session's zone, and a BC chunk's stem had no era.
+
+A key is never reused by a different relation. The first relation to archive under a
+`<prefix><schema>.<table>` claims that name in `archive.object_key_owner` and keeps the shape above;
+any other relation that later archives under the same name and prefix (a table created after the first
+was dropped and cleared with `pgpm.forget_missing()`, or one that took a renamed table's name) has its
+oid in the key, `<prefix><schema>.<table>.<oid>_<stem>.ndjson` (or `.parquet`), so it cannot write over an
+object the first one left, which after `forget_missing()` is the only copy of the rows `retire()` dropped.
+Nothing deletes a claim, `forget_missing()` and `DROP` included. Install claims every name
+`pgpm.archive_ledger` already records a key under, the earliest-archived relation first, so a table that
+archived before this release keeps its keys and its objects are protected the same way. The claims live in
+the database: two databases writing one bucket under one prefix are not told apart, so give each its own
+prefix.
 
 The synchronous functions write one object per call, named after the partition with its parent's
 schema: `archive.to_s3` to `<prefix><schema>.<child>.ndjson` (`.ndjson.gz` when compressed) and
