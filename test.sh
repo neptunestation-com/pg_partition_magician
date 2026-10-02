@@ -871,6 +871,8 @@ run_perf() {
     "bench/untransmute_moved_parent.sh pgpm_perf183"
     "bench/untransmute_index_names.sh pgpm_perf184"
     "bench/untransmute_replica_identity.sh pgpm_perf185"
+    "bench/cutover_secondary_unique_constraint.sh pgpm_perf188"
+    "bench/cutover_tablespace.sh pgpm_perf189"
   )
   local selected=()
   local n=${#guards[@]} idx

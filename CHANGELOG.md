@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- **`transmute` carries a secondary unique constraint as a constraint, under its name and with its
+  deferrability** (#828). Step 9b carried every unique index beside the reused key as a bare partitioned index
+  `<name>_pgpm`, including one that backs a `UNIQUE` constraint, so `INSERT ... ON CONFLICT ON CONSTRAINT
+  <name>` failed with 42704 on the converted table, and a `DEFERRABLE` constraint was immediate on the parent and
+  on every forward partition, where a one-statement swap the table accepted before failed with 23505. Such a
+  constraint is now carried the way the key is (#789, #731): the monolith's copy makes way as
+  `pgpm_key_<index oid>` (refused up front if that name is taken), the parent takes the name with the
+  original definition (`NULLS NOT DISTINCT`, `INCLUDE`, the index's storage parameters, `DEFERRABLE`,
+  `INITIALLY DEFERRED`), the monolith's own index is attached under it, and `untransmute` hands every such name
+  back, not only the key's. `tests/225` under `bench/cutover_secondary_unique_constraint.sh`, with the mutations
+  `cutover_secondary_unique_as_index`, `untransmute_unique_names_one` and `transmute_unique_key_clash_unchecked`.
+- **`transmute`'s parent takes the table's tablespace** (#829). The cutover's `CREATE TABLE ... (LIKE ...)
+  PARTITION BY` named no `TABLESPACE`, so the parent was created in the database default, and so was every
+  partition `obtain`, `extend_to` and a regrain minted from it: every row written past the monolith filled the
+  default volume instead of the one the table was on. The parent is now put in the table's tablespace, read
+  under the cutover's lock, and a caller without `CREATE` on that tablespace is refused before anything is
+  committed. `tests/226` under `bench/cutover_tablespace.sh`, with the mutations `cutover_tablespace_dropped` and
+  `transmute_tablespace_unchecked`.
 - **`untransmute` hands back a table moved with `ALTER TABLE ... SET SCHEMA`** (#827). Moving the managed
   table leaves its partitions, the monolith among them, where they were (#727), but the reverse resolved the
   restored table and built its comment, grant, policy and publication statements as `<the parent's
