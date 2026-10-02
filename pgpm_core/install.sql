@@ -1261,8 +1261,11 @@ $$;
 -- instant in an operator's session and another in pg_cron's. It is read as wall time in partition_tz
 -- instead, which is exactly what _time_literal writes back; and partition_tz is 'UTC' for such a column
 -- (#504), so this maps the column's own reading onto the lattice unchanged. A timestamptz column's text carries its
--- offset and round-trips exactly. Always ::timestamp first: `date at time zone` casts the date to a
--- timestamptz in the session zone and converts the WRONG way. Per-row SQL (regrain's reconcile) inlines
+-- offset, but it round-trips exactly only when it was rendered through _ts_text (ISO): a bare ::text under
+-- a DateStyle that renders zone abbreviations (SQL, Postgres) can name another zone ('IST' under
+-- Europe/Dublin or Asia/Kolkata reads as Israel), so callers hand this _ts_text of the value (#788).
+-- Always ::timestamp first: `date at time zone` casts the date to a timestamptz in the session zone and
+-- converts the WRONG way. Per-row SQL (regrain's reconcile) inlines
 -- the same rule as an expression rather than calling this, which does a catalog lookup.
 create or replace function pgpm._col_to_native(p_cfg pgpm.config, p_raw text)
 returns text language plpgsql stable as $$
@@ -3039,7 +3042,7 @@ declare
   cfg pgpm.config; v_nsp name;
   v_child_lo text; v_child_hi text; v_lo text;
   v_avg numeric; v_batch int; v_batch_count int; v_probe_hi_col text; v_probe_hi text;
-  v_next_distinct_col text; v_stop text; v_unit text;
+  v_next_distinct_col text; v_stop text; v_unit text; v_cval_q text;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
@@ -3075,6 +3078,19 @@ begin
   end if;
   v_batch := greatest(1, floor(cfg.archive_byte_budget::numeric / v_avg))::int;
 
+  -- How a row's control value is read back as text (#788): an instant through _ts_text, never a bare
+  -- ::text. Each value read here is parsed again in this session, by _col_to_native and, as a literal, by
+  -- the next-distinct probe, and under a DateStyle that renders zone abbreviations (SQL, Postgres) a bare
+  -- render does not round-trip: Europe/Dublin's summer 'IST' reads as Israel (+02), so every value read an
+  -- hour early, the stop fell at or below lo, no chunk was ever returned and the aged child was skipped
+  -- silently every tick, never archived and so never retired. The #570 rule, as regrain's reconcile
+  -- applies it per row. A naive column's own text carries no zone and parses back to itself in the session
+  -- that rendered it, and the other kinds' columns (numeric, uuid, text) render the same under every
+  -- DateStyle, so they stay ::text.
+  v_cval_q := case when cfg.control_kind = 'time' and not pgpm._control_naive(p_parent, cfg.control_column)
+                   then format('pgpm._ts_text(t.%I)', cfg.control_column)
+                   else format('t.%I::text', cfg.control_column) end;
+
   -- The window's size and its newest control value, in one scan (a CTE read twice is materialised once).
   -- The newest value is read with ORDER BY ... DESC LIMIT 1 and NOT max(), and the tie extension below
   -- with ORDER BY ... ASC LIMIT 1 and NOT min(): PostgreSQL has no max(uuid) or min(uuid) before 18, so
@@ -3082,9 +3098,9 @@ begin
   -- was logged as skip_archive, no ledger row was ever written and the aged partition was never
   -- retired (#507). Same reasoning, and the same shape, as _frontier_native's read of the frontier.
   execute format(
-    'with w as (select t.%I as c from %I.%I t where t.%I >= %L order by t.%I limit %s)
-     select (select count(*) from w), (select w.c::text from w order by w.c desc limit 1)',
-    cfg.control_column, v_nsp, p_child, cfg.control_column,
+    'with w as (select t.%I as c, %s as c_text from %I.%I t where t.%I >= %L order by t.%I limit %s)
+     select (select count(*) from w), (select w.c_text from w order by w.c desc limit 1)',
+    cfg.control_column, v_cval_q, v_nsp, p_child, cfg.control_column,
     pgpm._encode(cfg.control_kind, v_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz), cfg.control_column, v_batch)
     into v_batch_count, v_probe_hi_col;
 
@@ -3094,8 +3110,8 @@ begin
     v_probe_hi := pgpm._col_to_native(cfg, v_probe_hi_col);
     -- extend to the next distinct value past the boundary, so hi never splits a run of ties (a
     -- child's own CHECK bounds every row here to < v_child_hi already, so this can never overshoot it)
-    execute format('select t.%I::text from %I.%I t where t.%I > %L order by t.%I asc limit 1',
-                   cfg.control_column, v_nsp, p_child, cfg.control_column, v_probe_hi_col, cfg.control_column)
+    execute format('select %s from %I.%I t where t.%I > %L order by t.%I asc limit 1',
+                   v_cval_q, v_nsp, p_child, cfg.control_column, v_probe_hi_col, cfg.control_column)
       into v_next_distinct_col;
     v_stop := case when v_next_distinct_col is null then v_child_hi
                    else pgpm._col_to_native(cfg, v_next_distinct_col) end;
@@ -3121,8 +3137,8 @@ begin
                   when 'uuidv7' then '1 millisecond'
                   when 'time' then '1 microsecond'
                   else '1' end;
-      execute format('select t.%I::text from %I.%I t where t.%I >= %L order by t.%I asc limit 1',
-                     cfg.control_column, v_nsp, p_child, cfg.control_column,
+      execute format('select %s from %I.%I t where t.%I >= %L order by t.%I asc limit 1',
+                     v_cval_q, v_nsp, p_child, cfg.control_column,
                      pgpm._encode(cfg.control_kind, pgpm._grid_next(cfg.control_kind, v_unit, v_lo, cfg.partition_tz),
                                   cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
                                   cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
@@ -6114,13 +6130,21 @@ begin
       v_frontier_native := pgpm._decode(p_control_kind, v_max_raw, p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_tt_alphabet, p_tt_discard_bits, p_tt_epoch);
     end if;
   end if;
-  execute format('select t.%I::text from %s t order by t.%I asc limit 1', p_control, p_parent::text, p_control)
+  -- #788: a timestamptz minimum is rendered through _ts_text, never a bare ::text, because it is parsed
+  -- back with ::timestamptz below. Under a DateStyle that renders zone abbreviations (SQL, Postgres)
+  -- Asia/Kolkata's 'IST' reads as Israel (+02), so the minimum read 3.5 hours late, an oldest row in a
+  -- month's last 3.5 hours floored into the next month, and phase 2's VALIDATE failed on the table's own
+  -- row with the NOT VALID bound left behind. Any other column's text parses back to itself here.
+  execute format('select %s from %s t order by t.%I asc limit 1',
+                 case when p_control_kind = 'time' and v_typname not in ('timestamp', 'date')
+                      then format('pgpm._ts_text(t.%I)', p_control) else format('t.%I::text', p_control) end,
+                 p_parent::text, p_control)
     into v_min_raw;
   -- #455: a naive (timestamp / date) control value has no zone; read it as wall time in v_tz (which is
   -- 'UTC' for such a column, #504), the rule _col_to_native applies everywhere else, so the monolith's
-  -- lower bound is the one every later session would compute. A timestamptz text already carries its
-  -- offset. pgpm.config does not exist yet, so this is the inline form of that rule, with v_typname
-  -- already looked up above.
+  -- lower bound is the one every later session would compute. A timestamptz minimum is already canonical
+  -- text carrying its offset. pgpm.config does not exist yet, so this is the inline form of that rule,
+  -- with v_typname already looked up above.
   if p_control_kind = 'time' and v_min_raw is not null then
     v_min_raw := case when v_typname in ('timestamp', 'date') then pgpm._ts_text(v_min_raw::timestamp at time zone v_tz)
                       else pgpm._ts_text(v_min_raw::timestamptz) end;
