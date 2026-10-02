@@ -5200,7 +5200,7 @@ select is(
         "An ADD COLUMN on the parent mid-regrain fails every later copy and reconcile ('column ... does not "
         "exist'), a DROP COLUMN or a TYPE change fails the swap's ATTACH, and the run never moves again. One "
         "site, the restart branch, switched off. tests/211 parts A and B catch it.",
-        [("  if v_drift is not null then\n"
+        [("  if v_drift <> '' or v_capture_drift is not null then\n"
           "    for r in execute format(\n",
           "  if false then\n"
           "    for r in execute format(\n", 1)],
@@ -5211,9 +5211,12 @@ select is(
         "where it was. The sub-ranges behind it then have no copy and are not aged, so the swap refuses every "
         "tick and the run is wedged again. One site, the cursor reset in the restart branch. tests/211 parts A "
         "and B catch it.",
-        [("    update pgpm.config set regrain_cursor = v_lo where parent_table = p_parent;\n"
+        [("    update pgpm.config set regrain_cursor = v_lo, regrain_source_mark = pgpm._regrain_source_mark(v_child)\n"
+          "     where parent_table = p_parent;\n"
           "    insert into pgpm.log (parent_table, action, lo, hi, rows, method)\n"
           "      values (p_parent, 'regrain_restart', v_lo, v_hi, v_made,\n",
+          "    update pgpm.config set regrain_source_mark = pgpm._regrain_source_mark(v_child)\n"
+          "     where parent_table = p_parent;\n"
           "    insert into pgpm.log (parent_table, action, lo, hi, rows, method)\n"
           "      values (p_parent, 'regrain_restart', v_lo, v_hi, v_made,\n", 1)],
     ),
@@ -5371,6 +5374,47 @@ select is(
         [("  perform pgpm._refuse_filtered_reads(p_hypertable, 'cut over hypertable',\n"
           "    'the catch-up and the conservation check would read only those rows, and the swap would drop "
           "the others with the hypertable');\n", "", 1)],
+    ),
+    "regrain_value_drift_ignored": (
+        "bench/regrain_drift_values.sh",
+        "Pre-#824 regrain_step: the source mark the prepare tick recorded is never compared with the source, "
+        "so DDL that changes the source's values under an unchanged column signature (a column dropped and "
+        "added back under its old name and type, ALTER COLUMN ... TYPE <same type> USING) is not drift, no "
+        "restart happens, and the swap attaches the copies made before it, serving the dropped column's "
+        "values or the pre-rewrite ones. One site, the source-drift term of the restart condition; "
+        "tests/216 parts A and B catch it.",
+        [("                            then pgpm._regrain_source_drift(v_child, cfg.regrain_source_mark) end);\n",
+          "                            then null end);\n", 1)],
+    ),
+    "regrain_check_drift_ignored": (
+        "bench/regrain_drift_values.sh",
+        "Pre-#817 _regrain_shape_drift: the parent's CHECK constraints are not compared with the copies', "
+        "so a CHECK added to the parent mid-regrain is not drift and every swap tick fails ATTACH with "
+        "'child table is missing constraint' (skip_regrain forever, capture left on the source), and a "
+        "CHECK the parent dropped stays on the fine children. One site, the CHECK half of the comparison; "
+        "tests/216 part C catches it.",
+        [("     where (k.conrelid = p_parent or k.conrelid = any(p_copies)) and k.contype = 'c'\n",
+          "     where (k.conrelid = p_parent or k.conrelid = any(p_copies)) and k.contype = 'c' and false\n", 1)],
+    ),
+    "regrain_capture_drift_ignored": (
+        "bench/regrain_capture_follows_key.sh",
+        "Pre-#817 regrain_step: the capture apparatus is never compared with the parent's key, so after a "
+        "reused-key column is renamed every write into the regraining range fails 42703 and every reconcile "
+        "of a change captured before the rename fails ('column d.k does not exist'), and after one is "
+        "widened every write of a key the old type cannot hold fails 22003, each until the swap. One site, "
+        "the capture-drift probe; tests/217 parts A and B catch it.",
+        [("  v_capture_drift := pgpm._regrain_capture_drift(p_parent, v_keyidx);\n",
+          "  v_capture_drift := null;\n", 1)],
+    ),
+    "regrain_restart_keeps_capture": (
+        "bench/regrain_capture_follows_key.sh",
+        "#817, the plausible-but-wrong fix: the capture drift is seen and the run restarts, but the restart "
+        "keeps the capture apparatus minted at prepare, as #785's restart did. The writes the old trigger "
+        "cannot record keep failing, and the drift is seen again on every tick, so the run restarts forever "
+        "and never swaps. One site, the re-mint in the restart branch; tests/217 parts A and B catch it.",
+        [("    if v_capture_drift is not null then\n"
+          "      perform pgpm._regrain_capture_install(p_parent, v_child_name);\n"
+          "    end if;\n", "", 1)],
     ),
 }
 

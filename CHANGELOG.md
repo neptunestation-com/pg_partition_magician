@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- **A regrain restarts on DDL that changes its source's values, not only its columns** (#824). `_regrain_shape_drift`
+  compared the copies with the parent by column signature alone, so a column dropped and added back under its old
+  name and type, or `ALTER COLUMN ... TYPE <same type> USING <expression>`, which fire no row trigger, left the copies
+  made before them looking current, and the swap attached them: the regrained range served the dropped column's
+  values, or the pre-rewrite ones. The prepare tick now records the source's relfilenode and each column's attnum in
+  the new `config.regrain_source_mark`, and a resumed tick that finds either changed while copies exist restarts the
+  run from the source (`regrain_restart`, naming the rewrite or the replaced columns). `tests/216` parts A and B
+  under `bench/regrain_drift_values.sh`, with the mutation `regrain_value_drift_ignored`.
+- **A regrain survives a `CHECK` added to its parent, and a key column renamed or widened, mid-flight** (#817, F3-03,
+  F7-03, F10-02, F3-02, F3-08). The copies lacked a `CHECK` added to the parent after them, which the swap's `ATTACH`
+  requires, so every swap tick failed 'child table is missing constraint'; the parent's `CHECK` constraints are now
+  compared with the copies' by name and expression, and a difference restarts the run. And the capture apparatus kept
+  the key's names and types from the prepare, so after a rename every write into the regraining range failed 42703 and
+  every reconcile of a change captured before it failed, and after a widening every key past the old type failed
+  22003, each until the swap. A resumed tick now compares the delta's columns with the key and, when they differ,
+  restarts the run and re-mints capture for the key as it is now; a write between the `ALTER` and that tick is still
+  refused, never lost. `tests/216` part C under `bench/regrain_drift_values.sh`, with the mutation
+  `regrain_check_drift_ignored`, and `tests/217` under `bench/regrain_capture_follows_key.sh`, with the mutations
+  `regrain_capture_drift_ignored` and `regrain_restart_keeps_capture`.
 - **`transmute` and `from_hypertable` refuse a caller whose reads row-level security would filter** (#825).
   Both read the table as the caller, so on a table with `FORCE ROW LEVEL SECURITY` a non-superuser owner
   without `BYPASSRLS` saw only the rows its policies admit. `from_hypertable` copied those rows, its

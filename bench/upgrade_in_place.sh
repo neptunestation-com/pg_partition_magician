@@ -103,6 +103,7 @@ pgpm.config:regrain_to
 pgpm.config:regrain_cursor
 pgpm.config:regrain_delta_oid
 pgpm.config:regrain_capture_fn_oid
+pgpm.config:regrain_source_mark
 pgpm.config:retain_batch
 pgpm.config:archive_fn
 pgpm.config:archive_byte_budget
