@@ -906,6 +906,14 @@ UNTRANSMUTE_IDENTITY_OPTIONS_UNDER_LOCK = """  -- And each parent sequence's opt
   end if;
 """
 
+# archive._object_stem's body since #823 (the era and the decimal point kept). Three mutations put an
+# older body back in its place (#502, #551, #823), so the text they all find lives in one place.
+OBJECT_STEM_BODY = (
+    "  select case when p_kind = 'id' then p_lo\n"
+    "              else regexp_replace(p_lo::timestamptz::text, '[^0-9.]', '', 'g')\n"
+    "                   || case when p_lo::timestamptz::text like '% BC' then 'BC' else '' end end;\n"
+)
+
 MUTATIONS = {
     "transmute_no_commits": (
         "bench/transmute_lock.sh",
@@ -2646,7 +2654,7 @@ $$;''',
         "ledger rows record the shared key as archived, and retire() drops the first partition with its "
         "rows gone from the store. One site: both transports take the stem from the helper, which is "
         "what lets one edit put the defect back in the NDJSON and the Parquet path at once.",
-        [("  select case when p_kind = 'id' then p_lo else regexp_replace(p_lo::timestamptz::text, '[^0-9]', '', 'g') end;\n",
+        [(OBJECT_STEM_BODY,
           "  select regexp_replace(p_lo, '[^0-9]', '', 'g');\n", 1)],
     ),
     # #551, one mutation per session rendering the fix took out of the key, so a catch names which one
@@ -2672,12 +2680,47 @@ $$;''',
         "first while each call reports its chunk covered, and one chunk archived from two zones lands "
         "on two keys. The pre-#551 function exactly: immutable, no pinned TimeZone, digits of p_lo.",
         [("returns text language sql stable set timezone = 'UTC' set datestyle = 'ISO, MDY' as $$\n"
-          "  select case when p_kind = 'id' then p_lo else regexp_replace(p_lo::timestamptz::text, '[^0-9]', '', 'g') end;\n",
+          + OBJECT_STEM_BODY,
           "returns text language sql immutable as $$\n"
           "  select case when p_kind = 'id' then p_lo else regexp_replace(p_lo, '[^0-9]', '', 'g') end;\n", 1)],
     # #498, one mutation per site of the fix, so a catch names which anchor went missing. All three break
     # bench/dropped_fk_identity.sh: the first two through tests/124's own assertions, the third through
     # the wrapper's upgrade half, which is the only place a second run of install.sql happens.
+    ),
+    # #822, one mutation per site of the fix: the key that ignores its claim, and the install-time seed.
+    # Both break bench/archive_key_reused_name.sh through tests/archive/db/34.
+    "archive_object_key_reusable_name": (
+        "bench/archive_key_reused_name.sh",
+        "Pre-#822 object key: archive._object_key names a chunk by the parent's current schema.relname "
+        "and lo alone, whatever relation claimed that name first. After the runbook's drop and "
+        "pgpm.forget_missing(), which deletes the dropped table's ledger rows, a new managed table taking "
+        "the name and prefix archives its [0, 10000) to <prefix><schema>.<table>_0.ndjson (and .parquet), "
+        "and the unconditional PUT replaces the dropped table's only copy of the rows retire() dropped. "
+        "One site: both transports take the key from the helper.",
+        [("      || case when v_owner is not distinct from p_parent::oid then '' else '.' || p_parent::oid::text end\n",
+          "", 1)],
+    ),
+    "archive_object_key_owner_unseeded": (
+        "bench/archive_key_reused_name.sh",
+        "Install claims nothing from the keys pgpm.archive_ledger already records: an installation "
+        "upgraded to the release with archive.object_key_owner starts with no claims, so a table that "
+        "archived before the upgrade owns no base, and once it is dropped and forgotten a new table taking "
+        "its name claims the base itself and PUTs over the old table's objects. tests/archive/db/34 part C "
+        "re-runs the seed the way a re-install does and requires the claim it makes.",
+        [("             where l.s3_key like '%\\_%' and l.s3_key !~ '\\.[0-9]+_[^_]*$') b\n",
+          "             where false) b\n", 1)],
+    ),
+    # #823: the pre-#823 stem exactly, UTC-pinned digits only. Breaks bench/archive_stem_era.sh through
+    # tests/archive/db/35.
+    "archive_object_stem_drops_era": (
+        "bench/archive_stem_era.sh",
+        "Pre-#823 time stem: archive._object_stem keeps only the digits of the lo rendered in UTC, so the "
+        "' BC' era is thrown away with the punctuation and 2024-01-01 BC and 2024-01-01 AD of one table "
+        "share a key: the AD chunk's PUT replaces the BC chunk's object while both report their rows "
+        "archived. The decimal point goes too, so a tenth of a second in 2024 and a whole second in the "
+        "year 20240 share a stem. One site: both transports take the stem from the helper.",
+        [(OBJECT_STEM_BODY,
+          "  select case when p_kind = 'id' then p_lo else regexp_replace(p_lo::timestamptz::text, '[^0-9]', '', 'g') end;\n", 1)],
     ),
     "dropped_fk_definition_session_search_path": (
         "bench/dropped_fk_identity.sh",
@@ -5471,6 +5514,9 @@ MUTATION_SRC = {
     "archive_object_key_digits_only": "pgpm_archive/install.sql",
     "archive_object_key_search_path_parent": "pgpm_archive/install.sql",
     "archive_object_key_session_zone": "pgpm_archive/install.sql",
+    "archive_object_key_reusable_name": "pgpm_archive/install.sql",
+    "archive_object_key_owner_unseeded": "pgpm_archive/install.sql",
+    "archive_object_stem_drops_era": "pgpm_archive/install.sql",
     "sigv4_transaction_start_stamp": "pgpm_archive/install.sql",
     "to_s3_compress_unread": "pgpm_archive/install.sql",
     "parquet_numeric_scale_unsigned": "pgpm_archive/install.sql",

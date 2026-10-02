@@ -691,6 +691,13 @@ run_archive() {
   # pairs bench/discriminate.sh completes with each NDJSON render site put back to row_to_json(t).
   echo "--- NDJSON whole row over a column named t guard (issue #821) ---"
   bash "$(dirname "$0")/bench/archive_ndjson_row_alias.sh" pgpm_test-archive pgpm_perf175 || fail=1
+  # The object-key identity guards (#822, #823) re-run tests/archive/db/34 and 35 for the same reason: the
+  # clean-code halves of the pairs bench/discriminate.sh completes with the reusable-name, unseeded-claims
+  # and era-dropping mutants.
+  echo "--- archive object key never reused by another relation guard (issue #822) ---"
+  bash "$(dirname "$0")/bench/archive_key_reused_name.sh" pgpm_test-archive pgpm_perf176 || fail=1
+  echo "--- archive object key keeps a BC chunk's era guard (issue #823) ---"
+  bash "$(dirname "$0")/bench/archive_stem_era.sh" pgpm_test-archive pgpm_perf177 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi

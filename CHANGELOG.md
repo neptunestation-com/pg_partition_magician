@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+- **An archive object key is never reused by a different relation** (#822). `archive._object_key` named a
+  chunk by the parent's current `<prefix><schema>.<table>` and its `lo`, and both transports PUT
+  unconditionally, so after the runbook's drop and `pgpm.forget_missing()` (which deletes the dropped table's
+  ledger rows) a new managed table taking the same name and prefix archived its `[0, 10000)` over the old
+  table's only copy of the rows `retire()` had dropped. The first relation to archive under a name now claims
+  it in `archive.object_key_owner`, which nothing deletes from, and keeps its keys unchanged; any other
+  relation's chunks carry its oid, `<prefix><schema>.<table>.<oid>_<stem><ext>`. Install seeds the claims from
+  the keys `pgpm.archive_ledger` already records, so tables archived before the upgrade are covered.
+  `tests/archive/db/34` under `bench/archive_key_reused_name.sh`, with the mutations
+  `archive_object_key_reusable_name` and `archive_object_key_owner_unseeded`.
+- **A BC chunk and an AD chunk of one table no longer share an object key** (#823). `archive._object_stem`
+  kept only the digits of a time kind's `lo` rendered in UTC, which threw away the BC era marker, so 2024-01-01
+  BC and 2024-01-01 AD of one table were keyed alike and the second PUT replaced the first while both reported
+  their rows archived; the same projection collapsed a fraction of a second onto a five-digit year. The stem
+  now ends `BC` for a BC instant and keeps a fraction's decimal point (`2024010100000000BC`,
+  `20240101000000.100`); a whole-second AD stem is unchanged. `tests/archive/db/35` under
+  `bench/archive_stem_era.sh`, with the mutation `archive_object_stem_drops_era`.
 - **A regrain restarts on DDL that changes its source's values, not only its columns** (#824). `_regrain_shape_drift`
   compared the copies with the parent by column signature alone, so a column dropped and added back under its old
   name and type, or `ALTER COLUMN ... TYPE <same type> USING <expression>`, which fire no row trigger, left the copies

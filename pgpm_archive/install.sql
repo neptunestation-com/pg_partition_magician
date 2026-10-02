@@ -85,6 +85,20 @@ alter table archive.config drop column if exists probe_sample;
 -- pgpm._archive_step, is its successor.
 drop table if exists archive.ledger;
 
+-- Which relation an object-key base belongs to (#822). A key base is everything archive._object_key puts
+-- before a chunk's stem, <prefix><schema>.<table> quoted as that function quotes it, and a NAME: a dropped
+-- table's name can be taken by a new one, and a renamed table's by another. The first relation to archive
+-- under a base claims it here and keeps the key shape it always had; any other relation that computes the
+-- same base gets its oid in the key instead (archive._object_key, below), so it can never PUT over an
+-- object an earlier relation wrote. Nothing deletes from this table, deliberately: pgpm.forget_missing()
+-- deletes a dropped table's pgpm.archive_ledger rows, which leaves the bucket object as the ONLY copy of the
+-- rows retire() dropped, and the claim is what still remembers whose that object is.
+create table if not exists archive.object_key_owner (
+  key_base   text        primary key,
+  parent_oid oid         not null,
+  claimed_at timestamptz not null default now()
+);
+
 -- Operator interface for archive.config: an upsert with every connection-setting column as a
 -- named, defaulted parameter, guarding that p_parent is actually pgpm-managed first -- an operator
 -- should never need a raw `insert into archive.config` for normal use. Needed by BOTH paths this
@@ -2445,9 +2459,21 @@ $$;
 -- 2024010105000005, and the second chunk's PUT overwrote the first. With the offset fixed at +00 the
 -- digits name one instant, the stem of a chunk no longer depends on who ticks it, and keys sort by time.
 -- A stem written from a UTC session (pg_cron's, usually) is unchanged.
+--
+-- The digits alone still lost two distinctions (#823). The UTC rendering of a BC instant ends ` BC`
+-- (`2024-01-01 00:00:00+00 BC`), and the era was one of the characters thrown away, so a chunk at 2024-01-01
+-- BC and one at 2024-01-01 AD of one table shared a key and the second PUT replaced the first while both
+-- reported their rows archived. And a fraction of a second has no fixed width, so `00:00:00.1+00` in 2024
+-- and `00:00:01+00` in the five-digit year 20240 both left 20240101000000100. So the decimal point is kept
+-- and a BC instant's stem ends `BC`: everything after the year is fixed-width once the point marks where a
+-- fraction starts (ISO output never ends a fraction in 0, so the last two digits are always the `+00`
+-- offset), and the stem reads back to one instant. A whole-second AD instant with a four-digit year has
+-- neither, so its stem, every stem written so far in practice, is unchanged.
 create or replace function archive._object_stem(p_kind text, p_lo text)
 returns text language sql stable set timezone = 'UTC' set datestyle = 'ISO, MDY' as $$
-  select case when p_kind = 'id' then p_lo else regexp_replace(p_lo::timestamptz::text, '[^0-9]', '', 'g') end;
+  select case when p_kind = 'id' then p_lo
+              else regexp_replace(p_lo::timestamptz::text, '[^0-9.]', '', 'g')
+                   || case when p_lo::timestamptz::text like '% BC' then 'BC' else '' end end;
 $$;
 
 -- A chunk's object key: <prefix><schema>.<table>_<stem><ext>. The parent is named by IDENTITY,
@@ -2460,13 +2486,59 @@ $$;
 -- is what regclass::text already printed for a parent off the path, quoted the same way, so a key written
 -- from such a session is unchanged. Keys already in pgpm.archive_ledger stay as written: nothing derives
 -- a key from a chunk's bounds after the upload, so an existing object stays findable through its row.
+--
+-- A name is not an identity, though, and both transports PUT unconditionally (#822). After the runbook's
+-- "drop the table and run pgpm.forget_missing()", which deletes the dropped table's ledger rows, a new
+-- managed table taking the same name and prefix archived its [0, 10000) to the same key and replaced the
+-- old table's only copy of the rows retire() had dropped. So the base <prefix><schema>.<table> is claimed in
+-- archive.object_key_owner by the first relation to archive under it, which keeps the shape above, and any
+-- other relation gets <prefix><schema>.<table>.<oid>_<stem><ext>. That shape cannot collide with a claimed
+-- one: no stem holds an underscore, so a key's last `_` ends its base, and a claimed base never ends in `.`
+-- and digits (quote_ident quotes an identifier that starts with a digit). The claim is taken in the tick's
+-- own transaction, before the PUT, so a tick that rolls back leaves no claim, and the caller's snapshot
+-- missing a concurrent one can only land on the oid shape, never on another relation's key. What is left is
+-- oid reuse: after the OID counter wraps, a relation given a dropped one's oid AND its name could reach the
+-- old key again.
 create or replace function archive._object_key(p_parent regclass, p_prefix text, p_kind text, p_lo text, p_ext text)
-returns text language sql stable as $$
+returns text language plpgsql as $$
+declare v_base_q text; v_owner oid;
+begin
   select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(c.relname)
-         || '_' || archive._object_stem(p_kind, p_lo) || p_ext
+    into v_base_q
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
    where c.oid = p_parent;
+  insert into archive.object_key_owner (key_base, parent_oid) values (v_base_q, p_parent::oid)
+    on conflict (key_base) do nothing
+    returning parent_oid into v_owner;
+  if v_owner is null then
+    select o.parent_oid into v_owner from archive.object_key_owner o where o.key_base = v_base_q;
+  end if;
+  return v_base_q
+      || case when v_owner is not distinct from p_parent::oid then '' else '.' || p_parent::oid::text end
+      || '_' || archive._object_stem(p_kind, p_lo) || p_ext;
+end;
 $$;
+
+-- Seeds archive.object_key_owner from the keys pgpm.archive_ledger already records (#822), so a table that
+-- archived before the claims existed owns its base too, and a new table taking its name after a drop and
+-- pgpm.forget_missing() still gets the oid shape. A ledger key's base is the key up to its last `_`; keys
+-- already in the oid shape (`.<digits>_` before the stem) name a base that is not theirs and are skipped.
+-- Where several relations recorded one base, the earliest archived owns it: if two tables already
+-- collided before this release, the first one's surviving objects are the ones left to protect. Run by
+-- install, below, on every (re-)install; claims already made are left as they are.
+create or replace function archive._claim_archived_key_bases() returns int language sql as $$
+  with claimed as (
+    insert into archive.object_key_owner (key_base, parent_oid, claimed_at)
+    select distinct on (b.key_base) b.key_base, b.parent_oid, b.archived_at
+      from (select regexp_replace(l.s3_key, '_[^_]*$', '') as key_base, l.parent_table::oid as parent_oid, l.archived_at
+              from pgpm.archive_ledger l
+             where l.s3_key like '%\_%' and l.s3_key !~ '\.[0-9]+_[^_]*$') b
+     order by b.key_base, b.archived_at, b.parent_oid
+    on conflict (key_base) do nothing
+    returning 1)
+  select count(*)::int from claimed;
+$$;
+do $$ begin perform archive._claim_archived_key_bases(); end $$;
 
 -- single read, single PUT (optionally one gzip member for the whole body). No pagination, so no
 -- tiebreak is needed: a plain `order by` with no LIMIT never splits a run of ties across pages.
