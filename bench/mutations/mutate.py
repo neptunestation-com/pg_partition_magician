@@ -5476,6 +5476,52 @@ select is(
         "phases 1 and 2 committed the bound and the claim. tests/208's pinned refusal in part F catches it.",
         [("  if v_key_clash is not null then\n", "  if false and v_key_clash is not null then\n", 1)],
     ),
+    "cutover_secondary_unique_as_index": (
+        "bench/cutover_secondary_unique_constraint.sh",
+        "Issue #828 put back: step 9b carries an index that backs a secondary UNIQUE constraint the way it "
+        "carries a bare one, as a partitioned unique index <name>_pgpm, so the parent has no constraint by "
+        "the name (ON CONFLICT ON CONSTRAINT <name> fails with 42704) and a DEFERRABLE one is immediate on "
+        "every forward partition. One site, the constraint branch switched off, which leaves exactly the "
+        "pre-fix loop; tests/225's name, upsert, deferral and definition assertions catch it.",
+        [("      if found then\n        if right(v_ucon_def, length(v_ucon_sfx)) is distinct from v_ucon_sfx then\n",
+          "      if false then\n        if right(v_ucon_def, length(v_ucon_sfx)) is distinct from v_ucon_sfx then\n", 1)],
+    ),
+    "untransmute_unique_names_one": (
+        "bench/cutover_secondary_unique_constraint.sh",
+        "Issue #828's reverse cut short: untransmute hands back only the first pgpm_key_<index oid> name, as "
+        "it did when the key was the only constraint step 8 renamed, so a restored table keeps a unique "
+        "constraint under pgpm_key_<index oid> and every statement naming it fails with 42704. tests/225's "
+        "part D catches it.",
+        [("  for v_i in 1 .. coalesce(array_length(v_key_mons, 1), 0) loop\n",
+          "  for v_i in 1 .. least(coalesce(array_length(v_key_mons, 1), 0), 1) loop\n", 1)],
+    ),
+    "transmute_unique_key_clash_unchecked": (
+        "bench/cutover_secondary_unique_constraint.sh",
+        "Issue #828's refusal left out: the up-front check asks whether pgpm_key_<index oid> is free for the "
+        "key alone, not for each secondary unique constraint 9b renames the same way, so a relation holding "
+        "that name fails the rename raw inside the cutover after phases 1 and 2 committed the bound and the "
+        "claim. tests/225's pinned refusal in part E catches it.",
+        [("                  or exists (select 1 from pg_constraint c\n"
+          "                              where c.conrelid = p_parent and c.contype = 'u' and c.conindid = i.indexrelid))) k\n",
+          "                  or false)) k\n", 1)],
+    ),
+    "cutover_tablespace_dropped": (
+        "bench/cutover_tablespace.sh",
+        "Issue #829 put back: the cutover creates the parent in the database default whatever tablespace the "
+        "table is in, so every partition obtain, extend_to and a regrain mint from it lands there too. One "
+        "site, the SET TABLESPACE switched off; tests/226's part A catches it, while part B's default-"
+        "tablespace table still passes.",
+        [("  if v_spc is not null then\n    execute format('alter table %s set tablespace %I', v_parent::text, v_spc);\n",
+          "  if false then\n    execute format('alter table %s set tablespace %I', v_parent::text, v_spc);\n", 1)],
+    ),
+    "transmute_tablespace_unchecked": (
+        "bench/cutover_tablespace.sh",
+        "Issue #829's refusal left out: nothing asks up front whether the caller can create a relation in the "
+        "table's tablespace, so one who cannot fails with a raw 42501 inside the cutover, after phases 1 and "
+        "2 committed the bound and the claim. tests/226's pinned refusal in part C catches it.",
+        [("  if v_spc is not null and not has_tablespace_privilege(v_spc, 'CREATE') then\n",
+          "  if false then\n", 1)],
+    ),
     "unbuilt_cell_type_holder_unnamed": (
         "bench/unbuilt_cell_type_holder.sh",
         "Pre-#790 _log_unbuilt_cell: the holder is resolved through to_regclass alone, so when a type (an "

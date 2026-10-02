@@ -100,7 +100,16 @@ of its parent's: without it a keyless `FULL` table in a publication fails every 
 row past the monolith. A change to the parent's identity made later reaches the partitions minted after
 it, not the ones that already exist. The reused **key keeps its constraint name** on the parent, so
 `INSERT ... ON CONFLICT ON CONSTRAINT <name>` and DDL naming the key keep working; the monolith's copy is
-renamed `pgpm_key_<index oid>` to make way, and an `untransmute` hands the original name back. A sequence the table
+renamed `pgpm_key_<index oid>` to make way, and an `untransmute` hands the original name back. Every other
+**unique constraint** (one whose key includes the control column, beside the reused key) is carried the
+same way: as a constraint on the parent, under its own name and with its definition (`NULLS NOT DISTINCT`,
+`INCLUDE`, the index's storage parameters) and its deferrability, so `ON CONFLICT ON CONSTRAINT <name>` and a
+deferred check keep working on every partition; its monolith copy is renamed `pgpm_key_<index oid>` and
+handed back by `untransmute` too. A bare unique index is carried as a partitioned index `<index>_pgpm`. The
+parent is created in the table's **tablespace**, so every partition pgpm mints from it lands there as well
+(a table in the database default stays there). That needs `CREATE` on the tablespace: `transmute` refuses a
+caller without it, and the role that runs maintenance needs it too, since it creates the forward partitions.
+A sequence the table
 **owns** through a column (a `serial`, or an explicit `OWNED BY`) is handed to the same column of the
 parent, so retention can drop the monolith like any other partition. All of it is
 captured before the rename and re-applied inside
@@ -328,10 +337,11 @@ limit, which pgpm never truncates (the message names the offending name and says
 the table name by; the budget is under [Partition naming](#partition-naming)); a secondary index's name is
 longer than 58 bytes, so the `<index>_pgpm` name of its partitioned copy would not fit (PostgreSQL's own
 auto-names reach 63; the message names each such index, and `ALTER INDEX ... RENAME TO` a shorter name
-clears it); or a relation already
+clears it; an index behind a unique constraint is exempt, since the parent takes the constraint's own name);
+the table is in a tablespace the caller has no `CREATE` on (the message names it); or a relation already
 occupies one of the `<index>_pgpm` names the conversion needs for the partitioned copies of the table's
 secondary indexes (also usually a leftover from an interrupted run), or the `pgpm_key_<index oid>` name the
-monolith's copy of the key takes.
+monolith's copy of the key, or of a unique constraint, takes.
 
 ```sql
 call pgpm.transmute('public.search_history', 'id', interval '1 month',

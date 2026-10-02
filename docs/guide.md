@@ -886,7 +886,9 @@ stays right, which is exactly what `regrain`'s own transitional rename does.
 `transmute` copies the old table's non-unique secondary indexes onto the parent as partitioned indexes
 (reusing the monolith's existing index, no rebuild), so they propagate to every partition, including the
 fine children that regrain creates. A unique secondary index is carried the same way **when its key
-includes the partition key** (so global uniqueness is genuinely preserved). One whose key excludes the
+includes the partition key** (so global uniqueness is genuinely preserved). One that backs a `UNIQUE`
+constraint is carried as the constraint, under its own name and with its deferrability, so
+`ON CONFLICT ON CONSTRAINT <name>` and a `DEFERRABLE` check work on every partition as they did on the table. One whose key excludes the
 partition key cannot be a partitioned unique index, so `transmute` **refuses** rather than silently
 dropping the guarantee: add the partition key to that index, or drop it, then re-transmute. An exclusion
 constraint (`EXCLUDE`) is refused for the same reason: its index cannot be carried onto a partitioned
@@ -1033,7 +1035,10 @@ For step-by-step procedures when an alert fires, see the [runbook](runbook.md). 
 - **Logical-replication subscribers are covered.** Both pgpm triggers, the write block and the regrain
   change capture, are enabled `ALWAYS`, so a write applied with `session_replication_role = replica` is
   refused, or captured, exactly as an ordinary write is.
-- **Unique secondary indexes** are carried when their key includes the partition key; otherwise refused.
+- **Unique secondary indexes** are carried when their key includes the partition key; otherwise refused. A
+  unique constraint stays a constraint, under its own name and with its deferrability.
+- **The tablespace** is carried: the parent is created in the table's, so every partition pgpm mints lands
+  there, and the roles that run `transmute` and maintenance need `CREATE` on it.
 - **The key is never rewritten;** a primary key or unique constraint that includes the control column is
   reused in place, under its own constraint name on the parent, and a keyless table is partitioned
   keyless. The control column must be `NOT NULL`.
