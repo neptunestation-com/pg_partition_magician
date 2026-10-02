@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **`bench/transmute_cutover_order.sh` orders the policy replay, not only the ENABLE ROW LEVEL SECURITY**
+  (#845). Its PASS line named the RLS and policies replay, but it located only the ENABLE, so a copy of
+  `_transmute` whose CREATE POLICY loop ran after both cutover renames, inside the outage #344 keeps the new
+  parent's configuration out of, installed, transmuted and passed. The CREATE POLICY is now found as the
+  `execute format('...` that issues it, exactly once, before the first rename. The new mutation
+  `transmute_cutover_late_policy` moves that loop alone.
+- **The `_frontier_native` half of #325 has a guard of its own** (#846). `tests/85` and
+  `bench/frontier_drought.sh` asserted only that a partition covers now() and that a write at now() is accepted,
+  which transmute's monolith already satisfies through its own inline `greatest(decoded, now())`, so both passed
+  with `_frontier_native` reverted to the stale data maximum, the defect that refuses every write once a drought
+  outlasts the monolith. Both now also require `_frontier_native` itself at or past now() and a forward
+  partition past the monolith covering now() + 1 month, and each guard tick runs `maintain_obtain` after
+  `maintain`. The new mutation `frontier_native_data_only` reverts that one site; `frontier_data_only` still
+  reverts both.
 - **`from_hypertable` recognises its own change capture by its record, not by the table's current name**
   (#842). The swap's trigger carry (#787) left out the capture trigger whose function was named for the
   hypertable's current schema and relname, so after a tracking copy that was never cut over and an
