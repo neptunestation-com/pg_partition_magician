@@ -4214,6 +4214,50 @@ $$;''',
           "    continue when v_boundary is not null and not pgpm._native_gt(cfg.control_kind, r.hi, v_boundary);\n",
           "", 1)],
     ),
+    "control_followed_noop": (
+        "bench/control_column_rename.sh",
+        "Issue #826, the pre-fix shape at every reader: pgpm._control_followed hands back the control column "
+        "name recorded at transmute instead of the partition key's current one. After ALTER TABLE ... RENAME "
+        "COLUMN of the key, obtain's ceiling check runs `select '<bound>'::` and every tick logs skip_obtain, "
+        "the id frontier, extend_to, regrain's copy and untransmute's CHECK name a column that no longer "
+        "exists, and set_partition_tz and set_regrain fail open. One site, the helper's lookup. tests/219 "
+        "parts A to E catch it.",
+        [("  p_cfg.control_column := coalesce(\n"
+          "    (select a.attname\n",
+          "  p_cfg.control_column := coalesce(\n"
+          "    (select null::name\n", 1)],
+    ),
+    "control_followed_obtain_only": (
+        "bench/control_column_rename.sh",
+        "Issue #826, the per-site fix: only the line the issue names follows the rename (obtain's ceiling "
+        "check reads the column's type through the partition key), and every other reader keeps the recorded "
+        "name. The reported symptom is gone, so tests/219 part A passes; parts B to E (the id frontier, "
+        "extend_to, regrain, set_partition_tz, untransmute) catch it.",
+        [("  p_cfg.control_column := coalesce(\n"
+          "    (select a.attname\n",
+          "  p_cfg.control_column := coalesce(\n"
+          "    (select null::name\n", 1),
+         ("    from pg_attribute a where a.attrelid = p_parent and a.attname = cfg.control_column;\n\n"
+          "  v_frontier := pgpm._frontier_native(p_parent);\n",
+          "    from pg_attribute a join pg_partitioned_table pt on pt.partrelid = a.attrelid and a.attnum = pt.partattrs[0]\n"
+          "   where a.attrelid = p_parent;\n\n"
+          "  v_frontier := pgpm._frontier_native(p_parent);\n", 1)],
+    ),
+    "control_followed_missing_at_retain": (
+        "bench/control_column_rename.sh",
+        "Issue #826, the class rather than a site: one reader added (or edited) without the follow. "
+        "pgpm.retain loads its config row and goes on without pgpm._control_followed, so after a rename it "
+        "would hand the stale name to everything it calls. No part of tests/219 exercises retain after a "
+        "rename, so only part F, which checks that every whole-row config load in the installed code is "
+        "followed, catches it.",
+        [("  select * into cfg from pgpm.config where parent_table = p_parent;\n"
+          "  cfg := pgpm._control_followed(cfg);\n"
+          "  if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;\n"
+          "  -- #724: first, take back",
+          "  select * into cfg from pgpm.config where parent_table = p_parent;\n"
+          "  if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;\n"
+          "  -- #724: first, take back", 1)],
+    ),
     "retain_recall_parent_schema": (
         "bench/retain_recall_moved_parent.sh",
         "Issue #778, the pre-fix shape: _retain_recall resolves a retiring partition in the PARENT's current "

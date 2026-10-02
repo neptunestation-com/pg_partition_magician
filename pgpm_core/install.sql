@@ -1068,6 +1068,35 @@ returns text language sql stable as $$
   select name from pg_timezone_names where lower(name) = lower(p_tz) order by name limit 1;
 $$;
 
+-- The config row with control_column set to the control column's CURRENT name (#826). pgpm.config records
+-- the column by the name it had at transmute, and PostgreSQL allows ALTER TABLE ... RENAME COLUMN of a
+-- partition-key column: the key is held by attnum, so the table keeps routing under the new name. A reader
+-- that went on using the recorded name failed one of two ways after such a rename. It raised (obtain's
+-- ceiling check read the column's type by name, found nothing, and ran `select '<bound>'::`, so every tick
+-- logged skip_obtain and the forward grid never grew again; _frontier_native, extend_to, regrain's copy and
+-- untransmute's CHECK named a column that no longer exists), or it failed OPEN (a type lookup that finds
+-- nothing reads as "not naive" and "not an integer", so set_partition_tz moved a naive grid's zone and
+-- set_regrain stored a step no tick can place). The partition key is the identity anchor here: the parent
+-- is range-partitioned on exactly the control column, by attnum, and PostgreSQL refuses to drop or retype
+-- that column, so pg_partitioned_table.partattrs[0] names it for the life of the table whatever it is
+-- called. Every load of a config row (`select * into cfg from pgpm.config ...`) is followed by
+-- `cfg := pgpm._control_followed(cfg)`, so every reader of cfg.control_column sees the current name
+-- (an assignment leaves FOUND as the load set it, so the `if not found` after it still reads the load), and
+-- tests/219 fails on a load without it. The recorded name is the fallback, for a parent that is not (or no
+-- longer) partitioned.
+create or replace function pgpm._control_followed(p_cfg pgpm.config)
+returns pgpm.config language plpgsql stable as $$
+begin
+  p_cfg.control_column := coalesce(
+    (select a.attname
+       from pg_partitioned_table pt
+       join pg_attribute a on a.attrelid = pt.partrelid and a.attnum = pt.partattrs[0]
+      where pt.partrelid = p_cfg.parent_table and pt.partnatts = 1 and not a.attisdropped),
+    p_cfg.control_column);
+  return p_cfg;
+end;
+$$;
+
 -- Is the control column NAIVE: timestamp without time zone, or date? Such a value carries no zone of
 -- its own, so its grid is the column's own wall clock: partition_tz is 'UTC' for it (#504) and
 -- _col_to_native reads it as wall time in that zone. false for every other column type, and for a
@@ -1600,6 +1629,7 @@ begin
     raise exception 'pg_partition_magician: managed table with oid % no longer exists (dropped without pgpm.untransmute); run pgpm.forget_missing() to clear its pgpm state', p_parent::oid;
   end if;
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if cfg.control_kind = 'time' then return pgpm._ts_text(now()); end if;
   -- ORDER BY ... LIMIT 1 (not max()) so it works for uuid too; uses the index.
   -- Qualify with an alias so ORDER BY binds to the (typed) column, not the ::text projection.
@@ -1783,6 +1813,7 @@ begin
   -- FOR UPDATE before it judges the grid) waits for the cells this call builds to commit, and this read
   -- waits for a zone change in flight and then sees the zone it committed. See pgpm.set_partition_tz.
   select * into cfg from pgpm.config where parent_table = p_parent for key share;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
@@ -1904,6 +1935,7 @@ begin
   -- FOR KEY SHARE (#725), for the reason obtain() takes it: the zone this walk is computed in cannot
   -- change under it, and set_partition_tz cannot judge the grid around the cells it has not committed.
   select * into cfg from pgpm.config where parent_table = p_parent for key share;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
@@ -2102,6 +2134,7 @@ declare
   v_lo_lit text; v_hi_lit text; v_vals text[] := '{}'; v_more text[];
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
 
   select a.attnum into v_ctrl_attnum from pg_attribute a
@@ -2305,6 +2338,7 @@ declare
   v_chunks bigint;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   if cfg.retain is null then
     raise exception 'pg_partition_magician: % has no retention policy (config.retain is null); retire() drops only what retention allows', p_parent;
@@ -2633,6 +2667,7 @@ declare
   v_db oid := (select oid from pg_database where datname = current_database());
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   -- nothing under way, nothing to take back: the ordinary tick reads no frontier here
   if not exists (select 1 from pgpm.part where parent_table = p_parent and attached and retiring_at is not null) then
@@ -2738,6 +2773,7 @@ declare
   cfg pgpm.config; v_boundary text; v_ncast text; r record; v_dropped int := 0;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   -- #724: first, take back any retirement this horizon no longer reaches (recall its armed detach, or
   -- re-attach the partition it already took out of the parent). Ahead of the null check, because null
@@ -2972,6 +3008,7 @@ declare
   v_now regclass; v_substituted boolean;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   v_boundary := pgpm._retain_boundary(cfg);
 
@@ -3093,6 +3130,7 @@ returns pgpm.archive_result language plpgsql as $$
 declare cfg pgpm.config; v_nsp name; v_rows bigint; v_result pgpm.archive_result;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #727: the partition's own schema, not the parent's
   execute format('select count(*) from %I.%I where %I >= %L and %I < %L',
@@ -3113,6 +3151,7 @@ returns pgpm.archive_result language plpgsql as $$
 declare cfg pgpm.config; v_result pgpm.archive_result;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   if cfg.archive_fn is null then
     v_result.covered_hi := p_hi;
@@ -3184,6 +3223,7 @@ declare
   v_next_distinct_col text; v_stop text; v_unit text; v_cval_q text;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #727: the partition's own schema, not the parent's
   select p.lo, p.hi into v_child_lo, v_child_hi from pgpm.part p
@@ -3311,6 +3351,7 @@ returns boolean language plpgsql as $$
 declare cfg pgpm.config; v_child_hi text; v_watermark text;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   if cfg.archive_fn is null then return true; end if;
 
@@ -3388,6 +3429,7 @@ declare
   r record; v_range record; v_result pgpm.archive_result; v_breach text; v_count int := 0;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   if cfg.archive_fn is null then return 0; end if;
 
@@ -3745,6 +3787,7 @@ declare
   v_keyidx oid; v_keycols_q text; v_newvals_q text; v_oldvals_q text; v_bad_q text;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   select nsp, delta, fn into v_nsp, v_delta, v_fn from pgpm._regrain_capture_derive(p_parent);
 
   select coalesce(
@@ -3920,6 +3963,7 @@ returns bigint language plpgsql stable as $$
 declare cfg pgpm.config; v_nsp name; v_delta name; v_n bigint;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   select nsp, delta into v_nsp, v_delta from pgpm._regrain_capture_names(p_parent);
   if to_regclass(format('%I.%I', v_nsp, v_delta)) is null then return 0; end if;
   execute format('select count(*) from %I.%I where %3$s >= %4$L and %3$s < %5$L',
@@ -3946,6 +3990,7 @@ returns void language plpgsql as $$
 declare cfg pgpm.config; v_nsp name; v_delta name;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
   select delta into v_delta from pgpm._regrain_capture_names(p_parent);
   if to_regclass(format('%I.%I', v_nsp, v_delta)) is null then return; end if;
@@ -3990,6 +4035,7 @@ declare
   v_reltuples real; v_delta_has_rows boolean;   -- the delta's row estimate, and whether it holds a row (#710)
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   select n.nspname into v_nsp
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
   select delta into v_delta from pgpm._regrain_capture_names(p_parent);
@@ -4189,6 +4235,7 @@ begin
     return;
   end if;
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then return; end if;
   select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
 
@@ -4465,6 +4512,7 @@ declare
 begin
   perform pgpm._regrain_lock(p_parent);   -- #554: waits for a step in flight, and holds the next one off
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
 
@@ -4562,6 +4610,7 @@ begin
   -- subtransaction (fail_retain_drop) and the next tick retries it.
   perform pgpm._regrain_lock(p_parent);
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then return 0; end if;
   select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
   v_ncast := pgpm._native_type(cfg.control_kind);
@@ -4647,6 +4696,7 @@ returns void language plpgsql stable as $$
 declare cfg pgpm.config; v_typname name; v_months numeric; v_rest interval;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   select t.typname into v_typname
     from pg_attribute a join pg_type t on t.oid = a.atttypid
    where a.attrelid = p_parent and a.attname = cfg.control_column and not a.attisdropped;
@@ -4694,6 +4744,7 @@ returns void language plpgsql stable as $$
 declare cfg pgpm.config;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not pgpm._native_gt(cfg.control_kind,
                          pgpm._grid_next(cfg.control_kind, p_step, cfg.partition_anchor, cfg.partition_tz),
                          cfg.partition_anchor) then
@@ -4726,6 +4777,7 @@ begin
   -- cancel) waits for this step to commit and this step reads what the last one left
   perform pgpm._regrain_lock(p_parent);
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
@@ -5406,6 +5458,7 @@ returns int language plpgsql as $$
 declare cfg pgpm.config; v_ncast text; v_mon name;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   v_ncast := pgpm._native_type(cfg.control_kind);
   execute format('select child_name from pgpm.part where parent_table = %L::regclass and attached order by lo::%s asc limit 1',
@@ -7729,6 +7782,7 @@ declare
   v_key_name name; v_key_mon name;   -- #789: the parent's key name, and the monolith copy's pgpm_key_<oid>
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then
     raise exception 'pg_partition_magician: % is not managed by pgpm (nothing to untransmute)', p_parent;
   end if;
@@ -8250,6 +8304,7 @@ begin
   -- config, so the in-flight test below judges a run's committed marks, never around an uncommitted prepare
   perform pgpm._regrain_lock(p_parent);
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
 
   -- #588: a zero or negative target is refused first. It is "finer" than any partition_step, so the #341
@@ -8389,6 +8444,7 @@ declare
   v_hit name;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
 
   if p_retain is not null then
@@ -8509,6 +8565,7 @@ begin
   -- it to their transaction's end, which FOR UPDATE waits for, so the grid judged below includes every
   -- cell they built; and while this holds it, they wait and then compute in the zone it committed.
   select * into cfg from pgpm.config where parent_table = p_parent for update;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   if cfg.control_kind = 'id' then
     raise exception 'pg_partition_magician: % is an id grid, which has no calendar; partition_tz is never consulted for it and stays ''UTC''', p_parent;
@@ -8668,6 +8725,7 @@ declare
   v_regrain_to text;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   if cfg.paused then p_status := 'paused'; return; end if;
 
@@ -8975,6 +9033,7 @@ declare
   v_top text;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   -- Independently honor paused: this now runs on its own cadence and cannot assume maintain() ran
   -- first, or at all, in the same tick.
@@ -9862,6 +9921,7 @@ begin
     return 0;
   end if;
   select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;

@@ -2463,7 +2463,7 @@ One row per managed table (`parent_table` is the primary key). Columns:
 | Column | Type | Meaning |
 |---|---|---|
 | `parent_table` | `regclass` | the managed partitioned parent |
-| `control_column` | `name` | the partition-key column |
+| `control_column` | `name` | the partition-key column, by the name it had at transmute. pgpm resolves the column through the parent's partition key (its attribute number) on every read, so after `ALTER TABLE ... RENAME COLUMN` of it every step uses the new name; this value is not rewritten |
 | `control_kind` | `text` | `time`, `id`, `uuidv7`, or `text_time` |
 | `partition_step` | `text` | grid width (`1 month` for time/uuidv7/text_time; a bigint for id) |
 | `partition_anchor` | `text` | grid origin, a native value in the same form as `pgpm.part`'s bounds |

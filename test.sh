@@ -864,6 +864,7 @@ run_perf() {
     "bench/transmute_reads_caller_rls.sh pgpm_perf180"
     "bench/regrain_drift_values.sh pgpm_perf178"
     "bench/regrain_capture_follows_key.sh pgpm_perf179"
+    "bench/control_column_rename.sh pgpm_perf182"
   )
   local selected=()
   local n=${#guards[@]} idx
