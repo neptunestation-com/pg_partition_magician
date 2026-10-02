@@ -2576,6 +2576,18 @@ midnight twice a year, so two adjacent day cells could otherwise start on the sa
 adjacent hour cells share a wall hour every autumn) and share a name. UTC never repeats a date or an
 hour.
 
+A regrain toward a fixed step clamps a child's first cell to the child's own lower bound when that bound
+is off the target's lattice: a monthly grid in `America/New_York` regrained to `'1 day'` starts February at
+05:00Z while the day cells start at 00:00Z, so February's first cell is `[02-01 05:00Z, 02-02 00:00Z)`. A
+label at the step's grain is the floor of the instant, which that cell shares with the cell beside it (here
+January's last, `[02-01 00:00Z, 05:00Z)`, `events_p2024_02_01`), so a clamped cell is labelled at the
+coarsest grain, no coarser than the step's, at which both its bounds read exactly: `events_p2024_02_01_05`,
+`events_p2024_01_31_1830` for a month edge in `Asia/Kolkata`, down to the microsecond. A clamped cell
+whose bounds already read exactly at the step's grain (a weekly regrain of a UTC monthly grid) keeps the
+plain name, and every cell on the lattice keeps its name. The finer label makes the name up to 14 bytes
+longer; one that would exceed 63 bytes is refused like any other (see below): `regrain` raises, and
+auto-regrain logs `skip_regrain` on each tick until the table is renamed to a shorter name.
+
 A day or week partition created before that rule keeps the name it was given, the wall date of its start
 in `partition_tz`. East of UTC, with the grid anchored at local midnight, that is exactly the UTC date
 of the cell after it, so on such a grid the next cell's plain name is already taken. When `obtain` or

@@ -3361,8 +3361,8 @@ $$;''',
           "       and not pgpm._native_gt(cfg.control_kind, p.lo, v_sub_lo) and not pgpm._native_gt(cfg.control_kind, v_sub_lo, p.lo)\n"
           "       and not pgpm._native_gt(cfg.control_kind, p.hi, v_sub_hi) and not pgpm._native_gt(cfg.control_kind, v_sub_hi, p.hi);\n"
           "    v_sub_name := coalesce(v_sub_name,\n"
-          "                           pgpm._part_name(v_rel, cfg.control_kind, v_step, v_sub_lo, v_sub_hi, cfg.partition_tz));\n",
-          "    v_sub_name := pgpm._part_name(v_rel, cfg.control_kind, v_step, v_sub_lo, v_sub_hi, cfg.partition_tz);\n", 1)],
+          "                           pgpm._regrain_sub_name(v_rel, cfg, v_step, v_sub_lo, v_sub_hi));   -- #783\n",
+          "    v_sub_name := pgpm._regrain_sub_name(v_rel, cfg, v_step, v_sub_lo, v_sub_hi);\n", 1)],
     ),
     "regrain_copy_into_named_relation": (
         "bench/regrain_copy_name_clash.sh",
@@ -4983,6 +4983,18 @@ select is(
          (UNTRANSMUTE_ACL_CAPTURE_BODY, "", 1),
          ("  -- THE GATE, AGAIN, UNDER THE LOCK (#443).",
           UNTRANSMUTE_ACL_CAPTURE_HEAD + UNTRANSMUTE_ACL_CAPTURE_BODY + "\n  -- THE GATE, AGAIN, UNDER THE LOCK (#443).", 1)],
+    ),
+    "regrain_clamped_name_by_floor": (
+        "bench/regrain_clamped_subrange_names.sh",
+        "Pre-#783 naming: a regrain sub-range clamped to a child's off-lattice lo is named at the target "
+        "step's own granularity, so a day cell is labelled by the UTC date of its start, which it shares with "
+        "the lattice cell before or after it. On a monthly New York grid regrained to a day, February's "
+        "clamped first cell renders the name January's last cell holds and every regrain of February is "
+        "refused; a Los Angeles monolith's clamped first hour takes the name of the cell after it and "
+        "auto-regrain logs skip_regrain on every tick. One site, _regrain_sub_name's finer label replaced "
+        "by _part_name's, so the mutant names every sub-range as before. tests/209 parts A, B and C catch it.",
+        [("      return pgpm._part_name(p_relname, cfg.control_kind, v_label_steps[i], p_lo, null, cfg.partition_tz);\n",
+          "      return pgpm._part_name(p_relname, cfg.control_kind, p_step, p_lo, p_hi, cfg.partition_tz);\n", 1)],
     ),
     "hypertable_cutover_refusals_reordered": (
         "bench/hypertable_replica_capture.sh",

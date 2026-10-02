@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **A regrain names a clamped first cell by its own start, so a day regrain of a monthly grid in a non-UTC
+  zone completes** (#783). A regrain toward a fixed step clamps a child's first cell to the child's lower
+  bound when that bound is off the target's lattice, and named it by the UTC date of that bound, which is
+  the label of the cell beside it too: on a monthly `America/New_York` grid regrained to `'1 day'`,
+  February's first cell `[02-01 05:00Z, 02-02 00:00Z)` rendered the `_p2024_02_01` January's last cell
+  held, and every regrain of February was refused; a Los Angeles monolith anchored at local midnight
+  clamped its first hour under the next cell's name, and auto-regrain logged `skip_regrain` on every tick
+  with the capture trigger left on. A clamped cell is now labelled at the coarsest grain, no coarser than
+  the step's, at which both its bounds read exactly (`_p2024_02_01_05`); a lattice cell's name, and a
+  clamped one whose bounds already read exactly at the step's grain, are unchanged.
+  `bench/regrain_clamped_subrange_names.sh` runs tests/209 against the mutation
+  `regrain_clamped_name_by_floor`.
 - **`obtain` builds what fits in half the shared lock table and leaves the rest to the next tick** (#786).
   It is a function, so every partition one call creates holds its locks to that transaction's end, and
   `set_obtain` bounds only the sign of the lookahead: a lookahead past about 2000 missing cells on a stock
