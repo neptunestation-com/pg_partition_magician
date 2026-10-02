@@ -604,12 +604,22 @@ update pgpm.dropped_fk d
 -- table could be neither reversed nor regrained, while restore_incoming_fks and validate_incoming_fks
 -- logged a failure for it on every tick for good. Each of those four calls this first.
 --
--- Two cases, and only these. The referencing table is gone: nothing pgpm could do with the record has
--- anything to act on. Or the record says the key is LIVE (restored_at set) and the referencing table has
--- no foreign key of that name against this parent: the operator dropped it, and putting it back would
+-- Two cases forget, and only these. The referencing table is gone: nothing pgpm could do with the record
+-- has anything to act on. Or the record says the key is LIVE (restored_at set) and the referencing table
+-- has no foreign key of that name against this parent: the operator dropped it, and putting it back would
 -- overrule them. A SUSPENDED record (restored_at null) whose key is absent is the normal state between the
 -- cutover and the restore, not a dangling one, and is left alone. Each forget is logged
 -- forget_incoming_fk, `method` naming the key and why.
+--
+-- And one case adopts (#832): a SUSPENDED record whose key is live again, the operator having re-added it
+-- by hand (the remedy uninstall.sql's refusal and the guide name). Left suspended, restore_incoming_fks
+-- re-added it blindly and logged fail_restore_incoming_fk ("already exists") on every call, and
+-- untransmute, whose pre-drop loop drops only restored records, left it standing on the parent and died
+-- with 23503 at the DETACH. The record is marked restored, validated exactly when the live key is, so
+-- every caller then treats it as the key it is. The match is by the record's identity, the same one the
+-- forget asks after: a foreign key on that referencing table, under that name, AGAINST THIS PARENT. A key
+-- that merely has the name (against another table) is not this one, stays suspended, and its re-add
+-- fails honestly, because the name really is taken. Each adoption is logged adopt_incoming_fk.
 create or replace function pgpm._forget_dangling_fks(p_parent regclass)
 returns int language plpgsql as $$
 declare r record; v_n int := 0;
@@ -632,6 +642,20 @@ begin
                    then format('recorded as re-added, but %s has no such key against this table any more', r.rel_oid::regclass)
                    else format('its referencing table (oid %s) no longer exists', r.rel_oid) end);
     v_n := v_n + 1;
+  end loop;
+  for r in
+    update pgpm.dropped_fk d
+       set restored_at = now(), validated_at = case when k.convalidated then now() end
+      from pg_constraint k
+     where d.parent_table = p_parent and d.restored_at is null
+       and k.conrelid = d.referencing_table and k.conname = d.constraint_name
+       and k.contype = 'f' and k.confrelid = d.parent_table
+    returning d.constraint_name, k.convalidated
+  loop
+    insert into pgpm.log (parent_table, action, method)
+      values (p_parent, 'adopt_incoming_fk',
+              r.constraint_name || ': recorded as dropped, but it is live again on its table against this one'
+              || case when r.convalidated then '' else ' (NOT VALID)' end);
   end loop;
   return v_n;
 end;

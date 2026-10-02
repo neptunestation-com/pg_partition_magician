@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **A preserved incoming key re-added by hand while still recorded as dropped is adopted** (#832).
+  `_forget_dangling_fks` reconciled only a record marked re-added whose key is gone, never the opposite: a
+  record still marked dropped (`restored_at` null) whose key the operator had put back, the remedy uninstall's
+  refusal and the guide name. `restore_incoming_fks` re-added it blindly and logged `fail_restore_incoming_fk`
+  ("already exists") on every call, and `untransmute`, whose pre-drop loop drops only re-added records, left
+  the key on the parent and died with 23503 at the DETACH. The reconcile every caller shares now marks such a
+  record re-added (validated as the live key is), logged `adopt_incoming_fk`, when the live key is on its
+  referencing table, under its name, against this parent; a namesake against another table is not adopted.
+  `tests/227` under `bench/restore_fk_adopts_live_key.sh`, with the mutations
+  `dropped_fk_live_key_never_adopted` and `dropped_fk_adopt_by_name`.
 - **`untransmute` refuses an object typed by the parent's row type, rather than dying on its `DROP`** (#831).
   `_refuse_oid_bound_dependants` (#779) asked `pg_depend` about the parent's `pg_class` row alone, so a
   function taking the managed table's row type (or an array of it), or a column of that type, created since

@@ -4585,6 +4585,30 @@ $$;''',
         [("    delete from pgpm.dropped_fk d\n     where d.parent_table = p_parent\n",
           "    delete from pgpm.dropped_fk d\n     where false and d.parent_table = p_parent\n", 1)],
     ),
+    "dropped_fk_live_key_never_adopted": (
+        "bench/restore_fk_adopts_live_key.sh",
+        "Issue #832, the pre-fix shape: _forget_dangling_fks reconciles only a restored record whose key is "
+        "gone, never a SUSPENDED record whose key the operator re-added by hand. restore_incoming_fks re-adds "
+        "it blindly and logs fail_restore_incoming_fk ('already exists') on every call, and untransmute's "
+        "pre-drop loop skips it, so the live key stops the DETACH with 23503. One site, the adoption's "
+        "UPDATE, which every caller shares. tests/227 parts A and B catch it.",
+        [("     where d.parent_table = p_parent and d.restored_at is null\n"
+          "       and k.conrelid = d.referencing_table and k.conname = d.constraint_name\n",
+          "     where false and d.parent_table = p_parent and d.restored_at is null\n"
+          "       and k.conrelid = d.referencing_table and k.conname = d.constraint_name\n", 1)],
+    ),
+    "dropped_fk_adopt_by_name": (
+        "bench/restore_fk_adopts_live_key.sh",
+        "Issue #832, the plausible-but-wrong fix: adopt a suspended record whose NAME is live on its "
+        "referencing table, without asking that the key be against this parent. A namesake against another "
+        "table is recorded as the restored key, so its honest 'already exists' failure is swallowed and the "
+        "record says live while RI against the parent is off. One site, the adoption's confrelid test. "
+        "tests/227 part A catches it.",
+        [("       and k.contype = 'f' and k.confrelid = d.parent_table\n"
+          "    returning d.constraint_name, k.convalidated\n",
+          "       and k.contype = 'f'\n"
+          "    returning d.constraint_name, k.convalidated\n", 1)],
+    ),
     "regrain_step_mixed_month_duration": (
         "bench/regrain_target_shape.sh",
         "Pre-#674: _regrain_step_shape does not refuse a month count mixed with a duration. _grid_next's "
