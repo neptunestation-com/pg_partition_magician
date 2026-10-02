@@ -706,6 +706,13 @@ run_archive() {
   bash "$(dirname "$0")/bench/archive_key_reused_name.sh" pgpm_test-archive pgpm_perf176 || fail=1
   echo "--- archive object key keeps a BC chunk's era guard (issue #823) ---"
   bash "$(dirname "$0")/bench/archive_stem_era.sh" pgpm_test-archive pgpm_perf177 || fail=1
+  # The to_s3 cursor guard (#834) and the Parquet snapshot lock-entries guard (#632, F5-04) re-run
+  # tests/archive/db/36 and 37 for the same reason: the clean-code halves of the pairs
+  # bench/discriminate.sh completes with the session-rendered cursor and the per-encode snapshot table.
+  echo "--- archive.to_s3 cursor in a non-ISO DateStyle guard (issue #834) ---"
+  bash "$(dirname "$0")/bench/archive_to_s3_cursor_session.sh" pgpm_test-archive pgpm_perf195 || fail=1
+  echo "--- Parquet snapshot lock-table entries guard (issue #632, F5-04) ---"
+  bash "$(dirname "$0")/bench/archive_parquet_snapshot_locks.sh" pgpm_test-archive pgpm_perf196 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi

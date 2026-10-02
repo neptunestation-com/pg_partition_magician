@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+- **`archive.to_s3` pages every row whatever the session's DateStyle and TimeZone** (#834). Its keyset
+  cursor crossed from one page's query to the next as the control value's text in the caller's session, and a
+  non-ISO DateStyle names a timestamptz's zone by abbreviation: in Asia/Shanghai under DateStyle Postgres the
+  `CST` it wrote read back as US Central, the cursor jumped 14 hours, the next page skipped the rows in between
+  and the conservation check refused every multi-page export with nothing writing (in Pacific/Guam the `ChST`
+  did not parse at all and the second page raised). The cursor is now rendered by the new
+  `archive._cursor_text`, which pins TimeZone and DateStyle as `archive._object_stem` does, so it reads back as
+  the same value in any session. The objects' content is unchanged. `tests/archive/db/36` under
+  `bench/archive_to_s3_cursor_session.sh`, with the mutation `to_s3_cursor_session_text`.
+- **A Parquet encode no longer leaves lock-table entries behind it** (#632, F5-04). `archive._pq_snapshot`
+  created its temp table and the encoders dropped it on every encode, and a dropped relation's locks are held
+  to transaction end, so each encode left about eight entries in the shared lock table until commit and one
+  `pgpm._archive_step` grew it by eight per chunk archived. The snapshot relation is now reused by every
+  encode of the same shape in a transaction (emptied, then refilled by one INSERT, still one snapshot), and
+  rebuilt only when the shape changes; the files are byte for byte the same. `tests/archive/db/37` under
+  `bench/archive_parquet_snapshot_locks.sh`, with the mutation `parquet_snapshot_per_encode_table`; the
+  `parquet_per_column_statements` mutation is re-anchored on the new lifecycle.
 - **`from_hypertable` migrates a hypertable with a `serial` column, and keeps the sequences it owns** (#839).
   The copy is made `LIKE ... INCLUDING DEFAULTS`, so a serial column's default on it called the sequence the
   SOURCE's column owned, and the cutover's `DROP TABLE` of the source failed on that dependency after the whole
