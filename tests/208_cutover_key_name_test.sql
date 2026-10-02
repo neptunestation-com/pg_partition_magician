@@ -124,7 +124,7 @@ select conindid as ks_idx, 'pgpm_key_' || conindid as ks_squat
 create table public.:"ks_squat" (x int);
 select throws_like(
   $$ call pgpm.transmute('public.ks', 'k', 100::bigint, p_obtain => 2) $$,
-  'pg_partition_magician: cannot transmute ks -- the name pgpm_key_' || :ks_idx || ' is already taken%',
+  'pg_partition_magician: cannot transmute ks -- the name pgpm_key_' || :'ks_idx' || ' is already taken%',
   'F: transmute refuses up front when the name the monolith''s copy of the key needs is taken, naming it');
 select is((select relkind::text || ' ' || (select count(*) from public.ks)::text from pg_class where oid = 'public.ks'::regclass),
   'r 3', 'F: and the table is left as it was, a plain table holding its 3 rows');
