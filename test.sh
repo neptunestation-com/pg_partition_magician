@@ -855,6 +855,8 @@ run_perf() {
     "bench/orphan_type_guard_id_labels.sh pgpm_perf171"
     "bench/wrapper_tap_verdicts.sh pgpm_perf174"
     "bench/transmute_reads_caller_rls.sh pgpm_perf180"
+    "bench/regrain_drift_values.sh pgpm_perf178"
+    "bench/regrain_capture_follows_key.sh pgpm_perf179"
   )
   local selected=()
   local n=${#guards[@]} idx

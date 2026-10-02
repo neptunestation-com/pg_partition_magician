@@ -141,6 +141,14 @@ alter table pgpm.config add column if not exists regrain_cursor text;
 -- _regrain_capture_derive is defined, below.
 alter table pgpm.config add column if not exists regrain_delta_oid oid;
 alter table pgpm.config add column if not exists regrain_capture_fn_oid oid;
+-- what the regrain in flight copied FROM (#824): the source child's relfilenode, which a table rewrite
+-- replaces, and the attnum of each of its columns by name, which a column dropped and added back replaces.
+-- Recorded by the prepare tick (and again by each restart), before any copy exists, and compared by every
+-- resumed tick (see _regrain_source_drift): DDL that changes the source's values without changing its column
+-- signature fires no row trigger, so only this tells the copies made before it are stale. Meaningful only
+-- while regrain_cursor is set; null for a run begun before this column existed, which records it on its next
+-- tick.
+alter table pgpm.config add column if not exists regrain_source_mark jsonb;
 -- retain() pacing (issue #189): cap how many eligible partitions ONE retain() call will attempt
 -- (write-block, archive-coverage check, drop), so an aged-out backlog spreads across maintenance
 -- ticks (each tick its own transaction via pg_cron) instead of one call carrying the whole backlog
@@ -3789,9 +3797,15 @@ begin
   -- the delta's columns are the key as of THIS regrain and the trigger function below inserts the current
   -- key's column names, so keeping a delta minted under an earlier key (a key column renamed in between)
   -- made every write into the source raise for the life of the regrain. Dropping by recorded oid rather than
-  -- by name is what reaches a delta left under an earlier relname of the parent. The function first: nothing
-  -- depends on the delta, and no trigger can reference the function here, since regrain_step has already
-  -- refused a second in-flight regrain on this parent.
+  -- by name is what reaches a delta left under an earlier relname of the parent. The function before the
+  -- delta: nothing depends on the delta, and no trigger but this source's can reference the function, since
+  -- regrain_step has already refused a second in-flight regrain on this parent.
+  -- That trigger goes first (#817): a restart re-mints capture on a source that still carries
+  -- the trigger minted for an earlier key (see _regrain_capture_drift), and the function cannot be dropped
+  -- from under it. Dropping it takes ACCESS EXCLUSIVE on the source, so every writer in flight there commits
+  -- first, through the old trigger, and every writer after this tick fires the new one. At a first prepare
+  -- the source carries none, and the lock is the one CREATE TRIGGER below takes anyway.
+  execute format('drop trigger if exists pgpm_regrain_capture on %I.%I', v_nsp, p_child);
   if exists (select 1 from pg_proc where oid = cfg.regrain_capture_fn_oid) then
     execute format('drop function %s', cfg.regrain_capture_fn_oid::regprocedure::text);
   end if;
@@ -3828,7 +3842,6 @@ begin
     v_nsp, v_delta, v_keycols_q, v_oldvals_q, v_newvals_q,
     v_nsp, v_delta, v_keycols_q, v_newvals_q);
 
-  execute format('drop trigger if exists pgpm_regrain_capture on %I.%I', v_nsp, p_child);
   execute format('create trigger pgpm_regrain_capture after insert or update or delete on %I.%I for each row execute function %I.%I()',
                  v_nsp, p_child, v_nsp, v_fn);
   -- ENABLE ALWAYS (#450). CREATE TRIGGER leaves a trigger origin-only, which a session running as
@@ -4231,7 +4244,13 @@ $$;
 -- every copy matches. Each side's columns are compared as name, type, collation (when not the type's
 -- own), NOT NULL and generated: the properties regrain_step's copy and reconcile statements and the
 -- swap's ATTACH PARTITION depend on. Defaults, statistics targets and storage are not compared: the
--- copy's rows are inserted with explicit values and ATTACH does not ask. A copy is made LIKE its parent,
+-- copy's rows are inserted with explicit values and ATTACH does not ask. The parent's CHECK constraints
+-- are compared too, by name and expression (#817): ATTACH requires every one of them on the child, so a
+-- CHECK added to the parent mid-regrain failed every swap tick ('child table is missing constraint'), and a
+-- copy still carrying one the parent dropped would refuse rows the parent now accepts. The expression is
+-- compared and not pg_get_constraintdef, because LIKE does not carry NOT VALID and the parent's own CHECK
+-- may be NOT VALID; the copy's bound CHECK (<copy>_ck, under the name pgpm.part recorded or the one the copy
+-- has now) is the copy's own and is left out. A copy is made LIKE its parent,
 -- so the two differ only when the parent has been altered since; regrain_step restarts the run when they
 -- do. One statement over every copy, comparing each relation's column list as one string, and the
 -- difference spelt out for the first that differs only: asked on every resumed tick, and a run toward a
@@ -4248,6 +4267,15 @@ returns text language sql stable as $$
                   case when a.attgenerated <> '' then ' generated' else '' end) as col
       from pg_attribute a join pg_type t on t.oid = a.atttypid
      where (a.attrelid = p_parent or a.attrelid = any(p_copies)) and a.attnum > 0 and not a.attisdropped
+    union all
+    select k.conrelid, format('check %I %s', k.conname, pg_get_expr(k.conbin, k.conrelid))
+      from pg_constraint k
+     where (k.conrelid = p_parent or k.conrelid = any(p_copies)) and k.contype = 'c'
+       and not (k.conrelid <> p_parent
+                and (k.conname = ((select c.relname from pg_class c where c.oid = k.conrelid) || '_ck')::name
+                     or exists (select 1 from pgpm.part pp
+                                 where pp.parent_table = p_parent and not pp.attached and pp.child_oid = k.conrelid
+                                   and k.conname = (pp.child_name || '_ck')::name)))
   ),
   sig as (select attrelid, string_agg(col, ', ' order by col) as s from cols group by attrelid),
   drifted as (
@@ -4264,6 +4292,73 @@ returns text language sql stable as $$
     cross join lateral (select string_agg(col, ', ' order by col) as s
                           from (select col from cols where attrelid = d.attrelid
                                 except select col from cols where attrelid = p_parent) x) l;
+$$;
+
+-- The mark config.regrain_source_mark records (#824): what the copies a run makes are copied FROM. A table
+-- rewrite (ALTER COLUMN ... TYPE ... USING, a volatile default, SET EXPRESSION) gives the source a new
+-- relfilenode, and a column dropped and added back under its old name gives it a new attnum; neither fires a
+-- row trigger, so capture never sees the values they change, and neither need change a column's name or type,
+-- so the copies' signature does not change either.
+create or replace function pgpm._regrain_source_mark(p_child regclass)
+returns jsonb language sql stable as $$
+  select jsonb_build_object('relfilenode', c.relfilenode,
+                            'columns', (select jsonb_object_agg(a.attname, a.attnum) from pg_attribute a
+                                         where a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped))
+    from pg_class c where c.oid = p_child;
+$$;
+
+-- How the source differs from the mark the run recorded in a way that changes VALUES its copies hold
+-- (#824), or null. Rewritten: a new relfilenode. A column replaced: a name in both marks under another
+-- attnum, which is a column dropped and added back, or two renamed onto each other. A column added, dropped
+-- or renamed outright is not reported here: it changes the copies' columns, which _regrain_shape_drift
+-- reports. A rewrite that changes nothing (VACUUM FULL, CLUSTER, SET TABLESPACE) cannot be told from one
+-- that does, so it restarts the run too, at the cost of the copying done so far.
+create or replace function pgpm._regrain_source_drift(p_child regclass, p_mark jsonb)
+returns text language sql stable as $$
+  select nullif(concat_ws('; ',
+           case when (p_mark->>'relfilenode') is distinct from (m.now->>'relfilenode')
+                then format('the source was rewritten (relfilenode %s, now %s), so the copies may hold values its rows no longer have',
+                            p_mark->>'relfilenode', m.now->>'relfilenode') end,
+           (select format('the source''s column(s) %s were replaced (dropped and added back, or renamed onto one another), so the copies hold values the source no longer has',
+                          string_agg(quote_ident(w.key), ', ' order by w.key))
+              from jsonb_each_text(p_mark->'columns') w join jsonb_each_text(m.now->'columns') n on n.key = w.key
+             where n.value <> w.value
+            having count(*) > 0)), '')
+    from (select pgpm._regrain_source_mark(p_child) as now) m
+   where p_mark is not null and m.now is not null;
+$$;
+
+-- How the regrain's change capture differs from the parent's key as it is now (#817), or null. The prepare
+-- tick mints the delta with the key's columns and the trigger function with their names (see
+-- _regrain_capture_install), so a key column renamed afterwards made every write into the source fail
+-- 42703 and every reconcile of a change captured before it fail, and one widened made every write of a key
+-- the old type cannot hold fail 22003, each until the swap. Compared column by column in key order, as the
+-- delta was minted, by name and type. A delta that is gone is reported too: the trigger writes it on every
+-- change. regrain_step restarts the run on either and re-mints capture for the current key.
+create or replace function pgpm._regrain_capture_drift(p_parent regclass, p_keyidx oid)
+returns text language plpgsql stable as $$
+declare v_nsp name; v_delta name; v_delta_reg regclass; v_has_q text; v_want_q text;
+begin
+  select nsp, delta into v_nsp, v_delta from pgpm._regrain_capture_names(p_parent);
+  v_delta_reg := to_regclass(format('%I.%I', v_nsp, v_delta));
+  select string_agg(format('%I %s', a.attname, format_type(a.atttypid, a.atttypmod)), ', ' order by k.ord)
+    into v_want_q
+    from pg_index i
+    cross join lateral unnest(i.indkey) with ordinality as k(attnum, ord)
+    join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
+   where i.indexrelid = p_keyidx;
+  if v_delta_reg is null then
+    return format('change capture''s delta table %I.%I is gone; change capture is re-minted for the key (%s)',
+                  v_nsp, v_delta, v_want_q);
+  end if;
+  select string_agg(format('%I %s', attname, format_type(atttypid, atttypmod)), ', ' order by attnum)
+    into v_has_q
+    from pg_attribute
+   where attrelid = v_delta_reg and attnum > 0 and not attisdropped and attname <> 'pgpm_seq';
+  if v_has_q is not distinct from v_want_q then return null; end if;
+  return format('change capture records the key as (%s) and the parent''s key is now (%s); change capture is re-minted for the key as it is now',
+                v_has_q, v_want_q);
+end;
 $$;
 
 -- Resolve one regrain copy, a not-attached pgpm.part row of p_parent named p_child, to the relation its
@@ -4625,7 +4720,7 @@ declare
   v_fk_ids bigint[];
   v_child_name name; v_src_name name; v_rec int; v_delta_n bigint; v_delta_name name; v_busy name;
   v_delta_reg regclass; v_sub_known boolean; v_sub_oid oid; v_sub_now regclass; v_copy regclass;
-  v_held_lo text; v_held_hi text; v_drift text; v_copies oid[];
+  v_held_lo text; v_held_hi text; v_drift text; v_copies oid[]; v_capture_drift text;
 begin
   -- #554: before the config read below, so a second driver of this parent (a tick, a hand-driven step, a
   -- cancel) waits for this step to commit and this step reads what the last one left
@@ -4773,7 +4868,9 @@ begin
         values (p_parent, 'regrain_restart', v_lo, v_hi, v_made, 'copies predate change capture');
     end if;
     perform pgpm._regrain_capture_install(p_parent, v_child_name);
-    update pgpm.config set regrain_cursor = v_lo where parent_table = p_parent;
+    -- #824: and what the copies are about to be made from, before any of them is
+    update pgpm.config set regrain_cursor = v_lo, regrain_source_mark = pgpm._regrain_source_mark(v_child)
+     where parent_table = p_parent;
     insert into pgpm.log (parent_table, action, lo, hi, method)
       values (p_parent, 'regrain_prepare', v_lo, v_hi, v_child_name);
     return 'prepared';
@@ -4816,8 +4913,28 @@ begin
   loop
     v_copies := v_copies || coalesce(r.child_oid, to_regclass(format('%I.%I', v_nsp, r.child_name))::oid);
   end loop;
-  v_drift := pgpm._regrain_shape_drift(p_parent, v_copies);
-  if v_drift is not null then
+  --
+  -- #824, #817: and not only its columns. The copies cannot be trusted either after DDL that changed the
+  -- source's VALUES under an unchanged signature (a rewrite, a column dropped and added back: see
+  -- _regrain_source_drift, against the mark the prepare tick recorded), which fires no row trigger, so
+  -- capture never saw it and the swap attached the old values; nor without the parent's CHECK constraints,
+  -- which ATTACH requires (_regrain_shape_drift compares them). Both restart the run the same way. The
+  -- source mark matters only while a copy exists: with none, nothing stale can be attached.
+  --
+  -- And the capture apparatus must still fit the parent's key (_regrain_capture_drift), with or without
+  -- copies: a key column renamed or retyped since the prepare made every write into the source that the
+  -- old trigger cannot record fail, and every reconcile of a change captured under the old names. That
+  -- restarts the run too, and re-mints capture for the key as it is now (_regrain_capture_install, which
+  -- drops the source's trigger first and so waits for every writer in flight there). The rows captured in
+  -- the old delta go with it, and nothing is lost by that: the restart discards every copy, so the range
+  -- is copied again from the source, which holds every change committed before this tick. Between the
+  -- ALTER and this tick such a write is refused (it raises), never lost; pgpm has no hook into ALTER TABLE
+  -- that would let it re-mint any sooner.
+  v_drift := concat_ws('; ', pgpm._regrain_shape_drift(p_parent, v_copies),
+                       case when cardinality(v_copies) > 0
+                            then pgpm._regrain_source_drift(v_child, cfg.regrain_source_mark) end);
+  v_capture_drift := pgpm._regrain_capture_drift(p_parent, v_keyidx);
+  if v_drift <> '' or v_capture_drift is not null then
     for r in execute format(
       'select child_name from pgpm.part where parent_table = %L::regclass and not attached'
       || ' and lo::%s >= %L::%s and hi::%s <= %L::%s',
@@ -4826,12 +4943,22 @@ begin
       perform pgpm._regrain_drop_copy(p_parent, v_nsp, r.child_name);   -- #631: by recorded oid
       v_made := v_made + 1;
     end loop;
-    update pgpm.config set regrain_cursor = v_lo where parent_table = p_parent;
+    if v_capture_drift is not null then
+      perform pgpm._regrain_capture_install(p_parent, v_child_name);
+    end if;
+    update pgpm.config set regrain_cursor = v_lo, regrain_source_mark = pgpm._regrain_source_mark(v_child)
+     where parent_table = p_parent;
     insert into pgpm.log (parent_table, action, lo, hi, rows, method)
       values (p_parent, 'regrain_restart', v_lo, v_hi, v_made,
-              format('the parent''s columns changed since the copies were made (%s); the copies are discarded and the range is copied again from the source',
-                     v_drift));
+              format('the parent changed since the copies were made (%s); the copies are discarded and the range is copied again from the source',
+                     concat_ws('; ', nullif(v_drift, ''), v_capture_drift)));
     return 'restarted:' || v_made;
+  end if;
+  -- Nothing stale to discard, so the mark follows the source: null for a run begun before the mark was
+  -- recorded (#824 cannot judge the copies such a run made before the upgrade), or a source altered before
+  -- any copy was made.
+  if cfg.regrain_source_mark is distinct from pgpm._regrain_source_mark(v_child) then
+    update pgpm.config set regrain_source_mark = pgpm._regrain_source_mark(v_child) where parent_table = p_parent;
   end if;
 
   -- retention horizon (matches retain(), issue #91)
