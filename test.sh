@@ -867,6 +867,7 @@ run_perf() {
     "bench/control_column_rename.sh pgpm_perf182"
     "bench/untransmute_drop_dependants.sh pgpm_perf186"
     "bench/transmute_row_type_dependants.sh pgpm_perf187"
+    "bench/restore_fk_adopts_live_key.sh pgpm_perf190"
   )
   local selected=()
   local n=${#guards[@]} idx
