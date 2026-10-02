@@ -1645,6 +1645,19 @@ drop procedure if exists pgpm.obtain(regclass, int, boolean);
 -- This is now pgpm's ONLY defence against a write with nowhere to go, since there is no DEFAULT to catch
 -- one. config.obtain x partition_step is therefore both the slack for maintenance falling behind and a
 -- hard ceiling on how far ahead an application may write. The default is 30 steps for that reason.
+--
+-- The lock budget (#786), extend_to's (#591) applied to the creation loop. obtain is a function too, so
+-- every partition one call creates holds its locks (the table, its indexes, its TOAST table) to the
+-- transaction's end, and set_obtain bounds only the sign of the lookahead: a lookahead past ~2000 missing
+-- cells on a stock server died with 53200 `out of shared memory` on every tick, rolled back every cell it
+-- had built, and the grid never advanced. The same measurement as extend_to's: once two partitions exist,
+-- the first's cost and the second's (in non-fast-path pg_locks rows, counted from just after the frontier
+-- read so its locks on the existing partitions are not charged to them) project what the next one would
+-- hold, and the call stops before the next creation would take its partitions past HALF the nominal
+-- table, max_locks_per_transaction x (max_connections + max_prepared_transactions). It STOPS rather than
+-- refuses, unlike extend_to: the lookahead is opportunistic, so a call returns what fit and the next tick
+-- builds on from there, while extend_to's caller named a value it needs covered and a short walk would
+-- hide that it was not.
 create or replace function pgpm.obtain(p_parent regclass)
 returns int language plpgsql as $$
 declare
@@ -1652,6 +1665,9 @@ declare
   v_frontier text; v_lo text; v_hi text; v_name name;
   v_coltype text; v_hi_lit text;
   v_made int := 0; k int;
+  v_slots bigint := current_setting('max_locks_per_transaction')::bigint
+                    * (current_setting('max_connections')::bigint + current_setting('max_prepared_transactions')::bigint);
+  v_locks0 bigint; v_locks1 bigint; v_locks2 bigint;
 begin
   -- FOR KEY SHARE (#725): held to the end of this transaction, so set_partition_tz (which reads the row
   -- FOR UPDATE before it judges the grid) waits for the cells this call builds to commit, and this read
@@ -1666,6 +1682,10 @@ begin
 
   v_frontier := pgpm._frontier_native(p_parent);
   v_lo       := pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor, v_frontier, cfg.partition_tz);
+  -- the budget's zero (#786): after the frontier read, so the locks it holds on every existing partition
+  -- are not charged to the cells this call builds, and before the walk, so everything the walk itself
+  -- takes is (the first partition's cost includes the walk's own reads up to it)
+  select count(*) into v_locks0 from pg_locks where pid = pg_backend_pid() and not fastpath;
 
   for k in 0 .. cfg.obtain loop
     if k > 0 then v_lo := pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_lo, cfg.partition_tz); end if;
@@ -1707,8 +1727,17 @@ begin
     end if;
     continue when v_name is null;
 
+    -- the lock budget (#786, see above): what the next partition would leave this call holding, the
+    -- first one's cost plus the second one's for every partition after it, past half the table ends the call
+    exit when v_made >= 2
+              and (v_locks1 - v_locks0) + greatest(v_locks2 - v_locks1, 1) * v_made > v_slots / 2;
     perform pgpm._create_partition(cfg, v_nsp, v_rel, null, v_name, v_lo, v_hi);
     v_made := v_made + 1;
+    if v_made = 1 then
+      select count(*) into v_locks1 from pg_locks where pid = pg_backend_pid() and not fastpath;
+    elsif v_made = 2 then
+      select count(*) into v_locks2 from pg_locks where pid = pg_backend_pid() and not fastpath;
+    end if;
   end loop;
   return v_made;
 end;

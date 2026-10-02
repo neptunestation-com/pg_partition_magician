@@ -439,7 +439,9 @@ can leave a wide grid above the frontier; that is harmless, just worth knowing.
 
 To change the steady-state lookahead itself rather than pre-extend past it once, use
 `pgpm.set_obtain(p_parent, p_obtain)`. It refuses a negative `p_obtain`, which would otherwise silently
-and permanently disable lookahead (see [reference](reference.md#set_obtain)).
+and permanently disable lookahead (see [reference](reference.md#set_obtain)). `obtain` holds itself to the
+same half of the lock table as `extend_to`, but stops there rather than refusing, so a lookahead larger than
+one call can build fills over several ticks.
 
 ## Regrain the history
 
