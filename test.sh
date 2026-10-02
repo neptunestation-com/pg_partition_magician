@@ -873,6 +873,9 @@ run_perf() {
     "bench/untransmute_replica_identity.sh pgpm_perf185"
     "bench/cutover_secondary_unique_constraint.sh pgpm_perf188"
     "bench/cutover_tablespace.sh pgpm_perf189"
+    "bench/check_text_time_alphabet_syntax.sh pgpm_perf197"
+    "bench/grid_floor_across_era.sh pgpm_perf198"
+    "bench/fine_child_label_bc_wide_year.sh pgpm_perf199"
   )
   local selected=()
   local n=${#guards[@]} idx

@@ -5678,6 +5678,43 @@ select is(
         [("     or (v_ri = 'i' and not (select indisreplident from pg_index where indexrelid = v_ri_idx)) then\n",
           "     then\n", 1)],
     ),
+    "check_text_time_alphabet_regex": (
+        "bench/check_text_time_alphabet_syntax.sh",
+        "Pre-#837 check_text_time: both shape tests (the sample's and the maximum's) splice the alphabet raw "
+        "into the regex bracket expression '[^' || alphabet || ']' again instead of asking "
+        "_text_time_shaped, so '-' between two characters is a range and a backslash an unclosed bracket. "
+        "A value with ',' in its timestamp field under '+-0123456789' counts as shaped and raises in "
+        "_text_time_to_ts, aborting the sample and transmute's sampling step. tests/232 catches it at the "
+        "sample, the maximum, the backslash alphabet and both transmutes, while its default-alphabet control "
+        "still passes.",
+        [("              and pgpm._text_time_shaped(v, %4$L, %5$s, %7$s, %6$L)\n",
+          "              and left(v, length(%4$L)) = %4$L\n"
+          "              and length(v) >= length(%4$L) + %5$s\n"
+          "              and substr(v, length(%4$L) + 1, %5$s) !~ ('[^' || %6$L || ']')\n", 1),
+         ("           select case when pgpm._text_time_shaped(v, %4$L, %5$s, %7$s, %6$L)\n",
+          "           select case when left(v, length(%4$L)) = %4$L\n"
+          "                        and length(v) >= length(%4$L) + %5$s\n"
+          "                        and substr(v, length(%4$L) + 1, %5$s) !~ ('[^' || %6$L || ']')\n", 1)],
+    ),
+    "grid_floor_calendar_no_year_zero": (
+        "bench/grid_floor_across_era.sh",
+        "Pre-#769 _grid_floor: the calendar branch counts the years from the anchor with extract(year) "
+        "again, which has no year 0, so across the era the month count is 12 off: a BC value floors a year "
+        "early from the 2000 anchor and an AD value floors above itself from a BC anchor. tests/233's unit "
+        "sweep, the same-step resume of an interrupted BC transmute and the regrain of a BC monolith catch "
+        "it, while its AD controls still pass.",
+        [("      k := ((v_ty - v_ay) * 12\n",
+          "      k := ((extract(year from ts_wall) - extract(year from anc_wall)) * 12\n", 1)],
+    ),
+    "fine_child_label_time_four_digit": (
+        "bench/fine_child_label_bc_wide_year.sh",
+        "Pre-#769 _is_fine_child_label: the time branch is '^[0-9]{4}(_[0-9]+)*$' again, which matches no "
+        "`_bc` (BC) label and no five-digit-year label, so transmute's orphan guard (both halves) and "
+        "restore_incoming_fks's in-flight gate let such names through. One site, the helper all three "
+        "callers ask; tests/234's refusals and gate zeros catch it, while its AD controls still pass.",
+        [("    return p_suffix ~ '^([0-9]{4}|[1-9][0-9]{4,})(_[0-9]+)*(_bc)?$';\n",
+          "    return p_suffix ~ '^[0-9]{4}(_[0-9]+)*$';\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

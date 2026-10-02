@@ -1180,7 +1180,7 @@ returns text language plpgsql immutable as $$
 declare
   v_months int; v_fixsecs double precision; v_secs numeric;
   k bigint; ts timestamptz; anc timestamptz; ts_wall timestamp; anc_wall timestamp; v_out timestamptz;
-  v_us numeric; v_h numeric;
+  v_us numeric; v_h numeric; v_ty int; v_ay int;
 begin
   if p_kind in ('time', 'uuidv7', 'text_time') then
     anc := p_anchor::timestamptz; ts := p_native::timestamptz;
@@ -1194,7 +1194,16 @@ begin
       -- calendar step: count months on the WALL clock in p_tz, so a month boundary is midnight on the
       -- 1st in that zone whatever zone this session happens to be in
       ts_wall := ts at time zone p_tz; anc_wall := anc at time zone p_tz;
-      k := ((extract(year from ts_wall) - extract(year from anc_wall)) * 12
+      -- Years counted astronomically (#769): extract(year) numbers 1 BC as -1 and 1 AD as 1, with no year
+      -- 0, while the month arithmetic below (make_interval from the anchor) has one. Across the era the
+      -- difference was a year too large on one side, so a BC value floored a whole year early from an AD
+      -- anchor (a BC grid point never floored to itself: an interrupted transmute of a table with BC rows
+      -- refused its own recorded bound on the same-step re-run, and regrain_step of a BC monolith minted
+      -- an inverted copy child), and an AD value floored above itself from a BC anchor. Year N BC is
+      -- astronomical 1 - N, so a negative year moves up by one.
+      v_ty := extract(year from ts_wall);  if v_ty < 0 then v_ty := v_ty + 1; end if;
+      v_ay := extract(year from anc_wall); if v_ay < 0 then v_ay := v_ay + 1; end if;
+      k := ((v_ty - v_ay) * 12
           + (extract(month from ts_wall) - extract(month from anc_wall)))::bigint;
       k := (floor(k::numeric / v_months) * v_months)::bigint;
       v_out := (date_trunc('month', anc_wall) + make_interval(months => k::int)) at time zone p_tz;
@@ -1370,13 +1379,17 @@ $$;
 -- label exactly when it comes back unchanged, so whatever _id_label produces is recognised and a string
 -- it never produces (a trailing zero in the fraction, an extra leading zero) is not. The pattern below
 -- only keeps the cast to numeric safe; it decides nothing. A time label is digits in groups, the first
--- of four (the year); the coarse and explicit-range forms (_to_) are neither, and are checked elsewhere.
+-- the year, then an optional `_bc`; the coarse and explicit-range forms (_to_) are neither, and are
+-- checked elsewhere. The year is to_char's YYYY: four digits, zero-padded, up to 9999, and five or more,
+-- never padded, past it (a uuidv7 grid reaches 10889); and _part_name marks a BC year with `_bc` (#710).
+-- The pattern was '^[0-9]{4}(_[0-9]+)*$', which neither form matches, so an orphan or a type under a BC
+-- or five-digit-year child's name passed transmute's guard and this gate (#769).
 create or replace function pgpm._is_fine_child_label(p_kind text, p_suffix text)
 returns boolean language plpgsql immutable as $$
 declare v_whole text; v_frac text;
 begin
   if p_kind <> 'id' then
-    return p_suffix ~ '^[0-9]{4}(_[0-9]+)*$';
+    return p_suffix ~ '^([0-9]{4}|[1-9][0-9]{4,})(_[0-9]+)*(_bc)?$';
   end if;
   if p_suffix !~ '^(0*-)?[0-9]+(_[0-9]+)?$' then
     return false;
@@ -9580,7 +9593,12 @@ $$;
 -- it. A row that does not even have the right prefix/width/alphabet is counted implausible directly
 -- (never passed to _text_time_to_ts, which would raise on it -- one bad row must not abort the sample);
 -- a row that IS shaped correctly is further checked for decoding to a plausible recent timestamp,
--- exactly as check_uuidv7 does. Heuristic, not a proof.
+-- exactly as check_uuidv7 does. Heuristic, not a proof. The shape test is _text_time_shaped, for the
+-- sample and for the maximum alike (#837): it used to be the regex '[^' || alphabet || ']', and an
+-- alphabet is data, which a bracket expression reads as syntax. '+-0123456789' (an alphabet transmute
+-- accepts) made the class the range + through 0, so a value with ',' in its timestamp field counted as
+-- shaped, reached _text_time_to_ts and raised, aborting the sample and transmute's sampling step with
+-- it; an alphabet holding `\` left the bracket unclosed and raised on every column.
 --
 -- newest_decoded / newest_in_future are check_uuidv7's (#457): the column's ACTUAL maximum (not the
 -- sample's), found the way transmute finds its frontier and decoded, and whether it sits more than one hour
@@ -9617,18 +9635,14 @@ begin
          shaped as (
            select v from s
             where v is not null
-              and left(v, length(%4$L)) = %4$L
-              and length(v) >= length(%4$L) + %5$s
-              and substr(v, length(%4$L) + 1, %5$s) !~ %6$L
+              and pgpm._text_time_shaped(v, %4$L, %5$s, %7$s, %6$L)
          ),
          decoded as (
            select pgpm._text_time_to_ts(v, %4$L, %5$s, %7$s, %8$L, %9$L, %10$s, %11$L) as ts from shaped
          ),
          m as (select t.%1$I::text as v from %2$s t where t.%1$I is not null order by t.%1$I desc limit 1),
          m_decoded as (
-           select case when left(v, length(%4$L)) = %4$L
-                        and length(v) >= length(%4$L) + %5$s
-                        and substr(v, length(%4$L) + 1, %5$s) !~ %6$L
+           select case when pgpm._text_time_shaped(v, %4$L, %5$s, %7$s, %6$L)
                        then pgpm._text_time_to_ts(v, %4$L, %5$s, %7$s, %8$L, %9$L, %10$s, %11$L)
                   end as ts
              from m
@@ -9642,7 +9656,7 @@ begin
                / nullif((select count(*) from s where v is not null), 0), 0), 4),
            (select ts from m_decoded),
            (select ts > now() + interval '1 hour' from m_decoded)
-  $q$, p_control, p_table::text, p_sample, p_prefix, p_width, '[^' || v_class || ']', p_radix, p_unit,
+  $q$, p_control, p_table::text, p_sample, p_prefix, p_width, v_class, p_radix, p_unit,
       p_alphabet, p_discard_bits, p_epoch);
 end;
 $$;

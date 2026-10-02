@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- **`check_text_time` reads the alphabet as data, so one malformed row no longer aborts the sample** (#837).
+  Both its shape tests (the sample's and the column maximum's) spliced the alphabet raw into the regex
+  `'[^' || alphabet || ']'`. Under an alphabet `transmute` accepts, such as `+-0123456789`, the `-` made a range,
+  a value with `,` in its timestamp field counted as shaped, and `_text_time_to_ts` raised on it, aborting
+  `check_text_time` and `transmute`'s sampling step (`p_force_text_time` included); an alphabet holding `\`
+  left the bracket unclosed and raised on every column. Both now ask `_text_time_shaped`, whose `translate()`
+  test exists for exactly this. `tests/232` under `bench/check_text_time_alphabet_syntax.sh`, with the mutation
+  `check_text_time_alphabet_regex`.
+- **BC values floor to their own calendar cell, and BC or five-digit-year child names are recognised** (part of
+  #769). `_grid_floor`'s month and year branch counted years with `extract(year)`, which has no year 0, so a BC
+  value floored a whole year early from the default 2000 anchor (an interrupted `transmute` of a table with BC
+  rows was refused on its same-step re-run, and `regrain_step` of a BC monolith minted an inverted copy child)
+  and an AD value floored above itself from a BC anchor. Years are now counted astronomically. And
+  `_is_fine_child_label`'s time pattern matched no `_bc` label and no year past 9999, so `transmute`'s orphan
+  guard (both its relation and its type half) and `restore_incoming_fks`'s in-flight gate let such names
+  through; it now accepts both. `tests/233` under `bench/grid_floor_across_era.sh` (mutation
+  `grid_floor_calendar_no_year_zero`) and `tests/234` under `bench/fine_child_label_bc_wide_year.sh` (mutation
+  `fine_child_label_time_four_digit`).
 - **`transmute` carries a secondary unique constraint as a constraint, under its name and with its
   deferrability** (#828). Step 9b carried every unique index beside the reused key as a bare partitioned index
   `<name>_pgpm`, including one that backs a `UNIQUE` constraint, so `INSERT ... ON CONFLICT ON CONSTRAINT
