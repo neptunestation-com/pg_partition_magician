@@ -109,7 +109,9 @@ scripts/review/pass_metrics.py --pass N --date $(date +%F) --pinned $pinned --re
 ```
 
 **Report recall and precision before the count of findings, always**, recall with its suite-caught /
-read-caught split (the stopping criteria read the read-caught half). Then the findings by tier, the
+read-caught split (the stopping criteria read the read-caught half), precision with its strict figure
+and the fell rate beside it (verified re-finds of open issues count as true reports; the fell rate is
+the reaching alarm). Then the findings by tier, the
 blind spots (seeds missed, by lens), and the per-finder table including the model-tier split. If any
 candidate is unverified, say so and do not call it a finding. Under "Seed interactions to check" the
 record lists the candidates whose pristine run failed only its liveness checks; replace that list, in
@@ -131,6 +133,9 @@ the record, with which claim depended on which seed's side effect.
   Each issue carries its claims' reproductions inline (the verifier's `repro.verified.*` when present)
   and the acceptance paragraph; `--post` files them labelled `bug`, Tier 1 first, and writes
   `$WORK/issues/filed.json`. Fill the issue numbers from it into the record.
+- List, for the fix phase, the open issues whose bullets this pass re-found with a reproduction (the
+  record's "Known and open" section, the comments posted on them): they join the pass's own issues in
+  `/fix-phase`'s list, since each now has an acceptance test.
 - Fixes are separate work under `CLAUDE.md`'s rules (guard plus mutation per fix), one PR each, merged
   in order with a rebase and fresh CI per PR. A finding closes when its own reproduction passes on the
   fixed `main`; the verifier's `classify_claims.py --only <id>` against the new `main` is that check.
