@@ -634,6 +634,21 @@ begin
     v_eta, pg_size_pretty(v_bytes), v_mibps, v_regime;
 end $$;
 
+-- _from_hypertable_ctl_text: a control value as text that reads back as the SAME value in any session
+-- (#791, #793). Every append-only watermark and every reconcile range below is carried from one statement to
+-- the next as text and spliced back as a literal. A bare ::text renders it in the session's DateStyle, which
+-- under 'SQL', 'Postgres' or 'German' names the zone by ABBREVIATION, and an abbreviation reads back through
+-- timezone_abbreviations ('CST' under Asia/Shanghai is US Central): the bound moved 14 hours. Pinned to ISO,
+-- a timestamptz carries a numeric offset, and a timestamp or date its own wall clock, never passed through
+-- a zone. Polymorphic so the value keeps the column's type to the very end: a naive watermark held in a
+-- timestamptz, as the cutover's once was, went through the session TimeZone and moved an hour inside a
+-- spring-forward gap. The chunk bounds, always timestamptz, go through the core's pgpm._ts_text instead,
+-- which is the same rule for that one type.
+create or replace function pgpm._from_hypertable_ctl_text(p_value anyelement)
+returns text language sql stable set datestyle = 'ISO, MDY' as $$
+  select p_value::text;
+$$;
+
 -- from_hypertable runs in two phases, exposed as separate procedures so writes can keep arriving between
 -- them: from_hypertable_copy does the online bulk copy to a watermark, then from_hypertable_cutover catches
 -- up the rows that arrived after it, swaps the copy into place, and hands off to transmute. from_hypertable
@@ -794,11 +809,14 @@ begin
   -- the planner still folds it and excludes the other chunks. Any other dimension type has a NULL
   -- range_start in the view (an integer dimension reports range_start_integer instead), and the old
   -- predicate would have copied nothing at all; v_bound_tpl was resolved, and such a dimension refused,
-  -- up top before anything committed.
+  -- up top before anything committed. And the instant each %L carries is rendered through pgpm._ts_text, not
+  -- in the session's DateStyle (#793): under 'SQL' a bare %L wrote '01/01/2024 08:00:00 CST' for Asia/Shanghai,
+  -- the abbreviation read back as US Central, and every bound moved 14 hours, so "carries its offset" above
+  -- only held under ISO.
   for r in select range_start, range_end from timescaledb_information.chunks
             where hypertable_schema = v_nsp and hypertable_name = v_rel order by range_start loop
-    v_lo := format(v_bound_tpl, r.range_start);
-    v_hi := format(v_bound_tpl, r.range_end);
+    v_lo := format(v_bound_tpl, pgpm._ts_text(r.range_start));   -- #793: never the session DateStyle
+    v_hi := format(v_bound_tpl, pgpm._ts_text(r.range_end));
     execute format('insert into %I.%I (%s) select %s from %I.%I where %I >= %s and %I < %s order by %I',
                    v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel,
                    p_control, v_lo, p_control, v_hi, p_control);
@@ -925,7 +943,8 @@ begin
   -- bound the source read to the batch's touched control range, as literal constants, for chunk exclusion
   select format_type(atttypid, atttypmod) into v_ctl_type
     from pg_attribute where attrelid = p_hypertable and attname = p_control and not attisdropped;
-  execute format('select min(%I)::text, max(%I)::text from pgpm_dbatch', p_control, p_control)
+  execute format('select pgpm._from_hypertable_ctl_text(min(%I)), pgpm._from_hypertable_ctl_text(max(%I)) from pgpm_dbatch',
+                 p_control, p_control)
     into v_min_ctl, v_max_ctl;
 
   -- reconcile: drop the batch's keys from the dest, then reinsert their current source rows
@@ -1038,9 +1057,10 @@ begin
 
   -- the batch's upper control bound: the control value p_batch rows past the watermark (or the source's max
   -- past it when fewer remain). The <= insert below includes ALL rows at this value, so no tie is split.
+  -- Rendered through _from_hypertable_ctl_text (#793) outside the OFFSET, so it runs once, not per skipped row.
   execute format('select coalesce(
-                    (select %I::text from %I.%I where %s order by %I offset %s limit 1),
-                    (select max(%I)::text from %I.%I where %s))',
+                    (select pgpm._from_hypertable_ctl_text(b.c) from (select %I as c from %I.%I where %s order by %I offset %s limit 1) b),
+                    (select pgpm._from_hypertable_ctl_text(max(%I)) from %I.%I where %s))',
                  p_control, v_nsp, v_rel, v_past, p_control, greatest(p_batch - 1, 0),
                  p_control, v_nsp, v_rel, v_past) into v_hi;
   if v_hi is null then return p_watermark; end if;   -- nothing past the watermark
@@ -1075,7 +1095,7 @@ begin
     from pg_attribute where attrelid = p_hypertable and attname = p_control and not attisdropped;
   -- the initial frontier: the copy watermark (max control in the dest). Read once; each step advances it.
   -- NULL when nothing was copied, which puts every source row past it (#736, _from_hypertable_past).
-  execute format('select max(%I)::text from %I.%I', p_control, v_nsp, v_dest) into v_watermark;
+  execute format('select pgpm._from_hypertable_ctl_text(max(%I)) from %I.%I', p_control, v_nsp, v_dest) into v_watermark;
   loop
     -- residual past the watermark <= threshold? EXISTS at offset (chunk-excluded by control > watermark)
     execute format('select exists(select 1 from %I.%I where %s order by %I offset %s limit 1)',
@@ -1120,7 +1140,8 @@ create or replace procedure pgpm.from_hypertable_cutover(
 ) language plpgsql as $$
 declare
   v_nsp name; v_rel name; v_dest name; v_cols_q text; v_retain interval;
-  v_watermark timestamptz; v_orig regclass; k record;
+  v_watermark text;   -- the column's own text (#791), never a timestamptz: see _from_hypertable_ctl_text
+  v_orig regclass; k record;
   v_delta name; v_trgfn name; v_track boolean; v_keycols_q text; v_dkey_q text; v_skey_q text; v_subsel_q text;
   v_ctl_type text; v_min_ctl text; v_max_ctl text;
   v_ident_cols name[]; v_ident_kinds text[]; v_ident_opts text[]; v_ident_next numeric[]; v_srcseq regclass;
@@ -1234,7 +1255,7 @@ begin
   -- exactly the rows it adds or removes (their RETURNING) so the check under the lock can compare the two
   -- sides without scanning the dest again.
   if not v_track then
-    execute format('select count(*), coalesce(sum(%s), 0), max(%I) from %I.%I', v_fp_q, p_control, v_nsp, v_dest)
+    execute format('select count(*), coalesce(sum(%s), 0), pgpm._from_hypertable_ctl_text(max(%I)) from %I.%I', v_fp_q, p_control, v_nsp, v_dest)
       into v_dest_n, v_dest_h, v_watermark;
   else
     execute format('select count(*), coalesce(sum(%s), 0) from %I.%I', v_fp_q, v_nsp, v_dest) into v_dest_n, v_dest_h;
@@ -1374,7 +1395,8 @@ begin
     -- needed source row can be excluded -- the worst case (changes spanning all history) just prunes nothing.
     select format_type(atttypid, atttypmod) into v_ctl_type
       from pg_attribute where attrelid = p_hypertable and attname = p_control and not attisdropped;
-    execute format('select min(%I)::text, max(%I)::text from %I.%I', p_control, p_control, v_nsp, v_delta)
+    execute format('select pgpm._from_hypertable_ctl_text(min(%I)), pgpm._from_hypertable_ctl_text(max(%I)) from %I.%I',
+                   p_control, p_control, v_nsp, v_delta)
       into v_min_ctl, v_max_ctl;
     -- Each write reports what it changed through RETURNING, so the conservation baseline follows the
     -- destination by identity, not only by row_count (#653).
@@ -1417,14 +1439,14 @@ begin
       execute 'drop table if exists pgpm_htail';
       execute format('create temp table pgpm_htail on commit drop as select %s from %I.%I where %s',
                      v_cols_q, v_nsp, v_rel,
-                     pgpm._from_hypertable_past(p_control, v_watermark::text, p_inclusive => true));
+                     pgpm._from_hypertable_past(p_control, v_watermark, p_inclusive => true));
       analyze pgpm_htail;
       execute format('with w as (insert into %I.%I (%s) select %s from pgpm_htail s where not exists (select 1 from %I.%I d where %s = %s) returning %s as h) select count(*), coalesce(sum(h), 0) from w',
                      v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_dest, v_dkey_q, v_skey_q, v_fp_q) into v_n, v_h;
     else
       execute format('with w as (insert into %I.%I (%s) select %s from %I.%I where %s returning %s as h) select count(*), coalesce(sum(h), 0) from w',
                      v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel,
-                     pgpm._from_hypertable_past(p_control, v_watermark::text), v_fp_q) into v_n, v_h;
+                     pgpm._from_hypertable_past(p_control, v_watermark), v_fp_q) into v_n, v_h;
     end if;
     v_dest_n := v_dest_n + v_n; v_dest_h := v_dest_h + v_h;
   end if;

@@ -571,7 +571,9 @@ the workload continue, then run `from_hypertable_cutover` when ready. The destin
 columns, defaults and `CHECK` constraints as they stand now; schema changes to the hypertable before the
 cutover make it refuse (see `from_hypertable_cutover`), so re-run this after one. Each chunk's bounds are
 applied in the dimension's own type (`timestamptz`, `timestamp` without time zone, or `date`), so the copy is exact under any
-session `TimeZone`; a hypertable on a dimension of any other type is refused here.
+session `TimeZone` and `DateStyle`; a hypertable on a dimension of any other type is refused here. The same
+holds for every watermark and control range the drains and the cutover carry: each is rendered in ISO style
+and in the column's own type, never through the session's zone or a zone abbreviation.
 
 - `p_track_changes` -- capture in-flight **updates, deletes and out-of-order appends**, not just in-order
   appends. When `false` (the default), the cutover catches up **append-only**: it takes the rows whose
