@@ -411,6 +411,10 @@ run_timescale() {
     # the real install, the clean-code half of the pairs discriminate.sh completes with its three mutants.
     echo "--- bounds and watermarks independent of the session's DateStyle and TimeZone guard (issues #791, #793) ---"
     bash "$(dirname "$0")/bench/hypertable_time_rendering.sh" pgpm_test-timescale pgpm_perf172 || fail=1
+    # #825's guard, the same way: it re-runs tests/timescale/db/37 against the real install, the clean-code
+    # half of the pairs discriminate.sh completes with its two mutants.
+    echo "--- a caller whose reads row-level security filters is refused (issue #825) ---"
+    bash "$(dirname "$0")/bench/hypertable_reads_caller_rls.sh" pgpm_test-timescale pgpm_perf181 || fail=1
 
     echo "--- discriminate (timescale-scoped mutations) ---"
     bash "$(dirname "$0")/bench/discriminate.sh" --track=timescale pgpm_test-timescale || fail=1
@@ -850,6 +854,7 @@ run_perf() {
     "bench/unbuilt_cell_type_holder.sh pgpm_perf170"
     "bench/orphan_type_guard_id_labels.sh pgpm_perf171"
     "bench/wrapper_tap_verdicts.sh pgpm_perf174"
+    "bench/transmute_reads_caller_rls.sh pgpm_perf180"
   )
   local selected=()
   local n=${#guards[@]} idx

@@ -5341,6 +5341,37 @@ select is(
           "                else substr(t.typname, length(v_rel) + 3) ~ '^[0-9]{4}(_[0-9]+)*$'\n"
           "           end\n", 1)],
     ),
+    # Issue #825, one mutation per site that asks pgpm._refuse_filtered_reads.
+    "transmute_reads_under_caller_rls": (
+        "bench/transmute_reads_caller_rls.sh",
+        "Pre-#825 transmute: nothing asks whether row-level security filters the caller's reads, so a "
+        "non-superuser owner without BYPASSRLS of a FORCE'd table sizes the monolith's bound from the rows "
+        "its policies admit, phase 1 commits it, and phase 2's VALIDATE dies with a raw 23514, leaving the "
+        "bound rejecting every write below it. tests/218's pinned refusal and its no-claim, no-bound and "
+        "backfill assertions in part A catch it.",
+        [("  perform pgpm._refuse_filtered_reads(p_parent, 'transmute',\n"
+          "    'the monolith''s bound would be sized from those rows alone and reject the others');\n",
+          "", 1)],
+    ),
+    "hypertable_preflight_reads_under_caller_rls": (
+        "bench/hypertable_reads_caller_rls.sh",
+        "Pre-#825 preflight: from_hypertable and from_hypertable_copy copy the hypertable as an owner whose "
+        "reads a FORCE'd policy filters, so the copy holds only the rows it admits and the swap drops the "
+        "rest. tests/timescale/db/37's pinned refusals in part A catch it (the preflight's own, and the copy "
+        "dying at its first COMMIT inside the function context instead of refusing).",
+        [("  perform pgpm._refuse_filtered_reads(p_hypertable, 'migrate hypertable',\n"
+          "    'the copy would hold only those rows, the conservation check would read the source the same way "
+          "and agree, and the swap would drop the others with the hypertable');\n", "", 1)],
+    ),
+    "hypertable_cutover_reads_under_caller_rls": (
+        "bench/hypertable_reads_caller_rls.sh",
+        "Pre-#825 cutover: its catch-up and its conservation check read the source as an owner whose reads a "
+        "FORCE'd policy filters, and nothing refuses that caller first. tests/timescale/db/37's pinned "
+        "refusal in part B catches it (the cutover dies at its first COMMIT inside the function context).",
+        [("  perform pgpm._refuse_filtered_reads(p_hypertable, 'cut over hypertable',\n"
+          "    'the catch-up and the conservation check would read only those rows, and the swap would drop "
+          "the others with the hypertable');\n", "", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
@@ -5451,6 +5482,8 @@ MUTATION_SRC = {
     "radix_length_refusal_unpinned": "tests/90_text_time_alphabet_codec_test.sql",
     "id_conservation_after_migration": "tests/11_id_kind_test.sql",
     "uuid_conservation_after_migration": "tests/12_uuidv7_kind_test.sql",
+    "hypertable_preflight_reads_under_caller_rls": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_reads_under_caller_rls": "pgpm_hypertable/install.sql",
 }
 
 # name -> the CI track whose job runs it; anything not listed here belongs to the default `perf`
@@ -5504,6 +5537,8 @@ MUTATION_TRACK = {
     # from_hypertable_copy can run, which needs a real TimescaleDB.
     "uninstall_keeps_hypertable_capture": "timescale",
     "uninstall_hypertable_capture_by_name": "timescale",
+    "hypertable_preflight_reads_under_caller_rls": "timescale",
+    "hypertable_cutover_reads_under_caller_rls": "timescale",
 }
 
 

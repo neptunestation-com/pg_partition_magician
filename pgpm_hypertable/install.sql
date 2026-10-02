@@ -514,6 +514,12 @@ begin
   -- (0) the names the migration derives from the table's must fit whole (#552)
   perform pgpm._from_hypertable_check_names(p_hypertable);
 
+  -- (0b) a caller whose reads of the source row-level security filters (#825): the copy would hold only the
+  -- rows the policies admit, the conservation check reads the source through the same policies and agrees,
+  -- and the swap drops the rest with the hypertable. See pgpm._refuse_filtered_reads.
+  perform pgpm._refuse_filtered_reads(p_hypertable, 'migrate hypertable',
+    'the copy would hold only those rows, the conservation check would read the source the same way and agree, and the swap would drop the others with the hypertable');
+
   -- (1) continuous aggregates: no native-partition equivalent, and dropping them is data-destructive.
   select string_agg(view_name, ', ') into v_cagg from timescaledb_information.continuous_aggregates
    where hypertable_schema = v_nsp and hypertable_name = v_rel;
@@ -1177,6 +1183,14 @@ begin
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
   -- ...and the monolith name transmute will derive after the swap has committed (#707), before the pre-drain
   perform pgpm._from_hypertable_check_handoff(p_hypertable, p_interval, p_anchor);
+  -- A caller whose reads row-level security filters (issue #825), refused before the pre-drain spends anything.
+  -- The catch-up and the conservation check read the source as this role, so a filtered one would let the
+  -- swap drop every row its policies hide. Not asked again under the lock: the copy read the source as a
+  -- role this check passed, so a policy that starts filtering only after this point leaves the source's
+  -- reads short of the copy by every hidden row the window did not touch, which the conservation check
+  -- below refuses.
+  perform pgpm._refuse_filtered_reads(p_hypertable, 'cut over hypertable',
+    'the catch-up and the conservation check would read only those rows, and the swap would drop the others with the hypertable');
   -- The dimension facts the copy depended on are re-checked HERE, in the irreversible phase (issue #458).
   -- This procedure used to require only that a destination exist, and a destination left by a copy that
   -- ran under an older version, or made by hand, reaches the DROP below without preflight ever having run.

@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **`transmute` and `from_hypertable` refuse a caller whose reads row-level security would filter** (#825).
+  Both read the table as the caller, so on a table with `FORCE ROW LEVEL SECURITY` a non-superuser owner
+  without `BYPASSRLS` saw only the rows its policies admit. `from_hypertable` copied those rows, its
+  conservation check read the source the same way and agreed, and the swap dropped the hidden rows with the
+  hypertable; `transmute` sized the monolith's bound from them, committed it, and died at phase 2's `VALIDATE`
+  with a raw 23514, leaving the bound rejecting every write below it. One shared refusal,
+  `pgpm._refuse_filtered_reads` (PostgreSQL's `row_security_active()`), is now asked up front by `transmute`,
+  by `from_hypertable_preflight` (so by `from_hypertable` and `from_hypertable_copy`) and by
+  `from_hypertable_cutover`, before anything is read or committed. A `BYPASSRLS` role, a superuser, and an owner
+  on a table that only `ENABLE`s row-level security convert as before. `tests/218` and
+  `tests/timescale/db/37`, guarded by `bench/transmute_reads_caller_rls.sh` and
+  `bench/hypertable_reads_caller_rls.sh` with the mutations `transmute_reads_under_caller_rls`,
+  `hypertable_preflight_reads_under_caller_rls` and `hypertable_cutover_reads_under_caller_rls`.
 - **The NDJSON encoders archive the whole row on a table with a column named `t`** (#821). Both
   (`archive._encode_upload_ndjson_single`, behind `pgpm.archive_to_s3_ndjson`, and `archive.to_s3`, in its pages
   and its conservation fingerprint) aliased the table `t` and rendered `row_to_json(t)`, and PostgreSQL binds a

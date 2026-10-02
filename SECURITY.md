@@ -53,7 +53,10 @@ Stated so a reviewer can check them rather than infer them:
 - **No `SECURITY DEFINER`.** pgpm installs none, so every function runs with the privileges of the
   caller and pgpm adds no privilege boundary of its own to be crossed.
 - **No superuser requirement.** pg_cron needs a superuser to create the extension, which is a
-  PostgreSQL constraint on `CREATE EXTENSION`; pgpm's own functions do not.
+  PostgreSQL constraint on `CREATE EXTENSION`; pgpm's own functions do not. One precondition follows from
+  running as the caller: `transmute` and `from_hypertable` read every row of the table they convert, so
+  they refuse a caller whose reads row-level security would filter (a table with `FORCE ROW LEVEL
+  SECURITY` and an owner without `BYPASSRLS`). Run those as a role with `BYPASSRLS`; a superuser has it.
 - **Identifiers are quoted in dynamic SQL.** pgpm builds DDL as text. Identifiers pass through
   `format(%I)` or `quote_ident()`, including role names recovered via `pg_get_userbyid()`.
 - **Retention destroys data on purpose.** `retain` drops partitions and `retire` archives then drops

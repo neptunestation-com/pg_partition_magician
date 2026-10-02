@@ -311,7 +311,11 @@ column's collation does not order the way base-`p_tt_radix` place value does (KS
 samples as not matching the declared shape and `p_force_text_time` is not set; a `time`, `uuidv7` or `text_time` control's newest
 value lies (or decodes to) more than one partition step plus one hour past `now()` and `p_force_frontier` is not set
 (a future-dated row would pin the monolith's permanent `hi` there); a `time` control's newest value is
-`infinity`, which no partition can hold (`p_force_frontier` does not override this); a non-PK `UNIQUE` secondary index does not include the
+`infinity`, which no partition can hold (`p_force_frontier` does not override this); row-level security
+would filter the caller's reads of the table (`row_security_active()` is true: a non-superuser owner without
+`BYPASSRLS` on a table with `FORCE ROW LEVEL SECURITY`, or a caller that is not the owner), because the
+bound is read from the rows the caller can see (run it as a role with `BYPASSRLS`; an owner on a table
+that only `ENABLE`s row-level security is not filtered and converts as before); a non-PK `UNIQUE` secondary index does not include the
 partition key (global uniqueness could not be enforced); an incoming FK exists and `p_incoming_fks` is
 `'error'`; a standalone table matching the child-partition naming already exists (an orphan from an
 interrupted run); a name the conversion derives from the table's (the monolith's `<rel>_p<lo>_to_<hi>`, a
@@ -515,6 +519,12 @@ Scope and caveats:
   `FORCE`) and its policies, its comment and its triggers, which the swap puts back on the copy before
   `transmute` carries them onto the parent. TimescaleDB's own insert-blocker trigger is not carried. The
   replica identity and storage parameters are not carried, as `transmute` does not carry them.
+- The migration reads every row as the **caller**, so a caller whose reads row-level security would filter
+  is refused before anything is copied or committed, by `from_hypertable_preflight` (so by
+  `from_hypertable` and `from_hypertable_copy`) and again by `from_hypertable_cutover`: on a hypertable
+  with `FORCE ROW LEVEL SECURITY`, a non-superuser owner without `BYPASSRLS` would copy only the rows its
+  policies admit, and the conservation check, reading the source the same way, would agree. Run the
+  migration as a role with `BYPASSRLS` (a superuser has it); the hypertable keeps its `FORCE`.
 - The copy is **online** (the source serves traffic throughout), and so is the index rebuild: the
   destination's primary key and secondary indexes are built on the private copy **before** the cutover takes
   its lock. The cutover's `ACCESS EXCLUSIVE` window is therefore **brief and metadata-bound** -- it catches up
