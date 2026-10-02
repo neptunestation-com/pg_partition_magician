@@ -354,7 +354,9 @@ choice already made: the control column sits second because `tenant_id` is what 
 [`untransmute`](reference.md#untransmute) cleanly restores the original, taking the retention write block
 and any in-flight regrain off the monolith on the way (the regrain is abandoned as `regrain_cancel` would
 abandon it; the copy work is all that is lost). The table comes back with the owner, grants, row security,
-policies and comments you gave it after the conversion, not the ones it had before. It becomes a one-way door once a
+policies, comments, publication memberships and replica identity you gave it after the conversion, not the
+ones it had before, in the schema you moved it to, and with the indexes and constraints you added since under
+the names you gave them. It becomes a one-way door once a
 row lands outside the monolith (the frontier crosses `B`), a regrain swaps its fine children in, or
 retention retires the monolith.
 
@@ -711,8 +713,9 @@ the difference is whether the chunks already exported are exported a second time
 the managed table only: its partitions stay in `public`, and the partitions pgpm creates afterwards go in
 `history`. pgpm tracks the table by identity, and every step of the retention lifecycle finds a partition
 in its own schema through the identity it recorded for it, so write blocks, archiving and retirement carry
-on across the move. A rename is still a rename, though: the steps look a partition up by name in that
-schema, so the advice above applies wherever the partition lives.
+on across the move, and an `untransmute` hands the table back in `history`. A rename is still a rename,
+though: the steps look a partition up by name in that schema, so the advice above applies wherever the
+partition lives.
 
 **Renaming the partition-key column is safe.** `ALTER TABLE public.events RENAME COLUMN created_at TO
 occurred_at` keeps the table routing, and pgpm follows it: every step finds the control column through the

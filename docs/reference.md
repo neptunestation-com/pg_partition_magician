@@ -436,7 +436,24 @@ changes the parent's membership, not the monolith's, so the restored table joins
 parent was in, with the parent's row filter and column list, and leaves every one it was not in. A
 membership that already matches is left alone, so a reverse with no membership changed since the
 conversion issues no `ALTER PUBLICATION` at all. A publication `FOR ALL TABLES` or `FOR TABLES IN SCHEMA`
-names no table and covers the restored table as it covered the parent.
+names no table and covers the restored table as it covered the parent. And for its **replica identity**:
+`ALTER TABLE ... REPLICA IDENTITY` on the managed table lands on the parent only, so the restored table takes
+the parent's (`DEFAULT`, `FULL`, `NOTHING`, or `USING INDEX` on its own index that was attached under the
+parent's identity index) rather than the one the monolith kept from the conversion.
+
+The **indexes and index-backed constraints made on the managed table since the conversion** come back under
+the names the managed table gave them. `CREATE INDEX` or `ADD CONSTRAINT ... UNIQUE` on a partitioned table
+clones onto each partition under an auto-name of the partition's (`t_p<label>_v_idx`), and the reverse
+renames the monolith's copy to the parent's name, so `ON CONFLICT ON CONSTRAINT <name>` and `DROP INDEX
+<name>` keep working. A secondary index the conversion carried keeps the name the table always gave it,
+not its `<name>_pgpm` partitioned copy's, and the primary key of a table converted before its parent kept
+the key's name keeps the name it had.
+
+A table **moved to another schema** with `ALTER TABLE <parent> SET SCHEMA` comes back in that schema, where
+the application has been finding it since the move. The monolith stayed where it was, so the reverse names
+it by its recorded oid, renames it back and moves it, with its indexes, row type and the sequences it owns,
+into the parent's schema (after re-adding any preserved incoming FKs, whose recorded definitions name the
+schema the table was converted in).
 
 It also takes off the monolith whatever **maintenance** put there after the conversion, so the table handed
 back is the operator's again with none of pgpm's machinery on it. The retention **write block**

@@ -5573,6 +5573,65 @@ select is(
           "      perform pgpm._regrain_capture_install(p_parent, v_child_name);\n"
           "    end if;\n", "", 1)],
     ),
+    # Issues #827, #830 and #815 (F1-06): what untransmute hands back, and where.
+    "untransmute_moved_parent_resolved_by_name": (
+        "bench/untransmute_moved_parent.sh",
+        "Pre-#827 untransmute: the restored table is resolved as <the parent's schema>.<name> after the rename "
+        "instead of by the monolith's recorded oid, so after ALTER TABLE <parent> SET SCHEMA every reverse dies "
+        "raw with 42P01 on a name it built itself, rolled back. One site, the resolution; tests/220's reverse "
+        "and everything after it catch it.",
+        [("  v_restored := v_monreg;\n",
+          "  v_restored := format('%I.%I', v_nsp, v_rel)::regclass;\n", 1)],
+    ),
+    "untransmute_moved_parent_not_moved": (
+        "bench/untransmute_moved_parent.sh",
+        "Issue #827's move left out: the restored table is named by its oid but stays in the monolith's schema, "
+        "so the trigger replay, built off the parent in its new schema, dies raw with 42P01, and a reverse "
+        "without one would hand the table back out of the schema the application finds it in. tests/220's "
+        "reverse and schema assertions catch it.",
+        [("    execute format('alter table %s set schema %I', v_restored::text, v_nsp);\n", "    null;\n", 1)],
+    ),
+    "untransmute_index_names_kept": (
+        "bench/untransmute_index_names.sh",
+        "Pre-#830 untransmute: only the key is renamed back, so a UNIQUE constraint or index made on the "
+        "managed table since the conversion comes back under the monolith clone's auto-name and ON CONFLICT "
+        "ON CONSTRAINT <its name> fails with 42704. One site, the rename loop; tests/221's parts A and B "
+        "catch it.",
+        [("    execute format('alter index %s rename to %I', v_ix_oids[v_i]::regclass::text, v_ix_names[v_i]);\n",
+          "    null;\n", 1)],
+    ),
+    "untransmute_index_names_carried_renamed": (
+        "bench/untransmute_index_names.sh",
+        "Issue #830's first exception left out: a secondary index transmute carried (step 9b, parent copy "
+        "<name>_pgpm) is handed its parent copy's name too, so the table's own nx221_w_idx comes back as "
+        "nx221_w_idx_pgpm. tests/221's part A catches it.",
+        [("     and pc.relname::text <> mc.relname::text || '_pgpm'\n", "", 1)],
+    ),
+    "untransmute_index_names_legacy_key_renamed": (
+        "bench/untransmute_index_names.sh",
+        "Issue #830's second exception left out: a pre-#789 conversion's original key, whose parent copy "
+        "PostgreSQL auto-named, is renamed to that auto-name (lg221_pkey1) instead of keeping the name it "
+        "always had, as #789 decided. tests/221's part B catches it.",
+        [("   where mi.indrelid = v_monreg and not mi.indisprimary and pc.relname <> mc.relname\n",
+          "   where mi.indrelid = v_monreg and pc.relname <> mc.relname\n", 1)],
+    ),
+    "untransmute_replica_identity_not_restored": (
+        "bench/untransmute_replica_identity.sh",
+        "Pre-#815 (F1-06) untransmute: the parent's replica identity is read and never applied, so the "
+        "restored table keeps the monolith's conversion-time identity: FULL set since comes back DEFAULT, "
+        "DEFAULT comes back FULL. One site, the hand-back's ALTER, built and discarded; tests/222's every "
+        "transition catches it.",
+        [("    execute format('alter table %s replica identity %s', v_restored::text,\n",
+          "    perform format('alter table %s replica identity %s', v_restored::text,\n", 1)],
+    ),
+    "untransmute_replica_identity_kind_only": (
+        "bench/untransmute_replica_identity.sh",
+        "Issue #815's hand-back compares only the KIND of identity: a table whose identity was USING INDEX on "
+        "its key at the conversion and USING INDEX on another index since keeps its key as the identity. "
+        "tests/222's rh222 catches it.",
+        [("     or (v_ri = 'i' and not (select indisreplident from pg_index where indexrelid = v_ri_idx)) then\n",
+          "     then\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

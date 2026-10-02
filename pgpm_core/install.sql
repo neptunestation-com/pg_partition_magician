@@ -7825,6 +7825,16 @@ $$;
 -- it left published it again. The restored table leaves each publication it is in that the parent was not
 -- in with the same column list and row filter, and joins each the parent was in that it is not; a
 -- membership that matches costs no DDL, so a reverse with nothing changed needs no publication's owner.
+-- And its REPLICA IDENTITY (#815), once more for the same reason: ALTER TABLE ... REPLICA IDENTITY on a
+-- partitioned table does not reach its partitions (the premise of #782), so the monolith kept the
+-- conversion-time identity and a table set FULL since came back DEFAULT. An index identity is handed back
+-- as the restored table's own index that was attached under the parent's identity index.
+-- And its SCHEMA (#827): ALTER TABLE <parent> SET SCHEMA moves the parent and leaves the monolith where it
+-- was (#727), so the reverse names the monolith by the oid transmute recorded until it has moved it into
+-- the parent's schema, where the application has been finding the table since the move.
+-- And the names of the indexes and index-backed constraints made on the parent since the conversion (#830):
+-- each clones onto the monolith under an auto-name of the partition's, which the DETACH keeps, so each is
+-- given back the name the parent's copy carried, as the key is (#789).
 create or replace function pgpm.untransmute(p_parent regclass)
 returns regclass language plpgsql as $$
 declare
@@ -7845,6 +7855,8 @@ declare
   v_owner oid; v_comdefs text[] := '{}';
   v_pubdefs text[] := '{}';   -- #780: the parent's publication memberships, as ADD TABLEs naming the restored table
   v_key_name name; v_key_mon name;   -- #789: the parent's key name, and the monolith copy's pgpm_key_<oid>
+  v_ix_oids oid[] := '{}'; v_ix_names name[] := '{}';   -- #830: monolith index oids, and the parent copies' names
+  v_ri "char"; v_ri_idx oid;   -- #815: the parent's replica identity, and the monolith's index under its identity index
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
@@ -8111,6 +8123,39 @@ begin
   select p.conname, c.conname into v_key_name, v_key_mon
     from pg_constraint c join pg_constraint p on p.oid = c.conparentid
    where c.conrelid = v_monreg and c.contype in ('p', 'u') and c.conname = 'pgpm_key_' || c.conindid::text;
+  -- And every other index the parent's DDL put on the monolith since the conversion (#830): CREATE INDEX and
+  -- ADD CONSTRAINT ... UNIQUE on the parent clone onto each partition under an auto-name of the partition's
+  -- (t_p<label>_v_idx), the DETACH keeps those, and the DROP takes the parent's, which held the names every
+  -- statement uses. Each is found by its identity, the parent index it is attached under (pg_inherits, which
+  -- the DETACH removes, so read here), and handed that index's name once the DROP has freed it. Not 9b's
+  -- carried originals, whose parent copy is <name>_pgpm: the monolith's is the table's own index under the
+  -- name it always had. Not the key, handed back above by its pgpm_key_<oid> identity, nor a PRIMARY KEY
+  -- under any other name, which is a pre-#789 conversion's original key and keeps its name as it was.
+  select coalesce(array_agg(mi.indexrelid order by mi.indexrelid), '{}'),
+         coalesce(array_agg(pc.relname order by mi.indexrelid), '{}')
+    into v_ix_oids, v_ix_names
+    from pg_index mi
+    join pg_class mc on mc.oid = mi.indexrelid
+    join pg_inherits h on h.inhrelid = mi.indexrelid
+    join pg_class pc on pc.oid = h.inhparent
+   where mi.indrelid = v_monreg and not mi.indisprimary and pc.relname <> mc.relname
+     and pc.relname::text <> mc.relname::text || '_pgpm'
+     and mc.relname::text <> 'pgpm_key_' || mi.indexrelid::text;
+  -- The parent's replica identity (#815, see above), read under the lock: ALTER TABLE ... REPLICA IDENTITY
+  -- takes ACCESS EXCLUSIVE. An index identity names the parent's index; the one handed back is the
+  -- monolith's index attached under it, found by that identity before the DETACH removes it.
+  select c.relreplident into v_ri from pg_class c where c.oid = p_parent;
+  if v_ri = 'i' then
+    select h.inhrelid into v_ri_idx
+      from pg_index pi
+      join pg_inherits h on h.inhparent = pi.indexrelid
+      join pg_index mi on mi.indexrelid = h.inhrelid and mi.indrelid = v_monreg
+     where pi.indrelid = p_parent and pi.indisreplident;
+    if v_ri_idx is null then
+      raise exception 'pg_partition_magician: cannot untransmute % -- its replica identity is USING INDEX, and that index has no copy on the original table to hand back. Set the table''s REPLICA IDENTITY to DEFAULT, FULL or an index of the original table''s, then re-run untransmute.',
+        p_parent;
+    end if;
+  end if;
   execute format('alter table %s detach partition %s', p_parent::text, v_monreg::text);
   -- The mirror of transmute's 3b (#573): the parent owns the serial sequences the monolith's column
   -- defaults still call, so dropping it would take them too ("other objects depend on it"). Hand each
@@ -8132,6 +8177,11 @@ begin
   if v_key_mon is not null then
     execute format('alter table %s rename constraint %I to %I', v_monreg::text, v_key_mon, v_key_name);
   end if;
+  -- and so do the parent's other indexes, for the ones made on it since the conversion (#830). ALTER INDEX
+  -- renames an index-backed constraint with its index.
+  for v_i in 1 .. coalesce(array_length(v_ix_oids, 1), 0) loop
+    execute format('alter index %s rename to %I', v_ix_oids[v_i]::regclass::text, v_ix_names[v_i]);
+  end loop;
 
   -- re-establish identity on the restored monolith, with the parent sequence's options (#670), and reseed
   -- from the parent sequence's position, clearing every existing id on its lattice (mirrors transmute's
@@ -8149,9 +8199,12 @@ begin
   end if;
 
   -- rename the monolith back to the original table name. (transmute never renamed the secondary
-  -- indexes, so those names are already the originals; the key's was handed back above.)
+  -- indexes, so those names are already the originals; the key's was handed back above, and those of the
+  -- indexes made since the conversion, #830.) In the monolith's own schema, which is the parent's unless the
+  -- parent was moved (#827); the restored table IS the monolith, so it is named by that identity, the oid
+  -- transmute recorded, never resolved as <the parent's schema>.<name>, where a moved parent leaves nothing.
   execute format('alter table %s rename to %I', v_monreg::text, v_rel);
-  v_restored := format('%I.%I', v_nsp, v_rel)::regclass;
+  v_restored := v_monreg;
 
   -- The mirror of transmute's 0d (#498): every dropped_fk record in which THIS table was the referencer
   -- named the parent, which is gone; the table is v_restored now. That covers a key another managed
@@ -8160,6 +8213,42 @@ begin
   -- finding it) and a self-referential key of this parent's own, which the loop below re-adds on
   -- v_restored through the same column before the delete at the end forgets its record.
   update pgpm.dropped_fk set referencing_table = v_restored where referencing_table = p_parent;
+
+  -- re-add every preserved incoming FK against the restored table. The recorded definition names the
+  -- table as it was at the conversion, schema-qualified, which is the name the restored table carries again
+  -- here, still in the monolith's schema: so this runs before the move below (#827), which would leave it
+  -- naming a table that is not there. Mirror restore_incoming_fks:
+  -- a partitioned referencer validates in one step (Postgres forbids NOT VALID there), anything else
+  -- comes back NOT VALID, which enforces every new write from this statement on.
+  --
+  -- And stays NOT VALID (#577). The VALIDATE used to follow here, and it scans the whole REFERENCING
+  -- table: this is a function, one transaction, holding ACCESS EXCLUSIVE on the restored table since the
+  -- second gate, so every reader and writer of it waited out an O(referencing rows) scan inside what is
+  -- otherwise a metadata-only reverse; and an orphan written while the key was suspended failed it and
+  -- rolled the whole reverse back. restore_incoming_fks stops at NOT VALID for the same reason (#265),
+  -- but there a later maintain() tick validates; here pgpm is forgetting the table, so the VALIDATE is
+  -- the operator's, run in its own transaction after this one, where it takes only SHARE UPDATE EXCLUSIVE
+  -- on the referencing table and ROW SHARE on this one and blocks neither. The notice names it.
+  for r in select * from pgpm.dropped_fk where parent_table = p_parent order by id loop
+    if (select relkind from pg_class where oid = r.referencing_table) = 'p' then
+      execute format('alter table %s add constraint %I %s',
+                     r.referencing_table::text, r.constraint_name, r.definition);
+    else
+      execute format('alter table %s add constraint %I %s not valid',
+                     r.referencing_table::text, r.constraint_name, r.definition);
+      raise notice 'pg_partition_magician: untransmute re-added % on % NOT VALID; validate it outside this transaction with: ALTER TABLE % VALIDATE CONSTRAINT %',
+        quote_ident(r.constraint_name), r.referencing_table::text, r.referencing_table::text, quote_ident(r.constraint_name);
+    end if;
+  end loop;
+
+  -- The parent's schema (#827). ALTER TABLE <parent> SET SCHEMA moved the managed table and left the monolith
+  -- where it was (#727), and the application has been finding the table in the parent's schema since. The
+  -- restored table goes there, its indexes, its row type and the sequences it owns with it, so the statements
+  -- captured off the parent (triggers, comments, grants, policies, publication memberships) replay against
+  -- the name they were built with. The parent's DROP freed that name.
+  if (select relnamespace from pg_class where oid = v_restored) <> (select oid from pg_namespace where nspname = v_nsp) then
+    execute format('alter table %s set schema %I', v_restored::text, v_nsp);
+  end if;
 
   -- Replay the captured triggers onto the restored table, now that it carries the original name again,
   -- then put back each one's enabled state (#499): the replayed text leaves them all origin-only.
@@ -8236,30 +8325,16 @@ begin
     execute v_tdef;
   end loop;
 
-  -- re-add every preserved incoming FK against the restored table. The recorded definition names the
-  -- parent, schema-qualified, whose name the restored table now carries again. Mirror restore_incoming_fks:
-  -- a partitioned referencer validates in one step (Postgres forbids NOT VALID there), anything else
-  -- comes back NOT VALID, which enforces every new write from this statement on.
-  --
-  -- And stays NOT VALID (#577). The VALIDATE used to follow here, and it scans the whole REFERENCING
-  -- table: this is a function, one transaction, holding ACCESS EXCLUSIVE on the restored table since the
-  -- second gate, so every reader and writer of it waited out an O(referencing rows) scan inside what is
-  -- otherwise a metadata-only reverse; and an orphan written while the key was suspended failed it and
-  -- rolled the whole reverse back. restore_incoming_fks stops at NOT VALID for the same reason (#265),
-  -- but there a later maintain() tick validates; here pgpm is forgetting the table, so the VALIDATE is
-  -- the operator's, run in its own transaction after this one, where it takes only SHARE UPDATE EXCLUSIVE
-  -- on the referencing table and ROW SHARE on this one and blocks neither. The notice names it.
-  for r in select * from pgpm.dropped_fk where parent_table = p_parent order by id loop
-    if (select relkind from pg_class where oid = r.referencing_table) = 'p' then
-      execute format('alter table %s add constraint %I %s',
-                     r.referencing_table::text, r.constraint_name, r.definition);
-    else
-      execute format('alter table %s add constraint %I %s not valid',
-                     r.referencing_table::text, r.constraint_name, r.definition);
-      raise notice 'pg_partition_magician: untransmute re-added % on % NOT VALID; validate it outside this transaction with: ALTER TABLE % VALIDATE CONSTRAINT %',
-        quote_ident(r.constraint_name), r.referencing_table::text, r.referencing_table::text, quote_ident(r.constraint_name);
-    end if;
-  end loop;
+  -- Put the parent's replica identity on the restored table in place of the monolith's conversion-time one
+  -- (#815; captured under the lock, above). Only when they differ, so a reverse with nothing changed costs
+  -- no DDL. An index identity is the monolith's index that was attached under the parent's, by its oid,
+  -- under whatever name the renames above left it.
+  if v_ri <> (select relreplident from pg_class where oid = v_restored)
+     or (v_ri = 'i' and not (select indisreplident from pg_index where indexrelid = v_ri_idx)) then
+    execute format('alter table %s replica identity %s', v_restored::text,
+                   case v_ri when 'd' then 'default' when 'f' then 'full' when 'n' then 'nothing'
+                             else format('using index %I', (select relname from pg_class where oid = v_ri_idx)) end);
+  end if;
 
   -- the per-parent regrain change-capture apparatus (#267) is a side relation, not a partition, so the
   -- parent's DROP above does not take it. Drop it here or untransmute leaves it orphaned. Names were
