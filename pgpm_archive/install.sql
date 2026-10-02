@@ -2560,6 +2560,7 @@ begin
   select * into cfg from archive.config where parent_table = p_parent;
   if not found then raise exception 'archive._encode_upload_ndjson_single: % has no archive.config row', p_parent; end if;
   select * into pcfg from pgpm.config where parent_table = p_parent;
+  pcfg := pgpm._control_followed(pcfg);
   if not found then raise exception 'archive._encode_upload_ndjson_single: % is not managed', p_parent; end if;
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
@@ -2636,6 +2637,7 @@ begin
   select * into cfg from archive.config where parent_table = p_parent;
   if not found then raise exception 'archive._encode_upload_parquet: % has no archive.config row', p_parent; end if;
   select * into pcfg from pgpm.config where parent_table = p_parent;
+  pcfg := pgpm._control_followed(pcfg);
   if not found then raise exception 'archive._encode_upload_parquet: % is not managed', p_parent; end if;
 
   -- in config.partition_tz, for the reason given in _encode_upload_ndjson_single (#501)
@@ -2845,6 +2847,7 @@ begin
   select * into cfg from archive.config where parent_table = p_parent;
   if not found then raise exception 'archive.to_s3: % has no archive.config row', p_parent; end if;
   select * into pcfg from pgpm.config where parent_table = p_parent;
+  pcfg := pgpm._control_followed(pcfg);
   if not found then raise exception 'archive.to_s3: % is not managed', p_parent; end if;
   -- archive.configure refuses this now (#594), but a row written before it did, or by a raw UPDATE,
   -- still reaches here: with part_bytes <= 0 the read loop below never reads, and the part loop PUTs

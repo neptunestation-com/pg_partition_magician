@@ -714,6 +714,14 @@ in its own schema through the identity it recorded for it, so write blocks, arch
 on across the move. A rename is still a rename, though: the steps look a partition up by name in that
 schema, so the advice above applies wherever the partition lives.
 
+**Renaming the partition-key column is safe.** `ALTER TABLE public.events RENAME COLUMN created_at TO
+occurred_at` keeps the table routing, and pgpm follows it: every step finds the control column through the
+parent's partition key, which PostgreSQL holds by attribute number, so obtain keeps extending the grid,
+and retention, regrain, `set_partition_tz` and `untransmute` all act on the column under its new name.
+`pgpm.config.control_column` keeps the name it had at transmute. Rename between regrains rather than
+during one: a regrain in flight captures changes through a trigger minted from the name it had when
+that regrain began, and the next one mints its trigger from the new name.
+
 `status().retain_backlog` tracks partitions still waiting on their turn to drop; it falling tick over
 tick is normal draining (either a paced backlog or archiving still catching up), while flat with
 `retain_drop_failures` climbing means something else is wrong -- an unexpected `DROP` failure, not

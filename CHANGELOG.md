@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **A renamed control column is followed, not lost** (#826). `pgpm.config.control_column` records the column
+  by name, and every reader resolved it by that name, so after `ALTER TABLE ... RENAME COLUMN` of the
+  partition key (which PostgreSQL allows, the table routing on) obtain's ceiling check ran `select
+  '<bound>'::`, every tick logged `skip_obtain` and the forward grid never grew again; the id frontier,
+  `extend_to`, regrain's copy and `untransmute` named a column that no longer exists, and `set_partition_tz`
+  and `set_regrain` failed open on a type lookup that found nothing (a naive grid's zone was moved). Every
+  load of a config row now goes through `pgpm._control_followed`, which takes the column's current name from
+  the parent's partition key (`pg_partitioned_table.partattrs`), in the core and in `pgpm_archive`.
+  `tests/219` under `bench/control_column_rename.sh` (its last part checks that every whole-row config load in
+  the installed code is followed), with the mutations `control_followed_noop`, `control_followed_obtain_only`
+  and `control_followed_missing_at_retain`.
 - **An archive object key is never reused by a different relation** (#822). `archive._object_key` named a
   chunk by the parent's current `<prefix><schema>.<table>` and its `lo`, and both transports PUT
   unconditionally, so after the runbook's drop and `pgpm.forget_missing()` (which deletes the dropped table's
