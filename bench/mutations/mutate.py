@@ -935,6 +935,19 @@ OBJECT_STEM_BODY = (
     "                   || case when p_lo::timestamptz::text like '% BC' then 'BC' else '' end end;\n"
 )
 
+# archive._pq_snapshot's fill and the two Parquet encoders' tails (#632). Shared by the two mutations
+# that take the snapshot's lifecycle apart (parquet_per_column_statements, the pre-#462 view, and
+# parquet_snapshot_per_encode_table, the pre-#632 table per encode), so the exact text lives in one place.
+PQ_SNAPSHOT_FILL = """  truncate pg_temp.archive_pq_snapshot;
+  -- ONE statement, so ONE snapshot: every row the encoder writes is a row this statement saw.
+  execute format(
+    'insert into pg_temp.archive_pq_snapshot
+       select %s, row_number() over (order by %s) as archive_pq_ord from %s',
+    v_cols_q, v_order_q, v_from_q);
+  get diagnostics v_num_rows = row_count;
+"""
+PQ_SNAPSHOT_TAIL = "  truncate pg_temp.archive_pq_snapshot;  -- emptied, not dropped: the next encode reuses it (#632)\n"
+
 MUTATIONS = {
     "transmute_no_commits": (
         "bench/transmute_lock.sh",
@@ -2596,17 +2609,21 @@ $$;''',
         "COMMITTED snapshot of its own (one per column, plus one for the count), which is exactly the "
         "N+1 snapshots the encoders used to take. A row committing between two column reads is then "
         "in the later columns and not the earlier ones, and from that column on every value belongs "
-        "to the row next door, in a file every reader accepts. Five sites, all in the snapshot's "
-        "lifecycle: the create, the count, and the three drops (the guarded one before the create, "
-        "and one at the end of each encoder), so the mutant runs to completion rather than erroring "
-        "on `drop table` of a view, which would fail the guard for the wrong reason.",
+        "to the row next door, in a file every reader accepts. Four edits, all in the snapshot's "
+        "lifecycle since #632 made it reusable: the create (a view, so no WITH NO DATA), the fill "
+        "(the truncate and the one-statement INSERT become the separate count), the two encoders' "
+        "tails (they empty the table; the mutant drops the view, so the next call builds it again) "
+        "and the drop of a misshapen one, so the mutant runs to completion rather than erroring on a "
+        "TRUNCATE or a `drop table` of a view, which would fail the guard for the wrong reason.",
         [
-            ("    'create temp table archive_pq_snapshot on commit drop as\n",
-             "    'create temp view archive_pq_snapshot as\n", 1),
-            ("  get diagnostics v_num_rows = row_count;\n",
-             "  execute 'select count(*) from pg_temp.archive_pq_snapshot' into v_num_rows;\n", 1),
-            ("  drop table pg_temp.archive_pq_snapshot;\n",
-             "  drop view pg_temp.archive_pq_snapshot;\n", 3),
+            ("      'create temp table archive_pq_snapshot on commit drop as\n"
+             "         select %s, row_number() over (order by %s) as archive_pq_ord from %s with no data',\n",
+             "      'create temp view archive_pq_snapshot as\n"
+             "         select %s, row_number() over (order by %s) as archive_pq_ord from %s',\n", 1),
+            (PQ_SNAPSHOT_FILL, "  execute 'select count(*) from pg_temp.archive_pq_snapshot' into v_num_rows;\n", 1),
+            (PQ_SNAPSHOT_TAIL, "  drop view pg_temp.archive_pq_snapshot;\n", 2),
+            ("    drop table pg_temp.archive_pq_snapshot;\n",
+             "    drop view pg_temp.archive_pq_snapshot;\n", 1),
         ],
     ),
     "transmute_trigger_state_dropped": (
@@ -3922,6 +3939,30 @@ $$;''',
         "and every export of it is refused (or raises, on a timestamptz t). One site, the fingerprint.",
         [("coalesce(sum(hashtextextended(row_to_json(t.*)::text, 0)), 0) from %I.%I t',\n",
           "coalesce(sum(hashtextextended(row_to_json(t)::text, 0)), 0) from %I.%I t',   -- MUTANT: partial #821\n", 1)],
+    ),
+    "to_s3_cursor_session_text": (
+        "bench/archive_to_s3_cursor_session.sh",
+        "Pre-#834 archive.to_s3: the keyset cursor's control value crosses from one page's query to the "
+        "next as `k::text`, rendered in the calling session's DateStyle and TimeZone, and is cast back "
+        "with `$1::<type>` in that same session. Under a non-ISO DateStyle a timestamptz names its zone "
+        "by abbreviation, and Asia/Shanghai's CST reads back as US Central (-06): the cursor lands 14 "
+        "hours past the last paged row, the next page skips every row in between, and the conservation "
+        "check refuses every multi-page export of an unwritten partition. One site, the render.",
+        [("archive._cursor_text((array_agg(k order by k desc, c desc))[1]),",
+          "(array_agg(k order by k desc, c desc))[1]::text,", 1)],
+    ),
+    "parquet_snapshot_per_encode_table": (
+        "bench/archive_parquet_snapshot_locks.sh",
+        "Pre-#632 Parquet encoders: each drops archive._pq_snapshot's temp table when it is done with it, "
+        "so the next encode finds none and builds a fresh one. A dropped relation's locks are held to "
+        "transaction end (the table, its TOAST table and index, its two row types: ~8 entries in the "
+        "SHARED lock table), so one pgpm._archive_step, which encodes one chunk per partition for up to "
+        "archive_batch partitions in one transaction, grows the cluster's lock table by ~8 per chunk "
+        "until it commits. The files are byte for byte the same, so every identity assertion in "
+        "tests/archive/db/37 still passes; the lock-growth zeros and the emptied relation are what name "
+        "it. Two sites, the two encoders' tails.",
+        [(PQ_SNAPSHOT_TAIL,
+          "  drop table pg_temp.archive_pq_snapshot;   -- MUTANT: pre-#632, a fresh snapshot table per encode\n", 2)],
     ),
     "keep_both_two_way_only": (
         "bench/keep_both_diff3.sh",
@@ -5867,6 +5908,8 @@ MUTATION_SRC = {
     "archive_ndjson_single_row_alias_shadowed": "pgpm_archive/install.sql",
     "to_s3_row_alias_shadowed": "pgpm_archive/install.sql",
     "to_s3_fingerprint_row_alias_shadowed": "pgpm_archive/install.sql",
+    "to_s3_cursor_session_text": "pgpm_archive/install.sql",
+    "parquet_snapshot_per_encode_table": "pgpm_archive/install.sql",
     # The harness and review tooling guard themselves too (#598 to #601): their defects live in the
     # scripts, a doc and a test file, so that is what these mutate.
     "keep_both_two_way_only": "scripts/review/keep_both.py",

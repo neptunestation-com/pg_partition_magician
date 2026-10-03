@@ -2056,10 +2056,23 @@ $$;
 -- is encoding plus the compressed body it has built so far (the shape bench/archive_*_memory.sh pin
 -- for #366/#368/#370), not by the width of the row. It is one more copy ON DISK for the life of the
 -- call, and one sort (the row_number) in place of N sorts of the key over the source. The encoders
--- drop it as soon as the last column is read; ON COMMIT DROP covers an encoder that raises first,
--- and the guarded drop below covers the next call in the same transaction after such a raise.
+-- empty it as soon as the last column is read; ON COMMIT DROP removes it when the transaction ends.
 -- pg_temp is the only schema the name can resolve in, so it can never drop anything but this
 -- session's own.
+--
+-- LOCKS. The relation is REUSED, not rebuilt, by every later encode of the same shape in the same
+-- transaction: emptied (TRUNCATE) and refilled by one INSERT ... SELECT, which is still one statement
+-- and so still one snapshot. Creating a relation and dropping it took about eight entries in the
+-- SHARED lock table (the table, its TOAST table and TOAST index, its row type and array type), and a
+-- dropped relation's locks are held to transaction end, so an encoder that built a fresh one per call
+-- grew a transaction's lock entries by eight per encode. pgpm._archive_step runs one encode per chunk
+-- for up to archive_batch partitions of ONE parent in one transaction, so that was eight per chunk
+-- until the tick committed: the #587 cliff again (issue #632, F5-04). Reusing the relation takes its
+-- locks once, so the entries a transaction holds no longer grow with the number of encodes it runs.
+-- The shape is checked, not assumed: the relation is reused only when its columns are exactly the
+-- ones this call would create (names, types, typmods and collations, in order, then the ordinal),
+-- and otherwise it is dropped and built again, so encodes of differently shaped tables in one
+-- transaction stay correct and cost one set of entries per change of shape, not per encode.
 --
 -- Nothing here carries SQL (#408): the relation arrives as p_schema/p_table and the range as
 -- p_control/p_lo/p_hi (both go to archive._pq_from_item), the column list and the ordering as
@@ -2071,6 +2084,7 @@ create or replace function archive._pq_snapshot(
 language plpgsql as $$
 declare
   v_from_q text; v_cols_q text; v_order_q text; v_num_rows bigint;
+  v_snap regclass; v_want text[]; v_have text[];
 begin
   if 'archive_pq_ord' = any (p_cols) then
     raise exception 'archive._pq_snapshot: %.% has a column named archive_pq_ord, the name the Parquet encoder reserves for its row ordinal; rename it to archive the table as Parquet', p_schema, p_table;
@@ -2084,11 +2098,37 @@ begin
   end if;
   v_from_q := archive._pq_from_item(p_schema, p_table, p_control, p_lo, p_hi);
 
-  if to_regclass('pg_temp.archive_pq_snapshot') is not null then
+  -- The shape check runs on every call, the first included, and so does the TRUNCATE and the INSERT
+  -- below: the first encode in a transaction then takes every lock a later one takes, and a later one
+  -- takes none of its own. The columns this call's CREATE would give the relation, then the ordinal:
+  v_snap := to_regclass('pg_temp.archive_pq_snapshot');
+  select array_agg(format('%s %s %s %s', a.attname, a.atttypid, a.atttypmod, a.attcollation) order by t.ord)
+    into v_want
+    from unnest(p_cols) with ordinality as t(c, ord)
+    join pg_namespace n on n.nspname = p_schema
+    join pg_class r on r.relnamespace = n.oid and r.relname = p_table
+    join pg_attribute a on a.attrelid = r.oid and a.attname = t.c and a.attnum > 0 and not a.attisdropped;
+  v_want := v_want || format('%s %s %s %s', 'archive_pq_ord', 'int8'::regtype::oid, -1, 0);
+  -- and the columns the relation already there has (none when there is none)
+  select array_agg(format('%s %s %s %s', a.attname, a.atttypid, a.atttypmod, a.attcollation) order by a.attnum)
+    into v_have
+    from pg_attribute a join pg_class c on c.oid = a.attrelid
+   where a.attrelid = v_snap and c.relkind = 'r' and a.attnum > 0 and not a.attisdropped;
+  if v_snap is not null and v_have is distinct from v_want then
     drop table pg_temp.archive_pq_snapshot;
+    v_snap := null;
   end if;
+  -- built empty, then filled by the same two statements a reuse runs
+  if v_snap is null then
+    execute format(
+      'create temp table archive_pq_snapshot on commit drop as
+         select %s, row_number() over (order by %s) as archive_pq_ord from %s with no data',
+      v_cols_q, v_order_q, v_from_q);
+  end if;
+  truncate pg_temp.archive_pq_snapshot;
+  -- ONE statement, so ONE snapshot: every row the encoder writes is a row this statement saw.
   execute format(
-    'create temp table archive_pq_snapshot on commit drop as
+    'insert into pg_temp.archive_pq_snapshot
        select %s, row_number() over (order by %s) as archive_pq_ord from %s',
     v_cols_q, v_order_q, v_from_q);
   get diagnostics v_num_rows = row_count;
@@ -2234,7 +2274,7 @@ begin
   v_schema_list := array_prepend(archive._pq_build_schema_root(v_ncols), v_schema_elements);
   v_footer := archive._pq_build_file_metadata(v_schema_list, v_num_rows, array[v_row_group]);
 
-  drop table pg_temp.archive_pq_snapshot;
+  truncate pg_temp.archive_pq_snapshot;  -- emptied, not dropped: the next encode reuses it (#632)
   return v_body || v_footer || archive._pq_reverse_bytes(int4send(length(v_footer))) || v_magic;
 end;
 $$;
@@ -2409,7 +2449,7 @@ begin
   v_schema_list := array_prepend(archive._pq_build_schema_root(v_ncols), v_schema_elements);
   v_footer := archive._pq_build_file_metadata(v_schema_list, v_num_rows, array[v_row_group]);
 
-  drop table pg_temp.archive_pq_snapshot;
+  truncate pg_temp.archive_pq_snapshot;  -- emptied, not dropped: the next encode reuses it (#632)
   p_file := v_body || v_footer || archive._pq_reverse_bytes(int4send(length(v_footer))) || v_magic;
   p_num_rows := v_num_rows;
 end;
@@ -2813,6 +2853,22 @@ begin
 end;
 $$;
 
+-- archive.to_s3's keyset cursor, as text that reads back as the same value in ANY session (#834). The
+-- cursor's control value travels from one page's query to the next as text and is cast back with
+-- `$1::<type>` in the caller's session. Rendered in that session's own DateStyle and TimeZone, a
+-- timestamptz named its zone by ABBREVIATION under any non-ISO DateStyle, and several zones' own
+-- abbreviations read back as another zone: Asia/Shanghai's `CST` is read as US Central, so under
+-- DateStyle Postgres the cursor landed 14 hours past the last paged row, the next page skipped every
+-- row in between, and the conservation check refused every multi-page export with nothing writing.
+-- Pinned the way archive._object_stem is (#551), the text is ISO with a numeric offset of +00
+-- (`2024-01-01 00:00:00+00`), which every DateStyle and TimeZone reads back as the same instant; a
+-- `timestamp` or `date` is ISO too, and every other control type's text does not depend on either
+-- setting. Called once per page, on the page's last value, never per row.
+create or replace function archive._cursor_text(p_value anyelement)
+returns text language sql stable set timezone = 'UTC' set datestyle = 'ISO, MDY' as $$
+  select p_value::text;
+$$;
+
 -- Small partitions (one part's worth or less) take a plain single PUT; bigger ones stream
 -- through S3 multipart, holding at most one part in memory at a time. With archive.config.compress
 -- on, the same two paths carry a gzip stream instead of plain NDJSON (the fold inside the loop says
@@ -2911,10 +2967,11 @@ begin
       -- leaves quiescence to the caller (a concurrent UPDATE or VACUUM FULL cannot lose rows silently
       -- either, it trips the conservation check below). The planner derives the `control >= cursor`
       -- index condition from the row comparison itself, so an index on the control column still
-      -- drives each page.
+      -- drives each page. The cursor's control value crosses to the next page as text rendered by
+      -- archive._cursor_text, never in this session's DateStyle and TimeZone (#834).
       execute format(
         'select coalesce(string_agg(j, e''\n'' order by k, c), ''''),
-                (array_agg(k order by k desc, c desc))[1]::text,
+                archive._cursor_text((array_agg(k order by k desc, c desc))[1]),
                 (array_agg(c order by k desc, c desc))[1],
                 count(*), coalesce(sum(hashtextextended(j, 0)), 0)
            from (select row_to_json(t.*)::text as j, t.%I as k, t.ctid as c from %I.%I t
