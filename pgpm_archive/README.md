@@ -64,7 +64,9 @@ select pgpm.retire('public.events', 'events_p2024_01');
 
 The object is named after the partition with its parent's schema: `<prefix>public.events_p2024_01.ndjson`
 here (`.ndjson.gz` compressed), and `<prefix><schema>.<child>.parquet` from `archive.to_s3_parquet`, so
-same-named tables in two schemas can share a prefix.
+same-named tables in two schemas can share a prefix. The first table to export under a name keeps that
+shape; a later table that took the name of a dropped one gets its oid in the key
+(`<prefix>public.events_p2024_01.<oid>.ndjson`), so its export never replaces the dropped table's.
 
 `archive.to_s3` reads the partition in pages and, before writing the object, checks that the rows it
 paged are the rows the partition holds after the last page: the same count and the same content

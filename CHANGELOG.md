@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **A synchronous export never writes over another relation's object, and every archive key comes from one
+  function** (#872). `archive._child_object_key` keyed `archive.to_s3` and `archive.to_s3_parquet` by
+  `<prefix><schema>.<child>` with no owner, and both PUT unconditionally, so after the documented
+  to_s3-then-drop workflow and `pgpm.forget_missing()` a new table taking the dropped table's name exported its
+  same-named partition over the dropped table's export, the only copy of those rows. #822 had given the
+  automatic chunk keys an owner and left these. Every key, chunk or export, is now assembled and claimed in
+  `archive._owned_key`: the first parent to write under a name keeps the shape it always had, any other gets
+  its oid in the key (`<prefix><schema>.<child>.<oid><ext>` for an export). `scripts/check_archive_object_keys.py`
+  (the `Archive object keys` lint job) fails CI when a key prefix is assembled anywhere else, and
+  `tests/archive/db/39` under `bench/archive_key_owner_every_path.sh` takes every path that writes an object
+  through a namesake, with one mutation per site: `archive_child_key_unclaimed`, `archive_object_key_unclaimed`,
+  `archive_to_s3_key_inline`, `archive_to_s3_gz_key_inline`, `archive_to_s3_parquet_key_inline`,
+  `archive_ndjson_strategy_key_inline` and `archive_parquet_strategy_key_inline`.
 - **A regrain in flight across the upgrade that added `config.regrain_source_mark` no longer swaps in stale
   copies** (#878). Such a run carries a null mark, `_regrain_source_drift` answered null for it, and
   `regrain_step` then recorded the source as it was at that tick as the mark, so copies made before a

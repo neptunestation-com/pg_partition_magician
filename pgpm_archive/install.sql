@@ -2516,34 +2516,42 @@ returns text language sql stable set timezone = 'UTC' set datestyle = 'ISO, MDY'
                    || case when p_lo::timestamptz::text like '% BC' then 'BC' else '' end end;
 $$;
 
--- A chunk's object key: <prefix><schema>.<table>_<stem><ext>. The parent is named by IDENTITY,
--- quote_ident(schema) || '.' || quote_ident(table), never by p_parent::text (#551). regclass output leaves
--- the schema out whenever the calling session's search_path reaches the relation, so one table was keyed
--- `events_...` from one session and `public.events_...` from another, and two parents named `evt` in two
--- schemas, sharing a prefix (archive.configure's default `events/` is shared by every table) and each
--- ticked under its own schema's search_path, wrote ONE object: the second PUT overwrote the first while
--- both ledger rows recorded it, and retire() then dropped the first table's partition. The qualified name
--- is what regclass::text already printed for a parent off the path, quoted the same way, so a key written
--- from such a session is unchanged. Keys already in pgpm.archive_ledger stay as written: nothing derives
--- a key from a chunk's bounds after the upload, so an existing object stays findable through its row.
+-- Every object key this module writes is assembled here and nowhere else (#872), and every key is CLAIMED
+-- here before anything is PUT to it. A key is <base>[.<oid>]<tail>: the base is <prefix><schema>.<name>, the
+-- name being p_child when one is given (a synchronous export names its partition) and p_parent's own relname
+-- when it is null (an archive_fn chunk names its table); the tail is whatever follows the name, the chunk's
+-- _<stem><ext> or the export's <ext>. archive._object_key and archive._child_object_key are the two shapes'
+-- entry points, and both only call this. scripts/check_archive_object_keys.py fails CI when a prefix is
+-- assembled into a string anywhere else in this file, and tests/archive/db/39 takes every path that writes
+-- an object through a namesake.
 --
--- A name is not an identity, though, and both transports PUT unconditionally (#822). After the runbook's
--- "drop the table and run pgpm.forget_missing()", which deletes the dropped table's ledger rows, a new
--- managed table taking the same name and prefix archived its [0, 10000) to the same key and replaced the
--- old table's only copy of the rows retire() had dropped. So the base <prefix><schema>.<table> is claimed in
--- archive.object_key_owner by the first relation to archive under it, which keeps the shape above, and any
--- other relation gets <prefix><schema>.<table>.<oid>_<stem><ext>. That shape cannot collide with a claimed
--- one: no stem holds an underscore, so a key's last `_` ends its base, and a claimed base never ends in `.`
--- and digits (quote_ident quotes an identifier that starts with a digit). The claim is taken in the tick's
--- own transaction, before the PUT, so a tick that rolls back leaves no claim, and the caller's snapshot
--- missing a concurrent one can only land on the oid shape, never on another relation's key. What is left is
--- oid reuse: after the OID counter wraps, a relation given a dropped one's oid AND its name could reach the
--- old key again.
-create or replace function archive._object_key(p_parent regclass, p_prefix text, p_kind text, p_lo text, p_ext text)
+-- The relation is named by IDENTITY, quote_ident(schema) || '.' || quote_ident(name), never by
+-- p_parent::text (#551). regclass output leaves the schema out whenever the calling session's search_path
+-- reaches the relation, so one table was keyed `events_...` from one session and `public.events_...` from
+-- another, and two parents named `evt` in two schemas, sharing a prefix (archive.configure's default
+-- `events/` is shared by every table) and each ticked under its own schema's search_path, wrote ONE
+-- object: the second PUT overwrote the first while both ledger rows recorded it, and retire() then dropped
+-- the first table's partition. The synchronous exports keyed the bare child name the same way until #711.
+--
+-- A name is not an identity, though, and every path PUTs unconditionally (#822). After the runbook's "drop
+-- the table and run pgpm.forget_missing()", which deletes the dropped table's ledger rows, a new managed
+-- table taking the same name and prefix archived its [0, 10000) to the same key and replaced the old
+-- table's only copy of the rows retire() had dropped; and after the documented to_s3-then-drop workflow, a
+-- new table's archive.to_s3 of its same-named partition replaced the dropped table's export the same way
+-- (#872, which the #822 fix had left to the synchronous keys). So the base is claimed in
+-- archive.object_key_owner by the first relation to write under it, which keeps the shape it always had,
+-- and any other relation gets <base>.<oid><tail>. That shape cannot collide with a claimed one: a claimed
+-- base never ends in `.` and digits (quote_ident quotes an identifier that starts with a digit or holds a
+-- dot), and a chunk's stem holds no underscore, so a chunk key's last `_` ends its base. The claim is taken
+-- in the caller's own transaction, before the PUT, so a call that rolls back leaves no claim, and a
+-- snapshot missing a concurrent claim can only land on the oid shape, never on another relation's key.
+-- What is left is oid reuse: after the OID counter wraps, a relation given a dropped one's oid AND its name
+-- could reach the old key again.
+create or replace function archive._owned_key(p_parent regclass, p_prefix text, p_child name, p_tail text)
 returns text language plpgsql as $$
 declare v_base_q text; v_owner oid;
 begin
-  select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(c.relname)
+  select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(coalesce(p_child, c.relname))
     into v_base_q
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
    where c.oid = p_parent;
@@ -2555,8 +2563,17 @@ begin
   end if;
   return v_base_q
       || case when v_owner is not distinct from p_parent::oid then '' else '.' || p_parent::oid::text end
-      || '_' || archive._object_stem(p_kind, p_lo) || p_ext;
+      || p_tail;
 end;
+$$;
+
+-- A chunk's object key: <prefix><schema>.<table>_<stem><ext>, or <prefix><schema>.<table>.<oid>_<stem><ext>
+-- for a relation that did not claim the name first (archive._owned_key, above). Keys already in
+-- pgpm.archive_ledger stay as written: nothing derives a key from a chunk's bounds after the upload, so an
+-- existing object stays findable through its row.
+create or replace function archive._object_key(p_parent regclass, p_prefix text, p_kind text, p_lo text, p_ext text)
+returns text language sql as $$
+  select archive._owned_key(p_parent, p_prefix, null, '_' || archive._object_stem(p_kind, p_lo) || p_ext);
 $$;
 
 -- Seeds archive.object_key_owner from the keys pgpm.archive_ledger already records (#822), so a table that
@@ -2761,20 +2778,18 @@ begin
 end;
 $$;
 
--- The object key of a synchronous export, <prefix><schema>.<child><ext>. The child is named by
--- IDENTITY, quote_ident(schema) || '.' || quote_ident(child), the way archive._object_key names the
--- parent for the archive_fn transports (#551), and the schema is p_parent's, the one _resolve_child
--- read the child from. archive.to_s3 and archive.to_s3_parquet keyed on <prefix><child><ext>, the bare
--- name, and pgpm names a child after its parent's relname, so two parents named `evt` in two schemas
--- sharing a prefix (archive.configure's default `events/` is shared by every table) exported their
--- [0, 10000) partitions to ONE key: the second export replaced the first, and after the documented
--- to_s3-then-drop workflow the first table's rows existed nowhere (#711). Both functions take their key
--- from here and nowhere else.
+-- The object key of a synchronous export, <prefix><schema>.<child><ext>, or <prefix><schema>.<child>.<oid><ext>
+-- for a parent that did not claim the name first (archive._owned_key, above, which assembles every key).
+-- The child is named by IDENTITY with p_parent's schema, the one _resolve_child read the child from.
+-- archive.to_s3 and archive.to_s3_parquet keyed on <prefix><child><ext>, the bare name, and pgpm names a
+-- child after its parent's relname, so two parents named `evt` in two schemas sharing a prefix exported
+-- their [0, 10000) partitions to ONE key (#711). Then the schema-qualified key had no owner, so a table
+-- created after the first was dropped and forgotten exported its same-named partition over the first one's
+-- export, after the documented to_s3-then-drop workflow the only copy of those rows (#872). Both functions
+-- take their key from here and nowhere else.
 create or replace function archive._child_object_key(p_parent regclass, p_prefix text, p_child name, p_ext text)
-returns text language sql stable as $$
-  select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(p_child) || p_ext
-    from pg_class c join pg_namespace n on n.oid = c.relnamespace
-   where c.oid = p_parent;
+returns text language sql as $$
+  select archive._owned_key(p_parent, p_prefix, p_child, p_ext);
 $$;
 
 -- Aborts every multipart upload in flight at exactly p_key, returning how many it aborted. This is

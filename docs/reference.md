@@ -2002,7 +2002,15 @@ The synchronous functions write one object per call, named after the partition w
 schema: `archive.to_s3` to `<prefix><schema>.<child>.ndjson` (`.ndjson.gz` when compressed) and
 `archive.to_s3_parquet` to `<prefix><schema>.<child>.parquet`, quoted the same way, so two parents with
 one name in two schemas sharing a prefix export their same-named partitions to two objects. They used to
-write `<prefix><child>.<ext>`, and an object written under that shape stays where it is.
+write `<prefix><child>.<ext>`, and an object written under that shape stays where it is. Their keys are
+claimed the same way as the chunks': the first parent to export a partition under a
+`<prefix><schema>.<child>` claims that name in `archive.object_key_owner` and keeps the shape above, and
+any other parent that later exports a partition of the same name (its table took the name of one dropped
+after `archive.to_s3`, the documented export-then-drop workflow) has its oid in the key,
+`<prefix><schema>.<child>.<oid>.ndjson` (`.ndjson.gz`, `.parquet`), so it cannot write over the dropped
+table's export. Every key, on every path, comes from one function that takes the claim before the upload.
+An export written before this release left no record of whose it was, so its name is claimed by whichever
+parent exports under it next.
 
 ## Scheduling
 
