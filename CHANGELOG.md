@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+- **`from_hypertable` migrates a hypertable with a `serial` column, and keeps the sequences it owns** (#839).
+  The copy is made `LIKE ... INCLUDING DEFAULTS`, so a serial column's default on it called the sequence the
+  SOURCE's column owned, and the cutover's `DROP TABLE` of the source failed on that dependency after the whole
+  online copy, every time; a sequence owned through a column that no default named was dropped with the source,
+  silently. The swap now lets go of every sequence the source owns before the drop and hands each to the same
+  column of the table renamed into its place, once it carries the source's owner (a one-step hand-over is
+  refused when another role owns the table). `tests/timescale/db/39` under
+  `bench/hypertable_cutover_serial_sequences.sh`, with the mutations
+  `hypertable_cutover_serial_sequence_kept_by_source` and `hypertable_cutover_serial_owned_before_carry`.
+- **`from_hypertable_cutover` refuses outgoing foreign keys changed since the copy** (#840). Only the copy
+  carries outgoing keys, and the shape check (#738) compared columns, defaults and CHECKs but not keys, so a key
+  added to the hypertable between the copy and the cutover was dropped with the source and the migrated table
+  accepted orphans, and a key dropped in that window came back. `_from_hypertable_shape_diff` now compares the
+  outgoing keys by name and definition, up front and under the lock. `tests/timescale/db/40` under
+  `bench/hypertable_cutover_foreign_keys.sh`, with the mutation `hypertable_shape_ignores_foreign_keys`.
+- **`from_hypertable_cutover` asks the exclusion-constraint check again under its lock** (#841). It was asked
+  only up front, so an `EXCLUDE` constraint added while the cutover prepared (the pre-drain, the index
+  pre-builds) was dropped by the swap and the migrated table accepted the rows it rejected. It is now asked
+  under the `ACCESS EXCLUSIVE` too, like the shape, key and frontier checks. `tests/timescale/db/41` and a
+  second-session window under `bench/hypertable_cutover_exclusion_window.sh`, with the mutation
+  `hypertable_cutover_exclusion_unchecked_under_lock`; the up-front call's mutation,
+  `hypertable_cutover_no_exclusion_check`, moves to this guard, whose first part pins the refusal before the
+  pre-drain commits.
 - **`check_text_time` reads the alphabet as data, so one malformed row no longer aborts the sample** (#837).
   Both its shape tests (the sample's and the column maximum's) spliced the alphabet raw into the regex
   `'[^' || alphabet || ']'`. Under an alphabet `transmute` accepts, such as `+-0123456789`, the `-` made a range,

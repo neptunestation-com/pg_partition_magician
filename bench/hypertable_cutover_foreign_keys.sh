@@ -1,34 +1,29 @@
 #!/usr/bin/env bash
-# Run tests/timescale/db/26_from_hypertable_exclusion_test.sql against an ARBITRARY copy of
-# pgpm_hypertable/install.sql, so bench/discriminate.sh can point it at a mutant.
+# Run tests/timescale/db/40_from_hypertable_cutover_foreign_keys_test.sql against an ARBITRARY copy of
+# pgpm_hypertable/install.sql, so bench/discriminate.sh can point it at a mutant (issue #840).
 #
-# Same shape and same reason as bench/hypertable_cutover_identity.sh, which explains the constraint at
-# length: run_timescale fails the track on any `ERROR:` line, so every refusal has to be wrapped by
-# throws_like, and an entry point that WRONGLY proceeds cannot be observed committing: it dies at its own
-# first COMMIT inside the function context and rolls back into the same end state as a correct refusal.
-# The refusal's message, which names both exclusion constraints, is therefore the whole guard for issue
-# #675, and pointing the file at a mutant is the only standing proof that the message assertions are
-# load-bearing rather than incidental.
+# THE DEFECT. Outgoing foreign keys reach the migrated table only through from_hypertable_copy, and the
+# cutover's shape check (#738), the one place it compares the copy with the source, compared columns,
+# defaults and CHECKs but not foreign keys. A key added to the hypertable between the copy and the cutover
+# was dropped with the source (the migrated table accepted orphans), and a key dropped in that window came
+# back. _from_hypertable_shape_diff now compares the outgoing keys by name and definition, so both shape
+# checks (up front and under the lock) refuse. The file adds one key and drops the other in the window,
+# and pins the refusal naming both by its message: a cutover that does not refuse dies at its first COMMIT
+# inside throws_like with 2D000 and rolls back into the state a refusal leaves.
 #
-# The mutation required to fail against it (bench/mutations/mutate.py):
-#   hypertable_preflight_no_exclusion_check -- the preflight's call deleted. Breaks the preflight,
-#                                              from_hypertable and from_hypertable_copy assertions.
-# The cutover's own up-front call (hypertable_cutover_no_exclusion_check) used to be proven here too, by the
-# cutover assertion (a destination made by hand reaches the swap). Since #841 the cutover asks the check
-# again under its lock, which refuses that destination too before the swap, so the assertion passes without
-# the up-front call; that mutation is proven against bench/hypertable_cutover_exclusion_window.sh instead,
-# whose PART A pins what only the up-front call does: refusing before the pre-drain commits anything.
+# The mutation it is required to fail against (bench/mutations/mutate.py):
+#   hypertable_shape_ignores_foreign_keys -- the pre-#840 shape diff, without its three foreign-key arms.
+#                                            The refusal assertion fails; the invariants and the remedy pass.
 #
-# Usage: hypertable_exclusion_refusal.sh <container> <db> [pgpm_hypertable/install.sql]
-# Runs on the TIMESCALE track's container, which is why these mutations sit in MUTATION_TRACK=timescale.
-#
-# psql, not pg_prove: the supabase/postgres image has no pg_prove, so TAP is parsed out of psql -tAq here
-# exactly as run_timescale does, including the ERROR: check and the plan check (#601): a mutant that dies
-# with a raw error, or a file that stops short of its plan, must not read as the assertions failing.
+# Usage: hypertable_cutover_foreign_keys.sh <container> <db> [pgpm_hypertable/install.sql]
+# Runs on the TIMESCALE track's container, which is why this mutation sits in MUTATION_TRACK=timescale.
+# run_timescale also runs it against the unmutated module, so a harness that failed against everything
+# would not read as discrimination. psql, not pg_prove: the fleet image has none, so the TAP is judged here
+# exactly as run_timescale judges it.
 set -uo pipefail
 C="${1:?container}"; DB="${2:?db}"; HT="${3:-/repo/pgpm_hypertable/install.sql}"
-TEST_FILE=/repo/tests/timescale/db/26_from_hypertable_exclusion_test.sql
-LABEL="every entry point refuses an exclusion constraint"
+TEST_FILE=/repo/tests/timescale/db/40_from_hypertable_cutover_foreign_keys_test.sql
+LABEL="the cutover refuses outgoing keys changed since the copy"
 fail=0
 
 q() { docker exec -e PGPASSWORD=postgres "$C" psql -h 127.0.0.1 -U postgres "$@"; }
