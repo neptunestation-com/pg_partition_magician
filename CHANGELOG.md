@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **A regrain in flight across the upgrade that added `config.regrain_source_mark` no longer swaps in stale
+  copies** (#878). Such a run carries a null mark, `_regrain_source_drift` answered null for it, and
+  `regrain_step` then recorded the source as it was at that tick as the mark, so copies made before a
+  same-type `ALTER ... USING` rewrite (which fires no row trigger) were blessed and attached with the
+  pre-rewrite values, with no `regrain_restart`. A null mark over copies is now drift, and the run restarts;
+  re-running `install.sql` restarts every such run that has copies at the upgrade itself (logged
+  `regrain_restart`, `method` naming the upgrade) and only records the mark of one that has none.
+  `tests/243` under `bench/regrain_null_source_mark.sh` (mutation `regrain_null_mark_adopted`), and a new
+  in-flight stage of `bench/upgrade_in_place.sh` that upgrades a run with a copy from v0.6.0 (mutations
+  `upgrade_regrain_mark_adopted`, `upgrade_regrain_mark_block_noop`).
 - **`bench/hypertable_time_rendering.sh` carries the shared pgTAP verdict, and `bench/wrapper_tap_verdicts.sh`
   finds every timescale wrapper by what it does** (#844). The wrapper added for #791 and #793 kept the pre-#795
   verdict in its `run_file`: psql's exit ignored, a plan shortfall read only from finish()'s line, a `not ok`
