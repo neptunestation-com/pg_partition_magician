@@ -876,26 +876,12 @@ TRANSMUTE_GRANTS_AFTER_ATTACH = """  -- 7b (grants), HERE, after the rename and 
   -- what is read here, and one that has not committed cannot commit before the cutover does: it waits on
   -- this transaction and then fails with "tuple concurrently updated". p_parent is the monolith's oid by
   -- now, which is the table the grants are on.
-  -- aclexplode turns relacl into (grantor, grantee, privilege, grantable) rows; a NULL relacl
-  -- means the owner's implicit defaults, which the OWNER TO above already restores. grantee = 0 is
-  -- PUBLIC, which has no role name.
-  for v_g in
-    select a.grantee, a.privilege_type, a.is_grantable
-      from pg_class c, aclexplode(c.relacl) a where c.oid = p_parent and c.relacl is not null
-  loop
-    execute format('grant %s on %s to %s%s', v_g.privilege_type, v_parent::text,
-                   case when v_g.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(v_g.grantee)) end,
-                   case when v_g.is_grantable then ' with grant option' else '' end);
-  end loop;
-  -- COLUMN-level grants, which relacl does not carry at all: they live in pg_attribute.attacl.
-  for v_g in
-    select att.attname, a.grantee, a.privilege_type, a.is_grantable
-      from pg_attribute att, aclexplode(att.attacl) a
-     where att.attrelid = p_parent and att.attnum > 0 and not att.attisdropped and att.attacl is not null
-  loop
-    execute format('grant %s (%I) on %s to %s%s', v_g.privilege_type, v_g.attname, v_parent::text,
-                   case when v_g.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(v_g.grantee)) end,
-                   case when v_g.is_grantable then ' with grant option' else '' end);
+  -- The parent ends with exactly the table's grants, table and column level (#838): it was born with this
+  -- role's ALTER DEFAULT PRIVILEGES, so _acl_carry_ddl's first statement resets its ACL and the rest replay
+  -- the table's. Additive grants left a privilege REVOKEd on the table held on the parent. After the OWNER
+  -- TO above, which the reset needs (it takes the owner's own privileges too).
+  foreach v_grant in array pgpm._acl_carry_ddl(p_parent, v_parent::text) loop
+    execute v_grant;
   end loop;
 
 """
@@ -1433,6 +1419,16 @@ MUTATIONS = {
         "source, so the replay dies in the swap transaction and the cutover of tests/timescale/db/33's "
         "tracked hypertable fails on a raw error, leaving it a hypertable.",
         [("       and not (fn.nspname = v_nsp and f.proname = v_rel || '_pgpm_delta_fn')\n", "", 1)],
+    ),
+    "hypertable_acl_carry_unreset": (
+        "bench/hypertable_grant_carry_resets_acl.sh",
+        "Pre-#838 from_hypertable_cutover(): the swap replays the hypertable's grants onto the copy and does "
+        "not reset the copy's ACL first, so what the migrating role's ALTER DEFAULT PRIVILEGES gave the copy "
+        "at the LIKE stays, and transmute carries it onto the parent. Drops the first of _acl_carry_ddl's "
+        "statements, the reset, and keeps the grants; tests/timescale/db/38 parts A (the copy and the "
+        "parent) and B fail.",
+        [("  v_ddl := v_ddl || pgpm._acl_carry_ddl(p_hypertable, v_tbl_q);\n",
+          "  v_ddl := v_ddl || (pgpm._acl_carry_ddl(p_hypertable, v_tbl_q))[2:];   -- MUTANT: no reset\n", 1)],
     ),
     "hypertable_key_unchecked": (
         "bench/hypertable_handoff_refusals.sh",
@@ -5883,6 +5879,36 @@ select is(
           "                       else format('%I::text', v_refcol) end;\n",
           "    v_refval_q := format('%I::text', v_refcol);\n", 1)],
     ),
+    "acl_carry_additive": (
+        "bench/transmute_grant_carry_resets_acl.sh",
+        "Issue #838, the pre-fix shape: _acl_carry_ddl emits the source's grants with no reset in front of "
+        "them, so transmute's parent keeps every privilege the transmuting role's ALTER DEFAULT PRIVILEGES "
+        "gave it at its creation, a privilege REVOKEd on the table included. One site, the reset statement. "
+        "tests/235 parts A, B and C catch it.",
+        [("  v_ddl := array[format('select pgpm._acl_reset(%L::regclass, %L)', p_dst_q,\n"
+          "                        (select c.relacl is null from pg_class c where c.oid = p_src))];\n",
+          "  v_ddl := '{}';   -- MUTANT: no reset, the grants are added to what the destination holds\n", 1)],
+    ),
+    "acl_reset_no_owner_default": (
+        "bench/transmute_grant_carry_resets_acl.sh",
+        "Issue #838, a reset that only revokes: a source whose ACL is NULL (the owner's implicit default) has "
+        "no grant to replay, so without the GRANT ALL to the owner the parent's owner holds nothing at all. "
+        "One site, the owner's grant after the revokes. tests/235 part B catches it.",
+        [("  if p_default then\n"
+          "    execute format('grant all on %s to %I', p_rel::text,\n"
+          "                   (select pg_get_userbyid(c.relowner) from pg_class c where c.oid = p_rel));\n"
+          "  end if;\n", "", 1)],
+    ),
+    "acl_reset_spares_owner": (
+        "bench/transmute_grant_carry_resets_acl.sh",
+        "Issue #838, untransmute's reset shape taken over verbatim: revoke only from the roles the "
+        "destination's ACL names. A parent born with a NULL ACL names nobody, so nothing is revoked and the "
+        "first replayed GRANT materialises the owner's implicit everything, a privilege the owner had "
+        "revoked from itself on the table included. One site, the owner in the revoke list. tests/235 "
+        "part C catches it.",
+        [("    select c.relowner as grantee from pg_class c where c.oid = p_rel\n"
+          "    union\n", "", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
@@ -5924,6 +5950,7 @@ MUTATION_SRC = {
     "hypertable_cutover_shape_unchecked_up_front": "pgpm_hypertable/install.sql",
     "hypertable_cutover_shape_unchecked_under_lock": "pgpm_hypertable/install.sql",
     "hypertable_cutover_access_not_carried": "pgpm_hypertable/install.sql",
+    "hypertable_acl_carry_unreset": "pgpm_hypertable/install.sql",
     "hypertable_cutover_carries_insert_blocker": "pgpm_hypertable/install.sql",
     "hypertable_cutover_carries_capture": "pgpm_hypertable/install.sql",
     "hypertable_key_unchecked": "pgpm_hypertable/install.sql",
@@ -6051,6 +6078,7 @@ MUTATION_TRACK = {
     "hypertable_cutover_access_not_carried": "timescale",
     "hypertable_cutover_carries_insert_blocker": "timescale",
     "hypertable_cutover_carries_capture": "timescale",
+    "hypertable_acl_carry_unreset": "timescale",
     "hypertable_key_unchecked": "timescale",
     "hypertable_cutover_key_unchecked_under_lock": "timescale",
     "hypertable_frontier_unchecked_up_front": "timescale",
