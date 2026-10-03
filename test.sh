@@ -898,6 +898,9 @@ run_perf() {
     "bench/extend_to_edge_cell_count.sh pgpm_perf193"
     "bench/crossing_keys_datestyle.sh pgpm_perf194"
     "bench/transmute_grant_carry_resets_acl.sh pgpm_perf200"
+    "bench/regrain_capture_source_grantees.sh pgpm_perf208"
+    "bench/regrain_moved_parent_identity.sh pgpm_perf209"
+    "bench/regrain_names_fit_clamped_cell.sh pgpm_perf210"
   )
   local selected=()
   local n=${#guards[@]} idx

@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+- **A role granted DML on the regraining partition itself can write it mid-regrain** (#843). The capture
+  trigger inserts into the delta as the writer, and `_regrain_capture_grant` gave INSERT on the delta to the
+  grantees of DML on the parent only, so a role granted `UPDATE` or `DELETE` directly on the source partition
+  (a write PostgreSQL permits with no grant on the parent) got 42501 on every write into it for the life of the
+  regrain. The source's own grantees, table- and column-level, are granted too, at the prepare tick and on every
+  tick after it. `tests/236` under `bench/regrain_capture_source_grantees.sh`, with the mutation
+  `regrain_capture_grant_parent_only`.
+- **A regrain finds its source where it is after `ALTER TABLE ... SET SCHEMA` on the parent** (#768, F3-04 and
+  F3-12). `regrain_step`, the capture install, `_regrain_capture_active`, the reconcile's read of the source
+  rows, the janitor, `_regrain_reclaim` and install.sql's #650 upgrade block resolved the source as the parent's
+  current schema plus its name, so after the documented-safe schema move every auto-regrain tick failed
+  `relation <new schema>.<monolith> does not exist`, the monolith could never be regrained, and re-running
+  install.sql no longer put a missing TRUNCATE guard back on an in-flight source. They all ask the new
+  `pgpm._regrain_child_rel`, the relation `pgpm.part.child_oid` recorded. `tests/237` and
+  `bench/regrain_moved_parent_identity.sh`, with the mutations `regrain_step_source_parent_schema` and
+  `regrain_upgrade_guard_parent_schema`.
+- **A regrain's delta is read and cleared in its own schema after the parent moves** (#555, F3-11).
+  `regrain_cancel`, the swap, `_regrain_reclaim`, the purge, the reconcile, the per-tick grant and
+  `untransmute` paired the delta's recorded name with the parent's current schema, so a cancel after a
+  mid-regrain schema move emptied an unrelated table of that name in the new schema and left the real delta
+  holding its captured changes. Each takes the schema `_regrain_capture_names` resolves from the recorded
+  `regrain_delta_oid`. `tests/237` part C under `bench/regrain_moved_parent_identity.sh`, with the mutation
+  `regrain_cancel_delta_parent_schema`.
+- **`set_regrain` checks a clamped first cell's name the way `regrain_step` will mint it** (#815, F3-06).
+  `_regrain_names_fit` rendered every cell with `_part_name` at the target step's granularity, but a clamped
+  first sub-range is named through `_regrain_sub_name` at a finer, longer label, so a table name that fit the
+  day label and not the hour one was accepted and every auto-regrain tick then logged `skip_regrain` on the
+  63-byte limit. Each cell is now named through `_regrain_sub_name` with the bounds `regrain_step` gives it.
+  `tests/238` under `bench/regrain_names_fit_clamped_cell.sh`, with the mutation `regrain_names_fit_part_name`.
 - **A converted table holds exactly the original's grants, not those plus its creator's default privileges**
   (#838). transmute's parent and from_hypertable's `CREATE TABLE ... LIKE` copy are new tables, born with the
   creating role's `ALTER DEFAULT PRIVILEGES` (on Supabase, `anon` and `authenticated` in `public`), and both
