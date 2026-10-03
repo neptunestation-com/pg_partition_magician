@@ -148,7 +148,8 @@ Recorded per pass, in this order, so the count of findings is never read alone.
 | seeds `K`, recall | seeds planted; fraction reported by at least one finder; from pass 5 also split into suite-caught (the pgTAP suite run on the seeded tree fails, so a finder that ran the tests found it) and read-caught (it does not, so only reading finds it), each as hits over count |
 | claims | total claims across finders |
 | findings | claims that survived verification |
-| per finder | claims and precision for each finder, with the model it ran on when the pass split model tiers |
+| per finder | claims, precision and coverage for each finder, with the model it ran on when the pass split model tiers |
+| slice coverage | units of a finder's slice (functions and procedures of an install.sql slice, files of a tests, bench, docs or scripts slice) its coverage ledger marks read, over units in the slice, scored by `scripts/review/coverage.py` before classification; a slice below 0.9 is re-run or split first. From pass 8. A missed seed is then either read-and-missed (a reading blind spot) or unread (a budget or slicing fault), and only the first kind says anything about the lenses |
 | precision | (findings + seed hits + verified known-and-open re-finds) / claims that had a reproduction; a correctly reported seed is a true report, and so is a reproduced defect an earlier pass's issue already names; a hypothesis is not a claim. Reported with the **strict** figure, (findings + seed hits) / claims, beside it: the share of true reports that were new |
 | fell rate | claims that fell in verification / claims that had a reproduction: the reaching alarm. A claim that falls is the one shape a reviewer pushed for defects produces when there are none; a re-find is not |
 | findings by tier | Tier 1 through Tier 5 |
@@ -172,7 +173,9 @@ The deep-hunt mode ends when ALL of the following hold, judged on the two most r
 
 1. **Zero Tier 1 findings** in each of two consecutive passes, and
 2. **seed recall of at least 0.8** in each of those passes (so the zero was earned); from pass 5, the
-   read-caught recall when the suite check measured the split, and
+   read-caught recall when the suite check measured the split; from pass 8, with every slice's coverage
+   at 0.9 or above before classification (passes 6 and 7 read 0.56 twice with the missed seeds in
+   units no finder had opened, which is a budget fault, not a reading result), and
 3. **precision of at least 0.7** in each, counting verified known-and-open re-finds as true reports, and
    **a fell rate of at most 0.3** (so the passes were not reaching), and
 4. **the capture-recapture estimate for Tier 1 rounds to zero**, when two independent hunts were run, or

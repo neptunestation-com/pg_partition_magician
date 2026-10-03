@@ -739,7 +739,7 @@ run_archive() {
   # #873's guard, the archive module's half (tests/archive/db/38): the clean-code half of the pairs
   # bench/discriminate.sh completes with the four archive readers' mutants.
   echo "--- the archive readers refuse a caller whose reads row-level security filters (issue #873) ---"
-  bash "$(dirname "$0")/bench/reads_under_caller_rls.sh" pgpm_test-archive pgpm_perf212 /repo/pgpm_archive/install.sql || fail=1
+  bash "$(dirname "$0")/bench/reads_under_caller_rls.sh" pgpm_test-archive pgpm_perf216 /repo/pgpm_archive/install.sql || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi

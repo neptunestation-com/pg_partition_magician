@@ -44,6 +44,15 @@ null-results file as a hypothesis, not in a claim directory.
 - **Tier honestly** by the rubric in the methodology. A wrong tier costs the verifier time; an
   inflated one costs your precision, which is measured and recorded per finder.
 
+## Read the whole slice before you build anything
+
+Open every function, procedure or file in your slice and read it before writing a claim; hypothesise
+second, build third. Passes 6 and 7 measured recall at 0.56 twice, and the seeds missed were in units
+no finder had read: a slice half-read looks exactly like a slice read and found sound, unless the
+ledger below says which. Your coverage ledger is scored mechanically against the slice; a slice below
+0.9 is re-run or split before any claim of yours is classified. When the budget cannot cover the whole
+slice, say so in the ledger (`read: no`, with the reason) rather than skipping silently.
+
 ## Reaching
 
 Your precision (true reports over reports) is measured. A clean slice reported clean, with a full
@@ -58,7 +67,12 @@ When the budget runs low, stop and write up rather than lower the bar.
    module's own harness, so `container` is needed only to override that.
 2. `<claims>/<your id>/null-results.md`: for each lens, what you probed (functions, states, sequences),
    how, and that it held; then a "Hypotheses" list of suspicions without reproductions.
-3. A final message of at most ten lines: claims written (ids and tiers), lenses covered, budget used.
+3. `<claims>/<your id>/coverage.md`, the coverage ledger: one line per unit of your slice, in the form
+   `- <unit> | read: yes|no | <one line: what you probed, or why not>`, where a unit is a function or
+   procedure as `schema.name` for an install.sql slice and a repository path for a tests, bench, docs or
+   scripts slice. List every unit the slice contains, read or not; `scripts/review/coverage.py` scores it.
+4. A final message of at most ten lines: claims written (ids and tiers), lenses covered, units read over
+   units in the slice, budget used.
 
 Run reproductions yourself before writing them up: a fresh database in the harness container, the review
 tree's `pgpm_core/install.sql` piped in with `docker exec -i <container> psql -U postgres -d <db> -v

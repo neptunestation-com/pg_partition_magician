@@ -223,3 +223,13 @@ behind them; pushes to `main` and merge groups are keyed by sha and never cancel
 Assign before spawning. Fixers working in parallel each take "the next free" test number and guard
 database unless the coordinator hands them out; pass 2 ended with seven files numbered 124. `land.sh`
 renumbers a duplicate `pgpm_perfNN` (databases) but cannot renumber files.
+
+## coverage.py
+
+`coverage.py --tree <review tree> --slices <slices.json> --claims <claims dir> [--threshold 0.9] [--out <json>]`
+scores each finder's coverage ledger (`<claims>/<finder>/coverage.md`, one `- <unit> | read: yes|no | <notes>`
+line per unit) against its slice: functions and procedures for an install.sql slice (a `file:lo-hi` range
+keeps the units whose `create` line is inside it), files for a tests, bench, docs or scripts slice. One row
+per finder with the unread units; exit 1 when any finder is below the threshold or has no ledger, which
+the review-pass skill treats as "re-run or split before classifying". `--selftest` covers ranges, files
+slices, a missing ledger, units outside the slice and the threshold.
