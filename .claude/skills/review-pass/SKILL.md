@@ -50,15 +50,34 @@ Work in a scratch directory outside the repository (the session scratchpad). Ref
 Divide the review tree into as many slices as finders: by module and function group, so every
 `pgpm_core/install.sql` function, `pgpm_archive/install.sql`, `bench/`, `tests/` and `docs/` belong to
 exactly one slice. The fresh-surface hunks go to a dedicated slice in addition to their home slice.
+Write the slices down as `$WORK/slices.json` (`{"F1": {"files": ["pgpm_core/install.sql:1-2500"]},
+"F9": {"files": ["bench/*.sh"], "kind": "files"}}`; a line range on an install.sql keeps the units whose
+`create` line falls inside it), and size each finder's budget to its unit count from
+`scripts/review/coverage.py --tree $WORK/tree --slices $WORK/slices.json --claims $WORK/claims` (with no
+ledgers yet it prints the unit counts and exits 1).
 
 ## 4. Hunt
 
 Start `pgpm_test-15` from the pristine checkout (`docker compose --profile pg15 up -d postgres15`).
 Spawn one **`finder`** agent per slice (the `finder` type from `.claude/agents/`), all in one message so
 they run in parallel. Each prompt contains: the review tree path, the slice, the lenses, the claims
-directory `$WORK/claims`, its finder id (`F1`, `F2`, ...), the budget, the container name, and the text
-of `scripts/review/README.md`'s "Claim format" and "Reproduction contract" sections. Say nothing about
+directory `$WORK/claims`, its finder id (`F1`, `F2`, ...), the budget, the container name, the text
+of `scripts/review/README.md`'s "Claim format" and "Reproduction contract" sections, and the slice's
+unit list (the names `coverage.py` prints) so the coverage ledger can be complete. Say nothing about
 seeds.
+
+## 4b. Coverage (mechanical, before classifying)
+
+```bash
+scripts/review/coverage.py --tree $WORK/tree --slices $WORK/slices.json --claims $WORK/claims --out $WORK/coverage.json
+```
+
+One row per finder: units in the slice, units its ledger marks read, coverage, the unread units. A
+finder below 0.9 (or with no ledger) is re-run on its unread units with a fresh budget, or its slice is
+split and the halves re-run, BEFORE step 5: a missed seed in an unread unit measures the budget, not
+the reading, and the two must not be averaged into one recall. Record the re-runs in the record's
+coordinator notes. The per-finder table in the record carries each finder's coverage beside its
+precision.
 
 **Model-tier split** (the methodology's way of choosing models with data): give two slices to a second
 finder each, run with a different `model` on the Agent call, same prompt. Record which finder id ran on
@@ -112,7 +131,8 @@ scripts/review/pass_metrics.py --pass N --date $(date +%F) --pinned $pinned --re
 read-caught split (the stopping criteria read the read-caught half), precision with its strict figure
 and the fell rate beside it (verified re-finds of open issues count as true reports; the fell rate is
 the reaching alarm). Then the findings by tier, the
-blind spots (seeds missed, by lens), and the per-finder table including the model-tier split. If any
+blind spots (seeds missed, by lens, each marked read-and-missed or unread from the ledger), and the
+per-finder table including the model-tier split and each finder's coverage. If any
 candidate is unverified, say so and do not call it a finding. Under "Seed interactions to check" the
 record lists the candidates whose pristine run failed only its liveness checks; replace that list, in
 the record, with which claim depended on which seed's side effect.
