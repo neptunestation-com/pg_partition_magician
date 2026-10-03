@@ -39,6 +39,10 @@ SRC_QUERY="select lower(prosrc) from pg_proc where proname = '_transmute' and pr
 CREATE_RE="execute format\\('create table [^']* partition by range "
 RENAME_RE="execute format\\('alter table %s rename to "
 RLS_RE="execute format\\('alter table %s enable row level security'"
+# The policy replay is its own statement, in its own loop, and is anchored on its own (#845): with only the
+# ENABLE ROW LEVEL SECURITY anchored, a copy whose CREATE POLICY loop sat after both renames, inside the
+# outage, passed this guard under a PASS line that named the policies.
+POLICY_RE="execute format\\('create policy %i on %s as "
 # The pattern goes in dollar-quoted: it holds a single quote, and its backslashes must reach the regex.
 stmt_pos()   { q "select regexp_instr(($SRC_QUERY), \$re\$$1\$re\$)"; }
 stmt_count() { q "select regexp_count(($SRC_QUERY), \$re\$$1\$re\$)"; }
@@ -50,12 +54,15 @@ count_is() { # <label> <actual> <expected>
 count_is "LIVENESS: _transmute issues one CREATE TABLE ... PARTITION BY RANGE" "$(stmt_count "$CREATE_RE")" 1
 count_is "LIVENESS: _transmute issues the two cutover renames" "$(stmt_count "$RENAME_RE")" 2
 count_is "LIVENESS: _transmute issues one ENABLE ROW LEVEL SECURITY" "$(stmt_count "$RLS_RE")" 1
+count_is "LIVENESS: _transmute issues one CREATE POLICY" "$(stmt_count "$POLICY_RE")" 1
 
 RENAME_POS=$(stmt_pos "$RENAME_RE")
 PARTITION_POS=$(stmt_pos "$CREATE_RE")
 RLS_POS=$(stmt_pos "$RLS_RE")
+POLICY_POS=$(stmt_pos "$POLICY_RE")
 
 check "the new parent's CREATE TABLE runs before the first rename" "$PARTITION_POS" "$RENAME_POS"
-check "the RLS and policies replay runs before the first rename" "$RLS_POS" "$RENAME_POS"   # grants follow the attach (#706)
+check "the ENABLE ROW LEVEL SECURITY runs before the first rename" "$RLS_POS" "$RENAME_POS"   # grants follow the attach (#706)
+check "the CREATE POLICY replay runs before the first rename" "$POLICY_POS" "$RENAME_POS"
 
 exit "$fail"

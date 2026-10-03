@@ -38,6 +38,16 @@
 #      is accepted rather than refused. Checked every tick, not once, because the pre-#325 defect's
 #      defining symptom was that nothing changes tick over tick -- a guard that only checked tick 1
 #      could not tell "fixed" apart from "coincidentally not wedged yet".
+#   4. + 5. per tick, what ONLY _frontier_native produces (#846): the frontier itself is at or past now(),
+#      and a FORWARD partition (one starting at or past the monolith's hi, so not the monolith) covers
+#      now() + 1 month, inside the 2-month lookahead. Each tick runs maintain_obtain() after maintain(),
+#      as the two pg_cron jobs do since #347, because obtain is what plans that grid from the frontier.
+#      2 and 3 cannot tell the two #325 sites apart: _transmute's inline greatest() alone gives the
+#      monolith an upper bound past now(), so with only _frontier_native reverted both still hold on the
+#      day of the transmute, while obtain plans nothing past the monolith and the table runs out of
+#      partitions once the drought outlasts its hi.
+#      frontier_native_data_only (that site alone) is the mutation that proves these two discriminate;
+#      frontier_data_only (both sites) is the one 2 and 3 already caught.
 #
 # Usage: frontier_drought.sh <container> <db> [install.sql]
 # The install path defaults to the real one; bench/discriminate.sh passes a MUTANT copy instead, to
@@ -52,6 +62,23 @@ run() { docker exec -e PGOPTIONS='-c client_min_messages=warning' "$C" \
 check() { # <label> <actual> <expected>
   if [ "$2" = "$3" ]; then printf 'PASS  %-58s %s\n' "$1" "$2"
   else printf 'FAIL  %-58s got %s, want %s\n' "$1" "$2" "$3"; fail=1; fi
+}
+
+# frontier_checks <kind label> <table>: the two per-tick checks only _frontier_native can satisfy (4 and 5
+# above). Each read is its own transaction, after the tick's, so its now() is no earlier than the tick's.
+frontier_checks() {
+  local FRONT FORWARD
+  FRONT=$(q "select pgpm._frontier_native('$2'::regclass)::timestamptz >= now()")
+  check "$1: tick $tick: _frontier_native is at or past now()" "$FRONT" "t"
+  FORWARD=$(q "select exists (
+                 select 1 from pgpm.part p
+                  where p.parent_table = '$2'::regclass and p.attached
+                    and p.lo::timestamptz <= now() + interval '1 month'
+                    and p.hi::timestamptz >  now() + interval '1 month'
+                    and p.lo::timestamptz >= (select m.hi::timestamptz from pgpm.part m
+                                               where m.parent_table = p.parent_table
+                                               order by m.lo::timestamptz limit 1))")
+  check "$1: tick $tick: a forward partition covers now() + 1 month" "$FORWARD" "t"
 }
 
 docker exec "$C" psql -U postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
@@ -77,6 +104,7 @@ run "select pgpm.resume('public.fd')" >/dev/null
 
 for tick in 1 2 3; do
   run "call pgpm.maintain('public.fd')" >/dev/null
+  run "call pgpm.maintain_obtain('public.fd')" >/dev/null   # the forward grid's own job since #347
 
   COVERS=$(q "select exists (
                 select 1 from pgpm.part
@@ -90,6 +118,7 @@ for tick in 1 2 3; do
   else
     check "uuidv7: tick $tick: a write at now() is accepted" "rejected: $(tail -1 /tmp/fd_insert.log | cut -c1-70)" "accepted"
   fi
+  frontier_checks uuidv7 public.fd
 done
 
 # ---------------------------------------------------------------------------- text_time
@@ -112,6 +141,7 @@ run "select pgpm.resume('public.fd_tt')" >/dev/null
 
 for tick in 1 2 3; do
   run "call pgpm.maintain('public.fd_tt')" >/dev/null
+  run "call pgpm.maintain_obtain('public.fd_tt')" >/dev/null   # the forward grid's own job since #347
 
   COVERS_TT=$(q "select exists (
                 select 1 from pgpm.part
@@ -126,6 +156,7 @@ for tick in 1 2 3; do
   else
     check "text_time: tick $tick: a write at now() is accepted" "rejected: $(tail -1 /tmp/fd_tt_insert.log | cut -c1-70)" "accepted"
   fi
+  frontier_checks text_time public.fd_tt
 done
 
 exit "$fail"

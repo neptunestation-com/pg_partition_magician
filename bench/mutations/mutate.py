@@ -934,6 +934,53 @@ PQ_SNAPSHOT_FILL = """  truncate pg_temp.archive_pq_snapshot;
 """
 PQ_SNAPSHOT_TAIL = "  truncate pg_temp.archive_pq_snapshot;  -- emptied, not dropped: the next encode reuses it (#632)\n"
 
+# _frontier_native's #325 clock blend for uuidv7 and text_time, as one (find, replace, count) edit that puts
+# the data-only frontier back. Shared by frontier_data_only (which reverts _transmute's inline duplicate
+# too) and frontier_native_data_only (which reverts this site alone, #846), so the two cannot drift apart.
+FRONTIER_NATIVE_CLOCK_BLEND = (
+    "  v_decoded := pgpm._decode(cfg.control_kind, v_max,\n"
+    "                             cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch);\n"
+    "  -- #325: uuidv7 (and text_time, the same shape of thing) is a TIME grid fed by DATA. Left as plain\n"
+    "  -- max(control), a table whose writes go quiet (a restored dump, a stale clone, a drought) has a\n"
+    "  -- frontier stuck wherever the data ended while now() keeps moving -- obtain measures itself against\n"
+    "  -- its own past output and finds nothing to do, so the grid stalls exactly where the drought began and\n"
+    "  -- every write past it is refused, permanently and silently. greatest() with now() makes both kinds\n"
+    "  -- self-healing the same way `time` already is: the grid can never fall further behind the clock than\n"
+    "  -- one maintenance tick, drought or not. `id` is untouched below -- it has no clock, so its frontier\n"
+    "  -- can only be where the data actually put it.\n"
+    "  if cfg.control_kind in ('uuidv7', 'text_time') then\n"
+    "    return pgpm._ts_text(greatest(v_decoded::timestamptz, now()));\n"
+    "  end if;\n"
+    "  return v_decoded;\n"
+    "end;\n",
+    "  return pgpm._decode(cfg.control_kind, v_max,\n"
+    "                       cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch);\n"
+    "end;\n",
+    1,
+)
+
+# _transmute's policy replay loop, whole (#845). The one statement of the #344 hoist that the cutover-order
+# guard did not anchor, so the mutation that moves it alone must match it exactly.
+TRANSMUTE_POLICY_REPLAY = """  for v_pol in
+    select polname, polcmd, polpermissive,
+           case when polroles = '{0}'::oid[] then 'public'
+                else (select string_agg(quote_ident(rolname), ', ' order by rolname)
+                        from pg_roles where oid = any(polroles)) end as roles,
+           pg_get_expr(polqual, polrelid)      as qual,
+           pg_get_expr(polwithcheck, polrelid) as withcheck
+      from pg_policy where polrelid = p_parent
+  loop
+    execute format('create policy %I on %s as %s for %s to %s%s%s',
+      v_pol.polname, v_parent::text,
+      case when v_pol.polpermissive then 'permissive' else 'restrictive' end,
+      case v_pol.polcmd when 'r' then 'select' when 'a' then 'insert' when 'w' then 'update'
+                        when 'd' then 'delete' else 'all' end,
+      v_pol.roles,
+      case when v_pol.qual is not null then ' using (' || v_pol.qual || ')' else '' end,
+      case when v_pol.withcheck is not null then ' with check (' || v_pol.withcheck || ')' else '' end);
+  end loop;
+"""
+
 MUTATIONS = {
     "transmute_no_commits": (
         "bench/transmute_lock.sh",
@@ -1870,6 +1917,19 @@ MUTATIONS = {
           "  execute format('create table %I.%I (like %s including defaults including generated including storage including constraints) partition by range (%I)',\n"
           "                 v_nsp, v_staging, p_parent::text, p_control);\n", 1)],
     ),
+    "transmute_cutover_late_policy": (
+        "bench/transmute_cutover_order.sh",
+        "The #344 defect at the policy replay alone (#845): _transmute's CREATE POLICY loop moved, verbatim, to "
+        "just after the second cutover rename, inside the ACCESS EXCLUSIVE outage, with the CREATE TABLE and the "
+        "ENABLE ROW LEVEL SECURITY left before the renames. The guard anchored only the ENABLE, so it passed this "
+        "copy under a PASS line naming the policies; transmute_cutover_late_build moves the ENABLE too and so "
+        "never tested the policy statement on its own. Anchored on the loop and the second rename, not on "
+        "whatever sits around the loop, so the mutant does not depend on where neighbouring code is placed. The "
+        "copy installs and still carries every policy (only the order changes), which is all the guard reads.",
+        [(TRANSMUTE_POLICY_REPLAY, "", 1),
+         ("  execute format('alter table %s rename to %I', v_parent::text, v_rel);\n",
+          "  execute format('alter table %s rename to %I', v_parent::text, v_rel);\n" + TRANSMUTE_POLICY_REPLAY, 1)],
+    ),
     "untransmute_no_recheck_under_lock": (
         "bench/untransmute_race.sh",
         "Pre-#443 untransmute: the outside-rows check runs once, under ACCESS SHARE, and the DETACH and "
@@ -1998,24 +2058,7 @@ MUTATIONS = {
         "way while adding text_time: generalizing _frontier_native without also generalizing the inline "
         "duplicate reproduced a 10-month gap with no partition at all, not just a stale frontier.",
         [
-            ("  v_decoded := pgpm._decode(cfg.control_kind, v_max,\n"
-             "                             cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch);\n"
-             "  -- #325: uuidv7 (and text_time, the same shape of thing) is a TIME grid fed by DATA. Left as plain\n"
-             "  -- max(control), a table whose writes go quiet (a restored dump, a stale clone, a drought) has a\n"
-             "  -- frontier stuck wherever the data ended while now() keeps moving -- obtain measures itself against\n"
-             "  -- its own past output and finds nothing to do, so the grid stalls exactly where the drought began and\n"
-             "  -- every write past it is refused, permanently and silently. greatest() with now() makes both kinds\n"
-             "  -- self-healing the same way `time` already is: the grid can never fall further behind the clock than\n"
-             "  -- one maintenance tick, drought or not. `id` is untouched below -- it has no clock, so its frontier\n"
-             "  -- can only be where the data actually put it.\n"
-             "  if cfg.control_kind in ('uuidv7', 'text_time') then\n"
-             "    return pgpm._ts_text(greatest(v_decoded::timestamptz, now()));\n"
-             "  end if;\n"
-             "  return v_decoded;\n"
-             "end;\n",
-             "  return pgpm._decode(cfg.control_kind, v_max,\n"
-             "                       cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch);\n"
-             "end;\n", 1),
+            FRONTIER_NATIVE_CLOCK_BLEND,
             ("    if v_max_raw is null then\n"
              "      v_frontier_native := case when p_control_kind = 'id' then p_anchor else pgpm._ts_text(now()) end;\n"
              "    elsif p_control_kind in ('uuidv7', 'text_time') then\n"
@@ -2034,6 +2077,18 @@ MUTATIONS = {
              "                                  case when p_control_kind = 'id' then p_anchor else pgpm._ts_text(now()) end);\n",
              1),
         ],
+    ),
+    "frontier_native_data_only": (
+        "bench/frontier_drought.sh",
+        "#325 with only its _frontier_native half reverted (#846): uuidv7's and text_time's per-tick frontier "
+        "(what obtain, maintain and regrain_step read) is plain max(control) again, while _transmute's inline "
+        "duplicate keeps greatest(decoded, now()), so the monolith transmute builds still reaches now() and "
+        "every 'a partition covers now()' check holds on the day of the transmute. The defect is the grid "
+        "after that: obtain measures a drought table against its stale data maximum, plans nothing past the "
+        "monolith, and once the drought outlasts the monolith's hi plus obtain x step every write is refused. "
+        "frontier_data_only reverts both sites together and so never tested this half alone; tests/85 and the "
+        "guard's coverage checks passed against this copy.",
+        [FRONTIER_NATIVE_CLOCK_BLEND],
     ),
     "regrain_swap_reconcile_bounded": (
         "bench/regrain_swap_reconcile.sh",

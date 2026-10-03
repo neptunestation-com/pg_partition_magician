@@ -10,7 +10,7 @@
 -- 11-month-old frontier, so this cannot pass by accident of a generous default).
 create extension if not exists pgtap;
 
-select plan(4);
+select plan(6);
 
 create table public.fd_uuid (id uuid primary key, body text);
 insert into public.fd_uuid (id, body) values
@@ -37,6 +37,29 @@ select ok(
        and lo::timestamptz <= now() and hi::timestamptz > now()
   ),
   'a partition covers now() after one maintenance tick, despite an 11-month-stale data frontier'
+);
+
+-- The two checks above hold on the day of the transmute even with _frontier_native's greatest() removed
+-- (#846): transmute's monolith takes its upper bound from its OWN inline greatest(decoded, now()), so the
+-- monolith alone covers now() and accepts the write. What that half of #325 is for is the grid AFTER the
+-- monolith: obtain measures the table by _frontier_native every tick, and a data-only frontier plans
+-- nothing past the monolith, so the table runs out of partitions once the drought outlasts the monolith's
+-- hi. These two read what only _frontier_native produces: the frontier itself, and a FORWARD partition
+-- (one starting at or past the monolith's hi, so not the monolith) covering a point inside the lookahead.
+select ok(
+  pgpm._frontier_native('public.fd_uuid'::regclass)::timestamptz >= now(),
+  'the uuidv7 frontier obtain measures by is at or past now(), not the 11-month-stale data maximum'
+);
+
+select ok(
+  exists (
+    select 1 from pgpm.part p
+     where p.parent_table = 'public.fd_uuid'::regclass and p.attached
+       and p.lo::timestamptz <= now() + interval '1 month' and p.hi::timestamptz > now() + interval '1 month'
+       and p.lo::timestamptz >= (select m.hi::timestamptz from pgpm.part m
+                                  where m.parent_table = p.parent_table order by m.lo::timestamptz limit 1)
+  ),
+  'a forward partition past the monolith covers now() + 1 month, inside the 2-month lookahead'
 );
 
 select lives_ok(
