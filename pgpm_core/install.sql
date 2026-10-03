@@ -146,8 +146,9 @@ alter table pgpm.config add column if not exists regrain_capture_fn_oid oid;
 -- Recorded by the prepare tick (and again by each restart), before any copy exists, and compared by every
 -- resumed tick (see _regrain_source_drift): DDL that changes the source's values without changing its column
 -- signature fires no row trigger, so only this tells the copies made before it are stale. Meaningful only
--- while regrain_cursor is set; null for a run begun before this column existed, which records it on its next
--- tick.
+-- while regrain_cursor is set. Null for a run begun before this column existed (#878): the upgrade block
+-- after _regrain_try_lock below restarts such a run when it has copies, since nothing records what they were
+-- made from, and records the mark when it has none; regrain_step treats a null mark over copies as drift.
 alter table pgpm.config add column if not exists regrain_source_mark jsonb;
 -- retain() pacing (issue #189): cap how many eligible partitions ONE retain() call will attempt
 -- (write-block, archive-coverage check, drop), so an aged-out backlog spreads across maintenance
@@ -4489,9 +4490,17 @@ $$;
 -- or renamed outright is not reported here: it changes the copies' columns, which _regrain_shape_drift
 -- reports. A rewrite that changes nothing (VACUUM FULL, CLUSTER, SET TABLESPACE) cannot be told from one
 -- that does, so it restarts the run too, at the cost of the copying done so far.
+--
+-- No mark at all is drift too (#878): it is what a run in flight across the upgrade that added the column
+-- carries, its prepare tick having had nowhere to record one, so nothing says what its copies were made from.
+-- Answering null for it let regrain_step record the source as it is NOW as the mark, blessing copies made
+-- before a rewrite it could no longer see. The caller asks only when copies exist; a run with none records the
+-- mark and loses nothing.
 create or replace function pgpm._regrain_source_drift(p_child regclass, p_mark jsonb)
 returns text language sql stable as $$
-  select nullif(concat_ws('; ',
+  select case when p_mark is null
+              then 'no source mark records what the copies were made from (the run began before pgpm recorded one), so nothing shows they hold the values the source has'
+              else nullif(concat_ws('; ',
            case when (p_mark->>'relfilenode') is distinct from (m.now->>'relfilenode')
                 then format('the source was rewritten (relfilenode %s, now %s), so the copies may hold values its rows no longer have',
                             p_mark->>'relfilenode', m.now->>'relfilenode') end,
@@ -4499,9 +4508,9 @@ returns text language sql stable as $$
                           string_agg(quote_ident(w.key), ', ' order by w.key))
               from jsonb_each_text(p_mark->'columns') w join jsonb_each_text(m.now->'columns') n on n.key = w.key
              where n.value <> w.value
-            having count(*) > 0)), '')
+            having count(*) > 0)), '') end
     from (select pgpm._regrain_source_mark(p_child) as now) m
-   where p_mark is not null and m.now is not null;
+   where m.now is not null;
 $$;
 
 -- How the regrain's change capture differs from the parent's key as it is now (#817), or null. The prepare
@@ -4614,6 +4623,59 @@ exception when lock_not_available then
   return false;
 end;
 $$;
+
+-- Upgrade path (#878): a regrain in flight across the upgrade that added config.regrain_source_mark (#824)
+-- has a null mark, because its prepare tick had nowhere to record one, so nothing says what its copies were
+-- made FROM. The source may have been rewritten since they were made, before this upgrade as easily as after
+-- it, and a rewrite fires no row trigger; recording the source as it is now would bless those copies. So a run
+-- with copies is restarted here, as regrain_step restarts a drifted one: every copy is discarded, the cursor
+-- goes back to the source's lo, the mark is taken from the source before any new copy exists, and the restart
+-- is logged. Capture stays on and its delta is kept, as in that restart. A run with no copy yet only has the
+-- mark recorded: nothing stale exists to discard. regrain_step reports a null mark over copies as drift on its
+-- own (_regrain_source_drift), so a run this block cannot see (no capture on any child: the prepare tick then
+-- discards its copies anyway) is restarted at its next tick instead. Under _regrain_lock, so a tick in flight
+-- commits first and the next one reads what this left; only rows still carrying a null mark, so a re-run
+-- changes nothing.
+do $$
+declare
+  v_parent regclass; cfg pgpm.config; r record; c record; v_child regclass; v_nsp name; v_ncast text;
+  v_made int;
+begin
+  for v_parent in select parent_table from pgpm.config
+                   where regrain_cursor is not null and regrain_source_mark is null loop
+    perform pgpm._regrain_lock(v_parent);
+    select * into cfg from pgpm.config
+     where parent_table = v_parent and regrain_cursor is not null and regrain_source_mark is null;
+    continue when not found;
+    select p.child_name, p.lo, p.hi into r from pgpm.part p
+     where p.parent_table = v_parent and p.attached and pgpm._regrain_capture_active(v_parent, p.child_name)
+     limit 1;
+    continue when not found;
+    v_child := pgpm._regrain_child_rel(v_parent, r.child_name);
+    continue when v_child is null;
+    select n.nspname into v_nsp from pg_class k join pg_namespace n on n.oid = k.relnamespace where k.oid = v_parent;
+    v_ncast := pgpm._native_type(cfg.control_kind);
+    v_made := 0;
+    for c in execute format(
+      'select child_name from pgpm.part where parent_table = %L::regclass and not attached'
+      || ' and lo::%s >= %L::%s and hi::%s <= %L::%s',
+      v_parent::text, v_ncast, r.lo, v_ncast, v_ncast, r.hi, v_ncast)
+    loop
+      perform pgpm._regrain_drop_copy(v_parent, v_nsp, c.child_name);   -- #631: by recorded oid
+      v_made := v_made + 1;
+    end loop;
+    if v_made > 0 then
+      update pgpm.config set regrain_cursor = r.lo, regrain_source_mark = pgpm._regrain_source_mark(v_child)
+       where parent_table = v_parent;
+      insert into pgpm.log (parent_table, action, lo, hi, rows, method)
+        values (v_parent, 'regrain_restart', r.lo, r.hi, v_made,
+                'the run was in flight across the upgrade that added regrain_source_mark, so nothing records what its copies were made from; the copies are discarded and the range is copied again from the source');
+    else
+      update pgpm.config set regrain_source_mark = pgpm._regrain_source_mark(v_child)
+       where parent_table = v_parent;
+    end if;
+  end loop;
+end $$;
 
 -- Is a regrain of p_parent in flight? The three places a run leaves a mark, any one of which is enough:
 -- the cursor, a not-yet-attached copy (only regrain inserts one, #94), or capture on a child. The same
@@ -5147,9 +5209,9 @@ begin
                      concat_ws('; ', nullif(v_drift, ''), v_capture_drift)));
     return 'restarted:' || v_made;
   end if;
-  -- Nothing stale to discard, so the mark follows the source: null for a run begun before the mark was
-  -- recorded (#824 cannot judge the copies such a run made before the upgrade), or a source altered before
-  -- any copy was made.
+  -- Nothing stale to discard, so the mark follows the source: a source altered before any copy was made, or
+  -- a null mark on a run with no copies yet. Never a null mark over copies (#878): _regrain_source_drift
+  -- reports that as drift above, since nothing records what those copies were made from.
   if cfg.regrain_source_mark is distinct from pgpm._regrain_source_mark(v_child) then
     update pgpm.config set regrain_source_mark = pgpm._regrain_source_mark(v_child) where parent_table = p_parent;
   end if;

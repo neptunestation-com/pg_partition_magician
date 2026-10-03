@@ -913,6 +913,7 @@ run_perf() {
     "bench/regrain_capture_source_grantees.sh pgpm_perf208"
     "bench/regrain_moved_parent_identity.sh pgpm_perf209"
     "bench/regrain_names_fit_clamped_cell.sh pgpm_perf210"
+    "bench/regrain_null_source_mark.sh pgpm_perf214"
   )
   local selected=()
   local n=${#guards[@]} idx

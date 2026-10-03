@@ -47,6 +47,20 @@
 #      upgrade did not quietly reset the managed table's settings to defaults.
 #   6. The upgrade was RECORDED: pgpm.installed holds two rows, the second one this version. Distinct
 #      from 2: it separates "the file ran to the end" from "the schema happens to look right".
+#   8. A regrain IN FLIGHT WITH COPIES across the upgrade that added config.regrain_source_mark (#878),
+#      in its own database, from a REAL older artifact rather than a degrade: the degrade drops
+#      regrain_cursor and pgpm.part.attached with everything else, so it can only ever produce a run
+#      whose cursor and copies are already forgotten. The newest release without the column (v0.6.0,
+#      fetched as bench/upgrade_from_release.sh fetches its origin) prepares a run, copies a sub-range
+#      and then has the source rewritten under it by a same-type ALTER ... USING, which fires no row
+#      trigger; the current install.sql is run over that. Right after the upgrade, before any tick, the
+#      run must have been restarted: its copy gone BY OID, one regrain_restart naming the upgrade, the
+#      cursor back at the source's lo and the mark recorded from the source as rewritten. A run in the
+#      same database with no copy yet must only have its mark recorded, with no restart. Then the run is
+#      driven to its swap, and the regrained range must hold the rewritten values, row by row. Without
+#      the restart the swap attaches the copy made before the rewrite. LIVENESS witnesses first: the
+#      origin really lacks the column, the run really has a copy, and the copy really holds the old
+#      values while the source holds the new ones. (Numbered 8 but run last, in its own database.)
 #   7. LIVENESS WITNESS: the machine still runs afterwards. maintain_obtain() (issue #347 split obtain
 #      out of maintain()/maintain_all(), so this is now the call that mints partitions) on the table
 #      that existed BEFORE the upgrade mints a new partition, named. A structurally perfect install
@@ -326,6 +340,96 @@ else
   printf 'FAIL  %-58s %s\n' "maintain_obtain() minted nothing after the upgrade" "children: $CHILDREN_AFTER"
   fail=1
 fi
+
+# ---------------------------------------------------------------------------- a regrain in flight, from a release (#878)
+# ASSERTION 8. A real origin, not a degrade (see the header). v0.6.0 is the newest release whose install.sql
+# has no config.regrain_source_mark; asserted below rather than assumed, so a stale choice fails loudly.
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+OUT="$ROOT/bench/results"        # gitignored
+IDB="${DB}_inflight"
+ORIGIN_TAG="v0.6.0"
+ORIGIN_SQL="$OUT/upgrade-in-place-origin-$ORIGIN_TAG.sql"
+mkdir -p "$OUT"
+if ! git -C "$ROOT" rev-parse -q --verify "refs/tags/$ORIGIN_TAG^{commit}" >/dev/null 2>&1; then
+  if ! out=$(git -C "$ROOT" fetch --no-tags --depth=1 origin tag "$ORIGIN_TAG" 2>&1); then
+    echo "FAIL  could not fetch tag $ORIGIN_TAG; the in-flight regrain stage has no origin and verifies nothing"
+    printf '%s\n' "$out" | sed 's/^/      /'; exit 1
+  fi
+fi
+if ! git -C "$ROOT" show "$ORIGIN_TAG:pgpm_core/install.sql" > "$ORIGIN_SQL" 2>/tmp/up_inflight_show.err \
+   || [ ! -s "$ORIGIN_SQL" ]; then
+  echo "FAIL  git show $ORIGIN_TAG:pgpm_core/install.sql produced nothing; the in-flight regrain stage verifies nothing"
+  sed 's/^/      /' /tmp/up_inflight_show.err; exit 1
+fi
+docker exec "$C" psql -U postgres -q -c "drop database if exists $IDB" >/dev/null 2>&1
+docker exec "$C" psql -U postgres -q -c "create database $IDB" >/dev/null 2>&1
+if ! docker exec -i -e PGOPTIONS='-c client_min_messages=warning' "$C" \
+       psql -U postgres -q -d "$IDB" -v ON_ERROR_STOP=1 -f - < "$ORIGIN_SQL" >/tmp/up_inflight_origin.log 2>&1; then
+  echo "FAIL  the origin install ($ORIGIN_TAG) did not complete"; sed 's/^/      /' /tmp/up_inflight_origin.log; exit 1
+fi
+check "LIVENESS: the $ORIGIN_TAG origin has no regrain_source_mark" \
+  "$(q "$IDB" "select count(*) from information_schema.columns
+                where table_schema = 'pgpm' and table_name = 'config' and column_name = 'regrain_source_mark'")" "0"
+
+# Two id-kind tables, both regraining their monolith [0, 1000) toward 100 under the origin. up_r has a copy
+# of [0, 100) (99 rows) when the upgrade runs; up_n is prepared only. Asymmetric sizes (130 and 70 rows).
+for spec in up_r:130 up_n:70; do
+  t="${spec%%:*}"; n="${spec#*:}"
+  run "$IDB" "create table public.$t (id bigint not null, note text, primary key (id))" >/dev/null
+  run "$IDB" "insert into public.$t select g, 'old' || g from generate_series(1, $n) g" >/dev/null
+  run "$IDB" "call pgpm.transmute('public.$t', 'id', 1000::bigint, p_obtain => 1)" >/dev/null
+  run "$IDB" "select pgpm.resume('public.$t')" >/dev/null
+  run "$IDB" "call pgpm.maintain_obtain('public.$t')" >/dev/null
+  run "$IDB" "insert into public.$t values (1500, 'freeze')" >/dev/null
+done
+# The source by its range, re-read each time: the prepare renames it onto the target grid (#266).
+src_name() { q "$IDB" "select child_name from pgpm.part where parent_table = 'public.$1'::regclass
+                        and attached and lo = '0'"; }
+step() { docker exec -e PGOPTIONS='-c client_min_messages=warning' "$C" psql -U postgres -d "$IDB" -qtA \
+           -c "select pgpm.regrain_step('public.$1', '$(src_name "$1")', '100', 1000)"; }
+R_PREP=$(step up_r); R_COPY=$(step up_r); N_PREP=$(step up_n)
+COPY_OID=$(q "$IDB" "select child_oid from pgpm.part where parent_table = 'public.up_r'::regclass
+                      and not attached and lo = '0' and hi = '100'")
+COPY_REL=$(q "$IDB" "select '${COPY_OID:-0}'::oid::regclass::text")
+check "LIVENESS: up_r mid-regrain with a copy of [0, 100), up_n prepared" \
+  "$R_PREP/$R_COPY/$N_PREP/$(q "$IDB" "select string_agg(regrain_cursor, ',' order by parent_table::text)
+                                         from pgpm.config")/$(q "$IDB" "select count(*) from pg_class where oid = '${COPY_OID:-0}'::oid")" \
+  "prepared/copied:99/prepared/0,100/1"
+# The rewrite, BEFORE the upgrade: the origin cannot see it, and a rewrite fires no row trigger.
+run "$IDB" "alter table public.up_r alter column note type text using upper(note)" >/dev/null
+check "LIVENESS: the source holds OLD10, the copy made before it old10" \
+  "$(q "$IDB" "select note from public.up_r where id = 10")/$(q "$IDB" "select note from $COPY_REL where id = 10" 2>/dev/null)" \
+  "OLD10/old10"
+
+if ! install_into "$IDB" >/tmp/up_inflight_upgrade.log 2>&1; then
+  echo "FAIL  the upgrade over the in-flight regrain did not complete"; sed 's/^/      /' /tmp/up_inflight_upgrade.log; fail=1
+fi
+# Before any tick: the upgrade itself restarted up_r, and only recorded up_n's mark.
+check "the upgrade discarded up_r's pre-upgrade copy, by its oid" \
+  "$(q "$IDB" "select count(*) from pg_class where oid = '${COPY_OID:-0}'::oid")" "0"
+check "the upgrade logged up_r's restart, and no restart of up_n" \
+  "$(q "$IDB" "select coalesce(string_agg(parent_table::text || ' ' || lo || '/' || hi || '/' || rows || '/'
+                 || (method like 'the run was in flight across the upgrade that added regrain_source_mark%')::text,
+                 ',' order by id), 'none')
+                from pgpm.log where action = 'regrain_restart'")" "up_r 0/1000/1/true"
+check "the upgrade recorded each run's mark from its source as it is now" \
+  "$(q "$IDB" "select string_agg(g.parent_table::text || ' ' || g.regrain_cursor || ' '
+                 || coalesce((g.regrain_source_mark = pgpm._regrain_source_mark(p.child_oid::regclass))::text, 'null'),
+                 ',' order by g.parent_table::text)
+                from pgpm.config g join pgpm.part p on p.parent_table = g.parent_table and p.attached and p.lo = '0'")" \
+  "up_n 0 true,up_r 0 true"
+
+# Then the run to its swap, and the values it attached, row by row.
+for _ in $(seq 1 12); do
+  case "$(step up_r 2>/dev/null)" in swapped:*) break ;; esac
+done
+check "LIVENESS: up_r's regrain swapped [0, 1000)" \
+  "$(q "$IDB" "select count(*) from pgpm.log where parent_table = 'public.up_r'::regclass
+                and action = 'regrain' and method = 'copy_swap_drop' and lo = '0' and hi = '1000'")" "1"
+check "up_r's regrained range holds the rewritten values" \
+  "$(q "$IDB" "select string_agg(id || '=' || note, ',' order by id) from public.up_r where id in (1, 50, 99, 100, 130)")" \
+  "1=OLD1,50=OLD50,99=OLD99,100=OLD100,130=OLD130"
+docker exec "$C" psql -U postgres -q -c "drop database if exists $IDB" >/dev/null 2>&1
 
 docker exec "$C" psql -U postgres -q -c "drop database if exists $FRESH" >/dev/null 2>&1
 exit "$fail"

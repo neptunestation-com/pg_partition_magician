@@ -5936,6 +5936,39 @@ select is(
         [("     where (k.conrelid = p_parent or k.conrelid = any(p_copies)) and k.contype = 'c'\n",
           "     where (k.conrelid = p_parent or k.conrelid = any(p_copies)) and k.contype = 'c' and false\n", 1)],
     ),
+    "regrain_null_mark_adopted": (
+        "bench/regrain_null_source_mark.sh",
+        "Pre-#878 _regrain_source_drift: a null source mark (a run in flight across the upgrade that added "
+        "config.regrain_source_mark) answers null, 'no drift', so regrain_step's no-drift branch records the "
+        "source as it is now as the mark, over copies made before a rewrite that fired no row trigger, and the "
+        "swap attaches them with the pre-rewrite values. One site, the filter that turns a null mark into no "
+        "answer; tests/243 parts A and B catch it. The upgrade block is untouched, and does not run in that "
+        "file, so this proves regrain_step's lever on its own.",
+        [("   where m.now is not null;\n", "   where p_mark is not null and m.now is not null;\n", 1)],
+    ),
+    "upgrade_regrain_mark_adopted": (
+        "bench/upgrade_in_place.sh",
+        "The #878 upgrade block records the source as it is now as the mark of every in-flight run, copies "
+        "or not: its copy discard is gone, so a run with copies takes the no-copies branch. That is the "
+        "tempting fix (the mark exists after the upgrade, so regrain_step compares against something) and "
+        "the defect exactly: a rewrite made before the upgrade, which the origin could not see, is blessed, "
+        "regrain_step's null-mark lever never fires because the mark is no longer null, and the swap attaches "
+        "the pre-rewrite copy. bench/upgrade_in_place.sh's in-flight stage (assertion 8) must FAIL on the "
+        "copy still existing after the upgrade, on the missing regrain_restart, and on the values swapped in.",
+        [("      perform pgpm._regrain_drop_copy(v_parent, v_nsp, c.child_name);   -- #631: by recorded oid\n"
+          "      v_made := v_made + 1;\n", "", 1)],
+    ),
+    "upgrade_regrain_mark_block_noop": (
+        "bench/upgrade_in_place.sh",
+        "The #878 upgrade block visits no run: the pre-#878 upgrade, which only adds the column and leaves a "
+        "run in flight with copies and a null mark. regrain_step's own lever still restarts that run at its "
+        "next tick, so the values the stage finally reads are right; what must FAIL is the stage's state "
+        "right after the upgrade, before any tick (the copy by oid, the regrain_restart row, the mark), "
+        "which is what makes this stage the block's proof and not regrain_step's.",
+        [("  for v_parent in select parent_table from pgpm.config\n"
+          "                   where regrain_cursor is not null and regrain_source_mark is null loop\n",
+          "  for v_parent in select parent_table from pgpm.config where false loop\n", 1)],
+    ),
     "regrain_capture_drift_ignored": (
         "bench/regrain_capture_follows_key.sh",
         "Pre-#817 regrain_step: the capture apparatus is never compared with the parent's key, so after a "
