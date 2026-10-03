@@ -11,6 +11,9 @@
 #                      cannot discriminate on a loaded runner; five occurrences, always exactly 20)
 #   registry_quota     a third-party image pull refused with toomanyrequests / Data limit exceeded, and
 #                      no test output at all (the job never ran a test)
+#   regrain_perf_discriminate  a discriminate shard whose ONLY non-discriminating guard is bench/regrain_perf.sh
+#                      against regrain_no_delta_analyze (issue #871: the delta scan counter is read before the
+#                      statistics collector flushes it on a loaded runner, so the mutant's seq scan reads as 0)
 # The summary jobs (Perf summary, Test Summary, Lint summary) fail whenever a job they need failed;
 # their failure is derived, so they are skipped, but at least one REAL failed job must match.
 #
@@ -36,6 +39,10 @@ for j in $jobs; do
     echo "job $j: known flake lock_guard_probe (regrain_outgoing_fk_lock's probe timed out under load; liveness passed; #556)"
   elif grep -qE "toomanyrequests|Data limit exceeded" <<<"$log" && ! grep -qE "^FAIL |not ok" <<<"$log"; then
     echo "job $j: known flake registry_quota (third-party image pull refused; no test ran)"
+  elif [ "$(grep -cE '^FAIL +bench/[^ ]+ PASSED against its own defect' <<<"$log")" = "1" ] \
+     && grep -qE '^FAIL +bench/regrain_perf\.sh PASSED against its own defect' <<<"$log" \
+     && grep -qE '^--- regrain_no_delta_analyze$' <<<"$log"; then
+    echo "job $j: known flake regrain_perf_discriminate (regrain_perf.sh's scan counter read before the collector flushed; the only non-discriminating guard in the shard; #871)"
   else
     echo "job $j: UNKNOWN failure, not a flake this script knows; do not retry"
     rc=1
