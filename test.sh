@@ -405,6 +405,13 @@ run_timescale() {
     bash "$(dirname "$0")/bench/hypertable_grant_carry_resets_acl.sh" pgpm_test-timescale pgpm_perf201 || fail=1
     echo "--- transmute's key and frontier refusals before the swap (issue #792) ---"
     bash "$(dirname "$0")/bench/hypertable_handoff_refusals.sh" pgpm_test-timescale pgpm_perf168 || fail=1
+    # #842's, #816's and #768's (F6-09) harnesses, the same way: the clean-code half of their mutants' pairs.
+    echo "--- the swap knows its own capture by its record (issue #842) ---"
+    bash "$(dirname "$0")/bench/hypertable_carry_capture_by_record.sh" pgpm_test-timescale pgpm_perf205 || fail=1
+    echo "--- the swap carries publication membership and replica identity (issue #816) ---"
+    bash "$(dirname "$0")/bench/hypertable_carry_publications_replica_identity.sh" pgpm_test-timescale pgpm_perf206 || fail=1
+    echo "--- the cutover adopts only a key index on its destination (issue #768) ---"
+    bash "$(dirname "$0")/bench/hypertable_key_index_on_destination.sh" pgpm_test-timescale pgpm_perf207 || fail=1
     # #737's uninstall guard, the same way: the clean-code half of the pairs discriminate.sh completes with
     # its two mutants of uninstall.sql.
     echo "--- uninstall sweeps from_hypertable's change capture guard (issue #737) ---"

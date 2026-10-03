@@ -317,6 +317,28 @@ begin
   end if;
 end $$;
 
+-- _from_hypertable_check_publications: transmute's publication refusal (#566), asked of the hypertable before
+-- the swap (#816). The swap now carries the hypertable's publication membership onto the copy, with its row
+-- filter and column list, so that transmute carries it onto the parent; and PostgreSQL allows neither on a
+-- partitioned table in a publication with publish_via_partition_root = false, so transmute refuses that
+-- shape, which it could only do after the swap had committed, with the hypertable dropped. TimescaleDB
+-- accepts the shape on a hypertable (and copies it onto every chunk). Called by the preflight (and through it
+-- from_hypertable and from_hypertable_copy) and by the cutover under its ACCESS EXCLUSIVE, for the reason
+-- _from_hypertable_check_key gives: a membership can be added between the copy and the cutover.
+create or replace function pgpm._from_hypertable_check_publications(p_hypertable regclass)
+returns void language plpgsql stable as $$
+declare v_bad_q text;
+begin
+  select string_agg(quote_ident(p.pubname), ', ' order by p.pubname) into v_bad_q
+    from pg_publication_rel r join pg_publication p on p.oid = r.prpubid
+   where r.prrelid = p_hypertable and not p.pubviaroot
+     and (r.prqual is not null or r.prattrs is not null);
+  if v_bad_q is not null then
+    raise exception 'pg_partition_magician: cannot migrate hypertable % -- refused before anything is changed, because transmute, which takes the table over once the cutover''s swap has committed, would refuse it: the publication(s) (%) name it with a row filter or a column list and publish_via_partition_root = false, which PostgreSQL does not allow for a partitioned table, so the migrated table could not stay in them. Set publish_via_partition_root = true on them (ALTER PUBLICATION ... SET (publish_via_partition_root = true)), or drop the filter and column list, then re-run from_hypertable.',
+      p_hypertable, v_bad_q;
+  end if;
+end $$;
+
 -- _from_hypertable_carried_ddl: what the swap has to put back on the table it renames into the hypertable's
 -- place (#787), as the statements that do it. The copy is made by CREATE TABLE ... LIKE, which carries none
 -- of the table's owner, its table and column grants, its row-level security (ENABLE and FORCE) and
@@ -328,15 +350,29 @@ end $$;
 -- transaction once the copy has the source's name: each statement names the table by that name, and
 -- pg_get_triggerdef's text names it the same way, so they replay verbatim, as transmute replays its triggers.
 -- Left out, by what they are: TimescaleDB's own insert-blocker trigger (its function lives in a
--- _timescaledb_* schema) and this module's change-capture trigger (<rel>_pgpm_delta_fn, dropped with the
--- source). No trigger state rides along, because TimescaleDB refuses ENABLE and DISABLE TRIGGER on a
--- hypertable, so every user trigger is origin-enabled, which is what CREATE TRIGGER leaves. Not carried
--- either, because transmute does not carry them onto its parent: the replica identity and the storage
--- parameters.
+-- _timescaledb_* schema) and this module's change-capture triggers. A capture trigger is recognised by the
+-- module's RECORD, not by a name derived from the table's current one (#842): its function is
+-- <x>_pgpm_delta_fn beside a delta <x>_pgpm_delta that carries the copy's horizon comment, which is how
+-- pgpm_core/uninstall.sql finds a copy too (#737). By name alone, a tracking copy that was never cut over
+-- left its trigger on the hypertable under the table's name AT THAT TIME, and after a SET SCHEMA or a
+-- RENAME it read as a user trigger: carried onto the copy, cloned by transmute onto every partition, and
+-- logging every write into a delta nothing drains. The name derived from the current table is still left
+-- out too, for a delta a release before the comment built (the cutover drops that function before the
+-- replay). No trigger state rides along, because TimescaleDB refuses ENABLE and DISABLE TRIGGER on a
+-- hypertable, so every user trigger is origin-enabled, which is what CREATE TRIGGER leaves.
+-- The replica identity and the publication membership (#816) are carried too: transmute carries both from
+-- a plain table onto its parent and every partition (#782, #566), and the copy LIKE made has neither, so a
+-- REPLICA IDENTITY FULL hypertable came out DEFAULT (every UPDATE and DELETE of a keyless one refused under a
+-- publication of them) and a published one left every publication FOR TABLE it, its subscribers silently
+-- receiving nothing more. A membership's row filter and column list ride along; the shape transmute cannot
+-- carry onto a partitioned parent is refused before the swap (_from_hypertable_check_publications).
+-- USING INDEX names the index by the name the swap gives the copy's (the key it adopts, or a secondary it
+-- renames), which is the source's. Not carried, because transmute does not carry them onto its parent:
+-- the storage parameters.
 create or replace function pgpm._from_hypertable_carried_ddl(p_hypertable regclass)
 returns text[] language plpgsql stable as $$
 declare
-  v_nsp name; v_rel name; v_tbl_q text; v_ddl text[] := '{}'; r record;
+  v_nsp name; v_rel name; v_tbl_q text; v_ddl text[] := '{}'; r record; v_ri "char"; v_ri_idx name;
 begin
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
@@ -379,9 +415,43 @@ begin
      where t.tgrelid = p_hypertable and not t.tgisinternal
        and fn.nspname not like '\_timescaledb%'
        and not (fn.nspname = v_nsp and f.proname = v_rel || '_pgpm_delta_fn')
+       and not exists (select 1 from pg_class d
+                         join pg_description dd on dd.objoid = d.oid and dd.classoid = 'pg_class'::regclass
+                                               and dd.objsubid = 0
+                        where right(f.proname, 14) = '_pgpm_delta_fn' and f.pronargs = 0
+                          and d.relnamespace = f.pronamespace and d.relname = left(f.proname, -3)
+                          and d.relkind = 'r' and dd.description ~ '^pgpm from_hypertable horizon [0-9]+$')
      order by t.tgname
   loop
     v_ddl := v_ddl || r.def;
+  end loop;
+  -- REPLICA IDENTITY (#816). DEFAULT is what the copy has already.
+  select c.relreplident into v_ri from pg_class c where c.oid = p_hypertable;
+  if v_ri = 'i' then
+    select ic.relname into v_ri_idx
+      from pg_index i join pg_class ic on ic.oid = i.indexrelid where i.indrelid = p_hypertable and i.indisreplident;
+    -- an identity index dropped since leaves 'i' with no index, which PostgreSQL treats as NOTHING
+    v_ddl := v_ddl || case when v_ri_idx is null then format('alter table %s replica identity nothing', v_tbl_q)
+                           else format('alter table %s replica identity using index %I', v_tbl_q, v_ri_idx) end;
+  elsif v_ri in ('f', 'n') then
+    v_ddl := v_ddl || format('alter table %s replica identity %s', v_tbl_q,
+                             case v_ri when 'f' then 'full' else 'nothing' end);
+  end if;
+  -- Publication membership (#816), with its row filter and column list, as transmute's step 7c adds the
+  -- parent. Column names, not prattrs' attnums: the copy's attnums are dense, the source's may have holes.
+  -- A publication FOR ALL TABLES or FOR TABLES IN SCHEMA has no row here and needs none: it covers the copy,
+  -- in the same schema, already.
+  for r in
+    select p.pubname, pg_get_expr(pr.prqual, pr.prrelid) as qual,
+           (select string_agg(quote_ident(a.attname), ', ' order by a.attnum)
+              from pg_attribute a where a.attrelid = pr.prrelid and a.attnum = any(pr.prattrs::int2[])) as cols_q
+      from pg_publication_rel pr join pg_publication p on p.oid = pr.prpubid
+     where pr.prrelid = p_hypertable
+     order by p.pubname
+  loop
+    v_ddl := v_ddl || format('alter publication %I add table %s%s%s', r.pubname, v_tbl_q,
+                             case when r.cols_q is not null then ' (' || r.cols_q || ')' else '' end,
+                             case when r.qual is not null then ' where (' || r.qual || ')' else '' end);
   end loop;
   return v_ddl;
 end $$;
@@ -561,6 +631,10 @@ begin
   -- (3b2) a key transmute would refuse after the swap: a bare unique index (issue #792). See
   -- _from_hypertable_check_key.
   perform pgpm._from_hypertable_check_key(p_hypertable, p_control);
+
+  -- (3b3) a publication membership transmute could not carry onto the parent (issue #816). See
+  -- _from_hypertable_check_publications.
+  perform pgpm._from_hypertable_check_publications(p_hypertable);
 
   -- (3c) an EXCLUDE constraint, which nothing in the migration carries (issue #675). See
   -- _from_hypertable_check_exclusion.
@@ -1162,6 +1236,7 @@ declare
   v_tmp text; v_key_names text[]; v_key_types text[]; v_key_tmps text[]; v_idx_orig text[]; v_idx_tmps text[];
   v_in_names text[];     -- incoming FKs the swap dropped and recorded (#264, #563)
   v_dest_oid regclass;   -- which relation the destination check found, re-verified under lock (#422)
+  v_tmp_oid regclass;    -- what holds a key's temp name: the copy's index only if it is on v_dest_oid (#768)
   v_akey oid;            -- the key the append-only catch-up anti-joins by; null on a keyless table (#460)
   v_src_n bigint; v_dest_n bigint; v_n bigint;   -- conservation: source count under lock vs dest baseline + catch-up (#460)
   -- the untracked-write check on the tracking path (#654): the copy's recorded horizon, the predicates it
@@ -1327,7 +1402,16 @@ begin
     -- under this same name when tracking, so the drain can use it and the swap below adopts it. Other
     -- constraints (and the append-only / non-tracking path) are built here as before. Always record the
     -- conname -> temp-name mapping so the swap adopts every key index, copy-built or built here.
-    if to_regclass(format('%I.%I', v_nsp, v_tmp)) is null then
+    -- The copy's index is the one ON THE DESTINATION under that name (#768), not whatever holds the name: a
+    -- key keeps its name when its table is renamed, so an abandoned tracking copy's <dest>, under the old
+    -- name, can hold <conname>_pgpm_new for an index of ITS table, and taking that for ours skipped the
+    -- build and failed adopting it ("does not belong to table") after the whole copy. When something else
+    -- holds the name, ours is built under the oid form the temp name takes when the long one does not fit.
+    v_tmp_oid := to_regclass(format('%I.%I', v_nsp, v_tmp));
+    if not exists (select 1 from pg_index i where i.indexrelid = v_tmp_oid and i.indrelid = v_dest_oid) then
+      if v_tmp_oid is not null then
+        v_tmp := 'pgpm_new_' || k.conindid::text;
+      end if;
       execute pgpm._from_hypertable_index_ddl(k.conindid, v_tmp, v_nsp, v_dest);
     end if;
     v_key_names := array_append(v_key_names, k.conname::text);
@@ -1388,6 +1472,9 @@ begin
   -- ...and an EXCLUDE constraint, for the same reason (#841). The check up front saw none, but one added while
   -- the cutover prepared is on the frozen source now, and the swap below would drop it with the hypertable.
   perform pgpm._from_hypertable_check_exclusion(p_hypertable);
+  -- ...and a publication membership the swap would carry and transmute refuse (#816): one added while the
+  -- cutover prepared is refused here with the source whole. See _from_hypertable_check_publications.
+  perform pgpm._from_hypertable_check_publications(p_hypertable);
   -- ...and two of transmute's refusals the source already shows (#792). Asked here rather than up front, for
   -- two reasons. Nothing can write the source now, so a row dated past the frontier bound, or a bare unique
   -- index, that arrived while the cutover prepared (the pre-drain's commits, the index pre-builds) is refused

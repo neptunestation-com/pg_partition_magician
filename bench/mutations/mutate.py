@@ -1417,8 +1417,99 @@ MUTATIONS = {
         "bench/hypertable_cutover_carries_access.sh",
         "#787 replaying the tracked copy's change-capture trigger: the swap dropped its function with the "
         "source, so the replay dies in the swap transaction and the cutover of tests/timescale/db/33's "
-        "tracked hypertable fails on a raw error, leaving it a hypertable.",
-        [("       and not (fn.nspname = v_nsp and f.proname = v_rel || '_pgpm_delta_fn')\n", "", 1)],
+        "tracked hypertable fails on a raw error, leaving it a hypertable. Both of the carry's ways of "
+        "knowing the capture are removed, the record (#842) and the name derived from the current table.",
+        [("""       and not (fn.nspname = v_nsp and f.proname = v_rel || '_pgpm_delta_fn')
+       and not exists (select 1 from pg_class d
+                         join pg_description dd on dd.objoid = d.oid and dd.classoid = 'pg_class'::regclass
+                                               and dd.objsubid = 0
+                        where right(f.proname, 14) = '_pgpm_delta_fn' and f.pronargs = 0
+                          and d.relnamespace = f.pronamespace and d.relname = left(f.proname, -3)
+                          and d.relkind = 'r' and dd.description ~ '^pgpm from_hypertable horizon [0-9]+$')
+""", "", 1)],
+    ),
+    "hypertable_carry_capture_by_name": (
+        "bench/hypertable_carry_capture_by_record.sh",
+        "Pre-#842 _from_hypertable_carried_ddl: the module's capture trigger is left out only under the name "
+        "derived from the hypertable's CURRENT schema and relname, so an abandoned tracking copy's trigger, "
+        "named for the table before a SET SCHEMA or RENAME, is carried onto the copy and cloned onto every "
+        "partition. tests/timescale/db/42's parents and partitions fire the stale capture and its deltas grow.",
+        [("""       and not exists (select 1 from pg_class d
+                         join pg_description dd on dd.objoid = d.oid and dd.classoid = 'pg_class'::regclass
+                                               and dd.objsubid = 0
+                        where right(f.proname, 14) = '_pgpm_delta_fn' and f.pronargs = 0
+                          and d.relnamespace = f.pronamespace and d.relname = left(f.proname, -3)
+                          and d.relkind = 'r' and dd.description ~ '^pgpm from_hypertable horizon [0-9]+$')
+""", "", 1)],
+    ),
+    "hypertable_carry_capture_unrecorded": (
+        "bench/hypertable_carry_capture_by_record.sh",
+        "#842 trusting the record alone: a tracking copy made by a release that wrote no horizon comment "
+        "(0.6.0 and earlier) has its capture trigger carried, and the replay dies in the swap transaction "
+        "on the function the cutover just dropped. tests/timescale/db/42's unrecorded copy fails to cut over.",
+        [("""       and not (fn.nspname = v_nsp and f.proname = v_rel || '_pgpm_delta_fn')
+       and not exists (select 1 from pg_class d
+""", """       and not exists (select 1 from pg_class d
+""", 1)],
+    ),
+    "hypertable_swap_drops_publications": (
+        "bench/hypertable_carry_publications_replica_identity.sh",
+        "Pre-#816 from_hypertable swap: the hypertable's publication membership goes with the DROP and the "
+        "LIKE copy is in no publication, so transmute carries none onto the parent and every subscriber "
+        "silently stops receiving the table. tests/timescale/db/43's membership assertions fail.",
+        [("""     where pr.prrelid = p_hypertable
+     order by p.pubname
+""", """     where pr.prrelid = p_hypertable and false   -- MUTANT: no membership is carried
+     order by p.pubname
+""", 1)],
+    ),
+    "hypertable_swap_drops_replica_identity": (
+        "bench/hypertable_carry_publications_replica_identity.sh",
+        "Pre-#816 from_hypertable swap: the LIKE copy has the DEFAULT replica identity and nothing puts the "
+        "hypertable's on it, so transmute carries DEFAULT onto the parent and every partition, and a keyless "
+        "FULL table under a publication of updates refuses every UPDATE and DELETE with 55000. "
+        "tests/timescale/db/43's identity assertions and its UPDATE and DELETE fail.",
+        [("""  select c.relreplident into v_ri from pg_class c where c.oid = p_hypertable;
+""", """  v_ri := 'd';   -- MUTANT: the replica identity is not carried
+""", 1)],
+    ),
+    "hypertable_publications_unchecked_up_front": (
+        "bench/hypertable_carry_publications_replica_identity.sh",
+        "#816's carry without the preflight's check: a membership with a row filter in a publication with "
+        "publish_via_partition_root = false is carried onto the copy and refused by transmute only after the "
+        "swap has dropped the hypertable. tests/timescale/db/43's from_hypertable refusal is not raised (the "
+        "call reaches the copy's first COMMIT and dies 2D000 there instead).",
+        [("""  -- (3b3) a publication membership transmute could not carry onto the parent (issue #816). See
+  -- _from_hypertable_check_publications.
+  perform pgpm._from_hypertable_check_publications(p_hypertable);
+""", "  -- MUTANT: the preflight does not ask for the publication shape transmute refuses\n", 1)],
+    ),
+    "hypertable_cutover_publications_unchecked": (
+        "bench/hypertable_carry_publications_replica_identity.sh",
+        "#816's carry without the cutover's own check under its lock: a filtered membership added after the "
+        "copy reaches the swap, which commits, and transmute refuses after it. tests/timescale/db/43's "
+        "cutover refusal is not raised (the call dies 2D000 at the swap's COMMIT instead).",
+        [("""  -- cutover prepared is refused here with the source whole. See _from_hypertable_check_publications.
+  perform pgpm._from_hypertable_check_publications(p_hypertable);
+""", "  -- MUTANT: the cutover does not ask for the publication shape under its lock\n", 1)],
+    ),
+    "hypertable_key_index_by_name": (
+        "bench/hypertable_key_index_on_destination.sh",
+        "Pre-#768 (F6-09) from_hypertable_cutover: a key's index build is skipped whenever ANY relation holds "
+        "its temp name, so after an abandoned tracking copy and a RENAME of the hypertable (whose key keeps "
+        "its name) the stale copy's index is taken for the key's and the swap fails adopting it, after the "
+        "whole copy. tests/timescale/db/44's migration of the renamed table fails.",
+        [("""    v_tmp_oid := to_regclass(format('%I.%I', v_nsp, v_tmp));
+    if not exists (select 1 from pg_index i where i.indexrelid = v_tmp_oid and i.indrelid = v_dest_oid) then
+      if v_tmp_oid is not null then
+        v_tmp := 'pgpm_new_' || k.conindid::text;
+      end if;
+      execute pgpm._from_hypertable_index_ddl(k.conindid, v_tmp, v_nsp, v_dest);
+    end if;
+""", """    if to_regclass(format('%I.%I', v_nsp, v_tmp)) is null then   -- MUTANT: by name, anywhere in the schema
+      execute pgpm._from_hypertable_index_ddl(k.conindid, v_tmp, v_nsp, v_dest);
+    end if;
+""", 1)],
     ),
     "hypertable_acl_carry_unreset": (
         "bench/hypertable_grant_carry_resets_acl.sh",
@@ -6026,6 +6117,13 @@ MUTATION_SRC = {
     "hypertable_acl_carry_unreset": "pgpm_hypertable/install.sql",
     "hypertable_cutover_carries_insert_blocker": "pgpm_hypertable/install.sql",
     "hypertable_cutover_carries_capture": "pgpm_hypertable/install.sql",
+    "hypertable_carry_capture_by_name": "pgpm_hypertable/install.sql",
+    "hypertable_carry_capture_unrecorded": "pgpm_hypertable/install.sql",
+    "hypertable_swap_drops_publications": "pgpm_hypertable/install.sql",
+    "hypertable_swap_drops_replica_identity": "pgpm_hypertable/install.sql",
+    "hypertable_publications_unchecked_up_front": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_publications_unchecked": "pgpm_hypertable/install.sql",
+    "hypertable_key_index_by_name": "pgpm_hypertable/install.sql",
     "hypertable_key_unchecked": "pgpm_hypertable/install.sql",
     "hypertable_cutover_key_unchecked_under_lock": "pgpm_hypertable/install.sql",
     "hypertable_frontier_unchecked_up_front": "pgpm_hypertable/install.sql",
@@ -6152,6 +6250,13 @@ MUTATION_TRACK = {
     "hypertable_cutover_carries_insert_blocker": "timescale",
     "hypertable_cutover_carries_capture": "timescale",
     "hypertable_acl_carry_unreset": "timescale",
+    "hypertable_carry_capture_by_name": "timescale",
+    "hypertable_carry_capture_unrecorded": "timescale",
+    "hypertable_swap_drops_publications": "timescale",
+    "hypertable_swap_drops_replica_identity": "timescale",
+    "hypertable_publications_unchecked_up_front": "timescale",
+    "hypertable_cutover_publications_unchecked": "timescale",
+    "hypertable_key_index_by_name": "timescale",
     "hypertable_key_unchecked": "timescale",
     "hypertable_cutover_key_unchecked_under_lock": "timescale",
     "hypertable_frontier_unchecked_up_front": "timescale",

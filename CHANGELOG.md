@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+- **`from_hypertable` recognises its own change capture by its record, not by the table's current name**
+  (#842). The swap's trigger carry (#787) left out the capture trigger whose function was named for the
+  hypertable's current schema and relname, so after a tracking copy that was never cut over and an
+  `ALTER TABLE ... SET SCHEMA` or `RENAME`, the stale trigger was carried onto the copy and cloned by
+  `transmute` onto the parent and every partition, logging every write into a delta nothing drains. A trigger
+  whose function sits beside a delta carrying the copy's horizon comment is left out now, as
+  `pgpm_core/uninstall.sql` finds such a copy (#737); a copy from a release that wrote no record is still
+  known by the derived name. `tests/timescale/db/42` under `bench/hypertable_carry_capture_by_record.sh`,
+  with the mutations `hypertable_carry_capture_by_name` and `hypertable_carry_capture_unrecorded`;
+  `hypertable_cutover_carries_capture` now removes both ways of knowing the capture.
+- **`from_hypertable` carries the hypertable's publication membership and replica identity** (#816). The swap
+  drops the hypertable, which took it out of every publication `FOR TABLE` it, and renames in a `LIKE` copy
+  with the `DEFAULT` identity, so `transmute`, which carries both from a plain table (#566, #782), carried
+  nothing: subscribers silently stopped receiving the table, and a keyless `REPLICA IDENTITY FULL` one under a
+  publication of updates refused every `UPDATE` and `DELETE` with 55000. Both are put on the copy in the swap
+  now, each membership with its row filter and column list, and a filtered membership in a publication with
+  `publish_via_partition_root = false`, which `transmute` refuses on a partitioned table, is refused before the
+  swap by the preflight and by the cutover under its lock (`_from_hypertable_check_publications`).
+  `tests/timescale/db/43` under `bench/hypertable_carry_publications_replica_identity.sh`, with the mutations
+  `hypertable_swap_drops_publications`, `hypertable_swap_drops_replica_identity`,
+  `hypertable_publications_unchecked_up_front` and `hypertable_cutover_publications_unchecked`.
+- **`from_hypertable_cutover` adopts a key index only when it is on its destination** (#768). It skipped a
+  key's index build whenever any relation in the schema held the temp name `<conname>_pgpm_new`, so after a
+  tracking copy that was never cut over and a `RENAME` of the hypertable (whose key keeps its name), the stale
+  copy's index was taken for the key's and the swap failed adopting it after the whole copy. The index is
+  adopted now only when `pg_index.indrelid` is the destination; otherwise the key is built under the oid form
+  of the temp name. `tests/timescale/db/44` under `bench/hypertable_key_index_on_destination.sh`, with the
+  mutation `hypertable_key_index_by_name`.
 - **A role granted DML on the regraining partition itself can write it mid-regrain** (#843). The capture
   trigger inserts into the delta as the writer, and `_regrain_capture_grant` gave INSERT on the delta to the
   grantees of DML on the parent only, so a role granted `UPDATE` or `DELETE` directly on the source partition
