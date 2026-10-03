@@ -337,7 +337,7 @@ pull_third_party() {  # <profile> <service>
 # output for failures (the runner does not need pg_prove). To exercise a second fleet TimescaleDB version,
 # add the supabase/postgres:15 tag that bundles it to TS_PG_TAGS (e.g. an older tag for the 2.9.x cluster).
 run_timescale() {
-  local prof="timescale" svc="timescale" fail=0 f db out tag
+  local prof="timescale" svc="timescale" fail=0 f db out rc tag
   local px=( --profile "$prof" exec -T -e PGPASSWORD=postgres "$svc" psql -h 127.0.0.1 -U postgres )
   for tag in ${TS_PG_TAGS:-15.14.1.127}; do
     export TS_PG_TAG="$tag"   # docker-compose interpolates this into the supabase/postgres image tag
@@ -363,15 +363,19 @@ run_timescale() {
         --single-transaction -f /repo/pgpm_core/install.sql >/dev/null
       $DC "${px[@]}" -d "$db" -v ON_ERROR_STOP=1 -q -f /repo/pgpm_hypertable/install.sql >/dev/null
       $DC "${px[@]}" -d "$db" -v ON_ERROR_STOP=1 -q -f /repo/tests/timescale/fixtures.sql >/dev/null
-      # -tA gives clean TAP (no table chrome); no ON_ERROR_STOP so every assertion reports.
-      out=$($DC "${px[@]}" -d "$db" -tAq -f "/repo/$f" 2>&1)
+      # -tA gives clean TAP (no table chrome); no ON_ERROR_STOP so every assertion reports. psql's exit
+      # status is kept, not left to `set -e` (which would end the track there with no verdict and no
+      # teardown): a session lost part-way exits 2 and is judged below.
+      rc=0; out=$($DC "${px[@]}" -d "$db" -tAq -f "/repo/$f" 2>&1) || rc=$?
       echo "$out" | grep -E '^(ok|not ok|1\.\.|# )' || true
-      # pg_prove's verdict, which this runner does not use: a failed assertion, an error, or a file that
-      # ran a different number of assertions than it planned. pgTAP reports the last as "# Looks like you
-      # planned N tests but ran M", and missing it passed a file whose assertion silently never ran (#601).
-      # bench/tap_verdict.sh reads this condition back out and holds it to real pgTAP output.
-      if echo "$out" | grep -qE '^not ok|^# Looks like you (failed|planned)|ERROR:'; then
-        echo "FAIL ($tag): $f"; fail=1
+      # pg_prove's verdict, which this runner does not use: a failed assertion, an error, a file that
+      # ran a different number of assertions than it planned, or one psql did not run to its end. pgTAP
+      # reports the third as "# Looks like you planned N tests but ran M", and missing it passed a file
+      # whose assertion silently never ran (#601). A session that dies part-way (FATAL, no ERROR:) never
+      # reaches finish() to print that line, so only psql's exit shows it (#819).
+      # bench/tap_verdict.sh reads this region back out and holds it to real pgTAP output.
+      if [ "$rc" != 0 ] || echo "$out" | grep -qE '^not ok|^# Looks like you (failed|planned)|ERROR:'; then
+        echo "FAIL ($tag): $f (psql exit $rc)"; fail=1
       fi
       $DC "${px[@]}" -d postgres -q -c "drop database if exists $db" >/dev/null
     done
@@ -466,12 +470,13 @@ run_observe() {  # pg_flight_recorder observability track: impact_report correla
   wait_pg "$prof" "$svc" 90
 
   run_observe_file() {  # <db> <test-file> -- run one pgTAP file, collect TAP, flag failures
-    local db="$1" f="$2"
+    local db="$1" f="$2" rc
     echo "--- ${f##*/} (db: $db) ---"
-    out=$($DC "${px[@]}" -d "$db" -tAq -f "$f" 2>&1)
+    rc=0; out=$($DC "${px[@]}" -d "$db" -tAq -f "$f" 2>&1) || rc=$?
     echo "$out" | grep -E '^(ok|not ok|1\.\.|# )' || true
-    # The same verdict as run_timescale's, plan shortfall included (#601; bench/tap_verdict.sh).
-    if echo "$out" | grep -qE '^not ok|^# Looks like you (failed|planned)|ERROR:'; then echo "FAIL: $f"; fail=1; fi
+    # The same verdict as run_timescale's, plan shortfall and psql's exit included (#601, #819;
+    # bench/tap_verdict.sh).
+    if [ "$rc" != 0 ] || echo "$out" | grep -qE '^not ok|^# Looks like you (failed|planned)|ERROR:'; then echo "FAIL: $f (psql exit $rc)"; fail=1; fi
   }
 
   # pg_flight_recorder requires pg_cron, which lives only in cron.database_name (postgres), so this runs in

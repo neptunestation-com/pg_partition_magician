@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- **`bench/hypertable_time_rendering.sh` carries the shared pgTAP verdict, and `bench/wrapper_tap_verdicts.sh`
+  finds every timescale wrapper by what it does** (#844). The wrapper added for #791 and #793 kept the pre-#795
+  verdict in its `run_file`: psql's exit ignored, a plan shortfall read only from finish()'s line, a `not ok`
+  counted only with a description, so it passed `tests/timescale/db/35` and `36` after a session lost 1 of 3
+  assertions in, or after an undescribed assertion failed. The guard that holds every wrapper to the shared
+  block never judged it, because it discovered wrappers by the literal `-f "$TEST_FILE"` and this one ran
+  `-f "$file"`. The wrapper now runs the shared block, and the guard takes any bench script that names a
+  `tests/timescale/db/` file and runs a file through psql with tuples-only unaligned output, in any spelling;
+  each must carry the block, the scan is held to positive and negative spellings and must find every wrapper on
+  its name list, and a seventh fixture fails an undescribed assertion. Mutation
+  `wrapper_verdict_time_rendering_hand_rolled`.
+- **The timescale and observe tracks fail a file whose psql session was lost** (#819, F9-01). `run_timescale`
+  and `run_observe_file` judged a pgTAP file by grepping its output and never read psql's exit status, so the
+  verdict passed a file whose session died part-way (FATAL, no `ERROR:`, finish() never reached); as run,
+  `set -e` then ended the track at that call with no verdict, no teardown and its remaining files unrun. Both
+  keep the exit status and fail any file psql did not run to its end. `bench/tap_verdict.sh` now evaluates
+  each track's whole verdict region, the capture included, against two lost-session fixtures besides its
+  four, with the mutation `tap_verdict_ignores_psql_exit`.
 - **`bench/doc_env_knobs.sh` checks every knob in a documented command's prefix** (#847). Its command regex
   bound only the `NAME=value` next to `./test.sh`, so `TS_VERSIONS='2.9.1' TS_PG_TAGS='15.14.1.127' ./test.sh
   timescale` passed on the read TS_PG_TAGS although TS_VERSIONS, the #599 knob, is read nowhere. The prefix is

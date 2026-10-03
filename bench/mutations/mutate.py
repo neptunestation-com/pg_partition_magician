@@ -981,6 +981,42 @@ TRANSMUTE_POLICY_REPLAY = """  for v_pol in
   end loop;
 """
 
+# hypertable_time_rendering.sh's run_file verdict as it stood before #844, whole: its own hand-rolled
+# lines in place of the shared `# >>> pgTAP verdict` block (psql's exit never captured, a shortfall read
+# only from finish()'s line, a `not ok` counted only with a ` -` description). The mutation that puts it
+# back replaces the block with exactly this text, so it lives here once rather than inside a pattern.
+TIME_RENDERING_PRE_844_VERDICT = r"""  out=$(q -d "$DB" -tAq -f "$file" 2>&1)
+  # grep -E, not a sed alternation: this half runs on the HOST, and BSD sed has no `\|`.
+  echo "$out" | grep -E '^not ok [0-9]+ -' | sed 's/^/    /' | head -20
+  ran=$(echo "$out" | grep -cE '^(not )?ok [0-9]+ -')
+  bad=$(echo "$out" | grep -cE '^not ok [0-9]+ -')
+  # Two failure shapes, reported apart. A file that died early leaves a raw ERROR: and few or no
+  # assertions, which must NOT read the same as assertions that ran and failed: discriminate.sh treats
+  # any non-zero exit as "the guard caught the defect", so a harness broken enough to fail against
+  # everything would otherwise be reported as proving the mutation. And a plan shortfall is a failure
+  # too (#601), which this runner, unlike pg_prove, has to look for itself.
+  if echo "$out" | grep -qE '^ERROR:|^psql:.*ERROR:'; then
+    printf 'FAIL  %-58s %s\n' "$label: the file ran without a raw error" "see below"
+    echo "$out" | grep -E 'ERROR:' | head -5 | cut -c1-240 | sed 's/^/      /'
+    ffail=1
+  fi
+  if echo "$out" | grep -qE '^# Looks like you planned'; then
+    printf 'FAIL  %-58s %s\n' "$label: the file ran every assertion it planned" "$(echo "$out" | grep -E '^# Looks like you planned')"
+    ffail=1
+  fi
+  if [ "$bad" = 0 ] && [ "$ffail" = 0 ]; then
+    printf 'PASS  %-58s %s\n' "$label" "$ran ran"
+  else
+    printf 'FAIL  %-58s %s\n' "$label" "$ran ran, $bad failed"; ffail=1
+  fi
+  if [ "$ran" -eq 0 ]; then
+    printf 'FAIL  %-58s %s\n' "$label: the assertions were reached at all" "0 ran"
+    echo "$out" | tail -20 | sed 's/^/      /'
+    ffail=1
+  fi
+  [ "$ffail" = 0 ] || fail=1
+"""
+
 MUTATIONS = {
     "transmute_no_commits": (
         "bench/transmute_lock.sh",
@@ -4268,6 +4304,33 @@ $$;''',
         [("grep -qE '^not ok|^# Looks like you (failed|planned)|ERROR:'",
           "grep -qE '^not ok|^# Looks like you failed|ERROR:'", 2)],
     ),
+    "tap_verdict_ignores_psql_exit": (
+        "bench/tap_verdict.sh",
+        "Pre-#819 test.sh: the timescale and observe tracks run each pgTAP file with `out=$(psql -tAq ...)` "
+        "and never keep or read psql's exit status, so a file whose session is lost part-way (FATAL, no "
+        "ERROR:, finish() never reached) is PASSED by the verdict after 1 of its 3 planned assertions (and, "
+        "as run, `set -e` ends the track at that call with no verdict and no teardown). Six sites: each "
+        "track's capture, each verdict's exit test, each FAIL line's exit status.",
+        [('rc=0; out=$($DC "${px[@]}" -d "$db" -tAq -f "/repo/$f" 2>&1) || rc=$?\n',
+          'out=$($DC "${px[@]}" -d "$db" -tAq -f "/repo/$f" 2>&1)\n', 1),
+         ('rc=0; out=$($DC "${px[@]}" -d "$db" -tAq -f "$f" 2>&1) || rc=$?\n',
+          'out=$($DC "${px[@]}" -d "$db" -tAq -f "$f" 2>&1)\n', 1),
+         ('if [ "$rc" != 0 ] || echo "$out" | grep -qE', 'if echo "$out" | grep -qE', 2),
+         (' (psql exit $rc)";', '";', 2)],
+    ),
+    "wrapper_verdict_time_rendering_hand_rolled": (
+        "bench/wrapper_tap_verdicts.sh",
+        "Pre-#844 hypertable_time_rendering.sh: run_file judges tests/timescale/db/35 and 36 with its own "
+        "verdict instead of the shared block, so psql's exit is ignored, a shortfall is read only from "
+        "finish()'s line and an undescribed `not ok` is not counted: a file whose session is lost after 1 of "
+        "3 planned assertions, or whose undescribed assertion fails, is PASSED. Two sites: the block put back "
+        "to the hand-rolled lines, run_file's locals put back to the names they read.",
+        [(re.compile(r"  # The verdict is the shared block every timescale wrapper carries \(#844\).*?"
+                     r"  \[ \"\$failed_before\" = 0 \] \|\| fail=1\n", re.DOTALL),
+          lambda _m: TIME_RENDERING_PRE_844_VERDICT, 1),
+         ('  local TEST_FILE="$1" LABEL="$2" out rc planned ran bad failed_before="$fail"\n',
+          '  local file="$1" label="$2" out ran bad ffail=0\n', 1)],
+    ),
     "wrapper_verdict_reads_finish_only": (
         "bench/wrapper_tap_verdicts.sh",
         "Pre-#795 timescale wrapper verdict (hypertable_index_names.sh and seven siblings): a plan shortfall is "
@@ -6266,10 +6329,12 @@ MUTATION_SRC = {
     "classify_premise_bare_word": "scripts/review/classify_claims.py",
     "throws_ok_one_argument": "tests/72_transmute_attributes_test.sql",
     "tap_verdict_misses_plan_shortfall": "test.sh",
+    "tap_verdict_ignores_psql_exit": "test.sh",
     # #795 and #712: a timescale wrapper's own verdict block, judged by the guard that evaluates it.
     "wrapper_verdict_reads_finish_only": "bench/hypertable_index_names.sh",
     "wrapper_verdict_no_shortfall_check": "bench/hypertable_late_appends.sh",
     "wrapper_verdict_ignores_exit": "bench/hypertable_cutover_identity.sh",
+    "wrapper_verdict_time_rendering_hand_rolled": "bench/hypertable_time_rendering.sh",
     "discriminate_counts_uninstallable": "bench/discriminate.sh",
     "discriminate_list_on_stdin": "bench/discriminate.sh",
     # #742 to #744: a lint's document and three test files, each judged by the guard that runs it.
