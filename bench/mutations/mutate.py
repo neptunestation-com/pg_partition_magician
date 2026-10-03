@@ -1169,16 +1169,16 @@ MUTATIONS = {
         "consulted', not 'the anchor does not exist', and a mutant that dropped the column too "
         "would fail the test file on its liveness witnesses and look like a catch for the wrong "
         "reason.",
-        [("    v_now := to_regclass(format('%I.%I', v_nsp, r.child_name));\n"
-          "    if r.child_oid is not null and v_now::oid is distinct from r.child_oid then\n"
-          "      insert into pgpm.log (parent_table, action, lo, hi, method)\n"
-          "        values (p_parent, 'fail_archive_identity', r.lo, r.hi,\n"
-          "                format('%I.%I is oid %s now, not the oid %s recorded for this "
+        [("      v_now := to_regclass(format('%I.%I', v_nsp, r.child_name));\n"
+          "      if r.child_oid is not null and v_now::oid is distinct from r.child_oid then\n"
+          "        insert into pgpm.log (parent_table, action, lo, hi, method)\n"
+          "          values (p_parent, 'fail_archive_identity', r.lo, r.hi,\n"
+          "                  format('%I.%I is oid %s now, not the oid %s recorded for this "
           "partition; refusing to archive it',\n"
-          "                       v_nsp, r.child_name, coalesce(v_now::oid::text, 'nothing'), "
+          "                         v_nsp, r.child_name, coalesce(v_now::oid::text, 'nothing'), "
           "r.child_oid));\n"
-          "      continue;\n"
-          "    end if;\n\n", "", 1)],
+          "        continue;\n"
+          "      end if;\n\n", "", 1)],
     ),
     "write_block_unanchored_name": (
         "bench/write_block_identity.sh",
@@ -5815,6 +5815,73 @@ select is(
         "callers ask; tests/234's refusals and gate zeros catch it, while its AD controls still pass.",
         [("    return p_suffix ~ '^([0-9]{4}|[1-9][0-9]{4,})(_[0-9]+)*(_bc)?$';\n",
           "    return p_suffix ~ '^[0-9]{4}(_[0-9]+)*$';\n", 1)],
+    ),
+    "archive_step_no_child_isolation": (
+        "bench/archive_step_child_isolation.sh",
+        "Pre-#833 _archive_step: the per-candidate loop has no exception block of its own, so one strategy "
+        "raise (the documented skip_archive retry path) unwinds the whole step into maintain()'s one handler "
+        "and discards the ledger rows of every other partition archived in the same call, after the strategy "
+        "already ran for them. One site, the block's exception clause removed (the bare begin/end left is "
+        "inert). tests/228 catches it: the neighbours' chunks, the per-partition skip row, the same-tick "
+        "retirements, and A handed to the strategy twice.",
+        [("    exception when others then\n"
+          "      insert into pgpm.log (parent_table, action, lo, hi, method)\n"
+          "        values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 200));\n"
+          "    end;\n"
+          "  end loop;\n"
+          "  return v_count;\n",
+          "    end;\n"
+          "  end loop;\n"
+          "  return v_count;\n", 1)],
+    ),
+    "retire_one_step_no_disarm": (
+        "bench/retire_one_step_disarm.sh",
+        "Pre-#835 retire(): the one-step DROP of a retirement that had dispatched a detach (its incoming FK "
+        "dropped before pg_cron ran it) never returns pgpm_detach to idle, so the job runs DETACH PARTITION "
+        "of the dropped name every tick. One site, the one-step path's disarm. tests/229 part A catches it.",
+        [("  elsif r.retiring_at is not null then\n", "  elsif false then\n", 1)],
+    ),
+    "retire_one_step_disarm_any": (
+        "bench/retire_one_step_disarm.sh",
+        "Issue #835, the plausible-but-wrong fix: the one-step path disarms UNCONDITIONALLY, as the referenced "
+        "path does after a detach landed. No detach landed here, so nothing proves the job still holds this "
+        "retirement's command, and another retirement's dispatch is clobbered (the #407 rule). One site, the "
+        "disarm's argument. tests/229 part B catches it.",
+        [("    perform pgpm._idle_detach_job(pgpm._detach_cmd(p_parent, v_nsp, p_child));\n"
+          "  end if;\n\n"
+          "  begin\n"
+          "    -- THE REGRAIN THIS DROP WOULD ORPHAN",
+          "    perform pgpm._idle_detach_job(null);\n"
+          "  end if;\n\n"
+          "  begin\n"
+          "    -- THE REGRAIN THIS DROP WOULD ORPHAN", 1)],
+    ),
+    "extend_to_edge_uncounted": (
+        "bench/extend_to_edge_cell_count.sh",
+        "Pre-#836 extend_to: the p_max dry count counts grid steps past the frontier's floor only, while the "
+        "walk also builds the frontier's own cell when it is missing, so p_max => 1 creates two partitions. "
+        "One site, the edge's count. tests/230 part A catches it.",
+        [("  then\n    v_edge := 1;\n  end if;\n", "  then\n    v_edge := 0;\n  end if;\n", 1)],
+    ),
+    "extend_to_edge_always_counted": (
+        "bench/extend_to_edge_cell_count.sh",
+        "Issue #836, the over-correction: the edge's cell is counted whether or not it is built, so a call "
+        "one step past a built edge needs p_max => 2 and p_max => 1 is refused where it must create its one "
+        "partition. One site, the edge's count. tests/230 part C catches it.",
+        [("  v_needed int := 0; v_edge int := 0; v_made int := 0; v_walked int := 0;\n",
+          "  v_needed int := 0; v_edge int := 1; v_made int := 0; v_walked int := 0;\n", 1),
+         ("  then\n    v_edge := 1;\n  end if;\n", "  then\n    null;\n  end if;\n", 1)],
+    ),
+    "crossing_keys_bare_text": (
+        "bench/crossing_keys_datestyle.sh",
+        "Pre-#814 (F4-01) _crossing_keys: a timestamptz referencing key is read back with a bare ::text, so "
+        "under DateStyle SQL in Asia/Kolkata ('IST', Israel to PostgreSQL before 18) retire()'s crossing "
+        "DELETE parses every key 3.5 hours off and matches nothing: the declared ON DELETE CASCADE never "
+        "runs and the dispatched detach can never succeed. One site, the render. tests/231 catches it on "
+        "PostgreSQL 15 to 17.",
+        [("    v_refval_q := case when v_reftype = 'timestamptz'::regtype then format('pgpm._ts_text(%I)', v_refcol)\n"
+          "                       else format('%I::text', v_refcol) end;\n",
+          "    v_refval_q := format('%I::text', v_refcol);\n", 1)],
     ),
 }
 

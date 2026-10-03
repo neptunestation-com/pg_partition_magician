@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+- **One partition's archive raise defers that partition alone** (#833). `_archive_step`'s per-candidate loop had
+  no exception block of its own, so with `archive_batch` above 1 a strategy that raised for one partition (the
+  documented `skip_archive` retry path) unwound the whole step and discarded the ledger rows of every other
+  partition archived in the same call, after the strategy had already run, and uploaded, for them; while one
+  partition kept failing no partition of the parent recorded coverage or retired. Each candidate now runs in
+  its own subtransaction, as in `_enforce_write_blocks`: the one that raised is logged `skip_archive` over its
+  own `lo` and `hi` and retried with the same chunk, and the rest of the batch records what it archived.
+  `tests/228` under `bench/archive_step_child_isolation.sh`, with the mutation `archive_step_no_child_isolation`.
+- **A retirement finished by the one-step `DROP` returns `pgpm_detach` to idle** (#835). `retire` disarmed the
+  standing job only on its referenced path, so a partition whose detach was dispatched while an incoming FK
+  existed, and whose FK was dropped before pg_cron ran it, was dropped on the one-step path with the job left
+  running `DETACH PARTITION` of the dropped name every tick. That path now disarms too, before the drop, and
+  only if the job still holds this partition's command. `tests/229` under `bench/retire_one_step_disarm.sh`,
+  with the mutations `retire_one_step_no_disarm` and `retire_one_step_disarm_any`.
+- **`extend_to`'s `p_max` counts the forward edge's own cell** (#836). The dry count counted grid steps past the
+  frontier's floor while the walk also built the frontier's own cell when nothing covered it, so
+  `extend_to(..., p_max => 1)` could create two partitions. The edge's cell is counted when it is missing,
+  asked the way the walk asks it. `tests/230` under `bench/extend_to_edge_cell_count.sh`, with the mutations
+  `extend_to_edge_uncounted` and `extend_to_edge_always_counted`.
+- **`retire`'s crossing step reads a `timestamptz` referencing key back through `_ts_text`** (#814). `_crossing_keys`
+  rendered it with a bare `::text`, so under a DateStyle that abbreviates zones in a zone whose abbreviation is
+  ambiguous (`SQL` in Asia/Kolkata, whose `IST` PostgreSQL before 18 reads as Israel) the crossing `DELETE`
+  matched nothing: the FK's declared `ON DELETE` was never applied, `retain_crossing` reported 0 rows, and the
+  dispatched detach could never succeed. `tests/231` under `bench/crossing_keys_datestyle.sh`, with the
+  mutation `crossing_keys_bare_text`.
 - **`archive.to_s3` pages every row whatever the session's DateStyle and TimeZone** (#834). Its keyset
   cursor crossed from one page's query to the next as the control value's text in the caller's session, and a
   non-ISO DateStyle names a timestamptz's zone by abbreviation: in Asia/Shanghai under DateStyle Postgres the
