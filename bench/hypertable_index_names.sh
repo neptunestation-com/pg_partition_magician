@@ -13,7 +13,8 @@
 # The mutations it is required to fail against (bench/mutations/mutate.py), one per defect:
 #   hypertable_index_ddl_by_pattern -- the pre-builds rewrite pg_get_indexdef by the space-delimited
 #                                      pattern again (#735); part A fails
-#   hypertable_tmp_name_cut         -- the temp names are cut to 63 bytes again (#707); part B fails
+#   hypertable_tmp_name_cut         -- the temp names are cut to 63 bytes again (#707), in _from_hypertable_tmp_name
+#                                      and in the key helper #872 added; part B fails
 #   hypertable_handoff_unchecked    -- the monolith name is not asked for up front (#707); part C fails
 #
 # Usage: hypertable_index_names.sh <container> <db> [pgpm_hypertable/install.sql]

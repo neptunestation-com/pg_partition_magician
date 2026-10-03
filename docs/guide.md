@@ -156,7 +156,11 @@ pgpm holds the only record of such a key, so while any of them cannot be put bac
 while it was off, on a table Postgres only re-adds it to validating) uninstall **refuses** and removes
 nothing. The error gives each key's `alter table ... add constraint` statement and why it failed. Clear
 the cause and run it again, or add the key yourself, or accept losing it with
-`delete from pgpm.dropped_fk where constraint_name = '...'`, then run it again.
+`delete from pgpm.dropped_fk where constraint_name = '...'`, then run it again. The statement names the
+table as it was named when the key was dropped, so if you have moved or renamed the table since, point it
+at the table's current name when you add the key yourself. A key you add counts only if it is that key: on
+the same table, under the same name, against the managed table. One that merely takes the name, against
+another table, does not, and uninstall goes on refusing.
 
 ```bash
 psql "$DATABASE_URL" --single-transaction -f pgpm_core/uninstall.sql
@@ -713,7 +717,9 @@ the difference is whether the chunks already exported are exported a second time
 the managed table only: its partitions stay in `public`, and the partitions pgpm creates afterwards go in
 `history`. pgpm tracks the table by identity, and every step of the retention lifecycle finds a partition
 in its own schema through the identity it recorded for it, so write blocks, archiving and retirement carry
-on across the move, and an `untransmute` hands the table back in `history`. A rename is still a rename,
+on across the move, and an `untransmute` hands the table back in `history`. A regrain under way carries on
+too, its copies staying beside the partition they replace, and a preserved incoming foreign key is put back
+against the table where it is now, not wherever its old name points. A rename is still a rename,
 though: the steps look a partition up by name in that schema, so the advice above applies wherever the
 partition lives.
 
