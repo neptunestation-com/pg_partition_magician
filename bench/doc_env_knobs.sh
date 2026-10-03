@@ -12,13 +12,18 @@
 # HOW. Each such command in the docs is matched, the named track's `run_<track>() { ... }` body is read
 # out of test.sh, and the variable must appear in it as `$NAME` or `${NAME` on a line that is not a
 # comment (a variable only named in prose is not read). A variable read at top level, outside every
-# run_* function, counts for every track.
+# run_* function, counts for every track. EVERY assignment in the command's prefix is checked, not only
+# the one next to `./test.sh` (issue #847): `TS_VERSIONS='2.9.1' TS_PG_TAGS='15.14.1.127' ./test.sh
+# timescale` sets an unread knob as surely as the one-knob form does, and the shell is as silent about it.
 #   LIVENESS  the docs hold at least one such command, so a clean result is not a scan of nothing;
 #   CONTROL   a command naming a variable nothing reads (planted, not from the docs) is reported as
-#             unread, so the check can fail at all.
+#             unread, so the check can fail at all;
+#   CONTROL   a planted command whose FIRST knob is unread and whose last is read yields both knobs to
+#             the extractor, the unread one reported as unread: the prefix is read whole.
 #
-# The mutation it is required to fail against (bench/mutations/mutate.py):
-#   onboarding_ts_versions -- ONBOARDING.md's timescale knob put back to TS_VERSIONS='2.9.1'
+# The mutations it is required to fail against (bench/mutations/mutate.py):
+#   onboarding_ts_versions       -- ONBOARDING.md's timescale knob put back to TS_VERSIONS='2.9.1'
+#   onboarding_unread_knob_first -- the same unread TS_VERSIONS='2.9.1', placed before the read TS_PG_TAGS
 #
 # Usage: doc_env_knobs.sh <container> <db> [doc]
 # With no third argument it scans ONBOARDING.md, README.md and docs/*.md; with one it scans THAT file
@@ -59,12 +64,29 @@ def reads(var, track):
     rx = re.compile(r"\$\{?" + re.escape(var) + r"\b")
     return bool(rx.search(code(bodies.get(track, "")))) or bool(rx.search(code(top)))
 
-CMD = re.compile(r"\b([A-Z][A-Z0-9_]*)=(?:'[^']*'|\"[^\"]*\"|\S+)\s+\./test\.sh\s+([a-z0-9_]+)")
+# One assignment, and a command: one or more assignments, then ./test.sh <track>. The prefix is matched
+# whole and then walked assignment by assignment (#847: binding only the last one let an unread knob
+# placed earlier pass).
+VALUE = r"=(?:'[^']*'|\"[^\"]*\"|\S+)\s+"
+ONE = re.compile(r"([A-Z][A-Z0-9_]*)" + VALUE)
+CMD = re.compile(r"\b((?:[A-Z][A-Z0-9_]*" + VALUE + r")+)\./test\.sh\s+([a-z0-9_]+)")
+
+def knobs(text):  # -> [(line, var, track)], one per assignment of every command in text
+    out = []
+    for m in CMD.finditer(text):
+        line, pre, pos = text[:m.start()].count("\n") + 1, m.group(1), 0
+        while pos < len(pre):
+            a = ONE.match(pre, pos)
+            if not a:  # cannot happen: the prefix is a run of exactly these
+                raise SystemExit(f"FAIL  could not walk the knob prefix {pre!r}")
+            out.append((line, a.group(1), m.group(2)))
+            pos = a.end()
+    return out
+
 found = []
 for d in docs:
-    text = open(d).read()
-    for m in CMD.finditer(text):
-        found.append((d, text[:m.start()].count("\n") + 1, m.group(1), m.group(2)))
+    for line, var, track in knobs(open(d).read()):
+        found.append((d, line, var, track))
 
 if len(bodies) < 5:
     say(False, "LIVENESS: test.sh's run_* track bodies were parsed", f"{len(bodies)} found")
@@ -77,6 +99,15 @@ say(True, "LIVENESS: the docs name at least one NAME=... ./test.sh knob", f"{len
 ctl = not reads("PGPM_NO_SUCH_KNOB_599", "timescale")
 say(ctl, "CONTROL: a variable nothing reads is reported as unread", "PGPM_NO_SUCH_KNOB_599")
 fail |= not ctl
+# And the extractor (#847): an unread knob FIRST in a prefix that ends with a read one must be seen and
+# reported. The tracked docs hold no multi-knob prefix today, so without this nothing would show that the
+# whole prefix is read.
+planted = knobs("run `PGPM_NO_SUCH_KNOB_599='1' TS_PG_TAGS='15.14.1.127' ./test.sh timescale`\n")
+pair = [v for _, v, _ in planted] == ["PGPM_NO_SUCH_KNOB_599", "TS_PG_TAGS"]
+ctl2 = pair and not reads("PGPM_NO_SUCH_KNOB_599", "timescale") and reads("TS_PG_TAGS", "timescale")
+say(ctl2, "CONTROL: an unread knob before a read one is seen, and unread",
+    "extracted " + (",".join(v for _, v, _ in planted) or "nothing"))
+fail |= not ctl2
 for d, line, var, track in found:
     shown = d[len(test_sh) - len("test.sh"):] if d.startswith(test_sh[:-len("test.sh")]) else d
     ok = reads(var, track)

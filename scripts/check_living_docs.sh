@@ -31,17 +31,25 @@
 # went on promising `from_hypertable_adopt_fk` after its only writer was deleted). The reference's
 # `pgpm.log` vocabulary table, every "logged `x`" sentence in the operator docs, AND every single-quoted
 # literal the operator docs compare `action` with in SQL (`action = 'x'`, `action in ('x', 'y')`, a list
-# that may span lines) are held to the single-quoted literals on non-comment lines of the three install.sql
-# files. The SQL is where an alert is actually written: the runbook's queries are what an operator copies
-# into one, and before they were read a phantom action in them passed this check. Actions are always
-# written as literals in install.sql (nothing composes one from a prefix), which is what makes a literal
-# grep sound.
+# that may span lines) are held to the actions the three install.sql files WRITE: the literal in the
+# `action` position of each `insert into pgpm.log (...) values (...)` or `... select ...`, read through a
+# tokenizer that knows comments and string literals, so the column list, a multi-row VALUES and a CASE
+# (its THEN and ELSE literals) are all read where they are, on one line or many. The SQL is where an alert
+# is actually written: the runbook's queries are what an operator copies into one, and before they were
+# read a phantom action in them passed this check. The action position, not the line (issue #848): a
+# literal pgpm writes only as a `method` ('copy_swap_drop', the method of action 'regrain') is on a
+# non-comment install line too, and an alert on it as an action can never fire. Actions are always written
+# as literals in install.sql (nothing composes one from a prefix); a write whose action is not one (a
+# variable, or a pgpm.log write inside dynamic SQL) FAILS this check, naming the site, rather than being
+# read as writing nothing.
 #
-# `--selftest` re-breaks a scratch copy of the docs six ways (the stale pin; the phantom action in prose,
-# as a table row, in a runbook `action in (...)` list and in a runbook `action = '...'` comparison; and the
-# vocabulary heading moved so the extractor sees nothing) and requires checks 5 and 6 to FAIL against
-# each, after first passing against the unbroken copy. A check that stays green on its own re-break guards
-# nothing. CI runs the self-test before the check, as it does for check_quoted_splices.py.
+# `--selftest` re-breaks a scratch copy of the docs and install files eight ways (the stale pin; the
+# phantom action in prose, as a table row, in a runbook `action in (...)` list and in a runbook
+# `action = '...'` comparison; a method value named as an action in a runbook query; a write whose action
+# is a variable; and the vocabulary heading moved so the extractor sees nothing) and requires checks 5 and
+# 6 to FAIL against each, after first passing against the unbroken copy. A check that stays green on its
+# own re-break guards nothing. CI runs the self-test before the check, as it does for
+# check_quoted_splices.py.
 #
 # CHANGELOG.md is excluded from ALL of these: its entries are historical by design and must keep naming the
 # machinery, versions and actions they removed.
@@ -118,7 +126,7 @@ check_version_pins() {  # <root>
 
 # CHECK 6. Takes the tree root so --selftest can point it at a re-broken copy.
 check_log_actions() {  # <root>
-  local root="$1" f a n=0 n_table n_sql bad=0 named stripped sqlnamed ref
+  local root="$1" f a n=0 n_table n_sql n_sites bad=0 named stripped sqlnamed written sitesf ref
   ref="$root/docs/reference.md"
   echo "== check 6: every log action the operator docs name must be written by an install.sql =="
   for f in "${INSTALLS[@]}"; do
@@ -127,10 +135,119 @@ check_log_actions() {  # <root>
       return 1
     fi
   done
-  named=$(mktemp); stripped=$(mktemp); sqlnamed=$(mktemp)
-  # The literals pgpm can write: every non-comment line of the three install files, gathered once. Built to
-  # a file rather than piped per action because `grep -q` closing a pipe early reads as a failure under
-  # pipefail, which would make a written action look unwritten.
+  named=$(mktemp); stripped=$(mktemp); sqlnamed=$(mktemp); written=$(mktemp); sitesf=$(mktemp)
+  # The actions pgpm writes: the literal in the action position of every pgpm.log INSERT in the three
+  # install files, gathered once to a file (one per line) rather than piped per action, because `grep -q`
+  # closing a pipe early reads as a failure under pipefail, which would make a written action look
+  # unwritten. Its stdout is the count of write sites read, the witness that it read any at all.
+  if ! python3 - "$root" "$written" "${INSTALLS[@]}" > "$sitesf" <<'PY'
+import os, re, sys
+root, out, files = sys.argv[1], sys.argv[2], sys.argv[3:]
+TOK = re.compile(r"""
+   (?P<ws>\s+)
+  |(?P<com>--[^\n]*|/\*.*?\*/)
+  |(?P<str>[Ee]'(?:[^'\\]|\\.|'')*'|'(?:[^']|'')*')
+  |(?P<dol>\$[A-Za-z_]*\$)
+  |(?P<ident>"(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)
+  |(?P<other>::|:=|<>|!=|<=|>=|\|\||.)
+""", re.S | re.X)
+LOG = re.compile(r"\binsert\s+into\s+pgpm\.log\b", re.I)
+written, bad, sites = set(), [], 0
+
+def lit(tok):  # the value of a string token
+    if tok[0] in "Ee":
+        return re.sub(r"\\(.)", r"\1", tok[2:-1]).replace("''", "'")
+    return tok[1:-1].replace("''", "'")
+
+def items(toks, i, stop):  # top-level comma-separated items from toks[i], until a ')' at depth 0 or a stop word
+    out, cur, depth = [], [], 0
+    while i < len(toks):
+        kind, v, _ = toks[i]
+        lv = v.lower()
+        if depth == 0 and (v == ")" or v == ";" or (kind == "ident" and lv in stop)):
+            break
+        if v == "(":
+            depth += 1
+        elif v == ")":
+            depth -= 1
+        if depth == 0 and v == ",":
+            out.append(cur); cur = []
+        else:
+            cur.append(toks[i])
+        i += 1
+    out.append(cur)
+    return out, i
+
+def actions(expr):  # the literals an action expression can evaluate to, or None when it is not literal
+    if len(expr) == 1 and expr[0][0] == "str":
+        return [lit(expr[0][1])]
+    if expr and expr[0][1].lower() == "case":  # CASE ... THEN 'a' ... ELSE 'b' END: its results
+        res = [(k, v) for j, (k, v, _) in enumerate(expr) if j and expr[j - 1][1].lower() in ("then", "else")]
+        if res and all(k == "str" for k, _ in res):
+            return [lit(v) for _, v in res]
+    return None
+
+for rel in files:
+    text = open(os.path.join(root, rel)).read()
+    toks, line, last = [], 1, 0
+    for m in TOK.finditer(text):
+        k = m.lastgroup
+        if k in ("ws", "com", "dol"):
+            continue
+        line, last = line + text.count("\n", last, m.start()), m.start()
+        toks.append((k, m.group(), line))
+        if k == "str" and LOG.search(m.group()):  # a write this check cannot read: dynamic SQL
+            bad.append(f"{rel}:{toks[-1][2]}: a pgpm.log INSERT inside a string literal (dynamic SQL)")
+    for i in range(len(toks) - 5):
+        w = [v.lower() for _, v, _ in toks[i:i + 5]]
+        if w != ["insert", "into", "pgpm", ".", "log"]:
+            continue
+        sites += 1
+        line, j = toks[i][2], i + 5
+        if j >= len(toks) or toks[j][1] != "(":
+            bad.append(f"{rel}:{line}: a pgpm.log INSERT with no column list"); continue
+        cols, j = items(toks, j + 1, ())
+        cols = [c[0][1].lower() if len(c) == 1 else None for c in cols]
+        if "action" not in cols:
+            bad.append(f"{rel}:{line}: a pgpm.log INSERT whose column list names no action"); continue
+        at, j = cols.index("action"), j + 1
+        rows = []
+        if j < len(toks) and toks[j][1].lower() == "values":
+            j += 1
+            while j < len(toks) and toks[j][1] == "(":
+                row, j = items(toks, j + 1, ())
+                rows.append(row); j += 1
+                if j < len(toks) and toks[j][1] == "," and j + 1 < len(toks) and toks[j + 1][1] == "(":
+                    j += 1
+                else:
+                    break
+        elif j < len(toks) and toks[j][1].lower() == "select":
+            row, j = items(toks, j + 1, ("from", "where", "union", "returning", "on", "limit", "order", "group"))
+            rows.append(row)
+        if not rows:
+            bad.append(f"{rel}:{line}: a pgpm.log INSERT that is neither VALUES nor SELECT"); continue
+        for row in rows:
+            got = actions(row[at]) if at < len(row) else None
+            if got is None:
+                shown = " ".join(v for _, v, _ in row[at])[:60] if at < len(row) else "(nothing)"
+                bad.append(f"{rel}:{line}: a pgpm.log INSERT whose action is not a literal: {shown}")
+            else:
+                written.update(got)
+with open(out, "w") as fh:
+    fh.write("".join(a + "\n" for a in sorted(written)))
+for b in bad:
+    print(f"FAIL  {b}; this check reads the action a write names and cannot tell what this one writes",
+          file=sys.stderr)
+print(sites)
+sys.exit(1 if bad or not sites else 0)
+PY
+  then
+    [ "$(cat "$sitesf")" = 0 ] && printf 'FAIL  read no pgpm.log write in the install files; the writer shape moved and this check is looking at nothing\n'
+    rm -f "$named" "$stripped" "$sqlnamed" "$written" "$sitesf"; return 1
+  fi
+  n_sites=$(cat "$sitesf"); rm -f "$sitesf"
+  # Every non-comment install line, to say WHY a named literal is not written when it appears as something
+  # else (a method, usually).
   grep -hv '^[[:space:]]*--' "$root/pgpm_core/install.sql" "$root/pgpm_hypertable/install.sql" \
        "$root/pgpm_archive/install.sql" > "$stripped"
   # (a) The vocabulary table under "### `pgpm.log`": every backticked name in its first column. The
@@ -141,7 +258,7 @@ check_log_actions() {  # <root>
   if [ "$n_table" = 0 ]; then
     # The liveness witness: with the heading moved this check would otherwise compare nothing and pass.
     printf 'FAIL  found no action vocabulary table under "### `pgpm.log`" in docs/reference.md; the heading moved and this check is looking at nothing\n'
-    rm -f "$named" "$stripped" "$sqlnamed"; return 1
+    rm -f "$named" "$stripped" "$sqlnamed" "$written"; return 1
   fi
   # (b) Prose in the operator docs: "Logged `x` and `y`", "logged `x`", "logs `x` / `y` / `z`". Only the
   # backticked names in that chain, so a trailing "`method`" or a `skip_<mechanism>` placeholder is not read.
@@ -169,30 +286,34 @@ for rel in docs:
 PY
   then
     printf 'FAIL  could not read the action literals in the operator docs SQL (python3 failed)\n'
-    rm -f "$named" "$stripped" "$sqlnamed"; return 1
+    rm -f "$named" "$stripped" "$sqlnamed" "$written"; return 1
   fi
   n_sql=$(grep -c . "$sqlnamed")
   if [ "$n_sql" = 0 ]; then
     # The same witness as the table's: the runbook's alert queries compare `action` with literals, so
     # reading none means the extractor stopped matching them, not that the docs are clean.
     printf 'FAIL  found no action literal (action = ..., action in (...)) in the operator docs SQL; the extractor is looking at nothing\n'
-    rm -f "$named" "$stripped" "$sqlnamed"; return 1
+    rm -f "$named" "$stripped" "$sqlnamed" "$written"; return 1
   fi
   cat "$sqlnamed" >> "$named"
   while IFS= read -r a; do
     [ -n "$a" ] || continue
     n=$((n + 1))
-    if ! grep -qF -- "'$a'" "$stripped"; then
-      printf "FAIL  the operator docs name pgpm.log.action '%s', but no install.sql writes it, so an alert on it can never fire\n" "$a"
+    if ! grep -qxF -- "$a" "$written"; then
+      if grep -qF -- "'$a'" "$stripped"; then
+        printf "FAIL  the operator docs name pgpm.log.action '%s', but no install.sql writes it as an action (the literal is there, in another position: a method, say), so an alert on it can never fire\n" "$a"
+      else
+        printf "FAIL  the operator docs name pgpm.log.action '%s', but no install.sql writes it, so an alert on it can never fire\n" "$a"
+      fi
       for f in "${OPERATOR[@]}"; do
         [ -f "$root/$f" ] && grep -nF -e "\`$a\`" -e "'$a'" -- "$root/$f" | sed "s|^|        $f:|"
       done
       bad=1
     fi
   done < <(sort -u "$named")
-  rm -f "$named" "$stripped" "$sqlnamed"
+  rm -f "$named" "$stripped" "$sqlnamed" "$written"
   [ "$bad" = 0 ] || return 1
-  echo "PASS  all $n log actions the operator docs name ($n_table in the vocabulary table, $n_sql literal(s) in their SQL) are written by an install.sql"
+  echo "PASS  all $n log actions the operator docs name ($n_table in the vocabulary table, $n_sql literal(s) in their SQL) are written by an install.sql, as the action of one of its $n_sites pgpm.log writes"
 }
 
 # --selftest helpers. A re-break is applied to a scratch copy, never to the tree, and refuses to apply when
@@ -293,6 +414,21 @@ selftest() {
   else rc=1; fi
   cp docs/runbook.md "$tmp/docs/runbook.md"
 
+  # Re-break 7 (#848): a method value named as an action. 'copy_swap_drop' is on a non-comment install line,
+  # as the METHOD of an action 'regrain' row, so a line grep counted it written; the alert never fires.
+  if rebreak "$tmp/docs/runbook.md" "and action in ('skip_regrain', 'regrain')" \
+             "and action in ('skip_regrain', 'copy_swap_drop')" 1; then
+    expect_fail "check 6 against a method value named as an action" "copy_swap_drop" check_log_actions "$tmp" || rc=1
+  else rc=1; fi
+  cp docs/runbook.md "$tmp/docs/runbook.md"
+
+  # Re-break 8: a write whose action is not a literal must fail, naming the site, not read as writing nothing.
+  if rebreak "$tmp/pgpm_hypertable/install.sql" "values (p_hypertable, 'from_hypertable_carry_fk', r.conname)" \
+             "values (p_hypertable, v_action, r.conname)" 1; then
+    expect_fail "check 6 against a write whose action is a variable" "pgpm_hypertable/install.sql:" check_log_actions "$tmp" || rc=1
+  else rc=1; fi
+  cp pgpm_hypertable/install.sql "$tmp/pgpm_hypertable/install.sql"
+
   # Re-break 4: the vocabulary heading moved. The extractor then finds nothing, and "nothing is missing"
   # must read as a failure of the check, not a pass of the docs.
   if rebreak "$tmp/docs/reference.md" '### `pgpm.log`' '### `pgpm.logs`' 1; then
@@ -300,7 +436,7 @@ selftest() {
   else rc=1; fi
 
   rm -rf "$tmp"
-  if [ "$rc" = 0 ]; then echo "selftest: PASS (checks 5 and 6 fail against each of their six re-breaks)"
+  if [ "$rc" = 0 ]; then echo "selftest: PASS (checks 5 and 6 fail against each of their eight re-breaks)"
   else echo "selftest: FAIL"; fi
   return "$rc"
 }

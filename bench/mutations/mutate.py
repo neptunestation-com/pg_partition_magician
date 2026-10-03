@@ -4146,6 +4146,16 @@ $$;''',
           "                    # (the big fleet clusters), its own image, NOT in the default matrix\n"
           "                    # (TS_VERSIONS='2.9.1' ./test.sh timescale runs just one)\n", 1)],
     ),
+    "onboarding_unread_knob_first": (
+        "bench/doc_env_knobs.sh",
+        "Pre-#847 blind spot, as a document: ONBOARDING.md's timescale knob documented as TS_VERSIONS='2.9.1' "
+        "TS_PG_TAGS='15.14.1.127 <tag>' ./test.sh timescale. TS_PG_TAGS is read, TS_VERSIONS (the #599 knob) is "
+        "read nowhere, so the 2.9.1 the reader asked for is silently ignored. The guard's command regex bound "
+        "only the assignment next to ./test.sh, saw the read TS_PG_TAGS, and passed this. One site.",
+        [("# cluster, name a tag that ships it (TS_PG_TAGS='15.14.1.127 <tag>' ./test.sh timescale)\n",
+          "# cluster, name a tag that ships it (TS_VERSIONS='2.9.1' TS_PG_TAGS='15.14.1.127 <tag>' ./test.sh timescale)\n",
+          1)],
+    ),
     "runbook_retain_count_of_intervals": (
         "bench/doc_retain_unit.sh",
         "Pre-#676 docs/runbook.md: 'Storage is not dropping despite a retention policy' calls an id grid's "
@@ -5317,6 +5327,18 @@ $$;''',
         [("      and action in ('fail_retain_detach', 'fail_retain_crossing', 'fail_retain_identity',\n",
           "      and action in ('fail_retain_detach', 'fail_retain_crossing', 'fail_retire_identity',\n", 1)],
     ),
+    "runbook_alert_on_method": (
+        "bench/doc_log_actions.sh",
+        "Pre-#848 blind spot, as a document: docs/runbook.md's regrain progress query watches for "
+        "action in ('skip_regrain', 'copy_swap_drop'). 'copy_swap_drop' is the METHOD regrain's swap logs "
+        "under action 'regrain'; no pgpm.log row ever carries it as its action, so the query never shows a "
+        "completed regrain. Check 6 counted an action as written when its literal was on any non-comment "
+        "install.sql line, which that method's is, so it passed this; it now reads the action position of "
+        "each pgpm.log write. One site.",
+        [("    where parent_table = 'public.events'::regclass and action in ('skip_regrain', 'regrain')\n",
+          "    where parent_table = 'public.events'::regclass and action in ('skip_regrain', 'copy_swap_drop')\n",
+          1)],
+    ),
     "orphan_refusal_sqlstate_only": (
         "bench/tests_fail_on_defect.sh",
         "Pre-#743 tests/18: the orphaned-child refusal pinned by SQLSTATE alone, throws_ok(..., 'P0001', null, "
@@ -6234,6 +6256,7 @@ MUTATION_SRC = {
     # scripts, a doc and a test file, so that is what these mutate.
     "keep_both_two_way_only": "scripts/review/keep_both.py",
     "onboarding_ts_versions": "ONBOARDING.md",
+    "onboarding_unread_knob_first": "ONBOARDING.md",
     "runbook_retain_count_of_intervals": "docs/runbook.md",
     "reference_archive_identity_forget_missing": "docs/reference.md",
     "reference_fks_suspended_dead_swap": "docs/reference.md",
@@ -6251,6 +6274,7 @@ MUTATION_SRC = {
     "discriminate_list_on_stdin": "bench/discriminate.sh",
     # #742 to #744: a lint's document and three test files, each judged by the guard that runs it.
     "runbook_phantom_alert_action": "docs/runbook.md",
+    "runbook_alert_on_method": "docs/runbook.md",
     "orphan_refusal_sqlstate_only": "tests/18_orphan_child_guard_test.sql",
     "radix_length_refusal_unpinned": "tests/90_text_time_alphabet_codec_test.sql",
     "id_conservation_after_migration": "tests/11_id_kind_test.sql",

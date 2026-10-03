@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- **`bench/doc_env_knobs.sh` checks every knob in a documented command's prefix** (#847). Its command regex
+  bound only the `NAME=value` next to `./test.sh`, so `TS_VERSIONS='2.9.1' TS_PG_TAGS='15.14.1.127' ./test.sh
+  timescale` passed on the read TS_PG_TAGS although TS_VERSIONS, the #599 knob, is read nowhere. The prefix is
+  now matched whole and walked assignment by assignment, and a second control plants an unread knob before a
+  read one and requires both to be extracted, the first reported unread. The new mutation
+  `onboarding_unread_knob_first` puts that two-knob command in ONBOARDING.md.
+- **Check 6 of `scripts/check_living_docs.sh` reads the action a `pgpm.log` write names, not any line holding
+  the literal** (#848). An action counted as written when its quoted literal was on any non-comment install.sql
+  line, so a runbook alert on `action = 'copy_swap_drop'` passed although that literal is only ever the
+  `method` of an action `regrain` row and the alert can never fire. The check now tokenizes the three install
+  files (comments and string literals known) and reads the `action` position of every `insert into pgpm.log
+  (...)`, `values` (one row or many) or `select`, a CASE's THEN and ELSE literals included; a write whose
+  action is not a literal, or one inside dynamic SQL, fails the check naming the site. `--selftest` gains
+  both re-breaks, and `bench/doc_log_actions.sh` a control planting the method value, with the mutation
+  `runbook_alert_on_method`.
 - **`bench/transmute_cutover_order.sh` orders the policy replay, not only the ENABLE ROW LEVEL SECURITY**
   (#845). Its PASS line named the RLS and policies replay, but it located only the ENABLE, so a copy of
   `_transmute` whose CREATE POLICY loop ran after both cutover renames, inside the outage #344 keeps the new
