@@ -2925,15 +2925,17 @@ $$;''',
     # came back. Both break bench/archive_object_key_session.sh through tests/archive/db/26.
     "archive_object_key_search_path_parent": (
         "bench/archive_object_key_session.sh",
-        "Pre-#551 object key: archive._object_key names the parent p_parent::text, regclass output, "
+        "Pre-#551 object key: archive._owned_key names a chunk's parent p_parent::text, regclass output, "
         "which leaves the schema out whenever the calling session's search_path reaches the relation. "
         "Two parents named `evt` in schemas t26a and t26b, sharing a prefix and each ticked under its "
         "own search_path, both upload to <prefix>evt_0.ndjson (and <prefix>pq_0.parquet): the second "
         "PUT overwrites the first while both ledger rows record the key as archived, and retire() has "
-        "already dropped the first table's partition. One site: both transports take the key from the "
-        "helper.",
-        [("  select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(c.relname)\n",
-          "  select p_prefix || p_parent::text\n", 1)],
+        "already dropped the first table's partition. One site: every key is assembled in the one "
+        "function, and only the chunk half (no p_child) is put back, so a synchronous export's key "
+        "keeps its schema.",
+        [("  select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(coalesce(p_child, c.relname))\n",
+          "  select p_prefix || case when p_child is null then p_parent::text\n"
+          "                          else quote_ident(n.nspname) || '.' || quote_ident(p_child) end   -- MUTANT\n", 1)],
     ),
     "archive_object_key_session_zone": (
         "bench/archive_object_key_session.sh",
@@ -2960,7 +2962,8 @@ $$;''',
         "pgpm.forget_missing(), which deletes the dropped table's ledger rows, a new managed table taking "
         "the name and prefix archives its [0, 10000) to <prefix><schema>.<table>_0.ndjson (and .parquet), "
         "and the unconditional PUT replaces the dropped table's only copy of the rows retire() dropped. "
-        "One site: both transports take the key from the helper.",
+        "One site: archive._owned_key, which assembles every key, so the synchronous exports lose their "
+        "oid shape with it (tests/archive/db/39 sees that half; this mutation's guard is #822's).",
         [("      || case when v_owner is not distinct from p_parent::oid then '' else '.' || p_parent::oid::text end\n",
           "", 1)],
     ),
@@ -2973,6 +2976,79 @@ $$;''',
         "re-runs the seed the way a re-install does and requires the claim it makes.",
         [("             where l.s3_key like '%\\_%' and l.s3_key !~ '\\.[0-9]+_[^_]*$') b\n",
           "             where false) b\n", 1)],
+    ),
+    # #872 bullet 5, the archive object-key lever: one mutation per site that takes its key from the one
+    # function that assembles and claims it, each putting back a key built without the claim. All break
+    # bench/archive_key_owner_every_path.sh through tests/archive/db/39, and each is also refused statically
+    # by scripts/check_archive_object_keys.py (a second assembly).
+    "archive_child_key_unclaimed": (
+        "bench/archive_key_owner_every_path.sh",
+        "Pre-#872 synchronous key: archive._child_object_key assembles <prefix><schema>.<child><ext> itself "
+        "and claims nothing, so after the documented to_s3-then-drop workflow and pgpm.forget_missing(), a "
+        "new table taking the dropped table's name exports its same-named partition over the dropped "
+        "table's export, the only copy of those rows. One site, the entry point both archive.to_s3 and "
+        "archive.to_s3_parquet take their key from: the defect the issue reported.",
+        [("returns text language sql as $$\n"
+          "  select archive._owned_key(p_parent, p_prefix, p_child, p_ext);\n",
+          "returns text language sql stable as $$   -- MUTANT: the pre-#872 unclaimed export key\n"
+          "  select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(p_child) || p_ext\n"
+          "    from pg_class c join pg_namespace n on n.oid = c.relnamespace\n"
+          "   where c.oid = p_parent;\n", 1)],
+    ),
+    "archive_object_key_unclaimed": (
+        "bench/archive_key_owner_every_path.sh",
+        "Pre-#822 chunk key, at the chunk entry point: archive._object_key assembles "
+        "<prefix><schema>.<table>_<stem><ext> itself and claims nothing, so a table that takes a dropped "
+        "and forgotten table's name archives its [0, 10000) over the dropped table's only copy of the rows "
+        "retire() dropped. One site, the entry point both archive_fn transports take their key from.",
+        [("  select archive._owned_key(p_parent, p_prefix, null, '_' || archive._object_stem(p_kind, p_lo) || p_ext);\n",
+          "  select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(c.relname)   -- MUTANT: unclaimed\n"
+          "         || '_' || archive._object_stem(p_kind, p_lo) || p_ext\n"
+          "    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;\n", 1)],
+    ),
+    "archive_to_s3_key_inline": (
+        "bench/archive_key_owner_every_path.sh",
+        "archive.to_s3 builds its plain NDJSON key inline, <prefix><schema>.<child>.ndjson, instead of "
+        "asking archive._child_object_key, so the export PUTs to a key nothing claimed and a namesake's "
+        "export replaces a dropped table's. One site, the uncompressed key line.",
+        [("    v_key := archive._child_object_key(p_parent, cfg.prefix, p_child, '.ndjson');    v_ctype := 'application/x-ndjson';\n",
+          "    v_key := cfg.prefix || quote_ident(v_nsp) || '.' || quote_ident(p_child) || '.ndjson';    v_ctype := 'application/x-ndjson';   -- MUTANT\n", 1)],
+    ),
+    "archive_to_s3_gz_key_inline": (
+        "bench/archive_key_owner_every_path.sh",
+        "archive.to_s3 builds its compressed key inline, <prefix><schema>.<child>.ndjson.gz, instead of "
+        "asking archive._child_object_key, so a compressed export PUTs to a key nothing claimed and a "
+        "namesake's export replaces a dropped table's. One site, the compressed key line.",
+        [("    v_key := archive._child_object_key(p_parent, cfg.prefix, p_child, '.ndjson.gz'); v_ctype := 'application/gzip';\n",
+          "    v_key := cfg.prefix || quote_ident(v_nsp) || '.' || quote_ident(p_child) || '.ndjson.gz'; v_ctype := 'application/gzip';   -- MUTANT\n", 1)],
+    ),
+    "archive_to_s3_parquet_key_inline": (
+        "bench/archive_key_owner_every_path.sh",
+        "archive.to_s3_parquet builds its key inline, <prefix><schema>.<child>.parquet, instead of asking "
+        "archive._child_object_key, so the export PUTs to a key nothing claimed and a namesake's file "
+        "replaces a dropped table's. One site.",
+        [("  v_key := archive._child_object_key(p_parent, cfg.prefix, p_child, '.parquet');   -- named with its schema (#711)\n",
+          "  v_key := cfg.prefix || quote_ident((select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace\n"
+          "                                     where c.oid = p_parent)) || '.' || quote_ident(p_child) || '.parquet';   -- MUTANT\n", 1)],
+    ),
+    "archive_ndjson_strategy_key_inline": (
+        "bench/archive_key_owner_every_path.sh",
+        "The NDJSON archive_fn transport builds its chunk key inline, <prefix><schema>.<table>_<stem>.ndjson, "
+        "instead of asking archive._object_key, so a namesake's chunk PUTs over a dropped table's only copy. "
+        "One site, archive._encode_upload_ndjson_single's key line.",
+        [("  v_key := archive._object_key(p_parent, cfg.prefix, pcfg.control_kind, p_lo, '.ndjson');\n",
+          "  v_key := cfg.prefix || quote_ident(v_nsp) || '.' || quote_ident(v_rel)\n"
+          "           || '_' || archive._object_stem(pcfg.control_kind, p_lo) || '.ndjson';   -- MUTANT\n", 1)],
+    ),
+    "archive_parquet_strategy_key_inline": (
+        "bench/archive_key_owner_every_path.sh",
+        "The Parquet archive_fn transport builds its chunk key inline, <prefix><schema>.<table>_<stem>.parquet, "
+        "instead of asking archive._object_key, so a namesake's chunk PUTs over a dropped table's only copy. "
+        "One site, archive._encode_upload_parquet's key line.",
+        [("  v_key := archive._object_key(p_parent, cfg.prefix, pcfg.control_kind, p_lo, '.parquet');\n",
+          "  v_key := cfg.prefix || (select quote_ident(n.nspname) || '.' || quote_ident(c.relname)\n"
+          "                           from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent)\n"
+          "           || '_' || archive._object_stem(pcfg.control_kind, p_lo) || '.parquet';   -- MUTANT\n", 1)],
     ),
     # #823: the pre-#823 stem exactly, UTC-pinned digits only. Breaks bench/archive_stem_era.sh through
     # tests/archive/db/35.
@@ -4018,10 +4094,11 @@ $$;''',
         "bench/archive_edges_pass5.sh",
         "Pre-#711 archive.to_s3 and archive.to_s3_parquet: the object key is <prefix><child><ext>, the "
         "child's bare relname. Two parents named evt in two schemas sharing a prefix export their [0, 10000) "
-        "partitions to one key, and the second export replaces the first. One site, the helper both "
-        "functions take their key from.",
-        [("  select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(p_child) || p_ext\n",
-          "  select p_prefix || p_child || p_ext   -- MUTANT: the pre-#711 bare-child key\n", 1)],
+        "partitions to one key, and the second export replaces the first. One site, the one function "
+        "every key is assembled in, its export half only (a chunk's key keeps its schema).",
+        [("  select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(coalesce(p_child, c.relname))\n",
+          "  select p_prefix || case when p_child is null then quote_ident(n.nspname) || '.' || quote_ident(c.relname)\n"
+          "                          else p_child end   -- MUTANT: the pre-#711 bare-child key\n", 1)],
     ),
     "parquet_tstz_no_logical_type": (
         "bench/archive_edges_pass5.sh",
@@ -6315,6 +6392,13 @@ MUTATION_SRC = {
     "archive_object_key_session_zone": "pgpm_archive/install.sql",
     "archive_object_key_reusable_name": "pgpm_archive/install.sql",
     "archive_object_key_owner_unseeded": "pgpm_archive/install.sql",
+    "archive_child_key_unclaimed": "pgpm_archive/install.sql",
+    "archive_object_key_unclaimed": "pgpm_archive/install.sql",
+    "archive_to_s3_key_inline": "pgpm_archive/install.sql",
+    "archive_to_s3_gz_key_inline": "pgpm_archive/install.sql",
+    "archive_to_s3_parquet_key_inline": "pgpm_archive/install.sql",
+    "archive_ndjson_strategy_key_inline": "pgpm_archive/install.sql",
+    "archive_parquet_strategy_key_inline": "pgpm_archive/install.sql",
     "archive_object_stem_drops_era": "pgpm_archive/install.sql",
     "sigv4_transaction_start_stamp": "pgpm_archive/install.sql",
     "to_s3_compress_unread": "pgpm_archive/install.sql",

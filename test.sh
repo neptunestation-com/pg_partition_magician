@@ -727,6 +727,11 @@ run_archive() {
   bash "$(dirname "$0")/bench/archive_to_s3_cursor_session.sh" pgpm_test-archive pgpm_perf195 || fail=1
   echo "--- Parquet snapshot lock-table entries guard (issue #632, F5-04) ---"
   bash "$(dirname "$0")/bench/archive_parquet_snapshot_locks.sh" pgpm_test-archive pgpm_perf196 || fail=1
+  # The object-key lever guard (#872) re-runs tests/archive/db/39 for the same reason: the clean-code half of
+  # the pairs bench/discriminate.sh completes with one mutant per path that takes its key from the one
+  # function that assembles and claims it.
+  echo "--- archive object key names one relation on every path guard (issue #872) ---"
+  bash "$(dirname "$0")/bench/archive_key_owner_every_path.sh" pgpm_test-archive pgpm_perf213 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi
