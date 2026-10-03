@@ -19,6 +19,8 @@ name: Archive track
 # bench/ matching. It does rest on that naming convention holding for the next one. If a future
 # archive guard is named something else, add it here BY NAME rather than widening this to
 # bench/*.sh, which would start the whole MinIO-and-pyarrow track on every unrelated bench edit.
+# bench/reads_under_caller_rls.sh is the first such guard, by name (#873): one guard serves three
+# modules, and run_archive runs its archive half.
 #
 # MinIO comes from Docker Hub anonymously, and it is pulled here and by every perf.yml discriminate
 # shard, so a burst of PRs multiplies it the way it multiplied the supabase/postgres pull that spent
@@ -38,6 +40,7 @@ on:
       - 'pgpm_core/install.sql'
       - 'tests/archive/**'
       - 'bench/archive_*.sh'
+      - 'bench/reads_under_caller_rls.sh'
       - 'scripts/verify_parquet*.py'
       - 'scripts/requirements-verify.txt'
       - 'test.sh'
@@ -51,6 +54,7 @@ on:
       - 'pgpm_core/install.sql'
       - 'tests/archive/**'
       - 'bench/archive_*.sh'
+      - 'bench/reads_under_caller_rls.sh'
       - 'scripts/verify_parquet*.py'
       - 'scripts/requirements-verify.txt'
       - 'test.sh'

@@ -1023,6 +1023,10 @@ begin
   if to_regclass(format('%I.%I', v_nsp, v_delta)) is null then
     raise exception 'pg_partition_magician: from_hypertable_drain_delta_step(%) found no delta -- change tracking was not enabled by from_hypertable_copy', p_hypertable;
   end if;
+  -- #873: the batch's keys leave the delta below and their rows are re-read from the source as this caller,
+  -- so under row-level security that filters it a hidden row's change would be consumed and never applied.
+  perform pgpm._refuse_filtered_reads(p_hypertable, 'drain changes from hypertable',
+    'the copy would be brought up to date with those rows alone');
 
   -- key columns = every delta column EXCEPT the pgpm_seq ordering column, in attnum order (the same order
   -- the cutover uses, so the row constructors line up). d./s. variants for the dest delete + source insert.
@@ -1169,6 +1173,9 @@ begin
     from pg_attribute where attrelid = p_hypertable and attnum > 0 and not attisdropped and attgenerated = '';
 
   v_past := pgpm._from_hypertable_past(p_control, p_watermark, v_ctl_type);
+  -- #873: the tail is read from the source as this caller
+  perform pgpm._refuse_filtered_reads(p_hypertable, 'drain appends from hypertable',
+    'the copy would be brought up to date with those rows alone');
 
   -- the batch's upper control bound: the control value p_batch rows past the watermark (or the source's max
   -- past it when fewer remain). The <= insert below includes ALL rows at this value, so no tie is split.
@@ -1206,6 +1213,9 @@ begin
   if to_regclass(format('%I.%I', v_nsp, v_dest)) is null then
     raise exception 'pg_partition_magician: from_hypertable_drain_appends(%) found no copy to drain -- run from_hypertable_copy first', p_hypertable;
   end if;
+  -- #873: its own residual check reads the source too, and a tail its policies hide entirely reads as none
+  perform pgpm._refuse_filtered_reads(p_hypertable, 'drain appends from hypertable',
+    'the copy would be brought up to date with those rows alone');
   select format_type(atttypid, atttypmod) into v_ctl_type
     from pg_attribute where attrelid = p_hypertable and attname = p_control and not attisdropped;
   -- the initial frontier: the copy watermark (max control in the dest). Read once; each step advances it.
@@ -1296,10 +1306,11 @@ begin
   perform pgpm._from_hypertable_check_handoff(p_hypertable, p_interval, p_anchor);
   -- A caller whose reads row-level security filters (issue #825), refused before the pre-drain spends anything.
   -- The catch-up and the conservation check read the source as this role, so a filtered one would let the
-  -- swap drop every row its policies hide. Not asked again under the lock: the copy read the source as a
-  -- role this check passed, so a policy that starts filtering only after this point leaves the source's
-  -- reads short of the copy by every hidden row the window did not touch, which the conservation check
-  -- below refuses.
+  -- swap drop every row its policies hide. Asked AGAIN under the lock below (#873): this answer is the
+  -- committed catalog's, and a policy committed after it filters every later read. The conservation check
+  -- does not catch that on the append-only path, where the catch-up and the source's count and fingerprint
+  -- read through the same policy and agree, so a row appended past the watermark and hidden by it was left
+  -- out of both, and the swap dropped it with the hypertable.
   perform pgpm._refuse_filtered_reads(p_hypertable, 'cut over hypertable',
     'the catch-up and the conservation check would read only those rows, and the swap would drop the others with the hypertable');
   -- The dimension facts the copy depended on are re-checked HERE, in the irreversible phase (issue #458).
@@ -1502,6 +1513,12 @@ begin
   -- been unlocked from there to here (the pre-drain's commits, the index pre-builds), so DDL can have landed
   -- in between. Both relations are frozen now, and the column list read at the top must still describe both.
   perform pgpm._from_hypertable_check_shape(p_hypertable, v_dest_oid);
+  -- ...and the caller's row-level security (#873), for the same reason: a policy committed since the check up
+  -- front filters the catch-up and the conservation check below alike, and they would agree without the rows
+  -- it hides. ENABLE, FORCE and CREATE POLICY need ACCESS EXCLUSIVE, which this transaction holds now. Its
+  -- own words ('swap in the copy of'), so an operator can tell it from the refusal up front.
+  perform pgpm._refuse_filtered_reads(p_hypertable, 'swap in the copy of hypertable',
+    'the catch-up and the conservation check, read under this lock, would see only those rows and agree with each other (row-level security came on after the cutover''s first check), and the swap would drop the others with the hypertable');
   -- ...and an EXCLUDE constraint, for the same reason (#841). The check up front saw none, but one added while
   -- the cutover prepared is on the frozen source now, and the swap below would drop it with the hypertable.
   perform pgpm._from_hypertable_check_exclusion(p_hypertable);

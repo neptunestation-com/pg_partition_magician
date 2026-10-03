@@ -436,6 +436,10 @@ run_timescale() {
     bash "$(dirname "$0")/bench/hypertable_cutover_foreign_keys.sh" pgpm_test-timescale pgpm_perf203 || fail=1
     echo "--- the cutover asks the exclusion check again under its lock (issue #841) ---"
     bash "$(dirname "$0")/bench/hypertable_cutover_exclusion_window.sh" pgpm_test-timescale pgpm_perf204 || fail=1
+    # #873's guard, the hypertable module's half: tests/timescale/db/46 and PART H (row-level security that
+    # lands while the cutover prepares), which is run nowhere else on correct code.
+    echo "--- the drains, and the cutover under its lock, refuse a caller whose reads RLS filters (issue #873) ---"
+    bash "$(dirname "$0")/bench/reads_under_caller_rls.sh" pgpm_test-timescale pgpm_perf212 /repo/pgpm_hypertable/install.sql || fail=1
 
     echo "--- discriminate (timescale-scoped mutations) ---"
     bash "$(dirname "$0")/bench/discriminate.sh" --track=timescale pgpm_test-timescale || fail=1
@@ -732,6 +736,10 @@ run_archive() {
   # function that assembles and claims it.
   echo "--- archive object key names one relation on every path guard (issue #872) ---"
   bash "$(dirname "$0")/bench/archive_key_owner_every_path.sh" pgpm_test-archive pgpm_perf213 || fail=1
+  # #873's guard, the archive module's half (tests/archive/db/38): the clean-code half of the pairs
+  # bench/discriminate.sh completes with the four archive readers' mutants.
+  echo "--- the archive readers refuse a caller whose reads row-level security filters (issue #873) ---"
+  bash "$(dirname "$0")/bench/reads_under_caller_rls.sh" pgpm_test-archive pgpm_perf212 /repo/pgpm_archive/install.sql || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi
@@ -920,6 +928,7 @@ run_perf() {
     "bench/regrain_names_fit_clamped_cell.sh pgpm_perf210"
     "bench/regrain_null_source_mark.sh pgpm_perf214"
     "bench/recorded_identity.sh pgpm_perf211"
+    "bench/reads_under_caller_rls.sh pgpm_perf215"
   )
   local selected=()
   local n=${#guards[@]} idx
