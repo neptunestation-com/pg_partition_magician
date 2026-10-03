@@ -192,6 +192,28 @@ returns name language sql immutable as $$
                else 'pgpm_new_' || p_index::text end)::name
 $$;
 
+-- _from_hypertable_key_tmp: the name a KEY's index is pre-built under on the destination p_dest, asked by
+-- the tracking copy that builds it and by the cutover that adopts it (#872, #768). The temp name is
+-- schema-wide and a key keeps its name across ALTER TABLE ... RENAME, so an abandoned tracking copy taken
+-- under the table's old name can hold <conname>_pgpm_new for an index of ITS destination. The cutover learnt
+-- in #768 to adopt only an index on its own destination (pg_index.indrelid) and to build under the oid form
+-- otherwise; the copy's own pre-build did not, and died 'already exists' before copying a row. Both ask here
+-- now, so they agree on the name by the destination's identity: of the usual name and the oid form
+-- (pgpm_new_<index oid>), the first that is ALREADY an index on p_dest (the copy built it: adopt), else the
+-- first that nothing holds (build it). Null when something else holds both, which the caller refuses.
+create or replace function pgpm._from_hypertable_key_tmp(p_name name, p_index oid, p_nsp name, p_dest regclass)
+returns name language sql stable as $$
+  with c(tmp, ord) as (
+    values (pgpm._from_hypertable_tmp_name(p_name, p_index), 1), (('pgpm_new_' || p_index::text)::name, 2)
+  ), h as (
+    select tmp, ord, to_regclass(format('%I.%I', p_nsp, tmp)) as held from c
+  )
+  select tmp from h
+   where held is null or exists (select 1 from pg_index i where i.indexrelid = h.held and i.indrelid = p_dest)
+   order by (held is not null) desc, ord
+   limit 1
+$$;
+
 -- _from_hypertable_index_ddl: the CREATE INDEX that builds index p_index of the hypertable on the destination
 -- p_nsp.p_dest under p_tmp (#735). The name and the table are spliced BY IDENTITY, not matched by pattern:
 -- pg_get_indexdef spells them quote_ident(index name) and quote_ident(schema).quote_ident(table), read here
@@ -751,7 +773,7 @@ language plpgsql as $$
 declare
   v_nsp name; v_rel name; v_dest name; v_cols_q text; r record;
   v_delta name; v_trgfn name; v_trg name; v_keyidx oid; v_keycols_q text; v_newvals_q text; v_oldvals_q text;
-  v_keyconname name; v_keytmp text;
+  v_keyconname name; v_keytmp text; v_destreg regclass;
   v_ctl_typid regtype; v_bound_tpl text; v_lo text; v_hi text;
 begin
   perform pgpm.from_hypertable_preflight(p_hypertable, p_control);
@@ -955,7 +977,14 @@ begin
   -- refused on a keyless table, so it is always set here.)
   if p_track_changes then
     select conname into v_keyconname from pg_constraint where conindid = v_keyidx;
-    v_keytmp := pgpm._from_hypertable_tmp_name(v_keyconname, v_keyidx);
+    -- #872: by the destination's identity, as the cutover adopts it (#768), never the bare temp name: after a
+    -- RENAME an abandoned copy under the old name can hold it, and the build died 'already exists'
+    v_destreg := format('%I.%I', v_nsp, v_dest)::regclass;
+    v_keytmp := pgpm._from_hypertable_key_tmp(v_keyconname, v_keyidx, v_nsp, v_destreg);
+    if v_keytmp is null then
+      raise exception 'pg_partition_magician: cannot pre-build the key index of % on %.% -- both of its temp names (% and pgpm_new_%) are held by relations that are not on that destination. Drop or rename them (an abandoned copy''s %.<table>_pgpm_dest is the usual holder) and re-run.',
+        p_hypertable, quote_ident(v_nsp), quote_ident(v_dest), pgpm._from_hypertable_tmp_name(v_keyconname, v_keyidx), v_keyidx, quote_ident(v_nsp);
+    end if;
     execute pgpm._from_hypertable_index_ddl(v_keyidx, v_keytmp, v_nsp, v_dest);
     commit;
   end if;
@@ -1397,7 +1426,6 @@ begin
   -- a temp name that fits whole, and the index's own name and table replaced by identity.
   for k in select conname, contype, conindid from pg_constraint
             where conrelid = p_hypertable and contype in ('p', 'u') loop
-    v_tmp := pgpm._from_hypertable_tmp_name(k.conname, k.conindid);
     -- #175: skip the build if it already exists -- from_hypertable_copy pre-builds the reused-key index
     -- under this same name when tracking, so the drain can use it and the swap below adopts it. Other
     -- constraints (and the append-only / non-tracking path) are built here as before. Always record the
@@ -1407,11 +1435,16 @@ begin
     -- name, can hold <conname>_pgpm_new for an index of ITS table, and taking that for ours skipped the
     -- build and failed adopting it ("does not belong to table") after the whole copy. When something else
     -- holds the name, ours is built under the oid form the temp name takes when the long one does not fit.
+    -- #872: both names come from _from_hypertable_key_tmp, which the copy asks too, so the two agree when the
+    -- copy had to take the oid form (an index already on the destination under it is adopted, not rebuilt).
+    v_tmp := pgpm._from_hypertable_key_tmp(k.conname, k.conindid, v_nsp, v_dest_oid);
+    if v_tmp is null then
+      raise exception 'pg_partition_magician: cannot build the index of key % of % on %.% -- both of its temp names (% and pgpm_new_%) are held by relations that are not on that destination. Drop or rename them and re-run.',
+        quote_ident(k.conname), p_hypertable, quote_ident(v_nsp), quote_ident(v_dest),
+        pgpm._from_hypertable_tmp_name(k.conname, k.conindid), k.conindid;
+    end if;
     v_tmp_oid := to_regclass(format('%I.%I', v_nsp, v_tmp));
     if not exists (select 1 from pg_index i where i.indexrelid = v_tmp_oid and i.indrelid = v_dest_oid) then
-      if v_tmp_oid is not null then
-        v_tmp := 'pgpm_new_' || k.conindid::text;
-      end if;
       execute pgpm._from_hypertable_index_ddl(k.conindid, v_tmp, v_nsp, v_dest);
     end if;
     v_key_names := array_append(v_key_names, k.conname::text);

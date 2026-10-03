@@ -414,7 +414,7 @@ run_timescale() {
     bash "$(dirname "$0")/bench/hypertable_carry_capture_by_record.sh" pgpm_test-timescale pgpm_perf205 || fail=1
     echo "--- the swap carries publication membership and replica identity (issue #816) ---"
     bash "$(dirname "$0")/bench/hypertable_carry_publications_replica_identity.sh" pgpm_test-timescale pgpm_perf206 || fail=1
-    echo "--- the cutover adopts only a key index on its destination (issue #768) ---"
+    echo "--- the copy and the cutover adopt only a key index on their destination (issues #768, #872) ---"
     bash "$(dirname "$0")/bench/hypertable_key_index_on_destination.sh" pgpm_test-timescale pgpm_perf207 || fail=1
     # #737's uninstall guard, the same way: the clean-code half of the pairs discriminate.sh completes with
     # its two mutants of uninstall.sql.
@@ -919,6 +919,7 @@ run_perf() {
     "bench/regrain_moved_parent_identity.sh pgpm_perf209"
     "bench/regrain_names_fit_clamped_cell.sh pgpm_perf210"
     "bench/regrain_null_source_mark.sh pgpm_perf214"
+    "bench/recorded_identity.sh pgpm_perf211"
   )
   local selected=()
   local n=${#guards[@]} idx

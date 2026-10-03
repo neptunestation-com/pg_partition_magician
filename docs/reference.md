@@ -469,8 +469,8 @@ the key's name keeps the name it had.
 A table **moved to another schema** with `ALTER TABLE <parent> SET SCHEMA` comes back in that schema, where
 the application has been finding it since the move. The monolith stayed where it was, so the reverse names
 it by its recorded oid, renames it back and moves it, with its indexes, row type and the sequences it owns,
-into the parent's schema (after re-adding any preserved incoming FKs, whose recorded definitions name the
-schema the table was converted in).
+into the parent's schema (after re-adding any preserved incoming FKs against it by its identity, whatever
+name and schema their recorded definitions give it).
 
 It also takes off the monolith whatever **maintenance** put there after the conversion, so the table handed
 back is the operator's again with none of pgpm's machinery on it. The retention **write block**
@@ -752,7 +752,9 @@ online** (best-effort, using `p_drain_batch` as the batch size and residual thre
 destination's primary key and secondary indexes online** (on the private copy, before any lock -- this is the
 O(rows) work, deliberately kept out of the blocking window). Each is built from the source index's own
 definition under `<index>_pgpm_new`, or `pgpm_new_<index oid>` when that name would exceed 63 bytes (pgpm
-never cuts it), so index and table names holding spaces or other quoted characters migrate as they are. For the append-only path the catch-up watermark
+never cuts it) or, for a key, is held by something not on this destination (an abandoned tracking copy taken
+under the table's old name), so index and table names holding spaces or other quoted characters migrate as they are. A key
+index the tracking copy already built on the destination, under either name, is adopted rather than rebuilt. For the append-only path the catch-up watermark
 (`max(control)` on the destination) is also read here, before the lock, so an `O(rows)` `max()` seqscan on a
 keyless destination is not in the blocking window.
 Then it takes the **`ACCESS EXCLUSIVE` window**: catch up the writes that arrived during
@@ -1417,8 +1419,11 @@ by **oid** from then on (`config.regrain_delta_oid`, `config.regrain_capture_fn_
 mid-regrain changes nothing: the trigger keeps writing the delta it was given, and the reconcile, the swap
 gate and the swap read that same relation, in the schema it is in. The source is likewise the relation
 `pgpm.part.child_oid` recorded, in its own schema, so a parent moved by `ALTER TABLE ... SET SCHEMA` before
-its regrain begins, or after the prepare tick and before the first copy, regrains as if it had stayed; the
-delta is minted in the parent's schema as of the prepare tick. The copy finds each sub-range's fine child by its bounds in
+its regrain begins, or at any point while it runs, regrains as if it had stayed; the
+delta is minted in the parent's schema as of the prepare tick. The copies are made beside the source, in its
+schema, and each is found again in the schema of the relation its `child_oid` records, so copies made before
+the move are filled, checked and attached where they are, and a relation that takes a copy's name in the
+parent's new schema is left alone. The copy finds each sub-range's fine child by its bounds in
 `pgpm.part`, never by a name rendered from the parent's current name, so the sub-range whose copy was in
 progress at the rename resumes into the child it had started (which keeps its pre-rename name), and only
 the sub-ranges begun after it are named from the new one. Every prepare tick drops and re-mints the delta from the key as
@@ -2643,7 +2648,7 @@ Preserve-managed incoming FKs and their lifecycle.
 | `parent_table` | `regclass` | the referenced parent |
 | `referencing_table` | `regclass` | the table holding the FK. Follows the table through pgpm's own renames: a self-referential key names the new parent, and a later `transmute` (or `untransmute`) of the referencing table moves the anchor onto its new parent (or restored table), never onto a monolith partition |
 | `constraint_name` | `name` | the FK name |
-| `definition` | `text` | the captured FK definition. Names the new parent schema-qualified, so it replays against the same table from any session's `search_path` (`maintain` replays it from pg_cron's) |
+| `definition` | `text` | the captured FK definition, naming the referenced table schema-qualified as it was named at the capture. It is a record, not the statement replayed: every re-add points it at the table the record names by OID, under its name and schema as they are then (`parent_table` for `restore_incoming_fks` and regrain's swap, the restored table for `untransmute`), so a table moved with `SET SCHEMA` or renamed since gets its key back, and a table that took its old name does not |
 | `restored_at` | `timestamptz` | null = dropped (RI off); set = re-added |
 | `validated_at` | `timestamptz` | set = fully validated; null with `restored_at` set = re-added `NOT VALID` (orphans pending) |
 | `dropped_at` | `timestamptz` | when the FK was captured and dropped |
@@ -2662,7 +2667,9 @@ uninstall's refusal offers): a foreign key on the record's referencing table, un
 managed table. The record is marked re-added (and validated if the live key is), logged
 `adopt_incoming_fk`, so `restore_incoming_fks` does not try to add it a second time and `untransmute` drops
 and re-adds it like any restored key. A key that only shares the name, against another table, is not
-adopted: the re-add keeps failing on it as `fail_restore_incoming_fk`, because the name is taken.
+adopted: the re-add keeps failing on it as `fail_restore_incoming_fk`, because the name is taken. The
+uninstall script asks the same question before it exempts a record from its refusal, so such a key does not
+let the record go with the schema.
 
 ### `pgpm.transmute_inflight`
 

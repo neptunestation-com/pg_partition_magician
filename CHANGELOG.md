@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+- **A regrain survives its parent being moved to another schema mid-run** (#872, bullet 1). Its copies are
+  standalone tables that stay where they were made, but `_regrain_copy_rel` (the swap gate, the attach, the
+  reconcile) and the copy branch looked each one up in the parent's CURRENT schema, so after `ALTER TABLE
+  <parent> SET SCHEMA` every tick refused at the swap gate (`skip_regrain`) and the run never finished; a copy
+  part-filled at the move was replaced by a second one beside the parent, the first left full of rows; and the
+  swap's `archive_coverage_reset` named a source that never existed. Every copy is now found in the schema of
+  the relation its `child_oid` records, new copies are made beside the source, and the reset names the source
+  where it was. Mutations `regrain_copy_rel_parent_schema`, `regrain_copy_branch_parent_schema` and
+  `regrain_coverage_reset_parent_schema`.
+- **A preserved incoming key comes back against the table it was recorded for, by identity** (#872, bullets 2
+  and 3). `restore_incoming_fks` (and so `maintain`, regrain's swap and `uninstall.sql`) and `untransmute`
+  replayed `pgpm.dropped_fk.definition` verbatim, its `REFERENCES` naming the parent as it was at the
+  conversion, so after a `SET SCHEMA` or a `RENAME` the key came back against whatever now held the old name
+  (logged `restore_incoming_fk`, RI against the managed table off) or died 42P01 every tick, and inside a
+  regrain swap was put back nowhere. Every re-add now renders the definition against the referenced table by
+  oid (`pgpm._fk_readd_definition`). And `uninstall.sql` exempted a suspended record from its refusal when any
+  key of that NAME was live on the referencing table; it now asks for that key against the managed table, as
+  `_forget_dangling_fks` adopts, so a namesake key against another table no longer lets the schema drop take
+  the only record of the real one. Tests 239 (a moved-parent conformance suite: one table moved before every
+  lifecycle stage, a namesake planted where the old resolution lands) and 240, guard
+  `bench/recorded_identity.sh`, mutations `restore_fk_replays_recorded_definition`,
+  `untransmute_fk_replays_recorded_definition` and `uninstall_fk_exempt_by_name`.
+- **A tracking `from_hypertable_copy` of a renamed hypertable builds its key index** (#872, bullet 4). The copy
+  pre-built the key's index under `<conname>_pgpm_new` whatever held that name, and a key keeps its name across
+  `ALTER TABLE ... RENAME`, so an abandoned tracking copy taken under the old name made it die `already exists`.
+  The copy and the cutover now both ask `pgpm._from_hypertable_key_tmp`, which takes the name already on the
+  destination, else the first of `<conname>_pgpm_new` and `pgpm_new_<index oid>` that is free, so they agree
+  and the cutover adopts the copy's index. `tests/timescale/db/45`, mutations `hypertable_copy_key_tmp_by_name`
+  and `hypertable_cutover_key_tmp_unshared`.
 - **A synchronous export never writes over another relation's object, and every archive key comes from one
   function** (#872). `archive._child_object_key` keyed `archive.to_s3` and `archive.to_s3_parquet` by
   `<prefix><schema>.<child>` with no owner, and both PUT unconditionally, so after the documented

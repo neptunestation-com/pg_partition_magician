@@ -585,6 +585,21 @@ ARCHIVE_LEDGER_ORPHAN_SWEEP = """  -- COVERAGE UNDER A NAME NO LONGER TRACKED IS
 
 """
 
+# from_hypertable_cutover's choice of a key index's temp name and its build (#768, #872), whole. Shared by
+# the mutation that puts back the pre-#768 by-name skip and the one that puts back the pre-#872 choice the
+# copy did not share, for the reason RETIRE_IDENTITY_BLOCK is a constant.
+HT_CUTOVER_KEY_TMP_BLOCK = """    v_tmp := pgpm._from_hypertable_key_tmp(k.conname, k.conindid, v_nsp, v_dest_oid);
+    if v_tmp is null then
+      raise exception 'pg_partition_magician: cannot build the index of key % of % on %.% -- both of its temp names (% and pgpm_new_%) are held by relations that are not on that destination. Drop or rename them and re-run.',
+        quote_ident(k.conname), p_hypertable, quote_ident(v_nsp), quote_ident(v_dest),
+        pgpm._from_hypertable_tmp_name(k.conname, k.conindid), k.conindid;
+    end if;
+    v_tmp_oid := to_regclass(format('%I.%I', v_nsp, v_tmp));
+    if not exists (select 1 from pg_index i where i.indexrelid = v_tmp_oid and i.indrelid = v_dest_oid) then
+      execute pgpm._from_hypertable_index_ddl(k.conindid, v_tmp, v_nsp, v_dest);
+    end if;
+"""
+
 REGRAIN_SWAP_LEDGER_RETIRE = """  -- The source's archive coverage goes with it (#511). A partly archived child can be regrained
   -- (#278), and its chunks sit in pgpm.archive_ledger keyed (parent_table, lo) under its name. Left
   -- there, they describe a relation that no longer exists, and the first fine child starts at the
@@ -604,7 +619,7 @@ REGRAIN_SWAP_LEDGER_RETIRE = """  -- The source's archive coverage goes with it 
     insert into pgpm.log (parent_table, action, lo, hi, rows, method)
       values (p_parent, 'archive_coverage_reset', v_lo, v_hi, v_rec,
               format('%s archived chunk(s) were recorded for %I.%I, which this regrain replaced with %s fine partition(s) and dropped; discarded, and each fine partition archives from its own lo',
-                     v_rec, v_nsp, v_child_name, v_made));
+                     v_rec, v_src_nsp, v_child_name, v_made));   -- #872: where the source was
   end if;
 """
 
@@ -1582,14 +1597,8 @@ MUTATIONS = {
         "its temp name, so after an abandoned tracking copy and a RENAME of the hypertable (whose key keeps "
         "its name) the stale copy's index is taken for the key's and the swap fails adopting it, after the "
         "whole copy. tests/timescale/db/44's migration of the renamed table fails.",
-        [("""    v_tmp_oid := to_regclass(format('%I.%I', v_nsp, v_tmp));
-    if not exists (select 1 from pg_index i where i.indexrelid = v_tmp_oid and i.indrelid = v_dest_oid) then
-      if v_tmp_oid is not null then
-        v_tmp := 'pgpm_new_' || k.conindid::text;
-      end if;
-      execute pgpm._from_hypertable_index_ddl(k.conindid, v_tmp, v_nsp, v_dest);
-    end if;
-""", """    if to_regclass(format('%I.%I', v_nsp, v_tmp)) is null then   -- MUTANT: by name, anywhere in the schema
+        [(HT_CUTOVER_KEY_TMP_BLOCK, """    v_tmp := pgpm._from_hypertable_tmp_name(k.conname, k.conindid);
+    if to_regclass(format('%I.%I', v_nsp, v_tmp)) is null then   -- MUTANT: by name, anywhere in the schema
       execute pgpm._from_hypertable_index_ddl(k.conindid, v_tmp, v_nsp, v_dest);
     end if;
 """, 1)],
@@ -2230,8 +2239,8 @@ begin
          where conrelid = p_parent and contype = 'f' and confrelid <> p_parent and conparentid = 0
            and convalidated
       loop
-        execute format('alter table %I.%I add constraint %I %s not valid', v_nsp, v_sub_name, r.conname, r.def);
-        execute format('alter table %I.%I validate constraint %I', v_nsp, v_sub_name, r.conname);
+        execute format('alter table %I.%I add constraint %I %s not valid', v_sub_nsp, v_sub_name, r.conname, r.def);
+        execute format('alter table %I.%I validate constraint %I', v_sub_nsp, v_sub_name, r.conname);
       end loop;
 """, "", 1)],
     ),
@@ -3840,8 +3849,8 @@ $$;''',
         "and gains the managed table's row. One site: the fine child resolves by name, not through "
         "_regrain_copy_rel. tests/183 catches it at the refusal it pins and at the stranger's rows, named "
         "one by one.",
-        [("    v_sub_rel := pgpm._regrain_copy_rel(p_parent, v_nsp, v_sub_name, 'reconcile captured changes into');\n",
-          "    v_sub_rel := format('%I.%I', v_nsp, v_sub_name)::regclass;\n", 1)],
+        [("    v_sub_rel := pgpm._regrain_copy_rel(p_parent, v_sub_name, 'reconcile captured changes into');\n",
+          "    v_sub_rel := format('%I.%I', pgpm._child_nsp(p_parent, v_sub_name), v_sub_name)::regclass;\n", 1)],
     ),
     "regrain_swap_attaches_named_relation": (
         "bench/regrain_child_oid_sites.sh",
@@ -3850,8 +3859,8 @@ $$;''',
         "INCLUDING ALL under its old name is attached in its place, the source is dropped, and the copied "
         "rows leave the managed table. Two sites: the pre-DETACH identity check goes, and the attach loop "
         "resolves by name. tests/184 (A) catches it at the refusal and at rows 10, 20, 30.",
-        [("    perform pgpm._regrain_copy_rel(p_parent, v_nsp, r.child_name, 'attach');\n", "    null;\n", 1),
-         ("    v_copy := pgpm._regrain_copy_rel(p_parent, v_nsp, r.child_name, 'attach');   -- #707: by recorded oid\n",
+        [("    perform pgpm._regrain_copy_rel(p_parent, r.child_name, 'attach');\n", "    null;\n", 1),
+         ("    v_copy := pgpm._regrain_copy_rel(p_parent, r.child_name, 'attach');   -- #707: by recorded oid\n",
           "    v_copy := format('%I.%I', v_nsp, r.child_name)::regclass;\n", 1)],
     ),
     "regrain_cancel_triggers_by_name": (
@@ -6323,6 +6332,93 @@ select is(
         [("        perform pgpm._regrain_sub_name(p_rel, cfg, p_step, v, h);\n",
           "        perform pgpm._part_name(p_rel, k, p_step, v, null, z);\n", 1)],
     ),
+    # Issue #872, the recorded-identity lever: one mutation per site, each putting that site back to the
+    # parent's current schema or to a name recorded before a move. bench/recorded_identity.sh runs tests/239
+    # (the moved-parent conformance suite) and tests/240 against each.
+    "regrain_copy_rel_parent_schema": (
+        "bench/recorded_identity.sh",
+        "Issue #872 bullet 1 put back in _regrain_copy_rel: a regrain copy is looked up as <the parent's CURRENT "
+        "schema>.<name>, not in the schema its recorded oid sits in. After ALTER TABLE <parent> SET SCHEMA the "
+        "copies stay where regrain_step made them, so the swap gate refuses every tick ('no longer names the "
+        "copy', logged skip_regrain) and the run never swaps. One site, the helper the swap gate, the attach "
+        "and the reconcile all ask. tests/239 S2 catches it.",
+        [("  v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #872: the copy's own schema, by its recorded oid\n",
+          "  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace\n"
+          "   where c.oid = p_parent;   -- MUTANT: the parent's current schema\n", 1)],
+    ),
+    "regrain_copy_branch_parent_schema": (
+        "bench/recorded_identity.sh",
+        "Issue #872 bullet 1 put back in regrain_step's copy branch: a sub-range's copy is looked for, and a new "
+        "one made, in the parent's CURRENT schema. A copy part-filled before the parent moved is then a "
+        "namesake's name (refused every tick) or nothing (a second copy is made and re-anchored, the first left "
+        "full of rows). One site. tests/239 S2 catches it.",
+        [("    v_sub_nsp := coalesce((select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace\n"
+          "                            where c.oid = v_sub_oid), v_src_nsp);\n",
+          "    v_sub_nsp := v_nsp;   -- MUTANT: the parent's current schema\n", 1)],
+    ),
+    "regrain_coverage_reset_parent_schema": (
+        "bench/recorded_identity.sh",
+        "Issue #872 bullet 1 put back in the swap's archive_coverage_reset line: the source whose coverage is "
+        "discarded is named <the parent's CURRENT schema>.<source>, a relation that never existed once the "
+        "parent moved. One site. tests/239 S2 catches it at the logged method.",
+        [("                     v_rec, v_src_nsp, v_child_name, v_made));   -- #872: where the source was\n",
+          "                     v_rec, v_nsp, v_child_name, v_made));\n", 1)],
+    ),
+    "restore_fk_replays_recorded_definition": (
+        "bench/recorded_identity.sh",
+        "Issue #872 bullet 2 put back in restore_incoming_fks: the recorded definition is replayed verbatim, "
+        "its REFERENCES naming the parent as it was at the conversion. After a SET SCHEMA or RENAME the key "
+        "comes back against a namesake at the old name (logged restore_incoming_fk) or dies 42P01, which inside "
+        "regrain's swap leaves it off. Both branches of the one site (a partitioned and a plain referencer). "
+        "tests/239 S1, S2 and S5 and tests/240 A to C catch it.",
+        [("                       pgpm._fk_readd_definition(r.definition, p_parent));   -- #872: the parent by oid\n",
+          "                       r.definition);\n", 2)],
+    ),
+    "untransmute_fk_replays_recorded_definition": (
+        "bench/recorded_identity.sh",
+        "Issue #872 bullet 2 put back in untransmute: each preserved key is re-added from its recorded text "
+        "verbatim, so a table renamed since its conversion gets its key back against whatever now holds the "
+        "old name, or the reverse dies 42P01. Both branches of the one site. tests/239 S4 and tests/240 D "
+        "catch it.",
+        [("                     pgpm._fk_readd_definition(r.definition, v_restored));   -- #872: the restored table by oid\n",
+          "                     r.definition);\n", 2)],
+    ),
+    "uninstall_fk_exempt_by_name": (
+        "bench/recorded_identity.sh",
+        "Issue #872 bullet 3 put back in uninstall.sql: a suspended key is exempted from the refusal when ANY "
+        "foreign key of its name is live on the referencing table, against whatever table. A namesake key "
+        "suppresses the refusal and the schema drop takes the only record of the real one. One site. "
+        "tests/240 E catches it.",
+        [("                        where c.conrelid = d.referencing_table and c.conname = d.constraint_name and c.contype = 'f'\n"
+          "                          and c.confrelid = d.parent_table);\n",
+          "                        where c.conrelid = d.referencing_table and c.conname = d.constraint_name and c.contype = 'f');\n",
+          1)],
+    ),
+    "hypertable_copy_key_tmp_by_name": (
+        "bench/hypertable_key_index_on_destination.sh",
+        "Issue #872 bullet 4 put back in from_hypertable_copy: the tracked key's index is pre-built under the "
+        "bare temp name <conname>_pgpm_new whatever holds it, so after an abandoned tracking copy and a RENAME "
+        "of the hypertable (whose key keeps its name) the copy dies 'already exists' before copying a row. One "
+        "site. tests/timescale/db/45 catches it.",
+        [("    v_keytmp := pgpm._from_hypertable_key_tmp(v_keyconname, v_keyidx, v_nsp, v_destreg);\n",
+          "    v_keytmp := pgpm._from_hypertable_tmp_name(v_keyconname, v_keyidx);   -- MUTANT: by name\n", 1)],
+    ),
+    "hypertable_cutover_key_tmp_unshared": (
+        "bench/hypertable_key_index_on_destination.sh",
+        "Issue #872 bullet 4, the half-fix: the copy takes the oid form when an abandoned copy holds the temp "
+        "name, but the cutover keeps its #768 choice, which builds under the oid form without asking whether "
+        "the copy already put that index on the destination, so the cutover of the renamed table dies 'already "
+        "exists' after the whole copy. One site. tests/timescale/db/45 catches it.",
+        [(HT_CUTOVER_KEY_TMP_BLOCK, """    v_tmp := pgpm._from_hypertable_tmp_name(k.conname, k.conindid);
+    v_tmp_oid := to_regclass(format('%I.%I', v_nsp, v_tmp));
+    if not exists (select 1 from pg_index i where i.indexrelid = v_tmp_oid and i.indrelid = v_dest_oid) then
+      if v_tmp_oid is not null then
+        v_tmp := 'pgpm_new_' || k.conindid::text;
+      end if;
+      execute pgpm._from_hypertable_index_ddl(k.conindid, v_tmp, v_nsp, v_dest);
+    end if;
+""", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
@@ -6412,6 +6508,9 @@ MUTATION_SRC = {
     "uninstall_keeps_regrain_copies": "pgpm_core/uninstall.sql",
     "uninstall_keeps_hypertable_capture": "pgpm_core/uninstall.sql",
     "uninstall_hypertable_capture_by_name": "pgpm_core/uninstall.sql",
+    "uninstall_fk_exempt_by_name": "pgpm_core/uninstall.sql",
+    "hypertable_copy_key_tmp_by_name": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_key_tmp_unshared": "pgpm_hypertable/install.sql",
     "to_s3_part_bytes_unbounded": "pgpm_archive/install.sql",
     "to_s3_abort_misses_cancel": "pgpm_archive/install.sql",
     "to_s3_conservation_by_count": "pgpm_archive/install.sql",
@@ -6518,6 +6617,8 @@ MUTATION_TRACK = {
     "hypertable_publications_unchecked_up_front": "timescale",
     "hypertable_cutover_publications_unchecked": "timescale",
     "hypertable_key_index_by_name": "timescale",
+    "hypertable_copy_key_tmp_by_name": "timescale",
+    "hypertable_cutover_key_tmp_unshared": "timescale",
     "hypertable_key_unchecked": "timescale",
     "hypertable_cutover_key_unchecked_under_lock": "timescale",
     "hypertable_frontier_unchecked_up_front": "timescale",

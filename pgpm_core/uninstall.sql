@@ -135,7 +135,7 @@ $$;
 -- because the rollback also takes the pgpm.log row restore_incoming_fks wrote. Deleting the key's row from
 -- pgpm.dropped_fk is how an operator says they accept losing it. A record whose referencing table or parent
 -- no longer exists is not refused on (there is no key left to lose), nor is one whose key is live again
--- under its name because the operator re-added it by hand.
+-- under its name, against its parent, because the operator re-added it by hand.
 --
 -- The schema drop is inside this block, not after it, so a client that carries on past an error (psql
 -- without ON_ERROR_STOP and without --single-transaction, a SQL editor) cannot reach the drop around the
@@ -169,9 +169,13 @@ begin
      where d.restored_at is null
        and exists (select 1 from pg_class c where c.oid = d.parent_table)
        and exists (select 1 from pg_class c where c.oid = d.referencing_table)
-       -- re-added by hand since (the message below offers that): the key is live, so nothing is lost
+       -- re-added by hand since (the message below offers that): the key is live, so nothing is lost. The
+       -- key, not its name (#872): a foreign key on that table under that name AGAINST THIS PARENT, the
+       -- match _forget_dangling_fks adopts by. A namesake against another table is not this key, and
+       -- exempting the record for it let the schema drop take the only record of the real one.
        and not exists (select 1 from pg_constraint c
-                        where c.conrelid = d.referencing_table and c.conname = d.constraint_name and c.contype = 'f');
+                        where c.conrelid = d.referencing_table and c.conname = d.constraint_name and c.contype = 'f'
+                          and c.confrelid = d.parent_table);
     if v_left_q is not null then
       raise exception 'pg_partition_magician: refusing to uninstall: these incoming foreign keys, dropped by transmute(..., p_incoming_fks => ''preserve''), could not be restored, and pgpm.dropped_fk is the only record of them: %. Clear what blocks each one and re-run this script, or re-add it by hand, or accept losing it by deleting its row from pgpm.dropped_fk; then re-run.',
         v_left_q;
