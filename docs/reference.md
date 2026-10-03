@@ -436,7 +436,9 @@ back and hands its key the name the parent's carried (the conversion had renamed
 `pgpm_key_<index oid>`), restores identity, the ownership of any `serial` sequence, the row triggers (each in the enabled
 state the parent had) and any preserved incoming FKs (`NOT VALID`, see below), and clears `pgpm` state. The
 monolith is the original table itself, found by the oid `transmute` recorded for it
-(`pgpm.config.monolith_oid`), never by its position in the grid.
+(`pgpm.config.monolith_oid`), never by its position in the grid. A caller whose reads of the parent
+row-level security would filter is refused (see [Maintenance steps](#maintenance-steps)): its check for rows
+outside the monolith could not see a hidden one, and the reverse would drop it with the parent.
 
 The table comes back with the **privileges and row security the managed table had at the reverse**, not
 the ones it had at the conversion. After a `transmute` the parent is the table, so a `GRANT` or `REVOKE`,
@@ -569,9 +571,12 @@ Scope and caveats:
   on a partitioned table. Storage parameters are not carried, as `transmute` does not carry them.
 - The migration reads every row as the **caller**, so a caller whose reads row-level security would filter
   is refused before anything is copied or committed, by `from_hypertable_preflight` (so by
-  `from_hypertable` and `from_hypertable_copy`) and again by `from_hypertable_cutover`: on a hypertable
+  `from_hypertable` and `from_hypertable_copy`), by the drains (`from_hypertable_drain_appends`,
+  `from_hypertable_drain_delta` and their steps) and by `from_hypertable_cutover`: on a hypertable
   with `FORCE ROW LEVEL SECURITY`, a non-superuser owner without `BYPASSRLS` would copy only the rows its
-  policies admit, and the conservation check, reading the source the same way, would agree. Run the
+  policies admit, and the conservation check, reading the source the same way, would agree. The cutover
+  asks twice, up front and again under its lock, so row-level security switched on while it prepares
+  refuses the swap with the hypertable whole (`cannot swap in the copy of hypertable ...`). Run the
   migration as a role with `BYPASSRLS` (a superuser has it); the hypertable keeps its `FORCE`.
 - The copy is **online** (the source serves traffic throughout), and so is the index rebuild: the
   destination's primary key and secondary indexes are built on the private copy **before** the cutover takes
@@ -1003,6 +1008,21 @@ the delta catch-up.
 ## Maintenance steps
 
 `maintain` orchestrates these; you can also call them by hand.
+
+**Row-level security.** Every step reads user rows as the **caller**, and `transmute` leaves the original
+table (the monolith) its own `ENABLE` / `FORCE ROW LEVEL SECURITY` and policies, and carries them onto the
+parent. So for a caller whose reads row-level security would filter (`row_security_active()` is true: a
+non-superuser owner without `BYPASSRLS` on a table with `FORCE ROW LEVEL SECURITY`, or a caller that is not
+the owner), each read is refused, with the relation it reads named, before anything is written: the write
+frontier read through the parent on an `id`, `uuidv7` or `text_time` grid (`obtain`, `extend_to`,
+`progress`, and on an `id` grid `retain`, `retire` and `set_retain`), `regrain`'s copy of its source
+partition, `untransmute`'s check for rows outside the monolith, the archive step's reads of the parent and
+of the partition (before any `archive_fn` runs), `retire`'s read of the tables that reference a retiring
+partition, `incoming_fk_orphans`, and the sampling checks. Inside `maintain` and `maintain_obtain` each such
+refusal is that step's deferral (`skip_obtain`, `skip_write_block`, `skip_archive`, `skip_retain`,
+`skip_regrain`, with pgpm's message in `method`), and on an `id` grid `status()` reports `retain_backlog`
+as null for that table. Run maintenance as a role with `BYPASSRLS` (a superuser has it); an owner on a table that only
+`ENABLE`s row-level security is not filtered.
 
 ### `obtain`
 
@@ -1965,7 +1985,9 @@ select pgpm.set_archive_fn('public.events', 'pgpm.archive_to_s3_ndjson(regclass,
 Both delegate to `archive._encode_upload_ndjson_single` / `archive._encode_upload_parquet` for the
 actual transport -- the same encode/upload steps `archive.to_s3`/`archive.to_s3_parquet` (the
 synchronous functions, called directly rather than through `archive_fn`) are built on, so the
-encoded bytes and S3 semantics are identical; only the calling contract differs. Connection settings
+encoded bytes and S3 semantics are identical; only the calling contract differs. All four refuse a
+caller whose reads row-level security would filter (the transports read the chunk through the parent, the
+synchronous functions read the partition), before anything is read or sent. Connection settings
 (bucket, region, endpoint, prefix, vault key names, compression) still come from `archive.config`,
 the same one config surface the synchronous functions use -- setting `archive_fn` this way needs no
 second, independently configured surface. An `archive_fn` cannot issue `COMMIT`: it is a plain function
@@ -2392,6 +2414,10 @@ at these before converting: a single future-dated row (a client with a wrong clo
 leads the clock by more than one partition step plus one hour (see
 [`p_force_frontier`](#transmute-time--uuidv7--text_time-grid)).
 Rows to delete or correct are the ones sorting above `pgpm._ts_to_uuid(now() + <step> + interval '1 hour')`.
+
+`check_uuidv7`, `check_text_time` and `check_time_monotonic` refuse a caller whose reads of `p_table`
+row-level security would filter, rather than describe the visible rows as the column's (see
+[Maintenance steps](#maintenance-steps)).
 
 ### `check_text_time`
 

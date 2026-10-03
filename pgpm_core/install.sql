@@ -1710,6 +1710,11 @@ begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
   if cfg.control_kind = 'time' then return pgpm._ts_text(now()); end if;
+  -- #873: the read below is the caller's, so under row-level security that filters it the frontier would be
+  -- the largest VISIBLE value. Asked here, at the one read every caller shares (obtain, extend_to, progress,
+  -- retention's horizon on an id grid, maintain's regrain dispatch), rather than at each of them.
+  perform pgpm._refuse_filtered_reads(p_parent, 'read the write frontier of',
+    'the frontier, the largest value of the control column, would be the largest one those rows hold, and obtain, retention and regrain would place the grid by it');
   -- ORDER BY ... LIMIT 1 (not max()) so it works for uuid too; uses the index.
   -- Qualify with an alias so ORDER BY binds to the (typed) column, not the ::text projection.
   execute format('select t.%I::text from %s t order by t.%I desc limit 1',
@@ -2270,6 +2275,9 @@ begin
 
     -- A plain range predicate: a row whose key falls in [lo, hi) references a row in THIS partition,
     -- by the definition of range partitioning, whatever else the key carries.
+    -- #873: read from the referencing table as the caller, under ITS row-level security.
+    perform pgpm._refuse_filtered_reads(r.referencing, 'read the rows referencing a retiring partition from',
+      'retention would honour the declared ON DELETE for those rows alone, and the detach would then be refused by the others');
     execute format(
       'select coalesce(array_agg(distinct %s), ''{}''::text[]) from %s where %I >= %L and %I < %L',
       v_refval_q, r.referencing::text, v_refcol, v_lo_lit, v_refcol, v_hi_lit)
@@ -3652,6 +3660,14 @@ begin
         continue;
       end if;
 
+      -- #873: the chunk is sized from the partition's rows and the strategy reads them, through the parent
+      -- (pgpm_archive's transports) or the partition itself (_archive_noop, a strategy of the operator's), as
+      -- this caller; the ledger row then opens retire()'s drop gate. Both relations are asked, here, before the
+      -- first read, so a filtered caller defers this partition (skip_archive) with its coverage where it was.
+      perform pgpm._refuse_filtered_reads(p_parent, 'archive a partition of',
+        'an archive strategy reading the partition through it would archive only those rows, and retention would drop the others with the partition');
+      perform pgpm._refuse_filtered_reads(v_now, 'archive',
+        'the chunk would be sized and archived from those rows alone, and retention would drop the others with the partition');
       select * into v_range from pgpm._next_archive_chunk(p_parent, r.child_name);
       if not found then continue; end if;
 
@@ -5065,6 +5081,12 @@ begin
      where i.indexrelid = v_keyidx;
   end if;
   if v_pkjoin_q is null then return 'nokey'; end if;
+  -- #873: the copy, the reconcile and the avg-width probe below read the SOURCE directly, under its own
+  -- row-level security (transmute leaves the monolith its ENABLE / FORCE and policies), and the swap drops it
+  -- whole. Asked of v_child, the relation read, before anything below writes; the parent's read is the
+  -- frontier's, asked in _frontier_native.
+  perform pgpm._refuse_filtered_reads(v_child, 'regrain',
+    'the copy would hold only those rows, and the swap would drop the others with the source');
 
   -- frozen? (whole range at/below the current grid floor, so no live write still lands in it)
   v_frontier := pgpm._frontier_native(p_parent);
@@ -5986,6 +6008,19 @@ $$;
 -- a BYPASSRLS role, a superuser, and an owner on a table that is ENABLEd but not FORCEd all pass, and the
 -- table keeps its FORCE, which both conversions carry onto the result. Asked before anything is read or
 -- committed, by transmute and by each phase of from_hypertable (its preflight, so the copy, and its cutover).
+--
+-- THE LEVER FOR EVERY READ OF USER ROWS (#873). The conversions were not the only readers: the monolith
+-- keeps its own ENABLE / FORCE and policies after transmute, and the parent carries them, so every later
+-- read was filtered for such a caller too, and two of them lost rows (a regrain's copy of its source, then
+-- the swap's DROP; the hypertable cutover's catch-up and conservation check, agreeing under a policy
+-- committed after its first check). So the rule is: pgpm never reads user rows under the caller's
+-- row-level security without saying so, and this is asked of the relation each read ACTUALLY reads, not
+-- only the parent: the write frontier (_frontier_native), regrain_step's source, untransmute's gate,
+-- _archive_step (the parent and the partition, before any strategy runs), the sampling checks, retire's
+-- referencing tables (_crossing_keys), incoming_fk_orphans' two sides, pgpm_archive's readers, the
+-- hypertable drains, and the cutover again under its lock. tests/241 classifies every public entry point
+-- from the catalog (the modules' halves are tests/archive/db/38 and tests/timescale/db/46), so a new
+-- one that reads rows is refused here or fails that file until someone decides it reads none.
 create or replace function pgpm._refuse_filtered_reads(p_table regclass, p_doing text, p_consequence text)
 returns void language plpgsql stable as $$
 begin
@@ -8297,6 +8332,13 @@ begin
   v_door := format('pg_partition_magician: cannot untransmute %s -- rows now live outside the original monolith (a forward partition past B, a backdated stray, or a regraining has split it), so a metadata-only reverse would lose data. This is a one-way door once the frontier crosses B or a regrain has split the monolith.',
                    p_parent::text);
   execute v_gate_q into v_outside;
+  -- #873: the gate reads through the parent, under the caller's row-level security, and a row it cannot see
+  -- outside the monolith is one the DROP below takes with the parent. Asked AFTER the gate's first read, under
+  -- the ACCESS SHARE that read took and holds to the end: ENABLE, FORCE and CREATE POLICY all need ACCESS
+  -- EXCLUSIVE, so the answer cannot change between here and the reads it vouches for (the gate again under
+  -- the lock, the identity maxima).
+  perform pgpm._refuse_filtered_reads(p_parent, 'untransmute',
+    'the check that every row still lives in the monolith would pass with rows outside it, and the reverse would drop them with the parent');
   if v_outside then
     raise exception '%', v_door;
   end if;
@@ -9869,6 +9911,10 @@ returns table (sampled bigint, plausible bigint, fraction numeric, oldest timest
                newest_decoded timestamptz, newest_in_future boolean)
 language plpgsql as $$
 begin
+  -- #873: the sample and the maximum are the caller's reads; under row-level security that filters them
+  -- they would describe the visible rows as the column's.
+  perform pgpm._refuse_filtered_reads(p_table, 'sample',
+    'check_uuidv7 would report its fraction and the column''s maximum from those rows alone');
   return query execute format($q$
     with s as (select pgpm._uuid_to_ts(%1$I) as ts from %2$s limit %3$s),
          m as (select pgpm._uuid_to_ts(t.%1$I) as ts from %2$s t where t.%1$I is not null
@@ -9929,6 +9975,9 @@ begin
   -- #456: the same refusal transmute makes, so an operator who samples first hears it first, instead
   -- of a plausible fraction for a column whose collation would misroute every mixed-case value.
   perform pgpm._check_text_time_collation(p_table, p_control, p_prefix, p_width, p_radix, p_alphabet);
+  -- #873: as check_uuidv7's
+  perform pgpm._refuse_filtered_reads(p_table, 'sample',
+    'check_text_time would report its fraction and the column''s maximum from those rows alone');
   return query execute format($q$
     with s as (select %1$I::text as v from %2$s limit %3$s),
          shaped as (
@@ -9971,6 +10020,9 @@ create or replace function pgpm.check_time_monotonic(
 ) returns table (sampled bigint, monotonic bigint, fraction numeric)
 language plpgsql as $$
 begin
+  -- #873: as check_uuidv7's
+  perform pgpm._refuse_filtered_reads(p_table, 'sample',
+    'check_time_monotonic would report its fraction from those rows alone');
   return query execute format($q$
     with s as (select %2$I::timestamptz as t, %1$I as idv from %3$s order by random() limit %4$s),
          o as (select t, lag(t) over (order by idv) as prev from s)
@@ -10600,6 +10652,12 @@ begin
     select * into c from pg_constraint
       where conrelid = r.referencing_table and conname = r.constraint_name and contype = 'f';
     if not found then continue; end if;
+    -- #873: both sides are the caller's reads: a hidden referencing row is an orphan not counted, a hidden
+    -- parent row makes the rows referencing it look orphaned.
+    perform pgpm._refuse_filtered_reads(c.conrelid::regclass, 'count the orphans in',
+      'incoming_fk_orphans would count those rows alone');
+    perform pgpm._refuse_filtered_reads(c.confrelid::regclass, 'count the orphans against',
+      'a referencing row whose key those rows do not hold would be counted as an orphan');
     select string_agg(format('r.%I = p.%I', fa.attname, pa.attname), ' and '),
            string_agg(format('r.%I is not null', fa.attname), ' and ')
       into v_join_q, v_notnull_q

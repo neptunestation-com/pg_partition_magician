@@ -6015,6 +6015,184 @@ select is(
           "    'the catch-up and the conservation check would read only those rows, and the swap would drop "
           "the others with the hypertable');\n", "", 1)],
     ),
+    # Issue #873, the reads-under-RLS lever: one mutation per site that asks pgpm._refuse_filtered_reads,
+    # each deleting that one call (and its comment) so the read behind it runs as the filtered caller again.
+    "rls_frontier_unchecked": (
+        "bench/reads_under_caller_rls.sh",
+        "Pre-#873 _frontier_native: the write frontier (max of the control column) is read through the parent "
+        "under the caller's row-level security, so for an owner whose FORCE'd policy hides the largest id, "
+        "obtain, extend_to, progress, retention's id horizon and maintain's regrain dispatch all run on the "
+        "visible maximum. tests/241 part C1 catches it (obtain and the rest no longer refuse; status() "
+        "answers; maintain_obtain and maintain log no frontier refusal).",
+        [("  -- #873: the read below is the caller's, so under row-level security that filters it the frontier would be\n"
+          "  -- the largest VISIBLE value. Asked here, at the one read every caller shares (obtain, extend_to, progress,\n"
+          "  -- retention's horizon on an id grid, maintain's regrain dispatch), rather than at each of them.\n"
+          "  perform pgpm._refuse_filtered_reads(p_parent, 'read the write frontier of',\n"
+          "    'the frontier, the largest value of the control column, would be the largest one those rows hold, and "
+          "obtain, retention and regrain would place the grid by it');\n", "", 1)],
+    ),
+    "rls_regrain_source_unchecked": (
+        "bench/reads_under_caller_rls.sh",
+        "Pre-#873 regrain_step (#873 bullet 1, Tier 1): the copy reads the source partition directly, under the "
+        "monolith's own FORCE'd policy, and the swap drops the source whole, so every row the policy hides from "
+        "a non-BYPASSRLS owner is lost. tests/242 part A catches it (the parent set NO FORCE, so no other check "
+        "stands in): the regrain runs, and 8 hidden rows of 60 are gone by identity.",
+        [("  -- #873: the copy, the reconcile and the avg-width probe below read the SOURCE directly, under its own\n"
+          "  -- row-level security (transmute leaves the monolith its ENABLE / FORCE and policies), and the swap drops it\n"
+          "  -- whole. Asked of v_child, the relation read, before anything below writes; the parent's read is the\n"
+          "  -- frontier's, asked in _frontier_native.\n"
+          "  perform pgpm._refuse_filtered_reads(v_child, 'regrain',\n"
+          "    'the copy would hold only those rows, and the swap would drop the others with the source');\n", "", 1)],
+    ),
+    "rls_untransmute_unchecked": (
+        "bench/reads_under_caller_rls.sh",
+        "Pre-#873 untransmute: its outside-rows gate reads through the parent under the caller's row-level "
+        "security, so a hidden row in a forward partition is invisible to it and the reverse drops that "
+        "partition with the parent. tests/242 part C catches it: row 45 is gone and ut242 is a plain table.",
+        [("  -- #873: the gate reads through the parent, under the caller's row-level security, and a row it cannot see\n"
+          "  -- outside the monolith is one the DROP below takes with the parent. Asked AFTER the gate's first read, under\n"
+          "  -- the ACCESS SHARE that read took and holds to the end: ENABLE, FORCE and CREATE POLICY all need ACCESS\n"
+          "  -- EXCLUSIVE, so the answer cannot change between here and the reads it vouches for (the gate again under\n"
+          "  -- the lock, the identity maxima).\n"
+          "  perform pgpm._refuse_filtered_reads(p_parent, 'untransmute',\n"
+          "    'the check that every row still lives in the monolith would pass with rows outside it, and the reverse "
+          "would drop them with the parent');\n", "", 1)],
+    ),
+    "rls_archive_step_parent_unchecked": (
+        "bench/reads_under_caller_rls.sh",
+        "Pre-#873 _archive_step, the parent's half: an archive strategy that reads the chunk through the parent "
+        "(pgpm_archive's transports do) runs as a caller the parent's policy filters, and its ledger row opens "
+        "retire()'s drop gate over the rows it never saw. tests/241 part C4 catches it: the strategy counts "
+        "the visible rows into a ledger row.",
+        [("      perform pgpm._refuse_filtered_reads(p_parent, 'archive a partition of',\n"
+          "        'an archive strategy reading the partition through it would archive only those rows, and retention "
+          "would drop the others with the partition');\n", "", 1)],
+    ),
+    "rls_archive_step_child_unchecked": (
+        "bench/reads_under_caller_rls.sh",
+        "Pre-#873 _archive_step, the partition's half: the chunk is sized from, and a strategy such as "
+        "_archive_noop reads, the monolith under its own FORCE'd policy. tests/241 part C5 catches it (the parent "
+        "NO FORCE): a ledger row records the visible rows as the partition's.",
+        [("      perform pgpm._refuse_filtered_reads(v_now, 'archive',\n"
+          "        'the chunk would be sized and archived from those rows alone, and retention would drop the others "
+          "with the partition');\n", "", 1)],
+    ),
+    "rls_check_uuidv7_unchecked": (
+        "bench/reads_under_caller_rls.sh",
+        "Pre-#873 check_uuidv7 (#873 bullet 2): it samples, and finds the maximum, under the caller's "
+        "row-level security, so a hidden future-dated row never reaches newest_in_future. tests/241 part C6 "
+        "catches it.",
+        [("  -- #873: the sample and the maximum are the caller's reads; under row-level security that filters them\n"
+          "  -- they would describe the visible rows as the column's.\n"
+          "  perform pgpm._refuse_filtered_reads(p_table, 'sample',\n"
+          "    'check_uuidv7 would report its fraction and the column''s maximum from those rows alone');\n", "", 1)],
+    ),
+    "rls_check_text_time_unchecked": (
+        "bench/reads_under_caller_rls.sh",
+        "Pre-#873 check_text_time (#873 bullet 2), as check_uuidv7's. tests/241 part C7 catches it.",
+        [("  perform pgpm._refuse_filtered_reads(p_table, 'sample',\n"
+          "    'check_text_time would report its fraction and the column''s maximum from those rows alone');\n", "", 1)],
+    ),
+    "rls_check_time_monotonic_unchecked": (
+        "bench/reads_under_caller_rls.sh",
+        "Pre-#873 check_time_monotonic: it samples under the caller's row-level security, so a hidden "
+        "out-of-order row never lowers the fraction. tests/241 part C8 catches it.",
+        [("  perform pgpm._refuse_filtered_reads(p_table, 'sample',\n"
+          "    'check_time_monotonic would report its fraction from those rows alone');\n", "", 1)],
+    ),
+    "rls_crossing_keys_unchecked": (
+        "bench/reads_under_caller_rls.sh",
+        "Pre-#873 _crossing_keys: retire() reads the rows referencing a retiring partition from the referencing "
+        "table as the caller, so a row its FORCE'd policy hides is not deleted with the declared ON DELETE and "
+        "the detach is refused by it. tests/241 part C9 catches it: retire no longer refuses, and the visible "
+        "crossing is deleted.",
+        [("    -- #873: read from the referencing table as the caller, under ITS row-level security.\n"
+          "    perform pgpm._refuse_filtered_reads(r.referencing, 'read the rows referencing a retiring partition from',\n"
+          "      'retention would honour the declared ON DELETE for those rows alone, and the detach would then be "
+          "refused by the others');\n", "", 1)],
+    ),
+    "rls_fk_orphans_referencing_unchecked": (
+        "bench/reads_under_caller_rls.sh",
+        "Pre-#873 incoming_fk_orphans, the referencing side: an orphan the referencing table's policy hides is "
+        "not counted. tests/241 part C10 (ra241) catches it.",
+        [("    perform pgpm._refuse_filtered_reads(c.conrelid::regclass, 'count the orphans in',\n"
+          "      'incoming_fk_orphans would count those rows alone');\n", "", 1)],
+    ),
+    "rls_fk_orphans_parent_unchecked": (
+        "bench/reads_under_caller_rls.sh",
+        "Pre-#873 incoming_fk_orphans, the parent side: a parent row the policy hides makes the rows referencing "
+        "it count as orphans. tests/241 part C10 (ob241) catches it.",
+        [("    perform pgpm._refuse_filtered_reads(c.confrelid::regclass, 'count the orphans against',\n"
+          "      'a referencing row whose key those rows do not hold would be counted as an orphan');\n", "", 1)],
+    ),
+    "rls_to_s3_unchecked": (
+        "bench/reads_under_caller_rls.sh",
+        "Pre-#873 archive.to_s3: the export and its conservation check read the partition under the caller's "
+        "row-level security and agree on an object of the visible rows. tests/archive/db/38 catches it.",
+        [("  perform pgpm._refuse_filtered_reads(archive._resolve_child(p_parent, p_child, 'archive.to_s3'), 'export',\n"
+          "    'the object would hold only those rows');\n",
+          "  perform archive._resolve_child(p_parent, p_child, 'archive.to_s3');\n", 1)],
+    ),
+    "rls_to_s3_parquet_unchecked": (
+        "bench/reads_under_caller_rls.sh",
+        "Pre-#873 archive.to_s3_parquet, as archive.to_s3's. tests/archive/db/38 catches it.",
+        [("  perform pgpm._refuse_filtered_reads(v_child, 'export', 'the object would hold only those rows');   -- #873\n",
+          "", 1)],
+    ),
+    "rls_archive_ndjson_unchecked": (
+        "bench/reads_under_caller_rls.sh",
+        "Pre-#873 pgpm.archive_to_s3_ndjson: the chunk is read through the parent as the caller, and the "
+        "object holds the rows its policy admits. tests/archive/db/38 catches it (called directly, where "
+        "_archive_step's own check is not in front of it).",
+        [("  -- #873: the chunk is read through the parent as the caller, and its ledger row opens retire()'s drop gate\n"
+          "  perform pgpm._refuse_filtered_reads(p_parent, 'archive a chunk of',\n"
+          "    'the object would hold only those rows, and retention would drop the others once it is recorded');\n", "", 1)],
+    ),
+    "rls_archive_parquet_unchecked": (
+        "bench/reads_under_caller_rls.sh",
+        "Pre-#873 pgpm.archive_to_s3_parquet, as archive_to_s3_ndjson's. tests/archive/db/38 catches it.",
+        [("  -- #873: as archive_to_s3_ndjson's\n"
+          "  perform pgpm._refuse_filtered_reads(p_parent, 'archive a chunk of',\n"
+          "    'the object would hold only those rows, and retention would drop the others once it is recorded');\n", "", 1)],
+    ),
+    "rls_cutover_unchecked_under_lock": (
+        "bench/reads_under_caller_rls.sh",
+        "Pre-#873 from_hypertable_cutover (#873 bullet 3, Tier 1): the caller's row-level security is asked up "
+        "front only, so FORCE and a policy committed while the cutover prepares filter its append-only "
+        "catch-up and its conservation check alike, they agree, and the swap drops the hidden row with the "
+        "hypertable. PART H catches it: row 11 is gone, and the refusal that follows is transmute's, after "
+        "the swap.",
+        [("  perform pgpm._refuse_filtered_reads(p_hypertable, 'swap in the copy of hypertable',\n"
+          "    'the catch-up and the conservation check, read under this lock, would see only those rows and agree "
+          "with each other (row-level security came on after the cutover''s first check), and the swap would drop "
+          "the others with the hypertable');\n", "", 1)],
+    ),
+    "rls_drain_appends_step_unchecked": (
+        "bench/reads_under_caller_rls.sh",
+        "Pre-#873 from_hypertable_drain_appends_step: the tail is read as the caller, and a tail its policy "
+        "hides reads as nothing to drain. tests/timescale/db/46 catches it.",
+        [("  -- #873: the tail is read from the source as this caller\n"
+          "  perform pgpm._refuse_filtered_reads(p_hypertable, 'drain appends from hypertable',\n"
+          "    'the copy would be brought up to date with those rows alone');\n", "", 1)],
+    ),
+    "rls_drain_appends_unchecked": (
+        "bench/reads_under_caller_rls.sh",
+        "Pre-#873 from_hypertable_drain_appends: its own residual check reads the source as the caller, so a "
+        "wholly hidden tail ends the drain before its step is called. tests/timescale/db/46 catches it.",
+        [("  -- #873: its own residual check reads the source too, and a tail its policies hide entirely reads as none\n"
+          "  perform pgpm._refuse_filtered_reads(p_hypertable, 'drain appends from hypertable',\n"
+          "    'the copy would be brought up to date with those rows alone');\n", "", 1)],
+    ),
+    "rls_drain_delta_step_unchecked": (
+        "bench/reads_under_caller_rls.sh",
+        "Pre-#873 from_hypertable_drain_delta_step: the batch's changes leave the delta and their rows are "
+        "re-read from the source as the caller, so a hidden row's change is consumed and never applied. "
+        "tests/timescale/db/46 catches it: the delta is emptied and row 2 leaves the copy.",
+        [("  -- #873: the batch's keys leave the delta below and their rows are re-read from the source as this caller,\n"
+          "  -- so under row-level security that filters it a hidden row's change would be consumed and never applied.\n"
+          "  perform pgpm._refuse_filtered_reads(p_hypertable, 'drain changes from hypertable',\n"
+          "    'the copy would be brought up to date with those rows alone');\n", "", 1)],
+    ),
     "regrain_value_drift_ignored": (
         "bench/regrain_drift_values.sh",
         "Pre-#824 regrain_step: the source mark the prepare tick recorded is never compared with the source, "
@@ -6576,6 +6754,14 @@ MUTATION_SRC = {
     "uuid_conservation_after_migration": "tests/12_uuidv7_kind_test.sql",
     "hypertable_preflight_reads_under_caller_rls": "pgpm_hypertable/install.sql",
     "hypertable_cutover_reads_under_caller_rls": "pgpm_hypertable/install.sql",
+    "rls_to_s3_unchecked": "pgpm_archive/install.sql",
+    "rls_to_s3_parquet_unchecked": "pgpm_archive/install.sql",
+    "rls_archive_ndjson_unchecked": "pgpm_archive/install.sql",
+    "rls_archive_parquet_unchecked": "pgpm_archive/install.sql",
+    "rls_cutover_unchecked_under_lock": "pgpm_hypertable/install.sql",
+    "rls_drain_appends_step_unchecked": "pgpm_hypertable/install.sql",
+    "rls_drain_appends_unchecked": "pgpm_hypertable/install.sql",
+    "rls_drain_delta_step_unchecked": "pgpm_hypertable/install.sql",
 }
 
 # name -> the CI track whose job runs it; anything not listed here belongs to the default `perf`
@@ -6645,6 +6831,10 @@ MUTATION_TRACK = {
     "uninstall_hypertable_capture_by_name": "timescale",
     "hypertable_preflight_reads_under_caller_rls": "timescale",
     "hypertable_cutover_reads_under_caller_rls": "timescale",
+    "rls_cutover_unchecked_under_lock": "timescale",
+    "rls_drain_appends_step_unchecked": "timescale",
+    "rls_drain_appends_unchecked": "timescale",
+    "rls_drain_delta_step_unchecked": "timescale",
 }
 
 

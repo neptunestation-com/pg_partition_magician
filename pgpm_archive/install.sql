@@ -2939,8 +2939,11 @@ begin
     raise exception 'archive.to_s3: credentials missing from vault';
   end if;
 
-  -- identity before any read of the child (#464): %I.%I below names the same relation this resolves
-  perform archive._resolve_child(p_parent, p_child, 'archive.to_s3');
+  -- identity before any read of the child (#464): %I.%I below names the same relation this resolves; and the
+  -- caller's row-level security on it (#873), since the export and its conservation check both read it as
+  -- the caller and would agree on an object holding only the rows its policies admit
+  perform pgpm._refuse_filtered_reads(archive._resolve_child(p_parent, p_child, 'archive.to_s3'), 'export',
+    'the object would hold only those rows');
   select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
   select a.atttypid::regtype::text into v_ctltype
     from pg_attribute a where a.attrelid = p_parent and a.attname = pcfg.control_column;
@@ -3159,6 +3162,7 @@ begin
   -- in the parent's schema and checked against pgpm.part's oid (#464), not `p_child::regclass`,
   -- which resolved the bare name through the caller's search_path
   v_child := archive._resolve_child(p_parent, p_child, 'archive.to_s3_parquet');
+  perform pgpm._refuse_filtered_reads(v_child, 'export', 'the object would hold only those rows');   -- #873
   v_payload := archive._pq_to_parquet(v_child, cfg.compress);
   v_key := archive._child_object_key(p_parent, cfg.prefix, p_child, '.parquet');   -- named with its schema (#711)
 
@@ -3203,6 +3207,9 @@ declare
 begin
   select * into cfg from archive.config where parent_table = p_parent;
   if not found then raise exception 'pgpm.archive_to_s3_ndjson: % has no archive.config row', p_parent; end if;
+  -- #873: the chunk is read through the parent as the caller, and its ledger row opens retire()'s drop gate
+  perform pgpm._refuse_filtered_reads(p_parent, 'archive a chunk of',
+    'the object would hold only those rows, and retention would drop the others once it is recorded');
 
   select t.s3_key, t.etag, t.rows_archived into v_s3_key, v_etag, v_rows
     from archive._encode_upload_ndjson_single(p_parent, p_lo, p_hi, cfg.compress) t;
@@ -3223,6 +3230,9 @@ declare
 begin
   select * into cfg from archive.config where parent_table = p_parent;
   if not found then raise exception 'pgpm.archive_to_s3_parquet: % has no archive.config row', p_parent; end if;
+  -- #873: as archive_to_s3_ndjson's
+  perform pgpm._refuse_filtered_reads(p_parent, 'archive a chunk of',
+    'the object would hold only those rows, and retention would drop the others once it is recorded');
 
   select t.s3_key, t.etag, t.rows_archived into v_s3_key, v_etag, v_rows
     from archive._encode_upload_parquet(p_parent, p_lo, p_hi, cfg.compress) t;

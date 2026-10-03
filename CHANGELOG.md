@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+- **Every read of user rows refuses a caller whose reads row-level security would filter, asked of the
+  relation it actually reads** (#873). `transmute` leaves the monolith its own `ENABLE` / `FORCE ROW LEVEL
+  SECURITY` and policies and carries them onto the parent, and only the conversions asked
+  `pgpm._refuse_filtered_reads` (#825). So for a non-superuser owner without `BYPASSRLS` of a `FORCE`'d table,
+  `regrain` copied only the source rows its policies admit and the swap dropped the rest, and
+  `from_hypertable_cutover`, asked only up front, swapped in a copy short of a row appended past the watermark
+  and hidden by a policy committed while it prepared, its catch-up and conservation check agreeing through
+  that policy. The same refusal is now asked by the write frontier (`obtain`, `extend_to`, `progress`, and on
+  an `id` grid `retain`, `retire` and `set_retain`), `regrain_step`'s source, `untransmute`'s gate, the archive
+  step (of the parent and the partition, before any strategy runs), `retire`'s referencing tables,
+  `incoming_fk_orphans`, `check_uuidv7`, `check_text_time` and `check_time_monotonic`, `archive.to_s3`,
+  `archive.to_s3_parquet` and the two S3 transports, the hypertable drains, and the cutover again under its
+  lock; inside `maintain` each is that step's `skip_*` deferral. `tests/241` classifies every public entry
+  point from the catalog (its modules' halves are `tests/archive/db/38` and `tests/timescale/db/46`) and
+  `tests/242` holds regrain and untransmute by identity, guarded by `bench/reads_under_caller_rls.sh` with
+  one `rls_*_unchecked` mutation per site (19).
 - **A regrain survives its parent being moved to another schema mid-run** (#872, bullet 1). Its copies are
   standalone tables that stay where they were made, but `_regrain_copy_rel` (the swap gate, the attach, the
   reconcile) and the copy branch looked each one up in the parent's CURRENT schema, so after `ALTER TABLE
