@@ -30,6 +30,9 @@
   The copy and the cutover now both ask `pgpm._from_hypertable_key_tmp`, which takes the name already on the
   destination, else the first of `<conname>_pgpm_new` and `pgpm_new_<index oid>` that is free, so they agree
   and the cutover adopts the copy's index. `tests/timescale/db/45`, mutations `hypertable_copy_key_tmp_by_name`
+  and `hypertable_cutover_key_tmp_unshared`. The helper's fallback would also repair the #707 cut temp name, so
+  the mutation `hypertable_tmp_name_cut` now puts that cut back inside the helper as well, and
+  `bench/hypertable_index_names.sh` still fails against it.
   and `hypertable_cutover_key_tmp_unshared`.
 - **A synchronous export never writes over another relation's object, and every archive key comes from one
   function** (#872). `archive._child_object_key` keyed `archive.to_s3` and `archive.to_s3_parquet` by

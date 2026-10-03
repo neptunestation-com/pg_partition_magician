@@ -1775,11 +1775,25 @@ MUTATIONS = {
         "bench/hypertable_index_names.sh",
         "Pre-#707 pgpm_hypertable: an index's pre-build temp name is left(<name> || '_pgpm_new', 63), and "
         "for a 63-byte key name that cut IS the key's own name. The tracked copy's key build dies on "
-        "'already exists', and the append-only cutover finds the source's own index under the temp name, "
-        "skips its build, and fails adopting an index the DROP took. Part B of tests/timescale/db/29 fails.",
+        "'already exists', and the append-only cutover finds the source's own index under the temp name and "
+        "fails on it, after the whole copy. Part B of tests/timescale/db/29 fails. Since #872 a key's temp name "
+        "is chosen by _from_hypertable_key_tmp, whose fallback (a name held by anything not on the destination "
+        "takes pgpm_new_<oid>) would quietly repair a cut name, so the defect is put back INSIDE that helper "
+        "too: the cut name, taken by name, with neither the destination check nor the oid form.",
         [("""  select (case when octet_length(p_name || '_pgpm_new') <= 63 then p_name || '_pgpm_new'
                else 'pgpm_new_' || p_index::text end)::name""",
-          """  select left(p_name || '_pgpm_new', 63)::name   -- MUTANT: cut to 63 bytes""", 1)],
+          """  select left(p_name || '_pgpm_new', 63)::name   -- MUTANT: cut to 63 bytes""", 1),
+         ("""  with c(tmp, ord) as (
+    values (pgpm._from_hypertable_tmp_name(p_name, p_index), 1), (('pgpm_new_' || p_index::text)::name, 2)
+  ), h as (
+    select tmp, ord, to_regclass(format('%I.%I', p_nsp, tmp)) as held from c
+  )
+  select tmp from h
+   where held is null or exists (select 1 from pg_index i where i.indexrelid = h.held and i.indrelid = p_dest)
+   order by (held is not null) desc, ord
+   limit 1
+""", """  select left(p_name || '_pgpm_new', 63)::name   -- MUTANT: cut to 63 bytes, by name, no oid form
+""", 1)],
     ),
     "hypertable_handoff_unchecked": (
         "bench/hypertable_index_names.sh",
