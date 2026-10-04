@@ -2230,13 +2230,21 @@ returns text[] language plpgsql as $$
 declare
   cfg pgpm.config; r record;
   v_ctrl_attnum smallint; v_refcol name; v_reftype regtype; v_refval_q text; v_pos int;
+  v_ctrl_coll_q text; v_refcmp_q text;
   v_lo_lit text; v_hi_lit text; v_vals text[] := '{}'; v_more text[];
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
 
-  select a.attnum into v_ctrl_attnum from pg_attribute a
+  -- #900: the control column's collation, schema-qualified and quoted, or null for a type that has none.
+  -- A text_time grid's bounds order correctly only under it (_check_text_time_collation refused any other at
+  -- transmute), so the range predicate below compares the referencing column under it too.
+  select a.attnum, (select format('%I.%I', n.nspname, co.collname)
+                      from pg_collation co join pg_namespace n on n.oid = co.collnamespace
+                     where co.oid = a.attcollation)
+    into v_ctrl_attnum, v_ctrl_coll_q
+    from pg_attribute a
    where a.attrelid = p_parent and a.attname = cfg.control_column and not a.attisdropped;
 
   v_lo_lit := pgpm._encode(cfg.control_kind, p_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz);
@@ -2273,14 +2281,22 @@ begin
     v_refval_q := case when v_reftype = 'timestamptz'::regtype then format('pgpm._ts_text(%I)', v_refcol)
                        else format('%I::text', v_refcol) end;
 
+    -- The referencing column, compared under the CONTROL column's collation (#900). Its own is whatever
+    -- its DDL said, the database default for a column declared without COLLATE, and under en_US a
+    -- mixed-case KSUID cell whose bounds run from an uppercase to a lowercase digit is an EMPTY interval:
+    -- no crossing key, the declared ON DELETE never applied, and a detach the referencing rows refuse on
+    -- every run. Equal collations index the same way, so a referencing column that already carries the
+    -- control column's collation keeps its index.
+    v_refcmp_q := format('%I', v_refcol) || coalesce(' collate ' || v_ctrl_coll_q, '');
+
     -- A plain range predicate: a row whose key falls in [lo, hi) references a row in THIS partition,
     -- by the definition of range partitioning, whatever else the key carries.
     -- #873: read from the referencing table as the caller, under ITS row-level security.
     perform pgpm._refuse_filtered_reads(r.referencing, 'read the rows referencing a retiring partition from',
       'retention would honour the declared ON DELETE for those rows alone, and the detach would then be refused by the others');
     execute format(
-      'select coalesce(array_agg(distinct %s), ''{}''::text[]) from %s where %I >= %L and %I < %L',
-      v_refval_q, r.referencing::text, v_refcol, v_lo_lit, v_refcol, v_hi_lit)
+      'select coalesce(array_agg(distinct %s), ''{}''::text[]) from %s where %s >= %L and %s < %L',
+      v_refval_q, r.referencing::text, v_refcmp_q, v_lo_lit, v_refcmp_q, v_hi_lit)
       into v_more;
     v_vals := v_vals || v_more;
   end loop;

@@ -6455,6 +6455,16 @@ select is(
           "                       else format('%I::text', v_refcol) end;\n",
           "    v_refval_q := format('%I::text', v_refcol);\n", 1)],
     ),
+    "crossing_keys_referencing_collation": (
+        "bench/crossing_keys_control_collation.sh",
+        "Pre-#900 (F4-07) _crossing_keys: the referencing column is compared against a text_time cell's bounds "
+        "under its OWN collation, so for a referencing column declared without COLLATE in an en_US database a "
+        "mixed-case KSUID cell whose bounds run from an uppercase to a lowercase digit is an empty interval: "
+        "no crossing key is found, the declared ON DELETE CASCADE never runs and the dispatched detach is "
+        "refused on every run. One site, the compared expression. tests/253 catches it.",
+        [("    v_refcmp_q := format('%I', v_refcol) || coalesce(' collate ' || v_ctrl_coll_q, '');\n",
+          "    v_refcmp_q := format('%I', v_refcol);   -- MUTANT: the referencing column's own collation\n", 1)],
+    ),
     "acl_carry_additive": (
         "bench/transmute_grant_carry_resets_acl.sh",
         "Issue #838, the pre-fix shape: _acl_carry_ddl emits the source's grants with no reset in front of "

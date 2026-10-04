@@ -1209,6 +1209,9 @@ The sequence, per partition:
    and a `CASCADE` reaches whatever further tables it would reach on any other delete; `NO ACTION` and
    `RESTRICT` refuse, and the refusal is logged `fail_retain_crossing` with the
    constraint's own error, leaving the partition intact. A successful crossing is logged `retain_crossing`.
+   The keys are found by comparing each referencing column against the partition's bounds under the control
+   column's collation, not the referencing column's own, so a referencing column declared without `COLLATE`
+   (the database default, `en_US` say) still finds every key of a mixed-case `text_time` cell.
 2. Set `pgpm.part.retiring_at` and `pgpm.part.retiring_oid`, and point `pgpm_detach` at this partition's
    concurrent detach, in one transaction, logged `retain_detach`. With no such job, `fail_retain_detach`
    is logged instead.
