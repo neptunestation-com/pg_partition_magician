@@ -954,6 +954,7 @@ run_perf() {
     "bench/untransmute_primary_key_name.sh pgpm_perf231"
     "bench/identity_sequence_name.sh pgpm_perf232"
     "bench/incoming_fk_orphans_match_type.sh pgpm_perf239"
+    "bench/regrain_calendar_clamped_name.sh pgpm_perf234"
   )
   local selected=()
   local n=${#guards[@]} idx

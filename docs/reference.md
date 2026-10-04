@@ -2845,6 +2845,14 @@ target at call time when a partition auto-regrain would split needs it, `regrain
 (for a table renamed after `set_regrain` accepted its target) logs `skip_regrain` on each tick until the
 table is renamed to a shorter name.
 
+A regrain toward a calendar step (`'1 year'`, `'3 months'`) follows the same rule, with the year and the
+month read in `partition_tz` as the two coarsest grains. A year lattice starts in the month the anchor reads
+in `partition_tz`, which is December anywhere west of UTC with the default anchor: a monthly
+`America/New_York` monolith starting 2023-03-01, regrained to `'1 year'`, clamps its first cell to
+`[2023-03-01, 2023-12-01)`, labelled `events_p2023_03`, while the lattice cell after it,
+`[2023-12-01, 2024-12-01)`, keeps `events_p2023`. A clamp whose bounds read exactly as whole years (on a
+`'2 years'` step) or whole months (a quarter) keeps the plain name.
+
 A day or week partition created before that rule keeps the name it was given, the wall date of its start
 in `partition_tz`. East of UTC, with the grid anchored at local midnight, that is exactly the UTC date
 of the cell after it, so on such a grid the next cell's plain name is already taken. When `obtain` or

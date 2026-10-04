@@ -6785,6 +6785,21 @@ select is(
         [("        perform pgpm._regrain_sub_name(p_rel, cfg, p_step, v, h);\n",
           "        perform pgpm._part_name(p_rel, k, p_step, v, null, z);\n", 1)],
     ),
+    "regrain_calendar_name_by_lattice": (
+        "bench/regrain_calendar_clamped_name.sh",
+        "Pre-#904 _regrain_sub_name: a calendar target step (month, year) is left to _part_name, so a sub-range "
+        "clamped to a child's off-lattice lo is labelled at the step's own granularity, the label of the "
+        "lattice cell it sits in. A '1 year' lattice starts in the month the anchor reads in partition_tz "
+        "(December west of UTC with the default anchor), so a monthly New York monolith starting 2023-03-01 "
+        "clamps [2023-03-01, 2023-12-01) under 2023, the name of the cell after it, and regrain_history(.., "
+        "'1 year') refuses its own first copy. One site, the early return restored for calendar steps; "
+        "tests/260 parts A, B and C catch it.",
+        [("  v_from := case when v_months > 0 and v_months % 12 = 0 then 1 when v_months > 0 then 2\n",
+          "  if v_months > 0 then\n"
+          "    return pgpm._part_name(p_relname, cfg.control_kind, p_step, p_lo, p_hi, cfg.partition_tz);\n"
+          "  end if;\n"
+          "  v_from := case when v_months > 0 and v_months % 12 = 0 then 1 when v_months > 0 then 2\n", 1)],
+    ),
     # Issue #872, the recorded-identity lever: one mutation per site, each putting that site back to the
     # parent's current schema or to a name recorded before a move. bench/recorded_identity.sh runs tests/239
     # (the moved-parent conformance suite) and tests/240 against each.
