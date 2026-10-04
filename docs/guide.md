@@ -491,7 +491,9 @@ child toward the target step, sized by `config.regrain_batch`. It is off by defa
 (`set_regrain(parent, null)` turns it back off, abandoning any run it has in flight as `regrain_cancel`
 would) and always safe to enable: it only paces regraining; it never starts on a child that is not frozen.
 A different target while a run is in flight is refused, since the run's copies belong to the step it
-started at: let it finish, or `regrain_cancel` it first.
+started at: let it finish, or `regrain_cancel` it first. The same holds for a hand `regrain_step` or
+`regrain` on the child being split: one at another target is refused rather than resuming the run on a
+second grid.
 
 `set_regrain` refuses a target step **coarser** than `partition_step`: splitting toward it could only leave
 the history at a grain the grid does not have. Equal-or-finer targets are accepted, and `maintain` only ever

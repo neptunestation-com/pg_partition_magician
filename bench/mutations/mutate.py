@@ -6938,6 +6938,29 @@ select is(
           "          'retention would honour the declared ON DELETE for the referencing rows of those alone, and the detach "
           "would then be refused by the others');\n", "", 1)],
     ),
+    "regrain_step_retarget_unchecked": (
+        "bench/regrain_retarget_in_flight.sh",
+        "Issue #905 put back: regrain_step no longer asks whether the run in flight on the child was cut on "
+        "the requested step's grid, so the #267 check (which skips the child itself) is all that stands, a "
+        "hand regrain_step or regrain() at another target on the child an auto-regrain is splitting mints a "
+        "copy overlapping the run's, and every later swap fails 'would overlap' until regrain_cancel. One "
+        "site, the call of _regrain_off_grid. tests/261 parts A and B catch it.",
+        [("    v_off := pgpm._regrain_off_grid(p_parent, cfg, v_step, v_lo, v_hi);\n",
+          "    v_off := null;   -- MUTANT: the run's grid is not asked\n", 1)],
+    ),
+    "regrain_capture_grant_acl_only": (
+        "bench/regrain_capture_owner_grant.sh",
+        "Pre-#906 _regrain_capture_grant: INSERT on the delta goes to the roles an ACL of the parent or the "
+        "source lists, never to their owners, whose rights are implicit. After ALTER TABLE <parent> OWNER TO "
+        "the old owner still owns the source and gets 42501 on the delta on every write into it until the "
+        "swap, and a parent re-owned mid-regrain leaves its new owner the same. One site, the owners' arm of "
+        "the grantee union. tests/262 catches it at the delta's grantee list and at every owner's write.",
+        [("               and att.attacl is not null and a.privilege_type in ('INSERT', 'UPDATE')\n"
+          "            union\n"
+          "            select c.relowner from pg_class c where c.oid in (p_parent, p_source)) g   -- #906: the owners\n",
+          "               and att.attacl is not null and a.privilege_type in ('INSERT', 'UPDATE')) g   -- MUTANT: no owners\n",
+          1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
