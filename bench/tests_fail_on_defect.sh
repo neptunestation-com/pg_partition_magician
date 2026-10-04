@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prove that five pgTAP files FAIL against the defect each exists to catch, by putting the defect back and
+# Prove that seven pgTAP files FAIL against the defect each exists to catch, by putting the defect back and
 # running the file: a test that also passes against broken code is not evidence of anything.
 #
 # WHY THIS GUARD EXISTS (issues #743 and #744). Each of these files passed against the very defect it
@@ -13,6 +13,12 @@
 #   tests/12  compared the table's count with it in the next statement: count = count.
 # And issue #919: tests/92 promised 'identity, not just cardinality' for the rows its regrain moved and
 #   asserted count(*) = 250 over ids 1..2500, which a swap that loses row 2500 and invents 2499 satisfies.
+#   tests/88  (issue #881) claimed text_time's #325 drought immunity for cuid, and tests/91 for ULID and
+#   tests/91  KSUID, but asserted only that a partition covers now() and that a row at now() is accepted.
+#             Both hold with text_time dropped from _frontier_native's greatest(decoded, now()), because
+#             transmute's monolith takes its upper bound from its OWN inline greatest() and so covers now()
+#             by itself on the day of the transmute (tests/85 explains it for uuidv7); only
+#             bench/frontier_drought.sh caught that mutant.
 #
 # HOW. Per file, the same two runs, in fresh databases named <db> in <container>:
 #   CONTROL   the file passes, every planned assertion ok, against the clean pgpm (and fixtures);
@@ -21,16 +27,21 @@
 #               tests/90  the same with _radix_decode's alphabet-length check made unreachable;
 #               tests/11, tests/12  the clean install and fixtures, with two seeded rows ('evt 1', 'evt 2')
 #                         replaced by strangers under the same ids AFTER the migration: rows lost and
-#                         rows added that cancel in a count, so only an identity check can see them.
+#                         rows added that cancel in a count, so only an identity check can see them;
 #               tests/92  this checkout's install.sql whose regrain swap, after the source is dropped,
 #                         rewrites the highest copied key in the cell by one (2500 becomes 2499): one row
-#                         lost and one row invented, same count.
+#                         lost and one row invented, same count;
+#               tests/88, tests/91  this checkout's install.sql with text_time dropped from
+#                         _frontier_native's clock blend (uuidv7 keeps it), the pre-#325 shape for that
+#                         kind alone.
 #   LIVENESS  each defect is shown present before its file is judged: the mutant install lets an orphan
 #             through to a different refusal (and the clean one names the orphan), the mutant decodes a
 #             digit under a 5-character alphabet at radix 10 (the clean one refuses it), and the edited
 #             tables hold the seeded count without 'evt 1' and 'evt 2'; for tests/92, read after the file
 #             has run (the defect fires inside its regrain), the swap happened once, 2500 is gone, 2499 is
-#             there and the table still holds 251 rows. A defect that was never planted
+#             there and the table still holds 251 rows; and a stale text_time table's frontier under the
+#             mutant is its 11-month-old data maximum with no partition built past the monolith (under the
+#             clean install: at or past now(), with one). A defect that was never planted
 #             would make the file's failure meaningless and its pass vacuous.
 #
 # The mutations it is required to fail against (bench/mutations/mutate.py), each the file's pre-fix text:
@@ -39,9 +50,11 @@
 #   id_conservation_after_migration    -- tests/11's count back to a snapshot taken after the migration
 #   uuid_conservation_after_migration  -- tests/12's, likewise
 #   regrain_survivors_by_count         -- tests/92's identity check back to count(*) = 250 over 1..2500
+#   text_time_drought_coverage_only    -- tests/88's drought checks back to "a partition covers now()"
+#   text_time_drought_coverage_only_ulid_ksuid -- tests/91's, likewise
 #
 # Usage: tests_fail_on_defect.sh <container> <db> [test file]
-# With no third argument it judges all five files in this checkout. With one it judges THAT file in place
+# With no third argument it judges all seven files in this checkout. With one it judges THAT file in place
 # of the one it stands for, recognised by its file name or, for a mutant bench/discriminate.sh built
 # (<mutation>.sql), by the mutation's MUTATION_SRC; a /repo/... path is mapped to this checkout. Every
 # install and test is fed from the host over stdin, so the container need not mount the repository; it
@@ -62,8 +75,10 @@ T90="tests/90_text_time_alphabet_codec_test.sql"
 T11="tests/11_id_kind_test.sql"
 T12="tests/12_uuidv7_kind_test.sql"
 T92="tests/92_regrain_outgoing_fk_test.sql"
-F18="$ROOT/$T18"; F90="$ROOT/$T90"; F11="$ROOT/$T11"; F12="$ROOT/$T12"; F92="$ROOT/$T92"
-SEL=" 18 90 11 12 92 "
+T88="tests/88_text_time_transmute_test.sql"
+T91="tests/91_text_time_ulid_ksuid_transmute_test.sql"
+F18="$ROOT/$T18"; F90="$ROOT/$T90"; F11="$ROOT/$T11"; F12="$ROOT/$T12"; F92="$ROOT/$T92"; F88="$ROOT/$T88"; F91="$ROOT/$T91"
+SEL=" 18 90 11 12 92 88 91 "
 
 if [ -n "$ONLY" ]; then
   ONLY="${ONLY/#\/repo\//$ROOT/}"
@@ -82,7 +97,9 @@ PY
     "$(basename "$T11")":*|*:"$T11") SEL=" 11 "; F11="$ONLY" ;;
     "$(basename "$T12")":*|*:"$T12") SEL=" 12 "; F12="$ONLY" ;;
     "$(basename "$T92")":*|*:"$T92") SEL=" 92 "; F92="$ONLY" ;;
-    *) say FAIL "the file to judge is one of the five this guard knows" "$ONLY -> '${src}'"; exit 1 ;;
+    "$(basename "$T88")":*|*:"$T88") SEL=" 88 "; F88="$ONLY" ;;
+    "$(basename "$T91")":*|*:"$T91") SEL=" 91 "; F91="$ONLY" ;;
+    *) say FAIL "the file to judge is one of the seven this guard knows" "$ONLY -> '${src}'"; exit 1 ;;
   esac
 fi
 sel() { [[ "$SEL" == *" $1 "* ]]; }
@@ -287,6 +304,66 @@ if sel 92; then
     fi
   else
     say FAIL "planted the defect: a key rewrite after regrain's swap" "install.sql moved; fix the pattern"; fail=1
+  fi
+fi
+
+# ---- tests/88 and tests/91: text_time's #325 drought immunity ----------------------------------------
+# The probe: a cuid table backfilled 13 and 11 months stale, monthly step, p_obtain => 2 (tests/88's own
+# fixture), one maintenance tick, then "<frontier is stale>/<a partition starts at or past the monolith's
+# hi>". The clean install reads false/true; the mutant must read true/false, or its DEFECT run judges a
+# defect that was never planted.
+TT_PROBE="create table public.tt_probe (id text primary key, body text);
+insert into public.tt_probe values
+  (pgpm._ts_to_text_time(now() - interval '13 months', 'c', 8, 36, 'ms'), 'oldest'),
+  (pgpm._ts_to_text_time(now() - interval '11 months', 'c', 8, 36, 'ms'), 'newest');
+call pgpm.transmute('public.tt_probe', 'id', interval '1 month', p_obtain => 2,
+  p_tt_prefix => 'c', p_tt_width => 8, p_tt_radix => 36, p_tt_unit => 'ms');
+select pgpm.resume('public.tt_probe');
+call pgpm.maintain('public.tt_probe');
+select 'PROBE ' || (pgpm._frontier_native('public.tt_probe')::timestamptz < now() - interval '10 months')::text
+       || '/' || exists (select 1 from pgpm.part p join pgpm.config c on c.parent_table = p.parent_table
+                          join pgpm.part m on m.parent_table = c.parent_table and m.child_oid = c.monolith_oid
+                         where p.parent_table = 'public.tt_probe'::regclass and p.attached
+                           and p.lo::timestamptz >= m.hi::timestamptz)::text;"
+tt_probe() { q -d "$DB" -tAq -f - <<<"$TT_PROBE" 2>&1 | grep -o 'PROBE .*' | head -1; }
+# judge_on <install.sql> <label> <expect> <test file>: judge the file in a fresh <db> holding that install.
+judge_on() {
+  if fresh && install "$1"; then judge "$2" "$3" "$4"
+  else say FAIL "$2: the install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1; fi
+}
+if sel 88 || sel 91; then
+  if fresh && install "$ROOT/pgpm_core/install.sql"; then
+    probe=$(tt_probe)
+    if [ "$probe" = "PROBE false/true" ]; then
+      say PASS "LIVENESS: the clean text_time frontier is now(), grid grows" "$probe"
+    else
+      say FAIL "LIVENESS: the clean text_time frontier is now(), grid grows" "${probe:-no PROBE line}"; fail=1
+    fi
+    sel 88 && judge_on "$ROOT/pgpm_core/install.sql" "CONTROL: $T88 passes against the clean install" pass "$F88"
+    sel 91 && judge_on "$ROOT/pgpm_core/install.sql" "CONTROL: $T91 passes against the clean install" pass "$F91"
+  else
+    say FAIL "the clean install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
+  fi
+  if plant text_time_frontier_data_only \
+       "  if cfg.control_kind in ('uuidv7', 'text_time') then
+    return pgpm._ts_text(greatest(v_decoded::timestamptz, now()));
+" "  if cfg.control_kind in ('uuidv7') then
+    return pgpm._ts_text(greatest(v_decoded::timestamptz, now()));
+"; then
+    if fresh && install "$work/text_time_frontier_data_only.sql"; then
+      probe=$(tt_probe)
+      if [ "$probe" = "PROBE true/false" ]; then
+        say PASS "LIVENESS: the mutant text_time frontier is the stale max" "$probe"
+      else
+        say FAIL "LIVENESS: the mutant text_time frontier is the stale max" "${probe:-no PROBE line}"; fail=1
+      fi
+      sel 88 && judge_on "$work/text_time_frontier_data_only.sql" "DEFECT: $T88 fails with text_time's clock blend gone" fail "$F88"
+      sel 91 && judge_on "$work/text_time_frontier_data_only.sql" "DEFECT: $T91 fails with text_time's clock blend gone" fail "$F91"
+    else
+      say FAIL "the install with text_time's clock blend gone loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
+    fi
+  else
+    say FAIL "planted the defect: _frontier_native's text_time blend" "install.sql moved; fix the pattern"; fail=1
   fi
 fi
 
