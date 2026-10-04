@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **Regrain's change capture counts only while its trigger is `ENABLE ALWAYS`** (#892). `regrain_step` resumed
+  a run whenever the source carried a trigger named `pgpm_regrain_capture`, never asking whether it fires, so
+  one an owner disabled (`ALTER TABLE <partition> DISABLE TRIGGER USER` for a bulk load, or the same on the
+  parent) or left origin-only (the matching `ENABLE TRIGGER USER`, or a run prepared by 0.6.0 and in flight
+  across the upgrade, whose replica-role DML it skipped) still counted as live capture, and the swap attached
+  copies that missed the changes made meanwhile: an UPDATE reverted, a DELETE resurrected. A resuming tick
+  that finds the trigger in any other state now restarts the run (`regrain_restart`, `method` naming the
+  state), discarding the copies and re-minting capture `ENABLE ALWAYS`, and the swap asks again under its
+  `DETACH` and rolls back rather than drop the source. Tests 244 (owner DDL, a negative witness, the swap's
+  check) and 245 (the upgraded state), guarded by `bench/regrain_capture_enabled_always.sh`,
+  `bench/regrain_capture_origin_only_upgrade.sh` and the in-flight stage of `bench/upgrade_in_place.sh`, with
+  mutations `regrain_capture_unarmed_ignored`, `regrain_capture_unarmed_no_remint`,
+  `regrain_swap_capture_unchecked`, `regrain_capture_unarmed_disabled_only` and
+  `upgrade_regrain_capture_origin_only_kept`.
 - **`from_hypertable`'s scratch tables are named in `pg_temp`, never through the search_path** (#894). The
   tracked drain step's `pgpm_dbatch` and the keyed append-only cutover's `pgpm_htail` are temp tables `ON
   COMMIT DROP`, each dropped first by an unqualified `drop table if exists`. A fresh transaction has no temp

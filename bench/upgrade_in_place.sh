@@ -61,6 +61,10 @@
 #      the restart the swap attaches the copy made before the rewrite. LIVENESS witnesses first: the
 #      origin really lacks the column, the run really has a copy, and the copy really holds the old
 #      values while the source holds the new ones. (Numbered 8 but run last, in its own database.)
+#      The same run carries the capture trigger v0.6.0 minted origin-only (#892): the first tick after the
+#      upgrade must restart it once more and re-mint capture ENABLE ALWAYS, and a replica-role UPDATE and two
+#      DELETEs made once the restarted run has copied their sub-range again must survive the swap. Without
+#      the re-arm the replica-role DML is never captured (and the swap's own check refuses every swap).
 #   7. LIVENESS WITNESS: the machine still runs afterwards. maintain_obtain() (issue #347 split obtain
 #      out of maintain()/maintain_all(), so this is now the call that mints partitions) on the table
 #      that existed BEFORE the upgrade mints a new partition, named. A structurally perfect install
@@ -401,6 +405,12 @@ check "LIVENESS: the source holds OLD10, the copy made before it old10" \
   "$(q "$IDB" "select note from public.up_r where id = 10")/$(q "$IDB" "select note from $COPY_REL where id = 10" 2>/dev/null)" \
   "OLD10/old10"
 
+# #892: and the origin minted up_r's capture origin-only (CREATE TRIGGER alone, before #450), the state a
+# session_replication_role = replica writer skips.
+check "LIVENESS: the $ORIGIN_TAG origin minted up_r's capture trigger origin-only" \
+  "$(q "$IDB" "select string_agg(tgenabled::text, ',') from pg_trigger
+                where tgname = 'pgpm_regrain_capture' and tgrelid = 'public.$(src_name up_r)'::regclass")" "O"
+
 if ! install_into "$IDB" >/tmp/up_inflight_upgrade.log 2>&1; then
   echo "FAIL  the upgrade over the in-flight regrain did not complete"; sed 's/^/      /' /tmp/up_inflight_upgrade.log; fail=1
 fi
@@ -419,6 +429,25 @@ check "the upgrade recorded each run's mark from its source as it is now" \
                 from pgpm.config g join pgpm.part p on p.parent_table = g.parent_table and p.attached and p.lo = '0'")" \
   "up_n 0 true,up_r 0 true"
 
+# #892: the upgrade keeps that origin-only trigger, so the first tick must restart the run once more (its copy
+# is already gone, so it discards none) and re-mint capture ENABLE ALWAYS; then, once the run has copied
+# [0, 100) again, a replica-role UPDATE and two DELETEs into it are captured like any other change.
+UP_FIRST=$(step up_r 2>&1)
+check "the first tick re-armed up_r's capture ENABLE ALWAYS, restarting the run" \
+  "$UP_FIRST/$(q "$IDB" "select string_agg(tgenabled::text, ',') from pg_trigger
+                         where tgname = 'pgpm_regrain_capture' and tgrelid = 'public.$(src_name up_r)'::regclass")/$(q "$IDB" \
+     "select count(*) from pgpm.log where parent_table = 'public.up_r'::regclass and action = 'regrain_restart'
+         and method like '%pgpm_regrain_capture%is origin-only, not ENABLE ALWAYS%'")" "restarted:0/A/1"
+for _ in $(seq 1 4); do
+  [ "$(q "$IDB" "select regrain_cursor from pgpm.config where parent_table = 'public.up_r'::regclass")" = 100 ] && break
+  step up_r >/dev/null 2>&1
+done
+run "$IDB" "set session_replication_role = replica;
+            update public.up_r set note = 'new10' where id = 10; delete from public.up_r where id in (20, 21);" >/dev/null
+check "LIVENESS: up_r re-copied [0, 100) before the replica-role DML, which committed" \
+  "$(q "$IDB" "select regrain_cursor from pgpm.config where parent_table = 'public.up_r'::regclass")/$(q "$IDB" \
+     "select note from public.up_r where id = 10")/$(q "$IDB" "select count(*) from public.up_r where id in (20, 21)")" "100/new10/0"
+
 # Then the run to its swap, and the values it attached, row by row.
 for _ in $(seq 1 12); do
   case "$(step up_r 2>/dev/null)" in swapped:*) break ;; esac
@@ -429,6 +458,9 @@ check "LIVENESS: up_r's regrain swapped [0, 1000)" \
 check "up_r's regrained range holds the rewritten values" \
   "$(q "$IDB" "select string_agg(id || '=' || note, ',' order by id) from public.up_r where id in (1, 50, 99, 100, 130)")" \
   "1=OLD1,50=OLD50,99=OLD99,100=OLD100,130=OLD130"
+check "up_r's replica-role UPDATE survives the swap and its DELETEs are not resurrected (#892)" \
+  "$(q "$IDB" "select string_agg(id || '=' || note, ',' order by id) from public.up_r where id in (9, 10, 19, 20, 21, 22)")" \
+  "9=OLD9,10=new10,19=OLD19,22=OLD22"
 docker exec "$C" psql -U postgres -q -c "drop database if exists $IDB" >/dev/null 2>&1
 
 docker exec "$C" psql -U postgres -q -c "drop database if exists $FRESH" >/dev/null 2>&1

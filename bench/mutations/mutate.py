@@ -6292,6 +6292,58 @@ select is(
           "      perform pgpm._regrain_capture_install(p_parent, v_child_name);\n"
           "    end if;\n", "", 1)],
     ),
+    # Issue #892: regrain's change capture counts only while its trigger is ENABLE ALWAYS.
+    "regrain_capture_unarmed_ignored": (
+        "bench/regrain_capture_enabled_always.sh",
+        "Pre-#892 regrain_step: a resuming tick never asks whether the source's capture trigger is ENABLE "
+        "ALWAYS, only (through _regrain_capture_active) that it exists, so a trigger an owner disabled with "
+        "ALTER TABLE <partition> DISABLE TRIGGER USER, or left origin-only by the matching ENABLE TRIGGER USER, "
+        "counts as live capture and the run carries on from copies that missed the changes made meanwhile. "
+        "One site, the resuming tick's probe. tests/244 part A catches it: no regrain_restart, no re-mint, and "
+        "(with the swap's own check still in place) no swap at all.",
+        [("  v_unarmed := pgpm._regrain_capture_unarmed(v_child);\n  v_restart_why := concat_ws(",
+          "  v_unarmed := null;\n  v_restart_why := concat_ws(", 1)],
+    ),
+    "regrain_capture_unarmed_no_remint": (
+        "bench/regrain_capture_enabled_always.sh",
+        "#892, the plausible-but-wrong fix: a capture trigger that is not ENABLE ALWAYS restarts the run (the "
+        "copies are discarded and the cursor goes back), but capture is not re-minted, so the trigger stays "
+        "disabled or origin-only, the next tick finds it so again, and the run restarts forever without "
+        "swapping. One site, the fold that sends an unarmed trigger to the re-mint; tests/244 part A catches it.",
+        [("  v_capture_drift := coalesce(v_capture_drift, v_unarmed);\n", "", 1)],
+    ),
+    "regrain_swap_capture_unchecked": (
+        "bench/regrain_capture_enabled_always.sh",
+        "#892, the swap's half: the swap does not ask again whether capture is ENABLE ALWAYS once its DETACH "
+        "holds ACCESS EXCLUSIVE on the source, so a trigger disabled after the tick's own check (ALTER TABLE "
+        "... DISABLE TRIGGER needs only SHARE ROW EXCLUSIVE, which nothing the tick holds before the DETACH "
+        "conflicts with) is never seen and the swap drops the source for copies capture may have missed "
+        "changes for. One site, the post-DETACH check; tests/244 part C catches it.",
+        [("  v_unarmed := pgpm._regrain_capture_unarmed(v_child);\n  if v_unarmed is not null then\n",
+          "  v_unarmed := null;\n  if v_unarmed is not null then\n", 1)],
+    ),
+    "regrain_capture_unarmed_disabled_only": (
+        "bench/regrain_capture_origin_only_upgrade.sh",
+        "#892, the plausible-but-wrong fix: only a DISABLED capture trigger counts as not live, so an "
+        "origin-only one (the state v0.6.0 minted, which a run in flight across the upgrade keeps, and the "
+        "state ENABLE TRIGGER USER leaves) passes, though a session_replication_role = replica writer skips "
+        "it. Nothing re-mints it, and the swap reverts a replica-role UPDATE and resurrects a DELETE. One site, "
+        "the state _regrain_capture_unarmed accepts; tests/245 catches it.",
+        [("  select case when t.tgenabled = 'A' then null\n",
+          "  select case when t.tgenabled <> 'D' then null\n", 1)],
+    ),
+    "upgrade_regrain_capture_origin_only_kept": (
+        "bench/upgrade_in_place.sh",
+        "Pre-#892, through a REAL upgrade: a regrain in flight under the released v0.6.0 carries the "
+        "origin-only capture trigger v0.6.0 minted, the upgrade's #878 block restarts the run and keeps capture "
+        "as it was, and no tick asks whether capture is ENABLE ALWAYS, so a replica-role UPDATE and DELETE "
+        "applied after the restarted run has re-copied their sub-range are never captured. The same edit as "
+        "regrain_capture_unarmed_ignored; bench/upgrade_in_place.sh's in-flight stage (assertion 8) must FAIL "
+        "on the trigger still origin-only after the first tick and on the run never swapping (the swap's own "
+        "check refuses it every tick).",
+        [("  v_unarmed := pgpm._regrain_capture_unarmed(v_child);\n  v_restart_why := concat_ws(",
+          "  v_unarmed := null;\n  v_restart_why := concat_ws(", 1)],
+    ),
     # Issues #827, #830 and #815 (F1-06): what untransmute hands back, and where.
     "untransmute_moved_parent_resolved_by_name": (
         "bench/untransmute_moved_parent.sh",
