@@ -139,7 +139,9 @@ select is((select array_agg(st order by g) from steps233), array['prepared', 'co
   'regrain_step prepares, then copies the first yearly sub-range''s two rows');
 select is((select string_agg(c.child_name || ' [' || c.lo || ', ' || c.hi || ') ' || pg_temp.bodies(c.child_oid::regclass), '; ')
              from pgpm.part c where c.parent_table = 'public.rg233'::regclass and not c.attached),
-  'rg233_p0100_bc [0100-06-01 00:00:00+00 BC, 0099-01-01 00:00:00+00 BC) {bc100-june,bc100-sept}',
+  -- clamped to the monolith's lo (100 BC June, off the January year lattice), so it is labelled to the month
+  -- its bounds read exactly, as every clamped calendar cell is (#904); the year label is the lattice cell's
+  'rg233_p0100_06_bc [0100-06-01 00:00:00+00 BC, 0099-01-01 00:00:00+00 BC) {bc100-june,bc100-sept}',
   'the first copy child is [100 BC June, 99 BC January), not inverted, and holds bc100-june and bc100-sept, not bc99-march');
 
 select * from finish();
