@@ -45,7 +45,12 @@ create table public.t185a (id bigint primary key, body text, note text);
 insert into public.t185a values (1, 'a', 'x'), (2, 'b', 'y'), (5, 'c', 'z');
 grant select on public.t185a to t185_r1;
 grant update (body) on public.t185a to t185_r1;   -- a column grant the window's REVOKE does not touch
-create policy t185a_p on public.t185a using (true);   -- RLS not enabled; the policy is (A)'s window hook
+create policy t185a_p on public.t185a using (true);
+-- (A)'s window hook is the cutover replaying this flag onto the staging parent: the last statement of the
+-- staging work, after where the grants were read before #706 and before the lock. It used to be the staging
+-- parent's CREATE POLICY, which #897 moved after the renames, where the text names the table. The policy
+-- admits every row, and this session is a superuser, so nothing below reads through it.
+alter table public.t185a enable row level security;
 comment on table public.t185a is 't185a';             -- and its COMMENT replay is the hook after the read
 create temp table orig185a as select 'public.t185a'::regclass::oid as oid;
 
@@ -72,9 +77,11 @@ create function public.t185_inject() returns event_trigger language plpgsql as $
 declare r record; v_state text;
 begin
   for r in select * from pg_event_trigger_ddl_commands() loop
-    -- (A) the window: the staging parent's policy, after the old grant read, before the lock. A second
-    -- session commits a REVOKE and two GRANTs on the live table, which take no lock it could wait on.
-    if r.command_tag = 'CREATE POLICY' and r.object_identity like '%public.t185a_pgpm_new'
+    -- (A) the window: the staging parent's ENABLE ROW LEVEL SECURITY (the first of its ALTER TABLEs to
+    -- leave it with the flag set), after the old grant read, before the lock. A second session commits a
+    -- REVOKE and two GRANTs on the live table, which take no lock it could wait on.
+    if r.command_tag = 'ALTER TABLE' and r.object_identity = 'public.t185a_pgpm_new'
+       and (select relrowsecurity from pg_class where oid = r.objid)
        and not exists (select 1 from public.w185 where site = 'A window') then
       perform dblink_exec('dbname=' || current_database() || ' user=postgres options=-cstatement_timeout=10000',
         'revoke select on public.t185a from t185_r1; grant insert on public.t185a to t185_r2; '
@@ -112,7 +119,7 @@ begin
   end loop;
 end $$;
 create event trigger t185_inject on ddl_command_end
-  when tag in ('CREATE POLICY', 'COMMENT', 'CREATE TABLE') execute function public.t185_inject();
+  when tag in ('ALTER TABLE', 'COMMENT', 'CREATE TABLE') execute function public.t185_inject();
 
 -- ====================================================================================================
 -- (A) the parent carries the grants the table had at the rename
