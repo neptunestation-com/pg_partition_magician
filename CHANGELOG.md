@@ -12,6 +12,16 @@
   (`regrain_restart`) and every copy is made again carrying the keys the parent has now. `tests/251`, guarded
   by `bench/regrain_fk_drift_swap_scan.sh` (the copies' scan counters across the swap tick) with mutation
   `regrain_fk_drift_ignored`.
+- **An outgoing foreign key added to a parent mid-regrain restarts the run instead of being validated
+  under the swap's lock** (#898). Each copy is born with its own validated instance of the parent's
+  outgoing keys while it is still empty, so that the swap's `ATTACH PARTITION` adopts them, but the drift check compared
+  columns and `CHECK` constraints only: a copy made before a key was added reached the swap without it, and
+  `ATTACH` validated the key by scanning the copy while the swap held `ACCESS EXCLUSIVE` on the parent, and a
+  key the parent dropped stayed on the fine child. `_regrain_shape_drift` now compares the parent's validated
+  outgoing keys with each copy's by definition, so a key added, dropped or redefined restarts the run
+  (`regrain_restart`) and every copy is made again carrying the keys the parent has now. `tests/251`, guarded
+  by `bench/regrain_fk_drift_swap_scan.sh` (the copies' scan counters across the swap tick) with mutation
+  `regrain_fk_drift_ignored`.
 - **`forget_missing` returns `pgpm_detach` to idle when it forgets the retirement that armed it** (#893). A
   referenced partition's retirement arms the standing job with `DETACH PARTITION ... CONCURRENTLY` by name,
   and `forget_missing` deleted the dropped parent's retiring row without disarming it, so the command outlived
