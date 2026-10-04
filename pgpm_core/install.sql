@@ -1915,6 +1915,7 @@ begin
                  p_nsp, p_name, p_nsp, p_rel, v_lo_lit, v_hi_lit);
   perform pgpm._own_like_parent(format('%I.%I', p_nsp, p_rel)::regclass,
                                 format('%I.%I', p_nsp, p_name)::regclass);
+  perform pgpm._acl_reset(format('%I.%I', p_nsp, p_name)::regclass, true);   -- #875: the owner's alone
   perform pgpm._replica_identity_like_parent(format('%I.%I', p_nsp, p_rel)::regclass,
                                              format('%I.%I', p_nsp, p_name)::regclass);   -- #782
   -- child_oid: WHICH relation this row is about (#421), recorded in the same statement that first
@@ -5790,6 +5791,7 @@ begin
       -- ANALYZE it here, off the swap's exclusive-lock window, so the swap and any query that hits it after
       -- see real stats, not reltuples = -1 (#164).
       perform pgpm._own_like_parent(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);   -- #277
+      perform pgpm._acl_reset(format('%I.%I', v_sub_nsp, v_sub_name)::regclass, true);   -- #875
       perform pgpm._analyze(format('%I.%I', v_sub_nsp, v_sub_name)::regclass);
     end if;
     update pgpm.config set regrain_cursor = v_cursor where parent_table = p_parent;
@@ -6510,7 +6512,15 @@ $$;
 -- that had revoked one of its own privileges does not get it back either. p_default says the source's
 -- relacl was NULL, the owner's implicit all-privileges default, which has no grant to replay: the owner is
 -- then granted ALL, and a relation that is already at that default (nothing on it to revoke) is left
--- alone. The shape untransmute's reset has had since #667.
+-- alone. untransmute's reset since #875 (its own, before, spared the owner).
+-- Every partition pgpm mints is put at that default too (#875: _create_partition for obtain, extend_to and
+-- transmute's forward grid, and a regrain's fine children), after _own_like_parent gives it the parent's
+-- owner. It is created by whatever role runs maintenance, so it was born with that role's ALTER DEFAULT
+-- PRIVILEGES, and a role those name (on Supabase, anon and authenticated) read every row of it by naming
+-- it, past the parent's grants and its row security, which does not apply to a partition read directly.
+-- The owner's alone, not the parent's grants: a write or read routed through the parent is checked
+-- against the parent only, so no role needs a grant on a partition, and one the parent's policies filter
+-- would read the partition unfiltered.
 create or replace function pgpm._acl_reset(p_rel regclass, p_default boolean)
 returns void language plpgsql as $$
 declare
@@ -6540,42 +6550,97 @@ begin
   end if;
 end $$;
 
+-- _acl_may_grant_as: whether this session can replay a grant under p_grantor, its grantor (#903). The replay
+-- runs as the grantor (SET ROLE), which PostgreSQL checks against the SESSION user, not the current one: a
+-- superuser may become any role, anyone else only a role it is a member of (on 16 and later, one it may SET).
+-- And the grantor names the relation in the replayed GRANT, which needs USAGE on its schema, p_rel's.
+create or replace function pgpm._acl_may_grant_as(p_grantor oid, p_rel regclass)
+returns boolean language sql stable as $$
+  select pg_has_role(session_user, p_grantor,
+                     case when current_setting('server_version_num')::int >= 160000 then 'SET' else 'MEMBER' end)
+     and has_schema_privilege(p_grantor, (select c.relnamespace from pg_class c where c.oid = p_rel), 'USAGE');
+$$;
+
+-- _acl_grant_as: run p_grant, one replayed GRANT, as p_grantor, the role that made it on the source (#903). A
+-- grant made through a grant option is recorded under the role that made it, and only that role (or the
+-- owner, with CASCADE through it) can revoke it; replayed as the converting role it was recorded as the
+-- owner's, so its grantor's later REVOKE found no grant of its own and the grantee kept the privilege. A
+-- session that cannot become the grantor is refused rather than recording the grant under another one: the
+-- destination is the table the application names (transmute's parent, the hypertable's copy, untransmute's
+-- restored table), which ends with exactly its source's grants. transmute asks _acl_may_grant_as up front,
+-- before anything is committed; the hypertable's swap transaction and untransmute roll back whole, the
+-- source untouched. The role is put back as it was (RESET ROLE would drop a SET ROLE the caller made before
+-- calling pgpm).
+create or replace function pgpm._acl_grant_as(p_grantor oid, p_grant text)
+returns void language plpgsql as $$
+declare
+  v_was text := current_setting('role');
+begin
+  begin
+    execute format('set role %I', pg_get_userbyid(p_grantor));
+  exception when others then
+    raise exception 'pg_partition_magician: cannot replay the grant "%" as its grantor %, the role that made it through its grant option (%). Replayed as any other role it would be recorded under the owner, and % could no longer revoke it. Run this as a role that is a member of % (a superuser is), or have % revoke the grant and the owner make it, then re-run.',
+      p_grant, quote_ident(pg_get_userbyid(p_grantor)), sqlerrm, quote_ident(pg_get_userbyid(p_grantor)),
+      quote_ident(pg_get_userbyid(p_grantor)), quote_ident(pg_get_userbyid(p_grantor));
+  end;
+  execute p_grant;
+  execute 'set role ' || case when v_was = 'none' then 'none' else quote_ident(v_was) end;
+end $$;
+
 -- _acl_carry_ddl: the statements that give the relation named p_dst_q exactly p_src's table and column
--- grants (#838), shared by transmute's parent (7b) and pgpm_hypertable's swapped copy (#787). The FIRST
--- statement resets the destination's ACL (_acl_reset) and the rest replay p_src's grants onto it, so what
--- the destination's creator's default privileges gave it is gone and what the source had is all it holds.
+-- grants (#838), shared by transmute's parent (7b), pgpm_hypertable's swapped copy (#787) and untransmute's
+-- restored table (#875). The FIRST statement resets the destination's ACL (_acl_reset) and the rest replay
+-- p_src's grants onto it, so what the destination's creator's default privileges gave it is gone and what
+-- the source had is all it holds.
 -- Statements rather than DDL run here because the hypertable's swap reads them off the source before it
 -- drops it and replays them once the copy has the source's name, after its OWNER TO; the reset is a call
 -- so that it reads the destination's ACL when it runs, not when the list is built. Run it after the
 -- destination has its final owner: the reset takes the owner's own privileges too. p_dst_q is the
 -- destination's name as SQL, already quoted (a regclass's text or a format('%I.%I')); aclexplode gives a
 -- (grantor, grantee, privilege, grantable) row per grant, and grantee 0 is PUBLIC.
+-- Each grant keeps its GRANTOR (#903). One the owner made is replayed as it always was, by this role, which
+-- PostgreSQL records under the owner (the destination's owner is the source's by now). One another role made
+-- through its grant option is replayed as that role (_acl_grant_as), after the grant that gave it the
+-- option: the grants are ordered by the depth of that chain, per privilege and column (a table-level grant
+-- option covers a column grant too), which PostgreSQL keeps acyclic.
 create or replace function pgpm._acl_carry_ddl(p_src regclass, p_dst_q text)
 returns text[] language plpgsql stable as $$
 declare
-  v_ddl text[]; r record;
+  v_ddl text[]; r record; v_grant_q text;
 begin
   v_ddl := array[format('select pgpm._acl_reset(%L::regclass, %L)', p_dst_q,
                         (select c.relacl is null from pg_class c where c.oid = p_src))];
   for r in
-    select a.grantee, a.privilege_type, a.is_grantable
-      from pg_class c, aclexplode(c.relacl) a where c.oid = p_src and c.relacl is not null
-     order by a.grantee, a.privilege_type
+    with recursive g as (
+      select a.grantor, a.grantee, a.privilege_type, a.is_grantable, 0 as attnum, null::name as attname
+        from pg_class c, aclexplode(c.relacl) a where c.oid = p_src and c.relacl is not null
+      union all
+      -- COLUMN-level grants, which relacl does not carry at all: they live in pg_attribute.attacl.
+      select a.grantor, a.grantee, a.privilege_type, a.is_grantable, att.attnum::int, att.attname
+        from pg_attribute att, aclexplode(att.attacl) a
+       where att.attrelid = p_src and att.attnum > 0 and not att.attisdropped and att.attacl is not null
+    ), chain (grantor, grantee, privilege_type, is_grantable, attnum, depth) as (
+      select g.grantor, g.grantee, g.privilege_type, g.is_grantable, g.attnum, 0 from g
+       where g.grantor = (select c.relowner from pg_class c where c.oid = p_src)
+      union
+      select g.grantor, g.grantee, g.privilege_type, g.is_grantable, g.attnum, ch.depth + 1
+        from chain ch join g on g.grantor = ch.grantee and g.privilege_type = ch.privilege_type
+                             and (ch.attnum = 0 or ch.attnum = g.attnum)
+       where ch.is_grantable and ch.depth < 32
+    )
+    select g.*, g.grantor = (select c.relowner from pg_class c where c.oid = p_src) as by_owner,
+           coalesce((select min(ch.depth) from chain ch
+                      where ch.grantor = g.grantor and ch.grantee = g.grantee
+                        and ch.privilege_type = g.privilege_type and ch.attnum = g.attnum), 32) as depth
+      from g
+     order by depth, g.attnum, g.grantee, g.privilege_type, g.grantor
   loop
-    v_ddl := v_ddl || format('grant %s on %s to %s%s', r.privilege_type, p_dst_q,
-                             case when r.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(r.grantee)) end,
-                             case when r.is_grantable then ' with grant option' else '' end);
-  end loop;
-  -- COLUMN-level grants, which relacl does not carry at all: they live in pg_attribute.attacl.
-  for r in
-    select att.attname, a.grantee, a.privilege_type, a.is_grantable
-      from pg_attribute att, aclexplode(att.attacl) a
-     where att.attrelid = p_src and att.attnum > 0 and not att.attisdropped and att.attacl is not null
-     order by att.attnum, a.grantee, a.privilege_type
-  loop
-    v_ddl := v_ddl || format('grant %s (%I) on %s to %s%s', r.privilege_type, r.attname, p_dst_q,
-                             case when r.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(r.grantee)) end,
-                             case when r.is_grantable then ' with grant option' else '' end);
+    v_grant_q := format('grant %s%s on %s to %s%s', r.privilege_type,
+                        case when r.attname is null then '' else format(' (%I)', r.attname) end, p_dst_q,
+                        case when r.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(r.grantee)) end,
+                        case when r.is_grantable then ' with grant option' else '' end);
+    v_ddl := v_ddl || case when r.by_owner then v_grant_q
+                           else format('select pgpm._acl_grant_as(%s, %L)', r.grantor, v_grant_q) end;
   end loop;
   return v_ddl;
 end $$;
@@ -6661,6 +6726,7 @@ declare
   v_key_name name; v_key_idx oid; -- #789: the reused key's constraint name, which the parent takes, and its index
   v_replident "char"; v_ri_idx name;   -- #782: the table's replica identity, and the parent index it maps to
   v_unowned_pub_q text;
+  v_grantors_q text;   -- #903: the grantors of the table's grants this session cannot replay them as
   v_sq record;                    -- #573: sequences the table owns through a column
   -- #828: a carried secondary UNIQUE constraint: its name (the parent takes it), its index, its definition,
   -- the deferral suffix that definition ends with, and its index's storage parameters
@@ -7158,6 +7224,23 @@ begin
   if v_spc is not null and not has_tablespace_privilege(v_spc, 'CREATE') then
     raise exception 'pg_partition_magician: cannot transmute % as % -- it is in the tablespace %, and the partitioned parent that takes its place is created there too (so that every partition minted from it is), which needs CREATE on that tablespace. Grant it (GRANT CREATE ON TABLESPACE % TO %), or run transmute as a role that has it, then re-run transmute. The role that runs pgpm''s maintenance creates the forward partitions there, so it needs the same privilege.',
       p_parent, quote_ident(current_user), quote_ident(v_spc), quote_ident(v_spc), quote_ident(current_user);
+  end if;
+  -- A grant another role made through its grant option (#903). The cutover replays every grant onto the
+  -- parent under its grantor (_acl_carry_ddl), which takes SET ROLE to that role, and a session that may not
+  -- become it died inside the cutover, after phases 1 and 2 had committed the bound and the claim; replayed
+  -- as this role instead, the grant was recorded under the owner and its grantor could no longer revoke it.
+  -- Refused here, before anything is committed.
+  select string_agg(distinct quote_ident(pg_get_userbyid(g.grantor)), ', '
+                    order by quote_ident(pg_get_userbyid(g.grantor))) into v_grantors_q
+    from (select a.grantor from pg_class c, aclexplode(c.relacl) a where c.oid = p_parent and c.relacl is not null
+          union
+          select a.grantor from pg_attribute att, aclexplode(att.attacl) a
+           where att.attrelid = p_parent and att.attnum > 0 and not att.attisdropped and att.attacl is not null) g
+   where g.grantor <> (select c.relowner from pg_class c where c.oid = p_parent)
+     and not pgpm._acl_may_grant_as(g.grantor, p_parent);
+  if v_grantors_q is not null then
+    raise exception 'pg_partition_magician: cannot transmute % as % -- grants on it were made by % through a grant option, and the parent that takes its place gets each grant from the role that made it, so that role can still revoke it. That takes SET ROLE to each of them (and their USAGE on the schema), which this session cannot. Run transmute as a member of each (a superuser is one), or have each revoke its grants and the owner make them, then re-run transmute.',
+      p_parent, quote_ident(session_user), v_grantors_q;
   end if;
 
   -- Constraints the cutover cannot carry (#730). Its CREATE TABLE ... LIKE INCLUDING CONSTRAINTS copies
@@ -8650,7 +8733,7 @@ declare
   v_sq record;   -- #573: serial sequences the parent owns, handed back before it is dropped
   -- #667: the parent's grants and policies as statements naming the restored table, and its RLS flags
   v_grantdefs text[] := '{}'; v_poldefs text[] := '{}'; v_rls boolean; v_rls_force boolean;
-  v_acl_default boolean; v_revoked boolean := false; v_g record;
+  v_g record;
   v_owner oid; v_comdefs text[] := '{}';
   v_pubdefs text[] := '{}';   -- #780: the parent's publication memberships, as ADD TABLEs naming the restored table
   v_key_name name; v_key_mon name;   -- #789: the parent's key name, and the monolith copy's pgpm_key_<oid>
@@ -8833,9 +8916,8 @@ begin
   -- recurses to a partition, so the monolith still carries whatever the table had at the conversion. The
   -- parent's state is what gets handed back, replayed below onto the restored table once it has the name
   -- again, as statements built here with the name it will have (the monolith's own copy is reset first).
-  -- The shape is transmute's 7b, run the other way. v_acl_default: a NULL relacl is the owner's implicit
-  -- all-privileges default, which has no grant to replay.
-  select relrowsecurity, relforcerowsecurity, relacl is null into v_rls, v_rls_force, v_acl_default
+  -- The shape is transmute's 7b, run the other way.
+  select relrowsecurity, relforcerowsecurity into v_rls, v_rls_force
     from pg_class where oid = p_parent;
   -- and its owner and comments (#710, see above)
   select relowner into v_owner from pg_class where oid = p_parent;
@@ -8848,23 +8930,9 @@ begin
   loop
     v_comdefs := v_comdefs || format('comment on column %I.%I.%I is %L', v_nsp, v_rel, v_g.attname, v_g.c);
   end loop;
-  for v_g in
-    select a.privilege_type, a.is_grantable,
-           case when a.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(a.grantee)) end as role_q
-      from pg_class c, aclexplode(c.relacl) a where c.oid = p_parent and c.relacl is not null
-  loop
-    v_grantdefs := v_grantdefs || format('grant %s on %I.%I to %s%s', v_g.privilege_type, v_nsp, v_rel, v_g.role_q,
-                                         case when v_g.is_grantable then ' with grant option' else '' end);
-  end loop;
-  for v_g in
-    select att.attname, a.privilege_type, a.is_grantable,
-           case when a.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(a.grantee)) end as role_q
-      from pg_attribute att, aclexplode(att.attacl) a
-     where att.attrelid = p_parent and att.attnum > 0 and not att.attisdropped and att.attacl is not null
-  loop
-    v_grantdefs := v_grantdefs || format('grant %s (%I) on %I.%I to %s%s', v_g.privilege_type, v_g.attname, v_nsp, v_rel,
-                                         v_g.role_q, case when v_g.is_grantable then ' with grant option' else '' end);
-  end loop;
+  -- The grants as transmute carries them, the other way (#875, #903): the reset of the restored table's ACL
+  -- first, the owner included (_acl_reset), then the parent's table and column grants, each under its grantor.
+  v_grantdefs := pgpm._acl_carry_ddl(p_parent, format('%I.%I', v_nsp, v_rel));
   for v_g in
     select polname, polcmd, polpermissive,
            case when polroles = '{0}'::oid[] then 'public'
@@ -9116,27 +9184,14 @@ begin
   end loop;
 
   -- Put the parent's privileges and row security on the restored table in place of the monolith's
-  -- conversion-time copy (#667; captured under the lock, above). First reset that copy: every role holding
-  -- anything on it, at table or column level, has it revoked (a table-level REVOKE takes the column grants
-  -- with it, and CASCADE the grants made through a grant option), and every policy on it is dropped. Then
-  -- the parent's grants, or with a default (NULL) ACL the owner's own privileges, which the revoke took;
-  -- then its RLS flags, both directions, and its policies.
-  for v_g in
-    select a.grantee
-      from pg_class c, aclexplode(c.relacl) a where c.oid = v_restored and c.relacl is not null
-    union
-    select a.grantee
-      from pg_attribute att, aclexplode(att.attacl) a
-     where att.attrelid = v_restored and att.attnum > 0 and not att.attisdropped and att.attacl is not null
-  loop
-    execute format('revoke all on %s from %s cascade', v_restored::text,
-                   case when v_g.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(v_g.grantee)) end);
-    v_revoked := true;
-  end loop;
-  if v_acl_default and v_revoked then
-    execute format('grant all on %s to %I', v_restored::text,
-                   (select pg_get_userbyid(relowner) from pg_class where oid = v_restored));
-  end if;
+  -- conversion-time copy (#667; captured under the lock, above). First reset that copy, by v_grantdefs' first
+  -- statement (_acl_reset): every role holding anything on it, at table or column level, the OWNER included
+  -- (#875), has it revoked (a table-level REVOKE takes the column grants with it, and CASCADE the grants made
+  -- through a grant option), and a parent at the default (NULL) ACL gives the owner its own privileges back.
+  -- The owner's own were spared, so a monolith at that NULL default kept everything and the first replayed
+  -- grant materialised it, a privilege the owner had revoked from itself on the parent included. Then the
+  -- parent's grants, each under its grantor (#903); then its RLS flags, both directions, and its policies in
+  -- place of every policy on the copy.
   foreach v_tdef in array v_grantdefs loop
     execute v_tdef;
   end loop;

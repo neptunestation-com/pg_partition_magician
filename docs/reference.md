@@ -137,7 +137,14 @@ running the conversion, so it is born with that role's `ALTER DEFAULT PRIVILEGES
 for `anon` and `authenticated` in `public`). The cutover revokes everything the parent was born holding,
 from every role and its owner, before it replays the table's table and column grants, so a privilege
 revoked on the table is not held on the parent. A table no grant was ever made on (a `NULL` ACL) gives the
-parent its owner's full privileges and nothing for anyone else.
+parent its owner's full privileges and nothing for anyone else. Each grant keeps its **grantor**: one a role
+made through its grant option is replayed as that role (`SET ROLE`), after the grant that gave it the
+option, so the role that made it can still revoke it on the parent. That needs the session running
+`transmute` to be able to become each such role (a superuser can, any other role only one it is a member
+of) and the role to hold `USAGE` on the schema; a table with a grant by a role it cannot become is refused
+before anything is committed, naming the roles. Run the conversion as a member of each, or have each revoke
+its grants and the owner make them. `from_hypertable`'s swap and `untransmute` carry grants the same way, and
+refuse the same way inside their own transaction, which then rolls back whole.
 
 Policies live on the parent, and only on the parent: a parent policy governs parent-routed reads into a
 partition, and reaching a partition directly needs grants that live on the parent anyway. Each is created
@@ -147,6 +154,13 @@ can name the table itself: a correlated subquery's reference to the outer row (`
 table both mean the parent, and see every partition. So the policies are re-created inside the cutover's
 brief `ACCESS EXCLUSIVE` window, beside the triggers, where the rest of the parent's configuration is
 applied before it begins; on an empty partitioned table each is a catalog write.
+
+A partition pgpm mints (by `obtain`, `extend_to`, the conversion's forward grid or a regrain) holds its
+owner's default privileges and **no grant for any other role**, whatever the maintaining role's `ALTER
+DEFAULT PRIVILEGES` gave it when it was created: a read or write routed through the parent is checked
+against the parent's grants alone, so no role needs one on a partition, and one the parent's policies
+filter would read a partition unfiltered. The monolith is the original table and keeps its own grants, row
+security and policies.
 
 One shape is refused rather than carried: a `FOR EACH ROW` trigger with a transition table
 (`REFERENCING OLD/NEW TABLE`), which PostgreSQL does not permit on a partitioned table. Rewrite it as a
@@ -460,9 +474,10 @@ The table comes back with the **privileges and row security the managed table ha
 the ones it had at the conversion. After a `transmute` the parent is the table, so a `GRANT` or `REVOKE`,
 an `ENABLE` or `FORCE ROW LEVEL SECURITY` (or their opposites) and a `CREATE` or `DROP POLICY` issued since
 all landed on the parent, and none of them reaches a partition. `untransmute` resets the monolith's own
-conversion-time copy (every grantee's privileges revoked, every policy dropped) and puts the parent's in
-its place: its table and column grants (or, with no grant ever made, the owner's default privileges), both
-row-security flags, and its policies. The same holds for its **owner** and its table and column
+conversion-time copy (every role's privileges revoked, the owner's included, every policy dropped) and puts
+the parent's in its place: its table and column grants, each under its grantor as `transmute` carries them
+(or, with no grant ever made, the owner's default privileges), both row-security flags, and its policies. So
+a privilege the owner revoked from itself on the managed table stays revoked. The same holds for its **owner** and its table and column
 **comments**: `ALTER TABLE ... OWNER TO` and `COMMENT ON` the managed table do not reach its partitions
 either, so the restored table takes the parent's owner (the role that owned the managed table keeps it)
 and the parent's comments, a comment removed since the conversion staying removed. And for its
