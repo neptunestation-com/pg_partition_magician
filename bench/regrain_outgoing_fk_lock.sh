@@ -64,8 +64,9 @@ q "insert into public.rofk values ($((CHILD_ROWS * 2 + 1)), 1, 'frontier')" >/de
 # Pre-copy everything synchronously, stopping once the cursor reaches the coarse child's own hi
 # (fully copied, not yet swapped) -- so the ONE call left to run is the swap itself. Re-fetches
 # the coarse child's name every tick: regrain_step's first tick can RENAME it (#266), so a name
-# cached before that rename goes stale.
-docker exec "$C" psql -U postgres -d "$DB" -qtA -c "
+# cached before that rename goes stale. A setup that fails (it raises when the run never reaches the
+# swap) is a FAIL, never a run that goes on to probe a swap that will not happen and pass on nothing.
+if ! docker exec "$C" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 -qtA -c "
 do \$setup\$
 declare s text; n int := 0; v_cursor text; v_hi text; v_child name;
 begin
@@ -80,7 +81,10 @@ begin
     n := n + 1;
     if n > 500 then raise exception 'regrain setup did not converge'; end if;
   end loop;
-end \$setup\$;" >/dev/null
+end \$setup\$;" >/dev/null; then
+  printf 'FAIL  %-52s %s\n' "the regrain was pre-copied up to its swap" "setup raised (see above)"
+  exit 1
+fi
 
 q "vacuum analyze public.rofk" >/dev/null
 q "vacuum analyze public.rofk_ref" >/dev/null
