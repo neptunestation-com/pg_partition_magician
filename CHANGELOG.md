@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **`incoming_fk_orphans` counts under the key's match type** (#909). It counted with `MATCH SIMPLE`'s rule
+  (every FK column non-null and no parent row) for every key, so for a `MATCH FULL` key, which `preserve`
+  re-adds as written, a row with some but not all of its FK columns null made `validate_incoming_fks` fail
+  23503 while `incoming_fk_orphans` reported no orphan for that key. It now reads `confmatchtype`: a `MATCH
+  FULL` key also counts its partly-null rows, a `MATCH SIMPLE` key still exempts any row with a null. Test
+  265, guarded by `bench/incoming_fk_orphans_match_type.sh` with mutations `incoming_fk_orphans_simple_only`
+  and `incoming_fk_orphans_full_everywhere`.
 - **untransmute hands a primary key made since the conversion back under the managed table's name** (#901).
   #830's hand-back renamed each index the parent's DDL had cloned onto the monolith, but skipped every
   primary-key index to spare a pre-#789 conversion's original key, so a `PRIMARY KEY` added after converting a

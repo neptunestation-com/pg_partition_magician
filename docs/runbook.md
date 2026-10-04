@@ -81,7 +81,10 @@ when `archive_fn` is unset; the reconciliation below applies unchanged.
       and not exists (select 1 from public.events p where p.id = r.event_id);
    ```
 
-   For a composite FK, repeat the equality for each referencing/referenced column pair.
+   For a composite FK, repeat the equality for each referencing/referenced column pair. A `MATCH FULL` key
+   also refuses a row with some but not all of its FK columns null, and step 2 counts those too: select them
+   with `where num_nulls(r.tenant_id, r.event_id) = 1` (the FK columns; any count between 1 and one fewer than
+   the number of columns).
 
 4. Reconcile, according to your data model. Choose one per table:
 
