@@ -1706,6 +1706,51 @@ begin
 end;
 $$;
 
+-- _part_relation_exists: whether the relation a pgpm.part row anchors (its child_oid, #421) is still in the
+-- catalogue (#908). A null child_oid is an unanchored row an upgrade could not resolve, which nothing can
+-- judge here, so it reads as present: forget_missing is the tool that clears those.
+create or replace function pgpm._part_relation_exists(p_child_oid oid)
+returns boolean language sql stable as $$
+  select p_child_oid is null or exists (select 1 from pg_class c where c.oid = p_child_oid);
+$$;
+
+-- _cell_attached: whether an attached partition of p_parent overlaps the cell [p_lo, p_hi), the question
+-- obtain and extend_to (its dry count and its walk) ask of every cell before building it. Half-open
+-- [p_lo, p_hi) overlaps [p.lo, p.hi) iff p.hi > p_lo and p_hi > p.lo.
+--
+-- #908: the answer used to come from pgpm.part alone, and DROP TABLE on one of obtain's empty forward cells
+-- is something PostgreSQL permits and pgpm never sees: the partition went, its row stayed attached, and the
+-- row was taken for a built cell. The cell was never rebuilt and nothing was logged, so every write into
+-- it was refused with "no partition of relation found for row", for good. So an attached row overlapping
+-- the cell whose relation is gone from the catalogue is forgotten first, logged forget_dropped_partition
+-- naming what was dropped, and the cell is then judged on the rows that remain: missing, so the caller
+-- builds it (or, if a stranger holds its name, logs fail_obtain_name, #710). One place, so the three
+-- callers cannot drift. Only the cell's own rows are judged, so a dead row outside the walk (one retention
+-- or regrain owns) is left to them. The relation, not pg_inherits, is the test: a partition retire() has
+-- detached concurrently still exists and keeps its attached row until retire drops it.
+create or replace function pgpm._cell_attached(p_parent regclass, cfg pgpm.config, p_lo text, p_hi text)
+returns boolean language plpgsql as $$
+begin
+  with gone as (
+    delete from pgpm.part p
+     where p.parent_table = p_parent and p.attached
+       and pgpm._native_gt(cfg.control_kind, p.hi, p_lo)
+       and pgpm._native_gt(cfg.control_kind, p_hi, p.lo)
+       and not pgpm._part_relation_exists(p.child_oid)
+    returning p.child_name, p.child_oid, p.lo, p.hi)
+  insert into pgpm.log (parent_table, action, lo, hi, method)
+  select p_parent, 'forget_dropped_partition', g.lo, g.hi,
+         format('the partition %I (oid %s) recorded for this range no longer exists (dropped outside pgpm), so the range is built again',
+                g.child_name, g.child_oid)
+    from gone g;
+  return exists (
+    select 1 from pgpm.part p
+     where p.parent_table = p_parent and p.attached
+       and pgpm._native_gt(cfg.control_kind, p.hi, p_lo)
+       and pgpm._native_gt(cfg.control_kind, p_hi, p.lo));
+end;
+$$;
+
 -- the write frontier in native terms: now() (time), max(control) (id/uuidv7)
 create or replace function pgpm._frontier_native(p_parent regclass)
 returns text language plpgsql as $$
@@ -1951,15 +1996,11 @@ begin
       exit;
     end;
     -- skip a candidate that overlaps an EXISTING attached partition (e.g. the coarse monolith that
-    -- covers the active interval, REDESIGN.md section 7). Half-open [v_lo,v_hi) overlaps [p.lo,p.hi)
-    -- iff p.hi > v_lo and v_hi > p.lo. Creating it would error on an overlapping partition; pgpm.part
-    -- is the source of truth, and the non-overlap invariant holds over attached rows only. Asked BEFORE
-    -- the name (#572): a taken name does not mean the cell is built, see _obtain_name.
-    continue when exists (
-      select 1 from pgpm.part p
-       where p.parent_table = p_parent and p.attached
-         and pgpm._native_gt(cfg.control_kind, p.hi, v_lo)
-         and pgpm._native_gt(cfg.control_kind, v_hi, p.lo));
+    -- covers the active interval, REDESIGN.md section 7). Creating it would error on an overlapping
+    -- partition; pgpm.part is the source of truth, and the non-overlap invariant holds over attached rows
+    -- only, once a row whose partition was dropped by hand is forgotten (#908, see _cell_attached). Asked
+    -- BEFORE the name (#572): a taken name does not mean the cell is built, see _obtain_name.
+    continue when pgpm._cell_attached(p_parent, cfg, v_lo, v_hi);
     v_name := pgpm._obtain_name(p_parent, cfg, v_nsp, v_rel, v_lo, v_hi);
     -- a hole in the grid, so it is logged (#710)
     if v_name is null then
@@ -2085,13 +2126,10 @@ begin
   -- it visits v_needed + 1 cells and builds the first of them too when nothing attached overlaps it: a
   -- 1-second time grid with a lookahead of 0, a few seconds after its last obtain, has no cell under now().
   -- Counting steps alone let p_max => 1 create two partitions. The edge is asked exactly as the walk asks
-  -- it (overlap with an attached partition), so the dry count still never undercounts what the walk builds.
-  if not exists (
-       select 1 from pgpm.part p
-        where p.parent_table = p_parent and p.attached
-          and pgpm._native_gt(cfg.control_kind, p.hi, v_lo)
-          and pgpm._native_gt(cfg.control_kind,
-                              pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_lo, cfg.partition_tz), p.lo))
+  -- it (overlap with an attached partition, a hand-dropped one forgotten first, #908), so the dry count
+  -- still never undercounts what the walk builds. A refusal raises, so a row forgotten here comes back.
+  if not pgpm._cell_attached(p_parent, cfg, v_lo,
+                             pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_lo, cfg.partition_tz))
   then
     v_edge := 1;
   end if;
@@ -2118,13 +2156,8 @@ begin
       raise exception 'pg_partition_magician: extend_to(%, %) reaches the % grid''s ceiling before covering it; cannot extend that far',
         p_parent, p_value, cfg.control_kind;
     end;
-    -- overlap first, then the name (#572, see _obtain_name), exactly as obtain asks
-    if not exists (
-         select 1 from pgpm.part p
-          where p.parent_table = p_parent and p.attached
-            and pgpm._native_gt(cfg.control_kind, p.hi, v_lo)
-            and pgpm._native_gt(cfg.control_kind, v_hi, p.lo))
-    then
+    -- overlap first, then the name (#572, see _obtain_name), exactly as obtain asks (#908: _cell_attached)
+    if not pgpm._cell_attached(p_parent, cfg, v_lo, v_hi) then
       v_name := pgpm._obtain_name(p_parent, cfg, v_nsp, v_rel, v_lo, v_hi);
       -- a hole in the grid, so it is logged (#710), as obtain does
       if v_name is null then
@@ -10473,18 +10506,21 @@ begin
     -- this whole set-returning function, so a single dropped table returned NOTHING for every managed
     -- table, healthy ones included. Everything below except retain_backlog comes from pgpm.part /
     -- pgpm.config / pgpm.log, so a dead parent still gets a full, useful row -- and the flag says which
-    -- one it is, which is the single most actionable thing to report here.
+    -- one it is, which is the single most actionable thing to report here. (Its partitions went with it,
+    -- so the partition counts read 0 and newest_bound null: they count only partitions that exist, #908.)
     v_missing := not exists (select 1 from pg_class c where c.oid = r.parent_table);
 
     -- n_partitions = attached (real) partitions; coarse_partitions = the un-regrained coarse children (a
     -- wider-than-one-step range, REDESIGN.md section 14) -- the regraining backlog; inflight = the
-    -- not-yet-attached regrain children.
-    select count(*) filter (where attached),
-           count(*) filter (where attached
+    -- not-yet-attached regrain children. The attached ones and newest_bound read the catalogue too (#908):
+    -- a row whose partition was dropped by hand is neither counted nor the ceiling, since a write into its
+    -- range is refused until obtain forgets the row and builds the cell again (see _cell_attached).
+    select count(*) filter (where attached and pgpm._part_relation_exists(child_oid)),
+           count(*) filter (where attached and pgpm._part_relation_exists(child_oid)
                             and pgpm._native_gt(r.control_kind, hi, pgpm._grid_next(r.control_kind, r.partition_step, lo, r.partition_tz))),
            count(*) filter (where not attached)
       into v_np, v_coarse, v_inflight from pgpm.part where parent_table = r.parent_table;
-    execute format('select %s from pgpm.part where parent_table = %L::regclass and attached',
+    execute format('select %s from pgpm.part where parent_table = %L::regclass and attached and pgpm._part_relation_exists(child_oid)',
                    pgpm._max_hi_native(r.control_kind), r.parent_table::text) into v_new;
     -- preserve-managed incoming FK state: dropped (RI off) vs re-added-but-not-validated (orphan-blocked)
     select count(*) filter (where restored_at is null),

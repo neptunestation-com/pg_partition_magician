@@ -6670,6 +6670,34 @@ select is(
           "  v_needed int := 0; v_edge int := 1; v_made int := 0; v_walked int := 0;\n", 1),
          ("  then\n    v_edge := 1;\n  end if;\n", "  then\n    null;\n  end if;\n", 1)],
     ),
+    "obtain_trusts_dropped_cell": (
+        "bench/obtain_rebuilds_dropped_cell.sh",
+        "Pre-#908 obtain and extend_to: an attached pgpm.part row is taken for a built cell without asking "
+        "whether its partition still exists, so a forward cell dropped by hand is never rebuilt and nothing "
+        "is logged. One site, _cell_attached's forget. tests/264 parts A and B catch it.",
+        [("       and not pgpm._part_relation_exists(p.child_oid)\n    returning",
+          "       and false   -- MUTANT: the dead row is trusted\n    returning", 1)],
+    ),
+    "obtain_rebuild_keeps_stale_row": (
+        "bench/obtain_rebuilds_dropped_cell.sh",
+        "Issue #908, the plausible-but-wrong fix: the cell is judged on rows whose partition exists, so it is "
+        "rebuilt, but the dead row is never forgotten, and _create_partition's insert of the rebuilt row "
+        "conflicts on the name and does nothing: the row keeps the dropped partition's oid, so every "
+        "identity check after it refuses the live one, and nothing is logged. Two sites in _cell_attached. "
+        "tests/264 parts A and B catch it.",
+        [("       and not pgpm._part_relation_exists(p.child_oid)\n    returning",
+          "       and false   -- MUTANT: the dead row is kept\n    returning", 1),
+         ("       and pgpm._native_gt(cfg.control_kind, p_hi, p.lo));\nend;\n",
+          "       and pgpm._native_gt(cfg.control_kind, p_hi, p.lo) and pgpm._part_relation_exists(p.child_oid));\nend;\n",
+          1)],
+    ),
+    "status_counts_dropped_cell": (
+        "bench/obtain_rebuilds_dropped_cell.sh",
+        "Pre-#908 status(): n_partitions, coarse_partitions and newest_bound read pgpm.part alone, so a "
+        "partition dropped by hand is still counted, and still the ceiling when it was the top cell. Three "
+        "sites in status(). tests/264 part A catches it.",
+        [(" and pgpm._part_relation_exists(child_oid)", "", 3)],
+    ),
     "crossing_keys_bare_text": (
         "bench/crossing_keys_datestyle.sh",
         "Pre-#814 (F4-01) _crossing_keys: a timestamptz referencing key is read back with a bare ::text, so "
