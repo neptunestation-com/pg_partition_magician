@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **`from_hypertable`'s scratch tables are named in `pg_temp`, never through the search_path** (#894). The
+  tracked drain step's `pgpm_dbatch` and the keyed append-only cutover's `pgpm_htail` are temp tables `ON
+  COMMIT DROP`, each dropped first by an unqualified `drop table if exists`. A fresh transaction has no temp
+  table of that name, so the drop resolved through the search_path and took an operator's own
+  `public.pgpm_dbatch` (the first drain batch, the drain procedure, a tracked cutover's pre-drain) or
+  `public.pgpm_htail` (the cutover) with its rows; and under a search_path naming `pg_temp` after a schema
+  holding one, the unqualified reads took that table as the batch, consuming the real batch's keys without
+  applying them, or as the tail. Every drop, create, analyze and read now names `pg_temp`.
+  `tests/timescale/db/47`, guarded by `bench/hypertable_scratch_tables_in_pg_temp.sh` with the mutations
+  `hypertable_scratch_dbatch_drop_unqualified`, `hypertable_scratch_htail_drop_unqualified` and
+  `hypertable_scratch_reads_unqualified`.
 - **`retire`'s crossing step finds a mixed-case `text_time` cell's referencing keys whatever the referencing
   column's collation** (#900). `_crossing_keys` compared the referencing column against the cell's bounds
   under that column's own collation, the database default for one declared without `COLLATE`. Under `en_US`

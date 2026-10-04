@@ -440,6 +440,10 @@ run_timescale() {
     # lands while the cutover prepares), which is run nowhere else on correct code.
     echo "--- the drains, and the cutover under its lock, refuse a caller whose reads RLS filters (issue #873) ---"
     bash "$(dirname "$0")/bench/reads_under_caller_rls.sh" pgpm_test-timescale pgpm_perf212 /repo/pgpm_hypertable/install.sql || fail=1
+    # #894's guard, the same way: it re-runs tests/timescale/db/47 against the real install, the clean-code
+    # half of the pairs discriminate.sh completes with its three mutants.
+    echo "--- the drains and the cutover name their scratch tables in pg_temp (issue #894) ---"
+    bash "$(dirname "$0")/bench/hypertable_scratch_tables_in_pg_temp.sh" pgpm_test-timescale pgpm_perf220 || fail=1
 
     echo "--- discriminate (timescale-scoped mutations) ---"
     bash "$(dirname "$0")/bench/discriminate.sh" --track=timescale pgpm_test-timescale || fail=1

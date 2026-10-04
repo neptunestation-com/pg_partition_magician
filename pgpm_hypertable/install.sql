@@ -1051,9 +1051,12 @@ begin
   -- materialize this batch's distinct keys authoritatively by DELETING them: delete-returning is the source
   -- of truth, so we reconcile exactly what we removed (no delete-without-apply race). on commit drop: the
   -- driver commits after each batch (dropping it), a standalone call drops it at autocommit; the drop-if-
-  -- exists first guards the rare same-transaction re-call.
-  execute 'drop table if exists pgpm_dbatch';
-  execute format('create temp table pgpm_dbatch on commit drop as
+  -- exists first guards the rare same-transaction re-call. Every use names pg_temp (#894): a fresh
+  -- transaction has no temp table of this name, so an unqualified drop fell through the search_path and
+  -- dropped an operator's own pgpm_dbatch with its rows, and a search_path naming pg_temp after a schema
+  -- holding one read that table as the batch, consuming the real batch's keys without applying them.
+  execute 'drop table if exists pg_temp.pgpm_dbatch';
+  execute format('create temp table pg_temp.pgpm_dbatch on commit drop as
                   with d as (delete from %I.%I where pgpm_seq <= %s returning %s)
                   select distinct %s from d',
                  v_nsp, v_delta, v_watermark, v_keycols_q, v_keycols_q);
@@ -1062,18 +1065,18 @@ begin
   -- bound the source read to the batch's touched control range, as literal constants, for chunk exclusion
   select format_type(atttypid, atttypmod) into v_ctl_type
     from pg_attribute where attrelid = p_hypertable and attname = p_control and not attisdropped;
-  execute format('select pgpm._from_hypertable_ctl_text(min(%I)), pgpm._from_hypertable_ctl_text(max(%I)) from pgpm_dbatch',
+  execute format('select pgpm._from_hypertable_ctl_text(min(%I)), pgpm._from_hypertable_ctl_text(max(%I)) from pg_temp.pgpm_dbatch',
                  p_control, p_control)
     into v_min_ctl, v_max_ctl;
 
   -- reconcile: drop the batch's keys from the dest, then reinsert their current source rows
-  execute format('delete from %I.%I d where %s in (select %s from pgpm_dbatch)', v_nsp, v_dest, v_dkey_q, v_keycols_q);
+  execute format('delete from %I.%I d where %s in (select %s from pg_temp.pgpm_dbatch)', v_nsp, v_dest, v_dkey_q, v_keycols_q);
   if v_min_ctl is not null then
-    execute format('insert into %I.%I (%s) select %s from %I.%I s where %s in (select %s from pgpm_dbatch) and %I >= %L::%s and %I <= %L::%s',
+    execute format('insert into %I.%I (%s) select %s from %I.%I s where %s in (select %s from pg_temp.pgpm_dbatch) and %I >= %L::%s and %I <= %L::%s',
                    v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel, v_skey_q, v_keycols_q,
                    p_control, v_min_ctl, v_ctl_type, p_control, v_max_ctl, v_ctl_type);
   else
-    execute format('insert into %I.%I (%s) select %s from %I.%I s where %s in (select %s from pgpm_dbatch)',
+    execute format('insert into %I.%I (%s) select %s from %I.%I s where %s in (select %s from pg_temp.pgpm_dbatch)',
                    v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel, v_skey_q, v_keycols_q);
   end if;
   return v_keys;
@@ -1597,13 +1600,15 @@ begin
       -- from the newest chunk's statistics, and an overestimate there makes a hash anti-join that seqscans
       -- the WHOLE destination look cheap -- O(rows) under the lock, on a plan nobody sees. Measured: even
       -- at 20k rows the direct form planned a Seq Scan of the destination. On commit drop: the swap
-      -- transaction commits below, or rolls back on the refusal, and either ends the temp table.
-      execute 'drop table if exists pgpm_htail';
-      execute format('create temp table pgpm_htail on commit drop as select %s from %I.%I where %s',
+      -- transaction commits below, or rolls back on the refusal, and either ends the temp table. Named in
+      -- pg_temp at every use, as pgpm_dbatch is (#894): unqualified, the drop took an operator's own
+      -- pgpm_htail through the search_path, and a read could insert that table's rows as the tail.
+      execute 'drop table if exists pg_temp.pgpm_htail';
+      execute format('create temp table pg_temp.pgpm_htail on commit drop as select %s from %I.%I where %s',
                      v_cols_q, v_nsp, v_rel,
                      pgpm._from_hypertable_past(p_control, v_watermark, p_inclusive => true));
-      analyze pgpm_htail;
-      execute format('with w as (insert into %I.%I (%s) select %s from pgpm_htail s where not exists (select 1 from %I.%I d where %s = %s) returning %s as h) select count(*), coalesce(sum(h), 0) from w',
+      analyze pg_temp.pgpm_htail;
+      execute format('with w as (insert into %I.%I (%s) select %s from pg_temp.pgpm_htail s where not exists (select 1 from %I.%I d where %s = %s) returning %s as h) select count(*), coalesce(sum(h), 0) from w',
                      v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_dest, v_dkey_q, v_skey_q, v_fp_q) into v_n, v_h;
     else
       execute format('with w as (insert into %I.%I (%s) select %s from %I.%I where %s returning %s as h) select count(*), coalesce(sum(h), 0) from w',

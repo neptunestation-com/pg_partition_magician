@@ -6657,6 +6657,35 @@ select is(
           "  if false and p_control_kind = 'id'   -- MUTANT: no finiteness check\n     and (v_max_raw::numeric in ('NaN', 'Infinity', '-Infinity')\n",
           1)],
     ),
+    "hypertable_scratch_dbatch_drop_unqualified": (
+        "bench/hypertable_scratch_tables_in_pg_temp.sh",
+        "Pre-#894 from_hypertable_drain_delta_step: the batch's scratch table is dropped first by an "
+        "UNQUALIFIED name, and a fresh transaction has no temp pgpm_dbatch, so the drop falls through the "
+        "search_path and takes the operator's own public.pgpm_dbatch with its rows on the first batch (the "
+        "drain procedure and a tracked cutover's pre-drain call the step too). tests/timescale/db/47 parts A, "
+        "B and D catch it.",
+        [("  execute 'drop table if exists pg_temp.pgpm_dbatch';\n",
+          "  execute 'drop table if exists pgpm_dbatch';   -- MUTANT: resolved through the search_path\n", 1)],
+    ),
+    "hypertable_scratch_htail_drop_unqualified": (
+        "bench/hypertable_scratch_tables_in_pg_temp.sh",
+        "Pre-#894 from_hypertable_cutover: the keyed append-only catch-up drops its tail table by an "
+        "UNQUALIFIED name, so the cutover's transaction, which has no temp pgpm_htail yet, drops the "
+        "operator's own public.pgpm_htail with its rows. tests/timescale/db/47 parts C and D catch it.",
+        [("      execute 'drop table if exists pg_temp.pgpm_htail';\n",
+          "      execute 'drop table if exists pgpm_htail';   -- MUTANT: resolved through the search_path\n", 1)],
+    ),
+    "hypertable_scratch_reads_unqualified": (
+        "bench/hypertable_scratch_tables_in_pg_temp.sh",
+        "The half-fix of #894: the drops and creates name pg_temp but the reads do not, so under a "
+        "search_path that names pg_temp after a schema holding a table of the scratch name, the drain step "
+        "reads the operator's pgpm_dbatch as its batch (the real batch's keys are deleted from the delta and "
+        "never applied) and the cutover inserts the operator's pgpm_htail rows as its tail (the conservation "
+        "check then refuses the swap). tests/timescale/db/47 part D catches it.",
+        [("from pg_temp.pgpm_dbatch", "from pgpm_dbatch", 4),
+         ("      analyze pg_temp.pgpm_htail;\n", "      analyze pgpm_htail;\n", 1),
+         ("select %s from pg_temp.pgpm_htail s where", "select %s from pgpm_htail s where", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
@@ -6808,6 +6837,9 @@ MUTATION_SRC = {
     "rls_drain_appends_step_unchecked": "pgpm_hypertable/install.sql",
     "rls_drain_appends_unchecked": "pgpm_hypertable/install.sql",
     "rls_drain_delta_step_unchecked": "pgpm_hypertable/install.sql",
+    "hypertable_scratch_dbatch_drop_unqualified": "pgpm_hypertable/install.sql",
+    "hypertable_scratch_htail_drop_unqualified": "pgpm_hypertable/install.sql",
+    "hypertable_scratch_reads_unqualified": "pgpm_hypertable/install.sql",
 }
 
 # name -> the CI track whose job runs it; anything not listed here belongs to the default `perf`
@@ -6881,6 +6913,9 @@ MUTATION_TRACK = {
     "rls_drain_appends_step_unchecked": "timescale",
     "rls_drain_appends_unchecked": "timescale",
     "rls_drain_delta_step_unchecked": "timescale",
+    "hypertable_scratch_dbatch_drop_unqualified": "timescale",
+    "hypertable_scratch_htail_drop_unqualified": "timescale",
+    "hypertable_scratch_reads_unqualified": "timescale",
 }
 
 
