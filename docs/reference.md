@@ -1493,11 +1493,15 @@ resumes a regrain puts it back if it is missing.
 
 `ALTER TABLE` on the parent while a regrain is in flight **restarts** the run rather than wedging it or
 attaching stale copies. The copies are standalone tables made `LIKE` the parent when each was created, so a
-column added, dropped, retyped or renamed afterwards, a `NOT NULL` set or dropped, or a `CHECK` constraint
-added or dropped, reaches the source but not them, while the copy, the reconcile and the swap's `ATTACH` all
-need the parent's current columns and constraints. Every tick that resumes a run compares each copy's
-columns (name, type, collation, `NOT NULL`, generated) and `CHECK` constraints (name and expression) with
-the parent's first. It also compares the source with what the run recorded when it began copying
+column added, dropped, retyped or renamed afterwards, a `NOT NULL` set or dropped, a `CHECK` constraint
+added or dropped, or an outgoing foreign key added, dropped or redefined, reaches the source but not them,
+while the copy, the reconcile and the swap's `ATTACH` all need the parent's current columns and
+constraints. Every tick that resumes a run compares each copy's columns (name, type, collation, `NOT
+NULL`, generated), `CHECK` constraints (name and expression) and outgoing foreign keys (definition; a
+`NOT VALID` key on the parent is not carried, so not compared) with the parent's first. A copy made
+before a key was added would otherwise reach the swap without it, and `ATTACH` would validate the key by
+scanning the copy under the swap's lock; restarted, every copy is made again carrying the key, validated
+while it is empty. It also compares the source with what the run recorded when it began copying
 (`config.regrain_source_mark`): an `ALTER` that changes the source's values without changing any column's
 name or type, such as `ALTER COLUMN ... TYPE` to the same type with a `USING` expression (which rewrites
 every row) or a column dropped and added back under its old name, fires no row trigger, so capture never

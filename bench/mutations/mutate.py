@@ -6239,6 +6239,16 @@ select is(
         [("     where (k.conrelid = p_parent or k.conrelid = any(p_copies)) and k.contype = 'c'\n",
           "     where (k.conrelid = p_parent or k.conrelid = any(p_copies)) and k.contype = 'c' and false\n", 1)],
     ),
+    "regrain_fk_drift_ignored": (
+        "bench/regrain_fk_drift_swap_scan.sh",
+        "Pre-#898 _regrain_shape_drift: the parent's outgoing foreign keys are not compared with the copies', "
+        "so a key added to the parent mid-regrain is not drift, the copies made before it reach the swap "
+        "without it, and ATTACH PARTITION validates it by scanning each of them under the swap's ACCESS "
+        "EXCLUSIVE on the parent. One site, the foreign-key half of the comparison; tests/251 parts A, B "
+        "and C catch it too.",
+        [("     where k.contype = 'f' and k.conparentid = 0\n",
+          "     where k.contype = 'f' and k.conparentid = 0 and false\n", 1)],
+    ),
     "regrain_null_mark_adopted": (
         "bench/regrain_null_source_mark.sh",
         "Pre-#878 _regrain_source_drift: a null source mark (a run in flight across the upgrade that added "
