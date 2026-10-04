@@ -1731,18 +1731,28 @@ $$;
 create or replace function pgpm._cell_attached(p_parent regclass, cfg pgpm.config, p_lo text, p_hi text)
 returns boolean language plpgsql as $$
 begin
-  with gone as (
-    delete from pgpm.part p
-     where p.parent_table = p_parent and p.attached
-       and pgpm._native_gt(cfg.control_kind, p.hi, p_lo)
-       and pgpm._native_gt(cfg.control_kind, p_hi, p.lo)
-       and not pgpm._part_relation_exists(p.child_oid)
-    returning p.child_name, p.child_oid, p.lo, p.hi)
-  insert into pgpm.log (parent_table, action, lo, hi, method)
-  select p_parent, 'forget_dropped_partition', g.lo, g.hi,
-         format('the partition %I (oid %s) recorded for this range no longer exists (dropped outside pgpm), so the range is built again',
-                g.child_name, g.child_oid)
-    from gone g;
+  -- asked first with a read, so the ordinary cell takes no lock the overlap check did not already take:
+  -- obtain's lock budget (#786) projects every later cell's cost from the first two, and a write
+  -- statement run on every cell made it misjudge by a slot
+  if exists (
+       select 1 from pgpm.part p
+        where p.parent_table = p_parent and p.attached
+          and pgpm._native_gt(cfg.control_kind, p.hi, p_lo)
+          and pgpm._native_gt(cfg.control_kind, p_hi, p.lo)
+          and not pgpm._part_relation_exists(p.child_oid)) then
+    with gone as (
+      delete from pgpm.part p
+       where p.parent_table = p_parent and p.attached
+         and pgpm._native_gt(cfg.control_kind, p.hi, p_lo)
+         and pgpm._native_gt(cfg.control_kind, p_hi, p.lo)
+         and not pgpm._part_relation_exists(p.child_oid)
+      returning p.child_name, p.child_oid, p.lo, p.hi)
+    insert into pgpm.log (parent_table, action, lo, hi, method)
+    select p_parent, 'forget_dropped_partition', g.lo, g.hi,
+           format('the partition %I (oid %s) recorded for this range no longer exists (dropped outside pgpm), so the range is built again',
+                  g.child_name, g.child_oid)
+      from gone g;
+  end if;
   return exists (
     select 1 from pgpm.part p
      where p.parent_table = p_parent and p.attached

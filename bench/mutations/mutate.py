@@ -6675,8 +6675,8 @@ select is(
         "Pre-#908 obtain and extend_to: an attached pgpm.part row is taken for a built cell without asking "
         "whether its partition still exists, so a forward cell dropped by hand is never rebuilt and nothing "
         "is logged. One site, _cell_attached's forget. tests/264 parts A and B catch it.",
-        [("       and not pgpm._part_relation_exists(p.child_oid)\n    returning",
-          "       and false   -- MUTANT: the dead row is trusted\n    returning", 1)],
+        [("          and not pgpm._part_relation_exists(p.child_oid)) then\n",
+          "          and false) then   -- MUTANT: the dead row is trusted\n", 1)],
     ),
     "obtain_rebuild_keeps_stale_row": (
         "bench/obtain_rebuilds_dropped_cell.sh",
@@ -6685,8 +6685,8 @@ select is(
         "conflicts on the name and does nothing: the row keeps the dropped partition's oid, so every "
         "identity check after it refuses the live one, and nothing is logged. Two sites in _cell_attached. "
         "tests/264 parts A and B catch it.",
-        [("       and not pgpm._part_relation_exists(p.child_oid)\n    returning",
-          "       and false   -- MUTANT: the dead row is kept\n    returning", 1),
+        [("          and not pgpm._part_relation_exists(p.child_oid)) then\n",
+          "          and false) then   -- MUTANT: the dead row is kept\n", 1),
          ("       and pgpm._native_gt(cfg.control_kind, p_hi, p.lo));\nend;\n",
           "       and pgpm._native_gt(cfg.control_kind, p_hi, p.lo) and pgpm._part_relation_exists(p.child_oid));\nend;\n",
           1)],
