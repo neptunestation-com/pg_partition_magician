@@ -299,7 +299,12 @@ Parameters:
   [`check_text_time`](#check_text_time), whose `newest_decoded`/`newest_in_future` show the maximum before
   you convert.
 
-Refuses up front (leaving the table untouched) when: the step is not positive (a negative or zero
+Refuses up front (leaving the table untouched) when: an argument whose null has no meaning is null
+(every argument except `p_retain`, whose null keeps everything, the `text_time` shape arguments
+`p_tt_prefix`, `p_tt_width`, `p_tt_radix` and `p_tt_unit`, null outside `text_time` and required inside it,
+and `p_tt_alphabet`, whose null is the default alphabet): the message names each null argument, so a `p_force_*` override, `p_incoming_fks`,
+`p_regrain_batch`, `p_paused` or `p_tt_epoch` passed as null is refused rather than read as `true`, as
+absent, or as a bound no row satisfies; the step is not positive (a negative or zero
 interval or `bigint`), or is not a whole number of days or months on a `date` control column (a finer
 step's bounds truncate to dates); `p_obtain` is negative or null (the rule [`set_obtain`](#set_obtain)
 applies); the call resumes an earlier attempt's claim and that claim's recorded bound is not on this
@@ -1081,7 +1086,9 @@ It never moves the frontier or touches data, only creates empty partitions, and 
 that already exist (or overlap an attached one, like the monolith) are left alone. `p_max` bounds how many
 NEW partitions one call may create, checked with a dry count before any DDL runs, so a wildly-off
 `p_value` is refused loudly and immediately -- creating nothing -- rather than silently stopping `p_max`
-partitions short of the value actually asked for. The count includes the forward edge's own cell when
+partitions short of the value actually asked for. None of the three arguments takes a null: a null
+`p_max` is not "no cap", and a null `p_value` names no cell, so either (or a null `p_parent`) is refused
+before anything is read, the message naming it. The count includes the forward edge's own cell when
 nothing attached covers it (on a fine `time` grid with a short lookahead, the cell `now()` has moved
 into since the last `obtain`), because the call builds that cell too. Like `obtain`, it stops (here, raises) if the next grid
 boundary cannot be expressed (the `uuidv7`/`text_time` ceilings described above).

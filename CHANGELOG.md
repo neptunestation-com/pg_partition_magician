@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **`transmute` and `extend_to` refuse a null argument up front, naming it** (#896). Only `p_obtain`'s null
+  was refused (#581), and PL/pgSQL reads every other null through three-valued logic as "not true": so
+  `p_force_frontier`, `p_force_uuidv7` and `p_force_text_time => null` skipped their refusals and acted as
+  `true`, `p_incoming_fks => null` passed its argument check, the incoming-key gate and the cutover's drop
+  and left the referencing key on the monolith partition, `p_regrain_batch` or `p_paused => null` died at
+  `pgpm.config`'s NOT NULL in the cutover after phases 1 and 2 had committed the write-rejecting bound,
+  `p_tt_epoch => null` committed an unsatisfiable bound, and `extend_to`'s `p_max => null` walked a typo'd
+  value step by step while a null `p_value` created partitions until the shared lock table ran out. One
+  check, `pgpm._refuse_null_arguments`, now runs first in `_transmute` (both overloads) and in `extend_to`,
+  over every argument with no documented null meaning (`p_retain`, the `text_time` shape arguments and
+  `p_tt_alphabet` keep theirs). `tests/248` and `tests/249`, guarded by `bench/null_arguments_refused.sh`
+  with mutations `transmute_null_arguments_accepted`, `extend_to_null_arguments_accepted` and
+  `transmute_refuses_null_retain`.
 - **An outgoing foreign key added to a parent mid-regrain restarts the run instead of being validated
   under the swap's lock** (#898). Each copy is born with its own validated instance of the parent's
   outgoing keys while it is still empty, so that the swap's `ATTACH PARTITION` adopts them, but the drift check compared
