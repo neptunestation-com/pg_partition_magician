@@ -6604,6 +6604,37 @@ select is(
           "  end loop;\n"
           "  return v_count;\n", 1)],
     ),
+    "retain_loop_no_child_isolation": (
+        "bench/retain_loop_per_child_isolation.sh",
+        "Pre-#907 retain(): the loop over retire() has no exception block of its own, so a lock timeout in "
+        "retire()'s write-block install on one aged partition (a VACUUM or ANALYZE holding SHARE UPDATE "
+        "EXCLUSIVE on it) unwinds the whole retain step into maintain()'s one handler and rolls back the DROPs "
+        "already completed for the other aged partitions of the call. One site, the block's exception clause "
+        "removed (the bare begin/end left is inert). tests/263 catches it: the neighbours' drops, the rows "
+        "left, and the per-partition skip_retain row.",
+        [("      if pgpm.retire(p_parent, r.child_name) then v_dropped := v_dropped + 1; end if;\n"
+          "    exception when others then\n"
+          "      insert into pgpm.log (parent_table, action, lo, hi, method)\n"
+          "        values (p_parent, 'skip_retain', r.lo, r.hi, left(sqlerrm, 200));\n"
+          "    end;\n",
+          "      if pgpm.retire(p_parent, r.child_name) then v_dropped := v_dropped + 1; end if;\n"
+          "    end;\n", 1)],
+    ),
+    "retain_loop_silent_skip": (
+        "bench/retain_loop_per_child_isolation.sh",
+        "Issue #907, the plausible-but-wrong fix: retain()'s loop isolates each partition but swallows the "
+        "raise without logging it, so the neighbours are retired and the held partition's deferral leaves no "
+        "trace in pgpm.log: no skip_retain over its range, nothing for an operator to see while retention of "
+        "that partition stalls. One site, the handler's INSERT replaced by null. tests/263's per-partition "
+        "skip_retain assertion catches it while its drop assertions pass.",
+        [("    exception when others then\n"
+          "      insert into pgpm.log (parent_table, action, lo, hi, method)\n"
+          "        values (p_parent, 'skip_retain', r.lo, r.hi, left(sqlerrm, 200));\n"
+          "    end;\n",
+          "    exception when others then\n"
+          "      null;\n"
+          "    end;\n", 1)],
+    ),
     "retire_one_step_no_disarm": (
         "bench/retire_one_step_disarm.sh",
         "Pre-#835 retire(): the one-step DROP of a retirement that had dispatched a detach (its incoming FK "
