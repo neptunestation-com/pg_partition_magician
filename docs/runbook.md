@@ -118,8 +118,12 @@ when `archive_fn` is unset; the reconciliation below applies unchanged.
 control: **close it yourself, immediately after `transmute`**, rather than waiting for a tick.
 
 ```sql
-select pgpm.restore_incoming_fks('public.events');   -- then again next tick for the VALIDATE
+select pgpm.restore_incoming_fks('public.events');    -- re-adds the key NOT VALID, and stops there
+select pgpm.validate_incoming_fks('public.events');   -- then validates it; returns the number validated
 ```
+
+Run both yourself: a second `restore_incoming_fks` finds nothing left to re-add and returns 0, and the
+conversion registers the table paused, so no tick runs the `VALIDATE` for you.
 
 The conversion moves no rows, so there is nothing to wait for: the monolith holds every referenced row,
 attached, from the moment of cutover. If you also keep writes off the referencing table across those few
@@ -625,8 +629,10 @@ it captures appends as it goes). Migrate during a quieter write window when poss
 
 **Symptom.** Any of: `pgpm.status()` shows `parent_missing = true` for a row whose `parent` prints as a bare
 number instead of a table name; `pgpm.log` fills with `skip_obtain` / `skip_write_block` / `skip_retain`
-every tick, all giving `syntax error at or near "<number>"` as the reason; or, on a version before 0.2.0,
-`pgpm.status()` raises that syntax error and returns **no rows at all** for any managed table.
+every tick, all giving `managed table with oid <oid> no longer exists (dropped without pgpm.untransmute)` as
+the reason, so search `method` for `no longer exists (dropped without pgpm.untransmute)`. (On a version
+before 0.2.0, `pgpm.status()` itself fails with a syntax error and returns **no rows at all** for any managed
+table.)
 
 **What it means.** Someone ran `DROP TABLE` on a pgpm-managed parent instead of
 [`pgpm.untransmute`](reference.md#untransmute). `pgpm.config.parent_table` is a `regclass`, which carries no
