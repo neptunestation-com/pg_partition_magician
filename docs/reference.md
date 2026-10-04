@@ -331,7 +331,8 @@ column's collation does not order the way base-`p_tt_radix` place value does (KS
 samples as not matching the declared shape and `p_force_text_time` is not set; a `time`, `uuidv7` or `text_time` control's newest
 value lies (or decodes to) more than one partition step plus one hour past `now()` and `p_force_frontier` is not set
 (a future-dated row would pin the monolith's permanent `hi` there); a `time` control's newest value is
-`infinity`, which no partition can hold (`p_force_frontier` does not override this); row-level security
+`infinity`, which no partition can hold (`p_force_frontier` does not override this); a `numeric` `id`
+control holds `NaN`, `Infinity` or `-Infinity`, for the same reason (delete or correct those rows and re-run); row-level security
 would filter the caller's reads of the table (`row_security_active()` is true: a non-superuser owner without
 `BYPASSRLS` on a table with `FORCE ROW LEVEL SECURITY`, or a caller that is not the owner), because the
 bound is read from the rows the caller can see (run it as a role with `BYPASSRLS`; an owner on a table
