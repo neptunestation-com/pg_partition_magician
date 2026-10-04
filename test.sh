@@ -938,6 +938,7 @@ run_perf() {
     "bench/crossing_keys_control_collation.sh pgpm_perf227"
     "bench/regrain_capture_enabled_always.sh pgpm_perf217"
     "bench/regrain_capture_origin_only_upgrade.sh pgpm_perf218"
+    "bench/forget_missing_disarms_detach.sh pgpm_perf219"
   )
   local selected=()
   local n=${#guards[@]} idx

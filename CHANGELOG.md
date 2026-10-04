@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **`forget_missing` returns `pgpm_detach` to idle when it forgets the retirement that armed it** (#893). A
+  referenced partition's retirement arms the standing job with `DETACH PARTITION ... CONCURRENTLY` by name,
+  and `forget_missing` deleted the dropped parent's retiring row without disarming it, so the command outlived
+  the retirement and pg_cron's next run detached the same-named partition of a table re-created under the same
+  name and grid, its rows gone from every read of the parent with nothing logged. It now disarms a detach of a
+  partition the forgotten parent was retiring, and only when no live retirement owns that exact command (a
+  namesake already retiring the same-named partition keeps its own). `tests/246` under
+  `bench/forget_missing_disarms_detach.sh`, with the mutations `forget_missing_keeps_detach_armed`,
+  `forget_missing_disarm_any_command` and `forget_missing_disarm_owned`.
 - **Regrain's change capture counts only while its trigger is `ENABLE ALWAYS`** (#892). `regrain_step` resumed
   a run whenever the source carried a trigger named `pgpm_regrain_capture`, never asking whether it fires, so
   one an owner disabled (`ALTER TABLE <partition> DISABLE TRIGGER USER` for a bulk load, or the same on the

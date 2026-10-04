@@ -2122,6 +2122,14 @@ left in place -- destroying data as a side effect of a cleanup command would be 
 of "forget". Deal with those by hand. `pgpm.log` is also left intact, as the append-only audit trail it is;
 the clearance itself is logged `forget_missing`, naming any orphans in `method`.
 
+**It returns `pgpm_detach` to idle when it forgets the retirement that armed it.** A referenced
+partition's retirement arms the standing job with `ALTER TABLE <parent> DETACH PARTITION <child>
+CONCURRENTLY`, by name. Left armed past the retirement it belonged to, that command would detach the
+same-named partition of a table later re-created under the same name and grid, since partition names follow
+from the table's name and grid alone. So when the job holds a detach of a partition the forgotten table was
+retiring, `forget_missing` puts it back to `select 1`, unless a live retirement owns that exact command (a
+re-created namesake already retiring its own partition of that name keeps it).
+
 `orphan_tables` is **schema-qualified**, and deliberately so: `pgpm.part` records no namespace and the
 dropped parent's oid can no longer supply one, so the match is on the child's name alone and could in
 principle name a same-named table in an unrelated schema. Read the schema before acting on the list.

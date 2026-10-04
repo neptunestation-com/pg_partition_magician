@@ -9942,10 +9942,22 @@ $$;
 -- tables are REPORTED in orphan_tables, by name, and left alone: destroying data as a side effect of a
 -- cleanup command would be the worst possible reading of "forget". pgpm.log is left intact too -- it is an
 -- append-only audit trail, and the history of a table that once existed is still history.
+--
+-- A RETIREMENT IT FORGETS DOES NOT LEAVE ITS DETACH ARMED (issue #893). A referenced partition's retirement
+-- arms the standing pgpm_detach job with `ALTER TABLE <parent> DETACH PARTITION <child> CONCURRENTLY`, by
+-- NAME, and only that retirement's own completion (or recall) ever returns the job to idle. Forgetting the
+-- retirement removes the only thing that would, so the command used to outlive it for good, and partition
+-- names are a pure function of the table's name and grid: a table re-created under the same name and
+-- transmuted on the same grid has a partition of exactly that name, which the next pg_cron run detached.
+-- So the job is returned to idle here when it holds a detach of a partition the forgotten parent was
+-- retiring. The parent's name cannot be rebuilt (its pg_class row is gone, which is why it is being
+-- forgotten), so the command is recognised by the partition it names, and CONDITIONALLY, the #407 rule:
+-- never when a LIVE retirement owns that exact text. A namesake that has already armed its own retirement
+-- of the same-named partition holds a command identical to the forgotten one, and that one stays armed.
 create or replace function pgpm.forget_missing()
 returns table (parent_oid oid, partitions_forgotten int, orphan_tables text[])
 language plpgsql as $$
-declare r record; v_orphans text[]; v_parts int;
+declare r record; v_orphans text[]; v_parts int; v_retiring name[]; v_cmd text;
 begin
   for r in
     select c.parent_table, c.parent_table::oid as oid
@@ -9971,6 +9983,8 @@ begin
      where p.parent_table = r.parent_table;
 
     select count(*)::int into v_parts from pgpm.part where parent_table = r.parent_table;
+    select array_agg(child_name) into v_retiring
+      from pgpm.part where parent_table = r.parent_table and retiring_at is not null;
 
     delete from pgpm.transmute_inflight where parent_table = r.parent_table;
     delete from pgpm.archive_ledger     where parent_table = r.parent_table;
@@ -9978,6 +9992,28 @@ begin
     delete from pgpm.part               where parent_table = r.parent_table;
     delete from pgpm.regrain_lock       where parent_table = r.parent_table;   -- #554
     delete from pgpm.config             where parent_table = r.parent_table;
+
+    -- #893: after the deletes, so the forgotten rows cannot count as the live owner of their own command.
+    if v_retiring is not null then
+      begin
+        execute 'select command from cron.job where jobname = ''pgpm_detach'' and database = current_database()'
+          into v_cmd;
+      exception when others then
+        v_cmd := null;   -- no pg_cron, or no such job: nothing can be armed
+      end;
+      if starts_with(v_cmd, 'alter table ')
+         and exists (select 1 from unnest(v_retiring) as t(child_name)
+                      where position(' detach partition ' in v_cmd) > 0
+                        and right(v_cmd, length(quote_ident(t.child_name)) + 14)
+                          = '.' || quote_ident(t.child_name) || ' concurrently')
+         and not exists (select 1 from pgpm.part p
+                          where p.retiring_at is not null
+                            and pgpm._detach_cmd(p.parent_table, pgpm._child_nsp(p.parent_table, p.child_name),
+                                                 p.child_name) = v_cmd)
+      then
+        perform pgpm._idle_detach_job(v_cmd);
+      end if;
+    end if;
 
     insert into pgpm.log (parent_table, action, rows, method)
       values (r.parent_table, 'forget_missing', v_parts,
