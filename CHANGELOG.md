@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **`tests/92` holds the rows regrain's swap moved to the seeded ones, by identity** (#919). Under a comment
+  promising identity it asserted `count(*) = 250` over ids 1..2500, so a swap that lost row 2500 and invented
+  a row 2499 left the file green. Each seeded row now carries its own payload, and the file compares the
+  whole table, `(id, ref_id, payload)` row by row, with the 250 seeded rows and the frontier.
+  `bench/tests_fail_on_defect.sh` runs it against a swap that rewrites one copied key, which a count cannot
+  see, with the mutation `regrain_survivors_by_count`.
 - **`bench/obtain_backoff_headroom.sh` holds the grid the low-headroom tick builds by identity** (#913). Its
   header promised the tick extends the grid "by identity", but the checks were a count of attached partitions
   and the only write probe (8999) landed above the old top, so an obtain that built the right number of cells

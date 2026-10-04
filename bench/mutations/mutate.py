@@ -5738,6 +5738,23 @@ select is(
 );
 """, 1)],
     ),
+    "regrain_survivors_by_count": (
+        "bench/tests_fail_on_defect.sh",
+        "Pre-#919 tests/92: the rows regrain's swap moved, judged by count(*) = 250 over ids 1..2500 under a "
+        "comment promising identity. A swap that loses row 2500 and invents row 2499 keeps the count, so the "
+        "file stays green against it. The exact pre-#919 assertion (the per-row payloads stay; a count "
+        "cannot read them).",
+        [("""select results_eq(
+  $$ select id, ref_id, payload from public.ofk92 order by id $$,
+  $$ select id, ref_id, payload from (
+       select (g*10)::bigint as id, ((g*10) % 100) + 1 as ref_id, 'p' || (g*10) as payload
+         from generate_series(1, 250) g
+       union all select 20000::bigint, 1, 'frontier') e order by id $$,
+  'every row the regrain copied survived the swap: the same (id, ref_id, payload) rows, none lost, none invented, none altered');
+""", """select is((select count(*)::int from public.ofk92 where id between 1 and 2500), 250,
+  'every row the regrain copied survived the swap');
+""", 1)],
+    ),
     # Review pass 5's novel seeds (S1, S3, S6, S8, S9): each was planted for the pass, and the suite check
     # showed what caught it, if anything. These put each back so its guard is proven to fail against it.
     "type_squatter_any_schema": (
@@ -7397,6 +7414,7 @@ MUTATION_SRC = {
     "radix_length_refusal_unpinned": "tests/90_text_time_alphabet_codec_test.sql",
     "id_conservation_after_migration": "tests/11_id_kind_test.sql",
     "uuid_conservation_after_migration": "tests/12_uuidv7_kind_test.sql",
+    "regrain_survivors_by_count": "tests/92_regrain_outgoing_fk_test.sql",
     "hypertable_preflight_reads_under_caller_rls": "pgpm_hypertable/install.sql",
     "hypertable_cutover_reads_under_caller_rls": "pgpm_hypertable/install.sql",
     "rls_to_s3_unchecked": "pgpm_archive/install.sql",
