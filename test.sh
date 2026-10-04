@@ -931,6 +931,7 @@ run_perf() {
     "bench/recorded_identity.sh pgpm_perf211"
     "bench/reads_under_caller_rls.sh pgpm_perf215"
     "bench/transmute_non_finite_id_key.sh pgpm_perf221"
+    "bench/crossing_keys_control_collation.sh pgpm_perf227"
   )
   local selected=()
   local n=${#guards[@]} idx

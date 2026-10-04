@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **`retire`'s crossing step finds a mixed-case `text_time` cell's referencing keys whatever the referencing
+  column's collation** (#900). `_crossing_keys` compared the referencing column against the cell's bounds
+  under that column's own collation, the database default for one declared without `COLLATE`. Under `en_US`
+  a KSUID cell whose bounds run from an uppercase to a lowercase digit is an empty interval, so no crossing
+  key was found, the declared `ON DELETE CASCADE` ran on none of the referencing rows and the dispatched
+  detach was refused by them on every run. The range is now compared under the control column's collation.
+  `tests/253`, guarded by `bench/crossing_keys_control_collation.sh`; mutation
+  `crossing_keys_referencing_collation`.
 - **A regrain target finer than the control column's declared scale is refused up front** (#899).
   `_regrain_step_shape` refused a fractional target only on a column whose type name was `int2`, `int4` or
   `int8`, so `set_regrain('0.5')` on a `numeric(12,0)` key was stored, the run copied every sub-range, and at
