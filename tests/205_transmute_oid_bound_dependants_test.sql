@@ -77,11 +77,14 @@ drop rule dv205_r on public.dv205;
 call pgpm.transmute('public.dv205', 'k', 100::bigint, p_obtain => 2);
 select is((select relkind::text from pg_class where oid = 'public.dv205'::regclass), 'p',
   'A LIVENESS: with the seven dropped, the same call converts dv205 (its own policy and x205_v did not stop it)');
-select ok(exists (select 1 from pg_depend d join pg_policy p on p.oid = d.objid
-                   where d.classid = 'pg_policy'::regclass and p.polrelid = 'public.dv205'::regclass
-                     and p.polname = 'dv205_self'
-                     and d.refobjid = (select monolith_oid from pgpm.config where parent_table = 'public.dv205'::regclass)),
-  'A LIVENESS: the parent''s carried copy of dv205_self depends on the original oid, so the cutover''s re-check met it and let it through');
+-- The carried copy is created after the renames (#897), so its subquery binds to the parent. It used to be
+-- created on the staging parent before them, bound to the original oid, and the cutover's re-check had to
+-- exempt it; the monolith partition's copy is its own, and still names the monolith.
+select is((select array_agg(distinct d.refobjid) from pg_depend d join pg_policy p on p.oid = d.objid
+            where d.classid = 'pg_policy'::regclass and d.refclassid = 'pg_class'::regclass and d.deptype = 'n'
+              and p.polrelid = 'public.dv205'::regclass and p.polname = 'dv205_self'),
+  array['public.dv205'::regclass::oid],
+  'A: the parent''s carried copy of dv205_self reads the parent, not the original oid the monolith took (#897)');
 insert into public.dv205 values (150, 'forward'), (11, 'mono');
 select isnt((select tableoid from public.dv205 where k = 150), (select monolith_oid from pgpm.config where parent_table = 'public.dv205'::regclass),
   'A LIVENESS: k = 150 landed in a forward partition, not the monolith');

@@ -942,6 +942,7 @@ run_perf() {
     "bench/regrain_fk_drift_swap_scan.sh pgpm_perf225"
     "bench/regrain_fk_drift_swap_scan.sh pgpm_perf228"
     "bench/null_arguments_refused.sh pgpm_perf222"
+    "bench/transmute_self_naming_policy.sh pgpm_perf224"
   )
   local selected=()
   local n=${#guards[@]} idx

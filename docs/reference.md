@@ -140,7 +140,13 @@ revoked on the table is not held on the parent. A table no grant was ever made o
 parent its owner's full privileges and nothing for anyone else.
 
 Policies live on the parent, and only on the parent: a parent policy governs parent-routed reads into a
-partition, and reaching a partition directly needs grants that live on the parent anyway.
+partition, and reaching a partition directly needs grants that live on the parent anyway. Each is created
+on the parent after the renames, once the parent bears the table's name, because a policy's expression
+can name the table itself: a correlated subquery's reference to the outer row (`m.tenant = t.org`, or
+`org` written unqualified, which PostgreSQL stores qualified by the table's name) and a subquery over the
+table both mean the parent, and see every partition. So the policies are re-created inside the cutover's
+brief `ACCESS EXCLUSIVE` window, beside the triggers, where the rest of the parent's configuration is
+applied before it begins; on an empty partitioned table each is a catalog write.
 
 One shape is refused rather than carried: a `FOR EACH ROW` trigger with a transition table
 (`REFERENCING OLD/NEW TABLE`), which PostgreSQL does not permit on a partitioned table. Rewrite it as a
@@ -171,7 +177,8 @@ table's **row type** goes with the oid as well, so an object typed by it is refu
 with the rest: a function taking a row of the table (or an array of rows), another table's column of that
 type, or a domain over it. Converted, each would stay bound to the monolith: the function would stop taking
 the table's rows, the column would reject them, and the monolith could never be dropped. The
-table's own policies are not among them: they are carried. This one too is asked before anything is
+table's own policies are not among them: they are carried, re-created on the parent once it has the
+table's name, so one that queries the table reads the parent. This one too is asked before anything is
 committed and again under the cutover's lock, which `CREATE VIEW` (and the rest) has to wait for. **Outgoing** foreign keys (this table
 referencing another) are carried onto the new parent automatically, so they keep enforcing across every
 partition; a `NOT VALID` one is refused rather than carried, because re-adding it at the parent could not
