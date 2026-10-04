@@ -60,21 +60,32 @@ docker exec "$C" psql -U postgres -d "$DB" -q -c "create extension if not exists
 docker exec "$C" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f /repo/pgpm_core/install.sql >/dev/null
 docker exec "$C" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 -q -f "$ARCHIVE_INSTALL" >/dev/null
 
+# The probe session runs WITHOUT ON_ERROR_STOP on purpose, so its log records every statement's
+# outcome; the verdict therefore never reads a marker as "the call worked" (a marker prints after a DO
+# block that raised exactly as after one that returned, #912). The DO block hands the encoded length
+# out through a session setting it sets only after the encoder returned; a raised block rolls the
+# setting back with everything else, so the `<label>_len=` row read in the NEXT statement is the call's
+# own result or nothing. Any ERROR in the log fails the guard (the 1 GB ceiling's `invalid memory
+# alloc` and the `out of memory` an exhausted backend reports below it alike). The start/done markers
+# only bracket the call for the sampler.
 run_one() { # <label> <function name>
   local label="$1" fn="$2"
-  local log pid peak n
+  local log pid peak n started ended got_len n_err
   log=$(mktemp)
   docker exec "$C" psql -U postgres -d "$DB" -qtA \
     -c "set client_min_messages = warning" \
     -c "select pg_backend_pid()" \
     -c "select pg_sleep(0.3)" \
+    -c "select 'marker_${label}_start'" \
     -c "do \$\$
 declare v_payload bytea; v_len bigint;
 begin
   v_payload := (select string_agg(gen_random_bytes(1024), ''::bytea) from generate_series(1, $NCHUNKS));
   v_len := length($fn(v_payload));
+  perform set_config('pgpm_bench.deflate_len', v_len::text, false);
 end;
 \$\$;" \
+    -c "select '${label}_len=' || current_setting('pgpm_bench.deflate_len', true)" \
     -c "select 'marker_${label}_done'" \
     > "$log" 2>&1 &
   local bg=$!
@@ -90,8 +101,13 @@ end;
   if [ -n "$pid" ]; then
     while kill -0 "$bg" 2>/dev/null; do
       local rss
+      # Bracket the sample: the start marker in the log BEFORE it is taken and the done marker still
+      # absent AFTER, so it provably fell inside the call, not the pg_sleep before it. (grep -c prints
+      # 0 and exits 1 on no match; the printed count is what is read.)
+      started=$(grep -c "^marker_${label}_start\$" "$log" 2>/dev/null)
       rss=$(docker exec "$C" sh -c "grep VmRSS /proc/$pid/status 2>/dev/null | awk '{print \$2}'" 2>/dev/null)
-      if [ -n "${rss:-}" ]; then
+      ended=$(grep -c "^marker_${label}_done\$" "$log" 2>/dev/null)
+      if [ -n "${rss:-}" ] && [ "${started:-0}" = 1 ] && [ "${ended:-0}" = 0 ]; then
         n=$((n+1))
         [ "$rss" -gt "$peak" ] && peak=$rss
       fi
@@ -104,12 +120,16 @@ end;
   printf 'peak=%s (n=%s)\n' "$peak" "$n"
   cat "$log"
 
+  # The payload is random bytes, eight bits of entropy each, so no lossless stream that encodes all of
+  # it is meaningfully shorter than the payload: 99% of it is a floor a real encode clears (measured at
+  # 100.1% dynamic, 105.5% fixed) and a stub or a truncated return does not.
+  got_len=$(grep -E "^${label}_len=[0-9]+\$" "$log" | head -n1 | cut -d= -f2)
+  n_err=$(grep -c 'ERROR:' "$log")
   check "$label: the probe found the backend pid" "$pid" "$([ -n "$pid" ] && echo 1 || echo 0)"
-  check "$label: the call was actually sampled"    "n=$n"  "$([ "$n" -gt 0 ] && echo 1 || echo 0)"
-  check "$label: the call completed"               "$(grep -c "marker_${label}_done" "$log")" \
-        "$([ "$(grep -c "marker_${label}_done" "$log")" = "1" ] && echo 1 || echo 0)"
-  check "$label: no invalid-memory-alloc error"     "$(grep -c 'invalid memory alloc' "$log")" \
-        "$([ "$(grep -c 'invalid memory alloc' "$log")" = "0" ] && echo 1 || echo 0)"
+  check "$label: the call was sampled while it ran" "n=$n"  "$([ "$n" -gt 0 ] && echo 1 || echo 0)"
+  check "$label: the call returned a stream for the whole payload" "len=${got_len:-none} floor=$((NBYTES * 99 / 100))" \
+        "$([ "${got_len:-0}" -ge "$((NBYTES * 99 / 100))" ] && echo 1 || echo 0)"
+  check "$label: the probe session raised no ERROR" "$n_err" "$([ "$n_err" = 0 ] && echo 1 || echo 0)"
   check "$label: peak RSS stays bounded (<= ${MAX_PEAK_KB}KB)" "${peak}KB" \
         "$([ "$peak" -le "$MAX_PEAK_KB" ] && echo 1 || echo 0)"
 }
