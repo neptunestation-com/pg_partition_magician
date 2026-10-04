@@ -22,6 +22,10 @@
 --     <rel>_pgpm_delta, the trigger function <rel>_pgpm_delta_fn(), and the <rel>_pgpm_delta_trg
 --     row trigger it drives on the live hypertable and its chunks (found by the record the copy
 --     keeps on its delta; see the schema drop's block)
+--   * from_hypertable's copy, left in the hypertable's schema by a from_hypertable_copy that was never cut
+--     over: the table <rel>_pgpm_dest (a full second copy of the hypertable's rows) with its indexes and the
+--     outgoing foreign keys the copy replayed on it (found by the record the copy keeps on it, and dropped
+--     only while the hypertable it was copied from still exists; see the schema drop's block)
 --
 -- Put back first:
 --   * every incoming foreign key transmute(..., p_incoming_fks => 'preserve') dropped and
@@ -37,6 +41,8 @@
 --     all of its partitions (the monolith, the forward grid, any fine children a regrain
 --     built and attached, the DEFAULT) and every row. Nothing pgpm made survives in your
 --     schema except those relations.
+--   * a from_hypertable copy that was never cut over whose hypertable no longer exists: it
+--     may hold the only copy of those rows, so a WARNING names it and you decide
 --
 -- The one thing this script cannot undo is a conversion abandoned between transmute's
 -- phases: its pgpm_monolith_bound CHECK rejects writes outside the recorded range, and
@@ -235,6 +241,46 @@ begin
         raise warning 'pg_partition_magician: could not drop the from_hypertable change capture %.% (%). Left behind: table %.%, function %.%() and the row trigger it drives on the hypertable and its chunks, which logs every write. Drop them as their owner.',
           quote_ident(r.nsp), quote_ident(r.delta), sqlerrm, quote_ident(r.nsp), quote_ident(r.delta),
           quote_ident(r.nsp), quote_ident(v_fn);
+    end;
+  end loop;
+
+  -- Drop from_hypertable's copies that were never cut over (#773). from_hypertable_copy builds <rel>_pgpm_dest
+  -- in the hypertable's schema, a full second copy of its rows that still holds the outgoing foreign keys the
+  -- copy replayed on it (and, for a tracking copy, its pre-built key index), so a referenced row the
+  -- hypertable no longer uses could not be deleted. The cutover renames it into the hypertable's place; a
+  -- copy never cut over keeps it, out of the schema drop's reach.
+  --
+  -- Found by the module's own record, never by its name alone (an operator's table can end in _pgpm_dest):
+  -- the copy comments the table `pgpm from_hypertable copy of <hypertable oid>` in the transaction that
+  -- creates it, and the swap replaces that comment, so a table carrying it is a copy that was never cut over.
+  -- Dropped only while the hypertable it names still exists, since the hypertable then holds every row and
+  -- only the copy work is lost. A copy whose hypertable is gone may be the only home of those rows, so it is
+  -- left, with a WARNING naming it. A copy made by a release that wrote no record (0.6.0 and earlier) is not
+  -- found; drop it by hand.
+  for r in
+    select n.nspname as nsp, c.relname as dest,
+           substring(d.description from '^pgpm from_hypertable copy of ([0-9]+)$')::oid as src
+      from pg_description d
+      join pg_class c on c.oid = d.objoid
+      join pg_namespace n on n.oid = c.relnamespace
+     where d.classoid = 'pg_class'::regclass and d.objsubid = 0
+       and d.description ~ '^pgpm from_hypertable copy of [0-9]+$'
+       and c.relkind = 'r' and right(c.relname, 10) = '_pgpm_dest'
+     order by n.nspname, c.relname
+  loop
+    if not exists (select 1 from pg_class s where s.oid = r.src) then
+      raise warning 'pg_partition_magician: left behind %.%, a from_hypertable copy that was never cut over: the hypertable it was copied from (oid %) no longer exists, so this table may hold the only copy of those rows. Drop it once you have checked.',
+        quote_ident(r.nsp), quote_ident(r.dest), r.src;
+      continue;
+    end if;
+    begin
+      execute format('drop table %I.%I', r.nsp, r.dest);
+    exception
+      -- Best-effort per copy, as the sweeps above: the copy belongs to whoever ran it, and something of the
+      -- operator's (a view) may depend on it. Say what is left.
+      when insufficient_privilege or dependent_objects_still_exist then
+        raise warning 'pg_partition_magician: could not drop %.%, a from_hypertable copy that was never cut over (%). It is left behind with its rows; drop it as its owner.',
+          quote_ident(r.nsp), quote_ident(r.dest), sqlerrm;
     end;
   end loop;
 

@@ -145,9 +145,14 @@ not-yet-attached copies are dropped (the table being regrained still holds every
 `from_hypertable`'s change capture from a `from_hypertable_copy(..., p_track_changes => true)` that was
 never cut over (the `<table>_pgpm_delta` table, the `<table>_pgpm_delta_fn()` function and the
 `<table>_pgpm_delta_trg` trigger on the live hypertable and its chunks), found by the record the copy keeps
-on its delta table, so a table of yours that merely shares the name is left alone. Left: every
-transmuted table, still a partitioned table under its original name, with all of its partitions and rows.
-Nothing else pgpm made remains in your schema.
+on its delta table, so a table of yours that merely shares the name is left alone. And the copy itself
+from any `from_hypertable_copy` never cut over: the `<table>_pgpm_dest` table (a full second copy of the
+hypertable's rows) with its indexes and the foreign keys it holds, found by the record the copy keeps on
+it, and dropped while the hypertable it was copied from still exists, since that still holds every row.
+Left: every transmuted table, still a partitioned table under its original name, with all of its
+partitions and rows. Nothing else pgpm made remains in your schema, with one exception that a `WARNING`
+names: a never-cut-over copy whose hypertable you have since dropped, because it may hold the only copy
+of those rows. A copy made by 0.6.0 or earlier carries no record; drop it yourself.
 
 Uninstall also puts back every incoming foreign key that `transmute(..., p_incoming_fks => 'preserve')`
 dropped and pgpm has not restored yet (a paused table's keys wait for a maintenance tick that never

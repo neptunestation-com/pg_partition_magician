@@ -665,7 +665,10 @@ Phase 1: build the plain destination (`<rel>_pgpm_dest`) and bulk-copy the exist
 chunk-range per transaction, clustered by the control column. The source keeps serving traffic. Run this, let
 the workload continue, then run `from_hypertable_cutover` when ready. The destination takes the source's
 columns, defaults and `CHECK` constraints as they stand now; schema changes to the hypertable before the
-cutover make it refuse (see `from_hypertable_cutover`), so re-run this after one. Each chunk's bounds are
+cutover make it refuse (see `from_hypertable_cutover`), so re-run this after one. The destination carries the
+table comment `pgpm from_hypertable copy of <oid>`: it is the record by which `pgpm_core/uninstall.sql` finds a
+copy that was never cut over and drops it (while the hypertable it names still exists), and the cutover
+replaces it with the hypertable's own comment, or none. Each chunk's bounds are
 applied in the dimension's own type (`timestamptz`, `timestamp` without time zone, or `date`), so the copy is exact under any
 session `TimeZone` and `DateStyle`; a hypertable on a dimension of any other type is refused here. The same
 holds for every watermark and control range the drains and the cutover carry: each is rendered in ISO style

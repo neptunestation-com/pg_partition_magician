@@ -4073,6 +4073,68 @@ $$;''',
      where c.relkind = 'r' and right(c.relname, 11) = '_pgpm_delta'
 """, 1)],
     ),
+    # Issue #773 (its last bullet): uninstall drops a from_hypertable copy that was never cut over, found by
+    # the record the copy keeps on it, and only while its hypertable still holds every row; the swap leaves
+    # the migrated table no record. One mutation per half, all caught by tests/timescale/db/48 through
+    # bench/uninstall_hypertable_copy.sh.
+    "uninstall_keeps_hypertable_copy": (
+        "bench/uninstall_hypertable_copy.sh",
+        "Pre-#773 uninstall.sql after a from_hypertable_copy that was never cut over: only the tracking "
+        "copy's change capture is swept, so <rel>_pgpm_dest (a full second copy of the hypertable's rows), "
+        "its pre-built key index <conname>_pgpm_new and the outgoing foreign keys the copy replayed on it "
+        "survive, and a referenced row the hypertable no longer uses cannot be deleted. Deletes the sweep "
+        "(its comment through its loop), so tests/timescale/db/48's removal assertions fail and its "
+        "survivors still pass.",
+        [(re.compile(r"^  -- Drop from_hypertable's copies that were never cut over \(#773\)\..*?^  end loop;\n\n",
+                     re.MULTILINE | re.DOTALL), "", 1)],
+    ),
+    "uninstall_hypertable_copy_by_name": (
+        "bench/uninstall_hypertable_copy.sh",
+        "#773's sweep keyed on a name instead of the copy's record: every table ending in _pgpm_dest beside "
+        "a table of the derived name is taken for a copy of it and dropped, whether the module made it or "
+        "the operator did. tests/timescale/db/48's look-alike (public.u773_c_pgpm_dest beside public.u773_c, "
+        "no record) is dropped with its rows.",
+        [("""    select n.nspname as nsp, c.relname as dest,
+           substring(d.description from '^pgpm from_hypertable copy of ([0-9]+)$')::oid as src
+      from pg_description d
+      join pg_class c on c.oid = d.objoid
+      join pg_namespace n on n.oid = c.relnamespace
+     where d.classoid = 'pg_class'::regclass and d.objsubid = 0
+       and d.description ~ '^pgpm from_hypertable copy of [0-9]+$'
+       and c.relkind = 'r' and right(c.relname, 10) = '_pgpm_dest'
+""", """    select n.nspname as nsp, c.relname as dest,
+           coalesce(substring(d.description from '^pgpm from_hypertable copy of ([0-9]+)$')::oid,
+                    to_regclass(format('%I.%I', n.nspname, left(c.relname, -10)))::oid) as src
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+      left join pg_description d on d.objoid = c.oid and d.classoid = 'pg_class'::regclass and d.objsubid = 0
+     where c.relkind = 'r' and right(c.relname, 10) = '_pgpm_dest'
+""", 1)],
+    ),
+    "uninstall_drops_orphaned_copy": (
+        "bench/uninstall_hypertable_copy.sh",
+        "#773's sweep without its source check: a copy whose hypertable the operator has since dropped is "
+        "dropped too, although it may be the only home of those rows. tests/timescale/db/48's copy of the "
+        "dropped public.u773_d is gone with its three rows.",
+        [("""    if not exists (select 1 from pg_class s where s.oid = r.src) then
+      raise warning 'pg_partition_magician: left behind %.%, a from_hypertable copy that was never cut over: the hypertable it was copied from (oid %) no longer exists, so this table may hold the only copy of those rows. Drop it once you have checked.',
+        quote_ident(r.nsp), quote_ident(r.dest), r.src;
+      continue;
+    end if;
+""", "", 1)],
+    ),
+    "hypertable_swap_keeps_copy_record": (
+        "bench/uninstall_hypertable_copy.sh",
+        "The swap replays the source's comment only when it has one (the pre-#773 carry), so the copy's "
+        "`pgpm from_hypertable copy of <oid>` record survives onto the migrated table of a hypertable "
+        "without a comment. tests/timescale/db/48's migrated public.u773_e carries it, before the uninstall "
+        "and after.",
+        [("""  v_ddl := v_ddl || format('comment on table %s is %L', v_tbl_q, obj_description(p_hypertable, 'pg_class'));
+""", """  if obj_description(p_hypertable, 'pg_class') is not null then
+    v_ddl := v_ddl || format('comment on table %s is %L', v_tbl_q, obj_description(p_hypertable, 'pg_class'));
+  end if;
+""", 1)],
+    ),
     "to_s3_part_bytes_unbounded": (
         "bench/archive_to_s3_part_bytes.sh",
         "Pre-#594 archive.configure and archive.to_s3: configure stores any p_part_bytes, and to_s3 reads "
@@ -7244,6 +7306,10 @@ MUTATION_SRC = {
     "uninstall_keeps_regrain_copies": "pgpm_core/uninstall.sql",
     "uninstall_keeps_hypertable_capture": "pgpm_core/uninstall.sql",
     "uninstall_hypertable_capture_by_name": "pgpm_core/uninstall.sql",
+    "uninstall_keeps_hypertable_copy": "pgpm_core/uninstall.sql",
+    "uninstall_hypertable_copy_by_name": "pgpm_core/uninstall.sql",
+    "uninstall_drops_orphaned_copy": "pgpm_core/uninstall.sql",
+    "hypertable_swap_keeps_copy_record": "pgpm_hypertable/install.sql",
     "uninstall_fk_exempt_by_name": "pgpm_core/uninstall.sql",
     "hypertable_copy_key_tmp_by_name": "pgpm_hypertable/install.sql",
     "hypertable_cutover_key_tmp_unshared": "pgpm_hypertable/install.sql",
@@ -7376,6 +7442,11 @@ MUTATION_TRACK = {
     # from_hypertable_copy can run, which needs a real TimescaleDB.
     "uninstall_keeps_hypertable_capture": "timescale",
     "uninstall_hypertable_capture_by_name": "timescale",
+    # #773's, the same reason: the copy it must sweep exists only where from_hypertable_copy can run.
+    "uninstall_keeps_hypertable_copy": "timescale",
+    "uninstall_hypertable_copy_by_name": "timescale",
+    "uninstall_drops_orphaned_copy": "timescale",
+    "hypertable_swap_keeps_copy_record": "timescale",
     "hypertable_preflight_reads_under_caller_rls": "timescale",
     "hypertable_cutover_reads_under_caller_rls": "timescale",
     "rls_cutover_unchecked_under_lock": "timescale",
