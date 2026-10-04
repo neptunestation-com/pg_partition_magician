@@ -4946,17 +4946,34 @@ $$;
 --     a numeric column can regrain toward '0.5', but on a bigint column the first fine cell's bound
 --     ('0.0' rendered for a bigint) is invalid input and every tick logged skip_regrain with the capture
 --     trigger left on the source. transmute's id step is a bigint by signature, so the rule matches it.
+--   * a step finer than a numeric column's declared scale (#899): '0.5' on a numeric(12,0) key, '0.05' on
+--     a numeric(12,1) one. The type name is 'numeric', so the integer rule above passed it, and the copies
+--     were made and filled; then ATTACH PARTITION coerced each fine bound to the key's typmod, '0.5' and
+--     '1.0' both to 1, and every swap failed 'empty range bound', with the capture trigger and the TRUNCATE
+--     refusal left on the source until the run was cancelled. The column is judged by its base type and
+--     effective typmod, through any domain, so a domain over an integer type takes the integer rules too.
 -- Called from _regrain_step_forward, so set_regrain (at call time) and regrain_step (which regrain(),
 -- regrain_history() and maintain go through) refuse it alike.
 create or replace function pgpm._regrain_step_shape(p_parent regclass, p_step text)
 returns void language plpgsql stable as $$
-declare cfg pgpm.config; v_typname name; v_months numeric; v_rest interval;
+declare cfg pgpm.config; v_typname name; v_type oid; v_typmod int; v_scale int; v_months numeric; v_rest interval;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
-  select t.typname into v_typname
-    from pg_attribute a join pg_type t on t.oid = a.atttypid
+  select a.atttypid, a.atttypmod into v_type, v_typmod
+    from pg_attribute a
    where a.attrelid = p_parent and a.attname = cfg.control_column and not a.attisdropped;
+  -- #899: judge the column by what it stores, not by its type's name: a domain's base type, and the
+  -- typmod the column or the innermost domain that declares one carries
+  while (select t.typtype from pg_type t where t.oid = v_type) = 'd' loop
+    select t.typbasetype, case when v_typmod = -1 then t.typtypmod else v_typmod end into v_type, v_typmod
+      from pg_type t where t.oid = v_type;
+  end loop;
+  select t.typname into v_typname from pg_type t where t.oid = v_type;
+  -- a numeric(p, s) column's scale s (negative allowed since PostgreSQL 15); null for unconstrained numeric
+  if v_typname = 'numeric' and v_typmod >= 4 then
+    v_scale := (((v_typmod - 4) & 2047) # 1024) - 1024;
+  end if;
   if cfg.control_kind = 'id' then
     if v_typname in ('int2', 'int4', 'int8') and p_step::numeric <> trunc(p_step::numeric) then
       raise exception 'pg_partition_magician: regrain target step % for % is not a whole number, but its control column % is %, which holds whole numbers only -- the fine cells'' bounds could not be written as that type, so every tick would fail creating the first one; give a whole-number step (a fractional one is for a numeric column)',
@@ -4970,6 +4987,17 @@ begin
     if v_typname in ('int2', 'int4', 'int8') and p_step::numeric = trunc(p_step::numeric) and scale(p_step::numeric) > 0 then
       raise exception 'pg_partition_magician: regrain target step % for % is a whole number written with a fractional part, but its control column % is %, which holds whole numbers only -- the grid would write every fine cell''s bound with that fraction, which is not valid input for that type, so every tick would fail creating the first one; write it as %',
         p_step, p_parent, quote_ident(cfg.control_column), v_typname, trunc(p_step::numeric);
+    end if;
+    -- #899: and a step finer than a numeric column's scale. Every fine bound is a multiple of the step
+    -- from the anchor, and ATTACH rounds each one to the column's scale, so two adjacent bounds can round
+    -- to the same value: refused here, before a run copies anything it could never swap in.
+    if v_scale is not null and p_step::numeric <> round(p_step::numeric, v_scale) then
+      raise exception 'pg_partition_magician: regrain target step % for % is finer than its control column % can hold: it is %, which keeps % -- ATTACH PARTITION would round the fine cells'' bounds to that scale, adjacent bounds would round to the same value, and every swap would fail (empty range bound) after the run had copied the rows; give a step that is a multiple of %',
+        p_step, p_parent, quote_ident(cfg.control_column), format_type(v_type, v_typmod),
+        case when v_scale = 0 then 'whole numbers only'
+             when v_scale > 0 then v_scale || ' decimal place(s)'
+             else 'multiples of ' || trim_scale(power(10::numeric, -v_scale)) end,
+        trim_scale(power(10::numeric, -v_scale));
     end if;
   else
     v_months := extract(year from p_step::interval) * 12 + extract(month from p_step::interval);

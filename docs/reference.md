@@ -2148,7 +2148,9 @@ fail or churn), one whose shape the grid cannot place, by the rules `transmute` 
 step that is not a whole number of days on a `date` column, a fractional step such as `'2.5'` on an
 `int2`/`int4`/`int8` column, and on those columns a whole step written with a fraction such as `'10.0'`,
 whose fraction the grid would write into every bound, so the message says to write it as `'10'`; a
-fractional step on a `numeric` column is allowed), one coarser than
+step finer than a `numeric(p,s)` column's scale, such as `'0.5'` on `numeric(12,0)` or `'0.05'` on
+`numeric(12,1)`, whose fine bounds `ATTACH` would round until two of them meet; a domain is judged by its
+base type and typmod; a fractional step on an unconstrained `numeric` column is allowed), one coarser than
 `partition_step` (auto-regrain would reselect the same unsplittable child forever), and one whose fine
 names `<rel>_p<label>` would exceed PostgreSQL's 63-byte identifier limit.
 A finer step has a wider label, so a table whose monthly names fit can still be refused a daily target; the
