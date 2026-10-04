@@ -3206,6 +3206,129 @@ $$;''',
           "                           from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent)\n"
           "           || '_' || archive._object_stem(pcfg.control_kind, p_lo) || '.parquet';   -- MUTANT\n", 1)],
     ),
+    # #914: a write site Part 0 of tests/archive/db/39 must refuse by ENUMERATING the module's S3 writes, each
+    # shaped so the scan it replaced (a 'PUT' literal present, a key helper's name absent from the body)
+    # passes it: a helper named in a comment, a verb that is not a literal, and a second PUT at an inline key
+    # beside a claimed one. Each key carries no prefix, the case scripts/check_archive_object_keys.py hands
+    # to db/39. All three break bench/archive_key_owner_every_path.sh through Part 0 alone.
+    "archive_put_site_helper_named_in_comment": (
+        "bench/archive_key_owner_every_path.sh",
+        "A new write site, archive.to_s3_marker, PUTs a completion marker at <child>.done, a key no "
+        "helper made or claimed, while its comment names archive._child_object_key(: the pre-#914 Part 0 read "
+        "the helper's name anywhere in the body, comment included, and passed it.",
+        [("    raise exception 'archive.to_s3_parquet: PUT of % failed: HTTP % %', p_child, v_resp.status, left(v_resp.content, 200);\n"
+          "  end if;\n"
+          "end;\n"
+          "$$;\n",
+          "    raise exception 'archive.to_s3_parquet: PUT of % failed: HTTP % %', p_child, v_resp.status, left(v_resp.content, 200);\n"
+          "  end if;\n"
+          "end;\n"
+          "$$;\n"
+          "create or replace function archive.to_s3_marker(p_parent regclass, p_child name) returns void\n"
+          "language plpgsql as $$\n"
+          "declare cfg archive.config; v_key_id text; v_secret text; v_key text;\n"
+          "begin\n"
+          "  select * into cfg from archive.config where parent_table = p_parent;\n"
+          "  select decrypted_secret into v_key_id from vault.decrypted_secrets where name = cfg.vault_key_id;\n"
+          "  select decrypted_secret into v_secret from vault.decrypted_secrets where name = cfg.vault_secret;\n"
+          "  -- MUTANT: beside the export archive._child_object_key(p_parent, cfg.prefix, p_child, ...) names, unclaimed\n"
+          "  v_key := quote_ident(p_child) || '.done';\n"
+          "  perform archive.s3_signed_request('PUT', cfg.endpoint, cfg.bucket, cfg.region, v_key, '',\n"
+          "                                   'text/plain', '', v_key_id, v_secret);\n"
+          "end;\n"
+          "$$;\n", 1)],
+    ),
+    "archive_put_site_verb_in_variable": (
+        "bench/archive_key_owner_every_path.sh",
+        "A new write site, archive._s3_send, takes its method as a parameter (p_method text default 'PUT', a "
+        "default in the signature and so not in the body) and writes at <child>.ndjson, a key no helper made "
+        "or claimed: the pre-#914 Part 0 looked for a 'PUT' literal in the body and passed it.",
+        [("    raise exception 'archive.to_s3_parquet: PUT of % failed: HTTP % %', p_child, v_resp.status, left(v_resp.content, 200);\n"
+          "  end if;\n"
+          "end;\n"
+          "$$;\n",
+          "    raise exception 'archive.to_s3_parquet: PUT of % failed: HTTP % %', p_child, v_resp.status, left(v_resp.content, 200);\n"
+          "  end if;\n"
+          "end;\n"
+          "$$;\n"
+          "create or replace function archive._s3_send(p_parent regclass, p_child name, p_body text, p_method text default 'PUT')\n"
+          "returns http_response language plpgsql as $$\n"
+          "declare cfg archive.config; v_key_id text; v_secret text; v_key text;\n"
+          "begin\n"
+          "  select * into cfg from archive.config where parent_table = p_parent;\n"
+          "  select decrypted_secret into v_key_id from vault.decrypted_secrets where name = cfg.vault_key_id;\n"
+          "  select decrypted_secret into v_secret from vault.decrypted_secrets where name = cfg.vault_secret;\n"
+          "  v_key := quote_ident(p_child) || '.ndjson';   -- MUTANT: unclaimed\n"
+          "  return archive.s3_signed_request(p_method, cfg.endpoint, cfg.bucket, cfg.region, v_key, '',\n"
+          "                                   'application/x-ndjson', p_body, v_key_id, v_secret);\n"
+          "end;\n"
+          "$$;\n", 1)],
+    ),
+    "archive_to_s3_parquet_second_put_inline": (
+        "bench/archive_key_owner_every_path.sh",
+        "archive.to_s3_parquet, having PUT its file at the key archive._child_object_key claimed, PUTs a "
+        "manifest beside it at <child>.manifest.json, a key nothing claimed: the pre-#914 Part 0 saw a 'PUT' "
+        "literal and a helper's name in the body and passed it. One site; the export itself is unchanged, so "
+        "Part C's identity checks still pass and only the enumeration of writes can catch it.",
+        [("    raise exception 'archive.to_s3_parquet: PUT of % failed: HTTP % %', p_child, v_resp.status, left(v_resp.content, 200);\n"
+          "  end if;\n",
+          "    raise exception 'archive.to_s3_parquet: PUT of % failed: HTTP % %', p_child, v_resp.status, left(v_resp.content, 200);\n"
+          "  end if;\n"
+          "  v_key := quote_ident(p_child) || '.manifest.json';   -- MUTANT: a second object, unclaimed\n"
+          "  v_resp := archive.s3_signed_request('PUT', cfg.endpoint, cfg.bucket, cfg.region, v_key, '',\n"
+          "                                     'application/json', '{\"rows\": null}', v_key_id, v_secret);\n", 1)],
+    ),
+    # #914: a second key assembly scripts/check_archive_object_keys.py must refuse by FOLLOWING the prefix,
+    # the two shapes review pass 8 found (F8-05) that its token-adjacency rule passed. Both break
+    # bench/archive_object_keys_static.sh, which runs the checker on the mutant.
+    "archive_key_prefix_by_subquery": (
+        "bench/archive_object_keys_static.sh",
+        "A second, unclaimed export key, archive._export_key_ndjson, assembled as (select prefix from "
+        "archive.config where ...) || <schema>.<child>.ndjson: `prefix` touches no ||, is not assigned and is "
+        "no call's argument, so the pre-#914 checker read it as one assembly (archive._owned_key's) and passed.",
+        [("    raise exception 'archive.to_s3_parquet: PUT of % failed: HTTP % %', p_child, v_resp.status, left(v_resp.content, 200);\n"
+          "  end if;\n"
+          "end;\n"
+          "$$;\n",
+          "    raise exception 'archive.to_s3_parquet: PUT of % failed: HTTP % %', p_child, v_resp.status, left(v_resp.content, 200);\n"
+          "  end if;\n"
+          "end;\n"
+          "$$;\n"
+          "create or replace function archive._export_key_ndjson(p_parent regclass, p_child name) returns text\n"
+          "language sql stable as $$   -- MUTANT: a second, unclaimed assembly\n"
+          "  select (select prefix from archive.config where parent_table = p_parent)\n"
+          "         || quote_ident(n.nspname) || '.' || quote_ident(p_child) || '.ndjson'\n"
+          "    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;\n"
+          "$$;\n", 1)],
+    ),
+    "archive_key_prefix_by_renamed_param": (
+        "bench/archive_object_keys_static.sh",
+        "A second, unclaimed export key: archive._export_key_parquet hands cfg.prefix to archive._join_key, a "
+        "function the file defines, whose parameter is p_base and whose body is p_base || <schema>.<child>: the "
+        "pre-#914 checker followed the call on the promise that the callee's body is checked by the same rule, "
+        "but that rule knew only the names prefix and p_prefix, so p_base || ... passed.",
+        [("    raise exception 'archive.to_s3_parquet: PUT of % failed: HTTP % %', p_child, v_resp.status, left(v_resp.content, 200);\n"
+          "  end if;\n"
+          "end;\n"
+          "$$;\n",
+          "    raise exception 'archive.to_s3_parquet: PUT of % failed: HTTP % %', p_child, v_resp.status, left(v_resp.content, 200);\n"
+          "  end if;\n"
+          "end;\n"
+          "$$;\n"
+          "create or replace function archive._join_key(p_base text, p_parent regclass, p_child name) returns text\n"
+          "language sql stable as $$   -- MUTANT: a second, unclaimed assembly\n"
+          "  select p_base || quote_ident(n.nspname) || '.' || quote_ident(p_child) || '.parquet'\n"
+          "    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;\n"
+          "$$;\n"
+          "create or replace function archive._export_key_parquet(p_parent regclass, p_child name) returns text\n"
+          "language plpgsql stable as $$\n"
+          "declare cfg archive.config;\n"
+          "begin\n"
+          "  select * into cfg from archive.config where parent_table = p_parent;\n"
+          "  return archive._join_key(cfg.prefix, p_parent, p_child);\n"
+          "end;\n"
+          "$$;\n", 1)],
+    ),
     # #823: the pre-#823 stem exactly, UTC-pinned digits only. Breaks bench/archive_stem_era.sh through
     # tests/archive/db/35.
     "archive_object_stem_drops_era": (
@@ -7600,6 +7723,11 @@ MUTATION_SRC = {
     "archive_to_s3_parquet_key_inline": "pgpm_archive/install.sql",
     "archive_ndjson_strategy_key_inline": "pgpm_archive/install.sql",
     "archive_parquet_strategy_key_inline": "pgpm_archive/install.sql",
+    "archive_put_site_helper_named_in_comment": "pgpm_archive/install.sql",
+    "archive_put_site_verb_in_variable": "pgpm_archive/install.sql",
+    "archive_to_s3_parquet_second_put_inline": "pgpm_archive/install.sql",
+    "archive_key_prefix_by_subquery": "pgpm_archive/install.sql",
+    "archive_key_prefix_by_renamed_param": "pgpm_archive/install.sql",
     "archive_object_stem_drops_era": "pgpm_archive/install.sql",
     "sigv4_transaction_start_stamp": "pgpm_archive/install.sql",
     "to_s3_compress_unread": "pgpm_archive/install.sql",

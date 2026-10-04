@@ -24,6 +24,11 @@
 #   archive_to_s3_parquet_key_inline     -- archive.to_s3_parquet builds its key inline
 #   archive_ndjson_strategy_key_inline   -- the NDJSON archive_fn transport builds its chunk key inline
 #   archive_parquet_strategy_key_inline  -- the Parquet archive_fn transport builds its chunk key inline
+# and three that only the file's Part 0 can catch (#914), since each writes at a key no namesake case reads:
+#   archive_put_site_helper_named_in_comment -- a new write site names a key helper in a comment only
+#   archive_put_site_verb_in_variable        -- a new write site takes its method as a parameter
+#   archive_to_s3_parquet_second_put_inline  -- to_s3_parquet PUTs a manifest at an inline key beside its
+#                                               claimed export
 # (archive_object_key_reusable_name, which takes the oid out of archive._owned_key itself, stays with
 # bench/archive_key_reused_name.sh, the #822 guard.) scripts/check_archive_object_keys.py refuses every one
 # of these mutants statically too; this guard is the behavioural half.
