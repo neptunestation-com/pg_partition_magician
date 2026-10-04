@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **A regrain target finer than the control column's declared scale is refused up front** (#899).
+  `_regrain_step_shape` refused a fractional target only on a column whose type name was `int2`, `int4` or
+  `int8`, so `set_regrain('0.5')` on a `numeric(12,0)` key was stored, the run copied every sub-range, and at
+  the swap `ATTACH PARTITION` rounded the fine bounds to the key's scale (`0.5` and `1.0` both to `1`) and
+  failed `empty range bound` on every tick, with the capture trigger and the `TRUNCATE` refusal left on the
+  source until the run was cancelled. The column is now judged by its effective scale: a step that is not a
+  multiple of `numeric(p,s)`'s smallest unit is refused at call time and by `regrain_step`, `regrain()` and
+  each tick, and a domain is judged by its base type and typmod. `tests/252`, guarded by
+  `bench/regrain_target_column_scale.sh` with mutations `regrain_step_scale_by_typname` and
+  `regrain_step_shape_domain_blind`.
 - **`transmute` refuses a `numeric` `id` control holding `NaN`, `Infinity` or `-Infinity`, before anything
   commits** (#895). The id branch of the frontier read took the greatest value (`NaN` sorts above every number)
   with no finiteness check, where the `time` kind refuses `infinity`, so phase 1 committed a

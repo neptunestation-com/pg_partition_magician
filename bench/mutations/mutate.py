@@ -5080,6 +5080,31 @@ $$;''',
         [("    if v_typname in ('int2', 'int4', 'int8') and p_step::numeric = trunc(p_step::numeric) and scale(p_step::numeric) > 0 then\n",
           "    if false then\n", 1)],
     ),
+    "regrain_step_scale_by_typname": (
+        "bench/regrain_target_column_scale.sh",
+        "Pre-#899 (pass 8 F3-05): _regrain_step_shape refuses a fractional regrain target only on a column "
+        "whose type NAME is int2, int4 or int8, so set_regrain('0.5') on a numeric(12,0) key is stored, the "
+        "run copies every sub-range, and at the swap ATTACH PARTITION coerces the fine bounds to the key's "
+        "typmod ('0.5' and '1.0' both to 1) and fails 'empty range bound' on every tick, with the capture "
+        "trigger and the TRUNCATE refusal left on the source. One site: the scale check becomes 'if false'. "
+        "tests/252 catches it at the numeric(12,0) and numeric(12,1) refusals, at regrain_step's, regrain()'s "
+        "and the tick's, at the valid target a refused call must leave in place and at the source left "
+        "without capture; its accepted 0.5 on numeric(12,1) and the domain-over-bigint cases still pass, "
+        "which is what shows the mutant is this rule alone.",
+        [("    if v_scale is not null and p_step::numeric <> round(p_step::numeric, v_scale) then\n",
+          "    if false then\n", 1)],
+    ),
+    "regrain_step_shape_domain_blind": (
+        "bench/regrain_target_column_scale.sh",
+        "#899's second half put back: _regrain_step_shape judges a domain-typed control column by the "
+        "domain's own name, so a domain over numeric(12,0) carries no scale and a domain over bigint is "
+        "neither int2, int4 nor int8, and a fractional or fraction-spelled target is stored on either. One "
+        "site: the walk to the base type and its typmod becomes 'while false'. tests/252 catches it at the "
+        "domain refusals (0.5 through two domains, 2.5 and 10.0 on a domain over bigint) while its plain "
+        "numeric(p,s) refusals still pass.",
+        [("  while (select t.typtype from pg_type t where t.oid = v_type) = 'd' loop\n",
+          "  while false loop\n", 1)],
+    ),
     # #669-#671: three transmute contract gaps, each caught by its own pgTAP file through a wrapper in
     # bench/transmute_abort_owner.sh's shape.
     "carried_index_name_by_pattern": (
