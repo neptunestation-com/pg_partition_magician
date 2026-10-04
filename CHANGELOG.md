@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+- **Every guard discriminate.sh drives is also run against the unmodified code** (#917, F8-04).
+  `discriminate.sh` reads any non-zero exit of a guard pointed at a mutant as a catch, and nine guards with
+  mutations (`write_block_identity`, `retire_identity_unreferenced`, `coverage_reset_identity`,
+  `archive_identity_substitution` and the `hypertable_cutover_identity`, `late_appends`, `replica_capture`,
+  `exclusion_refusal` and `derived_names` wrappers) were in no track, so a copy broken enough to fail against
+  everything (a missing file: exit 1, "0 ran") was scored as catching each of its mutants. The core four now
+  run in the perf track and the five wrappers in the timescale track, and `bench/guards_run_on_clean_code.sh`
+  fails the perf track on any guard `bench/mutations/mutate.py` names that no track runs, with the mutations
+  `clean_run_perf_entry_dropped` and `clean_run_timescale_call_commented`.
+- **The timescale and observe tracks count the plan themselves** (#918, F8-06). Their verdicts read a plan
+  shortfall only from "# Looks like you planned", which pgTAP prints from `finish()` alone, so a file that
+  plans 3, runs 2 and never calls `finish()` exited psql 0 and passed both tracks while pg_prove fails it.
+  Both now count the assertions that ran against the `1..N` plan line, as the timescale wrappers' shared
+  block does. `bench/tap_verdict.sh` adds a fixture without `finish()` and one that runs no assertion, and
+  evaluates each region under test.sh's own `set -euo pipefail`, with the mutations
+  `tap_verdict_reads_finish_only` and `tap_verdict_count_ends_track` (a count that exits non-zero on zero
+  assertions would end the track unjudged).
 - **The runbook's foreign-key VALIDATE step names `validate_incoming_fks`** (#910). Its "Prevent" step after a
   preserve conversion said to call `restore_incoming_fks` "again next tick for the VALIDATE", while
   `restore_incoming_fks` re-adds the key `NOT VALID` and stops there (a second call returns 0) and the

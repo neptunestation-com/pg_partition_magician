@@ -16,6 +16,12 @@
 # track failed with no verdict, no teardown and the rest of its files unrun: a crash, not a check. The
 # psql call now keeps its exit status, and the verdict fails any file psql did not run to its end.
 #
+# AND A FILE THAT NEVER CALLS finish() (issue #918, F8-06). pgTAP prints "# Looks like you planned" from
+# finish() alone, so a file that plans 3, runs 2 and has no finish() printed no such line, psql exited 0,
+# and both verdicts PASSED it while pg_prove (which compares the 1..N plan line with the oks it counted)
+# fails it. Every fixture here called finish(), so this guard could not see it. The verdicts now count
+# the assertions that ran against the plan line themselves, as the timescale wrappers' shared block does.
+#
 # HOW. Each track's verdict REGION is read out of its run_<track>() body in test.sh, as written: from the
 # line that runs the file (`out=$(... -tAq ...)`, the exit-status capture included) to the `fi` that ends
 # its verdict. It is evaluated with the track's psql prefix pointed at a stand-in that replays what psql
@@ -26,16 +32,26 @@
 #   error            plan(2), a statement that errors between assertions       -> FAIL
 #   lost_midfile     plan(3), the session terminated after the first (#819)    -> FAIL (psql exits 2)
 #   lost_after_plan  plan(1), one passing assertion, finish(), then terminated -> FAIL (psql exits 2)
+#   nofinish         plan(3), the third over an empty table, and no finish()   -> FAIL (#918)
+#   none_ran         plan(2), an error before any assertion                    -> FAIL (#918: the count
+#                    the verdict now takes must not end the track when it counts nothing)
 # LIVENESS: each region was found; each fixture really has its shape (pgTAP printed the shortfall line and
-# psql exited 0 there, the lost ones printed no such line and psql exited non-zero); pg_prove, the
+# psql exited 0 there, the lost ones printed no such line and psql exited non-zero, the nofinish one
+# printed its plan and two oks, no shortfall line, and psql exited 0); pg_prove, the
 # reference, PASSES the clean file and FAILS every other one; and each evaluation ran the region's psql
 # call exactly once and reached a verdict, so "the track agrees with pg_prove" is not satisfied by a
 # verdict that fails everything, by fixtures that never ran, or by a region that died before it judged.
+# The region is evaluated under test.sh's own `set -euo pipefail`, so a step that would end the track
+# there (a failing capture, a count that exits non-zero) dies here too, before it judges, and FAILS.
 #
 # The mutations it is required to fail against (bench/mutations/mutate.py):
 #   tap_verdict_misses_plan_shortfall -- both tracks' pattern put back to one without the plan line
 #   tap_verdict_ignores_psql_exit     -- both tracks back to the pre-#819 shape: psql's exit neither
 #                                        captured nor read by the verdict
+#   tap_verdict_reads_finish_only     -- both tracks back to the pre-#918 shape: the plan not counted,
+#                                        a shortfall read only from finish()'s line
+#   tap_verdict_count_ends_track      -- the count of the assertions that ran without its `|| true`, so
+#                                        under `set -e` a file that ran none ends the track unjudged
 #
 # Usage: tap_verdict.sh <container> <db> [test.sh]
 # The container needs pgtap and pg_prove (the plain core image has both). A /repo/... path is mapped to
@@ -65,6 +81,7 @@ judge() {
   : > "$work/calls"
   # shellcheck disable=SC2034  # CUR, DC, px, db, f and tag are read by the evaluated region (test.sh's text)
   ( CUR="$2"; DC=""; px=(tv_psql); db="$DB"; f="tap_verdict_$2.sql"; tag=probe; fail=0
+    set -euo pipefail   # test.sh's own options: what would end the track there ends the evaluation here
     eval "$1" >/dev/null 2>&1 </dev/null; echo "$fail" )
 }
 
@@ -108,6 +125,19 @@ select ok(true, 'one');
 select * from finish();
 select pg_terminate_backend(pg_backend_pid());
 SQL
+cat > "$work/nofinish.sql" <<'SQL'
+create extension if not exists pgtap;
+create temp table tap_verdict_rows (x int);
+select plan(3);
+select ok(true, 'one');
+select ok(true, 'two');
+select ok(x > 0, 'three: over the rows of an empty table, and no finish() follows') from tap_verdict_rows;
+SQL
+cat > "$work/none_ran.sql" <<'SQL'
+create extension if not exists pgtap;
+select plan(2);
+select 1 / 0;
+SQL
 cat > "$work/error.sql" <<'SQL'
 create extension if not exists pgtap;
 select plan(2);
@@ -119,7 +149,7 @@ SQL
 
 q -d postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
 q -d postgres -q -c "create database $DB" >/dev/null 2>&1
-FIXTURES="clean failed shortfall error lost_midfile lost_after_plan"
+FIXTURES="clean failed shortfall error lost_midfile lost_after_plan nofinish none_ran"
 for f in $FIXTURES; do
   # exactly how the tracks run a file: -tAq, no ON_ERROR_STOP, stderr folded in, the exit status kept
   q -d "$DB" -tAq -f - < "$work/$f.sql" > "$work/$f.out" 2>&1
@@ -127,6 +157,21 @@ for f in $FIXTURES; do
 done
 
 rc_of() { cat "$work/$1.rc"; }
+nf="$work/nofinish.out"
+if [ "$(rc_of nofinish)" = 0 ] && grep -qx '1\.\.3' "$nf" && [ "$(grep -cE '^ok [0-9]+' "$nf")" = 2 ] \
+   && ! grep -qE '^# Looks like|^not ok|ERROR:' "$nf"; then
+  ok "LIVENESS: the nofinish file plans 3, runs 2, prints no finish() line" "psql exit 0"
+else
+  bad "LIVENESS: the nofinish file plans 3, runs 2, prints no finish() line" \
+    "rc=$(rc_of nofinish) $(tr '\n' ' ' < "$nf" | cut -c1-80)"
+fi
+nr="$work/none_ran.out"
+if [ "$(rc_of none_ran)" = 0 ] && grep -qx '1\.\.2' "$nr" && ! grep -qE '^(not )?ok [0-9]+' "$nr"; then
+  ok "LIVENESS: the none_ran file plans 2 and runs no assertion" "psql exit 0"
+else
+  bad "LIVENESS: the none_ran file plans 2 and runs no assertion" \
+    "rc=$(rc_of none_ran) $(tr '\n' ' ' < "$nr" | cut -c1-80)"
+fi
 if grep -q '^# Looks like you planned 3 tests but ran 2' "$work/shortfall.out" && [ "$(rc_of shortfall)" = 0 ]; then
   ok "LIVENESS: pgTAP reported the plan shortfall, psql exited 0" "planned 3, ran 2"
 else
