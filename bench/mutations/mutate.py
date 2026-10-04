@@ -2374,6 +2374,26 @@ begin
         "bound and the decision) so the mutant is self-consistent rather than a half-applied defect.",
         [("ceil(cfg.obtain / 2.0)", "cfg.obtain / 2", 2)],
     ),
+    "obtain_backoff_bypass_shifts_cell": (
+        "bench/obtain_backoff_headroom.sh",
+        "#913, the finder's shifted-cell obtain: the tick that bypasses a recorded back-off on low headroom "
+        "skips the FIRST cell it should create and builds one past the top instead, so it creates exactly "
+        "as many partitions as the real code but leaves a one-cell hole just past the old grid ([5000,6000) "
+        "in the guard's ob_race, [4000,5000) in ob_q) where every write is refused, the outage the guard "
+        "exists for. The guard once checked the grid as a count of attached partitions and probed only a "
+        "write at 8999, above the hole, so it stayed green; it now names every [lo,hi) cell and writes into "
+        "the first cell the bypass must build. Gated on obtain_retry_after being set, so the raced ticks and "
+        "the ample-headroom tick (which never reaches obtain) behave as the real code does.",
+        [("  v_made int := 0; k int;\n",
+          "  v_made int := 0; k int; v_skipped boolean := false;  -- MUTANT (#913)\n", 1),
+         ("  for k in 0 .. cfg.obtain loop\n",
+          "  for k in 0 .. cfg.obtain + (case when cfg.obtain_retry_after is not null then 1 else 0 end) loop\n", 1),
+         ("    perform pgpm._create_partition(cfg, v_nsp, v_rel, null, v_name, v_lo, v_hi);\n"
+          "    v_made := v_made + 1;\n",
+          "    if cfg.obtain_retry_after is not null and not v_skipped then v_skipped := true; continue; end if;\n"
+          "    perform pgpm._create_partition(cfg, v_nsp, v_rel, null, v_name, v_lo, v_hi);\n"
+          "    v_made := v_made + 1;\n", 1)],
+    ),
     "set_regrain_off_keeps_regrain": (
         "bench/set_regrain_off_midflight.sh",
         "Pre-#516 set_regrain: turning auto-regrain off writes regrain_to and nothing else, so the run in "
