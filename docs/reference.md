@@ -190,6 +190,8 @@ the form it had (`ALWAYS` or `BY DEFAULT`) and with its sequence's options (`INC
 `MINVALUE`/`MAXVALUE`, `START WITH`, `CACHE`, `CYCLE`), read under the cutover's lock and under a lock on
 the sequence itself, which `ALTER SEQUENCE` has to wait for (it takes no lock on the table), so a change
 committed while the conversion runs is either carried or waits until the cutover commits. Its new sequence
+takes the original's name (`t_id_seq`, or whatever the original was renamed to), not the staging parent's
+`t_pgpm_new_id_seq`, so a `setval`, `GRANT ... ON SEQUENCE` or `ALTER SEQUENCE` naming it keeps working. It
 is set from three values read under
 the cutover's lock: the original sequence's own next value, and the column's largest and smallest ids. The
 largest and smallest are re-read there only when an index leading with the column answers them, which also
@@ -446,7 +448,8 @@ Reverses a `transmute`, returning the restored ordinary table. It is a **clean, 
 while the monolith is still intact and holds the whole table**: it detaches the monolith, drops the
 childless parent (cascading any empty forward partitions), renames the monolith
 back and hands its key the name the parent's carried (the conversion had renamed the monolith's copy
-`pgpm_key_<index oid>`), restores identity, the ownership of any `serial` sequence, the row triggers (each in the enabled
+`pgpm_key_<index oid>`), restores identity (its sequence under the name the parent's carried, not the
+monolith's `t_p<label>_id_seq`), the ownership of any `serial` sequence, the row triggers (each in the enabled
 state the parent had) and any preserved incoming FKs (`NOT VALID`, see below), and clears `pgpm` state. The
 monolith is the original table itself, found by the oid `transmute` recorded for it
 (`pgpm.config.monolith_oid`), never by its position in the grid. A caller whose reads of the parent
@@ -477,9 +480,11 @@ The **indexes and index-backed constraints made on the managed table since the c
 the names the managed table gave them. `CREATE INDEX` or `ADD CONSTRAINT ... UNIQUE` on a partitioned table
 clones onto each partition under an auto-name of the partition's (`t_p<label>_v_idx`), and the reverse
 renames the monolith's copy to the parent's name, so `ON CONFLICT ON CONSTRAINT <name>` and `DROP INDEX
-<name>` keep working. A secondary index the conversion carried keeps the name the table always gave it,
-not its `<name>_pgpm` partitioned copy's, and the primary key of a table converted before its parent kept
-the key's name keeps the name it had.
+<name>` keep working. That includes a primary key made since the conversion (a keyless table's, or one
+replacing the key), whose copy on the monolith carries the clone's auto-name `t_p<label>_pkey`. A secondary
+index the conversion carried keeps the name the table always gave it, not its `<name>_pgpm` partitioned
+copy's, and the primary key of a table converted before its parent kept the key's name keeps the name it
+had.
 
 A table **moved to another schema** with `ALTER TABLE <parent> SET SCHEMA` comes back in that schema, where
 the application has been finding it since the move. The monolith stayed where it was, so the reverse names

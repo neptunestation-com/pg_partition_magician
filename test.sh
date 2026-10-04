@@ -951,6 +951,8 @@ run_perf() {
     "bench/retire_crossing_parent_rls.sh pgpm_perf241"
     "bench/regrain_retarget_in_flight.sh pgpm_perf235"
     "bench/regrain_capture_owner_grant.sh pgpm_perf236"
+    "bench/untransmute_primary_key_name.sh pgpm_perf231"
+    "bench/identity_sequence_name.sh pgpm_perf232"
   )
   local selected=()
   local n=${#guards[@]} idx

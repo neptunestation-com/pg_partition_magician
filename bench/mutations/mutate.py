@@ -6469,9 +6469,68 @@ select is(
         "bench/untransmute_index_names.sh",
         "Issue #830's second exception left out: a pre-#789 conversion's original key, whose parent copy "
         "PostgreSQL auto-named, is renamed to that auto-name (lg221_pkey1) instead of keeping the name it "
-        "always had, as #789 decided. tests/221's part B catches it.",
-        [("   where mi.indrelid = v_monreg and not mi.indisprimary and pc.relname <> mc.relname\n",
-          "   where mi.indrelid = v_monreg and pc.relname <> mc.relname\n", 1)],
+        "always had, as #789 decided. Since #901 the exception is the primary keys whose monolith copy does "
+        "not carry a clone's auto-name; this hands back every primary key. tests/221's part B catches it.",
+        [("     and (not mi.indisprimary or pgpm._is_clone_pkey_name(mt.relname, mc.relname))\n", "", 1)],
+    ),
+    # Issue #901 (F1-02): a primary key made since the conversion, handed back.
+    "untransmute_pkey_name_kept": (
+        "bench/untransmute_primary_key_name.sh",
+        "Pre-#901 untransmute: #830's hand-back skips every primary-key index, so a PRIMARY KEY made on the "
+        "managed table since the conversion (a keyless table's, or one replacing the key) comes back under the "
+        "monolith clone's auto-name <monolith>_pkey and ON CONFLICT ON CONSTRAINT <its name> fails with 42704. "
+        "One site, the filter; tests/257's parts A, B and C catch it.",
+        [("     and (not mi.indisprimary or pgpm._is_clone_pkey_name(mt.relname, mc.relname))\n",
+          "     and not mi.indisprimary\n", 1)],
+    ),
+    "untransmute_pkey_clone_name_unclipped": (
+        "bench/untransmute_primary_key_name.sh",
+        "Issue #901's clone-name test without PostgreSQL's clip: _is_clone_pkey_name compares the monolith's "
+        "whole name plus _pkey, never clipped to fit 63 bytes, so a table whose monolith name is longer than 58 "
+        "bytes keeps the clone's auto-name. tests/257's part C catches it.",
+        [("  while octet_length(v_pfx) > 63 - 1 - octet_length(v_m[2]) loop\n"
+          "    v_pfx := left(v_pfx, -1);\n"
+          "  end loop;\n", "", 1)],
+    ),
+    # Issue #877, bullet 1 (F1-08): the identity sequence keeps the table's name through both directions.
+    "transmute_identity_sequence_staging_name": (
+        "bench/identity_sequence_name.sh",
+        "Pre-#877 transmute: the parent's identity sequence keeps the name PostgreSQL gave it under the staging "
+        "parent, <table>_pgpm_new_<col>_seq, so setval, GRANT ... ON SEQUENCE and ALTER SEQUENCE naming the "
+        "table's sequence fail with 42P01 on the converted table. One site, step 3a's rename; tests/258's parts "
+        "A and B catch it.",
+        [("        execute format('alter sequence %s rename to %I', v_seq::text, v_idseqs[v_i]);\n",
+          "        null;\n", 1)],
+    ),
+    "untransmute_identity_sequence_monolith_name": (
+        "bench/identity_sequence_name.sh",
+        "Pre-#877 untransmute: the restored table's identity sequence keeps the name PostgreSQL gave it on the "
+        "monolith, <table>_p<label>_<col>_seq, so statements naming the table's sequence fail with 42P01 after "
+        "the reverse. One site, the hand-back's rename; tests/258's parts A and B catch it.",
+        [("    v_seq := pg_get_serial_sequence(v_restored::text, v_idcols[v_i])::regclass;\n"
+          "    if (select s.relname from pg_class s where s.oid = v_seq) is distinct from v_idseqs[v_i] then\n"
+          "      execute format('alter sequence %s rename to %I', v_seq::text, v_idseqs[v_i]);\n",
+          "    v_seq := pg_get_serial_sequence(v_restored::text, v_idcols[v_i])::regclass;\n"
+          "    if (select s.relname from pg_class s where s.oid = v_seq) is distinct from v_idseqs[v_i] then\n"
+          "      null;\n", 1)],
+    ),
+    "untransmute_identity_sequence_renamed_early": (
+        "bench/identity_sequence_name.sh",
+        "Issue #877's hand-back placed before the move into the parent's schema (#827): the restored table's "
+        "sequence is renamed in the monolith's schema, where a relation left behind under the name dies the "
+        "reverse raw with 42P07. tests/258's part B (a squatter on public.mv258_id_seq) catches it.",
+        [("  if (select relnamespace from pg_class where oid = v_restored) <> (select oid from pg_namespace where nspname = v_nsp) then\n"
+          "    execute format('alter table %s set schema %I', v_restored::text, v_nsp);\n"
+          "  end if;\n",
+          "  for v_i in 1 .. coalesce(array_length(v_idcols, 1), 0) loop\n"
+          "    v_seq := pg_get_serial_sequence(v_restored::text, v_idcols[v_i])::regclass;\n"
+          "    if (select s.relname from pg_class s where s.oid = v_seq) is distinct from v_idseqs[v_i] then\n"
+          "      execute format('alter sequence %s rename to %I', v_seq::text, v_idseqs[v_i]);\n"
+          "    end if;\n"
+          "  end loop;\n"
+          "  if (select relnamespace from pg_class where oid = v_restored) <> (select oid from pg_namespace where nspname = v_nsp) then\n"
+          "    execute format('alter table %s set schema %I', v_restored::text, v_nsp);\n"
+          "  end if;\n", 1)],
     ),
     "untransmute_replica_identity_not_restored": (
         "bench/untransmute_replica_identity.sh",
