@@ -6611,6 +6611,17 @@ select is(
     end if;
 """, 1)],
     ),
+    "transmute_id_frontier_non_finite": (
+        "bench/transmute_non_finite_id_key.sh",
+        "Issue #895 put back: transmute's id-kind frontier read takes a numeric column's NaN or Infinity "
+        "maximum (and a -Infinity minimum) into the monolith bound unchecked, so phase 1 commits a "
+        "pgpm_monolith_bound CHECK and a claim with hi = NaN and the re-run after the bad row's deletion "
+        "completes a monolith [0, NaN) that takes every future id. One site, the refusal both arms share. "
+        "tests/247's pinned NaN, Infinity and -Infinity refusals catch it.",
+        [("  if p_control_kind = 'id'\n     and (v_max_raw::numeric in ('NaN', 'Infinity', '-Infinity')\n",
+          "  if false and p_control_kind = 'id'   -- MUTANT: no finiteness check\n     and (v_max_raw::numeric in ('NaN', 'Infinity', '-Infinity')\n",
+          1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

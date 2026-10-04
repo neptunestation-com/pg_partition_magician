@@ -54,7 +54,8 @@ your retention policy. Everything is pure SQL in the `pgpm` schema; the only run
   same way `check_uuidv7` does; `p_force_text_time => true` overrides.
 
 `float` / `double` are rejected: they cannot guarantee gapless boundaries and `NaN`/`Inf` poison the
-ordering. An encoding whose alphabet order does not match its digit-value order (so plain text comparison
+ordering. A `numeric` `id` column is accepted, but `transmute` refuses one that holds `NaN`,
+`Infinity` or `-Infinity`: no partition can hold such a row, so delete or correct it and re-run. An encoding whose alphabet order does not match its digit-value order (so plain text comparison
 would not reflect time order), or whose timestamp field is not a fixed width, does not fit `text_time`;
 partition on a companion column instead.
 

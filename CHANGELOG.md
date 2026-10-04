@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **`transmute` refuses a `numeric` `id` control holding `NaN`, `Infinity` or `-Infinity`, before anything
+  commits** (#895). The id branch of the frontier read took the greatest value (`NaN` sorts above every number)
+  with no finiteness check, where the `time` kind refuses `infinity`, so phase 1 committed a
+  `pgpm_monolith_bound` CHECK and a claim with `hi = NaN`, phase 2's VALIDATE failed raw, and after the operator
+  deleted the row the re-run resumed that bound and completed a monolith `[0, NaN)` that takes every future id,
+  so `obtain`, retention and regrain never acted on the table again. A `-Infinity` minimum is refused too.
+  `tests/247` pins the three refusals and the corrected re-run's finite monolith, guarded by
+  `bench/transmute_non_finite_id_key.sh` with the mutation `transmute_id_frontier_non_finite`.
 - **Every read of user rows refuses a caller whose reads row-level security would filter, asked of the
   relation it actually reads** (#873). `transmute` leaves the monolith its own `ENABLE` / `FORCE ROW LEVEL
   SECURITY` and policies and carries them onto the parent, and only the conversions asked

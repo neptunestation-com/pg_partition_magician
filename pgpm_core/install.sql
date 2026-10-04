@@ -6988,6 +6988,20 @@ begin
     v_min_raw := case when v_typname in ('timestamp', 'date') then pgpm._ts_text(v_min_raw::timestamp at time zone v_tz)
                       else pgpm._ts_text(v_min_raw::timestamptz) end;
   end if;
+  -- #895: a numeric control column can hold NaN, Infinity and -Infinity, and the id branch above read
+  -- whatever ORDER BY put last (NaN sorts above every number, then Infinity) straight into the frontier,
+  -- where the time kind refuses infinity. Phase 1 then committed a pgpm_monolith_bound CHECK and a claim
+  -- with hi = NaN, phase 2's VALIDATE failed raw, and after the operator deleted the row the re-run resumed
+  -- that recorded bound and completed a monolith [0, NaN) that takes every future id, so obtain, retention
+  -- and regrain never acted on the table again. A -Infinity minimum is the same poison at lo. No range
+  -- bound covers a non-finite value, so there is nothing to force: refuse here, before anything commits.
+  -- The integer types cannot hold one, and their text casts to numeric unchanged.
+  if p_control_kind = 'id'
+     and (v_max_raw::numeric in ('NaN', 'Infinity', '-Infinity')
+          or v_min_raw::numeric in ('NaN', 'Infinity', '-Infinity')) then
+    raise exception 'pg_partition_magician: % cannot be partitioned on an id grid using %: it holds a non-finite value (its newest value is %, its oldest %), and no partition can hold one (NaN sorts above every number and a range partition''s bounds are finite, so a monolith bound of NaN or Infinity would take every future id and no forward partition would ever be built). Delete or correct the rows whose % is NaN, Infinity or -Infinity and re-run.',
+      p_parent, quote_ident(p_control), v_max_raw, v_min_raw, quote_ident(p_control);
+  end if;
   v_min_native := coalesce(pgpm._decode(p_control_kind, v_min_raw, p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_tt_alphabet, p_tt_discard_bits, p_tt_epoch),
                            pgpm._grid_floor(p_control_kind, p_step, p_anchor, v_frontier_native, v_tz));
   v_lo_native  := pgpm._grid_floor(p_control_kind, p_step, p_anchor, v_min_native, v_tz);
