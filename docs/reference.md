@@ -1031,7 +1031,9 @@ frontier read through the parent on an `id`, `uuidv7` or `text_time` grid (`obta
 `progress`, and on an `id` grid `retain`, `retire` and `set_retain`), `regrain`'s copy of its source
 partition, `untransmute`'s check for rows outside the monolith, the archive step's reads of the parent and
 of the partition (before any `archive_fn` runs), `retire`'s read of the tables that reference a retiring
-partition, `incoming_fk_orphans`, and the sampling checks. Inside `maintain` and `maintain_obtain` each such
+partition and, on every grid, of the parent its crossing `DELETE` reads (a filtered caller would delete only
+the referenced rows it can see, and the detach would then be refused by the rest), `incoming_fk_orphans`,
+and the sampling checks. Inside `maintain` and `maintain_obtain` each such
 refusal is that step's deferral (`skip_obtain`, `skip_write_block`, `skip_archive`, `skip_retain`,
 `skip_regrain`, with pgpm's message in `method`), and on an `id` grid `status()` reports `retain_backlog`
 as null for that table. Run maintenance as a role with `BYPASSRLS` (a superuser has it); an owner on a table that only
@@ -2072,6 +2074,18 @@ after `archive.to_s3`, the documented export-then-drop workflow) has its oid in 
 table's export. Every key, on every path, comes from one function that takes the claim before the upload.
 An export written before this release left no record of whose it was, so its name is claimed by whichever
 parent exports under it next.
+
+A name claim alone cannot tell the two kinds of key apart: the export of a relation named
+`<table>_<stem>` (the synchronous functions accept any relation in the parent's schema, tracked or not)
+is `<prefix><schema>.<table>_<stem>.ndjson`, which is also the key of `<table>`'s chunk at that stem. So
+every key is also claimed whole, in `archive.object_key_claim`, by its parent and its kind (`chunk` or
+`export`), and a call whose key is already another writer's takes the oid shape instead: the export to
+`<prefix><schema>.<child>.<oid>.ndjson`, the chunk to `<prefix><schema>.<table>.<oid>_<stem>.ndjson`
+(recorded in `pgpm.archive_ledger` as usual), and the first writer's object is left as it was. The same
+parent writing the same kind of object to the same key again (a retried chunk, a re-run export) finds the
+key its own. A call whose oid shape is taken as well is refused, and nothing is written. Install claims
+every key `pgpm.archive_ledger` records as its table's chunk, so a chunk archived before this release is
+protected the same way; an export from before it is not, having left no record.
 
 ## Scheduling
 

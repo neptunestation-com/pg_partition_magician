@@ -744,6 +744,11 @@ run_archive() {
   # bench/discriminate.sh completes with the four archive readers' mutants.
   echo "--- the archive readers refuse a caller whose reads row-level security filters (issue #873) ---"
   bash "$(dirname "$0")/bench/reads_under_caller_rls.sh" pgpm_test-archive pgpm_perf216 /repo/pgpm_archive/install.sql || fail=1
+  # The whole-key guard (#890) re-runs tests/archive/db/40 for the same reason: the clean-code half of the
+  # pairs bench/discriminate.sh completes with the base-only claim, the `.gz` outside the claim and the
+  # unseeded install.
+  echo "--- an export and a chunk never write one object key guard (issue #890) ---"
+  bash "$(dirname "$0")/bench/archive_key_full_claim.sh" pgpm_test-archive pgpm_perf240 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi
@@ -943,6 +948,7 @@ run_perf() {
     "bench/regrain_fk_drift_swap_scan.sh pgpm_perf228"
     "bench/null_arguments_refused.sh pgpm_perf222"
     "bench/transmute_self_naming_policy.sh pgpm_perf224"
+    "bench/retire_crossing_parent_rls.sh pgpm_perf241"
   )
   local selected=()
   local n=${#guards[@]} idx

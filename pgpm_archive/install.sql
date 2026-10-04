@@ -99,6 +99,21 @@ create table if not exists archive.object_key_owner (
   claimed_at timestamptz not null default now()
 );
 
+-- Which writer a FULL object key belongs to (#890). A base claim above cannot see across the two shapes of
+-- key: a chunk's is <base><tail> with tail _<stem><ext>, an export's is <base'><ext> with base' named after
+-- the child, and an export of a relation named <table>_<stem> (archive._resolve_child accepts any relation
+-- in the parent's schema, tracked or not) spells exactly a chunk key of <table> under a base of its own.
+-- Both base claims succeeded and the export PUT over the chunk, the only copy of the rows retire() dropped.
+-- So every key is also claimed whole, by its parent and its kind ('chunk' for an archive_fn chunk, 'export'
+-- for a synchronous export), and the same parent re-writing the same kind of object at it (a retried chunk,
+-- a re-run export) is the only writer that finds it its own. Never deleted, for the reason above.
+create table if not exists archive.object_key_claim (
+  object_key text        primary key,
+  parent_oid oid         not null,
+  kind       text        not null check (kind in ('chunk', 'export')),
+  claimed_at timestamptz not null default now()
+);
+
 -- Operator interface for archive.config: an upsert with every connection-setting column as a
 -- named, defaulted parameter, guarding that p_parent is actually pgpm-managed first -- an operator
 -- should never need a raw `insert into archive.config` for normal use. Needed by BOTH paths this
@@ -2516,6 +2531,21 @@ returns text language sql stable set timezone = 'UTC' set datestyle = 'ISO, MDY'
                    || case when p_lo::timestamptz::text like '% BC' then 'BC' else '' end end;
 $$;
 
+-- Claims the whole object key p_key for p_parent's p_kind of object (#890, see archive.object_key_claim and
+-- archive._owned_key, below) and returns the claim the key holds afterwards: p_parent's own when it was free
+-- or already p_parent's of that kind, another writer's when not. ON CONFLICT waits out a concurrent claim
+-- of the same key, and the read after it is a new statement, so it sees that claim once committed.
+create or replace function archive._claim_object_key(p_key text, p_parent regclass, p_kind text)
+returns archive.object_key_claim language plpgsql as $$
+declare v archive.object_key_claim;
+begin
+  insert into archive.object_key_claim (object_key, parent_oid, kind) values (p_key, p_parent::oid, p_kind)
+    on conflict (object_key) do nothing;
+  select * into v from archive.object_key_claim k where k.object_key = p_key;
+  return v;
+end;
+$$;
+
 -- Every object key this module writes is assembled here and nowhere else (#872), and every key is CLAIMED
 -- here before anything is PUT to it. A key is <base>[.<oid>]<tail>: the base is <prefix><schema>.<name>, the
 -- name being p_child when one is given (a synchronous export names its partition) and p_parent's own relname
@@ -2547,9 +2577,19 @@ $$;
 -- snapshot missing a concurrent claim can only land on the oid shape, never on another relation's key.
 -- What is left is oid reuse: after the OID counter wraps, a relation given a dropped one's oid AND its name
 -- could reach the old key again.
+--
+-- A base claim does not see across the two shapes, though (#890): the export of a relation named
+-- <table>_<stem>, under any parent in that schema, spells <prefix><schema>.<table>_<stem><ext>, a chunk key
+-- of <table>, under a base of its own, so both base claims succeeded and the export PUT over the chunk, the
+-- only copy of the rows retire() dropped (or the chunk over the export, the other way round). So the key is
+-- then claimed WHOLE in archive.object_key_claim, by its parent and its kind, and a key another writer
+-- holds is not written: the call takes the oid shape instead, which no other writer's key in the plain shape
+-- can spell (the argument above), and is refused if even that is held. A refusal rolls the call back whole,
+-- so neither claim survives it.
 create or replace function archive._owned_key(p_parent regclass, p_prefix text, p_child name, p_tail text)
 returns text language plpgsql as $$
-declare v_base_q text; v_owner oid;
+declare v_base_q text; v_owner oid; v_key text; v_held archive.object_key_claim;
+        v_kind text := case when p_child is null then 'chunk' else 'export' end;
 begin
   select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(coalesce(p_child, c.relname))
     into v_base_q
@@ -2561,14 +2601,25 @@ begin
   if v_owner is null then
     select o.parent_oid into v_owner from archive.object_key_owner o where o.key_base = v_base_q;
   end if;
-  return v_base_q
+  v_key := v_base_q
       || case when v_owner is not distinct from p_parent::oid then '' else '.' || p_parent::oid::text end
       || p_tail;
+  v_held := archive._claim_object_key(v_key, p_parent, v_kind);
+  if (v_held.parent_oid, v_held.kind) is distinct from (p_parent::oid, v_kind) and v_owner = p_parent::oid then
+    v_key := v_base_q || '.' || p_parent::oid::text || p_tail;
+    v_held := archive._claim_object_key(v_key, p_parent, v_kind);
+  end if;
+  if (v_held.parent_oid, v_held.kind) is distinct from (p_parent::oid, v_kind) then
+    raise exception 'pg_partition_magician: the object key % is already claimed by the % of relation %; refusing to write the % of % over it (archive.object_key_claim)',
+      v_key, v_held.kind, v_held.parent_oid, v_kind, p_parent;
+  end if;
+  return v_key;
 end;
 $$;
 
 -- A chunk's object key: <prefix><schema>.<table>_<stem><ext>, or <prefix><schema>.<table>.<oid>_<stem><ext>
--- for a relation that did not claim the name first (archive._owned_key, above). Keys already in
+-- for a relation that did not claim the name first, or whose plain key an export already holds (#890;
+-- archive._owned_key, above). Keys already in
 -- pgpm.archive_ledger stay as written: nothing derives a key from a chunk's bounds after the upload, so an
 -- existing object stays findable through its row.
 create or replace function archive._object_key(p_parent regclass, p_prefix text, p_kind text, p_lo text, p_ext text)
@@ -2596,6 +2647,23 @@ create or replace function archive._claim_archived_key_bases() returns int langu
   select count(*)::int from claimed;
 $$;
 do $$ begin perform archive._claim_archived_key_bases(); end $$;
+
+-- Seeds archive.object_key_claim the same way (#890): every key pgpm.archive_ledger records is a chunk's
+-- object, claimed whole for the relation that archived it (the earliest, where several recorded one key), so
+-- a chunk archived before the whole-key claims existed cannot be overwritten by an export whose key spells
+-- it. Run by install on every (re-)install; claims already made are left as they are.
+create or replace function archive._claim_archived_keys() returns int language sql as $$
+  with claimed as (
+    insert into archive.object_key_claim (object_key, parent_oid, kind, claimed_at)
+    select distinct on (l.s3_key) l.s3_key, l.parent_table::oid, 'chunk', l.archived_at
+      from pgpm.archive_ledger l
+     where l.s3_key is not null
+     order by l.s3_key, l.archived_at, l.parent_table::oid
+    on conflict (object_key) do nothing
+    returning 1)
+  select count(*)::int from claimed;
+$$;
+do $$ begin perform archive._claim_archived_keys(); end $$;
 
 -- single read, single PUT (optionally one gzip member for the whole body). No pagination, so no
 -- tiebreak is needed: a plain `order by` with no LIMIT never splits a run of ties across pages.
@@ -2652,9 +2720,10 @@ begin
     raise exception 'archive._encode_upload_ndjson_single: credentials missing from vault';
   end if;
 
-  v_key := archive._object_key(p_parent, cfg.prefix, pcfg.control_kind, p_lo, '.ndjson');
+  -- the whole key, `.gz` included, so the claim names the object the PUT writes (#890)
+  v_key := archive._object_key(p_parent, cfg.prefix, pcfg.control_kind, p_lo,
+                               case when p_compress then '.ndjson.gz' else '.ndjson' end);
   if p_compress then
-    v_key := v_key || '.gz';
     v_body := archive._pq_gzip_compress_dynamic(convert_to(v_payload, 'UTF8'));
     v_resp := archive.s3_signed_request_bytea('PUT', cfg.endpoint, cfg.bucket, cfg.region, v_key, '',
                                               'application/gzip', v_body, v_key_id, v_secret);
@@ -2779,7 +2848,8 @@ end;
 $$;
 
 -- The object key of a synchronous export, <prefix><schema>.<child><ext>, or <prefix><schema>.<child>.<oid><ext>
--- for a parent that did not claim the name first (archive._owned_key, above, which assembles every key).
+-- for a parent that did not claim the name first, or whose plain key a chunk already holds (#890: a child
+-- named <table>_<stem> spells a chunk key of <table>; archive._owned_key, above, which assembles every key).
 -- The child is named by IDENTITY with p_parent's schema, the one _resolve_child read the child from.
 -- archive.to_s3 and archive.to_s3_parquet keyed on <prefix><child><ext>, the bare name, and pgpm names a
 -- child after its parent's relname, so two parents named `evt` in two schemas sharing a prefix exported
