@@ -960,6 +960,7 @@ run_perf() {
     "bench/obtain_rebuilds_dropped_cell.sh pgpm_perf238"
     "bench/retain_loop_per_child_isolation.sh pgpm_perf237"
     "bench/acl_grantor_owner_partitions.sh pgpm_perf228"
+    "bench/incoming_not_valid_refused.sh pgpm_perf233"
   )
   local selected=()
   local n=${#guards[@]} idx

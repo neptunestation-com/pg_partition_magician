@@ -257,7 +257,13 @@ Parameters:
   was, and one that fails in the cutover rolls the drop back with it. Referential integrity on the
   referencing table is off only between a completed cutover and the restore. A key declared on a
   partitioned referencing table is dropped, recorded and restored once, at that partitioned table; its
-  per-partition copies go and come back with it.
+  per-partition copies go and come back with it. A **`NOT VALID`** incoming key is refused under
+  `'preserve'` and `'drop'` alike, before anything is committed and again under the cutover's lock,
+  naming every such key: `maintain` validates each key it re-adds, which is right for a key that was valid
+  when the cutover dropped it (any orphan then arose while it was down) and wrong for one you left
+  unvalidated, which it would either promote silently or fail to validate over the rows you tolerated and
+  retry every five minutes for good. Validate it first (`ALTER TABLE <referencing table> VALIDATE
+  CONSTRAINT <name>`) or drop it, then re-run, as for a `NOT VALID` outgoing key.
 - `p_force_uuidv7` -- skip the uuidv7 plausibility refusal (see below).
 - `p_tt_prefix`, `p_tt_width`, `p_tt_radix`, `p_tt_unit` -- **text_time only**, and all four are required
   together when the control column is `text`/`varchar`. They describe the column's shape: a constant
@@ -533,6 +539,9 @@ select format('alter table %s validate constraint %I', conrelid::regclass, conna
  where confrelid = 'public.events'::regclass and contype = 'f' and not convalidated;
 -- run each statement it prints; one that fails names an orphan row to fix first
 ```
+
+Validate them before converting the table again with `p_incoming_fks => 'preserve'`, too: `transmute`
+refuses an incoming key that is `NOT VALID` (see `p_incoming_fks` under [`transmute`](#transmute-time--uuidv7--text_time-grid)).
 
 A partitioned referencing table cannot hold a `NOT VALID` key, so its key is re-added validated in one step,
 as `restore_incoming_fks` does.

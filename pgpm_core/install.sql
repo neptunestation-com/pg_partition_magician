@@ -6258,6 +6258,21 @@ begin
       (select string_agg(conname || ' on ' || conrelid::regclass::text, ', ')
          from pg_constraint where confrelid = p_parent and contype = 'f');
   end if;
+  -- 'preserve' (and 'drop'): a NOT VALID incoming key is refused (#902), as the outgoing side refuses a
+  -- NOT VALID outgoing one. The cutover drops each key, restore_incoming_fks re-adds it NOT VALID, and
+  -- maintain's validate_incoming_fks then VALIDATEs it, which is right only for a key that was valid when
+  -- it was dropped: there every orphan arose in pgpm's window. Over a key the operator left NOT VALID it
+  -- silently promoted a clean one, and over the orphans they tolerated failed and was retried every five
+  -- minutes for good. Validating it first, or not keeping it, is the operator's call, not ours. Top-level
+  -- keys only: a key on a partitioned referencing table is validated (or not) where it is declared.
+  if exists (select 1 from pg_constraint
+              where confrelid = p_parent and contype = 'f' and conparentid = 0 and not convalidated) then
+    raise exception 'pg_partition_magician: cannot transmute % -- its incoming foreign key(s) (%) are NOT VALID. pgpm drops each incoming key for the conversion, re-adds it against the new parent and then validates it on a later maintenance tick, so a key left NOT VALID would either be silently promoted to a validated one or fail that validation on the rows it was left unvalidated over and be retried every five minutes for good. Run ALTER TABLE <referencing table> VALIDATE CONSTRAINT <name> first (or drop the constraint), then re-run transmute.',
+      p_parent,
+      (select string_agg(conname || ' on ' || conrelid::regclass::text, ', ' order by conname, conrelid::regclass::text)
+         from pg_constraint
+        where confrelid = p_parent and contype = 'f' and conparentid = 0 and not convalidated);
+  end if;
   -- 'preserve' (and 'drop'): preservable iff the parent keeps a unique key on EXACTLY this FK's referenced
   -- columns. pgpm reuses the existing key verbatim (the PK, or a unique constraint when there is no usable
   -- PK), so the FK must reference that reused key -- both a PK and a unique constraint are valid FK

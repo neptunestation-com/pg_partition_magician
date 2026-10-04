@@ -40,8 +40,8 @@ as `status().fks_suspended`; see the guide's
 [incoming foreign keys](guide.md#incoming-foreign-keys).) The re-add enforces every *new* write straight
 away (as `NOT VALID`), but it could not fully *validate* the constraint, because rows that violate it were
 written during that window. Those orphans are real RI violations to reconcile; new writes are already
-guarded again. The attribution is exact: the FK was valid when pgpm dropped it, so any orphan present now
-arose during the window.
+guarded again. The attribution is exact: the FK was valid when pgpm dropped it (`transmute` refuses an
+incoming key that is `NOT VALID`), so any orphan present now arose during the window.
 
 Two things that do *not* produce orphans this way. **Regrain** copies rather than moves, and its swap drops
 and re-adds the FK inside one atomic transaction, so no session observes RI off. **Retention** honours

@@ -789,7 +789,9 @@ parent -- so its multi-tick copy needs no such handling; only its atomic swap to
   transaction (the referencing table is otherwise untouched); it is re-added against the new parent on a
   later maintenance tick. A conversion that fails before the cutover, or in it, leaves the key where it
   was. (`'drop'` is accepted too, but takes the same path: the keys are recorded and restored just the
-  same.)
+  same.) A `NOT VALID` incoming key is refused up front, as a `NOT VALID` outgoing one is: maintenance
+  validates every key it re-adds, so it would promote a key you left unvalidated or, over the orphans you
+  tolerate, fail and retry for good. Validate or drop it first.
 
 With `'preserve'`, `pgpm.restore_incoming_fks(parent)` re-adds each FK against the new parent; `maintain`
 calls it automatically, so on the scheduled path you do nothing. It is a no-op while an in-flight,

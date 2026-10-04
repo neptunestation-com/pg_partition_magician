@@ -7214,6 +7214,21 @@ select is(
         [("      perform pgpm._acl_reset(format('%I.%I', v_sub_nsp, v_sub_name)::regclass, true);   -- #875\n",
           "", 1)],
     ),
+    "transmute_incoming_gate_accepts_not_valid": (
+        "bench/incoming_not_valid_refused.sh",
+        "Issue #902, the pre-fix shape: _transmute_incoming_gate does not look at convalidated, so under "
+        "'preserve' (or 'drop') a NOT VALID incoming key is dropped and recorded by the cutover, re-added NOT "
+        "VALID by restore_incoming_fks, and VALIDATEd by maintain's validate_incoming_fks: a clean key is "
+        "silently promoted, and one over tolerated orphans logs fail_validate_incoming_fk every five minutes "
+        "for good. One site, the gate, which covers both askings (the preflight and the cutover under its "
+        "lock). tests/259 parts A, B and C catch it.",
+        [("  if exists (select 1 from pg_constraint\n"
+          "              where confrelid = p_parent and contype = 'f' and conparentid = 0 and not convalidated) then\n"
+          "    raise exception 'pg_partition_magician: cannot transmute % -- its incoming foreign key(s) (%) are NOT VALID.",
+          "  if false and exists (select 1 from pg_constraint\n"
+          "              where confrelid = p_parent and contype = 'f' and conparentid = 0 and not convalidated) then\n"
+          "    raise exception 'pg_partition_magician: cannot transmute % -- its incoming foreign key(s) (%) are NOT VALID.", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
