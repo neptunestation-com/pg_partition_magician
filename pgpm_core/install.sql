@@ -1964,6 +1964,8 @@ declare
                     * (current_setting('max_connections')::bigint + current_setting('max_prepared_transactions')::bigint);
   v_locks0 bigint; v_locks1 bigint; v_locks2 bigint;
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('obtain', json_build_object('p_parent', p_parent));
   -- FOR KEY SHARE (#725): held to the end of this transaction, so set_partition_tz (which reads the row
   -- FOR UPDATE before it judges the grid) waits for the cells this call builds to commit, and this read
   -- waits for a zone change in flight and then sees the zone it committed. See pgpm.set_partition_tz.
@@ -2557,6 +2559,8 @@ declare
   v_cross text[]; v_coltype text; v_lo_lit text; v_hi_lit text; v_deleted int; v_reason text;
   v_chunks bigint;
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('retire', json_build_object('p_parent', p_parent, 'p_child', p_child));
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
@@ -3012,6 +3016,8 @@ returns int language plpgsql as $$
 declare
   cfg pgpm.config; v_boundary text; v_ncast text; r record; v_dropped int := 0;
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('retain', json_build_object('p_parent', p_parent));
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
@@ -4946,6 +4952,8 @@ returns int language plpgsql as $$
 declare
   cfg pgpm.config; v_nsp name; v_delta name; v_dropped int := 0; r record; v_rel regclass; v_dnsp name;
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('regrain_cancel', json_build_object('p_parent', p_parent));
   perform pgpm._regrain_lock(p_parent);   -- #554: waits for a step in flight, and holds the next one off
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
@@ -5285,6 +5293,9 @@ declare
   v_src_nsp name; v_sub_nsp name;   -- the source's own schema, and a copy's (#872): never the parent's
   v_off text;   -- what of the run in flight is off the requested grid (#905)
 begin
+  -- #951: refused before anything is read or committed; p_target_step (null: the partition step) and p_batch
+  -- (null: config.regrain_batch) are not
+  perform pgpm._refuse_null_arguments('regrain_step', json_build_object('p_parent', p_parent, 'p_child', p_child));
   -- #554: before the config read below, so a second driver of this parent (a tick, a hand-driven step, a
   -- cancel) waits for this step to commit and this step reads what the last one left
   perform pgpm._regrain_lock(p_parent);
@@ -5975,6 +5986,8 @@ create or replace function pgpm.regrain(p_parent regclass, p_child name, p_targe
 returns int language plpgsql as $$
 declare v_status text; v_iter int := 0; v_child name := p_child; v_next name; v_lo text;
 begin
+  -- #951: refused before anything is read or committed; p_target_step (null: the partition step) is not
+  perform pgpm._refuse_null_arguments('regrain', json_build_object('p_parent', p_parent, 'p_child', p_child));
   -- regrain_step may rename the source child on its first pass (#266: a child exactly one step wide is
   -- renamed to its coarse-form name on the target grid so its own first sub-range can take _p<lo>). Follow
   -- it by lo, which never changes, and re-resolve the name each iteration -- otherwise every iteration after
@@ -6029,6 +6042,8 @@ create or replace function pgpm.regrain_history(p_parent regclass, p_target_step
 returns int language plpgsql as $$
 declare cfg pgpm.config; v_ncast text; v_mon name;
 begin
+  -- #951: refused before anything is read or committed; p_target_step (null: the partition step) is not
+  perform pgpm._refuse_null_arguments('regrain_history', json_build_object('p_parent', p_parent));
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
@@ -6187,11 +6202,13 @@ begin
   -- 89 ms at 2M rows -- an O(rows) scan holding SHARE ROW EXCLUSIVE on the table AND on the referenced
   -- table, which is the data-coupled blocking lock this project's acceptance rule forbids. Validating it
   -- first is the operator's call, not ours: it would either fail on rows they never checked or silently
-  -- promote a constraint they deliberately left unvalidated.
-  select string_agg(conname, ', ') into v_bad_out
-    from pg_constraint
-   where conrelid = p_parent and contype = 'f' and confrelid <> p_parent and conparentid = 0
-     and not convalidated;
+  -- promote a constraint they deliberately left unvalidated. A NOT ENFORCED key (PostgreSQL 18) reads
+  -- convalidated = false too, and is left to the incoming gate's call of pgpm._refuse_unconvertible_keys, which
+  -- names it for what it is (#959); it is never carried, since only a validated key is listed above.
+  select string_agg(c.conname, ', ') into v_bad_out
+    from pg_constraint c
+   where c.conrelid = p_parent and c.contype = 'f' and c.confrelid <> p_parent and c.conparentid = 0
+     and not c.convalidated and to_jsonb(c) ->> 'conenforced' is distinct from 'false';
   if v_bad_out is not null then
     raise exception 'pg_partition_magician: cannot transmute % -- its outgoing foreign key(s) (%) are NOT VALID. pgpm re-adds an outgoing key on the new parent, which is metadata-only only when the key is already validated; over a NOT VALID one PostgreSQL would rescan the whole table under a lock that blocks writes on it and on the referenced table. Run ALTER TABLE % VALIDATE CONSTRAINT <name> first (or drop the constraint), then re-run transmute.',
       p_parent, v_bad_out, p_parent::text;
@@ -6235,6 +6252,131 @@ begin
 end;
 $$;
 
+-- THE KEY GATE EVERY CONVERTING ENTRY POINT SHARES (#902, #959). A conversion carries a foreign key across
+-- only as an enforced, validated key: an incoming one is dropped, recorded in pgpm.dropped_fk, re-added NOT
+-- VALID against the new table and then VALIDATEd by maintain's validate_incoming_fks; an outgoing one is
+-- re-added on the new table. Two shapes cannot make that trip, and both are refused here, before anything
+-- is committed, by transmute (its incoming gate, asked up front and again under the cutover's lock, for a
+-- table with no incoming key too) and by from_hypertable (its preflight, so before the copy, and its cutover
+-- under the lock):
+--   * a NOT VALID incoming key (#902). Re-added and validated, a clean one is silently promoted and one over
+--     the orphans the operator tolerated fails and is retried every five minutes for good. from_hypertable
+--     never asked (#959 bullet 1): its swap dropped and recorded the key, so transmute's gate, which only
+--     ever saw the plain table after the swap, never saw it, and the handoff promoted it.
+--   * on PostgreSQL 18, a NOT ENFORCED key, either direction (#959 bullet 2). It reads convalidated = false
+--     too, so it used to be refused with the NOT VALID wording and a VALIDATE CONSTRAINT remedy that
+--     PostgreSQL rejects for it ("cannot validate NOT ENFORCED constraint"). It is named for what it is, with
+--     the remedy that applies. pg_constraint.conenforced exists from 18 only, so it is read through the row's
+--     jsonb image, which on an older server simply has no such key: the arm cannot fire there, and nothing
+--     needs a version check.
+-- A NOT VALID OUTGOING key is refused by each path itself (_transmute_outgoing_fks, from_hypertable_preflight),
+-- since the reason differs: transmute re-adds it on the parent, from_hypertable replays it on the copy.
+-- p_doing completes "cannot <p_doing> <table>" and p_rerun names what to re-run. Top-level keys only: a key
+-- on a partitioned referencing table is validated (or not) where it is declared.
+create or replace function pgpm._refuse_unconvertible_keys(p_rel regclass, p_doing text, p_rerun text)
+returns void language plpgsql stable as $$
+declare v_keys text;
+begin
+  select string_agg(c.conname || ' on ' || c.conrelid::regclass::text, ', '
+                    order by c.conname, c.conrelid::regclass::text) into v_keys
+    from pg_constraint c
+   where (c.conrelid = p_rel or c.confrelid = p_rel) and c.contype = 'f' and c.conparentid = 0
+     and to_jsonb(c) ->> 'conenforced' = 'false';
+  if v_keys is not null then
+    raise exception 'pg_partition_magician: cannot % % -- its foreign key(s) (%) are NOT ENFORCED. pgpm carries a foreign key across the conversion only as an enforced one (an incoming key is dropped, re-added against the new table and validated; an outgoing key is re-added on it), so a key left NOT ENFORCED would be made enforced without your say, and would fail on the rows it was never checked against. Drop it, or enforce it first (ALTER TABLE <table> ALTER CONSTRAINT <name> ENFORCED, which checks every row), then re-run %.',
+      p_doing, p_rel, v_keys, p_rerun;
+  end if;
+  select string_agg(c.conname || ' on ' || c.conrelid::regclass::text, ', '
+                    order by c.conname, c.conrelid::regclass::text) into v_keys
+    from pg_constraint c
+   where c.confrelid = p_rel and c.contype = 'f' and c.conparentid = 0 and not c.convalidated;
+  if v_keys is not null then
+    raise exception 'pg_partition_magician: cannot % % -- its incoming foreign key(s) (%) are NOT VALID. pgpm drops each incoming key for the conversion, re-adds it against the new parent and then validates it on a later maintenance tick, so a key left NOT VALID would either be silently promoted to a validated one or fail that validation on the rows it was left unvalidated over and be retried every five minutes for good. Run ALTER TABLE <referencing table> VALIDATE CONSTRAINT <name> first (or drop the constraint), then re-run %.',
+      p_doing, p_rel, v_keys, p_rerun;
+  end if;
+end;
+$$;
+
+-- THE CONTROL-TYPE CONTRACT for an id grid, in one place (#952). Every bound pgpm writes for an id grid is
+-- the anchor plus a whole number of steps, and the cutover's ATTACH (and obtain's CREATE TABLE ... PARTITION
+-- OF, for every forward cell) coerces each bound to the control column's own type and typmod, rounding it to
+-- the column's scale and refusing one past its precision. The CHECK phase 1 adds compares as plain numeric
+-- and rounds nothing, so a bound the column cannot hold passed phases 1 and 2 and died raw in the cutover,
+-- on every retry, with the write-rejecting bound and the claim left behind: a numeric(6,-2) key with step 10
+-- (2010 rounds to 2000, so the monolith's ATTACH found its own rows outside it), and a numeric(4,0) key whose
+-- next boundary is 10000 (numeric field overflow).
+--
+-- _id_step_contract: the step and the anchor, before the table is read. A column with a negative scale -s
+-- holds only multiples of 10^s, so every grid boundary is one only when the step and the anchor are. (A
+-- positive scale holds every whole number, and the step and the anchor of an id grid are bigints.) The column
+-- is judged by what it stores, through any domain, as _regrain_step_shape judges a regrain target (#899).
+create or replace function pgpm._id_step_contract(p_parent regclass, p_control name, p_step text, p_anchor text)
+returns void language plpgsql stable as $$
+declare v_type oid; v_typmod int; v_scale int;
+begin
+  select a.atttypid, a.atttypmod into v_type, v_typmod
+    from pg_attribute a where a.attrelid = p_parent and a.attname = p_control and not a.attisdropped;
+  while exists (select 1 from pg_type t where t.oid = v_type and t.typtype = 'd') loop   -- through any domain
+    select t.typbasetype, case when v_typmod = -1 then t.typtypmod else v_typmod end into v_type, v_typmod
+      from pg_type t where t.oid = v_type;
+  end loop;
+  if v_type <> 'numeric'::regtype or v_typmod < 4 then
+    return;
+  end if;
+  v_scale := (((v_typmod - 4) & 2047) # 1024) - 1024;
+  if p_step::numeric <> round(p_step::numeric, v_scale) or p_anchor::numeric <> round(p_anchor::numeric, v_scale) then
+    raise exception 'pg_partition_magician: cannot partition % on % with step % and anchor % -- the column is %, which holds only multiples of %, so a partition bound between two of them would be rounded to one when the cutover attaches the monolith (and when each forward partition is created), and the bounds would no longer match the grid: the conversion would fail after committing a bound that rejects every write past it. Give a step and an anchor that are multiples of %, or change the column to a scale of 0 or more, then re-run transmute.',
+      p_parent, quote_ident(p_control), p_step, p_anchor, format_type(v_type, v_typmod),
+      trim_scale(power(10::numeric, -v_scale)), trim_scale(power(10::numeric, -v_scale));
+  end if;
+end;
+$$;
+
+-- _control_bound_contract: the monolith's bound itself, [p_lo, p_hi), once the claim has decided it (#952).
+-- Asked of a fresh bound and, above all, of a RESUMED one: a resume reuses the bound an earlier attempt
+-- recorded, and the install that recorded it may not have refused what this one does. A pre-#922 install
+-- recorded hi = NaN for a key holding a NaN row, and after the upgrade and the row's deletion the resume
+-- completed a monolith [0, NaN) that takes every future id (#952 bullet 2); one that predates this contract
+-- recorded a hi its column cannot hold. Each bound must be finite and, on an id grid, survive a round trip
+-- through the column's declared type unchanged (the coercion the cutover's ATTACH applies, domain included).
+create or replace function pgpm._control_bound_contract(p_parent regclass, p_control name, p_kind text,
+                                                        p_lo text, p_hi text, p_resumed boolean)
+returns void language plpgsql as $$
+declare v_type text; v_v text; v_back numeric; v_why text;
+begin
+  select format_type(a.atttypid, a.atttypmod) into v_type
+    from pg_attribute a where a.attrelid = p_parent and a.attname = p_control and not a.attisdropped;
+  foreach v_v in array array[p_lo, p_hi] loop
+    if p_kind = 'id' then
+      if v_v::numeric in ('NaN', 'Infinity', '-Infinity') then
+        v_why := format('%s is not finite (no range partition can hold it, and NaN sorts above every number, so a monolith bound by it would take every future id)', v_v);
+      else
+        begin
+          execute format('select %L::%s::numeric', v_v, v_type) into v_back;
+          if v_back <> v_v::numeric then
+            v_why := format('%s would be stored as %s', v_v, v_back);
+          end if;
+        exception when others then
+          v_why := format('%s cannot be stored in it at all (%s)', v_v, sqlerrm);
+        end;
+      end if;
+    elsif not isfinite(v_v::timestamptz) then
+      v_why := format('%s is not finite (no range partition can hold it)', v_v);
+    end if;
+    exit when v_why is not null;
+  end loop;
+  if v_why is null then
+    return;
+  end if;
+  if p_resumed then
+    raise exception 'pg_partition_magician: cannot resume the transmute of % on %: the bound [%, %) an earlier attempt recorded (and put in the pgpm_monolith_bound CHECK) cannot be a partition bound of the column, which is %: %. A resume reuses the recorded bound, so it would commit a monolith on it, or fail in the cutover on every retry. Call pgpm.transmute_abort(%) to drop the bound and the claim, then re-run transmute, which computes a fresh bound.',
+      p_parent, quote_ident(p_control), p_lo, p_hi, v_type, v_why, p_parent;
+  end if;
+  raise exception 'pg_partition_magician: cannot partition % on %: the monolith''s bound [%, %) cannot be stored in the column, which is %: %. The cutover''s ATTACH would fail on it after the bound had been committed, leaving the table rejecting every write past it. Give the column a type that holds the bound (ALTER TABLE % ALTER COLUMN % TYPE ...), or use a smaller step, then re-run transmute.',
+    p_parent, quote_ident(p_control), p_lo, p_hi, v_type, v_why, p_parent::text, quote_ident(p_control);
+end;
+$$;
+
 -- transmute's gate on incoming foreign keys (step 0), asked twice by _transmute (#706): in the preflight, so
 -- that a key it cannot keep is refused before anything is committed, and again in the cutover under the
 -- table's ACCESS EXCLUSIVE, just before 0c acts on what is live. ADD FOREIGN KEY takes only SHARE ROW
@@ -6248,10 +6390,7 @@ create or replace function pgpm._transmute_incoming_gate(p_parent regclass, p_in
 returns void language plpgsql stable as $$
 declare v_fk record;
 begin
-  if not exists (select 1 from pg_constraint where confrelid = p_parent and contype = 'f') then
-    return;
-  end if;
-  if p_incoming_fks = 'error' then
+  if p_incoming_fks = 'error' and exists (select 1 from pg_constraint where confrelid = p_parent and contype = 'f') then
     raise exception
       'pg_partition_magician: % has incoming foreign key(s) (%). Re-run with p_incoming_fks => ''preserve'' to keep them: pgpm drops each for the conversion and re-adds it against the new parent on a later maintenance tick (or call pgpm.restore_incoming_fks to do it now).',
       p_parent,
@@ -6259,19 +6398,12 @@ begin
          from pg_constraint where confrelid = p_parent and contype = 'f');
   end if;
   -- 'preserve' (and 'drop'): a NOT VALID incoming key is refused (#902), as the outgoing side refuses a
-  -- NOT VALID outgoing one. The cutover drops each key, restore_incoming_fks re-adds it NOT VALID, and
-  -- maintain's validate_incoming_fks then VALIDATEs it, which is right only for a key that was valid when
-  -- it was dropped: there every orphan arose in pgpm's window. Over a key the operator left NOT VALID it
-  -- silently promoted a clean one, and over the orphans they tolerated failed and was retried every five
-  -- minutes for good. Validating it first, or not keeping it, is the operator's call, not ours. Top-level
-  -- keys only: a key on a partitioned referencing table is validated (or not) where it is declared.
-  if exists (select 1 from pg_constraint
-              where confrelid = p_parent and contype = 'f' and conparentid = 0 and not convalidated) then
-    raise exception 'pg_partition_magician: cannot transmute % -- its incoming foreign key(s) (%) are NOT VALID. pgpm drops each incoming key for the conversion, re-adds it against the new parent and then validates it on a later maintenance tick, so a key left NOT VALID would either be silently promoted to a validated one or fail that validation on the rows it was left unvalidated over and be retried every five minutes for good. Run ALTER TABLE <referencing table> VALIDATE CONSTRAINT <name> first (or drop the constraint), then re-run transmute.',
-      p_parent,
-      (select string_agg(conname || ' on ' || conrelid::regclass::text, ', ' order by conname, conrelid::regclass::text)
-         from pg_constraint
-        where confrelid = p_parent and contype = 'f' and conparentid = 0 and not convalidated);
+  -- NOT VALID outgoing one, and on 18 a NOT ENFORCED key either way (#959): the gate from_hypertable shares,
+  -- so the two paths cannot drift. Asked of a table with no incoming key too, whose outgoing key can be NOT
+  -- ENFORCED. Validating a key first, or not keeping it, is the operator's call, not ours.
+  perform pgpm._refuse_unconvertible_keys(p_parent, 'transmute', 'transmute');
+  if not exists (select 1 from pg_constraint where confrelid = p_parent and contype = 'f') then
+    return;
   end if;
   -- 'preserve' (and 'drop'): preservable iff the parent keeps a unique key on EXACTLY this FK's referenced
   -- columns. pgpm reuses the existing key verbatim (the PK, or a unique constraint when there is no usable
@@ -6749,13 +6881,14 @@ declare
   v_spc name;                     -- #829: the table's tablespace, which the parent takes (null: the database default)
 begin
   -- #896: every argument with no null meaning, refused here, before anything below reads or commits. Not
-  -- listed: p_retain (null keeps everything), the four text_time shape arguments and p_tt_alphabet (null
-  -- outside text_time; the text_time block requires the four), and p_obtain, whose own #581 check refuses
-  -- a null with the negative values. The step is named as the caller's overload spells it.
+  -- listed: p_retain (null keeps everything), and the four text_time shape arguments and p_tt_alphabet (null
+  -- outside text_time; the text_time block requires the four). p_obtain is listed since #951, so its null is
+  -- refused the way every public routine refuses one (the #581 check below still refuses a negative one).
+  -- The step is named as the caller's overload spells it.
   perform pgpm._refuse_null_arguments('transmute', json_build_object(
     'p_parent', p_parent, 'p_control', p_control, 'p_control_kind', p_control_kind,
     case when p_control_kind = 'id' then 'p_step' else 'p_interval' end, p_step,
-    'p_anchor', p_anchor, 'p_regrain_batch', p_regrain_batch, 'p_paused', p_paused,
+    'p_anchor', p_anchor, 'p_obtain', p_obtain, 'p_regrain_batch', p_regrain_batch, 'p_paused', p_paused,
     'p_incoming_fks', p_incoming_fks, 'p_force_uuidv7', p_force_uuidv7,
     'p_bound_headroom', p_bound_headroom, 'p_lock_timeout', p_lock_timeout,
     'p_force_text_time', p_force_text_time, 'p_tt_discard_bits', p_tt_discard_bits,
@@ -6895,6 +7028,9 @@ begin
     elsif v_typname not in ('int2', 'int4', 'int8', 'numeric') then
       raise exception 'pg_partition_magician: control_kind id needs an integer or numeric column (got %)', v_typname;
     end if;
+    -- #952: and a step and an anchor the column can represent (a negative-scale numeric holds only multiples
+    -- of its unit, and the cutover's ATTACH rounds a bound between two of them). See _id_step_contract.
+    perform pgpm._id_step_contract(p_parent, p_control, p_step, p_anchor);
   elsif p_control_kind = 'uuidv7' and v_typname <> 'uuid' then
     raise exception 'pg_partition_magician: control_kind uuidv7 needs a uuid column (got %)', v_typname;
   elsif p_control_kind = 'text_time' then
@@ -7580,6 +7716,12 @@ begin
                'a column since dropped'),
       p_parent;
   end if;
+  -- #952: and the bound has to be one the column can hold, finite and unchanged by its type's coercion. A
+  -- fresh bound was computed from this call's grid and the rows, and a resumed one was recorded by an earlier
+  -- attempt, possibly by an install that did not refuse what this one does (a pre-#922 claim with hi = NaN
+  -- resumed into a monolith [0, NaN) after the upgrade). Still the first transaction: the raise rolls the
+  -- claim, or the take-over, back. See _control_bound_contract.
+  perform pgpm._control_bound_contract(p_parent, p_control, p_control_kind, v_lo_native, v_hi_native, v_resumed);
   -- #574: and the bound has to lie on the grid THIS call registers. The claim records the bound and its
   -- zone but not the step and anchor it was computed on, and a re-run given another step reused the bound
   -- and registered the new step: the recorded hi was not a boundary of the new grid, so obtain skipped the
@@ -8417,6 +8559,9 @@ create or replace function pgpm.transmute_abort(p_parent regclass, p_lock_timeou
 returns boolean language plpgsql as $$
 declare r pgpm.transmute_inflight%rowtype; v_prev_lock_timeout text;
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('transmute_abort', json_build_object(
+    'p_parent', p_parent, 'p_lock_timeout', p_lock_timeout));
   -- a bad p_lock_timeout is refused before anything is read or changed, and leaves the setting untouched
   begin
     v_prev_lock_timeout := current_setting('lock_timeout');
@@ -8756,6 +8901,8 @@ declare
   v_ri "char"; v_ri_idx oid;   -- #815: the parent's replica identity, and the monolith's index under its identity index
   v_key_names name[]; v_key_mons name[];   -- #828: every such pair, the key's and each unique constraint's
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('untransmute', json_build_object('p_parent', p_parent));
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
   if not found then
@@ -9360,6 +9507,8 @@ returns void language plpgsql as $$
 declare
   cfg pgpm.config; v_rel name;
 begin
+  -- #951: refused before anything is read or committed; p_target_step (null turns auto-regrain off) is not
+  perform pgpm._refuse_null_arguments('set_regrain', json_build_object('p_parent', p_parent));
   -- #554: a step of this parent in flight in another session commits (or aborts) before this call reads
   -- config, so the in-flight test below judges a run's committed marks, never around an uncommitted prepare
   perform pgpm._regrain_lock(p_parent);
@@ -9474,6 +9623,8 @@ $$;
 create or replace function pgpm.set_obtain(p_parent regclass, p_obtain int)
 returns void language plpgsql as $$
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('set_obtain', json_build_object('p_parent', p_parent, 'p_obtain', p_obtain));
   if p_obtain is null or p_obtain < 0 then
     raise exception 'pg_partition_magician: p_obtain must be a non-negative integer (got %)', p_obtain;
   end if;
@@ -9503,6 +9654,8 @@ declare
   v_old_retain text;
   v_hit name;
 begin
+  -- #951: refused before anything is read or committed; p_retain (null keeps everything) is not
+  perform pgpm._refuse_null_arguments('set_retain', json_build_object('p_parent', p_parent));
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
@@ -9620,6 +9773,8 @@ create or replace function pgpm.set_partition_tz(p_parent regclass, p_tz text)
 returns void language plpgsql as $$
 declare cfg pgpm.config; v_tz text; v_top text; v_off_child name; v_off_bound text;
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('set_partition_tz', json_build_object('p_parent', p_parent, 'p_tz', p_tz));
   perform pgpm._regrain_lock(p_parent);   -- #660: judge a regrain's committed marks, never around a step in flight
   -- #725: and never around an obtain() or extend_to() in flight. Both read this row FOR KEY SHARE and hold
   -- it to their transaction's end, which FOR UPDATE waits for, so the grid judged below includes every
@@ -9693,6 +9848,8 @@ create or replace function pgpm.set_archive_fn(p_parent regclass, p_archive_fn r
 returns void language plpgsql as $$
 declare v_rettype regtype; v_retset boolean;
 begin
+  -- #951: refused before anything is read or committed; p_archive_fn (null turns archiving off) is not
+  perform pgpm._refuse_null_arguments('set_archive_fn', json_build_object('p_parent', p_parent));
   -- The regprocedure cast resolves a NAME and an ARGUMENT LIST, so a reference with the wrong
   -- arguments fails at the cast (42883) and a function with the right arguments and any return type
   -- at all gets through it. That mattered: _run_archive_strategy reads the strategy's result INTO a
@@ -9727,6 +9884,8 @@ $$;
 create or replace function pgpm.resume(p_parent regclass)
 returns void language plpgsql as $$
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('resume', json_build_object('p_parent', p_parent));
   update pgpm.config set paused = false where parent_table = p_parent;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
 end;
@@ -9735,6 +9894,8 @@ $$;
 create or replace function pgpm.pause(p_parent regclass)
 returns void language plpgsql as $$
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('pause', json_build_object('p_parent', p_parent));
   update pgpm.config set paused = true where parent_table = p_parent;
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
 end;
@@ -9784,6 +9945,8 @@ declare
   v_batch int := null;
   v_regrain_to text;
 begin
+  -- #951: refused before anything is read or committed; p_status (INOUT: the status it returns) is not
+  perform pgpm._refuse_null_arguments('maintain', json_build_object('p_parent', p_parent));
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
@@ -10092,6 +10255,8 @@ declare
   v_cell text;
   v_top text;
 begin
+  -- #951: refused before anything is read or committed; p_status (INOUT: the status it returns) is not
+  perform pgpm._refuse_null_arguments('maintain_obtain', json_build_object('p_parent', p_parent));
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
@@ -10263,6 +10428,9 @@ create or replace function pgpm.schedule(p_every text default '* * * * *',
 returns bigint language plpgsql as $$
 declare v_jobid bigint;
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('schedule', json_build_object(
+    'p_every', p_every, 'p_obtain_every', p_obtain_every));
   if not exists (select 1 from pg_extension where extname = 'pg_cron') then
     raise exception 'pg_partition_magician: pg_cron is not installed in this database; enable it (create extension pg_cron) to schedule maintenance, or call pgpm.maintain_all() and pgpm.maintain_obtain_all() by hand';
   end if;
@@ -10429,6 +10597,9 @@ returns table (sampled bigint, plausible bigint, fraction numeric, oldest timest
                newest_decoded timestamptz, newest_in_future boolean)
 language plpgsql as $$
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('check_uuidv7', json_build_object(
+    'p_table', p_table, 'p_control', p_control, 'p_sample', p_sample));
   -- #873: the sample and the maximum are the caller's reads; under row-level security that filters them
   -- they would describe the visible rows as the column's.
   perform pgpm._refuse_filtered_reads(p_table, 'sample',
@@ -10479,6 +10650,10 @@ create or replace function pgpm.check_text_time(
 language plpgsql as $$
 declare v_class text;
 begin
+  -- #951: refused before anything is read or committed; p_alphabet (null: the default 0-9a-z alphabet) is not
+  perform pgpm._refuse_null_arguments('check_text_time', json_build_object(
+    'p_table', p_table, 'p_control', p_control, 'p_prefix', p_prefix, 'p_width', p_width, 'p_radix', p_radix,
+    'p_unit', p_unit, 'p_sample', p_sample, 'p_discard_bits', p_discard_bits, 'p_epoch', p_epoch));
   if p_alphabet is not null then
     if length(p_alphabet) <> p_radix then
       raise exception 'pg_partition_magician: alphabet % has length %, which does not match radix %', p_alphabet, length(p_alphabet), p_radix;
@@ -10538,6 +10713,9 @@ create or replace function pgpm.check_time_monotonic(
 ) returns table (sampled bigint, monotonic bigint, fraction numeric)
 language plpgsql as $$
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('check_time_monotonic', json_build_object(
+    'p_table', p_table, 'p_id', p_id, 'p_time', p_time, 'p_sample', p_sample));
   -- #873: as check_uuidv7's
   perform pgpm._refuse_filtered_reads(p_table, 'sample',
     'check_time_monotonic would report its fraction from those rows alone');
@@ -10899,6 +11077,9 @@ create or replace function pgpm.observe_window(
   regrains       bigint,
   retains        bigint
 ) language sql stable as $$
+  -- #951: refused before anything is read; neither argument has a null meaning (a null p_since compared every
+  -- log row with null and answered an empty window, a null p_parent the same, as if nothing had happened)
+  select pgpm._refuse_null_arguments('observe_window', json_build_object('p_parent', p_parent, 'p_since', p_since));
   select
     p_parent,
     min(l.at),
@@ -10926,6 +11107,8 @@ declare
   ln       text[] := '{}';
   sect     text;
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('impact_report', json_build_object('p_parent', p_parent, 'p_since', p_since));
   if not pgpm._observe_has_pgfr() then
     raise exception 'pg_partition_magician: impact_report requires pg_flight_recorder (the pgfr_analyze extension). Install it to correlate pgpm operations against database telemetry, or use pgpm.observe_window() for the pgpm-only summary.';
   end if;
@@ -11024,6 +11207,8 @@ declare
   cfg pgpm.config; v_nsp name; v_rel name; v_closed bigint; v_inflight name;
   r pgpm.dropped_fk%rowtype; v_n int := 0; v_is_part boolean; v_readded boolean;
 begin
+  -- #951: refused before anything is read or committed; p_ids (null: every not-yet-restored key) is not
+  perform pgpm._refuse_null_arguments('restore_incoming_fks', json_build_object('p_parent', p_parent));
   perform pgpm._forget_dangling_fks(p_parent);   -- #658: a key whose table is gone is not re-added, ever
   if not exists (select 1 from pgpm.dropped_fk
                   where parent_table = p_parent and restored_at is null
@@ -11135,6 +11320,9 @@ create or replace function pgpm.validate_incoming_fks(
 returns int language plpgsql as $$
 declare r pgpm.dropped_fk%rowtype; v_n int := 0;
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('validate_incoming_fks', json_build_object(
+    'p_parent', p_parent, 'p_respect_backoff', p_respect_backoff));
   perform pgpm._forget_dangling_fks(p_parent);   -- #658: nor validated
   for r in select * from pgpm.dropped_fk
             where parent_table = p_parent and restored_at is not null and validated_at is null
@@ -11172,6 +11360,8 @@ language plpgsql as $$
 declare r pgpm.dropped_fk%rowtype; c pg_constraint%rowtype; v_join_q text; v_notnull_q text; v_allnull_q text;
         v_orphan text; v_cnt bigint;
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('incoming_fk_orphans', json_build_object('p_parent', p_parent));
   for r in select * from pgpm.dropped_fk
             where parent_table = p_parent and restored_at is not null and validated_at is null order by id loop
     select * into c from pg_constraint
@@ -11219,6 +11409,9 @@ create or replace function pgpm.suspend_incoming_fks(p_parent regclass, p_force 
 returns int language plpgsql as $$
 declare v_closed bigint; r pgpm.dropped_fk%rowtype; v_n int := 0;
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('suspend_incoming_fks', json_build_object(
+    'p_parent', p_parent, 'p_force', p_force));
   perform pgpm._forget_dangling_fks(p_parent);   -- #658: nor dropped, which is what wedged regrain's swap
   if not exists (select 1 from pgpm.dropped_fk
                   where parent_table = p_parent and restored_at is not null) then

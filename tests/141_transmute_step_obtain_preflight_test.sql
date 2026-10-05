@@ -50,7 +50,8 @@ select throws_like($$ call pgpm.transmute('public.dt_ev', 'dt', interval '1 day 
 select throws_like($$ call pgpm.transmute('public.id_ev', 'id', 10::bigint, p_obtain => -1) $$,
   '%p_obtain must be a non-negative integer (got -1)%', 'a negative p_obtain is refused, as set_obtain refuses it');
 select throws_like($$ call pgpm.transmute('public.ts_ev', 'ts', interval '1 day', p_obtain => null) $$,
-  '%p_obtain must be a non-negative integer (got <NULL>)%', 'and so is a null one');
+  'pg_partition_magician: transmute does not accept null for p_obtain: %',
+  'and so is a null one (by the null check every public routine shares, #951)');
 
 -- what the refusals left: nothing
 select is((select count(*)::int from pg_constraint where conname = 'pgpm_monolith_bound'

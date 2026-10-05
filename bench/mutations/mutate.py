@@ -2267,6 +2267,8 @@ MUTATIONS = {
         "that records a positional echo instead of the well-typed twin's 7 rows.",
         [("""declare v_rettype regtype; v_retset boolean;
 begin
+  -- #951: refused before anything is read or committed; p_archive_fn (null turns archiving off) is not
+  perform pgpm._refuse_null_arguments('set_archive_fn', json_build_object('p_parent', p_parent));
   -- The regprocedure cast resolves a NAME and an ARGUMENT LIST, so a reference with the wrong
   -- arguments fails at the cast (42883) and a function with the right arguments and any return type
   -- at all gets through it. That mattered: _run_archive_strategy reads the strategy's result INTO a
@@ -2293,6 +2295,8 @@ begin
   update pgpm.config set archive_fn = p_archive_fn where parent_table = p_parent;
 """,
           "begin\n"
+          "  -- #951: refused before anything is read or committed; p_archive_fn (null turns archiving off) is not\n"
+          "  perform pgpm._refuse_null_arguments('set_archive_fn', json_build_object('p_parent', p_parent));\n"
           "  update pgpm.config set archive_fn = p_archive_fn where parent_table = p_parent;\n", 1)],
     ),
     "regrain_no_outgoing_fk": (
@@ -7455,8 +7459,8 @@ select ok(
         "whose null is documented (keep everything) and is also its default, so every conversion that does "
         "not set a retention is refused. One site, the argument list. tests/248 catches it: each refusal "
         "names p_retain too, and the liveness conversions, which pass p_retain => null, are refused.",
-        [("    'p_anchor', p_anchor, 'p_regrain_batch', p_regrain_batch, 'p_paused', p_paused,\n",
-          "    'p_anchor', p_anchor, 'p_retain', p_retain, 'p_regrain_batch', p_regrain_batch, 'p_paused', p_paused,\n", 1)],
+        [("    'p_anchor', p_anchor, 'p_obtain', p_obtain, 'p_regrain_batch', p_regrain_batch, 'p_paused', p_paused,\n",
+          "    'p_anchor', p_anchor, 'p_obtain', p_obtain, 'p_retain', p_retain, 'p_regrain_batch', p_regrain_batch, 'p_paused', p_paused,\n", 1)],
     ),
     # Issue #890, "Archive object keys" bullet 1: one mutation per site of the whole-key claim. All break
     # bench/archive_key_full_claim.sh through tests/archive/db/40.
@@ -7628,18 +7632,103 @@ select ok(
     ),
     "transmute_incoming_gate_accepts_not_valid": (
         "bench/incoming_not_valid_refused.sh",
-        "Issue #902, the pre-fix shape: _transmute_incoming_gate does not look at convalidated, so under "
-        "'preserve' (or 'drop') a NOT VALID incoming key is dropped and recorded by the cutover, re-added NOT "
-        "VALID by restore_incoming_fks, and VALIDATEd by maintain's validate_incoming_fks: a clean key is "
-        "silently promoted, and one over tolerated orphans logs fail_validate_incoming_fk every five minutes "
-        "for good. One site, the gate, which covers both askings (the preflight and the cutover under its "
-        "lock). tests/259 parts A, B and C catch it.",
-        [("  if exists (select 1 from pg_constraint\n"
-          "              where confrelid = p_parent and contype = 'f' and conparentid = 0 and not convalidated) then\n"
-          "    raise exception 'pg_partition_magician: cannot transmute % -- its incoming foreign key(s) (%) are NOT VALID.",
-          "  if false and exists (select 1 from pg_constraint\n"
-          "              where confrelid = p_parent and contype = 'f' and conparentid = 0 and not convalidated) then\n"
-          "    raise exception 'pg_partition_magician: cannot transmute % -- its incoming foreign key(s) (%) are NOT VALID.", 1)],
+        "Issue #902, the pre-fix shape: the incoming gate does not look at convalidated, so under 'preserve' "
+        "(or 'drop') a NOT VALID incoming key is dropped and recorded by the cutover, re-added NOT VALID by "
+        "restore_incoming_fks, and VALIDATEd by maintain's validate_incoming_fks: a clean key is silently "
+        "promoted, and one over tolerated orphans logs fail_validate_incoming_fk every five minutes for good. "
+        "One site, the NOT VALID arm of pgpm._refuse_unconvertible_keys (the gate transmute shares with "
+        "from_hypertable since #959), which covers both of transmute's askings (the preflight and the cutover "
+        "under its lock). tests/259 parts A, B and C catch it.",
+        [("   where c.confrelid = p_rel and c.contype = 'f' and c.conparentid = 0 and not c.convalidated;\n",
+          "   where c.confrelid = p_rel and c.contype = 'f' and c.conparentid = 0 and not c.convalidated and false;\n", 1)],
+    ),
+    # The shared-preflight lever (#966; issues #951, #952, #959): one mutation per site it changed. The
+    # null checks, one site per routine, are generated with their sources and tracks above def main().
+    "transmute_null_obtain_unlisted": (
+        "bench/shared_preflight_conformance.sh",
+        "transmute's p_obtain left out of its null list again (pre-#951): #581's own check answers a null "
+        "p_obtain with its own message, so the one refusal every public routine shares does not cover it. "
+        "One site, the argument list. tests/268 part A's sweep catches it on both transmute overloads.",
+        [("'p_anchor', p_anchor, 'p_obtain', p_obtain, 'p_regrain_batch', p_regrain_batch,",
+          "'p_anchor', p_anchor, 'p_regrain_batch', p_regrain_batch,", 1)],
+    ),
+    "set_retain_refuses_null_retain": (
+        "bench/shared_preflight_conformance.sh",
+        "The over-correction of #951: set_retain refuses p_retain => null, whose null is documented (keep "
+        "everything) and is its default, so retention could no longer be switched off. tests/268 part A's "
+        "documented-null assertion catches it.",
+        [("perform pgpm._refuse_null_arguments('set_retain', json_build_object('p_parent', p_parent));",
+          "perform pgpm._refuse_null_arguments('set_retain', json_build_object('p_parent', p_parent, 'p_retain', p_retain));",
+          1)],
+    ),
+    "id_step_contract_dropped": (
+        "bench/shared_preflight_conformance.sh",
+        "Issue #952 bullet 1, the pre-fix shape: transmute does not ask _id_step_contract, so a numeric(6,-2) "
+        "key with step 10 passes the id-kind preflight, phases 1 and 2 commit the bound CHECK and the claim, "
+        "and the cutover's ATTACH (which rounds 2010 to 2000) dies raw on every retry, the table rejecting "
+        "every write past hi. One site. tests/268 part B2 catches it.",
+        [("    perform pgpm._id_step_contract(p_parent, p_control, p_step, p_anchor);\n", "", 1)],
+    ),
+    "bound_contract_call_dropped": (
+        "bench/shared_preflight_conformance.sh",
+        "Issue #952, the pre-fix shape: transmute does not ask _control_bound_contract of the claim's bound, "
+        "so a fresh bound past the column's precision (numeric(4,0), hi 10000) commits and dies in the "
+        "cutover, and a resumed one is reused as recorded (a pre-#922 claim's hi = NaN completes a monolith "
+        "[0, NaN)). One site. tests/268 part B3 and tests/269 parts A and B catch it.",
+        [("  perform pgpm._control_bound_contract(p_parent, p_control, p_control_kind, v_lo_native, v_hi_native, v_resumed);\n",
+          "", 1)],
+    ),
+    "bound_contract_finiteness_dropped": (
+        "bench/shared_preflight_conformance.sh",
+        "Issue #952 bullet 2, half the contract: its finiteness arm skipped, so a resumed claim with hi = NaN "
+        "passes (NaN survives the round trip through numeric, and NaN = NaN in PostgreSQL) and the resume "
+        "completes a monolith [0, NaN) that takes every future id. tests/269 part A catches it.",
+        [("      if v_v::numeric in ('NaN', 'Infinity', '-Infinity') then\n",
+          "      if false and v_v::numeric in ('NaN', 'Infinity', '-Infinity') then   -- MUTANT\n", 1)],
+    ),
+    "bound_contract_representability_dropped": (
+        "bench/shared_preflight_conformance.sh",
+        "Issue #952, the other half: the round trip through the column's declared type skipped, so a bound "
+        "the column cannot hold (numeric(4,0), hi 10000), fresh or recorded, goes on to the cutover's ATTACH "
+        "and dies there after the bound has been committed. tests/268 part B3 and tests/269 part B catch it.",
+        [("""        begin
+          execute format('select %L::%s::numeric', v_v, v_type) into v_back;
+          if v_back <> v_v::numeric then
+            v_why := format('%s would be stored as %s', v_v, v_back);
+          end if;
+        exception when others then
+          v_why := format('%s cannot be stored in it at all (%s)', v_v, sqlerrm);
+        end;
+""", "        null;   -- MUTANT: no round trip through the column's type\n", 1)],
+    ),
+    "incoming_gate_shared_check_dropped": (
+        "bench/shared_preflight_conformance.sh",
+        "Issue #959's lever undone on the transmute side: _transmute_incoming_gate no longer calls the shared "
+        "key gate, so a NOT VALID incoming key under 'preserve' is dropped by the cutover and promoted by the "
+        "next tick's validate (#902 put back). One site, the call, which covers both of transmute's askings. "
+        "tests/268 part B4 catches it.",
+        [("  perform pgpm._refuse_unconvertible_keys(p_parent, 'transmute', 'transmute');\n", "", 1)],
+    ),
+    "hypertable_preflight_key_gate_dropped": (
+        "bench/hypertable_shared_preflight.sh",
+        "Issue #959 bullet 1, the pre-fix shape: from_hypertable_preflight never asks the shared key gate, so "
+        "a NOT VALID incoming key passes, the copy runs, and the swap drops and records the key for the "
+        "handoff to re-add and validate (a clean key promoted, one over tolerated orphans failing every tick). "
+        "One site, the preflight's call (the cutover's own asking still stands). tests/timescale/db/50 part B "
+        "catches it.",
+        [("  -- Asked here, so before the copy, and again by the cutover under its lock. See pgpm._refuse_unconvertible_keys.\n"
+          "  perform pgpm._refuse_unconvertible_keys(p_hypertable, 'migrate hypertable', 'from_hypertable');\n",
+          "  -- Asked here, so before the copy, and again by the cutover under its lock. See pgpm._refuse_unconvertible_keys.\n",
+          1)],
+    ),
+    "hypertable_cutover_key_gate_dropped": (
+        "bench/hypertable_shared_preflight.sh",
+        "Issue #959 bullet 1, the window half: the cutover does not ask the shared key gate under its lock, so "
+        "a NOT VALID incoming key added after the copy's preflight is dropped and recorded by the swap and "
+        "promoted by the handoff. One site. tests/timescale/db/50 part C catches it.",
+        [("  -- excludes, so this answer is final. See pgpm._refuse_unconvertible_keys.\n"
+          "  perform pgpm._refuse_unconvertible_keys(p_hypertable, 'migrate hypertable', 'from_hypertable');\n",
+          "  -- excludes, so this answer is final. See pgpm._refuse_unconvertible_keys.\n", 1)],
     ),
 }
 
@@ -7904,6 +7993,55 @@ MUTATION_TRACK = {
     "hypertable_scratch_htail_drop_unqualified": "timescale",
     "hypertable_scratch_reads_unqualified": "timescale",
 }
+
+
+# The shared-preflight lever (#966; issues #951, #952, #959). One mutation per site it changed, each putting
+# that site's defect back. The null checks are one site per routine, all of one shape, so they are generated:
+# each neutralises the routine's up-front pgpm._refuse_null_arguments call by handing the same arguments to
+# json_build_array, which evaluates them and refuses nothing (the pre-#951 shape: the null reaches whatever
+# the routine does next). The core's are caught by tests/268 part A's catalog sweep (bench/
+# shared_preflight_conformance.sh), the module's by tests/timescale/db/50 part A's (bench/
+# hypertable_shared_preflight.sh, on the timescale track).
+_NULL_REFUSAL_CORE = (
+    "obtain", "retire", "retain", "regrain_cancel", "regrain_step", "regrain", "regrain_history",
+    "transmute_abort", "untransmute", "set_regrain", "set_obtain", "set_retain", "set_partition_tz",
+    "set_archive_fn", "resume", "pause", "maintain", "maintain_obtain", "schedule", "check_uuidv7",
+    "check_text_time", "check_time_monotonic", "impact_report", "restore_incoming_fks", "validate_incoming_fks",
+    "incoming_fk_orphans", "suspend_incoming_fks", "observe_window",
+)
+_NULL_REFUSAL_HYPERTABLE = (
+    "from_hypertable_disk_estimate", "from_hypertable_time_estimate", "from_hypertable_preflight",
+    "from_hypertable_copy", "from_hypertable_drain_delta_step", "from_hypertable_drain_delta",
+    "from_hypertable_drain_appends_step", "from_hypertable_drain_appends", "from_hypertable_cutover",
+    "from_hypertable",
+)
+for _r in _NULL_REFUSAL_CORE:
+    _lead = "select" if _r == "observe_window" else "perform"   # observe_window is a SQL function
+    MUTATIONS[f"null_refusal_dropped_{_r}"] = (
+        "bench/shared_preflight_conformance.sh",
+        f"Pre-#951 pgpm.{_r}: no up-front null check, so a null argument with no meaning reaches what the "
+        f"routine does next (three-valued logic reads it as not true, or it splices into SQL, or it matches "
+        f"nothing). One site, the routine's _refuse_null_arguments call, neutralised. tests/268 part A's "
+        f"catalog sweep catches it" + (", and part A1 (p_force => null drops the live key)"
+                                       if _r == "suspend_incoming_fks" else "") + ".",
+        [(f"  {_lead} pgpm._refuse_null_arguments('{_r}',", f"  {_lead} json_build_array('{_r}',", 1)],
+    )
+for _r in _NULL_REFUSAL_HYPERTABLE:
+    MUTATIONS[f"null_refusal_dropped_{_r}"] = (
+        "bench/hypertable_shared_preflight.sh",
+        f"Pre-#951 pgpm.{_r}: no up-front null check, so a null argument with no meaning reaches what the "
+        f"routine does next (from_hypertable's p_paused => null was refused by transmute only after the swap "
+        f"had dropped the hypertable; p_lock_timeout => null left the swap's lock wait unbounded). One site, "
+        f"the routine's _refuse_null_arguments call, neutralised. tests/timescale/db/50 part A's catalog sweep "
+        f"catches it" + (", and part A1" if _r == "from_hypertable" else "") + ".",
+        [(f"  perform pgpm._refuse_null_arguments('{_r}',", f"  perform json_build_array('{_r}',", 1)],
+    )
+MUTATION_SRC.update({f"null_refusal_dropped_{_r}": "pgpm_hypertable/install.sql" for _r in _NULL_REFUSAL_HYPERTABLE})
+MUTATION_SRC.update({"hypertable_preflight_key_gate_dropped": "pgpm_hypertable/install.sql",
+                     "hypertable_cutover_key_gate_dropped": "pgpm_hypertable/install.sql"})
+MUTATION_TRACK.update({f"null_refusal_dropped_{_r}": "timescale" for _r in _NULL_REFUSAL_HYPERTABLE})
+MUTATION_TRACK.update({"hypertable_preflight_key_gate_dropped": "timescale",
+                       "hypertable_cutover_key_gate_dropped": "timescale"})
 
 
 def main() -> int:

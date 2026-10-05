@@ -17,6 +17,19 @@ Conventions used below: `p_parent` is the partitioned parent (a `regclass`); a n
 frontier" is `now()` for `time`, `max(control)` for `id`, and `greatest(max(control), now())` for
 `uuidv7`/`text_time` (both are time grids fed by data, so neither falls behind the clock).
 
+**Null arguments.** Every public routine (of `pgpm_core` and of `pgpm_hypertable`) refuses a null argument
+that has no meaning, before it reads or commits anything, naming it: `pg_partition_magician: <routine> does
+not accept null for <argument>: ...`. PL/pgSQL reads a null with three-valued logic, so before this a null
+`p_force` made `suspend_incoming_fks` drop the live keys it should have left alone, and a null `p_paused`
+reached `from_hypertable`'s handoff only after its swap had dropped the hypertable. The arguments whose null
+IS a meaning say so where they are described: `transmute`'s `p_retain` (keep everything) and its `text_time`
+shape arguments; `from_hypertable`'s and `from_hypertable_cutover`'s `p_retain` (the source's `drop_chunks`
+interval); `from_hypertable_drain_appends_step`'s `p_watermark`; `from_hypertable_time_estimate`'s
+`p_copy_mibps`; the `p_target_step` of `regrain`, `regrain_step`, `regrain_history` and `set_regrain`;
+`regrain_step`'s `p_batch`; `set_retain`'s `p_retain`; `set_archive_fn`'s `p_archive_fn`; `progress`'s
+`p_parent`; `restore_incoming_fks`'s `p_ids`; `check_text_time`'s `p_alphabet`; and the `p_status` that
+`maintain` and `maintain_obtain` return.
+
 ## Conversion
 
 ### `transmute` (time / uuidv7 / text_time grid)
@@ -366,7 +379,17 @@ samples as not matching the declared shape and `p_force_text_time` is not set; a
 value lies (or decodes to) more than one partition step plus one hour past `now()` and `p_force_frontier` is not set
 (a future-dated row would pin the monolith's permanent `hi` there); a `time` control's newest value is
 `infinity`, which no partition can hold (`p_force_frontier` does not override this); a `numeric` `id`
-control holds `NaN`, `Infinity` or `-Infinity`, for the same reason (delete or correct those rows and re-run); row-level security
+control holds `NaN`, `Infinity` or `-Infinity`, for the same reason (delete or correct those rows and re-run); an `id`
+control column cannot hold the grid's bounds: a `numeric` with a negative scale holds only multiples of its
+unit (100 for `numeric(6,-2)`), so a `p_step` or `p_anchor` that is not one is refused, since the cutover's
+`ATTACH` (and each forward partition's) would round a bound between two of them; and a monolith bound the
+column's type cannot store (past a `numeric`'s precision or an integer type's range, such as `10000` on a
+`numeric(4,0)` key) is refused, since the `ATTACH` would fail on it after the bound had been committed; a
+resumed claim's recorded bound is not finite or cannot be stored in the column (an older install could
+record one, such as `hi = NaN` for a key that held a `NaN` row): call [`transmute_abort`](#transmute_abort), then re-run, which
+computes a fresh bound; on PostgreSQL 18, a foreign key on or to the table is `NOT ENFORCED`, in either
+direction (pgpm carries a key only as an enforced one: drop it, or `ALTER TABLE <table> ALTER CONSTRAINT
+<name> ENFORCED`, which checks every row, then re-run); row-level security
 would filter the caller's reads of the table (`row_security_active()` is true: a non-superuser owner without
 `BYPASSRLS` on a table with `FORCE ROW LEVEL SECURITY`, or a caller that is not the owner), because the
 bound is read from the rows the caller can see (run it as a role with `BYPASSRLS`; an owner on a table
@@ -959,14 +982,18 @@ dimension is **integer-time** (`smallint`, `integer` or `bigint`: only `timestam
 dimensions are supported, because an integer dimension's chunk ranges are not in the column the copy reads,
 so it would copy nothing); it has an **exclusion constraint** (`EXCLUDE`: nothing in the migration carries one,
 and PostgreSQL before 17 allows none on a partitioned table, so the migrated table would silently accept the
-rows it rejects; the message names every one); an **outgoing** foreign key is `NOT VALID`; or an **incoming**
+rows it rejects; the message names every one); an **incoming** foreign key is `NOT VALID`, or, on PostgreSQL
+18, a foreign key either way is `NOT ENFORCED` (the gate `transmute` applies, the same function; the swap would
+drop the key and the handoff re-add and validate it, promoting a key you left unvalidated, or failing it every
+tick over the rows you tolerated); an **outgoing** foreign key is `NOT VALID`; or an **incoming**
 foreign key references anything other than the key pgpm will reuse. On success it raises a `NOTICE` estimating the
 transient extra disk the migration needs (see `from_hypertable_disk_estimate`) and a rough copy-time ETA (see
 `from_hypertable_time_estimate`). Both `from_hypertable_copy` and `from_hypertable` call it first, and
 `from_hypertable_cutover` repeats the two dimension checks and the exclusion-constraint check in its own
 right, since a destination left by an earlier copy is enough to reach the cutover's drop without preflight
 having run. It asks the exclusion-constraint check twice, before the pre-drain and again under its lock, so a
-constraint added while it prepares is refused too, with the source untouched.
+constraint added while it prepares is refused too, with the source untouched, and it asks the foreign-key gate
+under its lock, so a `NOT VALID` incoming key added after the copy is refused before the swap.
 
 #### Foreign keys
 
@@ -1440,7 +1467,8 @@ pgpm.regrain_step(p_parent regclass, p_child name, p_target_step text default nu
 
 One resumable microbatch of `regrain`: it **copies** (never deletes) a within-horizon sub-range's next
 budget-sized batch into its fine child, and performs the atomic swap once the cursor
-(`config.regrain_cursor`) reaches the coarse `hi`.
+(`config.regrain_cursor`) reaches the coarse `hi`. A null `p_target_step` takes the partition step, and a null
+`p_batch` takes `config.regrain_batch`.
 
 A **below-horizon** sub-range is handled one of two ways, depending on whether the table archives. With
 `config.archive_fn` unset it is skipped, logged as `regrain_aged`, and discarded with the source at the
@@ -2679,7 +2707,8 @@ The inverse of restore: re-drops every live preserve-managed FK on the parent, r
 caller is regrain's swap, which passes `p_force => true` and restores the same keys inside the same
 transaction, so no other session ever observes referential integrity off; a live `ON DELETE CASCADE` or
 `SET NULL` would otherwise silently delete or null referencing rows as their referent left the parent.
-Without `p_force` it does nothing. There is no reason for an operator to call it.
+Without `p_force` it does nothing, and a null `p_force` is refused (it used to read as `true`). There is no
+reason for an operator to call it.
 
 ## Catalog
 

@@ -54,6 +54,9 @@ create or replace function pgpm.from_hypertable_disk_estimate(p_hypertable regcl
 returns bigint language plpgsql as $$
 declare v_nsp name; v_rel name; v_bytes bigint;
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('from_hypertable_disk_estimate', json_build_object(
+    'p_hypertable', p_hypertable));
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   select coalesce(sum(pg_total_relation_size(format('%I.%I', chunk_schema, chunk_name)::regclass)), 0)
@@ -78,6 +81,9 @@ create or replace function pgpm.from_hypertable_time_estimate(
 ) returns interval language plpgsql as $$
 declare v_bytes bigint; v_cache bigint; v_mibps numeric;
 begin
+  -- #951: refused before anything is read or committed; p_copy_mibps (null: the regime's own rate) is not
+  perform pgpm._refuse_null_arguments('from_hypertable_time_estimate', json_build_object(
+    'p_hypertable', p_hypertable));
   v_bytes := pgpm.from_hypertable_disk_estimate(p_hypertable);
   v_mibps := p_copy_mibps;
   if v_mibps is null then
@@ -599,6 +605,9 @@ declare
   v_cache bigint; v_mibps numeric; v_regime text; v_eta interval;
   v_bad_fk text; v_reusekey text[]; v_fk record;
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('from_hypertable_preflight', json_build_object(
+    'p_hypertable', p_hypertable, 'p_control', p_control));
   if not exists (select 1 from pg_extension where extname = 'timescaledb') then
     raise exception 'pg_partition_magician: from_hypertable requires the timescaledb extension to be installed';
   end if;
@@ -657,6 +666,13 @@ begin
   -- (3b3) a publication membership transmute could not carry onto the parent (issue #816). See
   -- _from_hypertable_check_publications.
   perform pgpm._from_hypertable_check_publications(p_hypertable);
+
+  -- (3b4) the key gate transmute shares (issues #902, #959): a NOT VALID incoming key, and on PostgreSQL 18 a
+  -- NOT ENFORCED key either way. The swap drops every incoming key and records it, and the handoff re-adds and
+  -- validates it, so a key the operator left NOT VALID was promoted (or failed its validation every tick for
+  -- good) with transmute's own gate never seeing it: transmute only meets the plain table, after the swap.
+  -- Asked here, so before the copy, and again by the cutover under its lock. See pgpm._refuse_unconvertible_keys.
+  perform pgpm._refuse_unconvertible_keys(p_hypertable, 'migrate hypertable', 'from_hypertable');
 
   -- (3c) an EXCLUDE constraint, which nothing in the migration carries (issue #675). See
   -- _from_hypertable_check_exclusion.
@@ -776,6 +792,9 @@ declare
   v_keyconname name; v_keytmp text; v_destreg regclass;
   v_ctl_typid regtype; v_bound_tpl text; v_lo text; v_hi text;
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('from_hypertable_copy', json_build_object(
+    'p_hypertable', p_hypertable, 'p_control', p_control, 'p_track_changes', p_track_changes));
   perform pgpm.from_hypertable_preflight(p_hypertable, p_control);
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
@@ -1023,6 +1042,9 @@ declare
   v_keycols_q text; v_dkey_q text; v_skey_q text; v_cols_q text;
   v_ctl_type text; v_min_ctl text; v_max_ctl text; v_watermark bigint; v_keys bigint;
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('from_hypertable_drain_delta_step', json_build_object(
+    'p_hypertable', p_hypertable, 'p_control', p_control, 'p_batch', p_batch));
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
@@ -1106,6 +1128,10 @@ declare
   v_nsp name; v_rel name; v_dest name; v_delta name;
   v_iter int := 0; v_more boolean;
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('from_hypertable_drain_delta', json_build_object(
+    'p_hypertable', p_hypertable, 'p_control', p_control, 'p_batch', p_batch, 'p_threshold', p_threshold,
+    'p_max_iter', p_max_iter, 'p_best_effort', p_best_effort));
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
@@ -1174,6 +1200,10 @@ declare
   v_nsp name; v_rel name; v_dest name; v_cols_q text; v_ctl_type text; v_hi text;
   v_past text;   -- the predicate "past the watermark", over p_control
 begin
+  -- #951: refused before anything is read or committed; p_watermark (null: nothing copied yet, every source row
+  -- is past it) is not
+  perform pgpm._refuse_null_arguments('from_hypertable_drain_appends_step', json_build_object(
+    'p_hypertable', p_hypertable, 'p_control', p_control, 'p_batch', p_batch));
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
@@ -1217,6 +1247,10 @@ create or replace procedure pgpm.from_hypertable_drain_appends(
 declare
   v_nsp name; v_rel name; v_dest name; v_ctl_type text; v_watermark text; v_more boolean; v_iter int := 0;
 begin
+  -- #951: refused before anything is read or committed; no argument here has a null meaning
+  perform pgpm._refuse_null_arguments('from_hypertable_drain_appends', json_build_object(
+    'p_hypertable', p_hypertable, 'p_control', p_control, 'p_batch', p_batch, 'p_threshold', p_threshold,
+    'p_max_iter', p_max_iter, 'p_best_effort', p_best_effort));
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
@@ -1299,6 +1333,12 @@ declare
   v_carried_ddl text[];       -- #787: what LIKE left behind (owner, grants, RLS, policies, comment, triggers)
   v_stmt text;
 begin
+  -- #951: refused before anything is read or committed; p_retain (null: the source's drop_chunks interval, if
+  -- any) is not
+  perform pgpm._refuse_null_arguments('from_hypertable_cutover', json_build_object(
+    'p_hypertable', p_hypertable, 'p_control', p_control, 'p_interval', p_interval, 'p_obtain', p_obtain,
+    'p_drain_batch', p_drain_batch, 'p_anchor', p_anchor, 'p_paused', p_paused, 'p_predrain', p_predrain,
+    'p_lock_timeout', p_lock_timeout, 'p_force_frontier', p_force_frontier));
   -- #665: validate the lock timeout HERE, before the pre-drain commits anything or the index pre-builds
   -- spend their O(rows), exactly as transmute validates its own (#309). The prior value is restored at
   -- once, so the check has no side effect and the set_config at the swap is what applies the bound.
@@ -1536,6 +1576,11 @@ begin
   -- ...and a publication membership the swap would carry and transmute refuse (#816): one added while the
   -- cutover prepared is refused here with the source whole. See _from_hypertable_check_publications.
   perform pgpm._from_hypertable_check_publications(p_hypertable);
+  -- ...and the key gate transmute shares (#959): a NOT VALID incoming key added while the cutover prepared (the
+  -- copy's preflight saw none) would be dropped and recorded by the swap below and promoted by the handoff.
+  -- ADD FOREIGN KEY takes only SHARE ROW EXCLUSIVE on the referenced table, which this ACCESS EXCLUSIVE now
+  -- excludes, so this answer is final. See pgpm._refuse_unconvertible_keys.
+  perform pgpm._refuse_unconvertible_keys(p_hypertable, 'migrate hypertable', 'from_hypertable');
   -- ...and two of transmute's refusals the source already shows (#792). Asked here rather than up front, for
   -- two reasons. Nothing can write the source now, so a row dated past the frontier bound, or a bare unique
   -- index, that arrived while the cutover prepared (the pre-drain's commits, the index pre-builds) is refused
@@ -1971,6 +2016,13 @@ create or replace procedure pgpm.from_hypertable(
 ) language plpgsql as $$
 declare v_prev_lock_timeout text;
 begin
+  -- #951: refused before anything is read or committed; p_retain (null: the source's drop_chunks interval, if
+  -- any) is not
+  perform pgpm._refuse_null_arguments('from_hypertable', json_build_object(
+    'p_hypertable', p_hypertable, 'p_control', p_control, 'p_interval', p_interval, 'p_obtain', p_obtain,
+    'p_drain_batch', p_drain_batch, 'p_anchor', p_anchor, 'p_paused', p_paused,
+    'p_track_changes', p_track_changes, 'p_predrain', p_predrain, 'p_lock_timeout', p_lock_timeout,
+    'p_force_frontier', p_force_frontier));
   -- #665: refuse a bad p_lock_timeout before the copy, not from inside the cutover once the whole online
   -- copy has been paid for. No side effect: the prior value goes straight back.
   begin
