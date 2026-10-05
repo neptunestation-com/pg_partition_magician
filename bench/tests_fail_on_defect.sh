@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prove that four pgTAP files FAIL against the defect each exists to catch, by putting the defect back and
+# Prove that five pgTAP files FAIL against the defect each exists to catch, by putting the defect back and
 # running the file: a test that also passes against broken code is not evidence of anything.
 #
 # WHY THIS GUARD EXISTS (issues #743 and #744). Each of these files passed against the very defect it
@@ -11,6 +11,8 @@
 #             outside the alphabet, which raises the invalid-digit 22P02 with or without that check;
 #   tests/11  took their "before" row count AFTER fixtures/demo.sql had already run the migration and
 #   tests/12  compared the table's count with it in the next statement: count = count.
+# And issue #919: tests/92 promised 'identity, not just cardinality' for the rows its regrain moved and
+#   asserted count(*) = 250 over ids 1..2500, which a swap that loses row 2500 and invents 2499 satisfies.
 #
 # HOW. Per file, the same two runs, in fresh databases named <db> in <container>:
 #   CONTROL   the file passes, every planned assertion ok, against the clean pgpm (and fixtures);
@@ -20,10 +22,15 @@
 #               tests/11, tests/12  the clean install and fixtures, with two seeded rows ('evt 1', 'evt 2')
 #                         replaced by strangers under the same ids AFTER the migration: rows lost and
 #                         rows added that cancel in a count, so only an identity check can see them.
+#               tests/92  this checkout's install.sql whose regrain swap, after the source is dropped,
+#                         rewrites the highest copied key in the cell by one (2500 becomes 2499): one row
+#                         lost and one row invented, same count.
 #   LIVENESS  each defect is shown present before its file is judged: the mutant install lets an orphan
 #             through to a different refusal (and the clean one names the orphan), the mutant decodes a
 #             digit under a 5-character alphabet at radix 10 (the clean one refuses it), and the edited
-#             tables hold the seeded count without 'evt 1' and 'evt 2'. A defect that was never planted
+#             tables hold the seeded count without 'evt 1' and 'evt 2'; for tests/92, read after the file
+#             has run (the defect fires inside its regrain), the swap happened once, 2500 is gone, 2499 is
+#             there and the table still holds 251 rows. A defect that was never planted
 #             would make the file's failure meaningless and its pass vacuous.
 #
 # The mutations it is required to fail against (bench/mutations/mutate.py), each the file's pre-fix text:
@@ -31,9 +38,10 @@
 #   radix_length_refusal_unpinned      -- tests/90's refusal back to throws_ok on '5' with NULL, NULL
 #   id_conservation_after_migration    -- tests/11's count back to a snapshot taken after the migration
 #   uuid_conservation_after_migration  -- tests/12's, likewise
+#   regrain_survivors_by_count         -- tests/92's identity check back to count(*) = 250 over 1..2500
 #
 # Usage: tests_fail_on_defect.sh <container> <db> [test file]
-# With no third argument it judges all four files in this checkout. With one it judges THAT file in place
+# With no third argument it judges all five files in this checkout. With one it judges THAT file in place
 # of the one it stands for, recognised by its file name or, for a mutant bench/discriminate.sh built
 # (<mutation>.sql), by the mutation's MUTATION_SRC; a /repo/... path is mapped to this checkout. Every
 # install and test is fed from the host over stdin, so the container need not mount the repository; it
@@ -53,8 +61,9 @@ T18="tests/18_orphan_child_guard_test.sql"
 T90="tests/90_text_time_alphabet_codec_test.sql"
 T11="tests/11_id_kind_test.sql"
 T12="tests/12_uuidv7_kind_test.sql"
-F18="$ROOT/$T18"; F90="$ROOT/$T90"; F11="$ROOT/$T11"; F12="$ROOT/$T12"
-SEL=" 18 90 11 12 "
+T92="tests/92_regrain_outgoing_fk_test.sql"
+F18="$ROOT/$T18"; F90="$ROOT/$T90"; F11="$ROOT/$T11"; F12="$ROOT/$T12"; F92="$ROOT/$T92"
+SEL=" 18 90 11 12 92 "
 
 if [ -n "$ONLY" ]; then
   ONLY="${ONLY/#\/repo\//$ROOT/}"
@@ -72,7 +81,8 @@ PY
     "$(basename "$T90")":*|*:"$T90") SEL=" 90 "; F90="$ONLY" ;;
     "$(basename "$T11")":*|*:"$T11") SEL=" 11 "; F11="$ONLY" ;;
     "$(basename "$T12")":*|*:"$T12") SEL=" 12 "; F12="$ONLY" ;;
-    *) say FAIL "the file to judge is one of the four this guard knows" "$ONLY -> '${src}'"; exit 1 ;;
+    "$(basename "$T92")":*|*:"$T92") SEL=" 92 "; F92="$ONLY" ;;
+    *) say FAIL "the file to judge is one of the five this guard knows" "$ONLY -> '${src}'"; exit 1 ;;
   esac
 fi
 sel() { [[ "$SEL" == *" $1 "* ]]; }
@@ -242,6 +252,41 @@ if sel 11 || sel 12; then
     sel 12 && judge "DEFECT: $T12 fails with two seeded rows replaced" fail "$F12"
   else
     say FAIL "the clean install and fixtures/demo.sql loaded" "$(cat "$work/install.log" "$work/fixtures.log" 2>/dev/null | grep -m1 ERROR)"; fail=1
+  fi
+fi
+
+# ---- tests/92: the rows regrain's swap moved, by identity ---------------------------------------------
+# The defect fires inside the file's own regrain, so its liveness is read from the database the file left.
+SWAP_LOG="insert into pgpm.log (parent_table, action, lo, hi, rows, method) values (p_parent, 'regrain', v_lo, v_hi, v_made, 'copy_swap_drop');
+"
+if sel 92; then
+  if fresh && install "$ROOT/pgpm_core/install.sql"; then
+    judge "CONTROL: $T92 passes against the clean install" pass "$F92"
+  else
+    say FAIL "the clean install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
+  fi
+  if plant swap_rewrites_key "  $SWAP_LOG" \
+       "  execute format('update %s set %I = %I - 1 where %I = (select max(%I) from %s where %I < %L)',
+    p_parent, cfg.control_column, cfg.control_column, cfg.control_column, cfg.control_column, p_parent,
+    cfg.control_column, v_hi);
+  $SWAP_LOG"; then
+    if fresh && install "$work/swap_rewrites_key.sql"; then
+      judge "DEFECT: $T92 fails when the swap loses 2500 and invents 2499" fail "$F92"
+      got=$(v "select (select count(*) from pgpm.log where parent_table = 'public.ofk92'::regclass
+                         and action = 'regrain' and method = 'copy_swap_drop')
+                   || ':' || exists (select 1 from public.ofk92 where id = 2500)
+                   || ':' || exists (select 1 from public.ofk92 where id = 2499)
+                   || ':' || (select count(*) from public.ofk92)")
+      if [ "$got" = "1:false:true:251" ]; then
+        say PASS "LIVENESS: the swap ran once, lost 2500, invented 2499" "swaps:has2500:has2499:rows $got"
+      else
+        say FAIL "LIVENESS: the swap ran once, lost 2500, invented 2499" "swaps:has2500:has2499:rows $got"; fail=1
+      fi
+    else
+      say FAIL "the install whose swap rewrites a key loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
+    fi
+  else
+    say FAIL "planted the defect: a key rewrite after regrain's swap" "install.sql moved; fix the pattern"; fail=1
   fi
 fi
 

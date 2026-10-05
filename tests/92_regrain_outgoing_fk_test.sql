@@ -38,7 +38,9 @@ select throws_ok(
   $$ insert into public.ofk92 values (1, 999, 'orphan') $$,
   '23503', null, 'setup: the plain table rejects a ref_id that does not exist in ofk92_ref');
 
-insert into public.ofk92 select g*10, ((g*10) % 100) + 1, 'x' from generate_series(1, 250) g;
+-- every row carries its own payload, so a swap that rewrites a key, or hands one row's values to
+-- another, cannot hide behind identical 'x' rows in the identity check at the end
+insert into public.ofk92 select g*10, ((g*10) % 100) + 1, 'p' || (g*10) from generate_series(1, 250) g;
 
 -- a PROCEDURE, not a function: it calls transmute, which COMMITs (#275)
 create or replace procedure pg_temp.mk92() language plpgsql as $$
@@ -84,9 +86,17 @@ select throws_ok(
   $$ insert into public.ofk92 values (15, 999, 'orphan-after-regrain') $$,
   '23503', null, 'a fine partition (post-swap) still rejects a ref_id that does not exist');
 
--- and the data the regrain actually moved is intact (identity, not just cardinality)
-select is((select count(*)::int from public.ofk92 where id between 1 and 2500), 250,
-  'every row the regrain copied survived the swap');
+-- and the data the regrain actually moved is intact (identity, not just cardinality, #919): the
+-- whole table, row by row, is exactly the 250 seeded rows plus the frontier. A count of 250 over ids
+-- 1..2500 stayed green against a swap that lost row 2500 and invented a row 2499 (one out, one in,
+-- same count); naming every (id, ref_id, payload) cannot be satisfied by rows that cancel.
+select results_eq(
+  $$ select id, ref_id, payload from public.ofk92 order by id $$,
+  $$ select id, ref_id, payload from (
+       select (g*10)::bigint as id, ((g*10) % 100) + 1 as ref_id, 'p' || (g*10) as payload
+         from generate_series(1, 250) g
+       union all select 20000::bigint, 1, 'frontier') e order by id $$,
+  'every row the regrain copied survived the swap: the same (id, ref_id, payload) rows, none lost, none invented, none altered');
 
 select is(
   (select count(*)::int from pgpm.part p
