@@ -428,9 +428,9 @@ begin
       case when r.withcheck is not null then ' with check (' || r.withcheck || ')' else '' end);
   end loop;
   -- The table's own comment. LIKE ... INCLUDING COMMENTS carried the columns' and constraints', not this one.
-  if obj_description(p_hypertable, 'pg_class') is not null then
-    v_ddl := v_ddl || format('comment on table %s is %L', v_tbl_q, obj_description(p_hypertable, 'pg_class'));
-  end if;
+  -- Always set, to NULL when the source has none (%L renders a null as NULL): the copy carries the module's
+  -- `pgpm from_hypertable copy of <oid>` record (#773), which must not survive onto the migrated table.
+  v_ddl := v_ddl || format('comment on table %s is %L', v_tbl_q, obj_description(p_hypertable, 'pg_class'));
   for r in
     select pg_get_triggerdef(t.oid) as def
       from pg_trigger t join pg_proc f on f.oid = t.tgfoid join pg_namespace fn on fn.oid = f.pronamespace
@@ -891,6 +891,14 @@ begin
   execute format('drop table if exists %I.%I', v_nsp, v_dest);
   execute format('create table %I.%I (like %I.%I including defaults including constraints including generated including comments)',
                  v_nsp, v_dest, v_nsp, v_rel);
+  -- The module's record that this table is a from_hypertable copy, and of which hypertable (#773), in the
+  -- transaction that creates it. pgpm_core/uninstall.sql finds a copy that was never cut over by this
+  -- comment, not by its name (an operator's table can end in _pgpm_dest), and drops it only while the
+  -- hypertable it names still exists and so still holds every row. LIKE ... INCLUDING COMMENTS carries the
+  -- columns' comments, not the table's, so the comment is pgpm's alone; the swap replaces it with the
+  -- source's own (or none) in _from_hypertable_carried_ddl, so the migrated table never carries it.
+  execute format('comment on table %I.%I is %L', v_nsp, v_dest,
+                 'pgpm from_hypertable copy of ' || p_hypertable::oid::text);
   commit;
 
   -- online chunk-bounded copy: one chunk-range per transaction (the time predicate drives chunk exclusion

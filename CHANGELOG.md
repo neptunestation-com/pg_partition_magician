@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **`uninstall.sql` removes a `from_hypertable_copy` that was never cut over** (#773, last bullet). It swept
+  a tracking copy's change capture (#737) but left the copy itself: `<rel>_pgpm_dest`, a full second copy of
+  the hypertable's rows, with the tracking copy's pre-built key index and the outgoing foreign keys the copy
+  replayed on it, so a referenced row the hypertable no longer used could not be deleted, where the guide
+  says nothing else pgpm made remains. The copy now comments its table `pgpm from_hypertable copy of <oid>`
+  as it creates it, the swap replaces that comment with the source's own (or none), and uninstall finds each
+  copy by that record, never by its name, and drops it while the hypertable it names still exists. A copy
+  whose hypertable is gone may be the only home of its rows, so it is left with a `WARNING`.
+  `tests/timescale/db/48` under `bench/uninstall_hypertable_copy.sh`, with the mutations
+  `uninstall_keeps_hypertable_copy`, `uninstall_hypertable_copy_by_name`, `uninstall_drops_orphaned_copy`
+  and `hypertable_swap_keeps_copy_record`.
 - **Every grant the conversions carry keeps its grantor** (#903). `_acl_carry_ddl` read grantee, privilege and
   grant option off the ACL and dropped the grantor, so `transmute`'s parent, `from_hypertable`'s swapped copy
   and `untransmute`'s restored table recorded every grant as the owner's: one a role made through its grant
