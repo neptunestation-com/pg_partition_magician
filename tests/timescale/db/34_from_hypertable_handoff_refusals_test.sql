@@ -66,6 +66,9 @@ select is(to_regclass('public.hbu34_pgpm_dest'), null::regclass,
 -- p_predrain => false, so nothing commits ahead of the check for an unrelated reason.
 create table public.hbu34_pgpm_dest (like public.hbu34 including defaults including constraints including generated including comments);
 insert into public.hbu34_pgpm_dest select * from public.hbu34;
+-- recorded, as the upgrade records an older version's copy by the comment it carries (#955): the cutover
+-- swaps in only a copy pgpm recorded
+select pgpm._scratch_record('public.hbu34', 'hypertable_dest', 'public.hbu34_pgpm_dest'::regclass::oid);
 select throws_like(
   $$ call pgpm.from_hypertable_cutover('public.hbu34', 'ts', interval '1 day', p_predrain => false) $$,
   'pg_partition_magician: cannot migrate hypertable hbu34 -- refused before anything is changed%the unique index hbu34_dev_ts %bare index%',

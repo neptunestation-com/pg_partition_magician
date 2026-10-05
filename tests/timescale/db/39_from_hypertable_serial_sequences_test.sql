@@ -12,13 +12,16 @@
 -- issued past the rows kept (23 issued, 21 to 23 deleted, so a fresh sequence would give 1 and max(id) + 1
 -- would give 21, and only the source's own gives 24); n bigserial, moved to 1000 (next 1001); and s39_aux,
 -- OWNED BY v and named by no default. The table belongs to a third role, t39_owner, not to the migrating
--- one, because OWNED BY needs the sequence and the table to share an owner and the copy belongs to the
--- migrating role until the swap carries the source's owner: a hand-over made before that is refused.
+-- one, because OWNED BY needs the sequence and the table to share an owner, and the copy need not share the
+-- source's until the swap carries it: a hand-over made before that is refused. The copy is minted owned like
+-- the hypertable (#949), but a hypertable handed to a new owner during the online window leaves the copy with
+-- the old one; the fleet image cannot re-own a hypertable as postgres, so the copy is given to the migrating
+-- role between the two phases instead, which is the same shape at the cutover.
 -- IDENTITY, not cardinality: the sequences are compared by oid before and after, and the rows by value.
 --
--- Autocommit, disposable-db: from_hypertable commits, so it is called as a bare statement. On a tree with
+-- Autocommit, disposable-db: the copy and the cutover commit, so each is called as a bare statement. On a tree with
 -- the defect it raises the raw 2BP01, which the harness fails on, and the assertions after it fail too.
-select plan(9);
+select plan(10);
 
 do $$ begin
   if not exists (select 1 from pg_roles where rolname = 't39_owner') then create role t39_owner; end if;
@@ -65,7 +68,11 @@ select is(
   's39_aux:unused,s39_id_seq:23,s39_n_seq:1000',
   'WITNESS: id issued 23 with 20 kept, n stands at 1000, s39_aux was never used');
 
-call pgpm.from_hypertable('public.s39', 'ts', interval '1 day', p_paused => true);
+call pgpm.from_hypertable_copy('public.s39', 'ts');
+alter table public.s39_pgpm_dest owner to postgres;   -- the copy's owner drifts from the source's (see the header)
+select is((select pg_get_userbyid(relowner)::text from pg_class where oid = 'public.s39_pgpm_dest'::regclass), 'postgres',
+  'WITNESS: at the cutover the copy belongs to another role than the source and its sequences');
+call pgpm.from_hypertable_cutover('public.s39', 'ts', interval '1 day', p_paused => true);
 
 -- ================= THE CONTRACT =================
 select is(

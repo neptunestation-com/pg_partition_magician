@@ -159,6 +159,79 @@ begin
   end if;
 end $$;
 
+-- _from_hypertable_scratch: the NAME of the scratch relation of p_kind ('hypertable_dest', the copy, or
+-- 'hypertable_delta', a tracking copy's delta) that pgpm.scratch records for p_hypertable (#955), or null when
+-- none is recorded, it is gone, or it no longer sits in the hypertable's own schema (the swap renames the copy
+-- into the hypertable's place, so a copy moved elsewhere cannot be swapped in). Every step after the copy (the
+-- two drains and their steps, the cutover) finds the copy and the delta through here, by the oid the copy
+-- recorded when it created them. They used to render <rel>_pgpm_dest and <rel>_pgpm_delta from the
+-- hypertable's current name, and an operator's own table under one of those names was drained into, read
+-- as the delta and emptied, or swapped in as the migrated table. The name returned is the recorded
+-- relation's own, in the hypertable's schema, so the %I.%I splices that follow name exactly that relation.
+create or replace function pgpm._from_hypertable_scratch(p_hypertable regclass, p_kind text)
+returns name language sql stable as $$
+  select c.relname from pgpm.scratch s join pg_class c on c.oid = s.obj
+   where s.parent_oid = p_hypertable::oid and s.kind = p_kind and c.relkind = 'r'
+     and c.relnamespace = (select h.relnamespace from pg_class h where h.oid = p_hypertable)
+$$;
+
+-- _from_hypertable_scratch_check: refuse, before from_hypertable_copy creates or drops anything, when a name it
+-- is about to mint is held by an object pgpm.scratch does not record for this hypertable (#955). The copy used
+-- to run `drop table if exists` on <rel>_pgpm_dest and <rel>_pgpm_delta, `create or replace function` on
+-- <rel>_pgpm_delta_fn() and `drop trigger if exists` on <rel>_pgpm_delta_trg before building its own, so an
+-- operator's table, function or trigger under one of those names was dropped, or replaced, with its rows. What
+-- a previous copy of this hypertable left under them is recorded, and the copy replaces it by its oid. The
+-- delta, the function and the trigger are minted only by a tracking copy (p_track), and only then checked.
+-- Refused rather than minted under another name, as core's regrain capture refuses (#496): the cutover and the
+-- drains find the copy by its record either way, and a refusal up front leaves nothing half-built. A copy made
+-- by pgpm 0.6.0 or earlier carries no record and is refused here like any other relation; the remedy says to
+-- drop it.
+create or replace function pgpm._from_hypertable_scratch_check(p_hypertable regclass, p_track boolean)
+returns void language plpgsql stable as $$
+declare
+  v_nsp name; v_rel name; v_held regclass; v_held_fn regprocedure; v_trg_fn oid; v_owner oid;
+  v_fn oid;   -- the trigger function the previous tracking copy recorded, if any
+begin
+  select n.nspname, c.relname, c.relowner into v_nsp, v_rel, v_owner
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
+  -- #949: the copy, the delta and the function are given the hypertable's owner as they are created
+  -- (_scratch_mint), which needs this role to be a member of that owner, and the owner to hold CREATE on the
+  -- schema, as the swap's OWNER TO always has. Asked here, before anything commits, rather than met after the
+  -- tracking apparatus has committed and before the copy is built.
+  if not pg_has_role(current_user, v_owner,
+                     case when current_setting('server_version_num')::int >= 160000 then 'SET' else 'MEMBER' end)
+     or not (has_schema_privilege(v_owner, (select relnamespace from pg_class where oid = p_hypertable), 'CREATE')
+             or (select rolsuper from pg_roles where oid = current_user::regrole)) then
+    raise exception 'pg_partition_magician: cannot migrate hypertable % as % -- its copy and change capture are owned like the hypertable, by %, from the moment they are created, and this role cannot give them to it (it must be % or a member of it, and % must hold CREATE on schema %; the swap gives % the migrated table the same way). Run it as % (or as a role that is a member of it), or a superuser; nothing was changed.',
+      p_hypertable, quote_ident(current_user), quote_ident(pg_get_userbyid(v_owner)), quote_ident(pg_get_userbyid(v_owner)),
+      quote_ident(pg_get_userbyid(v_owner)), quote_ident(v_nsp), quote_ident(pg_get_userbyid(v_owner)),
+      quote_ident(pg_get_userbyid(v_owner));
+  end if;
+  select s.obj into v_fn from pgpm.scratch s where s.parent_oid = p_hypertable::oid and s.kind = 'hypertable_delta_fn';
+  v_held := to_regclass(format('%I.%I', v_nsp, v_rel || '_pgpm_dest'));
+  if v_held is not null and v_held is distinct from pgpm._scratch_rel(p_hypertable, 'hypertable_dest') then
+    raise exception 'pg_partition_magician: cannot migrate hypertable % -- from_hypertable_copy builds its copy as %.%, and that name is held by % (oid %), which pgpm did not record as this hypertable''s copy. pgpm never drops a relation it did not make. Drop or rename that relation (a copy an earlier release of pgpm made carries no record: drop it, from_hypertable_copy rebuilds the copy), then re-run.',
+      p_hypertable, quote_ident(v_nsp), quote_ident(v_rel || '_pgpm_dest'), v_held::text, v_held::oid;
+  end if;
+  if not p_track then return; end if;
+  v_held := to_regclass(format('%I.%I', v_nsp, v_rel || '_pgpm_delta'));
+  if v_held is not null and v_held is distinct from pgpm._scratch_rel(p_hypertable, 'hypertable_delta') then
+    raise exception 'pg_partition_magician: cannot migrate hypertable % with p_track_changes -- from_hypertable_copy builds its change-capture delta as %.%, and that name is held by % (oid %), which pgpm did not record as this hypertable''s delta. pgpm never drops a relation it did not make. Drop or rename that relation, then re-run.',
+      p_hypertable, quote_ident(v_nsp), quote_ident(v_rel || '_pgpm_delta'), v_held::text, v_held::oid;
+  end if;
+  v_held_fn := to_regprocedure(format('%I.%I()', v_nsp, v_rel || '_pgpm_delta_fn'));
+  if v_held_fn is not null and v_held_fn::oid is distinct from v_fn then
+    raise exception 'pg_partition_magician: cannot migrate hypertable % with p_track_changes -- from_hypertable_copy creates its change-capture function as %.%(), and that name is held by function % (oid %), which pgpm did not record as this hypertable''s. pgpm never replaces a function it did not make. Drop or rename that function, then re-run.',
+      p_hypertable, quote_ident(v_nsp), quote_ident(v_rel || '_pgpm_delta_fn'), v_held_fn::text, v_held_fn::oid;
+  end if;
+  select t.tgfoid into v_trg_fn from pg_trigger t
+   where t.tgrelid = p_hypertable and t.tgname = v_rel || '_pgpm_delta_trg' and not t.tgisinternal;
+  if found and v_trg_fn is distinct from v_fn then
+    raise exception 'pg_partition_magician: cannot migrate hypertable % with p_track_changes -- from_hypertable_copy puts its change-capture trigger on it as %, and a trigger of that name is already there, firing %, which pgpm did not record as this hypertable''s. pgpm never drops a trigger it did not make. Drop or rename that trigger, then re-run.',
+      p_hypertable, quote_ident(v_rel || '_pgpm_delta_trg'), v_trg_fn::regprocedure::text;
+  end if;
+end $$;
+
 -- _from_hypertable_check_exclusion: an EXCLUDE constraint is refused, never dropped (issue #675). Nothing in
 -- the migration carries one: the copy's CREATE TABLE ... LIKE takes CHECK and NOT NULL only, the cutover
 -- re-adds only primary and unique keys, and its index loop skips every constraint-backed index. Nor could
@@ -791,6 +864,7 @@ declare
   v_delta name; v_trgfn name; v_trg name; v_keyidx oid; v_keycols_q text; v_newvals_q text; v_oldvals_q text;
   v_keyconname name; v_keytmp text; v_destreg regclass;
   v_ctl_typid regtype; v_bound_tpl text; v_lo text; v_hi text;
+  v_prev regclass; v_prev_fn regprocedure;   -- #955: what a previous copy recorded under the names minted here
 begin
   -- #951: refused before anything is read or committed; no argument here has a null meaning
   perform pgpm._refuse_null_arguments('from_hypertable_copy', json_build_object(
@@ -817,6 +891,35 @@ begin
   if v_bound_tpl is null then
     raise exception 'pg_partition_magician: from_hypertable_copy(%) cannot bound the chunk copy on dimension % of type %: only timestamptz, timestamp and date dimensions are supported',
       p_hypertable, p_control, v_ctl_typid;
+  end if;
+  -- #955: and every name this copy mints must be free or this hypertable's own recorded scratch object, before
+  -- anything is created or dropped (see _from_hypertable_scratch_check).
+  perform pgpm._from_hypertable_scratch_check(p_hypertable, p_track_changes);
+  v_delta := v_rel || '_pgpm_delta';
+  v_trgfn := v_rel || '_pgpm_delta_fn';
+  v_trg   := v_rel || '_pgpm_delta_trg';
+  -- #955: a re-run replaces the previous copy's change capture, tracking or not: found by the oids it recorded,
+  -- and only under the names this copy mints (an apparatus a copy left under the table's OLD name, before a
+  -- RENAME, is left where it is and forgotten, as it always was left). The function's triggers on the
+  -- hypertable first (by the function they fire, not by name), then the function, then the delta. A copy
+  -- without p_track_changes then forgets the delta and the function it did not mint, so the cutover does not
+  -- take a previous copy's for its change log. In the same transaction as whatever this copy commits first.
+  select f.oid::regprocedure into v_prev_fn from pgpm.scratch sc join pg_proc f on f.oid = sc.obj
+   where sc.parent_oid = p_hypertable::oid and sc.kind = 'hypertable_delta_fn'
+     and f.pronamespace = (select oid from pg_namespace where nspname = v_nsp) and f.proname = v_trgfn;
+  if v_prev_fn is not null then
+    for r in select t.tgname from pg_trigger t
+              where t.tgrelid = p_hypertable and t.tgfoid = v_prev_fn and not t.tgisinternal loop
+      execute format('drop trigger %I on %I.%I', r.tgname, v_nsp, v_rel);
+    end loop;
+    execute format('drop function %s', v_prev_fn::text);
+  end if;
+  v_prev := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');
+  if v_prev is not null and v_prev = to_regclass(format('%I.%I', v_nsp, v_delta)) then
+    execute format('drop table %s', v_prev::text);
+  end if;
+  if not p_track_changes then
+    delete from pgpm.scratch where parent_oid = p_hypertable::oid and kind in ('hypertable_delta', 'hypertable_delta_fn');
   end if;
 
   -- change tracking (p_track_changes): install an AFTER-ROW trigger on the source BEFORE the copy reads
@@ -857,10 +960,6 @@ begin
         p_hypertable;
     end if;
 
-    v_delta := v_rel || '_pgpm_delta';
-    v_trgfn := v_rel || '_pgpm_delta_fn';
-    v_trg   := v_rel || '_pgpm_delta_trg';
-    execute format('drop table if exists %I.%I', v_nsp, v_delta);
     -- delta holds just the key columns (their types come from the source via WITH NO DATA)
     execute format('create table %I.%I as select %s from %I.%I with no data',
                    v_nsp, v_delta, v_keycols_q, v_nsp, v_rel);
@@ -872,9 +971,18 @@ begin
     -- offset/limit and the range delete are index-assisted at scale.
     execute format('alter table %I.%I add column pgpm_seq bigint generated always as identity', v_nsp, v_delta);
     execute format('create index on %I.%I (pgpm_seq)', v_nsp, v_delta);
+    -- #949: owned like the hypertable with an owner-only ACL from this transaction on, as core's regrain delta is
+    -- minted (_scratch_mint), rather than with the migrating role's default privileges, under which a role they
+    -- name read the keys of every write to a hypertable it holds no grant on. The capture trigger writes it as
+    -- the WRITER, so every role that can write the hypertable, its owner included, gets INSERT on it and
+    -- nothing more (_regrain_capture_grant, the regrain delta's rule, #496 #906). Recorded in the same
+    -- transaction (#955), so the drains and the cutover find it by its oid.
+    perform pgpm._scratch_mint(p_hypertable, format('%I.%I', v_nsp, v_delta)::regclass);
+    perform pgpm._regrain_capture_grant(p_hypertable, format('%I.%I', v_nsp, v_delta)::regclass, p_hypertable);
+    perform pgpm._scratch_record(p_hypertable, 'hypertable_delta', format('%I.%I', v_nsp, v_delta)::regclass::oid);
     -- the trigger body is dollar-quoted with a pgpm tag; the format template is single-quoted (inner quotes
     -- doubled) to avoid nesting another dollar-quoted string inside this procedure body.
-    execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$
+    execute format('create function %I.%I() returns trigger language plpgsql as $pgpm$
       begin
         if tg_op = ''DELETE'' then
           insert into %I.%I (%s) values (%s); return old;
@@ -888,7 +996,8 @@ begin
       v_nsp, v_delta, v_keycols_q, v_oldvals_q,
       v_nsp, v_delta, v_keycols_q, v_oldvals_q, v_newvals_q,
       v_nsp, v_delta, v_keycols_q, v_newvals_q);
-    execute format('drop trigger if exists %I on %I.%I', v_trg, v_nsp, v_rel);
+    perform pgpm._scratch_mint_fn(p_hypertable, format('%I.%I()', v_nsp, v_trgfn)::regprocedure);
+    perform pgpm._scratch_record(p_hypertable, 'hypertable_delta_fn', format('%I.%I()', v_nsp, v_trgfn)::regprocedure::oid);
     execute format('create trigger %I after insert or update or delete on %I.%I for each row execute function %I.%I()',
                    v_trg, v_nsp, v_rel, v_nsp, v_trgfn);
     -- The trigger is origin-only, and cannot be anything else: TimescaleDB refuses ENABLE ALWAYS on a
@@ -907,9 +1016,20 @@ begin
   end if;
 
   -- destination skeleton: structure but no indexes/key, so the bulk load maintains no per-row index.
-  execute format('drop table if exists %I.%I', v_nsp, v_dest);
+  -- #955: a re-run replaces the previous copy, found by its recorded oid under this name (anything else here
+  -- was refused before anything was created).
+  v_prev := pgpm._scratch_rel(p_hypertable, 'hypertable_dest');
+  if v_prev is not null and v_prev = to_regclass(format('%I.%I', v_nsp, v_dest)) then
+    execute format('drop table %s', v_prev::text);
+  end if;
   execute format('create table %I.%I (like %I.%I including defaults including constraints including generated including comments)',
                  v_nsp, v_dest, v_nsp, v_rel);
+  -- #949: the hypertable's owner and an owner-only ACL from the transaction that creates it, so no role the
+  -- migrating role's default privileges name reads the copied rows during the online window; the swap then
+  -- puts the hypertable's own grants on it (_from_hypertable_carried_ddl). And recorded (#955), so the drains,
+  -- the cutover and uninstall.sql find this relation by its oid.
+  perform pgpm._scratch_mint(p_hypertable, format('%I.%I', v_nsp, v_dest)::regclass);
+  perform pgpm._scratch_record(p_hypertable, 'hypertable_dest', format('%I.%I', v_nsp, v_dest)::regclass::oid);
   -- The module's record that this table is a from_hypertable copy, and of which hypertable (#773), in the
   -- transaction that creates it. pgpm_core/uninstall.sql finds a copy that was never cut over by this
   -- comment, not by its name (an operator's table can end in _pgpm_dest), and drops it only while the
@@ -1048,10 +1168,13 @@ begin
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
-  v_dest := v_rel || '_pgpm_dest';
-  v_delta := v_rel || '_pgpm_delta';
-  if to_regclass(format('%I.%I', v_nsp, v_delta)) is null then
+  v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');     -- #955: by record (drain_delta_step)
+  v_delta := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_delta');   -- #955: by record (drain_delta_step)
+  if v_delta is null then
     raise exception 'pg_partition_magician: from_hypertable_drain_delta_step(%) found no delta -- change tracking was not enabled by from_hypertable_copy', p_hypertable;
+  end if;
+  if v_dest is null then
+    raise exception 'pg_partition_magician: from_hypertable_drain_delta_step(%) found no copy to drain into -- run from_hypertable_copy first', p_hypertable;
   end if;
   -- #873: the batch's keys leave the delta below and their rows are re-read from the source as this caller,
   -- so under row-level security that filters it a hidden row's change would be consumed and never applied.
@@ -1135,9 +1258,9 @@ begin
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
-  v_dest := v_rel || '_pgpm_dest';
-  v_delta := v_rel || '_pgpm_delta';
-  if to_regclass(format('%I.%I', v_nsp, v_delta)) is null then
+  v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');     -- #955: by record (drain_delta)
+  v_delta := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_delta');   -- #955: by record (drain_delta)
+  if v_delta is null then
     raise exception 'pg_partition_magician: from_hypertable_drain_delta(%) found no delta -- change tracking was not enabled by from_hypertable_copy', p_hypertable;
   end if;
 
@@ -1207,7 +1330,10 @@ begin
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
-  v_dest := v_rel || '_pgpm_dest';
+  v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');   -- #955: by record (drain_appends_step)
+  if v_dest is null then
+    raise exception 'pg_partition_magician: from_hypertable_drain_appends_step(%) found no copy to drain -- run from_hypertable_copy first', p_hypertable;
+  end if;
   select format_type(atttypid, atttypmod) into v_ctl_type
     from pg_attribute where attrelid = p_hypertable and attname = p_control and not attisdropped;
   select string_agg(quote_ident(attname), ', ' order by attnum) into v_cols_q
@@ -1254,8 +1380,8 @@ begin
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
-  v_dest := v_rel || '_pgpm_dest';
-  if to_regclass(format('%I.%I', v_nsp, v_dest)) is null then
+  v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');   -- #955: by record (drain_appends)
+  if v_dest is null then
     raise exception 'pg_partition_magician: from_hypertable_drain_appends(%) found no copy to drain -- run from_hypertable_copy first', p_hypertable;
   end if;
   -- #873: its own residual check reads the source too, and a tail its policies hide entirely reads as none
@@ -1312,7 +1438,7 @@ declare
   v_nsp name; v_rel name; v_dest name; v_cols_q text; v_retain interval;
   v_watermark text;   -- the column's own text (#791), never a timestamptz: see _from_hypertable_ctl_text
   v_orig regclass; k record;
-  v_delta name; v_trgfn name; v_track boolean; v_keycols_q text; v_dkey_q text; v_skey_q text; v_subsel_q text;
+  v_delta name; v_trgfn_oid oid; v_track boolean; v_keycols_q text; v_dkey_q text; v_skey_q text; v_subsel_q text;
   v_ctl_type text; v_min_ctl text; v_max_ctl text;
   v_ident_cols name[]; v_ident_kinds text[]; v_ident_opts text[]; v_ident_next numeric[]; v_srcseq regclass;
   v_pseq regclass; v_i int;
@@ -1351,7 +1477,6 @@ begin
   end;
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
-  v_dest := v_rel || '_pgpm_dest';
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
   -- ...and the monolith name transmute will derive after the swap has committed (#707), before the pre-drain
   perform pgpm._from_hypertable_check_handoff(p_hypertable, p_interval, p_anchor);
@@ -1378,9 +1503,15 @@ begin
   -- a relation BECOMING the production table -- and between here and there the destination is
   -- unlocked (nothing takes a lock on it until the first index pre-build, and the pre-drain's
   -- per-batch commits release even that). Verified under lock at the swap.
-  v_dest_oid := to_regclass(format('%I.%I', v_nsp, v_dest));
+  -- #955: and that relation is the copy from_hypertable_copy RECORDED for this hypertable, by its oid, never
+  -- whatever answers to <rel>_pgpm_dest: an operator's table under that name, of the hypertable's shape and
+  -- holding its rows, passed every check below and was renamed into the hypertable's place, the operator's
+  -- table gone into the migration. A copy made by pgpm 0.6.0 or earlier carries no record and is refused
+  -- here, with the remedy.
+  v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');   -- #955: by record (cutover)
+  v_dest_oid := case when v_dest is not null then format('%I.%I', v_nsp, v_dest)::regclass end;
   if v_dest_oid is null then
-    raise exception 'pg_partition_magician: from_hypertable_cutover(%) found no copy to cut over -- run from_hypertable_copy first',
+    raise exception 'pg_partition_magician: from_hypertable_cutover(%) found no copy to cut over -- run from_hypertable_copy first. Only the copy from_hypertable_copy recorded for this hypertable is swapped in, never a relation that merely carries its name (a copy made by pgpm 0.6.0 or earlier has no record: drop it and re-run from_hypertable_copy).',
       p_hypertable;
   end if;
   -- #738: the copy's shape against the source's, up front, so DDL made since the copy is refused by name
@@ -1388,9 +1519,12 @@ begin
   perform pgpm._from_hypertable_check_shape(p_hypertable, v_dest_oid);
   -- auto-detect change tracking: the copy phase leaves a <rel>_pgpm_delta table iff p_track_changes was set,
   -- so the two phases cannot disagree about the catch-up mode (no matching flag to pass through).
-  v_delta := v_rel || '_pgpm_delta';
-  v_trgfn := v_rel || '_pgpm_delta_fn';
-  v_track := to_regclass(format('%I.%I', v_nsp, v_delta)) is not null;
+  -- #955: the delta it RECORDED, by its oid, and the function the same way; never <rel>_pgpm_delta by name, which
+  -- read an operator's table of that name as the change log, reconciled the copy from it and dropped it at the swap.
+  v_delta := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_delta');   -- #955: by record (cutover)
+  v_trgfn_oid := (select f.oid from pgpm.scratch sc join pg_proc f on f.oid = sc.obj
+                   where sc.parent_oid = p_hypertable::oid and sc.kind = 'hypertable_delta_fn');
+  v_track := v_delta is not null;
 
   -- retention translation: default from the source's drop_chunks policy when the caller did not set one
   v_retain := p_retain;
@@ -1886,8 +2020,14 @@ begin
     -- the trigger went with the source; drop the now-orphaned delta table and trigger function. This is
     -- inside the swap transaction, so an aborted cutover leaves the apparatus intact with the source.
     execute format('drop table %I.%I', v_nsp, v_delta);
-    execute format('drop function if exists %I.%I()', v_nsp, v_trgfn);
+    -- #955: the function the copy recorded, by its oid, never <rel>_pgpm_delta_fn rendered from the current name,
+    -- which after a RENAME of the hypertable is an operator's function, or nothing
+    if v_trgfn_oid is not null and exists (select 1 from pg_proc where oid = v_trgfn_oid) then
+      execute format('drop function %s', v_trgfn_oid::regprocedure::text);
+    end if;
   end if;
+  -- #955: the copy is the table now and the delta and its function are gone: none of them is scratch any more
+  delete from pgpm.scratch where parent_oid = p_hypertable::oid;
   execute format('alter table %I.%I rename to %I', v_nsp, v_dest, v_rel);
   -- adopt the pre-built unique indexes as the original PK/UNIQUE constraints (metadata-only; USING INDEX
   -- also renames the adopted index to the constraint name)

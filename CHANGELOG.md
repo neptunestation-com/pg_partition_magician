@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+- **Scratch relations are minted owner-only, found by their record, and follow the table's owner** (#949,
+  #950, #955; the lever of #966). A relation pgpm makes for its own use beside a table (a regrain's delta,
+  capture function and fine children; `from_hypertable`'s copy, delta and capture function) used to be born
+  with the maintaining role's `ALTER DEFAULT PRIVILEGES` and reset late (a fine child at its sub-range's end,
+  the hypertable copy at the swap) or never (both deltas), so a role those defaults name (on Supabase, `anon`
+  and `authenticated`) read the copied rows or the captured keys of a table it holds no grant on. It was also
+  found again by a name rendered from the table's: `from_hypertable_copy` dropped an operator's own
+  `<rel>_pgpm_dest` and `<rel>_pgpm_delta` (Tier 1) and replaced a `<rel>_pgpm_delta_fn()` or
+  `<rel>_pgpm_delta_trg` of theirs; the drains and the cutover worked, and swapped in, whatever answered to
+  the name; `regrain_cancel` truncated, and `untransmute` and `uninstall.sql` dropped, an operator's
+  `<rel>_pgpm_regrain_delta` and `<rel>_pgpm_regrain_capture()` on a table that had never regrained. And a
+  table handed to a new owner mid-regrain left its delta with the old one, so every tick the new owner ran
+  failed `permission denied`. Now each is minted through `pgpm._scratch_mint` (the table's owner and an
+  owner-only ACL, in the transaction that creates it), recorded there (the new catalog table `pgpm.scratch`
+  for the hypertable's, which an upgrade fills from the comments earlier releases kept on a copy), and
+  resolved only from the record; a name held by anything pgpm did not record is refused before anything is
+  created. Each resuming regrain tick gives the scratch relations the table's current owner, or, when the
+  tick's role can neither re-own them nor act as their owner, refuses once with the documented hand-over
+  step, the new `pgpm.hand_over_scratch(table)`. `from_hypertable_copy` now refuses up front a migrating
+  role that cannot give the copy to the hypertable's owner, which the swap already required, and the
+  cutover refuses a copy pgpm did not record (one made by hand, or by 0.6.0 or earlier: drop it and re-run
+  the copy). Conformance suite `tests/267` and `tests/timescale/db/49`, guard `bench/scratch_relations.sh`
+  with one mutation per site (`scratch_*`, `regrain_capture_names_derived_fallback`,
+  `hypertable_copy_*_by_name`, `hypertable_*_minted_default_acl`, `hypertable_delta_writers_ungranted`,
+  `hypertable_drain_*_by_name`, `hypertable_cutover_*_by_name`, `hypertable_swap_keeps_scratch_record`,
+  `uninstall_scratch_record_unread`), and `bench/upgrade_in_place.sh`'s fill assertion
+  (`scratch_upgrade_fill_dropped`).
 - **One shared preflight for every converting entry point: null arguments, the control type, and the key
   gates** (#951, #952 bullets 1 and 2, #959; lever phase #966). A refusal the core made before anything
   committed was re-implemented, or not made, at the other entry points. `pgpm._refuse_null_arguments` guarded

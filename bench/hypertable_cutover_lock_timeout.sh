@@ -81,7 +81,9 @@ q "create schema app;
      select null::name as proc_name, null::name as hypertable_schema, null::name as hypertable_name,
             null::jsonb as config where false;
    create table app.hclt_pgpm_dest (like app.hclt including defaults including constraints including generated including comments);
-   insert into app.hclt_pgpm_dest select * from app.hclt order by ts;" >/dev/null
+   insert into app.hclt_pgpm_dest select * from app.hclt order by ts;
+   -- recorded as from_hypertable_copy records the copy it builds (#955): the cutover swaps in nothing else
+   select pgpm._scratch_record('app.hclt', 'hypertable_dest', 'app.hclt_pgpm_dest'::regclass::oid);" >/dev/null
 SRC_OID=$(q "select 'app.hclt'::regclass::oid")
 check "LIVENESS: the destination copy holds the 72 source rows" "$(q "select count(*) from app.hclt_pgpm_dest")" "72"
 

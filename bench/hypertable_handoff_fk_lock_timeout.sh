@@ -114,7 +114,9 @@ q "create schema app;
      select null::name as proc_name, null::name as hypertable_schema, null::name as hypertable_name,
             null::jsonb as config where false;
    create table app.hh_pgpm_dest (like app.hh including defaults including constraints including generated including comments);
-   insert into app.hh_pgpm_dest select * from app.hh order by ts;" >/dev/null
+   insert into app.hh_pgpm_dest select * from app.hh order by ts;
+   -- recorded as from_hypertable_copy records the copy it builds (#955): the cutover swaps in nothing else
+   select pgpm._scratch_record('app.hh', 'hypertable_dest', 'app.hh_pgpm_dest'::regclass::oid);" >/dev/null
 check "LIVENESS: the copy holds the 48 rows, and both incoming keys are live" \
   "$(q "select (select count(*) from app.hh_pgpm_dest) || '/' || (select string_agg(conname, ',' order by conname)
          from pg_constraint where confrelid = 'app.hh'::regclass and contype = 'f')")" "48/ref_a_fk,ref_b_fk"

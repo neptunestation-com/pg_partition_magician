@@ -65,17 +65,20 @@ select is(
   (select count(*)::int from pgpm.config
     where parent_table in (format('f655.%I', :'A')::regclass, format('f655.%I', :'B')::regclass, format('f655.%I', :'C')::regclass)
       and regrain_delta_oid is null and regrain_capture_fn_oid is null and regrain_cursor is null),
-  3, 'LIVENESS: none of them has regrained, so nothing is recorded and the readers fall back to a derived name');
+  3, 'LIVENESS: none of them has regrained, so nothing is recorded for the readers to resolve');
 
 -- ============================== (A) the derived names fit whole and are pgpm's ==============================
 select is(
   (select d.delta::text || ' ' || d.fn::text from pgpm._regrain_capture_derive(format('f655.%I', :'A')::regclass) d),
   'pgpm_regrain_delta_' || format('f655.%I', :'A')::regclass::oid || ' pgpm_regrain_capture_' || format('f655.%I', :'A')::regclass::oid,
   'a 63-byte parent''s capture names are the oid form, not its own name');
+-- #955: with nothing recorded the resolver names nothing at all (it used to fall back to the derived names
+-- above, and a table of the operator's under them was then emptied or dropped), so no reader can reach the
+-- parent's own name either
 select is(
-  (select d.delta::text || ' ' || d.fn::text from pgpm._regrain_capture_names(format('f655.%I', :'A')::regclass) d),
-  'pgpm_regrain_delta_' || format('f655.%I', :'A')::regclass::oid || ' pgpm_regrain_capture_' || format('f655.%I', :'A')::regclass::oid,
-  'and with nothing recorded the resolver falls back to those');
+  (select coalesce(d.delta::text, 'none') || ' ' || coalesce(d.fn::text, 'none') from pgpm._regrain_capture_names(format('f655.%I', :'A')::regclass) d),
+  'none none',
+  'and with nothing recorded the resolver names nothing, never the parent''s own name');
 
 -- ============================== (B) regrain_cancel on a parent with nothing in flight ==============================
 create temp table a_children as
