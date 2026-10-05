@@ -454,6 +454,10 @@ run_timescale() {
     # half of the pairs discriminate.sh completes with its three mutants.
     echo "--- the drains and the cutover name their scratch tables in pg_temp (issue #894) ---"
     bash "$(dirname "$0")/bench/hypertable_scratch_tables_in_pg_temp.sh" pgpm_test-timescale pgpm_perf220 || fail=1
+    # The shared-preflight lever's guard (#966: #951, #959), the same way: it re-runs tests/timescale/db/50 against
+    # the real install, the clean-code half of the pairs discriminate.sh completes with its twelve mutants.
+    echo "--- every from_hypertable entry point refuses up front what the core refuses (lever #966) ---"
+    bash "$(dirname "$0")/bench/hypertable_shared_preflight.sh" pgpm_test-timescale pgpm_perf252 || fail=1
     # #917: five wrappers whose mutants discriminate.sh drives here had no clean-code run anywhere, so a
     # wrapper broken enough to fail against everything (a missing file: exit 1, "0 ran") was scored as
     # catching each of its mutants. These are their clean-code halves. bench/guards_run_on_clean_code.sh
@@ -996,6 +1000,7 @@ run_perf() {
     "bench/coverage_reset_identity.sh pgpm_covreset"
     "bench/archive_identity_substitution.sh pgpm_archident"
     "bench/guards_run_on_clean_code.sh pgpm_perf249"
+    "bench/shared_preflight_conformance.sh pgpm_perf251"
   )
   local selected=()
   local n=${#guards[@]} idx

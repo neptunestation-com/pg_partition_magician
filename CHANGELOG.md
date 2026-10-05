@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+- **One shared preflight for every converting entry point: null arguments, the control type, and the key
+  gates** (#951, #952 bullets 1 and 2, #959; lever phase #966). A refusal the core made before anything
+  committed was re-implemented, or not made, at the other entry points. `pgpm._refuse_null_arguments` guarded
+  `transmute` and `extend_to` only, so `suspend_incoming_fks(p, null)` read the null as `p_force => true` and
+  dropped the live keys, and `from_hypertable(..., p_paused => null)` reached `transmute`'s check only after its
+  swap had dropped the hypertable (a null `p_lock_timeout` left the swap's lock wait unbounded). Every public
+  routine of `pgpm_core` and `pgpm_hypertable` now refuses a null with no meaning first, naming it (`transmute`'s
+  `p_obtain` included, by the shared message). A `numeric(6,-2)` key with step 10 passed the id preflight and
+  died raw in the cutover's `ATTACH` after phases 1 and 2 had committed the bound, as did a bound past a
+  `numeric(4,0)` key's precision; the step, the anchor and the monolith's bound are now held to what the column
+  can store (`pgpm._id_step_contract`, `pgpm._control_bound_contract`), and a resume holds the bound an older
+  install recorded to the same contract, so a pre-#922 claim with `hi = NaN` is refused with the
+  `transmute_abort` remedy instead of completing a monolith `[0, NaN)`. `from_hypertable_preflight` never read
+  `convalidated`, so a `NOT VALID` incoming key was dropped by the swap and promoted by the handoff; the preflight
+  and the cutover under its lock now call the gate `transmute` uses (`pgpm._refuse_unconvertible_keys`), which on
+  PostgreSQL 18 also names a `NOT ENFORCED` key for what it is, with a remedy that applies to it, instead of the
+  `NOT VALID` wording and a `VALIDATE CONSTRAINT` PostgreSQL rejects. Acceptance: `tests/268` (a null sweep over
+  every public routine, enumerated from `pg_proc`, and the refusal cases against `transmute`), `tests/269` (the
+  resume's recorded bound) and `tests/timescale/db/50` (the module's sweep and cases), under the guards
+  `bench/shared_preflight_conformance.sh` and `bench/hypertable_shared_preflight.sh`, with one mutation per
+  site (`null_refusal_dropped_<routine>` for each of 38 routines, `transmute_null_obtain_unlisted`,
+  `set_retain_refuses_null_retain`, `id_step_contract_dropped`, `bound_contract_call_dropped`,
+  `bound_contract_finiteness_dropped`, `bound_contract_representability_dropped`,
+  `incoming_gate_shared_check_dropped`, `hypertable_preflight_key_gate_dropped`,
+  `hypertable_cutover_key_gate_dropped`).
 - **The archive object-key checks enumerate writes and follow the prefix, instead of matching text** (#914).
   `tests/archive/db/39`'s Part 0 looked for a `'PUT'` literal and for a key helper's name anywhere in a body,
   so a write site that took its verb from a variable, named a helper in a comment, or PUT a second object at
