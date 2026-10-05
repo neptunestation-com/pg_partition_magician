@@ -1006,7 +1006,7 @@ run_perf() {
     "bench/archive_identity_substitution.sh pgpm_archident"
     "bench/guards_run_on_clean_code.sh pgpm_perf249"
     "bench/shared_preflight_conformance.sh pgpm_perf251"
-    "bench/scratch_relations.sh pgpm_perf250"
+    "bench/scratch_relations.sh pgpm_perf253"
   )
   local selected=()
   local n=${#guards[@]} idx

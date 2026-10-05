@@ -12,7 +12,10 @@
 -- ASYMMETRIC FIXTURE. The default privileges give t38_gone SELECT and UPDATE and t38_dflt DELETE on every
 -- new table in public. ha38 is created under them and has them taken back: t38_gone loses SELECT and UPDATE
 -- but is granted UPDATE on ONE column (note, not v), t38_dflt loses DELETE, and t38_kept is granted SELECT
--- with grant option. hb38 is created BEFORE the default privileges, so its ACL is NULL, the owner's
+-- with grant option, and its owner (the migrating role) revokes its own TRUNCATE: since #949 the copy is minted
+-- at the owner's full privileges, so only the swap's reset keeps that privilege from coming back (as the reset,
+-- not the mint, is what drops the default privileges of a copy made before #949). hb38 is created BEFORE the
+-- default privileges, so its ACL is NULL, the owner's
 -- implicit everything and nothing for anyone else. ha38 goes through the two-phase flow (copy, then
 -- cutover), so the copy can be found by its oid after the swap; hb38 through the one-shot from_hypertable.
 -- The grants are compared by (grantee, privilege, grant option), not grantor, as tests/timescale/db/33
@@ -57,6 +60,7 @@ revoke select, update on public.ha38 from t38_gone;
 revoke delete on public.ha38 from t38_dflt;
 grant update (note) on public.ha38 to t38_gone;
 grant select on public.ha38 to t38_kept with grant option;
+revoke truncate on public.ha38 from postgres;
 
 create table public.hp38 (id bigint);
 select ok(has_table_privilege('t38_gone', 'public.hp38', 'select')
@@ -66,10 +70,10 @@ select ok(has_table_privilege('t38_gone', 'public.hp38', 'select')
 create temp table before38 as
   select 'ha38'::text as t, pg_temp.acl38('public.ha38') as acl
   union all select 'hb38', pg_temp.acl38('public.hb38');
-select ok((select acl from before38 where t = 'ha38') @> array['t38_kept:SELECT*', 'note/t38_gone:UPDATE']
+select ok((select acl from before38 where t = 'ha38') @> array['t38_kept:SELECT*', 'note/t38_gone:UPDATE', 'postgres:SELECT']
           and not (select acl from before38 where t = 'ha38')
-                  && array['t38_gone:SELECT', 't38_gone:UPDATE', 't38_dflt:DELETE'],
-  'LIVENESS: ha38 holds its own grants: the defaults taken back, one column grant, a grant option');
+                  && array['t38_gone:SELECT', 't38_gone:UPDATE', 't38_dflt:DELETE', 'postgres:TRUNCATE'],
+  'LIVENESS: ha38 holds its own grants: the defaults taken back, one column grant, a grant option, the owner without TRUNCATE');
 select is((select relacl from pg_class where oid = 'public.hb38'::regclass), null::aclitem[],
   'LIVENESS: hb38, created before the default privileges, has the NULL ACL of the owner''s implicit default');
 
