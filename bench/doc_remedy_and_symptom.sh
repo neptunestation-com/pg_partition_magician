@@ -32,16 +32,20 @@
 #            the remedy an operator copies IS the code line, which bench/doc_scan.py skips. Prose is not held
 #            to it, on purpose: for a PARTITIONED referencing table, which cannot hold a NOT VALID key,
 #            restore_incoming_fks does re-add the key validated in one step, and reference.md says so.
-#   DROPPED: every prose sentence that names skip_obtain, skip_write_block or skip_retain in a dropped-table
-#            context (its section heading or the sentence says dropped, DROP TABLE or parent_missing) and
-#            quotes a message (a backticked span with a space and no `=` in it) must quote text the ticks
-#            logged, a `<placeholder>` or a number standing for any number.
+#   DROPPED: every prose sentence that names skip_obtain, skip_write_block or skip_retain in a dropped-
+#            MANAGED-table context (its section heading or its paragraph says "dropped without", DROP TABLE,
+#            parent_missing or "no longer exists"; the bare word "dropped" is not enough, since retention
+#            prose says partitions are dropped) and quotes a message (a backticked span with a space, no `=`
+#            and not all upper case, so `parent_missing = true` and a lock mode such as `SHARE UPDATE
+#            EXCLUSIVE` are not read as messages) must quote text the ticks logged, a `<placeholder>` or a
+#            number standing for any number.
 #   LIVENESS  every measured step above did what it says (the FK was dropped at the cutover, re-added NOT
 #             VALID, left NOT VALID by the tick and the second restore, validated by validate_incoming_fks;
 #             the dropped table's three skip actions were all logged); the runbook (or the one doc given)
 #             has a code line calling restore_incoming_fks and one calling validate_incoming_fks, and quotes
 #             a dropped-table skip reason, so a deleted statement is a failure, not a vacuous pass;
-#   CONTROL   each pre-fix text is reported as wrong, and a planted right one is not.
+#   CONTROL   each pre-fix text is reported as wrong, and a planted right one is not; retention prose that
+#             names skip_retain beside dropped partitions and quotes a lock mode is not read as a symptom.
 #
 # The mutations it is required to fail against (bench/mutations/mutate.py):
 #   runbook_fk_validate_by_restore       -- the runbook's Prevent step names restore_incoming_fks again
@@ -153,7 +157,9 @@ def code_wrong(raw):
 
 # ---- DROPPED: the reasons measured above ----
 SKIPS = re.compile(r"(?<!\w)skip_(?:obtain|write_block|retain)(?!\w)")
-CONTEXT = re.compile(r"dropped|drop table|parent_missing", re.I)
+# A managed table dropped without untransmute, not any paragraph with "dropped" in it: retention prose says
+# partitions are dropped, and #939's retain paragraph names skip_retain beside one (a false positive here).
+CONTEXT = re.compile(r"dropped without|drop table|parent_missing|no longer exists", re.I)
 TICKS = re.compile(r"`([^`]+)`")
 
 def norm(t):
@@ -162,10 +168,12 @@ def norm(t):
 measured = [norm(r) for r in reasons.split("\n") if r.strip()]
 
 def dropped_spans(s):
-    if not (SKIPS.search(s.text) and CONTEXT.search(s.heading + " " + s.text)):
+    if not (SKIPS.search(s.text) and CONTEXT.search(s.heading + " " + s.block)):
         return []
-    # A quoted message has a space in it; an SQL condition (`parent_missing = true`) is not a message.
-    return [t for t in TICKS.findall(s.text) if re.search(r"\s", t) and "=" not in t]
+    # A quoted message has a space in it; an SQL condition (`parent_missing = true`) is not a message, and
+    # neither is an all-upper-case span (a lock mode, `SHARE UPDATE EXCLUSIVE`, or an SQL keyword run).
+    return [t for t in TICKS.findall(s.text)
+            if re.search(r"\s", t) and "=" not in t and not re.fullmatch(r"[A-Z][A-Z ]*", t.strip())]
 
 def span_ok(span):
     return any(norm(span) in m for m in measured)
@@ -192,6 +200,16 @@ gs = [sp for s in doc_scan.sentences(good_sym) for sp in dropped_spans(s)]
 ok = len(bs) == 1 and not span_ok(bs[0]) and len(gs) == 1 and span_ok(gs[0])
 say(ok, "CONTROL: the pre-fix symptom is flagged, the measured one is not",
     f"read {len(bs)} wrong span(s), {len(gs)} right span(s)")
+fail |= not ok
+# Retention prose names skip_retain beside partitions that were dropped, and quotes a lock mode: that is
+# not a dropped managed table's symptom, and reading it as one is the false positive #939's paragraph hit.
+retain_prose = ("## retain\n\nWhere `retire` would raise for one partition (a lock timeout installing its write block, "
+                "say, while a `VACUUM` of that partition holds `SHARE UPDATE EXCLUSIVE` on it), `retain` logs "
+                "`skip_retain` with the message in `method`, and goes on: the partitions dropped before and after it "
+                "stay dropped.\n")
+rs = [sp for s in doc_scan.sentences(retain_prose) for sp in dropped_spans(s)]
+ok = rs == []
+say(ok, "CONTROL: retention prose naming skip_retain is not read as a symptom", f"read {rs}")
 fail |= not ok
 
 # ---- THE DOCS ----
