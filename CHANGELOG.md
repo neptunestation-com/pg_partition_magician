@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- **Every grant the conversions carry keeps its grantor** (#903). `_acl_carry_ddl` read grantee, privilege and
+  grant option off the ACL and dropped the grantor, so `transmute`'s parent, `from_hypertable`'s swapped copy
+  and `untransmute`'s restored table recorded every grant as the owner's: one a role made through its grant
+  option could no longer be revoked by that role, and its grantee kept the privilege. A grant another role made
+  is now replayed as that role (`pgpm._acl_grant_as`), after the grant that gave it the option, and a session
+  that cannot become the grantor is refused rather than recording it under another: by `transmute` up front,
+  naming the roles, before anything is committed, and inside the hypertable's swap and `untransmute`, which
+  roll back whole. `tests/254`, guarded by `bench/acl_grantor_owner_partitions.sh` with mutation
+  `acl_carry_drops_grantor`.
+- **`untransmute`'s reset takes the owner's privileges too, and a partition pgpm mints grants nothing but its
+  owner's** (#875). `untransmute` revoked only from the grantees the restored table's ACL named, so on a
+  monolith at the `NULL` default it revoked nobody and a privilege the owner had revoked from itself on the
+  managed table came back; it now resets through `pgpm._acl_reset`, as `transmute`'s carry does. And every
+  partition `obtain`, `extend_to`, the conversion's forward grid and a regrain's fine children mint kept the
+  maintaining role's `ALTER DEFAULT PRIVILEGES` (`_own_like_parent` changes only the owner), so a role revoked
+  on the table, or one the parent's row security filters, read every row of it by naming it. Each is now put
+  at its owner's default privileges once it has the parent's owner. `tests/255` and `tests/256`, guarded by
+  `bench/acl_grantor_owner_partitions.sh` with mutations `untransmute_acl_reset_spares_owner`,
+  `partition_acl_unreset` and `regrain_fine_child_acl_unreset`.
 - **One partition's retire raise defers that partition alone** (#907). `retain()`'s loop over `retire()` had no
   exception block of its own, and `retire()` isolates its `DROP` but not the write-block install before it, so a
   lock timeout there on one aged partition (a `VACUUM` or `ANALYZE` holding `SHARE UPDATE EXCLUSIVE` on it alone)

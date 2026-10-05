@@ -437,30 +437,15 @@ UNTRANSMUTE_ACL_CAPTURE_HEAD = """  -- Capture the parent's privileges and row s
   -- recurses to a partition, so the monolith still carries whatever the table had at the conversion. The
   -- parent's state is what gets handed back, replayed below onto the restored table once it has the name
   -- again, as statements built here with the name it will have (the monolith's own copy is reset first).
-  -- The shape is transmute's 7b, run the other way. v_acl_default: a NULL relacl is the owner's implicit
-  -- all-privileges default, which has no grant to replay.
-  select relrowsecurity, relforcerowsecurity, relacl is null into v_rls, v_rls_force, v_acl_default
+  -- The shape is transmute's 7b, run the other way.
+  select relrowsecurity, relforcerowsecurity into v_rls, v_rls_force
     from pg_class where oid = p_parent;
 """
 # The rest of the #667 capture: the table and column grants and the policies. A piece of its own because
 # #710 (PR #753) inserts the owner and comment capture between the two, under the lock, where it stays.
-UNTRANSMUTE_ACL_CAPTURE_BODY = """  for v_g in
-    select a.privilege_type, a.is_grantable,
-           case when a.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(a.grantee)) end as role_q
-      from pg_class c, aclexplode(c.relacl) a where c.oid = p_parent and c.relacl is not null
-  loop
-    v_grantdefs := v_grantdefs || format('grant %s on %I.%I to %s%s', v_g.privilege_type, v_nsp, v_rel, v_g.role_q,
-                                         case when v_g.is_grantable then ' with grant option' else '' end);
-  end loop;
-  for v_g in
-    select att.attname, a.privilege_type, a.is_grantable,
-           case when a.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(a.grantee)) end as role_q
-      from pg_attribute att, aclexplode(att.attacl) a
-     where att.attrelid = p_parent and att.attnum > 0 and not att.attisdropped and att.attacl is not null
-  loop
-    v_grantdefs := v_grantdefs || format('grant %s (%I) on %I.%I to %s%s', v_g.privilege_type, v_g.attname, v_nsp, v_rel,
-                                         v_g.role_q, case when v_g.is_grantable then ' with grant option' else '' end);
-  end loop;
+UNTRANSMUTE_ACL_CAPTURE_BODY = """  -- The grants as transmute carries them, the other way (#875, #903): the reset of the restored table's ACL
+  -- first, the owner included (_acl_reset), then the parent's table and column grants, each under its grantor.
+  v_grantdefs := pgpm._acl_carry_ddl(p_parent, format('%I.%I', v_nsp, v_rel));
   for v_g in
     select polname, polcmd, polpermissive,
            case when polroles = '{0}'::oid[] then 'public'
@@ -5240,23 +5225,7 @@ $$;''',
         "it again), row security enabled since comes off, and a policy dropped since comes back. Removes the "
         "reset-and-replay after the rename whole, one site; tests/176's post-reversal assertions catch it, "
         "and its LIVENESS witnesses show the monolith really carried the stale state into the reverse.",
-        [("""  for v_g in
-    select a.grantee
-      from pg_class c, aclexplode(c.relacl) a where c.oid = v_restored and c.relacl is not null
-    union
-    select a.grantee
-      from pg_attribute att, aclexplode(att.attacl) a
-     where att.attrelid = v_restored and att.attnum > 0 and not att.attisdropped and att.attacl is not null
-  loop
-    execute format('revoke all on %s from %s cascade', v_restored::text,
-                   case when v_g.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(v_g.grantee)) end);
-    v_revoked := true;
-  end loop;
-  if v_acl_default and v_revoked then
-    execute format('grant all on %s to %I', v_restored::text,
-                   (select pg_get_userbyid(relowner) from pg_class where oid = v_restored));
-  end if;
-  foreach v_tdef in array v_grantdefs loop
+        [("""  foreach v_tdef in array v_grantdefs loop
     execute v_tdef;
   end loop;
   execute format('alter table %s %s row level security', v_restored::text,
@@ -6772,7 +6741,7 @@ select is(
     ),
     "acl_reset_spares_owner": (
         "bench/transmute_grant_carry_resets_acl.sh",
-        "Issue #838, untransmute's reset shape taken over verbatim: revoke only from the roles the "
+        "Issue #838, untransmute's pre-#875 reset shape taken over verbatim: revoke only from the roles the "
         "destination's ACL names. A parent born with a NULL ACL names nobody, so nothing is revoked and the "
         "first replayed GRANT materialises the owner's implicit everything, a privilege the owner had "
         "revoked from itself on the table included. One site, the owner in the revoke list. tests/235 "
@@ -7115,6 +7084,73 @@ select is(
           "      v_orphan := format('not (%1$s) and (not (%2$s) or not exists",
           "    if true then\n"
           "      v_orphan := format('not (%1$s) and (not (%2$s) or not exists", 1)],
+    ),
+    "acl_carry_drops_grantor": (
+        "bench/acl_grantor_owner_partitions.sh",
+        "Issue #903, the pre-fix shape: _acl_carry_ddl replays every grant as the converting role, so one a "
+        "role made through its grant option is recorded under the owner and its maker's REVOKE on the converted "
+        "table takes nothing away. One site, the grantor's replay; transmute's parent, untransmute's restored "
+        "table and the hypertable's copy all carry through it. tests/254 parts A, B and D catch it.",
+        [("    v_ddl := v_ddl || case when r.by_owner then v_grant_q\n"
+          "                           else format('select pgpm._acl_grant_as(%s, %L)', r.grantor, v_grant_q) end;\n",
+          "    v_ddl := v_ddl || v_grant_q;   -- MUTANT: every grant replayed by the converting role\n", 1)],
+    ),
+    "untransmute_acl_reset_spares_owner": (
+        "bench/acl_grantor_owner_partitions.sh",
+        "Issue #875 bullet 2, the pre-fix shape: untransmute resets the restored table with its own loop, which "
+        "revokes only from the grantees the monolith's ACL names, never from the owner, so on a monolith at the "
+        "NULL default it revokes nobody and the first replayed grant materialises the owner's implicit "
+        "everything, a privilege the owner revoked from itself on the managed table included. The old loop "
+        "back in place of _acl_reset, three sites (its two locals, the NULL read, the reset). tests/255 part A "
+        "catches it.",
+        [("  v_grantdefs text[] := '{}'; v_poldefs text[] := '{}'; v_rls boolean; v_rls_force boolean;\n"
+          "  v_g record;\n",
+          "  v_grantdefs text[] := '{}'; v_poldefs text[] := '{}'; v_rls boolean; v_rls_force boolean;\n"
+          "  v_g record; v_acl_default boolean; v_revoked boolean := false;   -- MUTANT\n", 1),
+         ("  select relrowsecurity, relforcerowsecurity into v_rls, v_rls_force\n"
+          "    from pg_class where oid = p_parent;\n",
+          "  select relrowsecurity, relforcerowsecurity, relacl is null into v_rls, v_rls_force, v_acl_default\n"
+          "    from pg_class where oid = p_parent;   -- MUTANT\n", 1),
+         ("  foreach v_tdef in array v_grantdefs loop\n"
+          "    execute v_tdef;\n"
+          "  end loop;\n",
+          """  for v_g in   -- MUTANT: the pre-#875 reset, the grantees the ACL names and never the owner
+    select a.grantee
+      from pg_class c, aclexplode(c.relacl) a where c.oid = v_restored and c.relacl is not null
+    union
+    select a.grantee
+      from pg_attribute att, aclexplode(att.attacl) a
+     where att.attrelid = v_restored and att.attnum > 0 and not att.attisdropped and att.attacl is not null
+  loop
+    execute format('revoke all on %s from %s cascade', v_restored::text,
+                   case when v_g.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(v_g.grantee)) end);
+    v_revoked := true;
+  end loop;
+  if v_acl_default and v_revoked then
+    execute format('grant all on %s to %I', v_restored::text,
+                   (select pg_get_userbyid(relowner) from pg_class where oid = v_restored));
+  end if;
+  foreach v_tdef in array v_grantdefs[2:] loop
+    execute v_tdef;
+  end loop;
+""", 1)],
+    ),
+    "partition_acl_unreset": (
+        "bench/acl_grantor_owner_partitions.sh",
+        "Issue #875 bullet 1, the pre-fix shape in _create_partition: a partition obtain, extend_to or "
+        "transmute's forward grid mints keeps the maintaining role's ALTER DEFAULT PRIVILEGES, so a role revoked "
+        "on the table reads it by naming it. One site. tests/256 catches it on the transmute, obtain and "
+        "extend_to partitions.",
+        [("  perform pgpm._acl_reset(format('%I.%I', p_nsp, p_name)::regclass, true);   -- #875: the owner's alone\n",
+          "", 1)],
+    ),
+    "regrain_fine_child_acl_unreset": (
+        "bench/acl_grantor_owner_partitions.sh",
+        "Issue #875 bullet 1, the pre-fix shape in regrain_step: a fine child keeps the default privileges of "
+        "the role that ran the regrain, and the swap attaches it so. One site. tests/256 catches it on the "
+        "regrain's two fine children.",
+        [("      perform pgpm._acl_reset(format('%I.%I', v_sub_nsp, v_sub_name)::regclass, true);   -- #875\n",
+          "", 1)],
     ),
 }
 

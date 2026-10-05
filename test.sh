@@ -945,7 +945,6 @@ run_perf() {
     "bench/regrain_capture_origin_only_upgrade.sh pgpm_perf218"
     "bench/forget_missing_disarms_detach.sh pgpm_perf219"
     "bench/regrain_fk_drift_swap_scan.sh pgpm_perf225"
-    "bench/regrain_fk_drift_swap_scan.sh pgpm_perf228"
     "bench/null_arguments_refused.sh pgpm_perf222"
     "bench/transmute_self_naming_policy.sh pgpm_perf224"
     "bench/retire_crossing_parent_rls.sh pgpm_perf241"
@@ -957,6 +956,7 @@ run_perf() {
     "bench/regrain_calendar_clamped_name.sh pgpm_perf234"
     "bench/obtain_rebuilds_dropped_cell.sh pgpm_perf238"
     "bench/retain_loop_per_child_isolation.sh pgpm_perf237"
+    "bench/acl_grantor_owner_partitions.sh pgpm_perf228"
   )
   local selected=()
   local n=${#guards[@]} idx
