@@ -2068,6 +2068,18 @@ MUTATIONS = {
   end if;
 """, "", 1)],
     ),
+    "regrain_reconcile_discards_delta": (
+        "bench/regrain_perf.sh",
+        "The fast wrong answer (#916): _regrain_reconcile resolves each fine child and then `continue`s past "
+        "the delete+reinsert that applies the captured change, while the final delete still consumes the "
+        "batch's keys. No scan of anything, so checks 1 and 2 pass, and the row count is intact, so the old "
+        "conservation check (count(*) > ROWS) passed too; the swap attaches the copies as they were copied "
+        "and every captured UPDATE of an already-copied row (25,000 in the guard's fixture) is reverted. "
+        "One site, the line after the copy relation is resolved.",
+        [("    v_sub_rel := pgpm._regrain_copy_rel(p_parent, v_sub_name, 'reconcile captured changes into');\n",
+          "    v_sub_rel := pgpm._regrain_copy_rel(p_parent, v_sub_name, 'reconcile captured changes into');\n"
+          "    continue;\n", 1)],
+    ),
     "upgrade_no_column_backfill": (
         "bench/upgrade_in_place.sh",
         "A column present in pgpm.config's `create table` body with no matching `add column if not "
@@ -4576,6 +4588,18 @@ $$;''',
         "a file with NO site already fails the guard's 'found a site' check and could not show the blind spot.",
         [("select throws_like($$ call pgpm.transmute('public.ev72t', 'id', 1000) $$,\n",
           "select throws_ok($$ call pgpm.transmute('public.ev72t', 'id', 1000) $$);\n"
+          "select throws_like($$ call pgpm.transmute('public.ev72t', 'id', 1000) $$,\n", 1)],
+    ),
+    "throws_ilike_unpinned": (
+        "bench/throws_pinned.sh",
+        "A throws_ilike($$ call pgpm.transmute(...) $$, '%') added to tests/72 beside its pinned throws_like. "
+        "The pattern '%' matches every message, so it accepts the 2D000 of a transmute that did not refuse. "
+        "Pre-#915 bench/throws_pinned.sh recognised throws_(ok|like|matching|imatching) only, so it never saw "
+        "this form and passed the file on the pinned neighbour alone ('1 pinned of 1'); the neighbour is there "
+        "for the reason throws_ok_one_argument gives (a file with no site already fails 'found a site').",
+        [("select throws_like($$ call pgpm.transmute('public.ev72t', 'id', 1000) $$,\n",
+          "select throws_ilike($$ call pgpm.transmute('public.ev72t', 'id', 1000) $$, '%',\n"
+          "  'an unpinned refusal: the pattern matches the 2D000 too');\n"
           "select throws_like($$ call pgpm.transmute('public.ev72t', 'id', 1000) $$,\n", 1)],
     ),
     "tap_verdict_misses_plan_shortfall": (
@@ -7559,6 +7583,7 @@ MUTATION_SRC = {
     "classify_sh_exit_code_only": "scripts/review/classify_claims.py",
     "classify_premise_bare_word": "scripts/review/classify_claims.py",
     "throws_ok_one_argument": "tests/72_transmute_attributes_test.sql",
+    "throws_ilike_unpinned": "tests/72_transmute_attributes_test.sql",
     "tap_verdict_misses_plan_shortfall": "test.sh",
     "tap_verdict_ignores_psql_exit": "test.sh",
     # #795 and #712: a timescale wrapper's own verdict block, judged by the guard that evaluates it.

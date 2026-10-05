@@ -13,7 +13,8 @@
 # (NULL included) as the message, so NULL there constrains nothing. Four of these shipped (tests/72,
 # tests/timescale/db/08, 10 and 14); this keeps a fifth from landing.
 #
-# HOW. For every throws_(ok|like|matching|imatching) whose statement under test contains `call pgpm.`,
+# HOW. For every throws_* pgTAP installs (read from its catalog, see below: ok, like, ilike, matching and
+# imatching in pgTAP 1.3) whose statement under test contains `call pgpm.`,
 # however that statement is written (dollar-quoted, single-quoted, built by format()) and however many
 # arguments follow it (none included), the SAME assertion is re-issued with that statement swapped for one that raises exactly that 2D000
 # (`do $d$ begin commit; end $d$`), and it has to say `not ok`. Nothing here depends on pgpm's code
@@ -37,6 +38,9 @@
 #                             here, since a file with NO site already fails the "found a site" check
 #   throws_ok_null_pattern_113 -- tests/113's refusal assertion loosened the same way (review pass 5 seed S6),
 #                             on a statement written across lines, the shape the first mutation lacks
+#   throws_ilike_unpinned  -- a throws_ilike($$ call pgpm... $$, '%') beside tests/72's pinned assertion. The
+#                             site pattern used to be a hand-written list without ilike, so it never saw this
+#                             form and passed the file on the pinned neighbour alone (#915)
 #
 # Usage: throws_pinned.sh <container> <db> [test file]
 # With no third argument it probes every tests/**/*.sql in the repository. With one it probes THAT
@@ -63,15 +67,46 @@ else
 fi
 
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
-python3 - "$ROOT" "${FILES[@]}" > "$work/probe.sql" <<'PY' || { echo "FAIL  the probe could not be built"; exit 1; }
-import re, sys
+
+q -d postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
+q -d postgres -q -c "create database $DB" >/dev/null 2>&1
+q -d "$DB" -q -c "create extension if not exists pgtap;" >/dev/null 2>&1
+# The core is installed so a pattern built from a pgpm helper evaluates; nothing under test is in it.
+if ! q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f /repo/pgpm_core/install.sql >/dev/null 2>&1; then
+  printf 'FAIL  %-58s %s\n' "pgpm_core installed" "/repo/pgpm_core/install.sql"
+  q -d postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
+  exit 1
+fi
+
+# WHICH throws_* A SITE CAN BE (#915). The site pattern used to be a hand-written list,
+# throws_(ok|like|matching|imatching), and it left out pgTAP's throws_ilike: a throws_ilike($$ call pgpm... $$,
+# '%') accepts the 2D000 as readily as a NULL pattern does, and the guard never saw it. So the forms are read
+# from the pgTAP the probe runs against, every function of the extension named throws_<word>, and a form a
+# later pgTAP adds is a site the day it is installed. The one form the controls below use has to be among
+# them, or the catalog read itself is broken and an empty pattern would find no site anywhere.
+forms=$(q -d "$DB" -tAq -c "select string_agg(distinct substr(p.proname, 8), ' ')
+                              from pg_proc p
+                              join pg_depend d on d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'e'
+                              join pg_extension x on x.oid = d.refobjid and x.extname = 'pgtap'
+                             where p.proname ~ '^throws_[a-z]+$'" 2>&1 </dev/null)
+if [[ " $forms " == *" ok "* ]]; then
+  printf 'PASS  %-58s %s\n' "the site pattern is every throws_* pgTAP installs" "$forms"
+else
+  printf 'FAIL  %-58s %s\n' "the site pattern is every throws_* pgTAP installs" "read: ${forms:-nothing}"
+  q -d postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
+  exit 1
+fi
+
+THROWS_FORMS="$forms" python3 - "$ROOT" "${FILES[@]}" > "$work/probe.sql" <<'PY' || { echo "FAIL  the probe could not be built"; q -d postgres -q -c "drop database if exists $DB" >/dev/null 2>&1; exit 1; }
+import os, re, sys
 root, files = sys.argv[1], sys.argv[2:]
+forms = os.environ["THROWS_FORMS"].split()
 # A site is a throws_* call whose FIRST argument (the statement under test, as written: dollar-quoted,
 # single-quoted or built by format()) contains `call pgpm.`; everything after that argument is the
 # assertion's own arguments, possibly none. The argument list is SPLIT, not pattern-matched (#601): a
 # pattern that demanded a comma after a dollar-quoted statement never saw the one-argument form, which
 # pins nothing at all, nor a single-quoted statement.
-CALL = re.compile(r"\bthrows_(ok|like|matching|imatching)\s*\(", re.I)
+CALL = re.compile(r"\bthrows_(" + "|".join(re.escape(f) for f in forms) + r")\s*\(", re.I)
 DOLLAR = re.compile(r"\$([A-Za-z_]\w*)?\$")
 TAG = "$pr522$"
 
@@ -167,16 +202,6 @@ for path in files:
         print(f"select '{shown}:{line} => ' || pg_temp.probe('{m.group(1).lower()}', {TAG} {rest} {TAG});")
 print(f"\\echo SITES {sites}")
 PY
-
-q -d postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
-q -d postgres -q -c "create database $DB" >/dev/null 2>&1
-q -d "$DB" -q -c "create extension if not exists pgtap;" >/dev/null 2>&1
-# The core is installed so a pattern built from a pgpm helper evaluates; nothing under test is in it.
-if ! q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f /repo/pgpm_core/install.sql >/dev/null 2>&1; then
-  printf 'FAIL  %-58s %s\n' "pgpm_core installed" "/repo/pgpm_core/install.sql"
-  q -d postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
-  exit 1
-fi
 
 out=$(q -d "$DB" -tAq -v ON_ERROR_STOP=1 -f - < "$work/probe.sql" 2>&1)
 rc=$?

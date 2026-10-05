@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **`bench/throws_pinned.sh` judges every `throws_*` pgTAP installs** (#915). Its site pattern was a
+  hand-written list, `throws_(ok|like|matching|imatching)`, without pgTAP's `throws_ilike`, so a
+  `throws_ilike($$ call pgpm... $$, '%')`, which accepts the 2D000 of a procedure that did not refuse, was
+  never probed and the guard reported the file clean. The forms are now read from the catalog of the pgTAP
+  the probe runs against (every extension function named `throws_<word>`), so a form a later pgTAP adds is
+  judged the day it is installed, and the guard fails when that read does not include the form its controls
+  use. Mutation `throws_ilike_unpinned`.
+- **`bench/regrain_perf.sh` checks the regrained rows by identity and value, not by count** (#916). Its
+  "conservation, so a fast wrong answer cannot pass" was `count(*) > ROWS`, and its fixture's only captured
+  change is an UPDATE of already-copied rows, so a reconcile that consumed the delta without applying it
+  (no scan, so the guard's work checks rewarded it) reverted every one of those updates at the swap and
+  passed. It now compares every row with the one it must be, by id (the updated ids read their new payload,
+  the rest their original, the frontier row its own, none missing or extra), beside a liveness check that
+  the updates were made and captured. Mutation `regrain_reconcile_discards_delta`.
 - **The three archive memory guards read each encode's own result and fail on any ERROR** (#912).
   `bench/archive_encode_memory.sh`, `bench/archive_lz77_memory.sh` and `bench/archive_deflate_memory.sh` ran
   their probe psql without `ON_ERROR_STOP` and took a marker printed after the call as "the call completed",

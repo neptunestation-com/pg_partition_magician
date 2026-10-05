@@ -50,7 +50,9 @@ FINE=$(( ROWS / 10 ))
 tick() { q "select pgpm.regrain_step('public.rp','$CHILD','$FINE',3000)"; }
 
 for _ in $(seq 1 6); do tick >/dev/null; done          # prepare + copy a few sub-ranges
-q "update public.rp set payload='d' where id <= $((ROWS/2));" >/dev/null   # a delta over copied rows
+HALF=$(( ROWS / 2 ))
+# a delta over copied rows; its row count is kept, because check 3 needs to know the updates happened
+UPD=$(q "with u as (update public.rp set payload='d' where id <= $HALF returning 1) select count(*) from u")
 DN=$(q "select pgpm._regrain_delta_count('public.rp')")
 
 # --- 1. a reconcile tick must not scan the whole delta -------------------------------------------------
@@ -78,8 +80,28 @@ while : ; do
   [ "$n" -gt 400 ] && { echo "FAIL  regrain did not converge"; fail=1; break; }
 done
 
-# --- 3. conservation, so a fast wrong answer cannot pass ----------------------------------------------
-AFTER=$(q "select count(*) from public.rp")
-check "rows conserved" "$(( AFTER > ROWS ? 0 : 1 ))" 0 "$AFTER rows, expected $(( ROWS + 1 ))"
+# --- 3. conservation by identity and value, so a fast wrong answer cannot pass -----------------------
+# A count cannot tell (#916). The fixture's only captured change is the UPDATE of already-copied rows above,
+# so a reconcile that consumes the delta WITHOUT applying it (no scan, which is exactly what checks 1 and 2
+# reward) reverts every one of those updates at the swap and keeps the row count. So every row is compared
+# with the one it must be, by id: the updated ids read 'd', the rest their original payload, the frontier
+# row its own, and no id is missing or extra. The liveness half first: the updates the comparison would
+# catch being reverted really happened and were captured, else an all-'x' table would pass it vacuously.
+# Mutation regrain_reconcile_discards_delta is that reconcile.
+if [ "$UPD" -eq $(( HALF / 2 )) ] && [ "$DN" -gt 0 ]; then
+  printf 'PASS  %-46s %s\n' "LIVENESS: captured updates exist to be lost" "$UPD rows updated over copied ranges, delta=$DN rows"
+else
+  printf 'FAIL  %-46s %s\n' "LIVENESS: captured updates exist to be lost" "$UPD rows updated (expected $(( HALF / 2 ))), delta=$DN rows"
+  fail=1
+fi
+WRONG=$(q "select count(*)
+             from (select g*2 as id, case when g*2 <= $HALF then 'd' else repeat('x',50) end as payload
+                     from generate_series(1,$ROWS) g
+                   union all select 500000, 'frontier') e
+             full join public.rp a on a.id = e.id
+            where a.id is null or e.id is null or a.payload is distinct from e.payload")
+SAMPLE=$(q "select string_agg(id || '=' || left(payload, 1), ' ' order by id)
+              from public.rp where id in (2, $HALF, $(( HALF + 2 )), $(( ROWS * 2 )), 500000)")
+check "rows conserved, by id and payload" "$WRONG" 0 "rows that differ from the expected set; sample $SAMPLE"
 
 exit "$fail"
