@@ -14,19 +14,30 @@ next site. The lever is one function that assembles every key and takes the clai
 before it can PUT over anything.
 
 WHAT COUNTS AS ASSEMBLING A KEY. Every key starts with the configured prefix, archive.config.prefix,
-which this file only ever names `prefix` (the column, `cfg.prefix`, `excluded.prefix`) or `p_prefix`
-(the parameter that carries it). So a prefix reference is ASSEMBLY when it
+and the check follows that value rather than a spelling of it (#914: the rule this replaces knew the
+prefix only by the names `prefix` and `p_prefix` beside `||`, so a scalar subquery or a helper whose
+parameter had another name assembled a second key it passed). A PREFIX REFERENCE is
+
+  * the column, however qualified (`prefix`, `cfg.prefix`, `excluded.prefix`), or `p_prefix`;
+  * a parameter of a function this file defines, whatever its name, when some call in the file hands
+    that parameter a prefix reference (by position or by name). That is a fixed point: a parameter
+    that carries it can hand it on to the next function's parameter;
+  * a scalar subquery that selects one (`(select prefix from archive.config where ...)`), where the
+    subquery stands.
+
+A prefix reference is ASSEMBLY when it
 
   * touches `||` on either side,
-  * is assigned (`v := cfg.prefix`, `select prefix into v`), which would let the value travel under
-    another name, or
+  * is assigned (`v := cfg.prefix`, `select prefix into v`, `v text default ...`), returned
+    (`return cfg.prefix`) or selected out as a column (`for r in select prefix ...`, a SQL function's
+    result), any of which would let the value travel under another name, or
   * is an argument of a call to anything this file does not define (`format`, `concat`, `coalesce`,
-    `replace`, a pgpm_core function ...): a function this file defines is followed instead, since its
-    own body is checked by the same rule.
+    `replace`, a pgpm_core function ...): a function this file defines is followed instead, through
+    the parameter that receives it, since its own body is checked by the same rule.
 
-Anything else is declaring it (`p_prefix text`), storing it (archive.configure's upsert) or passing it
-along to a function of this file, and is not a key. The rule names no site and has no exceptions; an
-allowlist is the thing that rots (CLAUDE.md, on `_q`).
+Anything else is declaring it (`p_prefix text`), storing it (archive.configure's upsert), comparing it
+or passing it along to a function of this file, and is not a key. The rule names no site and has no
+exceptions; an allowlist is the thing that rots (CLAUDE.md, on `_q`).
 
 THE CHECK. Exactly one function of pgpm_archive/install.sql assembles a prefix, and that function
 references archive.object_key_owner, the claim. Two assembling functions fail (the shape main had
@@ -36,8 +47,8 @@ stopped seeing the file must not report a clean sweep of nothing).
 
 What this cannot see, and tests/archive/db/39 does: a key built with no prefix at all, or a PUT that
 ignores the key it was given. That file takes every path that writes an object through a namesake and
-asserts the first relation's object survives by key and content, and its Part 0 requires every
-function that PUTs to take its key from the key helpers.
+asserts the first relation's object survives by key and content, and its Part 0 enumerates every S3
+write the installed module makes and requires the key each one gets to come from a key helper.
 
   ./scripts/check_archive_object_keys.py              # check pgpm_archive/install.sql
   ./scripts/check_archive_object_keys.py <file.sql>   # check another copy (a mutant, an old release)
@@ -65,6 +76,16 @@ NOT_CALLS = {
 }
 # A relation name before `(` (a column list), not a call.
 RELATION_BEFORE = {"into", "table", "update", "references", "from", "join"}
+# Parameter modes, before a parameter's name.
+PARAM_MODES = {"in", "out", "inout", "variadic"}
+# The words that open a clause of a statement; a prefix read while the clause is `select` is a column.
+CLAUSE_WORDS = {"select", "from", "where", "into", "values", "set", "group", "order", "having",
+                "returning", "limit", "offset", "union", "intersect", "except"}
+# What may follow a select-list item that is more than the item itself (a comparison, a test).
+NOT_BARE = {"is", "like", "ilike", "in", "not", "between", "similar", "and", "or", "collate", "isnull",
+            "notnull", "escape", "over", "filter", "within", "at"}
+# The tokens a plpgsql statement can start after, for `x = value` read as an assignment.
+STATEMENT_STARTS = {";", "begin", "then", "else", "loop", "declare"}
 # The floor: fewer prefix references than this and the lexer is no longer reading the module.
 MIN_PREFIX_REFS = 8
 
@@ -143,23 +164,120 @@ def lex(src):
     return toks
 
 
+def functions(toks):
+    """{name: [[param name or None, ...], ...]}: every function and procedure the file defines, with the
+    parameter names of each overload in order."""
+    defined = {}
+    for k in range(1, len(toks) - 2):
+        if not (toks[k][1] in ("function", "procedure") and toks[k - 1][1] in ("create", "replace")
+                and toks[k + 1][0] == "ID" and toks[k + 2][1] == "("):
+            continue
+        params, cur, depth, j = [], [], 0, k + 3
+        while j < len(toks):
+            text = toks[j][1]
+            if text == "(":
+                depth += 1
+            elif text == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            if text == "," and depth == 0:
+                params.append(cur)
+                cur = []
+            else:
+                cur.append(toks[j])
+            j += 1
+        if cur:
+            params.append(cur)
+        names = []
+        for p in params:
+            words = [t for t in p if t[0] == "ID"]
+            while words and words[0][1] in PARAM_MODES:
+                words.pop(0)
+            # a name is followed by its type; a lone word is a nameless parameter's type
+            names.append(words[0][1] if len(words) > 1 else None)
+        defined.setdefault(toks[k + 1][1], []).append(names)
+    return defined
+
+
 def scan(src):
     """Returns (refs, assembly, claims, defined): the number of prefix references, {scope: [(line,
     why)]} for every assembling reference, the scopes that name archive.object_key_owner, and the
-    functions the file defines."""
-    toks = lex(src)
-    defined = set()
-    for k in range(len(toks) - 2):
-        if toks[k][1] in ("function", "procedure") and toks[k + 1][0] == "ID":
-            if k > 0 and toks[k - 1][1] in ("create", "replace"):
-                defined.add(toks[k + 1][1])
+    functions the file defines.
 
-    refs, assembly, claims = 0, {}, set()
+    The prefix is followed, not spelled: a parameter of a function this file defines that receives a
+    prefix at any call site carries the prefix inside that function, whatever it is named, and a scalar
+    subquery that selects the prefix is a prefix reference where it stands. That takes a fixed point,
+    since a parameter that carries it can hand it on to another function's parameter."""
+    toks = lex(src)
+    defined = functions(toks)
+    carriers = {}   # function name -> the parameter names that carry a prefix into it
+    while True:
+        refs, assembly, claims, found = _scan_once(toks, defined, carriers)
+        grown = False
+        for fn, names in found.items():
+            if not names <= carriers.get(fn, set()):
+                carriers.setdefault(fn, set()).update(names)
+                grown = True
+        if not grown:
+            return refs, assembly, claims, set(defined)
+
+
+def _scan_once(toks, defined, carriers):
+    refs, assembly, claims, found = 0, {}, set(), {}
     scope, pending, body_tag = None, None, None
-    parens = []
+    parens = []                 # one dict per open parenthesis
+    stmt = {"clause": None}     # the statement's own level, outside every parenthesis
+
+    def tok(i):
+        return toks[i] if 0 <= i < len(toks) else ("", "", 0)
+
+    def after(i):
+        """The token after the expression ending at i, past any `::type` casts."""
+        i += 1
+        while tok(i)[1] == "::":
+            i += 2
+        return tok(i)
+
+    def judge(s, e, line, label):
+        """Is the prefix reference spanning tokens s..e assembly? Records it, or records the parameter
+        it is handed to when that is a parameter of a function this file defines."""
+        prev, nxt = tok(s - 1)[1], after(e)[1]
+        level = parens[-1] if parens else stmt
+        call = level.get("callee")
+        named = None
+        if prev in ("=>", ":=") and tok(s - 2)[0] == "ID" and tok(s - 3)[1] in ("(", ",") and call:
+            named = tok(s - 2)[1]
+        why = None
+        if prev == "||" or nxt == "||":
+            why = "concatenated with ||"
+        elif (prev == ":=" and named is None) or nxt == "into" or (prev == "default" and call != "<header>") \
+                or (prev == "=" and tok(s - 2)[0] == "ID" and tok(s - 3)[1] in STATEMENT_STARTS):
+            why = "assigned to another name"
+        elif prev == "return":
+            why = "returned, which would let the value travel under another name"
+        elif level.get("clause") == "select" and prev in ("select", "distinct", ",") \
+                and (nxt in (",", ")", ";", "", "from", "as", "where", "union", "limit", "order", "group")
+                     or (after(e)[0] == "ID" and nxt not in NOT_BARE)):
+            if level.get("subq"):
+                level["selects"] = True      # the subquery is the reference; judged where it closes
+                return
+            why = "selected out as a value, which would let it travel under another name"
+        elif call is not None and call != "<header>":
+            if call in defined:
+                for names in defined[call]:
+                    target = named if named is not None else (
+                        names[level["arg"]] if level["arg"] < len(names) else None)
+                    if target is not None and target in names:
+                        found.setdefault(call, set()).add(target)
+            else:
+                why = f"passed to {call}(), which this file does not define"
+        if why:
+            where = scope if scope is not None else "top level"
+            assembly.setdefault(where, []).append((line, f"{label} {why}"))
+
     for k, (kind, text, line) in enumerate(toks):
-        prev = toks[k - 1] if k > 0 else ("", "", 0)
-        nxt = toks[k + 1] if k + 1 < len(toks) else ("", "", 0)
+        prev, nxt = tok(k - 1), tok(k + 1)
 
         # scopes: a function from its header to the end of its body, a DO block likewise
         if kind == "ID" and text in ("function", "procedure") and prev[1] in ("create", "replace") and nxt[0] == "ID":
@@ -169,50 +287,51 @@ def scan(src):
         if kind == "DOLLAR":
             if body_tag is None and pending is not None:
                 body_tag, scope, pending = text, pending, None
+                stmt["clause"] = None
             elif body_tag == text:
                 body_tag, scope = None, None
+                stmt["clause"] = None
             continue
-        if kind == "OP" and text == ";" and body_tag is None:
-            pending = None
+        if kind == "OP" and text == ";":
+            if body_tag is None:
+                pending = None
+            stmt["clause"] = None
 
-        # calls: what each open parenthesis belongs to
+        # calls: what each open parenthesis belongs to, and which argument is being read
         if kind == "OP" and text == "(":
             callee = None
             if prev[0] == "ID" and prev[1] not in NOT_CALLS:
-                before = toks[k - 2][1] if k > 1 else ""
+                before = tok(k - 2)[1]
                 if before in ("function", "procedure"):
                     callee = "<header>"
                 elif before not in RELATION_BEFORE:
                     callee = prev[1]
-            parens.append(callee)
+            parens.append({"callee": callee, "arg": 0, "subq": nxt[1] == "select", "clause": None,
+                           "selects": False, "start": k})
             continue
         if kind == "OP" and text == ")":
             if parens:
-                parens.pop()
+                closed = parens.pop()
+                if closed["selects"]:
+                    judge(closed["start"], k, toks[closed["start"]][2], "a subquery selecting the prefix")
+            continue
+        if kind == "OP" and text == "," and parens:
+            parens[-1]["arg"] += 1
             continue
 
         if kind != "ID":
             continue
+        if text in CLAUSE_WORDS:
+            (parens[-1] if parens else stmt)["clause"] = text
         if text == CLAIM_TABLE and scope is not None:
             claims.add(scope)
-        if not PREFIX_NAME.match(text):
+        if not (PREFIX_NAME.match(text) or text in carriers.get(scope, ())):
             continue
         refs += 1
-        if nxt[1] in TYPE_WORDS:
-            continue  # a declaration
-        why = None
-        if prev[1] == "||" or nxt[1] == "||":
-            why = "concatenated with ||"
-        elif prev[1] == ":=" or nxt[1] == "into":
-            why = "assigned to another name"
-        else:
-            callee = parens[-1] if parens else None
-            if callee is not None and callee != "<header>" and callee not in defined:
-                why = f"passed to {callee}(), which this file does not define"
-        if why:
-            where = scope if scope is not None else "top level"
-            assembly.setdefault(where, []).append((line, f"{text} {why}"))
-    return refs, assembly, claims, defined
+        if nxt[1] in TYPE_WORDS or nxt[1] in ("=>", ":="):
+            continue  # a declaration, the label of a named argument, or the target of an assignment
+        judge(k, k, line, text)
+    return refs, assembly, claims, found
 
 
 def check_text(name, src):
@@ -391,6 +510,80 @@ begin
 end $$;
 """)
 
+# Real instances: review pass 8 (F8-05), each a second assembly the token-adjacency rule passed.
+# A scalar subquery: `prefix` sits between select and from, the `||` follows the closing parenthesis.
+SUBQUERY_SECOND = with_extra(r"""
+create or replace function archive._f8_export_key(p_parent regclass, p_child name) returns text
+language sql stable as $$
+  select (select prefix from archive.config where parent_table = p_parent)
+         || quote_ident(n.nspname) || $q$.$q$ || quote_ident(p_child) || $q$.ndjson$q$
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+$$;
+""")
+
+# A function this file defines, handed cfg.prefix through a parameter named p_base.
+RENAMED_CARRIER = with_extra(r"""
+create or replace function archive._f8_join(p_base text, p_parent regclass, p_child name) returns text
+language sql stable as $$
+  select p_base || quote_ident(n.nspname) || $q$.$q$ || quote_ident(p_child) || $q$.ndjson$q$
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+$$;
+create or replace function archive._f8_export_key2(p_parent regclass, p_child name) returns text
+language plpgsql stable as $$
+declare cfg archive.config;
+begin
+  select * into cfg from archive.config where parent_table = p_parent;
+  return archive._f8_join(cfg.prefix, p_parent, p_child);
+end;
+$$;
+""")
+
+# The same, two carriers deep and by name: the fixed point has to go round twice.
+CARRIED_TWICE = with_extra(r"""
+create or replace function archive._join2(p_root text, p_child name) returns text language sql as $$
+  select p_root || quote_ident(p_child);
+$$;
+create or replace function archive._join1(p_base text, p_child name) returns text language sql as $$
+  select archive._join2(p_child => p_child, p_root => p_base);
+$$;
+create or replace function archive._export_key3(p_parent regclass, p_child name) returns text language sql as $$
+  select archive._join1((select c.prefix from archive.config c where c.parent_table = p_parent), p_child);
+$$;
+""")
+
+RETURNED = with_extra(r"""
+create or replace function archive._prefix_of(p_parent regclass) returns text language plpgsql as $$
+declare cfg archive.config;
+begin
+  select * into cfg from archive.config where parent_table = p_parent;
+  return cfg.prefix;
+end;
+$$;
+""")
+
+SELECTED_OUT = with_extra(r"""
+create or replace function archive._sweep_keys() returns setof text language plpgsql as $$
+declare r record;
+begin
+  for r in select parent_table, prefix as base from archive.config loop
+    return next r.base || r.parent_table::text;
+  end loop;
+end;
+$$;
+""")
+
+# Carried and still clean: a helper of this file that takes the prefix under another name and only hands
+# it to the key function, and a subquery handed straight to it. Following must not mean refusing.
+CARRIED_CLEAN = with_extra(r"""
+create or replace function archive._export_key(p_parent regclass, p_base text, p_child name) returns text
+language sql as $$
+  select archive._child_object_key(p_parent, p_base, p_child, '.ndjson');
+$$;
+create or replace function archive.to_s3_manifest(p_parent regclass, p_child name) returns text language sql as $$
+  select archive._export_key(p_parent, (select prefix from archive.config where parent_table = p_parent), p_child);
+$$;
+""")
+
 NO_CLAIM = CLEAN.replace("""  insert into archive.object_key_owner (key_base, parent_oid) values (v_base_q, p_parent::oid)
     on conflict (key_base) do nothing returning parent_oid into v_owner;
 """, "")
@@ -426,6 +619,15 @@ def selftest():
     expect("a second assembly through concat()", CONCAT_SECOND, False, "passed to concat()")
     expect("a caller building its own key inline", INLINE_CALLER, False, "archive._encode_upload_ndjson_single")
     expect("a key assembled in a DO block", DO_BLOCK, False, "DO block")
+    expect("F8-05: a second assembly through a scalar subquery", SUBQUERY_SECOND, False,
+           "archive._f8_export_key (line")
+    expect("F8-05: a second assembly in a helper whose parameter is not named prefix", RENAMED_CARRIER,
+           False, "archive._f8_join (line")
+    expect("a second assembly two carriers deep, by name", CARRIED_TWICE, False, "archive._join2 (line")
+    expect("the prefix returned out of a function", RETURNED, False, "returned")
+    expect("the prefix selected out as a column", SELECTED_OUT, False, "selected out")
+    expect("the prefix carried under other names to the key function only", CARRIED_CLEAN, True,
+           owner="archive._owned_key")
     expect("the one assembling function never claims", NO_CLAIM, False, "never names archive.object_key_owner")
     expect("no assembly visible at all", NO_ASSEMBLY, False, "no function assembles")
 

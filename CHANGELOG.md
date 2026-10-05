@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **The archive object-key checks enumerate writes and follow the prefix, instead of matching text** (#914).
+  `tests/archive/db/39`'s Part 0 looked for a `'PUT'` literal and for a key helper's name anywhere in a body,
+  so a write site that took its verb from a variable, named a helper in a comment, or PUT a second object at
+  an inline key beside a claimed one passed it while writing at a key nothing claimed; and
+  `scripts/check_archive_object_keys.py` knew the prefix only as `prefix` / `p_prefix` beside `||`, so a second
+  key assembled from `(select prefix from archive.config ...)`, or in a function of the file whose parameter
+  carrying the prefix had another name, passed it. Part 0 now lexes the module's bodies and enumerates every
+  S3 request (every call to a function that calls the http extension, a write unless its method is the literal
+  GET, HEAD or DELETE), requiring each write's key to be a local only a key helper assigned; the checker
+  follows the prefix through parameters, scalar subqueries, returns and select lists to a fixed point. Guards
+  `bench/archive_key_owner_every_path.sh` (mutations `archive_put_site_helper_named_in_comment`,
+  `archive_put_site_verb_in_variable`, `archive_to_s3_parquet_second_put_inline`) and the new
+  `bench/archive_object_keys_static.sh` (`archive_key_prefix_by_subquery`,
+  `archive_key_prefix_by_renamed_param`).
 - **Every guard discriminate.sh drives is also run against the unmodified code** (#917, F8-04).
   `discriminate.sh` reads any non-zero exit of a guard pointed at a mutant as a catch, and nine guards with
   mutations (`write_block_identity`, `retire_identity_unreferenced`, `coverage_reset_identity`,

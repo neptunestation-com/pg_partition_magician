@@ -767,6 +767,11 @@ run_archive() {
   # function that assembles and claims it.
   echo "--- archive object key names one relation on every path guard (issue #872) ---"
   bash "$(dirname "$0")/bench/archive_key_owner_every_path.sh" pgpm_test-archive pgpm_perf213 || fail=1
+  # The static half of that lever (#914): scripts/check_archive_object_keys.py on the module, the clean-code
+  # half of the pairs bench/discriminate.sh completes with a second key assembled from a scalar subquery and
+  # through a parameter of another name.
+  echo "--- archive object key assembled in one function, followed by data flow guard (issue #914) ---"
+  bash "$(dirname "$0")/bench/archive_object_keys_static.sh" pgpm_test-archive pgpm_perf246 || fail=1
   # #873's guard, the archive module's half (tests/archive/db/38): the clean-code half of the pairs
   # bench/discriminate.sh completes with the four archive readers' mutants.
   echo "--- the archive readers refuse a caller whose reads row-level security filters (issue #873) ---"
