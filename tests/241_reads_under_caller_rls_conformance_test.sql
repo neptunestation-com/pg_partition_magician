@@ -360,6 +360,7 @@ insert into t241_entry values
   ('pgpm.check_uuidv7(regclass,name,integer)', 'refuses', 'samples the table (C6)'),
   ('pgpm.extend_to(regclass,text,integer)', 'refuses', 'the write frontier, through the parent (C1)'),
   ('pgpm.forget_missing()', 'no user rows', 'pgpm state and pg_class'),
+  ('pgpm.hand_over_scratch(regclass)', 'no user rows', 'pgpm state and the catalog: OWNER TO on pgpm''s scratch relations'),
   ('pgpm.impact_report(regclass,interval)', 'no user rows', 'pgpm.log and pg_flight_recorder'),
   ('pgpm.incoming_fk_orphans(regclass)', 'refuses', 'the referencing table and the parent (C10)'),
   ('pgpm.maintain_all()', 'refuses', 'each parent''s maintain (SWEEPS)'),

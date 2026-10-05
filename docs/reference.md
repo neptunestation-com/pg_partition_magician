@@ -173,7 +173,19 @@ owner's default privileges and **no grant for any other role**, whatever the mai
 DEFAULT PRIVILEGES` gave it when it was created: a read or write routed through the parent is checked
 against the parent's grants alone, so no role needs one on a partition, and one the parent's policies
 filter would read a partition unfiltered. The monolith is the original table and keeps its own grants, row
-security and policies.
+security and policies. A regrain's fine child holds that ACL, and the parent's owner, from the tick that
+creates it, before its first row is copied in, not only once its sub-range is complete: between ticks a
+role the maintaining role's default privileges name would otherwise read every row copied so far.
+
+Every other relation pgpm makes for its own use beside a table (a regrain's delta and capture function,
+`from_hypertable`'s copy, delta and capture function) is a **scratch relation**, and follows the same rule:
+it is owned like the table and holds no grant beyond its owner's from the transaction that creates it (a
+delta also grants `INSERT` to the roles that write the table, which its capture trigger writes as). pgpm
+records each one, by its oid, in the transaction that creates it (`pgpm.config.regrain_delta_oid` and
+`regrain_capture_fn_oid`, `pgpm.part.child_oid`, [`pgpm.scratch`](#pgpmscratch)) and finds it again only
+through that record: a table, function or trigger of yours that happens to carry one of pgpm's working
+names is never emptied, dropped, replaced, drained into or swapped in. Where pgpm would have to mint under
+a name you hold, it refuses, naming your relation, before anything is created.
 
 One shape is refused rather than carried: a `FOR EACH ROW` trigger with a transition table
 (`REFERENCING OLD/NEW TABLE`), which PostgreSQL does not permit on a partitioned table. Rewrite it as a
@@ -700,7 +712,21 @@ columns, defaults and `CHECK` constraints as they stand now; schema changes to t
 cutover make it refuse (see `from_hypertable_cutover`), so re-run this after one. The destination carries the
 table comment `pgpm from_hypertable copy of <oid>`: it is the record by which `pgpm_core/uninstall.sql` finds a
 copy that was never cut over and drops it (while the hypertable it names still exists), and the cutover
-replaces it with the hypertable's own comment, or none. Each chunk's bounds are
+replaces it with the hypertable's own comment, or none. The copy, and for a tracking copy its delta and
+capture function, are recorded in [`pgpm.scratch`](#pgpmscratch) as they are created, and every later step
+(the drains, the cutover, a re-run of this copy, `uninstall.sql`) finds them there, by oid. They are owned
+like the hypertable, with no grant beyond the owner's (the delta also grants `INSERT` to every role that can
+write the hypertable, since its capture trigger writes as the writer), from the moment they are created, so
+no role the migrating role's default privileges name reads the copied rows during the online window; the
+cutover gives the migrated table the hypertable's own grants. So the migrating role must be the hypertable's
+owner or a member of it (and the owner must hold `CREATE` on the schema), as the swap always required; this
+copy refuses otherwise, before anything is created. A table, function or trigger already holding one of the
+names this copy mints (`<rel>_pgpm_dest`, and for `p_track_changes` `<rel>_pgpm_delta`,
+`<rel>_pgpm_delta_fn()` and the trigger `<rel>_pgpm_delta_trg` on the hypertable) that is not this
+hypertable's recorded copy is **refused**, never dropped or replaced: rename or drop it and re-run. A copy
+an earlier release made carries no record if it predates the comment (pgpm 0.6.0 and earlier) and is
+refused the same way; drop it, and this copy rebuilds it. A re-run replaces this hypertable's previous copy.
+Each chunk's bounds are
 applied in the dimension's own type (`timestamptz`, `timestamp` without time zone, or `date`), so the copy is exact under any
 session `TimeZone` and `DateStyle`; a hypertable on a dimension of any other type is refused here. The same
 holds for every watermark and control range the drains and the cutover carry: each is rendered in ISO style
@@ -818,7 +844,12 @@ pgpm.from_hypertable_cutover(
 )
 ```
 
-Phase 2: the cutover. When `p_predrain` is `true` (the default), it first **pre-drains the catch-up backlog
+Phase 2: the cutover. It cuts over only the copy `from_hypertable_copy` recorded for this hypertable in
+[`pgpm.scratch`](#pgpmscratch), and takes change tracking from the delta recorded there, never from a relation
+that merely carries the name `<rel>_pgpm_dest` or `<rel>_pgpm_delta`: with no copy recorded it refuses
+(`found no copy to cut over`), and so do the drains. A copy made by pgpm 0.6.0 or earlier carries no record;
+drop it and re-run `from_hypertable_copy`. The swap drops the recorded delta and capture function and
+removes the records, the copy being the migrated table by then. When `p_predrain` is `true` (the default), it first **pre-drains the catch-up backlog
 online** (best-effort, using `p_drain_batch` as the batch size and residual threshold) -- the change delta
 (`from_hypertable_drain_delta`) when tracking is on, else the appended-rows tail
 (`from_hypertable_drain_appends`) -- so only a tiny residual is left for the lock. Then it **pre-builds the
@@ -1569,7 +1600,19 @@ with no grant on the parent), table- or column-level, is granted `INSERT` on it,
 the parent and of that partition, whose rights no ACL lists: after `ALTER TABLE <parent> OWNER TO`,
 which does not reach the partitions, the old owner still owns the source and writes it directly. Re-synced on
 every tick: a role granted, or an owner changed, mid-regrain can write from the next tick on, and nothing
-beyond those grants is needed.
+beyond those grants is needed. Beyond those grants and its owner's, the delta holds nothing, from the tick
+that creates it: the maintaining role's default privileges are reset, so a role they name cannot read the
+captured keys of a table it holds no grant on.
+
+The delta, the capture function and the copies not yet attached **follow the table's owner**. Each tick
+gives them the table's owner as it is then, so a table handed to a new owner mid-regrain (`ALTER TABLE ...
+OWNER TO` on the table and its partitions) has them handed over by the next tick run as a superuser, or by
+a role that is a member of both the old owner and the new. A tick run by a role that can do neither (the
+new owner itself, a non-superuser) refuses once, up front, and logs a `skip_regrain` row that leads with the
+step to take: see [Handing a table to a new owner](#handing-a-table-to-a-new-owner-hand_over_scratch). The
+delta and the function are found by the oids `pgpm.config` recorded; with none recorded (a table that has
+never regrained) there is none, so `regrain_cancel`, `untransmute` and `uninstall.sql` leave alone a table or
+function of yours named `<rel>_pgpm_regrain_delta` or `<rel>_pgpm_regrain_capture()`.
 
 The swap has the same contract. Whatever is captured between that gate and the moment the `DETACH` takes
 its lock is reconciled under the lock until nothing is left, and the source is dropped only once no
@@ -2367,6 +2410,24 @@ one at the swap (see [`regrain_step`](#regrain_step)), which refuses while any o
 the horizon. The change itself is safe; the swap waits until `retain` is set back or the run is
 cancelled with [`regrain_cancel`](#regrain_cancel).
 
+### Handing a table to a new owner (`hand_over_scratch`)
+
+```sql
+pgpm.hand_over_scratch(p_parent regclass) returns int
+```
+
+`ALTER TABLE <table> OWNER TO <new owner>` reaches neither the table's partitions nor the scratch relations
+pgpm keeps beside it while a regrain or a `from_hypertable` migration is in flight (a regrain's delta,
+capture function and not-yet-attached copies; a migration's copy, delta and capture function). Hand a table
+over by re-owning the table and every partition, then run `hand_over_scratch(<table>)`, which gives every
+scratch relation pgpm has recorded for the table to the table's owner as it is now and returns how many it
+handed over. Run it as a superuser, or as a role that is a member of both the old owner and the new;
+otherwise it refuses, as a tick does. A maintenance tick run by such a role does this on its own, so under
+pg_cron as a superuser there is nothing to do. A tick run by a role that can do neither (the new owner, as a
+non-superuser) refuses with a `skip_regrain` row whose message begins `run select
+pgpm.hand_over_scratch(...)`, and the regrain resumes on the first tick after the step is taken. A null table
+is refused.
+
 ### `set_partition_tz`
 
 ```sql
@@ -2766,6 +2827,22 @@ session; for `id`, the number.
 
 Primary key `(parent_table, child_name)`. The non-overlap invariant holds over `attached = true` rows
 only; an in-flight child may transiently sit inside a still-attached coarse child.
+
+### `pgpm.scratch`
+
+The record of the scratch relations `from_hypertable_copy` makes beside a hypertable, written in the
+transaction that creates each one. The drains, the cutover, a re-run of the copy and `uninstall.sql` find
+them here, by oid, never by name. (The core's own are recorded where they always were:
+`pgpm.config.regrain_delta_oid` and `regrain_capture_fn_oid`, and `pgpm.part.child_oid`.)
+
+| Column | Type | Meaning |
+|---|---|---|
+| `parent_oid` | `oid` | the hypertable, by oid (a hypertable dropped by hand leaves its rows naming nothing) |
+| `kind` | `text` | `hypertable_dest` (the copy), `hypertable_delta` (a tracking copy's delta), or `hypertable_delta_fn` (its trigger function) |
+| `obj` | `oid` | the relation (`pg_class`) or, for `hypertable_delta_fn`, the function (`pg_proc`) |
+
+Primary key `(parent_oid, kind)`. The swap removes a hypertable's rows. An upgrade records a copy made by an
+earlier release from the comment that release put on it.
 
 ### `pgpm.log`
 

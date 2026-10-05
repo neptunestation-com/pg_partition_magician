@@ -458,6 +458,11 @@ run_timescale() {
     # the real install, the clean-code half of the pairs discriminate.sh completes with its twelve mutants.
     echo "--- every from_hypertable entry point refuses up front what the core refuses (lever #966) ---"
     bash "$(dirname "$0")/bench/hypertable_shared_preflight.sh" pgpm_test-timescale pgpm_perf252 || fail=1
+    # #966 W1's scratch-relation guard, its module half: it re-runs tests/timescale/db/49 against the real
+    # install (run_perf runs its core half, tests/267), the clean-code half of the pairs discriminate.sh
+    # completes with its sixteen timescale-track mutants.
+    echo "--- scratch relations minted owner-only and resolved by record (issues #949, #955) ---"
+    bash "$(dirname "$0")/bench/scratch_relations.sh" pgpm_test-timescale pgpm_perf250 || fail=1
     # #917: five wrappers whose mutants discriminate.sh drives here had no clean-code run anywhere, so a
     # wrapper broken enough to fail against everything (a missing file: exit 1, "0 ran") was scored as
     # catching each of its mutants. These are their clean-code halves. bench/guards_run_on_clean_code.sh
@@ -1001,6 +1006,7 @@ run_perf() {
     "bench/archive_identity_substitution.sh pgpm_archident"
     "bench/guards_run_on_clean_code.sh pgpm_perf249"
     "bench/shared_preflight_conformance.sh pgpm_perf251"
+    "bench/scratch_relations.sh pgpm_perf250"
   )
   local selected=()
   local n=${#guards[@]} idx

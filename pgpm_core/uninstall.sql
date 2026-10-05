@@ -20,12 +20,13 @@
 --   * from_hypertable's change capture, left in the hypertable's schema by a
 --     from_hypertable_copy(..., p_track_changes => true) that was never cut over: the delta
 --     <rel>_pgpm_delta, the trigger function <rel>_pgpm_delta_fn(), and the <rel>_pgpm_delta_trg
---     row trigger it drives on the live hypertable and its chunks (found by the record the copy
---     keeps on its delta; see the schema drop's block)
+--     row trigger it drives on the live hypertable and its chunks (found by pgpm.scratch, or by
+--     the comment an earlier release's copy kept on its delta; see the schema drop's block)
 --   * from_hypertable's copy, left in the hypertable's schema by a from_hypertable_copy that was never cut
 --     over: the table <rel>_pgpm_dest (a full second copy of the hypertable's rows) with its indexes and the
---     outgoing foreign keys the copy replayed on it (found by the record the copy keeps on it, and dropped
---     only while the hypertable it was copied from still exists; see the schema drop's block)
+--     outgoing foreign keys the copy replayed on it (found by pgpm.scratch, or by the comment an earlier
+--     release's copy kept on it, and dropped only while the hypertable it was copied from still exists;
+--     see the schema drop's block)
 --
 -- Put back first:
 --   * every incoming foreign key transmute(..., p_incoming_fks => 'preserve') dropped and
@@ -100,10 +101,12 @@ begin
       -- Existence is checked first only to spare the operator a "does not exist, skipping" notice
       -- for every parent that never regrained. The trigger depends on the function, so the cascade
       -- is what removes it; the delta table depends on nothing.
-      if to_regprocedure(format('%I.%I()', v_nsp, v_fn)) is not null then
+      -- #955: only what pgpm.config recorded (the resolver leaves the names null otherwise), never a relation
+      -- or function of the operator's that happens to carry the derived name.
+      if v_fn is not null then
         execute format('drop function if exists %I.%I() cascade', v_nsp, v_fn);
       end if;
-      if to_regclass(format('%I.%I', v_nsp, v_delta)) is not null then
+      if v_delta is not null then
         execute format('drop table if exists %I.%I', v_nsp, v_delta);
       end if;
     exception
@@ -199,6 +202,54 @@ begin
     end if;
   exception
     -- An install that predates pgpm.dropped_fk has no key to put back.
+    when undefined_table then null;
+  end;
+
+  -- Drop what pgpm.scratch records (#955) and the comment sweeps below cannot find: from_hypertable_copy records
+  -- the copy, a tracking copy's delta and its trigger function there, in the transaction that creates each, so
+  -- the record names them by identity whatever has become of the comment the copy also puts on each (the
+  -- sweeps below find a copy by that comment, which is all a release before the record kept, and they still
+  -- take every copy that carries it). So only what has lost its comment is taken here: a delta without its
+  -- horizon comment (with the function recorded beside it), a copy without its `copy of` comment. The function
+  -- first (CASCADE takes its row trigger on the hypertable and every chunk), then the delta, then the copy,
+  -- dropped only while the hypertable it was copied from still exists, as the sweep below does it (#773).
+  begin
+    for r in
+      select s.parent_oid, s.kind, s.obj from pgpm.scratch s
+       where not exists (
+               select 1 from pg_description d
+                where d.classoid = 'pg_class'::regclass and d.objsubid = 0
+                  and ((s.kind = 'hypertable_dest' and d.objoid = s.obj
+                        and d.description = 'pgpm from_hypertable copy of ' || s.parent_oid)
+                       or (s.kind <> 'hypertable_dest' and d.description ~ '^pgpm from_hypertable horizon [0-9]+$'
+                           and d.objoid = (select s2.obj from pgpm.scratch s2
+                                            where s2.parent_oid = s.parent_oid and s2.kind = 'hypertable_delta'))))
+       order by s.kind desc, s.obj
+    loop
+      begin
+        if r.kind = 'hypertable_delta_fn' then
+          if exists (select 1 from pg_proc where oid = r.obj) then
+            execute format('drop function %s cascade', r.obj::regprocedure::text);
+          end if;
+        elsif not exists (select 1 from pg_class where oid = r.obj) then
+          null;
+        elsif r.kind = 'hypertable_delta' then
+          execute format('drop table %s', r.obj::regclass::text);
+        elsif not exists (select 1 from pg_class where oid = r.parent_oid) then
+          raise warning 'pg_partition_magician: left behind %, a from_hypertable copy that was never cut over: the hypertable it was copied from (oid %) no longer exists, so this table may hold the only copy of those rows. Drop it once you have checked.',
+            r.obj::regclass::text, r.parent_oid;
+        else
+          execute format('drop table %s', r.obj::regclass::text);
+        end if;
+      exception
+        when insufficient_privilege or dependent_objects_still_exist then
+          raise warning 'pg_partition_magician: could not drop %, from_hypertable''s % of the hypertable with oid % (%). It is left behind; drop it as its owner.',
+            case when r.kind = 'hypertable_delta_fn' then r.obj::regprocedure::text else r.obj::regclass::text end,
+            r.kind, r.parent_oid, sqlerrm;
+      end;
+    end loop;
+  exception
+    -- An install that predates pgpm.scratch has recorded nothing; the comment sweeps below cover it.
     when undefined_table then null;
   end;
 

@@ -106,7 +106,9 @@ q "create schema app;
             null::jsonb as config where false;" >/dev/null
 # what from_hypertable_copy builds: the plain destination, then the rows
 q "create table app.${REL}_pgpm_dest (like app.$REL including defaults including constraints including generated including comments);
-   insert into app.${REL}_pgpm_dest (id, ts, v) select id, ts, v from app.$REL order by ts;" >/dev/null
+   insert into app.${REL}_pgpm_dest (id, ts, v) select id, ts, v from app.$REL order by ts;
+   -- recorded as from_hypertable_copy records the copy it builds (#955): the cutover swaps in nothing else
+   select pgpm._scratch_record('app.$REL', 'hypertable_dest', 'app.${REL}_pgpm_dest'::regclass::oid);" >/dev/null
 
 check "LIVENESS: the destination copy holds the three source rows" \
   "$(q "select string_agg(id || ':' || v, ',' order by id) from app.${REL}_pgpm_dest")" "1:a,2:b,3:c"

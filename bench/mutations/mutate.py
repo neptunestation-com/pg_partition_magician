@@ -1776,9 +1776,11 @@ MUTATIONS = {
     "hypertable_cutover_serial_owned_before_carry": (
         "bench/hypertable_cutover_serial_sequences.sh",
         "The plausible one-step #839 fix: hand each owned sequence to the copy's column (OWNED BY) before "
-        "the DROP, while the copy still belongs to the migrating role. PostgreSQL refuses OWNED BY across "
-        "owners ('sequence must have same owner as table it is linked to'), so tests/timescale/db/39, whose "
-        "hypertable a third role owns, fails on that raw error and on its assertions after it.",
+        "the DROP, while the copy may still belong to another role than the source (the migrating role "
+        "before #949 minted it owned like the hypertable; a hand-over during the online window after). "
+        "PostgreSQL refuses OWNED BY across owners ('sequence must have same owner as table it is linked "
+        "to'), so tests/timescale/db/39, whose copy belongs to the migrating role at the cutover, fails on "
+        "that raw error and on its assertions after it.",
         [(HT_SERIAL_LET_GO,
           "    execute format('alter sequence %s owned by %I.%I.%I', k.seq::text, v_nsp, v_dest, k.attname);"
           "   -- MUTANT: one step\n", 1)],
@@ -2517,7 +2519,7 @@ begin
         "42501 on every UPDATE, DELETE and INSERT landing in the regraining child for the whole regrain. "
         "tests/124 section (C)'s owner and has_table_privilege checks and its lives_ok writes as those "
         "roles are what catch it.",
-        [("  perform pgpm._own_like_parent(p_parent, v_delta_reg);\n"
+        [("  perform pgpm._scratch_mint(p_parent, v_delta_reg);\n"
           "  perform pgpm._regrain_capture_grant(p_parent, v_delta_reg, v_src);\n", "", 1),
          ("  if v_delta_reg is not null then perform pgpm._regrain_capture_grant(p_parent, v_delta_reg, v_child); end if;\n", "", 1)],
     ),
@@ -7259,10 +7261,10 @@ select ok(
         "schema and leaves the real delta holding its captured changes. One site. tests/237 part C catches "
         "it on both tables.",
         [("  select nsp, delta into v_dnsp, v_delta from pgpm._regrain_capture_names(p_parent);\n"
-          "  if to_regclass(format('%I.%I', v_dnsp, v_delta)) is not null then\n"
+          "  if v_delta is not null then   -- #955: the recorded delta, or nothing\n"
           "    execute format('truncate %I.%I', v_dnsp, v_delta);\n",
           "  select delta into v_delta from pgpm._regrain_capture_names(p_parent);\n"
-          "  if to_regclass(format('%I.%I', v_nsp, v_delta)) is not null then\n"
+          "  if v_delta is not null and to_regclass(format('%I.%I', v_nsp, v_delta)) is not null then\n"
           "    execute format('truncate %I.%I', v_nsp, v_delta);\n", 1)],
     ),
     "regrain_upgrade_guard_parent_schema": (
@@ -7626,9 +7628,12 @@ select ok(
         "bench/acl_grantor_owner_partitions.sh",
         "Issue #875 bullet 1, the pre-fix shape in regrain_step: a fine child keeps the default privileges of "
         "the role that ran the regrain, and the swap attaches it so. One site. tests/256 catches it on the "
-        "regrain's two fine children.",
+        "regrain's two fine children. Since #949 the child is minted owner-only at its creation too, so both "
+        "resets go (the creation-time one is owned like the parent instead, as before #949).",
         [("      perform pgpm._acl_reset(format('%I.%I', v_sub_nsp, v_sub_name)::regclass, true);   -- #875\n",
-          "", 1)],
+          "", 1),
+         ("      perform pgpm._scratch_mint(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);\n",
+          "      perform pgpm._own_like_parent(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);   -- MUTANT\n", 1)],
     ),
     "transmute_incoming_gate_accepts_not_valid": (
         "bench/incoming_not_valid_refused.sh",
@@ -7729,6 +7734,214 @@ select ok(
         [("  -- excludes, so this answer is final. See pgpm._refuse_unconvertible_keys.\n"
           "  perform pgpm._refuse_unconvertible_keys(p_hypertable, 'migrate hypertable', 'from_hypertable');\n",
           "  -- excludes, so this answer is final. See pgpm._refuse_unconvertible_keys.\n", 1)],
+    ),
+    # The scratch-relation lever (#966 W1: #949, #950, #955): one mutation per site, each putting that site's
+    # defect back; bench/scratch_relations.sh runs tests/267 (core) or tests/timescale/db/49 (the module,
+    # uninstall.sql) against it.
+    "scratch_regrain_delta_minted_default_acl": (
+        "bench/scratch_relations.sh",
+        "Pre-#949 _regrain_capture_install: the delta is re-owned like the parent but its ACL is never reset, "
+        "so it keeps the tick role's ALTER DEFAULT PRIVILEGES and a role they name (on Supabase anon and "
+        "authenticated) reads the captured keys of a parent it holds no grant on. tests/267 stage A catches it.",
+        [("  perform pgpm._scratch_mint(p_parent, v_delta_reg);\n",
+          "  perform pgpm._own_like_parent(p_parent, v_delta_reg);   -- MUTANT: no ACL reset\n", 1)],
+    ),
+    "scratch_regrain_capture_fn_tick_owner": (
+        "bench/scratch_relations.sh",
+        "Pre-#950 _regrain_capture_install: the capture function stays owned by the role that ran the prepare "
+        "tick, so the role owning the parent when the next regrain re-mints capture cannot drop it, and a "
+        "hand-over cannot follow it. tests/267 stages A and C catch it.",
+        [("  perform pgpm._scratch_mint_fn(p_parent, format('%I.%I()', v_nsp, v_fn)::regprocedure);\n", "", 1)],
+    ),
+    "scratch_fine_child_minted_default_acl": (
+        "bench/scratch_relations.sh",
+        "Pre-#949 regrain_step: a fine child keeps the creating role's default privileges from its CREATE until "
+        "its sub-range's last short batch, so between ticks a role they name reads every row copied so far, "
+        "past the parent's row security. tests/267 stage A catches it.",
+        [("      perform pgpm._scratch_mint(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);\n", "", 1)],
+    ),
+    "scratch_regrain_owner_not_followed": (
+        "bench/scratch_relations.sh",
+        "Pre-#950 regrain_step: a resuming tick never re-checks the scratch objects' owner, so a table handed to "
+        "a new owner mid-regrain leaves its delta, capture function and copies with the old one, and every "
+        "tick a non-superuser new owner runs fails 'permission denied' on the delta. tests/267 stages C and D "
+        "catch it.",
+        [("  perform pgpm._scratch_owner_follow(p_parent, 'the regrain');\n", "", 1)],
+    ),
+    "scratch_owner_refusal_swallowed": (
+        "bench/scratch_relations.sh",
+        "_scratch_owner_follow without its refusal: a tick that can neither re-own the old owner's delta nor act "
+        "as that owner goes on, and fails 'permission denied' on the delta every tick, which is what an "
+        "operator saw before #950 instead of the hand-over step. tests/267 stage D catches it.",
+        [("  if cardinality(v_stuck) > 0 then\n", "  if false and cardinality(v_stuck) > 0 then   -- MUTANT: never refuse\n", 1)],
+    ),
+    "regrain_capture_names_derived_fallback": (
+        "bench/scratch_relations.sh",
+        "Pre-#955 _regrain_capture_names: with nothing recorded (a parent that never regrained) the delta and "
+        "the capture function fall back to the names derived from the parent's, so regrain_cancel TRUNCATEs an "
+        "operator's <rel>_pgpm_regrain_delta and untransmute DROPs it with <rel>_pgpm_regrain_capture(). "
+        "tests/267 stage B catches it.",
+        [("  select * into d from pgpm._regrain_capture_derive(p_parent);\n  nsp := d.nsp;\n",
+          "  select * into d from pgpm._regrain_capture_derive(p_parent);\n"
+          "  nsp := d.nsp; delta := d.delta; fn := d.fn;   -- MUTANT: the derived names, unconditionally\n", 1)],
+    ),
+    "hypertable_copy_drops_dest_by_name": (
+        "bench/scratch_relations.sh",
+        "Pre-#955 from_hypertable_copy (bullet 1, Tier 1): no check on the copy's name, and `drop table if "
+        "exists <rel>_pgpm_dest` before building it, so an operator's table of that name is dropped with its "
+        "rows. tests/timescale/db/49 stage B catches it.",
+        [("  if v_held is not null and v_held is distinct from pgpm._scratch_rel(p_hypertable, 'hypertable_dest') then\n",
+          "  if false and v_held is not null and v_held is distinct from pgpm._scratch_rel(p_hypertable, 'hypertable_dest') then\n", 1),
+         ("  v_prev := pgpm._scratch_rel(p_hypertable, 'hypertable_dest');\n"
+          "  if v_prev is not null and v_prev = to_regclass(format('%I.%I', v_nsp, v_dest)) then\n"
+          "    execute format('drop table %s', v_prev::text);\n"
+          "  end if;\n",
+          "  execute format('drop table if exists %I.%I', v_nsp, v_dest);   -- MUTANT: by name\n", 1)],
+    ),
+    "hypertable_copy_drops_delta_by_name": (
+        "bench/scratch_relations.sh",
+        "Pre-#955 from_hypertable_copy (bullet 1, Tier 1): no check on the delta's name, and `drop table if "
+        "exists <rel>_pgpm_delta` before a tracking copy builds it, so an operator's table of that name is "
+        "dropped with its rows. tests/timescale/db/49 stage B catches it.",
+        [("  if v_held is not null and v_held is distinct from pgpm._scratch_rel(p_hypertable, 'hypertable_delta') then\n",
+          "  if false and v_held is not null and v_held is distinct from pgpm._scratch_rel(p_hypertable, 'hypertable_delta') then\n", 1),
+         ("  v_prev := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');\n"
+          "  if v_prev is not null and v_prev = to_regclass(format('%I.%I', v_nsp, v_delta)) then\n"
+          "    execute format('drop table %s', v_prev::text);\n"
+          "  end if;\n",
+          "  if p_track_changes then execute format('drop table if exists %I.%I', v_nsp, v_delta); end if;   -- MUTANT: by name\n", 1)],
+    ),
+    "hypertable_copy_replaces_fn_by_name": (
+        "bench/scratch_relations.sh",
+        "Pre-#955 from_hypertable_copy: no check on the capture function's name, and `create or replace "
+        "function <rel>_pgpm_delta_fn()`, so an operator's function of that name has its body replaced. "
+        "tests/timescale/db/49 stage B catches it.",
+        [("  if v_held_fn is not null and v_held_fn::oid is distinct from v_fn then\n",
+          "  if false and v_held_fn is not null and v_held_fn::oid is distinct from v_fn then\n", 1),
+         ("    execute format('create function %I.%I() returns trigger language plpgsql as $pgpm$\n",
+          "    execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$\n", 1)],
+    ),
+    "hypertable_copy_drops_trigger_by_name": (
+        "bench/scratch_relations.sh",
+        "Pre-#955 from_hypertable_copy: no check on the capture trigger's name, and `drop trigger if exists "
+        "<rel>_pgpm_delta_trg` on the hypertable before creating it, so an operator's trigger of that name is "
+        "dropped. tests/timescale/db/49 stage B catches it.",
+        [("  if found and v_trg_fn is distinct from v_fn then\n",
+          "  if false and found and v_trg_fn is distinct from v_fn then\n", 1),
+         ("    perform pgpm._scratch_mint_fn(p_hypertable, format('%I.%I()', v_nsp, v_trgfn)::regprocedure);\n",
+          "    perform pgpm._scratch_mint_fn(p_hypertable, format('%I.%I()', v_nsp, v_trgfn)::regprocedure);\n"
+          "    execute format('drop trigger if exists %I on %I.%I', v_trg, v_nsp, v_rel);   -- MUTANT: by name\n", 1)],
+    ),
+    "hypertable_dest_minted_default_acl": (
+        "bench/scratch_relations.sh",
+        "Pre-#949 from_hypertable_copy (bullet 3): the copy keeps the migrating role's default privileges for "
+        "the whole online window (and the migrating role as its owner), so a role they name reads every "
+        "copied row of a hypertable it holds no grant on. tests/timescale/db/49 stage A catches it.",
+        [("  perform pgpm._scratch_mint(p_hypertable, format('%I.%I', v_nsp, v_dest)::regclass);\n", "", 1)],
+    ),
+    "hypertable_delta_minted_default_acl": (
+        "bench/scratch_relations.sh",
+        "Pre-#949 from_hypertable_copy: a tracking copy's delta keeps the migrating role's default privileges "
+        "(and that role as its owner), so a role they name reads the keys of every write to the hypertable. "
+        "tests/timescale/db/49 stage A catches it.",
+        [("    perform pgpm._scratch_mint(p_hypertable, format('%I.%I', v_nsp, v_delta)::regclass);\n", "", 1)],
+    ),
+    "hypertable_delta_writers_ungranted": (
+        "bench/scratch_relations.sh",
+        "The delta minted owner-only with no grant for the hypertable's writers: the capture trigger inserts as "
+        "the writer, so every write to the hypertable by a role that is not its owner fails 42501 for the "
+        "whole online window. tests/timescale/db/49 stage A catches it.",
+        [("    perform pgpm._regrain_capture_grant(p_hypertable, format('%I.%I', v_nsp, v_delta)::regclass, p_hypertable);\n", "", 1)],
+    ),
+    "hypertable_drain_delta_step_by_name": (
+        "bench/scratch_relations.sh",
+        "Pre-#955 from_hypertable_drain_delta_step: the copy and the delta are <rel>_pgpm_dest and "
+        "<rel>_pgpm_delta by name, so with no copy recorded it drains an operator's table of the delta's name, "
+        "deleting its rows. tests/timescale/db/49 stage B catches it.",
+        [("  v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');     -- #955: by record (drain_delta_step)\n"
+          "  v_delta := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_delta');   -- #955: by record (drain_delta_step)\n",
+          "  v_dest := v_rel || '_pgpm_dest';    -- MUTANT: by name\n  v_delta := v_rel || '_pgpm_delta';\n", 1)],
+    ),
+    "hypertable_drain_delta_by_name": (
+        "bench/scratch_relations.sh",
+        "Pre-#955 from_hypertable_drain_delta: the delta is <rel>_pgpm_delta by name, so with none recorded it "
+        "reads an operator's table of that name as the backlog and drives the step at it. "
+        "tests/timescale/db/49 stage B catches it (the refusal is not its own).",
+        [("  v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');     -- #955: by record (drain_delta)\n"
+          "  v_delta := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_delta');   -- #955: by record (drain_delta)\n",
+          "  v_dest := v_rel || '_pgpm_dest';    -- MUTANT: by name\n  v_delta := v_rel || '_pgpm_delta';\n", 1)],
+    ),
+    "hypertable_drain_appends_step_by_name": (
+        "bench/scratch_relations.sh",
+        "Pre-#955 from_hypertable_drain_appends_step: the copy is <rel>_pgpm_dest by name and nothing checks it "
+        "exists, so with no copy recorded it inserts the hypertable's rows into an operator's table of that "
+        "name. tests/timescale/db/49 stage B catches it.",
+        [("  v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');   -- #955: by record (drain_appends_step)\n"
+          "  if v_dest is null then\n",
+          "  v_dest := v_rel || '_pgpm_dest';   -- MUTANT: by name, unchecked\n  if false then\n", 1)],
+    ),
+    "hypertable_drain_appends_by_name": (
+        "bench/scratch_relations.sh",
+        "Pre-#955 from_hypertable_drain_appends: the copy is <rel>_pgpm_dest by name, so with none recorded it "
+        "takes an operator's table of that name for the copy, reads its watermark and drives the step at it. "
+        "tests/timescale/db/49 stage B catches it (the refusal is not its own).",
+        [("  v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');   -- #955: by record (drain_appends)\n"
+          "  if v_dest is null then\n",
+          "  v_dest := v_rel || '_pgpm_dest';   -- MUTANT: by name\n  if to_regclass(format('%I.%I', v_nsp, v_dest)) is null then\n", 1)],
+    ),
+    "hypertable_cutover_dest_by_name": (
+        "bench/scratch_relations.sh",
+        "Pre-#955 from_hypertable_cutover: the copy is whatever answers to <rel>_pgpm_dest, so with none "
+        "recorded an operator's table of the hypertable's shape is checked as the copy and, holding its rows, "
+        "renamed into its place. tests/timescale/db/49 stage B catches it.",
+        [("  v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');   -- #955: by record (cutover)\n"
+          "  v_dest_oid := case when v_dest is not null then format('%I.%I', v_nsp, v_dest)::regclass end;\n",
+          "  v_dest := v_rel || '_pgpm_dest';   -- MUTANT: by name\n  v_dest_oid := to_regclass(format('%I.%I', v_nsp, v_dest));\n", 1)],
+    ),
+    "hypertable_cutover_delta_by_name": (
+        "bench/scratch_relations.sh",
+        "Pre-#955 from_hypertable_cutover: change tracking is detected by <rel>_pgpm_delta's existence, so after "
+        "an append-only copy an operator's table of that name is taken for the change log (its pre-drain "
+        "refuses, or its keys reconcile the copy and the swap drops it). tests/timescale/db/49 stage B catches it.",
+        [("  v_delta := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_delta');   -- #955: by record (cutover)\n",
+          "  v_delta := v_rel || '_pgpm_delta';   -- MUTANT: by name\n", 1),
+         ("  v_track := v_delta is not null;\n",
+          "  v_track := to_regclass(format('%I.%I', v_nsp, v_delta)) is not null;\n", 1)],
+    ),
+    "hypertable_cutover_drops_fn_by_name": (
+        "bench/scratch_relations.sh",
+        "Pre-#955 from_hypertable_cutover: the swap drops <rel>_pgpm_delta_fn() by the hypertable's CURRENT name, "
+        "so after a RENAME since the copy it drops an operator's function of the new name and leaves the "
+        "copy's. tests/timescale/db/49 stage B catches it.",
+        [("    if v_trgfn_oid is not null and exists (select 1 from pg_proc where oid = v_trgfn_oid) then\n"
+          "      execute format('drop function %s', v_trgfn_oid::regprocedure::text);\n"
+          "    end if;\n",
+          "    execute format('drop function if exists %I.%I()', v_nsp, v_rel || '_pgpm_delta_fn');   -- MUTANT: by name\n", 1)],
+    ),
+    "hypertable_swap_keeps_scratch_record": (
+        "bench/scratch_relations.sh",
+        "The swap without forgetting the record: pgpm.scratch keeps naming the copy, which is now the migrated "
+        "table (and transmute's monolith), as the hypertable's scratch, where uninstall.sql reads it. "
+        "tests/timescale/db/49 stage A catches it.",
+        [("  delete from pgpm.scratch where parent_oid = p_hypertable::oid;\n", "", 1)],
+    ),
+    "uninstall_scratch_record_unread": (
+        "bench/scratch_relations.sh",
+        "uninstall.sql sweeping by the comments alone (pre-#955): a recorded copy, delta and function whose "
+        "comment record is gone are left, the trigger logging every write into a delta nothing drains. "
+        "tests/timescale/db/49 stage C catches it.",
+        [("       order by s.kind desc, s.obj\n    loop\n",
+          "       and false   -- MUTANT: the record unread\n       order by s.kind desc, s.obj\n    loop\n", 1)],
+    ),
+    "scratch_upgrade_fill_dropped": (
+        "bench/upgrade_in_place.sh",
+        "pgpm.scratch with no upgrade fill (#955): a from_hypertable copy made before the record existed is "
+        "not recorded by the upgrade, though it carries the module's comment record, so the cutover refuses "
+        "it and uninstall.sql's record sweep never sees it. bench/upgrade_in_place.sh's scratch-record "
+        "assertion catches it.",
+        [(re.compile(r"^-- Upgrade path: a copy made before the record existed is recorded.*?\nend \$\$;\n",
+                     re.MULTILINE | re.DOTALL),
+          "-- MUTANT: no upgrade fill of pgpm.scratch\n", 1)],
     ),
 }
 
@@ -7911,6 +8124,23 @@ MUTATION_SRC = {
     "hypertable_scratch_dbatch_drop_unqualified": "pgpm_hypertable/install.sql",
     "hypertable_scratch_htail_drop_unqualified": "pgpm_hypertable/install.sql",
     "hypertable_scratch_reads_unqualified": "pgpm_hypertable/install.sql",
+    # #966 W1, the scratch-relation lever
+    "hypertable_copy_drops_dest_by_name": "pgpm_hypertable/install.sql",
+    "hypertable_copy_drops_delta_by_name": "pgpm_hypertable/install.sql",
+    "hypertable_copy_replaces_fn_by_name": "pgpm_hypertable/install.sql",
+    "hypertable_copy_drops_trigger_by_name": "pgpm_hypertable/install.sql",
+    "hypertable_dest_minted_default_acl": "pgpm_hypertable/install.sql",
+    "hypertable_delta_minted_default_acl": "pgpm_hypertable/install.sql",
+    "hypertable_delta_writers_ungranted": "pgpm_hypertable/install.sql",
+    "hypertable_drain_delta_step_by_name": "pgpm_hypertable/install.sql",
+    "hypertable_drain_delta_by_name": "pgpm_hypertable/install.sql",
+    "hypertable_drain_appends_step_by_name": "pgpm_hypertable/install.sql",
+    "hypertable_drain_appends_by_name": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_dest_by_name": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_delta_by_name": "pgpm_hypertable/install.sql",
+    "hypertable_cutover_drops_fn_by_name": "pgpm_hypertable/install.sql",
+    "hypertable_swap_keeps_scratch_record": "pgpm_hypertable/install.sql",
+    "uninstall_scratch_record_unread": "pgpm_core/uninstall.sql",
 }
 
 # name -> the CI track whose job runs it; anything not listed here belongs to the default `perf`
@@ -7992,6 +8222,23 @@ MUTATION_TRACK = {
     "hypertable_scratch_dbatch_drop_unqualified": "timescale",
     "hypertable_scratch_htail_drop_unqualified": "timescale",
     "hypertable_scratch_reads_unqualified": "timescale",
+    # #966 W1: the module's sites, and uninstall.sql's, exist only where from_hypertable_copy can run
+    "hypertable_copy_drops_dest_by_name": "timescale",
+    "hypertable_copy_drops_delta_by_name": "timescale",
+    "hypertable_copy_replaces_fn_by_name": "timescale",
+    "hypertable_copy_drops_trigger_by_name": "timescale",
+    "hypertable_dest_minted_default_acl": "timescale",
+    "hypertable_delta_minted_default_acl": "timescale",
+    "hypertable_delta_writers_ungranted": "timescale",
+    "hypertable_drain_delta_step_by_name": "timescale",
+    "hypertable_drain_delta_by_name": "timescale",
+    "hypertable_drain_appends_step_by_name": "timescale",
+    "hypertable_drain_appends_by_name": "timescale",
+    "hypertable_cutover_dest_by_name": "timescale",
+    "hypertable_cutover_delta_by_name": "timescale",
+    "hypertable_cutover_drops_fn_by_name": "timescale",
+    "hypertable_swap_keeps_scratch_record": "timescale",
+    "uninstall_scratch_record_unread": "timescale",
 }
 
 

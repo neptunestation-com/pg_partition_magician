@@ -40,6 +40,10 @@
 #      resolves to, so a backfill writing one plausible oid everywhere fails too. Likewise
 #      pgpm.config.monolith_oid (issue #672), which untransmute resolves the monolith through and refuses
 #      the table without: it must be the oid of the fixture's own monolith, taken before the degrade.
+#      And pgpm.scratch (issue #955), the record of pgpm_hypertable's copies, which a release before it
+#      did not have: the degrade drops the table, and the upgrade must record a legacy copy, its delta and
+#      its function from the comment records that release kept on them, by identity, and nothing for an
+#      operator's look-alike (mutation scratch_upgrade_fill_dropped).
 #   4. Data survived BY IDENTITY, not by count. The fixture is asymmetric on purpose (3 inserted, 1
 #      deleted, 2 surviving) so that a lost insert and a resurrected delete cannot cancel out into a
 #      row count that still looks right.
@@ -260,6 +264,25 @@ MONO_OID=$(q "$DB" "select to_regclass(format('public.%I', '$MONO'))::oid")
 check "LIVENESS: a regrain is in flight before the degrade" \
   "$(q "$DB" "select pgpm.regrain_step('public.up_t', '$MONO', '100', 50)")" "prepared"
 
+# A from_hypertable copy made before pgpm.scratch existed (#955), as such a release left one: a tracking copy
+# <rel>_pgpm_dest commented `pgpm from_hypertable copy of <oid>`, its delta <rel>_pgpm_delta commented
+# `pgpm from_hypertable horizon <xid>`, the function <rel>_pgpm_delta_fn() beside them. A plain table stands in
+# for the hypertable (this image has no TimescaleDB; the upgrade reads the catalog alone). Beside it, an
+# operator's look-alike: up_x_pgpm_dest, whose comment is not the module's record, which must NOT be recorded.
+run "$DB" "create table public.up_h (ts timestamptz not null, v int);
+           create table public.up_h_pgpm_dest (like public.up_h);
+           create table public.up_h_pgpm_delta (ts timestamptz, pgpm_seq bigint generated always as identity);
+           create function public.up_h_pgpm_delta_fn() returns trigger language plpgsql as 'begin return null; end';
+           create table public.up_x (ts timestamptz);
+           create table public.up_x_pgpm_dest (note text);
+           comment on table public.up_x_pgpm_dest is 'staging copy of up_x, kept by the application';
+           comment on table public.up_h_pgpm_delta is 'pgpm from_hypertable horizon 777';
+           do \$\$ begin execute format('comment on table public.up_h_pgpm_dest is %L',
+                     'pgpm from_hypertable copy of ' || 'public.up_h'::regclass::oid); end \$\$;" >/dev/null
+SCRATCH_WANT=$(q "$DB" "select 'public.up_h'::regclass::oid || ':' || 'public.up_h_pgpm_delta'::regclass::oid || ','
+                             || 'public.up_h'::regclass::oid || ':' || 'public.up_h_pgpm_delta_fn()'::regprocedure::oid || ','
+                             || 'public.up_h'::regclass::oid || ':' || 'public.up_h_pgpm_dest'::regclass::oid")
+
 BODIES_BEFORE=$(q "$DB" "select string_agg(body, ',' order by body) from public.up_t")
 CONFIG_BEFORE=$(q "$DB" "select control_column||'/'||partition_step from pgpm.config
                           where parent_table = 'public.up_t'::regclass")
@@ -272,6 +295,10 @@ echo "$DEGRADE_COLS" | grep ':' | while IFS=: read -r t c; do
   docker exec "$C" psql -U postgres -d "$DB" -qtA \
     -c "alter table $t drop column if exists $c cascade" >/dev/null 2>&1
 done
+
+# ...and the release before pgpm.scratch had no such table at all (#955), so it goes too.
+docker exec "$C" psql -U postgres -d "$DB" -qtA -c "drop table if exists pgpm.scratch" >/dev/null 2>&1
+check "LIVENESS: the degrade really removed pgpm.scratch" "$(q "$DB" "select to_regclass('pgpm.scratch') is null")" "t"
 
 # ASSERTION 1, the liveness witness. Everything below asserts the upgrade put something back; all of it
 # passes against a degrade that did nothing at all.
@@ -323,6 +350,12 @@ check "the upgrade anchored the in-flight regrain's capture (delta/fn)" \
   "$(q "$DB" "select coalesce((regrain_delta_oid = to_regclass('public.up_t_pgpm_regrain_delta')::oid)::text, 'null')
                 || '/' || coalesce((regrain_capture_fn_oid = to_regprocedure('public.up_t_pgpm_regrain_capture()')::oid)::text, 'null')
                 from pgpm.config where parent_table = 'public.up_t'::regclass")" "true/true"
+# ASSERTION 3d (#955), by identity: the upgrade recorded the legacy copy, its delta and its function in
+# pgpm.scratch from the module's comment records, each under the hypertable it names, and recorded nothing for
+# the operator's look-alike. An upgrade that filled nothing reads empty; one that recorded by name, the
+# look-alike too.
+check "the upgrade recorded a legacy copy by its comment record, and only it" \
+  "$(q "$DB" "select coalesce(string_agg(parent_oid || ':' || obj, ',' order by kind), 'none') from pgpm.scratch")" "$SCRATCH_WANT"
 check "rows survived, by identity"                       "$(q "$DB" "select string_agg(body, ',' order by body) from public.up_t")" "$BODIES_BEFORE"
 check "registration survived (control column / step)"    "$(q "$DB" "select control_column||'/'||partition_step from pgpm.config where parent_table = 'public.up_t'::regclass")" "$CONFIG_BEFORE"
 check "the upgrade run was recorded"                     "$(q "$DB" "select count(*)||'/'||max(version) from pgpm.installed")" "2/$(q "$FRESH" "select pgpm.version()")"

@@ -567,6 +567,65 @@ update pgpm.dropped_fk d set validated_at = d.restored_at
                 where c.conrelid = d.referencing_table and c.conname = d.constraint_name
                   and c.contype = 'f' and c.convalidated);
 
+-- pgpm.scratch: the RECORD of the scratch objects pgpm_hypertable makes beside a hypertable it migrates
+-- (#955, #949, #950): the copy <rel>_pgpm_dest, and for a tracking copy the delta <rel>_pgpm_delta and its
+-- trigger function <rel>_pgpm_delta_fn(). One row per hypertable and kind, written in the transaction that
+-- creates the object, so every later step (the drains, the cutover, a re-run copy, uninstall.sql) finds
+-- the object by the oid it was created with and never by the name it was given: an operator's own table
+-- that happens to carry one of those names is never dropped, drained or swapped in. The row is removed
+-- when the object goes (the swap drops the delta and the function and renames the copy into the
+-- hypertable's place). Core's own scratch objects are recorded where they already were: the regrain delta
+-- and capture function in pgpm.config (regrain_delta_oid, regrain_capture_fn_oid, #496) and a regrain's
+-- fine children in pgpm.part.child_oid (#421). See _scratch_mint for the other half of the lever.
+-- parent_oid is an oid, not a regclass: a hypertable dropped by hand leaves its row naming nothing, which
+-- uninstall.sql reads as "the copy may hold the only home of those rows" (#773).
+create table if not exists pgpm.scratch (
+  parent_oid oid  not null,
+  kind       text not null check (kind in ('hypertable_dest', 'hypertable_delta', 'hypertable_delta_fn')),
+  obj        oid  not null,
+  primary key (parent_oid, kind)
+);
+-- Upgrade path: a copy made before the record existed is recorded from the module's earlier record, the
+-- comment the copy put on it (`pgpm from_hypertable copy of <oid>`, #773, and for a tracking copy's delta
+-- `pgpm from_hypertable horizon <xid>`, #654), written in the transaction that created it, so it names
+-- pgpm's own relation and never an operator's. A copy is taken when the hypertable it names still exists
+-- and the copy sits beside it under the name the copy derives from it; a delta (whose comment names no
+-- hypertable) when the relation it was derived from, its name less the suffix, is in its schema, with the
+-- function the copy created beside it. Only kinds with no row yet, so a re-run changes nothing. A copy
+-- made by 0.6.0 or earlier carries no comment and is not recorded: the cutover refuses it and names the
+-- remedy (re-run from_hypertable_copy).
+do $$
+declare r record;
+begin
+  for r in
+    select d.objoid as dest, substring(d.description from '^pgpm from_hypertable copy of ([0-9]+)$')::oid as src
+      from pg_description d join pg_class c on c.oid = d.objoid
+     where d.classoid = 'pg_class'::regclass and d.objsubid = 0 and c.relkind = 'r'
+       and d.description ~ '^pgpm from_hypertable copy of [0-9]+$'
+  loop
+    insert into pgpm.scratch (parent_oid, kind, obj)
+    select r.src, 'hypertable_dest', r.dest
+      from pg_class s join pg_class c on c.oid = r.dest
+     where s.oid = r.src and c.relnamespace = s.relnamespace and c.relname::text = s.relname::text || '_pgpm_dest'
+    on conflict do nothing;
+  end loop;
+  for r in
+    select c.oid as delta, s.oid as src, f.oid as fn
+      from pg_description d
+      join pg_class c on c.oid = d.objoid
+      join pg_class s on s.relnamespace = c.relnamespace and s.relname::text = left(c.relname::text, -11)
+      left join pg_proc f on f.pronamespace = c.relnamespace and f.proname::text = s.relname::text || '_pgpm_delta_fn'
+                         and f.pronargs = 0
+     where d.classoid = 'pg_class'::regclass and d.objsubid = 0 and c.relkind = 'r'
+       and d.description ~ '^pgpm from_hypertable horizon [0-9]+$' and right(c.relname, 11) = '_pgpm_delta'
+  loop
+    insert into pgpm.scratch (parent_oid, kind, obj) values (r.src, 'hypertable_delta', r.delta) on conflict do nothing;
+    if r.fn is not null then
+      insert into pgpm.scratch (parent_oid, kind, obj) values (r.src, 'hypertable_delta_fn', r.fn) on conflict do nothing;
+    end if;
+  end loop;
+end $$;
+
 -- _fk_definition(): pg_get_constraintdef() with the search_path pinned to pg_catalog, so the referenced
 -- table is ALWAYS schema-qualified (#498). A dropped_fk.definition is captured in the transmuting session
 -- and replayed in another: pg_cron's, with the default search_path, on a later maintenance tick or inside
@@ -1852,6 +1911,160 @@ begin
   if v_owner is distinct from (select pg_get_userbyid(relowner) from pg_class where oid = p_child) then
     execute format('alter table %s owner to %I', p_child::text, v_owner);
   end if;
+end;
+$$;
+
+-- ============================== scratch relations (#949, #950, #955) ==============================
+-- A SCRATCH relation is one pgpm makes for its own use beside a table it manages: a regrain's delta
+-- (<rel>_pgpm_regrain_delta) and capture function, a regrain's fine children while they are copied into
+-- and not yet attached, and pgpm_hypertable's copy (<rel>_pgpm_dest), delta (<rel>_pgpm_delta) and capture
+-- function. Each is MINTED one way and RESOLVED one way.
+--
+-- MINTED by _scratch_mint (a function by _scratch_mint_fn), in the transaction that creates it, before that
+-- transaction commits: the parent's owner, and an ACL reset to the owner's alone. Created by whatever role
+-- runs the step, a scratch relation is born with that role's ALTER DEFAULT PRIVILEGES (on Supabase, SELECT
+-- and more to anon and authenticated), and it holds the parent's rows (a copy, a fine child) or the keys of
+-- its in-flight writes (a delta), so a role the defaults name read them by naming the relation, past the
+-- parent's grants and its row security. The resets used to come later (a fine child's at the end of its
+-- sub-range, the hypertable copy's at the swap) or never (the deltas), and the gap between creation and
+-- reset was the window (#949). A delta then gets INSERT for the parent's writers (_regrain_capture_grant),
+-- since the capture trigger writes it as the writer, and nothing else.
+--
+-- RESOLVED from the record made in that same transaction, never from a name rendered from the parent's:
+-- pgpm.config.regrain_delta_oid and regrain_capture_fn_oid (_regrain_capture_names), pgpm.part.child_oid
+-- (_regrain_child_rel), pgpm.scratch for the hypertable's (_scratch_rel). A relation the record does not
+-- name is never dropped, emptied or swapped in, whatever it is called: a name held by one is refused before
+-- anything is created (#955).
+--
+-- And OWNED like the parent for as long as it lives: a table handed to a new owner mid-regrain left its
+-- delta and copies with the old one, and every tick the new owner ran failed 'permission denied' on them
+-- (#950). _scratch_owner_follow re-checks on every tick.
+create or replace function pgpm._scratch_mint(p_parent regclass, p_rel regclass)
+returns void language plpgsql as $$
+begin
+  perform pgpm._own_like_parent(p_parent, p_rel);
+  perform pgpm._acl_reset(p_rel, true);
+end;
+$$;
+
+-- The function half of _scratch_mint: a capture function owned like the parent, so whichever role owns the
+-- parent later can drop it when the next regrain re-mints capture. Its ACL is left at PostgreSQL's default:
+-- EXECUTE is not checked when a trigger fires it.
+create or replace function pgpm._scratch_mint_fn(p_parent regclass, p_fn regprocedure)
+returns void language plpgsql as $$
+declare v_owner oid;
+begin
+  select relowner into v_owner from pg_class where oid = p_parent;
+  if v_owner is distinct from (select proowner from pg_proc where oid = p_fn) then
+    execute format('alter function %s owner to %I', p_fn::text, pg_get_userbyid(v_owner));
+  end if;
+end;
+$$;
+
+-- The relation pgpm.scratch records for p_parent and p_kind, or null when there is none or it is gone.
+create or replace function pgpm._scratch_rel(p_parent regclass, p_kind text)
+returns regclass language sql stable as $$
+  select c.oid::regclass from pgpm.scratch s join pg_class c on c.oid = s.obj
+   where s.parent_oid = p_parent::oid and s.kind = p_kind and c.relkind = 'r';
+$$;
+
+-- Record p_obj as p_parent's scratch object of p_kind in pgpm.scratch, in the transaction that created it,
+-- replacing what an earlier run recorded for that kind.
+create or replace function pgpm._scratch_record(p_parent regclass, p_kind text, p_obj oid)
+returns void language sql as $$
+  insert into pgpm.scratch (parent_oid, kind, obj) values (p_parent::oid, p_kind, p_obj)
+  on conflict (parent_oid, kind) do update set obj = excluded.obj;
+$$;
+
+-- Every scratch object pgpm has recorded for p_parent: the regrain delta and every not-yet-attached copy
+-- (pgpm.config, pgpm.part), the hypertable copy and delta (pgpm.scratch) as relations; the two capture
+-- functions as functions. Only what exists.
+create or replace function pgpm._scratch_objects(p_parent regclass, out rels oid[], out fns oid[])
+returns record language sql stable as $$
+  select array(select c.oid from pg_class c
+                where c.oid in (select f.regrain_delta_oid from pgpm.config f where f.parent_table = p_parent
+                                union all
+                                select p.child_oid from pgpm.part p where p.parent_table = p_parent and not p.attached
+                                union all
+                                select s.obj from pgpm.scratch s where s.parent_oid = p_parent::oid
+                                   and s.kind in ('hypertable_dest', 'hypertable_delta'))
+                order by c.oid),
+         array(select p.oid from pg_proc p
+                where p.oid in (select f.regrain_capture_fn_oid from pgpm.config f where f.parent_table = p_parent
+                                union all
+                                select s.obj from pgpm.scratch s where s.parent_oid = p_parent::oid
+                                   and s.kind = 'hypertable_delta_fn')
+                order by p.oid);
+$$;
+
+-- Ownership follows the parent (#950). Each scratch object recorded for p_parent (_scratch_objects) that is
+-- not owned by p_parent's owner is given it, when this session may (a superuser, or a member of both owners).
+-- When it may not, and cannot act as the current owner either, p_what refuses here, once and up front, naming
+-- the remedy (pgpm.hand_over_scratch, run by a role that may), rather than going on to fail 'permission
+-- denied' on the first of them it touches, every tick, as a regrain did after its table was handed to a new
+-- owner. The remedy leads the message because maintain logs only the first 200 characters of it. A session
+-- that still holds the current owner's privileges goes on: it can grant on the object and work it as before
+-- (_regrain_capture_grant gives the parent's writers, its owner included, what they need). No DDL when every
+-- owner already matches, which is every tick but the first after a hand-over.
+drop function if exists pgpm._scratch_owner_follow(regclass, oid[], oid[], text);
+create or replace function pgpm._scratch_owner_follow(p_parent regclass, p_what text)
+returns void language plpgsql as $$
+declare
+  v_want oid; v_want_n name; r record; v_objs record;
+  v_stuck oid[] := '{}';   -- the owners this session could neither hand over from nor act as
+  v_parent_q text;         -- the parent, schema-qualified and quoted, for the remedy
+begin
+  select c.relowner, quote_ident(n.nspname) || '.' || quote_ident(c.relname) into v_want, v_parent_q
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+  v_want_n := pg_get_userbyid(v_want);
+  select * into v_objs from pgpm._scratch_objects(p_parent);
+  -- Named schema-qualified by %I, never by a regclass's text (which leaves out a schema on the search_path).
+  for r in select c.relowner, n.nspname, c.relname
+             from pg_class c join pg_namespace n on n.oid = c.relnamespace
+            where c.oid = any(v_objs.rels) and c.relowner <> v_want order by c.oid loop
+    begin
+      execute format('alter table %I.%I owner to %I', r.nspname, r.relname, v_want_n);
+    exception when insufficient_privilege then
+      if not pg_has_role(current_user, r.relowner, 'USAGE') then v_stuck := v_stuck || r.relowner; end if;
+    end;
+  end loop;
+  for r in select p.proowner, n.nspname, p.proname, pg_get_function_identity_arguments(p.oid) as args
+             from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+            where p.oid = any(v_objs.fns) and p.proowner <> v_want order by p.oid loop
+    begin
+      execute format('alter function %I.%I(%s) owner to %I', r.nspname, r.proname, r.args, v_want_n);
+    exception when insufficient_privilege then
+      if not pg_has_role(current_user, r.proowner, 'USAGE') then v_stuck := v_stuck || r.proowner; end if;
+    end;
+  end loop;
+  if cardinality(v_stuck) > 0 then
+    raise exception 'pg_partition_magician: run select pgpm.hand_over_scratch(%) as a superuser or a member of both % and %: % of % cannot go on while pgpm''s scratch objects for it are owned by %, not by the table''s owner %, and this session (%) can neither hand them over nor act as their owner. A table handed to a new owner needs them handed over too (docs/reference.md, "Handing a table to a new owner").',
+      quote_literal(v_parent_q), (select string_agg(distinct quote_ident(pg_get_userbyid(o)), ', ') from unnest(v_stuck) o),
+      quote_ident(v_want_n), p_what, p_parent,
+      (select string_agg(distinct quote_ident(pg_get_userbyid(o)), ', ') from unnest(v_stuck) o),
+      quote_ident(v_want_n), quote_ident(current_user);
+  end if;
+end;
+$$;
+
+-- The documented hand-over step (#950): give every scratch object pgpm recorded for p_parent (a regrain's delta,
+-- capture function and not-yet-attached copies, a from_hypertable copy's destination, delta and function) to
+-- p_parent's current owner. Run it, as a superuser or as a role that is a member of both the old owner and the
+-- new, after ALTER TABLE ... OWNER TO on a table pgpm is regraining or migrating, when maintenance runs as a
+-- role that cannot do it itself (a tick run by a superuser does it on its own). Returns how many objects it
+-- handed over. Refuses, as a tick does, when this session cannot.
+create or replace function pgpm.hand_over_scratch(p_parent regclass)
+returns int language plpgsql as $$
+declare v_objs record; v_n int;
+begin
+  perform pgpm._refuse_null_arguments('hand_over_scratch', json_build_object('p_parent', p_parent));
+  select * into v_objs from pgpm._scratch_objects(p_parent);
+  select count(*) into v_n from (
+    select 1 from pg_class c, pg_class t where c.oid = any(v_objs.rels) and t.oid = p_parent and c.relowner <> t.relowner
+    union all
+    select 1 from pg_proc p, pg_class t where p.oid = any(v_objs.fns) and t.oid = p_parent and p.proowner <> t.relowner) x;
+  perform pgpm._scratch_owner_follow(p_parent, 'pgpm.hand_over_scratch');
+  return v_n;
 end;
 $$;
 
@@ -3930,20 +4143,42 @@ end;
 $$;
 
 -- The parent's LIVE capture relations, by identity (#496): the delta and the function whose oids the prepare
--- tick recorded in pgpm.config, under whatever names they carry now. Falls back to the derived names when
--- nothing is recorded, which is a parent that has never regrained (its readers then find no relation and
--- count 0) or a capture minted before the oids were recorded (it sits under the derived name, and a legacy
--- trigger writes there); and likewise when a recorded relation is gone (dropped by hand), since the derived
--- name is where the next prepare will mint. The two are resolved independently, so a function dropped by
--- hand does not lose the delta.
+-- tick recorded in pgpm.config, under whatever names they carry now. delta and fn are NULL when nothing is
+-- recorded (a parent that has never regrained) or the recorded object is gone (dropped by hand), and every
+-- reader then has no relation to act on (#955). They used to fall back to the names derived from the
+-- parent's, and a relation the operator keeps under <rel>_pgpm_regrain_delta was then the "delta":
+-- regrain_cancel on a parent that had never regrained TRUNCATEd it, and untransmute DROPped it with an
+-- operator's <rel>_pgpm_regrain_capture() function. A capture minted before the oids were recorded is
+-- recorded by the upgrade below (#496); should a record be missing anyway with that capture still live, the
+-- derived names are taken only on the evidence that they ARE pgpm's: a pgpm_regrain_capture trigger on one
+-- of the parent's partitions firing the function under the derived name (the trigger is how a pre-#496
+-- capture writes there). Never on the name alone. nsp is the delta's schema when it exists, else the
+-- parent's (the schema the next prepare mints in). The two are resolved independently, so a function
+-- dropped by hand does not lose the delta.
 create or replace function pgpm._regrain_capture_names(
   p_parent regclass, out nsp name, out delta name, out fn name
 ) returns record language plpgsql stable as $$
-declare cfg record; v_nsp name; v_rel name;
+declare cfg record; v_nsp name; v_rel name; d record;
 begin
-  select d.nsp, d.delta, d.fn into nsp, delta, fn from pgpm._regrain_capture_derive(p_parent) d;
+  select * into d from pgpm._regrain_capture_derive(p_parent);
+  nsp := d.nsp;
   select regrain_delta_oid, regrain_capture_fn_oid into cfg from pgpm.config where parent_table = p_parent;
   if not found then return; end if;
+  if cfg.regrain_delta_oid is null and cfg.regrain_capture_fn_oid is null then
+    -- nothing recorded: a live pre-#496 capture, by its trigger, or nothing at all (#955)
+    if exists (select 1 from pg_trigger t
+                 join pg_inherits i on i.inhrelid = t.tgrelid and i.inhparent = p_parent
+                 join pg_proc f on f.oid = t.tgfoid
+                 join pg_namespace fn_n on fn_n.oid = f.pronamespace
+                where t.tgname = 'pgpm_regrain_capture' and f.proname = d.fn and fn_n.nspname = d.nsp) then
+      fn := d.fn;
+      if exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                  where n.nspname = d.nsp and c.relname = d.delta and c.relkind = 'r' and not c.relispartition) then
+        delta := d.delta;
+      end if;
+    end if;
+    return;
+  end if;
   if cfg.regrain_delta_oid is not null then
     select n.nspname, c.relname into v_nsp, v_rel
       from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = cfg.regrain_delta_oid;
@@ -4192,7 +4427,10 @@ begin
   v_delta_reg := format('%I.%I', v_nsp, v_delta)::regclass;
   -- The trigger runs as the WRITER, so the delta is owned like the parent and every role that can write the
   -- parent gets INSERT on it (#496; see _regrain_capture_grant).
-  perform pgpm._own_like_parent(p_parent, v_delta_reg);
+  -- #949: and its ACL reset to the owner's alone, here, in the tick that creates it, before the grants: created
+  -- by the tick's role, it was born with that role's ALTER DEFAULT PRIVILEGES, and a role those name read the
+  -- captured keys of a parent it holds no grant on for the life of the regrain (see _scratch_mint).
+  perform pgpm._scratch_mint(p_parent, v_delta_reg);
   perform pgpm._regrain_capture_grant(p_parent, v_delta_reg, v_src);
 
   execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$
@@ -4210,6 +4448,9 @@ begin
     v_nsp, v_delta, v_keycols_q, v_oldvals_q, v_newvals_q,
     v_nsp, v_delta, v_keycols_q, v_newvals_q);
 
+  -- #950: owned like the parent too, so the role that owns the parent when the next regrain re-mints capture can
+  -- drop it (it used to stay the role's that ran this tick).
+  perform pgpm._scratch_mint_fn(p_parent, format('%I.%I()', v_nsp, v_fn)::regprocedure);
   execute format('create trigger pgpm_regrain_capture after insert or update or delete on %s for each row execute function %I.%I()',
                  v_src::text, v_nsp, v_fn);
   -- ENABLE ALWAYS (#450). CREATE TRIGGER leaves a trigger origin-only, which a session running as
@@ -4299,7 +4540,7 @@ returns bigint language plpgsql stable as $$
 declare v_nsp name; v_delta name; v_n bigint;
 begin
   select nsp, delta into v_nsp, v_delta from pgpm._regrain_capture_names(p_parent);
-  if to_regclass(format('%I.%I', v_nsp, v_delta)) is null then return 0; end if;
+  if v_delta is null then return 0; end if;   -- #955: nothing recorded, nothing to count
   execute format('select count(*) from %I.%I', v_nsp, v_delta) into v_n;
   return v_n;
 end;
@@ -4317,7 +4558,7 @@ begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
   select nsp, delta into v_nsp, v_delta from pgpm._regrain_capture_names(p_parent);
-  if to_regclass(format('%I.%I', v_nsp, v_delta)) is null then return 0; end if;
+  if v_delta is null then return 0; end if;   -- #955: nothing recorded, nothing to count
   execute format('select count(*) from %I.%I where %3$s >= %4$L and %3$s < %5$L',
                  v_nsp, v_delta, quote_ident(cfg.control_column),
                  pgpm._encode(cfg.control_kind, p_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
@@ -4345,7 +4586,7 @@ begin
   cfg := pgpm._control_followed(cfg);
   -- the delta's own schema and name, by its recorded oid (#555), never the parent's current schema
   select nsp, delta into v_nsp, v_delta from pgpm._regrain_capture_names(p_parent);
-  if to_regclass(format('%I.%I', v_nsp, v_delta)) is null then return; end if;
+  if v_delta is null then return; end if;   -- #955: nothing recorded, nothing to purge
   execute format('delete from %I.%I where not (%3$s >= %4$L and %3$s < %5$L)',
                  v_nsp, v_delta, quote_ident(cfg.control_column),
                  pgpm._encode(cfg.control_kind, p_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz), pgpm._encode(cfg.control_kind, p_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));
@@ -4391,7 +4632,7 @@ begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
   select nsp, delta into v_dnsp, v_delta from pgpm._regrain_capture_names(p_parent);
-  if to_regclass(format('%I.%I', v_dnsp, v_delta)) is null then return 0; end if;
+  if v_delta is null then return 0; end if;   -- #955: nothing recorded, nothing to reconcile
   v_src := pgpm._regrain_child_rel(p_parent, p_child);
   if v_src is null then
     raise exception 'pg_partition_magician: internal error reconciling % -- the source pgpm.part records for % no longer exists, so its captured changes cannot be reread from it; refusing rather than discarding them.',
@@ -4766,7 +5007,7 @@ returns text language plpgsql stable as $$
 declare v_nsp name; v_delta name; v_delta_reg regclass; v_has_q text; v_want_q text;
 begin
   select nsp, delta into v_nsp, v_delta from pgpm._regrain_capture_names(p_parent);
-  v_delta_reg := to_regclass(format('%I.%I', v_nsp, v_delta));
+  if v_delta is not null then v_delta_reg := format('%I.%I', v_nsp, v_delta)::regclass; end if;   -- #955: recorded, or none
   select string_agg(format('%I %s', a.attname, format_type(a.atttypid, a.atttypmod)), ', ' order by k.ord)
     into v_want_q
     from pg_index i
@@ -4774,8 +5015,8 @@ begin
     join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
    where i.indexrelid = p_keyidx;
   if v_delta_reg is null then
-    return format('change capture''s delta table %I.%I is gone; change capture is re-minted for the key (%s)',
-                  v_nsp, v_delta, v_want_q);
+    return format('change capture''s delta table (oid %s, recorded in pgpm.config) is gone; change capture is re-minted for the key (%s)',
+                  coalesce((select regrain_delta_oid::text from pgpm.config where parent_table = p_parent), 'none'), v_want_q);
   end if;
   select string_agg(format('%I %s', attname, format_type(atttypid, atttypmod)), ', ' order by attnum)
     into v_has_q
@@ -4976,7 +5217,7 @@ begin
   -- another relation, or none, once the parent has been moved by ALTER TABLE ... SET SCHEMA: the cancel
   -- emptied whatever bore that name there and left the real delta holding its captured rows.
   select nsp, delta into v_dnsp, v_delta from pgpm._regrain_capture_names(p_parent);
-  if to_regclass(format('%I.%I', v_dnsp, v_delta)) is not null then
+  if v_delta is not null then   -- #955: the recorded delta, or nothing
     execute format('truncate %I.%I', v_dnsp, v_delta);
   end if;
 
@@ -5079,7 +5320,7 @@ begin
     execute format('drop trigger if exists pgpm_regrain_capture on %s', v_src::text);
     execute format('drop trigger if exists pgpm_regrain_truncate_guard on %s', v_src::text);
     select nsp, delta into v_dnsp, v_delta from pgpm._regrain_capture_names(p_parent);
-    if to_regclass(format('%I.%I', v_dnsp, v_delta)) is not null then
+    if v_delta is not null then   -- #955: the recorded delta, or nothing
       execute format('delete from %I.%I', v_dnsp, v_delta);
       get diagnostics v_purged = row_count;
     end if;
@@ -5488,8 +5729,14 @@ begin
   -- #496: a role granted DML on the parent after the prepare tick gets INSERT on the delta from the next
   -- tick on, rather than 42501 until the swap. Grants only what is missing, so this is a no-op most ticks.
   -- #843: and a role granted DML on the source itself, which writes it directly, gets it too.
+  -- #950: and before either, the scratch objects this regrain works (the delta, the capture function and every
+  -- not-yet-attached copy) are owned like the parent as it is NOW, not as it was when each was minted: a table
+  -- handed to a new owner mid-regrain left them with the old one, and every tick the new owner ran failed
+  -- 'permission denied' on the delta. Re-owned when this session may, else refused here with the hand-over
+  -- statements (_scratch_owner_follow). A no-op whenever the owners match.
+  perform pgpm._scratch_owner_follow(p_parent, 'the regrain');
   select nsp, delta into v_dnsp, v_delta_name from pgpm._regrain_capture_names(p_parent);   -- #555: by oid
-  v_delta_reg := to_regclass(format('%I.%I', v_dnsp, v_delta_name));
+  v_delta_reg := case when v_delta_name is not null then format('%I.%I', v_dnsp, v_delta_name)::regclass end;   -- #955
   if v_delta_reg is not null then perform pgpm._regrain_capture_grant(p_parent, v_delta_reg, v_child); end if;
 
   -- #785: the copies must still have the parent's columns. They are standalone tables made LIKE the
@@ -5748,6 +5995,10 @@ begin
     if to_regclass(format('%I.%I', v_sub_nsp, v_sub_name)) is null then
       execute format('create table %I.%I (like %I.%I including defaults including generated including storage including indexes including constraints excluding identity)',
                      v_sub_nsp, v_sub_name, v_nsp, v_rel);
+      -- #949: the parent's owner and an owner-only ACL from the tick that creates it, before a row is copied in.
+      -- The reset used to wait for the sub-range's last short batch (below), and between ticks a role the
+      -- creating role's default privileges name read every row copied so far, past the parent's row security.
+      perform pgpm._scratch_mint(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);
       execute format('alter table %I.%I add constraint %I check (%I >= %L and %I < %L)',
                      v_sub_nsp, v_sub_name, (v_sub_name || '_ck'), cfg.control_column, v_lo_lit, cfg.control_column, v_hi_lit);
       -- #348: give the fine child its own already-validated copy of every outgoing FK the parent
@@ -5965,7 +6216,7 @@ begin
   -- so the next regrain of this parent starts from an empty one and status() does not report a phantom
   -- backlog.
   select nsp, delta into v_dnsp, v_delta_name from pgpm._regrain_capture_names(p_parent);   -- #555: by oid
-  if to_regclass(format('%I.%I', v_dnsp, v_delta_name)) is not null then
+  if v_delta_name is not null then   -- #955: the recorded delta, or nothing
     execute format('truncate %I.%I', v_dnsp, v_delta_name);
   end if;
   -- re-add the FK(s) this swap dropped, against the new parent (the copies now hold every key). Only if WE
@@ -9398,8 +9649,9 @@ begin
   -- the per-parent regrain change-capture apparatus (#267) is a side relation, not a partition, so the
   -- parent's DROP above does not take it. Drop it here or untransmute leaves it orphaned. Names were
   -- resolved up front, before the parent went away.
-  execute format('drop table if exists %I.%I', v_cnsp, v_cdelta);   -- #555: where they are, not the parent's schema
-  execute format('drop function if exists %I.%I()', v_cnsp, v_cfn);
+  -- #555: where they are, not the parent's schema; #955: only what pgpm.config recorded, never a namesake
+  if v_cdelta is not null then execute format('drop table if exists %I.%I', v_cnsp, v_cdelta); end if;
+  if v_cfn is not null then execute format('drop function if exists %I.%I()', v_cnsp, v_cfn); end if;
 
   -- forget all pgpm state for this table (matched by the dropped parent's oid, which p_parent still
   -- carries), and log the reversal against the restored table.

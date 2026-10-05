@@ -11,7 +11,9 @@
 -- being owned by the old one. The contract: the delta grants INSERT to the source's owner and the parent's
 -- owner too (beside the ACL grantees, and not to the delta's own owner, whose rights are implicit), from the
 -- prepare tick on and, for an owner changed mid-regrain, from the next tick; their writes are captured and
--- survive the swap; and nobody else is granted.
+-- survive the swap; and nobody else is granted. Since #950 the delta also FOLLOWS the parent's owner (each
+-- tick gives it the parent's owner as it is then), so after the parent is re-owned to g262_par it is
+-- g262_par's, whose rights are implicit, and the grants go to the other owners.
 --
 -- Fixture, asymmetric on purpose: one monolith [0, 300) holding ids 1..200, owned by g262_old with its
 -- partitions, then the parent re-owned to g262_new (the delta's owner) before auto-regrain to 50 starts:
@@ -74,19 +76,19 @@ alter table public.g262_p0000000000000000000_to_0000000000000000300 owner to g26
 alter table public.g262 owner to g262_par;                                              -- mid-regrain
 call pgpm.maintain('public.g262');   -- reconciles id 10's capture; grants re-synced
 select ok(pgpm._regrain_capture_active('public.g262', 'g262_p0000000000000000000_to_0000000000000000300')
-          and (select pg_get_userbyid(relowner) = 'g262_new' from pg_class where oid = 'public.g262_pgpm_regrain_delta'::regclass)
+          and (select pg_get_userbyid(relowner) = 'g262_par' from pg_class where oid = 'public.g262_pgpm_regrain_delta'::regclass)
           and not has_table_privilege('g262_src', 'public.g262', 'DELETE')
           and not has_table_privilege('g262_par', 'public.g262_p0000000000000000000_to_0000000000000000300', 'SELECT')
           and (select relacl is null from pg_class where oid = 'public.g262'::regclass)
           and (select relacl is null from pg_class where oid = 'public.g262_p0000000000000000000_to_0000000000000000300'::regclass),
-          'LIVENESS: the run is still in flight past both re-owns, the delta is still g262_new''s, g262_src holds nothing on the parent nor g262_par on the source, and neither table has an ACL naming its owner');
+          'LIVENESS: the run is still in flight past both re-owns, the delta follows the parent to g262_par (#950), g262_src holds nothing on the parent nor g262_par on the source, and neither table has an ACL naming its owner');
 
 select is((select array_agg(pg_get_userbyid(a.grantee)::text order by pg_get_userbyid(a.grantee))
              from pg_class c cross join lateral aclexplode(c.relacl) a
             where c.oid = 'public.g262_pgpm_regrain_delta'::regclass and a.privilege_type = 'INSERT'
               and a.grantee <> c.relowner),
-          array['g262_old', 'g262_par', 'g262_src'],
-          'the delta grants INSERT to exactly the three owners (the two re-owned mid-regrain included), not to the reader');
+          array['g262_old', 'g262_src'],
+          'the delta grants INSERT to exactly the two owners that do not own it (g262_src, re-owned mid-regrain, included; g262_par owns it now), not to the reader');
 
 set role g262_src;
 select lives_ok($$ delete from public.g262_p0000000000000000000_to_0000000000000000300 where id in (20, 30) $$,
