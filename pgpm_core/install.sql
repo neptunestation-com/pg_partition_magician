@@ -2684,6 +2684,15 @@ begin
       -- of an explicit instruction for CASCADE.)
       v_cross := pgpm._crossing_keys(p_parent, r.lo, r.hi);
       if coalesce(array_length(v_cross, 1), 0) > 0 then
+        -- #890: the DELETE below reads the PARENT's rows as the caller, under the parent's row-level
+        -- security, as _crossing_keys reads the referencing tables (#873). Filtered, it deletes only the
+        -- referenced rows the policies admit, the declared ON DELETE reaches only their referencing rows,
+        -- and the hidden keys' references refuse the dispatched detach forever. On a time grid nothing
+        -- has read the parent before this point (the frontier is now()), so it is asked here, before the
+        -- write block is lifted or anything is deleted, and outside the handler below: a refusal is the
+        -- caller's to read, not a fail_retain_crossing to retry every tick.
+        perform pgpm._refuse_filtered_reads(p_parent, 'delete the referenced rows of a retiring partition from',
+          'retention would honour the declared ON DELETE for the referencing rows of those alone, and the detach would then be refused by the others');
         select format_type(a.atttypid, a.atttypmod) into v_coltype
           from pg_attribute a where a.attrelid = p_parent and a.attname = cfg.control_column;
         v_lo_lit := pgpm._encode(cfg.control_kind, r.lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz);
@@ -6154,10 +6163,11 @@ $$;
 -- row-level security without saying so, and this is asked of the relation each read ACTUALLY reads, not
 -- only the parent: the write frontier (_frontier_native), regrain_step's source, untransmute's gate,
 -- _archive_step (the parent and the partition, before any strategy runs), the sampling checks, retire's
--- referencing tables (_crossing_keys), incoming_fk_orphans' two sides, pgpm_archive's readers, the
--- hypertable drains, and the cutover again under its lock. tests/241 classifies every public entry point
--- from the catalog (the modules' halves are tests/archive/db/38 and tests/timescale/db/46), so a new
--- one that reads rows is refused here or fails that file until someone decides it reads none.
+-- referencing tables (_crossing_keys) and the parent its crossing DELETE reads (#890), incoming_fk_orphans'
+-- two sides, pgpm_archive's readers, the hypertable drains, and the cutover again under its lock. tests/241
+-- classifies every public entry point from the catalog (the modules' halves are tests/archive/db/38 and
+-- tests/timescale/db/46), so a new one that reads rows is refused here or fails that file until someone
+-- decides it reads none.
 create or replace function pgpm._refuse_filtered_reads(p_table regclass, p_doing text, p_consequence text)
 returns void language plpgsql stable as $$
 begin

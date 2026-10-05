@@ -3133,9 +3133,11 @@ $$;''',
         "The NDJSON archive_fn transport builds its chunk key inline, <prefix><schema>.<table>_<stem>.ndjson, "
         "instead of asking archive._object_key, so a namesake's chunk PUTs over a dropped table's only copy. "
         "One site, archive._encode_upload_ndjson_single's key line.",
-        [("  v_key := archive._object_key(p_parent, cfg.prefix, pcfg.control_kind, p_lo, '.ndjson');\n",
+        [("  v_key := archive._object_key(p_parent, cfg.prefix, pcfg.control_kind, p_lo,\n"
+          "                               case when p_compress then '.ndjson.gz' else '.ndjson' end);\n",
           "  v_key := cfg.prefix || quote_ident(v_nsp) || '.' || quote_ident(v_rel)\n"
-          "           || '_' || archive._object_stem(pcfg.control_kind, p_lo) || '.ndjson';   -- MUTANT\n", 1)],
+          "           || '_' || archive._object_stem(pcfg.control_kind, p_lo)\n"
+          "           || case when p_compress then '.ndjson.gz' else '.ndjson' end;   -- MUTANT\n", 1)],
     ),
     "archive_parquet_strategy_key_inline": (
         "bench/archive_key_owner_every_path.sh",
@@ -6880,6 +6882,62 @@ select is(
         [("    'p_anchor', p_anchor, 'p_regrain_batch', p_regrain_batch, 'p_paused', p_paused,\n",
           "    'p_anchor', p_anchor, 'p_retain', p_retain, 'p_regrain_batch', p_regrain_batch, 'p_paused', p_paused,\n", 1)],
     ),
+    # Issue #890, "Archive object keys" bullet 1: one mutation per site of the whole-key claim. All break
+    # bench/archive_key_full_claim.sh through tests/archive/db/40.
+    "archive_object_key_whole_unclaimed": (
+        "bench/archive_key_full_claim.sh",
+        "Pre-#890 key: archive._owned_key claims the key's BASE only, so a synchronous export of an untracked "
+        "relation named <table>_<stem> (archive._resolve_child accepts any relation in the parent's schema) "
+        "spells <prefix><schema>.<table>_<stem><ext>, a chunk key of <table>, under a base of its own, and "
+        "PUTs over the chunk retire() left as the only copy of its rows; the other way round a chunk PUTs over "
+        "the export. One site, the one function that assembles every key. tests/archive/db/40 parts A to D "
+        "catch it (the chunk object reads 7:export,8:export; the chunk of part B overwrites the export).",
+        [("  v_held := archive._claim_object_key(v_key, p_parent, v_kind);\n"
+          "  if (v_held.parent_oid, v_held.kind) is distinct from (p_parent::oid, v_kind) and v_owner = p_parent::oid then\n"
+          "    v_key := v_base_q || '.' || p_parent::oid::text || p_tail;\n"
+          "    v_held := archive._claim_object_key(v_key, p_parent, v_kind);\n"
+          "  end if;\n"
+          "  if (v_held.parent_oid, v_held.kind) is distinct from (p_parent::oid, v_kind) then\n",
+          "  if false then   -- MUTANT: the whole key is never claimed\n", 1)],
+    ),
+    "archive_ndjson_gz_outside_claim": (
+        "bench/archive_key_full_claim.sh",
+        "The NDJSON archive_fn transport asks for its key with the `.ndjson` tail and appends `.gz` after the "
+        "claim, the pre-#890 shape, so a compressed chunk claims <key>.ndjson while it writes <key>.ndjson.gz, "
+        "and a compressed export spelling that object finds the whole key free and PUTs over it. One site. "
+        "tests/archive/db/40 part C catches it (the claim does not name the object; its bytes change).",
+        [("  v_key := archive._object_key(p_parent, cfg.prefix, pcfg.control_kind, p_lo,\n"
+          "                               case when p_compress then '.ndjson.gz' else '.ndjson' end);\n"
+          "  if p_compress then\n",
+          "  v_key := archive._object_key(p_parent, cfg.prefix, pcfg.control_kind, p_lo, '.ndjson');\n"
+          "  if p_compress then\n"
+          "    v_key := v_key || '.gz';   -- MUTANT: after the claim\n", 1)],
+    ),
+    "archive_object_key_claim_unseeded": (
+        "bench/archive_key_full_claim.sh",
+        "Install claims no whole key from pgpm.archive_ledger: an installation upgraded to the release with "
+        "archive.object_key_claim starts with none, so a chunk archived before the upgrade is unprotected, and "
+        "an export whose key spells it PUTs over the only copy of its rows. tests/archive/db/40 part E re-runs "
+        "the seed the way a re-install does and requires the claim it makes.",
+        [("     where l.s3_key is not null\n"
+          "     order by l.s3_key, l.archived_at, l.parent_table::oid\n",
+          "     where false\n"
+          "     order by l.s3_key, l.archived_at, l.parent_table::oid\n", 1)],
+    ),
+    # Issue #890, "Reads under RLS" bullet 1: retire()'s crossing DELETE reads the parent as the caller.
+    # Breaks bench/retire_crossing_parent_rls.sh through tests/266.
+    "retire_crossing_parent_rls_unasked": (
+        "bench/retire_crossing_parent_rls.sh",
+        "Pre-#890 retire(): the crossing DELETE reads the parent under the caller's row-level security and "
+        "nothing asks pgpm._refuse_filtered_reads of the parent first (on a time grid the frontier is now(), "
+        "so nothing else reads it). A non-BYPASSRLS owner of a FORCE'd parent deletes only the referenced "
+        "rows its policy admits, the declared CASCADE reaches their referencing rows alone, and the detach it "
+        "dispatches is refused forever by the hidden keys' references. One site. tests/266 catches it (no "
+        "refusal; id 1 and its referencing row are gone; retain_crossing and retain_detach are logged).",
+        [("        perform pgpm._refuse_filtered_reads(p_parent, 'delete the referenced rows of a retiring partition from',\n"
+          "          'retention would honour the declared ON DELETE for the referencing rows of those alone, and the detach "
+          "would then be refused by the others');\n", "", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
@@ -6949,6 +7007,9 @@ MUTATION_SRC = {
     "archive_object_key_session_zone": "pgpm_archive/install.sql",
     "archive_object_key_reusable_name": "pgpm_archive/install.sql",
     "archive_object_key_owner_unseeded": "pgpm_archive/install.sql",
+    "archive_object_key_whole_unclaimed": "pgpm_archive/install.sql",
+    "archive_ndjson_gz_outside_claim": "pgpm_archive/install.sql",
+    "archive_object_key_claim_unseeded": "pgpm_archive/install.sql",
     "archive_child_key_unclaimed": "pgpm_archive/install.sql",
     "archive_object_key_unclaimed": "pgpm_archive/install.sql",
     "archive_to_s3_key_inline": "pgpm_archive/install.sql",

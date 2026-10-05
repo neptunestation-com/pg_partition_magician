@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- **An export and a chunk never write one object key** (#890, "Archive object keys" bullet 1). An object key
+  was claimed by its BASE, `<prefix><schema>.<name>`, and a chunk's key (`<base>_<stem><ext>`) and an
+  export's (`<base'><ext>`, named after the child) have different bases, so `archive.to_s3('public.evt',
+  'evt_0', ...)` of an untracked relation named like a chunk PUT `<prefix>public.evt_0.ndjson` over the chunk
+  `retire()` had left as the only copy of its rows, while both claims and the ledger recorded it (and a chunk
+  could PUT over such an export the other way round). Every key is now also claimed whole in
+  `archive.object_key_claim`, by parent and kind, before its PUT; a writer that finds its key another's
+  takes the oid shape, or is refused when that is taken too; the compressed NDJSON transport's `.gz` is
+  inside the claimed key; and install claims every key `pgpm.archive_ledger` records. Test
+  `tests/archive/db/40`, guard `bench/archive_key_full_claim.sh`, mutations
+  `archive_object_key_whole_unclaimed`, `archive_ndjson_gz_outside_claim` and
+  `archive_object_key_claim_unseeded`.
+- **`retire()` refuses a crossing `DELETE` the parent's row-level security would filter** (#890, "Reads
+  under RLS" bullet 1). The #873 lever asked the referencing tables but not the parent the crossing `DELETE`
+  reads, and on a time grid nothing else reads it first, so a non-`BYPASSRLS` owner of a `FORCE`'d parent
+  deleted only the referenced rows its policy admits, the declared `CASCADE` reached their referencing rows
+  alone, and the dispatched detach was refused forever by the rest. `retire()` now asks
+  `pgpm._refuse_filtered_reads` of the parent before the `DELETE`, changing nothing when it refuses. Test
+  `tests/266`, guard `bench/retire_crossing_parent_rls.sh`, mutation `retire_crossing_parent_rls_unasked`.
 - **`transmute` carries a policy whose expression names the table itself** (#897). The cutover replayed the
   table's policies onto the staging parent `<rel>_pgpm_new` before the renames, and `pg_get_expr` qualifies a
   reference to the outer row with the table's own name (a correlated subquery's `m.tenant = t.org`, and `org`
