@@ -953,6 +953,7 @@ run_perf() {
     "bench/regrain_capture_owner_grant.sh pgpm_perf236"
     "bench/untransmute_primary_key_name.sh pgpm_perf231"
     "bench/identity_sequence_name.sh pgpm_perf232"
+    "bench/incoming_fk_orphans_match_type.sh pgpm_perf239"
   )
   local selected=()
   local n=${#guards[@]} idx

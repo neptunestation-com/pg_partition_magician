@@ -2623,9 +2623,10 @@ pgpm.incoming_fk_orphans(p_parent regclass)
   returns table (referencing_table regclass, constraint_name name, orphan_rows bigint)
 ```
 
-For each re-added-but-unvalidated FK, the count of orphan rows blocking validation (referencing rows whose
-non-null FK columns match no parent key). Handles composite FKs. Use it to find what to clear before
-`validate_incoming_fks`.
+For each re-added-but-unvalidated FK, the count of orphan rows blocking validation, under the key's own match
+type: for `MATCH SIMPLE` (the default), referencing rows with no FK column null that match no parent key; for
+`MATCH FULL`, those plus every row with some but not all of its FK columns null, which `VALIDATE` refuses
+whatever the parent holds. Handles composite FKs. Use it to find what to clear before `validate_incoming_fks`.
 
 ### `suspend_incoming_fks`
 

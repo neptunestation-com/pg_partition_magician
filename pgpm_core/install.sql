@@ -11013,13 +11013,17 @@ end;
 $$;
 
 -- incoming_fk_orphans(): for each preserve-managed FK that is re-added but not yet validated, count the
--- orphan rows blocking validation -- referencing rows whose (non-null) FK columns match no parent key.
+-- orphan rows blocking validation, under the key's own match type (#909). MATCH SIMPLE (and PARTIAL,
+-- which PostgreSQL does not implement) exempts a row with ANY key column null and counts one whose
+-- columns match no parent key. MATCH FULL exempts only a row with EVERY key column null: one with some
+-- null and some not is refused by VALIDATE whatever the parent holds, so it is an orphan outright.
 -- The operator uses this to find and clear what blocks validate_incoming_fks(). Reads the column
--- mapping from the live (NOT VALID) constraint in pg_constraint; handles composite FKs.
+-- mapping and match type from the live (NOT VALID) constraint in pg_constraint; handles composite FKs.
 create or replace function pgpm.incoming_fk_orphans(p_parent regclass)
 returns table (referencing_table regclass, constraint_name name, orphan_rows bigint)
 language plpgsql as $$
-declare r pgpm.dropped_fk%rowtype; c pg_constraint%rowtype; v_join_q text; v_notnull_q text; v_cnt bigint;
+declare r pgpm.dropped_fk%rowtype; c pg_constraint%rowtype; v_join_q text; v_notnull_q text; v_allnull_q text;
+        v_orphan text; v_cnt bigint;
 begin
   for r in select * from pgpm.dropped_fk
             where parent_table = p_parent and restored_at is not null and validated_at is null order by id loop
@@ -11033,13 +11037,21 @@ begin
     perform pgpm._refuse_filtered_reads(c.confrelid::regclass, 'count the orphans against',
       'a referencing row whose key those rows do not hold would be counted as an orphan');
     select string_agg(format('r.%I = p.%I', fa.attname, pa.attname), ' and '),
-           string_agg(format('r.%I is not null', fa.attname), ' and ')
-      into v_join_q, v_notnull_q
+           string_agg(format('r.%I is not null', fa.attname), ' and '),
+           string_agg(format('r.%I is null', fa.attname), ' and ')
+      into v_join_q, v_notnull_q, v_allnull_q
       from unnest(c.conkey, c.confkey) with ordinality as u(fk_att, pk_att, ord)
       join pg_attribute fa on fa.attrelid = c.conrelid and fa.attnum = u.fk_att
       join pg_attribute pa on pa.attrelid = c.confrelid and pa.attnum = u.pk_att;
-    execute format('select count(*)::bigint from %s r where %s and not exists (select 1 from %s p where %s)',
-                   c.conrelid::regclass::text, v_notnull_q, c.confrelid::regclass::text, v_join_q) into v_cnt;
+    -- #909: the key's match type decides which null-bearing rows VALIDATE refuses.
+    if c.confmatchtype = 'f' then
+      v_orphan := format('not (%1$s) and (not (%2$s) or not exists (select 1 from %3$s p where %4$s))',
+                         v_allnull_q, v_notnull_q, c.confrelid::regclass::text, v_join_q);
+    else
+      v_orphan := format('%1$s and not exists (select 1 from %2$s p where %3$s)',
+                         v_notnull_q, c.confrelid::regclass::text, v_join_q);
+    end if;
+    execute format('select count(*)::bigint from %s r where %s', c.conrelid::regclass::text, v_orphan) into v_cnt;
     referencing_table := r.referencing_table; constraint_name := r.constraint_name; orphan_rows := v_cnt;
     return next;
   end loop;

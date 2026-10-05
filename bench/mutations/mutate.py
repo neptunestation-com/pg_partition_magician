@@ -7020,6 +7020,28 @@ select is(
           "               and att.attacl is not null and a.privilege_type in ('INSERT', 'UPDATE')) g   -- MUTANT: no owners\n",
           1)],
     ),
+    "incoming_fk_orphans_simple_only": (
+        "bench/incoming_fk_orphans_match_type.sh",
+        "Issue #909, the pre-fix shape: incoming_fk_orphans counts with MATCH SIMPLE's predicate (every key "
+        "column non-null and no parent row) for every key, never reading confmatchtype. A MATCH FULL key's "
+        "partly-null rows, which VALIDATE refuses, are not counted: the key reads 1 orphan where it has 3, and "
+        "0 while VALIDATE still refuses it. One site, the branch on the match type. tests/265 catches it.",
+        [("    if c.confmatchtype = 'f' then\n"
+          "      v_orphan := format('not (%1$s) and (not (%2$s) or not exists",
+          "    if false then\n"
+          "      v_orphan := format('not (%1$s) and (not (%2$s) or not exists", 1)],
+    ),
+    "incoming_fk_orphans_full_everywhere": (
+        "bench/incoming_fk_orphans_match_type.sh",
+        "Issue #909, the plausible over-fix: apply MATCH FULL's predicate (a partly-null row is an orphan) to "
+        "every key. A MATCH SIMPLE key exempts a row with any key column null, so its null-bearing rows are "
+        "counted though VALIDATE accepts them: the key reads 3 orphans where it has 2, and never reaches 0 "
+        "while it validates. One site, the branch on the match type. tests/265 catches it.",
+        [("    if c.confmatchtype = 'f' then\n"
+          "      v_orphan := format('not (%1$s) and (not (%2$s) or not exists",
+          "    if true then\n"
+          "      v_orphan := format('not (%1$s) and (not (%2$s) or not exists", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
