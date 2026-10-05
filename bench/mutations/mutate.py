@@ -4636,9 +4636,50 @@ $$;''',
         "Pre-#601 test.sh: the timescale and observe tracks call a pgTAP file failed on `not ok`, "
         "'# Looks like you failed' or ERROR:, and not on '# Looks like you planned N tests but ran M', so a "
         "file whose assertion silently never ran (over zero rows, or deleted without lowering plan()) passes "
-        "both tracks while pg_prove fails it. Two sites, one per track, the exact pre-#601 pattern.",
+        "both tracks while pg_prove fails it. Four sites, two per track: the exact pre-#601 pattern, and "
+        "the #918 count of the assertions that ran against the plan line taken out.",
         [("grep -qE '^not ok|^# Looks like you (failed|planned)|ERROR:'",
-          "grep -qE '^not ok|^# Looks like you failed|ERROR:'", 2)],
+          "grep -qE '^not ok|^# Looks like you failed|ERROR:'", 2),
+         ("ERROR:' \\\n         || [ -z \"$planned\" ] || [ \"$ran\" != \"$planned\" ]; then\n",
+          "ERROR:'; then\n", 1),
+         ("ERROR:' \\\n       || [ -z \"$planned\" ] || [ \"$ran\" != \"$planned\" ]; then echo",
+          "ERROR:'; then echo", 1)],
+    ),
+    "tap_verdict_reads_finish_only": (
+        "bench/tap_verdict.sh",
+        "Pre-#918 test.sh: the timescale and observe verdicts read a plan shortfall only from finish()'s "
+        "'# Looks like you planned' line, and pgTAP prints that line from finish() alone, so a file that "
+        "plans 3, runs 2 and never calls finish() exits psql 0 with no `not ok` and no ERROR: and passes "
+        "both tracks while pg_prove fails it. Two sites, one per track: the count of the assertions that "
+        "ran against the 1..N plan line taken out of the verdict.",
+        [("ERROR:' \\\n         || [ -z \"$planned\" ] || [ \"$ran\" != \"$planned\" ]; then\n",
+          "ERROR:'; then\n", 1),
+         ("ERROR:' \\\n       || [ -z \"$planned\" ] || [ \"$ran\" != \"$planned\" ]; then echo",
+          "ERROR:'; then echo", 1)],
+    ),
+    "tap_verdict_count_ends_track": (
+        "bench/tap_verdict.sh",
+        "#918's count without its `|| true`: grep -c exits 1 when it counts no assertion, so under test.sh's "
+        "`set -euo pipefail` a file that errors before its first assertion ends the timescale or observe track "
+        "at that file with no verdict, no teardown and the rest unrun (#819's crash, by another road). Two "
+        "sites, one per track.",
+        [("ran=$(echo \"$out\" | grep -cE '^(not )?ok [0-9]+( |$)' || true)\n",
+          "ran=$(echo \"$out\" | grep -cE '^(not )?ok [0-9]+( |$)')\n", 2)],
+    ),
+    "clean_run_perf_entry_dropped": (
+        "bench/guards_run_on_clean_code.sh",
+        "Pre-#917 test.sh: write_block_identity.sh, a guard discriminate.sh drives against three mutants, is in "
+        "no track's run, so it never meets the unmodified module and a copy of it broken enough to fail "
+        "against everything is scored as catching all three. One site: its entry in run_perf's guard list.",
+        [('    "bench/write_block_identity.sh pgpm_wbident"\n', '', 1)],
+    ),
+    "clean_run_timescale_call_commented": (
+        "bench/guards_run_on_clean_code.sh",
+        "Pre-#917 test.sh for a timescale wrapper: hypertable_late_appends.sh's run_timescale call commented "
+        "out, so test.sh still NAMES the guard (in a comment) but no track runs it against the unmodified "
+        "module, and only its mutants ever exercise it. One site.",
+        [('    bash "$(dirname "$0")/bench/hypertable_late_appends.sh" pgpm_test-timescale pgpm_htlate || fail=1\n',
+          '    # bash "$(dirname "$0")/bench/hypertable_late_appends.sh" pgpm_test-timescale pgpm_htlate || fail=1\n', 1)],
     ),
     "tap_verdict_ignores_psql_exit": (
         "bench/tap_verdict.sh",
@@ -7617,6 +7658,11 @@ MUTATION_SRC = {
     "throws_ilike_unpinned": "tests/72_transmute_attributes_test.sql",
     "tap_verdict_misses_plan_shortfall": "test.sh",
     "tap_verdict_ignores_psql_exit": "test.sh",
+    "tap_verdict_reads_finish_only": "test.sh",
+    "tap_verdict_count_ends_track": "test.sh",
+    # #917: a guard with mutations left out of every track's clean-code run.
+    "clean_run_perf_entry_dropped": "test.sh",
+    "clean_run_timescale_call_commented": "test.sh",
     # #795 and #712: a timescale wrapper's own verdict block, judged by the guard that evaluates it.
     "wrapper_verdict_reads_finish_only": "bench/hypertable_index_names.sh",
     "wrapper_verdict_no_shortfall_check": "bench/hypertable_late_appends.sh",

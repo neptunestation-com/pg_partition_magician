@@ -337,7 +337,7 @@ pull_third_party() {  # <profile> <service>
 # output for failures (the runner does not need pg_prove). To exercise a second fleet TimescaleDB version,
 # add the supabase/postgres:15 tag that bundles it to TS_PG_TAGS (e.g. an older tag for the 2.9.x cluster).
 run_timescale() {
-  local prof="timescale" svc="timescale" fail=0 f db out rc tag
+  local prof="timescale" svc="timescale" fail=0 f db out rc tag planned ran
   local px=( --profile "$prof" exec -T -e PGPASSWORD=postgres "$svc" psql -h 127.0.0.1 -U postgres )
   for tag in ${TS_PG_TAGS:-15.14.1.127}; do
     export TS_PG_TAG="$tag"   # docker-compose interpolates this into the supabase/postgres image tag
@@ -369,12 +369,19 @@ run_timescale() {
       rc=0; out=$($DC "${px[@]}" -d "$db" -tAq -f "/repo/$f" 2>&1) || rc=$?
       echo "$out" | grep -E '^(ok|not ok|1\.\.|# )' || true
       # pg_prove's verdict, which this runner does not use: a failed assertion, an error, a file that
-      # ran a different number of assertions than it planned, or one psql did not run to its end. pgTAP
-      # reports the third as "# Looks like you planned N tests but ran M", and missing it passed a file
-      # whose assertion silently never ran (#601). A session that dies part-way (FATAL, no ERROR:) never
-      # reaches finish() to print that line, so only psql's exit shows it (#819).
+      # ran a different number of assertions than it planned, or one psql did not run to its end. The
+      # third is counted here, the assertions that ran against the 1..N plan line, as pg_prove and the
+      # timescale wrappers count it: pgTAP's own "# Looks like you planned N tests but ran M" is printed
+      # by finish() alone, so reading only that line passed a file that never calls finish() (#918), as
+      # missing it once passed a file whose assertion silently never ran (#601). A session that dies
+      # part-way (FATAL, no ERROR:) shows as psql's exit (#819).
+      # Both counts end in `|| true`: grep -c exits 1 when it counts nothing, and under this script's
+      # `set -euo pipefail` that would end the track at a file that ran no assertion at all, unjudged.
       # bench/tap_verdict.sh reads this region back out and holds it to real pgTAP output.
-      if [ "$rc" != 0 ] || echo "$out" | grep -qE '^not ok|^# Looks like you (failed|planned)|ERROR:'; then
+      planned=$(echo "$out" | sed -nE 's/^1\.\.([0-9]+)$/\1/p' | head -1 || true)
+      ran=$(echo "$out" | grep -cE '^(not )?ok [0-9]+( |$)' || true)
+      if [ "$rc" != 0 ] || echo "$out" | grep -qE '^not ok|^# Looks like you (failed|planned)|ERROR:' \
+         || [ -z "$planned" ] || [ "$ran" != "$planned" ]; then
         echo "FAIL ($tag): $f (psql exit $rc)"; fail=1
       fi
       $DC "${px[@]}" -d postgres -q -c "drop database if exists $db" >/dev/null
@@ -447,6 +454,20 @@ run_timescale() {
     # half of the pairs discriminate.sh completes with its three mutants.
     echo "--- the drains and the cutover name their scratch tables in pg_temp (issue #894) ---"
     bash "$(dirname "$0")/bench/hypertable_scratch_tables_in_pg_temp.sh" pgpm_test-timescale pgpm_perf220 || fail=1
+    # #917: five wrappers whose mutants discriminate.sh drives here had no clean-code run anywhere, so a
+    # wrapper broken enough to fail against everything (a missing file: exit 1, "0 ran") was scored as
+    # catching each of its mutants. These are their clean-code halves. bench/guards_run_on_clean_code.sh
+    # fails the perf track on any guard with a mutation that no track runs.
+    echo "--- the cutover verifies both halves of the swap (tests/timescale/db/17) ---"
+    bash "$(dirname "$0")/bench/hypertable_cutover_identity.sh" pgpm_test-timescale pgpm_htcutident || fail=1
+    echo "--- the cutover conserves every row or refuses to swap (tests/timescale/db/20) ---"
+    bash "$(dirname "$0")/bench/hypertable_late_appends.sh" pgpm_test-timescale pgpm_htlate || fail=1
+    echo "--- from_hypertable refuses working names over 63 bytes (tests/timescale/db/23) ---"
+    bash "$(dirname "$0")/bench/hypertable_derived_names.sh" pgpm_test-timescale pgpm_htnames || fail=1
+    echo "--- no untracked write is reverted by the swap (tests/timescale/db/25) ---"
+    bash "$(dirname "$0")/bench/hypertable_replica_capture.sh" pgpm_test-timescale pgpm_htreplica || fail=1
+    echo "--- every entry point refuses an exclusion constraint (tests/timescale/db/26) ---"
+    bash "$(dirname "$0")/bench/hypertable_exclusion_refusal.sh" pgpm_test-timescale pgpm_htexcl || fail=1
 
     echo "--- discriminate (timescale-scoped mutations) ---"
     bash "$(dirname "$0")/bench/discriminate.sh" --track=timescale pgpm_test-timescale || fail=1
@@ -481,13 +502,16 @@ run_observe() {  # pg_flight_recorder observability track: impact_report correla
   wait_pg "$prof" "$svc" 90
 
   run_observe_file() {  # <db> <test-file> -- run one pgTAP file, collect TAP, flag failures
-    local db="$1" f="$2" rc
+    local db="$1" f="$2" rc planned ran
     echo "--- ${f##*/} (db: $db) ---"
     rc=0; out=$($DC "${px[@]}" -d "$db" -tAq -f "$f" 2>&1) || rc=$?
     echo "$out" | grep -E '^(ok|not ok|1\.\.|# )' || true
-    # The same verdict as run_timescale's, plan shortfall and psql's exit included (#601, #819;
-    # bench/tap_verdict.sh).
-    if [ "$rc" != 0 ] || echo "$out" | grep -qE '^not ok|^# Looks like you (failed|planned)|ERROR:'; then echo "FAIL: $f (psql exit $rc)"; fail=1; fi
+    # The same verdict as run_timescale's, the plan counted against the assertions that ran and psql's
+    # exit included (#601, #819, #918; bench/tap_verdict.sh).
+    planned=$(echo "$out" | sed -nE 's/^1\.\.([0-9]+)$/\1/p' | head -1 || true)
+    ran=$(echo "$out" | grep -cE '^(not )?ok [0-9]+( |$)' || true)
+    if [ "$rc" != 0 ] || echo "$out" | grep -qE '^not ok|^# Looks like you (failed|planned)|ERROR:' \
+       || [ -z "$planned" ] || [ "$ran" != "$planned" ]; then echo "FAIL: $f (psql exit $rc)"; fail=1; fi
   }
 
   # pg_flight_recorder requires pg_cron, which lives only in cron.database_name (postgres), so this runs in
@@ -962,6 +986,11 @@ run_perf() {
     "bench/retain_loop_per_child_isolation.sh pgpm_perf237"
     "bench/acl_grantor_owner_partitions.sh pgpm_perf228"
     "bench/incoming_not_valid_refused.sh pgpm_perf233"
+    "bench/write_block_identity.sh pgpm_wbident"
+    "bench/retire_identity_unreferenced.sh pgpm_retident"
+    "bench/coverage_reset_identity.sh pgpm_covreset"
+    "bench/archive_identity_substitution.sh pgpm_archident"
+    "bench/guards_run_on_clean_code.sh pgpm_perf249"
   )
   local selected=()
   local n=${#guards[@]} idx
