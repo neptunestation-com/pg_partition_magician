@@ -4524,7 +4524,15 @@ $$;
 -- copy still carrying one the parent dropped would refuse rows the parent now accepts. The expression is
 -- compared and not pg_get_constraintdef, because LIKE does not carry NOT VALID and the parent's own CHECK
 -- may be NOT VALID; the copy's bound CHECK (<copy>_ck, under the name pgpm.part recorded or the one the copy
--- has now) is the copy's own and is left out. A copy is made LIKE its parent,
+-- has now) is the copy's own and is left out. The parent's validated outgoing foreign keys are compared
+-- too, by definition (#898): regrain_step gives each copy its own validated copy of every one while the
+-- copy is still empty, so that the swap's ATTACH adopts it rather than validating it, and a key added to
+-- the parent after a copy was made reached the swap missing from it, where ATTACH validated it by scanning
+-- the copy under the swap's ACCESS EXCLUSIVE on the parent; one the parent dropped or changed stayed on
+-- the fine child. A NOT VALID key and a self-reference are left out on the parent's side because regrain
+-- never carries them, and a key's clones onto the partitions of a partitioned referenced table
+-- (conparentid set) on both sides. The name is not compared: ATTACH matches a key by its definition, so a
+-- renamed key is still adopted. A copy is made LIKE its parent,
 -- so the two differ only when the parent has been altered since; regrain_step restarts the run when they
 -- do. One statement over every copy, comparing each relation's column list as one string, and the
 -- difference spelt out for the first that differs only: asked on every resumed tick, and a run toward a
@@ -4550,6 +4558,12 @@ returns text language sql stable as $$
                      or exists (select 1 from pgpm.part pp
                                  where pp.parent_table = p_parent and not pp.attached and pp.child_oid = k.conrelid
                                    and k.conname = (pp.child_name || '_ck')::name)))
+    union all
+    select k.conrelid, format('foreign key %s', pg_get_constraintdef(k.oid))
+      from pg_constraint k
+     where k.contype = 'f' and k.conparentid = 0
+       and ((k.conrelid = p_parent and k.confrelid <> p_parent and k.convalidated)
+            or k.conrelid = any(p_copies))
   ),
   sig as (select attrelid, string_agg(col, ', ' order by col) as s from cols group by attrelid),
   drifted as (
@@ -5317,8 +5331,9 @@ begin
   -- source's VALUES under an unchanged signature (a rewrite, a column dropped and added back: see
   -- _regrain_source_drift, against the mark the prepare tick recorded), which fires no row trigger, so
   -- capture never saw it and the swap attached the old values; nor without the parent's CHECK constraints,
-  -- which ATTACH requires (_regrain_shape_drift compares them). Both restart the run the same way. The
-  -- source mark matters only while a copy exists: with none, nothing stale can be attached.
+  -- which ATTACH requires, nor without its outgoing foreign keys (#898), which ATTACH would validate by
+  -- scanning the copy under the swap's lock (_regrain_shape_drift compares both). All restart the run the
+  -- same way. The source mark matters only while a copy exists: with none, nothing stale can be attached.
   --
   -- And the capture apparatus must still fit the parent's key (_regrain_capture_drift), with or without
   -- copies: a key column renamed or retyped since the prepare made every write into the source that the

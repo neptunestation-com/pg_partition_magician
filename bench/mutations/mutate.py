@@ -2235,7 +2235,10 @@ begin
         "which never copies a FOREIGN KEY, and nothing else gives it one. So the swap's ATTACH "
         "PARTITION forces PostgreSQL to validate the parent's outgoing FK for that partition from "
         "scratch, an O(rows) scan under whatever lock the swap already holds -- exactly what "
-        "reached a production statement_timeout.",
+        "reached a production statement_timeout. Two sites: the #348 block, and the outgoing-key arm "
+        "#898 added to _regrain_shape_drift, because with that arm in place a copy without the parent's key "
+        "is drift, the run restarts on every tick, and the ATTACH scan the guard measures is never reached; "
+        "pre-#348 code had neither.",
         [("""      -- #348: give the fine child its own already-validated copy of every outgoing FK the parent
       -- has, the same trick the bound CHECK above uses. The child is still empty here (this runs
       -- before the first row is copied in below), so VALIDATE costs nothing -- exactly how an empty
@@ -2256,7 +2259,9 @@ begin
         execute format('alter table %I.%I add constraint %I %s not valid', v_sub_nsp, v_sub_name, r.conname, r.def);
         execute format('alter table %I.%I validate constraint %I', v_sub_nsp, v_sub_name, r.conname);
       end loop;
-""", "", 1)],
+""", "", 1),
+         ("     where k.contype = 'f' and k.conparentid = 0\n",
+          "     where k.contype = 'f' and k.conparentid = 0 and false\n", 1)],
     ),
     "obtain_backoff_ignores_headroom": (
         "bench/obtain_backoff_headroom.sh",
@@ -6238,6 +6243,16 @@ select is(
         "tests/216 part C catches it.",
         [("     where (k.conrelid = p_parent or k.conrelid = any(p_copies)) and k.contype = 'c'\n",
           "     where (k.conrelid = p_parent or k.conrelid = any(p_copies)) and k.contype = 'c' and false\n", 1)],
+    ),
+    "regrain_fk_drift_ignored": (
+        "bench/regrain_fk_drift_swap_scan.sh",
+        "Pre-#898 _regrain_shape_drift: the parent's outgoing foreign keys are not compared with the copies', "
+        "so a key added to the parent mid-regrain is not drift, the copies made before it reach the swap "
+        "without it, and ATTACH PARTITION validates it by scanning each of them under the swap's ACCESS "
+        "EXCLUSIVE on the parent. One site, the foreign-key half of the comparison; tests/251 parts A, B "
+        "and C catch it too.",
+        [("     where k.contype = 'f' and k.conparentid = 0\n",
+          "     where k.contype = 'f' and k.conparentid = 0 and false\n", 1)],
     ),
     "regrain_null_mark_adopted": (
         "bench/regrain_null_source_mark.sh",
