@@ -240,6 +240,21 @@ advance predictably and rarely hit this.
 dropped. This is correct: retention reclaimed that range. Do not widen retention to make the write
 succeed unless you actually want that data kept.
 
+**In a hole inside the grid** -- the cells on both sides exist and this one does not. Either its name is
+held by something pgpm does not own (logged `fail_obtain_name`, see
+[Partition naming](reference.md#partition-naming)), or one of the forward partitions was dropped by hand.
+`obtain` rebuilds a dropped one that lies within its lookahead (from the write frontier's cell forward),
+empty, and logs `forget_dropped_partition` naming it, so such a hole closes on the obtain job's next tick;
+run `pgpm.obtain` (or `extend_to` past the hole) to close it now. Rows that were in a dropped partition are
+gone with it.
+
+```sql
+select action, lo, hi, method, at from pgpm.log
+ where parent_table = 'public.events'::regclass
+   and action in ('fail_obtain_name', 'forget_dropped_partition')
+ order by at desc limit 5;
+```
+
 **No grid was ever built** -- the table was converted by a pgpm older than the one that refuses over-long
 names. Its name was long enough that every forward cell's `<rel>_p<label>` was cut to the same 63 bytes,
 the monolith took that name, and `obtain` skipped every cell as already existing, with nothing logged.

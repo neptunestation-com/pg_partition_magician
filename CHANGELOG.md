@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **`obtain` and `extend_to` rebuild a forward cell whose partition was dropped by hand** (#908). Both took an
+  attached `pgpm.part` row for a built cell without asking whether its partition still existed, so after a
+  `DROP TABLE` on one of obtain's empty forward cells the cell was never rebuilt and nothing was logged: every
+  write into its range was refused with `no partition of relation ... found for row`, for good, while
+  `status()` still counted the partition and reported its `hi` as the ceiling. A row overlapping the cell
+  whose `child_oid` no longer resolves is now forgotten first, logged `forget_dropped_partition` naming what
+  was dropped, and the cell is built again (`pgpm._cell_attached`, one place for obtain's walk and extend_to's
+  dry count and walk); `status().n_partitions`, `coarse_partitions` and `newest_bound` read only rows whose
+  partition exists. `tests/264` under `bench/obtain_rebuilds_dropped_cell.sh`, with the mutations
+  `obtain_trusts_dropped_cell`, `obtain_rebuild_keeps_stale_row` and `status_counts_dropped_cell`.
 - **A regrain to a calendar step names a clamped first cell by its own start, so the per-year split
   completes on a year lattice that does not start in January** (#904). `_regrain_sub_name` left month and
   year targets to `_part_name` on the premise that a calendar child's edge sits on the target's lattice. A
