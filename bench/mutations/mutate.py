@@ -6781,6 +6781,35 @@ select is(
          ("      analyze pg_temp.pgpm_htail;\n", "      analyze pgpm_htail;\n", 1),
          ("select %s from pg_temp.pgpm_htail s where", "select %s from pgpm_htail s where", 1)],
     ),
+    "transmute_null_arguments_accepted": (
+        "bench/null_arguments_refused.sh",
+        "Pre-#896 _transmute: no up-front null check, so three-valued logic reads each null as not true: "
+        "p_force_frontier, p_force_uuidv7 and p_force_text_time => null act as true, p_incoming_fks => null "
+        "leaves the incoming key on the monolith, and p_regrain_batch, p_paused and p_tt_epoch => null commit "
+        "the write-rejecting bound before failing. The check is handed its arguments with every null "
+        "stripped (two lines of one site). tests/248 parts A to D and tests/249 parts B and C catch it.",
+        [("  perform pgpm._refuse_null_arguments('transmute', json_build_object(\n",
+          "  perform pgpm._refuse_null_arguments('transmute', json_strip_nulls(json_build_object(\n", 1),
+         ("    'p_tt_epoch', p_tt_epoch, 'p_force_frontier', p_force_frontier));\n",
+          "    'p_tt_epoch', p_tt_epoch, 'p_force_frontier', p_force_frontier)));\n", 1)],
+    ),
+    "extend_to_null_arguments_accepted": (
+        "bench/null_arguments_refused.sh",
+        "Pre-#896 extend_to: no up-front null check, so p_max => null makes every cap test null and a far "
+        "p_value is walked step by step, and p_value => null never ends the walk. One site: the check is "
+        "handed its arguments with every null stripped. tests/249 part A catches it.",
+        [("    json_build_object('p_parent', p_parent, 'p_value', p_value, 'p_max', p_max));\n",
+          "    json_strip_nulls(json_build_object('p_parent', p_parent, 'p_value', p_value, 'p_max', p_max)));\n", 1)],
+    ),
+    "transmute_refuses_null_retain": (
+        "bench/null_arguments_refused.sh",
+        "Issue #896, the over-correction: every transmute argument is refused when null, p_retain included, "
+        "whose null is documented (keep everything) and is also its default, so every conversion that does "
+        "not set a retention is refused. One site, the argument list. tests/248 catches it: each refusal "
+        "names p_retain too, and the liveness conversions, which pass p_retain => null, are refused.",
+        [("    'p_anchor', p_anchor, 'p_regrain_batch', p_regrain_batch, 'p_paused', p_paused,\n",
+          "    'p_anchor', p_anchor, 'p_retain', p_retain, 'p_regrain_batch', p_regrain_batch, 'p_paused', p_paused,\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

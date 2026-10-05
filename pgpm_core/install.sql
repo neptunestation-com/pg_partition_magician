@@ -1968,6 +1968,34 @@ begin
 end;
 $$;
 
+-- Refuse a null argument that has no null meaning (issue #896), before the caller reads or commits
+-- anything. PL/pgSQL compares a null with three-valued logic, so a null that reached a check of the shape
+-- `if not p_force_x then raise` or `if p_x not in (...) then raise` read as "not true" and skipped the
+-- refusal: p_force_frontier, p_force_uuidv7 and p_force_text_time => null acted as true, p_incoming_fks =>
+-- null passed all three of its checks and left an incoming key on the monolith, p_tt_epoch => null encoded
+-- every bound as the zero id and committed an unsatisfiable bound CHECK, p_regrain_batch and p_paused =>
+-- null died at config's NOT NULL in the cutover after phases 1 and 2 had committed, and extend_to's p_max
+-- => null made every cap test null and walked a typo'd value step by step. One check per routine instead of
+-- one per site: the caller names every argument that has no null meaning, in its signature's order, and a
+-- null in any of them is refused here, naming it. An argument whose null IS documented (transmute's
+-- p_retain, the text_time shape arguments outside text_time, p_tt_alphabet) is simply not passed.
+--
+-- json, not jsonb: json_each keeps the caller's order, so the message lists the arguments as they appear
+-- in the signature. Every argument type pgpm takes has a json rendering, and a SQL null becomes JSON null.
+create or replace function pgpm._refuse_null_arguments(p_routine text, p_args json)
+returns void language plpgsql as $$
+declare v_nulls text;
+begin
+  select string_agg(e.key, ', ' order by e.ord) into v_nulls
+    from json_each(p_args) with ordinality as e(key, value, ord)
+   where json_typeof(e.value) = 'null';
+  if v_nulls is not null then
+    raise exception 'pg_partition_magician: % does not accept null for %: null has no meaning there, so the call is refused before it reads the table or commits anything. Pass a value, or omit the argument to take its default.',
+      p_routine, v_nulls;
+  end if;
+end;
+$$;
+
 -- extend_to(): pre-extend the forward grid to cover a known future value (issue #290).
 --
 -- obtain() is pgpm's ONLY defence against a write with nowhere to go, and its lookahead
@@ -2016,6 +2044,10 @@ declare
                     * (current_setting('max_connections')::bigint + current_setting('max_prepared_transactions')::bigint);
   v_locks0 bigint; v_locks1 bigint; v_locks2 bigint; v_projected bigint;
 begin
+  -- #896: none of the three has a null meaning. A null p_max made every cap test below null, so the dry
+  -- count neither exited nor refused and a typo'd p_value was walked grid step by grid step.
+  perform pgpm._refuse_null_arguments('extend_to',
+    json_build_object('p_parent', p_parent, 'p_value', p_value, 'p_max', p_max));
   -- FOR KEY SHARE (#725), for the reason obtain() takes it: the zone this walk is computed in cannot
   -- change under it, and set_partition_tz cannot judge the grid around the cells it has not committed.
   select * into cfg from pgpm.config where parent_table = p_parent for key share;
@@ -6479,6 +6511,18 @@ declare
   v_ucon_name name; v_ucon_idx oid; v_ucon_def text; v_ucon_sfx text; v_ucon_with_q text;
   v_spc name;                     -- #829: the table's tablespace, which the parent takes (null: the database default)
 begin
+  -- #896: every argument with no null meaning, refused here, before anything below reads or commits. Not
+  -- listed: p_retain (null keeps everything), the four text_time shape arguments and p_tt_alphabet (null
+  -- outside text_time; the text_time block requires the four), and p_obtain, whose own #581 check refuses
+  -- a null with the negative values. The step is named as the caller's overload spells it.
+  perform pgpm._refuse_null_arguments('transmute', json_build_object(
+    'p_parent', p_parent, 'p_control', p_control, 'p_control_kind', p_control_kind,
+    case when p_control_kind = 'id' then 'p_step' else 'p_interval' end, p_step,
+    'p_anchor', p_anchor, 'p_regrain_batch', p_regrain_batch, 'p_paused', p_paused,
+    'p_incoming_fks', p_incoming_fks, 'p_force_uuidv7', p_force_uuidv7,
+    'p_bound_headroom', p_bound_headroom, 'p_lock_timeout', p_lock_timeout,
+    'p_force_text_time', p_force_text_time, 'p_tt_discard_bits', p_tt_discard_bits,
+    'p_tt_epoch', p_tt_epoch, 'p_force_frontier', p_force_frontier));
   if p_control_kind not in ('time', 'id', 'uuidv7', 'text_time') then
     raise exception 'pg_partition_magician: unknown control_kind %', p_control_kind;
   end if;

@@ -940,6 +940,8 @@ run_perf() {
     "bench/regrain_capture_origin_only_upgrade.sh pgpm_perf218"
     "bench/forget_missing_disarms_detach.sh pgpm_perf219"
     "bench/regrain_fk_drift_swap_scan.sh pgpm_perf225"
+    "bench/regrain_fk_drift_swap_scan.sh pgpm_perf228"
+    "bench/null_arguments_refused.sh pgpm_perf222"
   )
   local selected=()
   local n=${#guards[@]} idx
