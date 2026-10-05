@@ -1344,6 +1344,16 @@ rules [`set_regrain`](#set_regrain) lists), or another regrain is already in fli
 Only one regrain runs per parent at a time: a second one is refused with an error naming the one in
 flight. Let it finish, or stop it with [`regrain_cancel`](#regrain_cancel), then re-run.
 
+**A step at a target the run in flight on that child was not cut on is refused too**, whichever
+driver sends it: a hand `regrain_step` or `regrain` at another target on the child an auto-regrain is
+splitting, and the `maintain` tick that meets a run started by hand at a step other than `regrain_to` (logged
+as `skip_regrain` with the refusal's message). The run's copies belong to the step it was started at, as
+[`set_regrain`](#set_regrain) says, and nothing records that step, so it is read off the run: every copy
+already made must be exactly a sub-range of the requested step's grid and the cursor one of its boundaries.
+The message names the copy (or the cursor) that is off the grid. Drive the run at its own target, or abandon
+it with [`regrain_cancel`](#regrain_cancel) and re-run at the new one. The run's own step spelled another way
+(`'50'` and `'050'`) is the same grid and is accepted.
+
 **Regrain calls on one parent take turns.** `regrain_step` (and so `regrain`, `regrain_history` and
 `maintain`'s auto-regrain), [`regrain_cancel`](#regrain_cancel), [`set_regrain`](#set_regrain) and
 [`set_partition_tz`](#set_partition_tz) each take one per-parent lock before they read anything, held until
@@ -1484,8 +1494,11 @@ the source; a relation already holding the name it would mint under, other than 
 is refused rather than adopted. The trigger runs with the **writer's** privileges (pgpm has no
 `SECURITY DEFINER`), so the delta is owned like the parent and every role holding `INSERT`, `UPDATE` or
 `DELETE` on the parent, or on the regraining partition itself (which PostgreSQL lets a role write directly
-with no grant on the parent), table- or column-level, is granted `INSERT` on it, re-synced on every tick: a
-role granted mid-regrain can write from the next tick on, and nothing beyond those grants is needed.
+with no grant on the parent), table- or column-level, is granted `INSERT` on it, and so are the **owners** of
+the parent and of that partition, whose rights no ACL lists: after `ALTER TABLE <parent> OWNER TO`,
+which does not reach the partitions, the old owner still owns the source and writes it directly. Re-synced on
+every tick: a role granted, or an owner changed, mid-regrain can write from the next tick on, and nothing
+beyond those grants is needed.
 
 The swap has the same contract. Whatever is captured between that gate and the moment the `DETACH` takes
 its lock is reconciled under the lock until nothing is left, and the source is dropped only once no

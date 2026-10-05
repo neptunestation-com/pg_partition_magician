@@ -3955,10 +3955,15 @@ $$;
 -- DELETE, table- or column-level (PUBLIC included), gets INSERT on the delta: of the parent, AND of the
 -- source partition itself (#843). PostgreSQL lets a role granted DML on a partition write it directly
 -- without any grant on the parent, and the trigger fires for that write as that role, so with the parent's
--- grantees alone such a role got 42501 on every write into the source until the swap. The owner's implicit
--- rights come from _own_like_parent, called beside this. Grants only what is missing, so a steady-state
--- tick issues no DDL, and regrain_step calls it on every tick so a grant made mid-regrain is honoured from
--- the next one.
+-- grantees alone such a role got 42501 on every write into the source until the swap. And the OWNERS of
+-- the source and the parent (#906): an owner writes with implicit rights that no ACL lists, and the delta is
+-- owned like the parent as it stood at the prepare tick (_own_like_parent, called beside this), so a source
+-- owned by anyone else was missed. ALTER TABLE <parent> OWNER TO does not reach the partitions, so after
+-- one the old owner still owns the source and got 42501 on every write into it until the swap, and a parent
+-- re-owned mid-regrain left its new owner the same. The delta's own owner is left out: its rights are
+-- implicit too, and a GRANT to it would only materialise the ACL. Grants only what is missing, so a
+-- steady-state tick issues no DDL, and regrain_step calls it on every tick so a grant (or an owner) changed
+-- mid-regrain is honoured from the next one.
 drop function if exists pgpm._regrain_capture_grant(regclass, regclass);
 create or replace function pgpm._regrain_capture_grant(p_parent regclass, p_delta regclass, p_source regclass)
 returns void language plpgsql as $$
@@ -3972,8 +3977,11 @@ begin
             union
             select a.grantee from pg_attribute att cross join lateral aclexplode(att.attacl) a
              where att.attrelid in (p_parent, p_source) and att.attnum > 0 and not att.attisdropped
-               and att.attacl is not null and a.privilege_type in ('INSERT', 'UPDATE')) g
-     where not exists (select 1 from pg_class d cross join lateral aclexplode(d.relacl) b
+               and att.attacl is not null and a.privilege_type in ('INSERT', 'UPDATE')
+            union
+            select c.relowner from pg_class c where c.oid in (p_parent, p_source)) g   -- #906: the owners
+     where g.grantee <> (select d.relowner from pg_class d where d.oid = p_delta)
+       and not exists (select 1 from pg_class d cross join lateral aclexplode(d.relacl) b
                         where d.oid = p_delta and d.relacl is not null
                           and b.grantee = g.grantee and b.privilege_type = 'INSERT')
   loop
@@ -5029,6 +5037,49 @@ begin
 end;
 $$;
 
+-- Is the regrain in flight on the source [p_lo, p_hi) cut on p_step's grid (issue #905)? Null when it is, else
+-- the first thing that is not: a copy, or the cursor. Nothing records the step a run was started at (#554 says
+-- why its copies belong to it), so it is read off the run itself: every copy of the source already made must
+-- be exactly the sub-range of p_step's grid that starts at its lo, clamped to the source the way regrain_step
+-- cuts them, and the cursor one of that grid's boundaries (or an edge of the source). A run with no copies
+-- and the cursor at the source's lo has not been cut yet, and fits any grid. Asked by regrain_step of a
+-- source carrying capture, after the #267 one-run-per-parent check and before anything mutates, so a step
+-- at a target the run was not cut on is refused whichever driver sends it: a hand regrain_step or regrain()
+-- at another target on the child an auto-regrain is splitting, and the maintain tick that would resume a
+-- run started by hand at a step other than regrain_to. Either used to resume the run on the other grid and
+-- mint copies overlapping the ones made, and every swap after failed 'would overlap' until regrain_cancel.
+-- Read off the grid rather than compared with regrain_to as text, so the run's own step spelled another way
+-- ('50' and '050') is the same step here, as it is to the grid.
+create or replace function pgpm._regrain_off_grid(p_parent regclass, p_cfg pgpm.config, p_step text, p_lo text, p_hi text)
+returns text language plpgsql stable as $$
+declare
+  r record; v_kind text := p_cfg.control_kind; v_ncast text := pgpm._native_type(p_cfg.control_kind);
+  v_g text; v_elo text; v_ehi text; v_cur text := p_cfg.regrain_cursor;
+begin
+  for r in execute format(
+    'select lo, hi from pgpm.part where parent_table = %L::regclass and not attached'
+    || ' and lo::%s >= %L::%s and hi::%s <= %L::%s order by lo::%s',
+    p_parent::text, v_ncast, p_lo, v_ncast, v_ncast, p_hi, v_ncast, v_ncast)
+  loop
+    v_g   := pgpm._grid_floor(v_kind, p_step, p_cfg.partition_anchor, r.lo, p_cfg.partition_tz);
+    v_elo := case when pgpm._native_gt(v_kind, p_lo, v_g) then p_lo else v_g end;
+    v_ehi := pgpm._grid_next(v_kind, p_step, v_g, p_cfg.partition_tz);
+    if pgpm._native_gt(v_kind, v_ehi, p_hi) then v_ehi := p_hi; end if;
+    if pgpm._native_gt(v_kind, r.lo, v_elo) or pgpm._native_gt(v_kind, v_elo, r.lo)
+       or pgpm._native_gt(v_kind, r.hi, v_ehi) or pgpm._native_gt(v_kind, v_ehi, r.hi) then
+      return format('its copy [%s, %s)', r.lo, r.hi);
+    end if;
+  end loop;
+  -- the cursor, strictly inside the source (out of it, regrain_step restarts from lo anyway)
+  if v_cur is not null and pgpm._native_gt(v_kind, v_cur, p_lo) and pgpm._native_gt(v_kind, p_hi, v_cur)
+     and pgpm._native_gt(v_kind, v_cur,
+                         pgpm._grid_floor(v_kind, p_step, p_cfg.partition_anchor, v_cur, p_cfg.partition_tz)) then
+    return format('its cursor %s', v_cur);
+  end if;
+  return null;
+end;
+$$;
+
 -- #674, #641: refuse a regrain target step whose SHAPE the grid cannot place, with the rules transmute's
 -- preflight applies to a partition_step. _regrain_step_forward asks only "does grid_next move forward", and
 -- grid_next reads a step the way the grid does, so it cannot see a step the grid half-ignores:
@@ -5157,6 +5208,7 @@ declare
   v_unarmed text; v_restart_why text;   -- #892
   v_dnsp name;   -- the delta's own schema, by its recorded oid (#555)
   v_src_nsp name; v_sub_nsp name;   -- the source's own schema, and a copy's (#872): never the parent's
+  v_off text;   -- what of the run in flight is off the requested grid (#905)
 begin
   -- #554: before the config read below, so a second driver of this parent (a tick, a hand-driven step, a
   -- cancel) waits for this step to commit and this step reads what the last one left
@@ -5239,6 +5291,21 @@ begin
   if v_busy is not null then
     raise exception 'pg_partition_magician: cannot regrain % -- a regrain of % is already in flight on this parent, and pgpm runs one regrain per parent (config.regrain_cursor and the change-capture delta are both per parent). Let it finish, or abandon it with pgpm.regrain_cancel(%), then re-run.',
       v_child_name, v_busy, p_parent;
+  end if;
+  -- ...and the run in flight on THIS child must have been cut on v_step's grid (#905). The check above skips
+  -- the child itself, so a hand regrain_step (or regrain()) at another target on the child an auto-regrain
+  -- is splitting resumed the run on the other grid, and so did the tick that met a run started by hand at a
+  -- step other than regrain_to: copies overlapping the ones already made, and every swap after failed 'would
+  -- overlap' (skip_regrain) until regrain_cancel. set_regrain refuses that change of target (#554), and this
+  -- is the same refusal for every driver of a step; see _regrain_off_grid. Only while capture is on: without
+  -- it the prepare below discards every copy and restarts, so no grid has been committed to. Before the #266
+  -- rename, so the refusal mutates nothing.
+  if pgpm._regrain_capture_active(p_parent, v_child_name) then
+    v_off := pgpm._regrain_off_grid(p_parent, cfg, v_step, v_lo, v_hi);
+    if v_off is not null then
+      raise exception 'pg_partition_magician: cannot regrain % at target step % -- the regrain in flight on it was not cut on that step''s grid: %, and a run''s copies belong to the step it was started at. Driven on another grid it would mint copies overlapping them, and every swap would fail. Drive it at its own target (config.regrain_to: %), or abandon it with pgpm.regrain_cancel(%) (the source still holds every row) and re-run at the new one.',
+        v_child_name, v_step, v_off, coalesce(cfg.regrain_to, 'null, a run started by hand'), p_parent;
+    end if;
   end if;
 
   -- ...and the source must not be named as its own first fine sub-range (issue #266). _part_name gives a

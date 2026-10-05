@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+- **A regrain step at a target the run in flight was not cut on is refused** (#905). The one-run-per-parent
+  check (#267) skips the child the run is on, and only `set_regrain` refused a change of target (#554), so
+  with an auto-regrain to 50 in flight a hand `regrain_step` or `regrain` at 20 on the same child resumed the
+  run on the 20 grid and minted a copy `[40, 60)` beside its `[0, 50)`, and every later swap failed 'would
+  overlap' (`skip_regrain`) until `regrain_cancel`; a `maintain` tick did the same to a run started by hand
+  at a step other than `regrain_to`. Nothing records a run's step, so `regrain_step` now reads it off the run
+  (`_regrain_off_grid`: every copy a sub-range of the requested grid, the cursor one of its boundaries) and
+  refuses before it mutates anything. `tests/261` under `bench/regrain_retarget_in_flight.sh`, with the
+  mutation `regrain_step_retarget_unchecked`.
+- **The owners of a regraining partition and of its parent can write it mid-regrain** (#906).
+  `_regrain_capture_grant` granted `INSERT` on the delta to the roles an ACL of the parent or the source
+  lists, never to their owners, whose rights are implicit, so after `ALTER TABLE <parent> OWNER TO` (which
+  does not reach the partitions) the old owner's every write into the regraining source failed 42501 on the
+  delta until the swap, and a parent re-owned mid-regrain left its new owner the same. Both owners are now
+  granted beside the ACL grantees, and re-synced every tick. `tests/262` under
+  `bench/regrain_capture_owner_grant.sh`, with the mutation `regrain_capture_grant_acl_only`.
 - **An export and a chunk never write one object key** (#890, "Archive object keys" bullet 1). An object key
   was claimed by its BASE, `<prefix><schema>.<name>`, and a chunk's key (`<base>_<stem><ext>`) and an
   export's (`<base'><ext>`, named after the child) have different bases, so `archive.to_s3('public.evt',

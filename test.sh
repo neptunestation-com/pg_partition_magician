@@ -949,6 +949,8 @@ run_perf() {
     "bench/null_arguments_refused.sh pgpm_perf222"
     "bench/transmute_self_naming_policy.sh pgpm_perf224"
     "bench/retire_crossing_parent_rls.sh pgpm_perf241"
+    "bench/regrain_retarget_in_flight.sh pgpm_perf235"
+    "bench/regrain_capture_owner_grant.sh pgpm_perf236"
   )
   local selected=()
   local n=${#guards[@]} idx
