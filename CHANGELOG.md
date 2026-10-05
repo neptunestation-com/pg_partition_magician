@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- **untransmute hands a primary key made since the conversion back under the managed table's name** (#901).
+  #830's hand-back renamed each index the parent's DDL had cloned onto the monolith, but skipped every
+  primary-key index to spare a pre-#789 conversion's original key, so a `PRIMARY KEY` added after converting a
+  keyless table (or replacing the key) came back as the monolith clone's `t_p<label>_pkey` and `ON CONFLICT ON
+  CONSTRAINT <its name>` failed with 42704. A primary key is now handed back when its monolith copy carries
+  the name PostgreSQL chose for the clone (`pgpm._is_clone_pkey_name`, the partition's name clipped to fit 63
+  bytes); a pre-#789 original key, under the name the table gave it, still keeps it. `tests/257`, guarded by
+  `bench/untransmute_primary_key_name.sh` with mutations `untransmute_pkey_name_kept` and
+  `untransmute_pkey_clone_name_unclipped`.
+- **The table's identity sequences keep their names through transmute and untransmute** (#877, bullet 1).
+  transmute added identity to the parent while it was still the staging `<table>_pgpm_new`, so the sequence
+  was `t_pgpm_new_id_seq` on the converted table, and untransmute added it to the monolith before renaming
+  it back, so it was `t_p<label>_id_seq` on the restored one; every `setval`, `GRANT ... ON SEQUENCE` or
+  `ALTER SEQUENCE` naming `t_id_seq` failed with 42P01 after either. transmute now hands the parent's sequence
+  the original's name (read under the cutover's lock, freed when the monolith's identity is dropped), and
+  untransmute hands the restored table's the parent's, after the move into the parent's schema. `tests/258`,
+  guarded by `bench/identity_sequence_name.sh` with mutations `transmute_identity_sequence_staging_name`,
+  `untransmute_identity_sequence_monolith_name` and `untransmute_identity_sequence_renamed_early`.
 - **A regrain step at a target the run in flight was not cut on is refused** (#905). The one-run-per-parent
   check (#267) skips the child the run is on, and only `set_regrain` refused a change of target (#554), so
   with an auto-regrain to 50 in flight a hand `regrain_step` or `regrain` at 20 on the same child resumed the

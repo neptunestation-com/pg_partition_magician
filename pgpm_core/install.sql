@@ -6564,6 +6564,7 @@ declare
   v_idmax bigint[]; v_m bigint; v_i int; v_idnext numeric[];   -- #656: all three refreshed under the cutover's lock
   v_idmin bigint[]; v_mmin bigint;   -- #670: min(identity), for a descending identity's reseed
   v_idopts text[]; v_opt text;      -- #732: the sequence options step 6 used, and their re-read under the lock
+  v_idseqs name[]; v_seq regclass;  -- #877: each original identity sequence's name, read under that lock
   v_keyshape text;                  -- #706: what the preflight planned the key and identity from
   v_ra record;                       -- #656/#670: one identity column's refreshed (next, max, min)
   v_monolith name; v_monreg regclass;
@@ -7675,6 +7676,13 @@ begin
       end if;
     end loop;
   end if;
+  -- #877: and each original sequence's name, which step 3a hands the parent's. After the lock above, which
+  -- ALTER SEQUENCE ... RENAME (ACCESS EXCLUSIVE on the sequence) waits for, so it is the name the table's
+  -- sequence has at the commit.
+  for v_i in 1 .. coalesce(array_length(v_idcols, 1), 0) loop
+    v_idseqs[v_i] := (select s.relname from pg_class s
+                       where s.oid = pg_get_serial_sequence(p_parent::text, v_idcols[v_i])::regclass);
+  end loop;
 
   -- 0c. drop the incoming FKs and record each, HERE (#444). Eligibility was settled by the gate at step 0,
   -- before anything was committed; this drops whatever is live NOW rather than replaying a list captured
@@ -7771,6 +7779,21 @@ begin
     end loop;
   end if;
   execute format('alter table %s alter column %I set not null', v_monreg::text, p_control);
+  -- 3a. the parent's identity sequences take the names the table's had (#877). Step 6 added them while the
+  -- parent was still the staging <table>_pgpm_new, so PostgreSQL named each <table>_pgpm_new_<col>_seq, and
+  -- every statement naming the table's sequence (setval or nextval by name, GRANT ... ON SEQUENCE, ALTER
+  -- SEQUENCE) failed with 42P01 on the converted table: the #789 class, for the sequence. The original's
+  -- name, read under the lock at 0b, is the one handed over, whatever it is (a sequence renamed by the
+  -- operator keeps the name they gave it), and the drop of identity just above freed it: an identity
+  -- sequence lives in its table's schema, which the parent shares. It was a relation's name, so it fits.
+  if v_idcols is not null then
+    for v_i in 1 .. array_length(v_idcols, 1) loop
+      v_seq := pg_get_serial_sequence(v_parent::text, v_idcols[v_i])::regclass;
+      if (select s.relname from pg_class s where s.oid = v_seq) is distinct from v_idseqs[v_i] then
+        execute format('alter sequence %s rename to %I', v_seq::text, v_idseqs[v_i]);
+      end if;
+    end loop;
+  end if;
   -- 3b. hand every sequence the table OWNS through a column (a serial, or an explicit OWNED BY) to the
   -- same column of the new parent (#573). CREATE TABLE ... LIKE INCLUDING DEFAULTS copied the column's
   -- nextval() default onto the parent, but the ownership stayed with the oid the rename just made the
@@ -8462,6 +8485,31 @@ returns table (o_pub name, o_def text) language sql stable as $$
    order by p.pubname;
 $$;
 
+-- Is p_name the name PostgreSQL itself chooses for a PRIMARY KEY index cloned onto a relation named p_rel
+-- (#901)? ADD PRIMARY KEY on a partitioned table creates each partition's copy with no name of its own, and
+-- the partition's is ChooseRelationName(<partition>, NULL, 'pkey'): <partition>_pkey, then _pkey1, _pkey2
+-- and so on for as long as the name is taken, the partition's name clipped (at a character boundary) so the
+-- whole fits NAMEDATALEN - 1 = 63 bytes. untransmute asks it of the monolith's key: a clone the parent's
+-- DDL made since the conversion carries such a name, and a pre-#789 conversion's original key carries the
+-- one the table gave it before it was the monolith, so the first is handed the parent's name and the second
+-- keeps its own.
+create or replace function pgpm._is_clone_pkey_name(p_rel name, p_name name)
+returns boolean language plpgsql immutable as $$
+declare
+  v_m text[]; v_pfx text;
+begin
+  v_m := regexp_match(p_name::text, '^(.*)_(pkey(?:[1-9][0-9]*)?)$');
+  if v_m is null then
+    return false;
+  end if;
+  v_pfx := p_rel::text;
+  while octet_length(v_pfx) > 63 - 1 - octet_length(v_m[2]) loop
+    v_pfx := left(v_pfx, -1);
+  end loop;
+  return v_m[1] = v_pfx;
+end;
+$$;
+
 -- Reverse a transmute, exactly while it is still reversible. transmute's cutover moves no data: the
 -- original table is attached intact as the monolith, merely renamed. As long as every row still lives
 -- inside the monolith's [lo, hi), untransmute exploits that: detach the monolith (it is a complete
@@ -8519,6 +8567,7 @@ declare
   v_gate_q text; v_door text;   -- #443: the outside-rows check and its refusal, asked twice
   v_idcols name[]; v_idmax bigint[]; v_col name; v_m bigint; v_i int; v_idnext numeric[]; v_seq regclass;
   v_idmin bigint[]; v_mmin bigint; v_idopts text[];   -- #670: min(identity) and the sequence options, per column
+  v_idseqs name[];                                    -- #877: each parent identity sequence's name, read under the lock
   v_ra record;                                        -- #656/#670: one identity column's refreshed (next, max, min)
   v_idkinds text[];   -- #308: 'a' (ALWAYS) or 'd' (BY DEFAULT) per v_idcols entry, same order
   r pgpm.dropped_fk%rowtype; v_cdelta name; v_cfn name; v_cnsp name;
@@ -8698,6 +8747,13 @@ begin
       v_idopts[v_i] := pgpm._identity_options_locked(pg_get_serial_sequence(p_parent::text, v_idcols[v_i])::regclass);
     end loop;
   end if;
+  -- #877: and each parent sequence's name, which the restored table's sequence is handed below. After that
+  -- lock, which ALTER SEQUENCE ... RENAME waits for, so it is the name the managed table's sequence has at
+  -- the commit.
+  for v_i in 1 .. coalesce(array_length(v_idcols, 1), 0) loop
+    v_idseqs[v_i] := (select s.relname from pg_class s
+                       where s.oid = pg_get_serial_sequence(p_parent::text, v_idcols[v_i])::regclass);
+  end loop;
   -- Capture the parent's privileges and row security (#667), here, under the lock: GRANT, REVOKE and the
   -- RLS and policy DDL all change the parent, the table the application uses by name, and none of them
   -- recurses to a partition, so the monolith still carries whatever the table had at the conversion. The
@@ -8816,16 +8872,21 @@ begin
   -- statement uses. Each is found by its identity, the parent index it is attached under (pg_inherits, which
   -- the DETACH removes, so read here), and handed that index's name once the DROP has freed it. Not 9b's
   -- carried originals, whose parent copy is <name>_pgpm: the monolith's is the table's own index under the
-  -- name it always had. Not the key, handed back above by its pgpm_key_<oid> identity, nor a PRIMARY KEY
-  -- under any other name, which is a pre-#789 conversion's original key and keeps its name as it was.
+  -- name it always had. Not the key, handed back above by its pgpm_key_<oid> identity. A PRIMARY KEY made on
+  -- the parent since the conversion (a keyless table's, or one replacing the key) is handed back like any
+  -- other (#901): its copy carries the name PostgreSQL chose for a clone on the monolith,
+  -- <monolith>_pkey[N], which _is_clone_pkey_name recognises. A primary key under any other name is a
+  -- pre-#789 conversion's original key, still under the name the table gave it, and keeps it.
   select coalesce(array_agg(mi.indexrelid order by mi.indexrelid), '{}'),
          coalesce(array_agg(pc.relname order by mi.indexrelid), '{}')
     into v_ix_oids, v_ix_names
     from pg_index mi
     join pg_class mc on mc.oid = mi.indexrelid
+    join pg_class mt on mt.oid = mi.indrelid
     join pg_inherits h on h.inhrelid = mi.indexrelid
     join pg_class pc on pc.oid = h.inhparent
-   where mi.indrelid = v_monreg and not mi.indisprimary and pc.relname <> mc.relname
+   where mi.indrelid = v_monreg and pc.relname <> mc.relname
+     and (not mi.indisprimary or pgpm._is_clone_pkey_name(mt.relname, mc.relname))
      and pc.relname::text <> mc.relname::text || '_pgpm'
      and mc.relname::text <> 'pgpm_key_' || mi.indexrelid::text;
   -- The parent's replica identity (#815, see above), read under the lock: ALTER TABLE ... REPLICA IDENTITY
@@ -8942,6 +9003,20 @@ begin
   if (select relnamespace from pg_class where oid = v_restored) <> (select oid from pg_namespace where nspname = v_nsp) then
     execute format('alter table %s set schema %I', v_restored::text, v_nsp);
   end if;
+
+  -- The restored table's identity sequences take the names the managed table's carried (#877). They were
+  -- re-added above on the monolith, still named <table>_p<label>, so PostgreSQL named each
+  -- <table>_p<label>_<col>_seq, and every statement naming the table's sequence failed with 42P01 after the
+  -- reverse. The parent's name, read under the lock (a sequence the operator renamed since the conversion
+  -- keeps the name they gave it, as an index does, #830), freed by the parent's DROP. After the move into
+  -- the parent's schema, which is where that name was freed (an owned sequence moves with its table), so
+  -- nothing left behind in the monolith's schema can be in the way. It was a relation's name, so it fits.
+  for v_i in 1 .. coalesce(array_length(v_idcols, 1), 0) loop
+    v_seq := pg_get_serial_sequence(v_restored::text, v_idcols[v_i])::regclass;
+    if (select s.relname from pg_class s where s.oid = v_seq) is distinct from v_idseqs[v_i] then
+      execute format('alter sequence %s rename to %I', v_seq::text, v_idseqs[v_i]);
+    end if;
+  end loop;
 
   -- Replay the captured triggers onto the restored table, now that it carries the original name again,
   -- then put back each one's enabled state (#499): the replayed text leaves them all origin-only.
