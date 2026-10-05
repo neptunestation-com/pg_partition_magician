@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **One partition's retire raise defers that partition alone** (#907). `retain()`'s loop over `retire()` had no
+  exception block of its own, and `retire()` isolates its `DROP` but not the write-block install before it, so a
+  lock timeout there on one aged partition (a `VACUUM` or `ANALYZE` holding `SHARE UPDATE EXCLUSIVE` on it alone)
+  unwound the whole retain step into `maintain()`'s one handler and rolled back the drops already completed for
+  the other aged partitions of the same call, logged as one `skip_retain` with no range; retention of the whole
+  table stood still while that one partition stayed locked. Each partition now runs in its own subtransaction,
+  as in `_enforce_write_blocks` and `_archive_step`: the one that raised is logged `skip_retain` over its own
+  `lo` and `hi` and taken again by the next call, and the rest are retired. `tests/263` (the lock held by a
+  second session) under `bench/retain_loop_per_child_isolation.sh`, with the mutations
+  `retain_loop_no_child_isolation` and `retain_loop_silent_skip`.
 - **`obtain` and `extend_to` rebuild a forward cell whose partition was dropped by hand** (#908). Both took an
   attached `pgpm.part` row for a built cell without asking whether its partition still existed, so after a
   `DROP TABLE` on one of obtain's empty forward cells the cell was never rebuilt and nothing was logged: every

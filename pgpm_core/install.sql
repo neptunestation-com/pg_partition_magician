@@ -3029,10 +3029,26 @@ begin
   -- coverage not yet complete -- a normal, retryable state, not a failure -- or claimed/retired by a
   -- concurrent assistant) still consumed its batch slot: the cap bounds ATTEMPTS, not successes.
   for r in execute format(
-    'select child_name from pgpm.part where parent_table = %L::regclass and attached and hi::%s <= %L::%s order by lo::%s limit %s',
+    'select child_name, lo, hi from pgpm.part where parent_table = %L::regclass and attached and hi::%s <= %L::%s order by lo::%s limit %s',
     p_parent::text, v_ncast, v_boundary, v_ncast, v_ncast, coalesce(cfg.retain_batch::text, 'all'))
   loop
-    if pgpm.retire(p_parent, r.child_name) then v_dropped := v_dropped + 1; end if;
+    -- ONE PARTITION AT A TIME (issue #907), in its own subtransaction, the per-child shape
+    -- _enforce_write_blocks (#360) and _archive_step (#833) have. retire() isolates its DROP, but not
+    -- what comes before it: the write-block install (CREATE TRIGGER) raises on a lock timeout under
+    -- maintain()'s 200 ms lock_timeout, against a VACUUM or ANALYZE holding SHARE UPDATE EXCLUSIVE on
+    -- that one partition, and so can any other step of its protocol. Without this block the raise
+    -- unwound the whole loop into maintain()'s one handler and rolled back the DROPs retire() had
+    -- already completed for the other partitions of this call, which nothing held, so retention for
+    -- the whole table stood still for as long as one partition stayed locked. Now only the partition
+    -- that raised is deferred: its subtransaction rolls back (its claim with it), it is logged
+    -- skip_retain over its own [lo, hi), it still consumed its batch slot, and the next call takes it
+    -- again. A direct retire() call by an assistant still raises: this is retain()'s loop, not retire().
+    begin
+      if pgpm.retire(p_parent, r.child_name) then v_dropped := v_dropped + 1; end if;
+    exception when others then
+      insert into pgpm.log (parent_table, action, lo, hi, method)
+        values (p_parent, 'skip_retain', r.lo, r.hi, left(sqlerrm, 200));
+    end;
   end loop;
   return v_dropped;
 end;

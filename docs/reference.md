@@ -1149,6 +1149,14 @@ everything behind it until it clears (the wedge shows as a flat `status().retain
 per-partition protocol. Every eligible partition is write-blocked before it is dropped, and the block
 holds for a session running as `session_replication_role = replica` too (see [`retire`](#retire)).
 
+Each partition's `retire` runs in its own subtransaction. Where `retire` would raise for one partition (a
+lock timeout installing its write block, say, while a `VACUUM` or `ANALYZE` of that partition holds `SHARE
+UPDATE EXCLUSIVE` on it), `retain` logs `skip_retain` over that partition's `lo` and `hi` with the message in
+`method`, counts it against `retain_batch` as an attempt, and goes on: the partitions dropped before and after
+it in the same call stay dropped, and the next call takes the deferred one again. A `skip_retain` row with no
+range is the whole step deferred (inside `maintain`, a raise outside the loop, such as the frontier read).
+A direct call of `retire` still raises.
+
 ### `retire`
 
 ```sql

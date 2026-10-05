@@ -956,6 +956,7 @@ run_perf() {
     "bench/incoming_fk_orphans_match_type.sh pgpm_perf239"
     "bench/regrain_calendar_clamped_name.sh pgpm_perf234"
     "bench/obtain_rebuilds_dropped_cell.sh pgpm_perf238"
+    "bench/retain_loop_per_child_isolation.sh pgpm_perf237"
   )
   local selected=()
   local n=${#guards[@]} idx
