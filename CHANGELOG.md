@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **`transmute` refuses an incoming foreign key left `NOT VALID` instead of validating it on the operator's
+  behalf** (#902). `_transmute_incoming_gate` preserved any incoming key that referenced the reused key without
+  looking at `convalidated`, so under `p_incoming_fks => 'preserve'` (or `'drop'`) the cutover recorded a key
+  the operator had deliberately left `NOT VALID`, `restore_incoming_fks` re-added it `NOT VALID` like any
+  other, and `maintain`'s `validate_incoming_fks` then validated it: a clean one was silently promoted, and one
+  over orphans the operator tolerated failed and was re-scanned every five minutes for good
+  (`fail_validate_incoming_fk`), orphans the runbook attributed to pgpm's window. The gate now refuses such a
+  key up front, naming it, as the outgoing side refuses a `NOT VALID` outgoing key, in the preflight and
+  again under the cutover's lock. `tests/259`, guarded by `bench/incoming_not_valid_refused.sh` with mutation
+  `transmute_incoming_gate_accepts_not_valid`.
 - **`uninstall.sql` removes a `from_hypertable_copy` that was never cut over** (#773, last bullet). It swept
   a tracking copy's change capture (#737) but left the copy itself: `<rel>_pgpm_dest`, a full second copy of
   the hypertable's rows, with the tracking copy's pre-built key index and the outgoing foreign keys the copy
