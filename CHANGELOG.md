@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **The three archive memory guards read each encode's own result and fail on any ERROR** (#912).
+  `bench/archive_encode_memory.sh`, `bench/archive_lz77_memory.sh` and `bench/archive_deflate_memory.sh` ran
+  their probe psql without `ON_ERROR_STOP` and took a marker printed after the call as "the call completed",
+  which prints after a raised call too; their "sampled" witness was met during the `pg_sleep` before the call,
+  and only the DEFLATE guard looked for an error, `invalid memory alloc` alone. So an encoder that raised
+  `out of memory` on every call passed every check with a small RSS. Each guard now reads the call's tagged
+  result row (the column's exact PLAIN length, each chunk's `PAR1`-framed Parquet file with the repeat equal
+  to the original, a DEFLATE stream at least 99% of the incompressible payload), fails on any `ERROR:` in
+  its log, and counts an RSS sample only when start and done markers bracket it inside the call. Mutations
+  `archive_encode_raises`, `archive_lz77_range_raises` and `archive_deflate_raises` (an encoder that does the
+  work and then raises); the guards' memory mutations are still caught.
 - **`tests/88` and `tests/91` assert text_time's drought immunity, not only coverage of now()** (#881, bullet
   G18). They asserted only that a partition covers now() and that a write at now() is accepted, which
   transmute's monolith already satisfies through its own inline `greatest(decoded, now())`, so both stayed

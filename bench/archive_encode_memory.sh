@@ -52,12 +52,19 @@ q "insert into public.encode_bench
      from generate_series(1, $ROWS) g" >/dev/null
 q "vacuum analyze public.encode_bench" >/dev/null
 
+# The probe session runs WITHOUT ON_ERROR_STOP on purpose, so its log records every statement's
+# outcome; the verdict therefore never reads a marker as "the call worked" (a marker prints after a
+# raised call exactly as after a returned one, #912). It reads the call's OWN result row, tagged
+# `encode_len=`, and refuses any ERROR in the log. The start/done markers only bracket the call, so
+# that a sample counts as "during the encode" only when it was taken between them, not during the
+# pg_sleep before it.
 LOG=$(mktemp)
 docker exec "$C" psql -U postgres -d "$DB" -qtA \
   -c "set client_min_messages = warning" \
   -c "select pg_backend_pid()" \
   -c "select pg_sleep(0.3)" \
-  -c "select length(archive._pq_encode_column_data(p_schema => 'public', p_table => 'encode_bench', p_col => 'payload', p_pgtype => 'text', p_nullable => false))" \
+  -c "select 'marker_encode_start'" \
+  -c "select 'encode_len=' || length(archive._pq_encode_column_data(p_schema => 'public', p_table => 'encode_bench', p_col => 'payload', p_pgtype => 'text', p_nullable => false))" \
   -c "select 'marker_encode_done'" \
   > "$LOG" 2>&1 &
 BG=$!
@@ -73,8 +80,13 @@ peak=0
 n=0
 if [ -n "$PID" ]; then
   while kill -0 "$BG" 2>/dev/null; do
+    # Bracket the sample: the start marker must be in the log BEFORE it is taken and the done marker
+    # still absent AFTER, so the sample provably fell inside the encode call. (grep -c prints 0 and
+    # exits 1 on no match; the printed count is what is read.)
+    started=$(grep -c '^marker_encode_start$' "$LOG" 2>/dev/null)
     rss=$(docker exec "$C" sh -c "grep VmRSS /proc/$PID/status 2>/dev/null | awk '{print \$2}'" 2>/dev/null)
-    if [ -n "${rss:-}" ]; then
+    ended=$(grep -c '^marker_encode_done$' "$LOG" 2>/dev/null)
+    if [ -n "${rss:-}" ] && [ "${started:-0}" = 1 ] && [ "${ended:-0}" = 0 ]; then
       n=$((n+1))
       [ "$rss" -gt "$peak" ] && peak=$rss
     fi
@@ -87,12 +99,20 @@ echo "--- backend $PID: peak RSS during encode (KB) ---"
 printf 'raw_input=%sKB peak=%s (n=%s)\n' "$RAW_KB" "$peak" "$n"
 cat "$LOG"
 
-# Liveness witnesses first: a probe that sampled nothing, or a call that silently failed, would
-# otherwise let the bound below pass vacuously.
-check "the probe found the backend pid"      "$PID"  "$([ -n "$PID" ] && echo 1 || echo 0)"
-check "the encode call was actually sampled" "n=$n"  "$([ "$n" -gt 0 ] && echo 1 || echo 0)"
-check "the encode call completed"            "$(grep -c 'marker_encode_done' "$LOG")" \
-      "$([ "$(grep -c 'marker_encode_done' "$LOG")" = "1" ] && echo 1 || echo 0)"
+# PLAIN text encoding is a 4-byte length plus the bytes of each value, and every row is non-null and
+# exactly PAYLOAD_BYTES of ASCII, so the whole column has exactly this length: anything else (no row,
+# an empty one, a short one) is not the encode of this column.
+EXPECT_LEN=$((ROWS * (PAYLOAD_BYTES + 4)))
+got_len=$(grep -E '^encode_len=[0-9]+$' "$LOG" | head -n1 | cut -d= -f2)
+n_err=$(grep -c 'ERROR:' "$LOG")
+
+# Liveness witnesses first: a probe that sampled nothing, or a call that failed, would otherwise let
+# the bound below pass vacuously.
+check "the probe found the backend pid"         "$PID"  "$([ -n "$PID" ] && echo 1 || echo 0)"
+check "the encode call was sampled while it ran" "n=$n"  "$([ "$n" -gt 0 ] && echo 1 || echo 0)"
+check "the encode call returned the whole column" "len=${got_len:-none} want=$EXPECT_LEN" \
+      "$([ "${got_len:-}" = "$EXPECT_LEN" ] && echo 1 || echo 0)"
+check "the probe session raised no ERROR"        "$n_err" "$([ "$n_err" = 0 ] && echo 1 || echo 0)"
 
 # The bar itself: encoding costs roughly the output size, not several full copies of the input.
 check "peak RSS stays bounded (<= ${MAX_PEAK_KB}KB, raw=${RAW_KB}KB)" "${peak}KB" \

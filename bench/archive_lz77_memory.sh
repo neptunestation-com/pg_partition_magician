@@ -48,16 +48,28 @@ q "insert into public.lz77_bench
 q "vacuum analyze public.lz77_bench" >/dev/null
 
 LO1=1; HI1=$((ROWS + 1)); LO2=$HI1; HI2=$((2 * ROWS + 1))
+# The probe session runs WITHOUT ON_ERROR_STOP on purpose, so its log records every chunk's outcome;
+# the verdict therefore never reads a marker as "the chunk worked" (a marker prints after a raised
+# call exactly as after a returned one, #912). Each call's OWN result row, tagged `chunkN_file=`,
+# carries the file's length and its leading and trailing magic, and any ERROR in the log fails the
+# guard. The start/done markers only bracket each call for the sampler below. The `offset 0` keeps the
+# subquery from being flattened, so the encode runs once per chunk however often its result is read.
+chunk() { # <n> <lo> <hi>: the probe statement for chunk n
+  printf "select 'chunk%s_file=' || length(f) || ':' || encode(substring(f from 1 for 4), 'escape') || encode(substring(f from length(f) - 3), 'escape') from (select archive._pq_to_parquet_range('public.lz77_bench'::regclass,'id','%s','%s',true) as f offset 0) s" "$1" "$2" "$3"
+}
 LOG=$(mktemp)
 docker exec "$C" psql -U postgres -d "$DB" -qtA \
   -c "set client_min_messages = warning" \
   -c "select pg_backend_pid()" \
   -c "select pg_sleep(0.3)" \
-  -c "select length(archive._pq_to_parquet_range('public.lz77_bench'::regclass,'id','$LO1','$HI1',true))" \
+  -c "select 'marker_chunk1_start'" \
+  -c "$(chunk 1 "$LO1" "$HI1")" \
   -c "select 'marker_chunk1_done'" \
-  -c "select length(archive._pq_to_parquet_range('public.lz77_bench'::regclass,'id','$LO2','$HI2',true))" \
+  -c "select 'marker_chunk2_start'" \
+  -c "$(chunk 2 "$LO2" "$HI2")" \
   -c "select 'marker_chunk2_done'" \
-  -c "select length(archive._pq_to_parquet_range('public.lz77_bench'::regclass,'id','$LO1','$HI1',true))" \
+  -c "select 'marker_chunk3_start'" \
+  -c "$(chunk 3 "$LO1" "$HI1")" \
   -c "select 'marker_chunk3_done'" \
   > "$LOG" 2>&1 &
 BG=$!
@@ -69,24 +81,26 @@ for _ in $(seq 1 200); do
   sleep 0.1
 done
 
-# peak[0]/[1]/[2] = chunk1/chunk2/chunk3's own window. A chunk's marker line appears only once
-# its own call returns, so the segment index is exactly the count of markers seen SO FAR.
+# peak[0]/[1]/[2] = chunk1/chunk2/chunk3's own window. A sample belongs to chunk k only when it is
+# bracketed by that chunk's markers: k start markers in the log BEFORE the sample is taken and k-1
+# done markers AFTER it, so it provably fell inside chunk k's call. Anything else (the pg_sleep before
+# chunk1, the gap between two chunks, a sample that straddled a boundary) is not counted at all.
 peak0=0; peak1=0; peak2=0
 n0=0; n1=0; n2=0
 if [ -n "$PID" ]; then
   while kill -0 "$BG" 2>/dev/null; do
+    # grep -c exits 1 (not 0) when the count is zero, even though it still prints "0" -- so this
+    # must not use `|| echo 0`, which would append a SECOND "0" on that exit status and corrupt the
+    # arithmetic below, silently dropping every chunk1 sample.
+    started=$(grep -c '^marker_chunk[123]_start$' "$LOG" 2>/dev/null)
     rss=$(docker exec "$C" sh -c "grep VmRSS /proc/$PID/status 2>/dev/null | awk '{print \$2}'" 2>/dev/null)
-    if [ -n "${rss:-}" ]; then
-      # grep -c exits 1 (not 0) when the count is zero, even though it still prints "0" -- so
-      # this must not use `|| echo 0`, which would append a SECOND "0" on that exit status and
-      # corrupt the case match below, silently dropping every chunk1 sample.
-      seg=$(grep -c 'marker_chunk' "$LOG" 2>/dev/null)
-      seg=${seg:-0}
-      [ "$seg" -gt 2 ] && seg=2
-      case "$seg" in
-        0) n0=$((n0+1)); [ "$rss" -gt "$peak0" ] && peak0=$rss ;;
-        1) n1=$((n1+1)); [ "$rss" -gt "$peak1" ] && peak1=$rss ;;
-        2) n2=$((n2+1)); [ "$rss" -gt "$peak2" ] && peak2=$rss ;;
+    ended=$(grep -c '^marker_chunk[123]_done$' "$LOG" 2>/dev/null)
+    started=${started:-0}; ended=${ended:-0}
+    if [ -n "${rss:-}" ] && [ "$started" -ge 1 ] && [ "$ended" = "$((started - 1))" ]; then
+      case "$started" in
+        1) n0=$((n0+1)); [ "$rss" -gt "$peak0" ] && peak0=$rss ;;
+        2) n1=$((n1+1)); [ "$rss" -gt "$peak1" ] && peak1=$rss ;;
+        3) n2=$((n2+1)); [ "$rss" -gt "$peak2" ] && peak2=$rss ;;
       esac
     fi
     sleep 0.15
@@ -99,13 +113,25 @@ printf 'chunk1=%s (n=%s)  chunk2=%s (n=%s)  chunk3(repeat of chunk1)=%s (n=%s)\n
   "$peak0" "$n0" "$peak1" "$n1" "$peak2" "$n2"
 cat "$LOG"
 
-# Liveness witnesses first: a probe that sampled nothing, or a call that silently failed, would
-# otherwise let every bound below pass vacuously.
-[ "$PID" != "" ]; check "the probe found the backend pid"        "$PID"                          "$([ -n "$PID" ] && echo 1 || echo 0)"
-check "chunk1 was actually sampled"     "n=$n0"  "$([ "$n0" -gt 0 ] && echo 1 || echo 0)"
-check "chunk2 was actually sampled"     "n=$n1"  "$([ "$n1" -gt 0 ] && echo 1 || echo 0)"
-check "chunk3 was actually sampled"     "n=$n2"  "$([ "$n2" -gt 0 ] && echo 1 || echo 0)"
-check "all three chunks completed"      "$(grep -c 'marker_chunk' "$LOG")" "$([ "$(grep -c 'marker_chunk' "$LOG")" = "3" ] && echo 1 || echo 0)"
+# chunkN_file=<length>:PAR1PAR1 is a Parquet file the call returned; read each chunk's own row.
+file_len() { grep -E "^chunk$1_file=[0-9]+:PAR1PAR1$" "$LOG" | head -n1 | sed -E 's/^[^=]*=([0-9]+):.*$/\1/'; }
+len1=$(file_len 1); len2=$(file_len 2); len3=$(file_len 3)
+n_err=$(grep -c 'ERROR:' "$LOG")
+
+# Liveness witnesses first: a probe that sampled nothing, or a call that failed, would otherwise let
+# every bound below pass vacuously.
+check "the probe found the backend pid"  "$PID"   "$([ -n "$PID" ] && echo 1 || echo 0)"
+check "chunk1 was sampled while it ran"  "n=$n0"  "$([ "$n0" -gt 0 ] && echo 1 || echo 0)"
+check "chunk2 was sampled while it ran"  "n=$n1"  "$([ "$n1" -gt 0 ] && echo 1 || echo 0)"
+check "chunk3 was sampled while it ran"  "n=$n2"  "$([ "$n2" -gt 0 ] && echo 1 || echo 0)"
+check "chunk1 returned a Parquet file"   "len=${len1:-none}" "$([ "${len1:-0}" -gt 8 ] && echo 1 || echo 0)"
+check "chunk2 returned a Parquet file"   "len=${len2:-none}" "$([ "${len2:-0}" -gt 8 ] && echo 1 || echo 0)"
+check "chunk3 returned a Parquet file"   "len=${len3:-none}" "$([ "${len3:-0}" -gt 8 ] && echo 1 || echo 0)"
+# chunk3 re-encodes chunk1's rows, so it is the same file: a repeat that came back different is not
+# a repeat of the work the ratio below compares.
+check "chunk3 (repeat) returned chunk1's file again" "chunk1=${len1:-none} chunk3=${len3:-none}" \
+      "$([ -n "${len1:-}" ] && [ "${len1:-}" = "${len3:-}" ] && echo 1 || echo 0)"
+check "the probe session raised no ERROR" "$n_err" "$([ "$n_err" = 0 ] && echo 1 || echo 0)"
 
 # The bar itself: flat, bounded memory, not O(input size).
 check "chunk1 peak RSS stays bounded (<= ${MAX_PEAK_KB}KB)" "${peak0}KB" "$([ "$peak0" -le "$MAX_PEAK_KB" ] && echo 1 || echo 0)"
