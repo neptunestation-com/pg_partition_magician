@@ -1564,27 +1564,42 @@ $$;
 --
 -- When the step's own granularity already reads both bounds exactly, this IS _part_name's name, so every
 -- name that was already injective keeps its form and no existing grid's names move (#582): a weekly
--- regrain of a UTC monthly grid still clamps [2024-03-01, 2024-03-02) under _p2024_03_01. A calendar step
--- (month, year) is left to _part_name, since a child edge of a calendar grid is a calendar edge of the
--- same zone and anchor; and an id label is exact already (_id_label never rounds).
+-- regrain of a UTC monthly grid still clamps [2024-03-01, 2024-03-02) under _p2024_03_01. An id label is
+-- exact already (_id_label never rounds), so an id grid is left to _part_name.
+--
+-- A calendar step (month, year) takes the same rule (#904), with the year and the month as its two coarsest
+-- granularities, read on the wall clock of partition_tz the way _part_name labels them, and the fixed ones
+-- below them in UTC, again as _part_name labels them. It used to be left to _part_name on the premise that
+-- a child edge of a calendar grid sits on the target's lattice. It sits on A calendar edge, not on the
+-- target's: a '1 year' lattice starts in whatever month the anchor reads in partition_tz, and the default
+-- anchor (2000-01-01 00:00Z) reads 31 December anywhere west of UTC, so there the year cells start on
+-- 1 December. A monthly monolith starting 2023-03-01 in America/New_York then clamps [2023-03-01,
+-- 2023-12-01) under the YYYY of its start, 2023, which is also the label of the lattice cell after it,
+-- [2023-12-01, 2024-12-01): regrain_history(.., '1 year') refused its own first copy as a relation it did
+-- not create. Labelled to the month its bounds read exactly, the clamped cell is _p2023_03, which the
+-- argument above makes injective whatever the anchor reads; a clamp whose bounds are whole years (a
+-- '2 years' step) or whole months (a quarter) keeps _part_name's name, so no name that read exactly moves.
 create or replace function pgpm._regrain_sub_name(p_relname name, cfg pgpm.config, p_step text, p_lo text, p_hi text)
 returns name language plpgsql stable as $$
-declare v_units text[] := array['day', 'hour', 'minute', 'second', 'microseconds'];
-        v_label_steps text[] := array['1 day', '1 hour', '1 minute', '1 second', '1 microsecond'];
-        v_secs numeric; v_from int; v_lo timestamp; v_hi timestamp;
+declare v_units text[] := array['year', 'month', 'day', 'hour', 'minute', 'second', 'microseconds'];
+        v_label_steps text[] := array['1 year', '1 month', '1 day', '1 hour', '1 minute', '1 second', '1 microsecond'];
+        v_months int; v_secs numeric; v_from int; v_lo timestamp; v_hi timestamp; v_label_tz text;
 begin
   if cfg.control_kind not in ('time', 'uuidv7', 'text_time')
-     or extract(year from p_step::interval) * 12 + extract(month from p_step::interval) <> 0
      or not pgpm._native_gt(cfg.control_kind, p_lo,
                             pgpm._grid_floor(cfg.control_kind, p_step, cfg.partition_anchor, p_lo, cfg.partition_tz)) then
     return pgpm._part_name(p_relname, cfg.control_kind, p_step, p_lo, p_hi, cfg.partition_tz);
   end if;
+  v_months := (extract(year from p_step::interval) * 12 + extract(month from p_step::interval))::int;
   v_secs := extract(epoch from p_step::interval);
-  v_from := case when v_secs >= 86400 then 1 when v_secs >= 3600 then 2 when v_secs >= 60 then 3
-                 when v_secs >= 1 then 4 else 5 end;   -- _part_name's label granularity for the step
-  v_lo := p_lo::timestamptz at time zone 'UTC';
-  v_hi := p_hi::timestamptz at time zone 'UTC';
-  for i in v_from .. 5 loop
+  v_from := case when v_months > 0 and v_months % 12 = 0 then 1 when v_months > 0 then 2
+                 when v_secs >= 86400 then 3 when v_secs >= 3600 then 4 when v_secs >= 60 then 5
+                 when v_secs >= 1 then 6 else 7 end;   -- _part_name's label granularity for the step
+  for i in v_from .. 7 loop
+    -- read in the zone _part_name labels that granularity in: a calendar one on the wall clock, a fixed one in UTC
+    v_label_tz := case when i <= 2 then cfg.partition_tz else 'UTC' end;
+    v_lo := p_lo::timestamptz at time zone v_label_tz;
+    v_hi := p_hi::timestamptz at time zone v_label_tz;
     if date_trunc(v_units[i], v_lo) = v_lo and date_trunc(v_units[i], v_hi) = v_hi then
       if i = v_from then
         return pgpm._part_name(p_relname, cfg.control_kind, p_step, p_lo, p_hi, cfg.partition_tz);

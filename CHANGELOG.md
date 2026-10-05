@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **A regrain to a calendar step names a clamped first cell by its own start, so the per-year split
+  completes on a year lattice that does not start in January** (#904). `_regrain_sub_name` left month and
+  year targets to `_part_name` on the premise that a calendar child's edge sits on the target's lattice. A
+  year lattice starts in the month the anchor reads in `partition_tz`, December west of UTC with the default
+  anchor (or the month of a non-January `p_anchor`), so a monthly `America/New_York` monolith starting
+  2023-03-01 clamped `[2023-03-01, 2023-12-01)` under `_p2023`, the name of the lattice cell after it, and
+  `regrain_history(.., '1 year')` refused its own first copy as a relation it did not create. A clamped
+  calendar cell now takes #783's rule, the year and the month read in `partition_tz` as its coarsest grains
+  (`_p2023_03`); a lattice cell's name, and a clamp whose bounds read exactly at the step's grain, are
+  unchanged. `bench/regrain_calendar_clamped_name.sh` runs tests/260 against the mutation
+  `regrain_calendar_name_by_lattice`.
 - **`incoming_fk_orphans` counts under the key's match type** (#909). It counted with `MATCH SIMPLE`'s rule
   (every FK column non-null and no parent row) for every key, so for a `MATCH FULL` key, which `preserve`
   re-adds as written, a row with some but not all of its FK columns null made `validate_incoming_fks` fail
