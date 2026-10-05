@@ -12,8 +12,9 @@
 #                                              committed the bound. Part A.
 #   oid_bound_dependants_preflight_only        refused only in the preflight, so one created after it
 #                                              follows the rename. Part B.
-#   oid_bound_dependants_no_staging_exemption  the cutover's re-check counts the new parent's carried copy
-#                                              of the table's own policy, a false refusal. Part A.
+#   oid_bound_dependants_policy_on_staging     the policies are created on the staging parent before the
+#                                              renames again (#897), so the cutover's re-check counts the
+#                                              copy of the table's own policy, a false refusal. Part A.
 #   untransmute_oid_bound_dependants_unrefused untransmute asks nothing: its DROP fails raw on a view and
 #                                              takes a rule on the parent with it silently. Part C.
 # The file is the acceptance test; this wrapper exists so the mutations have a guard the discriminate

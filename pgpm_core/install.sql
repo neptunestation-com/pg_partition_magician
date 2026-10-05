@@ -6234,11 +6234,15 @@ $$;
 -- table, detached and handed back, so whatever names it names the restored table.
 --
 -- A policy on the table itself is not one of these: both directions carry the table's own policies by
--- re-parsing their text against the table that takes the name. Nor is one on p_staging, the cutover's new
--- parent, which holds those carried copies by the time the cutover asks, nor a policy or a rule on one of
--- the partitions untransmute drops, which goes with its partition, without an error.
-create or replace function pgpm._refuse_oid_bound_dependants(p_rel regclass, p_untransmute boolean,
-                                                             p_staging regclass default null)
+-- re-parsing their text against the table that takes the name, after the rename that gives it that name
+-- (#897), so the cutover's new parent holds no carried copy yet when the cutover asks. Nor is a policy or
+-- a rule on one of the partitions untransmute drops, which goes with its partition, without an error.
+--
+-- #897 retired the third argument, p_staging, which exempted the copies the cutover had put on its staging
+-- parent before the renames. Dropped by its old signature so an upgraded install does not keep it beside
+-- this one, where every two-argument call would be ambiguous between them.
+drop function if exists pgpm._refuse_oid_bound_dependants(regclass, boolean, regclass);
+create or replace function pgpm._refuse_oid_bound_dependants(p_rel regclass, p_untransmute boolean)
 returns void language plpgsql stable as $$
 declare v_deps_q text; v_mon oid;
 begin
@@ -6271,8 +6275,7 @@ begin
                    when 'pg_proc'::regclass then 'function ' || d.objid::regprocedure::text
                    when 'pg_policy'::regclass then
                      (select 'policy ' || quote_ident(p.polname) || ' on ' || p.polrelid::regclass::text
-                        from pg_policy p where p.oid = d.objid and p.polrelid not in (select oid from rel)
-                         and p.polrelid is distinct from p_staging)
+                        from pg_policy p where p.oid = d.objid and p.polrelid not in (select oid from rel))
                    when 'pg_class'::regclass then
                      (select 'column ' || d.objid::regclass::text || '.' || quote_ident(a.attname)
                         from pg_attribute a where a.attrelid = d.objid and a.attnum = d.objsubid)
@@ -6499,6 +6502,7 @@ declare
   v_prev_lock_timeout text;   -- #309: so validating p_lock_timeout leaves the setting untouched
   v_trgdefs text[] := '{}'; v_grant text; v_g record;
   v_trgnames text[] := '{}'; v_trgstates text[] := '{}';   -- #499: tgname and tgenabled, index-aligned with v_trgdefs
+  v_poldefs text[] := '{}'; v_poldef text;   -- #897: the policies, captured as statements naming the table
   v_bad_pub text; v_pub record;   -- #566: publication membership, refused or carried
   v_bad_con text;                 -- #730: constraints the cutover cannot carry (NOT VALID, NO INHERIT)
   v_key_defer text := '';         -- #731: the reused key's DEFERRABLE / INITIALLY DEFERRED, carried onto the parent
@@ -7414,8 +7418,10 @@ begin
   --
   -- Trigger definitions get a free ride, but only once BOTH renames have happened (#344): pg_get_triggerdef
   -- emits "... ON public.<original name>", and that name only resolves to the new parent once the staging
-  -- parent has taken it, so the captured text replays verbatim with no rewriting. Policies get no such
-  -- help (there is no pg_get_policydef) and are rebuilt from pg_policy.
+  -- parent has taken it, so the captured text replays verbatim with no rewriting. Policies are rebuilt from
+  -- pg_policy (there is no pg_get_policydef) and take the same ride (#897): pg_get_expr qualifies a
+  -- reference to the outer row with the table's own name, so the text names the table and is replayed only
+  -- once that name is the new parent's.
 
   -- #344: everything below that only touches the NEW parent -- not the original/monolith relation -- runs
   -- BEFORE either rename, under a staging name (v_staging, collision-checked earlier alongside the
@@ -7471,8 +7477,8 @@ begin
   end if;
 
   -- 7b (moved before the renames -- #344). Replay everything captured at 0b onto the staging parent,
-  -- EXCEPT triggers: that is the one step that needs the LIVE name in place, not just the right OID (see
-  -- 0b), so it stays below, after both renames. And except comments, which only the table's ACCESS
+  -- EXCEPT triggers and policies: those are the steps that need the LIVE name in place, not just the right
+  -- OID (see 0b), so they stay below, after both renames. And except comments, which only the table's ACCESS
   -- EXCLUSIVE holds still (#630), so they are read and replayed below it, beside the triggers; and except
   -- grants, which no lock on the table holds still (#706), so they are read and replayed after the attach.
   execute format('alter table %s owner to %I', v_parent::text, v_owner);
@@ -7486,24 +7492,29 @@ begin
   if v_rls_force then
     execute format('alter table %s force row level security', v_parent::text);
   end if;
-  -- Policies live on the PARENT and only on the parent (measured: a parent policy governs parent-routed
-  -- reads into a partition, with no policy on the partition at all). Do not "fix" the apparent gap by
-  -- scattering copies onto children; direct partition access needs grants that live on the parent anyway.
+  -- 0b (policies). Captured here, under the LIKE's ACCESS SHARE (see 0b), and replayed after both renames
+  -- (7b, policies), not here onto the staging parent (#897). pg_get_expr renders a policy's expression
+  -- against the table it is on, so a reference to the outer row comes back qualified by the table's own
+  -- name (a correlated subquery's `m.tenant = t.org`, and `org` written unqualified as `t.org` too), and
+  -- a subquery over the table itself names it. Created on <rel>_pgpm_new that text either failed raw
+  -- ("missing FROM-clause entry"), after phases 1 and 2 had committed the bound and the claim, on every
+  -- retry, or bound the subquery to this oid, which the rename hands to the monolith. Each statement names
+  -- the table, which the new parent is by the time it runs, so it replays verbatim, as the triggers do.
   for v_pol in
     select polname, polcmd, polpermissive,
            case when polroles = '{0}'::oid[] then 'public'
                 else (select string_agg(quote_ident(rolname), ', ' order by rolname)
-                        from pg_roles where oid = any(polroles)) end as roles,
+                        from pg_roles where oid = any(polroles)) end as roles_q,
            pg_get_expr(polqual, polrelid)      as qual,
            pg_get_expr(polwithcheck, polrelid) as withcheck
-      from pg_policy where polrelid = p_parent
+      from pg_policy where polrelid = p_parent order by polname
   loop
-    execute format('create policy %I on %s as %s for %s to %s%s%s',
-      v_pol.polname, v_parent::text,
+    v_poldefs := v_poldefs || format('create policy %I on %I.%I as %s for %s to %s%s%s',
+      v_pol.polname, v_nsp, v_rel,
       case when v_pol.polpermissive then 'permissive' else 'restrictive' end,
       case v_pol.polcmd when 'r' then 'select' when 'a' then 'insert' when 'w' then 'update'
                         when 'd' then 'delete' else 'all' end,
-      v_pol.roles,
+      v_pol.roles_q,
       case when v_pol.qual is not null then ' using (' || v_pol.qual || ')' else '' end,
       case when v_pol.withcheck is not null then ' with check (' || v_pol.withcheck || ')' else '' end);
   end loop;
@@ -7553,9 +7564,10 @@ begin
   -- one committed since the preflight would otherwise reach the replay in 7b and fail it with a raw error.
   perform pgpm._transmute_refuse_transition_triggers(p_parent);
   -- and the objects that name the table by its oid (#779), refused again now that none can be created: one
-  -- committed since the preflight would otherwise follow the rename into the monolith. The new parent's
-  -- policies, carried above, are pgpm's own and exempt.
-  perform pgpm._refuse_oid_bound_dependants(p_parent, false, v_parent);
+  -- committed since the preflight would otherwise follow the rename into the monolith. The new parent has
+  -- no policies yet to count among them: they are created after the renames (#897), where a subquery over
+  -- the table binds to the new parent rather than to this oid.
+  perform pgpm._refuse_oid_bound_dependants(p_parent, false);   -- #779, again under the lock
 
   -- 0b (under the lock, #630 and #656). What the preflight listed, listed again now that nothing can change
   -- it: the secondary indexes 9b carries, the outgoing keys 7a re-adds, and where 8b resumes each identity
@@ -7776,6 +7788,17 @@ begin
       end if;
     end loop;
   end if;
+
+  -- 7b (policies). After both renames (#897), when the table's name, which every captured statement names
+  -- and pg_get_expr used to qualify the outer row, is the new parent's. Inside the outage, which #344 kept
+  -- the staging configuration out of; a CREATE POLICY on an empty partitioned table is catalog work, and
+  -- before the renames the text could not be replayed at all. Policies live on the PARENT and only on the
+  -- parent (measured: a parent policy governs parent-routed reads into a partition, with no policy on the
+  -- partition at all). Do not "fix" the apparent gap by scattering copies onto children; direct partition
+  -- access needs grants that live on the parent anyway.
+  foreach v_poldef in array v_poldefs loop
+    execute v_poldef;   -- names the ORIGINAL table, which is now the parent: replays verbatim
+  end loop;
 
   -- 7b (comments). Read and replayed under the lock (see 0b): COMMENT takes only SHARE UPDATE EXCLUSIVE,
   -- which the staging LIKE's ACCESS SHARE does not exclude. p_parent is the monolith's oid by now, which

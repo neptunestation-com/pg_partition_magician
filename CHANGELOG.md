@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **`transmute` carries a policy whose expression names the table itself** (#897). The cutover replayed the
+  table's policies onto the staging parent `<rel>_pgpm_new` before the renames, and `pg_get_expr` qualifies a
+  reference to the outer row with the table's own name (a correlated subquery's `m.tenant = t.org`, and `org`
+  written unqualified too), so the common tenant-membership policy failed `CREATE POLICY` raw in phase 3,
+  after the write-rejecting bound and the claim had committed, on every retry; a subquery over the table
+  itself bound to the oid the rename hands the monolith. The policies are still captured before the renames
+  and are now replayed after them, beside the triggers, when the parent bears the name, so both mean the
+  parent; `_refuse_oid_bound_dependants` loses the staging exemption that existed only for the pre-rename
+  copies. `tests/250`, guarded by `bench/transmute_self_naming_policy.sh` (mutation
+  `transmute_policies_on_staging`); `bench/transmute_cutover_order.sh` now requires the replay after the
+  second rename and the capture before the first (`transmute_cutover_early_policy` and
+  `transmute_cutover_late_policy_capture` replace `transmute_cutover_late_policy`), and
+  `oid_bound_dependants_policy_on_staging` replaces `oid_bound_dependants_no_staging_exemption`.
 - **`transmute` and `extend_to` refuse a null argument up front, naming it** (#896). Only `p_obtain`'s null
   was refused (#581), and PL/pgSQL reads every other null through three-valued logic as "not true": so
   `p_force_frontier`, `p_force_uuidv7` and `p_force_text_time => null` skipped their refusals and acted as

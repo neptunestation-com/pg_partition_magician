@@ -332,8 +332,8 @@ TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the N
   end if;
 
   -- 7b (moved before the renames -- #344). Replay everything captured at 0b onto the staging parent,
-  -- EXCEPT triggers: that is the one step that needs the LIVE name in place, not just the right OID (see
-  -- 0b), so it stays below, after both renames. And except comments, which only the table's ACCESS
+  -- EXCEPT triggers and policies: those are the steps that need the LIVE name in place, not just the right
+  -- OID (see 0b), so they stay below, after both renames. And except comments, which only the table's ACCESS
   -- EXCLUSIVE holds still (#630), so they are read and replayed below it, beside the triggers; and except
   -- grants, which no lock on the table holds still (#706), so they are read and replayed after the attach.
   execute format('alter table %s owner to %I', v_parent::text, v_owner);
@@ -347,24 +347,29 @@ TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the N
   if v_rls_force then
     execute format('alter table %s force row level security', v_parent::text);
   end if;
-  -- Policies live on the PARENT and only on the parent (measured: a parent policy governs parent-routed
-  -- reads into a partition, with no policy on the partition at all). Do not "fix" the apparent gap by
-  -- scattering copies onto children; direct partition access needs grants that live on the parent anyway.
+  -- 0b (policies). Captured here, under the LIKE's ACCESS SHARE (see 0b), and replayed after both renames
+  -- (7b, policies), not here onto the staging parent (#897). pg_get_expr renders a policy's expression
+  -- against the table it is on, so a reference to the outer row comes back qualified by the table's own
+  -- name (a correlated subquery's `m.tenant = t.org`, and `org` written unqualified as `t.org` too), and
+  -- a subquery over the table itself names it. Created on <rel>_pgpm_new that text either failed raw
+  -- ("missing FROM-clause entry"), after phases 1 and 2 had committed the bound and the claim, on every
+  -- retry, or bound the subquery to this oid, which the rename hands to the monolith. Each statement names
+  -- the table, which the new parent is by the time it runs, so it replays verbatim, as the triggers do.
   for v_pol in
     select polname, polcmd, polpermissive,
            case when polroles = '{0}'::oid[] then 'public'
                 else (select string_agg(quote_ident(rolname), ', ' order by rolname)
-                        from pg_roles where oid = any(polroles)) end as roles,
+                        from pg_roles where oid = any(polroles)) end as roles_q,
            pg_get_expr(polqual, polrelid)      as qual,
            pg_get_expr(polwithcheck, polrelid) as withcheck
-      from pg_policy where polrelid = p_parent
+      from pg_policy where polrelid = p_parent order by polname
   loop
-    execute format('create policy %I on %s as %s for %s to %s%s%s',
-      v_pol.polname, v_parent::text,
+    v_poldefs := v_poldefs || format('create policy %I on %I.%I as %s for %s to %s%s%s',
+      v_pol.polname, v_nsp, v_rel,
       case when v_pol.polpermissive then 'permissive' else 'restrictive' end,
       case v_pol.polcmd when 'r' then 'select' when 'a' then 'insert' when 'w' then 'update'
                         when 'd' then 'delete' else 'all' end,
-      v_pol.roles,
+      v_pol.roles_q,
       case when v_pol.qual is not null then ' using (' || v_pol.qual || ')' else '' end,
       case when v_pol.withcheck is not null then ' with check (' || v_pol.withcheck || ')' else '' end);
   end loop;
@@ -974,9 +979,52 @@ FRONTIER_NATIVE_CLOCK_BLEND = (
     1,
 )
 
-# _transmute's policy replay loop, whole (#845). The one statement of the #344 hoist that the cutover-order
-# guard did not anchor, so the mutation that moves it alone must match it exactly.
-TRANSMUTE_POLICY_REPLAY = """  for v_pol in
+# _transmute's policy blocks (#845, #897), each whole, so the mutations that move them match them exactly:
+# the capture, which builds each CREATE POLICY as text naming the table before the renames; the replay,
+# which executes them after both; and the pre-#897 loop, which executed them onto the staging parent.
+TRANSMUTE_POLICY_CAPTURE = """  -- 0b (policies). Captured here, under the LIKE's ACCESS SHARE (see 0b), and replayed after both renames
+  -- (7b, policies), not here onto the staging parent (#897). pg_get_expr renders a policy's expression
+  -- against the table it is on, so a reference to the outer row comes back qualified by the table's own
+  -- name (a correlated subquery's `m.tenant = t.org`, and `org` written unqualified as `t.org` too), and
+  -- a subquery over the table itself names it. Created on <rel>_pgpm_new that text either failed raw
+  -- ("missing FROM-clause entry"), after phases 1 and 2 had committed the bound and the claim, on every
+  -- retry, or bound the subquery to this oid, which the rename hands to the monolith. Each statement names
+  -- the table, which the new parent is by the time it runs, so it replays verbatim, as the triggers do.
+  for v_pol in
+    select polname, polcmd, polpermissive,
+           case when polroles = '{0}'::oid[] then 'public'
+                else (select string_agg(quote_ident(rolname), ', ' order by rolname)
+                        from pg_roles where oid = any(polroles)) end as roles_q,
+           pg_get_expr(polqual, polrelid)      as qual,
+           pg_get_expr(polwithcheck, polrelid) as withcheck
+      from pg_policy where polrelid = p_parent order by polname
+  loop
+    v_poldefs := v_poldefs || format('create policy %I on %I.%I as %s for %s to %s%s%s',
+      v_pol.polname, v_nsp, v_rel,
+      case when v_pol.polpermissive then 'permissive' else 'restrictive' end,
+      case v_pol.polcmd when 'r' then 'select' when 'a' then 'insert' when 'w' then 'update'
+                        when 'd' then 'delete' else 'all' end,
+      v_pol.roles_q,
+      case when v_pol.qual is not null then ' using (' || v_pol.qual || ')' else '' end,
+      case when v_pol.withcheck is not null then ' with check (' || v_pol.withcheck || ')' else '' end);
+  end loop;
+"""
+TRANSMUTE_POLICY_REPLAY = """  -- 7b (policies). After both renames (#897), when the table's name, which every captured statement names
+  -- and pg_get_expr used to qualify the outer row, is the new parent's. Inside the outage, which #344 kept
+  -- the staging configuration out of; a CREATE POLICY on an empty partitioned table is catalog work, and
+  -- before the renames the text could not be replayed at all. Policies live on the PARENT and only on the
+  -- parent (measured: a parent policy governs parent-routed reads into a partition, with no policy on the
+  -- partition at all). Do not "fix" the apparent gap by scattering copies onto children; direct partition
+  -- access needs grants that live on the parent anyway.
+  foreach v_poldef in array v_poldefs loop
+    execute v_poldef;   -- names the ORIGINAL table, which is now the parent: replays verbatim
+  end loop;
+
+"""
+TRANSMUTE_POLICY_ON_STAGING_PRE_897 = """  -- Policies live on the PARENT and only on the parent (measured: a parent policy governs parent-routed
+  -- reads into a partition, with no policy on the partition at all). Do not "fix" the apparent gap by
+  -- scattering copies onto children; direct partition access needs grants that live on the parent anyway.
+  for v_pol in
     select polname, polcmd, polpermissive,
            case when polroles = '{0}'::oid[] then 'public'
                 else (select string_agg(quote_ident(rolname), ', ' order by rolname)
@@ -995,6 +1043,9 @@ TRANSMUTE_POLICY_REPLAY = """  for v_pol in
       case when v_pol.withcheck is not null then ' with check (' || v_pol.withcheck || ')' else '' end);
   end loop;
 """
+# The pre-#897 shape put back, shared by the two guards that must each catch it on its own.
+TRANSMUTE_POLICIES_ON_STAGING_EDITS = [(TRANSMUTE_POLICY_CAPTURE, TRANSMUTE_POLICY_ON_STAGING_PRE_897, 1),
+                                       (TRANSMUTE_POLICY_REPLAY, "", 1)]
 
 # hypertable_time_rendering.sh's run_file verdict as it stood before #844, whole: its own hand-rolled
 # lines in place of the shared `# >>> pgTAP verdict` block (psql's exit never captured, a shortfall read
@@ -1976,18 +2027,36 @@ MUTATIONS = {
           "  execute format('create table %I.%I (like %s including defaults including generated including storage including constraints) partition by range (%I)',\n"
           "                 v_nsp, v_staging, p_parent::text, p_control);\n", 1)],
     ),
-    "transmute_cutover_late_policy": (
+    "transmute_cutover_early_policy": (
         "bench/transmute_cutover_order.sh",
-        "The #344 defect at the policy replay alone (#845): _transmute's CREATE POLICY loop moved, verbatim, to "
-        "just after the second cutover rename, inside the ACCESS EXCLUSIVE outage, with the CREATE TABLE and the "
-        "ENABLE ROW LEVEL SECURITY left before the renames. The guard anchored only the ENABLE, so it passed this "
-        "copy under a PASS line naming the policies; transmute_cutover_late_build moves the ENABLE too and so "
-        "never tested the policy statement on its own. Anchored on the loop and the second rename, not on "
-        "whatever sits around the loop, so the mutant does not depend on where neighbouring code is placed. The "
-        "copy installs and still carries every policy (only the order changes), which is all the guard reads.",
+        "The #897 defect in the cutover's statement order: the policy replay loop moved, verbatim, to just after "
+        "the capture, before either rename, where #344's outage reasoning would put it and #845 once anchored "
+        "it. There the captured text, which names the table and qualifies its outer-row references with the "
+        "table's name, cannot mean the new parent. Replaces transmute_cutover_late_policy, whose defect (the "
+        "replay after the renames) is now the contract. Counts unchanged, so only the order check can catch it; "
+        "the copy installs (plpgsql bodies are not resolved at CREATE), which is all the guard reads.",
         [(TRANSMUTE_POLICY_REPLAY, "", 1),
+         (TRANSMUTE_POLICY_CAPTURE, TRANSMUTE_POLICY_CAPTURE + TRANSMUTE_POLICY_REPLAY, 1)],
+    ),
+    "transmute_cutover_late_policy_capture": (
+        "bench/transmute_cutover_order.sh",
+        "#897's other half of the order: the policy capture moved to just after the second rename, beside the "
+        "replay. pg_policy is then read off p_parent, which is the monolith's oid by now, and pg_get_expr "
+        "qualifies each outer-row reference with the MONOLITH's name, so the replayed policy fails on the "
+        "parent exactly as it failed on the staging parent. Only the capture check can catch it; the copy "
+        "installs, which is all the guard reads.",
+        [(TRANSMUTE_POLICY_CAPTURE, "", 1),
          ("  execute format('alter table %s rename to %I', v_parent::text, v_rel);\n",
-          "  execute format('alter table %s rename to %I', v_parent::text, v_rel);\n" + TRANSMUTE_POLICY_REPLAY, 1)],
+          "  execute format('alter table %s rename to %I', v_parent::text, v_rel);\n" + TRANSMUTE_POLICY_CAPTURE, 1)],
+    ),
+    "transmute_policies_on_staging": (
+        "bench/transmute_self_naming_policy.sh",
+        "Issue #897 put back, the pre-fix shape: the cutover executes each CREATE POLICY onto the staging parent "
+        "<rel>_pgpm_new where it used to, before the renames, and the replay after them is gone. A policy whose "
+        "expression qualifies the outer row with the table's own name fails raw in phase 3, after the bound and "
+        "the claim committed. The one part of the pre-fix code not restored is _refuse_oid_bound_dependants' "
+        "staging exemption, which #897 retired; it plays no part in tests/250 part A, which catches this.",
+        TRANSMUTE_POLICIES_ON_STAGING_EDITS,
     ),
     "untransmute_no_recheck_under_lock": (
         "bench/untransmute_race.sh",
@@ -5752,17 +5821,18 @@ select is(
         "ACCESS EXCLUSIVE (phases 1 and 2 let go of the table) follows the rename into the monolith. One "
         "site, the cutover's re-check. tests/205 part B, whose event trigger creates the view in that window, "
         "catches it.",
-        [("  perform pgpm._refuse_oid_bound_dependants(p_parent, false, v_parent);\n", "", 1)],
+        [("  perform pgpm._refuse_oid_bound_dependants(p_parent, false);   -- #779, again under the lock\n", "", 1)],
     ),
-    "oid_bound_dependants_no_staging_exemption": (
+    "oid_bound_dependants_policy_on_staging": (
         "bench/transmute_oid_bound_dependants.sh",
-        "Issue #779, overreach: the cutover's re-check counts the policies it has just carried onto the new "
-        "parent, so a table whose own policy queries the table itself is refused under the lock, after phases "
-        "1 and 2 committed the bound, though the preflight let it through. One site, the staging exemption. "
-        "tests/205 part A's conversion of dv205 (policy dv205_self) catches it.",
-        [("from pg_policy p where p.oid = d.objid and p.polrelid not in (select oid from rel)\n"
-          "                         and p.polrelid is distinct from p_staging)",
-          "from pg_policy p where p.oid = d.objid and p.polrelid not in (select oid from rel))", 1)],
+        "Issue #779's overreach, by the route that is left (#897): the policy loop executes onto the staging "
+        "parent before the renames again, so the cutover's re-check meets the copy of the table's own "
+        "self-referencing policy, bound to the original oid, and refuses the table under the lock, after phases "
+        "1 and 2 committed the bound, though the preflight let it through. Replaces "
+        "oid_bound_dependants_no_staging_exemption: #897 replays the policies after the renames, so the copy no "
+        "longer exists when the re-check asks and the exemption it removed is gone. tests/205 part A's "
+        "conversion of dv205 (policy dv205_self) catches it.",
+        TRANSMUTE_POLICIES_ON_STAGING_EDITS,
     ),
     "untransmute_oid_bound_dependants_unrefused": (
         "bench/transmute_oid_bound_dependants.sh",
