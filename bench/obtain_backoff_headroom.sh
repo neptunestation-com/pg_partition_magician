@@ -31,7 +31,11 @@
 #   4. The back-off is still in the future immediately before the low-headroom tick, so assertion 5 cannot
 #      pass merely because 30 s elapsed.
 #   5. + 6. With headroom low (frontier in [4000,5000), 0 steps beyond) the tick extends the grid anyway, by
-#      identity (the partition count), and a write at 8999 is accepted rather than refused.
+#      identity: the attached [lo,hi) cells are exactly [0,1000) .. [8000,9000), and a write into [5000,6000),
+#      the first cell the bypass must build, is accepted, as is one at 8999, the last. A count of partitions
+#      is not identity (#913): an obtain that skips [5000,6000) and builds [9000,10000) instead has the same
+#      count, takes the 8999 write, and refuses every write in the hole, which is the very outage this guard
+#      exists for. Every grid check below names its cells for the same reason.
 #   public.ob_hr (p_bound_headroom => 4: the monolith [0,5000) is the only partition):
 #   7. + 8. LIVENESS WITNESS again, for this table's own race.
 #   9. Frontier in [1000,2000) leaves 3 steps covered INSIDE the monolith: the back-off holds and nothing is
@@ -41,7 +45,8 @@
 #   10. + 11. LIVENESS WITNESS again, for this table's own race.
 #   12. With exactly 1 complete step of headroom the tick must still extend the grid: 1 < ceil(3/2). Integer
 #       division makes the threshold 1, so the back-off would be honored and nothing created. obtain 4 (above)
-#       cannot see that difference, since ceil(4/2) and 4/2 are both 2.
+#       cannot see that difference, since ceil(4/2) and 4/2 are both 2. Asserted as the cells [0,1000) ..
+#       [5000,6000), plus a write into [4000,5000), the first cell the bypass must build.
 #
 # Usage: obtain_backoff_headroom.sh <container> <db> [install.sql]
 # The install path defaults to the real one; bench/discriminate.sh passes a MUTANT copy instead, to
@@ -57,7 +62,17 @@ check() { # <label> <actual> <expected>
   if [ "$2" = "$3" ]; then printf 'PASS  %-66s %s\n' "$1" "$2"
   else printf 'FAIL  %-66s got %s, want %s\n' "$1" "$2" "$3"; fail=1; fi
 }
-parts() { q "select count(*) from pgpm.part where parent_table = '$1'::regclass and attached"; }
+# The attached grid BY IDENTITY: every [lo,hi) cell, in order, so a hole or a shifted cell shows (#913).
+cells() { q "select string_agg(lo || '-' || hi, ',' order by lo::bigint) from pgpm.part
+             where parent_table = '$1'::regclass and attached"; }
+# A write must be accepted: the cell it targets really exists and takes rows, whatever pgpm.part says.
+accepts() { # <label> <table> <id>
+  if run "insert into $2 (id, body) values ($3, 'probe')" >/tmp/obh_insert.log 2>&1; then
+    check "$1" "accepted" "accepted"
+  else
+    check "$1" "rejected: $(grep -m1 'ERROR' /tmp/obh_insert.log | cut -c1-70)" "accepted"
+  fi
+}
 
 # Run one maintain_obtain tick while a second session holds ACCESS SHARE on the parent (which conflicts with
 # obtain's ACCESS EXCLUSIVE), so the tick loses a genuine lock race. Then assert the race's liveness witness.
@@ -97,7 +112,8 @@ raced_tick public.ob_race "ob_race"
 
 # Lock released, 2 steps still covered beyond the frontier's cell: the back-off must hold.
 run "call pgpm.maintain_obtain('public.ob_race')" >/dev/null
-check "ob_race: ample headroom: the back-off holds, nothing created" "$(parts public.ob_race)" "5"
+check "ob_race: ample headroom: the back-off holds, nothing created" "$(cells public.ob_race)" \
+  "0-1000,1000-2000,2000-3000,3000-4000,4000-5000"
 
 # Frontier into [4000,5000): nothing covered beyond it.
 run "insert into public.ob_race (id, body) values (4001, 'frontier')" >/dev/null
@@ -105,12 +121,10 @@ check "ob_race: the back-off is still in the future before the low-headroom tick
   "$(q "select obtain_retry_after > clock_timestamp() from pgpm.config where parent_table = 'public.ob_race'::regclass")" "t"
 
 run "call pgpm.maintain_obtain('public.ob_race')" >/dev/null
-check "ob_race: low headroom: the tick extends the grid through the back-off" "$(parts public.ob_race)" "9"
-if run "insert into public.ob_race (id, body) values (8999, 'past the old top')" >/tmp/obh_insert.log 2>&1; then
-  check "ob_race: a write at 8999, past the old grid top of 5000, is accepted" "accepted" "accepted"
-else
-  check "ob_race: a write at 8999, past the old grid top of 5000, is accepted" "rejected: $(tail -1 /tmp/obh_insert.log | cut -c1-60)" "accepted"
-fi
+check "ob_race: low headroom: the tick extends the grid through the back-off" "$(cells public.ob_race)" \
+  "0-1000,1000-2000,2000-3000,3000-4000,4000-5000,5000-6000,6000-7000,7000-8000,8000-9000"
+accepts "ob_race: a write at 5500, in the first cell past the old top, is accepted" public.ob_race 5500
+accepts "ob_race: a write at 8999, past the old grid top of 5000, is accepted" public.ob_race 8999
 
 # ------------------------------------------------------------------ public.ob_hr: headroom inside the monolith
 run "create table public.ob_hr (id bigint generated by default as identity primary key, body text)" >/dev/null
@@ -122,7 +136,7 @@ run "insert into public.ob_hr (id, body) values (1001, 'frontier')" >/dev/null
 raced_tick public.ob_hr "ob_hr"
 
 run "call pgpm.maintain_obtain('public.ob_hr')" >/dev/null
-check "ob_hr: 3 steps covered inside the monolith: the back-off holds" "$(parts public.ob_hr)" "1"
+check "ob_hr: 3 steps covered inside the monolith: the back-off holds" "$(cells public.ob_hr)" "0-5000"
 
 # ------------------------------------------------------------------ public.ob_q: ceil, not integer division
 # obtain 3: monolith [0,1000) plus forward [1000,2000), [2000,3000), [3000,4000) -> grid top 4000.
@@ -135,6 +149,8 @@ run "insert into public.ob_q (id, body) values (2001, 'frontier')" >/dev/null
 raced_tick public.ob_q "ob_q"
 
 run "call pgpm.maintain_obtain('public.ob_q')" >/dev/null
-check "ob_q: 1 step of headroom with obtain 3 (< ceil(3/2)): the tick extends the grid" "$(parts public.ob_q)" "6"
+check "ob_q: 1 step of headroom with obtain 3 (< ceil(3/2)): the tick extends the grid" "$(cells public.ob_q)" \
+  "0-1000,1000-2000,2000-3000,3000-4000,4000-5000,5000-6000"
+accepts "ob_q: a write at 4500, in the first cell past the old top, is accepted" public.ob_q 4500
 
 exit "$fail"

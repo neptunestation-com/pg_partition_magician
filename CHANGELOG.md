@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **`bench/obtain_backoff_headroom.sh` holds the grid the low-headroom tick builds by identity** (#913). Its
+  header promised the tick extends the grid "by identity", but the checks were a count of attached partitions
+  and the only write probe (8999) landed above the old top, so an obtain that built the right number of cells
+  one cell too far, leaving `[5000,6000)` in `ob_race` and `[4000,5000)` in `ob_q` refusing every write, stayed
+  green. Every grid check now names its `[lo,hi)` cells in order, and each extending tick is followed by a
+  write into the first cell the bypass must build. Mutation `obtain_backoff_bypass_shifts_cell`.
 - **`transmute` refuses an incoming foreign key left `NOT VALID` instead of validating it on the operator's
   behalf** (#902). `_transmute_incoming_gate` preserved any incoming key that referenced the reused key without
   looking at `convalidated`, so under `p_incoming_fks => 'preserve'` (or `'drop'`) the cutover recorded a key
