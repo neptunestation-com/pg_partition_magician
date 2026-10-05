@@ -4087,7 +4087,8 @@ begin
   -- skips. That default is for triggers that are replication side effects; this one is what keeps a
   -- mid-regrain write from being reverted, lost or resurrected by the swap, and a change it does not see
   -- is a change the reconcile cannot honour. Re-created per regrain, so a regrain begun after the upgrade
-  -- gets it without a repair step; one already in flight keeps its origin-only trigger until it swaps.
+  -- gets it without a repair step; one already in flight with an origin-only trigger is restarted, and its
+  -- capture re-minted here, by the first tick that resumes it (#892, _regrain_capture_unarmed).
   execute format('alter table %s enable always trigger pgpm_regrain_capture', v_src::text);
   -- #449: TRUNCATE fires no row trigger, so it is refused for as long as the row trigger is up (see
   -- _regrain_truncate_guard). Same lock, same tick, torn down wherever the row trigger is.
@@ -4116,6 +4117,31 @@ begin
                   where t.tgname = 'pgpm_regrain_capture'
                     and t.tgrelid = pgpm._regrain_child_rel(p_parent, p_child));
 end;
+$$;
+
+-- Why the capture on source p_src is NOT live, or null when it is (#892). Live means the trigger exists AND
+-- is ENABLE ALWAYS, the state _regrain_capture_install leaves it in. _regrain_capture_active above answers a
+-- different question, "is a regrain in flight on this child" (its trigger is the in-flight marker the
+-- janitor, regrain_cancel, retire's reclaim and the one-regrain-per-parent refusal read), and a disabled
+-- trigger still marks a run in flight. But it records nothing: ALTER TABLE <partition> DISABLE TRIGGER USER,
+-- the usual bulk-load idiom, turns it off, the matching ENABLE TRIGGER USER leaves it origin-only (skipped
+-- under session_replication_role = replica), ALTER TABLE <parent> DISABLE TRIGGER USER reaches it the same
+-- way, and a run in flight across the upgrade from a release before #450 kept the origin-only trigger it was
+-- minted with. A change made while it was so never reached the delta, so the swap attached copies that
+-- missed it: an UPDATE reverted, a DELETE resurrected. The write block has had the same rule since #651
+-- (_is_write_blocked). regrain_step asks this on every resuming tick and restarts the run when it answers
+-- (the copies are discarded, capture is re-minted ENABLE ALWAYS, the range is copied again from the source,
+-- which holds every committed change), and the swap asks it again under its DETACH's lock. The current
+-- state is all it can see: a trigger disabled and then put back ENABLE ALWAYS by hand reads as live.
+create or replace function pgpm._regrain_capture_unarmed(p_src regclass)
+returns text language sql stable as $$
+  select case when t.tgenabled = 'A' then null
+              else format('change capture''s trigger pgpm_regrain_capture on %s is %s, not ENABLE ALWAYS, so a change made in that state may never have reached the delta',
+                          p_src::text,
+                          case coalesce(t.tgenabled, '-') when '-' then 'missing' when 'D' then 'disabled'
+                                                          when 'R' then 'replica-only' else 'origin-only' end) end
+    from (select 1) one
+    left join pg_trigger t on t.tgrelid = p_src and t.tgname = 'pgpm_regrain_capture';
 $$;
 
 -- Upgrade path (#650): a regrain in flight across the upgrade has a source carrying the capture trigger and,
@@ -5073,6 +5099,7 @@ declare
   v_child_name name; v_src_name name; v_rec int; v_delta_n bigint; v_delta_name name; v_busy name;
   v_delta_reg regclass; v_sub_known boolean; v_sub_oid oid; v_sub_now regclass; v_copy regclass;
   v_held_lo text; v_held_hi text; v_drift text; v_copies oid[]; v_capture_drift text;
+  v_unarmed text; v_restart_why text;   -- #892
   v_dnsp name;   -- the delta's own schema, by its recorded oid (#555)
   v_src_nsp name; v_sub_nsp name;   -- the source's own schema, and a copy's (#872): never the parent's
 begin
@@ -5306,6 +5333,16 @@ begin
                        case when cardinality(v_copies) > 0
                             then pgpm._regrain_source_drift(v_child, cfg.regrain_source_mark) end);
   v_capture_drift := pgpm._regrain_capture_drift(p_parent, v_keyidx);
+  -- #892: and capture must still be LIVE, its trigger ENABLE ALWAYS (_regrain_capture_unarmed). One found
+  -- disabled, origin-only or replica-only may have let changes past, and the copies cannot show which, so
+  -- the run restarts the same way and capture is re-minted ENABLE ALWAYS with it. With or without copies: a
+  -- run with none has nothing stale, but its capture still has to be put back before the first is made.
+  v_unarmed := pgpm._regrain_capture_unarmed(v_child);
+  v_restart_why := concat_ws('; ',
+    case when v_drift <> '' or v_capture_drift is not null
+         then format('the parent changed since the copies were made (%s)', concat_ws('; ', nullif(v_drift, ''), v_capture_drift)) end,
+    v_unarmed || ', so change capture is re-minted ENABLE ALWAYS');
+  v_capture_drift := coalesce(v_capture_drift, v_unarmed);
   if v_drift <> '' or v_capture_drift is not null then
     for r in execute format(
       'select child_name from pgpm.part where parent_table = %L::regclass and not attached'
@@ -5322,8 +5359,7 @@ begin
      where parent_table = p_parent;
     insert into pgpm.log (parent_table, action, lo, hi, rows, method)
       values (p_parent, 'regrain_restart', v_lo, v_hi, v_made,
-              format('the parent changed since the copies were made (%s); the copies are discarded and the range is copied again from the source',
-                     concat_ws('; ', nullif(v_drift, ''), v_capture_drift)));
+              format('%s; the copies are discarded and the range is copied again from the source', v_restart_why));
     return 'restarted:' || v_made;
   end if;
   -- Nothing stale to discard, so the mark follows the source: a source altered before any copy was made, or
@@ -5645,6 +5681,16 @@ begin
    where parent_table = p_parent and restored_at is not null;
   v_fk := pgpm.suspend_incoming_fks(p_parent, true);
   execute format('alter table %s detach partition %s', p_parent::text, v_child::text);
+  -- #892: capture must still be live NOW. This tick's check above ran before anything here locked the source,
+  -- and an ALTER TABLE ... DISABLE TRIGGER needs only SHARE ROW EXCLUSIVE, which the copy and the reconcile do
+  -- not conflict with, so an owner's bulk edit could have disabled it, written, and committed (or put it back
+  -- origin-only) in between. The DETACH holds ACCESS EXCLUSIVE, so nothing can change it from here to the DROP.
+  -- Refused, not restarted here: the restart is the next tick's to make, and raising rolls this one back whole.
+  v_unarmed := pgpm._regrain_capture_unarmed(v_child);
+  if v_unarmed is not null then
+    raise exception 'pg_partition_magician: cannot swap % -- %; refusing to drop the source for copies capture may not have kept current. The swap rolls back whole: the source stays attached, and the next tick restarts the run with change capture re-minted ENABLE ALWAYS.',
+      v_child_name, v_unarmed;
+  end if;
   -- #267: the correctness backstop. The cursor is at hi, so every captured key is now eligible, and the
   -- DETACH above holds ACCESS EXCLUSIVE on the source, so no further writes can arrive: the delta is
   -- finite from here and every pass consumes at least one key, which is what makes this loop terminate.
