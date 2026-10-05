@@ -6480,6 +6480,34 @@ select is(
           "  begin\n"
           "    -- THE REGRAIN THIS DROP WOULD ORPHAN", 1)],
     ),
+    "forget_missing_keeps_detach_armed": (
+        "bench/forget_missing_disarms_detach.sh",
+        "Pre-#893 forget_missing(): it deletes a dropped parent's retiring pgpm.part row and leaves the "
+        "pgpm_detach job holding that retirement's DETACH ... CONCURRENTLY by name, so pg_cron's next run "
+        "detaches the same-named partition of a table re-created under the same name and grid. One site, the "
+        "disarm's guard. tests/246 part A catches it.",
+        [("    if v_retiring is not null then\n", "    if false then\n", 1)],
+    ),
+    "forget_missing_disarm_any_command": (
+        "bench/forget_missing_disarms_detach.sh",
+        "Issue #893, the over-wide fix: forget_missing() disarms whatever unowned command the job holds, not "
+        "only a detach of a partition the forgotten parent was retiring, so another table's dispatch, armed "
+        "after the drop, is clobbered. One site, the partition-name match. tests/246 part B catches it.",
+        [("                        and right(v_cmd, length(quote_ident(t.child_name)) + 14)\n"
+          "                          = '.' || quote_ident(t.child_name) || ' concurrently')\n",
+          "                        )\n", 1)],
+    ),
+    "forget_missing_disarm_owned": (
+        "bench/forget_missing_disarms_detach.sh",
+        "Issue #893, the plausible-but-wrong fix: forget_missing() disarms a matching detach without asking "
+        "whether a LIVE retirement owns it. A namesake re-created and already retiring the same-named partition "
+        "holds a command of identical text, and it is clobbered (the #407 rule). One site, the live-owner "
+        "check. tests/246 part C catches it.",
+        [("         and not exists (select 1 from pgpm.part p\n"
+          "                          where p.retiring_at is not null\n",
+          "         and not exists (select 1 from pgpm.part p\n"
+          "                          where false and p.retiring_at is not null\n", 1)],
+    ),
     "extend_to_edge_uncounted": (
         "bench/extend_to_edge_cell_count.sh",
         "Pre-#836 extend_to: the p_max dry count counts grid steps past the frontier's floor only, while the "
