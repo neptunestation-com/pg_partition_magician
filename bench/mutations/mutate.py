@@ -4550,6 +4550,35 @@ $$;''',
           "  and `regrain` is unavailable on a keyless monolith. So a keyless migration that relied on `drop_chunks` will\n"
           "  not reclaim disk until a key is added and the monolith is regrained.\n", 1)],
     ),
+    "runbook_fk_validate_by_restore": (
+        "bench/doc_remedy_and_symptom.sh",
+        "Pre-#910 docs/runbook.md: the Prevent step after a preserve conversion tells the operator to call "
+        "restore_incoming_fks again next tick 'for the VALIDATE', while restore_incoming_fks re-adds the key NOT "
+        "VALID and stops there (a second call returns 0) and the conversion registers paused, so no tick "
+        "validates either: the key is left NOT VALID. validate_incoming_fks validates. The exact pre-#910 text.",
+        [("select pgpm.restore_incoming_fks('public.events');    -- re-adds the key NOT VALID, and stops there\n"
+          "select pgpm.validate_incoming_fks('public.events');   -- then validates it; returns the number validated\n"
+          "```\n"
+          "\n"
+          "Run both yourself: a second `restore_incoming_fks` finds nothing left to re-add and returns 0, and the\n"
+          "conversion registers the table paused, so no tick runs the `VALIDATE` for you.\n",
+          "select pgpm.restore_incoming_fks('public.events');   -- then again next tick for the VALIDATE\n"
+          "```\n", 1)],
+    ),
+    "runbook_dropped_table_syntax_symptom": (
+        "bench/doc_remedy_and_symptom.sh",
+        "Pre-#911 docs/runbook.md: the dropped-without-untransmute entry says the skip_obtain / skip_write_block "
+        "/ skip_retain rows all give `syntax error at or near \"<number>\"` as the reason, while since #296 "
+        "_frontier_native refuses first with 'managed table with oid N no longer exists (dropped without "
+        "pgpm.untransmute)', so a search of pgpm.log for the documented symptom finds nothing. The exact "
+        "pre-#911 text.",
+        [("every tick, all giving `managed table with oid <oid> no longer exists (dropped without pgpm.untransmute)` as\n"
+          "the reason, so search `method` for `no longer exists (dropped without pgpm.untransmute)`. (On a version\n"
+          "before 0.2.0, `pgpm.status()` itself fails with a syntax error and returns **no rows at all** for any managed\n"
+          "table.)\n",
+          "every tick, all giving `syntax error at or near \"<number>\"` as the reason; or, on a version before 0.2.0,\n"
+          "`pgpm.status()` raises that syntax error and returns **no rows at all** for any managed table.\n", 1)],
+    ),
     "classify_tap_needs_description": (
         "bench/classify_claims_tap.sh",
         "Pre-#600 classify_claims.py (a): only `not ok <n> - <description>` lines count as failures, so a "
@@ -7579,6 +7608,8 @@ MUTATION_SRC = {
     "reference_archive_identity_forget_missing": "docs/reference.md",
     "reference_fks_suspended_dead_swap": "docs/reference.md",
     "reference_keyless_monolith_dormant": "docs/reference.md",
+    "runbook_fk_validate_by_restore": "docs/runbook.md",
+    "runbook_dropped_table_syntax_symptom": "docs/runbook.md",
     "classify_tap_needs_description": "scripts/review/classify_claims.py",
     "classify_sh_exit_code_only": "scripts/review/classify_claims.py",
     "classify_premise_bare_word": "scripts/review/classify_claims.py",

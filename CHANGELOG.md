@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- **The runbook's foreign-key VALIDATE step names `validate_incoming_fks`** (#910). Its "Prevent" step after a
+  preserve conversion said to call `restore_incoming_fks` "again next tick for the VALIDATE", while
+  `restore_incoming_fks` re-adds the key `NOT VALID` and stops there (a second call returns 0) and the
+  conversion registers the table paused, so no tick validates it either: an operator following it left the
+  key `NOT VALID`. The step now runs `restore_incoming_fks` and then `validate_incoming_fks`, as step 5 and
+  the guide already do. `bench/doc_remedy_and_symptom.sh` measures which of the two validates and checks
+  every code line of the docs that calls `restore_incoming_fks`, with the mutation
+  `runbook_fk_validate_by_restore`.
+- **The runbook's dropped-table symptom quotes the reason the ticks log** (#911). "A managed table was
+  dropped without `untransmute`" said the `skip_obtain` / `skip_write_block` / `skip_retain` rows all give
+  `syntax error at or near "<number>"`, while since #296 `_frontier_native` refuses first with `managed
+  table with oid N no longer exists (dropped without pgpm.untransmute)`, so a search of `pgpm.log` for the
+  documented text found nothing. The entry now quotes that message. The same guard drops a managed table,
+  ticks it, and holds every quoted dropped-table skip reason in the docs to what was logged, with the
+  mutation `runbook_dropped_table_syntax_symptom`.
 - **`bench/throws_pinned.sh` judges every `throws_*` pgTAP installs** (#915). Its site pattern was a
   hand-written list, `throws_(ok|like|matching|imatching)`, without pgTAP's `throws_ilike`, so a
   `throws_ilike($$ call pgpm... $$, '%')`, which accepts the 2D000 of a procedure that did not refuse, was
