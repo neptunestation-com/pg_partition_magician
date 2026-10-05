@@ -4,7 +4,7 @@
 -- must not regress it.
 create extension if not exists pgtap;
 
-select plan(7);
+select plan(10);
 
 create table public.tt_search (id text primary key, body text);
 insert into public.tt_search (id, body) values
@@ -12,6 +12,15 @@ insert into public.tt_search (id, body) values
   (pgpm._ts_to_text_time(now() - interval '11 months', 'c', 8, 36, 'ms'), 'newest');
 
 create temporary table _before_tt as select count(*) as n from public.tt_search;
+
+-- LIVENESS WITNESS: the drought is really present. The frontier and forward-partition checks below are
+-- of the form "obtain still reaches past now()", which would also pass against a fixture that was never
+-- stale.
+select cmp_ok(
+  now() - (select max(pgpm._decode('text_time', id, 'c', 8, 36, 'ms')::timestamptz) from public.tt_search),
+  '>', interval '2 months',
+  'the newest backfilled cuid is well outside the 2-month (p_obtain x step) lookahead about to be configured'
+);
 
 -- refusals, checked before anything is touched
 select throws_like(
@@ -56,6 +65,29 @@ select ok(
        and lo::timestamptz <= now() and hi::timestamptz > now()
   ),
   'a partition covers now() after one maintenance tick, despite an 11-month-stale data frontier'
+);
+
+-- The check above holds on the day of the transmute even with text_time dropped from _frontier_native's
+-- greatest(decoded, now()) (#881, as tests/85 explains for uuidv7): transmute's monolith takes its upper
+-- bound from its OWN inline greatest(), so the monolith alone covers now() and accepts the write. These
+-- two read what only _frontier_native produces, before the live insert below moves the data maximum to
+-- now(): the frontier itself, and a FORWARD partition (starting at or past the monolith's hi, so not the
+-- monolith; the monolith named by pgpm.config.monolith_oid) covering a point inside the lookahead.
+select ok(
+  pgpm._frontier_native('public.tt_search'::regclass)::timestamptz >= now(),
+  'the text_time frontier obtain measures by is at or past now(), not the 11-month-stale data maximum'
+);
+
+select ok(
+  exists (
+    select 1 from pgpm.part p
+     where p.parent_table = 'public.tt_search'::regclass and p.attached
+       and p.lo::timestamptz <= now() + interval '1 month' and p.hi::timestamptz > now() + interval '1 month'
+       and p.lo::timestamptz >= (select m.hi::timestamptz from pgpm.part m
+                                  join pgpm.config c on c.parent_table = m.parent_table and c.monolith_oid = m.child_oid
+                                 where m.parent_table = p.parent_table)
+  ),
+  'a forward partition past the monolith covers now() + 1 month, inside the 2-month lookahead'
 );
 
 select lives_ok(

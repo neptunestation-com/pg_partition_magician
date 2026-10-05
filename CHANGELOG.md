@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **`tests/88` and `tests/91` assert text_time's drought immunity, not only coverage of now()** (#881, bullet
+  G18). They asserted only that a partition covers now() and that a write at now() is accepted, which
+  transmute's monolith already satisfies through its own inline `greatest(decoded, now())`, so both stayed
+  green with text_time dropped from `_frontier_native`'s clock blend and only `bench/frontier_drought.sh`
+  caught it. Each format (cuid, ULID, KSUID) now carries the `tests/85` fixture's checks: a witness that the
+  data is 11 months stale, then, before the live insert, `_frontier_native` at or past now() and a forward
+  partition past the monolith (named by `pgpm.config.monolith_oid`) covering now() + 1 month.
+  `bench/tests_fail_on_defect.sh` runs both files against a text_time-only frontier mutant, with the mutations
+  `text_time_drought_coverage_only` and `text_time_drought_coverage_only_ulid_ksuid`.
 - **`tests/92` holds the rows regrain's swap moved to the seeded ones, by identity** (#919). Under a comment
   promising identity it asserted `count(*) = 250` over ids 1..2500, so a swap that lost row 2500 and invented
   a row 2499 left the file green. Each seeded row now carries its own payload, and the file compares the

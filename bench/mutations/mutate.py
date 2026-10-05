@@ -5755,6 +5755,124 @@ select is(
   'every row the regrain copied survived the swap');
 """, 1)],
     ),
+    "text_time_drought_coverage_only": (
+        "bench/tests_fail_on_defect.sh",
+        "Pre-#881 tests/88: text_time's #325 drought immunity for cuid asserted only as 'a partition covers "
+        "now()' after one tick and 'a row at now() is accepted'. Both hold with text_time dropped from "
+        "_frontier_native's greatest(decoded, now()), because transmute's monolith takes its upper bound from "
+        "its OWN inline greatest() and so covers now() by itself on the day of the transmute; the file stayed "
+        "green against that mutant and only bench/frontier_drought.sh caught it. The exact pre-#881 text, "
+        "plan included: no stale-data witness, no frontier check, no forward partition past the monolith.",
+        [
+            ("select plan(10);\n", "select plan(7);\n", 1),
+            ("""create temporary table _before_tt as select count(*) as n from public.tt_search;
+
+-- LIVENESS WITNESS: the drought is really present. The frontier and forward-partition checks below are
+-- of the form "obtain still reaches past now()", which would also pass against a fixture that was never
+-- stale.
+select cmp_ok(
+  now() - (select max(pgpm._decode('text_time', id, 'c', 8, 36, 'ms')::timestamptz) from public.tt_search),
+  '>', interval '2 months',
+  'the newest backfilled cuid is well outside the 2-month (p_obtain x step) lookahead about to be configured'
+);
+""", """create temporary table _before_tt as select count(*) as n from public.tt_search;
+""", 1),
+            ("""
+-- The check above holds on the day of the transmute even with text_time dropped from _frontier_native's
+-- greatest(decoded, now()) (#881, as tests/85 explains for uuidv7): transmute's monolith takes its upper
+-- bound from its OWN inline greatest(), so the monolith alone covers now() and accepts the write. These
+-- two read what only _frontier_native produces, before the live insert below moves the data maximum to
+-- now(): the frontier itself, and a FORWARD partition (starting at or past the monolith's hi, so not the
+-- monolith; the monolith named by pgpm.config.monolith_oid) covering a point inside the lookahead.
+select ok(
+  pgpm._frontier_native('public.tt_search'::regclass)::timestamptz >= now(),
+  'the text_time frontier obtain measures by is at or past now(), not the 11-month-stale data maximum'
+);
+
+select ok(
+  exists (
+    select 1 from pgpm.part p
+     where p.parent_table = 'public.tt_search'::regclass and p.attached
+       and p.lo::timestamptz <= now() + interval '1 month' and p.hi::timestamptz > now() + interval '1 month'
+       and p.lo::timestamptz >= (select m.hi::timestamptz from pgpm.part m
+                                  join pgpm.config c on c.parent_table = m.parent_table and c.monolith_oid = m.child_oid
+                                 where m.parent_table = p.parent_table)
+  ),
+  'a forward partition past the monolith covers now() + 1 month, inside the 2-month lookahead'
+);
+
+""", """
+""", 1),
+        ],
+    ),
+    "text_time_drought_coverage_only_ulid_ksuid": (
+        "bench/tests_fail_on_defect.sh",
+        "Pre-#881 tests/91: as text_time_drought_coverage_only, for ULID and KSUID. The exact pre-#881 text, "
+        "plan and header included.",
+        [
+            ("""-- each: refusal on a bad param, successful conversion, row conservation, and the #325 drought-immunity
+-- property carrying over to both, asserted as tests/85 asserts it for uuidv7 (#881): a witness that the
+-- data really is stale, then the frontier _frontier_native returns and a FORWARD partition past the
+-- monolith, both read before the live insert. "A partition covers now()" alone holds even with text_time
+-- dropped from _frontier_native's greatest(decoded, now()), because transmute's monolith takes its upper
+-- bound from its OWN inline greatest() and so covers now() by itself on the day of the transmute.
+""", """-- each: refusal on a bad param, successful conversion, row conservation, and the #325 drought-immunity
+-- property carrying over to both.
+""", 1),
+            ("select plan(15);\n", "select plan(9);\n", 1),
+            ("""create temporary table _before_ulid as select count(*) as n from public.tt_ulid;
+
+-- LIVENESS WITNESS: the drought is really present (every check below would pass on a fresh fixture).
+select cmp_ok(
+  now() - (select max(pgpm._decode('text_time', id, '', 10, 32, 'ms', '0123456789ABCDEFGHJKMNPQRSTVWXYZ')::timestamptz) from public.tt_ulid),
+  '>', interval '2 months',
+  'ULID: the newest backfilled row is well outside the 2-month (p_obtain x step) lookahead'
+);
+""", """create temporary table _before_ulid as select count(*) as n from public.tt_ulid;
+""", 1),
+            (""");
+select ok(
+  pgpm._frontier_native('public.tt_ulid'::regclass)::timestamptz >= now(),
+  'ULID: the frontier obtain measures by is at or past now(), not the 11-month-stale data maximum'
+);
+select ok(
+  exists (select 1 from pgpm.part p where p.parent_table = 'public.tt_ulid'::regclass and p.attached
+            and p.lo::timestamptz <= now() + interval '1 month' and p.hi::timestamptz > now() + interval '1 month'
+            and p.lo::timestamptz >= (select m.hi::timestamptz from pgpm.part m
+                                       join pgpm.config c on c.parent_table = m.parent_table and c.monolith_oid = m.child_oid
+                                      where m.parent_table = p.parent_table)),
+  'ULID: a forward partition past the monolith covers now() + 1 month, inside the 2-month lookahead'
+);
+""", """);
+""", 1),
+            ("""create temporary table _before_ksuid as select count(*) as n from public.tt_ksuid;
+
+-- LIVENESS WITNESS: the drought is really present (every check below would pass on a fresh fixture).
+select cmp_ok(
+  now() - (select max(pgpm._decode('text_time', id, '', 27, 62, 's',
+     '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz', 128, timestamptz '2014-05-13 16:53:20+00')::timestamptz) from public.tt_ksuid),
+  '>', interval '2 months',
+  'KSUID: the newest backfilled row is well outside the 2-month (p_obtain x step) lookahead'
+);
+""", """create temporary table _before_ksuid as select count(*) as n from public.tt_ksuid;
+""", 1),
+            (""");
+select ok(
+  pgpm._frontier_native('public.tt_ksuid'::regclass)::timestamptz >= now(),
+  'KSUID: the frontier obtain measures by is at or past now(), not the 11-month-stale data maximum'
+);
+select ok(
+  exists (select 1 from pgpm.part p where p.parent_table = 'public.tt_ksuid'::regclass and p.attached
+            and p.lo::timestamptz <= now() + interval '1 month' and p.hi::timestamptz > now() + interval '1 month'
+            and p.lo::timestamptz >= (select m.hi::timestamptz from pgpm.part m
+                                       join pgpm.config c on c.parent_table = m.parent_table and c.monolith_oid = m.child_oid
+                                      where m.parent_table = p.parent_table)),
+  'KSUID: a forward partition past the monolith covers now() + 1 month, inside the 2-month lookahead'
+);
+""", """);
+""", 1),
+        ],
+    ),
     # Review pass 5's novel seeds (S1, S3, S6, S8, S9): each was planted for the pass, and the suite check
     # showed what caught it, if anything. These put each back so its guard is proven to fail against it.
     "type_squatter_any_schema": (
@@ -7415,6 +7533,9 @@ MUTATION_SRC = {
     "id_conservation_after_migration": "tests/11_id_kind_test.sql",
     "uuid_conservation_after_migration": "tests/12_uuidv7_kind_test.sql",
     "regrain_survivors_by_count": "tests/92_regrain_outgoing_fk_test.sql",
+    # #881: text_time's drought immunity, judged by the same guard against a text_time-only frontier mutant.
+    "text_time_drought_coverage_only": "tests/88_text_time_transmute_test.sql",
+    "text_time_drought_coverage_only_ulid_ksuid": "tests/91_text_time_ulid_ksuid_transmute_test.sql",
     "hypertable_preflight_reads_under_caller_rls": "pgpm_hypertable/install.sql",
     "hypertable_cutover_reads_under_caller_rls": "pgpm_hypertable/install.sql",
     "rls_to_s3_unchecked": "pgpm_archive/install.sql",
