@@ -26,6 +26,30 @@ REPO=""
 while [ $# -gt 0 ]; do case "$1" in --repo) REPO=$2; shift 2;; *) echo "unknown option $1"; exit 3;; esac; done
 [ -n "$REPO" ] || REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 
+# runner_not_acquired: GitHub never gave the job a hosted runner ("The job was not acquired by Runner of
+# type hosted even after multiple attempts" in the job's annotations; the job is cancelled or failed with
+# no step run at all). Every non-success job of the latest attempt must carry that annotation, the
+# summary jobs included when they are the only ones: nothing of ours ran, so nothing of ours failed.
+# Met on 2026-10-05 during the lever phase before pass 9 (tracking issue #966) under GitHub's incident
+# "delays in assigning GitHub-hosted runners"; the record of that phase names it.
+# A summary job's failure is derived from the jobs it needs, so it is judged only when it is the sole
+# non-success job of the attempt (the perf summary itself can be the starved one).
+nonsuccess=$(gh run view "$RUN" --repo "$REPO" --json jobs \
+        --jq '.jobs[] | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped") | select(.name | test("summary"; "i") | not) | .databaseId')
+[ -n "$nonsuccess" ] || nonsuccess=$(gh run view "$RUN" --repo "$REPO" --json jobs \
+        --jq '.jobs[] | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped") | .databaseId')
+if [ -n "$nonsuccess" ]; then
+  all_runner=1
+  for j in $nonsuccess; do
+    ann=$(gh api "repos/$REPO/check-runs/$j/annotations" --jq '.[].message' 2>/dev/null)
+    grep -q "was not acquired by Runner of type hosted" <<<"$ann" || { all_runner=0; break; }
+  done
+  if [ "$all_runner" = 1 ]; then
+    echo "run $RUN: known flake runner_not_acquired (GitHub assigned no hosted runner to $(wc -w <<<"$nonsuccess" | tr -d ' ') job(s); nothing of ours ran)"
+    exit 0
+  fi
+fi
+
 jobs=$(gh run view "$RUN" --repo "$REPO" --json jobs \
         --jq '.jobs[] | select(.conclusion=="failure") | select(.name | test("summary"; "i") | not) | .databaseId')
 [ -n "$jobs" ] || { echo "run $RUN: no failed non-summary job in the latest attempt"; exit 2; }
