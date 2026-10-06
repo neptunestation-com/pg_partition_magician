@@ -100,12 +100,20 @@ end $$;
 
 # _from_hypertable_carried_ddl's ways of knowing the module's own capture trigger, which the swap must not
 # replay: pgpm.scratch's record (#969), a 0.6.0 capture (no record, no comment) by proof (#969), and the
-# delta's horizon comment (#842). Constants because four mutations cut them.
+# delta's horizon comment (#842). Constants because five mutations cut them. The proof reads <x> off the
+# function (#988) and is asked only of a capture that carries neither record, so the three stay disjoint.
 HT_CAPTURE_ARM_RECORD = """       and not exists (select 1 from pgpm.scratch s   -- #969: by the record, never by the function's name
                         where s.parent_oid = p_hypertable::oid and s.kind = 'hypertable_delta_fn' and s.obj = t.tgfoid)
 """
-HT_CAPTURE_ARM_PROOF = """       and not (fn.nspname = v_nsp and f.proname = v_rel || '_pgpm_delta_fn'   -- #969: 0.6.0's, on proof
-                and strpos(f.prosrc, format('insert into %I.%I (', v_nsp, v_rel || '_pgpm_delta')) > 0)
+HT_CAPTURE_ARM_PROOF = """       and not (right(f.proname, 14) = '_pgpm_delta_fn' and f.pronargs = 0   -- #969: 0.6.0's, on proof
+                and strpos(f.prosrc, format('insert into %I.%I (', fn.nspname, left(f.proname, -3))) > 0   -- #988: its own name
+                and not exists (select 1 from pgpm.scratch s   -- and asked only of a capture with neither record
+                                 where s.parent_oid = p_hypertable::oid and s.kind = 'hypertable_delta_fn' and s.obj = t.tgfoid)
+                and not exists (select 1 from pg_class d
+                                  join pg_description dd on dd.objoid = d.oid and dd.classoid = 'pg_class'::regclass
+                                                        and dd.objsubid = 0
+                                 where d.relnamespace = f.pronamespace and d.relname = left(f.proname, -3)
+                                   and d.relkind = 'r' and dd.description ~ '^pgpm from_hypertable horizon [0-9]+$'))
 """
 HT_CAPTURE_ARM_COMMENT = """       and not exists (select 1 from pg_class d
                          join pg_description dd on dd.objoid = d.oid and dd.classoid = 'pg_class'::regclass
@@ -8164,6 +8172,17 @@ select ok(
           "    perform pgpm._own_like_parent(p_hypertable, format('%I.%I', v_nsp, v_delta)::regclass);\n"
           "    perform pgpm._acl_reset(format('%I.%I', v_nsp, v_delta)::regclass, true);\n", 1)],
     ),
+    "hypertable_carry_capture_proof_by_current_name": (
+        "bench/hypertable_carry_capture_by_provenance.sh",
+        "Pre-#988 _from_hypertable_carried_ddl: the proof that a trigger is a capture pgpm 0.6.0 minted (no record, "
+        "no comment) derives <x>_pgpm_delta_fn and <x>_pgpm_delta from the hypertable's CURRENT schema and relname, "
+        "so after a RENAME or SET SCHEMA the 0.6.0 capture reads as a user trigger, is carried onto the migrated "
+        "table and cloned onto every partition, and logs every write into an orphaned delta. "
+        "tests/timescale/db/55's r55n and app55.s55 carry the capture and their deltas grow.",
+        [(HT_CAPTURE_ARM_PROOF,
+          "       and not (fn.nspname = v_nsp and f.proname = v_rel || '_pgpm_delta_fn'   -- #969: 0.6.0's, on proof\n"
+          "                and strpos(f.prosrc, format('insert into %I.%I (', v_nsp, v_rel || '_pgpm_delta')) > 0)\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
@@ -8363,6 +8382,7 @@ MUTATION_SRC = {
     "uninstall_scratch_record_unread": "pgpm_core/uninstall.sql",
     "hypertable_carried_ddl_by_name": "pgpm_hypertable/install.sql",
     "hypertable_carried_ddl_record_unread": "pgpm_hypertable/install.sql",
+    "hypertable_carry_capture_proof_by_current_name": "pgpm_hypertable/install.sql",
 }
 
 # name -> the CI track whose job runs it; anything not listed here belongs to the default `perf`
@@ -8462,6 +8482,7 @@ MUTATION_TRACK = {
     "uninstall_scratch_record_unread": "timescale",
     "hypertable_carried_ddl_by_name": "timescale",
     "hypertable_carried_ddl_record_unread": "timescale",
+    "hypertable_carry_capture_proof_by_current_name": "timescale",
 }
 
 

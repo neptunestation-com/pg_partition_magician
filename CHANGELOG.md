@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **`from_hypertable` no longer carries a 0.6.0 change capture onto a hypertable renamed or moved since**
+  (#988). A tracking copy pgpm 0.6.0 took leaves no record of its capture (no `pgpm.scratch` row, no horizon
+  comment on its delta), so the swap recognised it by proof: a function `<rel>_pgpm_delta_fn` whose body
+  inserts into `<rel>_pgpm_delta`, with `<rel>` the hypertable's CURRENT name. 0.6.0 named both for the table
+  as it was at the copy, so after an `ALTER TABLE ... RENAME` or `SET SCHEMA` the capture read as the
+  operator's trigger: the swap carried it, `transmute` cloned it onto every partition, and every write to the
+  migrated table was logged into a delta nothing drains. The proof now reads the name and schema off the
+  function itself (`<x>_pgpm_delta_fn` writing into `<x>_pgpm_delta` in its own schema), and is asked only of
+  a capture with neither record, so the record and the comment stay the only ways to know the ones they
+  mark. `tests/timescale/db/55` (new); guard `bench/hypertable_carry_capture_by_provenance.sh`; mutation
+  `hypertable_carry_capture_proof_by_current_name`.
+
 - **A from_hypertable migration's delta follows the hypertable's writers through the online window** (#979).
   A tracking `from_hypertable_copy` granted `INSERT` on its delta once, to the roles that could write the
   hypertable at that moment, and nothing granted again, so a role granted DML on the hypertable afterwards had
