@@ -2090,6 +2090,15 @@ repeats once per tick. A strategy that genuinely cannot make progress on a call 
 than return `p_lo`: a raise is logged as `skip_archive` and retried with the same chunk, and says
 what it is.
 
+A return that keeps the promise is recorded as the instant the check accepted, not as the text the
+strategy wrote: the ledger's `hi` is that value rendered canonically (ISO 8601 with its offset for a
+time grid, as every other stored bound is; plain numeric text for an `id` grid). The check parses
+`covered_hi` in the archiving session, so a value written without an offset
+(`'2026-03-01 00:00:00'`) is read in that session's zone, and the canonical text names that same
+instant from every other session. Recorded verbatim, such a value checked in a UTC tick as short of `hi` read as
+past it from a session west of UTC, and `retire()` there dropped the partition with rows the strategy
+was never handed. A strategy that means a particular instant should still say so with an offset.
+
 #### Sizing `archive_byte_budget`: there is no single optimal size
 
 Four considerations pull in different directions, and no formula resolves all of them at once --
