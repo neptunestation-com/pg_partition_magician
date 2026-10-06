@@ -17,7 +17,7 @@ Conventions used below: `p_parent` is the partitioned parent (a `regclass`); a n
 frontier" is `now()` for `time`, `max(control)` for `id`, and `greatest(max(control), now())` for
 `uuidv7`/`text_time` (both are time grids fed by data, so neither falls behind the clock).
 
-**Null arguments.** Every public routine (of `pgpm_core` and of `pgpm_hypertable`) refuses a null argument
+**Null arguments.** Every public routine (of `pgpm_core`, of `pgpm_hypertable` and of `pgpm_archive`) refuses a null argument
 that has no meaning, before it reads or commits anything, naming it: `pg_partition_magician: <routine> does
 not accept null for <argument>: ...`. PL/pgSQL reads a null with three-valued logic, so before this a null
 `p_force` made `suspend_incoming_fks` drop the live keys it should have left alone, and a null `p_paused`
@@ -28,7 +28,12 @@ interval); `from_hypertable_drain_appends_step`'s `p_watermark`; `from_hypertabl
 `p_copy_mibps`; the `p_target_step` of `regrain`, `regrain_step`, `regrain_history` and `set_regrain`;
 `regrain_step`'s `p_batch`; `set_retain`'s `p_retain`; `set_archive_fn`'s `p_archive_fn`; `progress`'s
 `p_parent`; `restore_incoming_fks`'s `p_ids`; `check_text_time`'s `p_alphabet`; and the `p_status` that
-`maintain` and `maintain_obtain` return.
+`maintain` and `maintain_obtain` return. In `pgpm_archive`, the `p_endpoint` of `archive.configure`,
+`archive.s3_signed_request` and `archive.s3_signed_request_bytea` (AWS S3 itself), and the arguments a
+routine does not read: the `p_lo` and `p_hi` of `archive.to_s3` and `archive.to_s3_parquet` (the export is
+the whole partition) and the `p_child` of `pgpm.archive_to_s3_ndjson` and `pgpm.archive_to_s3_parquet` (the
+chunk is read through the parent). Before this a strategy's null `p_hi` read no row and wrote an empty object
+over the chunk the same `p_lo` had archived (see [Real S3 archive strategies](#real-s3-archive-strategies)).
 
 ## Conversion
 
@@ -201,7 +206,9 @@ refused before anything is committed. Three more shapes the cutover could not co
 same way, before anything is committed, naming the constraint or column: a `NOT VALID` `CHECK` (or, on
 PostgreSQL 18, a `NOT VALID` `NOT NULL`) constraint, because the parent would get a validated copy the
 table cannot be attached under (`VALIDATE CONSTRAINT` it first, which blocks no reader or writer, or drop
-it); a `CHECK ... NO INHERIT` constraint, which PostgreSQL does not allow on a partitioned table (drop it,
+it); on PostgreSQL 18, a `NOT ENFORCED` `CHECK` constraint, named `NOT ENFORCED` (pgpm does not carry one
+across the conversion, and PostgreSQL 18 can neither validate one nor alter a `CHECK`'s enforceability:
+drop it, or re-create it as an enforced `CHECK`); a `CHECK ... NO INHERIT` constraint, which PostgreSQL does not allow on a partitioned table (drop it,
 or re-create it without `NO INHERIT`); and a generated control column, which PostgreSQL cannot partition
 by (partition on a plain column). The trigger refusal is asked again under the cutover's lock, so a
 trigger of that shape created while the conversion runs is refused the same way. So is every object that
@@ -2150,7 +2157,13 @@ actual transport -- the same encode/upload steps `archive.to_s3`/`archive.to_s3_
 synchronous functions, called directly rather than through `archive_fn`) are built on, so the
 encoded bytes and S3 semantics are identical; only the calling contract differs. All four refuse a
 caller whose reads row-level security would filter (the transports read the chunk through the parent, the
-synchronous functions read the partition), before anything is read or sent. Connection settings
+synchronous functions read the partition), before anything is read or sent. Each strategy also refuses an
+empty or inverted range (`p_hi` not above `p_lo`, compared as the grid's native type: numbers for an `id`
+grid, instants otherwise) before anything is read or sent: the chunk's key is derived from `p_lo` alone, so
+such a call would read no row and write an empty object over the one the chunk at `p_lo` was archived to,
+which after `retire()` is the only copy of its rows (`pg_partition_magician: archive_to_s3_ndjson refuses the
+range [lo, hi) of <table> -- it is empty or inverted, ...`). `pgpm._next_archive_chunk` never asks for one;
+the refusal is for a direct call. Connection settings
 (bucket, region, endpoint, prefix, vault key names, compression) still come from `archive.config`,
 the same one config surface the synchronous functions use -- setting `archive_fn` this way needs no
 second, independently configured surface. An `archive_fn` cannot issue `COMMIT`: it is a plain function

@@ -7652,9 +7652,24 @@ begin
   -- same way. Both cost nothing to refuse here, before anything is committed, as #509 does for every other
   -- shape the cutover cannot convert.
   --
+  -- A NOT ENFORCED CHECK (PostgreSQL 18; #969 bullet 10). It reads convalidated = false too, so the NOT
+  -- VALID arm below used to refuse it with the NOT VALID wording and a VALIDATE CONSTRAINT remedy that
+  -- PostgreSQL rejects for it ("cannot validate NOT ENFORCED constraint"), and PostgreSQL 18 cannot alter a
+  -- CHECK's enforceability either. It is named for what it is, with the remedies that apply: drop it, or
+  -- re-create it as an enforced CHECK. pg_constraint.conenforced exists from 18 only, so it is read through
+  -- the row's jsonb image, which on an older server has no such key, as the key gate does
+  -- (pgpm._refuse_unconvertible_keys, #959): the arm cannot fire there and needs no version check.
+  select string_agg(c.conname, ', ' order by c.conname) into v_bad_con
+    from pg_constraint c
+   where c.conrelid = p_parent and c.contype = 'c' and to_jsonb(c) ->> 'conenforced' = 'false';
+  if v_bad_con is not null then
+    raise exception 'pg_partition_magician: cannot transmute % -- its CHECK constraint(s) (%) are NOT ENFORCED. pgpm does not carry a NOT ENFORCED constraint across the conversion, and one cannot be made enforced in place: PostgreSQL 18 neither validates it nor alters the enforceability of a CHECK. Drop it (ALTER TABLE % DROP CONSTRAINT <name>), or re-create it as an enforced CHECK, then re-run transmute.',
+      p_parent, v_bad_con, p_parent::text;
+  end if;
   -- A NOT VALID one: LIKE gives the parent a VALIDATED copy, and the ATTACH then refuses the table under
   -- it ("conflicts with NOT VALID constraint on child table"). pgpm's own bound is excluded by name: a
-  -- resume after phase 1 committed and phase 2 did not finds it NOT VALID, and phase 2 validates it.
+  -- resume after phase 1 committed and phase 2 did not finds it NOT VALID, and phase 2 validates it. A NOT
+  -- ENFORCED CHECK, which reads convalidated = false too, never gets here: the arm above refuses it first.
   select string_agg(conname, ', ' order by conname) into v_bad_con
     from pg_constraint
    where conrelid = p_parent and contype in ('c', 'n') and not convalidated

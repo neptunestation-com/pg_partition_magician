@@ -8290,6 +8290,56 @@ MUTATION_TRACK.update({f"null_refusal_dropped_{_r}": "timescale" for _r in _NULL
 MUTATION_TRACK.update({"hypertable_preflight_key_gate_dropped": "timescale",
                        "hypertable_cutover_key_gate_dropped": "timescale"})
 
+# The shared-preflight lever's residue (#969 bullet 9): pgpm_archive's public routines. One mutation per routine,
+# each neutralising its up-front pgpm._refuse_null_arguments call the way the core's are (above), and one per
+# site of the archive_fn strategies' empty-range refusal. All are caught by tests/archive/db/41
+# (bench/archive_null_arguments.sh, against the archive image and MinIO): part A's catalog sweep for the null
+# checks, part B's read-back of the objects [1, 10) was archived to for the strategies'.
+_NULL_REFUSAL_ARCHIVE = (
+    # (name the refusal gives the routine, mutation name, the routine's lead keyword)
+    ("archive.configure", "archive_null_refusal_dropped_configure", "perform"),
+    ("archive.unconfigure", "archive_null_refusal_dropped_unconfigure", "perform"),
+    ("archive.s3_url_encode", "archive_null_refusal_dropped_s3_url_encode", "select"),   # a SQL function
+    ("archive.s3_signed_request", "archive_null_refusal_dropped_s3_signed_request", "perform"),
+    ("archive.s3_signed_request_bytea", "archive_null_refusal_dropped_s3_signed_request_bytea", "perform"),
+    ("archive.to_s3", "archive_null_refusal_dropped_to_s3", "perform"),
+    ("archive.to_s3_parquet", "archive_null_refusal_dropped_to_s3_parquet", "perform"),
+    ("archive_to_s3_ndjson", "null_refusal_dropped_archive_to_s3_ndjson", "perform"),
+    ("archive_to_s3_parquet", "null_refusal_dropped_archive_to_s3_parquet", "perform"),
+)
+for _label, _name, _lead in _NULL_REFUSAL_ARCHIVE:
+    MUTATIONS[_name] = (
+        "bench/archive_null_arguments.sh",
+        f"Pre-#969 {_label if '.' in _label else 'pgpm.' + _label}: no up-front null check, so a null argument with no "
+        f"meaning reaches what the routine does next (a strategy's null p_hi read no row and PUT an empty object "
+        f"over the key [lo, hi) was archived to; a null p_lo died raw on archive.object_key_claim's NOT NULL; a "
+        f"signer's null made the request or its signature null). One site, the routine's _refuse_null_arguments "
+        f"call, neutralised. tests/archive/db/41 part A's catalog sweep catches it"
+        + (", and part B (the object [1, 10) was archived to is overwritten)" if "." not in _label else "") + ".",
+        [(f"  {_lead} pgpm._refuse_null_arguments('{_label}',", f"  {_lead} json_build_array('{_label}',", 1)],
+    )
+    MUTATION_SRC[_name] = "pgpm_archive/install.sql"
+for _fmt in ("ndjson", "parquet"):
+    MUTATIONS[f"archive_{_fmt}_empty_range_unrefused"] = (
+        "bench/archive_null_arguments.sh",
+        f"Pre-#969 pgpm.archive_to_s3_{_fmt}: no range check, so a direct call for [lo, lo) or [lo, below lo) "
+        f"reads no row and PUTs an empty object over the key the chunk [lo, hi) was archived to (the key is "
+        f"derived from lo alone), which after retire() is the only copy of its rows. One site, the strategy's "
+        f"call of archive._refuse_empty_range. tests/archive/db/41 part B catches it (the object no longer holds "
+        f"what its PUT wrote).",
+        [(f"  perform archive._refuse_empty_range('archive_to_s3_{_fmt}', p_parent, p_lo, p_hi);\n", "", 1)],
+    )
+    MUTATION_SRC[f"archive_{_fmt}_empty_range_unrefused"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_empty_range_compared_as_text"] = (
+    "bench/archive_null_arguments.sh",
+    "archive._refuse_empty_range compares the bounds as text, not as the grid's native type: on an id grid '10' "
+    "sorts before '9', so the chunk [9, 10) is refused as inverted and a strategy can no longer archive it (and "
+    "an inverted numeric range such as [10, 9) would pass). One site. tests/archive/db/41 part B's control "
+    "catches it ([9, 10) archives row 9).",
+    [("  if not pgpm._native_gt(v_kind, p_hi, p_lo) then\n", "  if not (p_hi > p_lo) then   -- MUTANT: as text\n", 1)],
+)
+MUTATION_SRC["archive_empty_range_compared_as_text"] = "pgpm_archive/install.sql"
+
 
 def main() -> int:
     if len(sys.argv) in (2, 3) and sys.argv[1] == "--list":

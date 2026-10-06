@@ -790,6 +790,11 @@ run_archive() {
   # unseeded install.
   echo "--- an export and a chunk never write one object key guard (issue #890) ---"
   bash "$(dirname "$0")/bench/archive_key_full_claim.sh" pgpm_test-archive pgpm_perf240 || fail=1
+  # The null-argument and empty-range guard (#969) re-runs tests/archive/db/41 for the same reason: the
+  # clean-code half of the pairs bench/discriminate.sh completes with each public routine's null check
+  # neutralised and each strategy's range refusal taken out.
+  echo "--- pgpm_archive refuses null arguments and empty ranges guard (issue #969) ---"
+  bash "$(dirname "$0")/bench/archive_null_arguments.sh" pgpm_test-archive pgpm_perf255 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi

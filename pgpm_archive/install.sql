@@ -132,7 +132,17 @@ create or replace function archive.configure(
   p_part_bytes   bigint  default 8 * 1024 * 1024,
   p_fetch_rows   int     default 20000
 ) returns void language plpgsql as $$
+declare v_prefix_given boolean;
 begin
+  -- #969: refused before anything is read or written; p_endpoint (null = AWS S3) is not. The prefix is
+  -- handed over as whether it was given, never as itself: every object key starts with it, and
+  -- scripts/check_archive_object_keys.py reads any call the prefix is handed to as a second place a key
+  -- is assembled, which is the rule that keeps every key in archive._owned_key.
+  if p_prefix is not null then v_prefix_given := true; end if;
+  perform pgpm._refuse_null_arguments('archive.configure', json_build_object(
+    'p_parent', p_parent, 'p_bucket', p_bucket, 'p_region', p_region, 'p_prefix', v_prefix_given,
+    'p_vault_key_id', p_vault_key_id, 'p_vault_secret', p_vault_secret, 'p_compress', p_compress,
+    'p_part_bytes', p_part_bytes, 'p_fetch_rows', p_fetch_rows));
   if not exists (select 1 from pgpm.config where parent_table = p_parent) then
     raise exception 'archive.configure: % is not managed by pgpm; transmute() it first', p_parent;
   end if;
@@ -169,6 +179,8 @@ $$;
 create or replace function archive.unconfigure(p_parent regclass)
 returns void language plpgsql as $$
 begin
+  -- #969: a null p_parent deleted nothing and reported nothing, as if the settings were gone
+  perform pgpm._refuse_null_arguments('archive.unconfigure', json_build_object('p_parent', p_parent));
   delete from archive.config where parent_table = p_parent;
 end;
 $$;
@@ -212,6 +224,8 @@ $$;
 -- RFC 3986 percent-encoding of everything but the unreserved set, byte-wise (UTF-8), as SigV4 requires.
 create or replace function archive.s3_url_encode(p_raw text)
 returns text language sql immutable as $$
+  -- #969: a null encoded to '', so a null key or query value was signed and sent as an empty one
+  select pgpm._refuse_null_arguments('archive.s3_url_encode', json_build_object('p_raw', p_raw));
   select coalesce(string_agg(
     case when b.byte in (45, 46, 95, 126)                    -- - . _ ~
            or b.byte between 48 and 57                       -- 0-9
@@ -252,6 +266,13 @@ declare
   v_canonical text; v_sts text; v_kbin bytea; v_sig text; v_auth text;
   v_resp http_response;
 begin
+  -- #969: refused before anything is signed or sent; p_endpoint (null = AWS S3, virtual-hosted) is not. A
+  -- null anywhere else made the URL, the canonical request or the signature null, or sent a request with
+  -- an empty body or no credentials. The payload is handed over as its length, null exactly when it is:
+  -- a part is megabytes, and its text would be copied into the json for nothing.
+  perform pgpm._refuse_null_arguments('archive.s3_signed_request', json_build_object(
+    'p_method', p_method, 'p_bucket', p_bucket, 'p_region', p_region, 'p_key', p_key, 'p_query', p_query,
+    'p_ctype', p_ctype, 'p_payload', octet_length(p_payload), 'p_key_id', p_key_id, 'p_secret', p_secret));
   if p_endpoint is null then
     v_host := p_bucket || '.s3.' || p_region || '.amazonaws.com';   -- virtual-hosted style
     v_uri  := '/' || archive._s3_encode_path(p_key);
@@ -332,6 +353,10 @@ declare
   v_canonical text; v_sts text; v_kbin bytea; v_sig text; v_auth text;
   v_resp http_response;
 begin
+  -- #969: as archive.s3_signed_request's, the payload again handed over as its length
+  perform pgpm._refuse_null_arguments('archive.s3_signed_request_bytea', json_build_object(
+    'p_method', p_method, 'p_bucket', p_bucket, 'p_region', p_region, 'p_key', p_key, 'p_query', p_query,
+    'p_ctype', p_ctype, 'p_payload', octet_length(p_payload), 'p_key_id', p_key_id, 'p_secret', p_secret));
   if p_endpoint is null then
     v_host := p_bucket || '.s3.' || p_region || '.amazonaws.com';
     v_uri  := '/' || archive._s3_encode_path(p_key);
@@ -2974,6 +2999,9 @@ declare
   v_initiating boolean := false;
   v_resp http_response; h http_header;
 begin
+  -- #969: refused before anything is read or sent. p_lo and p_hi are not read (the export is the whole
+  -- partition), so their null is accepted.
+  perform pgpm._refuse_null_arguments('archive.to_s3', json_build_object('p_parent', p_parent, 'p_child', p_child));
 -- The export runs in its own block so that a CANCEL can reach the multipart abort as well as an
 -- error. `when others` does not catch query_canceled (57014), so a statement_timeout or a
 -- pg_cancel_backend used to leave the upload and its parts in the bucket (issue #595). Naming the
@@ -3220,6 +3248,8 @@ declare
   cfg archive.config; v_child regclass;
   v_key_id text; v_secret text; v_key text; v_payload bytea; v_resp http_response;
 begin
+  -- #969: as archive.to_s3's (p_lo and p_hi are not read)
+  perform pgpm._refuse_null_arguments('archive.to_s3_parquet', json_build_object('p_parent', p_parent, 'p_child', p_child));
   select * into cfg from archive.config where parent_table = p_parent;
   if not found then raise exception 'archive.to_s3_parquet: % has no archive.config row', p_parent; end if;
 
@@ -3269,14 +3299,44 @@ $$;
 --
 -- archive.to_s3/archive.to_s3_parquet (the synchronous functions above) are untouched and keep
 -- working exactly as before; the paced worker they used to sit alongside is gone entirely (#240).
+
+-- The range an archive_fn strategy is handed must hold something (#969). A chunk's object key is derived
+-- from its lo alone (archive._object_key), so a call for [lo, lo), or for a range whose hi is below its lo,
+-- read no row and PUT an empty object over the key the chunk [lo, hi) was archived to, which after retire()
+-- dropped the partition is the only copy of its rows. pgpm._next_archive_chunk never asks for such a range;
+-- a direct call could, and nothing refused it. Compared as the grid's native type (numeric for an id grid,
+-- timestamptz otherwise), never as text, where '9' sorts after '10'.
+create or replace function archive._refuse_empty_range(p_routine text, p_parent regclass, p_lo text, p_hi text)
+returns void language plpgsql as $$
+declare v_kind text;
+begin
+  select c.control_kind into v_kind from pgpm.config c where c.parent_table = p_parent;
+  if not found then
+    raise exception 'pg_partition_magician: % cannot archive a chunk of % -- it is not managed by pgpm', p_routine, p_parent;
+  end if;
+  if not pgpm._native_gt(v_kind, p_hi, p_lo) then
+    raise exception 'pg_partition_magician: % refuses the range [%, %) of % -- it is empty or inverted, and the object key is derived from lo alone, so the call would read no row and write an empty object over the one the chunk at % was archived to. Pass the chunk''s own [lo, hi).',
+      p_routine, p_lo, p_hi, p_parent, p_lo;
+  end if;
+end;
+$$;
+
 create or replace function pgpm.archive_to_s3_ndjson(p_parent regclass, p_child name, p_lo text, p_hi text)
 returns pgpm.archive_result language plpgsql as $$
 declare
   cfg archive.config; v_result pgpm.archive_result;
   v_s3_key text; v_etag text; v_rows bigint;
 begin
+  -- #969: refused before anything is read or sent. p_child is not read (the chunk is read through the
+  -- parent), so its null is accepted. A null p_lo died raw on archive.object_key_claim's NOT NULL, and a
+  -- null p_hi read no row and PUT an empty object over the chunk's key, which is derived from p_lo alone.
+  perform pgpm._refuse_null_arguments('archive_to_s3_ndjson', json_build_object('p_parent', p_parent, 'p_lo', p_lo, 'p_hi', p_hi));
   select * into cfg from archive.config where parent_table = p_parent;
   if not found then raise exception 'pgpm.archive_to_s3_ndjson: % has no archive.config row', p_parent; end if;
+  -- #969: and an empty or inverted range, before anything is read or sent. The key is derived from p_lo
+  -- alone, so [lo, lo) or [lo, below lo) read no row and PUT an empty object over the key the chunk
+  -- [lo, hi) was archived to, which after retire() is the only copy of its rows. See archive._refuse_empty_range.
+  perform archive._refuse_empty_range('archive_to_s3_ndjson', p_parent, p_lo, p_hi);
   -- #873: the chunk is read through the parent as the caller, and its ledger row opens retire()'s drop gate
   perform pgpm._refuse_filtered_reads(p_parent, 'archive a chunk of',
     'the object would hold only those rows, and retention would drop the others once it is recorded');
@@ -3298,8 +3358,12 @@ declare
   cfg archive.config; v_result pgpm.archive_result;
   v_s3_key text; v_etag text; v_rows bigint;
 begin
+  -- #969: as archive_to_s3_ndjson's
+  perform pgpm._refuse_null_arguments('archive_to_s3_parquet', json_build_object('p_parent', p_parent, 'p_lo', p_lo, 'p_hi', p_hi));
   select * into cfg from archive.config where parent_table = p_parent;
   if not found then raise exception 'pgpm.archive_to_s3_parquet: % has no archive.config row', p_parent; end if;
+  -- #969: as archive_to_s3_ndjson's
+  perform archive._refuse_empty_range('archive_to_s3_parquet', p_parent, p_lo, p_hi);
   -- #873: as archive_to_s3_ndjson's
   perform pgpm._refuse_filtered_reads(p_parent, 'archive a chunk of',
     'the object would hold only those rows, and retention would drop the others once it is recorded');
