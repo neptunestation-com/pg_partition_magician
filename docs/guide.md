@@ -135,6 +135,13 @@ create extension "dventimisupabase@pg_partition_magician" version '0.6.0' cascad
 
 You also need `pg_cron` enabled to run scheduled maintenance.
 
+**Upgrade** by re-running the same file. Your views over pgpm's functions (`status()`, `progress()`,
+`observe_window()`, `check_uuidv7()`, `check_text_time()`) survive it: a function whose shape is unchanged is
+replaced in place. When an upgrade changes one's result or arguments and a view of yours depends on it, the
+run refuses before it has changed anything, naming the function and the view (SQLSTATE `2BP01`). Save the
+view's definition (`select pg_get_viewdef('<view>'::regclass, true)`), drop it, re-run the file, then
+recreate the view against the new shape.
+
 **Uninstall** removes the manager and leaves your data. Gone: the `pgpm` schema (configuration,
 registry, log, every function and view), its cron jobs, the write-block triggers on frozen children, and
 regrain's change capture, which lives in your schema rather than in `pgpm`: a `<table>_pgpm_regrain_delta`

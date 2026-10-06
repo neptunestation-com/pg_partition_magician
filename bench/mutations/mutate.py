@@ -8183,6 +8183,31 @@ select ok(
           "       and not (fn.nspname = v_nsp and f.proname = v_rel || '_pgpm_delta_fn'   -- #969: 0.6.0's, on proof\n"
           "                and strpos(f.prosrc, format('insert into %I.%I (', v_nsp, v_rel || '_pgpm_delta')) > 0)\n", 1)],
     ),
+    "install_drops_surface_unconditionally": (
+        "bench/install_keeps_dependent_views.sh",
+        "Pre-#983 install.sql: status(), progress(regclass), observe_window(regclass, interval), check_uuidv7 "
+        "and check_text_time are dropped unconditionally on every run, whatever is installed, so a view over any "
+        "of them makes the documented re-run fail at that drop with PostgreSQL's raw dependency error. One site, "
+        "the call of pgpm._surface_prepare(). tests/281 dies at its first re-run, and the guard's stage B stops "
+        "at the raw error instead of pgpm's refusal.",
+        [("select pgpm._surface_prepare();\n",
+          "drop function if exists pgpm.check_uuidv7(regclass, name, int);\n"
+          "drop function if exists pgpm.check_text_time(regclass, name, text, int, int, text, int, text, int, timestamptz);\n"
+          "drop function if exists pgpm.status();\n"
+          "drop function if exists pgpm.progress(regclass);\n"
+          "drop function if exists pgpm.observe_window(regclass, interval);\n", 1)],
+    ),
+    "surface_shape_ignores_result": (
+        "bench/install_keeps_dependent_views.sh",
+        "pgpm._surface_unreplaceable compares the argument list and the defaults but not the result, so an "
+        "installed function whose arguments match its declaration and whose result does not is taken as "
+        "replaceable: nothing is refused or dropped up front, the run goes on until that function's CREATE OR "
+        "REPLACE rejects the result, and everything the file did before it is done. One site. The guard's "
+        "stage B (the marker the file removes near its top is gone) and tests/281 part B catch it.",
+        [("      or pg_get_function_identity_arguments(p.oid) <> s.args\n"
+          "      or pg_get_function_result(p.oid) <> s.result\n",
+          "      or pg_get_function_identity_arguments(p.oid) <> s.args\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
