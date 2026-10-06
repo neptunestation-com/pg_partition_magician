@@ -265,7 +265,7 @@ for n in $WRAPPERS; do
   if [ ! -f "$s" ]; then bad "LIVENESS: the wrapper $n exists" "$s"; continue; fi
   nb=$(grep -c '^ *# >>> pgTAP verdict' "$s"); ne=$(grep -c '^ *# <<< pgTAP verdict' "$s")
   if [ "$nb" != 1 ] || [ "$ne" != 1 ]; then
-    bad "LIVENESS: $n carries exactly one verdict block" "$nb begin, $ne end marker(s)"; continue
+    bad "$n carries exactly one verdict block" "$nb begin, $ne end marker(s)"; continue
   fi
   block=$(awk '/^ *# >>> pgTAP verdict/ {f=1} f {print} /^ *# <<< pgTAP verdict/ {exit}' "$s")
   if ! grep -qF -- '-f "$TEST_FILE"' <<<"$block"; then
