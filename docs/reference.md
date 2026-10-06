@@ -2185,7 +2185,14 @@ grid, instants otherwise) before anything is read or sent: the chunk's key is de
 such a call would read no row and write an empty object over the one the chunk at `p_lo` was archived to,
 which after `retire()` is the only copy of its rows (`pg_partition_magician: archive_to_s3_ndjson refuses the
 range [lo, hi) of <table> -- it is empty or inverted, ...`). `pgpm._next_archive_chunk` never asks for one;
-the refusal is for a direct call. Connection settings
+the refusal is for a direct call. A range of the right shape is not enough either: once `pgpm.archive_ledger`
+records a chunk at the key a call would write, the call is written only when it reproduces that chunk, with
+the chunk's own `[lo, hi)` (compared as the grid's native type) and a read that finds the rows the chunk
+recorded, which is the re-run of a live, write-blocked chunk. A shorter or longer range at that key, or the
+chunk's own range after `retire()` has dropped its partition (the read finds no row), is refused before the
+PUT, naming the recorded chunk and the key (`pg_partition_magician: archive_to_s3_ndjson refuses to write
+[lo, hi) of <table> to the object key <key>: pgpm.archive_ledger records the chunk [lo, hi) of <n> row(s)
+there, and ...`). `pgpm._next_archive_chunk` never hands a strategy a key the ledger records. Connection settings
 (bucket, region, endpoint, prefix, vault key names, compression) still come from `archive.config`,
 the same one config surface the synchronous functions use -- setting `archive_fn` this way needs no
 second, independently configured surface. An `archive_fn` cannot issue `COMMIT`: it is a plain function

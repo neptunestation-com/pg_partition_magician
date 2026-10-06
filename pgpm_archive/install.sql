@@ -2743,6 +2743,45 @@ create or replace function archive._record_claim_relations() returns int languag
 $$;
 do $$ begin perform archive._record_claim_relations(); end $$;
 
+-- An archive_fn strategy writes over the object pgpm.archive_ledger records a chunk at only to reproduce that
+-- chunk (#975). A chunk's key is derived from its lo alone, and the whole-key claim above admits the same parent
+-- and kind, so the claim cannot tell the tick that archived a chunk from a later direct call aimed at its key.
+-- #969's range check (archive._refuse_empty_range, below) refuses only an empty or inverted SHAPE. A direct call
+-- with the chunk's lo and a shorter hi PUT a subset over the chunk's object while the ledger still recorded
+-- [lo, hi) there, and retire() then dropped the partition with the rest of the rows copied nowhere; and after
+-- retire() a call with the chunk's own [lo, hi) read no row and PUT an empty object over the only copy.
+--
+-- So every strategy asks here, with the key it is about to PUT to and the row count of the read it is about to
+-- send, after both are known and before anything is sent. Where the ledger records a chunk at that key, the
+-- write is admitted only when it reproduces the chunk: the same [lo, hi), compared as the grid's native type
+-- (text would refuse a re-run spelling the same instant another way), and the read finding the rows the chunk
+-- recorded. That is the re-run the documentation describes: the chunk's own range while its rows are still in
+-- the table, which is safe because a covered partition stays write-blocked (#452). A key the ledger records
+-- nothing at, which is every key pgpm._archive_step hands a strategy (it resumes past what is recorded), is not
+-- this function's business. Looked up within p_parent's own rows: another relation's ledger row cannot name a
+-- key p_parent holds, because archive._owned_key has already refused a key claimed by anyone else.
+create or replace function archive._refuse_recorded_chunk_overwrite(
+  p_routine text, p_parent regclass, p_kind text, p_key text, p_lo text, p_hi text, p_rows bigint)
+returns void language plpgsql as $$
+declare l record; v_why text;
+begin
+  for l in select a.lo, a.hi, a.rows_archived from pgpm.archive_ledger a
+            where a.parent_table = p_parent and a.s3_key = p_key loop
+    if pgpm._native_gt(p_kind, l.lo, p_lo) or pgpm._native_gt(p_kind, p_lo, l.lo)
+       or pgpm._native_gt(p_kind, l.hi, p_hi) or pgpm._native_gt(p_kind, p_hi, l.hi) then
+      v_why := 'this call''s range is not that chunk''s';
+    elsif (l.rows_archived is null and coalesce(p_rows, 0) = 0)
+          or (l.rows_archived is not null and p_rows is distinct from l.rows_archived) then
+      v_why := format('the read found %s row(s) in it now', coalesce(p_rows, 0));
+    end if;
+    if v_why is not null then
+      raise exception 'pg_partition_magician: % refuses to write [%, %) of % to the object key %: pgpm.archive_ledger records the chunk [%, %) of % row(s) there, and %. That object is the record of the chunk, and once retire() has dropped its partition the only copy of its rows; a re-run may only reproduce it: the chunk''s own [lo, hi), while its rows are still in the table.',
+        p_routine, p_lo, p_hi, p_parent, p_key, l.lo, l.hi, coalesce(l.rows_archived::text, 'an unrecorded number of'), v_why;
+    end if;
+  end loop;
+end;
+$$;
+
 -- single read, single PUT (optionally one gzip member for the whole body). No pagination, so no
 -- tiebreak is needed: a plain `order by` with no LIMIT never splits a run of ties across pages.
 --
@@ -2801,6 +2840,8 @@ begin
   -- the whole key, `.gz` included, so the claim names the object the PUT writes (#890)
   v_key := archive._object_key(p_parent, cfg.prefix, pcfg.control_kind, p_lo,
                                case when p_compress then '.ndjson.gz' else '.ndjson' end);
+  -- #975: never over a recorded chunk this read does not reproduce
+  perform archive._refuse_recorded_chunk_overwrite('archive_to_s3_ndjson', p_parent, pcfg.control_kind, v_key, p_lo, p_hi, v_rows);
   if p_compress then
     v_body := archive._pq_gzip_compress_dynamic(convert_to(v_payload, 'UTF8'));
     v_resp := archive.s3_signed_request_bytea('PUT', cfg.endpoint, cfg.bucket, cfg.region, v_key, '',
@@ -2865,6 +2906,8 @@ begin
   end if;
 
   v_key := archive._object_key(p_parent, cfg.prefix, pcfg.control_kind, p_lo, '.parquet');
+  -- #975: as _encode_upload_ndjson_single's
+  perform archive._refuse_recorded_chunk_overwrite('archive_to_s3_parquet', p_parent, pcfg.control_kind, v_key, p_lo, p_hi, v_rows);
   v_resp := archive.s3_signed_request_bytea('PUT', cfg.endpoint, cfg.bucket, cfg.region, v_key, '',
                                             'application/vnd.apache.parquet', v_payload, v_key_id, v_secret);
   if v_resp.status not between 200 and 299 then
