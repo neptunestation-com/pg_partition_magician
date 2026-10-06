@@ -8977,6 +8977,125 @@ MUTATIONS["uninstall_scratch_record_skips_capture_fn"] = (
 MUTATION_SRC["uninstall_scratch_record_skips_capture_fn"] = "pgpm_core/uninstall.sql"
 MUTATION_TRACK["uninstall_scratch_record_skips_capture_fn"] = "timescale"
 
+# pass 9 G18: #994, #995, #1002. Four test files that counted where their own comments promised to name, each
+# judged by bench/tests_fail_on_defect.sh against a defect it plants in install.sql. One mutation per site, each
+# the site's exact pre-fix text, so the file under it passes against that defect.
+MUTATIONS.update({
+    "transmute_log_summed_count_247": (
+        "bench/tests_fail_on_defect.sh",
+        "Pre-#994 tests/247: 'A, D: each conversion logged its own transmute' asserted as count(*) = 2 summed over "
+        "t247_nan and t247_int, which a log holding two t247_nan rows and no t247_int row satisfies. The exact "
+        "pre-#994 assertion; the guard's defect logs every conversion under the first parent ever logged.",
+        [("""-- Identity, not cardinality (#994): one transmute row under EACH converted table's name. A count summed
+-- over both would accept t247_nan logged twice and t247_int never.
+select is((select array_agg(parent_table::text order by parent_table::text) from pgpm.log
+            where parent_table in ('public.t247_nan'::regclass, 'public.t247_int'::regclass) and action = 'transmute'),
+  array['t247_int', 't247_nan'],
+""", """select is((select count(*)::int from pgpm.log where parent_table in ('public.t247_nan'::regclass, 'public.t247_int'::regclass)
+                                               and action = 'transmute'), 2,
+""", 1)],
+    ),
+    "transmute_log_summed_count_178": (
+        "bench/tests_fail_on_defect.sh",
+        "Pre-#994 tests/178: 'B, C, D, F: each conversion logged its own transmute' asserted as count(*) = 4 "
+        "summed over nb, nc, fd and ff, which a log naming nb four times and the others never satisfies. The "
+        "exact pre-#994 assertion.",
+        [("""-- Identity, not cardinality (#994): one transmute row under EACH converted table's name. A count summed
+-- over the four would accept nb logged twice and nc never.
+select is((select array_agg(parent_table::text order by parent_table::text) from pgpm.log
+            where parent_table in ('public.nb'::regclass, 'public.nc'::regclass,
+                                   'public.fd'::regclass, 'public.ff'::regclass)
+              and action = 'transmute'),
+  array['fd', 'ff', 'nb', 'nc'],
+""", """select is((select count(*)::int from pgpm.log where parent_table in ('public.nb'::regclass, 'public.nc'::regclass,
+                                                                   'public.fd'::regclass, 'public.ff'::regclass)
+                                               and action = 'transmute'), 4,
+""", 1)],
+    ),
+    "reap_kept_rows_by_count": (
+        "bench/tests_fail_on_defect.sh",
+        "Pre-#995 tests/140: 'rn_old kept every row it had, and the new one' asserted as count(*) = 22, which a "
+        "reaper that rewrites id 1 to -1 after dropping the bound satisfies. The exact pre-#995 assertion.",
+        [("""-- Identity, not cardinality (#995): the ids rn_old holds, by name. A count of 22 would accept a reap that
+-- rewrote one of them (id 1 read back as -1) or lost one and gained another.
+select is((select array_agg(id order by id) from public.rn_old),
+  (select array_agg(g::bigint order by g) from generate_series(1, 20) g) || array[100, 200]::bigint[],
+  'rn_old kept every row it had, and the new one');
+""", """select is((select count(*)::int from public.rn_old), 22, 'rn_old kept every row it had, and the new one');
+""", 1)],
+    ),
+    "retiring_partition_attachment_only": (
+        "bench/tests_fail_on_defect.sh",
+        "Pre-#1002 tests/77 line 98: 'the partition is still attached, and still holds its rows, until the detach "
+        "actually happens' asserted as one pg_inherits row under the partition's NAME, reading none of its rows, "
+        "which a retire() that empties the partition when it dispatches the detach satisfies. The exact pre-#1002 "
+        "text of that site, plan and oid capture included.",
+        [("select plan(50);\n", "select plan(48);\n", 1),
+         ("""-- and its oid, before anything touches it: "still attached" below is judged on THIS relation, not on
+-- whatever holds the name by then
+select format('public.%I', :'doomed')::regclass::oid as doomed_oid \\gset
+""", "", 1),
+         ("""-- Nothing may be destroyed on the way. Identity, not cardinality: name the partition and its rows
+-- (#1002). Attachment alone reads no row, so it would pass a retire() that emptied the partition when it
+-- dispatched the detach. Rows are read THROUGH the parent, from that partition: ids 1, 25000 and 50000
+-- by name, then every one of 1..50000.
+select ok(exists (select 1 from pg_inherits where inhparent = 'public.rw77'::regclass
+                   and inhrelid = :'doomed_oid'::oid and not inhdetachpending),
+  'the partition is still attached, the same relation by oid and not detach-pending');
+select is(
+  (select array_agg(id order by id) from public.rw77
+    where tableoid = to_regclass(format('public.%I', :'doomed')) and id in (1, 25000, 50000)),
+  array[1, 25000, 50000]::bigint[],
+  'the partition still holds its rows (ids 1, 25000 and 50000), until the detach actually happens');
+select ok(
+  (select array_agg(id order by id) from public.rw77 where tableoid = :'doomed_oid'::oid)
+    = (select array_agg(g::bigint order by g) from generate_series(1, 50000) g),
+  'and every one of them: exactly ids 1 to 50000, none lost, none invented');
+""", """-- Nothing may be destroyed on the way. Identity, not cardinality: name the partition and its rows.
+select is(
+  (select count(*)::int from pg_inherits i join pg_class c on c.oid = i.inhrelid
+    where i.inhparent = 'public.rw77'::regclass and c.relname = :'doomed'),
+  1, 'the partition is still attached, and still holds its rows, until the detach actually happens');
+""", 1)],
+    ),
+    "crossing_refusal_attachment_only": (
+        "bench/tests_fail_on_defect.sh",
+        "Pre-#1002 tests/77 line 218: 'and the partition is left INTACT and attached, not half-retired' (the NO "
+        "ACTION crossing) asserted as one pg_inherits row under the partition's NAME, reading none of its rows, "
+        "which a refused retire() that has already deleted the rows nothing references satisfies. The exact "
+        "pre-#1002 text of that site, plan and oid capture included.",
+        [("select plan(50);\n", "select plan(48);\n", 1),
+         ("select format('public.%I', :'nx_doomed')::regclass::oid as nx_doomed_oid \\gset\n", "", 1),
+         ("""-- INTACT is about its rows, not only its attachment (#1002): a refused retire() that had already deleted
+-- the rows nothing references would leave it attached and half-retired. Ids 1, 42 (the referenced one),
+-- 25000 and 50000 by name, then every one of 1..50000.
+select ok(exists (select 1 from pg_inherits where inhparent = 'public.nx77'::regclass
+                   and inhrelid = :'nx_doomed_oid'::oid and not inhdetachpending),
+  'and the partition is left attached, the same relation by oid and not detach-pending');
+select is(
+  (select array_agg(id order by id) from public.nx77
+    where tableoid = to_regclass(format('public.%I', :'nx_doomed')) and id in (1, 42, 25000, 50000)),
+  array[1, 42, 25000, 50000]::bigint[],
+  'and the partition is left INTACT and attached, not half-retired: ids 1, 42, 25000 and 50000 are there');
+select ok(
+  (select array_agg(id order by id) from public.nx77 where tableoid = :'nx_doomed_oid'::oid)
+    = (select array_agg(g::bigint order by g) from generate_series(1, 50000) g),
+  'and every one of its rows: exactly ids 1 to 50000, none lost, none invented');
+""", """select is(
+  (select count(*)::int from pg_inherits i join pg_class c on c.oid = i.inhrelid
+    where i.inhparent = 'public.nx77'::regclass and c.relname = :'nx_doomed'),
+  1, 'and the partition is left INTACT and attached, not half-retired');
+""", 1)],
+    ),
+})
+MUTATION_SRC.update({
+    "transmute_log_summed_count_247": "tests/247_transmute_non_finite_id_key_test.sql",
+    "transmute_log_summed_count_178": "tests/178_transmute_time_future_maximum_test.sql",
+    "reap_kept_rows_by_count": "tests/140_transmute_reap_identity_test.sql",
+    "retiring_partition_attachment_only": "tests/77_retain_incoming_fk_test.sql",
+    "crossing_refusal_attachment_only": "tests/77_retain_incoming_fk_test.sql",
+})
+
 
 def main() -> int:
     if len(sys.argv) in (2, 3) and sys.argv[1] == "--list":

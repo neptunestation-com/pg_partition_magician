@@ -99,6 +99,11 @@ PY
     "$(basename "$T92")":*|*:"$T92") SEL=" 92 "; F92="$ONLY" ;;
     "$(basename "$T88")":*|*:"$T88") SEL=" 88 "; F88="$ONLY" ;;
     "$(basename "$T91")":*|*:"$T91") SEL=" 91 "; F91="$ONLY" ;;
+    # pass 9 G18: tests/247, 178, 140 and 77, defined with their defects at the end of this file
+    247_transmute_non_finite_id_key_test.sql:*|*:tests/247_transmute_non_finite_id_key_test.sql) SEL=" 247 "; F247="$ONLY" ;;
+    178_transmute_time_future_maximum_test.sql:*|*:tests/178_transmute_time_future_maximum_test.sql) SEL=" 178 "; F178="$ONLY" ;;
+    140_transmute_reap_identity_test.sql:*|*:tests/140_transmute_reap_identity_test.sql) SEL=" 140 "; F140="$ONLY" ;;
+    77_retain_incoming_fk_test.sql:*|*:tests/77_retain_incoming_fk_test.sql) SEL=" 77 "; F77="$ONLY" ;;
     *) say FAIL "the file to judge is one of the seven this guard knows" "$ONLY -> '${src}'"; exit 1 ;;
   esac
 fi
@@ -364,6 +369,164 @@ if sel 88 || sel 91; then
     fi
   else
     say FAIL "planted the defect: _frontier_native's text_time blend" "install.sql moved; fix the pattern"; fail=1
+  fi
+fi
+
+# pass 9 G18 ------------------------------------------------------------------------------------------------
+# Issues #994, #995 and #1002: four more files that counted where their own comments promised to name.
+#   tests/247 and tests/178 asserted "each conversion logged its own transmute" as one count(*) summed over
+#             every converted table, which a log naming one table twice and another never satisfies;
+#   tests/140 asserted "rn_old kept every row it had" as count(*) = 22 under a header promising asymmetric
+#             fixtures, which a reap that rewrites one row's id satisfies;
+#   tests/77  asserted "still attached, and still holds its rows" (fixture 1, mid-retirement) and "left
+#             INTACT and attached, not half-retired" (the NO ACTION crossing) by counting pg_inherits rows
+#             under the partition's NAME, reading none of its rows, which a retire() that empties the
+#             partition satisfies.
+# The defects, each this checkout's install.sql with one site changed:
+#   transmute_logs_first_parent    every transmute's log row names the first parent ever logged (in a fresh
+#                                  database, the file's first conversion), so later conversions log nothing
+#                                  of their own: tests/247 and tests/178;
+#   reap_rewrites_lowest_id        _transmute_reap, after dropping a table's bound, rewrites its lowest id
+#                                  to its negation (rn_old's id 1 reads back as -1): tests/140;
+#   retire_empties_at_dispatch     retire() deletes the partition's rows as it dispatches the detach;
+#   retire_empties_refused_crossing a crossing refused under NO ACTION first deletes the partition's rows
+#                                  that nothing references (all but the crossing key).
+# One defect per tests/77 site, each in its own install, so each site's mutation is judged alone: a single
+# install carrying both would leave the other site failing under either mutation and prove nothing.
+# LIVENESS: for tests/247, 178 and 140 the defect fires inside the file and is read from the database it
+# leaves; tests/77 drops its fixtures, so each retire() defect is shown by a probe of its own (a 500-row
+# table with an incoming FK, monolith [0, 600)), against the clean install and against the defect.
+# The mutations (bench/mutations/mutate.py), each the site's pre-fix text:
+#   transmute_log_summed_count_247, transmute_log_summed_count_178, reap_kept_rows_by_count,
+#   retiring_partition_attachment_only, crossing_refusal_attachment_only.
+T247="tests/247_transmute_non_finite_id_key_test.sql"
+T178="tests/178_transmute_time_future_maximum_test.sql"
+T140="tests/140_transmute_reap_identity_test.sql"
+T77="tests/77_retain_incoming_fk_test.sql"
+F247="${F247:-$ROOT/$T247}"; F178="${F178:-$ROOT/$T178}"; F140="${F140:-$ROOT/$T140}"; F77="${F77:-$ROOT/$T77}"
+[ -z "$ONLY" ] && SEL="${SEL}247 178 140 77 "
+
+# expect_v <label> <want> <sql>: a LIVENESS read of the database the last run left.
+expect_v() {
+  local got; got=$(v "$3")
+  if [ "$got" = "$2" ]; then say PASS "LIVENESS: $1" "$got"
+  else say FAIL "LIVENESS: $1" "want $2, got: $got"; fail=1; fi
+}
+
+# ---- tests/247 and tests/178: one transmute log row per converted table, by name ----------------------------
+if sel 247 || sel 178; then
+  sel 247 && judge_on "$ROOT/pgpm_core/install.sql" "CONTROL: $T247 passes against the clean install" pass "$F247"
+  sel 178 && judge_on "$ROOT/pgpm_core/install.sql" "CONTROL: $T178 passes against the clean install" pass "$F178"
+  if plant transmute_logs_first_parent \
+       "  insert into pgpm.log (parent_table, action) values (v_parent, 'transmute');
+" "  insert into pgpm.log (parent_table, action)
+    values (coalesce((select l.parent_table from pgpm.log l where l.action = 'transmute' order by l.id limit 1),
+                     v_parent), 'transmute');
+"; then
+    TLOG="select (select string_agg(parent_table::text, ',' order by parent_table::text) from pgpm.config)
+                 || ' | ' || (select string_agg(parent_table::text, ',' order by id) from pgpm.log where action = 'transmute')"
+    if sel 247; then
+      judge_on "$work/transmute_logs_first_parent.sql" "DEFECT: $T247 fails, t247_int logged as t247_nan" fail "$F247"
+      expect_v "both converted, both transmutes logged as t247_nan" "t247_int,t247_nan | t247_nan,t247_nan" "$TLOG"
+    fi
+    if sel 178; then
+      judge_on "$work/transmute_logs_first_parent.sql" "DEFECT: $T178 fails, all four logged as nb" fail "$F178"
+      expect_v "four converted, all four transmutes logged as nb" "fd,ff,nb,nc | nb,nb,nb,nb" "$TLOG"
+    fi
+  else
+    say FAIL "planted the defect: transmute's log row names the first parent" "install.sql moved; fix the pattern"; fail=1
+  fi
+fi
+
+# ---- tests/140: the rows rn_old kept across the reap, by id ------------------------------------------------
+if sel 140; then
+  judge_on "$ROOT/pgpm_core/install.sql" "CONTROL: $T140 passes against the clean install" pass "$F140"
+  if plant reap_rewrites_lowest_id \
+       "      execute format('alter table %s drop constraint if exists pgpm_monolith_bound', r.parent_table::text);
+" "      execute format('alter table %s drop constraint if exists pgpm_monolith_bound', r.parent_table::text);
+      execute format('update %1\$s set id = -id where ctid = (select ctid from %1\$s order by id limit 1)',
+                     r.parent_table::text);
+"; then
+    judge_on "$work/reap_rewrites_lowest_id.sql" "DEFECT: $T140 fails when the reap rewrites id 1 to -1" fail "$F140"
+    expect_v "the reap rewrote rn_old's id 1 to -1, kept 22 rows, dropped the bound" "f:t:22:0" \
+      "select (select bool_or(id = 1)::text from public.rn_old)::char || ':' || (select bool_or(id = -1)::text from public.rn_old)::char
+              || ':' || (select count(*) from public.rn_old) || ':' || (select count(*) from pg_constraint
+                where conrelid = 'public.rn_old'::regclass and conname = 'pgpm_monolith_bound')"
+  else
+    say FAIL "planted the defect: the reap rewrites the lowest id" "install.sql moved; fix the pattern"; fail=1
+  fi
+fi
+
+# ---- tests/77: a retiring or refused partition still holds its rows, by id ---------------------------------
+# The probe: a 500-row table, monolith [0, 600), the frontier at 1100 (horizon 800), and a referencing table
+# pointing at <ref>: 1100 (live, so retire() dispatches the detach) or 42 (inside the partition, so the NO
+# ACTION crossing refuses). Reports retire()'s verdict and the partition's rows by identity.
+rt_probe() {  # <ref>
+  q -d "$DB" -tAq -f - <<SQL 2>&1 | grep -o 'PROBE .*' | head -1
+create table public.rt_probe (id bigint generated by default as identity primary key, payload text);
+insert into public.rt_probe (payload) select 'x' from generate_series(1, 500);
+call pgpm.transmute('public.rt_probe', 'id', 100, p_retain => 300);
+select pgpm.obtain('public.rt_probe');
+insert into public.rt_probe (id, payload) values (1100, 'frontier');
+create table public.rt_probe_ref (id bigint primary key, p_id bigint not null references public.rt_probe(id));
+insert into public.rt_probe_ref values (1, $1);
+select child_name as rt_doomed from pgpm.part where parent_table = 'public.rt_probe'::regclass and lo = '0' \gset
+select (not pgpm.retire('public.rt_probe', :'rt_doomed'))::text as rt_deferred \gset
+select 'PROBE ' || :'rt_deferred'
+       || '/' || coalesce((select string_agg(action, ',' order by id) from pgpm.log
+                            where parent_table = 'public.rt_probe'::regclass
+                              and action in ('retain_drop', 'retain_detach', 'fail_retain_detach', 'retain_crossing',
+                                             'fail_retain_crossing', 'fail_retain_drop')), '')
+       || '/' || coalesce((select array_agg(id order by id) from public.rt_probe
+                            where tableoid = to_regclass(format('public.%I', :'rt_doomed')) and id in (1, 42, 500))::text, '{}')
+       || '/' || (select count(*) from public.rt_probe where tableoid = to_regclass(format('public.%I', :'rt_doomed')));
+SQL
+}
+# probe_on <install.sql> <ref> <label> <want>
+probe_on() {
+  local got
+  if fresh && install "$1"; then
+    got=$(rt_probe "$2")
+    if [ "$got" = "PROBE $4" ]; then say PASS "LIVENESS: $3" "$got"
+    else say FAIL "LIVENESS: $3" "want PROBE $4, got: ${got:-no PROBE line}"; fail=1; fi
+  else say FAIL "LIVENESS: $3: the install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1; fi
+}
+if sel 77; then
+  probe_on "$ROOT/pgpm_core/install.sql" 1100 "the clean retire() dispatches and keeps the rows" \
+    "true/fail_retain_detach/{1,42,500}/500"
+  probe_on "$ROOT/pgpm_core/install.sql" 42 "the clean crossing refusal keeps the rows" \
+    "true/fail_retain_crossing/{1,42,500}/500"
+  judge_on "$ROOT/pgpm_core/install.sql" "CONTROL: $T77 passes against the clean install" pass "$F77"
+  if plant retire_empties_at_dispatch \
+       "      v_reason := pgpm._dispatch_detach(p_parent, v_child);
+" "      perform pgpm._remove_write_block(p_parent, p_child);
+      execute format('delete from %s', v_child);
+      perform pgpm._install_write_block(p_parent, p_child);
+      v_reason := pgpm._dispatch_detach(p_parent, v_child);
+"; then
+    probe_on "$work/retire_empties_at_dispatch.sql" 1100 "the defect's retire() dispatches with the rows gone" \
+      "true/fail_retain_detach/{}/0"
+    judge_on "$work/retire_empties_at_dispatch.sql" "DEFECT: $T77 fails when retire() empties at dispatch" fail "$F77"
+  else
+    say FAIL "planted the defect: retire() empties the partition at dispatch" "install.sql moved; fix the pattern"; fail=1
+  fi
+  if plant retire_empties_refused_crossing \
+       "        exception when others then
+          insert into pgpm.log (parent_table, action, lo, hi, method)
+            values (p_parent, 'fail_retain_crossing', r.lo, r.hi, left(sqlerrm, 200));
+" "        exception when others then
+          perform pgpm._remove_write_block(p_parent, p_child);
+          execute format('delete from %s where not (%I = any (%L::text[]::%s[]))',
+            v_child, cfg.control_column, v_cross, v_coltype);
+          perform pgpm._install_write_block(p_parent, p_child);
+          insert into pgpm.log (parent_table, action, lo, hi, method)
+            values (p_parent, 'fail_retain_crossing', r.lo, r.hi, left(sqlerrm, 200));
+"; then
+    probe_on "$work/retire_empties_refused_crossing.sql" 42 "the defect's refusal leaves only the crossing row" \
+      "true/fail_retain_crossing/{42}/1"
+    judge_on "$work/retire_empties_refused_crossing.sql" "DEFECT: $T77 fails when a refused crossing half-retires" fail "$F77"
+  else
+    say FAIL "planted the defect: a refused crossing deletes the unreferenced rows" "install.sql moved; fix the pattern"; fail=1
   fi
 fi
 

@@ -114,9 +114,13 @@ select is((select lo::timestamptz from pgpm.part where parent_table = 'public.ff
   'F: and its lo is the floor of the oldest row');
 select is((select array_agg(id order by id) from public.ff where tableoid = :ff_oid), array[1, 2]::bigint[],
   'F: rows 1 and 2 are in the monolith');
-select is((select count(*)::int from pgpm.log where parent_table in ('public.nb'::regclass, 'public.nc'::regclass,
-                                                                   'public.fd'::regclass, 'public.ff'::regclass)
-                                               and action = 'transmute'), 4,
+-- Identity, not cardinality (#994): one transmute row under EACH converted table's name. A count summed
+-- over the four would accept nb logged twice and nc never.
+select is((select array_agg(parent_table::text order by parent_table::text) from pgpm.log
+            where parent_table in ('public.nb'::regclass, 'public.nc'::regclass,
+                                   'public.fd'::regclass, 'public.ff'::regclass)
+              and action = 'transmute'),
+  array['fd', 'ff', 'nb', 'nc'],
   'B, C, D, F: each conversion logged its own transmute');
 select is((select array_agg(parent_table::text order by parent_table::text) from pgpm.config
             where parent_table::text in ('fa', 'nb', 'nc', 'fd', 'fe', 'ff')),
