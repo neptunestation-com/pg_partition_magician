@@ -60,9 +60,15 @@ $f$;
 -- Each attached fine child below p_hi, with the outgoing keys it carries: 'clone' for a key whose parent
 -- constraint is the parent table's own key (adopted at ATTACH, or cloned there), 'own' for a standalone
 -- one, with ' cascade' when it cascades deletes. Clones onto a referenced table's partitions are left out.
+-- The parent's rows are fenced off first (MATERIALIZED) and only then cast: pgpm.part also holds the
+-- template's time-keyed fixture (public.messages, a monthly grid), and with the parent computed from p_rel
+-- the cheaper `lo::numeric < p_hi` qual sorted first, so a sequential scan of pgpm.part cast a timestamptz
+-- bound and the file died 'invalid input syntax for type numeric' whenever the planner chose one.
 create function s251.child_keys(p_rel text, p_hi numeric) returns text[] language sql as $f$
+  with p as materialized (
+    select * from pgpm.part where parent_table = ('public.' || p_rel)::regclass and attached)
   select array_agg(p.lo || '-' || p.hi || ':' || coalesce(k.keys, '') order by p.lo::numeric)
-    from pgpm.part p
+    from p
     left join lateral (
       select string_agg(case when pk.oid is not null then 'clone' else 'own' end
                         || case when c.confdeltype = 'c' then ' cascade' else '' end, ',') as keys
@@ -70,7 +76,7 @@ create function s251.child_keys(p_rel text, p_hi numeric) returns text[] languag
         left join pg_constraint pk on pk.oid = c.conparentid and pk.conrelid = p.parent_table
        where c.conrelid = p.child_oid and c.contype = 'f'
          and (c.conparentid = 0 or pk.oid is not null)) k on true
-   where p.parent_table = ('public.' || p_rel)::regclass and p.attached and p.lo::numeric < p_hi
+   where p.lo::numeric < p_hi
 $f$;
 
 select s251.mk('rg251a', 200, null);
