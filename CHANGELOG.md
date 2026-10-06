@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+- **tests/219's config-load sweep sees a FOR-loop load** (#999). Part F promises every whole-row
+  `pgpm.config` load in pgpm is followed by `pgpm._control_followed`, but found the loads by the one spelling
+  `select * into <var> from pgpm.config`, so a reader that loaded the row in a FOR loop (the shape `status()`
+  and `progress()` use) and read the stale control column name after a rename passed it. Part F now finds a
+  load by what it reads (SELECT INTO with INTO before or after FROM, a FOR loop, a composite assignment), runs
+  the same probe over one fixed source per shape so a shape it stops seeing fails by name, and names
+  `status()` and `progress()` among the FOR-loop loads; both now follow the control column too.
+  Mutation `control_followed_missing_at_for_loop_load` (guard `bench/control_column_rename.sh`).
+
+- **`bench/throws_pinned.sh` probes a bare-NULL assertion whose description is a psql variable** (#1000). The
+  skip for a pattern that reads its file's own psql variable searched every argument after the statement, the
+  description included, so `throws_ok($$ call pgpm... $$, NULL, :'d')` was reported INFO and the guard passed
+  it. The skip now looks only at the arguments pgTAP reads as a pattern (the description is positional, except
+  in a three-argument `throws_ok`, where it is the description only when the second argument is a NULL or a
+  literal that is not five octets); a variable description is replaced by a literal and the site is probed.
+  Mutation `throws_ok_null_pattern_var_desc`.
+
 - **Ten conservation tests assert the rows a regrain or a transmute keeps by identity, not by count**
   (#997). `tests/43`, `45`, `46`, `48`, `53`, `54`, `67` and `68` (regrain: 'all rows conserved', 'lossless')
   and `tests/15` and `49` (transmute: 'all rows conserved through the parent') compared `count(*)` over

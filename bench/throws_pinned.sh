@@ -41,6 +41,10 @@
 #   throws_ilike_unpinned  -- a throws_ilike($$ call pgpm... $$, '%') beside tests/72's pinned assertion. The
 #                             site pattern used to be a hand-written list without ilike, so it never saw this
 #                             form and passed the file on the pinned neighbour alone (#915)
+#   throws_ok_null_pattern_var_desc -- a throws_ok($$ call pgpm... $$, NULL, :'d72') beside tests/72's pinned
+#                             assertion: the bare-NULL shape with its DESCRIPTION in a psql variable. The
+#                             psql-variable skip used to search every argument after the statement, so it read
+#                             the description as an unevaluable pattern and reported the site INFO (#1000)
 #
 # Usage: throws_pinned.sh <container> <db> [test file]
 # With no third argument it probes every tests/**/*.sql in the repository. With one it probes THAT
@@ -151,6 +155,45 @@ def split_args(text, i):
     return None
 
 
+PSQL_VAR = r""":(?:'\w+'|"\w+")"""
+
+
+def literal_value(arg):
+    """The value of an argument written as one NULL, single-quoted or dollar-quoted literal: None for NULL,
+    the text otherwise. Raises ValueError for anything else (an integer, an expression, a variable)."""
+    a = arg.strip()
+    if a.upper() == "NULL":
+        return None
+    if len(a) >= 2 and a[0] == "'" and a[-1] == "'" and "'" not in a[1:-1].replace("''", ""):
+        return a[1:-1].replace("''", "'")
+    d = DOLLAR.match(a)
+    if d and a.endswith(d.group(0)) and len(a) >= 2 * len(d.group(0)) and d.group(0) not in a[d.end():-len(d.group(0))]:
+        return a[d.end():-len(d.group(0))]
+    raise ValueError(a)
+
+
+def description_index(kind, after):
+    """Which of the arguments after the statement pgTAP reads as the DESCRIPTION, or None when none is, or
+    when which one is depends on a value this probe does not read. throws_ok(sql, a, b, desc) and
+    throws_<like|ilike|matching|imatching>(sql, pattern, desc) are positional. throws_ok(sql, a, b) is not:
+    pgTAP reads b as the MESSAGE when a is five octets (or an integer SQLSTATE) and as the description
+    otherwise, so b is the description only when a is a literal that is NULL or not five octets."""
+    n = len(after)
+    if kind == "ok":
+        if n == 3:
+            return 2
+        if n == 2:
+            try:
+                v = literal_value(after[0])
+            except ValueError:
+                return None
+            return 1 if v is None or len(v.encode()) != 5 else None
+        return None
+    if kind in ("like", "ilike", "matching", "imatching") and n == 2:
+        return 1
+    return None
+
+
 sites = 0
 print("create extension if not exists pgtap;")
 print("select no_plan();")
@@ -186,20 +229,30 @@ for path in files:
         args, _end = split
         if not re.search(r"\bcall\s+pgpm\.", args[0], re.I):
             continue
-        rest = ",".join(args[1:]).strip()
-        if TAG in rest:
+        kind = m.group(1).lower()
+        after = args[1:]
+        if TAG in ",".join(after):
             sys.exit(f"probe: {shown} contains the probe's own quoting tag {TAG}; pick another")
         sites += 1
         # A pattern that reads one of its file's own psql variables (:'rel60') is an expression this probe
         # cannot evaluate, like one that reads its file's own table: reported, neither pass nor failure.
         # Only the quoted forms are recognised, because they cannot be anything else; a bare :name that
         # reaches the server is a syntax error, which FAILS as malformed rather than hiding.
-        psql_var = re.search(r""":(?:'\w+'|"\w+")""", rest)
+        # The skip is scoped to the arguments pgTAP reads as a PATTERN (#1000). It used to search every
+        # argument after the statement, so throws_ok($$ call pgpm... $$, NULL, :'d'), the bare-NULL shape
+        # this guard exists for with its description in a variable, was reported INFO and passed. The
+        # description pins nothing, so a variable there is replaced by a literal and the site is probed.
+        desc = description_index(kind, after)
+        pattern_args = [a for j, a in enumerate(after) if j != desc]
+        psql_var = re.search(PSQL_VAR, ",".join(pattern_args))
         if psql_var:
             name = psql_var.group(0)[2:-1]
             print(f"select '{shown}:{line} => unevaluable psql variable {name}: set by its own file';")
             continue
-        print(f"select '{shown}:{line} => ' || pg_temp.probe('{m.group(1).lower()}', {TAG} {rest} {TAG});")
+        if desc is not None and re.search(PSQL_VAR, after[desc]):
+            after = after[:desc] + [" 'description read from a psql variable'"] + after[desc + 1:]
+        rest = ",".join(after).strip()
+        print(f"select '{shown}:{line} => ' || pg_temp.probe('{kind}', {TAG} {rest} {TAG});")
 print(f"\\echo SITES {sites}")
 PY
 

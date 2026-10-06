@@ -4877,6 +4877,18 @@ $$;''',
           "  'an unpinned refusal: the pattern matches the 2D000 too');\n"
           "select throws_like($$ call pgpm.transmute('public.ev72t', 'id', 1000) $$,\n", 1)],
     ),
+    "throws_ok_null_pattern_var_desc": (
+        "bench/throws_pinned.sh",
+        "A throws_ok($$ call pgpm.transmute(...) $$, NULL, :'d72') added to tests/72 beside its pinned "
+        "throws_like, its description set by \\set. The NULL pattern accepts the 2D000 of a transmute that did "
+        "not refuse; the variable is only the description. Pre-#1000 bench/throws_pinned.sh searched every "
+        "argument after the statement for a psql variable, so it read this site as an unevaluable pattern, "
+        "reported it INFO and passed the file on the pinned neighbour ('1 pinned, 1 by an expression, of 2').",
+        [("select throws_like($$ call pgpm.transmute('public.ev72t', 'id', 1000) $$,\n",
+          "\\set d72 'a row trigger with a transition table is refused'\n"
+          "select throws_ok($$ call pgpm.transmute('public.ev72t', 'id', 1000) $$, NULL, :'d72');\n"
+          "select throws_like($$ call pgpm.transmute('public.ev72t', 'id', 1000) $$,\n", 1)],
+    ),
     "tap_verdict_misses_plan_shortfall": (
         "bench/tap_verdict.sh",
         "Pre-#601 test.sh: the timescale and observe tracks call a pgTAP file failed on `not ok`, "
@@ -5203,6 +5215,23 @@ $$;''',
           "  if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;\n"
           "  -- #724: first, take back",
           "  select * into cfg from pgpm.config where parent_table = p_parent;\n"
+          "  if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;\n"
+          "  -- #724: first, take back", 1)],
+    ),
+    "control_followed_missing_at_for_loop_load": (
+        "bench/control_column_rename.sh",
+        "Issue #999, the class in another spelling: pgpm.retain loads its config row in a FOR loop "
+        "(`for cfg in select * from pgpm.config ... loop end loop;`, the shape status() and progress() use) "
+        "and goes on without pgpm._control_followed, so after a rename it hands the stale control column name "
+        "to everything it calls. FOUND and the row are what the SELECT INTO left, so nothing else changes. "
+        "Pre-#999 tests/219 part F enumerated loads by the spelling `select * into <var> from pgpm.config` "
+        "alone, so this load dropped out of its list and the sweep stayed green; part F now enumerates the "
+        "FOR-loop shape too.",
+        [("  select * into cfg from pgpm.config where parent_table = p_parent;\n"
+          "  cfg := pgpm._control_followed(cfg);\n"
+          "  if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;\n"
+          "  -- #724: first, take back",
+          "  for cfg in select * from pgpm.config where parent_table = p_parent loop end loop;\n"
           "  if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;\n"
           "  -- #724: first, take back", 1)],
     ),
@@ -8626,6 +8655,7 @@ MUTATION_SRC = {
     "classify_premise_bare_word": "scripts/review/classify_claims.py",
     "throws_ok_one_argument": "tests/72_transmute_attributes_test.sql",
     "throws_ilike_unpinned": "tests/72_transmute_attributes_test.sql",
+    "throws_ok_null_pattern_var_desc": "tests/72_transmute_attributes_test.sql",
     "tap_verdict_misses_plan_shortfall": "test.sh",
     "tap_verdict_ignores_psql_exit": "test.sh",
     "tap_verdict_reads_finish_only": "test.sh",
