@@ -16,7 +16,7 @@
 -- the real child, and is what the bare name resolves to from this session; the object's key is
 -- cleared and witnessed absent before each export, because the bucket outlives a test database and a
 -- stale object from an earlier run at the same key would otherwise satisfy a read-back.
-select plan(32);
+select plan(33);
 
 set search_path = "$user", public;
 
@@ -261,6 +261,15 @@ select is(
   (select child_oid from pgpm.part where parent_table = 'app.evts'::regclass and child_name = :'child'),
   null::oid,
   'setup: the anchor is cleared, as for a row pgpm has no recorded oid for');
+
+-- The real child's export in Part A claimed :pq_key for the real child's oid (archive.object_key_claim,
+-- #976), and that claim, not the anchor, refuses another relation's export at it. So the export below goes
+-- to a prefix of its own, where no export was ever claimed, and what it shows is the anchor check alone.
+select archive.configure('app.evts'::regclass, 'archive-test-bucket',
+  p_endpoint => 'http://minio:9000', p_prefix => 'a13_child_identity_d/', p_compress => false);
+select 'a13_child_identity_d/app.' || :'child' || '.parquet' as pq_key \gset
+select is(pgpm_test13.clear_object('app.evts', :'pq_key'), 404,
+  'setup: nothing at the Part D key before the export');
 
 select lives_ok(
   format($$ select archive.to_s3_parquet('app.evts', %L, %L, %L) $$, :'child', :'lo', :'hi'),

@@ -2244,10 +2244,22 @@ every key is also claimed whole, in `archive.object_key_claim`, by its parent an
 `export`), and a call whose key is already another writer's takes the oid shape instead: the export to
 `<prefix><schema>.<child>.<oid>.ndjson`, the chunk to `<prefix><schema>.<table>.<oid>_<stem>.ndjson`
 (recorded in `pgpm.archive_ledger` as usual), and the first writer's object is left as it was. The same
-parent writing the same kind of object to the same key again (a retried chunk, a re-run export) finds the
-key its own. A call whose oid shape is taken as well is refused, and nothing is written. Install claims
-every key `pgpm.archive_ledger` records as its table's chunk, so a chunk archived before this release is
-protected the same way; an export from before it is not, having left no record.
+parent writing the same kind of object of the same relation to the same key again (a retried chunk, a
+re-run export of the same relation, by oid) finds the key its own. A call whose oid shape is taken as well
+is refused, and nothing is written. Install claims every key `pgpm.archive_ledger` records as its table's
+chunk, so a chunk archived before this release is protected the same way; an export from before it is
+not, having left no record.
+
+The whole-key claim also records the relation whose rows the object holds: the parent for a chunk, the
+exported relation for an export. So the same parent's export of another relation to a key it already
+exported to (a relation that took the name of one dropped after `archive.to_s3`, the export-then-drop
+workflow, after which the object is the only copy of the dropped relation's rows) is refused, `already
+claimed by the export of relation <oid> through <parent>`, at the plain key and at the oid shape alike: the
+oid shape names the parent, which is the same, so there is no key of its own to divert to. The first export
+is left as it was. To export the new relation as well, give the parent another prefix with
+`archive.configure`. A whole-key claim made before the claims recorded their relation has its chunk's
+relation recorded by install (the parent); an export claim's relation is not known, so every export over
+it is refused the same way.
 
 ## Scheduling
 

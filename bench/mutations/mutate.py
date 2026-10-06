@@ -7581,13 +7581,15 @@ select ok(
         "PUTs over the chunk retire() left as the only copy of its rows; the other way round a chunk PUTs over "
         "the export. One site, the one function that assembles every key. tests/archive/db/40 parts A to D "
         "catch it (the chunk object reads 7:export,8:export; the chunk of part B overwrites the export).",
-        [("  v_held := archive._claim_object_key(v_key, p_parent, v_kind);\n"
+        [("  v_held := archive._claim_object_key(v_key, p_parent, v_kind, v_relation);\n"
           "  if (v_held.parent_oid, v_held.kind) is distinct from (p_parent::oid, v_kind) and v_owner = p_parent::oid then\n"
           "    v_key := v_base_q || '.' || p_parent::oid::text || p_tail;\n"
-          "    v_held := archive._claim_object_key(v_key, p_parent, v_kind);\n"
+          "    v_held := archive._claim_object_key(v_key, p_parent, v_kind, v_relation);\n"
           "  end if;\n"
           "  if (v_held.parent_oid, v_held.kind) is distinct from (p_parent::oid, v_kind) then\n",
-          "  if false then   -- MUTANT: the whole key is never claimed\n", 1)],
+          "  if false then   -- MUTANT: the whole key is never claimed\n", 1),
+         # #976's relation check reads the claim too; with no claim it would refuse every call
+         ("  if v_held.relation_oid is distinct from v_relation then\n", "  if false then\n", 1)],
     ),
     "archive_ndjson_gz_outside_claim": (
         "bench/archive_key_full_claim.sh",
@@ -8534,6 +8536,28 @@ MUTATIONS["archive_empty_range_compared_as_text"] = (
     [("  if not pgpm._native_gt(v_kind, p_hi, p_lo) then\n", "  if not (p_hi > p_lo) then   -- MUTANT: as text\n", 1)],
 )
 MUTATION_SRC["archive_empty_range_compared_as_text"] = "pgpm_archive/install.sql"
+
+# Issue #976: an export's whole-key claim names the relation it exports. One mutation per site, both caught by
+# tests/archive/db/43 (bench/archive_export_key_by_relation.sh, against the archive image and MinIO).
+MUTATIONS["archive_export_claim_relation_unchecked"] = (
+    "bench/archive_export_key_by_relation.sh",
+    "Pre-#976 archive._owned_key: the claim is checked by parent and kind only, so after archive.to_s3 of a "
+    "relation, its DROP and a new relation taking its name, the same parent's export of the new one reads as a "
+    "re-run and PUTs over the first export, the only copy of the dropped relation's rows. One site, the "
+    "relation check. tests/archive/db/43 parts A to C catch it (the namesake's export is not refused, and the "
+    "first object then holds 10:second,11:second).",
+    [("  if v_held.relation_oid is distinct from v_relation then\n", "  if false then\n", 1)],
+)
+MUTATION_SRC["archive_export_claim_relation_unchecked"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_chunk_claim_relation_unrecorded"] = (
+    "bench/archive_export_key_by_relation.sh",
+    "Install records no relation for a whole-key claim made before archive.object_key_claim had the column, so "
+    "a chunk claimed then stays unrecorded and archive._owned_key refuses every retry of that chunk by its own "
+    "table. One site, archive._record_claim_relations. tests/archive/db/43 part C catches it (the seed records "
+    "no claim, and the chunk claim's relation stays null).",
+    [("     where kind = 'chunk' and relation_oid is null\n", "     where false\n", 1)],
+)
+MUTATION_SRC["archive_chunk_claim_relation_unrecorded"] = "pgpm_archive/install.sql"
 
 
 def main() -> int:
