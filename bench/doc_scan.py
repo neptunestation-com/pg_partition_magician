@@ -2,7 +2,7 @@
 
 Shared by the bench/doc_*.sh guards that check a sentence of the docs against pgpm's own behaviour
 (bench/doc_archive_identity_recovery.sh, bench/doc_fks_suspended_meaning.sh,
-bench/doc_monolith_retention.sh). Each guard measures a fact in the harness first, then asks this module
+bench/doc_monolith_retention.sh, bench/doc_transmute_no_default.sh). Each guard measures a fact in the harness first, then asks this module
 for every sentence of the living docs and decides which of them state that fact.
 
 What a sentence is, here. Fenced code is skipped whole (its blank lines do not split anything). Prose is
