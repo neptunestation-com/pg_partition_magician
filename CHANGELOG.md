@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- **`transmute` refuses a `text_time` anchor or step finer than the encoding's unit** (#989). Every bound of
+  a `text_time` grid is encoded by flooring to the unit (`p_tt_unit`) counted from `p_tt_epoch`, and
+  `transmute` took `p_anchor => '2000-01-01 00:00:00.5+00'` on an ObjectId seconds grid: `pgpm.part` recorded
+  every bound half a second above the catalog's, so a row in that half second sat in a partition whose
+  recorded range does not hold its time. An anchor or step that is not a whole number of units from the
+  epoch is now refused up front, naming the unit, as a negative-scale `numeric` id column's is.
+  `tests/284` (new); guard `bench/text_time_anchor_unit.sh`; mutations `text_time_anchor_unit_unchecked`,
+  `text_time_unit_unix_epoch`.
+
+- **`transmute` refuses a supplied `text_time` alphabet with a radix below 2** (#990). With `p_tt_alphabet`
+  supplied the only radix rule was the alphabet's length, so `p_tt_radix => 1` with alphabet `'x'` passed, and
+  encoding the frontier divided by 1 forever: `transmute` (forced past the shape sample) spun until
+  `statement_timeout`. It now refuses before anything is touched. `tests/285` (new); guard
+  `bench/text_time_radix_lower_bound.sh`; mutation `text_time_radix_no_lower_bound`.
+
 - **`transmute` refuses a NOT VALID or NO INHERIT CHECK, or a generated control column, committed while it
   runs** (#766 bullet 3). The three shapes #730 refuses up front were asked in the preflight only, so one
   committed after it (an `ALTER TABLE` queued behind phase 1's ADD of the bound is granted the moment phase 1

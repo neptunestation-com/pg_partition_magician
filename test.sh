@@ -1047,6 +1047,8 @@ run_perf() {
     "bench/hand_over_scratch_reports.sh pgpm_perf265"
     "bench/install_keeps_dependent_views.sh pgpm_perf270"
     "bench/transmute_uncarried_shapes_under_lock.sh pgpm_perf275"
+    "bench/text_time_anchor_unit.sh pgpm_perf276"
+    "bench/text_time_radix_lower_bound.sh pgpm_perf277"
   )
   local selected=()
   local n=${#guards[@]} idx
