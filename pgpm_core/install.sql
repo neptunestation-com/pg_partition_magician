@@ -1128,6 +1128,22 @@ returns text language sql immutable as $$
   select case when p_kind = 'id' then 'max(hi::numeric)::text' else 'pgpm._ts_text(max(hi::timestamptz))' end;
 $$;
 
+-- A native value handed to pgpm from OUTSIDE (an archive_fn's covered_hi) as the canonical text of what THIS
+-- session reads it as (#977): the same rendering _max_hi_native gives the ledger's watermark, so a chunk's hi
+-- and the next chunk's lo are the same text. Text pgpm did not render can be offset-less ('2026-03-01
+-- 00:00:00') or DateStyle-shaped ('01/03/2026'), and such text names a different instant in every session
+-- that parses it: checked as one instant by the tick and stored verbatim, it read as another to retire() in
+-- another zone, which dropped a partition with rows the strategy was never handed. Called in the session
+-- whose parse the check accepted, so what is stored is the instant that was checked, with its offset.
+create or replace function pgpm._native_text(p_kind text, p_value text)
+returns text language plpgsql stable as $$
+begin
+  if p_value is null then return null; end if;
+  if p_kind = 'id' then return p_value::numeric::text; end if;
+  return pgpm._ts_text(p_value::timestamptz);
+end;
+$$;
+
 -- is a retain value non-negative on its kind's scale (#451)? A count of ids for id, an interval for
 -- everything else: the same split _retain_boundary makes. A negative value is never a valid retention
 -- policy: it puts the horizon PAST the partition taking writes, so every partition is drop-eligible at once
@@ -4078,6 +4094,15 @@ begin
         continue;
       end if;
 
+      -- Record the instant the check above accepted, not the strategy's text (issue #977). The check parsed
+      -- covered_hi in THIS session, and the ledger row is read back by every other one (retire() from an
+      -- operator's session, the next chunk's lo, status()): an offset-less value checked here as three hours
+      -- short of hi, stored verbatim, read as past hi from a session west of UTC, and retire() dropped the
+      -- partition with the rows of those three hours never archived. The other bounds this row and the
+      -- check rest on are pgpm's own and already canonical: v_range.lo and v_range.hi come from pgpm.part
+      -- and from _next_archive_chunk's _ts_text/_col_to_native renders, and _archive_fully_covered compares
+      -- through _max_hi_native, which is exact over canonical text.
+      v_result.covered_hi := pgpm._native_text(cfg.control_kind, v_result.covered_hi);
       insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, s3_key, etag, rows_archived)
       values (p_parent, v_range.lo, v_result.covered_hi, r.child_name, v_result.s3_key, v_result.etag, v_result.rows_archived);
       v_count := v_count + 1;

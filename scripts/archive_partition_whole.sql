@@ -119,6 +119,9 @@ begin
   v_resume_lo := coalesce(v_resume_lo, r.lo);
 
   v_result := pgpm._run_archive_strategy(p_parent, r.child_name, v_resume_lo, r.hi);
+  -- the instant this session reads, in canonical text, as pgpm._archive_step records it (#977): a strategy's
+  -- offset-less text stored verbatim reads as a different instant, past hi, from a session in another zone
+  v_result.covered_hi := pgpm._native_text(cfg.control_kind, v_result.covered_hi);
 
   insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, s3_key, etag, rows_archived)
   values (p_parent, v_resume_lo, v_result.covered_hi, r.child_name, v_result.s3_key, v_result.etag, v_result.rows_archived);

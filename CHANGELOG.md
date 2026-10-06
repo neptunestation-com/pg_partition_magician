@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **The archive ledger records the instant its contract check accepted, so `retire()` reads the same coverage
+  from every session** (#977). `_archive_step` held an archive_fn's `covered_hi` to its chunk (#454) with a
+  parse in the tick's session, then wrote the strategy's text into `pgpm.archive_ledger.hi` verbatim. An
+  offset-less value is valid input, so a strategy that archived three hours short of a partition's `hi` and
+  said so without an offset passed the check in a UTC tick, and `retire()` run from an America/New_York session
+  read the same text as past `hi`, judged the partition covered and dropped it with the rows the strategy was
+  never handed (Tier 1). The row now holds `pgpm._native_text` of the value, the canonical rendering
+  (`_ts_text` for a time grid, numeric text for `id`) of what the check parsed, which is also how the next
+  chunk's `lo` is rendered; `scripts/archive_partition_whole.sql` records its strategy's return the same way.
+  Ledger rows a strategy wrote before this fix keep their text. `tests/273` (new),
+  `bench/archive_covered_hi_canonical.sh`; mutation `archive_covered_hi_verbatim`.
+
 - **The text_time collation check is a proof for the alphabet in use, so a two-letter contraction is
   refused** (#639 bullet 2). `transmute` and `check_text_time` probed adjacent single-character digit pairs,
   which no contraction disturbs: under `da-x-icu` `aa` is `å`, after `z`, so a hex (ObjectId-shaped)

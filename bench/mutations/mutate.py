@@ -8117,6 +8117,23 @@ select ok(
         "D (D2) catches it.",
         [(HT_CAPTURE_ARM_RECORD, "", 1)],
     ),
+    "archive_covered_hi_verbatim": (
+        "bench/archive_covered_hi_canonical.sh",
+        "Pre-#977 _archive_step: the ledger row takes the archive_fn's covered_hi as the strategy wrote it, not "
+        "the canonical text of the instant the contract check accepted. An offset-less value checked in a UTC "
+        "tick as three hours short of hi reads as past hi from an America/New_York session, and retire() there "
+        "drops the partition with rows the strategy was never handed. One site, the canonicalising assignment "
+        "and its note. tests/273 parts A and B catch it.",
+        [("      -- Record the instant the check above accepted, not the strategy's text (issue #977). The check parsed\n"
+          "      -- covered_hi in THIS session, and the ledger row is read back by every other one (retire() from an\n"
+          "      -- operator's session, the next chunk's lo, status()): an offset-less value checked here as three hours\n"
+          "      -- short of hi, stored verbatim, read as past hi from a session west of UTC, and retire() dropped the\n"
+          "      -- partition with the rows of those three hours never archived. The other bounds this row and the\n"
+          "      -- check rest on are pgpm's own and already canonical: v_range.lo and v_range.hi come from pgpm.part\n"
+          "      -- and from _next_archive_chunk's _ts_text/_col_to_native renders, and _archive_fully_covered compares\n"
+          "      -- through _max_hi_native, which is exact over canonical text.\n"
+          "      v_result.covered_hi := pgpm._native_text(cfg.control_kind, v_result.covered_hi);\n", "", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

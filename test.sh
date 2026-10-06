@@ -1014,6 +1014,7 @@ run_perf() {
     "bench/scratch_relations.sh pgpm_perf253"
     "bench/replica_identity_index_dropped.sh pgpm_perf262"
     "bench/text_time_collation_proof.sh pgpm_perf261"
+    "bench/archive_covered_hi_canonical.sh pgpm_perf260"
   )
   local selected=()
   local n=${#guards[@]} idx
