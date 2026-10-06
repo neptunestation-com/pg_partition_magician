@@ -1170,10 +1170,18 @@ Creates empty partitions ahead of the frontier so live writes always land in a r
 created empty, so nothing is scanned and nothing is moved. It skips any candidate range that overlaps an
 existing attached partition, for example the monolith, which covers the current interval, and leaves
 unbuilt a cell whose name something it does not own already holds, a relation or a type (see
-[Partition naming](#partition-naming)), building the cells around it. An attached `pgpm.part` row whose
-partition no longer exists (a forward cell dropped by hand with `DROP TABLE`) does not count as built: the
-row is forgotten, logged `forget_dropped_partition`, and the cell is built again, empty. `extend_to` does
-the same for every cell of its walk.
+[Partition naming](#partition-naming)), building the cells around it. An attached `pgpm.part` row counts
+as built only while its partition is a partition of the table. A forward cell dropped by hand with
+`DROP TABLE` does not count: the row is forgotten, logged `forget_dropped_partition`, and the cell is built
+again, empty. Nor does one detached by hand with `ALTER TABLE ... DETACH PARTITION`: the row is forgotten,
+logged `forget_detached_partition`, and a fresh empty partition is built over the range, under the cell's
+explicit-range name while the detached table keeps the plain one. The detached table is left exactly as
+it is, rows and all; pgpm no longer tracks it. A partition `retire` is detaching concurrently is not a hand
+detach: it keeps counting until retention drops it. A row left without a recorded OID by an upgrade from
+0.5.0 or older (its partition was dropped before the upgrade, so nothing resolved its name) counts as gone
+once every partition of the table is accounted for, and is forgotten and rebuilt the same way; while some
+partition of the table is not recorded (one renamed by hand before the upgrade, say), such a row keeps
+counting, since it may be that partition. `extend_to` does the same for every cell of its walk.
 
 It stops early, returning what it built, when the next grid boundary cannot be expressed: a `uuidv7` grid
 ends at the last instant a 48-bit millisecond prefix can carry, `10889-08-02 05:31:50.65504+00`; a
@@ -2569,8 +2577,8 @@ pgpm.status() returns table (
 One row per managed table. Beyond the static config it surfaces:
 
 - `n_partitions` / `coarse_partitions` -- attached partitions, and how many of those are still coarse
-  (wider than one step). Only partitions that still exist count: a row whose partition was dropped by hand
-  is not counted, nor is its `hi` the `newest_bound`, until `obtain` rebuilds the cell.
+  (wider than one step). Only partitions of the table count: a row whose partition was dropped or detached
+  by hand is not counted, nor is its `hi` the `newest_bound`, until `obtain` rebuilds the cell.
   `coarse_partitions > 0` (and `history_unregrained = true`) is the regraining backlog: pruning and fine
   retention are suspended over that span until it is regrained.
 - `inflight_partitions` -- regrain copy-children created but not yet attached. Because regrain copies
@@ -2641,7 +2649,10 @@ produced, not what you meant them to.
 - `frontier` -- the write frontier in native terms: `now()` for `time`, `max(control)` for `id`,
   `greatest(max(control), now())` for `uuidv7` and `text_time`.
 - `write_child` / `write_ceiling` -- the attached partition the frontier sits in, and its upper bound.
-  While `write_child` is the monolith, it has not frozen. Null if the grid has fallen behind the frontier.
+  While `write_child` is the monolith, it has not frozen. Null if the grid has fallen behind the frontier,
+  or if the partition that held it was dropped or detached by hand: only a partition `status()` counts is
+  reported here, so a hole at the frontier reads as null, with `write_ceiling`, `freeze_margin` and
+  `freeze_in`, until `obtain` rebuilds the cell.
 - `freeze_margin` -- `write_ceiling - frontier`: an interval for the time-grid kinds, a count for `id`.
 - `freeze_in` -- the same margin as an `interval`, **only for `time`, `uuidv7` and `text_time`**, whose
   frontier is a clock and so makes this plain arithmetic. For `id` it is **null**: the frontier is
@@ -2967,7 +2978,8 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `drop_incoming_fk` / `suspend_incoming_fk` / `restore_incoming_fk` / `validate_incoming_fk` | preserve-FK lifecycle events |
 | `from_hypertable_carry_fk` | (`pgpm_hypertable` only) an outgoing FK re-added onto the migrated destination during `from_hypertable_copy` |
 | `forget_missing` | `forget_missing()` cleared a parent's registration because its relation no longer exists; `rows` carries how many partition rows were cleared with it |
-| `forget_dropped_partition` | `obtain` or `extend_to` found an attached `pgpm.part` row over a cell it was about to judge whose partition no longer exists (dropped by hand, outside pgpm), forgot the row and built the cell again, empty (logged `obtain` next, or `fail_obtain_name` if something else holds its name). `method` names the dropped partition and its OID. Logged once per dropped partition |
+| `forget_dropped_partition` | `obtain` or `extend_to` found an attached `pgpm.part` row over a cell it was about to judge whose partition no longer exists (dropped by hand, outside pgpm), forgot the row and built the cell again, empty (logged `obtain` next, or `fail_obtain_name` if something else holds its name). `method` names the dropped partition and its OID, or says the row had no recorded OID (an upgrade from 0.5.0 or older could not resolve it). Logged once per dropped partition |
+| `forget_detached_partition` | `obtain` or `extend_to` found an attached `pgpm.part` row over a cell it was about to judge whose partition still exists but is no longer a partition of the table, with no retirement of pgpm's in flight on it (detached by hand, outside pgpm), forgot the row and built a fresh empty partition over the range (logged `obtain` next), under the cell's explicit-range name while the detached table holds the plain one. The detached table is left exactly as it is, rows and all. `method` names it and its OID. Logged once per detached partition |
 | `forget_incoming_fk` | a `pgpm.dropped_fk` record was forgotten because the catalog no longer backs it: its referencing table was dropped, or a key recorded as re-added is no longer on that table (see [`pgpm.dropped_fk`](#pgpmdropped_fk)). `method` names the key and which of the two it was |
 | `adopt_incoming_fk` | a `pgpm.dropped_fk` record still marked dropped was marked re-added because its key is live again, re-added by hand on its referencing table under its name and against this table (see [`pgpm.dropped_fk`](#pgpmdropped_fk)). `method` names the key, and says `NOT VALID` when the live key is not validated yet |
 | `archive_coverage_reset` | `pgpm.archive_ledger` rows were discarded because the coverage they record cannot be vouched for; `rows` carries how many chunks and `method` says why. Three causes: the partition they were recorded for has no write block in force on it (absent, disabled, or origin-only: coverage nothing has been guarding, see [`maintain`](#maintain) and [`retire`](#retire)); they were recorded under a `child_name` that is no longer a tracked partition of the parent, over a range a tracked partition now holds (a partition renamed without carrying the ledger, see [the archive step](#byte-budget-chunked-archiving)); or a `regrain` swap dropped a partly archived source, whose chunks go with it (see [`regrain`](#regrain)). In every case the partition holding the range archives again from its own `lo` |

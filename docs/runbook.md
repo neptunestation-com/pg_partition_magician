@@ -246,16 +246,18 @@ succeed unless you actually want that data kept.
 
 **In a hole inside the grid** -- the cells on both sides exist and this one does not. Either its name is
 held by something pgpm does not own (logged `fail_obtain_name`, see
-[Partition naming](reference.md#partition-naming)), or one of the forward partitions was dropped by hand.
-`obtain` rebuilds a dropped one that lies within its lookahead (from the write frontier's cell forward),
-empty, and logs `forget_dropped_partition` naming it, so such a hole closes on the obtain job's next tick;
-run `pgpm.obtain` (or `extend_to` past the hole) to close it now. Rows that were in a dropped partition are
-gone with it.
+[Partition naming](reference.md#partition-naming)), or one of the forward partitions was dropped or
+detached by hand. `obtain` rebuilds such a cell when it lies within its lookahead (from the write frontier's
+cell forward), empty, and logs `forget_dropped_partition` (dropped) or `forget_detached_partition`
+(detached) naming the partition, so the hole closes on the obtain job's next tick; run `pgpm.obtain` (or
+`extend_to` past the hole) to close it now. Rows that were in a dropped partition are gone with it. A
+detached one keeps its rows and is left alone, no longer tracked by pgpm: the cell is rebuilt beside it
+under its explicit-range name, so to put those rows back, insert them through the parent.
 
 ```sql
 select action, lo, hi, method, at from pgpm.log
  where parent_table = 'public.events'::regclass
-   and action in ('fail_obtain_name', 'forget_dropped_partition')
+   and action in ('fail_obtain_name', 'forget_dropped_partition', 'forget_detached_partition')
  order by at desc limit 5;
 ```
 

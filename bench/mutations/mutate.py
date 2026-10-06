@@ -7302,7 +7302,7 @@ select ok(
         "Pre-#908 obtain and extend_to: an attached pgpm.part row is taken for a built cell without asking "
         "whether its partition still exists, so a forward cell dropped by hand is never rebuilt and nothing "
         "is logged. One site, _cell_attached's forget. tests/264 parts A and B catch it.",
-        [("          and not pgpm._part_relation_exists(p.child_oid)) then\n",
+        [("          and not pgpm._part_built(p_parent, p.child_oid, p.retiring_at)) then\n",
           "          and false) then   -- MUTANT: the dead row is trusted\n", 1)],
     ),
     "obtain_rebuild_keeps_stale_row": (
@@ -7312,10 +7312,10 @@ select ok(
         "conflicts on the name and does nothing: the row keeps the dropped partition's oid, so every "
         "identity check after it refuses the live one, and nothing is logged. Two sites in _cell_attached. "
         "tests/264 parts A and B catch it.",
-        [("          and not pgpm._part_relation_exists(p.child_oid)) then\n",
+        [("          and not pgpm._part_built(p_parent, p.child_oid, p.retiring_at)) then\n",
           "          and false) then   -- MUTANT: the dead row is kept\n", 1),
          ("       and pgpm._native_gt(cfg.control_kind, p_hi, p.lo));\nend;\n",
-          "       and pgpm._native_gt(cfg.control_kind, p_hi, p.lo) and pgpm._part_relation_exists(p.child_oid));\nend;\n",
+          "       and pgpm._native_gt(cfg.control_kind, p_hi, p.lo) and pgpm._part_built(p_parent, p.child_oid, p.retiring_at));\nend;\n",
           1)],
     ),
     "status_counts_dropped_cell": (
@@ -7323,7 +7323,69 @@ select ok(
         "Pre-#908 status(): n_partitions, coarse_partitions and newest_bound read pgpm.part alone, so a "
         "partition dropped by hand is still counted, and still the ceiling when it was the top cell. Three "
         "sites in status(). tests/264 part A catches it.",
-        [(" and pgpm._part_relation_exists(child_oid)", "", 3)],
+        [(" and pgpm._part_built(parent_table, child_oid, retiring_at)", "", 3)],
+    ),
+    # Issue #981: a pgpm.part row an upgrade from before child_oid could not anchor.
+    "unanchored_row_reads_built": (
+        "bench/upgrade_unanchored_cell.sh",
+        "Pre-#981 _part_built: a null child_oid (a row the upgrade's backfill could not anchor, its partition "
+        "dropped by hand before the upgrade) reads as built, so obtain never forgets or rebuilds the cell and "
+        "every write into it is refused. One site, the null branch.",
+        [("    when p_child_oid is null then\n"
+          "      exists (select 1 from pg_inherits i\n"
+          "               where i.inhparent = p_parent\n"
+          "                 and not exists (select 1 from pgpm.part a\n"
+          "                                  where a.parent_table = p_parent and a.child_oid = i.inhrelid))\n",
+          "    when p_child_oid is null then true\n", 1)],
+    ),
+    "unanchored_row_reads_gone": (
+        "bench/upgrade_unanchored_cell.sh",
+        "Issue #981, the over-correction: a null child_oid reads as gone whatever the table holds, so the row "
+        "of a cell RENAMED by hand before the upgrade (the backfill cannot resolve it either) is forgotten, "
+        "and obtain dies on the renamed partition's overlap at every tick. One site, the null branch.",
+        [("    when p_child_oid is null then\n"
+          "      exists (select 1 from pg_inherits i\n"
+          "               where i.inhparent = p_parent\n"
+          "                 and not exists (select 1 from pgpm.part a\n"
+          "                                  where a.parent_table = p_parent and a.child_oid = i.inhrelid))\n",
+          "    when p_child_oid is null then false\n", 1)],
+    ),
+    # Issue #982: progress() reads the write child through the predicate status() shares.
+    "progress_reads_unbuilt_write_child": (
+        "bench/progress_write_child_built.sh",
+        "Pre-#982 progress(): write_child, write_ceiling, freeze_margin and freeze_in come from the pgpm.part "
+        "row alone, so a frontier cell dropped or detached by hand is reported as the partition taking "
+        "writes, with a healthy margin. One site. tests/279 catches it.",
+        [("         and pgpm._part_built(r.parent_table, p.child_oid, p.retiring_at)\n", "", 1)],
+    ),
+    # Issue #956: a forward cell DETACHed by hand is not built.
+    "obtain_trusts_detached_cell": (
+        "bench/obtain_rebuilds_detached_cell.sh",
+        "Pre-#956 _part_built: an anchored row is built when its relation exists, so a forward cell detached "
+        "by hand (its table kept) is never rebuilt and nothing is logged, while every write into its range is "
+        "refused. One site, the anchored branch. tests/280 parts A and B catch it.",
+        [("    else exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = p_child_oid)\n"
+          "         or (p_retiring_at is not null and exists (select 1 from pg_class c where c.oid = p_child_oid))\n",
+          "    else exists (select 1 from pg_class c where c.oid = p_child_oid)\n", 1)],
+    ),
+    "detached_cell_name_refused": (
+        "bench/obtain_rebuilds_detached_cell.sh",
+        "Issue #956, the plausible-but-wrong fix: the hand-detached row is forgotten, but _obtain_name reads the "
+        "detached table, which still holds the cell's plain name, as a stranger's, so the cell is logged "
+        "fail_obtain_name and left unbuilt. One site, _obtain_name's stand-in. tests/280 parts A and B catch it.",
+        [("     and not exists (\n"
+          "       select 1 from pgpm.log l\n"
+          "        where l.parent_table = p_parent and l.action = 'forget_detached_partition'\n"
+          "          and strpos(l.method, format('(oid %s)', v_held::oid)) > 0) then\n",
+          "     then\n", 1)],
+    ),
+    "retiring_cell_forgotten": (
+        "bench/obtain_rebuilds_detached_cell.sh",
+        "Issue #956, the over-correction: a partition retire() is detaching concurrently (retiring_at set) "
+        "reads as detached by hand, so obtain forgets its row and builds the range again under a retirement "
+        "in flight. One site, the anchored branch. tests/280 part C catches it.",
+        [("\n         or (p_retiring_at is not null and exists (select 1 from pg_class c where c.oid = p_child_oid))\n",
+          "\n", 1)],
     ),
     "crossing_keys_bare_text": (
         "bench/crossing_keys_datestyle.sh",

@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+- **A forward cell detached by hand is rebuilt, not trusted** (#956 bullet 2). `obtain` and `extend_to` judged
+  a cell built while the relation its `pgpm.part` row recorded existed, so a forward partition DETACHed by
+  hand (its table kept) stayed "built": never rebuilt, nothing logged, every write into its range refused for
+  good, while `status()` kept counting it. A cell is now built when its partition is a partition of the table
+  (`pg_inherits`), or while a retirement of pgpm's is detaching it (`retiring_at`). A hand-detached cell's row
+  is forgotten, logged with the new action `forget_detached_partition`, and a fresh partition is built over
+  the range under its explicit-range name; the detached table is left exactly as it is, rows and all.
+  `tests/280` (new), `bench/obtain_rebuilds_detached_cell.sh`; mutations `obtain_trusts_detached_cell`,
+  `detached_cell_name_refused`, `retiring_cell_forgotten`.
+
+- **progress() names only a built partition as the write child** (#982). `write_child`, `write_ceiling`,
+  `freeze_margin` and `freeze_in` were read from the `pgpm.part` row alone, so a frontier partition dropped
+  (or detached) by hand was reported as the one taking writes, with a healthy freeze margin, while every
+  write into it was refused and `status()` no longer counted it. progress() now reads through the predicate
+  `status()` uses (`pgpm._part_built`), and reports the four as null. `tests/279` (new),
+  `bench/progress_write_child_built.sh`; mutation `progress_reads_unbuilt_write_child`.
+
+- **A forward cell dropped by hand before an upgrade from 0.5.0 or older is rebuilt** (#981). The upgrade's
+  `child_oid` backfill resolves attached partitions by name and finds nothing for a dropped one, and a null
+  `child_oid` read as present, so `obtain` never rebuilt the cell and `forget_missing` (which clears only rows
+  whose parent is gone) never reached it: every write into the range was refused, for good. Such a row now
+  counts as gone once every partition of the table is accounted for, so `obtain` forgets it
+  (`forget_dropped_partition`) and rebuilds the cell; while a partition of the table is unrecorded (renamed
+  by hand before the upgrade), the row keeps counting, so `obtain` never dies on that partition's range.
+  `tests/278` (new), `bench/upgrade_unanchored_cell.sh` (a real upgrade from v0.5.0); mutations
+  `unanchored_row_reads_built`, `unanchored_row_reads_gone`; the #908 mutations re-anchored on
+  `pgpm._part_built`, which replaces `pgpm._part_relation_exists`.
+
 - **`transmute` refuses a `text_time` anchor or step finer than the encoding's unit** (#989). Every bound of
   a `text_time` grid is encoded by flooring to the unit (`p_tt_unit`) counted from `p_tt_epoch`, and
   `transmute` took `p_anchor => '2000-01-01 00:00:00.5+00'` on an ObjectId seconds grid: `pgpm.part` recorded
