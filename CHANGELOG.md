@@ -11,8 +11,10 @@
   `GUARD:` or `fixture:` check (its pgTAP `not ok` lines when it printed any, else its `FAIL` lines) FAILS the
   track as a starved fixture, while a witness failing beside a failed defect check still counts.
   `bench/discriminate_installs.sh` gains the shell and pgTAP cases that prove it, and its listing-on-stdin
-  check, which was one LIVENESS line, is split into the defect check and its witness; mutation
-  `discriminate_counts_liveness_only`.
+  check, which was one LIVENESS line, is split into the defect check and its witness, and
+  `bench/wrapper_tap_verdicts.sh`'s "carries exactly one verdict block" check, the #844 contract itself, is
+  no longer labelled LIVENESS; mutation `discriminate_counts_liveness_only`.
+
 - **The `Archive object keys` lint reads the SQL an `EXECUTE` runs** (#1001). Its lexer kept every
   single-quoted literal as one opaque token, so a second, unclaimed key function that read the prefix with
   `execute 'select prefix from archive.config where ...' into v` and returned `v || ...` passed CI, while the
