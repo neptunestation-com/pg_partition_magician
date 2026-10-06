@@ -187,7 +187,9 @@ role the maintaining role's default privileges name would otherwise read every r
 Every other relation pgpm makes for its own use beside a table (a regrain's delta and capture function,
 `from_hypertable`'s copy, delta and capture function) is a **scratch relation**, and follows the same rule:
 it is owned like the table and holds no grant beyond its owner's from the transaction that creates it (a
-delta also grants `INSERT` to the roles that write the table, which its capture trigger writes as). pgpm
+delta also grants `INSERT` to the roles that write the table, which its capture trigger writes as). So does
+every sequence a scratch relation owns, a delta's `pgpm_seq` identity sequence: no role your default
+privileges name can read it or `setval` it, and it follows its table's owner. pgpm
 records each one, by its oid, in the transaction that creates it (`pgpm.config.regrain_delta_oid` and
 `regrain_capture_fn_oid`, `pgpm.part.child_oid`, [`pgpm.scratch`](#pgpmscratch)) and finds it again only
 through that record: a table, function or trigger of yours that happens to carry one of pgpm's working
@@ -727,8 +729,9 @@ replaces it with the hypertable's own comment, or none. The copy, and for a trac
 capture function, are recorded in [`pgpm.scratch`](#pgpmscratch) as they are created, and every later step
 (the drains, the cutover, a re-run of this copy, `uninstall.sql`) finds them there, by oid. They are owned
 like the hypertable, with no grant beyond the owner's (the delta also grants `INSERT` to every role that can
-write the hypertable, since its capture trigger writes as the writer), from the moment they are created, so
-no role the migrating role's default privileges name reads the copied rows during the online window; the
+write the hypertable, since its capture trigger writes as the writer), from the moment they are created, as
+is the delta's `pgpm_seq` identity sequence, so no role the migrating role's default privileges name reads
+the copied rows, or reads or sets the sequence the drains batch by, during the online window; the
 cutover gives the migrated table the hypertable's own grants. So the migrating role must be the hypertable's
 owner or a member of it (and the owner must hold `CREATE` on the schema), as the swap always required; this
 copy refuses otherwise, before anything is created. A table, function or trigger already holding one of the

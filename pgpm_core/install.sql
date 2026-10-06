@@ -1965,11 +1965,29 @@ $$;
 -- And OWNED like the parent for as long as it lives: a table handed to a new owner mid-regrain left its
 -- delta and copies with the old one, and every tick the new owner ran failed 'permission denied' on them
 -- (#950). _scratch_owner_follow re-checks on every tick.
+--
+-- Everything the mint creates, including the sequences a minted relation OWNS (#974): a delta's pgpm_seq
+-- identity column makes <delta>_pgpm_seq_seq, born like the delta with the minting role's default
+-- privileges, and pgpm_seq is the identity the reconcile addresses delta rows by (#497), so a role those
+-- privileges name could setval it into duplicate values and make one tick consume a key it had not applied.
+-- Each owned sequence gets the same owner-only ACL here. It needs no record of its own and no owner step:
+-- PostgreSQL refuses to re-own a sequence linked to a table and ALTER TABLE ... OWNER carries it, so it is
+-- found through its table (pg_depend, deptype 'a' for OWNED BY, 'i' for identity) and follows its table's
+-- owner wherever _own_like_parent or _scratch_owner_follow sends it, keeping this ACL as it goes.
 create or replace function pgpm._scratch_mint(p_parent regclass, p_rel regclass)
 returns void language plpgsql as $$
+declare v_seq regclass;
 begin
   perform pgpm._own_like_parent(p_parent, p_rel);
   perform pgpm._acl_reset(p_rel, true);
+  for v_seq in
+    select d.objid::regclass from pg_depend d join pg_class s on s.oid = d.objid
+     where d.classid = 'pg_class'::regclass and d.refclassid = 'pg_class'::regclass
+       and d.refobjid = p_rel and d.deptype in ('a', 'i') and s.relkind = 'S'
+     order by d.objid
+  loop
+    perform pgpm._acl_reset(v_seq, true);
+  end loop;
 end;
 $$;
 

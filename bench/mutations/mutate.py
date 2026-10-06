@@ -8140,6 +8140,35 @@ select ok(
           "      -- through _max_hi_native, which is exact over canonical text.\n"
           "      v_result.covered_hi := pgpm._native_text(cfg.control_kind, v_result.covered_hi);\n", "", 1)],
     ),
+    # #974: the lever's mint reaches the sequences a minted relation owns. One mutation per site of the class;
+    # bench/scratch_sequences.sh runs tests/272 (core) or tests/timescale/db/51 (the module) against it.
+    "scratch_mint_sequence_default_acl": (
+        "bench/scratch_sequences.sh",
+        "Pre-#974 _scratch_mint: the minted relation's ACL is reset but not that of the sequences it owns, so "
+        "the regrain delta's pgpm_seq identity sequence keeps the tick role's ALTER DEFAULT PRIVILEGES and a "
+        "role they name, holding nothing on the parent, can setval it into duplicate pgpm_seq values: one tick "
+        "consumes a key it never applied and the swap drops rows 60..89 with the source. tests/272 catches it.",
+        [("  perform pgpm._acl_reset(p_rel, true);\n"
+          "  for v_seq in\n"
+          "    select d.objid::regclass from pg_depend d join pg_class s on s.oid = d.objid\n"
+          "     where d.classid = 'pg_class'::regclass and d.refclassid = 'pg_class'::regclass\n"
+          "       and d.refobjid = p_rel and d.deptype in ('a', 'i') and s.relkind = 'S'\n"
+          "     order by d.objid\n"
+          "  loop\n"
+          "    perform pgpm._acl_reset(v_seq, true);\n"
+          "  end loop;\n",
+          "  perform pgpm._acl_reset(p_rel, true);\n", 1)],
+    ),
+    "hypertable_delta_sequence_default_acl": (
+        "bench/scratch_sequences.sh",
+        "Pre-#974 from_hypertable_copy: a tracking copy's delta is re-owned and its own ACL reset, the lever as "
+        "it stood, but its pgpm_seq identity sequence keeps the migrating role's default privileges, so a role "
+        "they name reads the change counter and can setval the sequence the online drains batch by. "
+        "tests/timescale/db/51 catches it.",
+        [("    perform pgpm._scratch_mint(p_hypertable, format('%I.%I', v_nsp, v_delta)::regclass);\n",
+          "    perform pgpm._own_like_parent(p_hypertable, format('%I.%I', v_nsp, v_delta)::regclass);\n"
+          "    perform pgpm._acl_reset(format('%I.%I', v_nsp, v_delta)::regclass, true);\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
@@ -8490,6 +8519,8 @@ MUTATION_SRC.update({"hypertable_preflight_key_gate_dropped": "pgpm_hypertable/i
 MUTATION_TRACK.update({f"null_refusal_dropped_{_r}": "timescale" for _r in _NULL_REFUSAL_HYPERTABLE})
 MUTATION_TRACK.update({"hypertable_preflight_key_gate_dropped": "timescale",
                        "hypertable_cutover_key_gate_dropped": "timescale"})
+MUTATION_SRC["hypertable_delta_sequence_default_acl"] = "pgpm_hypertable/install.sql"   # #974
+MUTATION_TRACK["hypertable_delta_sequence_default_acl"] = "timescale"
 
 # The shared-preflight lever's residue (#969 bullet 9): pgpm_archive's public routines. One mutation per routine,
 # each neutralising its up-front pgpm._refuse_null_arguments call the way the core's are (above), and one per
