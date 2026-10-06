@@ -1,35 +1,27 @@
 #!/usr/bin/env bash
-# Run tests/timescale/db/39_from_hypertable_serial_sequences_test.sql against an ARBITRARY copy of
-# pgpm_hypertable/install.sql, so bench/discriminate.sh can point it at a mutant (issue #839).
+# Run tests/timescale/db/53_from_hypertable_scratch_owner_follow_test.sql against an ARBITRARY copy of
+# pgpm_hypertable/install.sql, so bench/discriminate.sh can point it at a mutant (issue #986).
 #
-# THE DEFECT. from_hypertable_copy builds the copy with CREATE TABLE ... LIKE INCLUDING DEFAULTS, so a serial
-# column's default on the copy is nextval() of the sequence the SOURCE's column owns, and nothing moved that
-# ownership: the cutover's DROP TABLE of the source failed with "cannot drop table ... because other objects
-# depend on it" after the whole online copy, every time, and a sequence owned through a column no default
-# named was dropped with the source. The swap now lets go of every owned sequence before the DROP and hands
-# each to the same column of the table renamed into the source's place, once the swap has carried the
-# source's owner onto it. The file migrates a hypertable owned by a third role whose columns own three
-# sequences, and compares them by oid and by the next values they issue.
+# The file is plain pgTAP and the timescale track runs it already; this wrapper is the standing proof that
+# its assertions DISCRIMINATE. The subject is the migration's scratch objects following the hypertable's
+# owner: after ALTER TABLE <hypertable> OWNER TO, every drain, drain step and the cutover either hands the
+# copy, the delta and the capture function to the new owner or refuses once, up front, SQLSTATE 42501,
+# naming pgpm.hand_over_scratch (_from_hypertable_scratch_follow calling _scratch_owner_follow). The defect
+# shows as a raw 'permission denied for table <rel>_pgpm_delta' (or _pgpm_dest) where the refusal is pinned.
 #
 # The mutation it is required to fail against (bench/mutations/mutate.py):
-#   hypertable_cutover_serial_sequence_kept_by_source -- the pre-#839 swap: the source keeps its sequences,
-#                                   so the DROP fails on the copy's default (a raw 2BP01, and every
-#                                   assertion on the migrated table after it).
-# A second one, hypertable_cutover_serial_owned_before_carry (the plausible one-step fix: OWNED BY the copy's
-# column before the DROP, refused while the copy belongs to another role than the source), is retired: #986
-# made a copy owned by another role at the swap unreachable (every drain and the cutover, again under its
-# lock, hand the copy back to the hypertable's owner or refuse), so its defect can no longer show. The file
-# stays as the regression test for the carry order.
+#   hypertable_drains_owner_not_followed -- no step asks the follow, the pre-#986 behaviour at every drain
+#                                           and the cutover
 #
-# Usage: hypertable_cutover_serial_sequences.sh <container> <db> [pgpm_hypertable/install.sql]
-# Runs on the TIMESCALE track's container, which is why its mutation sits in MUTATION_TRACK=timescale.
-# run_timescale also runs it against the unmutated module, so a harness that failed against everything
-# would not read as discrimination. psql, not pg_prove: the fleet image has none, so the TAP is judged here
-# exactly as run_timescale judges it.
+# Usage: hypertable_scratch_owner_follow.sh <container> <db> [pgpm_hypertable/install.sql]
+# Runs on the TIMESCALE track's container (supabase/postgres + TimescaleDB), which is why its mutation
+# sits in MUTATION_TRACK=timescale. That image does not trust the local socket, so every psql call goes
+# over TCP (see run_timescale). run_timescale also runs it against the real install, so a harness broken
+# enough to fail against everything cannot read as discriminating.
 set -uo pipefail
 C="${1:?container}"; DB="${2:?db}"; HT="${3:-/repo/pgpm_hypertable/install.sql}"
-TEST_FILE=/repo/tests/timescale/db/39_from_hypertable_serial_sequences_test.sql
-LABEL="a hypertable whose columns own sequences migrates and keeps them"
+TEST_FILE="${HYPERTABLE_SCRATCH_OWNER_FOLLOW_TEST_FILE:-/repo/tests/timescale/db/53_from_hypertable_scratch_owner_follow_test.sql}"
+LABEL="every hypertable step follows the owner or refuses up front"
 fail=0
 
 q() { docker exec -e PGPASSWORD=postgres "$C" psql -h 127.0.0.1 -U postgres "$@"; }
@@ -39,8 +31,6 @@ q -d postgres -q -c "create database $DB" >/dev/null 2>&1
 q -d postgres -q -c "alter database $DB set client_min_messages = warning" >/dev/null 2>&1
 q -d "$DB" -q -c "create extension if not exists timescaledb; create extension if not exists pgtap;" >/dev/null 2>&1
 
-# A mutant that will not even install is NOT a pass: say which happened. The core goes in first and is
-# never the mutated file; only pgpm_hypertable is.
 if ! q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f /repo/pgpm_core/install.sql >/dev/null 2>&1; then
   printf 'FAIL  %-58s %s\n' "pgpm_core installed" "/repo/pgpm_core/install.sql"
   fail=1

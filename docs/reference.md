@@ -732,7 +732,12 @@ like the hypertable, with no grant beyond the owner's (the delta also grants `IN
 write the hypertable, since its capture trigger writes as the writer), from the moment they are created, as
 is the delta's `pgpm_seq` identity sequence, so no role the migrating role's default privileges name reads
 the copied rows, or reads or sets the sequence the drains batch by, during the online window; the
-cutover gives the migrated table the hypertable's own grants. So the migrating role must be the hypertable's
+cutover gives the migrated table the hypertable's own grants. Every drain, drain step and the cutover
+re-syncs the delta's grants from the hypertable's before it acts, as a regrain tick does, so a role granted
+DML on the hypertable during the online window can write from the next one on. And they follow the
+hypertable's owner as a regrain's do: after `ALTER TABLE <hypertable> OWNER TO`, each of those steps hands
+them to the new owner when its role may, and otherwise refuses up front with the `pgpm.hand_over_scratch(...)`
+step (see [Handing a table to a new owner](#handing-a-table-to-a-new-owner-hand_over_scratch)). So the migrating role must be the hypertable's
 owner or a member of it (and the owner must hold `CREATE` on the schema), as the swap always required; this
 copy refuses otherwise, before anything is created. A table, function or trigger already holding one of the
 names this copy mints (`<rel>_pgpm_dest`, and for `p_track_changes` `<rel>_pgpm_delta`,
@@ -2479,13 +2484,16 @@ capture function and not-yet-attached copies; a migration's copy, delta and capt
 over by re-owning the table and every partition, then run `hand_over_scratch(<table>)`, which gives every
 scratch relation pgpm has recorded for the table to the table's owner as it is now and returns how many it
 handed over. Run it as a superuser, or as a role that is a member of both the old owner and the new;
-otherwise it refuses, as a tick does. A maintenance tick run by such a role does this on its own, so under
+otherwise it refuses, SQLSTATE `42501`, and hands nothing over. That includes the old owner itself, or a
+member of it alone, which a tick lets go on (it can work the objects as before) but which cannot hand them
+over. A maintenance tick run by such a role does this on its own, so under
 pg_cron as a superuser there is nothing to do. A tick run by a role that can do neither (the new owner, as a
 non-superuser) refuses with a `skip_regrain` row whose message begins `run select
 pgpm.hand_over_scratch(...)`, and the regrain resumes on the first tick after the step is taken. So does every
 other path that drops, empties or truncates those objects, before it changes anything: the tick that prepares
 the table's next regrain (it drops what the last one left), `regrain_cancel`, a retirement that reclaims the
-source of a regrain in flight, and `untransmute`. The refusal is SQLSTATE `42501` (`insufficient_privilege`).
+source of a regrain in flight, `untransmute`, and a `from_hypertable` migration's drains, drain steps and
+cutover. The refusal is SQLSTATE `42501` (`insufficient_privilege`).
 A retirement with nothing of a regrain to reclaim is not refused. A null table is refused.
 
 ### `set_partition_tz`

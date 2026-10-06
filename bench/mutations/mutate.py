@@ -1821,18 +1821,13 @@ MUTATIONS = {
         "migrated table fail.",
         [(HT_SERIAL_LET_GO, "    -- MUTANT: the source keeps the sequences it owns\n", 1)],
     ),
-    "hypertable_cutover_serial_owned_before_carry": (
-        "bench/hypertable_cutover_serial_sequences.sh",
-        "The plausible one-step #839 fix: hand each owned sequence to the copy's column (OWNED BY) before "
-        "the DROP, while the copy may still belong to another role than the source (the migrating role "
-        "before #949 minted it owned like the hypertable; a hand-over during the online window after). "
-        "PostgreSQL refuses OWNED BY across owners ('sequence must have same owner as table it is linked "
-        "to'), so tests/timescale/db/39, whose copy belongs to the migrating role at the cutover, fails on "
-        "that raw error and on its assertions after it.",
-        [(HT_SERIAL_LET_GO,
-          "    execute format('alter sequence %s owned by %I.%I.%I', k.seq::text, v_nsp, v_dest, k.attname);"
-          "   -- MUTANT: one step\n", 1)],
-    ),
+    # hypertable_cutover_serial_owned_before_carry is RETIRED (#986). It was the plausible one-step #839 fix
+    # (OWNED BY the copy's column before the DROP), caught only while the copy belonged to another role than
+    # the source at the swap. #986 made that state unreachable: during the migration every drain and the
+    # cutover hand a re-owned copy back to the hypertable's owner (or refuse 42501), the cutover asks again
+    # under its ACCESS EXCLUSIVE on the hypertable and the copy so nothing can re-own between that follow and
+    # the swap, and a copy re-owned before an upgrade meets the same follow at the first cutover after it.
+    # tests/timescale/db/39 and bench/hypertable_cutover_serial_sequences.sh stay as the carry order's test.
     "hypertable_shape_ignores_foreign_keys": (
         "bench/hypertable_cutover_foreign_keys.sh",
         "Pre-#840 _from_hypertable_shape_diff: columns, defaults and CHECKs are compared, outgoing foreign "
@@ -8197,7 +8192,6 @@ MUTATION_SRC = {
     "hypertable_cutover_no_exclusion_check": "pgpm_hypertable/install.sql",
     "hypertable_cutover_exclusion_unchecked_under_lock": "pgpm_hypertable/install.sql",
     "hypertable_cutover_serial_sequence_kept_by_source": "pgpm_hypertable/install.sql",
-    "hypertable_cutover_serial_owned_before_carry": "pgpm_hypertable/install.sql",
     "hypertable_shape_ignores_foreign_keys": "pgpm_hypertable/install.sql",
     "hypertable_index_ddl_by_pattern": "pgpm_hypertable/install.sql",
     "hypertable_tmp_name_cut": "pgpm_hypertable/install.sql",
@@ -8401,7 +8395,6 @@ MUTATION_TRACK = {
     "hypertable_cutover_no_exclusion_check": "timescale",
     "hypertable_cutover_exclusion_unchecked_under_lock": "timescale",
     "hypertable_cutover_serial_sequence_kept_by_source": "timescale",
-    "hypertable_cutover_serial_owned_before_carry": "timescale",
     "hypertable_shape_ignores_foreign_keys": "timescale",
     "hypertable_index_ddl_by_pattern": "timescale",
     "hypertable_tmp_name_cut": "timescale",
@@ -8571,6 +8564,44 @@ MUTATIONS["archive_empty_range_compared_as_text"] = (
     [("  if not pgpm._native_gt(v_kind, p_hi, p_lo) then\n", "  if not (p_hi > p_lo) then   -- MUTANT: as text\n", 1)],
 )
 MUTATION_SRC["archive_empty_range_compared_as_text"] = "pgpm_archive/install.sql"
+# #979 and #986: the hypertable module's steps (every drain, drain step and the cutover) re-sync the delta's
+# writer grants and follow the hypertable's owner first, through _from_hypertable_scratch_follow. One mutation
+# per half, each at the helper, so it takes the half away from every step at once.
+MUTATIONS["hypertable_delta_grants_not_resynced"] = (
+    "bench/hypertable_delta_writer_grants.sh",
+    "Pre-#979 pgpm_hypertable: the tracking delta's INSERT grants are the ones from_hypertable_copy made for "
+    "the writers it saw, and no drain or cutover grants again, so a role granted DML on the hypertable during "
+    "the online window has every write refused 'permission denied for table <rel>_pgpm_delta' by the capture "
+    "trigger until the cutover. _from_hypertable_scratch_follow keeps the owner half and drops the grant "
+    "re-sync; tests/timescale/db/52 fails where the late writers write after the next step.",
+    [("  if v_delta is not null then\n    perform pgpm._regrain_capture_grant(p_hypertable, v_delta, p_hypertable);\n  end if;\n",
+      "  if v_delta is null then\n    return;\n  end if;\n", 1)],
+)
+MUTATION_SRC["hypertable_delta_grants_not_resynced"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_delta_grants_not_resynced"] = "timescale"
+MUTATIONS["hypertable_drains_owner_not_followed"] = (
+    "bench/hypertable_scratch_owner_follow.sh",
+    "Pre-#986 pgpm_hypertable: no drain, drain step or cutover calls _scratch_owner_follow, so after ALTER "
+    "TABLE <hypertable> OWNER TO the new owner's step dies raw 'permission denied for table <rel>_pgpm_delta' "
+    "(or _pgpm_dest) on the old owner's object, naming no remedy, instead of the up-front 42501 refusal that "
+    "leads with pgpm.hand_over_scratch. _from_hypertable_scratch_follow keeps the grant half and drops the "
+    "follow; every refusal in part A of tests/timescale/db/53 fails.",
+    [("  perform pgpm._scratch_owner_follow(p_hypertable, p_what);\n  v_delta := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');\n",
+      "  v_delta := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');\n", 1)],
+)
+MUTATION_SRC["hypertable_drains_owner_not_followed"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_drains_owner_not_followed"] = "timescale"
+# #987: hand_over_scratch refuses when the follow left any object with another owner. The plausible wrong fix
+# applies the follow's rule for a tick (go on while this session can act as that owner) to the hand-over too.
+MUTATIONS["hand_over_scratch_unverified"] = (
+    "bench/hand_over_scratch_reports.sh",
+    "Pre-#987 pgpm.hand_over_scratch: an object the follow could not hand over is let through whenever this "
+    "session can act as its owner, the rule _scratch_owner_follow applies for a tick, so a member of the old "
+    "owner alone (the old owner itself included) hands nothing over and is not refused. Part A of tests/276 "
+    "fails (no exception where 42501 is pinned).",
+    [("  if cardinality(v_left) > 0 then\n",
+      "  if cardinality(v_left) > 0 and not pg_has_role(current_user, v_left[1], 'USAGE') then\n", 1)],
+)
 
 # Issue #976: an export's whole-key claim names the relation it exports. One mutation per site, both caught by
 # tests/archive/db/43 (bench/archive_export_key_by_relation.sh, against the archive image and MinIO).

@@ -175,6 +175,30 @@ returns name language sql stable as $$
      and c.relnamespace = (select h.relnamespace from pg_class h where h.oid = p_hypertable)
 $$;
 
+-- _from_hypertable_scratch_follow: what every step after the copy does first, before it reads or changes
+-- anything (#986, #979). The two rules core's regrain applies on every tick, applied here on every drain, every
+-- drain step and the cutover, which are this module's ticks:
+--   the scratch objects follow the hypertable's owner (pgpm._scratch_owner_follow, #950 #969): after ALTER
+--   TABLE <hypertable> OWNER TO, the copy, the delta and the capture function are handed to the new owner by
+--   a step run as a role that may, and a step run as a role that can neither hand them over nor act as their
+--   owner refuses here, once, SQLSTATE 42501, naming pgpm.hand_over_scratch. Left out, the new owner's drain
+--   died raw 'permission denied for table <rel>_pgpm_delta' on the old owner's delta, naming no remedy;
+--   the delta follows the hypertable's writers (pgpm._regrain_capture_grant, #496 #906): the capture trigger
+--   writes it as the writer, and the copy granted INSERT on it only to the roles that could write the
+--   hypertable then. A role granted DML on the hypertable during the online window had every write refused
+--   'permission denied for table <rel>_pgpm_delta' until the cutover; it now writes from the next step on.
+-- Both issue no DDL when nothing changed, which is every step but the first after a hand-over or a grant.
+create or replace function pgpm._from_hypertable_scratch_follow(p_hypertable regclass, p_what text)
+returns void language plpgsql as $$
+declare v_delta regclass;
+begin
+  perform pgpm._scratch_owner_follow(p_hypertable, p_what);
+  v_delta := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');
+  if v_delta is not null then
+    perform pgpm._regrain_capture_grant(p_hypertable, v_delta, p_hypertable);
+  end if;
+end $$;
+
 -- _from_hypertable_scratch_check: refuse, before from_hypertable_copy creates or drops anything, when a name it
 -- is about to mint is held by an object pgpm.scratch does not record for this hypertable (#955). The copy used
 -- to run `drop table if exists` on <rel>_pgpm_dest and <rel>_pgpm_delta, `create or replace function` on
@@ -1174,6 +1198,7 @@ begin
   perform pgpm._refuse_null_arguments('from_hypertable_drain_delta_step', json_build_object(
     'p_hypertable', p_hypertable, 'p_control', p_control, 'p_batch', p_batch));
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
+  perform pgpm._from_hypertable_scratch_follow(p_hypertable, 'from_hypertable_drain_delta_step');   -- #986 #979: owner and writers first
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');     -- #955: by record (drain_delta_step)
@@ -1264,6 +1289,7 @@ begin
     'p_hypertable', p_hypertable, 'p_control', p_control, 'p_batch', p_batch, 'p_threshold', p_threshold,
     'p_max_iter', p_max_iter, 'p_best_effort', p_best_effort));
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
+  perform pgpm._from_hypertable_scratch_follow(p_hypertable, 'from_hypertable_drain_delta');   -- #986 #979: owner and writers first
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');     -- #955: by record (drain_delta)
@@ -1336,6 +1362,7 @@ begin
   perform pgpm._refuse_null_arguments('from_hypertable_drain_appends_step', json_build_object(
     'p_hypertable', p_hypertable, 'p_control', p_control, 'p_batch', p_batch));
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
+  perform pgpm._from_hypertable_scratch_follow(p_hypertable, 'from_hypertable_drain_appends_step');   -- #986 #979: owner and writers first
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');   -- #955: by record (drain_appends_step)
@@ -1386,6 +1413,7 @@ begin
     'p_hypertable', p_hypertable, 'p_control', p_control, 'p_batch', p_batch, 'p_threshold', p_threshold,
     'p_max_iter', p_max_iter, 'p_best_effort', p_best_effort));
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
+  perform pgpm._from_hypertable_scratch_follow(p_hypertable, 'from_hypertable_drain_appends');   -- #986 #979: owner and writers first
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');   -- #955: by record (drain_appends)
@@ -1486,6 +1514,10 @@ begin
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
+  -- #986 #979: owner and writers first, before the pre-drain commits anything or the index pre-builds spend
+  -- their O(rows) on the copy (a new owner who cannot hand it over would otherwise fail raw on CREATE INDEX).
+  -- Asked again under the lock below, which is the answer the swap relies on.
+  perform pgpm._from_hypertable_scratch_follow(p_hypertable, 'from_hypertable_cutover');
   -- ...and the monolith name transmute will derive after the swap has committed (#707), before the pre-drain
   perform pgpm._from_hypertable_check_handoff(p_hypertable, p_interval, p_anchor);
   -- A caller whose reads row-level security filters (issue #825), refused before the pre-drain spends anything.
@@ -1702,6 +1734,16 @@ begin
       p_hypertable, quote_ident(v_nsp), quote_ident(v_dest), v_dest_oid::oid,
       coalesce(to_regclass(format('%I.%I', v_nsp, v_dest))::oid::text, 'nothing'), quote_ident(v_rel);
   end if;
+  -- THE OWNER, UNDER THE LOCK (#986). The follow up front saw the scratch objects as they were then, and the
+  -- copy and the delta were unlocked from there to here, so an ALTER ... OWNER TO can have landed on either in
+  -- between. Now the hypertable and the copy are frozen, and the delta is locked here (nothing writes it while
+  -- the hypertable is locked), so the owners this follow leaves are the owners at the swap: each scratch object
+  -- is the hypertable's owner's, or this refuses (42501) and the swap rolls back whole. A copy owned by another
+  -- role than the source therefore never reaches the sequence carry or the owner carry below.
+  if v_track then
+    execute format('lock table %I.%I in access exclusive mode', v_nsp, v_delta);
+  end if;
+  perform pgpm._from_hypertable_scratch_follow(p_hypertable, 'from_hypertable_cutover');
   -- THE SHAPE, UNDER THE LOCK (#738). The check up front saw the source as it was then, and the source has
   -- been unlocked from there to here (the pre-drain's commits, the index pre-builds), so DDL can have landed
   -- in between. Both relations are frozen now, and the column list read at the top must still describe both.

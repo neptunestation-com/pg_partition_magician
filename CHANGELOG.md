@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+- **A from_hypertable migration's delta follows the hypertable's writers through the online window** (#979).
+  A tracking `from_hypertable_copy` granted `INSERT` on its delta once, to the roles that could write the
+  hypertable at that moment, and nothing granted again, so a role granted DML on the hypertable afterwards had
+  every write refused 'permission denied for table `<rel>_pgpm_delta`' by the capture trigger until the
+  cutover. Every drain, drain step and the cutover now re-syncs the delta's writer grants from the
+  hypertable's ACL before it acts, as core's regrain does on every tick (#496), so such a role writes from the
+  next one on. `tests/timescale/db/52` (new), `bench/hypertable_delta_writer_grants.sh`; mutation
+  `hypertable_delta_grants_not_resynced`.
+
+- **A hypertable handed to a new owner mid-migration is handed over by the next step, or refused up front**
+  (#986). No `from_hypertable` drain and not the cutover asked whether the copy, the delta and the capture
+  function still belonged to the hypertable's owner, so after `ALTER TABLE <hypertable> OWNER TO` the new
+  owner's drain died raw 'permission denied for table `<rel>_pgpm_delta`', naming no remedy. Each now hands
+  them to the hypertable's owner when its role may, and otherwise refuses once, before it changes anything,
+  SQLSTATE `42501`, leading with the documented `pgpm.hand_over_scratch(...)` step, as every core path does.
+  The cutover asks again under its lock on the hypertable, the copy and the delta, so nothing can re-own them
+  between that answer and the swap. That makes a copy owned by another role at the swap unreachable, so the
+  mutation `hypertable_cutover_serial_owned_before_carry` (#839's plausible one-step fix, caught only in that
+  state) is retired; `tests/timescale/db/39` stays as the carry order's test. `tests/timescale/db/53` (new),
+  `bench/hypertable_scratch_owner_follow.sh`; mutation `hypertable_drains_owner_not_followed`.
+
+- **`pgpm.hand_over_scratch` reports only what it handed over, and refuses what it cannot** (#987). It
+  counted the scratch objects before handing them over, and the hand-over let a session that could still act
+  as the old owner go on without re-owning anything, so the old owner itself, or any member of it alone, was
+  told it had handed over every object while each stayed where it was and nothing refused. It now reads back
+  what it did, and refuses with SQLSTATE `42501` and the remedy (run it as a superuser or a member of both
+  owners) when any object is left with another owner; nothing is handed over then. `tests/276` (new),
+  `bench/hand_over_scratch_reports.sh`; mutation `hand_over_scratch_unverified`.
+
 - **A scratch relation's sequences are minted owner-only too: a stranger can no longer setval the regrain
   delta's `pgpm_seq` into duplicates and make the swap drop rows** (#974, Tier 1). `_scratch_mint` reset
   the ACL of the delta it minted but not that of the delta's `pgpm_seq` identity sequence, which kept the
