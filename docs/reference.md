@@ -312,8 +312,9 @@ Parameters:
   lowercase), requires spelling the alphabet out explicitly. Its length must equal `p_tt_radix`.
   A mixed-case alphabet (KSUID's) needs the control column on a bytewise collation (`collate "C"`):
   RANGE bounds on a `text` column compare under the column's collation, and `en_US` sorts `a` before `P`
-  where base62 puts it after. `transmute` refuses otherwise, naming the collation and the first
-  misordered digit pair; see [`check_text_time`](#check_text_time) and the
+  where base62 puts it after. A single-case alphabet can be misordered too, by a two-letter
+  contraction (hex under `da-x-icu`, where `aa` sorts after `z`). `transmute` refuses otherwise, naming
+  the collation and the first misordered digit pair; see [`check_text_time`](#check_text_time) and the
   [guide](guide.md#pick-the-kind).
 - `p_tt_discard_bits` -- **text_time only**, default `0`. After decoding the whole
   `p_tt_prefix`-plus-`p_tt_width`-characters field as one number, discard this many of its low-order
@@ -394,8 +395,9 @@ control is missing any of `p_tt_prefix`/`p_tt_width`/`p_tt_radix`/`p_tt_unit`, h
 2-36 with no `p_tt_alphabet` supplied, a `p_tt_alphabet` whose length does not match `p_tt_radix` or that
 repeats a character, a non-positive `p_tt_width`, a negative `p_tt_discard_bits`, an alphabet the control
 column's collation does not order the way base-`p_tt_radix` place value does (KSUID's base62 on an
-`en_US` column, or any alphabet with digits under an ICU collation with numeric ordering such as
-`und-u-kn-true`; put the column on `collate "C"`, which `p_force_text_time` does not override), or
+`en_US` column, any alphabet with digits under an ICU collation with numeric ordering such as
+`und-u-kn-true`, or an alphabet holding a two-letter contraction of the collation, such as hex under
+`da-x-icu`; put the column on `collate "C"`, which `p_force_text_time` does not override), or
 samples as not matching the declared shape and `p_force_text_time` is not set; a `time`, `uuidv7` or `text_time` control's newest
 value lies (or decodes to) more than one partition step plus one hour past `now()` and `p_force_frontier` is not set
 (a future-dated row would pin the monolith's permanent `hi` there); a `time` control's newest value is
@@ -2677,12 +2679,20 @@ correct before a refused `transmute` are the ones sorting above
 
 Refuses, with the same message `transmute` gives, when the control column's collation does not order the
 declared alphabet the way base-`p_radix` place value does (a mixed-case alphabet such as KSUID's base62
-on an `en_US` column, or any alphabet with digits under an ICU collation with numeric ordering, which
-compares a run of digits by its value). That is not a heuristic and no fraction is reported: RANGE bounds on a `text`
-column compare under the column's collation, so any such column would route rows to the wrong
-partition. The message names the collation (the effective database locale when the column is on the
-default), the first misordered digit pair, the two strings the collation put out of order, and the
-remedy, `alter table ... alter column ... type text collate "C"`.
+on an `en_US` column, any alphabet with digits under an ICU collation with numeric ordering, which
+compares a run of digits by its value, or an alphabet holding a two-letter contraction of the collation,
+such as hex under `da-x-icu`, where `aa` sorts after `z`, or base32 under `cs-x-icu`, where `ch` sorts
+after `h`). That is not a heuristic and no fraction is reported: the check is a proof that every one- and
+two-character string of the alphabet behind `p_prefix` sorts under the column's collation in place-value
+order, which covers case and accent weights, numeric ordering, ignored characters and every two-letter
+contraction, including one spanning the prefix and the first digit. It does not cover a contraction of
+three or more characters that does not begin with a two-letter one, nor one that joins the encoded field
+to a character outside the alphabet after it; `collate "C"` is bytewise by construction. RANGE bounds on
+a `text` column compare under the column's collation, so a column the proof refuses would route rows to
+the wrong partition. The message names the collation (the effective database locale when the column is
+on the default), the two digits whose order failed (or, when a string sorted after its own extension,
+says so), the two strings the collation put out of order, and the remedy,
+`alter table ... alter column ... type text collate "C"`.
 
 ### `check_time_monotonic`
 

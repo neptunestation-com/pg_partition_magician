@@ -6,17 +6,19 @@
 -- November rows land in the December partition (and retain drops them a month early) and some February
 -- rows are rejected with "no partition found" (issue #568). _check_text_time_collation used to probe only
 -- adjacent digit pairs padded as '<d>zzz...' < '<d+1>000...', which a numeric ordering satisfies (1 is
--- less than 2000...), so the column was accepted. It now also probes the opposite padding
--- ('<d>000...' < '<d+1>zzz...') and a lower cell's string extended by a suffix character against the
--- next cell's bound, and refuses the collation on any of them.
+-- less than 2000...), so the column was accepted. #568 added two more probe shapes (the opposite padding,
+-- '<d>000...' < '<d+1>zzz...', and a lower cell's string extended by a suffix character against the
+-- next cell's bound); since #639 the probes are replaced by a proof over every one- and two-digit string
+-- of the alphabet, which refuses a numeric ordering at its first misordered run ('c09' sorts after
+-- 'c0a', since 9 > 0), hence the digit pair the refusals below pin.
 --
 -- Every refusal here is paired with a witness that the condition it denies was present: the collation
 -- really orders the two literal cuid fragments against bytewise order, and each refused fixture really
 -- contains rows that sort outside their own month's bounds under it. The positive controls (the same
 -- rows on collate "C", a cuid column on en_US.utf8, and on ICU without numeric ordering) show the new
 -- probes do not refuse the collations the documented alphabets rely on.
--- bench/text_time_numeric_collation.sh runs this file against a mutant that removes the two new probe
--- shapes, and requires it to fail there.
+-- bench/text_time_numeric_collation.sh runs this file against a mutant that puts the pre-#568 check
+-- back (the first probe shape alone), and requires it to fail there.
 create extension if not exists pgtap;
 set timezone = 'UTC';
 
@@ -55,7 +57,7 @@ select cmp_ok(
 select throws_like(
   $$ call pgpm.transmute('public.tt_cuid_num', 'id', interval '1 month',
        p_tt_prefix => 'c', p_tt_width => 8, p_tt_radix => 36, p_tt_unit => 'ms') $$,
-  $p$pg_partition_magician: column %tt_cuid_num.id has collation tt_num%digit '1' (value 1)%digit '2' (value 2)%alter table %tt_cuid_num alter column id type text collate "C"%$p$,
+  $p$pg_partition_magician: column %tt_cuid_num.id has collation tt_num%digit '9' (value 9)%digit 'a' (value 10)%alter table %tt_cuid_num alter column id type text collate "C"%$p$,
   'transmute refuses a cuid column on a numeric-ordering ICU collation, naming the collation, a misordered digit pair and the collate "C" remedy'
 );
 select throws_like(
@@ -74,7 +76,7 @@ select is(
 );
 select throws_like(
   $$ select * from pgpm.check_text_time('public.tt_cuid_num', 'id', 'c', 8, 36, 'ms', 1000) $$,
-  $p$pg_partition_magician: column %tt_cuid_num.id has collation tt_num%digit '1' (value 1)%digit '2' (value 2)%collate "C"%$p$,
+  $p$pg_partition_magician: column %tt_cuid_num.id has collation tt_num%digit '9' (value 9)%digit 'a' (value 10)%collate "C"%$p$,
   'check_text_time reports the same refusal instead of a plausible fraction'
 );
 
@@ -125,7 +127,7 @@ select is(
 );
 
 -- cuid is single-case, so en_US.utf8 and ICU without numeric ordering order it the way place value does;
--- the new probes must not refuse either (the guide says single-case alphabets need nothing there).
+-- the check must not refuse either.
 create table public.tt_cuid_en (id text collate "en_US.utf8" primary key, body text);
 insert into public.tt_cuid_en select id, body from public.tt_cuid_num;
 create table public.tt_cuid_icu (id text collate public.tt_icu primary key, body text);

@@ -1111,6 +1111,23 @@ _RI_DROPPED_BLOCK = (
     "  end if;\n"
 )
 
+# The proof query of _check_text_time_collation (#639), which the two mutations that put an older check
+# back replace: text_time_collation_positional_only (pre-#568) and text_time_collation_probe_only (pre-#639).
+_TT_COLLATION_PROOF = (
+    "    with d(i, c) as (select i, substr(%1$L, i, 1) from generate_series(1, %2$s) as i),\n"
+    "    s(k, v) as (\n"
+    "      select x.i * (%2$s + 1), %3$L || x.c from d x\n"
+    "      union all\n"
+    "      select x.i * (%2$s + 1) + y.i, %3$L || x.c || y.c from d x cross join d y\n"
+    "    ),\n"
+    "    chain(k, lo, hi) as (select k, v, lead(v) over (order by k) from s)\n"
+    "    select lo, hi\n"
+    "      from chain\n"
+    "     where hi is not null and not ((lo::text collate %4$s) < (hi::text collate %4$s))\n"
+    "     order by k limit 1\n"
+    "  $q$, v_alphabet, length(v_alphabet), v_prefix, v_coll_q)\n"
+)
+
 MUTATIONS = {
     "transmute_no_commits": (
         "bench/transmute_lock.sh",
@@ -3734,23 +3751,62 @@ $$;''',
     ),
     "text_time_collation_positional_only": (
         "bench/text_time_numeric_collation.sh",
-        "Pre-#568 _check_text_time_collation: the probe keeps only its first shape per adjacent digit "
-        "pair, '<prefix><d><max>...' < '<prefix><d+1><zero>...', which proves the digits are separated "
+        "Pre-#568 _check_text_time_collation: one probe shape per adjacent digit pair at the declared "
+        "width, '<prefix><d><max>...' < '<prefix><d+1><zero>...', which proves the digits are separated "
         "at the primary level for a collation that compares position by position and says nothing about "
         "one that weighs a run of decimal digits by its value. An ICU collation with numeric ordering "
         "('und-u-kn-true') passes it, since the zero padding extends the higher digit's run (1 < 2000...), "
         "so transmute accepts a cuid column under it and RANGE routing disagrees with base-36 order: late "
-        "November rows land in the December partition and retain drops them a month early. The two "
-        "probe shapes the fix added (the opposite padding, and a lower cell's string extended by a "
-        "suffix digit against the next cell's bound) are removed and nothing else. tests/134's "
-        "refusals of a cuid and a decimal column on that collation are what catch it.",
-        [("      union all\n"
-          "      select x.i, x.c, y.c, 1, %3$L || x.c || %6$L, %3$L || y.c || %4$L\n"
+        "November rows land in the December partition and retain drops them a month early. Since #639 the "
+        "check is a proof over every one- and two-digit string of the alphabet, so the proof's query is "
+        "replaced by that single probe and nothing else. tests/134's refusals of a cuid and a decimal "
+        "column on that collation are what catch it.",
+        [(_TT_COLLATION_PROOF,
+          "    with d(i, c) as (select i, substr(%1$L, i, 1) from generate_series(1, %2$s) as i),\n"
+          "    probe(i, lo, hi) as (\n"
+          "      select x.i, %3$L || x.c || %4$L, %3$L || y.c || %6$L\n"
+          "        from d x join d y on y.i = x.i + 1\n"
+          "    )\n"
+          "    select lo, hi\n"
+          "      from probe\n"
+          "     where not ((lo::text collate %5$s) < (hi::text collate %5$s))\n"
+          "     order by i limit 1\n"
+          "  $q$, v_alphabet, length(v_alphabet), v_prefix,\n"
+          "       repeat(substr(v_alphabet, length(v_alphabet), 1), greatest(coalesce(p_width, 1), 1) - 1), v_coll_q,\n"
+          "       repeat(substr(v_alphabet, 1, 1), greatest(coalesce(p_width, 1), 1) - 1))\n",
+          1)],
+    ),
+    "text_time_collation_probe_only": (
+        "bench/text_time_collation_proof.sh",
+        "Pre-#639 _check_text_time_collation: the probes of #456 and #568 in place of the proof. Each "
+        "adjacent digit pair is compared at the declared width in three shapes ('<d><max>...' against "
+        "'<d+1><zero>...', the opposite padding, and the first extended by every digit), which catches a "
+        "case weight and a numeric ordering but never puts two letters of a contraction side by side "
+        "unless one of them is a padding digit. da-x-icu ('aa' is a-ring, after 'z') passes for hex, so "
+        "transmute accepts an ObjectId-shaped column on it and PostgreSQL routes a row decoded 28 November "
+        "into the December partition, which retain drops on December's schedule; cs-x-icu ('ch') passes "
+        "for Crockford base32. One site: the proof's query, replaced by the probe query it superseded. "
+        "tests/274's refusals catch it.",
+        [(_TT_COLLATION_PROOF,
+          "    with d(i, c) as (select i, substr(%1$L, i, 1) from generate_series(1, %2$s) as i),\n"
+          "    probe(i, n, lo, hi) as (\n"
+          "      select x.i, 0, %3$L || x.c || %4$L, %3$L || y.c || %6$L\n"
           "        from d x join d y on y.i = x.i + 1\n"
           "      union all\n"
-          "      select x.i, x.c, y.c, 2 + s.i, %3$L || x.c || %4$L || s.c, %3$L || y.c || %6$L\n"
-          "        from d x join d y on y.i = x.i + 1 cross join d s\n",
-          "", 1)],
+          "      select x.i, 1, %3$L || x.c || %6$L, %3$L || y.c || %4$L\n"
+          "        from d x join d y on y.i = x.i + 1\n"
+          "      union all\n"
+          "      select x.i, 2 + s.i, %3$L || x.c || %4$L || s.c, %3$L || y.c || %6$L\n"
+          "        from d x join d y on y.i = x.i + 1 cross join d s\n"
+          "    )\n"
+          "    select lo, hi\n"
+          "      from probe\n"
+          "     where not ((lo::text collate %5$s) < (hi::text collate %5$s))\n"
+          "     order by i, n limit 1\n"
+          "  $q$, v_alphabet, length(v_alphabet), v_prefix,\n"
+          "       repeat(substr(v_alphabet, length(v_alphabet), 1), greatest(coalesce(p_width, 1), 1) - 1), v_coll_q,\n"
+          "       repeat(substr(v_alphabet, 1, 1), greatest(coalesce(p_width, 1), 1) - 1))\n",
+          1)],
     ),
     "parquet_numeric_scale_unsigned": (
         "bench/archive_parquet_negative_scale.sh",

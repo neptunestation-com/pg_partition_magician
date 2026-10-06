@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- **The text_time collation check is a proof for the alphabet in use, so a two-letter contraction is
+  refused** (#639 bullet 2). `transmute` and `check_text_time` probed adjacent single-character digit pairs,
+  which no contraction disturbs: under `da-x-icu` `aa` is `å`, after `z`, so a hex (ObjectId-shaped)
+  column on it was accepted and PostgreSQL routed a row whose timestamp field held `aa` (decoded 28
+  November) into the December partition, where retain drops it on December's schedule (Tier 1); `cs-x-icu`
+  (`ch` after `h`) passed for base32 and Crockford the same way. The check now requires every one- and
+  two-character string of the alphabet behind the prefix to sort in place-value order under the column's
+  collation, which covers every two-letter contraction (a prefix's last letter with the first digit
+  included), ignored characters, case weights and numeric ordering, and still accepts a collation that
+  orders the alphabet correctly (`en_US` for cuid, ULID and hex; `cs-x-icu` for hex). A cuid column under
+  numeric ordering is now reported at the pair `'9'`/`'a'` (`'c09'` after `'c0a'`) rather than `'1'`/`'2'`.
+  `tests/274` (new), `tests/134`'s message pins, `bench/text_time_collation_proof.sh` (with a database
+  whose default collation is `C`); mutation `text_time_collation_probe_only` (and
+  `text_time_collation_positional_only`, re-cut onto the proof).
+
 - **A parent whose replica identity index was dropped keeps its forward grid growing** (#978). PostgreSQL
   lets `DROP INDEX` remove a table's `REPLICA IDENTITY USING INDEX` index, leaves the table marked USING
   INDEX with no index, and treats it as `NOTHING`. pgpm read that state as a partition missing its identity
