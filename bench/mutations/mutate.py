@@ -7599,8 +7599,12 @@ select ok(
         "tests/archive/db/40 part C catches it (the claim does not name the object; its bytes change).",
         [("  v_key := archive._object_key(p_parent, cfg.prefix, pcfg.control_kind, p_lo,\n"
           "                               case when p_compress then '.ndjson.gz' else '.ndjson' end);\n"
+          "  -- #975: never over a recorded chunk this read does not reproduce\n"
+          "  perform archive._refuse_recorded_chunk_overwrite('archive_to_s3_ndjson', p_parent, pcfg.control_kind, v_key, p_lo, p_hi, v_rows);\n"
           "  if p_compress then\n",
           "  v_key := archive._object_key(p_parent, cfg.prefix, pcfg.control_kind, p_lo, '.ndjson');\n"
+          "  -- #975: never over a recorded chunk this read does not reproduce\n"
+          "  perform archive._refuse_recorded_chunk_overwrite('archive_to_s3_ndjson', p_parent, pcfg.control_kind, v_key, p_lo, p_hi, v_rows);\n"
           "  if p_compress then\n"
           "    v_key := v_key || '.gz';   -- MUTANT: after the claim\n", 1)],
     ),
@@ -8558,6 +8562,46 @@ MUTATIONS["archive_chunk_claim_relation_unrecorded"] = (
     [("     where kind = 'chunk' and relation_oid is null\n", "     where false\n", 1)],
 )
 MUTATION_SRC["archive_chunk_claim_relation_unrecorded"] = "pgpm_archive/install.sql"
+
+# #975 (pass 9 F5-03, F5-04): an archive_fn strategy writes over the object pgpm.archive_ledger records a chunk at
+# only when the call reproduces that chunk. One mutation per encoder's call of the shared refusal, and one per rule
+# of it. All are caught by tests/archive/db/42 (bench/archive_recorded_chunk.sh, against the archive image and
+# MinIO), each by a refusal it no longer makes and, for the first three, by the object read back afterwards.
+for _fmt, _routine in (("ndjson", "archive_to_s3_ndjson"), ("parquet", "archive_to_s3_parquet")):
+    MUTATIONS[f"archive_{_fmt}_recorded_chunk_unchecked"] = (
+        "bench/archive_recorded_chunk.sh",
+        f"Pre-#975 pgpm.{_routine}: the encoder PUTs without asking what pgpm.archive_ledger records at the key, so "
+        f"a direct call with a recorded chunk's lo and a shorter hi writes a subset over the chunk's object while the "
+        f"ledger still records [lo, hi) there, and after retire() a call with the chunk's own [lo, hi) writes an empty "
+        f"object over the only copy of its rows. One site, the encoder's call of "
+        f"archive._refuse_recorded_chunk_overwrite. tests/archive/db/42 catches it (F5-04 and F5-03: the object no "
+        f"longer holds the chunk).",
+        [(f"  perform archive._refuse_recorded_chunk_overwrite('{_routine}', p_parent, pcfg.control_kind, v_key, p_lo, p_hi, v_rows);\n",
+          "", 1)],
+    )
+    MUTATION_SRC[f"archive_{_fmt}_recorded_chunk_unchecked"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_recorded_chunk_rows_unchecked"] = (
+    "bench/archive_recorded_chunk.sh",
+    "archive._refuse_recorded_chunk_overwrite compares a recorded chunk's range and never its rows, so after retire() "
+    "dropped the partition a direct call with the chunk's own [lo, hi) reads no row and PUTs an empty object over the "
+    "only copy (#975 F5-03). One site, the rows rule. tests/archive/db/42 catches it (F5-03: the retired chunk's "
+    "objects no longer hold its rows).",
+    [("    elsif (l.rows_archived is null and coalesce(p_rows, 0) = 0)\n"
+      "          or (l.rows_archived is not null and p_rows is distinct from l.rows_archived) then\n",
+      "    elsif false then\n", 1)],
+)
+MUTATION_SRC["archive_recorded_chunk_rows_unchecked"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_recorded_chunk_range_unchecked"] = (
+    "bench/archive_recorded_chunk.sh",
+    "archive._refuse_recorded_chunk_overwrite compares a recorded chunk's rows and never its range, so a direct call "
+    "whose range is not the chunk's but reads the same rows (a shorter hi past the last row, or a hi past the "
+    "chunk's) is written over the object while the ledger still records [lo, hi) there (#975 F5-04). One site, the "
+    "range rule. tests/archive/db/42 catches it ([0, 95) and [0, 200) over the chunk [0, 100) are not refused).",
+    [("    if pgpm._native_gt(p_kind, l.lo, p_lo) or pgpm._native_gt(p_kind, p_lo, l.lo)\n"
+      "       or pgpm._native_gt(p_kind, l.hi, p_hi) or pgpm._native_gt(p_kind, p_hi, l.hi) then\n",
+      "    if false then\n", 1)],
+)
+MUTATION_SRC["archive_recorded_chunk_range_unchecked"] = "pgpm_archive/install.sql"
 
 
 def main() -> int:

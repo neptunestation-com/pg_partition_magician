@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- **An `archive_fn` strategy no longer writes over a chunk the ledger records unless it reproduces it** (#975,
+  pass 9 F5-03 and F5-04). #969's direct-call guard refused only an empty or inverted range shape, and the
+  whole-key claim admits the same parent and kind, so nothing asked what `pgpm.archive_ledger` recorded at the
+  key a direct `pgpm.archive_to_s3_ndjson` / `_parquet` call would write (Tier 1). After `retire()` dropped an
+  archived partition, a call with the chunk's own `[lo, hi)`, which #969's refusal tells the caller to pass,
+  read no row and PUT an empty object over the only copy of its rows; and on a live archived partition a call
+  with the chunk's `lo` and a shorter `hi` PUT a subset over the chunk while the ledger still recorded
+  `[lo, hi)`, so `retire()` then dropped the rest of the rows with no copy. Both encoders now ask
+  `archive._refuse_recorded_chunk_overwrite` with the key and the read's row count before the PUT: where the
+  ledger records a chunk at that key, only the same `[lo, hi)` (compared natively) with the recorded rows
+  present is written, and anything else is refused, naming the recorded chunk and the key.
+  `tests/archive/db/42` (new) under the guard `bench/archive_recorded_chunk.sh`; mutations
+  `archive_ndjson_recorded_chunk_unchecked`, `archive_parquet_recorded_chunk_unchecked`,
+  `archive_recorded_chunk_rows_unchecked`, `archive_recorded_chunk_range_unchecked`.
+
 - **An export's object key is claimed by the relation it exports, so a namesake cannot export over it** (#976).
   `archive.object_key_claim` claimed a whole key by its parent and its kind only, so after `archive.to_s3` of
   a relation, its `DROP` and a new relation taking its name (the export-then-drop workflow, after which the

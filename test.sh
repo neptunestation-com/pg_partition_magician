@@ -800,6 +800,10 @@ run_archive() {
   # the install's relation backfill taken out.
   echo "--- another relation never exports over an export guard (issue #976) ---"
   bash "$(dirname "$0")/bench/archive_export_key_by_relation.sh" pgpm_test-archive pgpm_perf259 || fail=1
+  # The recorded-chunk guard (#975) re-runs tests/archive/db/42 for the same reason: the clean-code half of the
+  # pairs bench/discriminate.sh completes with each encoder's refusal taken out and each of its two rules dropped.
+  echo "--- no archive_fn strategy writes over a recorded chunk it does not reproduce guard (issue #975) ---"
+  bash "$(dirname "$0")/bench/archive_recorded_chunk.sh" pgpm_test-archive pgpm_perf258 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi
