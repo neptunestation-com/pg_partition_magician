@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **An export's object key is claimed by the relation it exports, so a namesake cannot export over it** (#976).
+  `archive.object_key_claim` claimed a whole key by its parent and its kind only, so after `archive.to_s3` of
+  a relation, its `DROP` and a new relation taking its name (the export-then-drop workflow, after which the
+  object is the only copy of the dropped relation's rows), the same parent's export of the new one read as a
+  re-run and PUT over the first export. The claim now records the relation whose rows the object holds
+  (`relation_oid`: the parent for a chunk, the exported relation for an export); a re-run by the same
+  relation still writes, and another relation's export at that key is refused, at the plain key and at the
+  oid shape alike. Install records the relation of a chunk claim made before the column existed; an export
+  claim's is not known, and every export over it is refused. Test `tests/archive/db/43` (and
+  `tests/archive/db/13` part D, moved to a prefix of its own: its impostor's export over the real child's
+  claimed key is now refused by the claim, before the anchor check it shows), guard
+  `bench/archive_export_key_by_relation.sh`, mutations `archive_export_claim_relation_unchecked` and
+  `archive_chunk_claim_relation_unrecorded` (and `archive_object_key_whole_unclaimed`, re-cut).
+
 - **The archive ledger records the instant its contract check accepted, so `retire()` reads the same coverage
   from every session** (#977). `_archive_step` held an archive_fn's `covered_hi` to its chunk (#454) with a
   parse in the tick's session, then wrote the strategy's text into `pgpm.archive_ledger.hi` verbatim. An

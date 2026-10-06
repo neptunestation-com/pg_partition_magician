@@ -107,12 +107,22 @@ create table if not exists archive.object_key_owner (
 -- So every key is also claimed whole, by its parent and its kind ('chunk' for an archive_fn chunk, 'export'
 -- for a synchronous export), and the same parent re-writing the same kind of object at it (a retried chunk,
 -- a re-run export) is the only writer that finds it its own. Never deleted, for the reason above.
+--
+-- relation_oid is the relation whose rows the object holds (#976): the parent itself for a chunk, the
+-- exported relation for an export. The parent and the kind alone could not tell a re-run export from the
+-- same parent's export of ANOTHER relation (archive._resolve_child accepts any relation in the parent's
+-- schema), so after archive.to_s3 of x, DROP TABLE x and a new relation named x, the new x's export read
+-- as a re-run and PUT over the first export, the only copy of x's rows. Null on a claim made before the
+-- column existed: install records a chunk's (its parent), and an export's is not known, so no export may
+-- write over it (archive._record_claim_relations, archive._owned_key).
 create table if not exists archive.object_key_claim (
-  object_key text        primary key,
-  parent_oid oid         not null,
-  kind       text        not null check (kind in ('chunk', 'export')),
-  claimed_at timestamptz not null default now()
+  object_key   text        primary key,
+  parent_oid   oid         not null,
+  kind         text        not null check (kind in ('chunk', 'export')),
+  claimed_at   timestamptz not null default now(),
+  relation_oid oid
 );
+alter table archive.object_key_claim add column if not exists relation_oid oid;
 
 -- Operator interface for archive.config: an upsert with every connection-setting column as a
 -- named, defaulted parameter, guarding that p_parent is actually pgpm-managed first -- an operator
@@ -2556,15 +2566,18 @@ returns text language sql stable set timezone = 'UTC' set datestyle = 'ISO, MDY'
                    || case when p_lo::timestamptz::text like '% BC' then 'BC' else '' end end;
 $$;
 
--- Claims the whole object key p_key for p_parent's p_kind of object (#890, see archive.object_key_claim and
--- archive._owned_key, below) and returns the claim the key holds afterwards: p_parent's own when it was free
--- or already p_parent's of that kind, another writer's when not. ON CONFLICT waits out a concurrent claim
--- of the same key, and the read after it is a new statement, so it sees that claim once committed.
-create or replace function archive._claim_object_key(p_key text, p_parent regclass, p_kind text)
+-- Claims the whole object key p_key for p_parent's p_kind of object holding the rows of relation p_relation
+-- (#890, #976, see archive.object_key_claim and archive._owned_key, below) and returns the claim the key
+-- holds afterwards: this writer's own when it was free or already this writer's, another writer's when not.
+-- ON CONFLICT waits out a concurrent claim of the same key, and the read after it is a new statement, so it
+-- sees that claim once committed. The three-argument form (#890) recorded no relation and is dropped.
+drop function if exists archive._claim_object_key(text, regclass, text);
+create or replace function archive._claim_object_key(p_key text, p_parent regclass, p_kind text, p_relation oid)
 returns archive.object_key_claim language plpgsql as $$
 declare v archive.object_key_claim;
 begin
-  insert into archive.object_key_claim (object_key, parent_oid, kind) values (p_key, p_parent::oid, p_kind)
+  insert into archive.object_key_claim (object_key, parent_oid, kind, relation_oid)
+    values (p_key, p_parent::oid, p_kind, p_relation)
     on conflict (object_key) do nothing;
   select * into v from archive.object_key_claim k where k.object_key = p_key;
   return v;
@@ -2611,15 +2624,36 @@ $$;
 -- holds is not written: the call takes the oid shape instead, which no other writer's key in the plain shape
 -- can spell (the argument above), and is refused if even that is held. A refusal rolls the call back whole,
 -- so neither claim survives it.
+--
+-- And the parent and the kind are not the writer's whole identity (#976): the same parent exports any
+-- relation in its schema, so a re-run export and the export of a new relation that took a dropped one's
+-- name were one writer to the claim, and the second PUT over the first export, after the documented
+-- export-then-drop workflow the only copy of the dropped relation's rows. So the claim also records the
+-- relation whose rows the object holds (the parent itself for a chunk), resolved here by name in the
+-- parent's schema as archive._resolve_child resolved it, and a key held for another relation of the same
+-- parent and kind is refused outright: the oid shape names the parent, which is this writer too, so there
+-- is no key of its own to divert to. A claim whose relation is unrecorded (made before #976) is refused the
+-- same way, since nothing says the relation now spelling its key is the one it holds.
 create or replace function archive._owned_key(p_parent regclass, p_prefix text, p_child name, p_tail text)
 returns text language plpgsql as $$
-declare v_base_q text; v_owner oid; v_key text; v_held archive.object_key_claim;
-        v_kind text := case when p_child is null then 'chunk' else 'export' end;
+declare v_base_q text; v_owner oid; v_key text; v_held archive.object_key_claim; v_relation oid; v_name name;
+        v_nsp name; v_kind text := case when p_child is null then 'chunk' else 'export' end;
 begin
   select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(coalesce(p_child, c.relname))
     into v_base_q
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
    where c.oid = p_parent;
+  -- the relation whose rows the object holds (#976): the parent for a chunk, the child for an export
+  select n.nspname, coalesce(p_child, c.relname),
+         case when p_child is null then c.oid
+              else (select r.oid from pg_class r where r.relnamespace = n.oid and r.relname = p_child) end
+    into v_nsp, v_name, v_relation
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace
+   where c.oid = p_parent;
+  if v_relation is null then
+    raise exception 'pg_partition_magician: %.% does not exist; no object key is claimed for it',
+      quote_ident(v_nsp), quote_ident(p_child);
+  end if;
   insert into archive.object_key_owner (key_base, parent_oid) values (v_base_q, p_parent::oid)
     on conflict (key_base) do nothing
     returning parent_oid into v_owner;
@@ -2629,14 +2663,19 @@ begin
   v_key := v_base_q
       || case when v_owner is not distinct from p_parent::oid then '' else '.' || p_parent::oid::text end
       || p_tail;
-  v_held := archive._claim_object_key(v_key, p_parent, v_kind);
+  v_held := archive._claim_object_key(v_key, p_parent, v_kind, v_relation);
   if (v_held.parent_oid, v_held.kind) is distinct from (p_parent::oid, v_kind) and v_owner = p_parent::oid then
     v_key := v_base_q || '.' || p_parent::oid::text || p_tail;
-    v_held := archive._claim_object_key(v_key, p_parent, v_kind);
+    v_held := archive._claim_object_key(v_key, p_parent, v_kind, v_relation);
   end if;
   if (v_held.parent_oid, v_held.kind) is distinct from (p_parent::oid, v_kind) then
     raise exception 'pg_partition_magician: the object key % is already claimed by the % of relation %; refusing to write the % of % over it (archive.object_key_claim)',
       v_key, v_held.kind, v_held.parent_oid, v_kind, p_parent;
+  end if;
+  if v_held.relation_oid is distinct from v_relation then
+    raise exception 'pg_partition_magician: the object key % is already claimed by the % of relation % through %; refusing to write the % of %.% (relation %) over it (archive.object_key_claim)',
+      v_key, v_held.kind, coalesce(v_held.relation_oid::text, '(unrecorded)'), p_parent, v_kind,
+      quote_ident(v_nsp), quote_ident(v_name), v_relation;
   end if;
   return v_key;
 end;
@@ -2679,8 +2718,8 @@ do $$ begin perform archive._claim_archived_key_bases(); end $$;
 -- it. Run by install on every (re-)install; claims already made are left as they are.
 create or replace function archive._claim_archived_keys() returns int language sql as $$
   with claimed as (
-    insert into archive.object_key_claim (object_key, parent_oid, kind, claimed_at)
-    select distinct on (l.s3_key) l.s3_key, l.parent_table::oid, 'chunk', l.archived_at
+    insert into archive.object_key_claim (object_key, parent_oid, kind, claimed_at, relation_oid)
+    select distinct on (l.s3_key) l.s3_key, l.parent_table::oid, 'chunk', l.archived_at, l.parent_table::oid
       from pgpm.archive_ledger l
      where l.s3_key is not null
      order by l.s3_key, l.archived_at, l.parent_table::oid
@@ -2689,6 +2728,20 @@ create or replace function archive._claim_archived_keys() returns int language s
   select count(*)::int from claimed;
 $$;
 do $$ begin perform archive._claim_archived_keys(); end $$;
+
+-- Records the relation of every whole-key claim made before archive.object_key_claim had the column (#976),
+-- where it is known: a chunk holds its parent's rows, so its relation is its parent. An export's relation
+-- was never recorded and is not guessed from the name its key spells, which a namesake created after the
+-- export's relation was dropped spells too; it stays null, and archive._owned_key refuses every export
+-- over it. Run by install on every (re-)install; returns how many claims it recorded.
+create or replace function archive._record_claim_relations() returns int language sql as $$
+  with recorded as (
+    update archive.object_key_claim set relation_oid = parent_oid
+     where kind = 'chunk' and relation_oid is null
+    returning 1)
+  select count(*)::int from recorded;
+$$;
+do $$ begin perform archive._record_claim_relations(); end $$;
 
 -- single read, single PUT (optionally one gzip member for the whole body). No pagination, so no
 -- tiebreak is needed: a plain `order by` with no LIMIT never splits a run of ties across pages.

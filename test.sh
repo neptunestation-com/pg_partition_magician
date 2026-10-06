@@ -795,6 +795,11 @@ run_archive() {
   # neutralised and each strategy's range refusal taken out.
   echo "--- pgpm_archive refuses null arguments and empty ranges guard (issue #969) ---"
   bash "$(dirname "$0")/bench/archive_null_arguments.sh" pgpm_test-archive pgpm_perf255 || fail=1
+  # The export-key-by-relation guard (#976) re-runs tests/archive/db/43 for the same reason: the clean-code
+  # half of the pairs bench/discriminate.sh completes with the claim checked by parent and kind only and with
+  # the install's relation backfill taken out.
+  echo "--- another relation never exports over an export guard (issue #976) ---"
+  bash "$(dirname "$0")/bench/archive_export_key_by_relation.sh" pgpm_test-archive pgpm_perf259 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi
