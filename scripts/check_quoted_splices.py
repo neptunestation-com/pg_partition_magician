@@ -33,9 +33,10 @@ predicate, not an identifier list, and its provenance is already legible in the 
 built from. Widening this to "any pre-built SQL fragment" would put the suffix on nearly every local
 in the file, at which point it marks nothing.
 
-Only `text` locals are considered, which is why the declare block is parsed at all: `v_child :=
+Only `text` locals are considered, which is why the declare blocks are parsed at all: `v_child :=
 format('%I.%I', v_nsp, p_child)::regclass` quotes identifiers on its way to an OID, and an OID is not
-a fragment anyone can splice wrong.
+a fragment anyone can splice wrong. Every DECLARE section of a body is read, a nested block's as well
+as the top level's (#1004: a quoted list declared in a nested block was never typed, so never checked).
 
   ./scripts/check_quoted_splices.py            # check the module
   ./scripts/check_quoted_splices.py --selftest # prove the checks fail when their defect is present
@@ -149,18 +150,22 @@ def bodies(text: str):
 
 
 def declared_types(body: str) -> dict:
-    """Map local name -> declared type for the body's top-level DECLARE section."""
-    m = re.search(r"(?is)\bdeclare\b(.*?)\bbegin\b", body)
-    if not m:
-        return {}
+    """Map local name -> the set of types it is declared with, over EVERY DECLARE section of the body.
+
+    A nested `declare ... begin` block declares locals as real as the top-level ones, and reading only
+    the first section left them untyped, so CHECK 1 never judged a quoted list declared there (issue
+    #1004). A name declared in more than one block keeps every type it is given: the checks ask whether
+    it is ever a `text` local, and the assignments are not scoped to the block that declares them.
+    """
     types = {}
-    for decl in m.group(1).split(";"):
-        decl = re.sub(r"(?s):=.*", "", decl).strip()
-        if not decl:
-            continue
-        parts = decl.split()
-        if len(parts) >= 2 and re.fullmatch(r"[a-z_][a-z0-9_]*", parts[0]):
-            types[parts[0]] = " ".join(parts[1:]).lower()
+    for m in re.finditer(r"(?is)\bdeclare\b(.*?)\bbegin\b", body):
+        for decl in m.group(1).split(";"):
+            decl = re.sub(r"(?s):=.*", "", decl).strip()
+            if not decl:
+                continue
+            parts = decl.split()
+            if len(parts) >= 2 and re.fullmatch(r"[a-z_][a-z0-9_]*", parts[0]):
+                types.setdefault(parts[0], set()).add(" ".join(parts[1:]).lower())
     return types
 
 
@@ -223,7 +228,7 @@ def check_text(path_label: str, text: str):
         clean = strip_noise(body)
         types = declared_types(clean)
         for target, expr, pos in assignments(clean):
-            if types.get(target, "") != "text":
+            if "text" not in types.get(target, ()):
                 continue
             line = line_of(text, offset + pos)
             marked = target.endswith("_q")
@@ -255,6 +260,25 @@ $$;
 """
 
 UNMARKED_FIXTURE = CLEAN_FIXTURE.replace("v_cols_q", "v_cols")
+
+# Issue #1004: the #409 shape again, but with the quoted list declared in a NESTED block of a body
+# that has a top-level DECLARE of its own. Typing only the first `declare ... begin` left v_cols
+# untyped, so CHECK 1 never looked at it. The marked twin must stay clean and still be counted, so
+# reading nested blocks is shown to add sight rather than noise.
+NESTED_FIXTURE = """
+create or replace function g() returns bigint language plpgsql as $$
+declare v_n bigint; v_nsp name;
+begin
+  declare v_cols text; v_rel regclass;
+  begin
+    select string_agg(quote_ident(attname), ', ' order by attnum) into v_cols from pg_attribute;
+    execute format('select count(*) from (select %s from %I.t) s', v_cols, v_nsp) into v_n;
+  end;
+  return v_n;
+end;
+$$;
+"""
+NESTED_MARKED_FIXTURE = NESTED_FIXTURE.replace("v_cols", "v_cols_q")
 LYING_FIXTURE = CLEAN_FIXTURE.replace("v_elig text", "v_elig_q text").replace("v_elig :=", "v_elig_q :=")
 
 
@@ -282,6 +306,22 @@ def selftest() -> int:
         failures += 1
     else:
         print("SELFTEST PASS  check 1 catches an unmarked quote_ident'd fragment")
+
+    v, _ = check_text("nested.sql", NESTED_FIXTURE)
+    if not any("not _q-suffixed" in x and "v_cols " in x for x in v):
+        print("SELFTEST FAIL  check 1 did not catch an unmarked quote_ident'd fragment declared in a "
+              "nested block (#1004)")
+        failures += 1
+    else:
+        print("SELFTEST PASS  check 1 catches an unmarked quote_ident'd fragment declared in a nested block")
+
+    v, q = check_text("nested_marked.sql", NESTED_MARKED_FIXTURE)
+    if v or q != 1:
+        print(f"SELFTEST FAIL  the marked nested-block fragment should be clean and counted once, saw "
+              f"{q} quoting assignment(s) and {v}")
+        failures += 1
+    else:
+        print("SELFTEST PASS  a marked fragment declared in a nested block is clean and counted")
 
     # v_elig_q is built with %L and %s off an already-_q variable, so it inherits quoting and must
     # NOT trip check 2. The lying case is the suffix on something with no quoting anywhere near it.

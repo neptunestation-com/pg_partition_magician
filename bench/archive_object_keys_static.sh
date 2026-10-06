@@ -22,6 +22,10 @@
 #                                          selecting archive.config.prefix
 #   archive_key_prefix_by_renamed_param -- a second export key assembled in a function of the file that
 #                                          receives cfg.prefix as p_base
+#   archive_key_prefix_by_execute       -- a second export key built from a prefix read by dynamic SQL,
+#                                          execute 'select prefix from archive.config ...' into v (#1001:
+#                                          the checker lexed every literal as one opaque token, so the
+#                                          prefix inside the literal EXECUTE runs was never read)
 # (A key built with no prefix at all is out of this checker's reach by design; tests/archive/db/39 Part 0
 # enumerates the module's S3 writes for that, guarded by bench/archive_key_owner_every_path.sh.)
 #

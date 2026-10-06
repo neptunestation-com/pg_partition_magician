@@ -25,6 +25,13 @@ parameter had another name assembled a second key it passed). A PREFIX REFERENCE
   * a scalar subquery that selects one (`(select prefix from archive.config where ...)`), where the
     subquery stands.
 
+Dynamic SQL is code (#1001: `execute 'select prefix from archive.config ...' into v` read the prefix
+inside a literal the lexer kept opaque, so a second key built from `v` passed). Every single-quoted
+literal in an EXECUTE's command (up to its INTO, USING or LOOP, format() arguments included) is lexed as
+the SQL it is, in place, and so is every literal assigned to a local that some EXECUTE of the same body
+runs by name (`v_sql := '...'; execute v_sql`). Every other literal stays one opaque token: `raise notice
+'cfg.prefix || x'` and the `'uploads=&prefix='` of a query string are text, not code.
+
 A prefix reference is ASSEMBLY when it
 
   * touches `||` on either side,
@@ -48,7 +55,10 @@ stopped seeing the file must not report a clean sweep of nothing).
 What this cannot see, and tests/archive/db/39 does: a key built with no prefix at all, or a PUT that
 ignores the key it was given. That file takes every path that writes an object through a namesake and
 asserts the first relation's object survives by key and content, and its Part 0 enumerates every S3
-write the installed module makes and requires the key each one gets to come from a key helper.
+write the installed module makes and requires the key each one gets to come from a key helper. Nor does
+this see dynamic SQL whose text is not a literal it can read where EXECUTE runs it: a statement selected
+INTO a local, returned by another function, or spelled in pieces that only name the prefix once
+concatenated (`'select pre' || 'fix'`).
 
   ./scripts/check_archive_object_keys.py              # check pgpm_archive/install.sql
   ./scripts/check_archive_object_keys.py <file.sql>   # check another copy (a mutant, an old release)
@@ -94,8 +104,9 @@ IDENT = re.compile(r'(?:[A-Za-z_][A-Za-z0-9_$]*|"(?:[^"]|"")*")(?:\.(?:[A-Za-z_]
 
 def lex(src):
     """Tokens of a SQL file as (kind, text, line), comments dropped and every string literal one STR
-    token, so nothing inside a comment or a literal is ever read as code. Dollar-quote delimiters are
-    DOLLAR tokens and what they enclose is lexed as code: in this module a $$ body is a function body.
+    token, so nothing inside a comment or a literal is ever read as code (an E-string's text keeps its
+    `E`, for executed_as_code to unescape). Dollar-quote delimiters are DOLLAR tokens and what they
+    enclose is lexed as code: in this module a $$ body is a function body.
     """
     toks, i, n, line = [], 0, len(src), 1
     while i < n:
@@ -134,7 +145,7 @@ def lex(src):
                     break
                 j += 1
             line += src.count("\n", i, j + 1)
-            toks.append(("STR", src[i:j + 1], start))
+            toks.append(("STR", ("E" if estr else "") + src[i:j + 1], start))
             i = j + 1
             continue
         if c == "$":
@@ -162,6 +173,83 @@ def lex(src):
             toks.append(("OP", c, line))
             i += 1
     return toks
+
+
+# What ends an EXECUTE's command expression, at its own parenthesis depth.
+EXEC_END = {"into", "using", "loop"}
+
+
+def _literal_sql(text):
+    """The text a STR token holds, unquoted: '' is a quote, and an E-string's backslash escapes apply."""
+    if text[:1] == "E":
+        inner = re.sub(r"\\(.)", lambda m: {"n": "\n", "t": "\t"}.get(m.group(1), m.group(1)), text[2:-1],
+                       flags=re.S)
+    else:
+        inner = text[1:-1]
+    return inner.replace("''", "'")
+
+
+def _relex(tok):
+    """A STR token's text lexed as code, on the literal's own lines. Dollar quotes inside it are dropped
+    (they must not open or close the enclosing body), and so are its parentheses when they do not balance
+    within the literal (`'... in (' || x || ')'`), so a fragment cannot unbalance the rest of the file."""
+    inner = [(k, t, tok[2] + ln - 1) for k, t, ln in lex(_literal_sql(tok[1])) if k != "DOLLAR"]
+    depth, balanced = 0, True
+    for _, t, _ in inner:
+        depth += (t == "(") - (t == ")")
+        balanced = balanced and depth >= 0
+    if depth or not balanced:
+        inner = [x for x in inner if x[1] not in ("(", ")")]
+    return inner
+
+
+def executed_as_code(toks):
+    """The tokens with every literal EXECUTE runs replaced by its own tokens (#1001): each STR in an
+    EXECUTE's command up to its INTO, USING or LOOP, and each STR assigned to a local that an EXECUTE of
+    the same dollar-quoted body runs by name. Everything else is returned as it was."""
+    def tok(i):
+        return toks[i] if 0 <= i < len(toks) else ("", "", 0)
+
+    spans, tag, start = [], None, 0
+    for k, (kind, text, _) in enumerate(toks):
+        if kind == "DOLLAR":
+            if tag is None:
+                tag, start = text, k + 1
+            elif text == tag:
+                spans.append((start, k))
+                tag = None
+    code = set()
+    for a, b in spans:
+        run = {tok(k + 1)[1] for k in range(a, b)
+               if toks[k] == ("ID", "execute", toks[k][2]) and tok(k + 1)[0] == "ID"
+               and tok(k + 2)[1] in EXEC_END | {";"}}
+        for k in range(a, b):
+            kind, text, _ = toks[k]
+            if kind != "ID":
+                continue
+            if text == "execute":
+                depth, j = 0, k + 1
+                while j < b:
+                    t = toks[j]
+                    if t[1] == "(":
+                        depth += 1
+                    elif t[1] == ")":
+                        depth -= 1
+                    elif depth <= 0 and (t[1] == ";" or (t[0] == "ID" and t[1] in EXEC_END)):
+                        break
+                    if t[0] == "STR":
+                        code.add(j)
+                    j += 1
+            elif text in run and tok(k - 1)[1] in STATEMENT_STARTS:
+                j = k + 1
+                while j < b and toks[j][1] != ";":
+                    if toks[j][0] == "STR":
+                        code.add(j)
+                    j += 1
+    out = []
+    for k, t in enumerate(toks):
+        out.extend(_relex(t) if k in code else [t])
+    return out
 
 
 def functions(toks):
@@ -209,7 +297,7 @@ def scan(src):
     prefix at any call site carries the prefix inside that function, whatever it is named, and a scalar
     subquery that selects the prefix is a prefix reference where it stands. That takes a fixed point,
     since a parameter that carries it can hand it on to another function's parameter."""
-    toks = lex(src)
+    toks = executed_as_code(lex(src))
     defined = functions(toks)
     carriers = {}   # function name -> the parameter names that carry a prefix into it
     while True:
@@ -584,6 +672,80 @@ create or replace function archive.to_s3_manifest(p_parent regclass, p_child nam
 $$;
 """)
 
+# Real instance: review pass 9 (F8-02, issue #1001). The prefix read by dynamic SQL: the literal EXECUTE
+# runs is code, and the pre-#1001 lexer read it as one opaque string, so `prefix` was never seen at all.
+EXECUTED_SECOND = with_extra(r"""
+create or replace function archive.f8_second_key(p_parent regclass, p_child name) returns text
+language plpgsql as $$
+declare v_base text;
+begin
+  execute 'select prefix from archive.config where parent_table = $1' into v_base using p_parent;
+  return v_base || quote_ident(p_child) || '.ndjson';
+end;
+$$;
+""")
+
+# The same statement held in a local first, and the column named by a format() argument: both literals
+# reach EXECUTE, so both are code.
+EXECUTED_VIA_LOCAL = with_extra(r"""
+create or replace function archive._sql_key(p_parent regclass, p_child name) returns text
+language plpgsql as $$
+declare v_sql text; v_base text;
+begin
+  v_sql := 'select prefix from archive.config where parent_table = $1';
+  execute v_sql into v_base using p_parent;
+  return v_base || quote_ident(p_child);
+end;
+$$;
+""")
+
+EXECUTED_FORMAT_ARG = with_extra(r"""
+create or replace function archive._fmt_key(p_parent regclass, p_child name) returns text
+language plpgsql as $$
+declare v_base text;
+begin
+  execute format('select %I from archive.config where parent_table = $1', 'prefix') into v_base using p_parent;
+  return v_base || quote_ident(p_child);
+end;
+$$;
+""")
+
+# Dynamic SQL that reads the config but not the prefix, and a literal naming the prefix that is NOT
+# executed: reading executed literals as code must not turn either into a key.
+EXECUTED_CLEAN = with_extra(r"""
+create or replace function archive._bucket_of(p_parent regclass) returns boolean
+language plpgsql as $$
+declare v_b text; v_sql text;
+begin
+  execute 'select bucket from archive.config where parent_table = $1' into v_b using p_parent;
+  v_sql := 'select ''unrelated'' where $1 is not null';
+  execute v_sql using v_b;
+  for v_b in execute format('select %I from archive.config', 'bucket') loop
+    raise notice 'prefix read: %', 'cfg.prefix || p_child';
+  end loop;
+  return v_b is not null;
+end;
+$$;
+""")
+
+# Executed fragments that are not whole statements. A dollar quote inside one must not end the body it
+# sits in (the owner's claim, after it, would be read at top level and the owner judged as never
+# claiming), and a parenthesis it closes but did not open must not close the format( around it (the
+# prefix argument after it would be judged outside any call, and the second key missed).
+OWNER_EXECUTES_DOLLAR = CLEAN.replace("""  insert into archive.object_key_owner""",
+                                      """  execute 'select $$' || p_tail || '$$';
+  insert into archive.object_key_owner""")
+UNPAIRED_PAREN_SECOND = with_extra(r"""
+create or replace function archive._split_key(p_parent regclass) returns text language plpgsql as $$
+declare cfg archive.config; v_key text;
+begin
+  select * into cfg from archive.config where parent_table = p_parent;
+  execute format('select %L' || ')', cfg.prefix) into v_key;
+  return v_key;
+end;
+$$;
+""")
+
 NO_CLAIM = CLEAN.replace("""  insert into archive.object_key_owner (key_base, parent_oid) values (v_base_q, p_parent::oid)
     on conflict (key_base) do nothing returning parent_oid into v_owner;
 """, "")
@@ -628,6 +790,18 @@ def selftest():
     expect("the prefix selected out as a column", SELECTED_OUT, False, "selected out")
     expect("the prefix carried under other names to the key function only", CARRIED_CLEAN, True,
            owner="archive._owned_key")
+    expect("F8-02: a second assembly reading the prefix through EXECUTE '<select prefix ...>'",
+           EXECUTED_SECOND, False, "archive.f8_second_key (line")
+    expect("a second assembly reading the prefix through a local that EXECUTE runs", EXECUTED_VIA_LOCAL,
+           False, "archive._sql_key (line")
+    expect("a second assembly naming the prefix in a format() argument EXECUTE runs", EXECUTED_FORMAT_ARG,
+           False, "archive._fmt_key (line")
+    expect("dynamic SQL that reads the config but not the prefix", EXECUTED_CLEAN, True,
+           owner="archive._owned_key")
+    expect("a dollar quote inside an executed literal does not end the owner's body", OWNER_EXECUTES_DOLLAR,
+           True, owner="archive._owned_key")
+    expect("an unpaired parenthesis in an executed literal does not hide the format() around it",
+           UNPAIRED_PAREN_SECOND, False, "archive._split_key (line")
     expect("the one assembling function never claims", NO_CLAIM, False, "never names archive.object_key_owner")
     expect("no assembly visible at all", NO_ASSEMBLY, False, "no function assembles")
 
