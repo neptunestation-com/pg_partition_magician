@@ -978,47 +978,50 @@ $$;
 
 -- The bounds above are ordered by base-N place value, which is bytewise for every alphabet pgpm
 -- documents (0-9 < A-Z < a-z in ASCII). A RANGE partition on a text column compares under the column's
--- COLLATION, and the two agree only when the collation orders the digit alphabet the way the arithmetic
+-- COLLATION, and the two agree only when the collation orders the digit strings the way the arithmetic
 -- does. en_US (glibc and ICU alike) weighs case below letter identity, so 'a' sorts before 'P' while
 -- base62 puts a = 36 above P = 25: random-payload KSUIDs on a default-collation database fail the
 -- pgpm_monolith_bound CHECK at VALIDATE, and a small table that happens to pass routes rows to the wrong
--- month, where retain drops them early (issue #456). Single-case alphabets (cuid's 0-9a-z, ULID's
--- Crockford upper, ObjectId's hex) order the same way under both. transmute and check_text_time both
+-- month, where retain drops them early (issue #456). A single-case alphabet is not safe by itself
+-- either: under da-x-icu 'aa' is one letter (a-ring, after 'z'), so the hex string '69aa0000' sorts after
+-- '69cc6000', and under cs-x-icu 'ch' sorts after 'h' (issue #639). transmute and check_text_time both
 -- refuse through this before anything is touched.
 --
--- The comparison is of STRINGS at the declared width, not of single characters: the largest string
--- whose first digit is c[i] must sort before the smallest whose first digit is c[i+1], that is
--- '<prefix>c[i]<max digit>...' < '<prefix>c[i+1]<zero digit>...'. A single-character test is not
--- enough, because a multi-level collation can order two characters at a secondary or tertiary level
--- (case, accent) and then let a difference at a LATER position, compared at the primary level first,
--- override it: under en_US 'a' < 'A' and yet 'aZ' > 'Ab'. The string form fails exactly when the two
--- digits are not separated at the primary level, which is the condition fixed-width digit strings
--- need. Adjacent pairs suffice, since primary weights are transitive. The other property the bounds
--- rely on, that a string sorts before any longer string extending it, needs no check here: every
--- collation PostgreSQL offers is deterministic unless created otherwise, and a deterministic collation
--- breaks a tie at every level bytewise, where the shorter string is less.
---
--- That argument assumes the collation compares position by position. An ICU collation with numeric
--- ordering ('und-u-kn-true', or any locale carrying -u-kn-true, possible as a database default on 15+)
--- does not: it weighs a RUN of decimal digits by its value, so 'ck9abcde' < 'ck10000'. The probe above
--- passes it (the zero padding extends the higher digit's run, and 1 < 2000...), and cuid rows were
--- routed a month early (issue #568). Two more probes per adjacent pair catch a run weighed by value:
--- the opposite padding, '<prefix>c[i]<zero>...' < '<prefix>c[i+1]<max>...' (a lower cell's bound
--- against a higher cell's value; under numeric ordering 1000... > 2 when the max digit is a letter),
--- and '<prefix>c[i]<max>...<s>' < '<prefix>c[i+1]<zero>...' for every digit s (a lower cell's value,
--- which a real id always extends with more characters, against the next cell's bound; this is what
--- catches a pure-decimal alphabet, whose paddings are digits either way). Both hold under any collation
--- that compares position by position with the digits separated at the primary level, so neither can
--- refuse a collation the first probe accepts for that reason.
+-- This is a PROOF for the alphabet and prefix in use, not a set of probes. Every string of one and of two
+-- digits behind the prefix is listed in place-value order (a string before every string extending it,
+-- then by digit), and each must sort strictly before the next under the column's collation; collations
+-- are total orders, so the chain holding means the collation sorts all of them the way place value does.
+-- What that covers, for a collation that compares strings as sequences of collation elements level by
+-- level (every libc and ICU collation PostgreSQL offers):
+--   * case and accent weights: 'AZ' against 'Aa' is the en_US base62 refusal (two digits not separated
+--     at the primary level let a later position decide);
+--   * any CONTRACTION of two characters at any position: the comparison of 'aa' against 'ab' is what
+--     misorders '69aa0000' against '69ab0000', and a contraction of the prefix's last character with
+--     the first digit is listed too (prefix 'c' and digit 'h' under cs-x-icu);
+--   * a digit the collation ignores at the primary level (glibc's en_US does that to punctuation such as
+--     '-' and '_', and so does an ICU collation with alternate=shifted): the ignored digit lets its
+--     neighbour decide, so '-9' sorts after '0' for the alphabet '-0123456789';
+--   * numeric ordering ('und-u-kn-true', or any locale carrying -u-kn-true, possible as a database
+--     default on 15+), which weighs a RUN of decimal digits by its value: '09' sorts after '0a', and for
+--     a pure decimal alphabet '09' after '1' (issue #568, where cuid rows were routed a month early);
+--   * a string sorting before every longer one extending it, which the bounds rely on because a real id
+--     extends its bound with more characters.
+-- And it stays exact: a collation that does order the alphabet passes, so en_US keeps cuid, ULID and hex,
+-- and cs-x-icu keeps hex (its one contraction is 'ch'). What it does NOT cover: a contraction of THREE or
+-- more characters whose two-character prefixes are not contractions themselves, and a contraction of a
+-- digit with a character outside the alphabet that follows the encoded field. (Hungarian's 'dzs', for
+-- one, begins with 'dz', which the proof does find.) A column that needs certainty about either goes on
+-- collate "C", which is bytewise by construction.
+-- p_width is not read: the proof is about the order of digits, and holds at any width.
 create or replace function pgpm._check_text_time_collation(
   p_table regclass, p_control name, p_prefix text, p_width int, p_radix int, p_alphabet text default null)
 returns void language plpgsql as $$
 declare
-  v_alphabet text; v_collnsp name; v_collname name; v_coll_q text; v_dbloc text; v_coltype text; v_pad int;
-  v_bad_i int; v_bad_c1 text; v_bad_c2 text; v_bad_lo text; v_bad_hi text;
+  v_alphabet text; v_prefix text; v_collnsp name; v_collname name; v_coll_q text; v_dbloc text; v_coltype text;
+  v_bad_lo text; v_bad_hi text; v_pos int; v_rule text;
 begin
   v_alphabet := coalesce(p_alphabet, substr('0123456789abcdefghijklmnopqrstuvwxyz', 1, p_radix));
-  v_pad := greatest(coalesce(p_width, 1), 1) - 1;
+  v_prefix := coalesce(p_prefix, '');
   select n.nspname, co.collname, format_type(a.atttypid, a.atttypmod)
     into v_collnsp, v_collname, v_coltype
     from pg_attribute a
@@ -1037,33 +1040,40 @@ begin
     select coalesce(j->>'datlocale', j->>'daticulocale', j->>'datcollate') into v_dbloc
       from (select to_jsonb(d) as j from pg_database d where d.datname = current_database()) x;
   end if;
-  -- %4$s is the max-digit padding, %6$s the zero-digit padding; each probe row is (pair, lower string,
-  -- higher string), and the first pair with any probe the collation does not order strictly is reported.
+  -- The place-value order of the one- and two-digit strings: digit i alone at k = i * (n + 1), then
+  -- digit i followed by digit j at k = i * (n + 1) + j. The first adjacent pair the collation does not
+  -- order strictly is reported.
   execute format($q$
     with d(i, c) as (select i, substr(%1$L, i, 1) from generate_series(1, %2$s) as i),
-    probe(i, c1, c2, n, lo, hi) as (
-      select x.i, x.c, y.c, 0, %3$L || x.c || %4$L, %3$L || y.c || %6$L
-        from d x join d y on y.i = x.i + 1
+    s(k, v) as (
+      select x.i * (%2$s + 1), %3$L || x.c from d x
       union all
-      select x.i, x.c, y.c, 1, %3$L || x.c || %6$L, %3$L || y.c || %4$L
-        from d x join d y on y.i = x.i + 1
-      union all
-      select x.i, x.c, y.c, 2 + s.i, %3$L || x.c || %4$L || s.c, %3$L || y.c || %6$L
-        from d x join d y on y.i = x.i + 1 cross join d s
-    )
-    select i, c1, c2, lo, hi
-      from probe
-     where not ((lo::text collate %5$s) < (hi::text collate %5$s))
-     order by i, n limit 1
-  $q$, v_alphabet, length(v_alphabet), coalesce(p_prefix, ''),
-       repeat(substr(v_alphabet, length(v_alphabet), 1), v_pad), v_coll_q, repeat(substr(v_alphabet, 1, 1), v_pad))
-  into v_bad_i, v_bad_c1, v_bad_c2, v_bad_lo, v_bad_hi;
-  if v_bad_i is not null then
-    raise exception 'pg_partition_magician: column %.% has collation %, which does not order the text_time digit alphabet the way base-% place value does: digit % (value %) must sort before digit % (value %) in every position, and under that collation it does not (% does not sort before %). RANGE bounds on a text column compare under the column''s collation while the encoded timestamp orders bytewise, so rows would be routed to the wrong partition: the pgpm_monolith_bound check fails at VALIDATE, or on a table that passes it, rows land in a neighbouring partition and retention drops them early. Give the column a bytewise collation: alter table % alter column % type % collate "C" (rewrites the table), or create the column with collate "C" to begin with.',
+      select x.i * (%2$s + 1) + y.i, %3$L || x.c || y.c from d x cross join d y
+    ),
+    chain(k, lo, hi) as (select k, v, lead(v) over (order by k) from s)
+    select lo, hi
+      from chain
+     where hi is not null and not ((lo::text collate %4$s) < (hi::text collate %4$s))
+     order by k limit 1
+  $q$, v_alphabet, length(v_alphabet), v_prefix, v_coll_q)
+  into v_bad_lo, v_bad_hi;
+  if v_bad_lo is not null then
+    -- the pair either differs at some digit, which names the two digits, or the second extends the first
+    v_pos := length(v_prefix) + 1;
+    while v_pos <= length(v_bad_lo) and substr(v_bad_lo, v_pos, 1) = substr(v_bad_hi, v_pos, 1) loop
+      v_pos := v_pos + 1;
+    end loop;
+    if v_pos <= length(v_bad_lo) then
+      v_rule := format('digit %s (value %s) must sort before digit %s (value %s) in every position',
+        quote_literal(substr(v_bad_lo, v_pos, 1)), strpos(v_alphabet, substr(v_bad_lo, v_pos, 1)) - 1,
+        quote_literal(substr(v_bad_hi, v_pos, 1)), strpos(v_alphabet, substr(v_bad_hi, v_pos, 1)) - 1);
+    else
+      v_rule := 'a digit string must sort before every longer one that begins with it';
+    end if;
+    raise exception 'pg_partition_magician: column %.% has collation %, which does not order the text_time digit alphabet the way base-% place value does: %, and under that collation it does not (% does not sort before %). RANGE bounds on a text column compare under the column''s collation while the encoded timestamp orders bytewise, so rows would be routed to the wrong partition: the pgpm_monolith_bound check fails at VALIDATE, or on a table that passes it, rows land in a neighbouring partition and retention drops them early. Give the column a bytewise collation: alter table % alter column % type % collate "C" (rewrites the table), or create the column with collate "C" to begin with.',
       p_table::text, quote_ident(p_control),
       case when v_dbloc is not null then format('"default" (the database default, %s)', v_dbloc) else quote_ident(v_collname) end,
-      length(v_alphabet), quote_literal(v_bad_c1), v_bad_i - 1, quote_literal(v_bad_c2), v_bad_i,
-      quote_literal(v_bad_lo), quote_literal(v_bad_hi),
+      length(v_alphabet), v_rule, quote_literal(v_bad_lo), quote_literal(v_bad_hi),
       p_table::text, quote_ident(p_control), v_coltype;
   end if;
 end;
