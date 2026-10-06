@@ -12,9 +12,9 @@
 --   B. a real statement_timeout mid-export, the issue's own shape;
 --   C. a transport error raised on part 3 while a cancel is already pending, so the cancel surfaces
 --      at the handler's first statement (deterministic).
--- A stand-in for the http extension's http(http_request), ahead of public in search_path (the
--- signers call it unqualified), forwards every request to the real one against MinIO and counts
--- initiates, part PUTs and abort DELETEs in sequences, which a rolled-back export cannot undo. For A
+-- A stand-in for the http extension's http(http_request), in the place of the module's transport,
+-- archive._s3_send (the one place every request goes through, #984), forwards every request to the
+-- real one against MinIO and counts initiates, part PUTs and abort DELETEs in sequences, which a rolled-back export cannot undo. For A
 -- and C it also lists the uploads in flight at the export's key at the moment it breaks the export,
 -- so "nothing in flight afterwards" is paired with "one in flight when the export broke". Each key is
 -- cleared of stale uploads and witnessed clean first, because the bucket outlives a test database.
@@ -22,7 +22,7 @@ select plan(17);
 
 create schema t24;
 
--- a signed request through the REAL transport (the signer, while search_path is the default)
+-- a signed request through the REAL transport (the signer, while the stand-in is switched off)
 create function t24.req(p_parent regclass, p_method text, p_key text, p_query text) returns http_response
 language plpgsql as $$
 declare cfg archive.config; v_key_id text; v_secret text;
@@ -123,22 +123,26 @@ begin
   return v_resp;
 end $$;
 
+-- The stand-in takes the place of the module's transport, archive._s3_send, while t24.standin is on
+-- (#984: the signers reach the http extension only through it, never through search_path).
+select mk_transport_standin('t24');
+
 create temp table outcome (label text primary key, sqlstate text, msg text);
 
--- one export under the stand-in, its outcome recorded. search_path is set inside the call (SET LOCAL
+-- one export under the stand-in, its outcome recorded. t24.standin is set inside the call (SET LOCAL
 -- semantics through set_config) so the stand-in is in the way of the export and of nothing else.
 create procedure t24.export(p_label text, p_parent text) language plpgsql as $$
 declare v_child text;
 begin
   select child_name into v_child from pgpm.part where parent_table = p_parent::regclass order by lo::numeric limit 1;
-  perform set_config('search_path', 't24, public', true);
+  perform set_config('t24.standin', 'on', true);
   begin
     perform archive.to_s3(p_parent::regclass, v_child, '0', '100000');
     insert into outcome values (p_label, '00000', 'returned');
   exception when query_canceled or others then
     insert into outcome values (p_label, sqlstate, sqlerrm);
   end;
-  perform set_config('search_path', 'public', true);
+  perform set_config('t24.standin', 'off', true);
 end $$;
 
 -- --- fixtures: three tables, one multipart export each -------------------------------------------

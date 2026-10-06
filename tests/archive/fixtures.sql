@@ -50,3 +50,31 @@ begin
     p_endpoint => 'http://minio:9000', p_prefix => p_name || '/', p_compress => p_compress);
 end;
 $$;
+
+-- Puts <p_schema>.http(http_request), a test's stand-in for the store, in the place of pgpm_archive's
+-- transport (#984). The module reaches the http extension only through archive._s3_send, in the extension's
+-- own schema and never through search_path, so a stand-in can no longer be slipped ahead of it on the path.
+-- Instead the real transport is renamed aside to archive._s3_send_real, and a replacement routes each
+-- request to the stand-in while the setting <p_schema>.standin is 'on', and to the real transport
+-- otherwise. The replacement keeps the search_path it is created under (FROM CURRENT, the test's own), so
+-- the http types it and the stand-in name resolve there: the signers that call it run under pg_catalog
+-- alone. For a test's own database only; returns nothing.
+create or replace function mk_transport_standin(p_schema name) returns void language plpgsql as $fn$
+begin
+  alter function archive._s3_send(text, text, text, text, text, text, bytea) rename to _s3_send_real;
+  execute format($f$
+    create function archive._s3_send(p_method text, p_url text, p_amz_date text, p_payload_hash text, p_auth text,
+                                     p_ctype text, p_body bytea)
+    returns http_response language plpgsql set search_path from current as $b$
+    begin
+      if current_setting(%L, true) = 'on' then
+        perform http_set_curlopt('CURLOPT_TIMEOUT_MS', '300000');   -- as the real transport does, for a forwarding stand-in
+        return %I.http((p_method::http_method, p_url,
+                        array[http_header('x-amz-date', p_amz_date), http_header('x-amz-content-sha256', p_payload_hash),
+                              http_header('authorization', p_auth)],
+                        p_ctype, bytea_to_text(p_body))::http_request);
+      end if;
+      return archive._s3_send_real(p_method, p_url, p_amz_date, p_payload_hash, p_auth, p_ctype, p_body);
+    end $b$ $f$, p_schema || '.standin', p_schema);
+end;
+$fn$;

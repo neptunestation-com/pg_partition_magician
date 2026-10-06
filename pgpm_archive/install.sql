@@ -261,6 +261,78 @@ returns text language sql immutable as $$
     from unnest(string_to_array(p_key, '/')) with ordinality as t(seg, ord);
 $$;
 
+-- The two extensions this module depends on, pgcrypto (digest, hmac) and http (http, http_set_curlopt,
+-- bytea_to_text and the http_* types), are reached through their OWN schemas, read from pg_extension at
+-- call time, never through the caller's search_path (#984). The signers below used to call them
+-- unqualified in functions that pinned no search_path, so they resolved through whatever path the calling
+-- session had: a function hmac(bytea, bytea, text) that any role could create in a schema ahead of
+-- pgcrypto's on that path (or a convert_to(text, name) ahead of an explicitly listed pg_catalog) was handed
+-- 'AWS4' || <the S3 secret key> and ran with the caller's privileges, a maintain() tick or a pg_cron job
+-- among them; and a session whose path did not name the extensions' schema at all (`set search_path = app`)
+-- could not resolve http_response, so every archive call failed and the tick logged skip_archive forever.
+-- So the signers and these helpers pin search_path to pg_catalog (pg_temp last, so a temporary object can
+-- never shadow a builtin either), the function-level SET core's _fk_definition uses, and every extension
+-- object is called as <its schema>.<name> with that schema looked up per call: an install-time pin would
+-- go stale the day pgcrypto is moved with ALTER EXTENSION ... SET SCHEMA (http cannot be), and leave the
+-- old schema named where anyone able to create in it could plant the shadow again. The functions that only receive a
+-- response (archive.to_s3 and the rest) name none of the http types any more: they hold it in a record.
+create or replace function archive._extension_schema(p_extension name)
+returns name language plpgsql stable set search_path = pg_catalog, pg_temp as $$
+declare v_nsp name;
+begin
+  select n.nspname into v_nsp
+    from pg_catalog.pg_extension e join pg_catalog.pg_namespace n on n.oid = e.extnamespace
+   where e.extname = p_extension;
+  if v_nsp is null then
+    raise exception 'pg_partition_magician: pgpm_archive needs the % extension, and it is not installed in database %',
+      p_extension, current_database();
+  end if;
+  return v_nsp;
+end;
+$$;
+
+-- SHA-256 of p_data, and HMAC-SHA256 of p_data under p_key: pgcrypto's digest() and hmac(), called in
+-- pgcrypto's own schema (above). p_key of the first HMAC of a signature is 'AWS4' || the secret key.
+create or replace function archive._sha256(p_data bytea)
+returns bytea language plpgsql stable set search_path = pg_catalog, pg_temp as $$
+declare v_out bytea;
+begin
+  execute format('select %I.digest($1, %L)', archive._extension_schema('pgcrypto'), 'sha256') into v_out using p_data;
+  return v_out;
+end;
+$$;
+
+create or replace function archive._hmac_sha256(p_data bytea, p_key bytea)
+returns bytea language plpgsql stable set search_path = pg_catalog, pg_temp as $$
+declare v_out bytea;
+begin
+  execute format('select %I.hmac($1, $2, %L)', archive._extension_schema('pgcrypto'), 'sha256') into v_out using p_data, p_key;
+  return v_out;
+end;
+$$;
+
+-- The transport: one signed request, assembled from the http extension's types and sent with its http(),
+-- all in the extension's own schema (above). p_body is the payload's bytes, crossed to text at the wire by
+-- the extension's bytea_to_text (a raw copy, see archive.s3_signed_request_bytea). Every request this
+-- module sends goes through here and nowhere else: the two signers are its only callers (tests/archive/db/39
+-- Part 0 starts its scan of the module's S3 requests from this function), and it is the one place a test
+-- puts a stand-in for the store (tests/archive/fixtures.sql's mk_transport_standin).
+create or replace function archive._s3_send(
+  p_method text, p_url text, p_amz_date text, p_payload_hash text, p_auth text, p_ctype text, p_body bytea
+) returns http_response language plpgsql set search_path = pg_catalog, pg_temp as $$
+declare v_http name := archive._extension_schema('http'); v_resp record;
+begin
+  execute format('select %I.http_set_curlopt(%L, %L)', v_http, 'CURLOPT_TIMEOUT_MS', '300000');   -- default is 5s; size for real parts
+  execute format(
+    'select r.* from %1$I.http(($1::%1$I.http_method, $2,'
+    ' array[%1$I.http_header(%2$L, $3), %1$I.http_header(%3$L, $4), %1$I.http_header(%4$L, $5)],'
+    ' $6, %1$I.bytea_to_text($7))::%1$I.http_request) r',
+    v_http, 'x-amz-date', 'x-amz-content-sha256', 'authorization')
+    into v_resp using p_method, p_url, p_amz_date, p_payload_hash, p_auth, p_ctype, p_body;
+  return v_resp;
+end;
+$$;
+
 -- One signed S3 request. p_query must already be the CANONICAL query string (keys sorted,
 -- keys and values percent-encoded, '' for none); it is used verbatim in both the signature
 -- and the URL, so they cannot drift apart.
@@ -268,13 +340,12 @@ create or replace function archive.s3_signed_request(
   p_method text, p_endpoint text, p_bucket text, p_region text,
   p_key text, p_query text, p_ctype text, p_payload text,
   p_key_id text, p_secret text
-) returns http_response language plpgsql as $$
+) returns http_response language plpgsql set search_path = pg_catalog, pg_temp as $$   -- #984, above
 declare
   v_host text; v_uri text; v_url text;
   v_amz_date text; v_date text; v_payload_hash text; v_scope text;
   v_signed_headers text := 'content-type;host;x-amz-content-sha256;x-amz-date';
   v_canonical text; v_sts text; v_kbin bytea; v_sig text; v_auth text;
-  v_resp http_response;
 begin
   -- #969: refused before anything is signed or sent; p_endpoint (null = AWS S3, virtual-hosted) is not. A
   -- null anywhere else made the URL, the canonical request or the signature null, or sent a request with
@@ -302,7 +373,7 @@ begin
   -- the fifteenth minute refused (#520). The credential scope's date is derived from this same stamp.
   v_amz_date     := to_char(clock_timestamp() at time zone 'utc', 'YYYYMMDD"T"HH24MISS"Z"');
   v_date         := substr(v_amz_date, 1, 8);
-  v_payload_hash := encode(digest(convert_to(p_payload, 'UTF8'), 'sha256'), 'hex');
+  v_payload_hash := encode(archive._sha256(convert_to(p_payload, 'UTF8')), 'hex');
   v_scope        := v_date || '/' || p_region || '/s3/aws4_request';
   v_canonical    := p_method || e'\n' || v_uri || e'\n' || p_query || e'\n'
                  || 'content-type:' || p_ctype || e'\n'
@@ -311,16 +382,14 @@ begin
                  || 'x-amz-date:' || v_amz_date || e'\n'
                  || e'\n' || v_signed_headers || e'\n' || v_payload_hash;
   v_sts          := 'AWS4-HMAC-SHA256' || e'\n' || v_amz_date || e'\n' || v_scope || e'\n'
-                 || encode(digest(convert_to(v_canonical, 'UTF8'), 'sha256'), 'hex');
-  v_kbin := hmac(convert_to(v_date, 'UTF8'),        convert_to('AWS4' || p_secret, 'UTF8'), 'sha256');
-  v_kbin := hmac(convert_to(p_region, 'UTF8'),      v_kbin, 'sha256');
-  v_kbin := hmac(convert_to('s3', 'UTF8'),          v_kbin, 'sha256');
-  v_kbin := hmac(convert_to('aws4_request', 'UTF8'), v_kbin, 'sha256');
-  v_sig  := encode(hmac(convert_to(v_sts, 'UTF8'), v_kbin, 'sha256'), 'hex');
+                 || encode(archive._sha256(convert_to(v_canonical, 'UTF8')), 'hex');
+  v_kbin := archive._hmac_sha256(convert_to(v_date, 'UTF8'),        convert_to('AWS4' || p_secret, 'UTF8'));
+  v_kbin := archive._hmac_sha256(convert_to(p_region, 'UTF8'),      v_kbin);
+  v_kbin := archive._hmac_sha256(convert_to('s3', 'UTF8'),          v_kbin);
+  v_kbin := archive._hmac_sha256(convert_to('aws4_request', 'UTF8'), v_kbin);
+  v_sig  := encode(archive._hmac_sha256(convert_to(v_sts, 'UTF8'), v_kbin), 'hex');
   v_auth := 'AWS4-HMAC-SHA256 Credential=' || p_key_id || '/' || v_scope
          || ', SignedHeaders=' || v_signed_headers || ', Signature=' || v_sig;
-
-  perform http_set_curlopt('CURLOPT_TIMEOUT_MS', '300000');   -- default is 5s; size for real parts
 
   -- The body on the wire is the very bytes v_payload_hash was computed over: the payload's UTF-8
   -- encoding, crossed to text the way the bytea signer below crosses it (bytea_to_text, a raw copy).
@@ -328,13 +397,7 @@ begin
   -- in a LATIN1 one every body holding a non-ASCII character was refused (400
   -- XAmzContentSHA256Mismatch), and the uncompressed NDJSON strategy, which sends a chunk through this
   -- signer, wedged its table on every tick (#728).
-  select * into v_resp from http((
-    p_method::http_method, v_url,
-    array[ http_header('x-amz-date', v_amz_date),
-           http_header('x-amz-content-sha256', v_payload_hash),
-           http_header('authorization', v_auth) ],
-    p_ctype, bytea_to_text(convert_to(p_payload, 'UTF8')))::http_request);
-  return v_resp;
+  return archive._s3_send(p_method, v_url, v_amz_date, v_payload_hash, v_auth, p_ctype, convert_to(p_payload, 'UTF8'));
 end;
 $$;
 
@@ -355,13 +418,12 @@ create or replace function archive.s3_signed_request_bytea(
   p_method text, p_endpoint text, p_bucket text, p_region text,
   p_key text, p_query text, p_ctype text, p_payload bytea,
   p_key_id text, p_secret text
-) returns http_response language plpgsql as $$
+) returns http_response language plpgsql set search_path = pg_catalog, pg_temp as $$   -- #984, above
 declare
   v_host text; v_uri text; v_url text;
   v_amz_date text; v_date text; v_payload_hash text; v_scope text;
   v_signed_headers text := 'content-type;host;x-amz-content-sha256;x-amz-date';
   v_canonical text; v_sts text; v_kbin bytea; v_sig text; v_auth text;
-  v_resp http_response;
 begin
   -- #969: as archive.s3_signed_request's, the payload again handed over as its length
   perform pgpm._refuse_null_arguments('archive.s3_signed_request_bytea', json_build_object(
@@ -381,7 +443,7 @@ begin
   -- the wall clock, as in archive.s3_signed_request above (#520)
   v_amz_date     := to_char(clock_timestamp() at time zone 'utc', 'YYYYMMDD"T"HH24MISS"Z"');
   v_date         := substr(v_amz_date, 1, 8);
-  v_payload_hash := encode(digest(p_payload, 'sha256'), 'hex');   -- bytea-native: no encoding involved
+  v_payload_hash := encode(archive._sha256(p_payload), 'hex');   -- bytea-native: no encoding involved
   v_scope        := v_date || '/' || p_region || '/s3/aws4_request';
   v_canonical    := p_method || e'\n' || v_uri || e'\n' || p_query || e'\n'
                  || 'content-type:' || p_ctype || e'\n'
@@ -390,24 +452,17 @@ begin
                  || 'x-amz-date:' || v_amz_date || e'\n'
                  || e'\n' || v_signed_headers || e'\n' || v_payload_hash;
   v_sts          := 'AWS4-HMAC-SHA256' || e'\n' || v_amz_date || e'\n' || v_scope || e'\n'
-                 || encode(digest(convert_to(v_canonical, 'UTF8'), 'sha256'), 'hex');
-  v_kbin := hmac(convert_to(v_date, 'UTF8'),        convert_to('AWS4' || p_secret, 'UTF8'), 'sha256');
-  v_kbin := hmac(convert_to(p_region, 'UTF8'),      v_kbin, 'sha256');
-  v_kbin := hmac(convert_to('s3', 'UTF8'),          v_kbin, 'sha256');
-  v_kbin := hmac(convert_to('aws4_request', 'UTF8'), v_kbin, 'sha256');
-  v_sig  := encode(hmac(convert_to(v_sts, 'UTF8'), v_kbin, 'sha256'), 'hex');
+                 || encode(archive._sha256(convert_to(v_canonical, 'UTF8')), 'hex');
+  v_kbin := archive._hmac_sha256(convert_to(v_date, 'UTF8'),        convert_to('AWS4' || p_secret, 'UTF8'));
+  v_kbin := archive._hmac_sha256(convert_to(p_region, 'UTF8'),      v_kbin);
+  v_kbin := archive._hmac_sha256(convert_to('s3', 'UTF8'),          v_kbin);
+  v_kbin := archive._hmac_sha256(convert_to('aws4_request', 'UTF8'), v_kbin);
+  v_sig  := encode(archive._hmac_sha256(convert_to(v_sts, 'UTF8'), v_kbin), 'hex');
   v_auth := 'AWS4-HMAC-SHA256 Credential=' || p_key_id || '/' || v_scope
          || ', SignedHeaders=' || v_signed_headers || ', Signature=' || v_sig;
 
-  perform http_set_curlopt('CURLOPT_TIMEOUT_MS', '300000');
-
-  select * into v_resp from http((
-    p_method::http_method, v_url,
-    array[ http_header('x-amz-date', v_amz_date),
-           http_header('x-amz-content-sha256', v_payload_hash),
-           http_header('authorization', v_auth) ],
-    p_ctype, bytea_to_text(p_payload))::http_request);   -- the one crossing to text, at the wire
-  return v_resp;
+  -- the one crossing to text, at the wire (bytea_to_text, in archive._s3_send)
+  return archive._s3_send(p_method, v_url, v_amz_date, v_payload_hash, v_auth, p_ctype, p_payload);
 end;
 $$;
 
@@ -2797,7 +2852,7 @@ language plpgsql set extra_float_digits = 1 as $$
 declare
   cfg archive.config; pcfg pgpm.config; v_nsp name; v_rel name;
   v_payload text; v_body bytea; v_key text;
-  v_key_id text; v_secret text; v_resp http_response; h http_header; v_etag text; v_rows bigint;
+  v_key_id text; v_secret text; v_resp record; h record; v_etag text; v_rows bigint;   -- records: no http type named (#984)
 begin
   select * into cfg from archive.config where parent_table = p_parent;
   if not found then raise exception 'archive._encode_upload_ndjson_single: % has no archive.config row', p_parent; end if;
@@ -2877,7 +2932,7 @@ language plpgsql as $$
 declare
   cfg archive.config; pcfg pgpm.config;
   v_payload bytea; v_key text; v_key_id text; v_secret text; v_lo_lit text; v_hi_lit text;
-  v_resp http_response; h http_header; v_etag text; v_rows bigint;
+  v_resp record; h record; v_etag text; v_rows bigint;   -- records: no http type named (#984)
 begin
   select * into cfg from archive.config where parent_table = p_parent;
   if not found then raise exception 'archive._encode_upload_parquet: % has no archive.config row', p_parent; end if;
@@ -3005,7 +3060,7 @@ create or replace function archive._s3_abort_uploads_at(
   p_page_size int default 1000
 ) returns int language plpgsql as $$
 declare
-  v_resp http_response; v_doc xml; v_ids text[] := '{}'; v_page_ids text[]; v_id text; n int := 0;
+  v_resp record; v_doc xml; v_ids text[] := '{}'; v_page_ids text[]; v_id text; n int := 0;   -- record: #984
   v_key_marker text; v_id_marker text; v_truncated text; v_next_key text; v_next_id text; v_last_key text;
 begin
   if p_page_size is null or p_page_size < 1 then
@@ -3093,7 +3148,7 @@ declare
   v_page_h numeric; v_written_h numeric := 0; v_expected_h numeric;   -- the rows' identity, not only their count (#673)
   v_upload_id text; v_part int := 0; v_etag text; v_parts_xml text := '';
   v_initiating boolean := false;
-  v_resp http_response; h http_header;
+  v_resp record; h record;   -- records: no http type named, so any session search_path compiles this (#984)
 begin
   -- #969: refused before anything is read or sent. p_lo and p_hi are not read (the export is the whole
   -- partition), so their null is accepted.
@@ -3342,7 +3397,7 @@ create or replace function archive.to_s3_parquet(p_parent regclass, p_child name
 returns void language plpgsql as $$
 declare
   cfg archive.config; v_child regclass;
-  v_key_id text; v_secret text; v_key text; v_payload bytea; v_resp http_response;
+  v_key_id text; v_secret text; v_key text; v_payload bytea; v_resp record;   -- record: #984
 begin
   -- #969: as archive.to_s3's (p_lo and p_hi are not read)
   perform pgpm._refuse_null_arguments('archive.to_s3_parquet', json_build_object('p_parent', p_parent, 'p_child', p_child));

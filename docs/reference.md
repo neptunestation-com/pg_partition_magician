@@ -2212,6 +2212,15 @@ either, since `pgpm._next_archive_chunk` bounds every call to `config.archive_by
 of ObjectId or KSUID ids, one millisecond of uuidv7, ULID or cuid ids) is never split, so a chunk
 that carries such a run is as large as the run.
 
+Neither the tick nor any other caller has to put the module's extensions on its `search_path`. Every S3
+request reaches pgcrypto (`digest`, `hmac`) and the http extension (`http` and its types) in the schemas
+they are installed in, looked up in `pg_extension` on each call, so a tick under an application's own
+schema alone archives like any other, and pgcrypto moved with `ALTER EXTENSION ... SET SCHEMA` is
+followed (the http extension does not support moving). The two signers, `archive.s3_signed_request` and `archive.s3_signed_request_bytea`, run with
+their own `search_path` pinned to `pg_catalog`: a function of the same name in a schema ahead of either
+extension (or ahead of `pg_catalog`) on the caller's path is never handed the secret key and never runs
+inside them.
+
 Each chunk is uploaded to `<prefix><schema>.<table>_<stem>.ndjson` (`.ndjson.gz` when compressed) or
 `<prefix><schema>.<table>_<stem>.parquet`, and the key does not depend on the session that runs the
 tick. The parent is always schema-qualified (each part quoted only when PostgreSQL would quote it), so

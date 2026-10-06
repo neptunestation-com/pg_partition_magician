@@ -818,6 +818,11 @@ run_archive() {
   # pairs bench/discriminate.sh completes with each encoder's refusal taken out and each of its two rules dropped.
   echo "--- no archive_fn strategy writes over a recorded chunk it does not reproduce guard (issue #975) ---"
   bash "$(dirname "$0")/bench/archive_recorded_chunk.sh" pgpm_test-archive pgpm_perf258 || fail=1
+  # The extension-resolution guard (#984) re-runs tests/archive/db/44 for the same reason: the clean-code half
+  # of the pairs bench/discriminate.sh completes with the signers' search_path pin taken out, HMAC called
+  # through it, and the NDJSON upload naming the http types again.
+  echo "--- pgpm_archive reaches pgcrypto and http in their own schemas, never through search_path guard (issue #984) ---"
+  bash "$(dirname "$0")/bench/archive_extension_resolution.sh" pgpm_test-archive pgpm_perf271 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi
