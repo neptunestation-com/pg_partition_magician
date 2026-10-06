@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **A scratch relation's sequences are minted owner-only too: a stranger can no longer setval the regrain
+  delta's `pgpm_seq` into duplicates and make the swap drop rows** (#974, Tier 1). `_scratch_mint` reset
+  the ACL of the delta it minted but not that of the delta's `pgpm_seq` identity sequence, which kept the
+  minting role's ALTER DEFAULT PRIVILEGES (Supabase's `grant all on sequences to anon, authenticated` is
+  that shape). A role holding nothing on the managed table could `setval` it; duplicate `pgpm_seq` values,
+  the identity the reconcile addresses delta rows by, made one tick consume a key it had not applied into
+  the sub-range being copied, and the swap dropped rows 60..89 with the source. The hypertable tracking
+  delta's sequence had the same gap (the change counter readable, the drains' watermark settable). The mint
+  now resets every sequence a minted relation owns (found through `pg_depend`), which follows its table's
+  owner on a hand-over. `tests/272` and `tests/timescale/db/51` (new), guard `bench/scratch_sequences.sh`;
+  mutations `scratch_mint_sequence_default_acl`, `hypertable_delta_sequence_default_acl`.
+
 - **An `archive_fn` strategy no longer writes over a chunk the ledger records unless it reproduces it** (#975,
   pass 9 F5-03 and F5-04). #969's direct-call guard refused only an empty or inverted range shape, and the
   whole-key claim admits the same parent and kind, so nothing asked what `pgpm.archive_ledger` recorded at the
