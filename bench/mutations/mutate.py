@@ -1096,6 +1096,21 @@ TIME_RENDERING_PRE_844_VERDICT = r"""  out=$(q -d "$DB" -tAq -f "$file" 2>&1)
   [ "$ffail" = 0 ] || fail=1
 """
 
+# Issue #978's fix in _replica_identity_like_parent, whole: both of its mutations replace it.
+_RI_DROPPED_BLOCK = (
+    "  if v_want = 'i' and not exists (select 1 from pg_index where indrelid = p_parent and indisreplident) then\n"
+    "    v_want := 'n';\n"
+    "    v_warned := coalesce(current_setting('pgpm.warned_replica_identity_nothing', true), '');\n"
+    "    if not p_parent::oid::text = any(string_to_array(v_warned, ',')) then\n"
+    "      perform set_config('pgpm.warned_replica_identity_nothing', concat_ws(',', nullif(v_warned, ''), p_parent::oid::text), true);\n"
+    "      insert into pgpm.log (parent_table, action, method)\n"
+    "        values (p_parent, 'warn_replica_identity_nothing',\n"
+    "                format('%s took REPLICA IDENTITY NOTHING: the identity index of %s was dropped, which PostgreSQL treats as NOTHING; partitions minted until %s is given a replica identity again keep NOTHING',\n"
+    "                       p_child, p_parent, p_parent));\n"
+    "    end if;\n"
+    "  end if;\n"
+)
+
 MUTATIONS = {
     "transmute_no_commits": (
         "bench/transmute_lock.sh",
@@ -6448,6 +6463,27 @@ select ok(
         "identity whatever the parent's, and nothing gives it the parent's, so a FULL table's regrained range "
         "publishes its key. tests/207's part F catches it.",
         [("    perform pgpm._replica_identity_like_parent(p_parent, v_copy);\n", "", 1)],
+    ),
+    # Issue #978: a parent whose USING INDEX identity index was dropped.
+    "replica_identity_index_dropped_raises": (
+        "bench/replica_identity_index_dropped.sh",
+        "Issue #978 put back: _replica_identity_like_parent reads a parent with relreplident 'i' and no "
+        "identity index (DROP INDEX on the identity index, which PostgreSQL allows and treats as NOTHING) as "
+        "a child missing its index and raises, so every mint fails: obtain raises, maintain_obtain logs "
+        "skip_obtain on every tick, extend_to raises, and writes past the grid are refused once it runs out. "
+        "tests/275's rx assertions catch it.",
+        [(_RI_DROPPED_BLOCK, "", 1)],
+    ),
+    "replica_identity_index_dropped_default": (
+        "bench/replica_identity_index_dropped.sh",
+        "Issue #978, the plausible-but-wrong fix: the mint proceeds but leaves the new partition at the "
+        "default identity, which publishes the key the parent no longer publishes (the parent is NOTHING), "
+        "and logs nothing, so a partition minted while the index is gone is not findable afterwards. "
+        "tests/275's rx identity and warning assertions catch it.",
+        [(_RI_DROPPED_BLOCK,
+          "  if v_want = 'i' and not exists (select 1 from pg_index where indrelid = p_parent and indisreplident) then\n"
+          "    return;\n"
+          "  end if;\n", 1)],
     ),
     # Issue #789, one mutation per site.
     "cutover_key_anonymous": (

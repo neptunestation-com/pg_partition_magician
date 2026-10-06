@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **A parent whose replica identity index was dropped keeps its forward grid growing** (#978). PostgreSQL
+  lets `DROP INDEX` remove a table's `REPLICA IDENTITY USING INDEX` index, leaves the table marked USING
+  INDEX with no index, and treats it as `NOTHING`. pgpm read that state as a partition missing its identity
+  index and raised, so every mint failed: `obtain` raised, `maintain_obtain` logged `skip_obtain` on every
+  tick, `extend_to` raised, and once the cells already built ahead of the frontier were used up every write
+  past them was refused. A partition minted for such a parent (by `obtain`, `extend_to` or a regrain's swap)
+  now takes `NOTHING`, the parent's identity in that state, and the transaction logs
+  `warn_replica_identity_nothing` once for the parent, naming the first such partition, because it keeps
+  `NOTHING` after the parent is given an identity again. `tests/275` (new) under the guard
+  `bench/replica_identity_index_dropped.sh`; mutations `replica_identity_index_dropped_raises` and
+  `replica_identity_index_dropped_default`.
+
 - **The scratch-relation lever's residue: an upgrade no longer adopts a namesake, every path refuses a hand-over
   it cannot follow, and the swap carries an operator's trigger whatever its function is called** (#969
   bullets 2, 3, 5 and 7; part of #966). Re-running `install.sql`, the documented upgrade, recorded whatever
