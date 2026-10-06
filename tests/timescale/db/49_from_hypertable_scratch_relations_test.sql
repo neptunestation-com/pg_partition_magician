@@ -94,8 +94,9 @@ select ok(has_table_privilege('w49_stranger', 'public.w49_witness', 'SELECT')
           and not has_table_privilege('w49_stranger', 'public.m49', 'SELECT'),
   'LIVENESS: a table this session creates now grants w49_stranger SELECT, and w49_stranger holds nothing on m49');
 
+-- every relation of every kind (a sequence, a view, a matview is as much an omission as a table)
 create temp table w49_before as
-  select oid, 'r' as k from pg_class where relnamespace = 'public'::regnamespace and relkind in ('r', 'i', 'p')
+  select oid, 'r' as k from pg_class where relnamespace = 'public'::regnamespace
   union all select oid, 'f' from pg_proc where pronamespace = 'public'::regnamespace;
 
 call pgpm.from_hypertable_copy('public.m49', 'ts', p_track_changes => true);
@@ -108,12 +109,20 @@ select is((select array_agg(c.oid::regclass::text order by c.relname) from pg_cl
   'LIVENESS: the copy recorded its copy (hypertable_dest) and its delta (hypertable_delta), under the names it minted');
 
 -- THE LIST AGAINST WHAT WAS CREATED
+-- of whatever kind: a relation that is not the recorded copy or delta, or an index or identity sequence that
+-- PostgreSQL makes and drops with one of them, is an omission
 select is(
   (select array_agg(c.oid order by c.oid) from pg_class c
-    where c.relnamespace = 'public'::regnamespace and c.relkind in ('r', 'p')
+    where c.relnamespace = 'public'::regnamespace
       and c.oid not in (select oid from w49_before where k = 'r')),
-  (select array_agg(o order by o) from unnest(array[:'dest'::oid, :'delta'::oid]) o),
-  'the list is complete: the only tables the copy created are the recorded copy and delta');
+  (select array_agg(o order by o) from (
+     select o from unnest(array[:'dest'::oid, :'delta'::oid]) o
+     union select i.indexrelid from pg_index i where i.indrelid in (:'dest'::oid, :'delta'::oid)
+     union select d.objid from pg_depend d
+            where d.classid = 'pg_class'::regclass and d.refclassid = 'pg_class'::regclass and d.deptype = 'i'
+              and d.refobjid in (:'dest'::oid, :'delta'::oid)
+              and (select relnamespace from pg_class where oid = d.objid) = 'public'::regnamespace) x),
+  'the list is complete: the only relations the copy created, of any kind, are the recorded copy and delta and their indexes');
 select is(
   (select count(*)::int from pg_class c join pg_index i on i.indexrelid = c.oid
     where c.relnamespace = 'public'::regnamespace and c.oid not in (select oid from w49_before where k = 'r')

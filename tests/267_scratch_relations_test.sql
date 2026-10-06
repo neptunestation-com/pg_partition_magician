@@ -53,7 +53,7 @@
 -- regrain_capture_names_derived_fallback), each of which it must FAIL.
 create extension if not exists pgtap;
 set client_min_messages = warning;
-select plan(67);
+select plan(69);
 
 do $$ begin create role w267_owner;    exception when duplicate_object then null; end $$;
 do $$ begin create role w267_stranger; exception when duplicate_object then null; end $$;
@@ -96,16 +96,22 @@ insert into public.s267 values (1000, 'frontier');   -- the monolith [0, 250) fr
 select ok(not has_table_privilege('w267_stranger', 'public.s267', 'SELECT'),
   'transmute_staging: the converted parent, built under the staging name, grants w267_stranger nothing (it carries the original''s grants)');
 
+-- every relation of every kind (a sequence, a view, a matview is as much an omission as a table), and every
+-- function, in the parent's schema before the regrain
 create temp table w267_before as
-  select oid, 'r' as k from pg_class where relnamespace = 'public'::regnamespace and relkind in ('r', 'p')
+  select oid, 'r' as k from pg_class where relnamespace = 'public'::regnamespace
   union all select oid, 'f' from pg_proc where pronamespace = 'public'::regnamespace;
 
 select is(pgpm.regrain_step('public.s267', 's267_p0000000000000000000_to_0000000000000000250', '50'), 'prepared',
   'LIVENESS: the prepare tick minted change capture');
 update public.s267 set payload = 'prep' where id = 7;   -- a captured key before the first copy
--- read right after the prepare tick, before a resuming tick's ownership check (#950) could mend the owner
+-- read right after the prepare tick, before a resuming tick's ownership check (#950) could mend the owner: the
+-- function's and the delta's alike (the copy tick below re-owns both, so a read after it cannot tell a delta
+-- minted under the tick's role from one minted the parent owner's)
 select pg_get_userbyid(p.proowner) as fn_owner_at_prepare from pg_proc p
  where p.oid = (select regrain_capture_fn_oid from pgpm.config where parent_table = 'public.s267'::regclass) \gset
+select pg_get_userbyid(c.relowner) as delta_owner_at_prepare from pg_class c
+ where c.oid = (select regrain_delta_oid from pgpm.config where parent_table = 'public.s267'::regclass) \gset
 select is(pgpm.regrain_step('public.s267', 's267_p0000000000000000000_to_0000000000000000250', '50'), 'copied:30',
   'LIVENESS: the next tick copies one batch of 30 of [0, 50) into the first fine child, its sub-range unfinished');
 
@@ -113,14 +119,30 @@ select cfg.regrain_delta_oid as delta, cfg.regrain_capture_fn_oid as fn
   from pgpm.config cfg where cfg.parent_table = 'public.s267'::regclass \gset
 select child_oid as fine from pgpm.part where parent_table = 'public.s267'::regclass and not attached \gset
 
--- THE LIST AGAINST WHAT WAS CREATED: every new relation and function in the parent's schema is a recorded
--- scratch object, and every recorded one is new.
+-- THE LIST AGAINST WHAT WAS CREATED: every new relation in the parent's schema, of whatever kind, is a
+-- scratch relation pgpm recorded (pgpm._scratch_objects reads every record: pgpm.config, pgpm.part,
+-- pgpm.scratch) or a part of one that PostgreSQL makes and drops with it (its indexes, its identity sequence),
+-- and every recorded one is new. Read from the records rather than from a name or a list of kinds, so an
+-- unrecorded sequence, view or matview the prepare mints fails here as surely as an unrecorded table.
+create temp table w267_new as
+  select c.oid, c.relkind::text as kind from pg_class c
+   where c.relnamespace = 'public'::regnamespace and c.oid not in (select oid from w267_before where k = 'r');
+create temp table w267_recorded as
+  select o as oid from unnest((pgpm._scratch_objects('public.s267'::regclass)).rels) o;
+select is((select array_agg(distinct kind collate "C" order by kind collate "C") from w267_new), array['S', 'i', 'r'],
+  'LIVENESS: the snapshot sees every kind of relation the regrain made, not only tables (the copy''s and the delta''s indexes, the delta''s identity sequence)');
 select is(
-  (select array_agg(c.oid order by c.oid) from pg_class c
-    where c.relnamespace = 'public'::regnamespace and c.relkind in ('r', 'p')
-      and c.oid not in (select oid from w267_before where k = 'r')),
-  (select array_agg(o order by o) from unnest(array[:'delta'::oid, :'fine'::oid]) o),
-  'the list is complete: the only relations the regrain created are the recorded delta (regrain_delta) and the recorded copy (regrain_fine_child)');
+  (select array_agg(oid order by oid) from w267_new),
+  (select array_agg(o order by o) from (
+     select oid as o from w267_recorded
+     union select i.indexrelid from pg_index i where i.indrelid in (select oid from w267_recorded)
+     union select d.objid from pg_depend d
+            where d.classid = 'pg_class'::regclass and d.refclassid = 'pg_class'::regclass and d.deptype = 'i'
+              and d.refobjid in (select oid from w267_recorded)
+              and (select relnamespace from pg_class where oid = d.objid) = 'public'::regnamespace) x),
+  'the list is complete: every relation the regrain created, of any kind, is a recorded scratch relation or an index or identity sequence of one');
+select ok(array[:'delta'::oid, :'fine'::oid] <@ (select array_agg(oid) from w267_recorded),
+  'the list is complete: what is recorded holds the delta (regrain_delta) and the copy (regrain_fine_child)');
 select is(
   (select array_agg(p.oid order by p.oid) from pg_proc p
     where p.pronamespace = 'public'::regnamespace and p.oid not in (select oid from w267_before where k = 'f')),
@@ -132,8 +154,9 @@ select ok(exists (select 1 from public.s267_pgpm_regrain_delta where id = 7),
 select is(pg_temp.w267_reads(:'fine'::regclass::text), 30::bigint,
   'LIVENESS: the fine child holds the 30 copied rows (this superuser reads them)');
 
-select is((select pg_get_userbyid(relowner)::text from pg_class where oid = :'delta'::oid), 'w267_owner',
-  'regrain_delta: owned like the parent');
+select is(:'delta_owner_at_prepare' || '/' || (select pg_get_userbyid(relowner)::text from pg_class where oid = :'delta'::oid),
+  'w267_owner/w267_owner',
+  'regrain_delta: owned like the parent from the prepare tick that creates it, and after the copy tick');
 select ok(not has_table_privilege('w267_stranger', :'delta'::oid, 'SELECT')
           and not has_table_privilege('w267_stranger', :'delta'::oid, 'INSERT'),
   'regrain_delta: w267_stranger holds nothing on it from the prepare tick on');
@@ -490,10 +513,17 @@ select is(pgpm.hand_over_scratch('public.s267i'), 2, 'untransmute: the remedy ha
 set role w267_m2;
 select pg_temp.w267_try($$select pgpm.untransmute('public.s267i')::text$$) as untr_i2 \gset
 reset role;
+-- the rows by identity, not by count: what the restored table lacks of ids 1..299 ('-') and holds beyond them
+-- ('+'), so a lost row offset by the resurrected 450 (the key the cancelled regrain captured) is named
 select is(:'untr_i2' || '/' || (select relkind::text from pg_class where oid = 'public.s267i'::regclass)
           || '/' || (select count(*) from pg_class where oid = :'i_delta'::oid)
           || '/' || (select count(*) from pg_proc where oid = :'i_fn'::oid)
-          || '/' || (select count(*) from public.s267i),
-  'ok:s267i/r/0/0/299', 'untransmute: after the remedy, s267i is a plain table with its 299 rows, the delta and the function gone');
+          || '/' || coalesce((select string_agg(d, ',' order by d) from (
+                       (select '-' || g || ':i' || g as d from generate_series(1, 299) g
+                        except select '-' || id || ':' || payload from public.s267i)
+                       union all
+                       (select '+' || id || ':' || payload from public.s267i
+                        except select '+' || g || ':i' || g from generate_series(1, 299) g)) x), 'same'),
+  'ok:s267i/r/0/0/same', 'untransmute: after the remedy, s267i is a plain table holding exactly its rows 1..299 (and not the deleted 450), the delta and the function gone');
 
 select * from finish();

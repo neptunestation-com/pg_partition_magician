@@ -495,6 +495,9 @@ run_timescale() {
     bash "$(dirname "$0")/bench/hypertable_replica_capture.sh" pgpm_test-timescale pgpm_htreplica || fail=1
     echo "--- every entry point refuses an exclusion constraint (tests/timescale/db/26) ---"
     bash "$(dirname "$0")/bench/hypertable_exclusion_refusal.sh" pgpm_test-timescale pgpm_htexcl || fail=1
+    # pass 9 G17: #996's guard, the clean-code half of the pair discriminate.sh completes with its mutant.
+    echo "--- the keyless catch-up is judged by its rows, not its count (issue #996) ---"
+    bash "$(dirname "$0")/bench/hypertable_catchup_identity.sh" pgpm_test-timescale pgpm_perf280 || fail=1
 
     echo "--- discriminate (timescale-scoped mutations) ---"
     bash "$(dirname "$0")/bench/discriminate.sh" --track=timescale pgpm_test-timescale || fail=1
