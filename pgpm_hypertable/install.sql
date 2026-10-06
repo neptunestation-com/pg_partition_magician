@@ -486,9 +486,14 @@ end $$;
 -- (#969): left out as <rel>_pgpm_delta_fn, an operator's own trigger whose function happened to carry that
 -- name was not carried by an untracked migration and went with the hypertable. A capture pgpm 0.6.0 minted
 -- carries neither record, and its trigger is still on a hypertable whose abandoned copy the operator dropped
--- to re-run the migration, so <rel>_pgpm_delta_fn is left out on PROOF that it is that capture: its body
--- inserts into <rel>_pgpm_delta, which is what the module wrote and an operator's function under the name
--- does not. No trigger state rides along, because TimescaleDB refuses ENABLE and DISABLE TRIGGER on a
+-- to re-run the migration, so a function <x>_pgpm_delta_fn is left out on PROOF that it is that capture: its
+-- body inserts into <x>_pgpm_delta in its own schema, which is what the module wrote and an operator's
+-- function under the name does not. <x> and the schema are read off the FUNCTION, never derived from the
+-- hypertable's current name (#988): 0.6.0 named both for the table as it was at the copy, so derived from
+-- the current name the proof missed every capture on a table renamed or moved since. Read that way the
+-- proof would also match every capture this release mints (its body is 0.6.0's), so it is asked only of a
+-- capture that carries neither record: the three ways partition the captures, and the loss of either record's
+-- way stays visible rather than being silently covered by the proof. No trigger state rides along, because TimescaleDB refuses ENABLE and DISABLE TRIGGER on a
 -- hypertable, so every user trigger is origin-enabled, which is what CREATE TRIGGER leaves.
 -- The replica identity and the publication membership (#816) are carried too: transmute carries both from
 -- a plain table onto its parent and every partition (#782, #566), and the copy LIKE made has neither, so a
@@ -546,8 +551,15 @@ begin
        and fn.nspname not like '\_timescaledb%'
        and not exists (select 1 from pgpm.scratch s   -- #969: by the record, never by the function's name
                         where s.parent_oid = p_hypertable::oid and s.kind = 'hypertable_delta_fn' and s.obj = t.tgfoid)
-       and not (fn.nspname = v_nsp and f.proname = v_rel || '_pgpm_delta_fn'   -- #969: 0.6.0's, on proof
-                and strpos(f.prosrc, format('insert into %I.%I (', v_nsp, v_rel || '_pgpm_delta')) > 0)
+       and not (right(f.proname, 14) = '_pgpm_delta_fn' and f.pronargs = 0   -- #969: 0.6.0's, on proof
+                and strpos(f.prosrc, format('insert into %I.%I (', fn.nspname, left(f.proname, -3))) > 0   -- #988: its own name
+                and not exists (select 1 from pgpm.scratch s   -- and asked only of a capture with neither record
+                                 where s.parent_oid = p_hypertable::oid and s.kind = 'hypertable_delta_fn' and s.obj = t.tgfoid)
+                and not exists (select 1 from pg_class d
+                                  join pg_description dd on dd.objoid = d.oid and dd.classoid = 'pg_class'::regclass
+                                                        and dd.objsubid = 0
+                                 where d.relnamespace = f.pronamespace and d.relname = left(f.proname, -3)
+                                   and d.relkind = 'r' and dd.description ~ '^pgpm from_hypertable horizon [0-9]+$'))
        and not exists (select 1 from pg_class d
                          join pg_description dd on dd.objoid = d.oid and dd.classoid = 'pg_class'::regclass
                                                and dd.objsubid = 0

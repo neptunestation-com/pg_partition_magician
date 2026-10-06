@@ -655,7 +655,9 @@ Scope and caveats:
   membership (with each row filter and column list), which the swap puts back on the copy before
   `transmute` carries them onto the parent and every partition. TimescaleDB's own insert-blocker trigger is
   not carried, nor is the change-capture trigger of a tracking copy that was never cut over, which the swap
-  recognises by the horizon comment on its delta, so a moved or renamed table does not take it along. A
+  recognises by the horizon comment on its delta, so a moved or renamed table does not take it along. One
+  that pgpm 0.6.0 left, which carries no comment, is recognised by its function, `<x>_pgpm_delta_fn` writing
+  into `<x>_pgpm_delta` beside it, whatever the table has been renamed or moved to since. A
   membership with a row filter or a column list in a publication with `publish_via_partition_root = false`
   is refused up front, by the preflight and by the cutover under its lock, because `transmute` refuses it
   on a partitioned table. Storage parameters are not carried, as `transmute` does not carry them.

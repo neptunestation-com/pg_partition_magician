@@ -419,6 +419,9 @@ run_timescale() {
     # #842's, #816's and #768's (F6-09) harnesses, the same way: the clean-code half of their mutants' pairs.
     echo "--- the swap knows its own capture by its record (issue #842) ---"
     bash "$(dirname "$0")/bench/hypertable_carry_capture_by_record.sh" pgpm_test-timescale pgpm_perf205 || fail=1
+    # #988's, the same way: it re-runs tests/timescale/db/55 against the real install.
+    echo "--- the swap knows a 0.6.0 capture by its own name, whatever the table is called now (issue #988) ---"
+    bash "$(dirname "$0")/bench/hypertable_carry_capture_by_provenance.sh" pgpm_test-timescale pgpm_perf274 || fail=1
     echo "--- the swap carries publication membership and replica identity (issue #816) ---"
     bash "$(dirname "$0")/bench/hypertable_carry_publications_replica_identity.sh" pgpm_test-timescale pgpm_perf206 || fail=1
     echo "--- the copy and the cutover adopt only a key index on their destination (issues #768, #872) ---"
