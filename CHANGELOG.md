@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **`./test.sh discriminate` no longer certifies a guard whose only failures against its mutant are LIVENESS
+  witnesses** (the discriminate.sh bullet of #713). `bench/discriminate.sh` read any non-zero exit of a guard
+  run against its installed mutant as "fails when the defect is present", so a mutant that starved the
+  fixture (the guard failed only the checks saying the state the defect needs was reached, and never got to
+  the defect) was counted as a catch and the track passed. It now applies the rule
+  `scripts/review/classify_claims.py` applies to a reproduction: a run whose every failure is a `LIVENESS:`,
+  `GUARD:` or `fixture:` check (its pgTAP `not ok` lines when it printed any, else its `FAIL` lines) FAILS the
+  track as a starved fixture, while a witness failing beside a failed defect check still counts.
+  `bench/discriminate_installs.sh` gains the shell and pgTAP cases that prove it, and its listing-on-stdin
+  check, which was one LIVENESS line, is split into the defect check and its witness; mutation
+  `discriminate_counts_liveness_only`.
 - **The `Archive object keys` lint reads the SQL an `EXECUTE` runs** (#1001). Its lexer kept every
   single-quoted literal as one opaque token, so a second, unclaimed key function that read the prefix with
   `execute 'select prefix from archive.config where ...' into v` and returned `v || ...` passed CI, while the
