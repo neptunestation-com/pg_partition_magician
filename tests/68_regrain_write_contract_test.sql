@@ -20,13 +20,13 @@
 -- Fixtures are sparse (ids 10,20,...,2500) so there are free slots inside an already-copied sub-range,
 -- and the monolith is COARSE ([0,3000), three grid steps) so #266 does not confound the result.
 create extension if not exists pgtap;
-select plan(10);
+select plan(11);
 
 -- a PROCEDURE, not a function: it calls transmute, which commits (#275)
 create or replace procedure pg_temp.mk(p_rel text) language plpgsql as $$
 begin
   execute format('create table public.%I (id bigint primary key, payload text)', p_rel);
-  execute format('insert into public.%I select g*10, ''x'' from generate_series(1, 250) g', p_rel);
+  execute format('insert into public.%I select g*10, ''p'' || g*10 from generate_series(1, 250) g', p_rel);
   call pgpm.transmute(format('public.%I', p_rel)::regclass, 'id', 1000);
   execute format('insert into public.%I values (20000, ''frontier'')', p_rel);   -- freeze the monolith
 end $$;
@@ -52,6 +52,13 @@ select pg_temp.finish_regrain('wc0', 50);
 
 select is((select count(*)::int from public.wc0), 251,
   'control: a feathered regrain with no concurrent DML is lossless');
+
+-- Identity, not cardinality (#997): every row carries its own payload, so a copy that rewrites a value
+-- while keeping the count is caught here.
+select bag_eq(
+  'select id, payload from public.wc0',
+  $$ select (g*10)::bigint, 'p' || g*10 from generate_series(1, 250) g union all select 20000::bigint, 'frontier' $$,
+  'control: the same (id, payload) rows survive the regrain, none lost, none added, none altered');
 
 select is(
   (select count(*)::int from pgpm.part p

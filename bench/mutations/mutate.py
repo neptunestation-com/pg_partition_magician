@@ -9216,6 +9216,133 @@ MUTATION_SRC.update({
     "retiring_partition_attachment_only": "tests/77_retain_incoming_fk_test.sql",
     "crossing_refusal_attachment_only": "tests/77_retain_incoming_fk_test.sql",
 })
+# pass 9 G19 (#997, #998): ten conservation tests and tests/79, each back to its count; judged by
+# bench/tests_fail_on_defect.sh against a value-rewriting transmute or regrain copy, or a forget_missing()
+# that rewrites the survivors' pgpm.part rows. Each mutant keeps the file's now distinct payloads.
+MUTATIONS['transmute_conservation_by_count_15'] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#997 tests/15: transmute's row conservation asserted only by count(*) = 500 ('all rows conserved'), which a transmute that rewrites a row's value keeps. The fixture keeps its distinct payloads; a count cannot read them.",
+    [
+        ('select plan(6);\n',
+         'select plan(5);\n', 1),
+        ("\nselect bag_eq(\n  'select id, payload from public.reuse_pk',\n  'select id, payload from _reuse_pk_before',\n  'every row survives the transmute by identity: the same (id, payload) rows, none lost, none added, none altered');\n",
+         '\n', 1),
+    ],
+)
+MUTATION_SRC['transmute_conservation_by_count_15'] = 'tests/15_pk_reuse_test.sql'
+MUTATIONS['transmute_conservation_by_count_49'] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#997 tests/49: transmute's row conservation on both reused-UNIQUE-constraint paths asserted only by count(*) (40 and 30), which a transmute that rewrites a row's value keeps. Both identity checks removed.",
+    [
+        ('select plan(12);\n',
+         'select plan(10);\n', 1),
+        ("\nselect bag_eq(\n  'select ts, id, body from public.uq_lead',\n  'select ts, id, body from _uq_lead_before',\n  'every row survives the transmute by identity: the same (ts, id, body) rows, none lost, none added, none altered');\n",
+         '\n', 1),
+        ("\nselect bag_eq(\n  'select device_id, ts, body from public.uq_mid',\n  'select device_id, ts, body from _uq_mid_before',\n  'every row survives by identity (non-leading control): none lost, none added, none altered');\n",
+         '\n', 1),
+    ],
+)
+MUTATION_SRC['transmute_conservation_by_count_49'] = 'tests/49_unique_constraint_reuse_test.sql'
+MUTATIONS['regrain_conservation_by_count_43'] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#997 tests/43: the regrain's conservation asserted only by count(*) = 50001 ('all rows conserved'), which a copy that rewrites a copied row's value keeps.",
+    [
+        ('select plan(9);\n',
+         'select plan(8);\n', 1),
+        ("\nselect bag_eq(\n  'select id, payload from public.rf',\n  $$ select id, payload from _rf_before union all select 65000::bigint, 'frontier' $$,\n  'every row survives the regrain by identity: the same (id, payload) rows, none lost, none added, none altered');\n",
+         '\n', 1),
+    ],
+)
+MUTATION_SRC['regrain_conservation_by_count_43'] = 'tests/43_regrain_test.sql'
+MUTATIONS['regrain_conservation_by_count_45'] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#997 tests/45: the feathered regrain's conservation asserted only by count(*) = 120, which a copy that rewrites a copied row's value keeps.",
+    [
+        ('select plan(5);\n',
+         'select plan(4);\n', 1),
+        ("\nselect bag_eq(\n  'select id, payload from public.fw where id < 150',\n  'select id, payload from _fw_before',\n  'every history row survives the feathered regrain by identity: none lost, none added, none altered');\n",
+         '\n', 1),
+    ],
+)
+MUTATION_SRC['regrain_conservation_by_count_45'] = 'tests/45_regrain_feathered_test.sql'
+MUTATIONS['regrain_conservation_by_count_46'] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#997 tests/46: the cross-tick regrain's conservation asserted only by count(*) = 200, which a copy that rewrites a copied row's value keeps.",
+    [
+        ('select plan(7);\n',
+         'select plan(6);\n', 1),
+        ("\nselect bag_eq(\n  'select id, payload from public.ar where id < 250',\n  'select id, payload from _ar_before',\n  'every history row survives the cross-tick regrain by identity: none lost, none added, none altered');\n",
+         '\n', 1),
+    ],
+)
+MUTATION_SRC['regrain_conservation_by_count_46'] = 'tests/46_auto_regrain_maintain_test.sql'
+MUTATIONS['regrain_conservation_by_count_48'] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#997 tests/48: the feathered copy-regrain's conservation asserted only by count(*) = 300, which a copy that rewrites a copied row's value keeps.",
+    [
+        ('select plan(9);\n',
+         'select plan(8);\n', 1),
+        ("\nselect bag_eq(\n  'select id, payload from public.cc where id <= 300',\n  'select id, payload from _cc_before',\n  'every history row survives the feathered copy-regrain by identity: none lost, none added, none altered');\n",
+         '\n', 1),
+    ],
+)
+MUTATION_SRC['regrain_conservation_by_count_48'] = 'tests/48_regrain_copy_contract_test.sql'
+MUTATIONS['regrain_conservation_by_count_53'] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#997 tests/53: the unique-constraint regrain's conservation asserted only by count(*) = 5001, which a copy that rewrites a copied row's value keeps.",
+    [
+        ('select plan(6);\n',
+         'select plan(5);\n', 1),
+        ("\n-- Identity, not cardinality (#997): every row carries its own body, so a copy that rewrites a value\n-- while keeping the count is caught here.\nselect bag_eq(\n  'select id, batch, body from public.ruq',\n  $$ select g::bigint, 1::bigint, 'b' || g from generate_series(1, 5000) g\n     union all select 20000::bigint, 1::bigint, 'frontier' $$,\n  'every row survives the regrain by identity: the same (id, batch, body) rows, none lost, none added, none altered');\n",
+         '\n', 1),
+    ],
+)
+MUTATION_SRC['regrain_conservation_by_count_53'] = 'tests/53_regrain_reused_key_test.sql'
+MUTATIONS['regrain_conservation_by_count_54'] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#997 tests/54: the regrain's conservation asserted only by count(*) = 5001 and the generated column's consistency, both of which a copy that rewrites a copied row's amount keeps (cents recomputes from it).",
+    [
+        ('select plan(4);\n',
+         'select plan(3);\n', 1),
+        ("\n-- Identity, not cardinality (#997): the fixture writes amount = id, so a copy that rewrites a value\n-- while keeping the count (and the generated column consistent with it) is caught here.\nselect bag_eq(\n  'select id, amount from public.gc',\n  $$ select g::bigint as id, g::numeric as amount from generate_series(1, 5000) g\n     union all select 20000::bigint, 100000::numeric $$,\n  'every row survives the regrain by identity: the same (id, amount) rows, none lost, none added, none altered');\n",
+         '\n', 1),
+    ],
+)
+MUTATION_SRC['regrain_conservation_by_count_54'] = 'tests/54_generated_column_test.sql'
+MUTATIONS['regrain_conservation_by_count_67'] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#997 tests/67: 'the regrain is lossless' asserted only by count(*) = 401 and the presence of ids 1..99, which a copy that rewrites a copied row's value keeps.",
+    [
+        ('select plan(15);\n',
+         'select plan(14);\n', 1),
+        ("\n-- Identity, not cardinality (#997): every row carries its own payload, so a copy that rewrites a value\n-- while keeping the count is caught here.\nselect bag_eq(\n  'select id, payload from public.rnc',\n  $$ select g::bigint, 'p' || g from generate_series(1, 400) g union all select 20000::bigint, 'frontier' $$,\n  'the regrain is lossless by identity: the same (id, payload) rows, none lost, none added, none altered');\n",
+         '\n', 1),
+    ],
+)
+MUTATION_SRC['regrain_conservation_by_count_67'] = 'tests/67_regrain_name_collision_test.sql'
+MUTATIONS['regrain_conservation_by_count_68'] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#997 tests/68: the control regrain's 'lossless' asserted only by count(*) = 251, which a copy that rewrites a copied row's value keeps.",
+    [
+        ('select plan(11);\n',
+         'select plan(10);\n', 1),
+        ("\n-- Identity, not cardinality (#997): every row carries its own payload, so a copy that rewrites a value\n-- while keeping the count is caught here.\nselect bag_eq(\n  'select id, payload from public.wc0',\n  $$ select (g*10)::bigint, 'p' || g*10 from generate_series(1, 250) g union all select 20000::bigint, 'frontier' $$,\n  'control: the same (id, payload) rows survive the regrain, none lost, none added, none altered');\n",
+         '\n', 1),
+    ],
+)
+MUTATION_SRC['regrain_conservation_by_count_68'] = 'tests/68_regrain_write_contract_test.sql'
+MUTATIONS['forget_missing_survivors_by_count'] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#998 tests/79: 'the healthy table keeps every one of its pgpm.part rows' asserted only by count, under its own 'Identity, not cardinality' comment, which a forget_missing() that rewrites every surviving row's child_name and child_oid keeps. The snapshot table stays; nothing reads it.",
+    [
+        ('select plan(27);\n',
+         'select plan(26);\n', 1),
+        ("\nselect bag_eq(\n  $$ select child_name, child_oid, lo, hi from pgpm.part where parent_table = 'public.keep79'::regclass $$,\n  'select child_name, child_oid, lo, hi from pgpm_t79_keep_parts',\n  'and each of them as it was: the same (child_name, child_oid, lo, hi), none rewritten, none added');\n",
+         '\n', 1),
+    ],
+)
+MUTATION_SRC['forget_missing_survivors_by_count'] = 'tests/79_status_survives_dropped_parent_test.sql'
+
 
 
 def main() -> int:

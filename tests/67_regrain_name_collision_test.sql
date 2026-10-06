@@ -14,14 +14,14 @@
 -- rendered on the TARGET grid, where it IS wider than one step and therefore always takes the explicit
 -- _to_ form. The fine sub-range names are then free, and the collision is structurally impossible.
 create extension if not exists pgtap;
-select plan(14);
+select plan(15);
 
 -- ======================= the case that used to destroy rows =======================
 -- 400 ids over a step of 1000: the monolith is [0, 1000), exactly ONE grid step wide, so its name
 -- carries no _to_<hi>. Its own first sub-range at a target step of 100 is [0, 100), which renders
 -- identically on the source grid.
 create table public.rnc (id bigint primary key, payload text);
-insert into public.rnc select g, 'x' from generate_series(1, 400) g;
+insert into public.rnc select g, 'p' || g from generate_series(1, 400) g;
 call pgpm.transmute('public.rnc', 'id', 1000);
 insert into public.rnc values (20000, 'frontier');   -- advance the frontier so the monolith freezes
 
@@ -39,6 +39,13 @@ select is(
 
 select is((select count(*)::int from public.rnc), 401,
   'the regrain is lossless: all 401 rows survive');
+
+-- Identity, not cardinality (#997): every row carries its own payload, so a copy that rewrites a value
+-- while keeping the count is caught here.
+select bag_eq(
+  'select id, payload from public.rnc',
+  $$ select g::bigint, 'p' || g from generate_series(1, 400) g union all select 20000::bigint, 'frontier' $$,
+  'the regrain is lossless by identity: the same (id, payload) rows, none lost, none added, none altered');
 
 select is(
   (select count(*)::int from generate_series(1, 99) g

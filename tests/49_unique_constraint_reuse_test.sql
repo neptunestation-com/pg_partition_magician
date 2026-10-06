@@ -6,7 +6,7 @@
 -- primary key is synthesized when the source had only a unique constraint.
 create extension if not exists pgtap;
 
-select plan(10);
+select plan(12);
 
 -- (A) NO primary key, a UNIQUE CONSTRAINT whose key LEADS with the control column
 create table public.uq_lead (
@@ -16,8 +16,10 @@ create table public.uq_lead (
   constraint uq_lead_key unique (ts, id)
 );
 insert into public.uq_lead (ts, id, body)
-  select date_trunc('month', now()) - interval '3 months' + (g || ' days')::interval, g, 'x'
+  select date_trunc('month', now()) - interval '3 months' + (g || ' days')::interval, g, 'lead ' || g
   from generate_series(1, 40) g;
+-- Identity, not cardinality (#997): distinct bodies, snapshotted before the transmute.
+create temporary table _uq_lead_before as select ts, id, body from public.uq_lead;
 
 call pgpm.transmute('public.uq_lead', 'ts', interval '1 month', p_paused => false);
 select pass('transmute reuses a UNIQUE constraint that includes the control column (no PK required)');
@@ -42,6 +44,10 @@ select is(
 
 -- row conservation: the monolith holds every row, visible through the parent
 select is((select count(*)::int from public.uq_lead), 40, 'all rows conserved through the parent');
+select bag_eq(
+  'select ts, id, body from public.uq_lead',
+  'select ts, id, body from _uq_lead_before',
+  'every row survives the transmute by identity: the same (ts, id, body) rows, none lost, none added, none altered');
 
 -- uniqueness is enforced across partitions once they are materialized
 select throws_ok(
@@ -58,8 +64,9 @@ create table public.uq_mid (
   constraint uq_mid_key unique (device_id, ts)
 );
 insert into public.uq_mid (device_id, ts, body)
-  select g, date_trunc('month', now()) - interval '2 months' + (g || ' days')::interval, 'x'
+  select g, date_trunc('month', now()) - interval '2 months' + (g || ' days')::interval, 'mid ' || g
   from generate_series(1, 30) g;
+create temporary table _uq_mid_before as select device_id, ts, body from public.uq_mid;
 
 call pgpm.transmute('public.uq_mid', 'ts', interval '1 month', p_paused => false);
 select pass('transmute reuses a composite UNIQUE constraint even when control is not the leading column');
@@ -68,5 +75,9 @@ select is(
     where n.nspname = 'public' and c.relname = 'uq_mid'),
   'p', 'the non-leading-control table is partitioned too');
 select is((select count(*)::int from public.uq_mid), 30, 'rows conserved (non-leading control)');
+select bag_eq(
+  'select device_id, ts, body from public.uq_mid',
+  'select device_id, ts, body from _uq_mid_before',
+  'every row survives by identity (non-leading control): none lost, none added, none altered');
 
 select * from finish();
