@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- **The shared preflight reaches `pgpm_archive`, and a NOT ENFORCED CHECK is named for what it is** (#969
+  bullets 9 and 10; lever phase #966). `pgpm.archive_to_s3_ndjson` and `pgpm.archive_to_s3_parquet` never
+  checked their bounds: a null `p_lo` died raw on `archive.object_key_claim`'s NOT NULL, and a null `p_hi` read
+  no row and PUT an empty object over the key an earlier call had archived `[lo, hi)` to (the key is derived
+  from `lo` alone), returning `covered_hi = null`; a direct call for `[lo, lo)` did the same with no null at
+  all. After `retire()` that object is the only copy of the chunk's rows. Every public routine of
+  `pgpm_archive` (`archive.configure`, `unconfigure`, `s3_url_encode`, `s3_signed_request`,
+  `s3_signed_request_bytea`, `to_s3`, `to_s3_parquet` and the two strategies) now refuses a null with no
+  meaning first, naming it, and each strategy refuses an empty or inverted range, compared as the grid's
+  native type, before anything is read or sent. On PostgreSQL 18, `transmute`'s refusal of a constraint the
+  cutover cannot carry (#730) read a NOT ENFORCED CHECK as NOT VALID and prescribed `VALIDATE CONSTRAINT`,
+  which PostgreSQL rejects for it; it is now refused as NOT ENFORCED, with the remedies that apply (drop it,
+  or re-create it as an enforced CHECK). Acceptance: `tests/archive/db/41` (a null sweep over the module's
+  routines, enumerated from `pg_proc`, and the reproduction read back by identity) under the guard
+  `bench/archive_null_arguments.sh`, with one mutation per site (`archive_null_refusal_dropped_<routine>` for
+  the seven routines of schema `archive`, `null_refusal_dropped_archive_to_s3_ndjson` and `_parquet`,
+  `archive_ndjson_empty_range_unrefused`, `archive_parquet_empty_range_unrefused`,
+  `archive_empty_range_compared_as_text`), and `tests/271`, which the PostgreSQL 18 leg of the matrix runs.
+
 - **Scratch relations are minted owner-only, found by their record, and follow the table's owner** (#949,
   #950, #955; the lever of #966). A relation pgpm makes for its own use beside a table (a regrain's delta,
   capture function and fine children; `from_hypertable`'s copy, delta and capture function) used to be born
