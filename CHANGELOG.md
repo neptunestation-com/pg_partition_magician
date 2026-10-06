@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **A regrain target finer than a `timestamp(p)` or `timestamptz(p)` control column's precision is refused up
+  front** (#980). `_regrain_step_shape` had a precision rule for a `numeric` key (#899) and none for a time
+  key, so `set_regrain('500 milliseconds')` on a `timestamptz(0)` key was stored, the run copied every
+  sub-range, and at the swap `ATTACH PARTITION` rounded the fine bounds to whole seconds (`..:20.5` and
+  `..:21` both to `..:21`) and failed `empty range bound` on every tick, with the capture trigger and the
+  `TRUNCATE` refusal left on the source until the run was cancelled. A fixed step must now be a whole number
+  of the column's smallest unit (`10^-p` seconds, read through any domain), at call time and by
+  `regrain_step`, `regrain()` and each tick; a month step and an unconstrained column are unaffected.
+  `tests/277`, guarded by `bench/regrain_target_time_precision.sh` with mutation
+  `regrain_step_time_precision_unread`.
+
 - **`uninstall.sql` drops every scratch object `pgpm.scratch` records, by oid, whatever it is called now**
   (#985). Its record sweep took only a recorded object that had lost the comment `from_hypertable_copy` also
   puts on it, and left every commented one to the comment sweeps, which also need the `<rel>_pgpm_delta` /

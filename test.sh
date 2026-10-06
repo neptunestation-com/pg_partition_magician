@@ -983,6 +983,7 @@ run_perf() {
     "bench/transmute_oid_bound_dependants.sh pgpm_perf158"
     "bench/regrain_target_step_spelling.sh pgpm_perf164"
     "bench/regrain_target_column_scale.sh pgpm_perf226"
+    "bench/regrain_target_time_precision.sh pgpm_perf266"
     "bench/regrain_survives_parent_ddl.sh pgpm_perf165"
     "bench/ts_text_archive_chunk_transmute_min.sh pgpm_perf169"
     "bench/obtain_lock_budget.sh pgpm_perf166"

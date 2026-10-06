@@ -5612,6 +5612,20 @@ $$;''',
         [("  while (select t.typtype from pg_type t where t.oid = v_type) = 'd' loop\n",
           "  while false loop\n", 1)],
     ),
+    "regrain_step_time_precision_unread": (
+        "bench/regrain_target_time_precision.sh",
+        "Pre-#980 (pass 9 F3-03): _regrain_step_shape has no precision rule for a time key, so "
+        "set_regrain('500 milliseconds') on a timestamptz(0) key is stored, the run copies every sub-range, "
+        "and at the swap ATTACH PARTITION rounds the fine bounds to whole seconds ('..:20.5' and '..:21' both "
+        "to '..:21') and fails 'empty range bound', with the capture trigger and the TRUNCATE refusal left on "
+        "the source. One site: the precision check becomes 'if false'. tests/277 catches it at the "
+        "timestamptz(0), timestamp(1), timestamptz(3) and domain refusals, at regrain_step's, regrain()'s and "
+        "the tick's, at the valid target a refused call must leave in place and at the source left without "
+        "capture; its accepted whole-second, 500 ms on timestamp(1), month and microsecond steps still pass, "
+        "which is what shows the mutant is this rule alone.",
+        [("    if v_unit_us is not null and v_months = 0\n",
+          "    if false\n", 1)],
+    ),
     # #669-#671: three transmute contract gaps, each caught by its own pgTAP file through a wrapper in
     # bench/transmute_abort_owner.sh's shape.
     "carried_index_name_by_pattern": (
