@@ -44,6 +44,12 @@
 #      did not have: the degrade drops the table, and the upgrade must record a legacy copy, its delta and
 #      its function from the comment records that release kept on them, by identity, and nothing for an
 #      operator's look-alike (mutation scratch_upgrade_fill_dropped).
+#      And the regrain anchors only on PROOF that pgpm minted what holds the derived names (#969): a parent
+#      that never regrained, beside an operator's own <rel>_pgpm_regrain_delta and a function of theirs
+#      under the capture function's name, must have nothing recorded, and its next prepare must refuse the
+#      table, which keeps its rows, rather than drop it (mutation scratch_upgrade_adopts_namesake). The
+#      in-flight regrain above, and assertion 8's two runs minted by a real v0.6.0, are the witnesses that
+#      the proof still takes what pgpm did mint.
 #   4. Data survived BY IDENTITY, not by count. The fixture is asymmetric on purpose (3 inserted, 1
 #      deleted, 2 surviving) so that a lost insert and a resurrected delete cannot cancel out into a
 #      row count that still looks right.
@@ -283,6 +289,32 @@ SCRATCH_WANT=$(q "$DB" "select 'public.up_h'::regclass::oid || ':' || 'public.up
                              || 'public.up_h'::regclass::oid || ':' || 'public.up_h_pgpm_delta_fn()'::regprocedure::oid || ','
                              || 'public.up_h'::regclass::oid || ':' || 'public.up_h_pgpm_dest'::regclass::oid")
 
+# #969: a managed parent that has never regrained, beside an operator's own table under its delta's derived
+# name and a function of the operator's under its capture function's (one that writes nothing of the delta).
+# The upgrade must record neither, and the next prepare refuse the table, as on a fresh install. Asymmetric:
+# the operator's table holds 3 rows.
+ns_setup() {
+  run "$DB" "create table public.up_ns (id bigint not null, body text, primary key (id))" &&
+  run "$DB" "insert into public.up_ns select g, 'ns' || g from generate_series(1, 30) g" &&
+  run "$DB" "call pgpm.transmute('public.up_ns', 'id', 1000::bigint, p_obtain => 1)" &&
+  run "$DB" "select pgpm.obtain('public.up_ns')" &&
+  run "$DB" "insert into public.up_ns values (1500, 'freeze')" &&
+  run "$DB" "create table public.up_ns_pgpm_regrain_delta (note text);
+             insert into public.up_ns_pgpm_regrain_delta values ('op-a'), ('op-b'), ('op-c');
+             create function public.up_ns_pgpm_regrain_capture() returns trigger language plpgsql
+               as 'begin insert into public.up_ns_audit values (1); return null; end'"
+}
+if ! ns_setup >/tmp/up_ns_setup.log 2>&1; then
+  echo "FAIL  the up_ns namesake fixture did not load"; sed 's/^/      /' /tmp/up_ns_setup.log; exit 1
+fi
+NS_DELTA=$(q "$DB" "select 'public.up_ns_pgpm_regrain_delta'::regclass::oid")
+NS_FN=$(q "$DB" "select 'public.up_ns_pgpm_regrain_capture()'::regprocedure::oid")
+NS_MONO=$(q "$DB" "select child_name from pgpm.part where parent_table = 'public.up_ns'::regclass and attached
+                    order by lo::numeric limit 1")
+check "LIVENESS: up_ns never regrained, beside the operator's namesakes" \
+  "$(q "$DB" "select coalesce(regrain_delta_oid::text, 'null') || '/' || (select count(*) from public.up_ns_pgpm_regrain_delta)
+                from pgpm.config where parent_table = 'public.up_ns'::regclass")/${NS_FN:+fn}/${NS_MONO:+mono}" "null/3/fn/mono"
+
 BODIES_BEFORE=$(q "$DB" "select string_agg(body, ',' order by body) from public.up_t")
 CONFIG_BEFORE=$(q "$DB" "select control_column||'/'||partition_step from pgpm.config
                           where parent_table = 'public.up_t'::regclass")
@@ -350,6 +382,18 @@ check "the upgrade anchored the in-flight regrain's capture (delta/fn)" \
   "$(q "$DB" "select coalesce((regrain_delta_oid = to_regclass('public.up_t_pgpm_regrain_delta')::oid)::text, 'null')
                 || '/' || coalesce((regrain_capture_fn_oid = to_regprocedure('public.up_t_pgpm_regrain_capture()')::oid)::text, 'null')
                 from pgpm.config where parent_table = 'public.up_t'::regclass")" "true/true"
+# ASSERTION 3e (#969), by identity: nothing recorded for up_ns, whose derived names the operator holds; the
+# next prepare refuses the operator's table by name (it used to DROP it as "the previous regrain's delta"), and
+# the table is the same relation with its 3 rows, the function the same function.
+check "the upgrade recorded no capture for up_ns beside the operator's namesakes" \
+  "$(q "$DB" "select coalesce(regrain_delta_oid::text, 'null') || '/' || coalesce(regrain_capture_fn_oid::text, 'null')
+                from pgpm.config where parent_table = 'public.up_ns'::regclass")" "null/null"
+NS_STEP=$(q "$DB" "select pgpm.regrain_step('public.up_ns', '$NS_MONO', '100', 50)" 2>&1)
+check "up_ns's next prepare refuses the operator's table by name" \
+  "$(echo "$NS_STEP" | grep -c "public.up_ns_pgpm_regrain_delta, and that name is held by relation")" "1"
+check "the operator's namesakes survive, by identity (table rows / function)" \
+  "$(q "$DB" "select string_agg(note, ',' order by note) from public.up_ns_pgpm_regrain_delta where tableoid = '${NS_DELTA:-0}'::oid")/$(q \
+     "$DB" "select count(*) from pg_proc where oid = '${NS_FN:-0}'::oid")" "op-a,op-b,op-c/1"
 # ASSERTION 3d (#955), by identity: the upgrade recorded the legacy copy, its delta and its function in
 # pgpm.scratch from the module's comment records, each under the hypertable it names, and recorded nothing for
 # the operator's look-alike. An upgrade that filled nothing reads empty; one that recorded by name, the
@@ -447,6 +491,13 @@ check "LIVENESS: the $ORIGIN_TAG origin minted up_r's capture trigger origin-onl
 if ! install_into "$IDB" >/tmp/up_inflight_upgrade.log 2>&1; then
   echo "FAIL  the upgrade over the in-flight regrain did not complete"; sed 's/^/      /' /tmp/up_inflight_upgrade.log; fail=1
 fi
+# #969: the upgrade anchored both runs' capture, which v0.6.0 minted, on the proof that pgpm minted it (the
+# witness that the proof assertion 3e leans on still takes what pgpm did make).
+check "the upgrade anchored each $ORIGIN_TAG run's capture, by identity" \
+  "$(q "$IDB" "select string_agg(parent_table::text || ' '
+                 || coalesce((regrain_delta_oid = to_regclass(parent_table::text || '_pgpm_regrain_delta')::oid)::text, 'null') || '/'
+                 || coalesce((regrain_capture_fn_oid = to_regprocedure(parent_table::text || '_pgpm_regrain_capture()')::oid)::text, 'null'),
+                 ',' order by parent_table::text) from pgpm.config")" "up_n true/true,up_r true/true"
 # Before any tick: the upgrade itself restarted up_r, and only recorded up_n's mark.
 check "the upgrade discarded up_r's pre-upgrade copy, by its oid" \
   "$(q "$IDB" "select count(*) from pg_class where oid = '${COPY_OID:-0}'::oid")" "0"

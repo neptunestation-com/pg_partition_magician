@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+- **The scratch-relation lever's residue: an upgrade no longer adopts a namesake, every path refuses a hand-over
+  it cannot follow, and the swap carries an operator's trigger whatever its function is called** (#969
+  bullets 2, 3, 5 and 7; part of #966). Re-running `install.sql`, the documented upgrade, recorded whatever
+  plain table held `<rel>_pgpm_regrain_delta` as the delta of a parent that had never regrained, by its name
+  alone, and the next prepare then DROPPED that table of the operator's with its rows (Tier 1); without the
+  re-run the same prepare refuses it. The upgrade now records the pair only on proof that pgpm minted it (the
+  capture function under its name, whose body inserts into exactly that relation, which carries the delta's
+  `pgpm_seq` identity column), which a real 0.6.0 capture, in flight or left by a completed run, meets. After a
+  table was handed to a non-superuser new owner, the tick preparing its next regrain logged `skip_regrain`
+  'must be owner of function <rel>_pgpm_regrain_capture' on every tick, and `regrain_cancel`, a retirement
+  reclaiming a regrain's source and `untransmute` failed 'permission denied' half-way; each now refuses once,
+  up front, with the documented `pgpm.hand_over_scratch(...)` step, and that refusal is now SQLSTATE `42501`
+  (it was `P0001`), so `uninstall.sql`'s per-parent handler still warns and goes on. And
+  `from_hypertable`'s swap left out any trigger whose function was named `<rel>_pgpm_delta_fn`, so an
+  operator's own trigger of that name went with the hypertable; it now knows the module's capture by
+  `pgpm.scratch`'s record, the delta's comment record, or (a capture 0.6.0 minted, which has neither) by its
+  body. `tests/270` (new), `tests/267` stage E, `tests/timescale/db/49` stage D, `bench/upgrade_in_place.sh`'s
+  namesake assertions; mutations `scratch_upgrade_adopts_namesake`, `scratch_prepare_owner_not_followed`,
+  `scratch_cancel_owner_not_followed`, `scratch_reclaim_owner_not_followed`,
+  `scratch_untransmute_owner_not_followed`, `scratch_owner_refusal_not_42501`, `hypertable_carried_ddl_by_name`,
+  `hypertable_carried_ddl_record_unread` (and `hypertable_carry_capture_unrecorded`, re-cut).
+
 - **The shared preflight reaches `pgpm_archive`, and a NOT ENFORCED CHECK is named for what it is** (#969
   bullets 9 and 10; lever phase #966). `pgpm.archive_to_s3_ndjson` and `pgpm.archive_to_s3_parquet` never
   checked their bounds: a null `p_lo` died raw on `archive.object_key_claim`'s NOT NULL, and a null `p_hi` read

@@ -878,7 +878,9 @@ re-add the identity columns (which `CREATE TABLE LIKE` does not carry) in the ki
 (`ALWAYS` or `BY DEFAULT`) and with their sequences' options (`INCREMENT BY`, `MINVALUE`/`MAXVALUE`,
 `START WITH`, `CACHE`, `CYCLE`), put back what `CREATE TABLE LIKE` left off the copy (the owner, the table
 and column grants, row-level security and its policies, the table's comment and its triggers, read off the
-source under the lock just before it is dropped; the copy is born with the migrating role's
+source under the lock just before it is dropped; every trigger of yours is carried, whatever its function is
+called, and only this module's own change capture is left out, known by its record and never by its
+function's name; the copy is born with the migrating role's
 `ALTER DEFAULT PRIVILEGES`, so its ACL is reset before the source's grants are replayed and it holds exactly
 those), then hand off to `transmute`, which carries them onto the parent the same way. A `GRANT` or `REVOKE` takes no lock on the table, so one committed in the instant between that read
 and the drop is not carried; make privilege changes before or after the cutover. Because
@@ -1619,7 +1621,11 @@ new owner itself, a non-superuser) refuses once, up front, and logs a `skip_regr
 step to take: see [Handing a table to a new owner](#handing-a-table-to-a-new-owner-hand_over_scratch). The
 delta and the function are found by the oids `pgpm.config` recorded; with none recorded (a table that has
 never regrained) there is none, so `regrain_cancel`, `untransmute` and `uninstall.sql` leave alone a table or
-function of yours named `<rel>_pgpm_regrain_delta` or `<rel>_pgpm_regrain_capture()`.
+function of yours named `<rel>_pgpm_regrain_delta` or `<rel>_pgpm_regrain_capture()`. Re-running `install.sql`
+(the upgrade) records the pair for a table with none recorded only on proof that pgpm minted it: the capture
+function under its name, a trigger function whose body inserts into exactly that delta, and the delta carrying
+its `pgpm_seq` identity column. So a table of yours under the delta's name is left unrecorded by an upgrade
+too, and the next prepare refuses it, naming it, as on a fresh install.
 
 The swap has the same contract. Whatever is captured between that gate and the moment the `DETACH` takes
 its lock is reconciled under the lock until nothing is left, and the source is dropped only once no
@@ -1707,7 +1713,10 @@ not-yet-attached copy, and resets
 child, by the identity recorded when the regrain created it (or when the child entered the catalog), not by
 its name, so a renamed copy or source is still the one reclaimed and a relation that has since taken its old
 name is left alone. The parent is untouched: the source child still holds every row, so this costs the
-copying work already done and nothing else.
+copying work already done and nothing else. On a table handed to a new owner whose regrain objects are still
+the old owner's, a session that can neither hand them over nor act as their owner is refused before anything
+is changed, SQLSTATE `42501`, with the step to take (see
+[Handing a table to a new owner](#handing-a-table-to-a-new-owner-hand_over_scratch)).
 
 The copies are **dropped, not kept**. Keeping them would let a later regrain resume from copies made before
 the cancel, which were therefore never reconciled.
@@ -2438,8 +2447,11 @@ handed over. Run it as a superuser, or as a role that is a member of both the ol
 otherwise it refuses, as a tick does. A maintenance tick run by such a role does this on its own, so under
 pg_cron as a superuser there is nothing to do. A tick run by a role that can do neither (the new owner, as a
 non-superuser) refuses with a `skip_regrain` row whose message begins `run select
-pgpm.hand_over_scratch(...)`, and the regrain resumes on the first tick after the step is taken. A null table
-is refused.
+pgpm.hand_over_scratch(...)`, and the regrain resumes on the first tick after the step is taken. So does every
+other path that drops, empties or truncates those objects, before it changes anything: the tick that prepares
+the table's next regrain (it drops what the last one left), `regrain_cancel`, a retirement that reclaims the
+source of a regrain in flight, and `untransmute`. The refusal is SQLSTATE `42501` (`insufficient_privilege`).
+A retirement with nothing of a regrain to reclaim is not refused. A null table is refused.
 
 ### `set_partition_tz`
 
@@ -2810,7 +2822,7 @@ One row per managed table (`parent_table` is the primary key). Columns:
 | `regrain_max_blocks` | `int` | optional block budget per microbatch (caps wide rows; null = row cap only) |
 | `regrain_to` | `text` | auto-regrain target step (null = off; see `set_regrain`) |
 | `regrain_cursor` | `text` | how far the in-progress regrain has copied (null = not regraining); [`progress`](#progress) reads it as a fraction of the range |
-| `regrain_delta_oid` / `regrain_capture_fn_oid` | `oid` / `oid` | the change-capture delta table and trigger function the last prepare tick minted for this parent, by identity; every reader of the delta resolves them from here, so a rename of the parent mid-regrain is harmless (null until the first regrain; backfilled by an upgrade) |
+| `regrain_delta_oid` / `regrain_capture_fn_oid` | `oid` / `oid` | the change-capture delta table and trigger function the last prepare tick minted for this parent, by identity; every reader of the delta resolves them from here, so a rename of the parent mid-regrain is harmless (null until the first regrain; backfilled by an upgrade, only for a pair pgpm provably minted) |
 | `regrain_source_mark` | `jsonb` | what the in-flight regrain copies from: the source partition's relfilenode and each column's attnum, recorded by the prepare tick and compared by every later tick, so an `ALTER TABLE` that rewrote the source or replaced a column restarts the run (meaningful only while `regrain_cursor` is set; null before the first regrain, and a null one over copies restarts the run too; an upgrade restarts a run in flight with copies and records the mark of one without) |
 | `archive_fn` | `regprocedure` | the pluggable archive strategy (null = `none`); see [Archive strategy contract](#archive-strategy-contract) |
 | `archive_byte_budget` / `archive_probe_sample` | `bigint` / `int` | byte-budget chunking knobs for the built-in chunked archiver (see [Byte-budget chunked archiving](#byte-budget-chunked-archiving)) |

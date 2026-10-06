@@ -11,10 +11,10 @@
 # into a delta nothing drains.
 #
 # The mutations it is required to fail against (bench/mutations/mutate.py):
-#   hypertable_carry_capture_by_name    -- the record is not consulted, the pre-#842 carry: only the name
-#                                          derived from the current table is left out
-#   hypertable_carry_capture_unrecorded -- the record alone: the capture of a copy made by a release that
-#                                          wrote no record is carried, and the swap dies replaying it
+#   hypertable_carry_capture_by_name    -- the comment record is not consulted, the pre-#842 carry
+# (hypertable_carry_capture_unrecorded, which this file guarded while u42 below had no other record, is
+# bench/scratch_relations.sh's since #969: u42 is recorded in pgpm.scratch now, and the capture that has no
+# record at all, one pgpm 0.6.0 minted, is tests/timescale/db/49 stage D's.)
 #
 # Usage: hypertable_carry_capture_by_record.sh <container> <db> [pgpm_hypertable/install.sql]
 # Runs on the TIMESCALE track's container (supabase/postgres + TimescaleDB), which is why its mutations

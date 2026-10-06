@@ -2006,6 +2006,12 @@ $$;
 -- that still holds the current owner's privileges goes on: it can grant on the object and work it as before
 -- (_regrain_capture_grant gives the parent's writers, its owner included, what they need). No DDL when every
 -- owner already matches, which is every tick but the first after a hand-over.
+--
+-- Called by EVERY path that acts on those objects (#969), before it acts: a resuming tick, the prepare tick
+-- that tears the previous run's down, regrain_cancel, retire's _regrain_reclaim and untransmute. A path left
+-- out failed 'must be owner of function' or 'permission denied for table' on the old owner's object instead,
+-- on every tick in the prepare's case. The refusal is SQLSTATE 42501 (insufficient_privilege), which is what
+-- it reports, so a caller that handles a 42501 from those objects (uninstall.sql's per-parent sweep) still does.
 drop function if exists pgpm._scratch_owner_follow(regclass, oid[], oid[], text);
 create or replace function pgpm._scratch_owner_follow(p_parent regclass, p_what text)
 returns void language plpgsql as $$
@@ -2042,7 +2048,8 @@ begin
       quote_literal(v_parent_q), (select string_agg(distinct quote_ident(pg_get_userbyid(o)), ', ') from unnest(v_stuck) o),
       quote_ident(v_want_n), p_what, p_parent,
       (select string_agg(distinct quote_ident(pg_get_userbyid(o)), ', ') from unnest(v_stuck) o),
-      quote_ident(v_want_n), quote_ident(current_user);
+      quote_ident(v_want_n), quote_ident(current_user)
+      using errcode = 'insufficient_privilege';   -- #969: what it is, so a caller's 42501 handler still sees it
   end if;
 end;
 $$;
@@ -4202,8 +4209,18 @@ $$;
 -- flight across the upgrade has its trigger writing the cut name. Only a plain table that is not a
 -- partition is taken for a delta, because for a parent named 63 bytes the cut name is the parent itself,
 -- and recording it as its own delta is the defect #655 removed.
+--
+-- And only on PROOF that pgpm minted the pair (#969), never on the name alone. Re-running this file is the
+-- documented upgrade, and it runs on a fresh install too: by name, an operator's own <rel>_pgpm_regrain_delta
+-- beside a parent that never regrained was recorded as its delta, and the next prepare then DROPPED it with its
+-- rows as "the previous regrain's", where without the re-run the same prepare refuses the namesake
+-- (_regrain_capture_install). The proof is what those releases minted together: the capture function under the
+-- derived name, a trigger function whose body inserts into exactly this relation, and the relation carrying the
+-- delta's pgpm_seq identity column. Not the trigger on a partition: a COMPLETED regrain leaves the delta and the
+-- function and no trigger, and the next prepare must take those for pgpm's own. Anything short of the proof is
+-- left unrecorded, which is a fresh install's state, so the prepare refuses it by name as it does there.
 do $$
-declare r record; v_nsp name; v_rel name; v_delta regclass;
+declare r record; v_nsp name; v_rel name; v_delta regclass; v_fn regprocedure;
 begin
   for r in select parent_table from pgpm.config where regrain_delta_oid is null loop
     select n.nspname, c.relname into v_nsp, v_rel
@@ -4213,9 +4230,17 @@ begin
     if v_delta is null
        or not exists (select 1 from pg_class c where c.oid = v_delta and c.relkind = 'r' and not c.relispartition)
     then continue; end if;
+    v_fn := to_regprocedure(format('%I.%I()', v_nsp, left(v_rel || '_pgpm_regrain_capture', 63)::name));
+    if v_fn is null   -- #969: the proof that pgpm minted the pair
+       or not exists (select 1 from pg_proc p
+                       where p.oid = v_fn and p.prorettype = 'trigger'::regtype
+                         and strpos(p.prosrc, format('insert into %I.%I (', v_nsp, left(v_rel || '_pgpm_regrain_delta', 63)::name)) > 0)
+       or not exists (select 1 from pg_attribute a
+                       where a.attrelid = v_delta and a.attname = 'pgpm_seq' and a.attidentity = 'a' and not a.attisdropped)
+    then continue; end if;
     update pgpm.config
        set regrain_delta_oid      = v_delta::oid,
-           regrain_capture_fn_oid = to_regprocedure(format('%I.%I()', v_nsp, left(v_rel || '_pgpm_regrain_capture', 63)::name))::oid
+           regrain_capture_fn_oid = v_fn::oid
      where parent_table = r.parent_table;
   end loop;
 end $$;
@@ -5200,6 +5225,10 @@ begin
   cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+  -- #969: it empties the delta and drops the copies, which a table handed to a new owner may have left with
+  -- the old one. Asked first, so the new owner's cancel refuses with the hand-over step rather than failing
+  -- 'permission denied for table <rel>_pgpm_regrain_delta' half-way. A no-op when every owner matches.
+  perform pgpm._scratch_owner_follow(p_parent, 'regrain_cancel');
 
   -- #707: from the relation each row's child_oid recorded (#421), wherever it now sits and whatever it is
   -- called, never from whatever bears the row's name. By name, a source renamed aside kept its capture
@@ -5310,11 +5339,15 @@ begin
     || ' and lo::%s >= %L::%s and hi::%s <= %L::%s order by lo::%s',
     p_parent::text, v_ncast, p_lo, v_ncast, v_ncast, p_hi, v_ncast, v_ncast)
   loop
+    -- #969: the copies and the delta may be a previous owner's after a hand-over; asked before the first is
+    -- touched, and only when one is, so a retirement with nothing of a regrain to reclaim is never refused
+    if v_dropped = 0 then perform pgpm._scratch_owner_follow(p_parent, 'the retirement'); end if;
     perform pgpm._regrain_drop_copy(p_parent, v_nsp, r.child_name);   -- #631: by recorded oid
     v_dropped := v_dropped + 1;
   end loop;
 
   if v_capture then
+    perform pgpm._scratch_owner_follow(p_parent, 'the retirement');   -- #969: before the delta is emptied
     -- #768, #555: the source as pgpm.part recorded it, the delta by its recorded oid, each in its own schema
     v_src := pgpm._regrain_child_rel(p_parent, p_child);
     execute format('drop trigger if exists pgpm_regrain_capture on %s', v_src::text);
@@ -5702,6 +5735,11 @@ begin
     -- was off reverted, every DELETE came back, every INSERT vanished. Only regrain inserts a
     -- not-attached pgpm.part row (#94), so a not-attached row inside this source's range is one of its
     -- copies whatever the cursor says. A set cursor with no copies still restarts (and logs) as before.
+    -- #969: this tick drops what the last run left (its copies here, its capture function and delta in
+    -- _regrain_capture_install), so it asks first whether this session may, as a resuming tick does below.
+    -- After a hand-over the new owner's prepare failed 'must be owner of function ...' on the old owner's
+    -- capture function every tick; now it refuses once, up front, with the hand-over step.
+    perform pgpm._scratch_owner_follow(p_parent, 'the regrain');   -- #969: the prepare tick
     for r in execute format(
       'select child_name from pgpm.part where parent_table = %L::regclass and not attached'
       || ' and lo::%s >= %L::%s and hi::%s <= %L::%s',
@@ -9192,6 +9230,10 @@ begin
   -- they come from the oids recorded there at prepare (#496), or failing that from the parent's own name,
   -- and both are gone by the time the drop below runs.
   select nsp, delta, fn into v_cnsp, v_cdelta, v_cfn from pgpm._regrain_capture_names(p_parent);
+  -- #969: and they are dropped at the end, with the copies a regrain in flight leaves, which a table handed to a
+  -- new owner may have left with the old one. Asked before anything is changed, so the new owner's untransmute
+  -- refuses with the hand-over step rather than failing 'must be owner of table' at that drop.
+  perform pgpm._scratch_owner_follow(p_parent, 'untransmute');
 
   -- THE GATE (REDESIGN.md section 13): a clean (metadata-only) reverse needs the original table still
   -- intact as the MONOLITH, holding the whole table, with nothing landed outside it. The reverse is a
