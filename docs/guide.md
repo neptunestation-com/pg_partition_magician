@@ -156,6 +156,7 @@ on its delta table, so a table of yours that merely shares the name is left alon
 from any `from_hypertable_copy` never cut over: the `<table>_pgpm_dest` table (a full second copy of the
 hypertable's rows) with its indexes and the foreign keys it holds, found by the record the copy keeps on
 it, and dropped while the hypertable it was copied from still exists, since that still holds every row.
+The copy, the delta and the function are found by oid, so one you renamed or moved since is still found.
 Left: every transmuted table, still a partitioned table under its original name, with all of its
 partitions and rows. Nothing else pgpm made remains in your schema, with one exception that a `WARNING`
 names: a never-cut-over copy whose hypertable you have since dropped, because it may hold the only copy

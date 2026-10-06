@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **`uninstall.sql` drops every scratch object `pgpm.scratch` records, by oid, whatever it is called now**
+  (#985). Its record sweep took only a recorded object that had lost the comment `from_hypertable_copy` also
+  puts on it, and left every commented one to the comment sweeps, which also need the `<rel>_pgpm_delta` /
+  `<rel>_pgpm_dest` name. So a never-cut-over copy and delta the operator had renamed (which the drains and
+  the cutover still find by oid) matched neither: the copy, the delta and the capture function survived the
+  uninstall, with the capture trigger still on the live hypertable and every chunk, while the schema drop
+  took the record that named them. The record sweep now takes every recorded copy, delta and function by
+  oid (a copy whose hypertable is gone is still left, with its `WARNING`), and the comment sweeps take only
+  what the record does not name. `tests/282` (new, core), `tests/timescale/db/54` (new); `tests/timescale/db/32`
+  and `48` now stage their comment-sweep copies as pre-record ones, so those sweeps stay guarded. Guards
+  `bench/uninstall_scratch_by_record.sh` and `bench/uninstall_hypertable_scratch_by_record.sh`; mutations
+  `uninstall_scratch_record_defers_commented`, `uninstall_scratch_record_drops_orphaned_copy`,
+  `uninstall_scratch_record_skips_capture_fn` (and `uninstall_scratch_record_unread`, re-cut).
+
 - **A forward cell detached by hand is rebuilt, not trusted** (#956 bullet 2). `obtain` and `extend_to` judged
   a cell built while the relation its `pgpm.part` row recorded existed, so a forward partition DETACHed by
   hand (its table kept) stayed "built": never rebuilt, nothing logged, every write into its range refused for

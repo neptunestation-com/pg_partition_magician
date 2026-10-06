@@ -20,13 +20,14 @@
 --   * from_hypertable's change capture, left in the hypertable's schema by a
 --     from_hypertable_copy(..., p_track_changes => true) that was never cut over: the delta
 --     <rel>_pgpm_delta, the trigger function <rel>_pgpm_delta_fn(), and the <rel>_pgpm_delta_trg
---     row trigger it drives on the live hypertable and its chunks (found by pgpm.scratch, or by
---     the comment an earlier release's copy kept on its delta; see the schema drop's block)
+--     row trigger it drives on the live hypertable and its chunks (found by pgpm.scratch, by oid
+--     whatever they are called now, or by the comment an earlier release's copy kept on its delta;
+--     see the schema drop's block)
 --   * from_hypertable's copy, left in the hypertable's schema by a from_hypertable_copy that was never cut
 --     over: the table <rel>_pgpm_dest (a full second copy of the hypertable's rows) with its indexes and the
---     outgoing foreign keys the copy replayed on it (found by pgpm.scratch, or by the comment an earlier
---     release's copy kept on it, and dropped only while the hypertable it was copied from still exists;
---     see the schema drop's block)
+--     outgoing foreign keys the copy replayed on it (found by pgpm.scratch, by oid whatever it is called
+--     now, or by the comment an earlier release's copy kept on it, and dropped only while the hypertable it
+--     was copied from still exists; see the schema drop's block)
 --
 -- Put back first:
 --   * every incoming foreign key transmute(..., p_incoming_fks => 'preserve') dropped and
@@ -151,7 +152,7 @@ $$;
 -- refusal.
 do $$
 declare
-  r record; v_mark bigint; v_left_q text; v_unvalidated_q text; v_fn name;
+  r record; v_mark bigint; v_left_q text; v_unvalidated_q text; v_fn name; v_done oid[] := '{}';
 begin
   if to_regnamespace('pgpm') is null then return; end if;          -- a re-run: nothing left to remove
   begin
@@ -205,27 +206,21 @@ begin
     when undefined_table then null;
   end;
 
-  -- Drop what pgpm.scratch records (#955) and the comment sweeps below cannot find: from_hypertable_copy records
-  -- the copy, a tracking copy's delta and its trigger function there, in the transaction that creates each, so
-  -- the record names them by identity whatever has become of the comment the copy also puts on each (the
-  -- sweeps below find a copy by that comment, which is all a release before the record kept, and they still
-  -- take every copy that carries it). So only what has lost its comment is taken here: a delta without its
-  -- horizon comment (with the function recorded beside it), a copy without its `copy of` comment. The function
-  -- first (CASCADE takes its row trigger on the hypertable and every chunk), then the delta, then the copy,
-  -- dropped only while the hypertable it was copied from still exists, as the sweep below does it (#773).
+  -- Drop EVERY object pgpm.scratch records (#955, #985), by its oid, whatever it is called now and whatever has
+  -- become of the comment the copy also puts on it: from_hypertable_copy records the copy, a tracking copy's
+  -- delta and its trigger function there, in the transaction that creates each, and the drains and the cutover
+  -- find them by that record, so a copy or delta renamed or moved since is still pgpm's. The comment sweeps
+  -- below require the <rel>_pgpm_delta / <rel>_pgpm_dest name as well as the comment, so they cannot be what
+  -- finds a recorded object: they are for a copy made before the record existed, and skip whatever this sweep
+  -- handled (v_done), so a copy this sweep keeps is not warned about twice. The function first (CASCADE takes
+  -- its row trigger on the hypertable and every chunk), then the delta, then the copy, dropped only while the
+  -- hypertable it was copied from still exists, as the sweep below does it (#773).
   begin
     for r in
       select s.parent_oid, s.kind, s.obj from pgpm.scratch s
-       where not exists (
-               select 1 from pg_description d
-                where d.classoid = 'pg_class'::regclass and d.objsubid = 0
-                  and ((s.kind = 'hypertable_dest' and d.objoid = s.obj
-                        and d.description = 'pgpm from_hypertable copy of ' || s.parent_oid)
-                       or (s.kind <> 'hypertable_dest' and d.description ~ '^pgpm from_hypertable horizon [0-9]+$'
-                           and d.objoid = (select s2.obj from pgpm.scratch s2
-                                            where s2.parent_oid = s.parent_oid and s2.kind = 'hypertable_delta'))))
        order by s.kind desc, s.obj
     loop
+      v_done := v_done || r.obj;
       begin
         if r.kind = 'hypertable_delta_fn' then
           if exists (select 1 from pg_proc where oid = r.obj) then
@@ -267,7 +262,8 @@ begin
   -- the hypertable and on each chunk. Here, past the refusal and beside the schema drop, for the same
   -- reason the drop is: a refused uninstall must leave a copy that can still be cut over with its capture.
   -- A tracking copy made by a release that wrote no such comment (0.6.0 and earlier) has no record; drop
-  -- its three objects by hand.
+  -- its three objects by hand. A copy pgpm.scratch records is the record sweep's above, by oid (#985): this
+  -- sweep is for a delta the record does not name, and skips what that sweep handled.
   for r in
     select n.nspname as nsp, c.relname as delta
       from pg_description d
@@ -276,6 +272,7 @@ begin
      where d.classoid = 'pg_class'::regclass and d.objsubid = 0
        and d.description ~ '^pgpm from_hypertable horizon [0-9]+$'
        and c.relkind = 'r' and right(c.relname, 11) = '_pgpm_delta'
+       and c.oid <> all (v_done)
      order by n.nspname, c.relname
   loop
     v_fn := left(r.delta, -11) || '_pgpm_delta_fn';
@@ -307,7 +304,8 @@ begin
   -- Dropped only while the hypertable it names still exists, since the hypertable then holds every row and
   -- only the copy work is lost. A copy whose hypertable is gone may be the only home of those rows, so it is
   -- left, with a WARNING naming it. A copy made by a release that wrote no record (0.6.0 and earlier) is not
-  -- found; drop it by hand.
+  -- found; drop it by hand. A copy pgpm.scratch records is the record sweep's above, by oid (#985): this sweep
+  -- is for a copy the record does not name, and skips what that sweep handled.
   for r in
     select n.nspname as nsp, c.relname as dest,
            substring(d.description from '^pgpm from_hypertable copy of ([0-9]+)$')::oid as src
@@ -317,6 +315,7 @@ begin
      where d.classoid = 'pg_class'::regclass and d.objsubid = 0
        and d.description ~ '^pgpm from_hypertable copy of [0-9]+$'
        and c.relkind = 'r' and right(c.relname, 10) = '_pgpm_dest'
+       and c.oid <> all (v_done)
      order by n.nspname, c.relname
   loop
     if not exists (select 1 from pg_class s where s.oid = r.src) then
