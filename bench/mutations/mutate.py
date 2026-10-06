@@ -2154,6 +2154,17 @@ MUTATIONS = {
         "to say only the operators who are not evaluating it.",
         [("alter table pgpm.config add column if not exists obtain_retry_after timestamptz;\n", "", 1)],
     ),
+    "upgrade_backfill_drops_not_null": (
+        "bench/upgrade_in_place.sh",
+        "#1003: pgpm.config.partition_tz's backfill line adds the column without its `not null default "
+        "'UTC'`, while the `create table` body keeps both, so a fresh install is unchanged and the whole "
+        "pgTAP suite stays green. An upgraded database gets a column of the right name and type, nullable, "
+        "and every config row that predates the upgrade holds NULL where a fresh install holds 'UTC'. The "
+        "guard's catalog read used to be name and type alone and called that identical to a fresh install; "
+        "it must compare nullability and default, and find the NULL rows.",
+        [("alter table pgpm.config add column if not exists partition_tz text not null default 'UTC';\n",
+          "alter table pgpm.config add column if not exists partition_tz text;\n", 1)],
+    ),
     "upgrade_child_oid_backfill_noop": (
         "bench/upgrade_in_place.sh",
         "The upgrade recreates pgpm.part.child_oid and populates nothing (issue #421). Deletes only "
@@ -2957,6 +2968,16 @@ $$;''',
         [("  p_num_rows := v_num_rows;\nend;\n",
           "  p_num_rows := v_num_rows;\n"
           "  raise exception using errcode = '53200', message = 'out of memory';\nend;\n", 1)],
+    ),
+    "archive_lz77_repeat_differs": (
+        "bench/archive_lz77_memory.sh",
+        "#992: the Parquet footer's created_by carries the encode's clock time to the microsecond, a fixed "
+        "width, so every call returns a different file of the same length, and chunk3, which re-encodes "
+        "chunk1's rows, does not return chunk1's file. The guard compared the two files by length alone, so "
+        "the repeat that the no-compounding ratio leans on passed as a repeat. It must compare their bytes.",
+        [("      || archive._pq_write_binary(4, 6, convert_to('pg_partition_magician parquet prototype', 'UTF8')) -- created_by\n",
+          "      || archive._pq_write_binary(4, 6, convert_to('pg_partition_magician parquet prototype '\n"
+          "           || to_char(clock_timestamp() at time zone 'utc', 'YYYYMMDD\"T\"HH24MISS.US'), 'UTF8')) -- created_by\n", 1)],
     ),
     "archive_deflate_raises": (
         "bench/archive_deflate_memory.sh",
@@ -8573,6 +8594,7 @@ MUTATION_SRC = {
     "archive_deflate_six_arrays": "pgpm_archive/install.sql",
     "archive_encode_raises": "pgpm_archive/install.sql",
     "archive_lz77_range_raises": "pgpm_archive/install.sql",
+    "archive_lz77_repeat_differs": "pgpm_archive/install.sql",
     "archive_deflate_raises": "pgpm_archive/install.sql",
     "archive_from_item_raw_splice": "pgpm_archive/install.sql",
     "archive_order_by_raw_splice": "pgpm_archive/install.sql",

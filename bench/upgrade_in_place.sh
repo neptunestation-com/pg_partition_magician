@@ -23,7 +23,10 @@
 #      of them pass trivially against a degrade that silently did nothing (a renamed column, a typo in
 #      the DROP list). This asserts the conditions for the defect were present before looking for it.
 #   2. The pgpm catalog after the upgrade is IDENTICAL to a fresh install of the same code: every
-#      column of every table and view, with its type. This is the assertion the mutation breaks.
+#      column of every table and view, with its type, nullability and default, and every constraint
+#      (#1003). This is the assertion the mutation breaks. Then, by row, every row that predates the
+#      upgrade holds a value in each backfilled column a fresh install declares NOT NULL: a backfill
+#      line that lost its `not null default` leaves them NULL (mutation upgrade_backfill_drops_not_null).
 #      And, separately and BY NAME, every routine in schema pgpm: name, identity arguments, kind and
 #      result type. `create or replace` across a changed argument list creates a second overload
 #      rather than replacing the first (issue #441), and when the new argument has a default the old
@@ -153,11 +156,20 @@ pgpm.dropped_fk:validate_retry_after
 "
 N_DEGRADE=$(echo "$DEGRADE_COLS" | grep -c ':')
 
-# Every column of every table AND view in schema pgpm, with its type. Views are included because a
-# DROP COLUMN ... CASCADE below takes pgpm.partitions with it, so "the view came back" is part of the
-# claim.
-CATALOG_SQL="select md5(string_agg(table_name||'.'||column_name||':'||data_type, ',' order by table_name, column_name))
-             from information_schema.columns where table_schema = 'pgpm'"
+# Every column of every table AND view in schema pgpm, with its type, its nullability and its default,
+# and every constraint on a pgpm table, by name and definition. Views are included because a DROP
+# COLUMN ... CASCADE below takes pgpm.partitions with it, so "the view came back" is part of the claim.
+# Nullability and default are part of it too (#1003): a backfill line that lost its `not null default`
+# restores a column of the right name and type, nullable, NULL on every row that predates the upgrade,
+# and a catalog read of name and type alone calls that identical to a fresh install. Kept as a LIST, as
+# the routines are, so a difference is reported by name rather than as two unequal hashes.
+CATALOG_SQL="select 'column '||table_name||'.'||column_name||' '||data_type||' nullable='||is_nullable
+                    ||' default='||coalesce(column_default, 'none')
+             from information_schema.columns where table_schema = 'pgpm'
+             union all
+             select 'constraint '||conrelid::regclass::text||' '||conname||' '||contype::text||' '||pg_get_constraintdef(oid)
+             from pg_constraint where connamespace = 'pgpm'::regnamespace"
+catalog() { q "$1" "$CATALOG_SQL" | LC_ALL=C sort; }
 
 # Every routine in schema pgpm, one line each: name, identity arguments, kind (f/p) and result type. Kept
 # as a LIST rather than a hash so a difference is reported by name (a stale overload reads as
@@ -174,7 +186,14 @@ docker exec "$C" psql -U postgres -q -c "create database $FRESH" >/dev/null 2>&1
 if ! install_into "$FRESH" >/tmp/up_fresh.log 2>&1; then
   echo "FAIL  the fresh oracle install did not complete"; sed 's/^/      /' /tmp/up_fresh.log; exit 1
 fi
-ORACLE=$(q "$FRESH" "$CATALOG_SQL")
+catalog "$FRESH" > /tmp/up_fresh_catalog.txt
+# The catalog oracle must have read columns AND constraints, and some NOT NULL column among them, or the
+# comparison below is empty-equals-empty in the half that went unread.
+N_CATALOG=$(grep -c . /tmp/up_fresh_catalog.txt)
+if ! grep -q '^column .* nullable=NO ' /tmp/up_fresh_catalog.txt || ! grep -q '^constraint ' /tmp/up_fresh_catalog.txt; then
+  echo "FAIL  the fresh catalog oracle read no NOT NULL column or no constraint: the catalog comparison would compare nothing"
+  sed 's/^/      /' /tmp/up_fresh_catalog.txt | head -5; exit 1
+fi
 routines "$FRESH" > /tmp/up_fresh_routines.txt
 # The routine oracle must have read SOMETHING, or the identity comparison below is empty-equals-empty.
 N_ROUTINES=$(grep -c . /tmp/up_fresh_routines.txt)
@@ -202,7 +221,7 @@ fi
 #
 # This does NOT make the guard circular, and the asymmetry is exactly why. The mutation deletes a
 # backfill line, and a missing backfill LINE is not a missing LIST entry: this check still passes
-# under the mutant, the degrade still drops the column, and the catalog-hash assertion below is
+# under the mutant, the degrade still drops the column, and the catalog assertion below is
 # still what fails. The check that would be circular is the converse -- "every list entry has a
 # backfill line" -- which would fail under the mutant for a reason that is not the defect, and it is
 # deliberately absent.
@@ -233,6 +252,13 @@ check "precondition: every backfilled column is degraded" "${unlisted:-none}" "n
 if [ -n "$unlisted" ]; then
   echo "      add them to DEGRADE_COLS; their backfill lines are exercised by nothing until you do"; exit 1
 fi
+
+# The backfilled columns a fresh install declares NOT NULL, read from the fresh oracle (#1003). The
+# upgrade must leave a value in each on every row that predates it, as the constraint would have.
+NOTNULL_COLS=$(echo "$DEGRADE_COLS" | grep ':' | while IFS=: read -r t c; do
+  grep -qE "^column ${t#pgpm.}\\.$c .* nullable=NO default=" /tmp/up_fresh_catalog.txt && echo "$t:$c"
+done | tr '\n' ' ')
+NOTNULL_COLS="${NOTNULL_COLS% }"
 
 # ---------------------------------------------------------------------------- an older install, with state
 docker exec "$C" psql -U postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
@@ -345,7 +371,36 @@ if ! install_into "$DB" >/tmp/up_upgrade.log 2>&1; then
   echo "FAIL  the in-place upgrade did not complete"; sed 's/^/      /' /tmp/up_upgrade.log; fail=1
 fi
 
-check "the pgpm catalog matches a fresh install exactly" "$(q "$DB" "$CATALOG_SQL")" "$ORACLE"
+catalog "$DB" > /tmp/up_catalog.txt
+if cmp -s /tmp/up_fresh_catalog.txt /tmp/up_catalog.txt; then
+  printf 'PASS  %-58s %s\n' "the pgpm catalog matches a fresh install exactly" "$N_CATALOG columns and constraints"
+else
+  printf 'FAIL  %-58s\n' "the pgpm catalog differs from a fresh install"
+  comm -23 /tmp/up_fresh_catalog.txt /tmp/up_catalog.txt | sed 's/^/      only in fresh:      /'
+  comm -13 /tmp/up_fresh_catalog.txt /tmp/up_catalog.txt | sed 's/^/      only after upgrade: /'
+  fail=1
+fi
+
+# ASSERTION 2b (#1003), by row. Right after the upgrade, before anything below writes, so every row read
+# here predates it. A column the upgrade restored nullable is in the catalog difference above; this says
+# what that costs the operator: the rows it left NULL where a fresh install has a value. LIVENESS first:
+# the fresh oracle has NOT NULL backfilled columns at all, and each was read over rows (pgpm.config and
+# pgpm.part both hold the fixture's), or "no NULLs" would be true of an empty table.
+nn_read=""; nn_null=""
+for col in $NOTNULL_COLS; do
+  t="${col%%:*}"; c="${col#*:}"
+  r=$(q "$DB" "select count(*) filter (where $c is null) || '/' || count(*) from $t" 2>/dev/null)
+  case "$r" in
+    0/0) ;;
+    0/*) nn_read="$nn_read $col" ;;
+    */*) nn_read="$nn_read $col"; nn_null="$nn_null $col(${r%%/*} of ${r#*/} rows)" ;;
+    *)   nn_null="$nn_null $col(unreadable)" ;;
+  esac
+done
+nn_read="${nn_read# }"
+check "LIVENESS: each NOT NULL backfilled column read over existing rows" "${nn_read:-none}" "${NOTNULL_COLS:-a non-empty list}"
+nn_null="${nn_null# }"
+check "no existing row left NULL in a NOT NULL backfilled column" "${nn_null:-none}" "none"
 
 # ASSERTION 2, the routine half (#441). Named differences, not a hash: `only after upgrade` is what a
 # stale overload looks like, `only in fresh` what a routine the upgrade failed to create looks like.

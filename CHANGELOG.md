@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **`bench/archive_lz77_memory.sh` judges the repeat chunk by its bytes, not its length** (#992). Its
+  witness "chunk3 (repeat) returned chunk1's file again", the premise of the no-compounding ratio, compared
+  the two files' lengths, so a repeat that returned a different file of the same length passed as a repeat.
+  Each chunk's result row now carries the md5 of the file it returned, and the repeat must match chunk1's.
+  Mutation `archive_lz77_repeat_differs` (a footer stamped with the encode's clock time, fixed width).
+- **`bench/upgrade_in_place.sh` compares nullability, defaults and constraints with a fresh install, and
+  reads the backfilled rows** (#1003). "The pgpm catalog matches a fresh install exactly" hashed table,
+  column and type alone, so a backfill line that lost its `not null default 'UTC'` for
+  `config.partition_tz` upgraded to a nullable column, NULL on every existing row, and every stage passed.
+  The catalog is now a named list of every column with its type, nullability and default and every
+  constraint by definition, reported line by line where it differs, and every row that predates the
+  upgrade must hold a value in each backfilled column a fresh install declares NOT NULL, beside a liveness
+  check that each was read over existing rows. Mutation `upgrade_backfill_drops_not_null`.
+
 - **tests/219's config-load sweep sees a FOR-loop load** (#999). Part F promises every whole-row
   `pgpm.config` load in pgpm is followed by `pgpm._control_followed`, but found the loads by the one spelling
   `select * into <var> from pgpm.config`, so a reader that loaded the row in a FOR loop (the shape `status()`
