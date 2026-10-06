@@ -26,6 +26,12 @@
 -- copy's cutover does not take the operator's <rel>_pgpm_delta for its change log, and the cutover of a
 -- hypertable renamed since its copy drops the function the copy recorded, not the operator's under the
 -- new name.
+-- STAGE D, carried by record, never by name (#969). The swap replays every trigger pgpm did not make: an
+-- operator's trigger whose function happens to be named <rel>_pgpm_delta_fn is carried by an untracked
+-- migration (it was left out by that name and went with the hypertable). And none it did: a tracking copy's
+-- capture on a hypertable renamed since, whose delta's comment the operator replaced, is known by
+-- pgpm.scratch's record alone, and a capture pgpm 0.6.0 minted, which carries neither record, by proof (its
+-- function's body inserts into <rel>_pgpm_delta). Run before stage C, which uninstalls. (Lettered after it.)
 -- STAGE C, uninstall.sql reads the record. A tracking copy never cut over, whose comment the operator has
 -- since replaced: uninstall drops the copy, the delta and the function by pgpm.scratch, where the comment
 -- sweeps alone (#737, #773) would have left all three, the trigger logging every write.
@@ -34,12 +40,13 @@
 -- step that could reach it. Every refusal is pinned by its message (a procedure that does not refuse dies at
 -- its first COMMIT inside throws_like, 2D000, and that must not pass). Autocommit, disposable database: every
 -- committing procedure that must succeed is a top-level CALL. bench/scratch_relations.sh runs this file
--- against the hypertable_scratch_* mutants and uninstall_scratch_record_unread, each of which it must FAIL.
+-- against the hypertable_scratch_* mutants, uninstall_scratch_record_unread and the carried-DDL mutants of
+-- stage D (hypertable_carried_ddl_*, hypertable_carry_capture_unrecorded), each of which it must FAIL.
 \if :{?uninstall}
 \else
 \set uninstall ../../../pgpm_core/uninstall.sql
 \endif
-select plan(52);
+select plan(64);
 
 do $$ begin
   if not exists (select 1 from pg_roles where rolname = 'w49_owner') then create role w49_owner; end if;
@@ -273,6 +280,92 @@ select is((select count(*)::int from pg_proc where oid = :'f_fn'::oid), 0,
   'hypertable_delta_fn: the cutover dropped the function the copy recorded, n49f_pgpm_delta_fn');
 select is((select oid from pg_proc where oid = :'g_fn'::oid), :'g_fn'::oid,
   'hypertable_delta_fn: and left the operator''s n49g_pgpm_delta_fn, the name the hypertable''s new name derives');
+
+-- ======================================================================================================
+-- STAGE D: the swap carries every trigger pgpm did not make, and none it did (#969 bullet 5)
+-- ======================================================================================================
+-- _from_hypertable_carried_ddl leaves the module's capture trigger out of what the swap replays. It used to
+-- know that trigger by its function's NAME, <rel>_pgpm_delta_fn, so an operator's trigger whose function
+-- carried that name was silently not carried by an untracked migration and went with the hypertable. Now
+-- by the record (pgpm.scratch), by the delta's horizon comment (#842), or, for a capture pgpm 0.6.0 minted
+-- (neither), by proof: a function of that name whose body inserts into <rel>_pgpm_delta.
+create table public.d49_audit (marker text, id bigint);
+-- D1, the operator's trigger under the working name, beside a neutral one: both carried
+create table public.d49a (id bigint not null, ts timestamptz not null, v int not null, primary key (id, ts));
+select create_hypertable('public.d49a', 'ts', chunk_time_interval => interval '1 day');
+insert into public.d49a values (1, '2024-09-01 00:00+00', 10), (2, '2024-09-02 00:00+00', 20), (3, '2024-09-03 00:00+00', 30);
+create function public.d49a_pgpm_delta_fn() returns trigger language plpgsql as $f$
+begin insert into public.d49_audit values ('audit', new.id); return new; end $f$;
+create trigger d49a_audit after insert on public.d49a for each row execute function public.d49a_pgpm_delta_fn();
+create function public.d49a_stamp() returns trigger language plpgsql as $f$
+begin insert into public.d49_audit values ('stamp', new.id); return new; end $f$;
+create trigger d49a_stamp after insert on public.d49a for each row execute function public.d49a_stamp();
+insert into public.d49a values (4, '2024-09-03 06:00+00', 40);
+select is((select string_agg(marker, ',' order by marker) from public.d49_audit where id = 4), 'audit,stamp',
+  'LIVENESS: both of the operator''s triggers fire on d49a before the migration');
+call pgpm.from_hypertable('public.d49a', 'ts', interval '1 day', p_paused => true);
+select is((select relkind::text from pg_class where oid = 'public.d49a'::regclass)
+          || '/' || (select string_agg(id::text, ',' order by id) from public.d49a),
+  'p/1,2,3,4', 'LIVENESS: d49a migrated with its 4 rows');
+select ok(exists (select 1 from pg_trigger where tgrelid = 'public.d49a'::regclass and tgname = 'd49a_stamp'),
+  'LIVENESS: the neutral-named trigger was carried');
+select ok(exists (select 1 from pg_trigger where tgrelid = 'public.d49a'::regclass and tgname = 'd49a_audit'),
+  'an operator''s trigger whose function is named d49a_pgpm_delta_fn is carried onto the migrated table');
+insert into public.d49a values (5, '2024-09-03 12:00+00', 50);
+select is((select string_agg(marker, ',' order by marker) from public.d49_audit where id = 5), 'audit,stamp',
+  'and both of the operator''s triggers fire on the migrated table');
+
+-- D2, the module's capture known by the record alone: a tracking copy of a hypertable renamed since, whose
+-- delta's comment the operator has replaced, so neither the name nor the comment says it is pgpm's
+create table public.d49b (id bigint not null, ts timestamptz not null, v int, primary key (id, ts));
+select create_hypertable('public.d49b', 'ts', chunk_time_interval => interval '1 day');
+insert into public.d49b values (1, '2024-09-01 00:00+00', 1), (2, '2024-09-02 00:00+00', 2), (3, '2024-09-03 00:00+00', 3);
+call pgpm.from_hypertable_copy('public.d49b', 'ts', p_track_changes => true);
+select s.obj as b_fn from pgpm.scratch s where s.parent_oid = 'public.d49b'::regclass::oid and s.kind = 'hypertable_delta_fn' \gset
+alter table public.d49b rename to d49c;
+comment on table public.d49b_pgpm_delta is 'the operator''s note';
+delete from public.d49c where id = 2;   -- a write during the window, captured
+select ok(exists (select 1 from pg_trigger where tgrelid = 'public.d49c'::regclass and tgfoid = :'b_fn'::oid)
+          and obj_description('public.d49b_pgpm_delta'::regclass, 'pg_class') = 'the operator''s note',
+  'LIVENESS: d49c carries the recorded capture trigger, under the old name, and its delta no comment record');
+call pgpm.from_hypertable_cutover('public.d49c', 'ts', interval '1 day', p_paused => true);
+select is((select relkind::text from pg_class where oid = 'public.d49c'::regclass)
+          || '/' || (select string_agg(id::text, ',' order by id) from public.d49c),
+  'p/1,3', 'the cutover of d49c completes, the captured delete applied');
+select is((select count(*)::int from pg_trigger where tgfoid = :'b_fn'::oid), 0,
+  'and no table or partition fires the recorded capture function');
+
+-- D3, a capture pgpm 0.6.0 minted, which carries no record and no comment: its trigger is still on the
+-- hypertable (its abandoned copy was dropped to re-run the migration), and an untracked migration follows
+create table public.d49d (id bigint not null, ts timestamptz not null, v int, primary key (id, ts));
+select create_hypertable('public.d49d', 'ts', chunk_time_interval => interval '1 day');
+insert into public.d49d values (1, '2024-09-01 00:00+00', 1), (2, '2024-09-02 00:00+00', 2);
+create table public.d49d_pgpm_delta as select id, ts from public.d49d with no data;
+alter table public.d49d_pgpm_delta add column pgpm_seq bigint generated always as identity;
+create function public.d49d_pgpm_delta_fn() returns trigger language plpgsql as $pgpm$
+    begin
+      if tg_op = 'DELETE' then
+        insert into public.d49d_pgpm_delta (id, ts) values (old.id, old.ts); return old;
+      elsif tg_op = 'UPDATE' then
+        insert into public.d49d_pgpm_delta (id, ts) values (old.id, old.ts), (new.id, new.ts); return new;
+      else
+        insert into public.d49d_pgpm_delta (id, ts) values (new.id, new.ts); return new;
+      end if;
+    end $pgpm$;
+create trigger d49d_pgpm_delta_trg after insert or update or delete on public.d49d
+  for each row execute function public.d49d_pgpm_delta_fn();
+insert into public.d49d values (3, '2024-09-03 00:00+00', 3);
+select is((select string_agg(id::text, ',') from public.d49d_pgpm_delta), '3',
+  'LIVENESS: d49d''s 0.6.0 capture is live (it logged id 3), and nothing records it');
+call pgpm.from_hypertable('public.d49d', 'ts', interval '1 day', p_paused => true);
+select is((select relkind::text from pg_class where oid = 'public.d49d'::regclass)
+          || '/' || (select string_agg(id::text, ',' order by id) from public.d49d),
+  'p/1,2,3', 'LIVENESS: d49d migrated with its 3 rows');
+select is((select count(*)::int from pg_trigger where tgfoid = 'public.d49d_pgpm_delta_fn()'::regprocedure), 0,
+  'no table or partition fires the 0.6.0 capture function after the migration');
+insert into public.d49d values (4, '2024-09-03 06:00+00', 4);
+select is((select string_agg(id::text, ',') from public.d49d_pgpm_delta), '3',
+  'and a write to the migrated d49d is not logged into the 0.6.0 delta');
 
 -- ======================================================================================================
 -- STAGE C: uninstall.sql reads the record

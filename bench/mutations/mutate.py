@@ -66,25 +66,53 @@ RETIRE_IDENTITY_BLOCK = """  if r.retiring_oid is not null or r.child_oid is not
   end if;
 """
 
-# The upgrade backfill of regrain's capture anchors (#496, reshaped by #655), whole. Shared by the mutation
-# that deletes it and the one that loosens it, for the reason RETIRE_IDENTITY_BLOCK is a constant.
+# The upgrade backfill of regrain's capture anchors (#496, reshaped by #655 and #969), whole. Shared by the
+# mutation that deletes it and the ones that loosen it, for the reason RETIRE_IDENTITY_BLOCK is a constant.
+# Its two gates are constants too: the plain-table check (#655) and the proof that pgpm minted the pair (#969).
+REGRAIN_CAPTURE_BACKFILL_PLAIN = """    if v_delta is null
+       or not exists (select 1 from pg_class c where c.oid = v_delta and c.relkind = 'r' and not c.relispartition)
+    then continue; end if;
+"""
+REGRAIN_CAPTURE_BACKFILL_PROOF = """    if v_fn is null   -- #969: the proof that pgpm minted the pair
+       or not exists (select 1 from pg_proc p
+                       where p.oid = v_fn and p.prorettype = 'trigger'::regtype
+                         and strpos(p.prosrc, format('insert into %I.%I (', v_nsp, left(v_rel || '_pgpm_regrain_delta', 63)::name)) > 0)
+       or not exists (select 1 from pg_attribute a
+                       where a.attrelid = v_delta and a.attname = 'pgpm_seq' and a.attidentity = 'a' and not a.attisdropped)
+    then continue; end if;
+"""
 REGRAIN_CAPTURE_BACKFILL_BLOCK = """do $$
-declare r record; v_nsp name; v_rel name; v_delta regclass;
+declare r record; v_nsp name; v_rel name; v_delta regclass; v_fn regprocedure;
 begin
   for r in select parent_table from pgpm.config where regrain_delta_oid is null loop
     select n.nspname, c.relname into v_nsp, v_rel
       from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = r.parent_table;
     if v_nsp is null then continue; end if;
     v_delta := to_regclass(format('%I.%I', v_nsp, left(v_rel || '_pgpm_regrain_delta', 63)::name));
-    if v_delta is null
-       or not exists (select 1 from pg_class c where c.oid = v_delta and c.relkind = 'r' and not c.relispartition)
-    then continue; end if;
-    update pgpm.config
+""" + REGRAIN_CAPTURE_BACKFILL_PLAIN + """    v_fn := to_regprocedure(format('%I.%I()', v_nsp, left(v_rel || '_pgpm_regrain_capture', 63)::name));
+""" + REGRAIN_CAPTURE_BACKFILL_PROOF + """    update pgpm.config
        set regrain_delta_oid      = v_delta::oid,
-           regrain_capture_fn_oid = to_regprocedure(format('%I.%I()', v_nsp, left(v_rel || '_pgpm_regrain_capture', 63)::name))::oid
+           regrain_capture_fn_oid = v_fn::oid
      where parent_table = r.parent_table;
   end loop;
 end $$;
+"""
+
+# _from_hypertable_carried_ddl's ways of knowing the module's own capture trigger, which the swap must not
+# replay: pgpm.scratch's record (#969), a 0.6.0 capture (no record, no comment) by proof (#969), and the
+# delta's horizon comment (#842). Constants because four mutations cut them.
+HT_CAPTURE_ARM_RECORD = """       and not exists (select 1 from pgpm.scratch s   -- #969: by the record, never by the function's name
+                        where s.parent_oid = p_hypertable::oid and s.kind = 'hypertable_delta_fn' and s.obj = t.tgfoid)
+"""
+HT_CAPTURE_ARM_PROOF = """       and not (fn.nspname = v_nsp and f.proname = v_rel || '_pgpm_delta_fn'   -- #969: 0.6.0's, on proof
+                and strpos(f.prosrc, format('insert into %I.%I (', v_nsp, v_rel || '_pgpm_delta')) > 0)
+"""
+HT_CAPTURE_ARM_COMMENT = """       and not exists (select 1 from pg_class d
+                         join pg_description dd on dd.objoid = d.oid and dd.classoid = 'pg_class'::regclass
+                                               and dd.objsubid = 0
+                        where right(f.proname, 14) = '_pgpm_delta_fn' and f.pronargs = 0
+                          and d.relnamespace = f.pronamespace and d.relname = left(f.proname, -3)
+                          and d.relkind = 'r' and dd.description ~ '^pgpm from_hypertable horizon [0-9]+$')
 """
 
 # _install_write_block's identity check (#429), and the whole of _remove_write_block, which is
@@ -1551,16 +1579,10 @@ MUTATIONS = {
         "bench/hypertable_cutover_carries_access.sh",
         "#787 replaying the tracked copy's change-capture trigger: the swap dropped its function with the "
         "source, so the replay dies in the swap transaction and the cutover of tests/timescale/db/33's "
-        "tracked hypertable fails on a raw error, leaving it a hypertable. Both of the carry's ways of "
-        "knowing the capture are removed, the record (#842) and the name derived from the current table.",
-        [("""       and not (fn.nspname = v_nsp and f.proname = v_rel || '_pgpm_delta_fn')
-       and not exists (select 1 from pg_class d
-                         join pg_description dd on dd.objoid = d.oid and dd.classoid = 'pg_class'::regclass
-                                               and dd.objsubid = 0
-                        where right(f.proname, 14) = '_pgpm_delta_fn' and f.pronargs = 0
-                          and d.relnamespace = f.pronamespace and d.relname = left(f.proname, -3)
-                          and d.relkind = 'r' and dd.description ~ '^pgpm from_hypertable horizon [0-9]+$')
-""", "", 1)],
+        "tracked hypertable fails on a raw error, leaving it a hypertable. Every one of the carry's ways of "
+        "knowing the capture is removed: pgpm.scratch's record and the proof of a 0.6.0 capture (#969), and "
+        "the delta's horizon comment (#842).",
+        [(HT_CAPTURE_ARM_RECORD + HT_CAPTURE_ARM_PROOF + HT_CAPTURE_ARM_COMMENT, "", 1)],
     ),
     "hypertable_carry_capture_by_name": (
         "bench/hypertable_carry_capture_by_record.sh",
@@ -1568,23 +1590,17 @@ MUTATIONS = {
         "derived from the hypertable's CURRENT schema and relname, so an abandoned tracking copy's trigger, "
         "named for the table before a SET SCHEMA or RENAME, is carried onto the copy and cloned onto every "
         "partition. tests/timescale/db/42's parents and partitions fire the stale capture and its deltas grow.",
-        [("""       and not exists (select 1 from pg_class d
-                         join pg_description dd on dd.objoid = d.oid and dd.classoid = 'pg_class'::regclass
-                                               and dd.objsubid = 0
-                        where right(f.proname, 14) = '_pgpm_delta_fn' and f.pronargs = 0
-                          and d.relnamespace = f.pronamespace and d.relname = left(f.proname, -3)
-                          and d.relkind = 'r' and dd.description ~ '^pgpm from_hypertable horizon [0-9]+$')
-""", "", 1)],
+        [(HT_CAPTURE_ARM_COMMENT, "", 1)],
     ),
     "hypertable_carry_capture_unrecorded": (
-        "bench/hypertable_carry_capture_by_record.sh",
-        "#842 trusting the record alone: a tracking copy made by a release that wrote no horizon comment "
-        "(0.6.0 and earlier) has its capture trigger carried, and the replay dies in the swap transaction "
-        "on the function the cutover just dropped. tests/timescale/db/42's unrecorded copy fails to cut over.",
-        [("""       and not (fn.nspname = v_nsp and f.proname = v_rel || '_pgpm_delta_fn')
-       and not exists (select 1 from pg_class d
-""", """       and not exists (select 1 from pg_class d
-""", 1)],
+        "bench/scratch_relations.sh",
+        "#842 and #955 trusting the records alone: a capture pgpm 0.6.0 minted carries neither pgpm.scratch's "
+        "record nor the horizon comment, and it is still on a hypertable whose abandoned copy the operator "
+        "dropped to re-run the migration; an untracked migration then carries its trigger onto the table and "
+        "every partition, logging every write into a delta nothing drains. The proof-gated arm (#969) removed. "
+        "tests/timescale/db/49 stage D (D3) catches it. tests/timescale/db/42's u42, which guarded this before "
+        "the record existed, is recorded now and needs no proof.",
+        [(HT_CAPTURE_ARM_PROOF, "", 1)],
     ),
     "hypertable_swap_drops_publications": (
         "bench/hypertable_carry_publications_replica_identity.sh",
@@ -5174,13 +5190,12 @@ $$;''',
         "a plain table. For a 63-byte parent that name is the parent itself, so a re-run of install.sql "
         "records the parent as its OWN delta by oid, and every reader then resolves it by identity: "
         "regrain_cancel TRUNCATEs the managed table even with the derive fixed. tests/160 section (C), "
-        "which re-runs the install, is what catches it.",
+        "which re-runs the install, is what catches it. The #969 proof goes too: it would refuse the parent "
+        "on its own (no capture function writes it), so with it in place this would not be the pre-#655 shape.",
         [(REGRAIN_CAPTURE_BACKFILL_BLOCK,
           REGRAIN_CAPTURE_BACKFILL_BLOCK.replace(
-              "    if v_delta is null\n"
-              "       or not exists (select 1 from pg_class c where c.oid = v_delta and c.relkind = 'r' and not c.relispartition)\n"
-              "    then continue; end if;\n",
-              "    if v_delta is null then continue; end if;\n"), 1)],
+              REGRAIN_CAPTURE_BACKFILL_PLAIN, "    if v_delta is null then continue; end if;\n").replace(
+              REGRAIN_CAPTURE_BACKFILL_PROOF, ""), 1)],
     ),
     "obtain_explicit_name_uncaught": (
         "bench/obtain_explicit_name_too_long.sh",
@@ -7943,6 +7958,73 @@ select ok(
                      re.MULTILINE | re.DOTALL),
           "-- MUTANT: no upgrade fill of pgpm.scratch\n", 1)],
     ),
+    # The lever's residue (#969, W1b): one mutation per site, each putting that site's defect back.
+    "scratch_upgrade_adopts_namesake": (
+        "bench/upgrade_in_place.sh",
+        "Pre-#969 #496 upgrade backfill: whatever plain table holds <rel>_pgpm_regrain_delta is recorded as the "
+        "parent's regrain delta by its name alone, so a re-run of install.sql (the documented upgrade, on a "
+        "fresh install too) adopts an operator's table beside a parent that never regrained, and the next "
+        "prepare DROPs it with its rows. The proof that pgpm minted the pair is removed. "
+        "bench/upgrade_in_place.sh's namesake assertions catch it (and tests/270).",
+        [(REGRAIN_CAPTURE_BACKFILL_PROOF, "", 1)],
+    ),
+    "scratch_prepare_owner_not_followed": (
+        "bench/scratch_relations.sh",
+        "Pre-#969 regrain_step: the PREPARE tick tears down the previous run's capture function, delta and copies "
+        "without asking whether this session can own them, so after a hand-over every tick the new owner (a "
+        "non-superuser) runs fails 'must be owner of function <rel>_pgpm_regrain_capture'. tests/267 stage E "
+        "(E1) catches it.",
+        [("    perform pgpm._scratch_owner_follow(p_parent, 'the regrain');   -- #969: the prepare tick\n", "", 1)],
+    ),
+    "scratch_cancel_owner_not_followed": (
+        "bench/scratch_relations.sh",
+        "Pre-#969 regrain_cancel: it truncates the delta and drops the copies without asking, so after a "
+        "hand-over the new owner's cancel fails 'permission denied for table <rel>_pgpm_regrain_delta' instead "
+        "of naming the hand-over step. tests/267 stage E (E2) catches it.",
+        [("  perform pgpm._scratch_owner_follow(p_parent, 'regrain_cancel');\n", "", 1)],
+    ),
+    "scratch_reclaim_owner_not_followed": (
+        "bench/scratch_relations.sh",
+        "Pre-#969 _regrain_reclaim (retire's): it drops the copies and empties the delta of a regrain whose source "
+        "retention is dropping without asking, so after a hand-over the retirement fails 'permission denied'. "
+        "Both of its checks are removed. tests/267 stage E (E3) catches it.",
+        [("    if v_dropped = 0 then perform pgpm._scratch_owner_follow(p_parent, 'the retirement'); end if;\n", "", 1),
+         ("    perform pgpm._scratch_owner_follow(p_parent, 'the retirement');   -- #969: before the delta is emptied\n",
+          "", 1)],
+    ),
+    "scratch_untransmute_owner_not_followed": (
+        "bench/scratch_relations.sh",
+        "Pre-#969 untransmute: it drops the regrain's delta and capture function at the end without asking, so "
+        "after a hand-over the new owner's untransmute fails 'must be owner of table'. tests/267 stage E (E4) "
+        "catches it.",
+        [("  perform pgpm._scratch_owner_follow(p_parent, 'untransmute');\n", "", 1)],
+    ),
+    "scratch_owner_refusal_not_42501": (
+        "bench/scratch_relations.sh",
+        "_scratch_owner_follow's refusal raised as P0001 rather than 42501: uninstall.sql's per-parent sweep, "
+        "which calls regrain_cancel and handles only insufficient_privilege, then aborts the whole uninstall on "
+        "a table handed to a new owner instead of warning and going on. tests/267 stage E pins the SQLSTATE.",
+        [("      quote_ident(v_want_n), quote_ident(current_user)\n"
+          "      using errcode = 'insufficient_privilege';   -- #969: what it is, so a caller's 42501 handler still sees it\n",
+          "      quote_ident(v_want_n), quote_ident(current_user);   -- MUTANT: P0001\n", 1)],
+    ),
+    "hypertable_carried_ddl_by_name": (
+        "bench/scratch_relations.sh",
+        "Pre-#969 _from_hypertable_carried_ddl: a trigger whose function is <rel>_pgpm_delta_fn is left out by "
+        "that NAME alone, so an operator's own trigger whose function carries it is not carried by an untracked "
+        "migration and goes with the hypertable. The proof-gated arm loses its proof. tests/timescale/db/49 "
+        "stage D (D1) catches it.",
+        [(HT_CAPTURE_ARM_PROOF,
+          "       and not (fn.nspname = v_nsp and f.proname = v_rel || '_pgpm_delta_fn')   -- MUTANT: by name\n", 1)],
+    ),
+    "hypertable_carried_ddl_record_unread": (
+        "bench/scratch_relations.sh",
+        "_from_hypertable_carried_ddl without pgpm.scratch's record: a tracking copy's capture on a hypertable "
+        "renamed since, whose delta's comment the operator replaced, matches neither the proof nor the comment, "
+        "is carried, and the replay dies on the function the cutover just dropped. tests/timescale/db/49 stage "
+        "D (D2) catches it.",
+        [(HT_CAPTURE_ARM_RECORD, "", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.
@@ -8141,6 +8223,8 @@ MUTATION_SRC = {
     "hypertable_cutover_drops_fn_by_name": "pgpm_hypertable/install.sql",
     "hypertable_swap_keeps_scratch_record": "pgpm_hypertable/install.sql",
     "uninstall_scratch_record_unread": "pgpm_core/uninstall.sql",
+    "hypertable_carried_ddl_by_name": "pgpm_hypertable/install.sql",
+    "hypertable_carried_ddl_record_unread": "pgpm_hypertable/install.sql",
 }
 
 # name -> the CI track whose job runs it; anything not listed here belongs to the default `perf`
@@ -8239,6 +8323,8 @@ MUTATION_TRACK = {
     "hypertable_cutover_drops_fn_by_name": "timescale",
     "hypertable_swap_keeps_scratch_record": "timescale",
     "uninstall_scratch_record_unread": "timescale",
+    "hypertable_carried_ddl_by_name": "timescale",
+    "hypertable_carried_ddl_record_unread": "timescale",
 }
 
 

@@ -457,9 +457,14 @@ end $$;
 -- pgpm_core/uninstall.sql finds a copy too (#737). By name alone, a tracking copy that was never cut over
 -- left its trigger on the hypertable under the table's name AT THAT TIME, and after a SET SCHEMA or a
 -- RENAME it read as a user trigger: carried onto the copy, cloned by transmute onto every partition, and
--- logging every write into a delta nothing drains. The name derived from the current table is still left
--- out too, for a delta a release before the comment built (the cutover drops that function before the
--- replay). No trigger state rides along, because TimescaleDB refuses ENABLE and DISABLE TRIGGER on a
+-- logging every write into a delta nothing drains. The function pgpm.scratch records for this hypertable
+-- (#955) is left out too, whatever its delta's comment says now. And never a function by its NAME alone
+-- (#969): left out as <rel>_pgpm_delta_fn, an operator's own trigger whose function happened to carry that
+-- name was not carried by an untracked migration and went with the hypertable. A capture pgpm 0.6.0 minted
+-- carries neither record, and its trigger is still on a hypertable whose abandoned copy the operator dropped
+-- to re-run the migration, so <rel>_pgpm_delta_fn is left out on PROOF that it is that capture: its body
+-- inserts into <rel>_pgpm_delta, which is what the module wrote and an operator's function under the name
+-- does not. No trigger state rides along, because TimescaleDB refuses ENABLE and DISABLE TRIGGER on a
 -- hypertable, so every user trigger is origin-enabled, which is what CREATE TRIGGER leaves.
 -- The replica identity and the publication membership (#816) are carried too: transmute carries both from
 -- a plain table onto its parent and every partition (#782, #566), and the copy LIKE made has neither, so a
@@ -515,7 +520,10 @@ begin
       from pg_trigger t join pg_proc f on f.oid = t.tgfoid join pg_namespace fn on fn.oid = f.pronamespace
      where t.tgrelid = p_hypertable and not t.tgisinternal
        and fn.nspname not like '\_timescaledb%'
-       and not (fn.nspname = v_nsp and f.proname = v_rel || '_pgpm_delta_fn')
+       and not exists (select 1 from pgpm.scratch s   -- #969: by the record, never by the function's name
+                        where s.parent_oid = p_hypertable::oid and s.kind = 'hypertable_delta_fn' and s.obj = t.tgfoid)
+       and not (fn.nspname = v_nsp and f.proname = v_rel || '_pgpm_delta_fn'   -- #969: 0.6.0's, on proof
+                and strpos(f.prosrc, format('insert into %I.%I (', v_nsp, v_rel || '_pgpm_delta')) > 0)
        and not exists (select 1 from pg_class d
                          join pg_description dd on dd.objoid = d.oid and dd.classoid = 'pg_class'::regclass
                                                and dd.objsubid = 0

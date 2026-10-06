@@ -40,13 +40,20 @@
 -- act as w267_m1, so the tick refuses ONCE, up front, with the hand-over statements (never 'permission
 -- denied' on the delta, which is what every tick logged before). After the remedy the message names, the
 -- next tick goes on.
+-- STAGE E, handed over, the session cannot, on every OTHER path that acts on the old owner's objects (#969):
+-- the prepare tick of the next regrain (it drops what the last run left), regrain_cancel, retire's reclaim of
+-- the regrain's source and untransmute. Each refuses once, up front, SQLSTATE 42501 with the hand-over step,
+-- changing nothing, and goes on after the remedy; a reclaim with nothing of the regrain to touch is not
+-- refused at all. They used to fail 'must be owner of function ...' (the prepare on every tick) or
+-- 'permission denied for table ...' half-way.
 --
 -- ASYMMETRIC: 200 rows, one sub-range copied 30 of 49, two writers making three changes (an UPDATE by each,
--- a DELETE), the operator's tables holding 2 rows and 1 row. bench/scratch_relations.sh runs this file against
--- the core mutants (scratch_* and regrain_capture_names_derived_fallback), each of which it must FAIL.
+-- a DELETE), the operator's tables holding 2 rows and 1 row; stage E's captured keys 30 and 31. bench/
+-- scratch_relations.sh runs this file against the core mutants (scratch_* and
+-- regrain_capture_names_derived_fallback), each of which it must FAIL.
 create extension if not exists pgtap;
 set client_min_messages = warning;
-select plan(47);
+select plan(67);
 
 do $$ begin create role w267_owner;    exception when duplicate_object then null; end $$;
 do $$ begin create role w267_stranger; exception when duplicate_object then null; end $$;
@@ -313,5 +320,180 @@ reset role;
 select is((select array_agg(action order by id) from pgpm.log
             where id > :mark_e and parent_table = 'public.s267e'::regclass and action in ('skip_regrain', 'regrain_copy')),
   array['regrain_copy'], 'after the remedy, the new owner''s tick copies and skips nothing');
+
+-- ======================================================================================================
+-- STAGE E: handed over, the session cannot, on every OTHER path that acts on the old owner's objects (#969)
+-- ======================================================================================================
+-- Stage D's tick resumes a run. These are the other paths that drop, empty or truncate a regrain's delta,
+-- capture function or copies: the PREPARE tick of the next regrain (it tears down what the last run left),
+-- regrain_cancel, retire's reclaim and untransmute. Each used to fail on the first object it touched ('must be
+-- owner of function ...', 'permission denied for table ...'), the prepare on every tick; each must refuse
+-- once, up front, 42501 with the hand-over step, change nothing, and go on after the remedy.
+--
+-- what a call did, as the role running it: 'ok:<result>' or '<SQLSTATE>:<message>', so a refusal is read
+-- without killing the file
+create function pg_temp.w267_try(p_sql text) returns text language plpgsql as $f$
+declare v text;
+begin
+  execute p_sql into v;
+  return 'ok:' || coalesce(v, '<null>');
+exception when others then return sqlstate || ':' || sqlerrm;
+end $f$;
+grant execute on function pg_temp.w267_try(text) to w267_m2;
+create function pg_temp.w267_hand_to_m2(p regclass) returns void language plpgsql as $f$
+declare r record;
+begin
+  execute format('alter table %s owner to w267_m2', p);
+  for r in select inhrelid::regclass as t from pg_inherits where inhparent = p loop
+    execute format('alter table %s owner to w267_m2', r.t);
+  end loop;
+end $f$;
+-- the refusal every path below must give, up to its first 200 characters (what maintain logs)
+create function pg_temp.w267_refusal(p_parent text, p_what text) returns text language sql as $f$
+  select left(format('pg_partition_magician: run select pgpm.hand_over_scratch(%L) as a superuser or a member of both w267_m1 and w267_m2: %s of %s cannot go on while pgpm''s scratch objects for it are owned by w267_m1, not by the table''s owner w267_m2',
+                     'public.' || p_parent, p_what, p_parent), 200)
+$f$;
+
+-- E1, the next regrain's PREPARE tick. s267f regrained once under w267_m1, by hand and to completion, which
+-- leaves its delta and capture function for the next run; then auto-regrain is turned on.
+set role w267_m1;
+create table public.s267f (id bigint primary key, payload text);
+insert into public.s267f select g, 'f' || g from generate_series(1, 299) g;
+call pgpm.transmute('public.s267f', 'id', 100, p_obtain => 3, p_regrain_batch => 1000, p_paused => false);
+select pgpm.obtain('public.s267f');
+insert into public.s267f select g, 'f' || g from generate_series(300, 450) g;
+select pgpm.regrain('public.s267f', 's267f_p0000000000000000300', '50');
+select pgpm.set_regrain('public.s267f', '50');
+reset role;
+select regrain_delta_oid as f_delta, regrain_capture_fn_oid as f_fn from pgpm.config
+ where parent_table = 'public.s267f'::regclass \gset
+select is((select regrain_cursor is null from pgpm.config where parent_table = 'public.s267f'::regclass)::text
+          || '/' || (select pg_get_userbyid(relowner) from pg_class where oid = :'f_delta'::oid)
+          || '/' || (select pg_get_userbyid(proowner) from pg_proc where oid = :'f_fn'::oid),
+  'true/w267_m1/w267_m1',
+  'LIVENESS: s267f''s first regrain completed and left its delta and capture function, w267_m1''s');
+select pg_temp.w267_hand_to_m2('public.s267f');
+select max(id) as mark_f from pgpm.log \gset
+set role w267_m2;
+call pgpm.maintain('public.s267f');
+call pgpm.maintain('public.s267f');
+reset role;
+select is((select array_agg(left(method, 200) order by id) from pgpm.log
+            where id > :mark_f and parent_table = 'public.s267f'::regclass and action in ('skip_regrain', 'regrain_prepare')),
+  array[pg_temp.w267_refusal('s267f', 'the regrain'), pg_temp.w267_refusal('s267f', 'the regrain')],
+  'prepare: each of the new owner''s ticks refuses once, up front, with the hand-over step, never ''must be owner of function''');
+select is((select oid from pg_proc where oid = :'f_fn'::oid)::text || '/' || (select oid from pg_class where oid = :'f_delta'::oid)::text,
+  :'f_fn' || '/' || :'f_delta', 'prepare: the refused ticks dropped neither the old capture function nor the old delta');
+select is(pgpm.hand_over_scratch('public.s267f'), 2, 'prepare: the remedy hands s267f''s delta and capture function to w267_m2');
+select max(id) as mark_f2 from pgpm.log \gset
+set role w267_m2;
+call pgpm.maintain('public.s267f');
+reset role;
+select is((select array_agg(action order by id) from pgpm.log
+            where id > :mark_f2 and parent_table = 'public.s267f'::regclass and action in ('skip_regrain', 'regrain_prepare')),
+  array['regrain_prepare'], 'prepare: after the remedy, the new owner''s tick prepares the next regrain');
+select is((select pg_get_userbyid(c.relowner) || '/' || (c.oid <> :'f_delta'::oid)::text from pg_class c
+            where c.oid = (select regrain_delta_oid from pgpm.config where parent_table = 'public.s267f'::regclass)),
+  'w267_m2/true', 'prepare: and minted a fresh delta, w267_m2''s, in place of the old one');
+
+-- E2 and E3, a run in flight: regrain_cancel, and retire's reclaim of the regrain's source. Each table has
+-- its capture up, a captured key and one copy, all w267_m1's.
+set role w267_m1;
+create table public.s267g (id bigint primary key, payload text);
+insert into public.s267g select g, 'g' || g from generate_series(1, 299) g;
+call pgpm.transmute('public.s267g', 'id', 100, p_obtain => 3, p_regrain_batch => 40, p_paused => false);
+select pgpm.obtain('public.s267g');
+insert into public.s267g values (450, 'frontier');
+select pgpm.regrain_step('public.s267g', 's267g_p0000000000000000000_to_0000000000000000300', '50');
+select pgpm.regrain_step('public.s267g', 's267g_p0000000000000000000_to_0000000000000000300', '50');
+update public.s267g set payload = 'g-captured' where id = 30;
+create table public.s267h (id bigint primary key, payload text);
+insert into public.s267h select g, 'h' || g from generate_series(1, 299) g;
+call pgpm.transmute('public.s267h', 'id', 100, p_obtain => 3, p_regrain_batch => 40, p_paused => false);
+select pgpm.obtain('public.s267h');
+insert into public.s267h values (450, 'frontier');
+select pgpm.regrain_step('public.s267h', 's267h_p0000000000000000000_to_0000000000000000300', '50');
+select pgpm.regrain_step('public.s267h', 's267h_p0000000000000000000_to_0000000000000000300', '50');
+update public.s267h set payload = 'h-captured' where id = 31;
+reset role;
+select pg_temp.w267_hand_to_m2('public.s267g');
+select pg_temp.w267_hand_to_m2('public.s267h');
+select is((select string_agg(c.relname || ':' || (select count(*) from pgpm.part p where p.parent_table = c.oid and not p.attached)
+                             || ':' || (select pg_get_userbyid(d.relowner) from pg_class d
+                                         where d.oid = (select regrain_delta_oid from pgpm.config f where f.parent_table = c.oid)),
+                             ',' order by c.relname)
+             from pg_class c where c.oid in ('public.s267g'::regclass, 'public.s267h'::regclass)),
+  's267g:1:w267_m1,s267h:1:w267_m1',
+  'LIVENESS: s267g and s267h are mid-regrain with one copy each, their deltas w267_m1''s, the tables w267_m2''s');
+select is((select string_agg(distinct id::text, ',') from public.s267g_pgpm_regrain_delta) || '/'
+          || (select string_agg(distinct id::text, ',') from public.s267h_pgpm_regrain_delta),
+  '30/31', 'LIVENESS: each delta holds its captured key');
+
+set role w267_m2;
+select pg_temp.w267_try($$select pgpm.regrain_cancel('public.s267g')::text$$) as cancel_g \gset
+reset role;
+select is(left(:'cancel_g', 206), '42501:' || pg_temp.w267_refusal('s267g', 'regrain_cancel'),
+  'regrain_cancel: the new owner''s cancel refuses, 42501, with the hand-over step, never ''permission denied for table''');
+select is((select regrain_cursor is not null from pgpm.config where parent_table = 'public.s267g'::regclass)::text
+          || '/' || (select count(*) from pgpm.part where parent_table = 'public.s267g'::regclass and not attached)
+          || '/' || (select string_agg(distinct id::text, ',') from public.s267g_pgpm_regrain_delta),
+  'true/1/30', 'regrain_cancel: the refused cancel changed nothing (cursor set, one copy, the captured key)');
+select is(pgpm.hand_over_scratch('public.s267g'), 3, 'regrain_cancel: the remedy hands the delta, the function and the copy over');
+set role w267_m2;
+select pg_temp.w267_try($$select pgpm.regrain_cancel('public.s267g')::text$$) as cancel_g2 \gset
+reset role;
+select is(:'cancel_g2'::text, 'ok:1', 'regrain_cancel: after the remedy, the new owner''s cancel drops the one copy');
+
+-- retire's reclaim, called as retention calls it on the child it is about to drop: the reclaim of the
+-- regrain's source must refuse; the reclaim of a child holding nothing of the regrain must not (a stale object
+-- never blocks a retirement it has nothing to do with)
+select lo as h_lo, hi as h_hi, child_name as h_src from pgpm.part
+ where parent_table = 'public.s267h'::regclass and attached order by lo::numeric limit 1 \gset
+select lo as h_lo2, hi as h_hi2, child_name as h_fwd from pgpm.part
+ where parent_table = 'public.s267h'::regclass and attached and lo::numeric >= 300 order by lo::numeric limit 1 \gset
+set role w267_m2;
+select pg_temp.w267_try(format('select pgpm._regrain_reclaim(%L, %L, %L, %L)::text', 'public.s267h', :'h_fwd', :'h_lo2', :'h_hi2')) as reclaim_fwd \gset
+select pg_temp.w267_try(format('select pgpm._regrain_reclaim(%L, %L, %L, %L)::text', 'public.s267h', :'h_src', :'h_lo', :'h_hi')) as reclaim_src \gset
+reset role;
+select is(:'reclaim_fwd'::text, 'ok:0', 'reclaim: retiring a child that holds nothing of the regrain is not refused for the old owner''s objects');
+select is(left(:'reclaim_src', 206), '42501:' || pg_temp.w267_refusal('s267h', 'the retirement'),
+  'reclaim: retiring the regrain''s source refuses, 42501, with the hand-over step, never ''permission denied''');
+select is((select count(*) from pgpm.part where parent_table = 'public.s267h'::regclass and not attached)::text
+          || '/' || (select string_agg(distinct id::text, ',') from public.s267h_pgpm_regrain_delta),
+  '1/31', 'reclaim: the refused reclaim changed nothing (one copy, the captured key)');
+
+-- E4, untransmute of a table whose cancelled regrain left its delta and capture function with w267_m1
+set role w267_m1;
+create table public.s267i (id bigint primary key, payload text);
+insert into public.s267i select g, 'i' || g from generate_series(1, 299) g;
+call pgpm.transmute('public.s267i', 'id', 100, p_obtain => 3, p_regrain_batch => 1000, p_paused => false);
+select pgpm.obtain('public.s267i');
+insert into public.s267i values (450, 'frontier');
+select pgpm.regrain_step('public.s267i', 's267i_p0000000000000000000_to_0000000000000000300', '50');
+select pgpm.regrain_cancel('public.s267i');
+delete from public.s267i where id = 450;
+reset role;
+select regrain_delta_oid as i_delta, regrain_capture_fn_oid as i_fn from pgpm.config
+ where parent_table = 'public.s267i'::regclass \gset
+select pg_temp.w267_hand_to_m2('public.s267i');
+select is((select pg_get_userbyid(relowner) from pg_class where oid = :'i_delta'::oid) || '/'
+          || (select pg_get_userbyid(proowner) from pg_proc where oid = :'i_fn'::oid),
+  'w267_m1/w267_m1', 'LIVENESS: s267i''s cancelled regrain left its delta and capture function, w267_m1''s');
+set role w267_m2;
+select pg_temp.w267_try($$select pgpm.untransmute('public.s267i')::text$$) as untr_i \gset
+reset role;
+select is(left(:'untr_i', 206), '42501:' || pg_temp.w267_refusal('s267i', 'untransmute'),
+  'untransmute: the new owner''s untransmute refuses, 42501, with the hand-over step, never ''must be owner of table''');
+select is((select relkind::text from pg_class where oid = 'public.s267i'::regclass), 'p',
+  'untransmute: the refused untransmute left s267i partitioned');
+select is(pgpm.hand_over_scratch('public.s267i'), 2, 'untransmute: the remedy hands the delta and the function over');
+set role w267_m2;
+select pg_temp.w267_try($$select pgpm.untransmute('public.s267i')::text$$) as untr_i2 \gset
+reset role;
+select is(:'untr_i2' || '/' || (select relkind::text from pg_class where oid = 'public.s267i'::regclass)
+          || '/' || (select count(*) from pg_class where oid = :'i_delta'::oid)
+          || '/' || (select count(*) from pg_proc where oid = :'i_fn'::oid)
+          || '/' || (select count(*) from public.s267i),
+  'ok:s267i/r/0/0/299', 'untransmute: after the remedy, s267i is a plain table with its 299 rows, the delta and the function gone');
 
 select * from finish();

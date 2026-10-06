@@ -114,8 +114,9 @@ select is((select count(*)::int from pg_trigger t join pg_class c on c.oid = t.t
             where t.tgname = 'w42_pgpm_delta_trg'), 0,
           'and leaves no capture trigger anywhere');
 
--- and so is the capture of a copy made by a release that wrote no record (0.6.0 and earlier), by the name
--- derived from the table, as before: carried, it would be replayed after the cutover dropped its function
+-- and so is the capture of a copy whose delta carries no comment record, by pgpm.scratch's record (#969; a
+-- capture pgpm 0.6.0 minted, with no record of either kind, is tests/timescale/db/49 stage D's): carried, it
+-- would be replayed after the cutover dropped its function
 create table public.u42 (id bigint not null, ts timestamptz not null, v int, primary key (id, ts));
 select create_hypertable('public.u42', 'ts', chunk_time_interval => interval '1 day');
 insert into public.u42 select g, now() - g * interval '4 hours', g from generate_series(1, 5) g;

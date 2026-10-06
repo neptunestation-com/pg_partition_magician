@@ -35,6 +35,12 @@
 #     scratch_regrain_owner_not_followed        no ownership check on a resuming tick (#950 bullet 2)
 #     scratch_owner_refusal_swallowed           a tick that cannot re-own goes on to fail permission denied
 #     regrain_capture_names_derived_fallback    the delta and function resolved by derived name when unrecorded
+#     scratch_prepare_owner_not_followed        the next regrain's prepare drops the old owner's objects
+#                                               without asking (#969 bullet 2)
+#     scratch_cancel_owner_not_followed         regrain_cancel truncates the old owner's delta without asking
+#     scratch_reclaim_owner_not_followed        retire's reclaim drops and empties them without asking
+#     scratch_untransmute_owner_not_followed    untransmute drops them without asking
+#     scratch_owner_refusal_not_42501           the hand-over refusal raised as P0001, past uninstall's handler
 #   pgpm_hypertable (timescale track)
 #     hypertable_copy_drops_dest_by_name        the copy drops <rel>_pgpm_dest by name (#955 bullet 1)
 #     hypertable_copy_drops_delta_by_name       the copy drops <rel>_pgpm_delta by name (#955 bullet 1)
@@ -52,6 +58,10 @@
 #     hypertable_cutover_drops_fn_by_name       the cutover drops <rel>_pgpm_delta_fn() by the current name
 #     hypertable_swap_keeps_scratch_record      the swap leaves the record naming the migrated table
 #     uninstall_scratch_record_unread           uninstall.sql sweeps by the comments alone
+#     hypertable_carried_ddl_by_name            the swap leaves out <rel>_pgpm_delta_fn's triggers by name
+#                                               (#969 bullet 5)
+#     hypertable_carried_ddl_record_unread      the swap does not read pgpm.scratch's record of the capture
+#     hypertable_carry_capture_unrecorded       nor know a capture 0.6.0 minted by its proof
 #
 # Usage: scratch_relations.sh <container> <db> [module or uninstall script, a path inside the container]
 # Every setup step runs under ON_ERROR_STOP with its exit read: a mutant that does not install, or fixtures
