@@ -2085,12 +2085,31 @@ $$;
 -- attached under the parent's identity index, found by identity in pg_inherits. A child that already
 -- matches gets no DDL, so the default identity costs nothing. The child is freshly created or just
 -- attached by the caller, which holds ACCESS EXCLUSIVE on it already: this takes no new lock.
+--
+-- A USING INDEX identity whose index was dropped (#978): PostgreSQL allows DROP INDEX on the identity
+-- index, leaves relreplident = 'i' with no index marked indisreplident, and documents the table as
+-- behaving like NOTHING. That is the parent's identity, so the child takes NOTHING; read as a child
+-- missing its index it raised, and every mint (obtain, extend_to, a regrain's swap) failed until the grid
+-- ran out. A partition minted then keeps NOTHING after the parent gets an identity back, so it is logged,
+-- once per transaction for the parent: a transaction-local setting lists the parents already logged, which
+-- costs nothing per cell where a lookup in pgpm.log would scan it once per cell an extend_to builds.
 create or replace function pgpm._replica_identity_like_parent(p_parent regclass, p_child regclass)
 returns void language plpgsql as $$
-declare v_want "char"; v_have "char"; v_idx name;
+declare v_want "char"; v_have "char"; v_idx name; v_warned text;
 begin
   select relreplident into v_want from pg_class where oid = p_parent;
   select relreplident into v_have from pg_class where oid = p_child;
+  if v_want = 'i' and not exists (select 1 from pg_index where indrelid = p_parent and indisreplident) then
+    v_want := 'n';
+    v_warned := coalesce(current_setting('pgpm.warned_replica_identity_nothing', true), '');
+    if not p_parent::oid::text = any(string_to_array(v_warned, ',')) then
+      perform set_config('pgpm.warned_replica_identity_nothing', concat_ws(',', nullif(v_warned, ''), p_parent::oid::text), true);
+      insert into pgpm.log (parent_table, action, method)
+        values (p_parent, 'warn_replica_identity_nothing',
+                format('%s took REPLICA IDENTITY NOTHING: the identity index of %s was dropped, which PostgreSQL treats as NOTHING; partitions minted until %s is given a replica identity again keep NOTHING',
+                       p_child, p_parent, p_parent));
+    end if;
+  end if;
   if v_want = 'i' then
     select ci.relname into v_idx
       from pg_index pi
