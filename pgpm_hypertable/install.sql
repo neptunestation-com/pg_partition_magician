@@ -1514,7 +1514,10 @@ begin
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
-  perform pgpm._from_hypertable_scratch_follow(p_hypertable, 'from_hypertable_cutover');   -- #986 #979: owner and writers first
+  -- #986 #979: owner and writers first, before the pre-drain commits anything or the index pre-builds spend
+  -- their O(rows) on the copy (a new owner who cannot hand it over would otherwise fail raw on CREATE INDEX).
+  -- Asked again under the lock below, which is the answer the swap relies on.
+  perform pgpm._from_hypertable_scratch_follow(p_hypertable, 'from_hypertable_cutover');
   -- ...and the monolith name transmute will derive after the swap has committed (#707), before the pre-drain
   perform pgpm._from_hypertable_check_handoff(p_hypertable, p_interval, p_anchor);
   -- A caller whose reads row-level security filters (issue #825), refused before the pre-drain spends anything.
@@ -1731,6 +1734,16 @@ begin
       p_hypertable, quote_ident(v_nsp), quote_ident(v_dest), v_dest_oid::oid,
       coalesce(to_regclass(format('%I.%I', v_nsp, v_dest))::oid::text, 'nothing'), quote_ident(v_rel);
   end if;
+  -- THE OWNER, UNDER THE LOCK (#986). The follow up front saw the scratch objects as they were then, and the
+  -- copy and the delta were unlocked from there to here, so an ALTER ... OWNER TO can have landed on either in
+  -- between. Now the hypertable and the copy are frozen, and the delta is locked here (nothing writes it while
+  -- the hypertable is locked), so the owners this follow leaves are the owners at the swap: each scratch object
+  -- is the hypertable's owner's, or this refuses (42501) and the swap rolls back whole. A copy owned by another
+  -- role than the source therefore never reaches the sequence carry or the owner carry below.
+  if v_track then
+    execute format('lock table %I.%I in access exclusive mode', v_nsp, v_delta);
+  end if;
+  perform pgpm._from_hypertable_scratch_follow(p_hypertable, 'from_hypertable_cutover');
   -- THE SHAPE, UNDER THE LOCK (#738). The check up front saw the source as it was then, and the source has
   -- been unlocked from there to here (the pre-drain's commits, the index pre-builds), so DDL can have landed
   -- in between. Both relations are frozen now, and the column list read at the top must still describe both.

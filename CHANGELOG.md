@@ -17,8 +17,11 @@
   owner's drain died raw 'permission denied for table `<rel>_pgpm_delta`', naming no remedy. Each now hands
   them to the hypertable's owner when its role may, and otherwise refuses once, before it changes anything,
   SQLSTATE `42501`, leading with the documented `pgpm.hand_over_scratch(...)` step, as every core path does.
-  `tests/timescale/db/53` (new), `bench/hypertable_scratch_owner_follow.sh`; mutation
-  `hypertable_drains_owner_not_followed`.
+  The cutover asks again under its lock on the hypertable, the copy and the delta, so nothing can re-own them
+  between that answer and the swap. That makes a copy owned by another role at the swap unreachable, so the
+  mutation `hypertable_cutover_serial_owned_before_carry` (#839's plausible one-step fix, caught only in that
+  state) is retired; `tests/timescale/db/39` stays as the carry order's test. `tests/timescale/db/53` (new),
+  `bench/hypertable_scratch_owner_follow.sh`; mutation `hypertable_drains_owner_not_followed`.
 
 - **`pgpm.hand_over_scratch` reports only what it handed over, and refuses what it cannot** (#987). It
   counted the scratch objects before handing them over, and the hand-over let a session that could still act

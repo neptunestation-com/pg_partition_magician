@@ -11,17 +11,18 @@
 # source's owner onto it. The file migrates a hypertable owned by a third role whose columns own three
 # sequences, and compares them by oid and by the next values they issue.
 #
-# TWO mutations are required to fail against it (bench/mutations/mutate.py):
+# The mutation it is required to fail against (bench/mutations/mutate.py):
 #   hypertable_cutover_serial_sequence_kept_by_source -- the pre-#839 swap: the source keeps its sequences,
 #                                   so the DROP fails on the copy's default (a raw 2BP01, and every
 #                                   assertion on the migrated table after it).
-#   hypertable_cutover_serial_owned_before_carry      -- the plausible one-step fix: OWNED BY the copy's
-#                                   column before the DROP, while the copy still belongs to the migrating
-#                                   role, which PostgreSQL refuses for a table another role owns ("sequence
-#                                   must have same owner as table it is linked to").
+# A second one, hypertable_cutover_serial_owned_before_carry (the plausible one-step fix: OWNED BY the copy's
+# column before the DROP, refused while the copy belongs to another role than the source), is retired: #986
+# made a copy owned by another role at the swap unreachable (every drain and the cutover, again under its
+# lock, hand the copy back to the hypertable's owner or refuse), so its defect can no longer show. The file
+# stays as the regression test for the carry order.
 #
 # Usage: hypertable_cutover_serial_sequences.sh <container> <db> [pgpm_hypertable/install.sql]
-# Runs on the TIMESCALE track's container, which is why these mutations sit in MUTATION_TRACK=timescale.
+# Runs on the TIMESCALE track's container, which is why its mutation sits in MUTATION_TRACK=timescale.
 # run_timescale also runs it against the unmutated module, so a harness that failed against everything
 # would not read as discrimination. psql, not pg_prove: the fleet image has none, so the TAP is judged here
 # exactly as run_timescale judges it.

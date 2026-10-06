@@ -1821,18 +1821,13 @@ MUTATIONS = {
         "migrated table fail.",
         [(HT_SERIAL_LET_GO, "    -- MUTANT: the source keeps the sequences it owns\n", 1)],
     ),
-    "hypertable_cutover_serial_owned_before_carry": (
-        "bench/hypertable_cutover_serial_sequences.sh",
-        "The plausible one-step #839 fix: hand each owned sequence to the copy's column (OWNED BY) before "
-        "the DROP, while the copy may still belong to another role than the source (the migrating role "
-        "before #949 minted it owned like the hypertable; a hand-over during the online window after). "
-        "PostgreSQL refuses OWNED BY across owners ('sequence must have same owner as table it is linked "
-        "to'), so tests/timescale/db/39, whose copy belongs to the migrating role at the cutover, fails on "
-        "that raw error and on its assertions after it.",
-        [(HT_SERIAL_LET_GO,
-          "    execute format('alter sequence %s owned by %I.%I.%I', k.seq::text, v_nsp, v_dest, k.attname);"
-          "   -- MUTANT: one step\n", 1)],
-    ),
+    # hypertable_cutover_serial_owned_before_carry is RETIRED (#986). It was the plausible one-step #839 fix
+    # (OWNED BY the copy's column before the DROP), caught only while the copy belonged to another role than
+    # the source at the swap. #986 made that state unreachable: during the migration every drain and the
+    # cutover hand a re-owned copy back to the hypertable's owner (or refuse 42501), the cutover asks again
+    # under its ACCESS EXCLUSIVE on the hypertable and the copy so nothing can re-own between that follow and
+    # the swap, and a copy re-owned before an upgrade meets the same follow at the first cutover after it.
+    # tests/timescale/db/39 and bench/hypertable_cutover_serial_sequences.sh stay as the carry order's test.
     "hypertable_shape_ignores_foreign_keys": (
         "bench/hypertable_cutover_foreign_keys.sh",
         "Pre-#840 _from_hypertable_shape_diff: columns, defaults and CHECKs are compared, outgoing foreign "
@@ -8197,7 +8192,6 @@ MUTATION_SRC = {
     "hypertable_cutover_no_exclusion_check": "pgpm_hypertable/install.sql",
     "hypertable_cutover_exclusion_unchecked_under_lock": "pgpm_hypertable/install.sql",
     "hypertable_cutover_serial_sequence_kept_by_source": "pgpm_hypertable/install.sql",
-    "hypertable_cutover_serial_owned_before_carry": "pgpm_hypertable/install.sql",
     "hypertable_shape_ignores_foreign_keys": "pgpm_hypertable/install.sql",
     "hypertable_index_ddl_by_pattern": "pgpm_hypertable/install.sql",
     "hypertable_tmp_name_cut": "pgpm_hypertable/install.sql",
@@ -8401,7 +8395,6 @@ MUTATION_TRACK = {
     "hypertable_cutover_no_exclusion_check": "timescale",
     "hypertable_cutover_exclusion_unchecked_under_lock": "timescale",
     "hypertable_cutover_serial_sequence_kept_by_source": "timescale",
-    "hypertable_cutover_serial_owned_before_carry": "timescale",
     "hypertable_shape_ignores_foreign_keys": "timescale",
     "hypertable_index_ddl_by_pattern": "timescale",
     "hypertable_tmp_name_cut": "timescale",
