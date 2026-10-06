@@ -468,6 +468,12 @@ run_timescale() {
     # hypertable_delta_sequence_default_acl.
     echo "--- the sequences a scratch relation owns are minted owner-only too (issue #974) ---"
     bash "$(dirname "$0")/bench/scratch_sequences.sh" pgpm_test-timescale pgpm_perf257 || fail=1
+    # #979's and #986's guards, the same way: they re-run tests/timescale/db/52 and 53 against the real install,
+    # the clean-code half of the pairs discriminate.sh completes with their mutants.
+    echo "--- every drain and the cutover re-sync the delta's writer grants (issue #979) ---"
+    bash "$(dirname "$0")/bench/hypertable_delta_writer_grants.sh" pgpm_test-timescale pgpm_perf263 || fail=1
+    echo "--- every drain and the cutover follow the hypertable's owner or refuse up front (issue #986) ---"
+    bash "$(dirname "$0")/bench/hypertable_scratch_owner_follow.sh" pgpm_test-timescale pgpm_perf264 || fail=1
     # #917: five wrappers whose mutants discriminate.sh drives here had no clean-code run anywhere, so a
     # wrapper broken enough to fail against everything (a missing file: exit 1, "0 ran") was scored as
     # catching each of its mutants. These are their clean-code halves. bench/guards_run_on_clean_code.sh
@@ -1030,6 +1036,7 @@ run_perf() {
     "bench/text_time_collation_proof.sh pgpm_perf261"
     "bench/archive_covered_hi_canonical.sh pgpm_perf260"
     "bench/scratch_sequences.sh pgpm_perf256"
+    "bench/hand_over_scratch_reports.sh pgpm_perf265"
   )
   local selected=()
   local n=${#guards[@]} idx

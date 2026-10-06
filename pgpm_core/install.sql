@@ -2052,7 +2052,8 @@ $$;
 -- owner already matches, which is every tick but the first after a hand-over.
 --
 -- Called by EVERY path that acts on those objects (#969), before it acts: a resuming tick, the prepare tick
--- that tears the previous run's down, regrain_cancel, retire's _regrain_reclaim and untransmute. A path left
+-- that tears the previous run's down, regrain_cancel, retire's _regrain_reclaim, untransmute, and
+-- pgpm_hypertable's drains, drain steps and cutover (_from_hypertable_scratch_follow, #986). A path left
 -- out failed 'must be owner of function' or 'permission denied for table' on the old owner's object instead,
 -- on every tick in the prepare's case. The refusal is SQLSTATE 42501 (insufficient_privilege), which is what
 -- it reports, so a caller that handles a 42501 from those objects (uninstall.sql's per-parent sweep) still does.
@@ -2104,18 +2105,40 @@ $$;
 -- new, after ALTER TABLE ... OWNER TO on a table pgpm is regraining or migrating, when maintenance runs as a
 -- role that cannot do it itself (a tick run by a superuser does it on its own). Returns how many objects it
 -- handed over. Refuses, as a tick does, when this session cannot.
+--
+-- #987: what it reports is what the follow DID, read back after it, and an object the follow left with another
+-- owner is a refusal here. _scratch_owner_follow lets a tick that can still act as the old owner go on without
+-- handing anything over (it can work the objects as before), and that is right for a tick, but this step's
+-- one job is the hand-over: a member of the old owner alone (the old owner itself, say) was told it had handed
+-- over a count taken BEFORE the follow, while every object stayed with the old owner and nothing refused.
 create or replace function pgpm.hand_over_scratch(p_parent regclass)
 returns int language plpgsql as $$
-declare v_objs record; v_n int;
+declare
+  v_objs record; v_want oid;
+  v_rels oid[]; v_fns oid[];   -- the objects not yet the owner's when this began
+  v_left oid[];                -- the owners of those still not the owner's after the follow
+  v_parent_q text;             -- the parent, schema-qualified and quoted, for the remedy
 begin
   perform pgpm._refuse_null_arguments('hand_over_scratch', json_build_object('p_parent', p_parent));
+  select c.relowner, quote_ident(n.nspname) || '.' || quote_ident(c.relname) into v_want, v_parent_q
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
   select * into v_objs from pgpm._scratch_objects(p_parent);
-  select count(*) into v_n from (
-    select 1 from pg_class c, pg_class t where c.oid = any(v_objs.rels) and t.oid = p_parent and c.relowner <> t.relowner
-    union all
-    select 1 from pg_proc p, pg_class t where p.oid = any(v_objs.fns) and t.oid = p_parent and p.proowner <> t.relowner) x;
+  v_rels := array(select c.oid from pg_class c where c.oid = any(v_objs.rels) and c.relowner <> v_want);
+  v_fns := array(select p.oid from pg_proc p where p.oid = any(v_objs.fns) and p.proowner <> v_want);
   perform pgpm._scratch_owner_follow(p_parent, 'pgpm.hand_over_scratch');
-  return v_n;
+  v_left := array(select c.relowner from pg_class c where c.oid = any(v_rels) and c.relowner <> v_want
+                   union
+                   select p.proowner from pg_proc p where p.oid = any(v_fns) and p.proowner <> v_want);
+  if cardinality(v_left) > 0 then
+    raise exception 'pg_partition_magician: run select pgpm.hand_over_scratch(%) as a superuser or a member of both % and %: this session (%) can act as % but cannot give pgpm''s scratch objects for % to the table''s owner %, so nothing was handed over (docs/reference.md, "Handing a table to a new owner").',
+      quote_literal(v_parent_q), (select string_agg(quote_ident(pg_get_userbyid(o)), ', ') from unnest(v_left) o),
+      quote_ident(pg_get_userbyid(v_want)), quote_ident(current_user),
+      (select string_agg(quote_ident(pg_get_userbyid(o)), ', ') from unnest(v_left) o),
+      p_parent, quote_ident(pg_get_userbyid(v_want))
+      using errcode = 'insufficient_privilege';
+  end if;
+  return (select count(*)::int from pg_class c where c.oid = any(v_rels) and c.relowner = v_want)
+       + (select count(*)::int from pg_proc p where p.oid = any(v_fns) and p.proowner = v_want);
 end;
 $$;
 
