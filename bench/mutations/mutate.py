@@ -314,6 +314,7 @@ TIME_FRONTIER_BLOCK_RE = re.compile(
 # policies, moved to run BEFORE either rename so none of it adds to the outage. (The comments were in it
 # too until #630 moved them under the cutover's ACCESS EXCLUSIVE, beside the triggers, and the grants
 # until #706 moved them after the attach, which is what serialises a GRANT or REVOKE against the cutover.)
+# #766's second asking of the #730 refusals, under an explicit ACCESS SHARE, opens it and moves with it.
 TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the NEW parent -- not the original/monolith relation -- runs
   -- BEFORE either rename, under a staging name (v_staging, collision-checked earlier alongside the
   -- orphan-name guard). None of it needs the original table's lock: CREATE TABLE ... LIKE only takes
@@ -321,6 +322,15 @@ TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the N
   -- now is byte-for-byte the same as building it from the monolith name later), and everything after that
   -- targets the not-yet-visible staging relation. This is what shrinks the outage: previously all of it
   -- ran AFTER the rename, adding directly to how long the live table was unavailable.
+
+  -- 5a (#766). The shapes the LIKE below cannot carry, asked again under the ACCESS SHARE the LIKE would
+  -- take anyway, taken explicitly one statement earlier so that nothing can add one between the asking and
+  -- the LIKE: a NOT VALID or NO INHERIT CHECK, or a generated control column, committed since the preflight
+  -- is refused in the preflight's words and rolls the cutover back to the resumable phase-2 state, where it
+  -- used to fail the LIKE or the ATTACH raw. Under this phase's lock_timeout, like every wait in it.
+  execute format('lock table %s in access share mode', p_parent::text);
+  perform pgpm._transmute_refuse_generated_control(p_parent, p_control);
+  perform pgpm._transmute_refuse_uncarried_constraints(p_parent);
 
   -- 5. create the partitioned parent under the STAGING name (no PK yet). INCLUDING CONSTRAINTS carries the
   -- user's CHECK constraints onto the parent so every partition (the monolith, the DEFAULT, and future
@@ -5735,6 +5745,31 @@ $$;''',
         "tests/187's refusal of gcc.d catches it.",
         [("       where a.attrelid = p_parent and a.attname = p_control and not a.attisdropped) <> '' then\n",
           "       where false and a.attrelid = p_parent and a.attname = p_control and not a.attisdropped) <> '' then\n", 1)],
+    ),
+    # #766 bullet 3: the cutover asks the #730 refusals again, before its staging LIKE, under the ACCESS SHARE
+    # it takes for that. One mutation per helper it calls, so each second asking is shown caught on its own.
+    "transmute_uncarried_constraints_preflight_only": (
+        "bench/transmute_uncarried_shapes_under_lock.sh",
+        "Pre-#766 transmute: the NOT ENFORCED, NOT VALID and NO INHERIT CHECK refusals are asked in the "
+        "preflight only. A NOT VALID CHECK committed after it (tests/283 (A), added with phase 1's bound) "
+        "reaches the cutover, whose LIKE gives the parent a validated copy, and the ATTACH dies raw "
+        "('conflicts with NOT VALID constraint on child table'); a NO INHERIT one (B) fails the LIKE itself "
+        "('cannot add NO INHERIT constraint to partitioned table'). Both after phases 1 and 2 committed the "
+        "bound and the claim. One site: the cutover's second asking of the constraint helper.",
+        [("  perform pgpm._transmute_refuse_generated_control(p_parent, p_control);\n"
+          "  perform pgpm._transmute_refuse_uncarried_constraints(p_parent);\n",
+          "  perform pgpm._transmute_refuse_generated_control(p_parent, p_control);\n", 1)],
+    ),
+    "transmute_generated_control_preflight_only": (
+        "bench/transmute_uncarried_shapes_under_lock.sh",
+        "Pre-#766 transmute: the generated-control-column refusal is asked in the preflight only. A control "
+        "column dropped and re-added as a stored generated column after it (tests/283 (C)) reaches the "
+        "cutover, whose CREATE TABLE ... PARTITION BY RANGE dies raw ('cannot use generated column in "
+        "partition key') after phases 1 and 2 committed. One site: the cutover's second asking of the "
+        "generated-column helper.",
+        [("  perform pgpm._transmute_refuse_generated_control(p_parent, p_control);\n"
+          "  perform pgpm._transmute_refuse_uncarried_constraints(p_parent);\n",
+          "  perform pgpm._transmute_refuse_uncarried_constraints(p_parent);\n", 1)],
     ),
     "transmute_key_immediate": (
         "bench/transmute_key_deferrability.sh",

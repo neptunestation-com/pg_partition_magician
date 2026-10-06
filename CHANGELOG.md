@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **`transmute` refuses a NOT VALID or NO INHERIT CHECK, or a generated control column, committed while it
+  runs** (#766 bullet 3). The three shapes #730 refuses up front were asked in the preflight only, so one
+  committed after it (an `ALTER TABLE` queued behind phase 1's ADD of the bound is granted the moment phase 1
+  commits) reached the cutover and failed it raw, after phases 1 and 2 had committed the write-rejecting
+  bound and the claim: 'conflicts with NOT VALID constraint on child table' from the ATTACH, 'cannot add NO
+  INHERIT constraint to partitioned table' from the staging LIKE, 'cannot use generated column in partition
+  key'. The cutover now takes the table's ACCESS SHARE explicitly before its staging LIKE (the lock the LIKE
+  takes anyway, and one every statement that adds such a shape must wait for) and asks all of them again
+  under it, the NOT ENFORCED refusal included, in the preflight's words and with its remedy; the refusal
+  rolls the cutover back to the resumable phase-2 state. `tests/283` (new) under the guard
+  `bench/transmute_uncarried_shapes_under_lock.sh`; mutations `transmute_uncarried_constraints_preflight_only`,
+  `transmute_generated_control_preflight_only`.
+
 - **`pgpm_archive` reaches pgcrypto and the http extension in their own schemas, never through the caller's
   `search_path`** (#984). Both SigV4 signers called `hmac()`, `digest()`, `http()` and `http_set_curlopt()`
   unqualified in functions that pinned no `search_path`, so a function `hmac(bytea, bytea, text)` any role
