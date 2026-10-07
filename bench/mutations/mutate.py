@@ -9259,6 +9259,34 @@ MUTATIONS["archive_whole_partial_compared_as_text"] = (
 """, "  if v_result.covered_hi is distinct from r.hi then\n", 1)],
 )
 MUTATION_SRC["archive_whole_partial_compared_as_text"] = "scripts/archive_partition_whole.sql"
+MUTATIONS["archive_whole_rls_unrefused"] = (
+    "bench/archive_partition_whole_contract.sh",
+    "Pre-#1030 scripts/archive_partition_whole.sql without #873's lever: pgpm_archive_next_partition_whole runs "
+    "the strategy under the caller's row-level security, so a non-BYPASSRLS owner of a FORCE ROW LEVEL SECURITY "
+    "table archives only the rows its policy admits, records whole coverage, and retire() drops the hidden rows "
+    "never archived. One site, both _refuse_filtered_reads calls and their skip_archive. tests/286 part E "
+    "catches it (no refusal, the strategy called, a ledger row, retire() drops ids 3 and 6).",
+    [("""  -- Refuse a caller whose reads row-level security filters, BEFORE the strategy runs: the lever (#873)
+  -- pgpm._archive_step applies to the same two relations, with the same calls. The strategy reads the rows as
+  -- this caller, through the parent (pgpm_archive's transports) or the partition itself, and the ledger row it
+  -- leads to opens retire()'s drop gate; under a FORCE ROW LEVEL SECURITY policy the strategy would archive
+  -- only the rows the policy admits, report the whole range covered, and retire() would drop the others with
+  -- the partition. Logged as the skip_archive _archive_step's handler writes for this refusal, over the
+  -- partition's range, and returned as the message; nothing is read or recorded.
+  begin
+    perform pgpm._refuse_filtered_reads(p_parent, 'archive a partition of',
+      'an archive strategy reading the partition through it would archive only those rows, and retention would drop the others with the partition');
+    perform pgpm._refuse_filtered_reads(v_now, 'archive',
+      'the partition would be archived from those rows alone, and retention would drop the others with the partition');
+  exception when raise_exception then
+    insert into pgpm.log (parent_table, action, lo, hi, method)
+      values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 200));
+    return format('%s: REFUSING to archive it: %s', r.child_name, sqlerrm);
+  end;
+
+""", "", 1)],
+)
+MUTATION_SRC["archive_whole_rls_unrefused"] = "scripts/archive_partition_whole.sql"
 
 # pass 9 G18: #994, #995, #1002. Four test files that counted where their own comments promised to name, each
 # judged by bench/tests_fail_on_defect.sh against a defect it plants in install.sql. One mutation per site, each

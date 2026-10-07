@@ -47,7 +47,10 @@
 -- (issue #454): a covered_hi that is null, not above the range's lo, past its hi, or not a value of
 -- the control's type is refused BEFORE anything is written to pgpm.archive_ledger (retire()'s drop
 -- precondition), logged fail_archive_contract, and reported in the returned message. Nothing is
--- recorded, so the partition stays unarchived and undroppable until the strategy is fixed.
+-- recorded, so the partition stays unarchived and undroppable until the strategy is fixed. And a
+-- caller whose reads of the parent or the partition row-level security filters is refused before the
+-- strategy runs, as _archive_step refuses it, logged skip_archive: run it as a role with BYPASSRLS (or
+-- a superuser) on a table with FORCE ROW LEVEL SECURITY.
 --
 -- STATEMENT_TIMEOUT IS THE ONE THING LEFT TO SIZE, AND IT'S ON YOU: pgpm never manages
 -- statement_timeout itself. Size it from a real measured single-partition archive time, not a
@@ -58,8 +61,9 @@
 --
 -- Requires pgpm_core (any version that ships pgpm._run_archive_strategy/_is_write_blocked/
 -- _archive_fully_covered/_native_type/_native_gt -- these predate this script, not new in any
--- particular release), plus pgpm._archive_contract_breach (issue #454) and pgpm._native_text (issue
--- #977) for the contract check and the ledger's canonical hi, plus pgpm.part.child_oid for the identity check below (issue #421; added after this
+-- particular release), plus pgpm._archive_contract_breach (issue #454), pgpm._native_text (issue
+-- #977) and pgpm._refuse_filtered_reads (issue #873) for the contract check, the ledger's canonical
+-- hi and the row-level security refusal, plus pgpm.part.child_oid for the identity check below (issue #421; added after this
 -- script, so an older core needs that check removed along with the column reference). Not part of pgpm_core/install.sql and never will be without a real feature proposal
 -- and its own issue/PR -- this is scratch space for an operator to paste into a session and run,
 -- not a shipped, versioned function.
@@ -118,6 +122,24 @@ begin
                   'Something took the name. Put the intended relation back under it, or clear the stale pgpm.part row.',
                   v_nsp, r.child_name, coalesce(v_now::oid::text, 'nothing'), r.child_oid);
   end if;
+
+  -- Refuse a caller whose reads row-level security filters, BEFORE the strategy runs: the lever (#873)
+  -- pgpm._archive_step applies to the same two relations, with the same calls. The strategy reads the rows as
+  -- this caller, through the parent (pgpm_archive's transports) or the partition itself, and the ledger row it
+  -- leads to opens retire()'s drop gate; under a FORCE ROW LEVEL SECURITY policy the strategy would archive
+  -- only the rows the policy admits, report the whole range covered, and retire() would drop the others with
+  -- the partition. Logged as the skip_archive _archive_step's handler writes for this refusal, over the
+  -- partition's range, and returned as the message; nothing is read or recorded.
+  begin
+    perform pgpm._refuse_filtered_reads(p_parent, 'archive a partition of',
+      'an archive strategy reading the partition through it would archive only those rows, and retention would drop the others with the partition');
+    perform pgpm._refuse_filtered_reads(v_now, 'archive',
+      'the partition would be archived from those rows alone, and retention would drop the others with the partition');
+  exception when raise_exception then
+    insert into pgpm.log (parent_table, action, lo, hi, method)
+      values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 200));
+    return format('%s: REFUSING to archive it: %s', r.child_name, sqlerrm);
+  end;
 
   -- resume from wherever this child's ledger coverage already left off, the same watermark
   -- _next_archive_chunk itself reads -- NOT always the child's own lo.

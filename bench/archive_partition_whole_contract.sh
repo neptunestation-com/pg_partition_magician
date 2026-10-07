@@ -6,17 +6,21 @@
 # mutations put back (issue #1030, bullet 3): the operator utility pgpm_archive_next_partition_whole wrote its
 # strategy's covered_hi into pgpm.archive_ledger with none of #454's contract check, so a strategy that
 # answered [0, 1000) with 1000000 and archived nothing marked the partition covered and retire() dropped it,
-# and its PARTIAL message compared covered_hi to hi as text. The file is the acceptance test; this wrapper
+# and its PARTIAL message compared covered_hi to hi as text; it also ran the strategy under the caller's
+# row-level security, without the refusal _archive_step makes (#873). The file is the acceptance test; this wrapper
 # exists so the mutations have a guard the discriminate track can run against the mutant, in the shape of
 # bench/retain_recall_moved_parent.sh. Nothing installs the script, so the third argument is the script's
 # path, which the test file reads through its archive_whole_script psql variable; pgpm_core is always the
 # tree's own.
 #
-# TWO mutations are required to fail against it (bench/mutations/mutate.py):
+# THREE mutations are required to fail against it (bench/mutations/mutate.py):
 #   archive_whole_contract_unchecked        -- the script records the strategy's covered_hi unchecked again,
 #                                              the pre-fix shape. Parts A and B.
 #   archive_whole_partial_compared_as_text  -- partial or whole decided by text inequality again, so a whole
 #                                              cover spelt '1000.0' reads as partial. Part C.
+#   archive_whole_rls_unrefused             -- the strategy runs under the caller's row-level security again
+#                                              (#873's refusal removed), so a FORCE RLS owner's call archives
+#                                              the visible rows and retire() drops the hidden ones. Part E.
 #
 # A copy of the script that does not even load is not a catch: that is reported as a `fixture:` failure,
 # which bench/discriminate.sh reads as a starved fixture rather than as discrimination.
