@@ -11443,6 +11443,7 @@ declare
   v_retain_boundary text; v_retain_backlog bigint;
 begin
   for r in select * from pgpm.config loop
+    r := pgpm._control_followed(r);
     select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = r.parent_table;
 
     -- Has the managed relation been dropped out from under us (#296)? status() is the DIAGNOSTIC, so it
@@ -11610,6 +11611,7 @@ begin
     raise exception 'pg_partition_magician: % is not managed', p_parent;
   end if;
   for r in select * from pgpm.config c where p_parent is null or c.parent_table = p_parent loop
+    r := pgpm._control_followed(r);
     -- every output is assigned on every iteration: RETURN NEXT reads the variables as they stand, and a
     -- value left over from the previous row would be reported as this one's
     parent := r.parent_table; control_kind := r.control_kind;

@@ -22,7 +22,8 @@
 --           and the zone stays UTC.
 --   PART E  untransmute hands the table back whole, under the column's new name.
 --   PART F  the class, not the five sites above: every load of a whole config row in pgpm's installed code
---           is followed by pgpm._control_followed, so a reader added later cannot quietly take the stale name.
+--           (a SELECT INTO, a FOR loop or a composite assignment) is followed by pgpm._control_followed, so a
+--           reader added later cannot quietly take the stale name.
 --
 -- ASYMMETRIC FIXTURES. Every table holds a different set of ids, and the cells each step must build are
 -- named by their bounds, so a missing cell, an extra one, a lost row or a resurrected one cannot stand in
@@ -31,7 +32,7 @@ create extension if not exists pgtap;
 set client_min_messages = warning;
 set timezone = 'UTC';
 
-select plan(30);
+select plan(32);
 
 create schema pgpm_t219;
 
@@ -165,17 +166,62 @@ select is((select count(*)::int from pgpm.config where parent_table = 'pgpm_t219
   'E: and pgpm no longer manages it');
 
 -- ==================== PART F: every config load follows ===================================================
--- each `select * into <var> from pgpm.config ...;` in an installed pgpm function, and whether the statement
--- right after it is `<var> := pgpm._control_followed(<var>);`
+-- Each whole-row load of pgpm.config in an installed pgpm function, and whether the statement right after it
+-- is `<var> := pgpm._control_followed(<var>);`. A load is found by WHAT it reads, not by one spelling of it
+-- (#999): the probe used to know `select * into <var> from pgpm.config` only, so a FOR loop over the same
+-- rows (`for r in select * from pgpm.config ... loop`, the shape status() and progress() use) was never
+-- enumerated and a reader written that way took the stale name with the sweep still green. Three shapes:
+--   into    select [<alias>.]* into [strict] <var> from pgpm.config ...;  (INTO after FROM as well)
+--   for     for <var> in select [<alias>.]* from pgpm.config ... loop     (the follow is the body's first statement)
+--   assign  <var> := (select <alias> from pgpm.config <alias> ...);       (the row as one composite)
+-- The same probe also runs over a fixed set of sources ('probe'), one per shape plus a followed load and
+-- statements that read pgpm.config but load no row, so a shape it stops seeing fails here by name.
 create temporary table f_loads as
-  select p.oid::regprocedure::text as fn, m[1] as var, m[2] as next_stmt
-    from pg_proc p join pg_namespace n on n.oid = p.pronamespace,
-         lateral regexp_matches(p.prosrc, 'select \* into (\w+) from pgpm\.config [^;]*;\s*([^;]*;)', 'g') m
-   where n.nspname = 'pgpm';
-select cmp_ok((select count(*)::int from f_loads), '>=', 30,
+  with src(origin, fn, prosrc) as (
+    select 'pgpm', p.oid::regprocedure::text, p.prosrc
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'pgpm'
+    union all
+    select 'probe', v.fn, v.prosrc from (values
+      ('into',        $s$ select * into cfg from pgpm.config where parent_table = p; x := cfg.control_column; $s$),
+      ('into_alias',  $s$ select c.* into strict cfg from pgpm.config c where c.parent_table = p; x := 1; $s$),
+      ('into_after',  $s$ select * from pgpm.config where parent_table = p into cfg; x := 1; $s$),
+      ('for',         $s$ for r in select * from pgpm.config where parent_table = p loop x := r.control_column; end loop; $s$),
+      ('assign',      $s$ cfg := (select c from pgpm.config c where c.parent_table = p); x := 1; $s$),
+      ('followed',    $s$ for r in select * from pgpm.config loop r := pgpm._control_followed(r); end loop; $s$),
+      ('not_a_load',  $s$ for r in select * from pgpm.part where x loop if exists (select 1 from pgpm.config) then
+                          select * into v from pgpm.config_x; end if; end loop;
+                          select control_kind into k from pgpm.config where y; $s$)
+    ) v(fn, prosrc)
+  )
+  select p.origin, p.fn, m.shape, m.var, m.next_stmt
+    from src p, lateral (
+      select 'into' as shape, x[1] as var, x[2] as next_stmt
+        from regexp_matches(p.prosrc, '\mselect\s+(?:\w+\.)?\*\s+into\s+(?:strict\s+)?(\w+)\s+from\s+pgpm\.config\M[^;]*;\s*([^;]*;)', 'gi') x
+      union all
+      select 'into', x[1], x[2]
+        from regexp_matches(p.prosrc, '\mselect\s+(?:\w+\.)?\*\s+from\s+pgpm\.config\M(?:(?!\mloop\M)[^;])*\minto\s+(?:strict\s+)?(\w+)[^;]*;\s*([^;]*;)', 'gi') x
+      union all
+      select 'for', x[1], x[2]
+        from regexp_matches(p.prosrc, '\mfor\s+(\w+)\s+in\s+select\s+(?:\w+\.)?\*\s+from\s+pgpm\.config\M(?:(?!\mloop\M)[^;])*\mloop\M\s*([^;]*;)', 'gi') x
+      union all
+      select 'assign', x[1], x[3]
+        from regexp_matches(p.prosrc, '\m(\w+)\s*:=\s*\(\s*select\s+(\w+)\s+from\s+pgpm\.config\s+(?:as\s+)?\2\M[^;]*;\s*([^;]*;)', 'gi') x
+    ) m;
+select cmp_ok((select count(*)::int from f_loads where origin = 'pgpm' and shape = 'into'), '>=', 30,
   'F LIVENESS: the probe finds pgpm''s whole-row config loads (obtain, extend_to, retain, regrain, untransmute, ...)');
 select is((select array_agg(fn order by fn) from f_loads
-            where next_stmt <> format('%1$s := pgpm._control_followed(%1$s);', var)),
+            where origin = 'pgpm' and next_stmt <> format('%1$s := pgpm._control_followed(%1$s);', var)),
   null::text[], 'F: every one of them is followed by pgpm._control_followed');
+select ok((select array_agg(fn) from f_loads where origin = 'pgpm' and shape = 'for')
+          @> array['pgpm.status()', 'pgpm.progress(regclass)'],
+  'F LIVENESS: the probe finds the FOR-loop loads too, status()''s and progress()''s');
+select is((select array_agg(fn || ':' || shape || ':'
+                            || (next_stmt = format('%1$s := pgpm._control_followed(%1$s);', var))::text
+                            order by fn)
+             from f_loads where origin = 'probe'),
+  array['assign:assign:false', 'followed:for:true', 'for:for:false', 'into:into:false',
+        'into_after:into:false', 'into_alias:into:false'],
+  'F LIVENESS: the probe sees each load shape, unfollowed where it is, and no load where there is none');
 
 select * from finish();

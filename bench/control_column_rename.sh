@@ -11,7 +11,7 @@
 # have a guard the discriminate track can run against the mutant, in the shape of
 # bench/retain_recall_moved_parent.sh.
 #
-# THREE mutations are required to fail against it (bench/mutations/mutate.py):
+# FOUR mutations are required to fail against it (bench/mutations/mutate.py):
 #   control_followed_noop              -- pgpm._control_followed hands back the recorded name, the pre-fix
 #                                         shape at every reader. Parts A to E.
 #   control_followed_obtain_only       -- the per-site fix: only obtain's ceiling-check type lookup follows
@@ -19,6 +19,10 @@
 #                                         reader still uses the stale name. Parts B to E.
 #   control_followed_missing_at_retain -- one config load (pgpm.retain's) left without the follow, a reader
 #                                         no part exercises after a rename. Part F, the class check.
+#   control_followed_missing_at_for_loop_load -- the same load written as a FOR loop
+#                                         (`for cfg in select * from pgpm.config ... loop end loop;`), the shape
+#                                         status() and progress() use, without the follow. Part F found loads by
+#                                         the SELECT INTO spelling alone and never saw it (#999).
 #
 # Runs on the plain core image (pgtap and pg_prove; the test needs no pg_cron). TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree
 # mounted somewhere other than /repo.
