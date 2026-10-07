@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- **`tests/267` holds the scratch lever to what it promises at three sites it used to accept** (#993). Stage A
+  read the regrain delta's owner only after the copy tick, whose ownership check re-owns it, so a prepare that
+  minted the delta under the tick's role passed; the owner is now read right after the prepare as well. Its
+  "the list is complete" snapshot looked at tables only (relkind `r` and `p`), so a sequence, view or matview
+  the prepare minted unrecorded passed; it now takes every relation of every kind in the parent's schema and
+  requires each to be a scratch relation pgpm recorded (`pgpm._scratch_objects`) or an index or identity
+  sequence of one, and `tests/timescale/db/49` widens its list the same way. Stage E4 judged the table
+  untransmute hands back by `count(*) = 299`, so one that lost row 17 and kept the deleted 450 passed; it now
+  names the rows. `bench/tests_fail_on_defect.sh` runs `tests/267` against each defect (a delta minted the
+  tick's, a swap of 17 for 450, an unrecorded sequence), with the mutations
+  `scratch_suite_delta_owner_after_copy`, `scratch_suite_restored_rows_by_count` and
+  `scratch_suite_list_tables_only`.
+
+- **`tests/timescale/db/05` judges the keyless catch-up by its rows, not its count** (#996). It asserted
+  `count(*) = 245`, so a migrated table that lost one copied row and held another twice passed. It now
+  snapshots the source right before the cutover and compares the migrated table with it as a bag. The new
+  timescale-track guard `bench/hypertable_catchup_identity.sh` runs the file against exactly that state, with
+  the mutation `hypertable_catchup_rows_by_count`.
+
 - **`tests/247` and `tests/178` name which table logged each transmute** (#994). Both asserted "each conversion
   logged its own transmute" as one `count(*)` summed over every converted table, which a log naming one table
   twice and another never satisfies. Each now asserts the transmute rows' parents by name, one per converted

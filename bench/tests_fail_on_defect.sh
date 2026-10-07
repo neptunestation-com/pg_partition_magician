@@ -52,6 +52,20 @@
 #   regrain_survivors_by_count         -- tests/92's identity check back to count(*) = 250 over 1..2500
 #   text_time_drought_coverage_only    -- tests/88's drought checks back to "a partition covers now()"
 #   text_time_drought_coverage_only_ulid_ksuid -- tests/91's, likewise
+# pass 9 G17 (issue #993): tests/267, the scratch lever's conformance suite, at three sites, each judged
+#   against the defect it used to accept:
+#   OWNER     the prepare tick mints the regrain delta under the tick's role (its ACL reset, never re-owned).
+#             The copy tick's _scratch_owner_follow re-owns it, so only a read right after the prepare sees it.
+#             LIVENESS: a probe regrain's delta is the tick role's after the prepare and the parent owner's
+#             after the copy under the mutant, the parent owner's after both under the clean install.
+#   ROWS      the remedied untransmute of s267i hands back a table that lost row 17 and holds the deleted 450
+#             (spliced into the file right after that untransmute: the same 299 rows by count, not by id).
+#             LIVENESS, read after the file: s267i is plain, 299 rows, 450 there and 17 gone.
+#   STRAY     the prepare tick also mints an unrecorded sequence beside the delta. LIVENESS, read after the
+#             file: s267's stray sequence exists.
+#   scratch_suite_delta_owner_after_copy -- tests/267 reads the delta's owner only after the copy tick
+#   scratch_suite_restored_rows_by_count -- tests/267 judges the restored s267i by count(*) = 299
+#   scratch_suite_list_tables_only       -- tests/267's 'the list is complete' sees relkind r and p only
 #
 # Usage: tests_fail_on_defect.sh <container> <db> [test file]
 # With no third argument it judges all seven files in this checkout. With one it judges THAT file in place
@@ -79,6 +93,8 @@ T88="tests/88_text_time_transmute_test.sql"
 T91="tests/91_text_time_ulid_ksuid_transmute_test.sql"
 F18="$ROOT/$T18"; F90="$ROOT/$T90"; F11="$ROOT/$T11"; F12="$ROOT/$T12"; F92="$ROOT/$T92"; F88="$ROOT/$T88"; F91="$ROOT/$T91"
 SEL=" 18 90 11 12 92 88 91 "
+# pass 9 G17
+T267="tests/267_scratch_relations_test.sql"; F267="$ROOT/$T267"; SEL="${SEL}267 "
 
 if [ -n "$ONLY" ]; then
   ONLY="${ONLY/#\/repo\//$ROOT/}"
@@ -104,6 +120,8 @@ PY
     178_transmute_time_future_maximum_test.sql:*|*:tests/178_transmute_time_future_maximum_test.sql) SEL=" 178 "; F178="$ONLY" ;;
     140_transmute_reap_identity_test.sql:*|*:tests/140_transmute_reap_identity_test.sql) SEL=" 140 "; F140="$ONLY" ;;
     77_retain_incoming_fk_test.sql:*|*:tests/77_retain_incoming_fk_test.sql) SEL=" 77 "; F77="$ONLY" ;;
+    # pass 9 G17
+    "$(basename "$T267")":*|*:"$T267") SEL=" 267 "; F267="$ONLY" ;;
     *) say FAIL "the file to judge is one of the seven this guard knows" "$ONLY -> '${src}'"; exit 1 ;;
   esac
 fi
@@ -528,6 +546,109 @@ if sel 77; then
   else
     say FAIL "planted the defect: a refused crossing deletes the unreferenced rows" "install.sql moved; fix the pattern"; fail=1
   fi
+fi
+
+# ---- pass 9 G17: tests/267, the scratch lever's conformance suite, at three sites (#993) ----------------
+# plant_file <src> <dst> <find> <replace> [...]: plant's discipline (each <find> exactly once) on any file.
+plant_file() {
+  python3 - "$@" <<'PY'
+import sys
+src, dst, pairs = sys.argv[1], sys.argv[2], sys.argv[3:]
+t = open(src).read()
+for find, repl in zip(pairs[::2], pairs[1::2]):
+    n = t.count(find)
+    if n != 1:
+        sys.exit(f"pattern matched {n} time(s), expected 1: {find.splitlines()[0]!r}")
+    t = t.replace(find, repl)
+open(dst, "w").write(t)
+PY
+}
+MINT_DELTA="  perform pgpm._scratch_mint(p_parent, v_delta_reg);
+"
+# A regrain of a table owned by another role: the delta's owner right after the prepare tick, and after the
+# copy tick. The clean install reads tfd267_owner both times.
+OWNER_PROBE="do \$\$ begin
+  if not exists (select 1 from pg_roles where rolname = 'tfd267_owner') then create role tfd267_owner; end if;
+end \$\$;
+create table public.o267 (id bigint primary key, payload text);
+insert into public.o267 select g, 'a' || g from generate_series(1, 200) g;
+alter table public.o267 owner to tfd267_owner;
+call pgpm.transmute('public.o267', 'id', 50, p_regrain_batch => 30);
+select pgpm.obtain('public.o267');
+insert into public.o267 values (1000, 'frontier');
+select pgpm.regrain_step('public.o267', 'o267_p0000000000000000000_to_0000000000000000250', '50');
+select 'PROBE prepare=' || pg_get_userbyid(relowner) from pg_class
+ where oid = (select regrain_delta_oid from pgpm.config where parent_table = 'public.o267'::regclass);
+select pgpm.regrain_step('public.o267', 'o267_p0000000000000000000_to_0000000000000000250', '50');
+select 'PROBE copy=' || pg_get_userbyid(relowner) from pg_class
+ where oid = (select regrain_delta_oid from pgpm.config where parent_table = 'public.o267'::regclass);"
+owner_probe() { q -d "$DB" -tAq -f - <<<"$OWNER_PROBE" 2>&1 | grep -o 'PROBE .*' | tr '\n' ' ' | sed 's/ $//'; }
+UNTR_I2=$(cat <<'SQL'
+select pg_temp.w267_try($$select pgpm.untransmute('public.s267i')::text$$) as untr_i2 \gset
+reset role;
+SQL
+)
+UNTR_I2="$UNTR_I2
+"
+if sel 267; then
+  if fresh && install "$ROOT/pgpm_core/install.sql"; then
+    probe=$(owner_probe)
+    if [ "$probe" = "PROBE prepare=tfd267_owner PROBE copy=tfd267_owner" ]; then
+      say PASS "LIVENESS: the clean prepare mints the delta the owner's" "$probe"
+    else
+      say FAIL "LIVENESS: the clean prepare mints the delta the owner's" "${probe:-no PROBE line}"; fail=1
+    fi
+    judge_on "$ROOT/pgpm_core/install.sql" "CONTROL: $T267 passes against the clean install" pass "$F267"
+  else
+    say FAIL "the clean install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
+  fi
+  # OWNER
+  if plant delta_minted_tick_owner "$MINT_DELTA" "  perform pgpm._acl_reset(v_delta_reg, true);
+"; then
+    if fresh && install "$work/delta_minted_tick_owner.sql"; then
+      probe=$(owner_probe)
+      if [ "$probe" = "PROBE prepare=postgres PROBE copy=tfd267_owner" ]; then
+        say PASS "LIVENESS: the mutant's delta is the tick's until the copy" "$probe"
+      else
+        say FAIL "LIVENESS: the mutant's delta is the tick's until the copy" "${probe:-no PROBE line}"; fail=1
+      fi
+      judge_on "$work/delta_minted_tick_owner.sql" "DEFECT: $T267 fails with the delta minted the tick's" fail "$F267"
+    else
+      say FAIL "the install minting the delta the tick's loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
+    fi
+  else
+    say FAIL "planted the defect: the delta's mint" "install.sql moved; fix the pattern"; fail=1
+  fi
+  # ROWS
+  if plant_file "$F267" "$work/t267_rows_swapped.sql" "$UNTR_I2" "${UNTR_I2}update public.s267i set id = 450, payload = 'frontier' where id = 17;
+"; then
+    judge_on "$ROOT/pgpm_core/install.sql" "DEFECT: $T267 fails when s267i loses 17 and keeps 450" fail "$work/t267_rows_swapped.sql"
+    got=$(v "select count(*) || '/' || bool_or(id = 450) || '/' || bool_or(id = 17) || '/'
+                   || (select relkind::text from pg_class where oid = 'public.s267i'::regclass) from public.s267i")
+    if [ "$got" = "299/true/false/r" ]; then
+      say PASS "LIVENESS: s267i came back plain, 299 rows, 450 for 17" "rows/has450/has17/kind $got"
+    else
+      say FAIL "LIVENESS: s267i came back plain, 299 rows, 450 for 17" "rows/has450/has17/kind $got"; fail=1
+    fi
+  else
+    say FAIL "planted the defect: a swap after s267i's untransmute" "$T267 moved; fix the pattern"; fail=1
+  fi
+  # STRAY
+  if plant delta_stray_sequence "$MINT_DELTA" "${MINT_DELTA}  execute format('create sequence if not exists %I.%I', v_nsp, v_delta || '_stray');
+"; then
+    judge_on "$work/delta_stray_sequence.sql" "DEFECT: $T267 fails with an unrecorded sequence minted" fail "$F267"
+    got=$(v "select coalesce((select relkind::text from pg_class
+                               where oid = to_regclass('public.s267_pgpm_regrain_delta_stray')), 'none')")
+    if [ "$got" = S ]; then
+      say PASS "LIVENESS: the prepare left s267's stray sequence behind" "relkind $got"
+    else
+      say FAIL "LIVENESS: the prepare left s267's stray sequence behind" "relkind $got"; fail=1
+    fi
+  else
+    say FAIL "planted the defect: a sequence beside the delta" "install.sql moved; fix the pattern"; fail=1
+  fi
+  q -d postgres -q -c "drop database if exists $DB" </dev/null >/dev/null 2>&1
+  q -d postgres -q -c "drop role if exists tfd267_owner" </dev/null >/dev/null 2>&1
 fi
 
 if [ "$fail" = 0 ]; then say PASS "every judged test file fails against its defect" "${SEL# }"
