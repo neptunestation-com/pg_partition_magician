@@ -12,11 +12,15 @@ The landing policy (docs/adversarial-review.md, "Per-PR verification"), applied 
   blocked   an acceptance reproduction that does not fail on the base, or does not pass on the head, or
             that the PR's mutation does not make fail again (the mutation restores a cousin, so the guard
             it certifies is not this fix's); a verified `regression` of any tier; a verified `pre_existing`
-            of Tier 1 or 2; a `regression` or `pre_existing` claim with no verdict yet (unverified is not
-            clear); a closing-claim verdict of `partial`.
-  clear     everything else. Verified Tier 3 to 5 pre-existing claims are listed for filing as issues and
-            do not hold the PR; a missed seed is reported as the hunt's sensitivity being unwitnessed on
-            this PR, and does not hold the PR either (it measures the hunt, not the change).
+            of Tier 1 or 2 INSIDE the PR's surface (its file:line in a touched unit, a caller, or a touched
+            file, per --surface); a `regression` or `pre_existing` claim with no verdict yet (unverified is
+            not clear); a closing-claim verdict of `partial`.
+  clear     everything else. Verified Tier 3 to 5 pre-existing claims, and verified pre-existing claims of
+            any tier OUTSIDE the surface (a sibling mechanism in another module the claims verifier reached),
+            are listed for filing as issues and do not hold the PR: the PR did not make them and did not
+            touch them, and holding a fix hostage to its neighbours' defects is how a backlog grows. A
+            missed seed is reported as the hunt's sensitivity being unwitnessed on this PR, and does not
+            hold the PR either (it measures the hunt, not the change).
 
 Verdicts are the verifier's JSON objects merged by claim id (scripts/review/README.md, "Verdicts"), with
 one addition for the claims verifier: a `"closing"` entry, `{"verdict": "holds" | "partial", "reason": ...,
@@ -41,7 +45,22 @@ def yn(v):
     return {True: "yes", False: "NO", None: "not run"}[v]
 
 
-def decide(classified, verdicts, acceptance="ACC"):
+def in_surface(claim, surface):
+    """Whether a claim's file:line lies in the PR's surface: inside a touched or calling unit of a SQL
+    file, or anywhere in a touched non-SQL file. With no surface given every claim counts as inside."""
+    if not surface:
+        return True
+    f, line = claim.get("file"), claim.get("line")
+    for u in surface.get("units", []):
+        if u.get("file") == f and line is not None and u["lines"][0] <= line <= u["lines"][1]:
+            return True
+    for fl in surface.get("files", []):
+        if fl.get("path") == f and not any(u.get("file") == f for u in surface.get("units", [])):
+            return True
+    return False
+
+
+def decide(classified, verdicts, acceptance="ACC", surface=None):
     """(blocked: bool, reasons: [str], to_file: [claim ids]) from the classes and verdicts."""
     reasons, to_file = [], []
     for c in classified["claims"]:
@@ -68,7 +87,7 @@ def decide(classified, verdicts, acceptance="ACC"):
         tier = v.get("tier") or c.get("tier")
         if cls == "regression":
             reasons.append(f"{cid}: verified regression (Tier {tier}): the PR introduced it")
-        elif tier in BLOCKING_TIERS:
+        elif tier in BLOCKING_TIERS and in_surface(c, surface):
             reasons.append(f"{cid}: verified Tier {tier} defect in the PR's own surface")
         else:
             to_file.append(cid)
@@ -79,7 +98,7 @@ def decide(classified, verdicts, acceptance="ACC"):
 
 
 def render(classified, verdicts, coverage, surface, sealed, pr, head, base, budget=""):
-    blocked, reasons, to_file = decide(classified, verdicts, classified.get("acceptance", "ACC"))
+    blocked, reasons, to_file = decide(classified, verdicts, classified.get("acceptance", "ACC"), surface)
     acc = [c for c in classified["claims"] if c.get("acceptance")]
     finds = [c for c in classified["claims"] if not c.get("acceptance")]
     out = [f"## Per-PR adversarial verification of `{head[:7]}` (base `{base[:7]}`)", ""]
@@ -126,7 +145,9 @@ def render(classified, verdicts, coverage, surface, sealed, pr, head, base, budg
     else:
         out.append("None.")
     if to_file:
-        out += ["", "To file as issues (verified, below Tier 2, not held against this PR): " + ", ".join(f"`{x}`" for x in to_file)]
+        by = {c["id"]: c for c in finds}
+        parts = [f"`{x}`" + ("" if in_surface(by[x], surface) else " (outside the PR's surface)") for x in to_file]
+        out += ["", "To file as issues (verified; below Tier 2, or outside the surface the PR touched; not held against this PR): " + ", ".join(parts)]
     out += ["", "### Seed witness", ""]
     seeds = (sealed or {}).get("seeds", [])
     if seeds:
@@ -170,7 +191,8 @@ def selftest():
     blocked, reasons, to_file = decide(classified, verdicts)
     assert blocked and len(reasons) == 1 and "P1-01" in reasons[0] and "regression" in reasons[0], reasons
     assert to_file == ["P1-02"], to_file   # P1-03 fell, P1-05 is known and open
-    b, text = render(classified, verdicts, coverage, {"files": [1], "units": [1, 2]}, sealed, 7, "abcdef0123", "0123456789", "finder 150k")
+    b, text = render(classified, verdicts, coverage, {"files": [{"path": "x.sql"}], "units": [{"unit": "a", "file": "x.sql", "lines": [1, 9]}, {"unit": "b", "file": "x.sql", "lines": [10, 19]}]},
+                     sealed, 7, "abcdef0123", "0123456789", "finder 150k")
     assert b and "Landing: BLOCKED" in text and "S1 in `pgpm_core/install.sql` (m): **found**" in text and "known_open (#999)" in text, text
     assert "| `ACC-01` issue repro | yes | yes | yes |" in text and "10 of 10 units read (1.00)" in text
     # clear once the regression is withdrawn (it fell) and nothing else blocks
@@ -183,6 +205,21 @@ def selftest():
     verdicts["P1-02"] = {"verdict": "finding", "tier": 3}
     verdicts["P1-03"] = {"verdict": "finding", "tier": 1, "root_cause": "z"}
     assert "P1-03: verified Tier 1 defect in the PR's own surface" in decide(classified, verdicts)[1]
+    # the same Tier 1, outside the surface (another file, or outside every touched unit's lines): filed, not blocking
+    surf = {"units": [{"unit": "pgpm.a", "file": "pgpm_core/install.sql", "lines": [100, 200]}],
+            "files": [{"path": "pgpm_core/install.sql"}, {"path": "tests/9_t.sql"}]}
+    classified["claims"][3].update({"file": "pgpm_core/install.sql", "line": 4721})
+    b, r, tf = decide(classified, verdicts, surface=surf)
+    assert not any("P1-03" in x for x in r) and "P1-03" in tf, (r, tf)
+    classified["claims"][3]["line"] = 150
+    assert any("P1-03" in x for x in decide(classified, verdicts, surface=surf)[1])
+    classified["claims"][3].update({"file": "tests/9_t.sql", "line": 3})     # a touched non-SQL file: inside
+    assert any("P1-03" in x for x in decide(classified, verdicts, surface=surf)[1])
+    classified["claims"][3].update({"file": "pgpm_hypertable/install.sql", "line": 3})   # untouched file: outside
+    assert "P1-03" in decide(classified, verdicts, surface=surf)[2]
+    b, text = render(classified, verdicts, coverage, surf, sealed, 7, "abcdef0", "0123456", "")
+    assert "(outside the PR's surface)" in text, text
+    classified["claims"][3].update({"file": None, "line": None})
     verdicts["P1-03"] = {"verdict": "fell", "reason": "r"}
     classified["claims"][0]["acceptance"]["mutant_restores"] = False
     r = decide(classified, verdicts)[1]
@@ -196,7 +233,7 @@ def selftest():
     classified["claims"][4]["class"] = "not_reproduced"
     b, text = render(classified, verdicts, coverage, None, sealed, 7, "abcdef0", "0123456", "")
     assert not b and "**MISSED**" in text, text
-    print("pr_comment selftest: PASS (policy: acceptance, regression, tiers, unverified, known_open, closing claim, seed witness; rendering)")
+    print("pr_comment selftest: PASS (policy: acceptance, regression, tiers, surface membership, unverified, known_open, closing claim, seed witness; rendering)")
 
 
 def main(argv):

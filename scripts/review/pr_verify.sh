@@ -22,6 +22,8 @@
 #                    coordinator's and verifiers' use only; the finder is never given these paths
 #   <work>/pr.diff   the change AS PRESENTED to the finder: diff -ruN of base against review, so a planted
 #                    seed reads as part of the PR, exactly as a defect the PR introduced would
+#   <work>/pr.real.diff   base against head, the change itself, for the claims verifier (which reads the
+#                    source trees anyway and must not chase the seed as a gap in the PR)
 #   <work>/surface/  pr_surface.py's slices.json, units.txt, surface.md, surface.json
 #   <work>/claims/ACC/   the acceptance claims copied from --acceptance (claim directories with claim.json
 #                    and the issue's verified reproduction; the coordinator writes their install lists)
@@ -178,6 +180,10 @@ case "$CMD" in
     fi
     diff -ruN -x .git "$WORK/base" "$WORK/review" > "$WORK/pr.diff"; rc=$?
     [ $rc -le 1 ] || die "diff failed ($rc)" 5
+    # the real change, for the claims verifier (it reads the source trees anyway, so the seed is not a
+    # secret from it, and a diff that carries the seed would send it chasing the seed as a gap in the PR)
+    diff -ruN -x .git "$WORK/base" "$WORK/head" > "$WORK/pr.real.diff"; rc=$?
+    [ $rc -le 1 ] || die "diff failed ($rc)" 5
     python3 "$S/pr_surface.py" --base "$WORK/base" --head "$WORK/review" --out "$WORK/surface" --finder "$FINDER" >/dev/null; rc=$?
     [ $rc -eq 0 ] || die "pr_surface exited $rc (3 = the trees are identical)" "$rc"
     if [ -n "$ACCEPT" ]; then
@@ -209,6 +215,7 @@ case "$CMD" in
     echo
     echo "PREPARED #$PR: $(jq -r .title "$WORK/pr.json")"
     echo "  trees: $WORK/base $WORK/head $WORK/review$([ -d "$WORK/mutant" ] && echo " $WORK/mutant")"
+    echo "  claims verifier V: $WORK/head_src, $WORK/base_src, real diff $WORK/pr.real.diff"
     echo "  finder $FINDER: tree $WORK/review, diff $WORK/pr.diff, units $WORK/surface/units.txt ($(wc -l < "$WORK/surface/units.txt" | tr -d ' ') units), surface $WORK/surface/surface.md"
     echo "  claims dir $WORK/claims; verdicts dir $WORK/verdicts; mutations: $(cut -f1 "$WORK/mutations.tsv" | paste -sd, -)"
     ;;

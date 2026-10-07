@@ -52,7 +52,9 @@ coordinator judges its claims worth the budget (a tooling PR that changes what a
   the private harness container names, and the text of the README's "Claim format" and "Reproduction
   contract". Never the base tree, `head_src`, `base_src`, `sealed.json` or the plan.
 - One **`verifier`** in its **claims-verifier** role (the section of `.claude/agents/verifier.md`), with:
-  `$W/pr/head_src` and `$W/pr/base_src` (it may read `bench/mutations/`), the diff, the PR body, the issue
+  `$W/pr/head_src` and `$W/pr/base_src` (it may read `bench/mutations/`), the REAL diff `$W/pr/pr.real.diff`
+  (not the presented one: it reads the source trees anyway, and a diff carrying the seed sends it chasing the
+  seed as a gap in the PR, as #1047's did), the PR body, the issue
   bullet's text, the acceptance claims and their reproductions, the harness, the claims directory with finder
   id `V`, the verdict path `$W/pr/verdicts/closing.json`, and the open-issue list
   (`gh issue list --state open --label bug --limit 200 --json number,title,body > $W/open.json`). Its job is
