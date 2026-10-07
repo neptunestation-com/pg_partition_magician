@@ -71,8 +71,10 @@ def decide(classified, verdicts, acceptance="ACC", surface=None):
                 reasons.append(f"{cid}: the acceptance reproduction does not fail on the base, so it does not demonstrate the defect the PR says it fixes")
             if a["passes_on_head"] is not True:
                 reasons.append(f"{cid}: the acceptance reproduction does not pass on the head" + (" (it failed only its liveness checks: the fix refuses the fixture)" if c.get("note") and "refuses" in c["note"] else ""))
-            if a.get("any_restores") is False:
-                reasons.append(f"{cid}: no new mutation of the PR makes the acceptance reproduction fail ({', '.join(a['mutant_restores'])}), so they restore a different defect and the guard they certify is not this fix's")
+            any_restores = a["any_restores"] if "any_restores" in a else a.get("mutant_restores")   # legacy bool shape
+            if any_restores is False:
+                names = ", ".join(a["mutant_restores"]) if isinstance(a.get("mutant_restores"), dict) else "the PR's mutations"
+                reasons.append(f"{cid}: no new mutation of the PR makes the acceptance reproduction fail ({names}), so they restore a different defect and the guard they certify is not this fix's")
             continue
         if cls not in ("regression", "pre_existing"):
             continue
@@ -112,7 +114,10 @@ def render(classified, verdicts, coverage, surface, sealed, pr, head, base, budg
         out += ["| reproduction | fails on base | passes on head | the PR's mutations restore it | note |", "|---|---|---|---|---|"]
         for c in acc:
             a = c["acceptance"]
-            mr = a.get("mutant_restores") or {}
+            mr = a.get("mutant_restores")
+            if isinstance(mr, bool) or mr is None and "any_restores" not in a:
+                mr = {"(the PR's mutations together)": mr}   # the record's first shape, one combined mutant tree
+            mr = mr or {}
             cell = ("; ".join(f"`{k}`: {yn(v)}" for k, v in mr.items()) if mr else "no mutant tree (not checked)")
             out.append(f"| `{c['id']}` {c.get('scenario') or ''} | {yn(a['fails_on_base'])} | {yn(a['passes_on_head'])} | {cell} | {a.get('note') or c.get('note') or ''} |")
     else:
@@ -166,7 +171,7 @@ def render(classified, verdicts, coverage, surface, sealed, pr, head, base, budg
             out.append(f"- {row['finder']}: {row['read']} of {row['units']} units read ({row['coverage']:.2f})" +
                        (f"; unread: {', '.join(row['unread'][:8])}" if row.get("unread") else ""))
     if surface:
-        out.append(f"- surface: {len(surface.get('files', []))} file(s), {len(surface.get('units', []))} unit(s) (touched units and their callers)")
+        out.append(f"- surface: {len(surface.get('files', []))} file(s), {len(surface.get('ledger') or surface.get('units', []))} unit(s) in the ledger (touched units, their callers, touched files)")
     if budget:
         out.append(f"- budget: {budget}")
     out += ["", "🤖 Generated with [Claude Code](https://claude.com/claude-code)"]
@@ -230,6 +235,11 @@ def selftest():
     assert not decide(classified, verdicts)[0]
     verdicts["closing"] = {"verdict": "partial", "reason": "the sibling path", "claims": ["V-01"]}
     assert decide(classified, verdicts)[1] == ["closing claim: partial (the sibling path)"]
+    # the record's first shape (one combined mutant, a boolean) still renders and still blocks on False
+    legacy = {"acceptance": "ACC", "claims": [{"id": "ACC-01", "finder": "ACC", "class": "fixed", "scenario": "s", "acceptance": {"fails_on_base": True, "passes_on_head": True, "mutant_restores": False}}]}
+    assert decide(legacy, {})[0] and "restore a different defect" in decide(legacy, {})[1][0]
+    legacy["claims"][0]["acceptance"]["mutant_restores"] = True
+    assert not decide(legacy, {})[0] and "mutations together)`: yes" in render(legacy, {}, None, None, None, 1, "a", "b")[1]
     # a missed seed is reported, not blocking
     verdicts["closing"]["verdict"] = "holds"
     classified["claims"][4]["class"] = "not_reproduced"
