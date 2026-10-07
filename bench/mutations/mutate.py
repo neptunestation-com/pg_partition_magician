@@ -5728,8 +5728,8 @@ $$;''',
         "the tick's, at the valid target a refused call must leave in place and at the source left without "
         "capture; its accepted whole-second, 500 ms on timestamp(1), month and microsecond steps still pass, "
         "which is what shows the mutant is this rule alone.",
-        [("    if v_unit_us is not null and v_months = 0\n",
-          "    if false\n", 1)],
+        [("    if v_time_unit is not null then\n",
+          "    if false then\n", 1)],
     ),
     # #669-#671: three transmute contract gaps, each caught by its own pgTAP file through a wrapper in
     # bench/transmute_abort_owner.sh's shape.
@@ -8458,6 +8458,27 @@ select ok(
           "p_tt_radix, p_tt_radix;\n"
           "      end if;\n",
           "", 1)],
+    ),
+    "transmute_time_unit_contract_dropped": (
+        "bench/transmute_step_precision.sh",
+        "Issue #1039 bullet 1, the pre-fix shape: transmute's preflight no longer asks _time_unit_contract, so "
+        "'500 milliseconds' on a timestamptz(0) key passes, phases 1 and 2 commit and validate the monolith's "
+        "bound CHECK, and the cutover's obtain dies on 'empty range bound' with the table rejecting every current "
+        "write; '1500 milliseconds' converts with pgpm.part bounds the catalog rounded to other instants. One "
+        "site, the call. tests/287 parts A, B, D and E catch it.",
+        [("    -- #1039: and a timestamp(p) key holds whole multiples of 10^-p seconds, so the step and the anchor must\n"
+          "    -- be too, or the cutover's ATTACH rounds a bound between two of them. See _time_unit_contract.\n"
+          "    perform pgpm._time_unit_contract(p_parent, p_control, p_step, p_anchor);\n",
+          "    null;\n", 1)],
+    ),
+    "time_unit_anchor_unchecked": (
+        "bench/transmute_step_precision.sh",
+        "Issue #1039 bullet 1, the half rule: _time_unit_breach asks the step and not the anchor, so an anchor "
+        "half a second off a timestamptz(0) key's seconds converts, every bound pgpm records sits half a second "
+        "from the one the catalog rounded it to, and a row in that half second is in a partition whose recorded "
+        "range does not hold it. tests/287 part D catches it.",
+        [("     or (p_anchor is not null and (extract(epoch from p_anchor::timestamptz) * 1000000) % v_unit_us <> 0) then\n",
+          "     then\n", 1)],
     ),
     # pass 9 G17: tests/267 at its three wrong-reason sites (#993) and tests/timescale/db/05's catch-up (#996),
     # each the file's pre-fix text; bench/tests_fail_on_defect.sh judges 267 against the defect each accepted,

@@ -5710,6 +5710,36 @@ begin
 end;
 $$;
 
+-- THE TIME-PRECISION RULE, in one place (#980, #1039). A timestamp(p) or timestamptz(p) column keeps whole
+-- multiples of 10^-p seconds, and every bound pgpm writes for a time grid is the anchor plus a whole number of
+-- steps, which ATTACH PARTITION and CREATE TABLE ... PARTITION OF round to the column's precision: two adjacent
+-- bounds closer than the unit round to the same instant (empty range bound), and a bound between two units is
+-- attached at another instant than pgpm records for it. So the bounds are ones the column holds exactly when
+-- the step is a whole number of units (a calendar step, a whole number of months, is always whole seconds)
+-- and the anchor is. An unconstrained column (typmod -1) keeps microseconds, below which an interval cannot go,
+-- so the rule then refuses nothing; any other type is not this rule's (null). Returns null when the step and
+-- the anchor (null: not asked, as for a regrain target, whose grid keeps the registered anchor) pass, and
+-- otherwise what the column keeps and the unit to give the step in, for the caller's own refusal:
+-- _regrain_step_shape for a regrain target, _time_unit_contract for transmute's partition step.
+create or replace function pgpm._time_unit_breach(p_type oid, p_typmod int, p_step text, p_anchor text,
+                                                  out r_keeps text, out r_unit text)
+returns record language plpgsql stable as $$
+declare v_prec int; v_unit_us numeric; v_months numeric;
+begin
+  if p_type not in ('timestamp'::regtype, 'timestamptz'::regtype) then
+    return;
+  end if;
+  v_prec    := case when p_typmod between 0 and 6 then p_typmod else 6 end;
+  v_unit_us := power(10::numeric, 6 - v_prec);
+  v_months  := extract(year from p_step::interval) * 12 + extract(month from p_step::interval);
+  if (v_months = 0 and (extract(epoch from p_step::interval) * 1000000) % v_unit_us <> 0)
+     or (p_anchor is not null and (extract(epoch from p_anchor::timestamptz) * 1000000) % v_unit_us <> 0) then
+    r_keeps := case when v_prec = 0 then 'whole seconds only' else v_prec || ' fractional-second digit(s)' end;
+    r_unit  := case when v_prec = 0 then '1 second' else trim_scale(power(10::numeric, -v_prec)) || ' seconds' end;
+  end if;
+end;
+$$;
+
 -- #674, #641: refuse a regrain target step whose SHAPE the grid cannot place, with the rules transmute's
 -- preflight applies to a partition_step. _regrain_step_forward asks only "does grid_next move forward", and
 -- grid_next reads a step the way the grid does, so it cannot see a step the grid half-ignores:
@@ -5741,7 +5771,7 @@ $$;
 create or replace function pgpm._regrain_step_shape(p_parent regclass, p_step text)
 returns void language plpgsql stable as $$
 declare cfg pgpm.config; v_typname name; v_type oid; v_typmod int; v_scale int; v_months numeric; v_rest interval;
-        v_prec int; v_unit_us numeric;
+        v_time_keeps text; v_time_unit text;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
@@ -5798,17 +5828,13 @@ begin
     -- #980: and a fixed step finer than a timestamp(p) column's precision. Every fine bound is a multiple
     -- of the step from the anchor, and ATTACH rounds each one to p fractional-second digits, so two
     -- adjacent bounds can round to the same instant: refused here, before a run copies anything it could
-    -- never swap in. The typmod is p itself (-1, unconstrained, keeps microseconds).
-    if v_typname in ('timestamp', 'timestamptz') then
-      v_prec    := case when v_typmod between 0 and 6 then v_typmod else 6 end;
-      v_unit_us := power(10::numeric, 6 - v_prec);
-    end if;
-    if v_unit_us is not null and v_months = 0
-       and (extract(epoch from p_step::interval) * 1000000) % v_unit_us <> 0 then
+    -- never swap in. The rule is _time_unit_breach's, which transmute's partition step answers to as well
+    -- (#1039); the anchor is the registered one, which transmute already held to it.
+    select b.r_keeps, b.r_unit into v_time_keeps, v_time_unit
+      from pgpm._time_unit_breach(v_type, v_typmod, p_step, null) b;
+    if v_time_unit is not null then
       raise exception 'pg_partition_magician: regrain target step % for % is finer than its control column % can hold: it is %, which keeps % -- ATTACH PARTITION would round the fine cells'' bounds to that precision, adjacent bounds would round to the same instant, and every swap would fail (empty range bound) after the run had copied the rows; give a step that is a multiple of %',
-        p_step, p_parent, quote_ident(cfg.control_column), format_type(v_type, v_typmod),
-        case when v_prec = 0 then 'whole seconds only' else v_prec || ' fractional-second digit(s)' end,
-        case when v_prec = 0 then '1 second' else trim_scale(power(10::numeric, -v_prec)) || ' seconds' end;
+        p_step, p_parent, quote_ident(cfg.control_column), format_type(v_type, v_typmod), v_time_keeps, v_time_unit;
     end if;
   end if;
 end;
@@ -6939,6 +6965,29 @@ begin
 end;
 $$;
 
+-- _time_unit_contract: the step and the anchor of a timestamp(p) or timestamptz(p) grid, before the table is
+-- read (#1039). The preflight held a date key to whole days (#581) and never a timestamp(p) key to its
+-- precision, so '500 milliseconds' on a timestamptz(0) key committed and validated the monolith's bound
+-- CHECK, and the cutover's obtain then died on 'empty range bound' (two forward bounds rounding to one
+-- second), leaving the table rejecting every current write; a resume reused the recorded bound and failed the
+-- same way. '1500 milliseconds' converted, but recorded bounds the catalog had rounded to other instants. The
+-- rule is _time_unit_breach's, the one a regrain target answers to (#980). A domain is not unwrapped: the
+-- time kind's type check above refuses a domain-typed column before this is asked.
+create or replace function pgpm._time_unit_contract(p_parent regclass, p_control name, p_step text, p_anchor text)
+returns void language plpgsql stable as $$
+declare v_type oid; v_typmod int; v_keeps text; v_unit text;
+begin
+  select a.atttypid, a.atttypmod into v_type, v_typmod
+    from pg_attribute a where a.attrelid = p_parent and a.attname = p_control and not a.attisdropped;
+  select b.r_keeps, b.r_unit into v_keeps, v_unit from pgpm._time_unit_breach(v_type, v_typmod, p_step, p_anchor) b;
+  if v_unit is not null then
+    raise exception 'pg_partition_magician: cannot partition % on % with step % and anchor % -- the column is %, which keeps %, and every partition bound is the anchor plus whole steps, which the cutover''s ATTACH (and obtain''s CREATE TABLE ... PARTITION OF, for every forward partition) rounds to that precision: two bounds would round to the same instant and the cutover would fail (empty range bound) after committing a bound CHECK that rejects every write past it, or a bound would be attached at another instant than pgpm records for it. Give a step and an anchor that are whole multiples of %, or widen the column''s precision (ALTER TABLE % ALTER COLUMN % TYPE %), then re-run transmute; if an earlier attempt left a pgpm_monolith_bound CHECK on the table, call pgpm.transmute_abort(%) first, since a re-run resumes its recorded bound.',
+      p_parent, quote_ident(p_control), p_step, p_anchor, format_type(v_type, v_typmod), v_keeps, v_unit,
+      p_parent::text, quote_ident(p_control), format_type(v_type, -1), p_parent;
+  end if;
+end;
+$$;
+
 -- _control_bound_contract: the monolith's bound itself, [p_lo, p_hi), once the claim has decided it (#952).
 -- Asked of a fresh bound and, above all, of a RESUMED one: a resume reuses the bound an earlier attempt
 -- recorded, and the install that recorded it may not have refused what this one does. A pre-#922 install
@@ -7697,6 +7746,10 @@ begin
     -- dated today. A calendar step (months) is whole days by construction; a duration has to be a whole
     -- number of 86400 s days.
     raise exception 'pg_partition_magician: the date column % holds whole days, so its partition step must be a whole number of days or months (got %) -- a finer step''s bounds truncate to dates, so the monolith''s bound CHECK would reject every row dated today and the cutover would fail on an empty partition range', quote_ident(p_control), p_step;
+  elsif p_control_kind = 'time' then
+    -- #1039: and a timestamp(p) key holds whole multiples of 10^-p seconds, so the step and the anchor must
+    -- be too, or the cutover's ATTACH rounds a bound between two of them. See _time_unit_contract.
+    perform pgpm._time_unit_contract(p_parent, p_control, p_step, p_anchor);
   elsif p_control_kind = 'id' then
     if v_typname in ('float4', 'float8') then
       raise exception 'pg_partition_magician: float/double control columns are unsupported (imprecise boundaries; NaN/Inf poison the frontier) -- use bigint or numeric';

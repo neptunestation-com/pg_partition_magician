@@ -1124,6 +1124,7 @@ run_perf() {
     "bench/progress_write_child_built.sh pgpm_perf268"
     "bench/obtain_rebuilds_detached_cell.sh pgpm_perf269"
     "bench/uninstall_scratch_by_record.sh pgpm_perf272"
+    "bench/transmute_step_precision.sh pgpm_perf284"
   )
   local selected=()
   local n=${#guards[@]} idx

@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **`transmute` refuses a partition step or anchor a `timestamp(p)` key cannot hold, before anything
+  commits** (#1039 bullet 1). The preflight held a `date` key to whole days and never a `timestamp(p)` key to
+  its precision, so `'500 milliseconds'` on a `timestamptz(0)` key committed and validated the
+  `pgpm_monolith_bound` CHECK, and the cutover's obtain then died on `empty range bound`, leaving the table
+  rejecting every current write until `transmute_abort` (a retry resumed the same bound); `'1500
+  milliseconds'` converted with `pgpm.part` bounds the catalog had rounded to other instants, and so did an
+  anchor half a second off. The #980 regrain rule is now one helper, `pgpm._time_unit_breach`, which
+  `_regrain_step_shape` and transmute's new `_time_unit_contract` both ask: a step (unless a whole number of
+  months) and an anchor must be whole multiples of `10^-p` seconds, and the refusal names the unit and the
+  remedies (whole units, a wider precision, `transmute_abort` for a bound an earlier attempt left). Test
+  `tests/287`, guard `bench/transmute_step_precision.sh`, mutations `transmute_time_unit_contract_dropped`
+  and `time_unit_anchor_unchecked`.
+
 - **`./test.sh discriminate` no longer certifies a guard whose only failures against its mutant are LIVENESS
   witnesses** (the discriminate.sh bullet of #713). `bench/discriminate.sh` read any non-zero exit of a guard
   run against its installed mutant as "fails when the defect is present", so a mutant that starved the
