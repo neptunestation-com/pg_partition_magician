@@ -15,7 +15,22 @@
 -- rows named, both candidate keys are cleared and witnessed absent before the tick (the bucket
 -- outlives a test database, and a stale object from an earlier run at the same key would otherwise
 -- satisfy a read-back), and the tick wrote a ledger row for each partition.
+--
+-- The stem itself (the #502 contract, pure functions) is asserted FIRST, before any fixture or tick: a
+-- mutant that collides two chunks' keys makes the tick refuse the second chunk, and the file then stops at
+-- the first read of that chunk's missing ledger row, so the contract must already have been read by then.
 select plan(23);
+
+-- ======================= PART 0: the stem itself =======================
+
+select is(archive._object_stem('id', '-10000'), '-10000',
+  'an id kind keeps the sign of a negative lo in the object stem');
+select is(archive._object_stem('id', '10.5'), '10.5',
+  'an id kind on a numeric control keeps the decimal point: 10.5 and 105 are different chunks');
+select is(archive._object_stem('id', '10000'), '10000',
+  'a non-negative id stem is unchanged from the key shape existing buckets hold');
+select is(archive._object_stem('time', '2024-01-01 00:00:00+00'), '2024010100000000',
+  'a time kind keeps the digits-only key shape existing buckets hold');
 
 create schema t16;
 
@@ -203,16 +218,7 @@ select diag(format('parquet: the [-10000, 0) object is %s bytes, the [10000, 200
 select ok((select neg_bytes > pos_bytes from t16_pq),
   'parquet: the object recorded for [-10000, 0) is the larger, 1000-row file, not the 10-row file that shared its key');
 
--- ======================= PART C: the stem itself, and the key shape it produces =======================
-
-select is(archive._object_stem('id', '-10000'), '-10000',
-  'an id kind keeps the sign of a negative lo in the object stem');
-select is(archive._object_stem('id', '10.5'), '10.5',
-  'an id kind on a numeric control keeps the decimal point: 10.5 and 105 are different chunks');
-select is(archive._object_stem('id', '10000'), '10000',
-  'a non-negative id stem is unchanged from the key shape existing buckets hold');
-select is(archive._object_stem('time', '2024-01-01 00:00:00+00'), '2024010100000000',
-  'a time kind keeps the digits-only key shape existing buckets hold');
+-- ======================= PART C: the key shape the stem produces =======================
 
 select is(
   (select s3_key from pgpm.archive_ledger where parent_table = 'public.negk'::regclass and lo = '-10000'),
