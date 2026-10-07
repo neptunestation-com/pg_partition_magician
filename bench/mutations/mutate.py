@@ -8245,6 +8245,38 @@ select ok(
           "      or pg_get_function_result(p.oid) <> s.result\n",
           "      or pg_get_function_identity_arguments(p.oid) <> s.args\n", 1)],
     ),
+    "text_time_anchor_unit_unchecked": (
+        "bench/text_time_anchor_unit.sh",
+        "Issue #989, the pre-fix shape: transmute's text_time preflight no longer asks _text_time_unit_contract, "
+        "so an anchor half a second off an ObjectId seconds grid (or a step with a sub-unit part) is accepted, "
+        "_ts_to_text_time floors every bound to the second, and pgpm.part records bounds half a second above the "
+        "catalog's. One site, the call. tests/284 assertions 1 to 4 catch it.",
+        [("    -- #989: and an anchor and a step the encoding can express. See _text_time_unit_contract.\n"
+          "    perform pgpm._text_time_unit_contract(p_parent, p_control, p_step, p_anchor, p_tt_unit, p_tt_epoch);\n",
+          "", 1)],
+    ),
+    "text_time_unit_unix_epoch": (
+        "bench/text_time_anchor_unit.sh",
+        "Issue #989, the plausible-but-wrong check: the anchor is measured in whole units from the Unix epoch "
+        "rather than from p_tt_epoch, which _ts_to_text_time counts from, so a whole-second anchor against an "
+        "epoch carrying a fraction passes and every bound floors to a different instant than the one recorded. "
+        "tests/284 assertion 4 catches it.",
+        [("  if mod((extract(epoch from p_anchor::timestamptz) - extract(epoch from p_epoch)) * 1000000, v_us) <> 0\n",
+          "  if mod(extract(epoch from p_anchor::timestamptz) * 1000000, v_us) <> 0\n", 1)],
+    ),
+    "text_time_radix_no_lower_bound": (
+        "bench/text_time_radix_lower_bound.sh",
+        "Issue #990, the pre-fix shape: with p_tt_alphabet supplied, transmute checks only the alphabet's length "
+        "and repeats, so p_tt_radix => 1 with alphabet 'x' passes and _radix_encode's div(v, 1) loop never ends: "
+        "transmute spins at the frontier encode until statement_timeout. tests/285 assertions 2 and 3 catch it "
+        "(the file sets statement_timeout around both, so the mutant fails rather than hangs).",
+        [("      if p_tt_radix < 2 then\n"
+          "        raise exception 'pg_partition_magician: p_tt_radix must be at least 2 (got %) -- a base-% encoding "
+          "has no place value to order bounds by; supply an alphabet of two or more characters, one per digit', "
+          "p_tt_radix, p_tt_radix;\n"
+          "      end if;\n",
+          "", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

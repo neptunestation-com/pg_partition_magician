@@ -397,8 +397,12 @@ control column is `float`/`double` (imprecise boundaries); a `time`-kind control
 is not a timestamp/date, a `uuidv7` control is not `uuid`, or a `text_time` control is not `text`/`varchar`;
 a `uuid` control samples as overwhelmingly random (UUIDv4) and `p_force_uuidv7` is not set; a `text_time`
 control is missing any of `p_tt_prefix`/`p_tt_width`/`p_tt_radix`/`p_tt_unit`, has a `p_tt_radix` outside
-2-36 with no `p_tt_alphabet` supplied, a `p_tt_alphabet` whose length does not match `p_tt_radix` or that
-repeats a character, a non-positive `p_tt_width`, a negative `p_tt_discard_bits`, an alphabet the control
+2-36 with no `p_tt_alphabet` supplied, or below 2 with one (a one-character alphabet has no place value, and
+encoding a bound in it never ends), a `p_tt_alphabet` whose length does not match `p_tt_radix` or that
+repeats a character, a non-positive `p_tt_width`, a negative `p_tt_discard_bits`, a `p_anchor` or a step
+that is not a whole number of the encoding's unit (`p_tt_unit`) from `p_tt_epoch`, such as
+`'2000-01-01 00:00:00.5+00'` on a seconds grid like ObjectId's (every bound is encoded by flooring to the
+unit, so the bounds pgpm records would sit above the catalog's), an alphabet the control
 column's collation does not order the way base-`p_tt_radix` place value does (KSUID's base62 on an
 `en_US` column, any alphabet with digits under an ICU collation with numeric ordering such as
 `und-u-kn-true`, or an alphabet holding a two-letter contraction of the collation, such as hex under

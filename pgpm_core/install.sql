@@ -6841,6 +6841,29 @@ begin
 end;
 $$;
 
+-- _text_time_unit_contract: the step and the anchor of a text_time grid, before the table is read (#989).
+-- _ts_to_text_time encodes a bound as the whole number of units (a second, or a millisecond) since p_tt_epoch,
+-- flooring whatever is finer, so a grid whose boundaries fall between two units is recorded in pgpm.part at
+-- one instant and written to the catalog at an earlier one: an anchor half a second off an ObjectId grid put
+-- every recorded bound half a second above the catalog's, and a row in that half second sat in a partition
+-- whose recorded range does not hold its time. Every boundary is the anchor plus whole steps, so it is a whole
+-- number of units from the epoch exactly when the anchor is and the step is (a month or a day is whole
+-- seconds in every zone PostgreSQL knows, so the step's sub-second part is the only one that can fail).
+create or replace function pgpm._text_time_unit_contract(p_parent regclass, p_control name, p_step text,
+                                                         p_anchor text, p_unit text, p_epoch timestamptz)
+returns void language plpgsql stable as $$
+declare v_us int := case p_unit when 'ms' then 1000 else 1000000 end;
+begin
+  if mod((extract(epoch from p_anchor::timestamptz) - extract(epoch from p_epoch)) * 1000000, v_us) <> 0
+     or mod(extract(epoch from p_step::interval) * 1000000, v_us) <> 0 then
+    raise exception 'pg_partition_magician: cannot partition % on % with step % and anchor % -- its text_time encoding counts whole %s from %, and every partition bound is encoded by flooring to that unit, so a bound between two of them would be written to the catalog at an earlier instant than pgpm records for it, and rows in that gap would sit in a partition whose recorded range does not hold their time. Give an anchor and a step that are whole multiples of 1 % from %, then re-run transmute.',
+      p_parent, quote_ident(p_control), p_step, p_anchor,
+      case p_unit when 'ms' then 'millisecond' else 'second' end, pgpm._ts_text(p_epoch),
+      case p_unit when 'ms' then 'millisecond' else 'second' end, pgpm._ts_text(p_epoch);
+  end if;
+end;
+$$;
+
 -- _control_bound_contract: the monolith's bound itself, [p_lo, p_hi), once the claim has decided it (#952).
 -- Asked of a fresh bound and, above all, of a RESUMED one: a resume reuses the bound an earlier attempt
 -- recorded, and the install that recorded it may not have refused what this one does. A pre-#922 install
@@ -7620,6 +7643,11 @@ begin
     -- p_tt_alphabet's own length IS the radix ceiling when supplied (ULID needs 32, KSUID needs 62);
     -- without one, the default contiguous 0-9a-z convention caps out at 36.
     if p_tt_alphabet is not null then
+      -- #990: and the floor is 2 either way. A one-character alphabet has no place value: _radix_encode's
+      -- v := div(v, 1) never reaches 0, so the frontier encode spun until statement_timeout.
+      if p_tt_radix < 2 then
+        raise exception 'pg_partition_magician: p_tt_radix must be at least 2 (got %) -- a base-% encoding has no place value to order bounds by; supply an alphabet of two or more characters, one per digit', p_tt_radix, p_tt_radix;
+      end if;
       if length(p_tt_alphabet) <> p_tt_radix then
         raise exception 'pg_partition_magician: p_tt_alphabet % has length %, which does not match p_tt_radix %', p_tt_alphabet, length(p_tt_alphabet), p_tt_radix;
       end if;
@@ -7638,6 +7666,8 @@ begin
     if p_tt_discard_bits < 0 then
       raise exception 'pg_partition_magician: p_tt_discard_bits must not be negative (got %)', p_tt_discard_bits;
     end if;
+    -- #989: and an anchor and a step the encoding can express. See _text_time_unit_contract.
+    perform pgpm._text_time_unit_contract(p_parent, p_control, p_step, p_anchor, p_tt_unit, p_tt_epoch);
     -- #456: the alphabet has to order the way base-N place value does UNDER THE COLUMN'S COLLATION, or
     -- the bounds this kind computes route rows to the wrong partition (see _check_text_time_collation).
     -- Not gated by p_force_text_time: that flag overrides a sampling heuristic, and this is arithmetic.
