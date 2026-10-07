@@ -18,18 +18,26 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # One job per PostgreSQL version AND install channel (psql, bundle, dbdev). The three channels run the
+  # same pgTAP files against differently packaged installs and cost the same: measured on a merge group
+  # on 2026-10-07, PG15 spent 80 s building its image, then 449, 451 and 447 s on the three channels in
+  # turn, 24 minutes in all, which made this matrix the critical path of every merge group (the next
+  # longest job, a discriminate shard, took 17). Twelve jobs of about nine minutes cost the same runner
+  # minutes as four of 24 and let the queue merge in half the time. `./test.sh <version> --channel=<ch>`
+  # runs one channel end to end, its uninstall check included; the Test Summary still needs every cell.
   test:
-    name: PostgreSQL ${{ matrix.pg_version }}
+    name: PostgreSQL ${{ matrix.pg_version }} / ${{ matrix.channel }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         pg_version: [15, 16, 17, 18]
+        channel: [psql, bundle, dbdev]
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - name: Test channels on PostgreSQL ${{ matrix.pg_version }}
-        run: ./test.sh ${{ matrix.pg_version }}
+      - name: Test the ${{ matrix.channel }} channel on PostgreSQL ${{ matrix.pg_version }}
+        run: ./test.sh ${{ matrix.pg_version }} --channel=${{ matrix.channel }}
 
   packages:
     name: Build channel packages
