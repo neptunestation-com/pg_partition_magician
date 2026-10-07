@@ -36,6 +36,15 @@
 # and not as a broken mutation. Mutants of other files (a test file, a script) have no install step;
 # their guards carry their own controls. bench/discriminate_installs.sh proves this check refuses.
 #
+# A GUARD THAT FAILED ONLY ITS LIVENESS WITNESSES VERIFIES NOTHING EITHER (#713). A LIVENESS witness says
+# the fixture reached the state the defect needs; when the only checks a guard fails against its mutant are
+# witnesses like that, the mutant starved the fixture and the guard never got to assert anything about the
+# defect. That is the rule the guards print themselves ("a failure is only evidence against the code when
+# the setup it depends on held") and the one scripts/review/classify_claims.py applies to a reproduction,
+# so it is applied here with the classifier's prefixes: a run whose every failure is `LIVENESS:`, `GUARD:`
+# or `fixture:` FAILS this check as a starved fixture, while one witness failing beside a failed defect
+# check still counts. See starved() for how failures are read; bench/discriminate_installs.sh proves it.
+#
 # DISCRIMINATE_DB_PREFIX (default pgpm_mut) names the scratch databases, <prefix><n> and
 # <prefix><n>_install; bench/discriminate_installs.sh sets it so its nested runs share nothing with this one.
 set -uo pipefail
@@ -102,6 +111,22 @@ installs() {
   "${q[@]}" -d postgres -q -c "drop database if exists $idb" >/dev/null 2>&1
   return "$rc"
 } </dev/null   # `docker exec -i` forwards stdin; the -f steps redirect their own, the rest get nothing
+
+# starved <guard log>: exit 0 when the guard printed at least one failure and EVERY one is a premise witness
+# (#713, see the header). The failures are its pgTAP `not ok` lines when it printed any (indented or not,
+# numbered or not, as classify_claims.py reads them): a wrapper's own `FAIL  <what>  N ran` line restates
+# the file's verdict and is not a check of its own, so the assertions behind it decide. Otherwise they are
+# its `FAIL  <label>` lines. An undescribed `not ok` names no premise, so it counts as a defect check, and a
+# guard that failed without printing any failure line is not read as starved (the classifier's rule too).
+starved() {
+  local tap='^[[:space:]]*not ok([^[:alnum:]_]|$)' descs
+  if grep -qE "$tap" "$1"; then
+    descs=$(grep -E "$tap" "$1" | sed -E 's/^[[:space:]]*not ok[[:space:]]*[0-9]*[[:space:]]*(-[[:space:]]*)?//')
+  else
+    descs=$(grep -E '^FAIL[[:space:]]' "$1" | sed -E 's/^FAIL[[:space:]]+//')
+  fi
+  [ -n "$descs" ] && ! grep -qvE '^(LIVENESS|GUARD|fixture):' <<<"$descs"
+}
 
 # Materialise the listing BEFORE the loop rather than piping it straight in. `done < <(cmd)` discards
 # cmd's exit status, so a mutate.py that refused to list anything -- an unknown track, a track whose
@@ -179,6 +204,11 @@ while IFS=$'\t' read -r name guard why src <&3; do
   elif [ "$guard_rc" = 0 ]; then
     printf 'FAIL  %s PASSED against its own defect: it does not discriminate\n' "$guard"
     sed 's/^/      /' "$OUT/$name.log"
+    fail=1
+  elif starved "$OUT/$name.log"; then
+    # Its failures are printed after a marker, so that none of them reads as a failure of whatever runs this.
+    printf 'FAIL  %s failed only LIVENESS witnesses against its mutant: the fixture starved and never reached the defect, so the guard is unverified\n' "$guard"
+    grep -E '^[[:space:]]*not ok|^FAIL' "$OUT/$name.log" | sed 's/^[[:space:]]*/      guard: /'
     fail=1
   else
     printf 'PASS  %s fails when the defect is present\n' "$guard"

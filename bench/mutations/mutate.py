@@ -5063,6 +5063,19 @@ $$;''',
             ('if [ "$i" != "$listed" ]; then', "if false; then", 1),
         ],
     ),
+    "discriminate_counts_liveness_only": (
+        "bench/discriminate_installs.sh",
+        "Pre-#713 bench/discriminate.sh: any non-zero exit of a guard run against its installed mutant is "
+        "certified as 'fails when the defect is present', so a guard whose only failures are LIVENESS "
+        "witnesses (the mutant starved the fixture, the defect check never ran or passed) is counted as "
+        "discriminating and the track reports PASS. One site: the starved-fixture branch of the verdict, whole.",
+        [("  elif starved \"$OUT/$name.log\"; then\n"
+          "    # Its failures are printed after a marker, so that none of them reads as a failure of whatever runs this.\n"
+          "    printf 'FAIL  %s failed only LIVENESS witnesses against its mutant: the fixture starved and never "
+          "reached the defect, so the guard is unverified\\n' \"$guard\"\n"
+          "    grep -E '^[[:space:]]*not ok|^FAIL' \"$OUT/$name.log\" | sed 's/^[[:space:]]*/      guard: /'\n"
+          "    fail=1\n", "", 1)],
+    ),
     "retire_straddles_horizon": (
         "bench/retire_straddle.sh",
         "Pass 3 seed: retire() compares the partition's LO, not its hi, with the retention horizon, so a "
@@ -8720,6 +8733,7 @@ MUTATION_SRC = {
     "wrapper_verdict_time_rendering_hand_rolled": "bench/hypertable_time_rendering.sh",
     "discriminate_counts_uninstallable": "bench/discriminate.sh",
     "discriminate_list_on_stdin": "bench/discriminate.sh",
+    "discriminate_counts_liveness_only": "bench/discriminate.sh",
     # #742 to #744: a lint's document and three test files, each judged by the guard that runs it.
     "runbook_phantom_alert_action": "docs/runbook.md",
     "runbook_alert_on_method": "docs/runbook.md",
