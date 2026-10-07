@@ -3004,15 +3004,32 @@ $$;
 -- never wedges a manual archive it has nothing to compare against; and a name pgpm.part has no row
 -- for at all is resolved but not checked, since the synchronous functions never required the child
 -- to be tracked.
+--
+-- And third, the relation resolved is HELD (#1030): ACCESS SHARE, to the end of the caller's transaction,
+-- the lock every read of it takes anyway. Each export resolves its child, claims its object key for that
+-- oid (archive._owned_key) and reads it, all in one transaction, and archive.to_s3 used to read it later
+-- by name with nothing held in between. A second session that dropped the child and created another
+-- relation by its name in that window had the export read the NEW relation's rows and PUT them under the
+-- OLD relation's claim, over its export: after the documented export-then-drop workflow, the only copy of
+-- those rows. Held, a concurrent DROP, RENAME or ALTER of the child waits until the export has committed.
+-- LOCK TABLE resolves the name again once the lock is granted, so the oid read after it is the relation
+-- held; one that differs from the first resolution was dropped or replaced while this waited, and is
+-- refused rather than exported in its place.
 create or replace function archive._resolve_child(p_parent regclass, p_child name, p_caller text)
 returns regclass language plpgsql as $$
-declare v_nsp name; v_now regclass; v_anchor oid;
+declare v_nsp name; v_now regclass; v_held regclass; v_anchor oid;
 begin
   select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
   v_now := to_regclass(format('%I.%I', v_nsp, p_child));
   if v_now is null then
     raise exception 'pg_partition_magician: %.% does not exist; % resolves p_child in the schema of p_parent, not through search_path',
       quote_ident(v_nsp), quote_ident(p_child), p_caller;
+  end if;
+  execute format('lock table %I.%I in access share mode', v_nsp, p_child);
+  v_held := to_regclass(format('%I.%I', v_nsp, p_child));
+  if v_held is distinct from v_now then
+    raise exception 'pg_partition_magician: %.% was dropped or replaced while % was resolving it (oid % then, % now); refusing to export it',
+      quote_ident(v_nsp), quote_ident(p_child), p_caller, v_now::oid, coalesce(v_held::oid::text, 'none');
   end if;
   select p.child_oid into v_anchor from pgpm.part p where p.parent_table = p_parent and p.child_name = p_child;
   if v_anchor is not null and v_now::oid <> v_anchor then
@@ -3143,6 +3160,7 @@ declare
   cfg archive.config; pcfg pgpm.config; v_ctltype text;
   v_gzip boolean; v_ctype text; v_body bytea := '';
   v_key_id text; v_secret text; v_nsp name; v_key text;
+  v_child regclass;   -- the relation resolved, held and claimed; every read below goes by it, never by name (#1030)
   v_part_payload text; v_chunk text; v_cursor text; v_cursor_tid tid; v_done boolean := false;
   v_page_rows bigint; v_written bigint := 0; v_expected bigint;
   v_page_h numeric; v_written_h numeric := 0; v_expected_h numeric;   -- the rows' identity, not only their count (#673)
@@ -3188,11 +3206,11 @@ begin
     raise exception 'archive.to_s3: credentials missing from vault';
   end if;
 
-  -- identity before any read of the child (#464): %I.%I below names the same relation this resolves; and the
+  -- identity before any read of the child (#464), held to the end of this transaction (#1030); and the
   -- caller's row-level security on it (#873), since the export and its conservation check both read it as
   -- the caller and would agree on an object holding only the rows its policies admit
-  perform pgpm._refuse_filtered_reads(archive._resolve_child(p_parent, p_child, 'archive.to_s3'), 'export',
-    'the object would hold only those rows');
+  v_child := archive._resolve_child(p_parent, p_child, 'archive.to_s3');
+  perform pgpm._refuse_filtered_reads(v_child, 'export', 'the object would hold only those rows');
   select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
   select a.atttypid::regtype::text into v_ctltype
     from pg_attribute a where a.attrelid = p_parent and a.attname = pcfg.control_column;
@@ -3235,16 +3253,19 @@ begin
       -- either, it trips the conservation check below). The planner derives the `control >= cursor`
       -- index condition from the row comparison itself, so an index on the control column still
       -- drives each page. The cursor's control value crosses to the next page as text rendered by
-      -- archive._cursor_text, never in this session's DateStyle and TimeZone (#834).
+      -- archive._cursor_text, never in this session's DateStyle and TimeZone (#834). The child is read as
+      -- v_child, the relation resolved and claimed, never as its schema and name (#1030): a regclass renders
+      -- as the name that reaches that oid in this session at the moment of rendering, so a schema renamed
+      -- away and a namesake created in its place cannot stand in for it.
       execute format(
         'select coalesce(string_agg(j, e''\n'' order by k, c), ''''),
                 archive._cursor_text((array_agg(k order by k desc, c desc))[1]),
                 (array_agg(c order by k desc, c desc))[1],
                 count(*), coalesce(sum(hashtextextended(j, 0)), 0)
-           from (select row_to_json(t.*)::text as j, t.%I as k, t.ctid as c from %I.%I t
+           from (select row_to_json(t.*)::text as j, t.%I as k, t.ctid as c from %s t
                   where $1 is null or (t.%I, t.ctid) > ($1::%s, $2)
                   order by t.%I, t.ctid limit $3) s',
-        pcfg.control_column, v_nsp, p_child, pcfg.control_column, v_ctltype, pcfg.control_column)
+        pcfg.control_column, v_child::text, pcfg.control_column, v_ctltype, pcfg.control_column)
         into v_chunk, v_cursor, v_cursor_tid, v_page_rows, v_page_h using v_cursor, v_cursor_tid, cfg.fetch_rows;
       if v_page_rows = 0 then v_done := true;
       else
@@ -3258,8 +3279,8 @@ begin
     -- below aborts an in-flight multipart upload on the way out. The partition is read once more, in a
     -- snapshot later than every page's, and must hold exactly the rows that were paged (#673).
     if v_done then
-      execute format('select count(*), coalesce(sum(hashtextextended(row_to_json(t.*)::text, 0)), 0) from %I.%I t',
-                     v_nsp, p_child) into v_expected, v_expected_h;
+      execute format('select count(*), coalesce(sum(hashtextextended(row_to_json(t.*)::text, 0)), 0) from %s t',
+                     v_child::text) into v_expected, v_expected_h;
       if v_written <> v_expected or v_written_h <> v_expected_h then
         raise exception 'pg_partition_magician: archive.to_s3 of %.% %, after the last page; a write changed the partition during the export, so refusing to write an incomplete object',
           v_nsp, p_child,

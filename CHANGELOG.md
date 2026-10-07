@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **A synchronous export reads the relation it claimed its key for** (#1030, bullet 1). `archive.to_s3`
+  resolved the child and claimed the object key for its oid, then read the child later by schema and name with
+  nothing held on it, so a second session that dropped the child and created another relation by its name in
+  that window had the export PUT the new relation's rows over the old relation's export, under the old
+  relation's claim, with exit 0: after the documented export-then-drop workflow, the only copy of those rows.
+  `archive._resolve_child`, which `archive.to_s3` and `archive.to_s3_parquet` both call first, now holds the
+  child (ACCESS SHARE, to the end of the calling transaction) and refuses one dropped or replaced while it
+  waited, so a concurrent `DROP` or rename of the child waits for the export; and `archive.to_s3` reads the
+  child by the resolved regclass, so a schema renamed away with a namesake in its place cannot stand in for
+  it either. Test `tests/archive/db/45`, guard `bench/archive_to_s3_child_held.sh`, mutations
+  `archive_to_s3_child_unheld`, `archive_resolve_child_unlocked` and `archive_to_s3_reads_child_by_name`.
+
 - **`scripts/archive_partition_whole.sql` holds its archive strategy to the contract `_archive_step` does**
   (#1030, bullet 3). The operator utility wrote the strategy's `covered_hi` into `pgpm.archive_ledger` with
   none of #454's check, so a strategy that answered `[0, 1000)` with `1000000` and archived nothing marked the

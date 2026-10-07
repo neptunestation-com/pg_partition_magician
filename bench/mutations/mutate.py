@@ -4688,18 +4688,18 @@ $$;''',
         "Pre-#821 archive.to_s3: its pages render row_to_json(t) and its conservation fingerprint hashes the "
         "same text, so on a table with a composite column t both sides agree on that column alone and the "
         "object lands without the rows' other columns; a timestamptz column t raises. Both sites.",
-        [("           from (select row_to_json(t.*)::text as j, t.%I as k, t.ctid as c from %I.%I t\n",
-          "           from (select row_to_json(t)::text as j, t.%I as k, t.ctid as c from %I.%I t   -- MUTANT: pre-#821\n", 1),
-         ("coalesce(sum(hashtextextended(row_to_json(t.*)::text, 0)), 0) from %I.%I t',\n",
-          "coalesce(sum(hashtextextended(row_to_json(t)::text, 0)), 0) from %I.%I t',   -- MUTANT: pre-#821\n", 1)],
+        [("           from (select row_to_json(t.*)::text as j, t.%I as k, t.ctid as c from %s t\n",
+          "           from (select row_to_json(t)::text as j, t.%I as k, t.ctid as c from %s t   -- MUTANT: pre-#821\n", 1),
+         ("coalesce(sum(hashtextextended(row_to_json(t.*)::text, 0)), 0) from %s t',\n",
+          "coalesce(sum(hashtextextended(row_to_json(t)::text, 0)), 0) from %s t',   -- MUTANT: pre-#821\n", 1)],
     ),
     "to_s3_fingerprint_row_alias_shadowed": (
         "bench/archive_ndjson_row_alias.sh",
         "A partial #821 fix: archive.to_s3's pages render row_to_json(t.*) but the after-the-last-page "
         "fingerprint still hashes row_to_json(t), so on a table with a column named t the two never agree "
         "and every export of it is refused (or raises, on a timestamptz t). One site, the fingerprint.",
-        [("coalesce(sum(hashtextextended(row_to_json(t.*)::text, 0)), 0) from %I.%I t',\n",
-          "coalesce(sum(hashtextextended(row_to_json(t)::text, 0)), 0) from %I.%I t',   -- MUTANT: partial #821\n", 1)],
+        [("coalesce(sum(hashtextextended(row_to_json(t.*)::text, 0)), 0) from %s t',\n",
+          "coalesce(sum(hashtextextended(row_to_json(t)::text, 0)), 0) from %s t',   -- MUTANT: partial #821\n", 1)],
     ),
     "to_s3_cursor_session_text": (
         "bench/archive_to_s3_cursor_session.sh",
@@ -6946,9 +6946,7 @@ select ok(
         "bench/reads_under_caller_rls.sh",
         "Pre-#873 archive.to_s3: the export and its conservation check read the partition under the caller's "
         "row-level security and agree on an object of the visible rows. tests/archive/db/38 catches it.",
-        [("  perform pgpm._refuse_filtered_reads(archive._resolve_child(p_parent, p_child, 'archive.to_s3'), 'export',\n"
-          "    'the object would hold only those rows');\n",
-          "  perform archive._resolve_child(p_parent, p_child, 'archive.to_s3');\n", 1)],
+        [("  perform pgpm._refuse_filtered_reads(v_child, 'export', 'the object would hold only those rows');\n", "", 1)],
     ),
     "rls_to_s3_parquet_unchecked": (
         "bench/reads_under_caller_rls.sh",
@@ -9068,6 +9066,49 @@ MUTATIONS["archive_chunk_claim_relation_unrecorded"] = (
     [("     where kind = 'chunk' and relation_oid is null\n", "     where false\n", 1)],
 )
 MUTATION_SRC["archive_chunk_claim_relation_unrecorded"] = "pgpm_archive/install.sql"
+
+# Issue #1030 (bullet 1, A1030-1): a synchronous export reads the relation it resolved and claimed. Two sites, the
+# hold archive._resolve_child takes and archive.to_s3's reads by the resolved regclass, one mutation each and one
+# that puts both back (the defect as reported, the one the issue's reproduction fails against). All are caught by
+# tests/archive/db/45 (bench/archive_to_s3_child_held.sh, against the archive image and MinIO).
+_RESOLVE_HOLD = (
+    "  execute format('lock table %I.%I in access share mode', v_nsp, p_child);\n"
+    "  v_held := to_regclass(format('%I.%I', v_nsp, p_child));\n",
+    "  v_held := v_now;\n", 1)
+_TO_S3_READS_BY_NAME = [
+    ("order by t.%I, t.ctid limit $3) s',\n        pcfg.control_column, v_child::text, pcfg.control_column, v_ctltype, pcfg.control_column)",
+     "order by t.%I, t.ctid limit $3) s',\n        pcfg.control_column, v_nsp, p_child, pcfg.control_column, v_ctltype, pcfg.control_column)", 1),
+    ("t.ctid as c from %s t\n", "t.ctid as c from %I.%I t\n", 1),
+    ("0)), 0) from %s t',\n                     v_child::text) into v_expected", "0)), 0) from %I.%I t',\n                     v_nsp, p_child) into v_expected", 1),
+]
+MUTATIONS["archive_to_s3_child_unheld"] = (
+    "bench/archive_to_s3_child_held.sh",
+    "Pre-#1030 archive.to_s3: archive._resolve_child takes no lock on the child it resolves and the export reads "
+    "the child by schema and name after claiming its key for the resolved oid, so a second session's DROP and "
+    "re-CREATE of that name in the window has the export PUT the new relation's rows over the old relation's "
+    "export under the old relation's claim. Both sites. tests/archive/db/45 parts A to C catch it (the DROP does "
+    "not wait, the object then holds 10:second,11:second, and part B's object holds 20:third).",
+    [_RESOLVE_HOLD] + _TO_S3_READS_BY_NAME,
+)
+MUTATION_SRC["archive_to_s3_child_unheld"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_resolve_child_unlocked"] = (
+    "bench/archive_to_s3_child_held.sh",
+    "archive._resolve_child resolves the child without holding it, so nothing keeps it the relation the export "
+    "claimed until the export commits: archive.to_s3_parquet's encode reads by the name of whatever relation then "
+    "has it, and archive.to_s3's re-run dies mid-export on the dropped oid. One site, the hold. "
+    "tests/archive/db/45 parts A and C catch it (the concurrent DROP does not wait, and the re-run fails).",
+    [_RESOLVE_HOLD],
+)
+MUTATION_SRC["archive_resolve_child_unlocked"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_to_s3_reads_child_by_name"] = (
+    "bench/archive_to_s3_child_held.sh",
+    "archive.to_s3 holds the child it resolved but reads it by schema and name, which the hold does not pin: a "
+    "second session that renames the child's schema away and creates a namesake in a new schema of the old name "
+    "has the export read the namesake under the claimed relation's key. One site, the reads. "
+    "tests/archive/db/45 part B catches it (the object holds 20:third).",
+    _TO_S3_READS_BY_NAME,
+)
+MUTATION_SRC["archive_to_s3_reads_child_by_name"] = "pgpm_archive/install.sql"
 
 # #975 (pass 9 F5-03, F5-04): an archive_fn strategy writes over the object pgpm.archive_ledger records a chunk at
 # only when the call reproduces that chunk. One mutation per encoder's call of the shared refusal, and one per rule
