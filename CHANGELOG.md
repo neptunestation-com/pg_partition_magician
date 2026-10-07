@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **The `Archive object keys` lint reads the SQL an `EXECUTE` runs** (#1001). Its lexer kept every
+  single-quoted literal as one opaque token, so a second, unclaimed key function that read the prefix with
+  `execute 'select prefix from archive.config where ...' into v` and returned `v || ...` passed CI, while the
+  same function with a static `select prefix into v` failed it. Every literal in an EXECUTE's command (its
+  `format()` arguments included), and every literal assigned to a local an EXECUTE of the same body runs, is
+  now lexed as the code it is; every other literal stays text. `--selftest` gains the reproduction and both
+  indirections; guard `bench/archive_object_keys_static.sh`, mutation `archive_key_prefix_by_execute`.
+
+- **The `Quoted splices` lint types the locals of every DECLARE block** (#1004). It read only a body's first
+  `declare ... begin`, so a text local declared in a nested block and assigned `string_agg(quote_ident(...))`
+  without the `_q` suffix, the #409 shape, was never typed and never checked. Every DECLARE section is now
+  read; no install file had such a local. `--selftest` gains the nested case, unmarked (refused) and marked
+  (clean and counted).
+
 - **`bench/archive_lz77_memory.sh` judges the repeat chunk by its bytes, not its length** (#992). Its
   witness "chunk3 (repeat) returned chunk1's file again", the premise of the no-compounding ratio, compared
   the two files' lengths, so a repeat that returned a different file of the same length passed as a repeat.

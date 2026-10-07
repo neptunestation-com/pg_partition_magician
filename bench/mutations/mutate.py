@@ -3417,6 +3417,33 @@ $$;''',
           "end;\n"
           "$$;\n", 1)],
     ),
+    # #1001: a second key assembly that reads the prefix through dynamic SQL, the shape review pass 9 found
+    # (F8-02): the checker lexed the literal EXECUTE runs as one opaque string. Breaks
+    # bench/archive_object_keys_static.sh, which runs the checker on the mutant.
+    "archive_key_prefix_by_execute": (
+        "bench/archive_object_keys_static.sh",
+        "A second, unclaimed export key, archive._export_key_dynamic, reads archive.config.prefix with execute "
+        "'select prefix from archive.config where parent_table = $1' into v_base and returns v_base || "
+        "<schema>.<child>.ndjson: the pre-#1001 checker lexed that literal as one opaque token, so it saw no "
+        "prefix reference in the function at all and passed it, while the same SELECT written statically fails.",
+        [("    raise exception 'archive.to_s3_parquet: PUT of % failed: HTTP % %', p_child, v_resp.status, left(v_resp.content, 200);\n"
+          "  end if;\n"
+          "end;\n"
+          "$$;\n",
+          "    raise exception 'archive.to_s3_parquet: PUT of % failed: HTTP % %', p_child, v_resp.status, left(v_resp.content, 200);\n"
+          "  end if;\n"
+          "end;\n"
+          "$$;\n"
+          "create or replace function archive._export_key_dynamic(p_parent regclass, p_child name) returns text\n"
+          "language plpgsql stable as $$\n"
+          "declare v_base text; v_nsp name;\n"
+          "begin\n"
+          "  execute 'select prefix from archive.config where parent_table = $1' into v_base using p_parent;\n"
+          "  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;\n"
+          "  return v_base || quote_ident(v_nsp) || '.' || quote_ident(p_child) || '.ndjson';\n"
+          "end;\n"
+          "$$;\n", 1)],
+    ),
     # #823: the pre-#823 stem exactly, UTC-pinned digits only. Breaks bench/archive_stem_era.sh through
     # tests/archive/db/35.
     "archive_object_stem_drops_era": (
@@ -8620,6 +8647,7 @@ MUTATION_SRC = {
     "archive_to_s3_parquet_second_put_inline": "pgpm_archive/install.sql",
     "archive_key_prefix_by_subquery": "pgpm_archive/install.sql",
     "archive_key_prefix_by_renamed_param": "pgpm_archive/install.sql",
+    "archive_key_prefix_by_execute": "pgpm_archive/install.sql",
     "archive_object_stem_drops_era": "pgpm_archive/install.sql",
     "sigv4_transaction_start_stamp": "pgpm_archive/install.sql",
     "to_s3_compress_unread": "pgpm_archive/install.sql",
