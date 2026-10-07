@@ -37,7 +37,7 @@ RUN apt-get update \
          && git clone --depth 1 --branch ${PGSQL_HTTP_REF} https://github.com/pramsey/pgsql-http.git \
          && cd pgsql-http && make && make install && cd .. && rm -rf pgsql-http; \
        fi \
-    && apt-get remove -y build-essential git \
+    && apt-get remove -y build-essential git postgresql-server-dev-${PG_MAJOR} \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
@@ -67,3 +67,11 @@ RUN if [ "$WITH_LOCK_TRACER" = "true" ]; then \
         "postgresql-${PG_MAJOR}-dbgsym=$(dpkg-query -W -f='${Version}' "postgresql-${PG_MAJOR}")"; \
       rm -rf /var/lib/apt/lists/*; \
     fi
+
+# The build key test.sh passes (scripts/image_build_key.sh: the Dockerfile and compose file hashed, plus
+# the ISO week). CI caches the image under it and test.sh's build_image rebuilds only when the local
+# image's label differs, so an image built by hand with no key (`dev`) is always rebuilt by test.sh.
+# Last on purpose: a LABEL layer is free, and putting the ARG any earlier would invalidate the build
+# cache of everything after it on every key change.
+ARG PGPM_BUILD_KEY=dev
+LABEL org.pg_partition_magician.build_key="${PGPM_BUILD_KEY}"

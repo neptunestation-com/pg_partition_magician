@@ -57,7 +57,7 @@ each PR the fixers report in `$WORK/prs.tsv` with its test, guard and mutation n
   stacked PR's ancestry and allow groups of up to five once `land.sh` has a batch mode.
 - Before the first landing, make sure `main` holds the third-party image cache: a merge group can read
   only its own ref's caches and `main`'s, and a `main` push run that met the registry quota saved
-  nothing. `gh workflow run timescale.yml --ref main` once seeds it. The fixers' pushes are a CI storm
+  nothing. `gh workflow run timescale.yml --ref main` once seeds it, and `gh workflow run test.yml --ref main` seeds the matrix images, which `test.yml` caches under `scripts/image_build_key.sh`'s key (the Dockerfile, the compose file and the ISO week). The fixers' pushes are a CI storm
   (pass 3: 21 heads, about 90 queued runs, the first landing's checks still queued when `land.sh`'s
   60-minute wait expired); a wait timeout is a restart, not a failure.
 - When it stops: read why. A conflict `keep_both.py` refused (both sides edited the same lines) is
