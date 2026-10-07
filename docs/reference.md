@@ -375,7 +375,11 @@ and `p_tt_alphabet`, whose null is the default alphabet): the message names each
 `p_regrain_batch`, `p_paused` or `p_tt_epoch` passed as null is refused rather than read as `true`, as
 absent, or as a bound no row satisfies; the step is not positive (a negative or zero
 interval or `bigint`), or is not a whole number of days or months on a `date` control column (a finer
-step's bounds truncate to dates); `p_obtain` is negative or null (the rule [`set_obtain`](#set_obtain)
+step's bounds truncate to dates); the step (unless it is a whole number of months) or `p_anchor` is not a
+whole multiple of a `timestamp(p)` or `timestamptz(p)` control column's smallest unit (`10^-p` seconds),
+such as `'500 milliseconds'` or `'1500 milliseconds'` on `timestamptz(0)` (the cutover's `ATTACH` rounds every
+bound to the column's precision, so two bounds would round to the same instant, or pgpm would record a
+bound other than the one attached: give whole units, or widen the column's precision); `p_obtain` is negative or null (the rule [`set_obtain`](#set_obtain)
 applies); the call resumes an earlier attempt's claim and that claim's recorded bound is not on this
 call's grid (its `lo` or `hi` is not a boundary of `p_step` and `p_anchor` in the zone the bound was
 computed in: re-run with the step and anchor of the attempt that recorded it, or abort it), or was

@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# transmute_step_precision.sh <container> <db> [install.sql]
+#
+# Run tests/287_transmute_time_step_precision_test.sql against an ARBITRARY copy of pgpm_core/install.sql, so
+# that bench/discriminate.sh can show the file catches the defect its mutations put back (issue #1039 bullet
+# 1): transmute's preflight never held a partition step to a timestamp(p) key's precision, so '500
+# milliseconds' on a timestamptz(0) key committed and validated the monolith's bound CHECK and the cutover's
+# obtain then died on 'empty range bound', leaving the table rejecting every current write; and '1500
+# milliseconds' converted with pgpm.part bounds the catalog had rounded to other instants. The file is the
+# acceptance test; this wrapper exists so the mutations have a guard the discriminate track can run against
+# the mutant, in the shape of bench/text_time_anchor_unit.sh.
+#
+# TWO mutations are required to fail against it (bench/mutations/mutate.py):
+#   transmute_time_unit_contract_dropped -- transmute no longer asks _time_unit_contract, the pre-fix shape.
+#                                           tests/287 parts A, B, D and E.
+#   time_unit_anchor_unchecked           -- _time_unit_breach asks the step and not the anchor, so a grid
+#                                           whose every bound sits half a second off a timestamptz(0) key's
+#                                           seconds converts. tests/287 part D.
+#
+# Runs on the plain core image (pgtap, dblink and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's
+# path inside the container, for a worktree mounted somewhere other than /repo.
+set -uo pipefail
+C="${1:?container}"; DB="${2:?db}"; INSTALL="${3:-/repo/pgpm_core/install.sql}"
+TEST_FILE="${TAP_GUARD_TEST_FILE:-/repo/tests/287_transmute_time_step_precision_test.sql}"
+fail=0
+
+q() { docker exec "$C" psql -U postgres "$@"; }
+
+q -qtA -c "select pg_terminate_backend(pid) from pg_stat_activity where datname = '$DB'" >/dev/null 2>&1
+q -q -c "drop database if exists $DB" >/dev/null 2>&1
+q -q -c "create database $DB" >/dev/null 2>&1
+q -d "$DB" -q -c "create extension if not exists pgtap;" >/dev/null 2>&1
+
+# A mutant that will not even install is NOT a pass: say which happened.
+if ! q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f "$INSTALL" >/dev/null 2>&1; then
+  printf 'FAIL  %-58s %s\n' "the module under test installed" "$INSTALL"
+  fail=1
+fi
+
+if [ "$fail" = 0 ]; then
+  out=$(docker exec "$C" sh -c "pg_prove -v -U postgres -d $DB $TEST_FILE" 2>&1)
+  rc=$?
+  echo "$out" | grep -E '^not ok [0-9]+ -' | sed 's/^/    /' | head -20
+  # the count is asserted separately: a run that never reached the database must not read as a catch
+  ran=$(echo "$out" | grep -cE '^(not )?ok [0-9]+ -')
+  if [ "$rc" = 0 ]; then printf 'PASS  %-58s %s\n' "a time grid's step and anchor are whole units of the key" "$ran ran"
+  else printf 'FAIL  %-58s %s\n' "a time grid's step and anchor are whole units of the key" "$ran ran"; fail=1; fi
+  if [ "$ran" -eq 0 ]; then
+    printf 'FAIL  %-58s %s\n' "the assertions were reached at all" "0 ran"
+    echo "$out" | tail -20 | sed 's/^/      /'
+    fail=1
+  fi
+fi
+
+q -qtA -c "select pg_terminate_backend(pid) from pg_stat_activity where datname = '$DB'" >/dev/null 2>&1
+q -q -c "drop database if exists $DB" >/dev/null 2>&1
+exit "$fail"
