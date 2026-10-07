@@ -1,0 +1,43 @@
+name: Save a pgpm test image to the Actions cache
+description: >-
+  After the track has run, on a cache miss, saves the image test.sh built under the key test-image-restore
+  resolved, whatever the track's result. Only an image that carries the key is saved: one built by hand
+  (label `dev`) or not built at all is not evidence of anything.
+inputs:
+  cache-hit:
+    description: test-image-restore's cache-hit output
+    required: true
+  image:
+    description: test-image-restore's image output
+    required: true
+  key:
+    description: test-image-restore's key output
+    required: true
+  cache-key:
+    description: test-image-restore's cache-key output
+    required: true
+  tarball:
+    description: test-image-restore's tarball output
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: save
+      if: inputs.cache-hit != 'true'
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        KEY: ${{ inputs.key }}
+        TARBALL: ${{ inputs.tarball }}
+      run: |
+        have=$(docker image inspect --format '{{ index .Config.Labels "org.pg_partition_magician.build_key" }}' "$IMAGE" 2>/dev/null || true)
+        if [ "$have" != "$KEY" ]; then echo "$IMAGE was not built under key $KEY (label: '${have:-absent}'); nothing to cache"; exit 0; fi
+        mkdir -p "$(dirname "$TARBALL")"
+        docker save -o "$TARBALL" "$IMAGE"
+        ls -l "$TARBALL"
+        echo "saved=true" >> "$GITHUB_OUTPUT"
+    - if: steps.save.outputs.saved == 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ inputs.tarball }}
+        key: ${{ inputs.cache-key }}

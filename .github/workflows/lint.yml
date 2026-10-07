@@ -142,6 +142,8 @@ jobs:
         with:
           scandir: '.'
           severity: warning
+      - name: The test images' build key must follow its inputs and nothing else
+        run: bash scripts/image_build_key.sh --selftest
 
   lock-view-selftest:
     name: Lock-view self-test

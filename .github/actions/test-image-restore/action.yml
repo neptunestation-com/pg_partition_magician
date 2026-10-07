@@ -1,0 +1,63 @@
+name: Restore a pgpm test image from the Actions cache
+description: >-
+  Loads the compose service's pgpm_test image from the Actions cache when one was built from these inputs
+  (scripts/image_build_key.sh), so test.sh neither rebuilds it (about 80 s on a runner) nor pulls its
+  postgres base from Docker Hub. Pair with test-image-save after the track has run.
+inputs:
+  profile:
+    description: The compose profile the service belongs to (pg15, archive, locktrace, ...)
+    required: true
+  service:
+    description: The compose service whose image to restore (postgres15, archive, locktrace, ...)
+    required: true
+outputs:
+  cache-hit:
+    description: "'true' when the image was loaded from the cache"
+    value: ${{ steps.cache.outputs.cache-hit }}
+  image:
+    description: The image reference compose gives the service (pgpm_test:15, ...)
+    value: ${{ steps.resolve.outputs.image }}
+  key:
+    description: The build key the image must carry as its label
+    value: ${{ steps.resolve.outputs.key }}
+  cache-key:
+    description: The Actions cache key
+    value: ${{ steps.resolve.outputs.cache_key }}
+  tarball:
+    description: Where the image tarball is restored to or saved from
+    value: ${{ steps.resolve.outputs.tarball }}
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      env:
+        PROFILE: ${{ inputs.profile }}
+        SERVICE: ${{ inputs.service }}
+      run: |
+        image=$(docker compose --profile "$PROFILE" config --images "$SERVICE")
+        key=$(bash scripts/image_build_key.sh)
+        {
+          echo "image=$image"
+          echo "key=$key"
+          echo "cache_key=test-image-v1-${RUNNER_OS}-${RUNNER_ARCH}-${SERVICE}-${key}"
+          echo "tarball=$RUNNER_TEMP/test-images/${SERVICE}.tar"
+        } >> "$GITHUB_OUTPUT"
+        echo "$image under key $key"
+    - id: cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ steps.resolve.outputs.tarball }}
+        key: ${{ steps.resolve.outputs.cache_key }}
+    - if: steps.cache.outputs.cache-hit == 'true'
+      shell: bash
+      env:
+        IMAGE: ${{ steps.resolve.outputs.image }}
+        KEY: ${{ steps.resolve.outputs.key }}
+        TARBALL: ${{ steps.resolve.outputs.tarball }}
+      run: |
+        docker load -i "$TARBALL"
+        # Witness: the loaded image carries this key, so test.sh's build_image will not rebuild (nor pull).
+        have=$(docker image inspect --format '{{ index .Config.Labels "org.pg_partition_magician.build_key" }}' "$IMAGE")
+        [ "$have" = "$KEY" ] || { echo "::error::the cached $IMAGE carries build key '$have', expected '$KEY'"; exit 1; }
+        echo "loaded $IMAGE from the cache (build key $KEY)"

@@ -20,7 +20,7 @@ services:
   postgres15:
     <<: *pg-base
     profiles: ["pg15", "all"]
-    build: { context: ., args: { PG_VERSION: 15 } }
+    build: { context: ., args: { PG_VERSION: 15, PGPM_BUILD_KEY: "${PGPM_BUILD_KEY:-dev}" } }
     image: pgpm_test:15
     container_name: pgpm_test-15
     ports: ["5515:5432"]
@@ -28,7 +28,7 @@ services:
   postgres16:
     <<: *pg-base
     profiles: ["pg16", "all"]
-    build: { context: ., args: { PG_VERSION: 16 } }
+    build: { context: ., args: { PG_VERSION: 16, PGPM_BUILD_KEY: "${PGPM_BUILD_KEY:-dev}" } }
     image: pgpm_test:16
     container_name: pgpm_test-16
     ports: ["5516:5432"]
@@ -36,7 +36,7 @@ services:
   postgres17:
     <<: *pg-base
     profiles: ["pg17", "all"]
-    build: { context: ., args: { PG_VERSION: 17 } }
+    build: { context: ., args: { PG_VERSION: 17, PGPM_BUILD_KEY: "${PGPM_BUILD_KEY:-dev}" } }
     image: pgpm_test:17
     container_name: pgpm_test-17
     ports: ["5517:5432"]
@@ -44,7 +44,7 @@ services:
   postgres18:
     <<: *pg-base
     profiles: ["pg18", "all"]
-    build: { context: ., args: { PG_VERSION: 18 } }
+    build: { context: ., args: { PG_VERSION: 18, PGPM_BUILD_KEY: "${PGPM_BUILD_KEY:-dev}" } }
     image: pgpm_test:18
     container_name: pgpm_test-18
     ports: ["5518:5432"]
@@ -119,7 +119,7 @@ services:
   archive:
     <<: *pg-base
     profiles: ["archive"]
-    build: { context: ., args: { PG_VERSION: 17, WITH_PGSQL_HTTP: "true" } }
+    build: { context: ., args: { PG_VERSION: 17, WITH_PGSQL_HTTP: "true", PGPM_BUILD_KEY: "${PGPM_BUILD_KEY:-dev}" } }
     image: pgpm_test:17-archive
     container_name: pgpm_test-archive
     ports: ["5520:5432"]
@@ -144,7 +144,7 @@ services:
   locktrace:
     <<: *pg-base
     profiles: ["locktrace"]
-    build: { context: ., args: { PG_VERSION: 17, WITH_LOCK_TRACER: "true" } }
+    build: { context: ., args: { PG_VERSION: 17, WITH_LOCK_TRACER: "true", PGPM_BUILD_KEY: "${PGPM_BUILD_KEY:-dev}" } }
     image: pgpm_test:17-locktrace
     container_name: pgpm_test-locktrace
     privileged: true

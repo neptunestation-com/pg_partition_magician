@@ -140,6 +140,26 @@ wait_pg() {  # <profile> <service> [seconds]
   return 1
 }
 
+# Build a compose service's image only when the local one was not built from these inputs. The key is
+# scripts/image_build_key.sh's (the Dockerfile and compose file hashed, plus the ISO week, so the floating
+# postgres:<major> base is refreshed weekly), and the Dockerfile stamps it into the image as a label. CI
+# restores each matrix image from the Actions cache under the same key (test.yml), so a hit here is also
+# "do not touch Docker Hub"; a developer's image built by hand carries `dev` and is rebuilt once. Say which
+# way it went: a cache that silently never hits reads exactly like one that works. PGPM_FORCE_BUILD=1
+# rebuilds regardless.
+build_image() {  # <profile> <service>
+  local prof="$1" svc="$2" img key have
+  img=$($DC --profile "$prof" config --images "$svc")
+  key=$(bash "$(dirname "$0")/scripts/image_build_key.sh")
+  have=$(docker image inspect --format '{{ index .Config.Labels "org.pg_partition_magician.build_key" }}' "$img" 2>/dev/null || true)
+  if [ "${PGPM_FORCE_BUILD:-}" != 1 ] && [ -n "$have" ] && [ "$have" = "$key" ]; then
+    echo "  $img carries build key $key; not rebuilding"
+    return 0
+  fi
+  echo "  building $img (build key $key; local image: ${have:-absent})"
+  PGPM_BUILD_KEY="$key" $DC --profile "$prof" build $BUILD_PROGRESS "$svc"
+}
+
 psql_run() { $DC --profile "$1" exec -T "$2" psql -U postgres -d postgres -v ON_ERROR_STOP=1 "${@:3}"; }
 # same, but against an arbitrary database: the pgTAP suite now runs one database PER FILE
 psql_db()  { $DC --profile "$1" exec -T "$2" psql -U postgres -d "$3" -v ON_ERROR_STOP=1 "${@:4}"; }
@@ -238,7 +258,7 @@ run_version() {  # <pg_version>
   echo "PostgreSQL $v -- channels: ${CHANNELS[*]}"
   echo "========================================="
   $DC --profile "$p" down -v 2>/dev/null || true
-  $DC --profile "$p" build $BUILD_PROGRESS
+  build_image "$p" "$s"
   $DC --profile "$p" up -d
 
   wait_pg "$p" "$s" 60
@@ -581,7 +601,7 @@ run_archive() {
   echo "Archive track: pgpm_archive against MinIO (pg17 + pgsql-http)"
   echo "========================================="
   $DC --profile "$prof" down -v 2>/dev/null || true
-  $DC --profile "$prof" build $BUILD_PROGRESS archive
+  build_image "$prof" archive
   pull_third_party "$prof" minio
   $DC --profile "$prof" up -d
 
@@ -1104,7 +1124,7 @@ run_discriminate() {
     return
   fi
   $DC --profile "$prof" up -d --wait "$svc"
-  $DC --profile "$aprof" build $BUILD_PROGRESS "$asvc"
+  build_image "$aprof" "$asvc"
   pull_third_party "$aprof" minio
   $DC --profile "$aprof" up -d
   wait_pg "$aprof" "$asvc" 60
@@ -1141,7 +1161,7 @@ run_locktrace() {
   echo "Lock-trace track: eBPF lock boundaries (pg17 + bench/lock_probe.py)"
   echo "========================================="
   $DC --profile "$prof" down -v 2>/dev/null || true
-  $DC --profile "$prof" build $BUILD_PROGRESS "$svc"
+  build_image "$prof" "$svc"
   $DC --profile "$prof" up -d
   wait_pg "$prof" "$svc" 60
   local rc=0
@@ -1218,7 +1238,7 @@ run_lockview() {
   echo "Lock-view track: eBPF capture for the lock-sequence renderer (pg17 + bench/lock_view.py)"
   echo "========================================="
   $DC --profile "$prof" down -v 2>/dev/null || true
-  $DC --profile "$prof" build $BUILD_PROGRESS "$svc"
+  build_image "$prof" "$svc"
   $DC --profile "$prof" up -d
   wait_pg "$prof" "$svc" 60
   local rc=0

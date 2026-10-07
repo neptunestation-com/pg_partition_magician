@@ -36,8 +36,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
+      # The matrix image from the Actions cache rather than a fresh build: about 80 s per job (apt, pg_cron
+      # and pgTAP from source) plus a pull of the postgres:<major> base from Docker Hub, whose anonymous data
+      # quota a burst of PRs has exhausted before (#558). scripts/image_build_key.sh keys it on the Dockerfile,
+      # the compose file and the ISO week (the floating base refreshes weekly); the Dockerfile stamps the key
+      # into the image as a label and test.sh builds only when the local image's label differs, so on a hit
+      # the job never touches Docker Hub. A merge group reads only its own ref's caches and main's, so the
+      # first push to main each week (or after the Dockerfile or compose file changes) builds and saves,
+      # and every later run loads; `gh workflow run test.yml --ref main` seeds it by hand.
+      - name: Restore the test image from the cache
+        id: image
+        uses: ./.github/actions/test-image-restore
+        with:
+          profile: pg${{ matrix.pg_version }}
+          service: postgres${{ matrix.pg_version }}
       - name: Test the ${{ matrix.channel }} channel on PostgreSQL ${{ matrix.pg_version }}
         run: ./test.sh ${{ matrix.pg_version }} --channel=${{ matrix.channel }}
+      # On a miss, after the tests whatever their result, so the next run loads what this one built.
+      - name: Save the test image for the cache
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/test-image-save
+        with:
+          cache-hit: ${{ steps.image.outputs.cache-hit }}
+          image: ${{ steps.image.outputs.image }}
+          key: ${{ steps.image.outputs.key }}
+          cache-key: ${{ steps.image.outputs.cache-key }}
+          tarball: ${{ steps.image.outputs.tarball }}
 
   packages:
     name: Build channel packages
