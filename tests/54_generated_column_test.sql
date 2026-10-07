@@ -5,7 +5,7 @@
 -- the generated value is recomputed correctly on the destination.
 create extension if not exists pgtap;
 
-select plan(3);
+select plan(4);
 
 create table public.gc (
   id     bigint  not null,
@@ -22,6 +22,13 @@ select lives_ok(
   $$ select pgpm.regrain_history('public.gc', '1000') $$,
   'regrain copies a table with a generated column without an insert-into-generated error');
 select is((select count(*)::int from public.gc), 5001, 'rows conserved through regrain');
+-- Identity, not cardinality (#997): the fixture writes amount = id, so a copy that rewrites a value
+-- while keeping the count (and the generated column consistent with it) is caught here.
+select bag_eq(
+  'select id, amount from public.gc',
+  $$ select g::bigint as id, g::numeric as amount from generate_series(1, 5000) g
+     union all select 20000::bigint, 100000::numeric $$,
+  'every row survives the regrain by identity: the same (id, amount) rows, none lost, none added, none altered');
 select is(
   (select count(*)::int from public.gc where cents = amount * 100),
   5001, 'the generated column is correct on every row after regrain');

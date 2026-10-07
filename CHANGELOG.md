@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+- **Ten conservation tests assert the rows a regrain or a transmute keeps by identity, not by count**
+  (#997). `tests/43`, `45`, `46`, `48`, `53`, `54`, `67` and `68` (regrain: 'all rows conserved', 'lossless')
+  and `tests/15` and `49` (transmute: 'all rows conserved through the parent') compared `count(*)` over
+  fixtures whose rows all carried one payload, so a copy that rewrites a row's values while keeping every count
+  passed all ten. Each fixture now carries a distinct value per row and each file adds a `bag_eq` of the rows
+  against a snapshot taken before the operation (or the generated set the fixture wrote). Guard:
+  `bench/tests_fail_on_defect.sh` now requires every one of the ten to fail against a regrain copy, or a
+  transmute, that sets one row's value to another's (liveness read from a probe table of distinct values);
+  mutations `regrain_conservation_by_count_43`, `_45`, `_46`, `_48`, `_53`, `_54`, `_67`, `_68` and
+  `transmute_conservation_by_count_15`, `_49`.
+
+- **`tests/79` names the healthy table's `pgpm.part` rows that survive `forget_missing()`** (#998). Under its
+  own 'Identity, not cardinality' comment it compared a count, which a `forget_missing()` that rewrites every
+  surviving row's `child_name` and `child_oid` keeps; it now compares `(child_name, child_oid, lo, hi)` with
+  a snapshot taken before the drop. Guard: `bench/tests_fail_on_defect.sh` against exactly that rewrite;
+  mutation `forget_missing_survivors_by_count`.
+
 - **`tests/267` holds the scratch lever to what it promises at three sites it used to accept** (#993). Stage A
   read the regrain delta's owner only after the copy tick, whose ownership check re-owns it, so a prepare that
   minted the delta under the tick's role passed; the owner is now read right after the prepare as well. Its

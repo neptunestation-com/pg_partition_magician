@@ -19,6 +19,11 @@
 #             transmute's monolith takes its upper bound from its OWN inline greatest() and so covers now()
 #             by itself on the day of the transmute (tests/85 explains it for uuidv7); only
 #             bench/frontier_drought.sh caught that mutant.
+# And issues #997 and #998 (pass 9 G19): ten files asserted that a regrain (tests/43, 45, 46, 48, 53, 54,
+#   67, 68) or a transmute (tests/15, 49) conserved rows by count(*) over fixtures whose rows all carried
+#   one payload, and tests/79 that forget_missing() left the healthy table's pgpm.part rows by count under
+#   its own 'Identity, not cardinality' comment; a copy that rewrites values, or a forget_missing() that
+#   rewrites every surviving row's name and oid, kept every count and passed all eleven.
 #
 # HOW. Per file, the same two runs, in fresh databases named <db> in <container>:
 #   CONTROL   the file passes, every planned assertion ok, against the clean pgpm (and fixtures);
@@ -43,6 +48,17 @@
 #             mutant is its 11-month-old data maximum with no partition built past the monolith (under the
 #             clean install: at or past now(), with one). A defect that was never planted
 #             would make the file's failure meaningless and its pass vacuous.
+#   G19       three defects, and EVERY file of each set must go red against its defect (not one of them):
+#               tests/43, 45, 46, 48, 53, 54, 67, 68  regrain_step's copy batch, once it has copied rows,
+#                         sets one copied row's first plain column (not the control column, not generated,
+#                         not identity, in no unique index) to another copied row's value;
+#               tests/15, 49  _transmute, just before it registers the table, does the same to one row of
+#                         the converted parent;
+#               tests/79  forget_missing() also renames every OTHER parent's pgpm.part rows and clears
+#                         their child_oid (deleting and adding none).
+#             Liveness is behavioural, read from a probe table of distinct values: under the clean
+#             install it reads every row (or every part row) as it was, under the defect the same count
+#             with at least one row altered (for forget_missing: none as it was).
 #
 # The mutations it is required to fail against (bench/mutations/mutate.py), each the file's pre-fix text:
 #   orphan_refusal_sqlstate_only       -- tests/18's refusal back to throws_ok(..., 'P0001', null, desc)
@@ -66,9 +82,12 @@
 #   scratch_suite_delta_owner_after_copy -- tests/267 reads the delta's owner only after the copy tick
 #   scratch_suite_restored_rows_by_count -- tests/267 judges the restored s267i by count(*) = 299
 #   scratch_suite_list_tables_only       -- tests/267's 'the list is complete' sees relkind r and p only
+#   transmute_conservation_by_count_15 and _49, regrain_conservation_by_count_43, _45, _46, _48, _53,
+#   _54, _67 and _68, forget_missing_survivors_by_count -- each file's identity check (bag_eq) removed,
+#   leaving the pre-#997/#998 count beside its now distinct payloads
 #
 # Usage: tests_fail_on_defect.sh <container> <db> [test file]
-# With no third argument it judges all seven files in this checkout. With one it judges THAT file in place
+# With no third argument it judges every file it knows in this checkout. With one it judges THAT file in place
 # of the one it stands for, recognised by its file name or, for a mutant bench/discriminate.sh built
 # (<mutation>.sql), by the mutation's MUTATION_SRC; a /repo/... path is mapped to this checkout. Every
 # install and test is fed from the host over stdin, so the container need not mount the repository; it
@@ -95,6 +114,32 @@ F18="$ROOT/$T18"; F90="$ROOT/$T90"; F11="$ROOT/$T11"; F12="$ROOT/$T12"; F92="$RO
 SEL=" 18 90 11 12 92 88 91 "
 # pass 9 G17
 T267="tests/267_scratch_relations_test.sql"; F267="$ROOT/$T267"; SEL="${SEL}267 "
+# pass 9 G19 (#997, #998): conservation across a transmute, a regrain and forget_missing(), by identity.
+# shellcheck disable=SC2034  # each T<n> is read through ${!t} below
+{
+  T15="tests/15_pk_reuse_test.sql"
+  T49="tests/49_unique_constraint_reuse_test.sql"
+  T43="tests/43_regrain_test.sql"
+  T45="tests/45_regrain_feathered_test.sql"
+  T46="tests/46_auto_regrain_maintain_test.sql"
+  T48="tests/48_regrain_copy_contract_test.sql"
+  T53="tests/53_regrain_reused_key_test.sql"
+  T54="tests/54_generated_column_test.sql"
+  T67="tests/67_regrain_name_collision_test.sql"
+  T68="tests/68_regrain_write_contract_test.sql"
+  T79="tests/79_status_survives_dropped_parent_test.sql"
+}
+G19_TRANSMUTE="15 49"; G19_REGRAIN="43 45 46 48 53 54 67 68"; G19_FORGET="79"
+for n in $G19_TRANSMUTE $G19_REGRAIN $G19_FORGET; do t="T$n"; printf -v "F$n" '%s' "$ROOT/${!t}"; SEL="$SEL$n "; done
+# g19_only <base name> <mutation src>: select the one G19 file ONLY stands for; false when it is none of them.
+g19_only() {
+  local n t
+  for n in $G19_TRANSMUTE $G19_REGRAIN $G19_FORGET; do
+    t="T$n"
+    if [ "$1" = "$(basename "${!t}")" ] || [ "$2" = "${!t}" ]; then SEL=" $n "; printf -v "F$n" '%s' "$ONLY"; return 0; fi
+  done
+  return 1
+}
 
 if [ -n "$ONLY" ]; then
   ONLY="${ONLY/#\/repo\//$ROOT/}"
@@ -122,7 +167,8 @@ PY
     77_retain_incoming_fk_test.sql:*|*:tests/77_retain_incoming_fk_test.sql) SEL=" 77 "; F77="$ONLY" ;;
     # pass 9 G17
     "$(basename "$T267")":*|*:"$T267") SEL=" 267 "; F267="$ONLY" ;;
-    *) say FAIL "the file to judge is one of the seven this guard knows" "$ONLY -> '${src}'"; exit 1 ;;
+    *) g19_only "$base" "$src" ||
+         { say FAIL "the file to judge is one of the files this guard knows" "$ONLY -> '${src}'"; exit 1; } ;;
   esac
 fi
 sel() { [[ "$SEL" == *" $1 "* ]]; }
@@ -650,6 +696,125 @@ if sel 267; then
   q -d postgres -q -c "drop database if exists $DB" </dev/null >/dev/null 2>&1
   q -d postgres -q -c "drop role if exists tfd267_owner" </dev/null >/dev/null 2>&1
 fi
+
+# pass 9 G19
+# ---- tests/15, 49 (transmute), 43, 45, 46, 48, 53, 54, 67, 68 (regrain), 79 (forget_missing) --------
+# Issues #997 and #998: each of these files asserted conservation by count. Every file of a set must go red
+# against its defect, so one file that slips back to a count fails the guard however the others fare.
+#
+# g19_overwrite <relation expr> <table regclass expr> <control name expr>: plpgsql that sets one row's first
+# plain column (not the control column, not generated, not identity, in no unique index of <table>) to
+# another row's value. Rows are neither lost nor added; only an identity check can see it.
+g19_overwrite() {
+  printf '%s' "execute (select format('update %1\$s set %2\$I = (select %2\$I from %1\$s where ctid = (select max(ctid) from %1\$s)) where ctid = (select min(ctid) from %1\$s)',
+                   $1, a.attname)
+              from pg_attribute a
+             where a.attrelid = $2 and a.attnum > 0 and not a.attisdropped and a.attgenerated = ''
+               and a.attidentity = '' and a.attname <> $3
+               and not exists (select 1 from pg_index i where i.indrelid = $2 and i.indisunique and a.attnum = any (i.indkey))
+             order by a.attnum limit 1);
+"
+}
+# g19_judge <set> <mutant install.sql> <how the defect reads>: CONTROL and DEFECT for every selected file.
+g19_judge() {
+  local n f t
+  for n in $1; do
+    sel "$n" || continue
+    f="F$n"; t="T$n"
+    judge_on "$ROOT/pgpm_core/install.sql" "CONTROL: ${!t} passes against the clean install" pass "${!f}"
+    judge_on "$2" "DEFECT: ${!t} fails when $3" fail "${!f}"
+  done
+}
+g19_sel() { local n; for n in $1; do sel "$n" && return 0; done; return 1; }
+# g19_probe <probe sql>: the probe's PROBE line in a fresh <db> holding the install loaded last.
+g19_probe() { q -d "$DB" -tAq -f - <<<"$1" 2>&1 | grep -o 'PROBE .*' | head -1; }
+# g19_case <set> <plant name> <find> <replace> <probe sql> <clean PROBE line> <defect PROBE regex> <defect text>
+g19_case() {
+  local set="$1" name="$2" find="$3" repl="$4" probe="$5" clean="$6" defect="$7" what="$8" got
+  g19_sel "$set" || return 0
+  if fresh && install "$ROOT/pgpm_core/install.sql"; then
+    got=$(g19_probe "$probe")
+    if [ "$got" = "$clean" ]; then say PASS "LIVENESS: clean install, $what: probe intact" "$got"
+    else say FAIL "LIVENESS: clean install, $what: probe intact" "${got:-no PROBE line}"; fail=1; fi
+  else
+    say FAIL "the clean install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
+  fi
+  if ! plant "$name" "$find" "$repl"; then
+    say FAIL "planted the defect: $what" "install.sql moved; fix the pattern"; fail=1; return
+  fi
+  if fresh && install "$work/$name.sql"; then
+    got=$(g19_probe "$probe")
+    if [[ "$got" =~ $defect ]]; then say PASS "LIVENESS: under the defect, $what" "$got"
+    else say FAIL "LIVENESS: under the defect, $what" "${got:-no PROBE line}"; fail=1; fi
+  else
+    say FAIL "the install with the defect ($what) loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1; return
+  fi
+  g19_judge "$set" "$work/$name.sql" "$what"
+}
+
+# The probes: distinct values, a snapshot, the operation, then "<shape>/<rows>/<rows altered>".
+G19_TRANSMUTE_PROBE="create table public.g19_tp (id bigint generated by default as identity primary key, payload text);
+insert into public.g19_tp (payload) select 'p' || g from generate_series(1, 300) g;
+create temporary table g19_tp_before as select id, payload from public.g19_tp;
+call pgpm.transmute('public.g19_tp', 'id', 100000);
+select 'PROBE ' || (select relkind::text from pg_class where oid = 'public.g19_tp'::regclass)
+       || '/' || (select count(*) from public.g19_tp)
+       || '/' || (select count(*) from g19_tp_before b
+                   where not exists (select 1 from public.g19_tp t where t.id = b.id and t.payload = b.payload));"
+G19_TRANSMUTE_FIND="  -- 10. register
+"
+G19_REGRAIN_PROBE="create table public.g19_rp (id bigint generated by default as identity primary key, payload text);
+insert into public.g19_rp (payload) select 'p' || g from generate_series(1, 120) g;
+create temporary table g19_rp_before as select id, payload from public.g19_rp;
+call pgpm.transmute('public.g19_rp', 'id', 50, p_regrain_batch => 10);
+select pgpm.obtain('public.g19_rp');
+insert into public.g19_rp (id, payload) values (1000, 'frontier');
+select pgpm.regrain_history('public.g19_rp') as g19_children \gset
+select 'PROBE ' || :g19_children
+       || '/' || (select count(*) from public.g19_rp where id < 150)
+       || '/' || (select count(*) from g19_rp_before b
+                   where not exists (select 1 from public.g19_rp t where t.id = b.id and t.payload = b.payload));"
+G19_REGRAIN_FIND="    get diagnostics v_moved = row_count;
+    if v_moved > 0 then
+"
+G19_FORGET_PROBE="create table public.g19_kp (id bigint generated by default as identity primary key, payload text);
+insert into public.g19_kp (payload) select 'p' || g from generate_series(1, 5000) g;
+call pgpm.transmute('public.g19_kp', 'id', 1000, p_retain => 3000);
+create table public.g19_gp (id bigint generated by default as identity primary key, payload text);
+insert into public.g19_gp (payload) select 'p' || g from generate_series(1, 5000) g;
+call pgpm.transmute('public.g19_gp', 'id', 1000, p_retain => 3000);
+create temporary table g19_kp_before as
+  select child_name, child_oid, lo, hi from pgpm.part where parent_table = 'public.g19_kp'::regclass;
+drop table public.g19_gp cascade;
+create temporary table g19_forgot as select * from pgpm.forget_missing();
+select 'PROBE ' || forgot || '/' || (n_before > 0) || '/' || (n_after = n_before) || '/'
+       || case n_unchanged when n_before then 'all' when 0 then 'none' else 'some' end
+  from (select (select count(*) from g19_forgot) as forgot,
+               (select count(*) from g19_kp_before) as n_before,
+               (select count(*) from pgpm.part where parent_table = 'public.g19_kp'::regclass) as n_after,
+               (select count(*) from g19_kp_before b where exists (
+                  select 1 from pgpm.part p where p.parent_table = 'public.g19_kp'::regclass
+                     and p.child_name = b.child_name and p.child_oid = b.child_oid
+                     and p.lo = b.lo and p.hi = b.hi)) as n_unchanged) s;"
+G19_FORGET_FIND="    delete from pgpm.part               where parent_table = r.parent_table;
+"
+
+g19_case "$G19_TRANSMUTE" transmute_overwrites_value "$G19_TRANSMUTE_FIND" \
+  "  $(g19_overwrite 'v_parent::text' 'v_parent' 'p_control')"$'\n'"$G19_TRANSMUTE_FIND" \
+  "$G19_TRANSMUTE_PROBE" "PROBE p/300/0" '^PROBE p/300/[1-9][0-9]*$' \
+  "transmute rewrites a row's value"
+g19_case "$G19_REGRAIN" regrain_overwrites_value "$G19_REGRAIN_FIND" \
+  "$G19_REGRAIN_FIND      $(g19_overwrite "format('%I.%I', v_sub_nsp, v_sub_name)" 'p_parent' 'cfg.control_column')"$'\n' \
+  "$G19_REGRAIN_PROBE" "PROBE 3/120/0" '^PROBE 3/120/[1-9][0-9]*$' \
+  "regrain's copy rewrites a copied row's value"
+# forget_missing: one dead parent forgotten, the healthy table's part rows all still there, and under the
+# clean install every one of them as it was, under the defect none.
+g19_case "$G19_FORGET" forget_missing_rewrites_survivors "$G19_FORGET_FIND" \
+  "${G19_FORGET_FIND}    update pgpm.part set child_name = left('gone_' || child_name, 63), child_oid = null
+     where parent_table <> r.parent_table;
+" \
+  "$G19_FORGET_PROBE" "PROBE 1/true/true/all" '^PROBE 1/true/true/none$' \
+  "forget_missing() rewrites the survivors' part rows"
 
 if [ "$fail" = 0 ]; then say PASS "every judged test file fails against its defect" "${SEL# }"
 else say FAIL "every judged test file fails against its defect" "${SEL# }"; fi

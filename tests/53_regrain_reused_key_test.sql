@@ -5,12 +5,12 @@
 -- queryable permanent state).
 create extension if not exists pgtap;
 
-select plan(5);
+select plan(6);
 
 -- (A) regrain a UNIQUE-constraint (no primary key) coarse monolith
 create table public.ruq (id bigint not null, batch bigint not null, body text,
                          constraint ruq_uq unique (id, batch));
-insert into public.ruq select g, 1, 'x' from generate_series(1, 5000) g;   -- spans [0,6000) at step 1000
+insert into public.ruq select g, 1, 'b' || g from generate_series(1, 5000) g;   -- spans [0,6000) at step 1000
 call pgpm.transmute('public.ruq', 'id', 1000::bigint, p_paused => true);
 insert into public.ruq (id, batch, body) values (20000, 1, 'frontier');   -- push the frontier past the monolith
 
@@ -18,6 +18,13 @@ select lives_ok(
   $$ select pgpm.regrain_history('public.ruq', '1000') $$,
   'regrain works on a unique-constraint (no primary key) coarse monolith');
 select is((select count(*)::int from public.ruq), 5001, 'rows conserved through regrain');
+-- Identity, not cardinality (#997): every row carries its own body, so a copy that rewrites a value
+-- while keeping the count is caught here.
+select bag_eq(
+  'select id, batch, body from public.ruq',
+  $$ select g::bigint, 1::bigint, 'b' || g from generate_series(1, 5000) g
+     union all select 20000::bigint, 1::bigint, 'frontier' $$,
+  'every row survives the regrain by identity: the same (id, batch, body) rows, none lost, none added, none altered');
 select is(
   (select count(*)::int from pgpm.part
     where parent_table = 'public.ruq'::regclass and attached

@@ -29,7 +29,7 @@
 -- in its own database rather than begin/rollback.
 create extension if not exists pgtap;
 
-select plan(26);
+select plan(27);
 
 -- ============================ fixture: one healthy, one dropped ============================
 -- Asymmetric on purpose (2 in, 1 out): a compensating error that wiped both, or neither, cannot pass.
@@ -45,6 +45,10 @@ call pgpm.transmute('public.gone79', 'id', 1000, p_retain => 3000);
 select ('public.gone79'::regclass)::oid as gone_oid \gset
 select count(*)::int as keep_parts from pgpm.part
   where parent_table = 'public.keep79'::regclass \gset
+-- and WHICH rows they are (#998): the healthy table's pgpm.part rows by name, oid and bounds, so that
+-- forget_missing() is held to leaving each of them as it was, not merely as many of them.
+create table pgpm_t79_keep_parts as
+  select child_name, child_oid, lo, hi from pgpm.part where parent_table = 'public.keep79'::regclass;
 select count(*)::int as gone_parts from pgpm.part
   where parent_table = 'public.gone79'::regclass \gset
 
@@ -141,6 +145,11 @@ select is(
   (select count(*)::int from pgpm.part where parent_table = 'public.keep79'::regclass),
   :keep_parts, 'the healthy table keeps every one of its pgpm.part rows');
 
+select bag_eq(
+  $$ select child_name, child_oid, lo, hi from pgpm.part where parent_table = 'public.keep79'::regclass $$,
+  'select child_name, child_oid, lo, hi from pgpm_t79_keep_parts',
+  'and each of them as it was: the same (child_name, child_oid, lo, hi), none rewritten, none added');
+
 select is(
   (select count(*)::int from pgpm.part where parent_table::oid = :gone_oid),
   0, 'and the dead parent keeps none');
@@ -184,6 +193,6 @@ select is((select count(*)::int from public.orph79_p0000000000000000000_to_00000
 
 drop table if exists public.keep79,
   public.orph79_p0000000000000000000_to_0000000000000006000 cascade;
-drop table if exists pgpm_t79_report, pgpm_t79_orphan;
+drop table if exists pgpm_t79_report, pgpm_t79_orphan, pgpm_t79_keep_parts;
 
 select * from finish();
