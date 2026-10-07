@@ -15,9 +15,10 @@
 #   <work>/head      the PR's head: the tree WITH the change
 #   <work>/review    the head plus the seed(s) of --plan (plant_seeds.py; the finder's tree); no plan: a
 #                    second copy of the head, and the comment will say the hunt was unwitnessed
-#   <work>/mutant    the head with the PR's NEW mutations applied (every name in the head's
-#                    bench/mutations/mutate.py that the base's lacks, or --mutations): the defect the PR
-#                    says it fixes, put back, so the acceptance reproductions can be shown to fail on it
+#   <work>/mutants/<name>   one tree per NEW mutation of the PR (every name in the head's
+#                    bench/mutations/mutate.py that the base's lacks, or --mutations), the head with that
+#                    mutation alone applied: the defect the PR says it fixes, put back, so the acceptance
+#                    reproductions can be shown to fail on it; FAILED.txt lists one that did not build
 #   <work>/head_src, base_src   detached worktrees of the two commits WITH bench/mutations, for the
 #                    coordinator's and verifiers' use only; the finder is never given these paths
 #   <work>/pr.diff   the change AS PRESENTED to the finder: diff -ruN of base against review, so a planted
@@ -200,21 +201,31 @@ case "$CMD" in
         printf '%s\t%s\n' "$m" "$src" >> "$WORK/mutations.tsv"
       done
     fi
+    jq --arg head "$HEAD" --arg base "$BASE" --arg finder "$FINDER" --argjson seeds "$SEEDS" \
+       --arg muts "$(cut -f1 "$WORK/mutations.tsv" | paste -sd, -)" \
+       '. + {head: $head, base: $base, finder: $finder, seeds: $seeds, mutations: $muts}' "$WORK/pr.json" > "$WORK/pr.json.tmp" && mv "$WORK/pr.json.tmp" "$WORK/pr.json"
+    # one mutant tree per new mutation: two that edit the same lines cannot be applied in sequence (#1052's
+    # archive_to_s3_child_unheld no longer matched once archive_resolve_child_unlocked had removed the lock
+    # line), and the acceptance holds when ANY of them restores the issue's defect. One that does not build
+    # against its own head is recorded, not fatal: CI's discriminate fails that PR on its own.
     if [ -s "$WORK/mutations.tsv" ]; then
-      "$S/build_review_tree.sh" "$HEAD" "$WORK/mutant" >/dev/null || exit 5
+      mkdir -p "$WORK/mutants"; : > "$WORK/mutants/FAILED.txt"
       while IFS=$'\t' read -r name src; do
-        python3 "$WORK/head_src/bench/mutations/mutate.py" "$name" "$WORK/mutant/$src" "$WORK/mutant/$src" || die "mutation $name did not build against the head" 4
-        say "mutant: $name applied to $src"
+        "$S/build_review_tree.sh" "$HEAD" "$WORK/mutants/$name" >/dev/null || exit 5
+        if python3 "$WORK/head_src/bench/mutations/mutate.py" "$name" "$WORK/mutants/$name/$src" "$WORK/mutants/$name/$src"; then
+          say "mutant: $name applied to $src"
+        else
+          say "MUTANT $name DID NOT BUILD against the head (recorded in mutants/FAILED.txt; the PR's own discriminate run will fail on it)"
+          echo "$name" >> "$WORK/mutants/FAILED.txt"; rm -rf "$WORK/mutants/$name"
+        fi
       done < "$WORK/mutations.tsv"
     else
       say "no new mutation in this PR: no mutant tree (the comment will say the acceptance was not checked against a mutant)"
     fi
-    jq --arg head "$HEAD" --arg base "$BASE" --arg finder "$FINDER" --argjson seeds "$SEEDS" \
-       --arg muts "$(cut -f1 "$WORK/mutations.tsv" | paste -sd, -)" \
-       '. + {head: $head, base: $base, finder: $finder, seeds: $seeds, mutations: $muts}' "$WORK/pr.json" > "$WORK/pr.json.tmp" && mv "$WORK/pr.json.tmp" "$WORK/pr.json"
     echo
     echo "PREPARED #$PR: $(jq -r .title "$WORK/pr.json")"
-    echo "  trees: $WORK/base $WORK/head $WORK/review$([ -d "$WORK/mutant" ] && echo " $WORK/mutant")"
+    built=""; for d in "$WORK"/mutants/*/; do [ -d "$d" ] && built="$built,$(basename "$d")"; done
+    echo "  trees: $WORK/base $WORK/head $WORK/review${built:+ mutants/${built#,}}"
     echo "  claims verifier V: $WORK/head_src, $WORK/base_src, real diff $WORK/pr.real.diff"
     echo "  finder $FINDER: tree $WORK/review, diff $WORK/pr.diff, units $WORK/surface/units.txt ($(wc -l < "$WORK/surface/units.txt" | tr -d ' ') units), surface $WORK/surface/surface.md"
     echo "  claims dir $WORK/claims; verdicts dir $WORK/verdicts; mutations: $(cut -f1 "$WORK/mutations.tsv" | paste -sd, -)"
@@ -223,7 +234,7 @@ case "$CMD" in
     [ -f "$WORK/pr.json" ] || die "$WORK has no pr.json; run prepare first" 3
     args=(--claims "$WORK/claims" --base "$WORK/base" --head "$WORK/head" --review "$WORK/review" --out "$WORK/pr_classified.json"
           --container "$C15" --archive-container "$CARCH" --timescale-container "$CTS")
-    [ -d "$WORK/mutant" ] && args+=(--mutant "$WORK/mutant")
+    [ -d "$WORK/mutants" ] && args+=(--mutants-dir "$WORK/mutants")
     [ -f "$WORK/sealed.json" ] && args+=(--sealed "$WORK/sealed.json")
     python3 "$S/pr_classify.py" "${args[@]}" || exit 4
     python3 "$S/coverage.py" --tree "$WORK/review" --slices "$WORK/surface/slices.json" --claims "$WORK/claims" --out "$WORK/coverage.json"

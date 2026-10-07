@@ -107,9 +107,11 @@ def score(tree, slices, claims, threshold):
                          'unread': units, 'extra': [], 'ledger': 'missing'})
             worst = 0.0
             continue
-        uset = set(units)
-        hit = [u for u in units if u in read]
-        missing = [u for u in units if u not in read]
+        # the ledger's names are lowercased when read (SQL identifiers); compare the slice's the same way, so a
+        # file unit such as CHANGELOG.md is not reported unread beside "changelog.md" in the ledger
+        uset = {u.lower() for u in units}
+        hit = [u for u in units if u.lower() in read]
+        missing = [u for u in units if u.lower() not in read]
         extra = sorted((read | unread) - uset)
         cov = (len(hit) / len(units)) if units else 1.0
         worst = min(worst, cov)
@@ -144,7 +146,7 @@ def selftest():
         claims = os.path.join(d, 'claims'); os.makedirs(os.path.join(claims, 'F1')); os.makedirs(os.path.join(claims, 'F2'))
         open(os.path.join(claims, 'F1', 'coverage.md'), 'w').write(
             '# ledger\n- pgpm.a | read: yes | identity: fine\n- `pgpm.b` | read: no | out of budget\n- pgpm.zzz | read: yes | not in slice\n')
-        open(os.path.join(claims, 'F2', 'coverage.md'), 'w').write('- bench/g1.sh | read: yes |\n- bench/g2.sh | read: yes |\n')
+        open(os.path.join(claims, 'F2', 'coverage.md'), 'w').write('- bench/g1.sh | read: yes |\n- BENCH/G2.sh | read: yes |\n')   # case-insensitive match
         slices = {'F1': {'files': ['pgpm_core/install.sql:1-4']}, 'F2': {'files': ['bench/*.sh'], 'kind': 'files'}, 'F3': {'files': ['pgpm_core/install.sql']}}
         rows, worst = score(tree, slices, claims, 0.9)
         by = {r['finder']: r for r in rows}

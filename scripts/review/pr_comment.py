@@ -71,8 +71,8 @@ def decide(classified, verdicts, acceptance="ACC", surface=None):
                 reasons.append(f"{cid}: the acceptance reproduction does not fail on the base, so it does not demonstrate the defect the PR says it fixes")
             if a["passes_on_head"] is not True:
                 reasons.append(f"{cid}: the acceptance reproduction does not pass on the head" + (" (it failed only its liveness checks: the fix refuses the fixture)" if c.get("note") and "refuses" in c["note"] else ""))
-            if a["mutant_restores"] is False:
-                reasons.append(f"{cid}: the PR's mutation does not make the acceptance reproduction fail, so it restores a different defect and the guard it certifies is not this fix's")
+            if a.get("any_restores") is False:
+                reasons.append(f"{cid}: no new mutation of the PR makes the acceptance reproduction fail ({', '.join(a['mutant_restores'])}), so they restore a different defect and the guard they certify is not this fix's")
             continue
         if cls not in ("regression", "pre_existing"):
             continue
@@ -109,10 +109,12 @@ def render(classified, verdicts, coverage, surface, sealed, pr, head, base, budg
         out += ["", "Why:"] + [f"- {r}" for r in reasons]
     out += ["", "### Acceptance: the PR's own claims", ""]
     if acc:
-        out += ["| reproduction | fails on base | passes on head | PR's mutation restores it | note |", "|---|---|---|---|---|"]
+        out += ["| reproduction | fails on base | passes on head | the PR's mutations restore it | note |", "|---|---|---|---|---|"]
         for c in acc:
             a = c["acceptance"]
-            out.append(f"| `{c['id']}` {c.get('scenario') or ''} | {yn(a['fails_on_base'])} | {yn(a['passes_on_head'])} | {yn(a['mutant_restores'])} | {a.get('note') or c.get('note') or ''} |")
+            mr = a.get("mutant_restores") or {}
+            cell = ("; ".join(f"`{k}`: {yn(v)}" for k, v in mr.items()) if mr else "no mutant tree (not checked)")
+            out.append(f"| `{c['id']}` {c.get('scenario') or ''} | {yn(a['fails_on_base'])} | {yn(a['passes_on_head'])} | {cell} | {a.get('note') or c.get('note') or ''} |")
     else:
         out.append("No acceptance reproduction was given (the PR does not close a verified issue).")
     closing = verdicts.get("closing")
@@ -173,7 +175,7 @@ def render(classified, verdicts, coverage, surface, sealed, pr, head, base, budg
 
 def selftest():
     classified = {"acceptance": "ACC", "claims": [
-        {"id": "ACC-01", "finder": "ACC", "class": "fixed", "scenario": "issue repro", "acceptance": {"fails_on_base": True, "passes_on_head": True, "mutant_restores": True}},
+        {"id": "ACC-01", "finder": "ACC", "class": "fixed", "scenario": "issue repro", "acceptance": {"fails_on_base": True, "passes_on_head": True, "mutant_restores": {"m_x": True, "m_y": False}, "any_restores": True}},
         {"id": "P1-01", "finder": "P1", "tier": 3, "class": "regression", "scenario": "a refusal lost", "runs": {"base": {"tail": "ok 1"}, "head": {"tail": "not ok 2 - refused"}}},
         {"id": "P1-02", "finder": "P1", "tier": 3, "class": "pre_existing", "scenario": "old contract gap", "runs": {}},
         {"id": "P1-03", "finder": "P1", "tier": 1, "class": "pre_existing", "scenario": "old data loss", "runs": {}},
@@ -194,7 +196,7 @@ def selftest():
     b, text = render(classified, verdicts, coverage, {"files": [{"path": "x.sql"}], "units": [{"unit": "a", "file": "x.sql", "lines": [1, 9]}, {"unit": "b", "file": "x.sql", "lines": [10, 19]}]},
                      sealed, 7, "abcdef0123", "0123456789", "finder 150k")
     assert b and "Landing: BLOCKED" in text and "S1 in `pgpm_core/install.sql` (m): **found**" in text and "known_open (#999)" in text, text
-    assert "| `ACC-01` issue repro | yes | yes | yes |" in text and "10 of 10 units read (1.00)" in text
+    assert "| `ACC-01` issue repro | yes | yes | `m_x`: yes; `m_y`: NO |" in text and "10 of 10 units read (1.00)" in text
     # clear once the regression is withdrawn (it fell) and nothing else blocks
     verdicts["P1-01"] = {"verdict": "fell", "reason": "the refusal is documented"}
     blocked, reasons, to_file = decide(classified, verdicts)
@@ -221,10 +223,10 @@ def selftest():
     assert "(outside the PR's surface)" in text, text
     classified["claims"][3].update({"file": None, "line": None})
     verdicts["P1-03"] = {"verdict": "fell", "reason": "r"}
-    classified["claims"][0]["acceptance"]["mutant_restores"] = False
+    classified["claims"][0]["acceptance"].update({"mutant_restores": {"m_x": False, "m_y": False}, "any_restores": False})
     r = decide(classified, verdicts)[1]
-    assert len(r) == 1 and "restores a different defect" in r[0], r
-    classified["claims"][0]["acceptance"]["mutant_restores"] = None   # no mutant tree: not held against the PR
+    assert len(r) == 1 and "restore a different defect" in r[0], r
+    classified["claims"][0]["acceptance"].update({"mutant_restores": {}, "any_restores": None})   # no mutant tree: not held against the PR
     assert not decide(classified, verdicts)[0]
     verdicts["closing"] = {"verdict": "partial", "reason": "the sibling path", "claims": ["V-01"]}
     assert decide(classified, verdicts)[1] == ["closing claim: partial (the sibling path)"]
