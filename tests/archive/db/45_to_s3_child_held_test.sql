@@ -106,7 +106,8 @@ select set_config('t45.sql', format(
 select set_config('t45.part', 'A', false) as armed \gset discard_
 select lives_ok(format('select archive.to_s3(%L, %L, null, null)', 't45.evt', :'a_child'),
   'A: the re-run export completed, a second session''s DROP of its child attempted inside it');
-select set_config('t45.part', '', false) as disarmed \gset discard_   -- a failed export rolls the trigger's own disarm back
+-- disarmed here too: a failed export rolls the trigger's own disarm back
+select set_config('t45.part', '', false) as disarmed \gset discard_
 select is((select count(*)::int from t45.seen where part = 'A'), 1,
   'A LIVENESS: the second session made its attempt inside the re-run, after the export resolved its child');
 select is((select outcome from t45.seen where part = 'A'), 'lock_not_available',
@@ -145,7 +146,8 @@ select set_config('t45.sql', format(
 select set_config('t45.part', 'B', false) as armed \gset discard_
 select lives_ok(format('select archive.to_s3(%L, %L, null, null)', 't45b.evt', :'b_child'),
   'B: the re-run export completed, a second session''s schema rename attempted inside it');
-select set_config('t45.part', '', false) as disarmed \gset discard_   -- a failed export rolls the trigger's own disarm back
+-- disarmed here too: a failed export rolls the trigger's own disarm back
+select set_config('t45.part', '', false) as disarmed \gset discard_
 select is((select outcome from t45.seen where part = 'B'), 'done',
   'B LIVENESS: the second session renamed t45b away and created a namesake inside the re-run');
 select ok(to_regclass(format('t45b.%I', :'b_child'))::oid is distinct from :'b_oid'::oid
