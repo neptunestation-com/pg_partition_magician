@@ -11,9 +11,11 @@ It partitions on any **monotonic** key (time, integer/bigint ids including Snowf
 and manages the whole lifecycle:
 
 - **`transmute`**: convert a live, unpartitioned table to partitioned **with no row movement**. The
-  original is renamed aside and attached intact as one bounded **monolith** child; a fresh `DEFAULT` is the
-  safety net. The cutover is one read-only scan plus a metadata flip: no rebuild, no row rewrite, and **no
-  lock that scales with row count** -- the scan runs under a lock that blocks neither readers nor writers
+  original is renamed aside and attached intact as one bounded **monolith** child, with a forward grid of
+  real partitions laid down ahead of it. There is no `DEFAULT`: a write past that grid is refused, so the
+  safety net is `obtain`'s lookahead, and `extend_to` for a write you know will land beyond it. The cutover
+  is one read-only scan plus a metadata flip: no rebuild, no row rewrite, and **no lock that scales with row
+  count** -- the scan runs under a lock that blocks neither readers nor writers
   (see [the guide](docs/guide.md#the-cutover-moves-no-rows)). What it does cost is a write ceiling for the
   scan's duration: writes outside the certified bound are rejected outright, not queued. Reversible with
   **`untransmute`** until the history outgrows the monolith.

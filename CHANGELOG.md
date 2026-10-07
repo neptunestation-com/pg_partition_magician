@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **README.md no longer promises transmute a `DEFAULT` partition as its safety net** (#991). The front-door
+  `transmute` bullet still said "a fresh `DEFAULT` is the safety net", though the `DEFAULT` partition went in
+  #288: transmute builds none, and a write past the forward grid is refused ('no partition of relation ...
+  found for row'), as the same README's caveat, the guide and the reference say. An operator who trusted it
+  wrote ahead of the grid expecting the row to be parked, and skipped sizing `obtain` or calling
+  `extend_to`. The bullet now names the forward grid, `obtain`'s lookahead and `extend_to`.
+  `bench/doc_transmute_no_default.sh` measures the refusal (and `extend_to` lifting it) and checks every
+  sentence of the docs that names a `DEFAULT` partition, with the mutation `readme_transmute_fresh_default`.
+
 - **A regrain target finer than a `timestamp(p)` or `timestamptz(p)` control column's precision is refused up
   front** (#980). `_regrain_step_shape` had a precision rule for a `numeric` key (#899) and none for a time
   key, so `set_regrain('500 milliseconds')` on a `timestamptz(0)` key was stored, the run copied every

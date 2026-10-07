@@ -4781,6 +4781,21 @@ $$;''',
           "  and `regrain` is unavailable on a keyless monolith. So a keyless migration that relied on `drop_chunks` will\n"
           "  not reclaim disk until a key is added and the monolith is regrained.\n", 1)],
     ),
+    "readme_transmute_fresh_default": (
+        "bench/doc_transmute_no_default.sh",
+        "Pre-#991 README.md: the transmute bullet says 'a fresh `DEFAULT` is the safety net', while the DEFAULT "
+        "partition was removed in #288: transmute builds none and a write past the forward grid is refused "
+        "('no partition of relation ... found for row'), so an operator who trusts the bullet writes ahead of "
+        "the grid without sizing obtain or calling extend_to. The exact pre-#991 text.",
+        [("  original is renamed aside and attached intact as one bounded **monolith** child, with a forward grid of\n"
+          "  real partitions laid down ahead of it. There is no `DEFAULT`: a write past that grid is refused, so the\n"
+          "  safety net is `obtain`'s lookahead, and `extend_to` for a write you know will land beyond it. The cutover\n"
+          "  is one read-only scan plus a metadata flip: no rebuild, no row rewrite, and **no lock that scales with row\n"
+          "  count** -- the scan runs under a lock that blocks neither readers nor writers\n",
+          "  original is renamed aside and attached intact as one bounded **monolith** child; a fresh `DEFAULT` is the\n"
+          "  safety net. The cutover is one read-only scan plus a metadata flip: no rebuild, no row rewrite, and **no\n"
+          "  lock that scales with row count** -- the scan runs under a lock that blocks neither readers nor writers\n", 1)],
+    ),
     "runbook_fk_validate_by_restore": (
         "bench/doc_remedy_and_symptom.sh",
         "Pre-#910 docs/runbook.md: the Prevent step after a preserve conversion tells the operator to call "
@@ -8489,6 +8504,7 @@ MUTATION_SRC = {
     "reference_archive_identity_forget_missing": "docs/reference.md",
     "reference_fks_suspended_dead_swap": "docs/reference.md",
     "reference_keyless_monolith_dormant": "docs/reference.md",
+    "readme_transmute_fresh_default": "README.md",
     "runbook_fk_validate_by_restore": "docs/runbook.md",
     "runbook_dropped_table_syntax_symptom": "docs/runbook.md",
     "classify_tap_needs_description": "scripts/review/classify_claims.py",
