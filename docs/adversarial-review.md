@@ -328,11 +328,14 @@ fresh-surface lens and one more, on a slice that is the units the diff touches p
 test rather than a fact. One verifier per candidate, exactly as in a pass, with the base as the pristine
 commit.
 
-**The seed is the witness.** One seed in the PR's surface, usually the PR's own new mutation (its surface
-is the PR's by construction) or a one-line novel patch, measures the one finder the way nine seeds measure
-a pass: a hunt that missed it proves little about the PR, whatever else it found. The comment says found or
-missed, and a miss is a method result, not a mark against the PR. Three misses in a row on one surface shape
-mean the brief or the lens needs changing.
+**The seed is the witness.** One seed in the PR's surface, usually one of the PR's own new mutations (its
+surface is the PR's by construction) or a one-line novel patch, measures the one finder the way nine seeds
+measure a pass: a hunt that missed it proves little about the PR, whatever else it found. The quietest
+candidate is the right one: a mutation that reverts the whole fix hands the finder the issue's own defect
+and the budget goes to re-finding it (the trial's #1052), while one that removes a single clause is found
+just the same and leaves the budget for the PR's backlash. The comment says found or missed, and a miss is a
+method result, not a mark against the PR. Three misses in a row on one surface shape mean the brief or the
+lens needs changing.
 
 **Policy, applied by the script.** `pr_comment.py` decides and posts; the coordinator does not decide by
 hand. Blocked: an acceptance reproduction that does not fail on the base, pass on the head, or fail on the

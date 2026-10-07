@@ -25,10 +25,14 @@ coordinator judges its claims worth the budget (a tooling PR that changes what a
   (a reproduction that read a file from `/repo` gets that file in `install` and that line removed, because
   the trees differ and `/repo` cannot follow them; say so in the comment). Tier and scenario from the issue.
 - A seed plan `$W/plan.json`, one seed that sits in the PR's surface: a catalogue mutation in a touched unit
-  (the PR's own new mutation is a fine choice, since its surface is exactly the PR's), or a one-line novel
-  patch in the catalogue's style. It is the hunt's liveness witness: a finder that misses it says the hunt
-  on this PR proves little, whatever else it found. Plant none only when the surface holds nothing quiet
-  to plant, and expect the comment to say the hunt was unwitnessed.
+  (one of the PR's own new mutations is the natural choice, since its surface is exactly the PR's), or a
+  one-line novel patch in the catalogue's style. It is the hunt's liveness witness: a finder that misses it
+  says the hunt on this PR proves little, whatever else it found. Pick the QUIETEST one: a mutation that
+  reverts the whole fix hands the finder the issue's own defect, and it spends its budget re-finding the
+  issue instead of hunting the PR's backlash (#1052's finder wrote three claims, all the seed); a mutation
+  that removes one clause (#1047's anchor check, #1046's RLS refusal) is found too and leaves the budget for
+  the hunt. Plant none only when the surface holds nothing quiet to plant, and expect the comment to say
+  the hunt was unwitnessed.
 - `scripts/review/pr_verify.sh harness up [--archive] [--timescale]` (private containers `pgpm_prv-*`, so
   the fixers' gated `./test.sh` runs are never disturbed), then
 
