@@ -15,9 +15,9 @@
 --      landing there now both leave no upload in flight at the key, and the sweep that finds the
 --      orphan reaches no other key: an upload at a key the export's key is a PREFIX of survives.
 --
--- For 3, a stand-in for the http extension's http(http_request), ahead of public in search_path (the
--- signers call it unqualified), forwards every request to the real one against MinIO, counts
--- initiates, part PUTs and abort DELETEs in sequences (which a rolled-back export cannot undo), and
+-- For 3, a stand-in for the http extension's http(http_request), in the place of the module's
+-- transport, archive._s3_send (the one place every request goes through, #984), forwards every request
+-- to the real one against MinIO, counts initiates, part PUTs and abort DELETEs in sequences (which a rolled-back export cannot undo), and
 -- breaks the export right after the initiate's real response arrived, so the store HAS the upload and
 -- archive.to_s3 never saw its id. The id escapes the rolled-back export in the error message itself,
 -- which is how the file can say WHICH upload must be gone, not only how many are left.
@@ -36,7 +36,7 @@ select plan(29);
 
 create schema t28;
 
--- a signed request through the REAL transport (the signer, while search_path is the default)
+-- a signed request through the REAL transport (the signer, while the stand-in is switched off)
 create function t28.req(p_parent regclass, p_method text, p_key text, p_query text) returns http_response
 language plpgsql as $$
 declare cfg archive.config; v_key_id text; v_secret text;
@@ -158,22 +158,26 @@ begin
   return v_resp;
 end $$;
 
+-- The stand-in takes the place of the module's transport, archive._s3_send, while t28.standin is on
+-- (#984: the signers reach the http extension only through it, never through search_path).
+select mk_transport_standin('t28');
+
 create temp table outcome (label text primary key, sqlstate text, msg text);
 
--- one export under the stand-in, its outcome recorded. search_path is set inside the call (SET LOCAL
+-- one export under the stand-in, its outcome recorded. t28.standin is set inside the call (SET LOCAL
 -- semantics through set_config) so the stand-in is in the way of the export and of nothing else.
 create procedure t28.export(p_label text, p_parent text) language plpgsql as $$
 declare v_child text;
 begin
   select child_name into v_child from pgpm.part where parent_table = p_parent::regclass order by lo::numeric limit 1;
-  perform set_config('search_path', 't28, public', true);
+  perform set_config('t28.standin', 'on', true);
   begin
     perform archive.to_s3(p_parent::regclass, v_child, '0', '100000');
     insert into outcome values (p_label, '00000', 'returned');
   exception when query_canceled or others then
     insert into outcome values (p_label, sqlstate, sqlerrm);
   end;
-  perform set_config('search_path', 'public', true);
+  perform set_config('t28.standin', 'off', true);
 end $$;
 
 -- a statement's error message, or 'ok'

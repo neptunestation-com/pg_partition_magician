@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- **`pgpm_archive` reaches pgcrypto and the http extension in their own schemas, never through the caller's
+  `search_path`** (#984). Both SigV4 signers called `hmac()`, `digest()`, `http()` and `http_set_curlopt()`
+  unqualified in functions that pinned no `search_path`, so a function `hmac(bytea, bytea, text)` any role
+  created in a schema ahead of pgcrypto's on the calling session's path (a `maintain()` tick's, a pg_cron
+  job's) was handed `'AWS4' || <the S3 secret key>` and ran with the caller's privileges; and every S3
+  function named the http types in its declarations, so a tick under an application `search_path` that does
+  not name the extensions' schema (`set search_path = app`) logged `skip_archive` 'type "http_response" does
+  not exist' on every tick and never archived or retired. The signers now pin their `search_path` to
+  `pg_catalog`, every extension object is called in the schema `pg_extension` names for it at call time
+  (`archive._sha256`, `archive._hmac_sha256`, and `archive._s3_send`, now the one transport every request goes
+  through), and the functions that receive a response hold it in a record. `tests/archive/db/17`, `23`, `24`
+  and `28` put their stand-ins in `archive._s3_send`'s place (`tests/archive/fixtures.sql`'s
+  `mk_transport_standin`) rather than ahead of the extension on the path, and `tests/archive/db/39`'s scan
+  starts from that transport. Acceptance: `tests/archive/db/44` (shadows owned by another role ahead of both
+  extensions and of `pg_catalog`, and both strategies, both exports and the abort sweep under `search_path
+  app`, read back by identity) under the guard `bench/archive_extension_resolution.sh`; mutations
+  `archive_signer_hmac_through_search_path`, `archive_signer_search_path_unpinned`,
+  `archive_upload_names_http_types` (and `signer_text_sends_server_encoding`, re-anchored on the new send).
+
 - **Re-running `install.sql` keeps an operator's views over pgpm's functions** (#983). The file dropped
   `status()`, `progress(regclass)`, `observe_window(regclass, interval)`, `check_uuidv7` and `check_text_time`
   unconditionally on every run before creating them, so one monitoring view over `pgpm.status()` made the

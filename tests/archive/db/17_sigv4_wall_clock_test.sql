@@ -9,14 +9,14 @@
 --
 -- Fifteen minutes is the skew S3 tolerates, and the issue's reproduction ages a real transaction past
 -- it. This file proves the same thing in two seconds by looking at the stamp itself rather than at
--- MinIO's verdict on it. A recording stand-in for the http extension's http(http_request) is placed
--- ahead of public in search_path (the signers call it unqualified, so resolution follows the caller's
--- path); both signers are called at the start of one transaction and again after a pg_sleep; and the
+-- MinIO's verdict on it. A recording stand-in for the http extension's http(http_request) is put in
+-- the place of the module's transport, archive._s3_send (the one place every request goes through, #984);
+-- both signers are called at the start of one transaction and again after a pg_sleep; and the
 -- late stamps must lie between wall-clock readings taken around the late calls AND be strictly later
 -- than the transaction-start stamp. Read from now(), a late stamp IS the start stamp, so the second
 -- assertion of each pair fails against the defect and the first pins down which clock was read
--- instead. The last two assertions put search_path back and sign for real against MinIO, so the
--- stand-in is known to be out of the way of everything else the archive track exercises.
+-- instead. The last two assertions take the stand-in out of the way and sign for real against MinIO,
+-- so it is known to be out of the way of everything else the archive track exercises.
 select plan(14);
 
 create schema t17;
@@ -55,10 +55,14 @@ $$;
 
 create table t17.marks (k text primary key, v text not null);
 
-set search_path = t17, public;
+-- The stand-in takes the place of the module's transport, archive._s3_send, while t17.standin is on
+-- (#984: the signers reach the http extension only through it, never through search_path).
+select mk_transport_standin('t17');
 
-select is((select p.pronamespace::regnamespace::text from pg_proc p where p.oid = 'http(http_request)'::regprocedure), 't17',
-  'LIVENESS: http(http_request) resolves to the recording stand-in while it is ahead of public');
+set t17.standin = on;
+
+select is(current_setting('t17.standin'), 'on',
+  'LIVENESS: the module''s transport routes to the recording stand-in while t17.standin is on');
 
 -- One transaction, so now() is frozen across all four requests while the wall clock moves.
 begin;
@@ -73,7 +77,7 @@ select t17.sign('late');
 insert into t17.marks values ('after_late', t17.stamp(clock_timestamp()));
 commit;
 
-reset search_path;
+set t17.standin = off;
 
 -- --- What the stand-in saw ---------------------------------------------------------------------
 
@@ -135,12 +139,12 @@ select ok(
 
 -- --- Control: the stand-in is out of the way and the real signer still satisfies MinIO -------------
 
-select isnt((select p.pronamespace::regnamespace::text from pg_proc p where p.oid = 'http(http_request)'::regprocedure), 't17',
-  'http(http_request) resolves to the extension again once search_path is reset');
-
 select is(
   (select status from archive.s3_signed_request('PUT', 'http://minio:9000', 'archive-test-bucket', 'us-east-1',
       't17/control.txt', '', 'text/plain', 'control', 'minioadmin', 'minioadmin')),
   200, 'control: signed for real with the wall clock, MinIO accepts the request');
+
+select is((select count(*)::int from t17.req), 4,
+  'and that request reached MinIO, not the stand-in: it still holds only the four it recorded');
 
 select * from finish();

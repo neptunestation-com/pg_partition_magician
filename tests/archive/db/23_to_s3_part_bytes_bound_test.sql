@@ -7,8 +7,8 @@
 -- archive.to_s3 before it sends anything.
 --
 -- "Sends nothing" is a negative, and a counter that never counted anything would satisfy it too. So a
--- counting stand-in for the http extension's http(http_request) is placed ahead of public in
--- search_path (the signers call it unqualified), the refusal is required to leave its counter at 0,
+-- counting stand-in for the http extension's http(http_request) is put in the place of the module's
+-- transport, archive._s3_send (the one place every request goes through, #984), the refusal is required to leave its counter at 0,
 -- and the SAME stand-in, the same child and the same counter are then required to see exactly one
 -- request, the single PUT of the right key, once part_bytes is positive again. The counter is a
 -- sequence because a refused call rolls back everything else it wrote.
@@ -78,10 +78,14 @@ select is((select part_bytes from archive.config where parent_table = 'public.pb
 
 update archive.config set part_bytes = 0 where parent_table = 'public.pb23'::regclass;
 
-set search_path = t23, public;
+-- The stand-in takes the place of the module's transport, archive._s3_send, while t23.standin is on
+-- (#984: the signers reach the http extension only through it, never through search_path).
+select mk_transport_standin('t23');
 
-select is((select p.pronamespace::regnamespace::text from pg_proc p where p.oid = 'http(http_request)'::regprocedure), 't23',
-  'LIVENESS: http(http_request) resolves to the counting stand-in while it is ahead of public');
+set t23.standin = on;
+
+select is(current_setting('t23.standin'), 'on',
+  'LIVENESS: the module''s transport routes to the counting stand-in while t23.standin is on');
 
 select throws_like(
   format($$ select archive.to_s3('public.pb23', %L, '0', '10000') $$, :'child'),
@@ -106,6 +110,6 @@ select is((select array_agg(method || ' ' || uri order by n) from t23.req),
   array['PUT http://minio:9000/archive-test-bucket/pb23/public.' || :'child' || '.ndjson'],
   'LIVENESS: and that request is the single PUT of this child''s key');
 
-reset search_path;
+set t23.standin = off;
 
 select * from finish();

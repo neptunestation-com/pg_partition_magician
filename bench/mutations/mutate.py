@@ -4523,9 +4523,11 @@ $$;''',
         "'UTF8') but the body on the wire is p_payload itself, text in the SERVER encoding. In a LATIN1 "
         "database every body holding a non-ASCII character is refused (400 XAmzContentSHA256Mismatch), so "
         "the uncompressed NDJSON strategy, which signs its chunk through this signer, logs skip_archive "
-        "every tick and the partition is never covered or retired. One site, the signer's one send.",
-        [("    p_ctype, bytea_to_text(convert_to(p_payload, 'UTF8')))::http_request);\n",
-          "    p_ctype, p_payload)::http_request);   -- MUTANT: the pre-#728 send, server-encoding bytes\n", 1)],
+        "every tick and the partition is never covered or retired. One site, the signer's one send (since #984 the "
+        "bytes it hands archive._s3_send, here the payload in the server encoding, which is what the extension "
+        "sent for a text body).",
+        [("  return archive._s3_send(p_method, v_url, v_amz_date, v_payload_hash, v_auth, p_ctype, convert_to(p_payload, 'UTF8'));\n",
+          "  return archive._s3_send(p_method, v_url, v_amz_date, v_payload_hash, v_auth, p_ctype, convert_to(p_payload, getdatabaseencoding()));\n", 1)],
     ),
     "to_s3_sync_key_bare_child": (
         "bench/archive_edges_pass5.sh",
@@ -8710,6 +8712,62 @@ MUTATIONS["archive_recorded_chunk_range_unchecked"] = (
       "    if false then\n", 1)],
 )
 MUTATION_SRC["archive_recorded_chunk_range_unchecked"] = "pgpm_archive/install.sql"
+
+# pgpm_archive reaches pgcrypto and the http extension in their own schemas, never through the caller's
+# search_path (#984). All three are caught by tests/archive/db/44 (bench/archive_extension_resolution.sh,
+# against the archive image and MinIO): part A's shadows ahead of the extensions, owned by another role, for
+# the first two; part B's tick under `set search_path = app` for the third.
+_EXTRES_SIGNER_PIN = (
+    ") returns http_response language plpgsql set search_path = pg_catalog, pg_temp as $$   -- #984, above\n",
+    ") returns http_response language plpgsql as $$\n",
+    2,
+)
+MUTATIONS["archive_signer_hmac_through_search_path"] = (
+    "bench/archive_extension_resolution.sh",
+    "Pre-#984 SigV4 signers: neither pins its search_path, and HMAC is pgcrypto's hmac() called unqualified, so "
+    "it resolves through the CALLER's path and a function hmac(bytea, bytea, text) any role created in a schema "
+    "ahead of pgcrypto's is handed 'AWS4' || the S3 secret key and runs as the caller (a maintain() tick, a "
+    "pg_cron job). Two sites: both signers' pin, and archive._hmac_sha256's pin and qualified call. "
+    "tests/archive/db/44 part A catches it (the shadow hmac recorded the key).",
+    [
+        _EXTRES_SIGNER_PIN,
+        ("create or replace function archive._hmac_sha256(p_data bytea, p_key bytea)\n"
+         "returns bytea language plpgsql stable set search_path = pg_catalog, pg_temp as $$\n"
+         "declare v_out bytea;\n"
+         "begin\n"
+         "  execute format('select %I.hmac($1, $2, %L)', archive._extension_schema('pgcrypto'), 'sha256') into v_out using p_data, p_key;\n",
+         "create or replace function archive._hmac_sha256(p_data bytea, p_key bytea)\n"
+         "returns bytea language plpgsql stable as $$\n"
+         "declare v_out bytea;\n"
+         "begin\n"
+         "  v_out := hmac(p_data, p_key, 'sha256');\n",
+         1),
+    ],
+)
+MUTATION_SRC["archive_signer_hmac_through_search_path"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_signer_search_path_unpinned"] = (
+    "bench/archive_extension_resolution.sh",
+    "The #984 signers with their search_path pin taken out and every extension call still made in the "
+    "extension's own schema: the builtins they call resolve through the caller's path, so a convert_to(text, "
+    "name) in a schema ahead of an explicitly listed pg_catalog is handed 'AWS4' || the S3 secret key and runs "
+    "as the caller. One site, both signers' pin. tests/archive/db/44 part A catches it (the shadow convert_to "
+    "recorded the key).",
+    [_EXTRES_SIGNER_PIN],
+)
+MUTATION_SRC["archive_signer_search_path_unpinned"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_upload_names_http_types"] = (
+    "bench/archive_extension_resolution.sh",
+    "Pre-#984 archive._encode_upload_ndjson_single: it declares its response as http_response and its header "
+    "as http_header, names PL/pgSQL resolves through the session's search_path when it compiles the function, "
+    "so a maintain() tick under an application path that does not name the http extension's schema (`set "
+    "search_path = app`) fails every chunk with `type \"http_response\" does not exist`, logs skip_archive and "
+    "never archives or retires. One site. tests/archive/db/44 part B catches it (no ledger row for the NDJSON "
+    "table, and the skip_archive rows).",
+    [("  v_key_id text; v_secret text; v_resp record; h record; v_etag text; v_rows bigint;   -- records: no http type named (#984)\n",
+      "  v_key_id text; v_secret text; v_resp http_response; h http_header; v_etag text; v_rows bigint;\n",
+      1)],
+)
+MUTATION_SRC["archive_upload_names_http_types"] = "pgpm_archive/install.sql"
 
 
 def main() -> int:

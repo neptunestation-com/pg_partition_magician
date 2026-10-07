@@ -87,7 +87,8 @@ select current_database() || '/t39/' as p \gset
 -- the module (comments dropped, each literal one token) and enumerates the S3 requests themselves:
 --
 --   * the TRANSPORTS are the functions that call the http extension's request functions (each of its
---     functions that returns http_response) directly. Each must take its method and key as p_method and
+--     functions that returns http_response) directly, or archive._s3_send, the module's one gateway to
+--     them (it reaches the extension in its own schema by dynamic SQL, #984). Each must take its method and key as p_method and
 --     p_key, so that every call to it can be read; a function calling the extension any other way is
 --     refused, its key being out of reach;
 --   * every call to a transport is a WRITE unless its method argument is the literal 'GET', 'HEAD' or
@@ -224,12 +225,15 @@ declare
   r record; lx record; k text[]; t text[]; n int; j int; c int; i int; d int; s int;
   v_starts int[]; v_ends int[]; v_args text[]; v_ix int; v_m int; v_kp int; v_verb text; v_key text; v_why text;
 begin
-  -- the http extension's request functions, bare and schema-qualified
+  -- the http extension's request functions, bare and schema-qualified, and the module's one gateway to them,
+  -- archive._s3_send, which calls the extension in its own schema by dynamic SQL (#984), so that the scan
+  -- starts from it where it cannot read the call itself
   select array_agg(x) into v_req from (
     select q.x from pg_proc p join pg_depend dp on dp.classid = 'pg_proc'::regclass and dp.objid = p.oid and dp.deptype = 'e'
       join pg_extension e on e.oid = dp.refobjid and e.extname = 'http'
       cross join lateral (values (p.proname::text), (p.pronamespace::regnamespace::text || '.' || p.proname)) q(x)
-     where p.prorettype = 'http_response'::regtype) s;
+     where p.prorettype = 'http_response'::regtype
+    union all values ('_s3_send'), ('archive._s3_send')) s;
   -- the transports: the module's functions that call one of those directly
   for r in select p.oid, p.pronamespace::regnamespace::text as nsp, p.proname::text as name, p.proargnames, p.prosrc
              from pg_proc p where p.pronamespace in ('archive'::regnamespace, 'pgpm'::regnamespace)
