@@ -54,8 +54,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
+      # The PG17 image from the Actions cache (test.yml explains the key); on a hit the job neither
+      # builds nor pulls, and the shard starts its guards about a minute earlier.
+      - name: Restore the PG17 test image from the cache
+        id: image
+        uses: ./.github/actions/test-image-restore
+        with:
+          profile: pg17
+          service: postgres17
       - name: Run the perf track, shard ${{ matrix.shard }}
         run: ./test.sh perf --shard=${{ matrix.shard }}
+      - name: Save the PG17 test image for the cache
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/test-image-save
+        with:
+          cache-hit: ${{ steps.image.outputs.cache-hit }}
+          image: ${{ steps.image.outputs.image }}
+          key: ${{ steps.image.outputs.key }}
+          cache-key: ${{ steps.image.outputs.cache-key }}
+          tarball: ${{ steps.image.outputs.tarball }}
 
   # Every guard is green on correct code. That alone does not show any of them would notice a
   # regression, and this repo has repeatedly produced guards that pass while observing nothing. These
@@ -69,16 +86,35 @@ jobs:
   # skips the pull of an image that is already present: a hit never calls Docker Hub. A miss pulls as
   # before and saves the image afterwards, pass or fail. archive.yml carries the same steps and the
   # same key, so either workflow's save serves both.
+  #
+  # Six shards, over a listing bench/mutations/mutate.py prints heaviest first (MUTATION_COST there):
+  # with four shards over the catalogue's own order the slowest took 17 minutes, the critical path of
+  # a merge group once the pgTAP matrix was split by channel, because the 240 s lz77 probe and the two
+  # 100 s deflate probes shared a shard; heavy-first over six, the slowest is about 11 (measured and
+  # simulated on the pr-1029 group, 2026-10-07). Both images the track builds (pgpm_test:17 and the
+  # pgsql-http one) come from the Actions cache under scripts/image_build_key.sh's key, as test.yml's.
   discriminate:
     name: guards discriminate ${{ matrix.shard }} / PG17
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: ['1/4', '2/4', '3/4', '4/4']
+        shard: ['1/6', '2/6', '3/6', '4/6', '5/6', '6/6']
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
+      - name: Restore the PG17 test image from the cache
+        id: image
+        uses: ./.github/actions/test-image-restore
+        with:
+          profile: pg17
+          service: postgres17
+      - name: Restore the archive test image from the cache
+        id: image-archive
+        uses: ./.github/actions/test-image-restore
+        with:
+          profile: archive
+          service: archive
       # MinIO from the Actions cache rather than Docker Hub (see the comment on this job). The reference
       # is read from docker-compose.yml, never restated here, and the cached copy is the digest-pulled
       # image under the local tag pgpm-cache/minio:<digest hex>: the runners' classic image store drops
@@ -138,6 +174,24 @@ jobs:
         with:
           path: ${{ steps.minio.outputs.tarball }}
           key: ${{ steps.minio.outputs.key }}
+      - name: Save the PG17 test image for the cache
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/test-image-save
+        with:
+          cache-hit: ${{ steps.image.outputs.cache-hit }}
+          image: ${{ steps.image.outputs.image }}
+          key: ${{ steps.image.outputs.key }}
+          cache-key: ${{ steps.image.outputs.cache-key }}
+          tarball: ${{ steps.image.outputs.tarball }}
+      - name: Save the archive test image for the cache
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/test-image-save
+        with:
+          cache-hit: ${{ steps.image-archive.outputs.cache-hit }}
+          image: ${{ steps.image-archive.outputs.image }}
+          key: ${{ steps.image-archive.outputs.key }}
+          cache-key: ${{ steps.image-archive.outputs.cache-key }}
+          tarball: ${{ steps.image-archive.outputs.tarball }}
 
   # One stable name for the merge queue and branch protection to require, whatever the shard count.
   summary:

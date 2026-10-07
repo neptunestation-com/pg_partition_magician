@@ -13,7 +13,7 @@ discriminate.sh would report "does not discriminate" for a guard that is in fact
 on a stale pattern is the same liveness-witness discipline the guards themselves follow.
 
 Usage: mutate.py <name> <src install.sql> <dst path>
-       mutate.py --list [--track=NAME]
+       mutate.py --list [--track=NAME]     (heaviest first: MUTATION_COST, so --shard=I/N balances)
 """
 import re
 import sys
@@ -9439,6 +9439,54 @@ MUTATION_SRC['forget_missing_survivors_by_count'] = 'tests/79_status_survives_dr
 
 
 
+# How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
+# enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
+# cost), and discriminate.sh's --shard=I/N interleaves that list, so the heavy ones spread over the
+# shards instead of landing wherever the catalogue put them. Measured on the pr-1029 merge group
+# (2026-10-07): 548 mutations, 45.5 minutes of work, median 2 s; in catalogue order the four shards
+# took 12, 14, 12 and 17 minutes because the 240 s lz77 probe and two 100 s deflate probes shared one;
+# heavy-first over six shards, the slowest is about 11. A mutation not listed here counts as
+# MUTATION_COST_DEFAULT. A name here that is not in MUTATIONS fails `--list` loudly: a stale entry
+# would silently stop balancing the mutation it was measured for.
+MUTATION_COST_DEFAULT = 2
+MUTATION_COST = {
+    "archive_lz77_hash_scratch": 240,
+    "archive_deflate_raises": 112,
+    "archive_deflate_six_arrays": 94,
+    "retire_inline_detach": 91,
+    "regrain_no_outgoing_fk": 82,
+    "archive_lz77_range_raises": 64,
+    "transmute_no_lock_timeout": 61,
+    "hypertable_cutover_no_lock_timeout": 41,
+    "transmute_abort_no_lock_timeout": 37,
+    "detach_reap_no_lock_timeout": 37,
+    "archive_lz77_repeat_differs": 32,
+    "transmute_reap_no_lock_timeout": 30,
+    "restore_fk_inline_validate": 30,
+    "parquet_per_column_statements": 29,
+    "maintain_no_commits": 27,
+    "transmute_no_commits": 25,
+    "hypertable_handoff_validate_no_lock_timeout": 25,
+    "upgrade_backfill_drops_not_null": 22,
+    "upgrade_regrain_capture_backfill_noop": 22,
+    "upgrade_child_oid_backfill_noop": 21,
+    "upgrade_regrain_mark_block_noop": 21,
+    "scratch_upgrade_fill_dropped": 20,
+}
+
+
+def listing_order():
+    """The catalogue heaviest first, catalogue order within a cost (see MUTATION_COST)."""
+    stale = sorted(set(MUTATION_COST) - set(MUTATIONS))
+    if stale:
+        raise SystemExit(
+            f"mutate.py: MUTATION_COST names mutations the catalogue does not have: {', '.join(stale)}.\n"
+            f"  A renamed or retired mutation must be renamed or removed there too, or the shards stop\n"
+            f"  balancing the one it was measured for."
+        )
+    return sorted(MUTATIONS.items(), key=lambda kv: -MUTATION_COST.get(kv[0], MUTATION_COST_DEFAULT))
+
+
 def main() -> int:
     if len(sys.argv) in (2, 3) and sys.argv[1] == "--list":
         track = "perf"
@@ -9466,7 +9514,7 @@ def main() -> int:
             return 2
 
         listed = 0
-        for name, (guard, why, _) in MUTATIONS.items():
+        for name, (guard, why, _) in listing_order():
             if MUTATION_TRACK.get(name, "perf") != track:
                 continue
             listed += 1
