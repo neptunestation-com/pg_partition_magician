@@ -8145,8 +8145,9 @@ select ok(
         "uninstall.sql sweeping by the comments alone (pre-#955): a recorded copy, delta and function whose "
         "comment record is gone are left, the trigger logging every write into a delta nothing drains. "
         "tests/timescale/db/49 stage C catches it.",
-        [("       order by s.kind desc, s.obj\n    loop\n",
-          "       and false   -- MUTANT: the record unread\n       order by s.kind desc, s.obj\n    loop\n", 1)],
+        [("      select s.parent_oid, s.kind, s.obj from pgpm.scratch s\n       order by s.kind desc, s.obj\n",
+          "      select s.parent_oid, s.kind, s.obj from pgpm.scratch s\n       where false\n"
+          "       order by s.kind desc, s.obj\n", 1)],
     ),
     "scratch_upgrade_fill_dropped": (
         "bench/upgrade_in_place.sh",
@@ -8897,6 +8898,54 @@ MUTATIONS["archive_upload_names_http_types"] = (
       1)],
 )
 MUTATION_SRC["archive_upload_names_http_types"] = "pgpm_archive/install.sql"
+
+# Issue #985: uninstall.sql's record sweep takes EVERY object pgpm.scratch records, by its oid, whatever it is
+# called now; the comment sweeps are left only a copy made before the record. One mutation per way the sweep
+# can fall short, each of pgpm_core/uninstall.sql.
+MUTATIONS["uninstall_scratch_record_defers_commented"] = (
+    "bench/uninstall_scratch_by_record.sh",
+    "Pre-#985 uninstall.sql: the record sweep takes only a recorded object that has lost the copy's comment and "
+    "leaves every commented one to the comment sweeps, which also need the <rel>_pgpm_delta / <rel>_pgpm_dest "
+    "name, so a recorded copy, delta and function the operator renamed survive with the capture trigger on the "
+    "live table. tests/282 catches it (A's four objects survive, and the table refuses a write).",
+    [("      select s.parent_oid, s.kind, s.obj from pgpm.scratch s\n       order by s.kind desc, s.obj\n",
+      """      select s.parent_oid, s.kind, s.obj from pgpm.scratch s
+       where not exists (
+               select 1 from pg_description d
+                where d.classoid = 'pg_class'::regclass and d.objsubid = 0
+                  and ((s.kind = 'hypertable_dest' and d.objoid = s.obj
+                        and d.description = 'pgpm from_hypertable copy of ' || s.parent_oid)
+                       or (s.kind <> 'hypertable_dest' and d.description ~ '^pgpm from_hypertable horizon [0-9]+$'
+                           and d.objoid = (select s2.obj from pgpm.scratch s2
+                                            where s2.parent_oid = s.parent_oid and s2.kind = 'hypertable_delta'))))
+       order by s.kind desc, s.obj
+""", 1)],
+)
+MUTATION_SRC["uninstall_scratch_record_defers_commented"] = "pgpm_core/uninstall.sql"
+MUTATIONS["uninstall_scratch_record_drops_orphaned_copy"] = (
+    "bench/uninstall_scratch_by_record.sh",
+    "#985's record sweep without its source check: a recorded copy whose table the operator has since dropped is "
+    "dropped too, although it may be the only home of those rows (#773's rule, which the comment sweep keeps). "
+    "tests/282's B (a renamed recorded copy of a dropped table) is gone with its two rows.",
+    [("""        elsif not exists (select 1 from pg_class where oid = r.parent_oid) then
+          raise warning 'pg_partition_magician: left behind %, a from_hypertable copy that was never cut over: the hypertable it was copied from (oid %) no longer exists, so this table may hold the only copy of those rows. Drop it once you have checked.',
+            r.obj::regclass::text, r.parent_oid;
+""", "", 1)],
+)
+MUTATION_SRC["uninstall_scratch_record_drops_orphaned_copy"] = "pgpm_core/uninstall.sql"
+MUTATIONS["uninstall_scratch_record_skips_capture_fn"] = (
+    "bench/uninstall_hypertable_scratch_by_record.sh",
+    "#985's record sweep taking the copy and the delta by oid but leaving the capture function to the comment "
+    "sweep, which derives it from the delta's name: once the delta is renamed (or dropped here first) nothing "
+    "finds the function, and it and its trigger on the live hypertable and every chunk survive. "
+    "tests/timescale/db/54 catches it (the trigger and u985_a_capture() survive, and the hypertable refuses a "
+    "write).",
+    [("      select s.parent_oid, s.kind, s.obj from pgpm.scratch s\n       order by s.kind desc, s.obj\n",
+      "      select s.parent_oid, s.kind, s.obj from pgpm.scratch s\n       where s.kind <> 'hypertable_delta_fn'\n"
+      "       order by s.kind desc, s.obj\n", 1)],
+)
+MUTATION_SRC["uninstall_scratch_record_skips_capture_fn"] = "pgpm_core/uninstall.sql"
+MUTATION_TRACK["uninstall_scratch_record_skips_capture_fn"] = "timescale"
 
 
 def main() -> int:

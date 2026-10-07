@@ -2947,7 +2947,9 @@ them here, by oid, never by name. (The core's own are recorded where they always
 | `obj` | `oid` | the relation (`pg_class`) or, for `hypertable_delta_fn`, the function (`pg_proc`) |
 
 Primary key `(parent_oid, kind)`. The swap removes a hypertable's rows. An upgrade records a copy made by an
-earlier release from the comment that release put on it.
+earlier release from the comment that release put on it. `uninstall.sql` drops every object recorded here
+whatever it is called now and wherever it has been moved, keeping only a copy whose hypertable is gone (a
+`WARNING` names it); its comment-and-name sweeps are for a copy the record does not name.
 
 ### `pgpm.log`
 

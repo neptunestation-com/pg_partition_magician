@@ -477,6 +477,10 @@ run_timescale() {
     bash "$(dirname "$0")/bench/hypertable_delta_writer_grants.sh" pgpm_test-timescale pgpm_perf263 || fail=1
     echo "--- every drain and the cutover follow the hypertable's owner or refuse up front (issue #986) ---"
     bash "$(dirname "$0")/bench/hypertable_scratch_owner_follow.sh" pgpm_test-timescale pgpm_perf264 || fail=1
+    # #985's guard, the same way: it re-runs tests/timescale/db/54 against the real install, the clean-code half of
+    # the pair discriminate.sh completes with its timescale-track mutant (run_perf runs its core half, tests/282).
+    echo "--- uninstall drops every recorded scratch object by oid, whatever it is called now (issue #985) ---"
+    bash "$(dirname "$0")/bench/uninstall_hypertable_scratch_by_record.sh" pgpm_test-timescale pgpm_perf273 || fail=1
     # #917: five wrappers whose mutants discriminate.sh drives here had no clean-code run anywhere, so a
     # wrapper broken enough to fail against everything (a missing file: exit 1, "0 ran") was scored as
     # catching each of its mutants. These are their clean-code halves. bench/guards_run_on_clean_code.sh
@@ -1052,6 +1056,7 @@ run_perf() {
     "bench/upgrade_unanchored_cell.sh pgpm_perf267"
     "bench/progress_write_child_built.sh pgpm_perf268"
     "bench/obtain_rebuilds_detached_cell.sh pgpm_perf269"
+    "bench/uninstall_scratch_by_record.sh pgpm_perf272"
   )
   local selected=()
   local n=${#guards[@]} idx

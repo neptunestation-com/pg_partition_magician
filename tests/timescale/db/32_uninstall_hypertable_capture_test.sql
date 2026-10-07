@@ -21,13 +21,18 @@
 -- must survive with its trigger still firing. Every "gone" is paired with a witness that it was there and
 -- live before.
 --
+-- Since #985 uninstall drops whatever pgpm.scratch records by that record alone, so the comment sweep this file
+-- states is what finds a tracking copy made by a release before the record (it keeps the comment and has no
+-- row). "EvB"'s copy is made one: its rows in pgpm.scratch are deleted, as such a release would have left it.
+-- u737_a's stays recorded, so the two copies leave by the two paths.
+--
 -- The uninstall script is read with \ir, relative to this file. bench/uninstall_hypertable_capture.sh runs
 -- this file against a mutant uninstall.sql by setting the psql variable `uninstall` to its path.
 \if :{?uninstall}
 \else
 \set uninstall ../../../pgpm_core/uninstall.sql
 \endif
-select plan(15);
+select plan(16);
 
 -- ======================================================================================================
 -- fixture: two tracking copies not cut over, and the operator's own look-alike
@@ -64,6 +69,8 @@ end $f$;
 
 call pgpm.from_hypertable_copy('public.u737_a', 'ts', p_track_changes => true);
 call pgpm.from_hypertable_copy('"U737"."EvB"', 'ts', p_track_changes => true);
+-- "EvB"'s copy as a release before pgpm.scratch made it: the comment record alone (#985)
+delete from pgpm.scratch where parent_oid = '"U737"."EvB"'::regclass::oid;
 
 -- the online window: two keys touched on one, one on the other
 update public.u737_a set v = 'a2-upd' where id = 2;
@@ -90,6 +97,11 @@ select is(
       and obj_description(c.oid, 'pg_class') ~ '^pgpm from_hypertable horizon [0-9]+$'),
   array['"U737"."EvB_pgpm_delta"', 'u737_a_pgpm_delta'],
   'LIVENESS: the two copies'' deltas carry the module''s record and the look-alike does not');
+select is(
+  (select array_agg(c.relname::text || ':' || s.kind order by s.kind) from pgpm.scratch s join pg_class c on c.oid = s.parent_oid
+    where s.parent_oid in ('public.u737_a'::regclass::oid, '"U737"."EvB"'::regclass::oid)),
+  array['u737_a:hypertable_delta', 'u737_a:hypertable_delta_fn', 'u737_a:hypertable_dest'],
+  'LIVENESS: u737_a''s copy is in pgpm.scratch and "EvB"''s is not, so only the comment sweep can find it');
 
 -- ======================================================================================================
 -- the uninstall, in one transaction, as the script says to run it

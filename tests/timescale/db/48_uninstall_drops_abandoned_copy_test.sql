@@ -25,13 +25,18 @@
 -- Every "gone" is paired with a witness that it was there before, and every survivor with a witness that
 -- the sweep ran.
 --
+-- Since #985 uninstall drops whatever pgpm.scratch records by that record alone, so the comment sweep this file
+-- states is what finds a copy made by a release before the record (it keeps the comment and has no row). B's
+-- and D's copies are made such copies: their rows in pgpm.scratch are deleted, as such a release would have
+-- left them. A's stays recorded, so the copies leave by both paths.
+--
 -- The uninstall script is read with \ir, relative to this file. bench/uninstall_hypertable_copy.sh runs this
 -- file against a mutant uninstall.sql by setting the psql variable `uninstall` to its path.
 \if :{?uninstall}
 \else
 \set uninstall ../../../pgpm_core/uninstall.sql
 \endif
-select plan(22);
+select plan(23);
 
 -- ======================================================================================================
 -- fixture
@@ -52,6 +57,7 @@ create table "U773"."EvB" (ts timestamptz not null, ref_id int not null referenc
 select create_hypertable('"U773"."EvB"', 'ts', chunk_time_interval => interval '1 day');
 insert into "U773"."EvB" values ('2026-01-01 00:00+00', 1, 10), ('2026-01-02 00:00+00', 2, 20);
 call pgpm.from_hypertable_copy('"U773"."EvB"', 'ts');
+delete from pgpm.scratch where parent_oid = '"U773"."EvB"'::regclass::oid;   -- a pre-record copy (#985)
 
 -- C: the operator's own table, with the module's name and a comment that is not the module's record
 create table public.u773_c (id int primary key);
@@ -65,6 +71,7 @@ select create_hypertable('public.u773_d', 'ts', chunk_time_interval => interval 
 insert into public.u773_d values ('2025-03-01 00:00+00', 31), ('2025-03-02 00:00+00', 32), ('2025-03-03 00:00+00', 33);
 call pgpm.from_hypertable_copy('public.u773_d', 'ts');
 select oid as d_oid from pg_class where oid = 'public.u773_d'::regclass \gset
+delete from pgpm.scratch where parent_oid = :'d_oid'::oid;                      -- a pre-record copy (#985)
 drop table public.u773_d;
 
 -- E: a completed migration
@@ -118,6 +125,12 @@ select is(
   'p no comment',
   'E was migrated, and the swap left the migrated table no record of the copy it was');
 select is(to_regclass('public.u773_e_pgpm_dest'), null, 'LIVENESS: E''s copy is the migrated table, nothing under the copy''s name');
+select is(
+  (select array_agg(s.obj::regclass::text || ':' || s.kind order by s.kind) from pgpm.scratch s
+    where s.obj in ('public.u773_a_pgpm_dest'::regclass::oid, '"U773"."EvB_pgpm_dest"'::regclass::oid,
+                    'public.u773_d_pgpm_dest'::regclass::oid)),
+  array['u773_a_pgpm_dest:hypertable_dest'],
+  'LIVENESS: A''s copy is in pgpm.scratch and B''s and D''s are not, so only the comment sweep can find them');
 
 -- ======================================================================================================
 -- the uninstall, in one transaction, as the script says to run it
