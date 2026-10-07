@@ -50,6 +50,7 @@ reads the tail before anything else.
 import argparse
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -88,9 +89,17 @@ def pr_class(runs):
     return "not_reproduced", None
 
 
+TAP_LINE = re.compile(r"^\s*(?:not )?ok\b", re.M)
+
+
 def same_last_error(runs):
-    """The last ERROR line when every run failed and they all end in the same one, else None."""
+    """The last ERROR line when every run failed with the same one AND none of them printed a single
+    assertion result (`ok` / `not ok`): the reproduction died before its first check (a missing extension,
+    a fixture that cannot load). A defect whose own error is the same on every tree, after the liveness
+    checks passed, is a pre-existing defect and is not flagged (#1053's upgrade-path claim)."""
     if len(runs) < 2 or not all(r.get("fails") for r in runs.values()):
+        return None
+    if any(TAP_LINE.search(r.get("tail") or "") for r in runs.values()):
         return None
     lasts = set()
     for r in runs.values():
@@ -215,11 +224,13 @@ def selftest():
             mk("P1", cid)
         mk("P1", "P1-05", "select 1;")   # no LIVENESS: invalid
         E = {"fails": True, "exit": 3, "tail": "psql:<stdin>:12: ERROR:  function plan(integer) does not exist"}
-        mk("P1", "P1-06")
+        D = {"fails": True, "exit": 3, "tail": "ok 1 - LIVENESS: prepared\nnot ok 4 - write after the rename\npsql:<stdin>:40: ERROR:  relation x does not exist"}
+        mk("P1", "P1-06"); mk("P1", "P1-07")
         table = {  # (claim, tree) -> result
             ("ACC-01", "base"): F, ("ACC-01", "head"): P, ("ACC-01", "review"): P, ("ACC-01", "m_a"): F, ("ACC-01", "m_b"): P,
             ("ACC-02", "base"): F, ("ACC-02", "head"): P, ("ACC-02", "review"): P, ("ACC-02", "m_a"): P, ("ACC-02", "m_b"): P,   # both restore a cousin
             ("P1-06", "base"): E, ("P1-06", "head"): E, ("P1-06", "review"): E,     # never ran
+            ("P1-07", "base"): D, ("P1-07", "head"): D, ("P1-07", "review"): D,     # the defect's own error, after a liveness check
             ("P1-01", "base"): P, ("P1-01", "head"): F, ("P1-01", "review"): F,     # regression
             ("P1-02", "base"): F, ("P1-02", "head"): F, ("P1-02", "review"): F,     # pre-existing
             ("P1-03", "base"): P, ("P1-03", "head"): P, ("P1-03", "review"): F,     # seed hit
@@ -237,6 +248,7 @@ def selftest():
         assert by["ACC-01"]["class"] == "fixed" and by["ACC-01"]["acceptance"] == {"fails_on_base": True, "passes_on_head": True, "mutant_restores": {"a": True, "b": False}, "any_restores": True}, by["ACC-01"]
         assert by["ACC-02"]["acceptance"]["any_restores"] is False, by["ACC-02"]
         assert by["P1-06"]["class"] == "pre_existing" and "same last error" in by["P1-06"]["note"], by["P1-06"]
+        assert by["P1-07"]["class"] == "pre_existing" and not by["P1-07"].get("note"), by["P1-07"]
         assert by["P1-01"]["class"] == "regression" and by["P1-02"]["class"] == "pre_existing"
         assert by["P1-03"]["class"] == "seed_hit" and by["P1-03"]["seed"] == "S1", by["P1-03"]
         assert by["P1-04"]["class"] == "not_reproduced" and by["P1-05"]["class"] == "invalid_repro"
