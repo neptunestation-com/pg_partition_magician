@@ -15,6 +15,7 @@ the two model roles.
 | `file_issues.py --groups --claims --verdicts --pinned --pass --out [--post]` | 10 | one issue body per root-cause group with its reproductions inline; `--post` files them, Tier 1 first, and writes `filed.json` |
 
 Each Python script has a `--selftest` that CI runs (`.github/workflows/lint.yml`, "Review tooling self-test").
+The per-PR mode's scripts are listed under [Per-PR verification tooling](#per-pr-verification-tooling).
 
 ## Claim format
 
@@ -224,12 +225,38 @@ Assign before spawning. Fixers working in parallel each take "the next free" tes
 database unless the coordinator hands them out; pass 2 ended with seven files numbered 124. `land.sh`
 renumbers a duplicate `pgpm_perfNN` (databases) but cannot renumber files.
 
+## Per-PR verification tooling
+
+The standing mode after convergence (docs/adversarial-review.md, "Per-PR verification"), started early as a
+test. `/pr-verify` (`.claude/skills/pr-verify/`) is the coordinator checklist; the `finder` and `verifier`
+agents each have a per-PR section. A pull request has four trees where a pass has two, and the classes read
+off them are the mode's own:
+
+| script | does | proof |
+|---|---|---|
+| `pr_verify.sh prepare <pr> --work <dir> [--acceptance <dir>] [--plan <json>] [--mutations a,b]` | resolves the head and the merge base, builds the history-less trees `base`, `head`, `review` (head plus the seed plan, planted by `plant_seeds.py`) and `mutant` (head with the PR's NEW mutations applied, found by comparing the two catalogues), the diff as presented (base against review, so the seed reads as part of the PR), the surface, and copies the acceptance claims; `harness up\|down` runs the private containers (`pgpm_prv-15`, `-archive` with MinIO, `-timescale`) so the fixers' gated runs are never disturbed; `classify` and `report` drive the two scripts below; `cleanup` removes the worktrees | its header; a run on a PR with no new mutation says so rather than building an empty mutant |
+| `pr_surface.py --base <tree> --head <tree> --out <dir>` | the slice: every unit (function or procedure, delimited by its dollar-quoted body) a hunk touches, a labelled unit per top-level hunk, every unit that calls a touched one (schema-qualified or bare, one hop), the touched non-SQL files as paths; writes `slices.json` for `coverage.py` (explicit `units`, since this release), `units.txt` for the finder's ledger and `surface.md`; exit 3 when the trees are identical | `--selftest`: hunks, unit extents, top-level hunks, both caller spellings, exercised-by, identical trees |
+| `pr_classify.py --claims --base --head [--review] [--mutant] [--sealed] --acceptance ACC --out` | `classify_claims.py`'s loader, contract and harness over four trees: `regression` (fails on head, not base), `pre_existing` (both), `fixed` (base only), `seed_hit` (review only), `not_reproduced`, `invalid_repro`; a base run that failed only its liveness checks does not make a head failure a regression, a head run that failed only its liveness checks while the base fails is `fixed` by a refusal of the premise, flagged; the acceptance finder's claims also run on the mutant and record `fails_on_base`, `passes_on_head`, `mutant_restores` | `--selftest` with a fake runner over every class and both liveness readings |
+| `pr_comment.py --classified --pr --head --base --out [--verdicts] [--coverage] [--surface] [--sealed] [--post]` | renders the comment and applies the landing policy, exit 1 = blocked: an acceptance that does not fail on the base, pass on the head or fail on the mutant; a verified regression of any tier; a verified Tier 1 or 2 pre-existing claim; an unverified candidate; a `partial` closing claim; verified Tier 3 to 5 pre-existing claims are listed for filing; the seed witness is reported found or MISSED and never blocks | `--selftest` over each policy clause |
+
+The verifier's `closing.json` is a verdict object with one key, `closing`, `{"verdict": "holds" | "partial",
+"reason": "...", "claims": [...]}`: whether the PR's own closing claim survived an attempt to reach the
+issue's consequence by a path the diff does not cover. `pr_verify.sh report` merges it with the per-claim
+verdicts (`jq -s add`) the way a pass does.
+
+Why the mutant. `./test.sh discriminate` proves the guard FAILS against the mutation; it cannot know whether
+the mutation put back the defect the issue describes or a cousin that happens to live on the same lines. The
+issue's own reproduction can: run against the mutant it must fail, and when it does not, the guard the
+mutation certifies is not a guard for this fix. That check costs one more install per acceptance claim.
+
 ## coverage.py
 
 `coverage.py --tree <review tree> --slices <slices.json> --claims <claims dir> [--threshold 0.9] [--out <json>]`
 scores each finder's coverage ledger (`<claims>/<finder>/coverage.md`, one `- <unit> | read: yes|no | <notes>`
 line per unit) against its slice: functions and procedures for an install.sql slice (a `file:lo-hi` range
-keeps the units whose `create` line is inside it), files for a tests, bench, docs or scripts slice. One row
+keeps the units whose `create` line is inside it), files for a tests, bench, docs or scripts slice, both at
+once for a mixed one, and an explicit `units` list (the shape `pr_surface.py` writes: named units plus a
+`file:lo-hi` label per top-level hunk) when the slice is a pull request's surface. One row
 per finder with the unread units; exit 1 when any finder is below the threshold or has no ledger, which
 the review-pass skill treats as "re-run or split before classifying". `--selftest` covers ranges, files
 slices, a missing ledger, units outside the slice and the threshold.

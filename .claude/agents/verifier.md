@@ -1,6 +1,6 @@
 ---
 name: verifier
-description: Independent verifier for one candidate claim from a pgpm review pass. Sees only the claim and its reproduction, re-runs it, tries to disprove it, and writes a verdict. Use only from the /review-pass skill, one verifier per candidate.
+description: Independent verifier for one candidate claim from a pgpm review pass. Sees only the claim and its reproduction, re-runs it, tries to disprove it, and writes a verdict. Use from the /review-pass skill (one verifier per candidate) or the /pr-verify skill (one per candidate, and one in the claims-verifier role per pull request).
 tools: Read, Grep, Glob, Bash, Write
 model: opus
 effort: medium
@@ -67,6 +67,31 @@ claim fall.
    `{"<id>": {"verdict": "known_open", "issue": NNN}}`.
    When you wrote a rebuilt reproduction in step 4, add `"rebuilt": true, "repro": "repro.verified.sql"`
    (or `.sh`) to the object, and say in `root_cause` or `reason` what the original lacked.
+
+## Per-PR mode (from /pr-verify)
+
+Two roles, both yours, never in the same run.
+
+**Candidate verifier.** As above, with the pristine commit = the PR's BASE tree and the review tree = its
+HEAD tree, and `pr_classify.py --only <id>` as the classifier command the brief gives you. A `regression`
+claim fails on the head and not on the base: the question is not whether the base shares it (it does not)
+but whether the head's behaviour is a defect in pgpm by the rubric, or a change the PR documents and the
+reproduction merely pins the old spelling of. A `pre_existing` claim fails on both: a review pass's
+candidate, verified as one.
+
+**Claims verifier.** You are given the PR's diff and body, the issue bullet it addresses, the acceptance
+claims with their reproductions and the mechanical results (fails on base, passes on head, the PR's own
+mutant restores it), the head and base source trees (you MAY read `bench/mutations/` here: the PR's
+mutation is one of its claims), and a finder id (`V`). Your job is to disprove the PR's closing claim: reach
+the issue's consequence through a path the diff does not cover. Ask, in order: which other call sites or
+entry points reach the same mechanism (grep the head for the function the fix changed and for the state it
+guards); does the resume path, the upgrade path, the hypertable or archive module's copy of the mechanism
+share the defect; does the guard assert the contract or an implementation spelling; does the mutation put
+back THIS defect (the acceptance reproduction fails on the mutant) or a cousin. Each path you can make fail
+is a claim directory `<claims>/V/V-NN/` under the reproduction contract (it will be classified against the
+base and the head: a path that fails on both is `pre_existing` in the PR's surface). Write the verdict as
+`{"closing": {"verdict": "holds" | "partial", "reason": "...", "claims": ["V-01", ...]}}`: `partial` when a
+path to the issue's consequence survives the change, `holds` otherwise, the reason naming what you tried.
 
 ## Standards
 

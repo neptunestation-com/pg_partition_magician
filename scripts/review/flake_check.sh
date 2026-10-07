@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# flake_check.sh <run_id> [--repo owner/name]
+# flake_check.sh <run_id> [--repo owner/name] [--attempt N]
 #
 # Decide whether a failed workflow run is one of the KNOWN CI flakes, so land.sh may retry it once. Exit
-# 0 when every failed job of the run's latest attempt matches a signature, 1 when any failed job is
-# something else, 2 when the run has no failed non-summary job. One line per failed job says which.
+# 0 when every failed job of the run's latest attempt (or of --attempt N, for checking a signature against
+# an old attempt) matches a signature, 1 when any failed job is something else, 2 when the run has no
+# failed non-summary job and did not itself conclude failure. One line per failed job says which.
 #
 # The signatures are deliberately narrow, so a real regression is never retried:
 #   lock_guard_probe   bench/regrain_outgoing_fk_lock.sh's probe assertion, with its liveness witness
@@ -14,47 +15,85 @@
 #   regrain_perf_discriminate  a discriminate shard whose ONLY non-discriminating guard is bench/regrain_perf.sh
 #                      against regrain_no_delta_analyze (issue #871: the delta scan counter is read before the
 #                      statistics collector flushes it on a loaded runner, so the mutant's seq scan reads as 0)
+#   runner_not_acquired  GitHub never gave the job a hosted runner: every non-success non-summary job of the
+#                      attempt carries the annotation "was not acquired by Runner of type hosted" or "was not
+#                      started because it repeatedly failed to be acquired", and no step of ours ran (the
+#                      lever phase before pass 9, 2026-10-05, under GitHub's incident "delays in assigning
+#                      GitHub-hosted runners"; tracking issue #966)
+#   lost_runner        the same loss without the annotation: every non-success non-summary job of the attempt
+#                      has NO steps at all (conclusion failure or cancelled with an empty step list and an
+#                      empty or BlobNotFound log, or still queued with no conclusion while the run itself has
+#                      concluded). Nothing of ours ran, so nothing of ours failed; `gh run rerun --failed`
+#                      restarts them (2026-10-07, after GitHub's incident of that afternoon: #1043's head run
+#                      had five matrix jobs and the lock-trace job fail this way, and #1044's perf run had
+#                      two discriminate shards queued for good while its summary failed; issue #1048)
+#   summary_only       the run concluded failure (or cancelled) while NO non-summary job of the attempt is
+#                      anything other than success or skipped: the only failure is a summary job's, or
+#                      GitHub recorded no failed job at all (#1041's merge group on 2026-10-07 lost its Perf
+#                      summary job to the incident and concluded failure with seven green jobs; #1043's Lint
+#                      run failed its summary with an empty log while every Lint job was green). Nothing of
+#                      ours failed. A PR head is rerun (--failed reruns the summary); a merge group cannot be
+#                      rerun, and land.sh re-enqueues it (issue #1048)
 # The summary jobs (Perf summary, Test Summary, Lint summary) fail whenever a job they need failed;
-# their failure is derived, so they are skipped, but at least one REAL failed job must match.
+# their failure is derived, so they are skipped, but at least one REAL failed job must match, except under
+# summary_only, where the point is that there is none.
 #
-# To add a signature: a name, a regex the job log must match, and the conditions under which the match
+# To add a signature: a name, the condition the run must meet, and the conditions under which the match
 # is NOT a flake. Then add the flake to the record of the pass that met it; a signature nobody can point
 # at an issue for is a way of hiding a regression.
 set -uo pipefail
 RUN=${1:?run id}; shift
-REPO=""
-while [ $# -gt 0 ]; do case "$1" in --repo) REPO=$2; shift 2;; *) echo "unknown option $1"; exit 3;; esac; done
+REPO=""; ATTEMPT=""
+while [ $# -gt 0 ]; do case "$1" in --repo) REPO=$2; shift 2;; --attempt) ATTEMPT=$2; shift 2;; *) echo "unknown option $1"; exit 3;; esac; done
 [ -n "$REPO" ] || REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 
-# runner_not_acquired: GitHub never gave the job a hosted runner ("The job was not acquired by Runner of
-# type hosted even after multiple attempts" in the job's annotations; the job is cancelled or failed with
-# no step run at all). Every non-success job of the latest attempt must carry that annotation, the
-# summary jobs included when they are the only ones: nothing of ours ran, so nothing of ours failed.
-# Met on 2026-10-05 during the lever phase before pass 9 (tracking issue #966) under GitHub's incident
-# "delays in assigning GitHub-hosted runners"; the record of that phase names it.
-# A summary job's failure is derived from the jobs it needs, so it is judged only when it is the sole
-# non-success job of the attempt (the perf summary itself can be the starved one).
-nonsuccess=$(gh run view "$RUN" --repo "$REPO" --json jobs \
-        --jq '.jobs[] | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped") | select(.name | test("summary"; "i") | not) | .databaseId')
-[ -n "$nonsuccess" ] || nonsuccess=$(gh run view "$RUN" --repo "$REPO" --json jobs \
-        --jq '.jobs[] | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped") | .databaseId')
-if [ -n "$nonsuccess" ]; then
-  all_runner=1
-  for j in $nonsuccess; do
-    ann=$(gh api "repos/$REPO/check-runs/$j/annotations" --jq '.[].message' 2>/dev/null)
-    grep -q "was not acquired by Runner of type hosted" <<<"$ann" || { all_runner=0; break; }
-  done
-  if [ "$all_runner" = 1 ]; then
-    echo "run $RUN: known flake runner_not_acquired (GitHub assigned no hosted runner to $(wc -w <<<"$nonsuccess" | tr -d ' ') job(s); nothing of ours ran)"
-    exit 0
-  fi
+run_conclusion=$(gh api "repos/$REPO/actions/runs/$RUN" --jq '.conclusion // "null"' 2>/dev/null)
+if [ -n "$ATTEMPT" ]; then
+  jobs_url="repos/$REPO/actions/runs/$RUN/attempts/$ATTEMPT/jobs?per_page=100"
+else
+  jobs_url="repos/$REPO/actions/runs/$RUN/jobs?per_page=100"
+fi
+# one line per job: id, status, conclusion, step count, name (the name last: it may hold spaces)
+alljobs=$(gh api "$jobs_url" --jq '.jobs[] | "\(.id)\t\(.status)\t\(.conclusion // "null")\t\(.steps | length)\t\(.name)"') || { echo "run $RUN: could not list its jobs"; exit 3; }
+# the non-summary jobs that are not a completed success or skip
+bad=$(awk -F'\t' 'tolower($5) !~ /summary/ && !($2 == "completed" && ($3 == "success" || $3 == "skipped"))' <<<"$alljobs")
+
+if [ -z "$bad" ]; then
+  case "$run_conclusion" in
+    failure|cancelled|timed_out)
+      echo "run $RUN: known flake summary_only (the run concluded $run_conclusion while every non-summary job is success or skipped; a summary job was lost or failed with nothing behind it; #1048)"
+      exit 0;;
+  esac
+  echo "run $RUN: no failed non-summary job in the latest attempt (run conclusion $run_conclusion)"; exit 2
 fi
 
-jobs=$(gh run view "$RUN" --repo "$REPO" --json jobs \
-        --jq '.jobs[] | select(.conclusion=="failure") | select(.name | test("summary"; "i") | not) | .databaseId')
-[ -n "$jobs" ] || { echo "run $RUN: no failed non-summary job in the latest attempt"; exit 2; }
+# runner_not_acquired: every bad job carries the not-acquired annotation
+all_runner=1
+while IFS=$'\t' read -r j _status _concl _steps _name; do
+  ann=$(gh api "repos/$REPO/check-runs/$j/annotations" --jq '.[].message' 2>/dev/null)
+  grep -qE "was not acquired by Runner of type hosted|not started because it repeatedly failed to be acquired" <<<"$ann" || { all_runner=0; break; }
+done <<<"$bad"
+if [ "$all_runner" = 1 ]; then
+  echo "run $RUN: known flake runner_not_acquired (GitHub assigned no hosted runner to $(wc -l <<<"$bad" | tr -d ' ') job(s); nothing of ours ran)"
+  exit 0
+fi
+
+# lost_runner: every bad job has no steps at all
+if ! awk -F'\t' '$4 != 0 { found = 1 } END { exit found ? 1 : 0 }' <<<"$bad"; then
+  :
+else
+  echo "run $RUN: known flake lost_runner ($(wc -l <<<"$bad" | tr -d ' ') job(s) with no step run at all: $(awk -F'\t' '{printf "%s%s [%s/%s]", (NR>1?", ":""), $5, $2, $3}' <<<"$bad"); nothing of ours ran; #1048)"
+  exit 0
+fi
+
+# anything else: a job that ran and failed must match a log signature; one that ran and was cancelled, or
+# that never ran beside one that did, is not a flake this script knows
 rc=0
-for j in $jobs; do
+while IFS=$'\t' read -r j status concl steps name; do
+  if [ "$concl" != failure ] || [ "$steps" = 0 ]; then
+    echo "job $j ($name): $status/$concl with $steps step(s) beside a job that ran; not a flake this script knows; do not retry"
+    rc=1; continue
+  fi
   log=$(gh api "repos/$REPO/actions/jobs/$j/logs" 2>/dev/null | sed 's/^[^ ]* //')
   other_fails=$(grep -E "^FAIL " <<<"$log" | grep -vc "writes to the MANAGED PARENT are not blocked")
   if grep -qE "^FAIL +writes to the MANAGED PARENT are not blocked +got [0-9]+, want 0" <<<"$log" \
@@ -68,8 +107,8 @@ for j in $jobs; do
      && grep -qE '^--- regrain_no_delta_analyze$' <<<"$log"; then
     echo "job $j: known flake regrain_perf_discriminate (regrain_perf.sh's scan counter read before the collector flushed; the only non-discriminating guard in the shard; #871)"
   else
-    echo "job $j: UNKNOWN failure, not a flake this script knows; do not retry"
+    echo "job $j ($name): UNKNOWN failure, not a flake this script knows; do not retry"
     rc=1
   fi
-done
+done <<<"$bad"
 exit $rc

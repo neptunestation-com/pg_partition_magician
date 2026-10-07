@@ -17,6 +17,7 @@ and `bench/mutations/`.
 - [Stopping criteria](#stopping-criteria)
 - [Between passes](#between-passes)
 - [Fix phase](#fix-phase)
+- [Per-PR verification](#per-pr-verification)
 - [Lenses](#lenses)
 - [Pass record](#pass-record)
 - [Pass history](#pass-history)
@@ -183,9 +184,10 @@ The deep-hunt mode ends when ALL of the following hold, judged on the two most r
 
 Stopping does not mean no scrutiny. It means the standing mode changes to:
 
-- **per-PR adversarial verification**: every PR touching `pgpm_core/install.sql` or `pgpm_archive/`
-  gets a verifier pass on its claims (the CHANGELOG bullet, the guard, the mutation) with the same
-  fail-then-pass rule;
+- **per-PR adversarial verification**: every PR touching `pgpm_core/install.sql`, `pgpm_archive/` or
+  `pgpm_hypertable/` gets a verifier pass on its claims (the CHANGELOG bullet, the guard, the mutation)
+  with the same fail-then-pass rule, and a finder on the units it touched; the mode is specified in
+  [Per-PR verification](#per-pr-verification) and was started before convergence, as a test;
 - **a full pass after any release, and after any merge batch of more than five PRs**, since a batch of
   fixes is new surface with new interactions.
 
@@ -287,6 +289,62 @@ what follows.
   root causes closed. The fixers' adjacent observations are filed as issues, marked unverified, and
   verified bullet by bullet before the next pass is pinned ("The backlog is verified before the pin",
   above).
+
+## Per-PR verification
+
+The standing mode the stopping criteria name, specified here because it was started early: after pass 9
+every Tier 1 of the pass, and both Tier 1s of the verified backlog, sat on surface a recent fix PR had just
+created (a scratch lever's gap, an export claim's shape, a refusal's missing sibling). A pass finds that
+backlash a week later; this finds it on the PR, while the PR waits for its own head checks. The hypothesis
+it tests is the fix-adjacent one: if the pass after a per-PR-verified fix round shows fewer fresh-surface
+Tier 1s, the mode works. The coordinator's checklist is `/pr-verify`
+(`.claude/skills/pr-verify/SKILL.md`); the mechanical steps are `scripts/review/pr_verify.sh` and the three
+scripts it drives (`pr_surface.py`, `pr_classify.py`, `pr_comment.py`).
+
+**Which PRs.** Every PR that touches `pgpm_core/install.sql`, `pgpm_archive/` or `pgpm_hypertable/`; any
+other PR when its claims are worth the budget. It runs on the head as opened, before the queue; a rebase at
+landing changes only the list files `keep_both.py` resolves, and the comment names the head it verified.
+
+**Four trees, not two.** A pass runs a reproduction against the seeded review tree and the pristine commit.
+A PR has a base (the merge base: the tree without the change), a head (with it), a review tree (the head
+plus one planted seed, the tree the finder is shown) and a mutant (the head with the PR's own new mutations
+applied: the defect the PR says it fixes, put back). All four are history-less exports; the finder is given
+the review tree and the diff of the base against it, so the seed reads as part of the PR, exactly as a
+defect the PR introduced would. Where a reproduction fails decides its class: on the head and not the base,
+a **regression** the PR introduced; on both, a **pre-existing** defect in the PR's surface (a pass's
+candidate); on the base and not the head, **fixed**; on the review tree alone, a **seed hit**. A base run
+that failed only its liveness checks never reached the defect and does not make a head failure a
+regression; a head run that failed only its liveness checks while the base fails the defect is fixed by a
+refusal of the fixture's premise, and a verifier says whether that refusal is what the issue asked for.
+
+**Two halves.** The cheap half re-runs the PR's own claims: the issue's verified reproduction must fail on
+the base, pass on the head, and fail again on the mutant, since a mutation that does not make the issue's
+reproduction fail has put back some defect but not this one, and the guard it certifies is not a guard for
+this fix. A claims verifier then tries to disprove the closing claim by reaching the issue's consequence
+through a path the diff does not cover (a sibling call site, the resume or upgrade path, the other module's
+copy of the mechanism); each path it can make fail is a claim. The other half is a finder under the
+fresh-surface lens and one more, on a slice that is the units the diff touches plus the units that call them
+(`pr_surface.py`, one hop, scored by the coverage ledger as in a pass), with the PR's body as a claim to
+test rather than a fact. One verifier per candidate, exactly as in a pass, with the base as the pristine
+commit.
+
+**The seed is the witness.** One seed in the PR's surface, usually the PR's own new mutation (its surface
+is the PR's by construction) or a one-line novel patch, measures the one finder the way nine seeds measure
+a pass: a hunt that missed it proves little about the PR, whatever else it found. The comment says found or
+missed, and a miss is a method result, not a mark against the PR. Three misses in a row on one surface shape
+mean the brief or the lens needs changing.
+
+**Policy, applied by the script.** `pr_comment.py` decides and posts; the coordinator does not decide by
+hand. Blocked: an acceptance reproduction that does not fail on the base, pass on the head, or fail on the
+mutant; a verified regression of any tier; a verified Tier 1 or 2 pre-existing defect in the PR's surface;
+a candidate with no verdict; a closing claim verified `partial`. Clear: everything else. Verified Tier 3 to
+5 pre-existing claims are filed as issues with their reproductions and do not hold the PR. A blocked PR is
+fixed in place by its fixer and verified again on the new head.
+
+**Cost.** Measured in the trial (the lever phase before pass 10, four fix PRs): about a finder's budget on a
+surface of five to twenty units plus one claims verifier and one verifier per candidate, in the time the
+head checks take anyway. The record of the phase it belongs to carries each verification's head, seed
+result, classes, verdicts and cost, so the mode's own yield can be read against the passes'.
 
 ## Lenses
 

@@ -37,13 +37,29 @@ cap allows. The brief carries: the issue number and body, the assigned numbers, 
 the reminder that the issue's reproductions are the acceptance test unless they prove unsound. Its harness line is
 `docker run -d --name pgpm_fix_<id> --network pgpm_test_net -e POSTGRES_PASSWORD=postgres -v "$PWD:/repo:ro" pgpm_test:15`;
 without `-e POSTGRES_PASSWORD` the container exits at once (pass 5's wave-1 briefs lacked it and every
-fixer worked around it). Record
+fixer worked around it). An archive fixer gets a PRIVATE MinIO on a private network, with the compose
+service's exact invocation: `docker run -d --name pgpm_fix_<id>_minio --network pgpm_fix_<id>_net
+--network-alias minio -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin --entrypoint minio
+<the bitnamilegacy/minio digest in docker-compose.yml> server /bitnami/minio/data --address :9000`
+(the image's entrypoint bypassed on purpose; keeping it with `server /data` exits "file access denied":
+three pass-9 fixers lost time to the old recipe, #1035), then the `/minio/health/cluster` wait and the
+SigV4 bucket PUT `test.sh`'s run_archive does. Four more lines every brief carries since pass 9 (#1035):
+run each gated track ONCE, at the end, in the FOREGROUND, and do not report until its verdict is in (nine
+of 23 fixers' "gated run in progress" notices read as reports); a partial fix of a multi-bullet issue says
+`Addresses #N (bullet k)`, never `Fixes`/`Closes`, which close the whole issue whatever follows the
+number; a rule-tightening PR (a stricter discriminate or lint) is spawned with the wave but landed LAST,
+and its fixer re-runs the track on the rebased head before it is enqueued; when several fixers must extend
+one guard script's dispatch, one fixer owns the dispatch and the others append under it. Record
 each PR the fixers report in `$WORK/prs.tsv` with its test, guard and mutation names.
 
 ## 3. Gate, then land in order
 
-- Before landing, every PR must have passed `./test.sh 15 --channel=psql` on its own head (the fixer's
-  report says so; spot-check one), run through `scripts/review/gate.sh $WORK/gate.lock -- ./test.sh 15
+- Before landing, every PR that touches `pgpm_core/install.sql`, `pgpm_archive/` or `pgpm_hypertable/`
+  gets `/pr-verify` (the standing per-PR verification: the issue's reproduction re-run on the base, the head
+  and the PR's own mutant, a finder on the touched units and their callers, one verifier per candidate, the
+  comment that says clear or blocked); a blocked PR goes back to its fixer. It runs while the head checks
+  run, so it costs no landing time. Every PR must also have passed `./test.sh 15 --channel=psql` on its own
+  head (the fixer's report says so; spot-check one), run through `scripts/review/gate.sh $WORK/gate.lock -- ./test.sh 15
   --channel=psql` so parallel fixers do not fail each other at `compose up`. The merge queue runs every
   track on the exact tree it merges.
 - Land them with `scripts/review/landq.sh $WORK --batch 5` reading `$WORK/landq.txt` (`<tier> <pr>` lines,

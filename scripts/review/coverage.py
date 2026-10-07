@@ -37,20 +37,42 @@ def sql_units(path, lo=None, hi=None):
     return units
 
 
+SQL_FILE = re.compile(r'^pgpm_[a-z]+/.*\.sql(:\d+-\d+)?$')
+
+
 def slice_units(tree, spec):
+    """The units a slice contains. `files` are expanded: an install.sql under pgpm_*/ to its functions and
+    procedures (a `:lo-hi` range keeps those whose create line is inside it), anything else to its path.
+    `units` names SQL units explicitly (`schema.name`, or a `file:lo-hi` label for a top-level hunk), the
+    shape pr_surface.py writes for a pull request's touched units and their callers: when it is present
+    the slice's SQL files are not expanded (they only say where the units live) and the non-SQL files are
+    still listed. `kind` may force every file to be read as a path ("files"); otherwise each file decides
+    for itself, and the kind reported is sql, files, mixed or units."""
     files = spec.get('files', [])
+    explicit = spec.get('units')
     kind = spec.get('kind')
+    sqlish = [bool(SQL_FILE.match(f)) for f in files]
     if kind is None:
-        kind = 'sql' if files and all(re.match(r'^pgpm_[a-z]+/.*\.sql(:\d+-\d+)?$', f) for f in files) else 'files'
-    units = []
-    for f in files:
+        if explicit is not None:
+            kind = 'units' if all(sqlish) else 'mixed'
+        elif files and all(sqlish):
+            kind = 'sql'
+        elif files and not any(sqlish):
+            kind = 'files'
+        else:
+            kind = 'mixed'
+    units = list(explicit or [])
+    for f, is_sql in zip(files, sqlish):
+        as_sql = is_sql and kind != 'files'
+        if as_sql and explicit is not None:
+            continue   # named explicitly above
         lo = hi = None
         m = re.match(r'^(.*?):(\d+)-(\d+)$', f)
         if m:
             f, lo, hi = m.group(1), int(m.group(2)), int(m.group(3))
         for p in sorted(glob.glob(os.path.join(tree, f), recursive=True)):
             rel = os.path.relpath(p, tree)
-            if kind == 'sql':
+            if as_sql:
                 units += sql_units(p, lo, hi)
             else:
                 units.append(rel)
@@ -138,7 +160,20 @@ def selftest():
         rows, worst = score(tree, {'F1': slices['F1']}, claims, 0.9)
         assert rows[0]['coverage'] == 1.0 and worst == 1.0
         text = render(rows, 0.9); assert 'ok' in text
-    print('coverage.py selftest: PASS (sql units with ranges, files slices, missing ledger, extra units, threshold)')
+        # a mixed slice expands its SQL file to units and lists its other files as paths
+        kind, units = slice_units(tree, {'files': ['pgpm_core/install.sql:1-4', 'bench/g1.sh']})
+        assert kind == 'mixed' and units == ['pgpm.a', 'pgpm.b', 'pgpm.c', 'bench/g1.sh'], (kind, units)
+        # explicit units (pr_surface.py's shape): the SQL file is not expanded, the label for a top-level
+        # hunk is a unit like any other, and the touched non-SQL files are still listed
+        spec = {'files': ['pgpm_core/install.sql', 'bench/g2.sh'], 'units': ['pgpm.b', 'pgpm_core/install.sql:2-2']}
+        kind, units = slice_units(tree, spec)
+        assert kind == 'mixed' and units == ['pgpm.b', 'pgpm_core/install.sql:2-2', 'bench/g2.sh'], (kind, units)
+        assert slice_units(tree, {'files': ['pgpm_core/install.sql'], 'units': ['pgpm.c']}) == ('units', ['pgpm.c'])
+        open(os.path.join(claims, 'F1', 'coverage.md'), 'w').write(
+            '- pgpm.b | read: yes |\n- pgpm_core/install.sql:2-2 | read: yes | top-level grant\n- bench/g2.sh | read: no | budget\n')
+        rows, worst = score(tree, {'F1': spec}, claims, 0.9)
+        assert rows[0]['units'] == 3 and rows[0]['read'] == 2 and rows[0]['unread'] == ['bench/g2.sh'], rows[0]
+    print('coverage.py selftest: PASS (sql units with ranges, files slices, mixed and explicit-unit slices, missing ledger, extra units, threshold)')
 
 
 def main(argv):

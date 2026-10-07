@@ -132,6 +132,9 @@ jobs:
           python3 scripts/review/close_comments.py --selftest
           python3 scripts/review/file_issues.py --selftest
           python3 scripts/review/landing_stats.py --selftest
+          python3 scripts/review/pr_surface.py --selftest
+          python3 scripts/review/pr_classify.py --selftest
+          python3 scripts/review/pr_comment.py --selftest
 
   shellcheck:
     name: Shell scripts
