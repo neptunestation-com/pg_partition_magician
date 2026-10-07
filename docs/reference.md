@@ -1625,7 +1625,10 @@ pgpm never cuts one to 63 bytes, which for a 63-byte table name would be the tab
 from the parent when the prepare tick mints them and found
 by **oid** from then on (`config.regrain_delta_oid`, `config.regrain_capture_fn_oid`), so renaming the parent
 mid-regrain changes nothing: the trigger keeps writing the delta it was given, and the reconcile, the swap
-gate and the swap read that same relation, in the schema it is in. The source is likewise the relation
+gate and the swap read that same relation, in the schema it is in. The trigger reaches the delta through
+that oid too, so a delta you rename or move mid-regrain goes on taking every change, and a table you create
+under the name it gave up takes none. A delta you drop refuses every write into the regraining partition
+(42P01, naming the remedy) until the next tick, which restarts the run and re-mints capture. The source is likewise the relation
 `pgpm.part.child_oid` recorded, in its own schema, so a parent moved by `ALTER TABLE ... SET SCHEMA` before
 its regrain begins, or at any point while it runs, regrains as if it had stayed; the
 delta is minted in the parent's schema as of the prepare tick. The copies are made beside the source, in its

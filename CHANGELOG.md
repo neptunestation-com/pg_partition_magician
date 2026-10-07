@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **Regrain's change capture writes its delta by the oid the prepare tick recorded** (#1051). The reconcile,
+  the swap gate, the swap and `regrain_cancel` have found the delta by `pgpm.config.regrain_delta_oid` since
+  #496, but the capture function `_regrain_capture_install` minted inserted into `<rel>_pgpm_regrain_delta`
+  by name, so renaming the recorded delta mid-regrain refused every write into the regraining partition
+  (42P01) for the life of the regrain, and a table created under the freed name took the captured keys, which
+  the swap never read. The function keeps its static insert only while the minted name still leads to the
+  recorded oid (still the body the #969 upgrade proof recognises); once it does not, it renders the oid to the
+  delta's current name and inserts through it dynamically, the key values bound, and a delta that is gone
+  refuses the write as 42P01, naming the remedy (the next tick restarts the run and re-mints capture).
+  Measured on 100,000-row updates on PG 15: the name check costs about 0.3 microseconds a captured write, and
+  a write after the rename about 5.5 more. The core sibling of #1037's bullet 1. Test `tests/288`, guard
+  `bench/regrain_capture_delta_by_record.sh`, mutation `regrain_capture_delta_insert_by_name`.
+
 - **A synchronous export reads the relation it claimed its key for** (#1030, bullet 1). `archive.to_s3`
   resolved the child and claimed the object key for its oid, then read the child later by schema and name with
   nothing held on it, so a second session that dropped the child and created another relation by its name in
