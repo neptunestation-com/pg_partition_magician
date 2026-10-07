@@ -214,8 +214,11 @@ it); on PostgreSQL 18, a `NOT ENFORCED` `CHECK` constraint, named `NOT ENFORCED`
 across the conversion, and PostgreSQL 18 can neither validate one nor alter a `CHECK`'s enforceability:
 drop it, or re-create it as an enforced `CHECK`); a `CHECK ... NO INHERIT` constraint, which PostgreSQL does not allow on a partitioned table (drop it,
 or re-create it without `NO INHERIT`); and a generated control column, which PostgreSQL cannot partition
-by (partition on a plain column). The trigger refusal is asked again under the cutover's lock, so a
-trigger of that shape created while the conversion runs is refused the same way. So is every object that
+by (partition on a plain column). These are asked again at the start of the cutover, under the table lock
+it takes before building the new parent, so one committed while the conversion runs is refused with the
+same message and remedy, leaving the resumable state a failed cutover leaves (the bound and the claim).
+The trigger refusal is asked again under the cutover's lock, so a trigger of that shape created while the
+conversion runs is refused the same way. So is every object that
 names the table by its oid rather than its name: a **view** or **materialized view** over it, a **rule** whose
 action uses it (on the table itself or on another), a SQL-standard function body (`BEGIN ATOMIC`) that reads
 it, and another table's **policy** that queries it. The cutover renames the original table, and that oid with

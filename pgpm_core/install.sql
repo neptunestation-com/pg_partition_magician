@@ -6982,6 +6982,82 @@ begin
 end;
 $$;
 
+-- The shapes of the table the cutover cannot carry (#730), refused. Asked twice by _transmute (#766): in the
+-- preflight, before anything is committed, and again at the start of the cutover, under the ACCESS SHARE it
+-- takes on the table before its staging LIKE. Every one of them was asked in the preflight only, so one
+-- committed while phases 1 and 2 had let go of the table (an ALTER queued behind phase 1's ADD of the bound
+-- is granted as soon as phase 1 commits) reached the cutover and failed it raw, after the write-rejecting
+-- bound and the claim had committed. ADD CONSTRAINT ... CHECK, ALTER COLUMN and ADD and DROP COLUMN all take
+-- ACCESS EXCLUSIVE, which that ACCESS SHARE excludes until the cutover commits, so the second answer is the
+-- one the LIKE and the ATTACH act on. Asked before the LIKE rather than under the ACCESS EXCLUSIVE further
+-- down: the LIKE is itself where a NO INHERIT CHECK and a generated control column fail.
+create or replace function pgpm._transmute_refuse_generated_control(p_parent regclass, p_control name)
+returns void language plpgsql stable as $$
+begin
+  -- A GENERATED control column (STORED, or VIRTUAL on 18) passed the type check, phases 1 and 2 committed
+  -- the validated bound on it and the claim, and the cutover's CREATE TABLE ... PARTITION BY RANGE died with
+  -- a raw "cannot use generated column in partition key", on every retry, leaving the table rejecting each
+  -- write past hi until an abort or the sweep. A plain column cannot be made generated in place; dropping
+  -- it and adding it back as one is the way it happens after the preflight.
+  if (select a.attgenerated from pg_attribute a
+       where a.attrelid = p_parent and a.attname = p_control and not a.attisdropped) <> '' then
+    raise exception 'pg_partition_magician: cannot partition % on % -- it is a generated column, and PostgreSQL cannot use a generated column in a partition key. Partition on a plain column instead (the one it is computed from, when that is time-ordered), then re-run transmute.',
+      p_parent, quote_ident(p_control);
+  end if;
+end;
+$$;
+
+create or replace function pgpm._transmute_refuse_uncarried_constraints(p_parent regclass)
+returns void language plpgsql stable as $$
+declare v_bad_con text;
+begin
+  -- Constraints the cutover cannot carry (#730). Its CREATE TABLE ... LIKE INCLUDING CONSTRAINTS copies
+  -- every CHECK (and, on 18, every NOT NULL constraint) onto the new parent, and two shapes cannot make
+  -- that trip. Neither was checked, so each surfaced as a raw error from inside the cutover, after phases
+  -- 1 and 2 had committed the validated, write-rejecting bound and the claim, and every retry failed the
+  -- same way. Both cost nothing to refuse in the preflight, before anything is committed, as #509 does for
+  -- every other shape the cutover cannot convert.
+  --
+  -- A NOT ENFORCED CHECK (PostgreSQL 18; #969 bullet 10). It reads convalidated = false too, so the NOT
+  -- VALID arm below used to refuse it with the NOT VALID wording and a VALIDATE CONSTRAINT remedy that
+  -- PostgreSQL rejects for it ("cannot validate NOT ENFORCED constraint"), and PostgreSQL 18 cannot alter a
+  -- CHECK's enforceability either. It is named for what it is, with the remedies that apply: drop it, or
+  -- re-create it as an enforced CHECK. pg_constraint.conenforced exists from 18 only, so it is read through
+  -- the row's jsonb image, which on an older server has no such key, as the key gate does
+  -- (pgpm._refuse_unconvertible_keys, #959): the arm cannot fire there and needs no version check.
+  select string_agg(c.conname, ', ' order by c.conname) into v_bad_con
+    from pg_constraint c
+   where c.conrelid = p_parent and c.contype = 'c' and to_jsonb(c) ->> 'conenforced' = 'false';
+  if v_bad_con is not null then
+    raise exception 'pg_partition_magician: cannot transmute % -- its CHECK constraint(s) (%) are NOT ENFORCED. pgpm does not carry a NOT ENFORCED constraint across the conversion, and one cannot be made enforced in place: PostgreSQL 18 neither validates it nor alters the enforceability of a CHECK. Drop it (ALTER TABLE % DROP CONSTRAINT <name>), or re-create it as an enforced CHECK, then re-run transmute.',
+      p_parent, v_bad_con, p_parent::text;
+  end if;
+  -- A NOT VALID one: LIKE gives the parent a VALIDATED copy, and the ATTACH then refuses the table under
+  -- it ("conflicts with NOT VALID constraint on child table"). pgpm's own bound is excluded by name: a
+  -- resume after phase 1 committed and phase 2 did not finds it NOT VALID, and phase 2 validates it. A NOT
+  -- ENFORCED CHECK, which reads convalidated = false too, never gets here: the arm above refuses it first.
+  select string_agg(conname, ', ' order by conname) into v_bad_con
+    from pg_constraint
+   where conrelid = p_parent and contype in ('c', 'n') and not convalidated
+     and conname <> 'pgpm_monolith_bound';
+  if v_bad_con is not null then
+    raise exception 'pg_partition_magician: cannot transmute % -- its constraint(s) (%) are NOT VALID, and the cutover cannot carry a NOT VALID constraint: the new parent gets a validated copy, under which PostgreSQL refuses to attach the table. Validate them first (ALTER TABLE % VALIDATE CONSTRAINT <name>, which takes SHARE UPDATE EXCLUSIVE and so blocks no reader or writer), or drop them, then re-run transmute.',
+      p_parent, v_bad_con, p_parent::text;
+  end if;
+  -- A CHECK ... NO INHERIT: PostgreSQL does not allow one on a partitioned table ("cannot add NO INHERIT
+  -- constraint to partitioned table"), and leaving it on the monolith alone would check only the rows
+  -- routed there. CHECK only: a NOT NULL constraint the LIKE does not copy as NO INHERIT, and 18 marks a
+  -- primary key connoinherit too.
+  select string_agg(conname, ', ' order by conname) into v_bad_con
+    from pg_constraint
+   where conrelid = p_parent and contype = 'c' and connoinherit;
+  if v_bad_con is not null then
+    raise exception 'pg_partition_magician: cannot transmute % -- its CHECK constraint(s) (%) are NO INHERIT, which PostgreSQL does not allow on a partitioned table, and left on the original table alone they would check only the rows routed into it. Drop them, or re-create them without NO INHERIT (ADD CONSTRAINT ... CHECK (...) NOT VALID, then VALIDATE CONSTRAINT), then re-run transmute.',
+      p_parent, v_bad_con;
+  end if;
+end;
+$$;
+
 -- The one trigger shape a partitioned table cannot host (#277), refused. Asked twice by _transmute (#706):
 -- in the preflight, and again in the cutover under the table's ACCESS EXCLUSIVE, beside the trigger capture.
 -- CREATE TRIGGER takes only SHARE ROW EXCLUSIVE, so a row trigger with a transition table committed in
@@ -7377,7 +7453,6 @@ declare
   v_trgnames text[] := '{}'; v_trgstates text[] := '{}';   -- #499: tgname and tgenabled, index-aligned with v_trgdefs
   v_poldefs text[] := '{}'; v_poldef text;   -- #897: the policies, captured as statements naming the table
   v_bad_pub text; v_pub record;   -- #566: publication membership, refused or carried
-  v_bad_con text;                 -- #730: constraints the cutover cannot carry (NOT VALID, NO INHERIT)
   v_key_defer text := '';         -- #731: the reused key's DEFERRABLE / INITIALLY DEFERRED, carried onto the parent
   v_key_name name; v_key_idx oid; -- #789: the reused key's constraint name, which the parent takes, and its index
   v_replident "char"; v_ri_idx name;   -- #782: the table's replica identity, and the parent index it maps to
@@ -7511,15 +7586,8 @@ begin
   if v_typname is null then
     raise exception 'pg_partition_magician: column % not found on %', p_control, p_parent;
   end if;
-  -- #730: and a column PostgreSQL can partition by at all. A GENERATED one (STORED, or VIRTUAL on 18)
-  -- passed the type check below, phases 1 and 2 committed the validated bound on it and the claim, and the
-  -- cutover's CREATE TABLE ... PARTITION BY RANGE died with a raw "cannot use generated column in partition
-  -- key", on every retry, leaving the table rejecting each write past hi until an abort or the sweep.
-  if (select a.attgenerated from pg_attribute a
-       where a.attrelid = p_parent and a.attname = p_control and not a.attisdropped) <> '' then
-    raise exception 'pg_partition_magician: cannot partition % on % -- it is a generated column, and PostgreSQL cannot use a generated column in a partition key. Partition on a plain column instead (the one it is computed from, when that is time-ordered), then re-run transmute.',
-      p_parent, quote_ident(p_control);
-  end if;
+  -- #730: and a column PostgreSQL can partition by at all. Asked again in the cutover (#766), see the helper.
+  perform pgpm._transmute_refuse_generated_control(p_parent, p_control);
   if p_control_kind = 'time' and v_typname not in ('timestamptz', 'timestamp', 'date') then
     raise exception 'pg_partition_magician: control_kind time needs a timestamp/date column (got %)', v_typname;
   elsif p_control_kind = 'time' and v_typname = 'date'
@@ -7903,50 +7971,9 @@ begin
       p_parent, quote_ident(session_user), v_grantors_q;
   end if;
 
-  -- Constraints the cutover cannot carry (#730). Its CREATE TABLE ... LIKE INCLUDING CONSTRAINTS copies
-  -- every CHECK (and, on 18, every NOT NULL constraint) onto the new parent, and two shapes cannot make
-  -- that trip. Neither was checked, so each surfaced as a raw error from inside the cutover, after phases
-  -- 1 and 2 had committed the validated, write-rejecting bound and the claim, and every retry failed the
-  -- same way. Both cost nothing to refuse here, before anything is committed, as #509 does for every other
-  -- shape the cutover cannot convert.
-  --
-  -- A NOT ENFORCED CHECK (PostgreSQL 18; #969 bullet 10). It reads convalidated = false too, so the NOT
-  -- VALID arm below used to refuse it with the NOT VALID wording and a VALIDATE CONSTRAINT remedy that
-  -- PostgreSQL rejects for it ("cannot validate NOT ENFORCED constraint"), and PostgreSQL 18 cannot alter a
-  -- CHECK's enforceability either. It is named for what it is, with the remedies that apply: drop it, or
-  -- re-create it as an enforced CHECK. pg_constraint.conenforced exists from 18 only, so it is read through
-  -- the row's jsonb image, which on an older server has no such key, as the key gate does
-  -- (pgpm._refuse_unconvertible_keys, #959): the arm cannot fire there and needs no version check.
-  select string_agg(c.conname, ', ' order by c.conname) into v_bad_con
-    from pg_constraint c
-   where c.conrelid = p_parent and c.contype = 'c' and to_jsonb(c) ->> 'conenforced' = 'false';
-  if v_bad_con is not null then
-    raise exception 'pg_partition_magician: cannot transmute % -- its CHECK constraint(s) (%) are NOT ENFORCED. pgpm does not carry a NOT ENFORCED constraint across the conversion, and one cannot be made enforced in place: PostgreSQL 18 neither validates it nor alters the enforceability of a CHECK. Drop it (ALTER TABLE % DROP CONSTRAINT <name>), or re-create it as an enforced CHECK, then re-run transmute.',
-      p_parent, v_bad_con, p_parent::text;
-  end if;
-  -- A NOT VALID one: LIKE gives the parent a VALIDATED copy, and the ATTACH then refuses the table under
-  -- it ("conflicts with NOT VALID constraint on child table"). pgpm's own bound is excluded by name: a
-  -- resume after phase 1 committed and phase 2 did not finds it NOT VALID, and phase 2 validates it. A NOT
-  -- ENFORCED CHECK, which reads convalidated = false too, never gets here: the arm above refuses it first.
-  select string_agg(conname, ', ' order by conname) into v_bad_con
-    from pg_constraint
-   where conrelid = p_parent and contype in ('c', 'n') and not convalidated
-     and conname <> 'pgpm_monolith_bound';
-  if v_bad_con is not null then
-    raise exception 'pg_partition_magician: cannot transmute % -- its constraint(s) (%) are NOT VALID, and the cutover cannot carry a NOT VALID constraint: the new parent gets a validated copy, under which PostgreSQL refuses to attach the table. Validate them first (ALTER TABLE % VALIDATE CONSTRAINT <name>, which takes SHARE UPDATE EXCLUSIVE and so blocks no reader or writer), or drop them, then re-run transmute.',
-      p_parent, v_bad_con, p_parent::text;
-  end if;
-  -- A CHECK ... NO INHERIT: PostgreSQL does not allow one on a partitioned table ("cannot add NO INHERIT
-  -- constraint to partitioned table"), and leaving it on the monolith alone would check only the rows
-  -- routed there. CHECK only: a NOT NULL constraint the LIKE does not copy as NO INHERIT, and 18 marks a
-  -- primary key connoinherit too.
-  select string_agg(conname, ', ' order by conname) into v_bad_con
-    from pg_constraint
-   where conrelid = p_parent and contype = 'c' and connoinherit;
-  if v_bad_con is not null then
-    raise exception 'pg_partition_magician: cannot transmute % -- its CHECK constraint(s) (%) are NO INHERIT, which PostgreSQL does not allow on a partitioned table, and left on the original table alone they would check only the rows routed into it. Drop them, or re-create them without NO INHERIT (ADD CONSTRAINT ... CHECK (...) NOT VALID, then VALIDATE CONSTRAINT), then re-run transmute.',
-      p_parent, v_bad_con;
-  end if;
+  -- Constraints the cutover cannot carry (#730): a NOT ENFORCED CHECK, a NOT VALID one, a CHECK ... NO
+  -- INHERIT. Asked again in the cutover (#766), see the helper.
+  perform pgpm._transmute_refuse_uncarried_constraints(p_parent);
 
   -- 0. incoming FKs: the GATE, and only the gate. pgpm never rewrites the PK, so the referenced unique
   -- key (the reused PK) always survives and an incoming FK can be re-pointed at the new parent verbatim on
@@ -8346,6 +8373,15 @@ begin
   -- now is byte-for-byte the same as building it from the monolith name later), and everything after that
   -- targets the not-yet-visible staging relation. This is what shrinks the outage: previously all of it
   -- ran AFTER the rename, adding directly to how long the live table was unavailable.
+
+  -- 5a (#766). The shapes the LIKE below cannot carry, asked again under the ACCESS SHARE the LIKE would
+  -- take anyway, taken explicitly one statement earlier so that nothing can add one between the asking and
+  -- the LIKE: a NOT VALID or NO INHERIT CHECK, or a generated control column, committed since the preflight
+  -- is refused in the preflight's words and rolls the cutover back to the resumable phase-2 state, where it
+  -- used to fail the LIKE or the ATTACH raw. Under this phase's lock_timeout, like every wait in it.
+  execute format('lock table %s in access share mode', p_parent::text);
+  perform pgpm._transmute_refuse_generated_control(p_parent, p_control);
+  perform pgpm._transmute_refuse_uncarried_constraints(p_parent);
 
   -- 5. create the partitioned parent under the STAGING name (no PK yet). INCLUDING CONSTRAINTS carries the
   -- user's CHECK constraints onto the parent so every partition (the monolith, the DEFAULT, and future
