@@ -6,6 +6,7 @@
 # a clean uninstall.
 #
 #   ./test.sh [15|16|17|18|all] [--channel=psql|bundle|dbdev|all]
+#       PGPM_JOBS=N runs the pgTAP files N at a time, each in its own clone (default 4; 1 is serial)
 #   ./test.sh timescale                  # the from_hypertable track (TimescaleDB 2.16.1 / PG15)
 #   ./test.sh observe                    # the pg_flight_recorder observability track (PG15)
 #   ./test.sh archive                    # the pgpm_archive track (PG17 + pgsql-http + MinIO)
@@ -245,6 +246,21 @@ SQL
   psql_run "$p" "$s" -q -c "drop table public.uninst_ev cascade" >/dev/null
 }
 
+# One test file in its own clone of the template: clone, prove, drop. pg_prove's output goes to <log>,
+# because the files run several at a time (run_version) and the record is printed in file order
+# afterwards. The exit status is pg_prove's; a clone that could not be made is a failure with a line
+# in the log, never a file that silently did not run.
+prove_one() {  # <profile> <service> <db> <file basename> <log>
+  local p="$1" s="$2" db="$3" b="$4" log="$5" rc=0
+  if ! { psql_run "$p" "$s" -c "drop database if exists $db" && psql_run "$p" "$s" -c "create database $db template pgpm_tmpl"; } >/dev/null 2>>"$log"; then
+    echo "not ok - could not clone $db from pgpm_tmpl for $b (see above)" >>"$log"
+    return 1
+  fi
+  $DC --profile "$p" exec -T "$s" sh -c "pg_prove --timer -U postgres -d $db /repo/tests/$b" >>"$log" 2>&1 || rc=1
+  psql_run "$p" "$s" -c "drop database if exists $db" >/dev/null 2>&1 || true
+  return $rc
+}
+
 reset_demo() {  # <profile> <service> -- drop fixture tables so the next channel is clean
   psql_run "$1" "$2" -c "
     drop table if exists public.messages, public.events_id, public.events_uuid cascade;
@@ -280,33 +296,59 @@ run_version() {  # <pg_version>
     install_channel "$ch" "$p" "$s" pgpm_tmpl
     load_fixtures "$p" "$s" pgpm_tmpl
 
-    local n=0 failed=0 pg_ready=""
+    # The files run PGPM_JOBS at a time (4 by default: a GitHub runner has four cores, and a channel's
+    # 272 files are a second each of mostly idle waiting on docker exec, psql and pg_prove start-up), each
+    # in its own clone, its pg_prove output kept in a log and printed in file order once the channel is
+    # done, so the record reads the same whatever the workers' order; one line per file as it finishes
+    # keeps the run legible while it runs. Measured 2026-10-07: a channel took 449 s one file at a time
+    # on a runner and 253 s on a laptop. The two pg_cron files run after the others, alone, on
+    # `postgres`, as they always have (see below). PGPM_JOBS=1 is the old serial run.
+    local n=0 failed=0 pg_ready="" jobs="${PGPM_JOBS:-4}" logdir
+    logdir=$(mktemp -d)
+    local -a parallel=() serial=()
     for f in tests/*.sql; do
-      local b db; b="$(basename "$f")"; n=$((n + 1)); db="pgpm_t$n"
+      local b; b="$(basename "$f")"; n=$((n + 1))
       if [ "$b" = "31_schedule_test.sql" ] || [ "$b" = "78_retain_detach_dispatch_test.sql" ]; then
         # pg_cron can only be created in the database named by cron.database_name (postgres on these
         # images: "can only create extension in database postgres"), so these files cannot run in a
         # per-file clone. They get `postgres`, which the uninstall check below installs into anyway.
         # 31 covers schedule()/unschedule(); 78 covers retire() dispatching a concurrent detach to the
         # standing pgpm_detach job (#268). Both leave the cron state clean for the next file.
-        db=postgres
-        # Set `postgres` up ONCE per channel, however many files land here. fixtures/demo.sql CREATEs
-        # its tables, so a second load fails on "relation messages already exists" -- and with
-        # ON_ERROR_STOP under `set -e` that takes the whole version down, which is exactly what adding
-        # a second file to this branch did.
-        if [ "$pg_ready" != "$ch" ]; then
-          install_channel "$ch" "$p" "$s"
-          load_fixtures "$p" "$s"
-          pg_ready="$ch"
-        fi
-      else
-        psql_run "$p" "$s" -c "drop database if exists $db" >/dev/null
-        psql_run "$p" "$s" -c "create database $db template pgpm_tmpl" >/dev/null
+        serial+=("$b")
+        continue
       fi
-      if ! $DC --profile "$p" exec -T "$s" sh -c "pg_prove --timer -U postgres -d $db /repo/tests/$b"; then
+      parallel+=("$n:$b")
+      # bash 3.2 (macOS) has no `wait -n`: poll the running job count instead
+      while [ "$(jobs -rp | wc -l)" -ge "$jobs" ]; do sleep 0.2; done
+      (
+        if prove_one "$p" "$s" "pgpm_t$n" "$b" "$logdir/$n.log"; then echo 0 > "$logdir/$n.rc"; else echo 1 > "$logdir/$n.rc"; fi
+        # [[:space:]], not \s: BSD sed reads \s as a literal s and strips the letter from "Tests"
+        printf '    %-58s %s  %s\n' "$b" "$(grep -m1 -oE '^Files=1, Tests=[0-9]+,[[:space:]]+[0-9]+ wallclock secs' "$logdir/$n.log" | sed -E 's/Files=1, //; s/[[:space:]]+/ /g')" "$(grep -m1 -E '^Result: ' "$logdir/$n.log" || echo 'Result: ERROR (no verdict)')"
+      ) &
+    done
+    wait
+    local e nn
+    for e in "${parallel[@]}"; do
+      nn="${e%%:*}"
+      echo; echo "### ${e#*:}"
+      cat "$logdir/$nn.log"
+      [ "$(cat "$logdir/$nn.rc" 2>/dev/null)" = 0 ] || failed=$((failed + 1))
+    done
+    rm -rf "$logdir"
+    for b in "${serial[@]}"; do
+      # Set `postgres` up ONCE per channel, however many files land here. fixtures/demo.sql CREATEs
+      # its tables, so a second load fails on "relation messages already exists" -- and with
+      # ON_ERROR_STOP under `set -e` that takes the whole version down, which is exactly what adding
+      # a second file to this branch did.
+      if [ "$pg_ready" != "$ch" ]; then
+        install_channel "$ch" "$p" "$s"
+        load_fixtures "$p" "$s"
+        pg_ready="$ch"
+      fi
+      echo; echo "### $b (on postgres)"
+      if ! $DC --profile "$p" exec -T "$s" sh -c "pg_prove --timer -U postgres -d postgres /repo/tests/$b"; then
         failed=$((failed + 1))
       fi
-      [ "$db" = postgres ] || psql_run "$p" "$s" -c "drop database if exists $db" >/dev/null
     done
     psql_run "$p" "$s" -c "drop database if exists pgpm_tmpl" >/dev/null
     [ "$failed" -eq 0 ] || { echo "PG $v / $ch: FAIL ($failed file(s))"; return 1; }
