@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+- **`tests/247` and `tests/178` name which table logged each transmute** (#994). Both asserted "each conversion
+  logged its own transmute" as one `count(*)` summed over every converted table, which a log naming one table
+  twice and another never satisfies. Each now asserts the transmute rows' parents by name, one per converted
+  table. `bench/tests_fail_on_defect.sh` judges both files against an install whose transmute logs every
+  conversion under the first parent it logged; mutations `transmute_log_summed_count_247`,
+  `transmute_log_summed_count_178`.
+
+- **`tests/140` names the rows `rn_old` kept across the reap** (#995). "rn_old kept every row it had, and the new
+  one" was `count(*) = 22`, which a reap that rewrites id 1 to -1 satisfies; it now asserts ids 1 to 20, 100 and
+  200. `bench/tests_fail_on_defect.sh` judges it against a reaper that does exactly that; mutation
+  `reap_kept_rows_by_count`.
+
+- **`tests/77` reads the retiring partition's rows, not only its name in `pg_inherits`** (#1002). "Still
+  attached, and still holds its rows" (fixture 1, mid-retirement) and "left INTACT and attached, not
+  half-retired" (the NO ACTION crossing) each counted one `pg_inherits` row under the partition's name and read
+  none of its rows, so a `retire()` that emptied the partition passed both. Each is now three assertions: the
+  partition attached by the oid it had before `retire()` and not detach-pending, ids 1, 25000 and 50000 (and
+  42 for the crossing) by name, and exactly ids 1 to 50000. `bench/tests_fail_on_defect.sh` judges the file
+  against a `retire()` that empties the partition at dispatch and one whose refused crossing deletes the rows
+  nothing references, one install each, with a probe showing each defect present; mutations
+  `retiring_partition_attachment_only`, `crossing_refusal_attachment_only`.
+
 - **README.md no longer promises transmute a `DEFAULT` partition as its safety net** (#991). The front-door
   `transmute` bullet still said "a fresh `DEFAULT` is the safety net", though the `DEFAULT` partition went in
   #288: transmute builds none, and a write past the forward grid is refused ('no partition of relation ...

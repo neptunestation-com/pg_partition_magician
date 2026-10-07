@@ -150,7 +150,11 @@ select lives_ok($$ insert into elsewhere.mv values (200, now() + interval '2 day
 select is((select string_agg(x, ',') from (select 'rn_old ' || id from public.rn_old where id = 200
                                            union all select 'mv ' || id from elsewhere.mv where id = 200) w(x)),
   'rn_old 200,mv 200', 'and both writes are there, by identity');
-select is((select count(*)::int from public.rn_old), 22, 'rn_old kept every row it had, and the new one');
+-- Identity, not cardinality (#995): the ids rn_old holds, by name. A count of 22 would accept a reap that
+-- rewrote one of them (id 1 read back as -1) or lost one and gained another.
+select is((select array_agg(id order by id) from public.rn_old),
+  (select array_agg(g::bigint order by g) from generate_series(1, 20) g) || array[100, 200]::bigint[],
+  'rn_old kept every row it had, and the new one');
 
 
 select * from finish();

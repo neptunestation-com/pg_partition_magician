@@ -35,7 +35,7 @@
 create extension if not exists pgtap;
 create extension if not exists dblink;
 
-select plan(46);
+select plan(50);
 
 -- ============================ fixture 1: an incoming FK, no crossing ============================
 -- 50000 rows -> monolith [0,60000); the frontier write at 110000 puts the horizon at 80000, so the
@@ -56,6 +56,9 @@ create table pgpm_test77.names as
   select lo, child_name from pgpm.part where parent_table = 'public.rw77'::regclass;
 
 select child_name as doomed from pgpm_test77.names where lo = '0' \gset
+-- and its oid, before anything touches it: "still attached" below is judged on THIS relation, not on
+-- whatever holds the name by then
+select format('public.%I', :'doomed')::regclass::oid as doomed_oid \gset
 
 -- LIVENESS WITNESSES. Both negatives below ("retire did not drop it yet", "nothing was destroyed")
 -- are satisfied by a run where retirement was never eligible at all, so pin the conditions first.
@@ -94,11 +97,22 @@ select is(
     where parent_table = 'public.rw77'::regclass and retiring_at is not null),
   1, 'only ONE retirement is ever in flight: the single standing job cannot carry two detaches');
 
--- Nothing may be destroyed on the way. Identity, not cardinality: name the partition and its rows.
+-- Nothing may be destroyed on the way. Identity, not cardinality: name the partition and its rows
+-- (#1002). Attachment alone reads no row, so it would pass a retire() that emptied the partition when it
+-- dispatched the detach. Rows are read THROUGH the parent, from that partition: ids 1, 25000 and 50000
+-- by name, then every one of 1..50000.
+select ok(exists (select 1 from pg_inherits where inhparent = 'public.rw77'::regclass
+                   and inhrelid = :'doomed_oid'::oid and not inhdetachpending),
+  'the partition is still attached, the same relation by oid and not detach-pending');
 select is(
-  (select count(*)::int from pg_inherits i join pg_class c on c.oid = i.inhrelid
-    where i.inhparent = 'public.rw77'::regclass and c.relname = :'doomed'),
-  1, 'the partition is still attached, and still holds its rows, until the detach actually happens');
+  (select array_agg(id order by id) from public.rw77
+    where tableoid = to_regclass(format('public.%I', :'doomed')) and id in (1, 25000, 50000)),
+  array[1, 25000, 50000]::bigint[],
+  'the partition still holds its rows (ids 1, 25000 and 50000), until the detach actually happens');
+select ok(
+  (select array_agg(id order by id) from public.rw77 where tableoid = :'doomed_oid'::oid)
+    = (select array_agg(g::bigint order by g) from generate_series(1, 50000) g),
+  'and every one of them: exactly ids 1 to 50000, none lost, none invented');
 
 -- ============================ the detach, exactly as cron performs it ============================
 -- Top level, because that is the only context PostgreSQL permits it in -- \gexec rather than a literal
@@ -206,6 +220,7 @@ create table public.nxref77 (id bigint primary key, p_id bigint not null
 insert into public.nxref77 values (1, 42);
 select child_name as nx_doomed from pgpm.part
   where parent_table = 'public.nx77'::regclass and lo = '0' \gset
+select format('public.%I', :'nx_doomed')::regclass::oid as nx_doomed_oid \gset
 
 select ok(not pgpm.retire('public.nx77', :'nx_doomed'),
   'a crossing under NO ACTION blocks retirement, which is what the operator asked for');
@@ -215,10 +230,21 @@ select is(
     where parent_table = 'public.nx77'::regclass and action = 'fail_retain_crossing'),
   1, 'refused as exactly fail_retain_crossing, distinct from a generic drop failure');
 
+-- INTACT is about its rows, not only its attachment (#1002): a refused retire() that had already deleted
+-- the rows nothing references would leave it attached and half-retired. Ids 1, 42 (the referenced one),
+-- 25000 and 50000 by name, then every one of 1..50000.
+select ok(exists (select 1 from pg_inherits where inhparent = 'public.nx77'::regclass
+                   and inhrelid = :'nx_doomed_oid'::oid and not inhdetachpending),
+  'and the partition is left attached, the same relation by oid and not detach-pending');
 select is(
-  (select count(*)::int from pg_inherits i join pg_class c on c.oid = i.inhrelid
-    where i.inhparent = 'public.nx77'::regclass and c.relname = :'nx_doomed'),
-  1, 'and the partition is left INTACT and attached, not half-retired');
+  (select array_agg(id order by id) from public.nx77
+    where tableoid = to_regclass(format('public.%I', :'nx_doomed')) and id in (1, 42, 25000, 50000)),
+  array[1, 42, 25000, 50000]::bigint[],
+  'and the partition is left INTACT and attached, not half-retired: ids 1, 42, 25000 and 50000 are there');
+select ok(
+  (select array_agg(id order by id) from public.nx77 where tableoid = :'nx_doomed_oid'::oid)
+    = (select array_agg(g::bigint order by g) from generate_series(1, 50000) g),
+  'and every one of its rows: exactly ids 1 to 50000, none lost, none invented');
 
 select is((select count(*)::int from public.nxref77 where id = 1), 1,
   'the referencing row is untouched: a refused DELETE severs nothing');

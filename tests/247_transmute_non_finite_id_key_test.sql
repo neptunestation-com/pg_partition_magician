@@ -103,8 +103,11 @@ select is((select array_agg(parent_table::text order by parent_table::text) from
             where parent_table::text like 't247\_%'),
   array['t247_int', 't247_nan'],
   'exactly the two converted tables are registered, and none of the refused ones');
-select is((select count(*)::int from pgpm.log where parent_table in ('public.t247_nan'::regclass, 'public.t247_int'::regclass)
-                                               and action = 'transmute'), 2,
+-- Identity, not cardinality (#994): one transmute row under EACH converted table's name. A count summed
+-- over both would accept t247_nan logged twice and t247_int never.
+select is((select array_agg(parent_table::text order by parent_table::text) from pgpm.log
+            where parent_table in ('public.t247_nan'::regclass, 'public.t247_int'::regclass) and action = 'transmute'),
+  array['t247_int', 't247_nan'],
   'A, D: each conversion logged its own transmute');
 
 select * from finish();
