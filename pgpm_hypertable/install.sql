@@ -909,6 +909,7 @@ declare
   v_keyconname name; v_keytmp text; v_destreg regclass;
   v_ctl_typid regtype; v_bound_tpl text; v_lo text; v_hi text;
   v_prev regclass; v_prev_fn regprocedure;   -- #955: what a previous copy recorded under the names minted here
+  v_nkeys int; v_oldargs text; v_newargs text; v_delta_oid oid;   -- #1037: the capture's insert, by the record
 begin
   -- #951: refused before anything is read or committed; no argument here has a null meaning
   perform pgpm._refuse_null_arguments('from_hypertable_copy', json_build_object(
@@ -985,12 +986,16 @@ begin
     -- the key columns, and the NEW./OLD. value lists the trigger logs, in key order
     select string_agg(quote_ident(a.attname), ', ' order by k.ord),
            string_agg('new.' || quote_ident(a.attname), ', ' order by k.ord),
-           string_agg('old.' || quote_ident(a.attname), ', ' order by k.ord)
-      into v_keycols_q, v_newvals_q, v_oldvals_q
+           string_agg('old.' || quote_ident(a.attname), ', ' order by k.ord),
+           count(*)
+      into v_keycols_q, v_newvals_q, v_oldvals_q, v_nkeys
       from pg_index i
       cross join lateral unnest(i.indkey) with ordinality as k(attnum, ord)
       join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
      where i.indexrelid = v_keyidx;
+    -- the capture's bind parameters: $1..$n for one key row, $n+1..$2n for an UPDATE's second
+    select string_agg('$' || g, ', ' order by g) into v_oldargs from generate_series(1, v_nkeys) g;
+    select string_agg('$' || g, ', ' order by g) into v_newargs from generate_series(v_nkeys + 1, 2 * v_nkeys) g;
 
     -- Reconciliation matches keys with a row-constructor IN, which never matches a NULL component -- so a
     -- key row with a NULL in any non-control key column could never be reconciled and its change would be
@@ -1023,11 +1028,37 @@ begin
     -- transaction (#955), so the drains and the cutover find it by its oid.
     perform pgpm._scratch_mint(p_hypertable, format('%I.%I', v_nsp, v_delta)::regclass);
     perform pgpm._regrain_capture_grant(p_hypertable, format('%I.%I', v_nsp, v_delta)::regclass, p_hypertable);
-    perform pgpm._scratch_record(p_hypertable, 'hypertable_delta', format('%I.%I', v_nsp, v_delta)::regclass::oid);
+    v_delta_oid := format('%I.%I', v_nsp, v_delta)::regclass::oid;
+    perform pgpm._scratch_record(p_hypertable, 'hypertable_delta', v_delta_oid);
     -- the trigger body is dollar-quoted with a pgpm tag; the format template is single-quoted (inner quotes
     -- doubled) to avoid nesting another dollar-quoted string inside this procedure body.
+    -- #1037: the capture reaches the delta by the oid recorded above, as the drains, the cutover and uninstall
+    -- do (#955), never by the name alone. A static `insert into <rel>_pgpm_delta` resolved that name at every
+    -- write, so a delta the operator renamed during the window refused every write to the live hypertable
+    -- (42P01), and a table later created under the name took the keys the cutover never read. The static
+    -- insert stays as the fast path, taken only while the minted name still leads to the recorded oid, which
+    -- is one name lookup a row and lets the insert keep its cached plan. Once it does not (the delta renamed
+    -- or moved, or another table under the name), the oid is rendered to the delta's current name (regclass
+    -- output, qualified wherever the writer's search_path would not find it) and the insert is dynamic, with
+    -- the key values bound. A delta that is gone refuses the write as 42P01, as the static insert did, naming
+    -- the table and the remedy, rather than as a syntax error at the bare oid.
     execute format('create function %I.%I() returns trigger language plpgsql as $pgpm$
+      declare
+        d regclass;
       begin
+        if pg_catalog.to_regclass(%L) is distinct from %s::pg_catalog.oid::pg_catalog.regclass then
+          select c.oid::pg_catalog.regclass into d from pg_catalog.pg_class c where c.oid = %s;
+          if d is null then
+            raise exception using errcode = ''undefined_table'', message = %L;
+          end if;
+          if tg_op = ''DELETE'' then
+            execute ''insert into '' || d::text || %L using %s; return old;
+          elsif tg_op = ''UPDATE'' then
+            execute ''insert into '' || d::text || %L using %s, %s; return new;
+          else
+            execute ''insert into '' || d::text || %L using %s; return new;
+          end if;
+        end if;
         if tg_op = ''DELETE'' then
           insert into %I.%I (%s) values (%s); return old;
         elsif tg_op = ''UPDATE'' then
@@ -1037,6 +1068,12 @@ begin
         end if;
       end $pgpm$',
       v_nsp, v_trgfn,
+      format('%I.%I', v_nsp, v_delta), v_delta_oid, v_delta_oid,
+      format('pg_partition_magician: the change capture of %s.%s has lost the delta from_hypertable_copy recorded for it (oid %s), so no write to the table can be logged. Re-run pgpm.from_hypertable_copy with p_track_changes => true, which mints a fresh delta and capture.',
+             quote_ident(v_nsp), quote_ident(v_rel), v_delta_oid),
+      format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_oldvals_q,
+      format(' (%s) values (%s), (%s)', v_keycols_q, v_oldargs, v_newargs), v_oldvals_q, v_newvals_q,
+      format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_newvals_q,
       v_nsp, v_delta, v_keycols_q, v_oldvals_q,
       v_nsp, v_delta, v_keycols_q, v_oldvals_q, v_newvals_q,
       v_nsp, v_delta, v_keycols_q, v_newvals_q);

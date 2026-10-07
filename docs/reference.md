@@ -740,7 +740,9 @@ table comment `pgpm from_hypertable copy of <oid>`: it is the record by which `p
 copy that was never cut over and drops it (while the hypertable it names still exists), and the cutover
 replaces it with the hypertable's own comment, or none. The copy, and for a tracking copy its delta and
 capture function, are recorded in [`pgpm.scratch`](#pgpmscratch) as they are created, and every later step
-(the drains, the cutover, a re-run of this copy, `uninstall.sql`) finds them there, by oid. They are owned
+(the drains, the cutover, a re-run of this copy, `uninstall.sql`) finds them there, by oid. So does the
+capture trigger, which writes the delta through its recorded oid, so a delta renamed during the online
+window goes on logging every write, and a table you create under the name it gave up takes none. They are owned
 like the hypertable, with no grant beyond the owner's (the delta also grants `INSERT` to every role that can
 write the hypertable, since its capture trigger writes as the writer), from the moment they are created, as
 is the delta's `pgpm_seq` identity sequence, so no role the migrating role's default privileges name reads
