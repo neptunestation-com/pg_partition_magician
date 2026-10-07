@@ -56,8 +56,10 @@ while :; do
   case "${1:-}" in
     --track=*) TRACK="${1#--track=}"; shift ;;
     # --shard=I/N: run the I-th of N interleaved slices of the mutation list (1-based), so CI can spread
-    # the list over N runners. The mutation's index in the FULL list still names its database, so
-    # shards never collide, and a shard that selects nothing FAILS (the i=0 rule below, per shard).
+    # the list over N runners. mutate.py prints the list heaviest first (its MUTATION_COST), so the
+    # interleave spreads the long probes over the shards rather than leaving them where the catalogue
+    # put them. The mutation's index in the FULL list still names its database, so shards never
+    # collide, and a shard that selects nothing FAILS (the i=0 rule below, per shard).
     --shard=*) SHARD_I="${1#--shard=}"; SHARD_N="${SHARD_I#*/}"; SHARD_I="${SHARD_I%/*}"; shift ;;
     --list) LIST_ONLY=1; shift ;;
     *) break ;;
