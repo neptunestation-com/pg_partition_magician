@@ -41,6 +41,131 @@
 
 create schema if not exists pgpm;
 
+-- ============================ functions an operator's view can depend on (#983) ============================
+-- Re-running this file is the upgrade, and an operator builds monitoring views over pgpm's set-returning
+-- functions. This file used to `drop function if exists` each of the functions below right before creating
+-- it, on every run, so that a widened result could be created at all: CREATE OR REPLACE cannot change a
+-- function's result, rename an argument or take a default away. PostgreSQL refuses to drop a function a view
+-- depends on, so one view over pgpm.status() made every re-run fail at that drop, the whole run rolled back
+-- under --single-transaction, and plain psql -f carried on without the function's new body.
+--
+-- Now each of them is created with CREATE OR REPLACE only, which keeps its oid, its grants and every view
+-- over it, and _surface_prepare() below, the first thing this file runs, drops one only when its installed
+-- shape cannot be replaced in place. When something depends on such a function it refuses the whole run
+-- instead, naming the function, the dependant and the remedy, before anything else in this file has run.
+--
+-- _surface_shapes() is the declaration: the signature, the argument list (names and types, as
+-- pg_get_function_identity_arguments renders it), the result (as pg_get_function_result does) and the number
+-- of defaults each of them is created with further down. Change one of those functions' shape and change its
+-- row here in the same edit; _surface_settled(), at the end of this file, fails every install whose
+-- declaration does not match what the file created, so a stale row cannot reach a release. Defaults are
+-- counted, not rendered: a rendered timestamptz default is in the session's TimeZone.
+create or replace function pgpm._surface_shapes()
+returns table (sig text, args text, result text, ndefaults int)
+language sql immutable as $$
+  values
+    ('pgpm.check_uuidv7(regclass,name,integer)',
+     'p_table regclass, p_control name, p_sample integer',
+     'TABLE(sampled bigint, plausible bigint, fraction numeric, oldest timestamp with time zone, '
+       'newest timestamp with time zone, newest_decoded timestamp with time zone, newest_in_future boolean)',
+     1),
+    ('pgpm.check_text_time(regclass,name,text,integer,integer,text,integer,text,integer,timestamp with time zone)',
+     'p_table regclass, p_control name, p_prefix text, p_width integer, p_radix integer, p_unit text, '
+       'p_sample integer, p_alphabet text, p_discard_bits integer, p_epoch timestamp with time zone',
+     'TABLE(sampled bigint, plausible bigint, fraction numeric, newest_decoded timestamp with time zone, '
+       'newest_in_future boolean)',
+     4),
+    ('pgpm.status()',
+     '',
+     'TABLE(parent regclass, control_kind text, partition_step text, obtain integer, retain text, '
+       'paused boolean, n_partitions bigint, coarse_partitions bigint, inflight_partitions bigint, '
+       'newest_bound text, fks_suspended bigint, fks_unvalidated bigint, history_unregrained boolean, '
+       'retain_drop_failures bigint, retain_backlog bigint, retain_detaching bigint, parent_missing boolean, '
+       'regrain_to text)',
+     0),
+    ('pgpm.progress(regclass)',
+     'p_parent regclass',
+     'TABLE(parent regclass, control_kind text, parent_missing boolean, frontier text, write_child name, '
+       'write_ceiling text, freeze_margin text, freeze_in interval, coarse_frozen bigint, regrain_to text, '
+       'regrain_child name, regrain_cursor text, regrain_pct_range numeric, regrain_rows_copied bigint, '
+       'regrain_rows_total_est bigint, regrain_delta_pending bigint, regrain_started_at timestamp with time zone, '
+       'regrain_elapsed interval, regrain_eta interval)',
+     1),
+    ('pgpm.observe_window(regclass,interval)',
+     'p_parent regclass, p_since interval',
+     'TABLE(parent_table regclass, window_start timestamp with time zone, window_end timestamp with time zone, '
+       'duration interval, log_rows bigint, rows_copied bigint, regrains bigint, retains bigint)',
+     1)
+$$;
+
+-- the installed functions CREATE OR REPLACE could not replace with their declared shape, and what depends on
+-- each (null: nothing), a view named with its schema whatever the search_path. A different argument list or
+-- result is refused by CREATE OR REPLACE, and so is a default taken away; a default added is not, so more
+-- defaults declared than installed is replaceable.
+create or replace function pgpm._surface_unreplaceable()
+returns table (fn regprocedure, dependants text)
+language sql stable as $$
+  select p.oid::regprocedure,
+         (select string_agg(distinct
+                   case when d.classid = 'pg_rewrite'::regclass
+                        then (select case c.relkind when 'm' then 'materialized view ' else 'view ' end
+                                     || format('%I.%I', n.nspname, c.relname)
+                                from pg_rewrite w join pg_class c on c.oid = w.ev_class
+                                join pg_namespace n on n.oid = c.relnamespace where w.oid = d.objid)
+                        else pg_describe_object(d.classid, d.objid, d.objsubid) end, ', ')
+            from pg_depend d
+           where d.refclassid = 'pg_proc'::regclass and d.refobjid = p.oid and d.deptype = 'n')
+    from pgpm._surface_shapes() s
+    join pg_proc p on p.oid = to_regprocedure(s.sig)
+   where p.prokind <> 'f'
+      or pg_get_function_identity_arguments(p.oid) <> s.args
+      or pg_get_function_result(p.oid) <> s.result
+      or p.pronargdefaults > s.ndefaults
+   order by p.oid::regprocedure::text
+$$;
+
+-- Refuse the run while a function that has to change shape has a dependant, else drop every such function so
+-- that its CREATE OR REPLACE below creates it afresh. Nothing is dropped unless nothing is refused.
+create or replace function pgpm._surface_prepare()
+returns void language plpgsql as $$
+declare v_refused text; r record;
+begin
+  select string_agg(format('%s (on which %s depends)', u.fn, u.dependants), ', ' order by u.fn::text)
+    into v_refused
+    from pgpm._surface_unreplaceable() u where u.dependants is not null;
+  if v_refused is not null then
+    raise exception using errcode = 'dependent_objects_still_exist', message = format(
+      'pg_partition_magician: install.sql cannot replace %s in place: its result or its arguments change, and '
+      'PostgreSQL will not drop a function another object depends on. Nothing has been changed. Save each '
+      'dependant''s definition (a view''s: select pg_get_viewdef(''<view>''::regclass, true)), drop it, re-run '
+      'install.sql, then recreate it against the new shape.', v_refused);
+  end if;
+  for r in select u.fn from pgpm._surface_unreplaceable() u loop
+    execute format('drop function %s', r.fn);
+  end loop;
+end $$;
+
+-- every declared function exists in its declared shape: run at the end of this file, after they are created
+create or replace function pgpm._surface_settled()
+returns void language plpgsql as $$
+declare r record;
+begin
+  for r in select s.*, to_regprocedure(s.sig) as fn from pgpm._surface_shapes() s order by s.sig loop
+    if r.fn is null then
+      raise exception 'pg_partition_magician: install.sql did not create %, which pgpm._surface_shapes() declares', r.sig;
+    end if;
+    if (select p.prokind <> 'f' or pg_get_function_identity_arguments(p.oid) <> r.args
+               or pg_get_function_result(p.oid) <> r.result or p.pronargdefaults <> r.ndefaults
+          from pg_proc p where p.oid = r.fn) then
+      raise exception 'pg_partition_magician: install.sql created % as (%) returns % with % default(s), not the shape pgpm._surface_shapes() declares for it: (%) returns % with % default(s). Update the declaration to what the file creates.',
+        r.fn, pg_get_function_identity_arguments(r.fn), pg_get_function_result(r.fn),
+        (select p.pronargdefaults from pg_proc p where p.oid = r.fn), r.args, r.result, r.ndefaults;
+    end if;
+  end loop;
+end $$;
+
+select pgpm._surface_prepare();
+
 create table if not exists pgpm.config (
   parent_table     regclass    primary key,
   control_column   name        not null,
@@ -10995,7 +11120,7 @@ $$;
 -- `IS NOT NULL` is an index condition, so the backward index scan survives where NULLS LAST would sort.
 -- newest_in_future is that maximum more than one hour past now(), the fixed clock-skew tolerance transmute
 -- also applies; transmute additionally allows one partition step, which this function does not know.
-drop function if exists pgpm.check_uuidv7(regclass, name, int);
+-- Its shape is declared in pgpm._surface_shapes() (#983): change that row with it.
 create or replace function pgpm.check_uuidv7(p_table regclass, p_control name, p_sample int default 1000)
 returns table (sampled bigint, plausible bigint, fraction numeric, oldest timestamptz, newest timestamptz,
                newest_decoded timestamptz, newest_in_future boolean)
@@ -11043,7 +11168,7 @@ $$;
 -- past now(). A maximum that does not match the declared shape reports null rather than raising, for the
 -- same reason a malformed sampled row counts as implausible rather than aborting the sample. NULLs are
 -- skipped in the read's WHERE clause, as in check_uuidv7 and for its reason (#734).
-drop function if exists pgpm.check_text_time(regclass, name, text, int, int, text, int, text, int, timestamptz);
+-- Its shape is declared in pgpm._surface_shapes() (#983): change that row with it.
 create or replace function pgpm.check_text_time(
   p_table regclass, p_control name, p_prefix text, p_width int, p_radix int, p_unit text,
   p_sample int default 1000,
@@ -11155,10 +11280,10 @@ $$;
 -- all is the first question when coarse_partitions looks stalled, and this was the one field that had to
 -- be read from pgpm.config separately to answer it -- easy to forget next to the more visible counters.
 --
--- dropped/recreated (not CREATE OR REPLACE) because the redesign widens the return shape with
--- coarse_partitions + history_unregrained (REDESIGN.md section 14), again for parent_missing (#296), and
--- again for regrain_to (#343).
-drop function if exists pgpm.status();
+-- The redesign widened the return shape with coarse_partitions + history_unregrained (REDESIGN.md section
+-- 14), again for parent_missing (#296), and again for regrain_to (#343). CREATE OR REPLACE cannot widen it,
+-- so a widening changes its row in pgpm._surface_shapes() too, and _surface_prepare() drops the old shape
+-- at the top of the file (#983: only then, so an operator's view over an unchanged status() survives).
 create or replace function pgpm.status()
 returns table (
   parent regclass, control_kind text, partition_step text, obtain int, retain text,
@@ -11320,7 +11445,7 @@ $$;
 -- Survives a parent dropped without untransmute the way status() learned to (#296): the row is reported
 -- with parent_missing = true and every frontier-derived column null, rather than one dead table taking
 -- the diagnostic down for every healthy one.
-drop function if exists pgpm.progress(regclass);
+-- Its shape is declared in pgpm._surface_shapes() (#983): change that row with it.
 create or replace function pgpm.progress(p_parent regclass default null)
 returns table (
   parent regclass, control_kind text, parent_missing boolean,
@@ -11468,7 +11593,7 @@ $$;
 -- drain and its adaptive feathering were removed (#288), so those columns could only ever read 0 -- a
 -- reported zero that means "this never happens" is worse than no column at all, because it looks like
 -- a measurement.
-drop function if exists pgpm.observe_window(regclass, interval);
+-- Its shape is declared in pgpm._surface_shapes() (#983): change that row with it.
 create or replace function pgpm.observe_window(
   p_parent regclass, p_since interval default '7 days'
 ) returns table (
@@ -11837,6 +11962,10 @@ $$;
 
 create or replace view pgpm.partitions as
   select parent_table, child_name, lo, hi, created_at, attached from pgpm.part order by parent_table, lo;
+
+-- #983: every function pgpm._surface_shapes() declares now exists in its declared shape. A declaration left
+-- stale by an edit to one of them fails here, on every fresh install, rather than on an operator's upgrade.
+select pgpm._surface_settled();
 
 -- =============================================================================
 -- Identity: what is installed here, and when it got here.

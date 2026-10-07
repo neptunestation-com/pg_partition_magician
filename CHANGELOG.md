@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **Re-running `install.sql` keeps an operator's views over pgpm's functions** (#983). The file dropped
+  `status()`, `progress(regclass)`, `observe_window(regclass, interval)`, `check_uuidv7` and `check_text_time`
+  unconditionally on every run before creating them, so one monitoring view over `pgpm.status()` made the
+  documented upgrade fail at that drop (the whole run rolled back under `--single-transaction` or the
+  dashboard bundle; plain `psql -f` carried on without the new body). Each is now created with CREATE OR
+  REPLACE only, keeping its oid, its grants and every view over it; `pgpm._surface_shapes()` declares the
+  shape each is created with, and `pgpm._surface_prepare()`, the first thing the file runs, drops one only
+  when its installed shape cannot be replaced in place, and refuses the run (SQLSTATE `2BP01`, naming the
+  function, the dependant and the remedy) before anything else in the file has run when something depends on
+  such a function. `pgpm._surface_settled()` fails any install whose declaration has drifted from what the
+  file creates. `tests/281` (new), `bench/install_keeps_dependent_views.sh` (new); mutations
+  `install_drops_surface_unconditionally`, `surface_shape_ignores_result`.
+
 - **`from_hypertable` no longer carries a 0.6.0 change capture onto a hypertable renamed or moved since**
   (#988). A tracking copy pgpm 0.6.0 took leaves no record of its capture (no `pgpm.scratch` row, no horizon
   comment on its delta), so the swap recognised it by proof: a function `<rel>_pgpm_delta_fn` whose body
