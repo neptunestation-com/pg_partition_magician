@@ -5730,11 +5730,18 @@ $$;
 --     '1.0' both to 1, and every swap failed 'empty range bound', with the capture trigger and the TRUNCATE
 --     refusal left on the source until the run was cancelled. The column is judged by its base type and
 --     effective typmod, through any domain, so a domain over an integer type takes the integer rules too.
+--   * a fixed step finer than a timestamp(p) or timestamptz(p) column's fractional-second precision (#980):
+--     '500 milliseconds' on a timestamptz(0) key. The same mechanism as #899 on a time key: ATTACH rounds
+--     each fine bound to the column's precision, '..:20.5' and '..:21' both to '..:21', and every swap
+--     failed 'empty range bound' after the copies were made. The step must be a whole number of the
+--     column's smallest unit (10^-p seconds; one microsecond for an unconstrained timestamp, which an
+--     interval cannot go below, so the rule then refuses nothing). A month step is always whole seconds.
 -- Called from _regrain_step_forward, so set_regrain (at call time) and regrain_step (which regrain(),
 -- regrain_history() and maintain go through) refuse it alike.
 create or replace function pgpm._regrain_step_shape(p_parent regclass, p_step text)
 returns void language plpgsql stable as $$
 declare cfg pgpm.config; v_typname name; v_type oid; v_typmod int; v_scale int; v_months numeric; v_rest interval;
+        v_prec int; v_unit_us numeric;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
@@ -5787,6 +5794,21 @@ begin
     if v_typname = 'date' and v_months = 0 and extract(epoch from p_step::interval)::numeric % 86400 <> 0 then
       raise exception 'pg_partition_magician: regrain target step % for % is not a whole number of days, but its control column % is a date, which holds whole days -- the fine cells'' bounds would truncate to dates and two cells would read as one; give a whole number of days or months',
         p_step, p_parent, quote_ident(cfg.control_column);
+    end if;
+    -- #980: and a fixed step finer than a timestamp(p) column's precision. Every fine bound is a multiple
+    -- of the step from the anchor, and ATTACH rounds each one to p fractional-second digits, so two
+    -- adjacent bounds can round to the same instant: refused here, before a run copies anything it could
+    -- never swap in. The typmod is p itself (-1, unconstrained, keeps microseconds).
+    if v_typname in ('timestamp', 'timestamptz') then
+      v_prec    := case when v_typmod between 0 and 6 then v_typmod else 6 end;
+      v_unit_us := power(10::numeric, 6 - v_prec);
+    end if;
+    if v_unit_us is not null and v_months = 0
+       and (extract(epoch from p_step::interval) * 1000000) % v_unit_us <> 0 then
+      raise exception 'pg_partition_magician: regrain target step % for % is finer than its control column % can hold: it is %, which keeps % -- ATTACH PARTITION would round the fine cells'' bounds to that precision, adjacent bounds would round to the same instant, and every swap would fail (empty range bound) after the run had copied the rows; give a step that is a multiple of %',
+        p_step, p_parent, quote_ident(cfg.control_column), format_type(v_type, v_typmod),
+        case when v_prec = 0 then 'whole seconds only' else v_prec || ' fractional-second digit(s)' end,
+        case when v_prec = 0 then '1 second' else trim_scale(power(10::numeric, -v_prec)) || ' seconds' end;
     end if;
   end if;
 end;
