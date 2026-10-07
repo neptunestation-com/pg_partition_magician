@@ -420,7 +420,10 @@ alter table pgpm.part add column if not exists child_oid oid;
 -- partition OF THIS PARENT by construction -- strictly better than to_regclass, which would take any
 -- relation of that name in the schema. A not-yet-attached regrain child is not in pg_inherits at all
 -- (it is standalone until the swap), so it has nothing but its name to go on; a row whose name does
--- not resolve is left null and stays unanchored, which is exactly the state forget_missing clears.
+-- not resolve is left null and stays unanchored. An ATTACHED one is a cell whose partition was dropped
+-- (or renamed) by hand before the upgrade; pgpm._part_built reads it as gone once every partition of the
+-- table is accounted for, so obtain forgets and rebuilds it (#981: forget_missing clears only rows whose
+-- PARENT is gone, so it never reached these).
 update pgpm.part p set child_oid = i.inhrelid
   from pg_inherits i join pg_class c on c.oid = i.inhrelid
  where i.inhparent = p.parent_table and c.relname = p.child_name
@@ -1837,6 +1840,14 @@ $$;
 -- explicit-range name instead, and the legacy child is left exactly as it is: no rename, no lock on it.
 -- A name held by anything else is left alone as before: that is a relation pgpm does not own.
 --
+-- #956: one relation pgpm no longer owns is treated like its own, for the same reason: a former partition of
+-- THIS parent that the operator DETACHed by hand, which _cell_attached forgot (logged
+-- forget_detached_partition, naming its oid). It still holds the plain name of the cell it stood for, so
+-- the cell is built afresh under its explicit-range name beside it, and the detached table is left exactly
+-- as it is. The log row is the anchor because it is the one record of that release that outlives the
+-- forgotten pgpm.part row (pgpm.log is append-only), so a cell whose rebuild a tick did not reach (the lock
+-- budget ended the call) is still built under the stand-in on the next one, rather than read as a stranger's.
+--
 -- #663: the explicit-range name is 14 bytes longer than a day or week cell's plain one (`_to_` and a second
 -- label), so for a table name that fits the plain label and not the explicit one (38 to 51 bytes on a day
 -- grid), _part_name refuses it (#510). That refusal used to escape from here, and obtain and
@@ -1870,7 +1881,11 @@ begin
        select 1 from pgpm.part p
         where p.parent_table = p_parent and p.child_oid = v_held::oid
           and not (pgpm._native_gt(cfg.control_kind, p.hi, p_lo)
-                   and pgpm._native_gt(cfg.control_kind, p_hi, p.lo))) then
+                   and pgpm._native_gt(cfg.control_kind, p_hi, p.lo)))
+     and not exists (
+       select 1 from pgpm.log l
+        where l.parent_table = p_parent and l.action = 'forget_detached_partition'
+          and strpos(l.method, format('(oid %s)', v_held::oid)) > 0) then
     return null;
   end if;
   begin
@@ -1916,12 +1931,36 @@ begin
 end;
 $$;
 
--- _part_relation_exists: whether the relation a pgpm.part row anchors (its child_oid, #421) is still in the
--- catalogue (#908). A null child_oid is an unanchored row an upgrade could not resolve, which nothing can
--- judge here, so it reads as present: forget_missing is the tool that clears those.
-create or replace function pgpm._part_relation_exists(p_child_oid oid)
+-- _part_built: whether the cell an ATTACHED pgpm.part row of p_parent stands for is built, i.e. a write into
+-- its range has a partition to land in. The one predicate every reader of "is this cell there" shares:
+-- obtain and extend_to (through _cell_attached), status() and progress(), so they cannot disagree.
+--
+--   * A row anchored by child_oid (#421) is built when that relation is a partition OF p_parent, by
+--     pg_inherits (#956). The relation existing is not enough: a forward cell DETACHed by hand keeps its
+--     table, and judging by the relation (#908's first test) took it for built, so it was never rebuilt and
+--     every write into its range was refused for good. The one detached partition that IS still pgpm's is
+--     the one a retirement is in flight on (retiring_at set): retire()'s concurrent detach leaves the
+--     relation standing outside the table until retire drops it, so it stays built while it exists.
+--   * A row with a NULL child_oid is one an upgrade from before #421 could not anchor: its backfill resolves
+--     attached partitions through pg_inherits by name, and finds nothing for a cell dropped by hand before
+--     the upgrade (#981). That used to read as built, and forget_missing (which only clears rows whose
+--     PARENT is gone) never reached it: the cell stayed a hole for good. It is not built when every
+--     partition of p_parent is accounted for by another row's child_oid, because then its relation cannot
+--     exist. While some partition is unaccounted for, the row may be about it (a cell RENAMED by hand before
+--     the upgrade leaves the same null), and forgetting it would send obtain into that partition's range at
+--     every tick and the overlap would take the whole call down; so it stays built, as before.
+drop function if exists pgpm._part_relation_exists(oid);
+create or replace function pgpm._part_built(p_parent regclass, p_child_oid oid, p_retiring_at timestamptz)
 returns boolean language sql stable as $$
-  select p_child_oid is null or exists (select 1 from pg_class c where c.oid = p_child_oid);
+  select case
+    when p_child_oid is null then
+      exists (select 1 from pg_inherits i
+               where i.inhparent = p_parent
+                 and not exists (select 1 from pgpm.part a
+                                  where a.parent_table = p_parent and a.child_oid = i.inhrelid))
+    else exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = p_child_oid)
+         or (p_retiring_at is not null and exists (select 1 from pg_class c where c.oid = p_child_oid))
+  end;
 $$;
 
 -- _cell_attached: whether an attached partition of p_parent overlaps the cell [p_lo, p_hi), the question
@@ -1932,12 +1971,18 @@ $$;
 -- is something PostgreSQL permits and pgpm never sees: the partition went, its row stayed attached, and the
 -- row was taken for a built cell. The cell was never rebuilt and nothing was logged, so every write into
 -- it was refused with "no partition of relation found for row", for good. So an attached row overlapping
--- the cell whose relation is gone from the catalogue is forgotten first, logged forget_dropped_partition
--- naming what was dropped, and the cell is then judged on the rows that remain: missing, so the caller
--- builds it (or, if a stranger holds its name, logs fail_obtain_name, #710). One place, so the three
--- callers cannot drift. Only the cell's own rows are judged, so a dead row outside the walk (one retention
--- or regrain owns) is left to them. The relation, not pg_inherits, is the test: a partition retire() has
--- detached concurrently still exists and keeps its attached row until retire drops it.
+-- the cell that is not built (see _part_built) is forgotten first, and the cell is then judged on the rows
+-- that remain: missing, so the caller builds it (or, if a stranger holds its name, logs fail_obtain_name,
+-- #710). One place, so the three callers cannot drift. Only the cell's own rows are judged, so a dead row
+-- outside the walk (one retention or regrain owns) is left to them. What is forgotten is logged by what
+-- became of its relation, each with its own exact action:
+--   forget_dropped_partition   the relation is gone (#908), or the row was never anchored and every
+--                              partition of the table is accounted for (#981);
+--   forget_detached_partition  the relation still exists but is no longer a partition of the table, and no
+--                              retirement of pgpm's is in flight on it: DETACHed by hand (#956). The table
+--                              is the operator's now, rows and all, and is left exactly as it is; the cell
+--                              is built afresh beside it, under its explicit-range name while the detached
+--                              table holds the plain one (see _obtain_name).
 create or replace function pgpm._cell_attached(p_parent regclass, cfg pgpm.config, p_lo text, p_hi text)
 returns boolean language plpgsql as $$
 begin
@@ -1949,19 +1994,27 @@ begin
         where p.parent_table = p_parent and p.attached
           and pgpm._native_gt(cfg.control_kind, p.hi, p_lo)
           and pgpm._native_gt(cfg.control_kind, p_hi, p.lo)
-          and not pgpm._part_relation_exists(p.child_oid)) then
+          and not pgpm._part_built(p_parent, p.child_oid, p.retiring_at)) then
     with gone as (
       delete from pgpm.part p
        where p.parent_table = p_parent and p.attached
          and pgpm._native_gt(cfg.control_kind, p.hi, p_lo)
          and pgpm._native_gt(cfg.control_kind, p_hi, p.lo)
-         and not pgpm._part_relation_exists(p.child_oid)
+         and not pgpm._part_built(p_parent, p.child_oid, p.retiring_at)
       returning p.child_name, p.child_oid, p.lo, p.hi)
     insert into pgpm.log (parent_table, action, lo, hi, method)
-    select p_parent, 'forget_dropped_partition', g.lo, g.hi,
-           format('the partition %I (oid %s) recorded for this range no longer exists (dropped outside pgpm), so the range is built again',
-                  g.child_name, g.child_oid)
-      from gone g;
+    select p_parent,
+           case when k.oid is null then 'forget_dropped_partition' else 'forget_detached_partition' end,
+           g.lo, g.hi,
+           case when k.oid is not null
+                then format('the partition %I (oid %s) recorded for this range is no longer a partition of this table (detached outside pgpm), so the range is built again; %s is left exactly as it is, rows and all',
+                            g.child_name, g.child_oid, k.oid::regclass::text)
+                when g.child_oid is null
+                then format('the partition %I recorded for this range was never anchored by oid (an upgrade from before child_oid found no partition of that name) and every partition of this table is accounted for, so it no longer exists (dropped outside pgpm) and the range is built again',
+                            g.child_name)
+                else format('the partition %I (oid %s) recorded for this range no longer exists (dropped outside pgpm), so the range is built again',
+                            g.child_name, g.child_oid) end
+      from gone g left join pg_class k on k.oid = g.child_oid;
   end if;
   return exists (
     select 1 from pgpm.part p
@@ -11382,14 +11435,15 @@ begin
     -- n_partitions = attached (real) partitions; coarse_partitions = the un-regrained coarse children (a
     -- wider-than-one-step range, REDESIGN.md section 14) -- the regraining backlog; inflight = the
     -- not-yet-attached regrain children. The attached ones and newest_bound read the catalogue too (#908):
-    -- a row whose partition was dropped by hand is neither counted nor the ceiling, since a write into its
-    -- range is refused until obtain forgets the row and builds the cell again (see _cell_attached).
-    select count(*) filter (where attached and pgpm._part_relation_exists(child_oid)),
-           count(*) filter (where attached and pgpm._part_relation_exists(child_oid)
+    -- a row whose partition was dropped or detached by hand, or never anchored and gone (#956, #981), is
+    -- neither counted nor the ceiling, since a write into its range is refused until obtain forgets the row
+    -- and builds the cell again (see _part_built and _cell_attached).
+    select count(*) filter (where attached and pgpm._part_built(parent_table, child_oid, retiring_at)),
+           count(*) filter (where attached and pgpm._part_built(parent_table, child_oid, retiring_at)
                             and pgpm._native_gt(r.control_kind, hi, pgpm._grid_next(r.control_kind, r.partition_step, lo, r.partition_tz))),
            count(*) filter (where not attached)
       into v_np, v_coarse, v_inflight from pgpm.part where parent_table = r.parent_table;
-    execute format('select %s from pgpm.part where parent_table = %L::regclass and attached and pgpm._part_relation_exists(child_oid)',
+    execute format('select %s from pgpm.part where parent_table = %L::regclass and attached and pgpm._part_built(parent_table, child_oid, retiring_at)',
                    pgpm._max_hi_native(r.control_kind), r.parent_table::text) into v_new;
     -- preserve-managed incoming FK state: dropped (RI off) vs re-added-but-not-validated (orphan-blocked)
     select count(*) filter (where restored_at is null),
@@ -11554,11 +11608,14 @@ begin
       frontier   := v_frontier;
 
       -- the child taking writes: the attached one with lo <= frontier < hi. At most one, by the
-      -- non-overlap invariant over attached rows; none if the grid has fallen behind the frontier.
+      -- non-overlap invariant over attached rows; none if the grid has fallen behind the frontier. Only a
+      -- BUILT cell takes writes (#982): one whose partition was dropped or detached by hand is a hole every
+      -- write into is refused from, so it is read through status()'s predicate, not from its row alone.
       select p.child_name, p.hi into v_wc_name, v_wc_hi from pgpm.part p
        where p.parent_table = r.parent_table and p.attached
          and not pgpm._native_gt(r.control_kind, p.lo, v_frontier)
          and pgpm._native_gt(r.control_kind, p.hi, v_frontier)
+         and pgpm._part_built(r.parent_table, p.child_oid, p.retiring_at)
        limit 1;
       write_child := v_wc_name; write_ceiling := v_wc_hi;
       if v_wc_hi is not null then
