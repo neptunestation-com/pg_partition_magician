@@ -89,6 +89,12 @@ which installs fresh into one database per file and never upgrades anything.
 older shape, re-runs install.sql, and requires the result to be catalog-identical to a fresh install
 with its managed tables still working. Its mutation is `upgrade_no_column_backfill`.
 
+The backfill line must also say everything the `create table` body says about the column: a line that
+drops its `not null default` restores a nullable column, NULL on every row the database already had. The
+guard's catalog comparison covers each column's nullability and default and every constraint, and it
+requires each backfilled NOT NULL column to hold a value on every row that predates the upgrade. Its
+mutation is `upgrade_backfill_drops_not_null`.
+
 **The backfill line also needs an entry in that guard's `DEGRADE_COLS`**, which is what says the
 column gets dropped before the upgrade runs, and so what makes the backfill line exercised at all.
 The list is hardcoded on purpose (deriving it from the backfill lines would make the guard circular
