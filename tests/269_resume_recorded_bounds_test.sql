@@ -49,15 +49,21 @@ begin
   execute format('alter table %s add constraint pgpm_monolith_bound check (%I >= %L and %I < %L) not valid',
                  p_rel, p_col, p_lo, p_col, p_hi);
 end $$;
--- the owner's backend exits asynchronously after the disconnect; wait until it is gone
+-- the owner's backend exits asynchronously after the disconnect; wait until it is gone. The budget is
+-- 30 s (600 polls of 50 ms): the files run four at a time (test.sh's PGPM_JOBS), and on one loaded
+-- PostgreSQL 18 run a backend took longer than the 5 s this used to allow to leave pg_stat_activity.
+-- The owner is the (pid, backend_start) pair the claim recorded, not the pid alone, so a reused pid
+-- can never hold the wait up or end it early.
 create function pg_temp.t269_owner_gone(p_rel regclass) returns boolean language plpgsql as $$
 declare i int := 0;
 begin
-  while i < 100 and exists (select 1 from pgpm.transmute_inflight t join pg_stat_activity a on a.pid = t.owner_pid
+  while i < 600 and exists (select 1 from pgpm.transmute_inflight t join pg_stat_activity a
+                             on a.pid = t.owner_pid and a.backend_start = t.owner_backend_start
                              where t.parent_table = p_rel) loop
     perform pg_sleep(0.05); i := i + 1;
   end loop;
-  return not exists (select 1 from pgpm.transmute_inflight t join pg_stat_activity a on a.pid = t.owner_pid
+  return not exists (select 1 from pgpm.transmute_inflight t join pg_stat_activity a
+                      on a.pid = t.owner_pid and a.backend_start = t.owner_backend_start
                       where t.parent_table = p_rel);
 end $$;
 create function pg_temp.t269_state(p_rel regclass) returns text language sql as $$
