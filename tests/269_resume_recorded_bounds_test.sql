@@ -49,15 +49,26 @@ begin
   execute format('alter table %s add constraint pgpm_monolith_bound check (%I >= %L and %I < %L) not valid',
                  p_rel, p_col, p_lo, p_col, p_hi);
 end $$;
--- the owner's backend exits asynchronously after the disconnect; wait until it is gone
+-- the owner's backend exits asynchronously after the disconnect; wait until it is gone. The poll runs
+-- inside one function call, one transaction, and pg_stat_activity is SNAPSHOTTED once per transaction:
+-- without pg_stat_clear_snapshot() every iteration re-read the first snapshot and could never see the
+-- backend leave, so the wait only "worked" when the backend had already gone before the first read.
+-- With the files running four at a time (test.sh's PGPM_JOBS) it sometimes had not, and the probe burned
+-- its whole budget (31 s on one PostgreSQL 16 run) on a backend that had left within milliseconds; every
+-- other polling file in tests/ clears the snapshot the same way. The owner is the (pid, backend_start)
+-- pair the claim recorded, not the pid alone, so a reused pid can never hold the wait up or end it early.
 create function pg_temp.t269_owner_gone(p_rel regclass) returns boolean language plpgsql as $$
 declare i int := 0;
 begin
-  while i < 100 and exists (select 1 from pgpm.transmute_inflight t join pg_stat_activity a on a.pid = t.owner_pid
+  while i < 600 and exists (select 1 from pgpm.transmute_inflight t join pg_stat_activity a
+                             on a.pid = t.owner_pid and a.backend_start = t.owner_backend_start
                              where t.parent_table = p_rel) loop
     perform pg_sleep(0.05); i := i + 1;
+    perform pg_stat_clear_snapshot();
   end loop;
-  return not exists (select 1 from pgpm.transmute_inflight t join pg_stat_activity a on a.pid = t.owner_pid
+  perform pg_stat_clear_snapshot();
+  return not exists (select 1 from pgpm.transmute_inflight t join pg_stat_activity a
+                      on a.pid = t.owner_pid and a.backend_start = t.owner_backend_start
                       where t.parent_table = p_rel);
 end $$;
 create function pg_temp.t269_state(p_rel regclass) returns text language sql as $$
