@@ -2114,6 +2114,11 @@ stays shut. It counts in `status().retain_drop_failures`, and at `archive_batch`
 also holds up that parent's other partitions, which is right: the strategy is demonstrably wrong
 about what it archived.
 
+The operator utility `scripts/archive_partition_whole.sql`, which hands the strategy a write-blocked
+partition's whole remaining range in one call, holds the return to the same check before it writes
+anything: on a breach it records nothing, logs the same `fail_archive_contract` row over the range it
+handed, and returns the refusal as its message.
+
 Unlike the identity refusals, this one is retryable by construction. Nothing advanced, so the next
 tick hands the strategy the very same chunk; correct the strategy (or point `pgpm.set_archive_fn` at
 a corrected one) and archiving resumes from where the ledger honestly stands. Until then the row
