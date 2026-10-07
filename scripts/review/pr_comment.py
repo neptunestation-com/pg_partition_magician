@@ -95,7 +95,13 @@ def decide(classified, verdicts, acceptance="ACC", surface=None):
             to_file.append(cid)
     closing = verdicts.get("closing")
     if closing and closing.get("verdict") == "partial":
-        reasons.append("closing claim: partial (" + (closing.get("reason") or "see the claims below") + ")")
+        # a partial stands on the paths it names: when every one of them fell or is known and open, the
+        # closing claim holds after verification (#1053's upgrade-path claim fell: unreleased builds only)
+        named = closing.get("claims") or []
+        standing = [cid for cid in named if verdicts.get(cid, {}).get("verdict") not in ("fell", "known_open")]
+        if not named or standing:
+            reasons.append("closing claim: partial (" + (closing.get("reason") or "see the claims below")[:300] + ")"
+                           + (f"; standing on {', '.join(standing)}" if standing else "; no path named"))
     return bool(reasons), reasons, to_file
 
 
@@ -125,7 +131,12 @@ def render(classified, verdicts, coverage, surface, sealed, pr, head, base, budg
     closing = verdicts.get("closing")
     out += ["", "### Closing claim", ""]
     if closing:
-        out.append(f"**{closing.get('verdict', '?')}**: {closing.get('reason', '')}")
+        named = closing.get("claims") or []
+        fallen = [cid for cid in named if verdicts.get(cid, {}).get("verdict") in ("fell", "known_open")]
+        label = closing.get("verdict", "?")
+        if label == "partial" and named and len(fallen) == len(named):
+            label = "partial as claimed, holds after verification (" + ", ".join(f"{c} {verdicts[c]['verdict']}" for c in fallen) + ")"
+        out.append(f"**{label}**: {closing.get('reason', '')}")
     else:
         out.append("Not verified separately.")
     out += ["", "### Claims in the PR's surface", ""]
@@ -234,7 +245,13 @@ def selftest():
     classified["claims"][0]["acceptance"].update({"mutant_restores": {}, "any_restores": None})   # no mutant tree: not held against the PR
     assert not decide(classified, verdicts)[0]
     verdicts["closing"] = {"verdict": "partial", "reason": "the sibling path", "claims": ["V-01"]}
-    assert decide(classified, verdicts)[1] == ["closing claim: partial (the sibling path)"]
+    assert decide(classified, verdicts)[1] == ["closing claim: partial (the sibling path); standing on V-01"]
+    verdicts["V-01"] = {"verdict": "fell", "reason": "unreleased builds only"}      # the named path fell: holds
+    assert decide(classified, verdicts)[1] == [], decide(classified, verdicts)[1]
+    assert "holds after verification (V-01 fell)" in render(classified, verdicts, coverage, None, sealed, 7, "a", "b")[1]
+    verdicts["closing"]["claims"] = []                                              # a partial naming no path still blocks
+    assert decide(classified, verdicts)[1] == ["closing claim: partial (the sibling path); no path named"]
+    verdicts["closing"]["claims"] = ["V-01"]; del verdicts["V-01"]
     # the record's first shape (one combined mutant, a boolean) still renders and still blocks on False
     legacy = {"acceptance": "ACC", "claims": [{"id": "ACC-01", "finder": "ACC", "class": "fixed", "scenario": "s", "acceptance": {"fails_on_base": True, "passes_on_head": True, "mutant_restores": False}}]}
     assert decide(legacy, {})[0] and "restore a different defect" in decide(legacy, {})[1][0]
