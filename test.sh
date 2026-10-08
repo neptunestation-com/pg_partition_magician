@@ -1135,6 +1135,7 @@ run_perf() {
     "bench/transmute_step_precision.sh pgpm_perf284"
     "bench/archive_partition_whole_contract.sh pgpm_perf282"
     "bench/regrain_capture_delta_by_record.sh pgpm_perf289"
+    "bench/archive_partition_whole_follows_step.sh pgpm_perf290"
   )
   local selected=()
   local n=${#guards[@]} idx

@@ -63,7 +63,8 @@
 -- _archive_fully_covered/_native_type/_native_gt -- these predate this script, not new in any
 -- particular release), plus pgpm._archive_contract_breach (issue #454), pgpm._native_text (issue
 -- #977) and pgpm._refuse_filtered_reads (issue #873) for the contract check, the ledger's canonical
--- hi and the row-level security refusal, plus pgpm.part.child_oid for the identity check below (issue #421; added after this
+-- hi and the row-level security refusal, pgpm._max_hi_native (issue #500) for the canonical resume
+-- watermark and pgpm._child_nsp (issue #727) for the partition's own schema, plus pgpm.part.child_oid for the identity check below (issue #421; added after this
 -- script, so an older core needs that check removed along with the column reference). Not part of pgpm_core/install.sql and never will be without a real feature proposal
 -- and its own issue/PR -- this is scratch space for an operator to paste into a session and run,
 -- not a shipped, versioned function.
@@ -84,6 +85,7 @@ declare
   v_now regclass;
   v_result pgpm.archive_result;
   v_breach text;
+  v_found int;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then
@@ -94,16 +96,22 @@ begin
   end if;
   v_ncast := pgpm._native_type(cfg.control_kind);
 
-  select p.child_name, p.lo, p.hi, p.child_oid into r
-    from pgpm.part p
-   where p.parent_table = p_parent
-     and p.attached
-     and pgpm._is_write_blocked(p_parent, p.child_name)
-     and not pgpm._archive_fully_covered(p_parent, p.child_name)
-   order by p.lo
-   limit 1;
+  -- Oldest first in the control's NATIVE order, as pgpm._archive_step orders its candidates: pgpm.part.lo is
+  -- text, and as text '1000' sorts before '200', so an id grid crossing a power of ten handed out a newer
+  -- partition ahead of an older one (issue #1054). EXECUTE does not set FOUND, so the row count says whether
+  -- anything was eligible.
+  execute format(
+    'select p.child_name, p.lo, p.hi, p.child_oid from pgpm.part p
+      where p.parent_table = %L::regclass and p.attached
+        and pgpm._is_write_blocked(%L::regclass, p.child_name)
+        and not pgpm._archive_fully_covered(%L::regclass, p.child_name)
+      order by p.lo::%s
+      limit 1',
+    p_parent::text, p_parent::text, p_parent::text, v_ncast)
+    into r;
+  get diagnostics v_found = row_count;
 
-  if not found then
+  if v_found = 0 then
     return format('nothing eligible left to archive for %s', p_parent);
   end if;
 
@@ -111,11 +119,12 @@ begin
   -- writes the same kind of pgpm.archive_ledger row and that ledger is retire()'s drop precondition:
   -- a coverage claim built by reading whatever answers to child_name is what authorises dropping the
   -- partition that name was recorded for. Returned as a message rather than logged as
-  -- fail_archive_identity -- this is a hand-run function, so its caller is reading the output. Unlike
-  -- _archive_step's check, nothing guards this one (tests/286 guards the contract check below, not
-  -- this), which is a reason to keep it consistent with the shipped path, not a reason to leave the
-  -- gap open here.
-  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+  -- fail_archive_identity -- this is a hand-run function, so its caller is reading the output. tests/289
+  -- guards where it looks (parts C and D: a moved parent's partition is archived, a relation that took
+  -- the name in the partition's own schema is refused). The name is resolved in the PARTITION's own schema, through pgpm._child_nsp, as _archive_step
+  -- resolves it (#727): ALTER TABLE <parent> SET SCHEMA moves the parent alone, and looking in the
+  -- parent's schema found nothing under the name and refused the intact partition (issue #1054).
+  v_nsp := pgpm._child_nsp(p_parent, r.child_name);
   v_now := to_regclass(format('%I.%I', v_nsp, r.child_name));
   if r.child_oid is not null and v_now::oid is distinct from r.child_oid then
     return format('%I.%I is oid %s now, not the oid %s recorded for this partition -- REFUSING to archive it. '
@@ -142,9 +151,13 @@ begin
   end;
 
   -- resume from wherever this child's ledger coverage already left off, the same watermark
-  -- _next_archive_chunk itself reads -- NOT always the child's own lo.
-  execute format('select max(hi::%s)::text from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L',
-                 v_ncast, p_parent::text, r.child_name)
+  -- _next_archive_chunk itself reads -- NOT always the child's own lo -- and in the same canonical text,
+  -- through pgpm._max_hi_native (#500): it is written below as the next ledger row's lo, which every other
+  -- session reads back. A bare ::text rendered it in the CALLER's DateStyle ('13/08/2026 12:00:00 UTC'
+  -- under SQL, DMY), and once the partition was retired _archive_step's #511 discard query cast that lo
+  -- under the default DateStyle and raised on every tick (issue #1054).
+  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L',
+                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, r.child_name)
     into v_resume_lo;
   v_resume_lo := coalesce(v_resume_lo, r.lo);
 

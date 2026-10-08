@@ -41,6 +41,20 @@
   `bench/archive_partition_whole_contract.sh`, mutations `archive_whole_contract_unchecked`,
   `archive_whole_partial_compared_as_text` and `archive_whole_rls_unrefused`.
 
+- **`scripts/archive_partition_whole.sql` picks, resumes and finds a partition as `_archive_step` does**
+  (#1054). The operator utility ordered its candidates by `pgpm.part.lo` as text, so on an id grid crossing a
+  power of ten it archived `[1000, 1100)` ahead of the older `[200, 300)`; it now orders them in the
+  control's native type. It rendered its resume watermark with a bare `::text` in the caller's `DateStyle`
+  and wrote that as the next ledger row's `lo`, so a call under `SQL, DMY` recorded `13/08/2026 12:00:00 UTC`,
+  and once `retire()` dropped the partition `_archive_step`'s #511 discard query could not parse it and every
+  `maintain()` tick logged `skip_archive` for the parent; it now reads the watermark through
+  `pgpm._max_hi_native`, so the `lo` it records is canonical. And it looked the partition up in the parent's
+  schema, so after `ALTER TABLE <parent> SET SCHEMA` it refused the intact partition it had recorded; it now
+  resolves it with `pgpm._child_nsp`, and its identity check still refuses a relation that took the name in
+  the partition's own schema. Test `tests/289`, guard `bench/archive_partition_whole_follows_step.sh`,
+  mutations `archive_whole_order_by_text`, `archive_whole_resume_session_render` and
+  `archive_whole_parent_schema`.
+
 - **`from_hypertable_copy`'s change capture writes its delta by the oid it recorded** (#1037, bullet 1). The
   drains, the cutover and uninstall have found the delta by its `pgpm.scratch` oid since #955, but the
   capture function the copy minted inserted into `<rel>_pgpm_delta` by name, so renaming the recorded delta
