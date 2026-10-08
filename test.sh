@@ -564,6 +564,10 @@ run_timescale() {
     # half of the pair discriminate.sh completes with hypertable_capture_delta_by_name.
     echo "--- the change capture writes the delta it recorded, renamed or not (issue #1037) ---"
     bash "$(dirname "$0")/bench/hypertable_capture_delta_by_record.sh" pgpm_test-timescale pgpm_perf283 || fail=1
+    # #1057 bullet 3's guard, the same way: it re-runs tests/timescale/db/57 against the real install, the clean-code
+    # half of the pair discriminate.sh completes with hypertable_capture_fast_path_unlocked.
+    echo "--- the change capture writes its delta only while it holds it (issue #1057) ---"
+    bash "$(dirname "$0")/bench/hypertable_capture_delta_held.sh" pgpm_test-timescale pgpm_perf295 || fail=1
 
     echo "--- discriminate (timescale-scoped mutations) ---"
     bash "$(dirname "$0")/bench/discriminate.sh" --track=timescale pgpm_test-timescale || fail=1
@@ -1142,6 +1146,7 @@ run_perf() {
     "bench/archive_partition_whole_contract.sh pgpm_perf282"
     "bench/regrain_capture_delta_by_record.sh pgpm_perf289"
     "bench/archive_partition_whole_follows_step.sh pgpm_perf290"
+    "bench/regrain_capture_delta_held.sh pgpm_perf294"
   )
   local selected=()
   local n=${#guards[@]} idx

@@ -1035,48 +1035,80 @@ begin
     -- #1037: the capture reaches the delta by the oid recorded above, as the drains, the cutover and uninstall
     -- do (#955), never by the name alone. A static `insert into <rel>_pgpm_delta` resolved that name at every
     -- write, so a delta the operator renamed during the window refused every write to the live hypertable
-    -- (42P01), and a table later created under the name took the keys the cutover never read. The static
-    -- insert stays as the fast path, taken only while the minted name still leads to the recorded oid, which
-    -- is one name lookup a row and lets the insert keep its cached plan. Once it does not (the delta renamed
-    -- or moved, or another table under the name), the oid is rendered to the delta's current name (regclass
-    -- output, qualified wherever the writer's search_path would not find it) and the insert is dynamic, with
-    -- the key values bound. A delta that is gone refuses the write as 42P01, as the static insert did, naming
-    -- the table and the remedy, rather than as a syntax error at the bare oid.
+    -- (42P01), and a table later created under the name took the keys the cutover never read.
+    -- #1057: and it writes through a name only while it HOLDS the delta, exactly as core's regrain capture does
+    -- (_regrain_capture_install, which explains the mechanism in full). #1037's fast path checked the minted
+    -- name with to_regclass, which takes no lock, and the insert looked the name up again after queueing on the
+    -- delta's lock, so a writer that arrived while an operator's transaction held the delta to rename it wrote
+    -- its keys, once the rename committed, into whatever held the name by then (a table the operator created
+    -- under it in the same transaction, which the cutover never reads), or died 42P01 when nothing did. Every
+    -- write now takes ROW EXCLUSIVE on the delta through the name it is about to use and uses the name only if,
+    -- with the lock held, the name still leads to the recorded oid; a rename, SET SCHEMA or DROP of the delta
+    -- then waits for the writer to commit. The fast path keeps the static LOCK and insert while the minted name
+    -- leads to the delta (cached plans, and the body text the #988 provenance check reads); otherwise the oid
+    -- is rendered to the delta's current name (regclass output, qualified wherever the writer's search_path
+    -- would not find it), locked and re-checked, retried from a fresh rendering while renames keep landing in
+    -- between, and the insert is dynamic, the key values bound. A delta that is gone refuses the write as
+    -- 42P01, as the static insert did, naming the table and the remedy, rather than as a syntax error at the
+    -- bare oid.
     execute format('create function %I.%I() returns trigger language plpgsql as $pgpm$
       declare
         d regclass;
+        n text;
       begin
-        if pg_catalog.to_regclass(%L) is distinct from %s::pg_catalog.oid::pg_catalog.regclass then
-          select c.oid::pg_catalog.regclass into d from pg_catalog.pg_class c where c.oid = %s;
-          if d is null then
-            raise exception using errcode = ''undefined_table'', message = %L;
-          end if;
-          if tg_op = ''DELETE'' then
-            execute ''insert into '' || d::text || %L using %s; return old;
-          elsif tg_op = ''UPDATE'' then
-            execute ''insert into '' || d::text || %L using %s, %s; return new;
-          else
-            execute ''insert into '' || d::text || %L using %s; return new;
+        if pg_catalog.to_regclass(%L) = %s::pg_catalog.oid::pg_catalog.regclass then
+          begin
+            lock table only %I.%I in row exclusive mode;
+          exception when undefined_table or invalid_schema_name or insufficient_privilege then
+            null;
+          end;
+          if pg_catalog.to_regclass(%L) = %s::pg_catalog.oid::pg_catalog.regclass then
+            if tg_op = ''DELETE'' then
+              insert into %I.%I (%s) values (%s); return old;
+            elsif tg_op = ''UPDATE'' then
+              insert into %I.%I (%s) values (%s), (%s); return new;   -- old + new: a key change dirties both
+            else
+              insert into %I.%I (%s) values (%s); return new;
+            end if;
           end if;
         end if;
+        loop
+          d := %s::pg_catalog.oid::pg_catalog.regclass;
+          n := d::pg_catalog.text;
+          if pg_catalog.pg_table_is_visible(d) is null then
+            raise exception using errcode = ''undefined_table'', message = %L;
+          end if;
+          begin
+            execute ''lock table only '' || n || '' in row exclusive mode'';
+          exception when undefined_table or invalid_schema_name or insufficient_privilege then
+            if d::pg_catalog.text = n and pg_catalog.pg_table_is_visible(d) is not null then
+              raise;
+            end if;
+            continue;
+          end;
+          exit when pg_catalog.to_regclass(n) = d;
+        end loop;
         if tg_op = ''DELETE'' then
-          insert into %I.%I (%s) values (%s); return old;
+          execute ''insert into '' || n || %L using %s; return old;
         elsif tg_op = ''UPDATE'' then
-          insert into %I.%I (%s) values (%s), (%s); return new;   -- old + new: a key change dirties both
+          execute ''insert into '' || n || %L using %s, %s; return new;
         else
-          insert into %I.%I (%s) values (%s); return new;
+          execute ''insert into '' || n || %L using %s; return new;
         end if;
       end $pgpm$',
       v_nsp, v_trgfn,
-      format('%I.%I', v_nsp, v_delta), v_delta_oid, v_delta_oid,
+      format('%I.%I', v_nsp, v_delta), v_delta_oid,
+      v_nsp, v_delta,
+      format('%I.%I', v_nsp, v_delta), v_delta_oid,
+      v_nsp, v_delta, v_keycols_q, v_oldvals_q,
+      v_nsp, v_delta, v_keycols_q, v_oldvals_q, v_newvals_q,
+      v_nsp, v_delta, v_keycols_q, v_newvals_q,
+      v_delta_oid,
       format('pg_partition_magician: the change capture of %s.%s has lost the delta from_hypertable_copy recorded for it (oid %s), so no write to the table can be logged. Re-run pgpm.from_hypertable_copy with p_track_changes => true, which mints a fresh delta and capture.',
              quote_ident(v_nsp), quote_ident(v_rel), v_delta_oid),
       format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_oldvals_q,
       format(' (%s) values (%s), (%s)', v_keycols_q, v_oldargs, v_newargs), v_oldvals_q, v_newvals_q,
-      format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_newvals_q,
-      v_nsp, v_delta, v_keycols_q, v_oldvals_q,
-      v_nsp, v_delta, v_keycols_q, v_oldvals_q, v_newvals_q,
-      v_nsp, v_delta, v_keycols_q, v_newvals_q);
+      format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_newvals_q);
     perform pgpm._scratch_mint_fn(p_hypertable, format('%I.%I()', v_nsp, v_trgfn)::regprocedure);
     perform pgpm._scratch_record(p_hypertable, 'hypertable_delta_fn', format('%I.%I()', v_nsp, v_trgfn)::regprocedure::oid);
     execute format('create trigger %I after insert or update or delete on %I.%I for each row execute function %I.%I()',

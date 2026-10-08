@@ -742,7 +742,9 @@ replaces it with the hypertable's own comment, or none. The copy, and for a trac
 capture function, are recorded in [`pgpm.scratch`](#pgpmscratch) as they are created, and every later step
 (the drains, the cutover, a re-run of this copy, `uninstall.sql`) finds them there, by oid. So does the
 capture trigger, which writes the delta through its recorded oid, so a delta renamed during the online
-window goes on logging every write, and a table you create under the name it gave up takes none. They are owned
+window goes on logging every write, and a table you create under the name it gave up takes none. Each write
+holds the delta while it writes it, so a rename, move or drop of the delta waits for the writes in flight, and
+a write that arrives while one is pending waits for it and then writes the delta where it now is. They are owned
 like the hypertable, with no grant beyond the owner's (the delta also grants `INSERT` to every role that can
 write the hypertable, since its capture trigger writes as the writer), from the moment they are created, as
 is the delta's `pgpm_seq` identity sequence, so no role the migrating role's default privileges name reads
@@ -1627,7 +1629,10 @@ by **oid** from then on (`config.regrain_delta_oid`, `config.regrain_capture_fn_
 mid-regrain changes nothing: the trigger keeps writing the delta it was given, and the reconcile, the swap
 gate and the swap read that same relation, in the schema it is in. The trigger reaches the delta through
 that oid too, so a delta you rename or move mid-regrain goes on taking every change, and a table you create
-under the name it gave up takes none. A delta you drop refuses every write into the regraining partition
+under the name it gave up takes none. Each write holds the delta while it writes it (`ROW EXCLUSIVE`, the
+lock its insert takes anyway), so a rename, move or drop of the delta waits for the writes in flight, and a
+write that arrives while one is pending waits for it and then writes the delta where it now is, even when
+the same transaction gives the freed name to a table of yours. A delta you drop refuses every write into the regraining partition
 (42P01, naming the remedy) until the next tick, which restarts the run and re-mints capture. The source is likewise the relation
 `pgpm.part.child_oid` recorded, in its own schema, so a parent moved by `ALTER TABLE ... SET SCHEMA` before
 its regrain begins, or at any point while it runs, regrains as if it had stayed; the

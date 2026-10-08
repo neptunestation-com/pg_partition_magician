@@ -9613,82 +9613,73 @@ MUTATIONS['forget_missing_survivors_by_count'] = (
 )
 MUTATION_SRC['forget_missing_survivors_by_count'] = 'tests/79_status_survives_dropped_parent_test.sql'
 
-# #1037 bullet 1: the hypertable capture writes its delta through the recorded oid.
-MUTATIONS["hypertable_capture_delta_by_name"] = (
-    "bench/hypertable_capture_delta_by_record.sh",
-    "Pre-#1037 from_hypertable_copy: the capture function it mints inserts into <schema>.<rel>_pgpm_delta by "
-    "NAME alone (the fast path without the by-oid fallback), while the drains, the cutover and uninstall find the delta by the oid pgpm.scratch recorded (#955). "
-    "Rename the recorded delta during the online window and every insert, update and delete on the live "
-    "hypertable dies 42P01; a table the operator then creates under the freed name takes the captured keys, "
-    "which nothing drains, and the cutover refuses the swap. tests/timescale/db/56 catches it: the three "
-    "writes after the rename die, the renamed delta holds no keys, the operator's table holds 100002, and a56 "
-    "is never cut over.",
-    [("    execute format('create function %I.%I() returns trigger language plpgsql as $pgpm$\n"
-      "      declare\n"
-      "        d regclass;\n"
-      "      begin\n"
-      "        if pg_catalog.to_regclass(%L) is distinct from %s::pg_catalog.oid::pg_catalog.regclass then\n"
-      "          select c.oid::pg_catalog.regclass into d from pg_catalog.pg_class c where c.oid = %s;\n"
-      "          if d is null then\n"
-      "            raise exception using errcode = ''undefined_table'', message = %L;\n"
-      "          end if;\n"
-      "          if tg_op = ''DELETE'' then\n"
-      "            execute ''insert into '' || d::text || %L using %s; return old;\n"
-      "          elsif tg_op = ''UPDATE'' then\n"
-      "            execute ''insert into '' || d::text || %L using %s, %s; return new;\n"
-      "          else\n"
-      "            execute ''insert into '' || d::text || %L using %s; return new;\n"
-      "          end if;\n"
-      "        end if;\n"
-      "        if tg_op = ''DELETE'' then\n"
-      "          insert into %I.%I (%s) values (%s); return old;\n"
-      "        elsif tg_op = ''UPDATE'' then\n"
-      "          insert into %I.%I (%s) values (%s), (%s); return new;   -- old + new: a key change dirties both\n"
-      "        else\n"
-      "          insert into %I.%I (%s) values (%s); return new;\n"
-      "        end if;\n"
-      "      end $pgpm$',\n"
-      "      v_nsp, v_trgfn,\n"
-      "      format('%I.%I', v_nsp, v_delta), v_delta_oid, v_delta_oid,\n"
-      "      format('pg_partition_magician: the change capture of %s.%s has lost the delta from_hypertable_copy recorded for it (oid %s), so no write to the table can be logged. Re-run pgpm.from_hypertable_copy with p_track_changes => true, which mints a fresh delta and capture.',\n"
-      "             quote_ident(v_nsp), quote_ident(v_rel), v_delta_oid),\n"
-      "      format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_oldvals_q,\n"
-      "      format(' (%s) values (%s), (%s)', v_keycols_q, v_oldargs, v_newargs), v_oldvals_q, v_newvals_q,\n"
-      "      format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_newvals_q,\n"
-      "      v_nsp, v_delta, v_keycols_q, v_oldvals_q,\n"
-      "      v_nsp, v_delta, v_keycols_q, v_oldvals_q, v_newvals_q,\n"
-      "      v_nsp, v_delta, v_keycols_q, v_newvals_q);\n",
-      "    execute format('create function %I.%I() returns trigger language plpgsql as $pgpm$\n"
-      "      begin\n"
-      "        if tg_op = ''DELETE'' then\n"
-      "          insert into %I.%I (%s) values (%s); return old;\n"
-      "        elsif tg_op = ''UPDATE'' then\n"
-      "          insert into %I.%I (%s) values (%s), (%s); return new;   -- old + new: a key change dirties both\n"
-      "        else\n"
-      "          insert into %I.%I (%s) values (%s); return new;\n"
-      "        end if;\n"
-      "      end $pgpm$',\n"
-      "      v_nsp, v_trgfn,\n"
-      "      v_nsp, v_delta, v_keycols_q, v_oldvals_q,\n"
-      "      v_nsp, v_delta, v_keycols_q, v_oldvals_q, v_newvals_q,\n"
-      "      v_nsp, v_delta, v_keycols_q, v_newvals_q);\n", 1)],
-)
-MUTATION_SRC["hypertable_capture_delta_by_name"] = "pgpm_hypertable/install.sql"
-MUTATION_TRACK["hypertable_capture_delta_by_name"] = "timescale"
-
-# #1051: regrain's change capture writes its delta through the oid the prepare tick recorded.
-MUTATIONS["regrain_capture_delta_insert_by_name"] = (
-    "bench/regrain_capture_delta_by_record.sh",
-    "Pre-#1051 _regrain_capture_install: the capture function it mints inserts into "
-    "<schema>.<rel>_pgpm_regrain_delta by NAME alone (the fast path without the by-oid fallback), while the "
-    "reconcile, the swap gate, the swap and regrain_cancel find the delta by pgpm.config.regrain_delta_oid "
-    "(#496). Rename the recorded delta mid-regrain and every write into the regraining source dies 42P01 for "
-    "the life of the regrain; a table the operator then creates under the freed name takes the captured keys, "
-    "which nothing reconciles, so the swap attaches copies that miss them. tests/288 catches it: the three "
-    "writes after the rename die, the renamed delta holds no keys, the operator's table holds 9600, a288 "
-    "after the swap still has row 8 and lacks 9500 and 9600, and a dropped delta dies with PostgreSQL's "
-    "message instead of pgpm's.",
-    [("""  execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$
+# The capture functions' whole minting statement, in three shapes, shared by the four mutations below so each
+# shape lives in one place (a block this long, duplicated, drifts in one copy and silently stops matching in
+# the other). HELD is the code as it stands (#1057: the delta written only under a lock that pins it to the
+# name used); UNLOCKED is #1051's and #1037's (the to_regclass check, then a static insert that resolves the
+# name again after any wait); STATIC is pre-#1051 and pre-#1037 (the insert by the minted name alone).
+CAPTURE_HELD_CORE = """  execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$
+    declare
+      d regclass;
+      n text;
+    begin
+      if pg_catalog.to_regclass(%L) = %s::pg_catalog.oid::pg_catalog.regclass then
+        begin
+          lock table only %I.%I in row exclusive mode;
+        exception when undefined_table or invalid_schema_name or insufficient_privilege then
+          null;
+        end;
+        if pg_catalog.to_regclass(%L) = %s::pg_catalog.oid::pg_catalog.regclass then
+          if tg_op = ''DELETE'' then
+            insert into %I.%I (%s) values (%s); return old;
+          elsif tg_op = ''UPDATE'' then
+            insert into %I.%I (%s) values (%s), (%s); return new;   -- old + new: a key change dirties both
+          else
+            insert into %I.%I (%s) values (%s); return new;
+          end if;
+        end if;
+      end if;
+      loop
+        d := %s::pg_catalog.oid::pg_catalog.regclass;
+        n := d::pg_catalog.text;
+        if pg_catalog.pg_table_is_visible(d) is null then
+          raise exception using errcode = ''undefined_table'',
+            message = pg_catalog.format(%L, %s::pg_catalog.oid::pg_catalog.regclass);
+        end if;
+        begin
+          execute ''lock table only '' || n || '' in row exclusive mode'';
+        exception when undefined_table or invalid_schema_name or insufficient_privilege then
+          if d::pg_catalog.text = n and pg_catalog.pg_table_is_visible(d) is not null then
+            raise;
+          end if;
+          continue;
+        end;
+        exit when pg_catalog.to_regclass(n) = d;
+      end loop;
+      if tg_op = ''DELETE'' then
+        execute ''insert into '' || n || %L using %s; return old;
+      elsif tg_op = ''UPDATE'' then
+        execute ''insert into '' || n || %L using %s, %s; return new;
+      else
+        execute ''insert into '' || n || %L using %s; return new;
+      end if;
+    end $pgpm$',
+    v_nsp, v_fn,
+    format('%I.%I', v_nsp, v_delta), v_delta_reg::oid,
+    v_nsp, v_delta,
+    format('%I.%I', v_nsp, v_delta), v_delta_reg::oid,
+    v_nsp, v_delta, v_keycols_q, v_oldvals_q,
+    v_nsp, v_delta, v_keycols_q, v_oldvals_q, v_newvals_q,
+    v_nsp, v_delta, v_keycols_q, v_newvals_q,
+    v_delta_reg::oid,
+    format('pg_partition_magician: the regrain change capture of %%s has lost the delta table the prepare tick recorded for it (oid %s), so no write to the regraining partition can be logged. The next pgpm.regrain_step tick on the table restarts the regrain and mints a fresh delta, or pgpm.regrain_cancel ends it.',
+           v_delta_reg::oid),
+    p_parent::oid,
+    format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_oldvals_q,
+    format(' (%s) values (%s), (%s)', v_keycols_q, v_oldargs, v_newargs), v_oldvals_q, v_newvals_q,
+    format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_newvals_q);
+"""
+CAPTURE_UNLOCKED_CORE = """  execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$
     declare
       d regclass;
     begin
@@ -9707,11 +9698,14 @@ MUTATIONS["regrain_capture_delta_insert_by_name"] = (
         end if;
       end if;
       if tg_op = ''DELETE'' then
-""", """  execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$
-    begin
-      if tg_op = ''DELETE'' then
-""", 1),
-     ("""    v_nsp, v_fn,
+        insert into %I.%I (%s) values (%s); return old;
+      elsif tg_op = ''UPDATE'' then
+        insert into %I.%I (%s) values (%s), (%s); return new;   -- old + new: a key change dirties both
+      else
+        insert into %I.%I (%s) values (%s); return new;
+      end if;
+    end $pgpm$',
+    v_nsp, v_fn,
     format('%I.%I', v_nsp, v_delta), v_delta_reg::oid, v_delta_reg::oid,
     format('pg_partition_magician: the regrain change capture of %%s has lost the delta table the prepare tick recorded for it (oid %s), so no write to the regraining partition can be logged. The next pgpm.regrain_step tick on the table restarts the regrain and mints a fresh delta, or pgpm.regrain_cancel ends it.',
            v_delta_reg::oid),
@@ -9719,9 +9713,192 @@ MUTATIONS["regrain_capture_delta_insert_by_name"] = (
     format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_oldvals_q,
     format(' (%s) values (%s), (%s)', v_keycols_q, v_oldargs, v_newargs), v_oldvals_q, v_newvals_q,
     format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_newvals_q,
-""", """    v_nsp, v_fn,
-""", 1)],
+    v_nsp, v_delta, v_keycols_q, v_oldvals_q,
+    v_nsp, v_delta, v_keycols_q, v_oldvals_q, v_newvals_q,
+    v_nsp, v_delta, v_keycols_q, v_newvals_q);
+"""
+CAPTURE_STATIC_CORE = """  execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$
+    begin
+      if tg_op = ''DELETE'' then
+        insert into %I.%I (%s) values (%s); return old;
+      elsif tg_op = ''UPDATE'' then
+        insert into %I.%I (%s) values (%s), (%s); return new;   -- old + new: a key change dirties both
+      else
+        insert into %I.%I (%s) values (%s); return new;
+      end if;
+    end $pgpm$',
+    v_nsp, v_fn,
+    v_nsp, v_delta, v_keycols_q, v_oldvals_q,
+    v_nsp, v_delta, v_keycols_q, v_oldvals_q, v_newvals_q,
+    v_nsp, v_delta, v_keycols_q, v_newvals_q);
+"""
+CAPTURE_HELD_HYPERTABLE = """    execute format('create function %I.%I() returns trigger language plpgsql as $pgpm$
+      declare
+        d regclass;
+        n text;
+      begin
+        if pg_catalog.to_regclass(%L) = %s::pg_catalog.oid::pg_catalog.regclass then
+          begin
+            lock table only %I.%I in row exclusive mode;
+          exception when undefined_table or invalid_schema_name or insufficient_privilege then
+            null;
+          end;
+          if pg_catalog.to_regclass(%L) = %s::pg_catalog.oid::pg_catalog.regclass then
+            if tg_op = ''DELETE'' then
+              insert into %I.%I (%s) values (%s); return old;
+            elsif tg_op = ''UPDATE'' then
+              insert into %I.%I (%s) values (%s), (%s); return new;   -- old + new: a key change dirties both
+            else
+              insert into %I.%I (%s) values (%s); return new;
+            end if;
+          end if;
+        end if;
+        loop
+          d := %s::pg_catalog.oid::pg_catalog.regclass;
+          n := d::pg_catalog.text;
+          if pg_catalog.pg_table_is_visible(d) is null then
+            raise exception using errcode = ''undefined_table'', message = %L;
+          end if;
+          begin
+            execute ''lock table only '' || n || '' in row exclusive mode'';
+          exception when undefined_table or invalid_schema_name or insufficient_privilege then
+            if d::pg_catalog.text = n and pg_catalog.pg_table_is_visible(d) is not null then
+              raise;
+            end if;
+            continue;
+          end;
+          exit when pg_catalog.to_regclass(n) = d;
+        end loop;
+        if tg_op = ''DELETE'' then
+          execute ''insert into '' || n || %L using %s; return old;
+        elsif tg_op = ''UPDATE'' then
+          execute ''insert into '' || n || %L using %s, %s; return new;
+        else
+          execute ''insert into '' || n || %L using %s; return new;
+        end if;
+      end $pgpm$',
+      v_nsp, v_trgfn,
+      format('%I.%I', v_nsp, v_delta), v_delta_oid,
+      v_nsp, v_delta,
+      format('%I.%I', v_nsp, v_delta), v_delta_oid,
+      v_nsp, v_delta, v_keycols_q, v_oldvals_q,
+      v_nsp, v_delta, v_keycols_q, v_oldvals_q, v_newvals_q,
+      v_nsp, v_delta, v_keycols_q, v_newvals_q,
+      v_delta_oid,
+      format('pg_partition_magician: the change capture of %s.%s has lost the delta from_hypertable_copy recorded for it (oid %s), so no write to the table can be logged. Re-run pgpm.from_hypertable_copy with p_track_changes => true, which mints a fresh delta and capture.',
+             quote_ident(v_nsp), quote_ident(v_rel), v_delta_oid),
+      format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_oldvals_q,
+      format(' (%s) values (%s), (%s)', v_keycols_q, v_oldargs, v_newargs), v_oldvals_q, v_newvals_q,
+      format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_newvals_q);
+"""
+CAPTURE_UNLOCKED_HYPERTABLE = """    execute format('create function %I.%I() returns trigger language plpgsql as $pgpm$
+      declare
+        d regclass;
+      begin
+        if pg_catalog.to_regclass(%L) is distinct from %s::pg_catalog.oid::pg_catalog.regclass then
+          select c.oid::pg_catalog.regclass into d from pg_catalog.pg_class c where c.oid = %s;
+          if d is null then
+            raise exception using errcode = ''undefined_table'', message = %L;
+          end if;
+          if tg_op = ''DELETE'' then
+            execute ''insert into '' || d::text || %L using %s; return old;
+          elsif tg_op = ''UPDATE'' then
+            execute ''insert into '' || d::text || %L using %s, %s; return new;
+          else
+            execute ''insert into '' || d::text || %L using %s; return new;
+          end if;
+        end if;
+        if tg_op = ''DELETE'' then
+          insert into %I.%I (%s) values (%s); return old;
+        elsif tg_op = ''UPDATE'' then
+          insert into %I.%I (%s) values (%s), (%s); return new;   -- old + new: a key change dirties both
+        else
+          insert into %I.%I (%s) values (%s); return new;
+        end if;
+      end $pgpm$',
+      v_nsp, v_trgfn,
+      format('%I.%I', v_nsp, v_delta), v_delta_oid, v_delta_oid,
+      format('pg_partition_magician: the change capture of %s.%s has lost the delta from_hypertable_copy recorded for it (oid %s), so no write to the table can be logged. Re-run pgpm.from_hypertable_copy with p_track_changes => true, which mints a fresh delta and capture.',
+             quote_ident(v_nsp), quote_ident(v_rel), v_delta_oid),
+      format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_oldvals_q,
+      format(' (%s) values (%s), (%s)', v_keycols_q, v_oldargs, v_newargs), v_oldvals_q, v_newvals_q,
+      format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_newvals_q,
+      v_nsp, v_delta, v_keycols_q, v_oldvals_q,
+      v_nsp, v_delta, v_keycols_q, v_oldvals_q, v_newvals_q,
+      v_nsp, v_delta, v_keycols_q, v_newvals_q);
+"""
+CAPTURE_STATIC_HYPERTABLE = """    execute format('create function %I.%I() returns trigger language plpgsql as $pgpm$
+      begin
+        if tg_op = ''DELETE'' then
+          insert into %I.%I (%s) values (%s); return old;
+        elsif tg_op = ''UPDATE'' then
+          insert into %I.%I (%s) values (%s), (%s); return new;   -- old + new: a key change dirties both
+        else
+          insert into %I.%I (%s) values (%s); return new;
+        end if;
+      end $pgpm$',
+      v_nsp, v_trgfn,
+      v_nsp, v_delta, v_keycols_q, v_oldvals_q,
+      v_nsp, v_delta, v_keycols_q, v_oldvals_q, v_newvals_q,
+      v_nsp, v_delta, v_keycols_q, v_newvals_q);
+"""
+
+# #1037 bullet 1: the hypertable capture writes its delta through the recorded oid.
+MUTATIONS["hypertable_capture_delta_by_name"] = (
+    "bench/hypertable_capture_delta_by_record.sh",
+    "Pre-#1037 from_hypertable_copy: the capture function it mints inserts into <schema>.<rel>_pgpm_delta by "
+    "NAME alone (the fast path without the by-oid fallback), while the drains, the cutover and uninstall find the delta by the oid pgpm.scratch recorded (#955). "
+    "Rename the recorded delta during the online window and every insert, update and delete on the live "
+    "hypertable dies 42P01; a table the operator then creates under the freed name takes the captured keys, "
+    "which nothing drains, and the cutover refuses the swap. tests/timescale/db/56 catches it: the three "
+    "writes after the rename die, the renamed delta holds no keys, the operator's table holds 100002, and a56 "
+    "is never cut over.",
+    [(CAPTURE_HELD_HYPERTABLE, CAPTURE_STATIC_HYPERTABLE, 1)],
 )
+MUTATION_SRC["hypertable_capture_delta_by_name"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_capture_delta_by_name"] = "timescale"
+
+# #1051: regrain's change capture writes its delta through the oid the prepare tick recorded.
+MUTATIONS["regrain_capture_delta_insert_by_name"] = (
+    "bench/regrain_capture_delta_by_record.sh",
+    "Pre-#1051 _regrain_capture_install: the capture function it mints inserts into "
+    "<schema>.<rel>_pgpm_regrain_delta by NAME alone (the fast path without the by-oid fallback), while the "
+    "reconcile, the swap gate, the swap and regrain_cancel find the delta by pgpm.config.regrain_delta_oid "
+    "(#496). Rename the recorded delta mid-regrain and every write into the regraining source dies 42P01 for "
+    "the life of the regrain; a table the operator then creates under the freed name takes the captured keys, "
+    "which nothing reconciles, so the swap attaches copies that miss them. tests/288 catches it: the three "
+    "writes after the rename die, the renamed delta holds no keys, the operator's table holds 9600, a288 "
+    "after the swap still has row 8 and lacks 9500 and 9600, and a dropped delta dies with PostgreSQL's "
+    "message instead of pgpm's.",
+    [(CAPTURE_HELD_CORE, CAPTURE_STATIC_CORE, 1)],
+)
+
+# #1057 bullet 3: each capture writes its delta only under a lock that pins the delta to the name it uses.
+MUTATIONS["regrain_capture_fast_path_unlocked"] = (
+    "bench/regrain_capture_delta_held.sh",
+    "#1051's _regrain_capture_install: the capture function checks the minted name with to_regclass, which "
+    "takes no lock, and then runs the static insert, which looks the name up again after queueing on the "
+    "delta's lock. A writer that arrives while an operator's transaction holds the delta to rename it passes "
+    "the check, waits, and once the rename commits writes its keys into whatever holds the minted name: a "
+    "table the operator created under it in the same transaction (the swap never reads it, so the committed "
+    "write is reverted), or nothing, and the write dies 42P01. tests/290 catches it: a290's update lands in "
+    "the operator's table and row 7 reads 'orig' after the swap, c290's write dies 42P01, d290's dies 42501 on "
+    "the operator's table, and no renamed delta holds a key.",
+    [(CAPTURE_HELD_CORE, CAPTURE_UNLOCKED_CORE, 1)],
+)
+MUTATIONS["hypertable_capture_fast_path_unlocked"] = (
+    "bench/hypertable_capture_delta_held.sh",
+    "#1037's from_hypertable_copy: the capture function it mints checks the minted name with to_regclass, "
+    "which takes no lock, and then runs the static insert, which looks the name up again after queueing on "
+    "the delta's lock. A writer that arrives while an operator's transaction holds the delta to rename it "
+    "writes its keys, once the rename commits, into a table the operator created under the freed name in "
+    "the same transaction, or dies 42P01 when there is none. tests/timescale/db/57 catches it: a57's update "
+    "lands in the operator's table (and the cutover refuses the swap), c57's write dies 42P01, and neither "
+    "renamed delta holds a key.",
+    [(CAPTURE_HELD_HYPERTABLE, CAPTURE_UNLOCKED_HYPERTABLE, 1)],
+)
+MUTATION_SRC["hypertable_capture_fast_path_unlocked"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_capture_fast_path_unlocked"] = "timescale"
 
 # Issue #1055 (bullet 1, A1055-1): a Parquet export reads the relation it was handed, never a namesake its old
 # spelling reaches once a schema is renamed. Three parts in archive._pq_snapshot, which both encoders read
