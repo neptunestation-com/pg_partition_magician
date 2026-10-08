@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **A cell whose own label makes its plain name too long is a hole, not the end of the tick** (#1072).
+  An id label widens from 19 to 20 digits at 10^19, so on a `numeric` key a 42-byte table name fits every cell
+  below that edge and none past it. `_obtain_name` caught `_part_name`'s over-63-byte refusal only for the
+  explicit-range stand-in (#663); the plain name's refusal escaped, and `obtain` and `extend_to` are single
+  functions, so the first unnameable cell unwound the whole call on every tick (`skip_obtain`) and the cell
+  `[9.9e18, 10^19)` below it, whose name fits, was never built and refused every write. Such a cell is now left
+  unbuilt and logged `fail_obtain_name` (its `method` gives the name, its length and the bytes to shorten by),
+  and the cells that fit are built, by both callers. A table whose name fits not even the grid's ordinary
+  label (renamed after `transmute`) is still refused, as before. Test `tests/293`, guard
+  `bench/obtain_plain_name_too_long.sh`, mutations `obtain_plain_name_uncaught` and
+  `obtain_plain_name_caught_always`.
+
 - **transmute refuses an anchor off 00:00 UTC on a `date` key** (#769, last bullet). #581 held a `date` key's
   step to whole days and never its anchor, and `_time_unit_breach` returned nothing for a `date`, so an anchor
   at noon converted with every `pgpm.part` bound at noon while the catalog attached each partition at its

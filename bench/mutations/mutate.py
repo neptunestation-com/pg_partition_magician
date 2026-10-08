@@ -5405,6 +5405,39 @@ $$;''',
 """, """  v_name := pgpm._part_name(p_rel, cfg.control_kind, cfg.partition_step, p_lo, p_hi, cfg.partition_tz, true);
 """, 1)],
     ),
+    "obtain_plain_name_uncaught": (
+        "bench/obtain_plain_name_too_long.sh",
+        "Pre-#1072 _obtain_name: _part_name's #510 refusal of a cell's PLAIN name escapes, though the grid's "
+        "ordinary label fits. obtain and extend_to are single functions, so on a numeric id grid whose labels "
+        "widen to 20 digits at 10^19 the first cell past that edge unwinds every cell of the call on every "
+        "tick (skip_obtain), and the nameable cell [9.9e18, 10^19) below it is never built. One clause: the "
+        "handler raises the refusal where it would leave the cell unbuilt. tests/293's obtained=1 status, its "
+        "no-skip_obtain check, the built cell and extend_to's return are what catch it.",
+        [("""      raise exception using message = v_refusal;
+    end;
+    return null;
+  end;
+""", """      raise exception using message = v_refusal;
+    end;
+    raise exception using message = v_refusal;
+  end;
+""", 1)],
+    ),
+    "obtain_plain_name_caught_always": (
+        "bench/obtain_plain_name_too_long.sh",
+        "Issue #1072, the over-correction: _obtain_name swallows every refusal of a plain name, including a "
+        "table whose name leaves no room for its grid's ordinary label (renamed after transmute), so obtain "
+        "stops refusing such a table and quietly logs every cell unbuilt instead of naming the table name "
+        "as the thing to shorten. One clause: the narrowest-label check's handler leaves the cell unbuilt "
+        "instead of raising. tests/293 part C's pinned refusal is what catches it.",
+        [("""    exception when raise_exception then
+      raise exception using message = v_refusal;
+    end;
+""", """    exception when raise_exception then
+      null;
+    end;
+""", 1)],
+    ),
     "hypertable_derived_names_unchecked": (
         "bench/hypertable_derived_names.sh",
         "Pre-#552 pgpm_hypertable: _from_hypertable_check_names refuses nothing, so the working names "

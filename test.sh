@@ -1037,6 +1037,7 @@ run_perf() {
     "bench/write_block_enabled_state.sh pgpm_perf104"
     "bench/regrain_capture_name_fits.sh pgpm_perf91"
     "bench/obtain_explicit_name_too_long.sh pgpm_perf92"
+    "bench/obtain_plain_name_too_long.sh pgpm_perf301"
     "bench/config_stamp_lock.sh pgpm_perf101"
     "bench/transmute_reap_lock_timeout.sh pgpm_perf99"
     "bench/hypertable_cutover_lock_timeout.sh pgpm_perf300"

@@ -1864,14 +1864,38 @@ $$;
 -- orphan-child guard refuses such a type up front (_type_squatter, #671), so only one created after the
 -- conversion gets here.
 --
+-- #1072: the PLAIN name can be refused too, and #663's catch did not cover it. An id label is zero-padded to
+-- 19 digits and never cut (#582), so on a numeric key it widens to 20 at 10^19, and a table name that fits
+-- every 19-digit cell (up to 42 bytes) does not fit the cells past that edge; a fraction, a long negative id,
+-- a BC year or a five-digit one widens a label the same way. The refusal escaped, so the first
+-- unnameable cell unwound the call on every tick (skip_obtain), and the cells below it whose names fit,
+-- [9.9e18, 10^19) among them, were never built. Such a cell is now left unbuilt like the others here. The
+-- catch is for a cell whose OWN label is wider than the grid's ordinary one, judged by the grid's narrowest
+-- label (an id of 0, a time label of an AD year of four digits): when even that does not fit, the table's
+-- name leaves no room for any cell of its grid (it was renamed after transmute, which refuses one up front),
+-- and the refusal is raised as it was, naming the cell that met it.
+--
 -- A null here is a hole in the forward grid, so both callers log it (fail_obtain_name, #710) through
 -- _log_unbuilt_cell; this function stays a stable one that only decides.
 create or replace function pgpm._obtain_name(p_parent regclass, cfg pgpm.config, p_nsp name, p_rel name,
                                              p_lo text, p_hi text)
 returns name language plpgsql stable as $$
-declare v_name name; v_held regclass;
+declare v_name name; v_held regclass; v_refusal text;
 begin
-  v_name := pgpm._part_name(p_rel, cfg.control_kind, cfg.partition_step, p_lo, p_hi, cfg.partition_tz);
+  begin
+    v_name := pgpm._part_name(p_rel, cfg.control_kind, cfg.partition_step, p_lo, p_hi, cfg.partition_tz);
+  exception when raise_exception then
+    if sqlerrm not like 'pg_partition_magician: cannot name a partition of %' then raise; end if;
+    v_refusal := sqlerrm;
+    begin   -- #1072: a hole only when the grid's narrowest label fits, see above
+      perform pgpm._part_name(p_rel, cfg.control_kind, cfg.partition_step,
+                              case when cfg.control_kind = 'id' then '0' else '2000-01-01 00:00:00+00' end,
+                              null, cfg.partition_tz);
+    exception when raise_exception then
+      raise exception using message = v_refusal;
+    end;
+    return null;
+  end;
   v_held := to_regclass(format('%I.%I', p_nsp, v_name));
   if v_held is null then
     if pgpm._type_squatter(p_nsp, v_name) is not null then return null; end if;   -- #707
@@ -1909,13 +1933,24 @@ $$;
 -- and the method stopped at "is held by ", #790), or one of its partitions over another range, in which
 -- case the explicit-range name that would have stood in was taken or over 63 bytes (see _obtain_name). _obtain_name itself stays a STABLE function that decides and writes nothing; the
 -- two callers log, both through this one function. Repeats once per tick while the cell stays unbuilt, the
--- way every other refusal a tick meets does.
+-- way every other refusal a tick meets does. A cell whose plain name is itself over 63 bytes (#1072) holds
+-- nothing to name: its method is _part_name's refusal, the name, its length and the bytes to shorten by.
 create or replace function pgpm._log_unbuilt_cell(p_parent regclass, cfg pgpm.config, p_nsp name, p_rel name,
                                                   p_lo text, p_hi text)
 returns void language plpgsql as $$
-declare v_name name := pgpm._part_name(p_rel, cfg.control_kind, cfg.partition_step, p_lo, p_hi, cfg.partition_tz);
-        v_held regclass := to_regclass(format('%I.%I', p_nsp, v_name));
+declare v_name name; v_held regclass; v_prefix text;
 begin
+  begin
+    v_name := pgpm._part_name(p_rel, cfg.control_kind, cfg.partition_step, p_lo, p_hi, cfg.partition_tz);
+  exception when raise_exception then
+    v_prefix := format('pg_partition_magician: cannot name a partition of %s -- ', p_rel);
+    if not starts_with(sqlerrm, v_prefix) then raise; end if;
+    insert into pgpm.log (parent_table, action, lo, hi, method)
+      values (p_parent, 'fail_obtain_name', p_lo, p_hi,
+              'left unbuilt, so writes into it are refused: its name ' || substr(sqlerrm, length(v_prefix) + 1));
+    return;
+  end;
+  v_held := to_regclass(format('%I.%I', p_nsp, v_name));
   insert into pgpm.log (parent_table, action, lo, hi, method)
     values (p_parent, 'fail_obtain_name', p_lo, p_hi,
             format('left unbuilt, so writes into it are refused: its name %I.%I is held by %s',
