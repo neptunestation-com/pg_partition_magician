@@ -87,11 +87,13 @@
 #   leaving the pre-#997/#998 count beside its now distinct payloads
 #
 # Usage: tests_fail_on_defect.sh <container> <db> [test file]
-# With no third argument it judges every file it knows in this checkout. With one it judges THAT file in place
-# of the one it stands for, recognised by its file name or, for a mutant bench/discriminate.sh built
+# With no third argument it judges every core file it knows in this checkout. With one it judges THAT file in
+# place of the one it stands for, recognised by its file name or, for a mutant bench/discriminate.sh built
 # (<mutation>.sql), by the mutation's MUTATION_SRC; a /repo/... path is mapped to this checkout. Every
 # install and test is fed from the host over stdin, so the container need not mount the repository; it
-# needs pgtap (the plain core image has it). Needs python3 on the host.
+# needs pgtap (the plain core image has it). Needs python3 on the host. The one timescale file it knows
+# (tests/timescale/db/33, pass 10 G20) is judged only when named, on the timescale track's container, over
+# TCP as every timescale wrapper connects; the default run leaves it out.
 set -uo pipefail
 C="${1:?container}"; DB="${2:?db}"; ONLY="${3:-}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -167,11 +169,17 @@ PY
     77_retain_incoming_fk_test.sql:*|*:tests/77_retain_incoming_fk_test.sql) SEL=" 77 "; F77="$ONLY" ;;
     # pass 9 G17
     "$(basename "$T267")":*|*:"$T267") SEL=" 267 "; F267="$ONLY" ;;
+    # pass 10 G20: tests/07 and tests/timescale/db/33, defined with their defects at the end of this file
+    07_retain_test.sql:*|*:tests/07_retain_test.sql) SEL=" 07 "; F07="$ONLY" ;;
+    33_from_hypertable_cutover_carries_access_test.sql:*|*:tests/timescale/db/33_from_hypertable_cutover_carries_access_test.sql)
+      SEL=" ts33 "; FTS33="$ONLY" ;;
     *) g19_only "$base" "$src" ||
          { say FAIL "the file to judge is one of the files this guard knows" "$ONLY -> '${src}'"; exit 1; } ;;
   esac
 fi
 sel() { [[ "$SEL" == *" $1 "* ]]; }
+# The timescale track's image does not trust the local socket (see run_timescale): its file is judged over TCP.
+if sel ts33; then q() { docker exec -i -e PGPASSWORD=postgres "$C" psql -h 127.0.0.1 -U postgres -X "$@"; }; fi
 
 fresh() {  # a fresh <db> with pgtap
   q -d postgres -q -c "drop database if exists $DB" </dev/null >/dev/null 2>&1
@@ -815,6 +823,85 @@ g19_case "$G19_FORGET" forget_missing_rewrites_survivors "$G19_FORGET_FIND" \
 " \
   "$G19_FORGET_PROBE" "PROBE 1/true/true/all" '^PROBE 1/true/true/none$' \
   "forget_missing() rewrites the survivors' part rows"
+
+# pass 10 G20 ------------------------------------------------------------------------------------------------
+# Issues #1092 and #1091: two more files that passed against the defect they name.
+#   tests/07  promised that a retention-aware regrain copies the within-horizon rows and discards only the
+#             aged ones, and asserted only that the aged rows were gone (a count of zero), the copy count, the
+#             regrain_aged rows and that the fine children exist: a regrain that lost every row of
+#             [30000, 60000) passed all six assertions;
+#   tests/timescale/db/33  asserted the tracked copy's delta table and capture function dropped with
+#             is(delta::text || fn::text, null), which null || x satisfies as soon as either is gone.
+# The defects, each a copy of this checkout's module with one site changed:
+#   swap_shifts_max_key       regrain's swap, after the source is dropped, moves the highest copied key in the
+#                             cell up by one (50000 becomes 50001, payload kept): one row lost, one invented,
+#                             the same count;
+#   cutover_keeps_capture_fn  pgpm_hypertable's cutover drops the tracked copy's delta and keeps its recorded
+#                             capture function.
+# LIVENESS, read from the database each file leaves: for tests/07 the swap ran once, and under the clean install
+# 50000 is there and 50001 is not, under the defect 50001 holds 50000's payload in its place, 20002 rows within
+# the horizon either way; for tests/timescale/db/33, hg33 migrated and its delta is gone, its capture function
+# gone too under the clean module and still there under the defect.
+# The mutations (bench/mutations/mutate.py), each the file's pre-fix shape:
+#   retain_regrain_survivors_unnamed                 -- tests/07 compares nothing with its snapshot
+#   hypertable_cutover_capture_fn_drop_concatenated  -- tests/timescale/db/33 back to delta::text || fn::text
+T07="tests/07_retain_test.sql"; F07="${F07:-$ROOT/$T07}"
+TS33="tests/timescale/db/33_from_hypertable_cutover_carries_access_test.sql"; FTS33="${FTS33:-$ROOT/$TS33}"
+[ -z "$ONLY" ] && SEL="${SEL}07 "
+
+# ---- tests/07: the within-horizon rows a retention-aware regrain keeps, by identity ---------------------------
+RT7="select (select count(*) from pgpm.log where parent_table = 'public.rt7'::regclass
+                and action = 'regrain' and method = 'copy_swap_drop')
+        || ':' || exists (select 1 from public.rt7 where id = 50000)
+        || ':' || coalesce((select payload from public.rt7 where id = 50001), 'none')
+        || ':' || (select count(*) from public.rt7 where id >= 30000)"
+if sel 07; then
+  judge_on "$ROOT/pgpm_core/install.sql" "CONTROL: $T07 passes against the clean install" pass "$F07"
+  expect_v "the clean swap ran once and kept 50000, 20002 within" "1:true:none:20002" "$RT7"
+  if plant swap_shifts_max_key "  $SWAP_LOG" \
+       "  execute format('update %s set %I = %I + 1 where %I = (select max(%I) from %s where %I < %L)',
+    p_parent, cfg.control_column, cfg.control_column, cfg.control_column, cfg.control_column, p_parent,
+    cfg.control_column, v_hi);
+  $SWAP_LOG"; then
+    judge_on "$work/swap_shifts_max_key.sql" "DEFECT: $T07 fails when the swap loses 50000 for 50001" fail "$F07"
+    expect_v "the swap ran once, lost 50000, holds 50001 in its place" "1:false:p50000:20002" "$RT7"
+  else
+    say FAIL "planted the defect: regrain's swap shifts its highest key" "install.sql moved; fix the pattern"; fail=1
+  fi
+fi
+
+# ---- tests/timescale/db/33: the tracked copy's capture function goes with the source ---------------------------
+# ts_judge_on <hypertable install.sql> <label> <expect>: judge tests/timescale/db/33 in a fresh <db> holding
+# TimescaleDB, pgtap, the core, that module and tests/timescale/fixtures.sql.
+ts_judge_on() {
+  q -d postgres -q -c "drop database if exists $DB" </dev/null >/dev/null 2>&1
+  if q -d postgres -q -c "create database $DB" </dev/null >"$work/install.log" 2>&1 &&
+     q -d postgres -q -c "alter database $DB set client_min_messages = warning" </dev/null >>"$work/install.log" 2>&1 &&
+     q -d "$DB" -v ON_ERROR_STOP=1 -q -c "create extension if not exists timescaledb; create extension if not exists pgtap;" </dev/null >>"$work/install.log" 2>&1 &&
+     q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f - <"$ROOT/pgpm_core/install.sql" >>"$work/install.log" 2>&1 &&
+     q -d "$DB" -v ON_ERROR_STOP=1 -q -f - <"$1" >>"$work/install.log" 2>&1 &&
+     q -d "$DB" -v ON_ERROR_STOP=1 -q -f - <"$ROOT/tests/timescale/fixtures.sql" >>"$work/install.log" 2>&1; then
+    judge "$2" "$3" "$FTS33"
+  else
+    say FAIL "$2: TimescaleDB, the core, the module and the fixtures loaded" "$(grep -m1 -E 'ERROR|FATAL' "$work/install.log")"; fail=1
+  fi
+}
+HG33="select (select relkind::text from pg_class where oid = to_regclass('public.hg33'))
+        || '|' || (to_regclass('public.hg33_pgpm_delta') is null)::text
+        || '|' || (to_regprocedure('public.hg33_pgpm_delta_fn()') is not null)::text"
+if sel ts33; then
+  ts_judge_on "$ROOT/pgpm_hypertable/install.sql" "CONTROL: $TS33 passes against the clean module" pass
+  expect_v "clean, hg33 migrated, delta and capture function gone" "p|true|false" "$HG33"
+  if plant_file "$ROOT/pgpm_hypertable/install.sql" "$work/cutover_keeps_capture_fn.sql" \
+       "      execute format('drop function %s', v_trgfn_oid::regprocedure::text);
+" "      null;
+"; then
+    ts_judge_on "$work/cutover_keeps_capture_fn.sql" "DEFECT: $TS33 fails when the cutover keeps the capture fn" fail
+    expect_v "defect, hg33 migrated, delta gone, capture function kept" "p|true|true" "$HG33"
+  else
+    say FAIL "planted the defect: the cutover keeps the capture function" "pgpm_hypertable/install.sql moved; fix the pattern"; fail=1
+  fi
+fi
 
 if [ "$fail" = 0 ]; then say PASS "every judged test file fails against its defect" "${SEL# }"
 else say FAIL "every judged test file fails against its defect" "${SEL# }"; fi

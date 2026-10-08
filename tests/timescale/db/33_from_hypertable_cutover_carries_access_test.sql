@@ -18,7 +18,13 @@
 -- append-only with a single grant, so both catch-up paths go through the carry.
 -- WITNESSES: each property is asserted on the hypertable before the migration, and the migration is
 -- asserted to have completed (a partitioned table, registered, every row by value).
-select plan(28);
+--
+-- The tracked copy's delta table and capture function are asserted gone one at a time (issue #1091): the
+-- two used to be tested together as is(delta::text || fn::text, null), and null || x is null, so a cutover
+-- that dropped the delta and left hg33_pgpm_delta_fn() in public passed. Neither absence means anything
+-- unless the copy minted them, which happens inside the one from_hypertable call, so an event trigger
+-- records what it created there by identity.
+select plan(30);
 
 do $$ begin
   if not exists (select 1 from pg_roles where rolname = 't33_app') then create role t33_app; end if;
@@ -120,7 +126,18 @@ select is((select string_agg(tgname, ',' order by tgname) from pg_trigger where 
   'hg33_stamp,ts_insert_blocker', 'WITNESS: the user trigger sits beside TimescaleDB''s insert blocker');
 
 -- ================= the migrations =================
+-- What the tracked copy mints for its change capture, by identity, as it creates it.
+create table public.t33_minted (identity text);
+create function public.t33_record_minted() returns event_trigger language plpgsql as $f$
+begin
+  insert into public.t33_minted
+  select c.object_identity from pg_event_trigger_ddl_commands() c
+   where c.object_identity like '%hg33\_pgpm\_delta%';
+end $f$;
+create event trigger t33_minted_et on ddl_command_end when tag in ('CREATE TABLE AS', 'CREATE FUNCTION')
+  execute function public.t33_record_minted();
 call pgpm.from_hypertable('public.hg33', 'ts', interval '1 day', p_paused => false, p_track_changes => true);
+drop event trigger t33_minted_et;
 call pgpm.from_hypertable('public.hk33', 'ts', interval '1 day', p_paused => false);
 
 -- LIVENESS: both migrations completed, every row by value.
@@ -134,8 +151,13 @@ select is((select relkind::text from pg_class where oid = 'public.hk33'::regclas
   'p/1/1,2', 'LIVENESS: hk33 is a pgpm-managed partitioned table holding its two rows');
 select is((select count(*)::int from timescaledb_information.hypertables where hypertable_name in ('hg33', 'hk33')),
   0, 'LIVENESS: neither is a hypertable any more');
-select is(to_regclass('public.hg33_pgpm_delta')::text || to_regproc('public.hg33_pgpm_delta_fn')::text, null,
-  'LIVENESS: the tracked copy''s delta table and capture function were dropped with the source');
+select is((select string_agg(distinct identity, ',' order by identity) from public.t33_minted),
+  'public.hg33_pgpm_delta,public.hg33_pgpm_delta_fn()',
+  'LIVENESS: the tracked copy minted its delta table and its capture function');
+select is(to_regclass('public.hg33_pgpm_delta'), null,
+  'the tracked copy''s delta table was dropped with the source');
+select is(to_regprocedure('public.hg33_pgpm_delta_fn()'), null,
+  'the tracked copy''s capture function was dropped with the source');
 
 -- ================= THE CONTRACT: the migrated tables kept their access =================
 select is(pg_temp.access_of('public.hg33'), (select access from before33 where t = 'hg33'),

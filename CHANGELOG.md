@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+- **The archive_fn S3 test reads its Parquet objects back** (#1093). `tests/archive/db/08` promised that the
+  uploaded object is fetched back from MinIO and checked, and did that for NDJSON only: its Parquet checks read
+  the ledger's `rows_archived`, the key's suffix and the ETag, so it stayed green against a transport that
+  uploaded the 4-byte magic `PAR1` and recorded 5000 rows. Each Parquet object it makes (Part B's three ledger
+  chunks, Parts C and D's direct calls) is now fetched back and compared, byte for byte, with the file of the
+  rows its range holds. Guard `bench/archive_fn_s3_readback.sh`, mutation `archive_fn_parquet_readback_trusted`.
+
+- **The retention-aware regrain test names the rows it keeps** (#1092). `tests/07` checked that the aged rows
+  were gone, the copy count, the `regrain_aged` rows and that the fine children exist, so a regrain that lost
+  every row of `[30000, 60000)` passed all six assertions. Its rows now carry their own payloads and the file
+  compares every row from 30000 up with a snapshot taken before the regrain, by `(id, payload)`. Guard
+  `bench/tests_fail_on_defect.sh` (a swap that loses 50000 and holds 50001 in its place), mutation
+  `retain_regrain_survivors_unnamed`.
+
+- **The hypertable cutover test asserts each scratch object dropped** (#1091). `tests/timescale/db/33`
+  asserted the tracked copy's delta table and capture function gone with one null-concatenated expression,
+  which passes as soon as either is gone, so a cutover that left `hg33_pgpm_delta_fn()` in `public` passed. It
+  now asserts each absence on its own, beside a witness (an event trigger) that the copy minted both. Guard
+  `bench/tests_fail_on_defect.sh`, run by the timescale track on its own container (a cutover that keeps the
+  capture function), mutation `hypertable_cutover_capture_fn_drop_concatenated`.
+
 - **The archive object-key lint follows the prefix column however it is quoted** (#1094).
   `scripts/check_archive_object_keys.py` recognised the prefix by its token's spelling, and its lexer kept a
   double-quoted identifier's quotes, so a second object key assembled from `cfg."prefix"`, the same column as

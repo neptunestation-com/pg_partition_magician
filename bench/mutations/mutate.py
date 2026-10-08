@@ -10961,6 +10961,44 @@ MUTATIONS["quoted_splices_initialiser_unread"] = (
 """, "", 1)],
 )
 MUTATION_SRC["quoted_splices_initialiser_unread"] = "scripts/check_quoted_splices.py"
+# pass 10 G20 (#1091, #1092, #1093): three test files that passed against the defect they name, each back to
+# the shape that passed. Judged by bench/tests_fail_on_defect.sh (tests/07, tests/timescale/db/33) and
+# bench/archive_fn_s3_readback.sh (tests/archive/db/08), each against an injection of that defect.
+MUTATIONS["retain_regrain_survivors_unnamed"] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#1092 tests/07: nothing names a within-horizon row that must come through the retention-aware regrain, "
+    "so a swap that loses 50000 and holds 50001 in its place passes every assertion. The snapshot and its "
+    "witness stay; nothing compares the table with it.",
+    [
+        ("select plan(8);\n", "select plan(7);\n", 1),
+        ("select bag_eq(\n  'select id, payload from public.rt7 where id >= 30000',\n"
+         "  'select id, payload from rt7_before where id >= 30000',\n"
+         "  'every within-horizon row survives the regrain by identity: 30000 through 50000 and the frontier, none lost, none added, none altered');\n\n",
+         "", 1),
+    ],
+)
+MUTATION_SRC["retain_regrain_survivors_unnamed"] = "tests/07_retain_test.sql"
+MUTATIONS["hypertable_cutover_capture_fn_drop_concatenated"] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#1091 tests/timescale/db/33: the capture function's absence asserted through to_regclass(delta)::text "
+    "|| to_regprocedure(fn)::text compared with null, and null || x is null, so a cutover that drops the delta "
+    "and keeps hg33_pgpm_delta_fn() passes.",
+    [("select is(to_regprocedure('public.hg33_pgpm_delta_fn()'), null,\n",
+      "select is(to_regclass('public.hg33_pgpm_delta')::text || to_regprocedure('public.hg33_pgpm_delta_fn()')::text, null,\n", 1)],
+)
+MUTATION_SRC["hypertable_cutover_capture_fn_drop_concatenated"] = "tests/timescale/db/33_from_hypertable_cutover_carries_access_test.sql"
+MUTATION_TRACK["hypertable_cutover_capture_fn_drop_concatenated"] = "timescale"
+MUTATIONS["archive_fn_parquet_readback_trusted"] = (
+    "bench/archive_fn_s3_readback.sh",
+    "Pre-#1093 tests/archive/db/08: its Parquet checks trust the ledger and never fetch the object back. One "
+    "site, the read-back helper every Parquet check calls, which answers from the key alone, so a transport "
+    "that uploads the 4-byte magic PAR1 and reports 5000 rows passes.",
+    [("  select pgpm_test08.fetch_object(p_parent, p_key)\n"
+      "         = archive._pq_to_parquet_range(p_parent, 'id', p_lo, p_hi,\n"
+      "                                        (select compress from archive.config where parent_table = p_parent));\n",
+      "  select p_key is not null;\n", 1)],
+)
+MUTATION_SRC["archive_fn_parquet_readback_trusted"] = "tests/archive/db/08_archive_fn_s3_test.sql"
 
 
 
