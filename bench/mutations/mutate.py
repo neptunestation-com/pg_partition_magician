@@ -7846,6 +7846,22 @@ select ok(
         "site, _part_detached_by_hand. tests/307 part D catches it.",
         [("\n     and exists (select 1 from pg_class c where c.oid = p_child_oid);\n", ";\n", 1)],
     ),
+    "regrain_trusts_part_attached": (
+        "bench/write_block_skips_hand_detached.sh",
+        "Pre-#705 maintain(): the auto-regrain candidate scan trusts pgpm.part.attached, so a coarse child the "
+        "operator detached by hand is picked first, its table gets the capture and TRUNCATE-guard triggers and "
+        "its rows are copied, and every swap after fails on it. One site, the scan. tests/307 part E catches it.",
+        [("        || ' and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)'   -- #705\n",
+          "", 1)],
+    ),
+    "progress_coarse_counts_hand_detached": (
+        "bench/write_block_skips_hand_detached.sh",
+        "Issue #705: progress().coarse_frozen stops mirroring the auto-regrain scan and counts a coarse child "
+        "the operator detached by hand, which auto-regrain will never work. One site, progress(). tests/307 "
+        "part E catches it.",
+        [("         and not pgpm._part_detached_by_hand(r.parent_table, p.child_oid, p.retiring_at)   -- #705, as maintain asks\n",
+          "", 1)],
+    ),
     "crossing_keys_bare_text": (
         "bench/crossing_keys_datestyle.sh",
         "Pre-#814 (F4-01) _crossing_keys: a timestamptz referencing key is read back with a bare ::text, so "

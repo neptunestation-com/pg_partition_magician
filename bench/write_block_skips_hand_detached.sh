@@ -3,14 +3,15 @@
 #
 # Run tests/307_write_block_skips_hand_detached_test.sql against an ARBITRARY copy of pgpm_core/install.sql,
 # so that bench/discriminate.sh can show the file catches the defects its mutations put back (issue #705):
-# _enforce_write_blocks and _archive_step trusted pgpm.part.attached, which an operator's own DETACH
-# PARTITION never touches, so a maintain() tick put pgpm_write_block on a table the operator had detached to
-# keep (every write to it refused "past its retention boundary"), and the archive step handed such a table
-# to the strategy and recorded coverage for it, while retire() refused it as detached by the operator
-# (#652). The file is the acceptance test; this wrapper exists so the mutations have a guard the
+# _enforce_write_blocks, _archive_step and maintain()'s auto-regrain candidate scan trusted
+# pgpm.part.attached, which an operator's own DETACH PARTITION never touches, so a maintain() tick put
+# pgpm_write_block on a table the operator had detached to keep (every write to it refused "past its
+# retention boundary"), the archive step handed such a table to the strategy and recorded coverage for it,
+# and auto-regrain put its capture and TRUNCATE guard on a detached coarse child and wedged on it, while
+# retire() refused it as detached by the operator (#652). The file is the acceptance test; this wrapper exists so the mutations have a guard the
 # discriminate track can run against the mutant, in the shape of bench/obtain_rebuilds_detached_cell.sh.
 #
-# FOUR mutations are required to fail against it (bench/mutations/mutate.py):
+# SIX mutations are required to fail against it (bench/mutations/mutate.py):
 #   write_block_trusts_part_attached     -- _enforce_write_blocks walks every attached row again, the
 #                                           pre-fix shape. Part A.
 #   archive_trusts_part_attached         -- _archive_step's candidate query trusts attached again, the
@@ -21,6 +22,10 @@
 #   detached_by_hand_counts_dropped      -- the over-correction: a partition dropped by hand reads as
 #                                           detached too, so the write-block step skips it silently instead
 #                                           of logging skip_write_block (tests/94's path). Part D.
+#   regrain_trusts_part_attached         -- the auto-regrain candidate scan trusts attached again, the
+#                                           pre-fix shape. Part E.
+#   progress_coarse_counts_hand_detached -- progress().coarse_frozen stops mirroring that scan and counts
+#                                           the detached coarse child. Part E.
 #
 # Runs on the plain core image (pgtap and pg_prove). TAP_GUARD_TEST_FILE overrides the test
 # file's path inside the container, for a worktree mounted somewhere other than /repo.

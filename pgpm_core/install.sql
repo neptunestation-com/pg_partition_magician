@@ -2113,10 +2113,12 @@ $$;
 -- still exists and is not built in _part_built's sense: not a partition of p_parent, and no retirement of
 -- pgpm's in flight on it (retiring_at). pgpm.part.attached says what pgpm did, not what the catalog holds,
 -- and an operator's own DETACH PARTITION never touches it, so every maintain() step that acts on an
--- attached row asks this first: _enforce_write_blocks (no write block goes on the operator's table) and
--- _archive_step (it is not handed to the strategy, and no coverage is recorded for it). retire() refuses the
--- same table (#652) and logs it fail_retain_drop on every call, which is why its row is LEFT, not forgotten
--- as _cell_attached forgets a forward cell's: the row is what keeps that refusal counted in status().
+-- attached row asks this first: _enforce_write_blocks (no write block goes on the operator's table),
+-- _archive_step (it is not handed to the strategy, and no coverage is recorded for it) and the auto-regrain
+-- candidate scan (no capture or TRUNCATE guard goes on it, nothing is copied out of it), with
+-- progress().coarse_frozen mirroring that scan. retire() refuses the same table (#652) and logs it
+-- fail_retain_drop on every call, which is why its row is LEFT, not forgotten as _cell_attached forgets a
+-- forward cell's: the row is what keeps that refusal counted in status().
 --
 -- One-directional, like _part_built. A child pgpm's own retirement detached (retiring_at set) is still
 -- pgpm's. A row whose relation is gone is not a table anyone keeps: it stays on the paths that report it
@@ -11644,6 +11646,11 @@ begin
   -- and inside the handler so a holder defers the step like any other lock race. Only while the top-of-tick
   -- read had auto-regrain on: a parent that never had it takes no regrain lock, and one turned on mid-tick
   -- starts next tick. tests/191 and bench/maintain_sweep_reads_tap.sh guard it.
+  --
+  -- A coarse child the operator DETACHed by hand is not a candidate (#705, _part_detached_by_hand), as it
+  -- is not one for the write-block and archive steps: picked, it got the capture and TRUNCATE-guard
+  -- triggers on the operator's table and its rows copied, then every swap failed on it ("is not a
+  -- partition") and, being the oldest, it held auto-regrain there for good.
   if cfg.regrain_to is not null then
     begin   -- #590: the candidate search is part of the regrain step
       perform pgpm._regrain_lock(p_parent);   -- #729: before the re-read
@@ -11651,6 +11658,7 @@ begin
       if v_regrain_to is not null then   -- #729: off since the top of the tick, so no candidate either
         execute format(
         'select child_name from pgpm.part p where p.parent_table = %L::regclass and p.attached'
+        || ' and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)'   -- #705
         || ' and pgpm._native_gt(%L, p.hi, pgpm._grid_next(%L, %L, p.lo, %L))'
         || ' and pgpm._native_gt(%L, p.hi, pgpm._grid_next(%L, %L, p.lo, %L))'   -- #515: the target subdivides it
         || ' and not pgpm._native_gt(%L, p.hi, %L) order by p.lo::%s asc limit 1',
@@ -12793,6 +12801,7 @@ begin
       v_floor := pgpm._grid_floor(r.control_kind, r.partition_step, r.partition_anchor, v_frontier, r.partition_tz);
       select count(*) into coarse_frozen from pgpm.part p
        where p.parent_table = r.parent_table and p.attached
+         and not pgpm._part_detached_by_hand(r.parent_table, p.child_oid, p.retiring_at)   -- #705, as maintain asks
          and pgpm._native_gt(r.control_kind, p.hi, pgpm._grid_next(r.control_kind, r.partition_step, p.lo, r.partition_tz))
          and pgpm._native_gt(r.control_kind, p.hi, pgpm._grid_next(r.control_kind, coalesce(r.regrain_to, r.partition_step), p.lo, r.partition_tz))
          and not pgpm._native_gt(r.control_kind, p.hi, v_floor);

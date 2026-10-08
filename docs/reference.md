@@ -2675,7 +2675,8 @@ while a tick is in an earlier step (archiving, say) stops that tick from startin
 `regrain_step` enforces its own preconditions, so an un-meetable tick simply retries, and `maintain` selects
 only a frozen coarse child the target subdivides, so a child the target cannot split (a 30-day cell that
 starts in February, on a monthly grid) is left alone rather than retried forever; it stays counted in
-`status().coarse_partitions`. A `p_target_step` coarser than `partition_step` (compared at
+`status().coarse_partitions`. A coarse child detached by hand is not selected either: it is the operator's
+table, so no capture or `TRUNCATE` guard goes on it and nothing is copied out of it. A `p_target_step` coarser than `partition_step` (compared at
 `partition_anchor`) is refused.
 
 Four kinds of target are refused at call time rather than left to wedge every tick: a `p_target_step` of
@@ -2940,7 +2941,7 @@ produced, not what you meant them to.
   `freeze_margin` instead.
 - `coarse_frozen` -- coarse partitions whose whole range is already behind the frontier: frozen, and
   eligible for regrain; with `regrain_to` set, only those the target subdivides, which is exactly what
-  `maintain` will select. `coarse_frozen > 0` beside a null `regrain_to` is a history that is not going to
+  `maintain` will select. A coarse partition detached by hand is not counted. `coarse_frozen > 0` beside a null `regrain_to` is a history that is not going to
   split by itself. `coarse_frozen = 0` beside `coarse_partitions > 0` and a set `regrain_to` is coarse
   history that is either not frozen yet (see `freeze_in`) or that the target cannot split.
 

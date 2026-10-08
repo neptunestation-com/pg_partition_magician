@@ -24,7 +24,7 @@
 -- horizon beside the one detached, so a block missing from one and present on another cannot cancel.
 set client_min_messages = warning;
 create extension if not exists pgtap;
-select plan(26);
+select plan(36);
 
 create schema pgpm_test307;
 
@@ -201,5 +201,68 @@ select ok(exists (select 1 from pg_trigger where tgrelid = :'dr_sib_oid'::oid an
 select ok(not exists (select 1 from pgpm.log where action = 'skip_write_block'
                        and parent_table in ('public.wb307'::regclass, 'public.ar307'::regclass, 'public.rt307'::regclass)),
   'no detached partition was reported as a deferral: a hand-detached table is left alone, not attempted');
+
+-- ============== part E: the auto-regrain step does not pick a hand-detached coarse child ==============
+-- Two frozen coarse children: the monolith [0, 20000) of ids 1..15000, and [20000, 40000) holding 25000 and
+-- 35000, built in place of the empty forward cells [20000, 30000) and [30000, 40000) and recorded in
+-- pgpm.part the way obtain records a partition. With both attached, the monolith is the first candidate
+-- (oldest first). The operator detaches the monolith to keep its history; auto-regrain must pass it over
+-- and work [20000, 40000), not put its capture and TRUNCATE guard on the operator's table, copy its rows,
+-- and then fail every swap on it ("is not a partition"), which held auto-regrain on it for good.
+create table public.rg307 (id bigint primary key, payload text);
+insert into public.rg307 select g, 'hist' from generate_series(1, 15000) g;
+call pgpm.transmute('public.rg307', 'id', 10000, p_paused => false);
+select pgpm.obtain('public.rg307');
+select format('drop table public.%I', child_name) from pgpm.part
+ where parent_table = 'public.rg307'::regclass and lo in ('20000', '30000') \gexec
+delete from pgpm.part where parent_table = 'public.rg307'::regclass and lo in ('20000', '30000');
+create table public.rg307_coarse2 partition of public.rg307 for values from (20000) to (40000);
+insert into pgpm.part (parent_table, child_name, lo, hi, attached, child_oid)
+  values ('public.rg307'::regclass, 'rg307_coarse2', '20000', '40000', true, 'public.rg307_coarse2'::regclass::oid);
+insert into public.rg307 values (25000, 'coarse2-a'), (35000, 'coarse2-b'), (55000, 'frontier');
+select child_name as rg_mono, child_oid as rg_mono_oid from pgpm.part
+ where parent_table = 'public.rg307'::regclass and lo = '0' \gset
+
+select is((select coarse_frozen from pgpm.progress('public.rg307')), 2::bigint,
+  'LIVENESS: with both attached, the monolith [0, 20000) and [20000, 40000) are frozen coarse children');
+select is((select array_agg(child_name::text order by lo::bigint) from pgpm.part
+            where parent_table = 'public.rg307'::regclass and attached
+              and pgpm._native_gt('id', hi, pgpm._grid_next('id', '10000', lo, null))),
+  array[:'rg_mono', 'rg307_coarse2'],
+  'LIVENESS: the monolith is the oldest coarse child, the one the auto-regrain scan reaches first');
+
+select format('alter table public.rg307 detach partition public.%I', :'rg_mono') \gexec
+select pgpm.set_regrain('public.rg307', '5000');
+
+select ok(not exists (select 1 from pg_inherits where inhparent = 'public.rg307'::regclass and inhrelid = :'rg_mono_oid'::oid)
+          and (select attached and retiring_at is null from pgpm.part where child_oid = :'rg_mono_oid'::oid),
+  'LIVENESS: the monolith is detached by hand, and its pgpm.part row still says attached with no retiring_at');
+select is((select coarse_frozen from pgpm.progress('public.rg307')), 1::bigint,
+  'progress() counts only [20000, 40000) as a frozen coarse child once the monolith is the operator''s');
+
+call pgpm.maintain('public.rg307');
+call pgpm.maintain('public.rg307');
+call pgpm.maintain('public.rg307');
+
+select is((select array_agg(lo order by lo) from pgpm.log
+            where parent_table = 'public.rg307'::regclass and action = 'regrain_prepare'),
+  array['20000'],
+  'auto-regrain prepared exactly one run, on [20000, 40000), the next candidate');
+select is((select array_agg(tgname::text order by tgname) from pg_trigger
+            where tgrelid = 'public.rg307_coarse2'::regclass and not tgisinternal and tgname like 'pgpm%'),
+  array['pgpm_regrain_capture', 'pgpm_regrain_truncate_guard'],
+  'LIVENESS: the run on [20000, 40000) put its capture and TRUNCATE guard on that partition');
+select is((select array_agg(tgname::text order by tgname) from pg_trigger
+            where tgrelid = :'rg_mono_oid'::oid and not tgisinternal and tgname like 'pgpm%'),
+  null,
+  'no pgpm trigger (regrain capture or TRUNCATE guard) is put on the operator''s detached monolith');
+select ok(not exists (select 1 from pgpm.part where parent_table = 'public.rg307'::regclass and not attached
+                       and not pgpm._native_gt('id', lo, '20000') and pgpm._native_gt('id', '20000', lo)),
+  'no regrain copy of the operator''s detached monolith [0, 20000) is built');
+select is((select count(*) from pgpm.log where parent_table = 'public.rg307'::regclass and action = 'skip_regrain'),
+  0::bigint,
+  'auto-regrain logged no skip_regrain: it is not stuck failing a swap on the detached monolith');
+select lives_ok(format('truncate public.%I', :'rg_mono'),
+  'the operator can TRUNCATE the table they detached');
 
 select * from finish();
