@@ -1183,8 +1183,8 @@ Creates empty partitions ahead of the frontier so live writes always land in a r
 `config.obtain` of them ready, and returns how many it created. Pure catalog work: the partitions are
 created empty, so nothing is scanned and nothing is moved. It skips any candidate range that overlaps an
 existing attached partition, for example the monolith, which covers the current interval, and leaves
-unbuilt a cell whose name something it does not own already holds, a relation or a type (see
-[Partition naming](#partition-naming)), building the cells around it. An attached `pgpm.part` row counts
+unbuilt a cell whose name something it does not own already holds, a relation or a type, or whose own
+label makes its name over 63 bytes (see [Partition naming](#partition-naming)), building the cells around it. An attached `pgpm.part` row counts
 as built only while its partition is a partition of the table. A forward cell dropped by hand with
 `DROP TABLE` does not count: the row is forgotten, logged `forget_dropped_partition`, and the cell is built
 again, empty. Nor does one detached by hand with `ALTER TABLE ... DETACH PARTITION`: the row is forgotten,
@@ -3092,7 +3092,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `fail_retain_drop` / `fail_retain_detach` / `fail_retain_crossing` / `fail_detach_reap` | an unexpected `DROP` failure, or a partition detached by something other than pgpm, which `retire` leaves alone / no `pgpm_detach` job to dispatch the detach to (run `pgpm.schedule()`) / a `NO ACTION`/`RESTRICT` FK blocked the crossing delete / finalizing an abandoned detach failed (including its 5 s lock wait running out behind a reader of the partition, retried next tick). In every case the partition is left whole and `method` carries the error |
 | `fail_retain_reattach` | a partition retention no longer reaches, which its dispatched detach had already taken out of the parent, could not be re-attached (a lock timeout, or something else now holds its range). The table and its rows are left whole, `method` carries the error, and the next tick tries again. Counts in `status().retain_drop_failures` |
 | `fail_retain_identity` / `fail_archive_identity` / `fail_write_block_identity` | a partition's name no longer resolves to the relation pgpm recorded for it, so `retire` refused to detach or drop it (see [identity](#what-retire-checks-a-partitions-identity-against)) / the archive step refused to read it (see [the archive step's identity check](#the-archive-steps-identity-check)) / the write-block step refused to put its trigger on it. `method` names the OIDs and, for the first, which anchor disagreed. None clears itself on a later tick |
-| `fail_obtain_name` | `obtain` or `extend_to` left the cell `[lo, hi)` unbuilt because its name is held by a relation that is not one of the table's partitions or by a type (an enum, domain or range type, since a table's row type takes its name), or its explicit-range stand-in is taken or over 63 bytes (see [Partition naming](#partition-naming)); every write into the range is refused until the name is freed. `method` names what holds it. Repeats once per tick until the cell is built |
+| `fail_obtain_name` | `obtain` or `extend_to` left the cell `[lo, hi)` unbuilt because its name is held by a relation that is not one of the table's partitions or by a type (an enum, domain or range type, since a table's row type takes its name), or its explicit-range stand-in is taken or over 63 bytes, or its own name is over 63 bytes (see [Partition naming](#partition-naming)); every write into the range is refused until the name is freed. `method` names what holds it, or for a name over 63 bytes gives the name, its length and the bytes to shorten the table name by. Repeats once per tick until the cell is built |
 | `fail_archive_contract` | the archive step refused what the archive strategy returned: `covered_hi` was null, not above the chunk's `lo`, past its `hi`, or not a native value, so no ledger row was written and coverage did not advance (see [the archive step's contract check](#the-archive-steps-contract-check)). `method` names the strategy, the chunk, the value returned and the rule it broke. Repeats once per tick until the strategy is corrected, and clears itself once it is |
 
 ### `pgpm.dropped_fk`
@@ -3216,7 +3216,12 @@ one step wide) and leaves the older partition untouched. A name held by anything
 cell from being built (a relation, or a type such as an enum or domain, since a table's row type takes
 its name), and so does an explicit-range name that would exceed 63 bytes (it is 14 bytes longer
 than a day cell's plain name, so a table name of 38 to 51 bytes meets this): that one cell is left unbuilt,
-never under a cut name, and the cells after it are built. Renaming the table to a name that fits frees it.
+never under a cut name, and the cells after it are built. So is a cell whose own label makes its plain name
+over 63 bytes while the grid's ordinary label fits: an id cell at or past 10^19 (a 20-digit label) on a
+table name of 42 bytes, or any cell whose label is wider than the grid's ordinary one (a fraction, a
+`_bc` year, a five-digit year) by more than the table name leaves room for. A table whose name fits not even the
+grid's ordinary label (renamed after `transmute`, which refuses one up front) is still refused: `obtain` and
+`extend_to` raise, naming the first cell they could not name. Renaming the table to a name that fits frees it.
 Each time `obtain` or `extend_to` leaves a cell unbuilt this way it logs `fail_obtain_name` for the cell's
 range, naming what holds the name, so the hole shows in `pgpm.log` before a write into it is refused.
 
@@ -3235,6 +3240,8 @@ would not fit. The budget, in bytes: a fine name is `len(<rel>) + 2 + label`, th
 10 (day), 13 (hour), 15 (minute), 17 (second), 24 (microsecond) or 19 (id, longer past 19 digits or with a
 fraction). A monthly grid therefore takes a table name of up to 43 bytes when the data spans more than one
 month (a coarse monolith) and 54 when it does not; an id grid, whose labels are 19 digits, takes 19 and 42.
+A cell whose label is wider than its grid's (an id at or past 10^19, a fraction) can still not fit; it is left
+unbuilt and logged `fail_obtain_name` rather than stopping the grid (see above).
 
 ## Internal adapter layer
 
