@@ -11395,6 +11395,7 @@ declare
   v_try boolean;
   v_ahead int;
   v_cell text;
+  v_next text;
   v_top text;
 begin
   -- #951: refused before anything is read or committed; p_status (INOUT: the status it returns) is not
@@ -11430,26 +11431,41 @@ begin
   -- the monolith a permanent hi several steps beyond the frontier, and that room is real even though the
   -- monolith's lo is far behind. Counting only partitions whose lo is ahead saw none of it, so such a table
   -- bypassed the back-off every tick and retried obtain's ACCESS EXCLUSIVE while it still had room (review
-  -- on #386). Steps are walked from the frontier's cell up to max(hi), which assumes attached coverage is
-  -- contiguous there: obtain and extend_to build it end to end, and retain only drops the oldest cells.
-  -- The walk stops at the threshold, so it costs at most ceil(obtain / 2) grid steps. Counted only while a
-  -- back-off is active, so a healthy tick pays nothing extra, and guarded so a failure to count (a dropped
-  -- parent, say) falls back to the back-off rather than aborting the sweep.
+  -- on #386). Steps are walked from the frontier's cell up to max(hi), and each one, the frontier's own cell
+  -- first, counts only while an attached partition that is BUILT overlaps it (#1078): the question obtain
+  -- itself asks of a cell (_part_built, through _cell_attached). Coverage is not contiguous just because
+  -- obtain and extend_to build it end to end: a forward cell dropped or detached by hand is a hole inside
+  -- the span whose pgpm.part row stays attached, and counted as coverage it kept the back-off honoured
+  -- while every write into the hole was refused and obtain, which rebuilds it (#908, #956), sat out. So a
+  -- hole in the frontier's cell or in the ceil(obtain / 2) steps past it bypasses the back-off like a short
+  -- lookahead does; a hole further out is past the threshold and waits for the back-off to expire, as a
+  -- missing cell at the top of the grid always has. Only the walk changes: the back-off still holds while
+  -- that many built steps remain, which is what it exists to protect (an ACCESS EXCLUSIVE queued behind
+  -- sustained contention every tick). The walk stops at the threshold, so it costs at most
+  -- ceil(obtain / 2) + 1 grid steps. Counted only while a back-off is active, so a healthy tick pays nothing
+  -- extra, and guarded so a failure to count (a dropped parent, say) falls back to the back-off rather than
+  -- aborting the sweep.
   v_try := coalesce(cfg.obtain_retry_after, '-infinity'::timestamptz) <= clock_timestamp();
   if not v_try then
     begin
-      -- the first grid boundary past the frontier's own cell, and the top of attached coverage
-      v_cell := pgpm._grid_next(cfg.control_kind, cfg.partition_step,
-                  pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor,
-                                   pgpm._frontier_native(p_parent), cfg.partition_tz), cfg.partition_tz);
+      -- the frontier's own grid cell, and the top of attached coverage
+      v_cell := pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor,
+                                 pgpm._frontier_native(p_parent), cfg.partition_tz);
       execute format('select %s from pgpm.part where parent_table = %L::regclass and attached',
                      pgpm._max_hi_native(cfg.control_kind), p_parent::text) into v_top;
-      v_ahead := 0;
-      while v_top is not null and v_ahead < ceil(cfg.obtain / 2.0)
-            and not pgpm._native_gt(cfg.control_kind,
-                  pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_cell, cfg.partition_tz), v_top) loop
+      -- the frontier's own cell is walked but not counted, so it starts the count one below zero
+      v_ahead := -1;
+      loop
+        v_next := pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_cell, cfg.partition_tz);
+        exit when v_ahead >= ceil(cfg.obtain / 2.0) or v_top is null
+               or (v_ahead >= 0 and pgpm._native_gt(cfg.control_kind, v_next, v_top))
+               or not exists (select 1 from pgpm.part p
+                               where p.parent_table = p_parent and p.attached
+                                 and pgpm._native_gt(cfg.control_kind, p.hi, v_cell)
+                                 and pgpm._native_gt(cfg.control_kind, v_next, p.lo)
+                                 and pgpm._part_built(p_parent, p.child_oid, p.retiring_at));
         v_ahead := v_ahead + 1;
-        v_cell := pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_cell, cfg.partition_tz);
+        v_cell := v_next;
       end loop;
       v_try := v_ahead < ceil(cfg.obtain / 2.0);
       if v_try then v_note := v_note || ' obtain_backoff_bypassed'; end if;

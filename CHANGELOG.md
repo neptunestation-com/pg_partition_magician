@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **A hole in the lookahead bypasses the obtain back-off** (#1078). After a lost lock race armed
+  `config.obtain_retry_after`, `maintain_obtain` honoured the back-off while `ceil(obtain / 2)` grid steps
+  past the frontier's cell were covered, and measured that by walking from the frontier's cell up to the
+  highest attached `hi`, assuming the coverage was contiguous. A forward cell dropped or detached by hand
+  keeps its attached `pgpm.part` row, so it counted as coverage: the next tick logged `obtain_backoff`
+  instead of rebuilding it, and every write into it stayed refused for the back-off window. The walk now
+  judges each step, the frontier's own cell first, by whether a built partition (`_part_built`, the
+  question `obtain` asks through `_cell_attached`) overlaps it, so such a hole bypasses the back-off and
+  `obtain` rebuilds it; with that many built steps in place the back-off still holds. Test `tests/298`,
+  guard `bench/obtain_backoff_hole.sh`, mutation `obtain_backoff_counts_hole`.
+
 - **A role that writes the table through a view can write a regraining partition** (#1073). The regrain
   capture trigger wrote its delta as the writer, and `_regrain_capture_grant` grants `INSERT` on the delta only
   to the grantees and owners of the parent and the source. A write through an ordinary view is checked as the
