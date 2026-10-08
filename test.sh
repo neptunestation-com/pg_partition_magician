@@ -1206,6 +1206,7 @@ run_perf() {
     "bench/adopt_partition.sh pgpm_perf315"
     "bench/write_block_skips_hand_detached.sh pgpm_perf316"
     "bench/bound_contract_remedy.sh pgpm_perf318"
+    "bench/liveness_witness_labels.sh pgpm_perf322"
   )
   local selected=()
   local n=${#guards[@]} idx

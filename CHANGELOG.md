@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **The liveness witnesses of eight shell guards print as lines `discriminate.sh` reads as premises**
+  (#1095). Its starved-fixture rule (#713) refuses a mutant run whose every failure begins `LIVENESS:`,
+  `GUARD:` or `fixture:`, reading only the head of each FAIL line, but `maintain_lock`,
+  `obtain_backoff_headroom`, `obtain_int_ceiling`, `frontier_drought`, `archive_lz77_memory`,
+  `archive_deflate_memory`, `archive_encode_memory` and `dropped_fk_identity` printed the checks their own
+  headers call witnesses with no prefix, two of them behind a `<table>:` tag, so a mutant that starved one
+  (retain deferred to `skip_retain`, a lock race never lost, a probe that sampled nothing) was certified as
+  catching its defect. Those witnesses now lead with `LIVENESS:`; the archive guards' result checks
+  ("returned a Parquet file", "raised no ERROR") stay unprefixed, because they are the only checks the #912
+  and #992 mutants fail. Guard `bench/liveness_witness_labels.sh` renders each listed witness and defect check
+  through its guard's own `check()` and applies `discriminate.sh`'s own `starved()` to it, and holds every
+  `bench/*.sh` to a LIVENESS prefix at a label's head; mutations `witness_label_unprefixed` and
+  `witness_label_prefix_behind_tag`.
+
 - **The archive_fn S3 test reads its Parquet objects back** (#1093). `tests/archive/db/08` promised that the
   uploaded object is fetched back from MinIO and checked, and did that for NDJSON only: its Parquet checks read
   the ledger's `rows_archived`, the key's suffix and the ETag, so it stayed green against a transport that

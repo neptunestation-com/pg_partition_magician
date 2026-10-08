@@ -121,12 +121,17 @@ len1=$(file_len 1); len2=$(file_len 2); len3=$(file_len 3)
 md5_1=$(file_md5 1); md5_3=$(file_md5 3)
 n_err=$(grep -c 'ERROR:' "$LOG")
 
-# Liveness witnesses first: a probe that sampled nothing, or a call that failed, would otherwise let
-# every bound below pass vacuously.
-check "the probe found the backend pid"  "$PID"   "$([ -n "$PID" ] && echo 1 || echo 0)"
-check "chunk1 was sampled while it ran"  "n=$n0"  "$([ "$n0" -gt 0 ] && echo 1 || echo 0)"
-check "chunk2 was sampled while it ran"  "n=$n1"  "$([ "$n1" -gt 0 ] && echo 1 || echo 0)"
-check "chunk3 was sampled while it ran"  "n=$n2"  "$([ "$n2" -gt 0 ] && echo 1 || echo 0)"
+# Liveness witnesses first: a probe that sampled nothing would otherwise let every bound below pass
+# vacuously. They print as LIVENESS: lines, the prefix bench/discriminate.sh reads to refuse a mutant run
+# that failed only these as a starved fixture (#713, #1095).
+check "LIVENESS: the probe found the backend pid" "$PID"   "$([ -n "$PID" ] && echo 1 || echo 0)"
+check "LIVENESS: chunk1 was sampled while it ran" "n=$n0"  "$([ "$n0" -gt 0 ] && echo 1 || echo 0)"
+check "LIVENESS: chunk2 was sampled while it ran" "n=$n1"  "$([ "$n1" -gt 0 ] && echo 1 || echo 0)"
+check "LIVENESS: chunk3 was sampled while it ran" "n=$n2"  "$([ "$n2" -gt 0 ] && echo 1 || echo 0)"
+# The calls' own results. A call that failed would let the bounds pass vacuously too, but these are NOT
+# premise witnesses: a call that raised after building the whole file (archive_lz77_range_raises, #912)
+# and a repeat that returned a different file (archive_lz77_repeat_differs, #992) are defects they exist
+# to catch, and each fails only these, so they stay defect checks (no LIVENESS: prefix).
 check "chunk1 returned a Parquet file"   "len=${len1:-none}" "$([ "${len1:-0}" -gt 8 ] && echo 1 || echo 0)"
 check "chunk2 returned a Parquet file"   "len=${len2:-none}" "$([ "${len2:-0}" -gt 8 ] && echo 1 || echo 0)"
 check "chunk3 returned a Parquet file"   "len=${len3:-none}" "$([ "${len3:-0}" -gt 8 ] && echo 1 || echo 0)"

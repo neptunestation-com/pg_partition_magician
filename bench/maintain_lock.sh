@@ -172,23 +172,25 @@ begin
 end \$p\$;" >/dev/null 2>&1
 wait $BG
 
-check "the probe overlapped a running tick"     "$(q "select saw_tick::text from public.probe")" "true"
+check "LIVENESS: the probe overlapped a running tick"   "$(q "select saw_tick::text from public.probe")" "true"
 check "a concurrent reader is never locked out (ml)"     "$(q "select timeouts::text from public.probe")"     "0"
 check "a concurrent reader is never locked out (mg_ret)" "$(q "select timeouts_ret::text from public.probe")" "0"
-check "at least one read landed inside the tick (ml)" \
+check "LIVENESS: at least one read landed inside the tick (ml)" \
       "$(q "select (attempts > 0)::text from public.probe")" "true"
-check "at least one read landed inside the tick (mg_ret)" \
+check "LIVENESS: at least one read landed inside the tick (mg_ret)" \
       "$(q "select (attempts_ret > 0)::text from public.probe")" "true"
 # These are what stop the guard passing vacuously. A tick starved of its locks logs skip_obtain/skip_retain,
 # takes no ACCESS EXCLUSIVE, and would sail through the reader assertions having proved nothing -- so every
-# step under test must be shown to have done real work, and a *_skip must not count as work.
-check "the tick did the work that takes the lock (obtain)" \
+# step under test must be shown to have done real work, and a *_skip must not count as work. They and the
+# overlap/read witnesses above print as LIVENESS: lines, the prefix bench/discriminate.sh reads to refuse a
+# mutant run that failed only these as a starved fixture (#713, #1095).
+check "LIVENESS: the tick did the work that takes the lock (obtain)" \
       "$(q "select (count(*) > 0)::text from pgpm.log
              where parent_table='public.ml'::regclass and action = 'obtain'")" "true"
-check "the tick did the work that takes the lock (retain)" \
+check "LIVENESS: the tick did the work that takes the lock (retain)" \
       "$(q "select (count(*) > 0)::text from pgpm.log
              where parent_table='public.mg_ret'::regclass and action = 'retain_drop'")" "true"
-check "and regrained in the same tick" \
+check "LIVENESS: and regrained in the same tick" \
       "$(q "select (count(*) > 0)::text from pgpm.log
              where parent_table='public.ml'::regclass and action in ('regrain_copy','regrain_attach','regrain')")" "true"
 

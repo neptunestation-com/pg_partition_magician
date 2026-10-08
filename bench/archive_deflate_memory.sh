@@ -125,8 +125,13 @@ end;
   # 100.1% dynamic, 105.5% fixed) and a stub or a truncated return does not.
   got_len=$(grep -E "^${label}_len=[0-9]+\$" "$log" | head -n1 | cut -d= -f2)
   n_err=$(grep -c 'ERROR:' "$log")
-  check "$label: the probe found the backend pid" "$pid" "$([ -n "$pid" ] && echo 1 || echo 0)"
-  check "$label: the call was sampled while it ran" "n=$n"  "$([ "$n" -gt 0 ] && echo 1 || echo 0)"
+  # The first two are liveness witnesses (a probe that sampled nothing lets the bound pass vacuously) and
+  # print with the LIVENESS: prefix bench/discriminate.sh reads (#713, #1095); the prefix leads the line,
+  # ahead of the $label tag, because that rule reads only the head. The call's own result is NOT a
+  # witness: a call that raised after the whole encode (archive_deflate_raises, #912) is a defect it exists
+  # to catch, and fails only the stream and ERROR checks, so they stay defect checks.
+  check "LIVENESS: $label: the probe found the backend pid" "$pid" "$([ -n "$pid" ] && echo 1 || echo 0)"
+  check "LIVENESS: $label: the call was sampled while it ran" "n=$n"  "$([ "$n" -gt 0 ] && echo 1 || echo 0)"
   check "$label: the call returned a stream for the whole payload" "len=${got_len:-none} floor=$((NBYTES * 99 / 100))" \
         "$([ "${got_len:-0}" -ge "$((NBYTES * 99 / 100))" ] && echo 1 || echo 0)"
   check "$label: the probe session raised no ERROR" "$n_err" "$([ "$n_err" = 0 ] && echo 1 || echo 0)"

@@ -96,7 +96,7 @@ else
   qa "update pgpm.dropped_fk set definition = replace(definition, ' REFERENCES bf.parent(', ' REFERENCES parent(')
        where parent_table = 'bf.parent'::regclass" >/dev/null
   # LIVENESS: the legacy shape really is in place before the upgrade looks for it.
-  check "the forged record reads as a pre-#498 capture would" \
+  check "LIVENESS: the forged record reads as a pre-#498 capture would" \
         "$(qa "select definition from pgpm.dropped_fk where parent_table = 'bf.parent'::regclass")" \
         "FOREIGN KEY (p_id) REFERENCES parent(id)"
   if ! q -d "$UP" -v ON_ERROR_STOP=1 -q --single-transaction -f "$INSTALL" >/dev/null 2>&1; then

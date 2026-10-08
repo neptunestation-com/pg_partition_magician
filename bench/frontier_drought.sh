@@ -31,7 +31,8 @@
 #
 #   1. LIVENESS WITNESS: the backfilled data really is stale enough to wedge under the pre-#325 rule
 #      (> obtain x step behind now()). Every assertion below reads as "obtain still reaches now()",
-#      which would also pass vacuously against a fixture that was never actually stale.
+#      which would also pass vacuously against a fixture that was never actually stale. Printed as
+#      `LIVENESS: <kind>: ...`, the prefix bench/discriminate.sh reads to refuse a starved run (#1095).
 #   2. + 3. per tick, across THREE SEPARATE `pgpm.maintain()` calls (three separate sessions, three
 #      separate now()s, matching the issue's own "across five ticks" table): a partition covers now()
 #      BY IDENTITY (its own [lo, hi), not "some partition exists somewhere"), and a row stamped at now()
@@ -97,7 +98,7 @@ run "insert into public.fd (id, body) values
        (pgpm._ts_to_uuid(now() - interval '11 months'), 'newest')" >/dev/null
 
 GAP=$(q "select (now() - (select pgpm._uuid_to_ts(id) from public.fd order by id desc limit 1)) > interval '2 months'")
-check "uuidv7: the backfilled frontier is well outside the 2-month lookahead" "$GAP" "t"
+check "LIVENESS: uuidv7: the backfilled frontier is well outside the 2-month lookahead" "$GAP" "t"
 
 run "call pgpm.transmute('public.fd', 'id', interval '1 month', p_obtain => 2)" >/dev/null
 run "select pgpm.resume('public.fd')" >/dev/null
@@ -133,7 +134,7 @@ run "insert into public.fd_tt (id, body) values
 
 GAP_TT=$(q "select (now() - (select pgpm._text_time_to_ts(id, 'c', 8, 36, 'ms')
                               from public.fd_tt order by id desc limit 1)) > interval '2 months'")
-check "text_time: the backfilled frontier is well outside the 2-month lookahead" "$GAP_TT" "t"
+check "LIVENESS: text_time: the backfilled frontier is well outside the 2-month lookahead" "$GAP_TT" "t"
 
 run "call pgpm.transmute('public.fd_tt', 'id', interval '1 month', p_obtain => 2,
        p_tt_prefix => 'c', p_tt_width => 8, p_tt_radix => 36, p_tt_unit => 'ms')" >/dev/null

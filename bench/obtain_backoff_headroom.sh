@@ -24,7 +24,8 @@
 #   public.ob_race (monolith [0,1000), grid top 5000):
 #   1. + 2. LIVENESS WITNESS: the race really happened -- a skip_obtain row carrying the lock-timeout error,
 #      and a back-off set in the future. Without these, every assertion below could pass against a tick
-#      that never contended for anything.
+#      that never contended for anything. Printed as `LIVENESS: <table>: ...`, the prefix leading the line,
+#      because bench/discriminate.sh reads only the head of a FAIL line to refuse a starved run (#1095).
 #   3. The back-off still holds while headroom is ample (frontier in [2000,3000), 2 steps covered beyond it):
 #      the next tick creates nothing even though obtain has partitions to create. A "fix" that deletes the
 #      back-off fails here.
@@ -89,10 +90,10 @@ raced_tick() { # <table> <label prefix>
   done
   run "call pgpm.maintain_obtain('$1')" >/dev/null
   wait "$holder"
-  check "$2: the lock race really happened: skip_obtain with a lock timeout" \
+  check "LIVENESS: $2: the lock race really happened: skip_obtain with a lock timeout" \
     "$(q "select exists (select 1 from pgpm.log where parent_table = '$1'::regclass
                           and action = 'skip_obtain' and method like '%lock timeout%')")" "t"
-  check "$2: the deferral set a back-off in the future" \
+  check "LIVENESS: $2: the deferral set a back-off in the future" \
     "$(q "select obtain_retry_after > clock_timestamp() from pgpm.config where parent_table = '$1'::regclass")" "t"
 }
 
