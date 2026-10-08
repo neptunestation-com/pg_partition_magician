@@ -724,9 +724,9 @@ migration does not need to interleave application writes between the phases. `p_
 `p_obtain`/`p_retain`/`p_anchor`/`p_paused` parameters pass straight through to `transmute`; `p_drain_batch` is this module's own
 to `transmute` (see there); `p_control` is the time dimension column; `p_track_changes`, `p_predrain` and
 `p_lock_timeout` are described under `from_hypertable_copy` and `from_hypertable_cutover` (a bad
-`p_lock_timeout` is refused before the copy starts, and so is a `p_interval` whose monolith name would not
-fit, a key that is a bare unique index, and a newest row past `transmute`'s frontier bound, see
-`from_hypertable_cutover`). `p_force_frontier` is passed through to the cutover and on to `transmute`.
+`p_lock_timeout` is refused before the copy starts, and so is a negative `p_retain` or `p_obtain`, a
+`p_interval` that is not positive, a `p_interval` whose monolith name would not fit, a key that is a bare
+unique index, and a newest row past `transmute`'s frontier bound, see `from_hypertable_cutover`). `p_force_frontier` is passed through to the cutover and on to `transmute`.
 When `p_retain` is left `null`, the source's `drop_chunks` policy interval (if any) is carried in.
 
 ```sql
@@ -962,6 +962,15 @@ that arrived while it prepared is seen too. A refused cutover rolls back whole, 
 stay in the copy. For the key, build the unique constraint and drop the bare index (the message gives both
 statements); for the frontier, correct the rows, or pass `p_force_frontier => true` to accept the farther
 monolith bound, which is skipped here and passed to `transmute`.
+
+**`transmute`'s argument rules are asked first.** `transmute` refuses a negative `p_retain`, a negative
+`p_obtain` and a `p_interval` that is not positive before it commits anything, and the cutover reaches it only
+after its swap. So `from_hypertable` before its copy, and the cutover before its pre-drain, ask the same rules
+first, ahead of every check that reads the table, and refuse with `transmute`'s own messages
+(`pg_partition_magician: p_retain cannot be negative ...`, `... p_obtain must be a non-negative integer ...`,
+`... the partition step must be positive ...`), with the hypertable untouched. A negative `p_interval` is
+therefore refused as a step, with or without `p_force_frontier`, never by the frontier check, whose remedy
+(correct the newest rows) does not apply to it.
 
 **The handoff runs after the swap has committed, and can still refuse.** `transmute` applies its own
 preconditions to the plain table (for example, a secondary index whose name leaves no room for the `_pgpm`

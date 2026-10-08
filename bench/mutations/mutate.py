@@ -10417,6 +10417,49 @@ MUTATIONS["capture_definer_reach_by_fn_schema"] = (
       "  select has_schema_privilege(p.proowner, p.pronamespace, 'USAGE') and has_table_privilege(p.proowner, c.oid, 'INSERT')\n", 1)],
 )
 
+# Issue #1085 (and #966 W2, F6-05): from_hypertable and from_hypertable_cutover ask transmute's argument rules
+# (pgpm._refuse_bad_transmute_arguments: p_retain not negative, p_obtain not negative, p_interval positive)
+# through pgpm._from_hypertable_check_arguments before anything is read or committed. All three are caught by
+# tests/timescale/db/58 (bench/hypertable_argument_rules.sh, on the timescale track).
+_HT_ARGS_DRIVER = ("""  -- #1085: and transmute's argument rules, before the copy and ahead of the frontier check below, which would
+  -- read a step that is not positive as a frontier to delete rows for
+  perform pgpm._from_hypertable_check_arguments(p_interval, p_obtain, p_retain);
+""", "", 1)
+_HT_ARGS_CUTOVER = ("""  -- #1085: transmute's argument rules, before the pre-drain commits anything and before any check reads the
+  -- table: refused only by transmute, they came after the swap had dropped the hypertable
+  perform pgpm._from_hypertable_check_arguments(p_interval, p_obtain, p_retain);
+""", "", 1)
+MUTATIONS["hypertable_arguments_unchecked"] = (
+    "bench/hypertable_argument_rules.sh",
+    "Pre-#1085 pgpm_hypertable: nothing in the module asks transmute's argument rules, so a negative p_retain or "
+    "p_obtain, or a p_interval that is not positive, is refused only by transmute at the handoff, after the "
+    "cutover's swap has committed and dropped the hypertable; and a negative p_interval meets the frontier "
+    "check first, which tells the operator to delete the newest rows. _from_hypertable_check_arguments asks "
+    "nothing. tests/timescale/db/58's ten refusals by from_hypertable and the cutover fail (the copy's or the "
+    "swap's COMMIT dies 2D000 inside throws_like, and the negative step meets the frontier's message).",
+    [("  perform pgpm._refuse_bad_transmute_arguments('time', p_interval::text, p_obtain, p_retain::text);\n",
+      "", 1)],
+)
+MUTATIONS["hypertable_arguments_unchecked_up_front"] = (
+    "bench/hypertable_argument_rules.sh",
+    "#1085 without from_hypertable's own call: the cutover still refuses a bad argument before its swap, but "
+    "only after the whole online copy has run and committed, and a negative p_interval meets the frontier "
+    "check first, with its delete-the-rows remedy (F6-05). tests/timescale/db/58 part A fails: the copy's "
+    "first COMMIT dies 2D000 inside throws_like, and the negative step is refused as a frontier.",
+    [_HT_ARGS_DRIVER],
+)
+MUTATIONS["hypertable_cutover_arguments_unchecked"] = (
+    "bench/hypertable_argument_rules.sh",
+    "#1085 without the cutover's own call: from_hypertable refuses a bad argument before its copy, but the "
+    "two-phase flow's cutover reaches the swap and drops the hypertable before transmute refuses. "
+    "tests/timescale/db/58 part B fails: the swap's COMMIT (or the pre-drain's) dies 2D000 inside throws_like.",
+    [_HT_ARGS_CUTOVER],
+)
+for _name in ("hypertable_arguments_unchecked", "hypertable_arguments_unchecked_up_front",
+              "hypertable_cutover_arguments_unchecked"):
+    MUTATION_SRC[_name] = "pgpm_hypertable/install.sql"
+    MUTATION_TRACK[_name] = "timescale"
+
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
