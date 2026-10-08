@@ -2315,6 +2315,16 @@ is left as it was. To export the new relation as well, give the parent another p
 relation recorded by install (the parent); an export claim's relation is not known, so every export over
 it is refused the same way.
 
+The relation an export claims its key for is the relation it reads. `archive.to_s3` and
+`archive.to_s3_parquet` hold the child they resolve (an ACCESS SHARE lock, the one any read of it takes) from
+the moment they resolve it to the end of the calling transaction, so a concurrent `DROP`, rename or `ALTER`
+of the child waits until the export has committed, and a relation created by its name afterwards is another
+relation, which the claim above refuses. `archive.to_s3` also reads the child by that identity rather than by
+its schema and name, so a schema renamed away with a namesake created in its place does not stand in for it.
+A child dropped or replaced while the call waited for that lock is refused, `<schema>.<child> was dropped or
+replaced while archive.to_s3 was resolving it`, and nothing is written. An export run inside a longer
+transaction keeps the hold until that transaction ends.
+
 ## Scheduling
 
 ### `schedule`

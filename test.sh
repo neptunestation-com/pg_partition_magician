@@ -896,6 +896,10 @@ run_archive() {
   # through it, and the NDJSON upload naming the http types again.
   echo "--- pgpm_archive reaches pgcrypto and http in their own schemas, never through search_path guard (issue #984) ---"
   bash "$(dirname "$0")/bench/archive_extension_resolution.sh" pgpm_test-archive pgpm_perf271 || fail=1
+  # The child-held guard (#1030) re-runs tests/archive/db/45 for the same reason: the clean-code half of the
+  # pairs bench/discriminate.sh completes with the resolved child left unheld, read by name, and both.
+  echo "--- a synchronous export reads the relation it resolved and claimed guard (issue #1030) ---"
+  bash "$(dirname "$0")/bench/archive_to_s3_child_held.sh" pgpm_test-archive pgpm_perf281 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi
