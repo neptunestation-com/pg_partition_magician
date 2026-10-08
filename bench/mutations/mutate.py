@@ -7901,11 +7901,11 @@ select ok(
         [("  v_key := archive._object_key(p_parent, cfg.prefix, pcfg.control_kind, p_lo,\n"
           "                               case when p_compress then '.ndjson.gz' else '.ndjson' end);\n"
           "  -- #975: never over a recorded chunk this read does not reproduce\n"
-          "  perform archive._refuse_recorded_chunk_overwrite('archive_to_s3_ndjson', p_parent, pcfg.control_kind, v_key, p_lo, p_hi, v_rows);\n"
+          "  perform archive._refuse_recorded_chunk_overwrite('archive_to_s3_ndjson', p_parent, pcfg.control_kind, v_key, p_lo, p_hi, v_rows, v_rows_digest);\n"
           "  if p_compress then\n",
           "  v_key := archive._object_key(p_parent, cfg.prefix, pcfg.control_kind, p_lo, '.ndjson');\n"
           "  -- #975: never over a recorded chunk this read does not reproduce\n"
-          "  perform archive._refuse_recorded_chunk_overwrite('archive_to_s3_ndjson', p_parent, pcfg.control_kind, v_key, p_lo, p_hi, v_rows);\n"
+          "  perform archive._refuse_recorded_chunk_overwrite('archive_to_s3_ndjson', p_parent, pcfg.control_kind, v_key, p_lo, p_hi, v_rows, v_rows_digest);\n"
           "  if p_compress then\n"
           "    v_key := v_key || '.gz';   -- MUTANT: after the claim\n", 1)],
     ),
@@ -9245,7 +9245,7 @@ for _fmt, _routine in (("ndjson", "archive_to_s3_ndjson"), ("parquet", "archive_
         f"object over the only copy of its rows. One site, the encoder's call of "
         f"archive._refuse_recorded_chunk_overwrite. tests/archive/db/42 catches it (F5-04 and F5-03: the object no "
         f"longer holds the chunk).",
-        [(f"  perform archive._refuse_recorded_chunk_overwrite('{_routine}', p_parent, pcfg.control_kind, v_key, p_lo, p_hi, v_rows);\n",
+        [(f"  perform archive._refuse_recorded_chunk_overwrite('{_routine}', p_parent, pcfg.control_kind, v_key, p_lo, p_hi, v_rows, v_rows_digest);\n",
           "", 1)],
     )
     MUTATION_SRC[f"archive_{_fmt}_recorded_chunk_unchecked"] = "pgpm_archive/install.sql"
@@ -9253,10 +9253,13 @@ MUTATIONS["archive_recorded_chunk_rows_unchecked"] = (
     "bench/archive_recorded_chunk.sh",
     "archive._refuse_recorded_chunk_overwrite compares a recorded chunk's range and never its rows, so after retire() "
     "dropped the partition a direct call with the chunk's own [lo, hi) reads no row and PUTs an empty object over the "
-    "only copy (#975 F5-03). One site, the rows rule. tests/archive/db/42 catches it (F5-03: the retired chunk's "
-    "objects no longer hold its rows).",
+    "only copy (#975 F5-03). One site, the rows rule, which since #1069 is the count and the digest (taking out "
+    "the count alone leaves the digest refusing the empty read). tests/archive/db/42 catches it (F5-03: the "
+    "retired chunk's objects no longer hold its rows).",
     [("    elsif (l.rows_archived is null and coalesce(p_rows, 0) = 0)\n"
       "          or (l.rows_archived is not null and p_rows is distinct from l.rows_archived) then\n",
+      "    elsif false then\n", 1),
+     ("    elsif l.rows_digest is null or p_rows_digest is distinct from l.rows_digest then\n",
       "    elsif false then\n", 1)],
 )
 MUTATION_SRC["archive_recorded_chunk_rows_unchecked"] = "pgpm_archive/install.sql"
@@ -9271,6 +9274,81 @@ MUTATIONS["archive_recorded_chunk_range_unchecked"] = (
       "    if false then\n", 1)],
 )
 MUTATION_SRC["archive_recorded_chunk_range_unchecked"] = "pgpm_archive/install.sql"
+
+# #1069 (pass 10 F5-03): the rows a recorded chunk's key is rewritten with are compared by a digest of them,
+# recorded on the key's whole-key claim by every admitted write, not by their count. All three are caught by
+# tests/archive/db/48 (bench/archive_recorded_chunk_rows_identity.sh, against the archive image and MinIO).
+MUTATIONS["archive_recorded_chunk_identity_unchecked"] = (
+    "bench/archive_recorded_chunk_rows_identity.sh",
+    "archive._refuse_recorded_chunk_overwrite records the digest of the rows each write puts at a chunk key and "
+    "never compares it, so after retire() dropped a chunk's partition, a partition re-created over the range holding "
+    "as many rows as the chunk did, but other ones, is PUT over the only copy (#1069 F5-03), and so is any write at "
+    "a chunk claimed before the digest existed. One site, the identity rule. tests/archive/db/48 catches it "
+    "(90 other NDJSON rows and 70 Parquet rows with one changed are written over the chunks' objects).",
+    [("    elsif l.rows_digest is null or p_rows_digest is distinct from l.rows_digest then\n",
+      "    elsif false then\n", 1)],
+)
+MUTATION_SRC["archive_recorded_chunk_identity_unchecked"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_recorded_chunk_identity_unrecorded"] = (
+    "bench/archive_recorded_chunk_rows_identity.sh",
+    "archive._refuse_recorded_chunk_overwrite compares a recorded chunk's digest and never records one, so "
+    "every chunk's claim stays without and every re-run of a recorded chunk is refused, the documented re-run of a "
+    "live, write-blocked chunk included. One site, the record. tests/archive/db/48 catches it (the live re-runs "
+    "are refused).",
+    [("  update archive.object_key_claim set rows_digest = p_rows_digest where object_key = p_key;\n", "", 1)],
+)
+MUTATION_SRC["archive_recorded_chunk_identity_unrecorded"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_row_digest_session_zone"] = (
+    "bench/archive_recorded_chunk_rows_identity.sh",
+    "archive._row_digest renders a row's timestamptz in the calling session's TimeZone, so the same rows have "
+    "another digest from a session in another zone, and the documented re-run of a live chunk is refused when "
+    "it runs anywhere but in the zone the tick ran in. One site, the digest's pinned zone. "
+    "tests/archive/db/48 catches it (the re-run from Asia/Karachi is refused).",
+    [("set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'postgres'\n",
+      "set datestyle = 'ISO, YMD' set intervalstyle = 'postgres'\n", 1)],
+)
+MUTATION_SRC["archive_row_digest_session_zone"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_row_digest_search_path"] = (
+    "bench/archive_recorded_chunk_rows_identity.sh",
+    "archive._row_digest renders a row under the calling session's search_path, so a regclass (or any reg*) value "
+    "renders unqualified wherever the path reaches its schema, the same rows have another digest there, and the "
+    "documented re-run of a live chunk with unchanged rows is refused as other rows (#1069 V-02). One site, the "
+    "digest's pinned search_path. tests/archive/db/48 catches it (the re-run under search_path t48 is refused).",
+    [("set search_path = pg_catalog\nas $$ select pg_catalog.decode(", "as $$ select pg_catalog.decode(", 1)],
+)
+MUTATION_SRC["archive_row_digest_search_path"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_pq_row_digest_alias_shadowed"] = (
+    "bench/archive_recorded_chunk_rows_identity.sh",
+    "archive._pq_to_parquet_range_counted digests the snapshot's rows as archive._row_digest(s), the bare alias, so "
+    "on a table with a column named s the column shadows the row (#821's shape), row_to_json(text) does not exist, "
+    "and every Parquet archive of the table raises: each tick logs skip_archive and nothing is archived or retired "
+    "(#1069 P1-02). One site, the Parquet digest's row reference. tests/archive/db/48 catches it (t48.ps, whose "
+    "column is named s, is never archived).",
+    [("string_agg(archive._row_digest(s.*), %L::bytea order by archive._row_digest(s.*))",
+      "string_agg(archive._row_digest(s), %L::bytea order by archive._row_digest(s))", 1)],
+)
+MUTATION_SRC["archive_pq_row_digest_alias_shadowed"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_ndjson_row_digest_alias_shadowed"] = (
+    "bench/archive_recorded_chunk_rows_identity.sh",
+    "archive._encode_upload_ndjson_single digests its rows as archive._row_digest(t), the bare alias, so on a table "
+    "with a column named t the column shadows the row (#821's shape) and the digest is of that column alone, or "
+    "the call raises for a type row_to_json does not take: a text column t raises on every tick, which logs "
+    "skip_archive and archives nothing. One site, the NDJSON digest's row reference. tests/archive/db/48 catches "
+    "it (t48.nt, whose column is named t, is never archived).",
+    [("string_agg(archive._row_digest(t.*), ''''::bytea order by archive._row_digest(t.*))",
+      "string_agg(archive._row_digest(t), ''''::bytea order by archive._row_digest(t))", 1)],
+)
+MUTATION_SRC["archive_ndjson_row_digest_alias_shadowed"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_recorded_chunk_claim_unlocked"] = (
+    "bench/archive_recorded_chunk_tick_race.sh",
+    "archive._refuse_recorded_chunk_overwrite reads pgpm.archive_ledger without first locking the key's claim row, "
+    "so a direct call whose lookup runs while a tick is archiving the same chunk finds no ledger row, is admitted, "
+    "and PUTs its shorter range over the chunk after the tick's own PUT; the ledger records the whole chunk at a "
+    "key holding part of it and retire() drops the rest (#1069 V-01). One site, the lock. "
+    "bench/archive_recorded_chunk_tick_race.sh catches it (the direct call for [0, 50) is written over [0, 180)).",
+    [("  perform 1 from archive.object_key_claim k where k.object_key = p_key for update;\n", "", 1)],
+)
+MUTATION_SRC["archive_recorded_chunk_claim_unlocked"] = "pgpm_archive/install.sql"
 
 # pgpm_archive reaches pgcrypto and the http extension in their own schemas, never through the caller's
 # search_path (#984). All three are caught by tests/archive/db/44 (bench/archive_extension_resolution.sh,
