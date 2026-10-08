@@ -9308,6 +9308,25 @@ MUTATIONS["archive_row_digest_session_zone"] = (
       "set datestyle = 'ISO, YMD' set intervalstyle = 'postgres'\n", 1)],
 )
 MUTATION_SRC["archive_row_digest_session_zone"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_row_digest_search_path"] = (
+    "bench/archive_recorded_chunk_rows_identity.sh",
+    "archive._row_digest renders a row under the calling session's search_path, so a regclass (or any reg*) value "
+    "renders unqualified wherever the path reaches its schema, the same rows have another digest there, and the "
+    "documented re-run of a live chunk with unchanged rows is refused as other rows (#1069 V-02). One site, the "
+    "digest's pinned search_path. tests/archive/db/48 catches it (the re-run under search_path t48 is refused).",
+    [("set search_path = pg_catalog\nas $$ select pg_catalog.decode(", "as $$ select pg_catalog.decode(", 1)],
+)
+MUTATION_SRC["archive_row_digest_search_path"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_recorded_chunk_claim_unlocked"] = (
+    "bench/archive_recorded_chunk_tick_race.sh",
+    "archive._refuse_recorded_chunk_overwrite reads pgpm.archive_ledger without first locking the key's claim row, "
+    "so a direct call whose lookup runs while a tick is archiving the same chunk finds no ledger row, is admitted, "
+    "and PUTs its shorter range over the chunk after the tick's own PUT; the ledger records the whole chunk at a "
+    "key holding part of it and retire() drops the rest (#1069 V-01). One site, the lock. "
+    "bench/archive_recorded_chunk_tick_race.sh catches it (the direct call for [0, 50) is written over [0, 180)).",
+    [("  perform 1 from archive.object_key_claim k where k.object_key = p_key for update;\n", "", 1)],
+)
+MUTATION_SRC["archive_recorded_chunk_claim_unlocked"] = "pgpm_archive/install.sql"
 
 # pgpm_archive reaches pgcrypto and the http extension in their own schemas, never through the caller's
 # search_path (#984). All three are caught by tests/archive/db/44 (bench/archive_extension_resolution.sh,

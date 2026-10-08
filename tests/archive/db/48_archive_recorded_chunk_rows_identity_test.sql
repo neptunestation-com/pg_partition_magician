@@ -17,12 +17,13 @@
 -- Parquet chunk holds 70 and its re-created range 70 of which ONE differs, so a check that looked at any single
 -- row, or at the count, would not pass both. Each refusal is followed by reading the object back (the NDJSON one
 -- by its rows' ids and payloads, the Parquet one by its bytes), and each object is first shown to hold what its
--- chunk recorded (LIVENESS). CONTROLS: a re-run of the live chunk from a session in another time zone, and a
--- re-run after retire() over a range holding exactly the chunk's rows again, are both written, so the refusal is
--- about the rows and not a blanket one after retire().
+-- chunk recorded (LIVENESS). CONTROLS: a re-run of the live chunk from a session in another time zone and from
+-- another search_path (t48.nd carries a regclass, which a search_path reaching its schema renders unqualified),
+-- and a re-run after retire() over a range holding exactly the chunk's rows again, are all written, so the
+-- refusal is about the rows, not about the caller's session, and not a blanket one after retire().
 -- bench/archive_recorded_chunk_rows_identity.sh runs this file against the module's mutants.
 set client_min_messages = warning;
-select plan(27);
+select plan(29);
 
 create schema t48;
 
@@ -65,7 +66,10 @@ select current_database() || '/t48/' || txid_current() || '/' as p \gset
 -- Two id grids of step 100, retention 100, each with one chunk below the horizon: [0, 100) holds ids 1..90 of
 -- t48.nd (archived as NDJSON) and ids 1..70 of t48.pq (as Parquet). A frontier at 450 puts the horizon at 300.
 -- retain_batch = 0 holds retire() off until the live half of the test is done.
-create table t48.nd (id bigint primary key, payload text not null, at timestamptz not null);
+-- every NDJSON row also names a relation, as a regclass, whose text output follows the session's search_path
+create table t48.target ();
+create table t48.nd (id bigint primary key, payload text not null, at timestamptz not null,
+                     ref regclass not null default 't48.target');
 insert into t48.nd select * from t48.seed('n', 90);
 call pgpm.transmute('t48.nd', 'id', 100::bigint, p_retain => 100::bigint, p_paused => false);
 insert into t48.nd values (450, 'frontier', '2024-06-01 00:00:00+00');
@@ -116,6 +120,13 @@ select is(t48.try('ndjson', 't48.nd', '0', '100'), '90 ' || :'knd',
 select is(t48.try('parquet', 't48.pq', '0', '100'), '70 ' || :'kpq',
   'CONTROL: the same for the Parquet strategy (70 rows, the same key)');
 reset timezone;
+-- and from a session whose search_path reaches t48, where every row's regclass renders as target, not t48.target
+set search_path = t48, public;
+select is((select row_to_json(n.*) ->> 'ref' from t48.nd n where n.id = 1), 'target',
+  'LIVENESS: under search_path t48 the chunk''s rows render their regclass unqualified (target, not t48.target)');
+select is(t48.try('ndjson', 't48.nd', '0', '100'), '90 ' || :'knd',
+  'CONTROL: a re-run of the live chunk''s own [0, 100) from that search_path is written (90 rows, the same key)');
+reset search_path;
 select is(t48.rows(:'knd'), t48.expect('n', 1, 90),
   'CONTROL: the re-run left the NDJSON object holding exactly ids 1..90');
 -- the Parquet object as the re-run left it, which is what retire() leaves as the only copy

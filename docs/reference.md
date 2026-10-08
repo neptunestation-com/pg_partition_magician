@@ -2255,8 +2255,12 @@ the chunk's own `[lo, hi)` (compared as the grid's native type) and a read that 
 recorded, which is the re-run of a live, write-blocked chunk. The rows are compared by identity, not by
 number: every write a strategy makes records a digest of the rows it wrote on the key's whole-key claim
 (`archive.object_key_claim.rows_digest`, the md5 of the sorted md5s of each row's JSON text, rendered under
-pinned settings so a re-run from a session in another time zone or with another `IntervalStyle` finds the same
-rows, in whatever order it reads them), and a later write at a recorded chunk's key must bring that digest. A
+pinned settings so a re-run from a session in another time zone, with another `IntervalStyle` or another
+`search_path` finds the same rows, in whatever order it reads them), and a later write at a recorded chunk's key
+must bring that digest. Writes to one key are serialised on its claim row, taken before the ledger is read: a
+direct call made while a tick is archiving that chunk waits for the tick to commit and is then judged against
+the chunk the tick recorded (a tick that waits out `maintain()`'s lock timeout behind a direct call defers the
+chunk, `skip_archive`, and retries it). A
 shorter or longer range at that key, the chunk's own range after `retire()` has dropped its partition (the
 read finds no row), the same range read off a partition re-created over it holding as many rows but other
 ones, and any write at a chunk whose claim records no digest (one archived before pgpm_archive recorded them,

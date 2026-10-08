@@ -21,6 +21,9 @@
 #                                                 is refused, the documented one included)
 #   archive_row_digest_session_zone            -- the digest renders a timestamptz in the caller's zone
 #                                                 (the live re-run from another zone is refused)
+#   archive_row_digest_search_path             -- the digest renders a regclass under the caller's search_path
+#                                                 (the live re-run under search_path t48 is refused)
+# The race between a direct call and a tick archiving the same chunk is bench/archive_recorded_chunk_tick_race.sh's.
 #
 # Usage: archive_recorded_chunk_rows_identity.sh <container> <db> [archive install.sql]
 # Needs the archive image (pgsql-http + pgtap + pg_prove) AND MinIO on the same network: the file archives

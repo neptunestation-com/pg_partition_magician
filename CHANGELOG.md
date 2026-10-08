@@ -10,13 +10,17 @@
   PUT them over the only copy with 200. Every write either strategy makes now records a digest of the rows
   it wrote on the key's whole-key claim (`archive.object_key_claim.rows_digest`: the md5 of the sorted md5s of
   each row's JSON text, rendered under pinned TimeZone, DateStyle, IntervalStyle, extra_float_digits,
-  bytea_output and lc_monetary, taken in the read that produced the object's rows: the NDJSON statement
-  itself, the Parquet encoder's snapshot), and a write at a recorded chunk's key is refused unless its read's
-  digest is the recorded one. A chunk claimed before the column existed records none and can no longer be
-  re-run. The synchronous exports write export keys the ledger never records, so they are unaffected.
-  Test `tests/archive/db/48`, guard `bench/archive_recorded_chunk_rows_identity.sh`, mutations
-  `archive_recorded_chunk_identity_unchecked`, `archive_recorded_chunk_identity_unrecorded` and
-  `archive_row_digest_session_zone`.
+  bytea_output, lc_monetary and search_path, taken in the read that produced the object's rows: the NDJSON
+  statement itself, the Parquet encoder's snapshot), and a write at a recorded chunk's key is refused unless
+  its read's digest is the recorded one. A chunk claimed before the column existed records none and can no
+  longer be re-run. The refusal also locks the key's claim row before it reads the ledger, so a direct call
+  made while a tick is archiving the same chunk (its ledger row not yet committed) waits for the tick and is
+  then judged against the chunk it recorded; it used to find no ledger row and PUT a shorter range over the
+  chunk after the tick's own PUT. The synchronous exports write export keys the ledger never records, so they
+  are unaffected. Test `tests/archive/db/48`, guards `bench/archive_recorded_chunk_rows_identity.sh` and
+  `bench/archive_recorded_chunk_tick_race.sh`, mutations `archive_recorded_chunk_identity_unchecked`,
+  `archive_recorded_chunk_identity_unrecorded`, `archive_row_digest_session_zone`,
+  `archive_row_digest_search_path` and `archive_recorded_chunk_claim_unlocked`.
 
 - **A regrain reconcile tick applies and consumes only the delta rows it judged eligible** (#1070, Tier 1).
   `_regrain_reconcile` cut its batch from the eligible rows (keys in a sub-range the copy has finished) and

@@ -2522,7 +2522,8 @@ $$;
 -- same pass it, and with enough rows such a set can be searched for. The text is rendered here, under settings
 -- pinned for the call, never the caller's: a timestamptz renders in the session's TimeZone, an interval in its
 -- IntervalStyle, a bytea in its bytea_output, money in its lc_monetary, a float by extra_float_digits, a range
--- or a nested value's text output by DateStyle. So the same rows have the same digest whichever session archived
+-- or a nested value's text output by DateStyle, and a regclass, regtype or other reg* value by search_path (a name
+-- the path reaches renders unqualified). So the same rows have the same digest whichever session archived
 -- them and whichever re-runs them, which the NDJSON payload itself does not (it is rendered in the caller's
 -- session). Called once per row, inside the read that produces the object's rows, so the digest is of the rows
 -- the object holds and of no later read; it costs a few microseconds a row, the sort included.
@@ -2530,6 +2531,7 @@ create or replace function archive._row_digest(p_row anyelement) returns bytea
 language sql stable
 set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'postgres'
 set extra_float_digits = 1 set bytea_output = 'hex' set lc_monetary = 'C'
+set search_path = pg_catalog
 as $$ select pg_catalog.decode(pg_catalog.md5(pg_catalog.row_to_json(p_row)::text), 'hex') $$;
 
 -- archive._pq_to_parquet_range_counted: reads [p_lo, p_hi) of p_control off p_parent (typically a
@@ -2973,12 +2975,23 @@ do $$ begin perform archive._record_claim_relations(); end $$;
 -- archive._row_digest), and a write at a key the ledger records a chunk at must bring the digest recorded
 -- there. A claim with none (a chunk archived before the digest existed) admits no write: nothing says which
 -- rows its object holds, and refusing a re-run is the safe side of not knowing.
+--
+-- The lookup is ORDERED against every other write to the key (#1069, V-01). pgpm._archive_step calls a strategy
+-- and inserts the chunk's ledger row afterwards, in the same transaction, so a direct call whose lookup ran while
+-- a tick was archiving that very chunk found no ledger row, was admitted, and PUT its range (a shorter one, say)
+-- over the chunk once the tick had PUT its own: the ledger then recorded the whole chunk at a key holding part of
+-- it, and retire() dropped the rest. So the key's claim row is locked first, and held to the end of the
+-- transaction, which for a tick is after its ledger row: a call racing a tick waits for the tick to commit, and
+-- its lookup, a later statement, then reads the chunk the tick recorded. Writers of one key are serialised; a
+-- tick that waits out maintain()'s lock_timeout behind a direct call's PUT defers the chunk (skip_archive) and
+-- retries it.
 drop function if exists archive._refuse_recorded_chunk_overwrite(text, regclass, text, text, text, text, bigint);
 create or replace function archive._refuse_recorded_chunk_overwrite(
   p_routine text, p_parent regclass, p_kind text, p_key text, p_lo text, p_hi text, p_rows bigint, p_rows_digest text)
 returns void language plpgsql as $$
 declare l record; v_why text;
 begin
+  perform 1 from archive.object_key_claim k where k.object_key = p_key for update;
   for l in select a.lo, a.hi, a.rows_archived, k.rows_digest
              from pgpm.archive_ledger a left join archive.object_key_claim k on k.object_key = a.s3_key
             where a.parent_table = p_parent and a.s3_key = p_key loop
