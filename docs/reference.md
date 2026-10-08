@@ -2920,9 +2920,12 @@ raising. Rows to delete or
 correct before a refused `transmute` are the ones sorting above
 `pgpm._ts_to_text_time(now() + <step> + interval '1 hour', <prefix>, <width>, <radix>, <unit>, ...)`.
 
-Refuses a radix `transmute` refuses: below 2 with a supplied `p_alphabet` (`p_radix must be at least 2`,
-the rule `transmute` applies to `p_tt_radix`), outside 2-36 without one, and an alphabet whose length is
-not `p_radix`.
+Refuses, before it reads a row, the declared shapes `transmute` refuses by the same rules: a radix below 2
+with a supplied `p_alphabet` (`p_radix must be at least 2`, the rule `transmute` applies to `p_tt_radix`),
+outside 2-36 without one, an alphabet whose length is not `p_radix`, a `p_width` below 1
+(`p_width must be positive`), a negative `p_discard_bits` (`p_discard_bits must not be negative`), and a
+`p_unit` other than `'ms'` or `'s'` (`unknown text_time unit`). It does not refuse an alphabet with a
+repeated character, which `transmute` does.
 
 Refuses, with the same message `transmute` gives, when the control column's collation does not order the
 declared alphabet the way base-`p_radix` place value does (a mixed-case alphabet such as KSUID's base62

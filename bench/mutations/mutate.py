@@ -8662,6 +8662,27 @@ select ok(
         "the shape (#990). One site. tests/302 assertions 12 and 13 catch it.",
         [("    perform pgpm._text_time_radix_floor(p_radix, 'p_radix');\n", "", 1)],
     ),
+    "check_text_time_unit_after_decode": (
+        "bench/check_text_time_contract.sh",
+        "PR #1115 verification P1-03 (and #1120's unit): check_text_time does not refuse an unknown unit before "
+        "it decodes, so the only check left is _text_time_to_ts's, which _text_time_to_ts_bounded reaches only "
+        "for a count inside its limits: on a column whose shaped values all overflow, unit 'h' is reported on "
+        "(2 sampled, 0 plausible, a null maximum), and on an empty column it always is. One site. tests/302 "
+        "assertions 19 and 21 catch it.",
+        [("  if p_unit not in ('ms', 's') then\n"
+          "    raise exception 'pg_partition_magician: unknown text_time unit % (expected ms or s)', p_unit;\n"
+          "  end if;\n"
+          "  if p_alphabet is not null then\n",
+          "  if p_alphabet is not null then\n", 1)],
+    ),
+    "check_text_time_shape_floor_dropped": (
+        "bench/check_text_time_contract.sh",
+        "Pre-#1120 check_text_time: no width or discard-bits rule, so p_width 0 (every value decodes to the "
+        "epoch) and p_discard_bits -1 (every count doubled) are sampled and reported on where transmute refuses "
+        "the shape. One site, check_text_time's call to the rule it shares with transmute. tests/302 "
+        "assertions 23 and 26 catch it.",
+        [("  perform pgpm._text_time_shape_floor(p_width, p_discard_bits, 'p_');\n", "", 1)],
+    ),
     "time_unit_anchor_unchecked": (
         "bench/transmute_step_precision.sh",
         "Issue #1039 bullet 1, the half rule: _time_unit_breach asks the step and not the anchor, so an anchor "

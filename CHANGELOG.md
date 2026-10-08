@@ -28,6 +28,16 @@
   guard `bench/check_text_time_contract.sh`, mutation `check_text_time_radix_floor_dropped`; `tests/285`'s
   first witness now asks the shape gate and the decoder directly instead of `check_text_time`.
 
+- **`check_text_time` refuses the width, discard bits and unit `transmute` refuses, before it reads a row**
+  (#1120). It checked none of them, so `p_width` 0 (every value decodes to the epoch) and `p_discard_bits` -1
+  (every count doubled, so a column of half-counts read 100% plausible) were sampled and reported on, and an
+  unknown `p_unit` was refused only when a shaped value in range reached the decoder: never on an empty
+  column, and, once #1084's bounded decode returned null for an overflowing count first, not on a column whose
+  shaped values all overflow either (found by PR #1115's verification). The width and discard-bits rules are
+  now one rule, `_text_time_shape_floor`, that `transmute` and `check_text_time` both ask, naming the
+  caller's arguments; the unit is refused up front with the decoder's message. Test `tests/302` part C, guard
+  `bench/check_text_time_contract.sh`, mutations `check_text_time_shape_floor_dropped` and
+  `check_text_time_unit_after_decode`.
 - **`from_hypertable` and its cutover ask `transmute`'s argument rules before the swap** (#1085; #966 W2).
   A negative `p_retain` or `p_obtain`, or a `p_interval` that is not positive, was refused only by
   `transmute` at the handoff, after the cutover's swap had committed and dropped the hypertable, leaving a

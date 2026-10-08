@@ -18,12 +18,22 @@
 -- it checked the length alone, so radix 1 with alphabet 'x' sampled a shape transmute refuses (#990). Both
 -- now ask _text_time_radix_floor. The control: radix 2 with 'ab' is accepted and samples its rows.
 --
--- bench/check_text_time_contract.sh runs this file against the mutants check_text_time_decode_unbounded and
--- check_text_time_radix_floor_dropped, so it is also required to FAIL there.
+-- (C) The rest of the shape transmute refuses (#1120), and the unit before any decode (the PR-verification
+-- finding P1-03 on #1084's fix). check_text_time checked neither the width (0 decodes every value to the
+-- epoch), nor the discard bits (-1 doubles every count), nor the unit up front: _text_time_to_ts_bounded returns
+-- null for a count past its limits before the decoder's unit check is reached, so on a column whose shaped
+-- values all overflow, unit 'h' was reported on (2 sampled, 0 plausible, a null maximum), and on a column with
+-- no shaped value it always was. Each is refused now, before a row is read, with transmute's refusal of the
+-- same shape witnessed beside it; the overflow column's values are witnessed to overflow (the bounded decode
+-- swallows them under 's'), so the unit refusal there is not the decoder's.
+--
+-- bench/check_text_time_contract.sh runs this file against the mutants check_text_time_decode_unbounded,
+-- check_text_time_radix_floor_dropped, check_text_time_unit_after_decode and
+-- check_text_time_shape_floor_dropped, so it is also required to FAIL there.
 create extension if not exists pgtap;
 set client_min_messages = warning;
 set timezone = 'UTC';
-select plan(16);
+select plan(26);
 
 -- The error a statement raised, its SQLSTATE first; 'completed' if it raised none.
 create function pg_temp._attempt(p_sql text) returns text language plpgsql as $f$
@@ -169,5 +179,72 @@ select results_eq(
             (select string_agg(id, ',' order by id) from public.tt302r) collate "default" $$,
   $$ values ('r', 0, 'cxxxxxxxx0001,cxxxxxxxx0002,cxxxxxxxx0003,cxxxxxxxx0004,cxxxxxxxx0005') $$,
   'the refused calls left public.tt302r a plain, unmanaged table with its five rows');
+
+-- ================ (C) the width, the discard bits and the unit, refused before a row is read ================
+create table public.tt302u (id text collate "C" primary key);
+insert into public.tt302u values ('czzzzzzzzzabc'), ('czzzzzzzzyabd');
+create table public.tt302z (id text collate "C" primary key);
+create table public.tt302h (id text collate "C" primary key, note text);
+insert into public.tt302h
+  select 'c' || pgpm._radix_encode(floor(extract(epoch from now() - g * interval '1 hour') * 1000 / 2), 36, 8) || 'r' || g,
+         g || ' hours ago'
+    from generate_series(1, 3) g;
+
+-- 17-18: LIVENESS. Both rows of tt302u have the shape and overflow (the bounded decode swallows each under 's',
+-- so it would swallow them under any unit it read as seconds), and transmute refuses unit 'h' on that table.
+select results_eq(
+  $$ select bool_and(pgpm._text_time_shaped(id, 'c', 9, 36)),
+            bool_and(pgpm._text_time_to_ts_bounded(id, 'c', 9, 36, 's') is null) from public.tt302u $$,
+  $$ values (true, true) $$,
+  'LIVENESS: both rows of tt302u have the declared shape and decode past the range (the bounded decode nulls them)');
+select throws_like(
+  $$ call pgpm.transmute('public.tt302u', 'id', interval '1 month', p_tt_prefix => 'c', p_tt_width => 9,
+       p_tt_radix => 36, p_tt_unit => 'h') $$,
+  'pg_partition_magician: p_tt_unit must be ''ms'' or ''s'' (got h)%',
+  'LIVENESS: transmute refuses unit h on tt302u');
+
+-- 19-21: the unit, on the overflowing column and on an empty one (whose control reports under 's')
+select throws_ok(
+  $$ select * from pgpm.check_text_time('public.tt302u', 'id', 'c', 9, 36, 'h') $$,
+  'P0001', 'pg_partition_magician: unknown text_time unit h (expected ms or s)',
+  'check_text_time refuses unit h on a column whose shaped values all overflow');
+select results_eq(
+  $$ select sampled, plausible, newest_decoded from pgpm.check_text_time('public.tt302z', 'id', 'c', 9, 36, 's') $$,
+  $$ values (0::bigint, 0::bigint, null::timestamptz) $$,
+  'LIVENESS: the empty tt302z reports under unit s: nothing sampled');
+select throws_ok(
+  $$ select * from pgpm.check_text_time('public.tt302z', 'id', 'c', 9, 36, 'h') $$,
+  'P0001', 'pg_partition_magician: unknown text_time unit h (expected ms or s)',
+  'check_text_time refuses unit h on an empty column, where no decode would ever see it');
+
+-- 22-23: the width
+select throws_like(
+  $$ call pgpm.transmute('public.tt302u', 'id', interval '1 month', p_tt_prefix => 'c', p_tt_width => 0,
+       p_tt_radix => 36, p_tt_unit => 's') $$,
+  'pg_partition_magician: p_tt_width must be positive (got 0)%',
+  'LIVENESS: transmute refuses p_tt_width 0');
+select throws_ok(
+  $$ select * from pgpm.check_text_time('public.tt302h', 'id', 'c', 0, 36, 'ms') $$,
+  'P0001', 'pg_partition_magician: p_width must be positive (got 0)',
+  'check_text_time refuses p_width 0, as transmute does');
+
+-- 24-26: the discard bits. Under -1 every row of tt302h decodes to the hour it was minted for, so the column
+-- would read 100% plausible on a shape transmute refuses.
+select results_eq(
+  $$ select note from public.tt302h
+      where pgpm._text_time_shaped(id, 'c', 8, 36)
+        and pgpm._text_time_to_ts(id, 'c', 8, 36, 'ms', null, -1) between now() - interval '3 hours 5 minutes' and now()
+      order by note $$,
+  $$ values ('1 hours ago'), ('2 hours ago'), ('3 hours ago') $$,
+  'LIVENESS: every row of tt302h has the shape and decodes, under discard bits -1, to the last three hours');
+select throws_like(
+  $$ call pgpm.transmute('public.tt302h', 'id', interval '1 month', p_tt_prefix => 'c', p_tt_width => 8,
+       p_tt_radix => 36, p_tt_unit => 'ms', p_tt_discard_bits => -1) $$,
+  'pg_partition_magician: p_tt_discard_bits must not be negative (got -1)%',
+  'LIVENESS: transmute refuses p_tt_discard_bits -1');
+select throws_ok(
+  $$ select * from pgpm.check_text_time('public.tt302h', 'id', 'c', 8, 36, 'ms', 1000, null, -1) $$,
+  'P0001', 'pg_partition_magician: p_discard_bits must not be negative (got -1)',
+  'check_text_time refuses p_discard_bits -1, as transmute does');
 
 select * from finish();

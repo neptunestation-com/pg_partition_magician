@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run tests/301 and tests/302 against an ARBITRARY copy of pgpm_core/install.sql, so bench/discriminate.sh
-# can point them at a mutant (issues #1081, #1084, #1039 bullet 3).
+# can point them at a mutant (issues #1081, #1084, #1039 bullet 3, #1120).
 #
 # WHY A WRAPPER. The two files are plain pgTAP files and the default matrix already runs them on every
 # version and channel, so on correct code this script adds nothing. What it adds is the standing proof that
@@ -20,6 +20,10 @@
 #                                           raises 'interval out of range' instead of reporting
 #   check_text_time_radix_floor_dropped  -- check_text_time's supplied-alphabet branch without the radix
 #                                           floor: tests/302 (B) samples radix 1 and radix 0
+#   check_text_time_unit_after_decode    -- check_text_time without its up-front unit refusal: tests/302 (C)
+#                                           reports on unit 'h' over an overflowing column and an empty one
+#   check_text_time_shape_floor_dropped  -- check_text_time without the width and discard-bits rule it shares
+#                                           with transmute: tests/302 (C) samples width 0 and discard bits -1
 #
 # Usage: check_text_time_contract.sh <container> <db> [install.sql]
 # Runs on the plain core image (pgtap and pg_prove). CHECK_TEXT_TIME_TEST_DIR overrides the directory holding
