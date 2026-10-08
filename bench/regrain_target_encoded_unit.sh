@@ -11,6 +11,12 @@
 #   regrain_step_unit_uuidv7_unasked          -- a uuidv7 key has no unit; the ObjectId refusals still pass.
 #   regrain_step_unit_text_time_seconds_unread -- a text_time key is held to a millisecond whatever its
 #                                                 text_time_unit, so 1.5 seconds passes on an ObjectId key.
+#   transmute_uuidv7_anchor_unasked            -- transmute registers a uuidv7 anchor off the millisecond
+#                                                 (pass-10 per-PR verification V-01).
+#   transmute_uuidv7_step_unasked              -- transmute takes a uuidv7 step off the millisecond (#1113).
+#   regrain_step_registered_anchor_unasked     -- a regrain on a grid registered with an off-unit anchor is
+#                                                 accepted.
+#   regrain_step_registered_step_unasked       -- likewise for an off-unit registered step.
 # The file is the acceptance test; this wrapper exists so the mutations have a guard the discriminate track
 # can run against the mutant, in the shape of bench/regrain_target_time_precision.sh.
 #

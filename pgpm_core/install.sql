@@ -5848,13 +5848,15 @@ $$;
 --   * a fixed step that is not a whole number of an encoded key's unit (#1039): a millisecond for uuidv7, the
 --     text_time_unit (a second or a millisecond) for text_time. '1.5 seconds' on an ObjectId key was copied
 --     by bounds floored to the second and reconciled by unfloored ones, so a row deleted mid-regrain came
---     back at the swap. The same rule as a timestamp(p) key's, asked of the precision the encoding keeps.
+--     back at the swap. The same rule as a timestamp(p) key's, asked of the precision the encoding keeps,
+--     and asked of the registered anchor and step as well, which an older install did not hold to the unit.
 -- Called from _regrain_step_forward, so set_regrain (at call time) and regrain_step (which regrain(),
 -- regrain_history() and maintain go through) refuse it alike.
 create or replace function pgpm._regrain_step_shape(p_parent regclass, p_step text)
 returns void language plpgsql stable as $$
 declare cfg pgpm.config; v_typname name; v_type oid; v_typmod int; v_scale int; v_months numeric; v_rest interval;
         v_time_keeps text; v_time_unit text; v_enc_prec int; v_enc_unit text;
+        v_enc_epoch timestamptz;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
@@ -5926,13 +5928,31 @@ begin
     -- decoded instant: with '1.5 seconds' on an ObjectId key the row at T+1s is copied into [T+1.5s, T+3s)
     -- and a DELETE of it is applied to [T, T+1.5s), so the swap brought the deleted row back; a step finer
     -- than the unit floors two adjacent bounds to one key. Finer or coarser, a step that is not whole units
-    -- is refused. The anchor is the registered one and is not asked here: transmute holds a text_time
-    -- anchor to its unit (#989).
+    -- is refused. And the grid itself must be on the unit: the fine bounds are the target's multiples from
+    -- the REGISTERED anchor, and the source cell's own bounds are the registered step's, so an anchor or a
+    -- step off the unit puts every bound off it whatever the target. transmute holds both to the unit
+    -- (#989 for text_time, _uuidv7_unit_contract for uuidv7), but an install before those registered what it
+    -- was given, so the registered grid is asked here too, and a run on such a grid, fresh or resumed, is
+    -- refused rather than floored. The anchor is measured from the encoding's epoch.
     v_enc_prec := case cfg.control_kind
                     when 'uuidv7' then 3
                     when 'text_time' then case cfg.text_time_unit when 's' then 0 else 3 end
                   end;
     if v_enc_prec is not null then
+      v_enc_epoch := case cfg.control_kind when 'text_time' then coalesce(cfg.text_time_epoch, 'epoch'::timestamptz)
+                                           else 'epoch'::timestamptz end;
+      select b.r_unit into v_enc_unit
+        from pgpm._time_unit_breach('timestamptz'::regtype, v_enc_prec, cfg.partition_step, null) b;
+      if mod((extract(epoch from cfg.partition_anchor::timestamptz) - extract(epoch from v_enc_epoch)) * 1000000,
+             case v_enc_prec when 0 then 1000000 else 1000 end) <> 0
+         or v_enc_unit is not null then
+        raise exception 'pg_partition_magician: cannot regrain % -- its grid is not on its control column %''s encoded unit: it is a % key, which encodes whole %s from %, and the registered partition_anchor % and partition_step % do not both fall on whole %s, so every bound of the grid and of any regrain of it is encoded by flooring it to that unit, and a row deleted mid-regrain could come back at the swap. An install that did not hold the grid to the unit registered it: convert the table back with pgpm.untransmute and transmute it again with an anchor and a step that are whole %s',
+          p_parent, quote_ident(cfg.control_column), cfg.control_kind,
+          case v_enc_prec when 0 then 'second' else 'millisecond' end, pgpm._ts_text(v_enc_epoch),
+          cfg.partition_anchor, cfg.partition_step,
+          case v_enc_prec when 0 then 'second' else 'millisecond' end,
+          case v_enc_prec when 0 then 'second' else 'millisecond' end;
+      end if;
       select b.r_unit into v_enc_unit
         from pgpm._time_unit_breach('timestamptz'::regtype, v_enc_prec, p_step, null) b;
       if v_enc_unit is not null then
@@ -7080,6 +7100,24 @@ begin
 end;
 $$;
 
+-- _uuidv7_unit_contract: the step and the anchor of a uuidv7 grid, before the table is read (#1039). A uuidv7
+-- key's leading 48 bits are whole milliseconds since 1970, and _ts_to_uuid encodes a bound by flooring to the
+-- millisecond, so a grid whose boundaries fall between two milliseconds is recorded in pgpm.part at one
+-- instant and written to the catalog at an earlier one, _text_time_unit_contract's defect on the other encoded
+-- kind. A regrain of such a grid copied rows by the floored bounds while its reconcile placed a captured change
+-- by the unfloored grid, so a row deleted mid-regrain came back at the swap. Every boundary is the anchor plus
+-- whole steps, so it is a whole number of milliseconds exactly when the anchor and the step are.
+create or replace function pgpm._uuidv7_unit_contract(p_parent regclass, p_control name, p_step text, p_anchor text)
+returns void language plpgsql stable as $$
+begin
+  if mod(extract(epoch from p_anchor::timestamptz) * 1000000, 1000) <> 0
+     or mod(extract(epoch from p_step::interval) * 1000000, 1000) <> 0 then
+    raise exception 'pg_partition_magician: cannot partition % on % with step % and anchor % -- its uuidv7 encoding counts whole milliseconds from 1970-01-01 00:00:00+00, and every partition bound is encoded by flooring to that unit, so a bound between two of them would be written to the catalog at an earlier instant than pgpm records for it, and rows in that gap would sit in a partition whose recorded range does not hold their time. Give an anchor and a step that are whole multiples of 1 millisecond, then re-run transmute.',
+      p_parent, quote_ident(p_control), p_step, p_anchor;
+  end if;
+end;
+$$;
+
 -- _time_unit_contract: the step and the anchor of a timestamp(p) or timestamptz(p) grid, before the table is
 -- read (#1039). The preflight held a date key to whole days (#581) and never a timestamp(p) key to its
 -- precision, so '500 milliseconds' on a timestamptz(0) key committed and validated the monolith's bound
@@ -7874,8 +7912,12 @@ begin
     -- #952: and a step and an anchor the column can represent (a negative-scale numeric holds only multiples
     -- of its unit, and the cutover's ATTACH rounds a bound between two of them). See _id_step_contract.
     perform pgpm._id_step_contract(p_parent, p_control, p_step, p_anchor);
-  elsif p_control_kind = 'uuidv7' and v_typname <> 'uuid' then
-    raise exception 'pg_partition_magician: control_kind uuidv7 needs a uuid column (got %)', v_typname;
+  elsif p_control_kind = 'uuidv7' then
+    if v_typname <> 'uuid' then
+      raise exception 'pg_partition_magician: control_kind uuidv7 needs a uuid column (got %)', v_typname;
+    end if;
+    -- #1039: and an anchor and a step the encoding can express. See _uuidv7_unit_contract.
+    perform pgpm._uuidv7_unit_contract(p_parent, p_control, p_step, p_anchor);
   elsif p_control_kind = 'text_time' then
     if v_typname not in ('text', 'varchar') then
       raise exception 'pg_partition_magician: control_kind text_time needs a text or varchar column (got %)', v_typname;

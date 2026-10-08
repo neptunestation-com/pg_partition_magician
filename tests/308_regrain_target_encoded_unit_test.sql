@@ -16,12 +16,16 @@
 -- unit on the same table. The asymmetric pair is the point: the same '1.5 seconds' is refused on a key that
 -- encodes seconds and accepted, and completed, on one that encodes milliseconds. The mid-regrain DELETE runs
 -- at a whole-unit target on both affected kinds, so the fixed path is shown to keep a deleted row deleted,
--- naming which rows remain. bench/regrain_target_encoded_unit.sh runs this file against the mutants
--- regrain_step_unit_uuidv7_unasked and regrain_step_unit_text_time_seconds_unread.
+-- naming which rows remain. The grid itself must be on the unit too: transmute refuses a uuidv7 anchor or
+-- step off the millisecond (door 1), and a regrain of a grid an older install registered off the unit is
+-- refused whatever its target (door 2). bench/regrain_target_encoded_unit.sh runs this file against the
+-- mutants regrain_step_unit_uuidv7_unasked, regrain_step_unit_text_time_seconds_unread,
+-- transmute_uuidv7_anchor_unasked, transmute_uuidv7_step_unasked (#1113),
+-- regrain_step_registered_anchor_unasked and regrain_step_registered_step_unasked.
 set timezone = 'UTC';
 set client_min_messages = warning;
 create extension if not exists pgtap;
-select plan(37);
+select plan(52);
 
 -- ============ three encoded grids: ObjectId (text_time, unit s), hex ms (text_time, unit ms), uuidv7 ============
 create function pg_temp.u7(p_ts timestamptz, n int) returns uuid language sql as $$
@@ -231,5 +235,82 @@ select set_eq($$ select id, payload from public.cu $$, $$ select id, payload fro
   'cu: every row survived the split with its own key and payload');
 select is((select count(*) from pgpm.part where parent_table = 'public.cu'::regclass and not attached), 0::bigint,
   'cu: no copy left unattached after the swap');
+
+-- ======== door 1: transmute holds a uuidv7 anchor and step to whole milliseconds, as #989 does text_time's ========
+-- (pass-10 per-PR verification V-01: a half-millisecond anchor registered, a whole-millisecond target then cut
+-- bounds off the unit and a row deleted mid-regrain came back at the swap)
+create table public.ua (id uuid primary key, payload text);
+insert into public.ua select pg_temp.u7(now() - interval '1 day' + make_interval(secs => s), s), 'a' || s
+  from generate_series(0, 2) s;
+select throws_like($$ call pgpm.transmute('public.ua', 'id', interval '6 milliseconds', p_obtain => 2,
+                                           p_anchor => '2000-01-01 00:00:00.0005+00') $$,
+  'pg_partition_magician: cannot partition ua on id with step 00:00:00.006 and anchor 2000-01-01 00:00:00.0005+00 -- its uuidv7 encoding counts whole milliseconds%',
+  'transmute refuses a uuidv7 anchor half a millisecond off the unit');
+select throws_like($$ call pgpm.transmute('public.ua', 'id', interval '4500 microseconds', p_obtain => 2) $$,
+  'pg_partition_magician: cannot partition ua on id with step 00:00:00.0045 and anchor 2000-01-01 00:00:00+00 -- its uuidv7 encoding counts whole milliseconds%',
+  'transmute refuses a uuidv7 partition_step that is not a whole number of milliseconds');
+-- #1113: a sub-millisecond step committed and validated the monolith's bound CHECK and then died at the
+-- cutover on 'empty range bound', leaving the table rejecting current writes; 1500 microseconds converted with
+-- pgpm.part bounds half a millisecond off the attached ones. Both are refused before anything commits.
+create table public.ub (id uuid primary key, payload text);
+insert into public.ub select pg_temp.u7(now() - interval '1 day' + make_interval(secs => s), s), 'b' || s
+  from generate_series(0, 2) s;
+select throws_like($$ call pgpm.transmute('public.ub', 'id', interval '500 microseconds', p_obtain => 4) $$,
+  'pg_partition_magician: cannot partition ub on id with step 00:00:00.0005 and anchor 2000-01-01 00:00:00+00 -- its uuidv7 encoding counts whole milliseconds%',
+  'transmute refuses a 500 microsecond uuidv7 step, finer than the unit');
+select throws_like($$ call pgpm.transmute('public.ub', 'id', interval '1500 microseconds', p_obtain => 4) $$,
+  'pg_partition_magician: cannot partition ub on id with step 00:00:00.0015 and anchor 2000-01-01 00:00:00+00 -- its uuidv7 encoding counts whole milliseconds%',
+  'transmute refuses a 1500 microsecond uuidv7 step, coarser than the unit but not a whole number of it');
+select is((select string_agg(conname, ',') from pg_constraint
+            where conrelid = 'public.ub'::regclass and conname = 'pgpm_monolith_bound'), null,
+  'the refused steps left no write-rejecting pgpm_monolith_bound CHECK on ub');
+select lives_ok($$ insert into public.ub values (pg_temp.u7(clock_timestamp() + interval '1 hour', 99), 'current') $$,
+  'and ub still takes a current write');
+select is((select relkind::text from pg_class where oid = 'public.ua'::regclass)
+          || ':' || (select count(*) from pgpm.config where parent_table = 'public.ua'::regclass), 'r:0',
+  'the refused conversions left ua a plain table with no grid registered');
+call pgpm.transmute('public.ua', 'id', interval '6 milliseconds', p_obtain => 2);
+select is((select relkind::text from pg_class where oid = 'public.ua'::regclass)
+          || ':' || (select count(*) from pgpm.config where parent_table = 'public.ua'::regclass), 'p:1',
+  'LIVENESS: the same table converts with a whole-millisecond step and the default anchor');
+
+-- ===== door 2: a grid an older install registered off the unit is refused any regrain, fresh or resumed =====
+-- Registered by hand, as tests/277's domain parents are: transmute now refuses these grids, and an install
+-- that predates it registered them as given.
+create table public.hu (id uuid not null) partition by range (id);
+create table public.hs (id uuid not null) partition by range (id);
+create table public.hk (id uuid not null) partition by range (id);
+create table public.ht (id text collate "C" not null) partition by range (id);
+insert into pgpm.config (parent_table, control_column, control_kind, partition_step, partition_anchor)
+  values ('public.hu', 'id', 'uuidv7', '6 milliseconds', '2000-01-01 00:00:00.0005+00'),
+         ('public.hs', 'id', 'uuidv7', '4500 microseconds', '2000-01-01 00:00:00+00'),
+         ('public.hk', 'id', 'uuidv7', '6 milliseconds', '2000-01-01 00:00:00+00');
+insert into pgpm.config (parent_table, control_column, control_kind, partition_step, partition_anchor,
+                         text_time_prefix, text_time_width, text_time_radix, text_time_unit)
+  values ('public.ht', 'id', 'text_time', '6 seconds', '2000-01-01 00:00:00.5+00', '', 8, 16, 's');
+select is((select string_agg(parent_table::text || '@' || (extract(microseconds from partition_anchor::timestamptz)::bigint % 1000000)
+                             || '/' || partition_step, ',' order by parent_table::text)
+             from pgpm.config where parent_table in ('public.hu'::regclass, 'public.hs'::regclass, 'public.ht'::regclass)),
+          'hs@0/4500 microseconds,ht@500000/6 seconds,hu@500/6 milliseconds',
+  'LIVENESS: the off-unit grids are registered: hu''s anchor 500 us off, hs''s step 4.5 ms, ht''s anchor half a second off');
+select lives_ok($$ select pgpm.set_regrain('public.hk', '1 millisecond') $$,
+  'LIVENESS: set_regrain accepts 1 millisecond on a hand-registered uuidv7 grid that is on the unit');
+select throws_like($$ select pgpm.set_regrain('public.hu', '1 millisecond') $$,
+  'pg_partition_magician: cannot regrain hu -- its grid is not on its control column id''s encoded unit: it is a uuidv7 key, which encodes whole milliseconds%partition_anchor 2000-01-01 00:00:00.0005+00%',
+  'set_regrain refuses a whole-millisecond target on a uuidv7 grid whose registered anchor is off the unit');
+select throws_like($$ select pgpm.regrain_step('public.hu', 'hu_any', '1 millisecond') $$,
+  'pg_partition_magician: cannot regrain hu -- its grid is not on its control column id''s encoded unit%',
+  'regrain_step refuses it too, before it looks for the child, so a resumed run is refused as a fresh one is');
+select throws_like($$ select pgpm.set_regrain('public.hs', '9 milliseconds') $$,
+  'pg_partition_magician: cannot regrain hs -- its grid is not on its control column id''s encoded unit%partition_step 4500 microseconds%',
+  'set_regrain refuses a whole-millisecond target on a uuidv7 grid whose registered step is off the unit');
+select throws_like($$ select pgpm.set_regrain('public.ht', '2 seconds') $$,
+  'pg_partition_magician: cannot regrain ht -- its grid is not on its control column id''s encoded unit: it is a text_time key, which encodes whole seconds from 1970-01-01 00:00:00+00%',
+  'set_regrain refuses a whole-second target on a text_time grid whose registered anchor is off its unit');
+select is((select string_agg(parent_table::text || '=' || coalesce(regrain_to, 'null'), ',' order by parent_table::text)
+             from pgpm.config where parent_table in ('public.hu'::regclass, 'public.hs'::regclass,
+                                                    'public.ht'::regclass, 'public.hk'::regclass)),
+          'hk=1 millisecond,hs=null,ht=null,hu=null',
+  'the refused grids stored no target, and the grid on the unit kept its own');
 
 select * from finish();

@@ -380,7 +380,10 @@ step's bounds truncate to dates); the step (unless it is a whole number of month
 whole multiple of a `timestamp(p)` or `timestamptz(p)` control column's smallest unit (`10^-p` seconds),
 such as `'500 milliseconds'` or `'1500 milliseconds'` on `timestamptz(0)` (the cutover's `ATTACH` rounds every
 bound to the column's precision, so two bounds would round to the same instant, or pgpm would record a
-bound other than the one attached: give whole units, or widen the column's precision); `p_obtain` is negative or null (the rule [`set_obtain`](#set_obtain)
+bound other than the one attached: give whole units, or widen the column's precision); on a `uuidv7` key, the
+step or `p_anchor` is not a whole number of milliseconds, such as `'4500 microseconds'` or an anchor of
+`'2000-01-01 00:00:00.0005+00'` (the encoding keeps whole milliseconds and floors every bound to one, so pgpm
+would record a bound other than the one attached); `p_obtain` is negative or null (the rule [`set_obtain`](#set_obtain)
 applies); the call resumes an earlier attempt's claim and that claim's recorded bound is not on this
 call's grid (its `lo` or `hi` is not a boundary of `p_step` and `p_anchor` in the zone the bound was
 computed in: re-run with the step and anchor of the attempt that recorded it, or abort it), or was
@@ -2489,7 +2492,10 @@ a whole number of an encoded key's unit, a millisecond for `uuidv7` and the `tex
 millisecond) for `text_time`, such as `'1500 microseconds'` on a `uuidv7` key or `'1.5 seconds'` on an
 ObjectId key, finer or coarser than the unit: each fine bound is encoded by flooring it to the unit, so the
 run would copy a row into one cell and apply a change made to it during the run to another, and a row
-deleted mid-regrain would come back at the swap; a domain is judged by its
+deleted mid-regrain would come back at the swap; and for the same reason any target at all on such a key
+whose registered `partition_anchor` or `partition_step` is itself off the unit, which an older install could
+register: convert that table back with [`untransmute`](#untransmute) and transmute it again on whole units;
+a domain is judged by its
 base type and typmod; a fractional step on an unconstrained `numeric` column is allowed), one coarser than
 `partition_step` (auto-regrain would reselect the same unsplittable child forever), and one whose fine
 names `<rel>_p<label>` would exceed PostgreSQL's 63-byte identifier limit.
