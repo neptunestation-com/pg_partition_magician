@@ -2125,6 +2125,112 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------------
+-- The relation a read reached (issue #1055)
+-- ---------------------------------------------------------------------------
+
+-- Every read in this module names its relation, because SQL has no other way to: the statement is text,
+-- and PostgreSQL resolves the name in it again when it parses it. A name taken from the oid earlier and
+-- spliced in later is a lookup of a moment ago. archive._pq_to_parquet and the range encoder took
+-- (schema, name) from the oid before the column loop and archive._pq_snapshot read by them after it, so
+-- a second session that renamed the child's schema away and gave another schema its name, in between,
+-- had the export read the namesake's rows and archive.to_s3_parquet PUT them under the child's key with
+-- no error (#1055, 21 of 40 tries at 1500 columns). Nothing the export holds stops that:
+-- ALTER SCHEMA ... RENAME takes no lock that conflicts with the ACCESS SHARE archive._resolve_child holds
+-- on the child (#1030), and the child itself is never renamed, its schema is.
+--
+-- So the readers render the regclass (archive._pq_from_relation, below) in the statement that reads,
+-- never a name derived earlier. That narrows the window to the parse of that one statement and does not
+-- close it: a rename committed after the render and seen by the parse still moves the name. Measured on
+-- the issue's reproduction (a second session swapping the two schemas about six times a second): 2 of 300
+-- reads reached the namesake with the rendering alone, and still 3 of 400 once archive._pq_snapshot took
+-- its INSERT's lock before rendering, so that the parse takes no new lock in between. Which catalog state a
+-- parse sees is PostgreSQL's cache machinery, not a promise. What closes the window is checking what the
+-- read reached: every relation a statement reads stays locked by this transaction until it ends, so the
+-- relations it holds after a read and did not hold before it are what the read touched. archive._refuse_foreign_read refuses when that
+-- set holds anything but the relation meant, its inheritance and partition descendants, their TOAST
+-- tables and indexes, and the relations the caller names (the snapshot table): a read that reached a
+-- namesake raises before anything is written, rather than putting another table's rows under this one's
+-- key. The one thing it cannot see is a namesake this transaction had locked already before the sample
+-- (a caller's own earlier read of it), since that lock is not new.
+
+-- The relations this backend holds a lock on, in this database, now.
+create or replace function archive._held_relations() returns oid[]
+language sql volatile as $$
+  select coalesce(array_agg(distinct l.relation), '{}'::oid[])
+    from pg_catalog.pg_locks l
+   where l.locktype = 'relation' and l.pid = pg_catalog.pg_backend_pid()
+     and l.database = (select d.oid from pg_catalog.pg_database d where d.datname = pg_catalog.current_database());
+$$;
+
+-- Raises when the read since p_before (archive._held_relations(), sampled before it) may have reached a
+-- relation other than p_relation. THE INVARIANT: of the relations this backend holds a lock on now and did not
+-- hold in p_before, (1) every one is p_relation's own (p_relation, its inheritance and partition descendants,
+-- the p_also relations, and their TOAST tables and indexes), and (2) none but p_relation and p_also is a
+-- readable relation (table, partitioned table, view, materialized view, foreign table) carrying p_relation's
+-- own relname. System catalogs (oids below 16384, FirstNormalObjectId) are not relations a read is about and
+-- are ignored.
+--
+-- Rule (2) is what a descendant needs. A read of the parent locks the parent and the partitions its range
+-- reaches; a misdirected read of ONE partition locks that partition alone, and the parent is already held by
+-- then (the snapshot's CREATE TABLE AS, an earlier encode, the export's own hold), so "p_relation is among
+-- the relations newly locked" cannot tell the two apart, and rule (1) admits every descendant. But a name can
+-- only reach a relation that bears it: the read's FROM item is p_relation rendered, schema-qualified or not,
+-- so whatever the parse reached carries p_relation's relname (held, it cannot be renamed under the read, and
+-- the relation reached is locked by the parse that reached it). A partition attached under the parent's own
+-- name in another schema, which a schema swap can put the rendered name on, is therefore refused whenever a
+-- read newly locks it (#1055, V-01: such a swap had the range encoder read that one partition and archive an
+-- empty chunk), including a read of the parent that legitimately reaches it: the check cannot tell that read
+-- from the misdirected one, and refusing it is the safe side. Names are compared as the syscache renders
+-- them now (regclassout, then parse_ident), not as this transaction's snapshot of pg_class has them.
+create or replace function archive._refuse_foreign_read(p_caller text, p_relation regclass, p_before oid[], p_also oid[] default '{}')
+returns void language plpgsql as $$
+declare
+  v_stray oid;
+  v_name text := (select n[cardinality(n)] from parse_ident(p_relation::text) n);
+begin
+  with recursive tree(rel) as (
+    select s.rel from (select p_relation::oid union select a from unnest(p_also) a where a is not null) s(rel)
+    union
+    select i.inhrelid from pg_catalog.pg_inherits i join tree t on i.inhparent = t.rel
+  ), heaps(rel) as (
+    select rel from tree
+    union select c.reltoastrelid from pg_catalog.pg_class c join tree t on c.oid = t.rel where c.reltoastrelid <> 0
+  ), own(rel) as (
+    select rel from heaps
+    union select i.indexrelid from pg_catalog.pg_index i join heaps h on i.indrelid = h.rel
+  )
+  select l into v_stray
+    from unnest(archive._held_relations()) l
+   where l >= 16384 and l <> all (coalesce(p_before, '{}'::oid[]))
+     and (l not in (select rel from own)                                                          -- rule (1)
+          or (l <> p_relation::oid and l <> all (coalesce(p_also, '{}'::oid[]))                   -- rule (2)
+              and exists (select 1 from pg_catalog.pg_class c where c.oid = l and c.relkind in ('r', 'p', 'v', 'm', 'f'))
+              and (select n[cardinality(n)] from parse_ident(l::regclass::text) n) = v_name))
+   order by l limit 1;
+  if v_stray is not null then
+    raise exception 'pg_partition_magician: % reached % (oid %) while reading % (oid %): the name it read by named another relation by the time the read was parsed (a schema renamed meanwhile), so it refuses to go on with that relation''s rows; nothing was written, run it again',
+      p_caller, v_stray::regclass, v_stray, p_relation, p_relation::oid;
+  end if;
+end;
+$$;
+
+-- The FROM item of a read of p_relation, rendered from the oid NOW (regclassout: schema-qualified unless
+-- the search_path reaches it), for the statement that is about to read it (#1055). archive._pq_from_item's
+-- shape (a half-open [p_lo, p_hi) on p_control, %I/%L-quoted) with the relation as a regclass rather than
+-- a schema and a name, so no caller can hand in a name it took earlier. STABLE, not IMMUTABLE: the
+-- rendering depends on the catalog and on search_path.
+create or replace function archive._pq_from_relation(
+  p_relation regclass, p_control name default null, p_lo text default null, p_hi text default null
+) returns text
+language sql stable as $$
+  select case
+    when p_control is null then p_relation::text
+    else format('(select * from %s where %I >= %L and %I < %L) x',
+                p_relation, p_control, p_lo, p_control, p_hi)
+  end;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- The read: one statement, one snapshot (issue #462)
 -- ---------------------------------------------------------------------------
 
@@ -2179,20 +2285,31 @@ $$;
 -- and otherwise it is dropped and built again, so encodes of differently shaped tables in one
 -- transaction stay correct and cost one set of entries per change of shape, not per encode.
 --
--- Nothing here carries SQL (#408): the relation arrives as p_schema/p_table and the range as
--- p_control/p_lo/p_hi (both go to archive._pq_from_item), the column list and the ordering as
--- name[], quote_ident'd element by element.
+-- Nothing here carries SQL (#408): the relation arrives as a regclass and the range as p_control/p_lo/p_hi
+-- (both go to archive._pq_from_relation), the column list and the ordering as name[], quote_ident'd element
+-- by element.
+--
+-- THE RELATION IS READ BY ITS OID (#1055). It used to arrive as a schema and a name the encoders took from the
+-- oid before their column loop; a schema renamed in between had this read a namesake (see
+-- archive._refuse_foreign_read). Three steps now, in this order. The snapshot table's ROW EXCLUSIVE is taken
+-- first, the lock the INSERT would otherwise take while it is parsed, so taking it here brings in any catalog
+-- change committed so far and the INSERT's parse takes no new lock, and with it no newer change, before it
+-- looks the relation up. Then the regclass is rendered, and the INSERT reads by what was rendered. Rendered
+-- without that lock first, the INSERT's own parse took it between the two and brought in a rename the
+-- rendering had not seen. Last, what the read reached is checked against the relations this call held when it
+-- began (v_held), which closes what the first two only narrow.
 create or replace function archive._pq_snapshot(
-  p_schema name, p_table name, p_cols name[], p_order_by name[],
+  p_relation regclass, p_cols name[], p_order_by name[],
   p_control name default null, p_lo text default null, p_hi text default null
 ) returns bigint
 language plpgsql as $$
 declare
   v_from_q text; v_cols_q text; v_order_q text; v_num_rows bigint;
   v_snap regclass; v_want text[]; v_have text[];
+  v_held oid[] := archive._held_relations();   -- before anything below reads by a name (#1055)
 begin
   if 'archive_pq_ord' = any (p_cols) then
-    raise exception 'archive._pq_snapshot: %.% has a column named archive_pq_ord, the name the Parquet encoder reserves for its row ordinal; rename it to archive the table as Parquet', p_schema, p_table;
+    raise exception 'archive._pq_snapshot: % has a column named archive_pq_ord, the name the Parquet encoder reserves for its row ordinal; rename it to archive the table as Parquet', p_relation;
   end if;
   select string_agg(quote_ident(c), ', ' order by ord) into v_cols_q
     from unnest(p_cols) with ordinality as t(c, ord);
@@ -2201,8 +2318,6 @@ begin
   if v_cols_q is null or v_order_q is null then
     raise exception 'archive._pq_snapshot: p_cols and p_order_by must both be non-empty';
   end if;
-  v_from_q := archive._pq_from_item(p_schema, p_table, p_control, p_lo, p_hi);
-
   -- The shape check runs on every call, the first included, and so does the TRUNCATE and the INSERT
   -- below: the first encode in a transaction then takes every lock a later one takes, and a later one
   -- takes none of its own. The columns this call's CREATE would give the relation, then the ordinal:
@@ -2210,9 +2325,7 @@ begin
   select array_agg(format('%s %s %s %s', a.attname, a.atttypid, a.atttypmod, a.attcollation) order by t.ord)
     into v_want
     from unnest(p_cols) with ordinality as t(c, ord)
-    join pg_namespace n on n.nspname = p_schema
-    join pg_class r on r.relnamespace = n.oid and r.relname = p_table
-    join pg_attribute a on a.attrelid = r.oid and a.attname = t.c and a.attnum > 0 and not a.attisdropped;
+    join pg_attribute a on a.attrelid = p_relation and a.attname = t.c and a.attnum > 0 and not a.attisdropped;
   v_want := v_want || format('%s %s %s %s', 'archive_pq_ord', 'int8'::regtype::oid, -1, 0);
   -- and the columns the relation already there has (none when there is none)
   select array_agg(format('%s %s %s %s', a.attname, a.atttypid, a.atttypmod, a.attcollation) order by a.attnum)
@@ -2225,11 +2338,15 @@ begin
   end if;
   -- built empty, then filled by the same two statements a reuse runs
   if v_snap is null then
+    v_from_q := archive._pq_from_relation(p_relation, p_control, p_lo, p_hi);
     execute format(
       'create temp table archive_pq_snapshot on commit drop as
          select %s, row_number() over (order by %s) as archive_pq_ord from %s with no data',
       v_cols_q, v_order_q, v_from_q);
+    v_snap := to_regclass('pg_temp.archive_pq_snapshot');
   end if;
+  lock table pg_temp.archive_pq_snapshot in row exclusive mode;
+  v_from_q := archive._pq_from_relation(p_relation, p_control, p_lo, p_hi);
   truncate pg_temp.archive_pq_snapshot;
   -- ONE statement, so ONE snapshot: every row the encoder writes is a row this statement saw.
   execute format(
@@ -2237,6 +2354,7 @@ begin
        select %s, row_number() over (order by %s) as archive_pq_ord from %s',
     v_cols_q, v_order_q, v_from_q);
   get diagnostics v_num_rows = row_count;
+  perform archive._refuse_foreign_read('archive._pq_snapshot', p_relation, v_held, array[v_snap]);
   return v_num_rows;
 end;
 $$;
@@ -2248,7 +2366,6 @@ $$;
 create or replace function archive._pq_to_parquet(p_relation regclass, p_compress boolean default true) returns bytea
 language plpgsql as $$
 declare
-  v_schema name; v_table name;
   v_col record;
   v_col_names text[] := '{}';
   v_col_pgtypes text[] := '{}';
@@ -2272,10 +2389,6 @@ declare
   v_footer bytea;
   i int4;
 begin
-  select n.nspname, c.relname into v_schema, v_table
-    from pg_class c join pg_namespace n on n.oid = c.relnamespace
-    where c.oid = p_relation;
-
   for v_col in
     select a.attname, a.attnotnull, t.typname, t.typtype, t.typcategory, t.typelem, a.atttypmod
     from pg_attribute a join pg_type t on t.oid = a.atttypid
@@ -2335,7 +2448,7 @@ begin
   -- row count that sizes the page headers and the footer is the count of rows the file holds, not
   -- a count(*) that saw a snapshot of its own. ctid order, as this entry point has always written a
   -- single heap; archive._pq_snapshot numbers the rows in that order once.
-  v_num_rows := archive._pq_snapshot(v_schema, v_table, v_col_names::name[], array['ctid']::name[]);
+  v_num_rows := archive._pq_snapshot(p_relation, v_col_names::name[], array['ctid']::name[]);
 
   v_body := v_magic;
   for i in 1..v_ncols loop
@@ -2411,7 +2524,7 @@ create or replace function archive._pq_to_parquet_range_counted(
   out p_file bytea, out p_num_rows bigint)
 language plpgsql as $$
 declare
-  v_schema name; v_table name; v_order_cols name[]; v_key_cols name[];
+  v_order_cols name[]; v_key_cols name[];
   v_col record;
   v_col_names text[] := '{}';
   v_col_pgtypes text[] := '{}';
@@ -2435,10 +2548,6 @@ declare
   v_footer bytea;
   i int4;
 begin
-  select n.nspname, c.relname into v_schema, v_table
-    from pg_class c join pg_namespace n on n.oid = c.relnamespace
-    where c.oid = p_parent;
-
   -- the ordering travels as column NAMES, not as a joined SQL fragment: the encoder quote_ident's
   -- each one itself (#408). The control column leads, the key columns, when there are any, tiebreak it.
   --
@@ -2512,7 +2621,7 @@ begin
   -- the key columns tiebreaking it (v_order_cols). The range predicate is applied here, once; the
   -- per-column reads below see only the materialised rows, so they need neither the range nor the
   -- key, just the ordinal.
-  v_num_rows := archive._pq_snapshot(v_schema, v_table, v_col_names::name[], v_order_cols, p_control, p_lo, p_hi);
+  v_num_rows := archive._pq_snapshot(p_parent, v_col_names::name[], v_order_cols, p_control, p_lo, p_hi);
 
   v_body := v_magic;
   for i in 1..v_ncols loop
@@ -2850,8 +2959,9 @@ create or replace function archive._encode_upload_ndjson_single(p_parent regclas
 returns table(s3_key text, etag text, rows_archived bigint)
 language plpgsql set extra_float_digits = 1 as $$
 declare
-  cfg archive.config; pcfg pgpm.config; v_nsp name; v_rel name;
+  cfg archive.config; pcfg pgpm.config;
   v_payload text; v_body bytea; v_key text;
+  v_held oid[];
   v_key_id text; v_secret text; v_resp record; h record; v_etag text; v_rows bigint;   -- records: no http type named (#984)
 begin
   select * into cfg from archive.config where parent_table = p_parent;
@@ -2859,8 +2969,6 @@ begin
   select * into pcfg from pgpm.config where parent_table = p_parent;
   pcfg := pgpm._control_followed(pcfg);
   if not found then raise exception 'archive._encode_upload_ndjson_single: % is not managed', p_parent; end if;
-  select n.nspname, c.relname into v_nsp, v_rel
-    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
 
   -- [p_lo, p_hi) as literals of the column's type, rendered in config.partition_tz like every other
   -- reader of a chunk in pgpm_core (#501). On a timestamptz column any zone's rendering names the same
@@ -2873,10 +2981,14 @@ begin
   -- COLUMN before it tries a whole-row reference, so on a table with a column named t the bare form was
   -- that column (a composite's fields alone, archived in place of the row, or a raise on a timestamptz),
   -- while `t.*` resolves against the FROM item's alias only (#821). archive.to_s3 renders the same way.
+  --
+  -- The parent is read as p_parent, rendered in this statement, never as a schema and a name looked up
+  -- in an earlier one, and what the read reached is checked after it (#1055; see archive._refuse_foreign_read).
+  v_held := archive._held_relations();
   execute format(
     'select coalesce(string_agg(row_to_json(t.*)::text, e''\n'' order by t.%I), ''''), count(*)
-       from %I.%I t where t.%I >= %L and t.%I < %L',
-    pcfg.control_column, v_nsp, v_rel, pcfg.control_column,
+       from %s t where t.%I >= %L and t.%I < %L',
+    pcfg.control_column, p_parent, pcfg.control_column,
     pgpm._encode(pcfg.control_kind, p_lo, pcfg.text_time_prefix, pcfg.text_time_width,
                  pcfg.text_time_radix, pcfg.text_time_unit, pcfg.text_time_alphabet,
                  pcfg.text_time_discard_bits, pcfg.text_time_epoch, pcfg.partition_tz),
@@ -2885,6 +2997,7 @@ begin
                  pcfg.text_time_radix, pcfg.text_time_unit, pcfg.text_time_alphabet,
                  pcfg.text_time_discard_bits, pcfg.text_time_epoch, pcfg.partition_tz))
     into v_payload, v_rows;
+  perform archive._refuse_foreign_read('archive._encode_upload_ndjson_single', p_parent, v_held);
 
   select decrypted_secret into v_key_id from vault.decrypted_secrets where name = cfg.vault_key_id;
   select decrypted_secret into v_secret from vault.decrypted_secrets where name = cfg.vault_secret;
@@ -3582,3 +3695,7 @@ drop function if exists archive._pq_build_schema_leaf(text, int4, int4, boolean,
 -- archive._s3_abort_uploads_at grew a trailing optional p_page_size (#711). With the 6-arg version still
 -- installed, archive.to_s3's 6-argument calls would match both and be refused as "not unique".
 drop function if exists archive._s3_abort_uploads_at(text, text, text, text, text, text);
+-- archive._pq_snapshot took the relation as a schema and a name until #1055, and read it by that name, so
+-- a schema renamed between the encoder's lookup and the read had it read a namesake. It takes the regclass
+-- now, a different parameter list, so the by-name version would otherwise stay installed beside it.
+drop function if exists archive._pq_snapshot(name, name, name[], name[], name, text, text);

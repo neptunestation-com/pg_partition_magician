@@ -57,7 +57,9 @@ FILES = [
 # Functions that return an already-quoted fragment built from typed inputs. A call to one of these
 # is as good as calling quote_ident directly, for CHECK 2's purposes. Adding an entry here is the
 # moment a new trusted builder is introduced, which is exactly when it wants a reviewer's eye.
-QUOTING_HELPERS = ["archive._pq_from_item", "pgpm._detach_cmd"]
+# archive._pq_from_relation (#1055) renders a regclass, whose output function quotes the names it emits, and
+# %I/%L-quotes the range, so it is one of these too.
+QUOTING_HELPERS = ["archive._pq_from_item", "archive._pq_from_relation", "pgpm._detach_cmd"]
 
 # The floor. A parser that silently stops matching -- a formatting change, a new body delimiter --
 # would otherwise report a clean run having examined nothing, which is the one result this script

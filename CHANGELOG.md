@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+- **A Parquet export reads the relation it was handed, never a namesake** (#1055, bullet 1).
+  `archive._pq_to_parquet` and the range encoder took a schema and a name from the relation's oid before their
+  column loop, and `archive._pq_snapshot` read the rows by that name after it. `ALTER SCHEMA ... RENAME` takes
+  no lock that conflicts with the hold `archive._resolve_child` takes, so a second session that swapped the
+  child's schema with another holding a same-shaped table of the same name, committed in between, had
+  `archive.to_s3_parquet` PUT the namesake's rows under the child's key with no error (21 of 40 tries at 1500
+  columns). `archive._pq_snapshot` now takes the relation as a regclass and renders it in the statement that
+  reads it (`archive._pq_from_relation`), after taking its snapshot table's ROW EXCLUSIVE so the INSERT's parse
+  takes no new lock, and with it no catalog change, between the rendering and the lookup. That narrows the
+  window and does not close it (the reproduction still reached the namesake in 3 of 400 tries), so the read is
+  then checked: `archive._refuse_foreign_read` compares the relations the read newly locked with the one it
+  was handed, its descendants, their indexes and TOAST tables, and refuses before anything is written when the
+  read reached any other, or any relation but the one handed that carries its name (a descendant attached
+  under the parent's name in another schema is where a swap can send a range read, and that partition is
+  refused whenever a range read reaches it). Under the reproduction's continuous swaps 7 of 600 exports were refused and none
+  exported the namesake. The automatic NDJSON strategy's read (`archive._encode_upload_ndjson_single`) took
+  its name the same way and now renders the regclass and is checked the same way.
+  Test `tests/archive/db/46`, guard `bench/archive_parquet_read_by_regclass.sh`, mutations
+  `archive_pq_snapshot_reads_by_name`, `archive_pq_snapshot_render_only`,
+  `archive_pq_snapshot_render_before_news`, `archive_read_witness_inert`,
+  `archive_read_witness_descendants_admitted`, `archive_pq_snapshot_sampled_after_read` and
+  `archive_ndjson_single_unchecked`.
+
 - **Regrain's change capture writes its delta by the oid the prepare tick recorded** (#1051). The reconcile,
   the swap gate, the swap and `regrain_cancel` have found the delta by `pgpm.config.regrain_delta_oid` since
   #496, but the capture function `_regrain_capture_install` minted inserted into `<rel>_pgpm_regrain_delta`
