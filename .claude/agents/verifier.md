@@ -87,7 +87,10 @@ the issue's consequence through a path the diff does not cover. Ask, in order: w
 entry points reach the same mechanism (grep the head for the function the fix changed and for the state it
 guards); does the resume path, the upgrade path, the hypertable or archive module's copy of the mechanism
 share the defect; does the guard assert the contract or an implementation spelling; does the mutation put
-back THIS defect (the acceptance reproduction fails on the mutant) or a cousin. Each path you can make fail
+back THIS defect (the acceptance reproduction fails on the mutant) or a cousin; and does a CAVEAT in the body
+hold up: a race the body calls "tiny" or "not instrumentable" is a claim to build, not a disclaimer to accept
+(the lever phase before pass 10 accepted #1049's and #1053's "tiny race against a transaction's first write"
+and the backlog verification then built it as a Tier 1, #1057 bullet 3). Each path you can make fail
 is a claim directory `<claims>/V/V-NN/` under the reproduction contract (it will be classified against the
 base and the head: a path that fails on both is `pre_existing` in the PR's surface). Write the verdict as
 `{"closing": {"verdict": "holds" | "partial", "reason": "...", "claims": ["V-01", ...]}}`: `partial` when a

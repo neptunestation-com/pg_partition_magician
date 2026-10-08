@@ -62,7 +62,8 @@ coordinator judges its claims worth the budget (a tooling PR that changes what a
   bullet's text, the acceptance claims and their reproductions, the harness, the claims directory with finder
   id `V`, the verdict path `$W/pr/verdicts/closing.json`, and the open-issue list
   (`gh issue list --state open --label bug --limit 200 --json number,title,body > $W/open.json`). Its job is
-  to disprove the PR's closing claim: reach the issue's consequence through a path the diff does not cover.
+  to disprove the PR's closing claim: reach the issue's consequence through a path the diff does not cover,
+  and build every caveat the body states (a race it calls tiny is a claim, not a disclaimer: #1057 bullet 3).
 
 ## 3. Classify (mechanical)
 

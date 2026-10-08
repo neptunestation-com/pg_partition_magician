@@ -322,7 +322,9 @@ the base, pass on the head, and fail again on the mutant, since a mutation that 
 reproduction fail has put back some defect but not this one, and the guard it certifies is not a guard for
 this fix. A claims verifier then tries to disprove the closing claim by reaching the issue's consequence
 through a path the diff does not cover (a sibling call site, the resume or upgrade path, the other module's
-copy of the mechanism); each path it can make fail is a claim. The other half is a finder under the
+copy of the mechanism), and builds every caveat the body states, since a race the body calls tiny is a claim and
+not a disclaimer (the trial accepted one and the backlog verification then built it as a Tier 1); each path it
+can make fail is a claim. The other half is a finder under the
 fresh-surface lens and one more, on a slice that is the units the diff touches plus the units that call them
 (`pr_surface.py`, one hop, scored by the coverage ledger as in a pass), with the PR's body as a claim to
 test rather than a fact. One verifier per candidate, exactly as in a pass, with the base as the pristine
