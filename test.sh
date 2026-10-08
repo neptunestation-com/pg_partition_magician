@@ -1151,6 +1151,7 @@ run_perf() {
     "bench/regrain_capture_delta_by_record.sh pgpm_perf289"
     "bench/archive_partition_whole_follows_step.sh pgpm_perf290"
     "bench/regrain_capture_delta_held.sh pgpm_perf294"
+    "bench/regrain_children_tablespace.sh pgpm_perf106"
   )
   local selected=()
   local n=${#guards[@]} idx

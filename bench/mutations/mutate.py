@@ -6776,6 +6776,17 @@ select ok(
         [("  if v_spc is not null and not has_tablespace_privilege(v_spc, 'CREATE') then\n",
           "  if false then\n", 1)],
     ),
+    "regrain_children_tablespace_dropped": (
+        "bench/regrain_children_tablespace.sh",
+        "Issue #1075 put back: regrain_step's standalone CREATE TABLE (LIKE ...) for a fine child splices no "
+        "tablespace clause, so the fine children, and the rows a regrain moves into them, land in the database "
+        "default whatever tablespace the parent mints its partitions in. One clause, the splice dropped from "
+        "the create; tests/296's parts A and B catch it, while part C's database-default table still passes.",
+        [("including indexes including constraints excluding identity)%s',\n"
+          "                     v_sub_nsp, v_sub_name, v_nsp, v_rel, v_spc_q);\n",
+          "including indexes including constraints excluding identity)',\n"
+          "                     v_sub_nsp, v_sub_name, v_nsp, v_rel, v_spc_q);\n", 1)],
+    ),
     "unbuilt_cell_type_holder_unnamed": (
         "bench/unbuilt_cell_type_holder.sh",
         "Pre-#790 _log_unbuilt_cell: the holder is resolved through to_regclass alone, so when a type (an "

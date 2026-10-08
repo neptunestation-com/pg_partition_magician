@@ -5963,6 +5963,7 @@ declare
   v_unarmed text; v_restart_why text;   -- #892
   v_dnsp name;   -- the delta's own schema, by its recorded oid (#555)
   v_src_nsp name; v_sub_nsp name;   -- the source's own schema, and a copy's (#872): never the parent's
+  v_spc_q text;   -- #1075: ' tablespace <the parent's>', or empty for the database default
   v_off text;   -- what of the run in flight is off the requested grid (#905)
 begin
   -- #951: refused before anything is read or committed; p_target_step (null: the partition step) and p_batch
@@ -6429,8 +6430,16 @@ begin
       end if;
     end if;
     if to_regclass(format('%I.%I', v_sub_nsp, v_sub_name)) is null then
-      execute format('create table %I.%I (like %I.%I including defaults including generated including storage including indexes including constraints excluding identity)',
-                     v_sub_nsp, v_sub_name, v_nsp, v_rel);
+      -- #1075: in the parent's tablespace, where every other partition of it is minted. _create_partition's
+      -- CREATE ... PARTITION OF takes the parent's; this standalone CREATE ... (LIKE) carries none, so without
+      -- the clause every fine child, and every row the regrain moves into it, landed in the database default
+      -- and the swap attached it there. None when the parent is in the database default (reltablespace 0),
+      -- which leaves the create to default_tablespace exactly as PARTITION OF does.
+      v_spc_q := coalesce((select format(' tablespace %I', t.spcname)
+                             from pg_class c join pg_tablespace t on t.oid = c.reltablespace
+                            where c.oid = p_parent), '');
+      execute format('create table %I.%I (like %I.%I including defaults including generated including storage including indexes including constraints excluding identity)%s',
+                     v_sub_nsp, v_sub_name, v_nsp, v_rel, v_spc_q);
       -- #949: the parent's owner and an owner-only ACL from the tick that creates it, before a row is copied in.
       -- The reset used to wait for the sub-range's last short batch (below), and between ticks a role the
       -- creating role's default privileges name read every row copied so far, past the parent's row security.
