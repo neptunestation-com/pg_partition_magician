@@ -16,6 +16,14 @@
 --   Part C  the check that closes what rendering the regclass only narrows: archive._refuse_foreign_read
 --           refuses once a read has reached a relation outside the one meant, and passes a read of the
 --           relation itself, its index included
+--   Part D  the window between the rendering and the INSERT's parse, entered: a swap committed there that
+--           puts the rendered name on one of the parent's OWN partitions (attached under the parent's name in
+--           another schema) has the range encoder refuse, not archive that one partition's rows as the
+--           parent's chunk (review of #1059, V-01: it encoded 0 rows of the parent's 5, with no error)
+--   Part E  the check fires from inside both readers that call it: a range read of a parent that newly
+--           locks a relation carrying the parent's name (here, that same-named partition) is refused by
+--           archive._pq_snapshot and by archive._encode_upload_ndjson_single, and a range of the same parent
+--           that does not reach it is read as before
 --
 -- THE INSTRUMENT. The window is entered with no timing. archive._pq_snapshot builds its temp table with
 -- CREATE TABLE AS before the INSERT that reads the rows, and an event trigger on that command's end, armed for
@@ -30,7 +38,7 @@
 -- carries current_database() because the bucket outlives a test database.
 set client_min_messages = warning;
 create extension if not exists dblink;
-select plan(21);
+select plan(29);
 
 create schema t46h;   -- the helpers live apart from every schema the second session renames
 
@@ -181,6 +189,67 @@ select throws_like(format('select archive._refuse_foreign_read(%L, %L, %L::oid[]
   '%t46 reached t46c.other%while reading t46c.mine%',
   'C: once a read has reached another relation, it is refused, naming the relation reached');
 commit;
+
+-- ======================= PART D: the swap lands on a partition named like the parent =======================
+-- The instrument is the verifier's (V-01): a BEFORE TRUNCATE trigger on the reused snapshot table, whose
+-- TRUNCATE runs between the rendering and the INSERT, commits the swap from the second session and then takes
+-- a new lock on a system catalog, so this backend reads the catalog change as the INSERT's parse would. Its
+-- state lives in transaction-local settings, not a table: a table it locked inside the encode would be a
+-- relation the check rightly refuses, and would mask what this part probes.
+create schema t46d; create schema t46d_x;
+create table t46d.evt (id bigint not null, payload text) partition by range (id);
+create table t46d.evt_p0 partition of t46d.evt for values from (0) to (100);
+create table t46d_x.evt partition of t46d.evt for values from (1000) to (2000);   -- the parent's own name
+insert into t46d.evt select g, 'parent-d' from generate_series(1, 5) g;
+insert into t46d.evt values (1500, 'partition-d');
+select 't46d.evt'::regclass::oid as d_oid \gset
+create function t46h.swap_on_truncate() returns trigger language plpgsql as $$
+begin
+  if current_setting('t46.d_armed', true) = 'yes' then
+    perform set_config('t46.d_armed', '', true);
+    perform dblink_exec('h', t46h.swap_sql('t46d', 't46d_x'));
+    lock table pg_catalog.pg_description in access share mode;   -- a new lock: the catalog change is read
+  end if;
+  return null;
+end $$;
+
+begin;
+-- the snapshot table is ON COMMIT DROP, so the encodes and the trigger on it share this one transaction
+select is((select c.p_num_rows from archive._pq_to_parquet_range_counted(:'d_oid'::oid::regclass, 'id', '0', '100', false) c),
+          5::bigint, 'D LIVENESS: before the swap the range encoder reads the parent''s 5 rows of [0, 100)');
+create trigger t46_d_swap before truncate on pg_temp.archive_pq_snapshot
+  for each statement execute function t46h.swap_on_truncate();
+select set_config('t46.d_armed', 'yes', true) as armed \gset discard_
+select throws_like(format('select archive._pq_to_parquet_range_counted(%s::oid::regclass, %L, %L, %L, false)',
+                          :'d_oid', 'id', '0', '100'),
+  '%archive._pq_snapshot reached t46d.evt%while reading t46d_x.evt%',
+  'D: the range encoder refuses once its rendered name reached the partition named like the parent');
+select ok(to_regclass('t46d_x.evt')::oid = :'d_oid'::oid
+          and exists (select 1 from pg_inherits where inhrelid = to_regclass('t46d.evt') and inhparent = :'d_oid'::oid),
+  'D LIVENESS: the swap committed inside the encode, and the parent''s old spelling names one of its own partitions');
+commit;
+
+-- ======================= PART E: the check fires inside both readers =======================
+create schema t46e; create schema t46e_x;
+create table t46e.evt (id bigint primary key, payload text not null);
+insert into t46e.evt values (1, 'parent-e'), (2, 'parent-e');
+call pgpm.transmute('t46e.evt', 'id', 10000::bigint, p_paused => true);
+select archive.configure('t46e.evt', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
+create table t46e_x.evt partition of t46e.evt for values from (900000000) to (900010000);   -- the parent's own name
+insert into t46e.evt values (900000001, 'partition-e');
+select ok(exists (select 1 from pg_inherits where inhrelid = 't46e_x.evt'::regclass and inhparent = 't46e.evt'::regclass)
+          and (select count(*) from t46e_x.evt) = 1,
+  'E LIVENESS: t46e_x.evt is a partition of t46e.evt, carries its name, and holds row 900000001');
+select lives_ok($$ select archive._pq_to_parquet_range('t46e.evt', 'id', '0', '10000', false) $$,
+  'E LIVENESS: the range encoder reads [0, 10000), which does not reach that partition');
+select throws_like($$ select archive._pq_to_parquet_range('t46e.evt', 'id', '900000000', '900010000', false) $$,
+  '%archive._pq_snapshot reached t46e_x.evt%while reading t46e.evt%',
+  'E: the range encoder refuses a read that newly locked a relation carrying the parent''s name');
+select lives_ok($$ select * from archive._encode_upload_ndjson_single('t46e.evt', '0', '10000', false) $$,
+  'E LIVENESS: the NDJSON strategy''s read of [0, 10000) completes');
+select throws_like($$ select * from archive._encode_upload_ndjson_single('t46e.evt', '900000000', '900010000', false) $$,
+  '%archive._encode_upload_ndjson_single reached t46e_x.evt%while reading t46e.evt%',
+  'E: the NDJSON strategy refuses the same read, from inside its own call of the check');
 
 select dblink_disconnect('h') as disconnected \gset discard_
 drop event trigger t46_window;

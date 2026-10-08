@@ -14,12 +14,16 @@
   window and does not close it (the reproduction still reached the namesake in 3 of 400 tries), so the read is
   then checked: `archive._refuse_foreign_read` compares the relations the read newly locked with the one it
   was handed, its descendants, their indexes and TOAST tables, and refuses before anything is written when the
-  read reached any other. Under the reproduction's continuous swaps 7 of 600 exports were refused and none
+  read reached any other, or any relation but the one handed that carries its name (a descendant attached
+  under the parent's name in another schema is where a swap can send a range read, and that partition is
+  refused whenever a range read reaches it). Under the reproduction's continuous swaps 7 of 600 exports were refused and none
   exported the namesake. The automatic NDJSON strategy's read (`archive._encode_upload_ndjson_single`) took
   its name the same way and now renders the regclass and is checked the same way.
   Test `tests/archive/db/46`, guard `bench/archive_parquet_read_by_regclass.sh`, mutations
   `archive_pq_snapshot_reads_by_name`, `archive_pq_snapshot_render_only`,
-  `archive_pq_snapshot_render_before_news` and `archive_read_witness_inert`.
+  `archive_pq_snapshot_render_before_news`, `archive_read_witness_inert`,
+  `archive_read_witness_descendants_admitted`, `archive_pq_snapshot_sampled_after_read` and
+  `archive_ndjson_single_unchecked`.
 
 - **Regrain's change capture writes its delta by the oid the prepare tick recorded** (#1051). The reconcile,
   the swap gate, the swap and `regrain_cancel` have found the delta by `pgpm.config.regrain_delta_oid` since

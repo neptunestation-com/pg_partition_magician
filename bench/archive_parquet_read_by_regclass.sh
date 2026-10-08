@@ -18,7 +18,12 @@
 #                                              the issue reported (parts A and B)
 #   archive_pq_snapshot_render_only         -- the regclass rendered for the read, nothing else (parts A and B)
 #   archive_pq_snapshot_render_before_news  -- rendered before the snapshot table's lock: refused (parts A and B)
-#   archive_read_witness_inert              -- archive._refuse_foreign_read refuses nothing (part C)
+#   archive_read_witness_inert              -- archive._refuse_foreign_read refuses nothing (parts C to E)
+#   archive_read_witness_descendants_admitted -- the check admits a descendant carrying the parent's name, the
+#                                              hole review found in #1059 (parts D and E)
+#   archive_pq_snapshot_sampled_after_read  -- archive._pq_snapshot samples what it holds after its read, so
+#                                              its check never fires (parts D and E)
+#   archive_ndjson_single_unchecked         -- the NDJSON strategy's read is never checked (part E)
 #
 # Usage: archive_parquet_read_by_regclass.sh <container> <db> [archive install.sql]
 # Needs the archive image (pgsql-http + pgtap + pg_prove + dblink) AND MinIO on the same network: part A PUTs a

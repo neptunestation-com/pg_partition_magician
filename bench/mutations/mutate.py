@@ -9777,6 +9777,35 @@ MUTATIONS["archive_read_witness_inert"] = (
       "  if false then\n    raise exception 'pg_partition_magician: % reached", 1)],
 )
 MUTATION_SRC["archive_read_witness_inert"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_read_witness_descendants_admitted"] = (
+    "bench/archive_parquet_read_by_regclass.sh",
+    "archive._refuse_foreign_read admits every relation a read newly locked that is the handed relation's own, "
+    "every inheritance and partition descendant included, and checks no name. For the range encoder and the "
+    "NDJSON strategy the handed relation is the parent, so a schema swap that puts the rendered name on one of "
+    "the parent's own partitions (attached under the parent's name in another schema) has the read take that "
+    "one partition's rows for the parent's chunk, with no error (review of #1059, V-01). One site, the name "
+    "rule. tests/archive/db/46 parts D and E catch it (neither reader refuses).",
+    [("          or (l <> p_relation::oid and l <> all (coalesce(p_also, '{}'::oid[]))                   -- rule (2)\n",
+      "          or (false and l <> all (coalesce(p_also, '{}'::oid[]))\n", 1)],
+)
+MUTATION_SRC["archive_read_witness_descendants_admitted"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_pq_snapshot_sampled_after_read"] = (
+    "bench/archive_parquet_read_by_regclass.sh",
+    "archive._pq_snapshot hands archive._refuse_foreign_read the relations it holds AFTER its read as the ones "
+    "held before it, so nothing the read locked is new and the check can never fire from this call site. One "
+    "site, the sample. tests/archive/db/46 parts D and E catch it (the range encoder does not refuse).",
+    [("  perform archive._refuse_foreign_read('archive._pq_snapshot', p_relation, v_held, array[v_snap]);\n",
+      "  perform archive._refuse_foreign_read('archive._pq_snapshot', p_relation, archive._held_relations(), array[v_snap]);\n", 1)],
+)
+MUTATION_SRC["archive_pq_snapshot_sampled_after_read"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_ndjson_single_unchecked"] = (
+    "bench/archive_parquet_read_by_regclass.sh",
+    "archive._encode_upload_ndjson_single renders the parent's regclass for its read and never checks what the "
+    "read reached, so a read the parse sent elsewhere is PUT as the parent's chunk. One site, its call of "
+    "archive._refuse_foreign_read. tests/archive/db/46 part E catches it (the NDJSON strategy does not refuse).",
+    [("  perform archive._refuse_foreign_read('archive._encode_upload_ndjson_single', p_parent, v_held);\n", "", 1)],
+)
+MUTATION_SRC["archive_ndjson_single_unchecked"] = "pgpm_archive/install.sql"
 
 
 

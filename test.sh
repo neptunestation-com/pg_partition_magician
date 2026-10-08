@@ -902,7 +902,8 @@ run_archive() {
   bash "$(dirname "$0")/bench/archive_to_s3_child_held.sh" pgpm_test-archive pgpm_perf281 || fail=1
   # The read-by-regclass guard (#1055) re-runs tests/archive/db/46 for the same reason: the clean-code half of the
   # pairs bench/discriminate.sh completes with the read by an earlier name, the regclass rendered alone, rendered
-  # before the snapshot table's lock, and the check of what a read reached made inert.
+  # before the snapshot table's lock, the check of what a read reached made inert, admitting a descendant named
+  # like the parent, sampled after the read, and left out of the NDJSON strategy.
   echo "--- a Parquet export reads the relation it was handed, never a namesake guard (issue #1055) ---"
   bash "$(dirname "$0")/bench/archive_parquet_read_by_regclass.sh" pgpm_test-archive pgpm_perf292 || fail=1
 

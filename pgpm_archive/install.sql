@@ -2162,13 +2162,31 @@ language sql volatile as $$
      and l.database = (select d.oid from pg_catalog.pg_database d where d.datname = pg_catalog.current_database());
 $$;
 
--- Raises when this backend now holds a lock it did not hold in p_before (archive._held_relations(), sampled
--- before the read) on a relation outside p_relation's own: p_relation, its descendants, the p_also
--- relations, and their TOAST tables and indexes. System catalogs (oids below 16384, FirstNormalObjectId)
--- are not relations a read is about and are ignored.
+-- Raises when the read since p_before (archive._held_relations(), sampled before it) may have reached a
+-- relation other than p_relation. THE INVARIANT: of the relations this backend holds a lock on now and did not
+-- hold in p_before, (1) every one is p_relation's own (p_relation, its inheritance and partition descendants,
+-- the p_also relations, and their TOAST tables and indexes), and (2) none but p_relation and p_also is a
+-- readable relation (table, partitioned table, view, materialized view, foreign table) carrying p_relation's
+-- own relname. System catalogs (oids below 16384, FirstNormalObjectId) are not relations a read is about and
+-- are ignored.
+--
+-- Rule (2) is what a descendant needs. A read of the parent locks the parent and the partitions its range
+-- reaches; a misdirected read of ONE partition locks that partition alone, and the parent is already held by
+-- then (the snapshot's CREATE TABLE AS, an earlier encode, the export's own hold), so "p_relation is among
+-- the relations newly locked" cannot tell the two apart, and rule (1) admits every descendant. But a name can
+-- only reach a relation that bears it: the read's FROM item is p_relation rendered, schema-qualified or not,
+-- so whatever the parse reached carries p_relation's relname (held, it cannot be renamed under the read, and
+-- the relation reached is locked by the parse that reached it). A partition attached under the parent's own
+-- name in another schema, which a schema swap can put the rendered name on, is therefore refused whenever a
+-- read newly locks it (#1055, V-01: such a swap had the range encoder read that one partition and archive an
+-- empty chunk), including a read of the parent that legitimately reaches it: the check cannot tell that read
+-- from the misdirected one, and refusing it is the safe side. Names are compared as the syscache renders
+-- them now (regclassout, then parse_ident), not as this transaction's snapshot of pg_class has them.
 create or replace function archive._refuse_foreign_read(p_caller text, p_relation regclass, p_before oid[], p_also oid[] default '{}')
 returns void language plpgsql as $$
-declare v_stray oid;
+declare
+  v_stray oid;
+  v_name text := (select n[cardinality(n)] from parse_ident(p_relation::text) n);
 begin
   with recursive tree(rel) as (
     select s.rel from (select p_relation::oid union select a from unnest(p_also) a where a is not null) s(rel)
@@ -2183,7 +2201,11 @@ begin
   )
   select l into v_stray
     from unnest(archive._held_relations()) l
-   where l >= 16384 and l <> all (coalesce(p_before, '{}'::oid[])) and l not in (select rel from own)
+   where l >= 16384 and l <> all (coalesce(p_before, '{}'::oid[]))
+     and (l not in (select rel from own)                                                          -- rule (1)
+          or (l <> p_relation::oid and l <> all (coalesce(p_also, '{}'::oid[]))                   -- rule (2)
+              and exists (select 1 from pg_catalog.pg_class c where c.oid = l and c.relkind in ('r', 'p', 'v', 'm', 'f'))
+              and (select n[cardinality(n)] from parse_ident(l::regclass::text) n) = v_name))
    order by l limit 1;
   if v_stray is not null then
     raise exception 'pg_partition_magician: % reached % (oid %) while reading % (oid %): the name it read by named another relation by the time the read was parsed (a schema renamed meanwhile), so it refuses to go on with that relation''s rows; nothing was written, run it again',
