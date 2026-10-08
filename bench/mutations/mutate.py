@@ -10542,6 +10542,36 @@ for _name in ("hypertable_arguments_unchecked", "hypertable_arguments_unchecked_
     MUTATION_SRC[_name] = "pgpm_hypertable/install.sql"
     MUTATION_TRACK[_name] = "timescale"
 
+# Issues #1079 and #1089: the remedy for a refused hypertable handoff keeps the carried retention and re-adds the
+# keys. bench/hypertable_handoff_remedy.sh runs the reference's own remedy block after a refused handoff.
+MUTATIONS["hypertable_handoff_retain_unrecorded"] = (
+    "bench/hypertable_handoff_remedy.sh",
+    "Pre-#1079 from_hypertable_cutover: the retention the handoff passes transmute (p_retain, or the source's "
+    "drop_chunks interval) lives only in v_retain, and the swap records nothing. When the handoff refuses, the "
+    "hypertable and its policy job are gone, so the reference's remedy (transmute on the table, p_retain left "
+    "null) registers it with retain null. One site, the swap's insert into pgpm.handoff; its delete stays.",
+    [("  if v_retain is not null then\n"
+      "    insert into pgpm.handoff (table_oid, retain) values (v_dest_oid::oid, v_retain);\n"
+      "  end if;\n", "", 1)],
+)
+MUTATION_SRC["hypertable_handoff_retain_unrecorded"] = "pgpm_hypertable/install.sql"
+MUTATIONS["transmute_handoff_retain_unread"] = (
+    "bench/hypertable_handoff_remedy.sh",
+    "Pre-#1079 _transmute, the core half: the cutover's record of the retention it carried in is written but "
+    "never read, so the reference's remedy after a refused handoff (transmute on the table, p_retain left null) "
+    "registers it with retain null. One site, the read of pgpm.handoff; the sweep and the delete stay.",
+    [("    select h.retain::text into p_retain from pgpm.handoff h where h.table_oid = p_parent::oid;\n", "", 1)],
+)
+MUTATIONS["reference_handoff_remedy_without_restore"] = (
+    "bench/hypertable_handoff_remedy.sh",
+    "Pre-#1089 docs/reference.md: the remedy for a refused hypertable handoff is transmute on the table alone, "
+    "trusting the next maintenance tick to re-add the dropped incoming keys. transmute registers the table "
+    "paused by default and maintain returns 'paused' before its restore step, so no tick does, and referential "
+    "integrity stays off. The remedy block without its restore_incoming_fks and validate_incoming_fks calls.",
+    [("select pgpm.restore_incoming_fks('app.events');\nselect pgpm.validate_incoming_fks('app.events');\n", "", 1)],
+)
+MUTATION_SRC["reference_handoff_remedy_without_restore"] = "docs/reference.md"
+
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

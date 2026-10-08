@@ -754,6 +754,23 @@ begin
   end loop;
 end $$;
 
+-- pgpm.handoff: what pgpm_hypertable's from_hypertable_cutover hands transmute that exists nowhere else once
+-- its swap has committed (#1079): the retention it carries in, the caller's p_retain or, left null, the
+-- source's drop_chunks policy interval. The handoff to transmute runs after the swap commits and can still
+-- refuse, and the documented remedy is the operator's own transmute call on the table; by then the
+-- hypertable, and the policy job the interval was read from, are gone with the swap. So the cutover writes
+-- this row in the swap transaction, against the table it puts in place (by oid, which the rename into the
+-- source's name keeps), and _transmute reads it when it is called on that table with p_retain null. The
+-- conversion's own cutover deletes it, so a transmute that refuses again leaves it for the next attempt.
+-- An interval, not text: it is rendered by the reading session, as the caller's own p_retain would be, so the
+-- writing session's IntervalStyle cannot reach config.retain. A row whose table is gone is swept by the next
+-- _transmute, before it reads one.
+create table if not exists pgpm.handoff (
+  table_oid   oid         not null primary key,
+  retain      interval    not null,
+  recorded_at timestamptz not null default now()
+);
+
 -- _fk_definition(): pg_get_constraintdef() with the search_path pinned to pg_catalog, so the referenced
 -- table is ALWAYS schema-qualified (#498). A dropped_fk.definition is captured in the transmuting session
 -- and replayed in another: pg_cron's, with the default search_path, on a later maintenance tick or inside
@@ -8189,6 +8206,17 @@ begin
   if p_incoming_fks not in ('error', 'drop', 'preserve') then
     raise exception 'pg_partition_magician: p_incoming_fks must be ''error'', ''drop'', or ''preserve'' (got %)', p_incoming_fks;
   end if;
+  -- #1079: a table from_hypertable_cutover swapped in, whose handoff to this procedure then refused, carries
+  -- the retention the cutover took into that handoff in pgpm.handoff, and nowhere else: the hypertable and
+  -- its drop_chunks policy went with the swap. Called on that table with p_retain null (the reference's
+  -- remedy: fix what the refusal names and call transmute on the table), this takes it from there; an
+  -- explicit p_retain still wins. Only for a time grid, the only kind the cutover hands over. The row is
+  -- removed at registration below. A row whose table is gone is swept first, so an oid reused since names
+  -- nothing here.
+  delete from pgpm.handoff h where not exists (select 1 from pg_class c where c.oid = h.table_oid);
+  if p_retain is null and p_control_kind = 'time' then
+    select h.retain::text into p_retain from pgpm.handoff h where h.table_oid = p_parent::oid;
+  end if;
   -- #451, #581: the argument rules, before anything is read or committed. One function, so that the entry
   -- points that reach this procedure only after committing work of their own (from_hypertable, whose
   -- cutover swap commits before the handoff) can ask exactly these rules first (#1085).
@@ -9684,6 +9712,8 @@ begin
     text_time_alphabet = excluded.text_time_alphabet, text_time_discard_bits = excluded.text_time_discard_bits,
     text_time_epoch = excluded.text_time_epoch, monolith_oid = excluded.monolith_oid;
 
+  -- #1079: the cutover's handoff record for this table, if any, is spent: the table is registered above
+  delete from pgpm.handoff where table_oid = p_parent::oid;
   insert into pgpm.log (parent_table, action) values (v_parent, 'transmute');
   -- keyed on v_parent, not p_parent: after the rename p_parent's oid is the monolith's, so an operator
   -- looking the table up by name would never see it (#275).

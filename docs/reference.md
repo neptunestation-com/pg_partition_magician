@@ -290,7 +290,9 @@ Parameters:
   partition. Negative means any field: none of the interval's months, days or time may be below zero,
   so a mixed-sign value such as `'-1 year 360 days'` is refused too (it compares equal to zero, yet
   taken off the calendar it moves the horizon five or six days into the future). `interval '0'` is
-  allowed and keeps only the partition taking writes.
+  allowed and keeps only the partition taking writes. One exception to `null`: on a table a
+  `from_hypertable_cutover` swapped in and could not hand over, `null` takes the retention that cutover
+  recorded in [`pgpm.handoff`](#pgpmhandoff) (see its refused-handoff remedy).
 - `p_regrain_batch` -- rows per regrain COPY microbatch.
 - `p_anchor` -- the grid origin the boundaries align to (month and year steps count from its month in
   the session's zone; day and shorter steps count seconds from the instant).
@@ -985,9 +987,25 @@ suffix of its partitioned copy). The cutover then errors with the swap in place:
 original name is an ordinary table holding every row, not a hypertable and not yet partitioned. Nothing the
 swap did is lost. Its identity already continues from the source sequence's position, and every incoming
 foreign key it dropped is recorded in `pgpm.dropped_fk` (and logged `drop_incoming_fk`) against that table.
-Fix what `transmute`'s message names and call `pgpm.transmute` on the table yourself. Its cutover moves those records onto the new
-parent, so [`restore_incoming_fks`](#restore_incoming_fks) re-adds the keys, on the next maintenance tick or
-when called directly.
+The retention the handoff was to pass (`p_retain`, or the source's `drop_chunks` interval it defaulted to)
+is recorded too, in [`pgpm.handoff`](#pgpmhandoff) against that table, since the hypertable and its policy
+are gone. Fix what `transmute`'s message names, then finish the handoff yourself, the three calls the cutover
+makes after its swap:
+
+```sql
+call pgpm.transmute('app.events', 'ts', interval '1 day');  -- your table, control column and p_interval
+select pgpm.restore_incoming_fks('app.events');
+select pgpm.validate_incoming_fks('app.events');
+```
+
+Pass `transmute` the cutover's other arguments you set (`p_obtain`, `p_anchor`, `p_paused`,
+`p_lock_timeout`, `p_force_frontier`, and `p_regrain_batch` for its `p_drain_batch`). Leave `p_retain` out:
+called on that table with `p_retain` null, `transmute` takes the recorded retention (an explicit one still
+wins) and registration deletes the record. Its cutover moves the `pgpm.dropped_fk` records onto the new
+parent, and the two calls after it re-add the keys and validate them. Do not leave them to maintenance:
+`transmute` registers the table paused by default, and [`maintain`](#maintain) returns `paused` for a paused
+table before its restore step, so the keys stay off until those calls (or until the table is resumed and a
+tick runs).
 
 **The cutover refuses to swap unless the two sides hold the same rows.** Before anything is dropped, and still
 under the lock (so both sides are exact), it compares the source with the destination after the catch-up by
@@ -3139,6 +3157,22 @@ Primary key `(parent_oid, kind)`. The swap removes a hypertable's rows. An upgra
 earlier release from the comment that release put on it. `uninstall.sql` drops every object recorded here
 whatever it is called now and wherever it has been moved, keeping only a copy whose hypertable is gone (a
 `WARNING` names it); its comment-and-name sweeps are for a copy the record does not name.
+
+### `pgpm.handoff`
+
+What `from_hypertable_cutover` hands `transmute` that exists nowhere else once its swap has committed: the
+retention it carries in. Written in the swap transaction, read by `transmute` when it is called on that table
+with `p_retain` null (the remedy for a refused handoff, see
+[`from_hypertable_cutover`](#from_hypertable_cutover)), and deleted when `transmute` registers the table.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `table_oid` | `oid` | the plain table the swap put in place under the hypertable's name, by oid |
+| `retain` | `interval` | the cutover's `p_retain`, or the source's `drop_chunks` interval it defaulted to |
+| `recorded_at` | `timestamptz` | when the swap committed |
+
+Primary key `table_oid`. A cutover with no retention to carry writes no row. A row whose table no longer
+exists is removed by the next `transmute` call, before it reads one.
 
 ### `pgpm.log`
 

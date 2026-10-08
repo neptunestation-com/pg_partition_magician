@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- **A refused hypertable handoff no longer loses the retention it carried** (#1079). When
+  `from_hypertable_cutover`'s handoff to `transmute` refused after the swap had committed, the reference's
+  remedy (fix what the refusal names, call `pgpm.transmute` on the table) registered the table with no
+  retention: the interval the cutover carried in (`p_retain`, or the source's `drop_chunks` policy interval)
+  lived only in a plpgsql local, and the hypertable and its policy job went with the swap. The swap now records
+  it in a new table, `pgpm.handoff`, against the table it puts in place, and `transmute` called on that table
+  with `p_retain` null takes it (an explicit `p_retain` still wins); registration deletes the record. Test
+  `tests/timescale/db/59`, guard `bench/hypertable_handoff_remedy.sh`, mutations
+  `hypertable_handoff_retain_unrecorded` and `transmute_handoff_retain_unread`.
+
+- **The refused-handoff remedy in the reference re-adds the incoming keys** (#1089). It promised the next
+  maintenance tick would re-add the foreign keys the swap dropped, but `transmute` registers the table paused
+  by default and `maintain` returns `paused` before its restore step, so referential integrity stayed off until
+  someone called `restore_incoming_fks` by hand. The reference now gives the remedy as the three calls the
+  cutover makes after its swap (`transmute`, `restore_incoming_fks`, `validate_incoming_fks`), and the guard
+  runs that block verbatim. Test `tests/timescale/db/59`, guard `bench/hypertable_handoff_remedy.sh`, mutation
+  `reference_handoff_remedy_without_restore`.
+
 - **The table's identity sequences keep their grants through `transmute` and `untransmute`** (#1076). Both
   re-add identity, which makes a new sequence, and since #877 hand it the source sequence's name, but the new
   one was born with the converting role's `ALTER DEFAULT PRIVILEGES` and none of the source's grants: the app
