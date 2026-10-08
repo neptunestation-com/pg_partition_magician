@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+- **A role that writes the table through a view can write a regraining partition** (#1073). The regrain
+  capture trigger wrote its delta as the writer, and `_regrain_capture_grant` grants `INSERT` on the delta only
+  to the grantees and owners of the parent and the source. A write through an ordinary view is checked as the
+  view's owner, but the table's triggers fire as the session's role, so a role whose only grant was on a view
+  over the table got 42501 `permission denied for table <rel>_pgpm_regrain_delta` on every write into the
+  regraining partition until the swap (and on every write into a hypertable during a tracking
+  `from_hypertable_copy`'s online window, on `<rel>_pgpm_delta`). Both capture functions now write their delta
+  as their owner, the table's (`pgpm._capture_definer`): `SECURITY DEFINER`, `search_path` pinned to
+  `pg_catalog, pg_temp` so a writer's own operators never run as the owner, and `EXECUTE` held by the owner
+  alone so no role can attach the function to a table of its own. Armed where each is minted
+  (`_scratch_mint_fn`) and by every tick, drain step and cutover (`_scratch_owner_follow`), so a capture
+  minted by an earlier release is armed by the first one that resumes it. The writer grants are still made.
+  Measured on 100,000-row updates of a capturing source on PG 15: about 2 to 3 microseconds more a captured
+  write (the pinned `search_path`; the definer switch alone measured no difference). Test `tests/294`, guard
+  `bench/regrain_capture_view_writer.sh`, mutations `capture_definer_dropped`,
+  `capture_definer_search_path_unpinned`, `capture_definer_execute_kept` and `capture_definer_not_rearmed`.
 - **The archive contract holds an `id` grid's `covered_hi` to the control column's own type** (#1071).
   `pgpm._archive_contract_breach` judged it as `numeric` only, so a resumable strategy returning
   `(lo + hi) / 2` on a `bigint` key had `22.5000000000000000` (or `15000.0000000000000000`) recorded, and

@@ -10297,6 +10297,44 @@ MUTATIONS["archive_contract_column_type_unchecked"] = (
       "      end if;\n", "", 1)],
 )
 
+# Issue #1073: a capture function writes its delta as its owner (pgpm._capture_definer), so a role that writes the
+# table through a view, a rule or anything else the table accepts is captured rather than refused 42501 on the
+# delta. One guard, bench/regrain_capture_view_writer.sh (tests/294), and one mutation per clause of the lever.
+MUTATIONS["capture_definer_dropped"] = (
+    "bench/regrain_capture_view_writer.sh",
+    "Pre-#1073 capture: the function runs as the WRITER, so a role that writes the table through an ordinary view "
+    "(checked as the view's owner, but the trigger fires as the session's role) holds no INSERT on the delta and "
+    "gets 42501 on every write into the regraining partition until the swap. One clause, SECURITY DEFINER. "
+    "tests/294 parts A, B, D and E catch it (the view writer is refused, the writes never reach the table).",
+    [("    execute format('alter function %s security definer set search_path = pg_catalog, pg_temp', p_fn::text);\n",
+      "    execute format('alter function %s set search_path = pg_catalog, pg_temp', p_fn::text);\n", 1)],
+)
+MUTATIONS["capture_definer_search_path_unpinned"] = (
+    "bench/regrain_capture_view_writer.sh",
+    "The capture is SECURITY DEFINER but its search_path is the writer's, so the regclass `=` in its body resolves "
+    "through a schema the writer put ahead of pg_catalog, and the writer's own operator runs as the table's owner. "
+    "One clause, the pinned search_path. tests/294 part B catches it (the operator ran as g294_own).",
+    [("    execute format('alter function %s security definer set search_path = pg_catalog, pg_temp', p_fn::text);\n",
+      "    execute format('alter function %s security definer', p_fn::text);\n", 1)],
+)
+MUTATIONS["capture_definer_execute_kept"] = (
+    "bench/regrain_capture_view_writer.sh",
+    "The capture is SECURITY DEFINER but keeps PUBLIC's default EXECUTE, so any role may attach it to a table of "
+    "its own (CREATE TRIGGER checks EXECUTE) and write keys into the delta as the table's owner. One clause, the "
+    "revoke. tests/294 parts C and D catch it (g294_other holds EXECUTE and attaches the function).",
+    [("    execute format('revoke all on function %s from %s cascade', p_fn::text,\n",
+      "    perform format('revoke all on function %s from %s cascade', p_fn::text,\n", 1)],
+)
+MUTATIONS["capture_definer_not_rearmed"] = (
+    "bench/regrain_capture_view_writer.sh",
+    "Only a freshly minted capture is armed: a tick never re-arms the capture function it works, so a regrain in "
+    "flight across the upgrade keeps the pre-#1073 capture and refuses every view writer until the swap. One "
+    "site, the arming in _scratch_owner_follow. tests/294 part D catches it (the tick leaves the capture as it "
+    "was and the view writer is still refused).",
+    [("      perform pgpm._capture_definer(r.oid::regprocedure);\n    exception when insufficient_privilege then\n",
+      "      perform r.oid::regprocedure;\n    exception when insufficient_privilege then\n", 1)],
+)
+
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

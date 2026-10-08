@@ -752,7 +752,7 @@ window goes on logging every write, and a table you create under the name it gav
 holds the delta while it writes it, so a rename, move or drop of the delta waits for the writes in flight, and
 a write that arrives while one is pending waits for it and then writes the delta where it now is. They are owned
 like the hypertable, with no grant beyond the owner's (the delta also grants `INSERT` to every role that can
-write the hypertable, since its capture trigger writes as the writer), from the moment they are created, as
+write the hypertable), from the moment they are created, as
 is the delta's `pgpm_seq` identity sequence, so no role the migrating role's default privileges name reads
 the copied rows, or reads or sets the sequence the drains batch by, during the online window; the
 cutover gives the migrated table the hypertable's own grants. Every drain, drain step and the cutover
@@ -1661,14 +1661,20 @@ progress at the rename resumes into the child it had started (which keeps its pr
 the sub-ranges begun after it are named from the new one. Every prepare tick drops and re-mints the delta from the key as
 it is then, so a key column renamed between two regrains is picked up rather than tripping every write into
 the source; a relation already holding the name it would mint under, other than the one this parent recorded,
-is refused rather than adopted. The trigger runs with the **writer's** privileges (pgpm has no
-`SECURITY DEFINER`), so the delta is owned like the parent and every role holding `INSERT`, `UPDATE` or
-`DELETE` on the parent, or on the regraining partition itself (which PostgreSQL lets a role write directly
-with no grant on the parent), table- or column-level, is granted `INSERT` on it, and so are the **owners** of
-the parent and of that partition, whose rights no ACL lists: after `ALTER TABLE <parent> OWNER TO`,
-which does not reach the partitions, the old owner still owns the source and writes it directly. Re-synced on
-every tick: a role granted, or an owner changed, mid-regrain can write from the next tick on, and nothing
-beyond those grants is needed. Beyond those grants and its owner's, the delta holds nothing, from the tick
+is refused rather than adopted. The capture function writes the delta as its **owner**, the parent's, never
+as the writer: it is `SECURITY DEFINER`, owned like the delta, with its `search_path` pinned to
+`pg_catalog, pg_temp` and `EXECUTE` held by its owner alone (PostgreSQL checks `EXECUTE` when a trigger is
+created, never when it fires, so no role can attach it to a table of its own). So every write the table
+accepts is captured whatever path it took: directly, through the parent or the partition, or through an
+ordinary **view** over the table, which PostgreSQL checks as the view's owner while the table's triggers fire
+as the session's role, so the writer needs no privilege on the delta. The same holds for a
+`from_hypertable_copy` tracking delta, and a capture minted by an earlier release is armed this way by the
+first tick (or drain step) that resumes it. The delta is owned like the parent, and every role holding
+`INSERT`, `UPDATE` or `DELETE` on the parent, or on the regraining partition itself (which PostgreSQL lets a
+role write directly with no grant on the parent), table- or column-level, is still granted `INSERT` on it, and
+so are the **owners** of the parent and of that partition, whose rights no ACL lists: after `ALTER TABLE
+<parent> OWNER TO`, which does not reach the partitions, the old owner still owns the source and writes it
+directly. Re-synced on every tick. Beyond those grants and its owner's, the delta holds nothing, from the tick
 that creates it: the maintaining role's default privileges are reset, so a role they name cannot read the
 captured keys of a table it holds no grant on.
 

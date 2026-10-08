@@ -184,7 +184,8 @@ $$;
 --   owner refuses here, once, SQLSTATE 42501, naming pgpm.hand_over_scratch. Left out, the new owner's drain
 --   died raw 'permission denied for table <rel>_pgpm_delta' on the old owner's delta, naming no remedy;
 --   the delta follows the hypertable's writers (pgpm._regrain_capture_grant, #496 #906): the capture trigger
---   writes it as the writer, and the copy granted INSERT on it only to the roles that could write the
+--   wrote it as the writer (since #1073 it writes as its owner, pgpm._capture_definer, which this step's
+--   _scratch_owner_follow also re-arms), and the copy granted INSERT on it only to the roles that could write the
 --   hypertable then. A role granted DML on the hypertable during the online window had every write refused
 --   'permission denied for table <rel>_pgpm_delta' until the cutover; it now writes from the next step on.
 -- Both issue no DDL when nothing changed, which is every step but the first after a hand-over or a grant.
@@ -1022,9 +1023,10 @@ begin
     perform pgpm._delta_seq_add(format('%I.%I', v_nsp, v_delta)::regclass);
     -- #949: owned like the hypertable with an owner-only ACL from this transaction on, as core's regrain delta is
     -- minted (_scratch_mint), rather than with the migrating role's default privileges, under which a role they
-    -- name read the keys of every write to a hypertable it holds no grant on. The capture trigger writes it as
-    -- the WRITER, so every role that can write the hypertable, its owner included, gets INSERT on it and
-    -- nothing more (_regrain_capture_grant, the regrain delta's rule, #496 #906). Recorded in the same
+    -- name read the keys of every write to a hypertable it holds no grant on. Every role that can write the
+    -- hypertable, its owner included, gets INSERT on it and nothing more (_regrain_capture_grant, the regrain
+    -- delta's rule, #496 #906), and the capture function below writes it as its owner, the hypertable's, so a
+    -- role that writes through a view is captured too (_scratch_mint_fn arms it: _capture_definer, #1073). Recorded in the same
     -- transaction (#955), so the drains and the cutover find it by its oid.
     perform pgpm._scratch_mint(p_hypertable, format('%I.%I', v_nsp, v_delta)::regclass);
     perform pgpm._regrain_capture_grant(p_hypertable, format('%I.%I', v_nsp, v_delta)::regclass, p_hypertable);
