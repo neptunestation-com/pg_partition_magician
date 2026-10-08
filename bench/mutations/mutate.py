@@ -10141,8 +10141,8 @@ MUTATIONS["regrain_reconcile_batch_by_seq"] = (
     "and the swap drops the rows it skipped with the source. tests/291 catches it: the tick reconciles 3 rows, "
     "not 2, the delta keeps nothing instead of key 18, [10, 20) holds 18 ahead of 16, and after the swap row "
     "16 is gone.",
-    [("  v_batch := format('k.%I = any($1) and k.ctid = any($2)', v_seq);\n",
-      "  v_batch := format('k.%I = any($1)', v_seq);\n", 1)],
+    [("  v_batch := format('k.%s = any($1) and k.ctid = any($2)', v_seq_q);\n",
+      "  v_batch := format('k.%s = any($1)', v_seq_q);\n", 1)],
 )
 # #1070: the swap gate's purge discards every delta row the swap's reconcile can never consume, NULL control included.
 MUTATIONS["regrain_delta_purge_null_blind"] = (

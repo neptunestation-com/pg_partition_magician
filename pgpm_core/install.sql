@@ -5089,6 +5089,7 @@ declare
   v_dnsp name;            -- the delta's own schema, by its recorded oid (#555), not the parent's current one
   v_src regclass;         -- the source the rows are reread from, as pgpm.part recorded it (#768)
   v_seq name;             -- the delta's ordering column, found as its identity column (#1074)
+  v_seq_q text;           -- the same, quoted for the batch predicate
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
@@ -5189,7 +5190,8 @@ begin
   execute format('select array_agg(%1$I), array_agg(ctid) from (select %1$I, ctid from %2$I.%3$I where %4$s order by %1$I limit %5$s) t',
                  v_seq, v_dnsp, v_delta, v_elig, greatest(p_batch, 1)) into v_seqs, v_rows;
   if v_seqs is null then return 0; end if;
-  v_batch := format('k.%I = any($1) and k.ctid = any($2)', v_seq);
+  v_seq_q := quote_ident(v_seq);
+  v_batch := format('k.%s = any($1) and k.ctid = any($2)', v_seq_q);
 
   -- one pair of set-based statements per distinct fine child touched, not per key
   for r in execute format(
