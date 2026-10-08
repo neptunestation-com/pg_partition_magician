@@ -8560,6 +8560,17 @@ select ok(
         [("     or (p_anchor is not null and (extract(epoch from p_anchor::timestamptz) * 1000000) % v_unit_us <> 0) then\n",
           "     then\n", 1)],
     ),
+    "date_anchor_unchecked": (
+        "bench/date_key_anchor_midnight.sh",
+        "Issue #769 (last bullet), the pre-fix rule: _time_unit_breach's date branch asks the step and not the "
+        "anchor, so transmute converts a date key on an anchor at noon with every pgpm.part bound at noon while "
+        "the catalog attached each partition at its whole date, and '2024-01-01' typed in a New York session "
+        "(05:00 UTC) commits a bound CHECK whose VALIDATE dies on the table's own newest row, leaving the CHECK "
+        "and the claim. One clause. tests/306 parts A, B and D catch it.",
+        [("    if (v_months = 0 and extract(epoch from p_step::interval)::numeric % 86400 <> 0)\n"
+          "       or (p_anchor is not null and extract(epoch from p_anchor::timestamptz)::numeric % 86400 <> 0) then\n",
+          "    if (v_months = 0 and extract(epoch from p_step::interval)::numeric % 86400 <> 0) then\n", 1)],
+    ),
     # pass 9 G17: tests/267 at its three wrong-reason sites (#993) and tests/timescale/db/05's catch-up (#996),
     # each the file's pre-fix text; bench/tests_fail_on_defect.sh judges 267 against the defect each accepted,
     # bench/hypertable_catchup_identity.sh judges 05 (on the timescale track).

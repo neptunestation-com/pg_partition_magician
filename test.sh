@@ -1165,6 +1165,7 @@ run_perf() {
     "bench/regrain_children_tablespace.sh pgpm_perf106"
     "bench/regrain_target_encoded_unit.sh pgpm_perf298"
     "bench/regrain_reconcile_judged_rows.sh pgpm_perf299"
+    "bench/date_key_anchor_midnight.sh pgpm_perf126"
   )
   local selected=()
   local n=${#guards[@]} idx

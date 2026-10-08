@@ -5828,10 +5828,15 @@ $$;
 -- attached at another instant than pgpm records for it. So the bounds are ones the column holds exactly when
 -- the step is a whole number of units (a calendar step, a whole number of months, is always whole seconds)
 -- and the anchor is. An unconstrained column (typmod -1) keeps microseconds, below which an interval cannot go,
--- so the rule then refuses nothing; any other type is not this rule's (null). Returns null when the step and
--- the anchor (null: not asked, as for a regrain target, whose grid keeps the registered anchor) pass, and
--- otherwise what the column keeps and the unit to give the step in, for the caller's own refusal:
--- _regrain_step_shape for a regrain target, _time_unit_contract for transmute's partition step.
+-- so the rule then refuses nothing. A date (#769) keeps whole days and has no zone, so its grid is computed in
+-- UTC (#504) and every bound literal is read as the date it falls in: its unit is one day, and a step (unless
+-- it is a whole number of months) and an anchor must be whole days from the epoch, which on that lattice is
+-- "at 00:00 UTC". An anchor at noon, or midnight typed in a New York session (05:00 UTC), had every bound
+-- recorded at that hour while the catalog attached each at its whole date. Any other type is not this
+-- rule's (null). Returns null when the step and the anchor (null: not asked, as for a regrain target, whose
+-- grid keeps the registered anchor) pass, and otherwise what the column keeps and the unit to give the step
+-- in, for the caller's own refusal: _regrain_step_shape for a regrain target, _time_unit_contract for
+-- transmute's partition step.
 -- _regrain_step_shape also asks it of an encoded key (uuidv7, text_time) as the timestamptz(3) or
 -- timestamptz(0) its encoding keeps (#1039).
 create or replace function pgpm._time_unit_breach(p_type oid, p_typmod int, p_step text, p_anchor text,
@@ -5839,6 +5844,15 @@ create or replace function pgpm._time_unit_breach(p_type oid, p_typmod int, p_st
 returns record language plpgsql stable as $$
 declare v_prec int; v_unit_us numeric; v_months numeric;
 begin
+  if p_type = 'date'::regtype then
+    v_months := extract(year from p_step::interval) * 12 + extract(month from p_step::interval);
+    if (v_months = 0 and extract(epoch from p_step::interval)::numeric % 86400 <> 0)
+       or (p_anchor is not null and extract(epoch from p_anchor::timestamptz)::numeric % 86400 <> 0) then
+      r_keeps := 'whole days only';
+      r_unit  := '1 day';
+    end if;
+    return;
+  end if;
   if p_type not in ('timestamp'::regtype, 'timestamptz'::regtype) then
     return;
   end if;
@@ -7158,8 +7172,9 @@ $$;
 -- CHECK, and the cutover's obtain then died on 'empty range bound' (two forward bounds rounding to one
 -- second), leaving the table rejecting every current write; a resume reused the recorded bound and failed the
 -- same way. '1500 milliseconds' converted, but recorded bounds the catalog had rounded to other instants. The
--- rule is _time_unit_breach's, the one a regrain target answers to (#980). A domain is not unwrapped: the
--- time kind's type check above refuses a domain-typed column before this is asked.
+-- rule is _time_unit_breach's, the one a regrain target answers to (#980). A date key is asked too (#769): its
+-- anchor at noon converted with every recorded bound at noon and every attached one at its whole date. A
+-- domain is not unwrapped: the time kind's type check above refuses a domain-typed column before this is asked.
 create or replace function pgpm._time_unit_contract(p_parent regclass, p_control name, p_step text, p_anchor text)
 returns void language plpgsql stable as $$
 declare v_type oid; v_typmod int; v_keeps text; v_unit text;
@@ -7167,6 +7182,15 @@ begin
   select a.atttypid, a.atttypmod into v_type, v_typmod
     from pg_attribute a where a.attrelid = p_parent and a.attname = p_control and not a.attisdropped;
   select b.r_keeps, b.r_unit into v_keeps, v_unit from pgpm._time_unit_breach(v_type, v_typmod, p_step, p_anchor) b;
+  -- #769: a date's unit is a day on the UTC lattice, and what it asks of the operator is an anchor at 00:00
+  -- UTC (the #581 branch before this has already held the step to whole days), so it is named that way:
+  -- widening the column's precision is not a remedy for a date.
+  if v_unit is not null and v_type = 'date'::regtype then
+    raise exception 'pg_partition_magician: cannot partition % on % with step % and anchor % -- the column is a date, which holds whole days and has no zone, so its grid is computed in UTC and every partition bound must fall at 00:00 UTC; this anchor falls at % UTC, and every bound literal would be attached at the date it falls in while pgpm records the instant: rows dated a partition''s first day would sit outside its recorded range, and the monolith''s bound CHECK could exclude the table''s own newest rows. Give an anchor at 00:00 UTC (the default ''2000-01-01 00:00:00+00'', or any date written with +00: a literal without an offset is read in the session''s time zone, %) and a step that is a whole number of days or months, then re-run transmute; if an earlier attempt left a pgpm_monolith_bound CHECK on the table, call pgpm.transmute_abort(%) first, since a re-run resumes its recorded bound.',
+      p_parent, quote_ident(p_control), p_step, p_anchor,
+      coalesce(nullif(to_char(p_anchor::timestamptz at time zone 'UTC', 'HH24:MI:SS'), ''), p_anchor),
+      current_setting('TimeZone'), p_parent;
+  end if;
   if v_unit is not null then
     raise exception 'pg_partition_magician: cannot partition % on % with step % and anchor % -- the column is %, which keeps %, and every partition bound is the anchor plus whole steps, which the cutover''s ATTACH (and obtain''s CREATE TABLE ... PARTITION OF, for every forward partition) rounds to that precision: two bounds would round to the same instant and the cutover would fail (empty range bound) after committing a bound CHECK that rejects every write past it, or a bound would be attached at another instant than pgpm records for it. Give a step and an anchor that are whole multiples of %, or widen the column''s precision (ALTER TABLE % ALTER COLUMN % TYPE %), then re-run transmute; if an earlier attempt left a pgpm_monolith_bound CHECK on the table, call pgpm.transmute_abort(%) first, since a re-run resumes its recorded bound.',
       p_parent, quote_ident(p_control), p_step, p_anchor, format_type(v_type, v_typmod), v_keeps, v_unit,
