@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **transmute refuses an anchor off 00:00 UTC on a `date` key** (#769, last bullet). #581 held a `date` key's
+  step to whole days and never its anchor, and `_time_unit_breach` returned nothing for a `date`, so an anchor
+  at noon converted with every `pgpm.part` bound at noon while the catalog attached each partition at its
+  whole date (a row dated a partition's first day lay outside its recorded range, and `extend_to` reported
+  cells built while the write of the date it was asked for was refused), and `'2024-01-01'` typed in a New
+  York session (05:00 UTC) committed a bound `CHECK` whose `VALIDATE` died on the table's own newest row,
+  leaving it and the claim rejecting every later write until `transmute_abort`. `_time_unit_breach` now knows
+  a `date`: its unit is one day and the anchor must be at 00:00 UTC, the lattice a date's grid is computed on
+  (#504), asked through `_time_unit_contract` before anything is committed, with a message naming the
+  session's zone and the remedy. Test `tests/306`, guard `bench/date_key_anchor_midnight.sh`, mutation
+  `date_anchor_unchecked`.
+
 - **An archive_fn strategy compares a recorded chunk's rows by identity, not by count** (#1069).
   `archive._refuse_recorded_chunk_overwrite` (#975) admitted a write at a key `pgpm.archive_ledger` records a
   chunk at when the range matched and the read's row count equalled `rows_archived`, so after `retire()`

@@ -376,7 +376,9 @@ and `p_tt_alphabet`, whose null is the default alphabet): the message names each
 `p_regrain_batch`, `p_paused` or `p_tt_epoch` passed as null is refused rather than read as `true`, as
 absent, or as a bound no row satisfies; the step is not positive (a negative or zero
 interval or `bigint`), or is not a whole number of days or months on a `date` control column (a finer
-step's bounds truncate to dates); the step (unless it is a whole number of months) or `p_anchor` is not a
+step's bounds truncate to dates); `p_anchor` is not at 00:00 UTC on a `date` control column, whose grid is
+computed in UTC (an anchor at noon, or `'2024-01-01'` typed in a New York session, which is 05:00 UTC, would
+have every bound attached at its date while pgpm recorded the hour: write the anchor with `+00`); the step (unless it is a whole number of months) or `p_anchor` is not a
 whole multiple of a `timestamp(p)` or `timestamptz(p)` control column's smallest unit (`10^-p` seconds),
 such as `'500 milliseconds'` or `'1500 milliseconds'` on `timestamptz(0)` (the cutover's `ATTACH` rounds every
 bound to the column's precision, so two bounds would round to the same instant, or pgpm would record a
