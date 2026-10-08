@@ -32,6 +32,8 @@
 # skipped, so a batch that stopped after some of its PRs had merged is rerun with the same command.
 #
 # Knobs, all environment: LAND_WAIT_CHECKS_MIN (60), LAND_WAIT_MERGE_MIN (60), LAND_WAIT_RUN_MIN (90),
+# LAND_STALL_MIN (10: minutes a merge group may sit with every summary check green while the queue entry
+# still reads AWAITING_CHECKS before the entry is dequeued and enqueued again, once; #1041 and #1049),
 # LAND_MERGE_METHOD (merge; must match the ruleset's merge_method), LAND_TOOLING (the scripts/review
 # directory to run keep_both.py and flake_check.sh from; default this checkout's, which means a PR that
 # fixes the landing tooling cannot be landed by the copy it fixes unless this points at its worktree).
@@ -169,11 +171,40 @@ wait_checks() { # <pr>: 0 green, 5 a check failed (prints the failing run id to 
 
 in_queue() { gh api graphql -f query="{repository(owner:\"${REPO%/*}\",name:\"${REPO#*/}\"){pullRequest(number:$1){state mergeQueueEntry{state}}}}" \
              --jq '.data.repository.pullRequest | "\(.state) \(.mergeQueueEntry.state // "none")"' 2>/dev/null || echo "query-failed"; }
+queue_head() { # <pr>: the oid of the PR's merge-group head, empty when it has none
+  gh api graphql -f query="{repository(owner:\"${REPO%/*}\",name:\"${REPO#*/}\"){pullRequest(number:$1){mergeQueueEntry{headCommit{oid}}}}}" \
+    --jq '.data.repository.pullRequest.mergeQueueEntry.headCommit.oid // ""' 2>/dev/null; }
+summaries_green() { # <oid>: 0 when every summary check-run on the commit is completed and successful (and there is at least one)
+  [ "$(gh api "repos/$REPO/commits/$1/check-runs?per_page=100" \
+        --jq '[.check_runs[] | select(.name | test("summary"; "i"))] | (length > 0) and all(.status == "completed" and .conclusion == "success")' 2>/dev/null)" = "true" ]; }
+nudge_queue() { # <pr>: dequeue and enqueue again (the hand recovery for a stalled entry, #1041 and #1049)
+  local id; id=$(gh pr view "$1" --repo "$REPO" --json id --jq .id) || return 1
+  gh api graphql -f query="mutation { dequeuePullRequest(input:{id:\"$id\"}) { mergeQueueEntry { state } } }" >/dev/null 2>&1
+  sleep 8
+  gh api graphql -f query="mutation { enqueuePullRequest(input:{pullRequestId:\"$id\"}) { mergeQueueEntry { state } } }" >/dev/null 2>&1
+}
 
 wait_merge() { # <pr>: 0 merged, 6 fell out of the queue, 8 dirty (main moved under it), 1 timeout
-  local pr=$1 s i
+  local pr=$1 s i head green_since="" nudged=""
   for i in $(seq 1 "$WAIT_MERGE"); do
     s=$(in_queue "$pr")
+    # A GitHub stall: the group's every workflow and all three required summaries are green, and the entry
+    # goes on reading AWAITING_CHECKS (#1041 on 2026-10-07 for 40 min; #1049 on 2026-10-08 for 19 min after
+    # its last run, until a hand dequeued and enqueued it). After LAND_STALL_MIN minutes green the entry is
+    # nudged the same way, once per wait; the queue then builds a fresh group and merges it.
+    if [ "$s" = "OPEN AWAITING_CHECKS" ] && [ -z "$nudged" ]; then
+      head=$(queue_head "$pr")
+      if [ -n "$head" ] && summaries_green "$head"; then
+        green_since=${green_since:-$(date +%s)}
+        if [ $(( $(date +%s) - green_since )) -ge $(( ${LAND_STALL_MIN:-10} * 60 )) ]; then
+          say "  #$pr: group ${head:0:7} green for ${LAND_STALL_MIN:-10} min while the queue still reads AWAITING_CHECKS (stall); dequeue and enqueue"
+          nudge_queue "$pr"; nudged=1; green_since=""
+          sleep 30; continue
+        fi
+      else
+        green_since=""
+      fi
+    fi
     case "$s" in
       MERGED*) return 0;;
       "OPEN none")

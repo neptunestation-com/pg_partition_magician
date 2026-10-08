@@ -57,7 +57,13 @@ Commit with a Conventional Commits message that ends with the trailer
 `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>` (this one, whatever model a session reminder
 names; pass 3 landed two PRs with another), push your branch, and open the PR with
 `gh pr create --head <branch>` (always pass `--head`). The body: what the defect was, what the fix
-changes, `Closes #<issue>`, the acceptance (test file, guard, mutation) and any caveat about the
-issue's reproduction, ending with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
+changes and exactly what it guarantees (which sites it covers), `Closes #<issue>` for a whole issue or
+`Addresses #<issue> (bullet k)` for one bullet of an issue with others still open (GitHub's closing-keyword
+parser ignores the qualifier, so `Fixes #N bullet 3` closes all of N; #1035), the acceptance (test file,
+guard, mutation) and any caveat about the issue's reproduction, ending with
+`🤖 Generated with [Claude Code](https://claude.com/claude-code)`. The PR is adversarially verified before
+it lands (`/pr-verify`): the issue's reproduction is re-run on the base, your head and your mutant, and a
+finder reviews the units you touched and their callers, so a body that overstates what the fix covers is a
+body that gets the PR blocked.
 Report back in ten lines: PR number, branch, test/guard/mutation names, the local proof results, and
 the adjacent observations.

@@ -24,11 +24,15 @@ and absence-of-setup look identical unless you separate them deliberately.
   invariant under compensating errors: a lost INSERT and a resurrected DELETE cancelled
   and the test passed under a real data-loss bug. Say *which* rows, and build fixtures
   where the expected effects cannot cancel (2 in, 1 out, not 1 and 1).
-- **A concurrency probe perturbs what it measures.** Two rules learned the hard way: give
+- **A concurrency probe perturbs what it measures.** Three rules learned the hard way: give
   each observation its own transaction (locks are held to transaction end, and a `DO`
   block is one transaction, so a polling loop pins its lock and starves the code under
-  test), and check your instrument's cost against the window's width before trusting it
-  (~100 ms per `docker exec` sample cannot land inside a ~400 ms scan; poll server-side).
+  test); check your instrument's cost against the window's width before trusting it
+  (~100 ms per `docker exec` sample cannot land inside a ~400 ms scan; poll server-side);
+  and remember that `pg_stat_activity` is snapshotted per transaction, so a poll that runs
+  inside one function or `DO` block must call `pg_stat_clear_snapshot()` every iteration
+  or it never sees the backend leave and burns its whole budget (tests/269 under the
+  parallel runner, #1045).
 - **Counters flush at transaction end.** `pg_stat_all_tables` scan counters read 0 when
   sampled inside the transaction that produced them, so the sample has to come from a
   later transaction than the work it measures. Those assertions belong in a `bench/` shell
