@@ -2353,6 +2353,14 @@ check cannot tell that read from one a renamed schema sent to the partition alon
 name of its own. The check sees the relations the read newly locked, so a same-named table the calling
 transaction had already read before the export is the one case it cannot tell apart.
 
+The child is the relation of that name in the parent's schema as one catalog snapshot sees both, never a
+relation found by a schema name read earlier: a concurrent session that swaps two schemas' names during the
+call (the parent's schema renamed away, another given its name) cannot make the export resolve, hold or read
+a namesake in the schema that took the name, whether or not `pgpm.part` records the child. A swap that lands
+between the resolution and the lock is resolved again; one that keeps landing there is refused after three
+tries, `<schema>.<child> led to another relation each of the 3 times archive.to_s3 locked it`, and nothing
+is written.
+
 ## Scheduling
 
 ### `schedule`
