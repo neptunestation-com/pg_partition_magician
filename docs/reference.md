@@ -2123,6 +2123,10 @@ anything: on a breach it records nothing, logs the same `fail_archive_contract` 
 handed, and returns the refusal as its message. Before the strategy runs it also refuses a caller whose
 reads of the parent or the partition row-level security filters, as the archive step does (logged
 `skip_archive`, nothing read or recorded), so run it as a role with `BYPASSRLS` on such a table.
+It also picks and finds the partition as the archive step does: the oldest candidate in the control's
+native order (not `pgpm.part.lo`'s text order), resumed from the ledger's watermark in the same canonical
+text the step records (whatever the caller's `DateStyle`), and resolved in the partition's own schema, so it
+still archives a moved parent's partitions and refuses only a relation that took the partition's name there.
 
 Unlike the identity refusals, this one is retryable by construction. Nothing advanced, so the next
 tick hands the strategy the very same chunk; correct the strategy (or point `pgpm.set_archive_fn` at

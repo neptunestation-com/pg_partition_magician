@@ -9329,6 +9329,45 @@ MUTATIONS["archive_whole_rls_unrefused"] = (
 )
 MUTATION_SRC["archive_whole_rls_unrefused"] = "scripts/archive_partition_whole.sql"
 
+# Issue #1054 bullets 1 to 3: scripts/archive_partition_whole.sql picks, resumes and resolves a partition as
+# _archive_step does. One mutation per bullet, each the site's pre-fix text, each caught by tests/289 through
+# bench/archive_partition_whole_follows_step.sh. The source is the script, which nothing installs.
+MUTATIONS["archive_whole_order_by_text"] = (
+    "bench/archive_partition_whole_follows_step.sh",
+    "Pre-#1054 scripts/archive_partition_whole.sql: the candidates are ordered by pgpm.part.lo as TEXT, so on an "
+    "id grid crossing a power of ten the third call archives [1000, 1100) ahead of the older [200, 300), though "
+    "the header promises the OLDEST. One site, the candidate query's ORDER BY. tests/289 part A catches it (the "
+    "third call's partition, by name; [1000, 1100) covered).",
+    [("      order by p.lo::%s\n      limit 1',", "      order by p.lo\n      limit 1',", 1)],
+)
+MUTATION_SRC["archive_whole_order_by_text"] = "scripts/archive_partition_whole.sql"
+MUTATIONS["archive_whole_resume_session_render"] = (
+    "bench/archive_partition_whole_follows_step.sh",
+    "Pre-#1054 scripts/archive_partition_whole.sql: the resume watermark is max(hi::<type>)::text, rendered in "
+    "the caller's DateStyle, and written as the next ledger row's lo, so a call under SQL, DMY records "
+    "'13/08/2020 12:00:00 UTC'; once retire() drops the partition _archive_step's #511 discard query cannot "
+    "parse it and every maintain() tick logs skip_archive. One site, the watermark read. tests/289 part B "
+    "catches it (the ledger lo and the strategy's p_lo by value, the next partition never archived, "
+    "skip_archive logged).",
+    [("""  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L',
+                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, r.child_name)""",
+      """  execute format('select max(hi::%s)::text from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L',
+                 v_ncast, p_parent::text, r.child_name)""", 1)],
+)
+MUTATION_SRC["archive_whole_resume_session_render"] = "scripts/archive_partition_whole.sql"
+MUTATIONS["archive_whole_parent_schema"] = (
+    "bench/archive_partition_whole_follows_step.sh",
+    "Pre-#1054 scripts/archive_partition_whole.sql: the partition is looked up in the PARENT's schema, not "
+    "through pgpm._child_nsp (#727), so after ALTER TABLE <parent> SET SCHEMA the identity check finds nothing "
+    "under the name and refuses the intact partition pgpm recorded. One site, the schema lookup. tests/289 "
+    "parts C and D catch it (no strategy call or ledger row for the moved parent's partition; the decoy's "
+    "refusal names the parent's schema, not the partition's).",
+    [("  v_nsp := pgpm._child_nsp(p_parent, r.child_name);\n",
+      "  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;\n",
+      1)],
+)
+MUTATION_SRC["archive_whole_parent_schema"] = "scripts/archive_partition_whole.sql"
+
 # pass 9 G18: #994, #995, #1002. Four test files that counted where their own comments promised to name, each
 # judged by bench/tests_fail_on_defect.sh against a defect it plants in install.sql. One mutation per site, each
 # the site's exact pre-fix text, so the file under it passes against that defect.
