@@ -11397,6 +11397,8 @@ declare
   v_cell text;
   v_next text;
   v_top text;
+  v_nsp name;
+  v_rel name;
 begin
   -- #951: refused before anything is read or committed; p_status (INOUT: the status it returns) is not
   perform pgpm._refuse_null_arguments('maintain_obtain', json_build_object('p_parent', p_parent));
@@ -11432,22 +11434,28 @@ begin
   -- monolith's lo is far behind. Counting only partitions whose lo is ahead saw none of it, so such a table
   -- bypassed the back-off every tick and retried obtain's ACCESS EXCLUSIVE while it still had room (review
   -- on #386). Steps are walked from the frontier's cell up to max(hi), and each one, the frontier's own cell
-  -- first, counts only while an attached partition that is BUILT overlaps it (#1078): the question obtain
-  -- itself asks of a cell (_part_built, through _cell_attached). Coverage is not contiguous just because
-  -- obtain and extend_to build it end to end: a forward cell dropped or detached by hand is a hole inside
-  -- the span whose pgpm.part row stays attached, and counted as coverage it kept the back-off honoured
-  -- while every write into the hole was refused and obtain, which rebuilds it (#908, #956), sat out. So a
-  -- hole in the frontier's cell or in the ceil(obtain / 2) steps past it bypasses the back-off like a short
-  -- lookahead does; a hole further out is past the threshold and waits for the back-off to expire, as a
-  -- missing cell at the top of the grid always has. Only the walk changes: the back-off still holds while
-  -- that many built steps remain, which is what it exists to protect (an ACCESS EXCLUSIVE queued behind
-  -- sustained contention every tick). The walk stops at the threshold, so it costs at most
-  -- ceil(obtain / 2) + 1 grid steps. Counted only while a back-off is active, so a healthy tick pays nothing
+  -- first, is asked the question obtain asks of it (#1078): _cell_attached (is a partition BUILT there,
+  -- forgetting a row whose partition was dropped or detached by hand, exactly as obtain would), then
+  -- _obtain_name (could obtain build it). A step counts as coverage when obtain would leave it alone, and
+  -- ends the walk when obtain would build it. Coverage is not contiguous just because obtain and extend_to
+  -- build it end to end: a forward cell dropped or detached by hand is a hole inside the span whose
+  -- pgpm.part row stays attached, and counted as coverage it kept the back-off honoured while every write
+  -- into the hole was refused and obtain, which rebuilds it (#908, #956), sat out. So such a hole in the
+  -- frontier's cell or in the ceil(obtain / 2) steps past it bypasses the back-off like a short lookahead
+  -- does; a hole further out is past the threshold and waits for the back-off to expire, as a missing cell
+  -- at the top of the grid always has. A hole obtain cannot build (its name held by a relation or type pgpm
+  -- does not own, or too long to name, #710) does NOT bypass: obtain would only log fail_obtain_name for it
+  -- again, and the bypass would buy one more ACCESS EXCLUSIVE queued behind the contention for nothing. The
+  -- back-off still holds while that many steps obtain would not build remain, which is what it exists to
+  -- protect (an ACCESS EXCLUSIVE queued behind sustained contention every tick). The walk stops at the
+  -- threshold, so it costs at most ceil(obtain / 2) + 1 grid steps. Counted only while a back-off is active, so a healthy tick pays nothing
   -- extra, and guarded so a failure to count (a dropped parent, say) falls back to the back-off rather than
   -- aborting the sweep.
   v_try := coalesce(cfg.obtain_retry_after, '-infinity'::timestamptz) <= clock_timestamp();
   if not v_try then
     begin
+      select n.nspname, c.relname into v_nsp, v_rel
+        from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
       -- the frontier's own grid cell, and the top of attached coverage
       v_cell := pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor,
                                  pgpm._frontier_native(p_parent), cfg.partition_tz);
@@ -11458,12 +11466,12 @@ begin
       loop
         v_next := pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_cell, cfg.partition_tz);
         exit when v_ahead >= ceil(cfg.obtain / 2.0) or v_top is null
-               or (v_ahead >= 0 and pgpm._native_gt(cfg.control_kind, v_next, v_top))
-               or not exists (select 1 from pgpm.part p
-                               where p.parent_table = p_parent and p.attached
-                                 and pgpm._native_gt(cfg.control_kind, p.hi, v_cell)
-                                 and pgpm._native_gt(cfg.control_kind, v_next, p.lo)
-                                 and pgpm._part_built(p_parent, p.child_oid, p.retiring_at));
+               or (v_ahead >= 0 and pgpm._native_gt(cfg.control_kind, v_next, v_top));
+        -- in obtain's order, as separate statements: _cell_attached forgets a detached cell's row first, and
+        -- until it has, _obtain_name reads the detached table holding the cell's name as a stranger's
+        if not pgpm._cell_attached(p_parent, cfg, v_cell, v_next) then
+          exit when pgpm._obtain_name(p_parent, cfg, v_nsp, v_rel, v_cell, v_next) is not null;
+        end if;
         v_ahead := v_ahead + 1;
         v_cell := v_next;
       end loop;

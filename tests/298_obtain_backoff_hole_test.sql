@@ -22,13 +22,20 @@
 --           tick bypasses, rebuilds the cell beside the detached table, and leaves that table alone.
 --   PART D  the frontier's OWN cell dropped (a time grid, where now() has moved into a forward cell): the
 --           walk judges it too, so the tick bypasses and rebuilds it, and a write at now() lands.
+--   PART E  a healthy lookahead: the back-off is honoured, as before.
+--   PART F  a hole obtain CANNOT build: [2000, 3000) dropped and its name taken by a stranger table (#710).
+--           obtain would only log fail_obtain_name for it, so it is no reason to bypass: under sustained
+--           contention (a second session holds the parent across both ticks) the tick after the lost race
+--           honours the back-off and queues no second lock attempt, though the top cell [4000, 5000) is
+--           missing too and obtain would have tried for it.
 -- The fixtures are asymmetric on purpose: the hole sits at a different step in each part (first, third,
--- second, the frontier's own), so a walk that counted holes, or always bypassed, or never did, cannot pass.
+-- second, the frontier's own), so a walk that counted holes, or always bypassed, or never did, cannot pass;
+-- and F's unbuildable hole sits where A's buildable one would bypass.
 create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
 
-select plan(31);
+select plan(40);
 
 -- ==================== (A) the issue's reproduction: a real lock race, first forward cell dropped ====================
 create table public.bh298a (id bigint primary key, payload text);
@@ -190,5 +197,61 @@ select is(:'e_tick_p_status'::text, 'obtained=0 obtain_backoff'::text,
 update pgpm.config set obtain_retry_after = null where parent_table = 'public.bh298e'::regclass;
 call pgpm.maintain_obtain('public.bh298e') \gset e_wit_
 select is(:'e_wit_p_status'::text, 'obtained=2'::text, 'E witness: without the back-off the same tick builds two cells');
+
+-- ==================== (F) a hole obtain cannot build: the back-off holds ====================
+create table public.bh298f (id bigint primary key, payload text);
+insert into public.bh298f select g, 'x' from generate_series(1, 500) g;
+call pgpm.transmute('public.bh298f', 'id', 1000::bigint, p_obtain => 4, p_paused => false);
+-- [2000, 3000) dropped by hand and its name taken by a stranger, so obtain cannot build it
+select child_name as f_held from pgpm.part where parent_table = 'public.bh298f'::regclass and lo = '2000' \gset
+select format('drop table public.%I', :'f_held') \gexec
+select format('create table public.%I (x int)', :'f_held') \gexec
+select to_regclass(format('public.%I', :'f_held'))::oid as f_stranger_oid \gset
+-- the top cell [4000, 5000) dropped too, past the threshold: a cell obtain CAN build, so a tick that runs
+-- obtain takes the parent's lock for it
+select child_name as f_top from pgpm.part where parent_table = 'public.bh298f'::regclass and lo = '4000' \gset
+select format('drop table public.%I', :'f_top') \gexec
+
+-- sustained contention: a second session holds the parent across both ticks below
+select dblink_connect('bh298f', format('dbname=%s user=postgres', current_database())) as f_conn \gset
+select dblink_exec('bh298f', 'begin') as f_begin \gset
+select dblink_exec('bh298f', 'lock table public.bh298f in access share mode') as f_lock \gset
+call pgpm.maintain_obtain('public.bh298f') \gset f_race_
+create temporary table mark298f as select coalesce(max(id), 0) as id from pgpm.log;
+call pgpm.maintain_obtain('public.bh298f') \gset f_tick_
+select dblink_exec('bh298f', 'commit') as f_commit \gset
+select dblink_disconnect('bh298f') as f_disc \gset
+
+select is(:'f_race_p_status'::text, 'obtained=0 obtain_deferred'::text,
+  'LIVENESS: F''s first tick lost the lock race (obtain had a cell to build and queued the lock)');
+select ok((select obtain_retry_after > clock_timestamp() from pgpm.config where parent_table = 'public.bh298f'::regclass),
+  'LIVENESS: the lost race armed the obtain back-off');
+select ok(:'f_stranger_oid'::oid is not null
+          and to_regclass(format('public.%I', :'f_held'))::oid = :'f_stranger_oid'::oid
+          and not exists (select 1 from pg_inherits where inhrelid = :'f_stranger_oid'::oid),
+  'LIVENESS: [2000, 3000)''s plain name is held by a stranger table that is no partition');
+select is((select array_agg(p.lo order by p.lo::numeric) from pgpm.part p join pg_inherits i on i.inhrelid = p.child_oid
+            where p.parent_table = 'public.bh298f'::regclass and i.inhparent = 'public.bh298f'::regclass),
+  array['0', '1000', '3000'], 'GUARD: [0, 1000), [1000, 2000) and [3000, 4000) are built, nothing else');
+
+select is(:'f_tick_p_status'::text, 'obtained=0 obtain_backoff'::text,
+  'F: a hole obtain cannot build does not bypass the back-off');
+select is((select count(*)::int from pgpm.log where parent_table = 'public.bh298f'::regclass
+            and id > (select id from mark298f) and action = 'skip_obtain'), 0,
+  'F: no second lock attempt was queued behind the contention inside the back-off window');
+select ok(exists (select 1 from pg_class where oid = :'f_stranger_oid'::oid and relname = :'f_held'),
+  'F: the stranger is left exactly as it is');
+
+-- the witness: the back-off cleared and the contention gone, the same tick builds the top cell and logs the
+-- held cell as one it cannot build, so F's tick was kept from real work and the hole is really unbuildable
+update pgpm.config set obtain_retry_after = null where parent_table = 'public.bh298f'::regclass;
+create temporary table mark298f2 as select coalesce(max(id), 0) as id from pgpm.log;
+call pgpm.maintain_obtain('public.bh298f') \gset f_wit_
+select is(:'f_wit_p_status'::text, 'obtained=1'::text, 'F witness: without the back-off the tick builds one cell');
+select is((select array_agg(action || ':' || lo order by id) from pgpm.log
+            where parent_table = 'public.bh298f'::regclass and id > (select id from mark298f2)
+              and (action in ('fail_obtain_name', 'skip_obtain') or (action = 'forget_dropped_partition' and lo = '4000'))),
+  array['fail_obtain_name:2000', 'forget_dropped_partition:4000'],
+  'F witness: it cannot build [2000, 3000) (fail_obtain_name) and rebuilds [4000, 5000)');
 
 select * from finish();

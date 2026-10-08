@@ -6,12 +6,16 @@
 # maintain_obtain's back-off walk counted a step as coverage whenever an attached pgpm.part row overlapped
 # it, so a cell dropped or detached by hand inside the frontier's cell or the ceil(obtain / 2) steps past it
 # kept the back-off honoured after a lost lock race, and every write into the hole stayed refused for the
-# back-off window. The file is the acceptance test; this wrapper exists so the mutation has a guard the
-# discriminate track can run against the mutant, in the shape of bench/retain_recall_moved_parent.sh.
+# back-off window. And the other way round: a hole obtain CANNOT build (its name held by a stranger, #710)
+# must not bypass the back-off, or every tick queues another ACCESS EXCLUSIVE behind the contention for a
+# cell obtain only logs. The file is the acceptance test; this wrapper exists so the mutations have a guard
+# the discriminate track can run against the mutant, in the shape of bench/retain_recall_moved_parent.sh.
 #
-# ONE mutation is required to fail against it (bench/mutations/mutate.py):
-#   obtain_backoff_counts_hole  -- the walk's _part_built clause removed, the pre-fix judgement of a step.
-#                                  Parts A, C and D.
+# TWO mutations are required to fail against it (bench/mutations/mutate.py):
+#   obtain_backoff_counts_hole         -- the walk's _cell_attached read as the bare row overlap, the
+#                                         pre-fix judgement of a step. Parts A, C and D.
+#   obtain_backoff_bypasses_held_name  -- the walk's _obtain_name dropped, so a held-name hole bypasses
+#                                         the back-off. Part F.
 #
 # Runs on the plain core image (pgtap, dblink and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's
 # path inside the container, for a worktree mounted somewhere other than /repo.

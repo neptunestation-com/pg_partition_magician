@@ -2418,10 +2418,10 @@ begin
         "assertion instead and look like a catch for the wrong reason.",
         [("  if not v_try then\n"
           "    begin\n"
-          "      -- the frontier's own grid cell, and the top of attached coverage\n",
+          "      select n.nspname, c.relname into v_nsp, v_rel\n",
           "  if false then\n"
           "    begin\n"
-          "      -- the frontier's own grid cell, and the top of attached coverage\n", 1)],
+          "      select n.nspname, c.relname into v_nsp, v_rel\n", 1)],
     ),
     "obtain_headroom_ignores_monolith": (
         "bench/obtain_backoff_headroom.sh",
@@ -2442,12 +2442,12 @@ begin
           "      loop\n"
           "        v_next := pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_cell, cfg.partition_tz);\n"
           "        exit when v_ahead >= ceil(cfg.obtain / 2.0) or v_top is null\n"
-          "               or (v_ahead >= 0 and pgpm._native_gt(cfg.control_kind, v_next, v_top))\n"
-          "               or not exists (select 1 from pgpm.part p\n"
-          "                               where p.parent_table = p_parent and p.attached\n"
-          "                                 and pgpm._native_gt(cfg.control_kind, p.hi, v_cell)\n"
-          "                                 and pgpm._native_gt(cfg.control_kind, v_next, p.lo)\n"
-          "                                 and pgpm._part_built(p_parent, p.child_oid, p.retiring_at));\n"
+          "               or (v_ahead >= 0 and pgpm._native_gt(cfg.control_kind, v_next, v_top));\n"
+          "        -- in obtain's order, as separate statements: _cell_attached forgets a detached cell's row first, and\n"
+          "        -- until it has, _obtain_name reads the detached table holding the cell's name as a stranger's\n"
+          "        if not pgpm._cell_attached(p_parent, cfg, v_cell, v_next) then\n"
+          "          exit when pgpm._obtain_name(p_parent, cfg, v_nsp, v_rel, v_cell, v_next) is not null;\n"
+          "        end if;\n"
           "        v_ahead := v_ahead + 1;\n"
           "        v_cell := v_next;\n"
           "      end loop;\n",
@@ -2496,10 +2496,23 @@ begin
         "Pre-#1078 maintain_obtain: the back-off walk counts a step as coverage when an attached pgpm.part "
         "row overlaps it, without asking whether its partition is still there, so a cell dropped or detached "
         "by hand inside the frontier's cell or the ceil(obtain / 2) steps past it keeps the back-off "
-        "honoured while every write into the hole is refused. One clause, the walk's _part_built. "
-        "tests/298 parts A, C and D catch it.",
-        [("\n                                 and pgpm._part_built(p_parent, p.child_oid, p.retiring_at));\n",
-          ");\n", 1)],
+        "honoured while every write into the hole is refused. One clause, the walk's _cell_attached read "
+        "as the bare row overlap. tests/298 parts A, C and D catch it.",
+        [("        if not pgpm._cell_attached(p_parent, cfg, v_cell, v_next) then\n",
+          "        if not exists (select 1 from pgpm.part p\n"
+          "                        where p.parent_table = p_parent and p.attached\n"
+          "                          and pgpm._native_gt(cfg.control_kind, p.hi, v_cell)\n"
+          "                          and pgpm._native_gt(cfg.control_kind, v_next, p.lo)) then\n", 1)],
+    ),
+    "obtain_backoff_bypasses_held_name": (
+        "bench/obtain_backoff_hole.sh",
+        "#1078's first cut (PR #1107, V-01): the back-off walk ends at any cell without a built partition, "
+        "including one obtain cannot build because a relation or type pgpm does not own holds its name "
+        "(fail_obtain_name, #710), so while the stranger holds it every tick bypasses the back-off and "
+        "queues another ACCESS EXCLUSIVE behind the contention for a cell obtain only logs. One clause, the "
+        "walk's _obtain_name. tests/298 part F catches it.",
+        [("          exit when pgpm._obtain_name(p_parent, cfg, v_nsp, v_rel, v_cell, v_next) is not null;\n",
+          "          exit;\n", 1)],
     ),
     "set_regrain_off_keeps_regrain": (
         "bench/set_regrain_off_midflight.sh",
