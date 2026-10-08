@@ -5731,6 +5731,77 @@ $$;''',
         [("    if v_time_unit is not null then\n",
           "    if false then\n", 1)],
     ),
+    "regrain_step_unit_uuidv7_unasked": (
+        "bench/regrain_target_encoded_unit.sh",
+        "Pre-#1039 for a uuidv7 key (pass 10 F3-04): _regrain_step_shape gives a uuidv7 key no encoded unit, so "
+        "'1500 microseconds' is stored and run: the copy floors each fine bound to the millisecond while the "
+        "reconcile places a captured key by its unfloored grid cell, so a row deleted mid-regrain is consumed "
+        "against the wrong copy and the swap brings it back. One clause: the uuidv7 arm of the unit CASE. "
+        "tests/308 catches it at the uuidv7 refusals (set_regrain, regrain_step, regrain() and the tick) and the "
+        "valid target a refused call must leave in place; its ObjectId and hex-ms refusals still pass, which is "
+        "what shows the mutant is this arm alone.",
+        [("                    when 'uuidv7' then 3\n",
+          "                    when 'uuidv7' then null\n", 1)],
+    ),
+    "regrain_step_unit_text_time_seconds_unread": (
+        "bench/regrain_target_encoded_unit.sh",
+        "Pre-#1039 for a seconds text_time key (pass 10 F3-01): _regrain_step_shape holds every text_time key to a "
+        "millisecond whatever its text_time_unit, so '1.5 seconds' on an ObjectId key is stored and run, the copy "
+        "floors the fine bounds to the second while the reconcile does not, and a row deleted mid-regrain comes "
+        "back at the swap. One clause: the text_time_unit read. tests/308 catches it at the ObjectId refusals of "
+        "1.5 seconds (set_regrain, regrain_step, regrain() and the tick); its uuidv7 and hex-ms refusals still "
+        "pass, since a millisecond is the unit those keys do keep.",
+        [("                    when 'text_time' then case cfg.text_time_unit when 's' then 0 else 3 end\n",
+          "                    when 'text_time' then 3\n", 1)],
+    ),
+    "transmute_uuidv7_anchor_unasked": (
+        "bench/regrain_target_encoded_unit.sh",
+        "Pre-#1039 at transmute for the anchor (pass-10 per-PR verification V-01 and P1-02): the preflight holds "
+        "a time key and a text_time key to their units but never a uuidv7 key's anchor, so p_anchor => "
+        "'2000-01-01 00:00:00.0005+00' registers a grid whose every bound is half a millisecond off the unit the "
+        "encoding keeps, and a whole-millisecond regrain of it brings back a row deleted mid-regrain (door 2 then "
+        "refuses that regrain, so the guard catches this door at transmute). One clause: the anchor test in "
+        "_uuidv7_unit_contract. tests/308 catches it at the half-millisecond anchor refusal; its step refusals "
+        "still pass, which is what shows the mutant is this clause alone.",
+        [("  if mod(extract(epoch from p_anchor::timestamptz) * 1000000, 1000) <> 0\n",
+          "  if false\n", 1)],
+    ),
+    "transmute_uuidv7_step_unasked": (
+        "bench/regrain_target_encoded_unit.sh",
+        "Issue #1113 put back: transmute's preflight never holds a uuidv7 partition_step to whole milliseconds, so "
+        "a '500 microseconds' step commits and validates the pgpm_monolith_bound CHECK and the cutover then dies "
+        "on 'empty range bound' (two forward bounds floor to one millisecond key), leaving the table rejecting "
+        "current writes, and '1500 microseconds' converts with pgpm.part bounds half a millisecond off the "
+        "attached ones. One clause: the step test in _uuidv7_unit_contract. tests/308 catches it at the 500, "
+        "1500 and 4500 microsecond refusals, the bound CHECK a refused step must not leave and the current write "
+        "the table must still take; its anchor refusal still passes.",
+        [("     or mod(extract(epoch from p_step::interval) * 1000000, 1000) <> 0 then\n",
+          "     then\n", 1)],
+    ),
+    "regrain_step_registered_anchor_unasked": (
+        "bench/regrain_target_encoded_unit.sh",
+        "Pre-#1039 at regrain for a grid an older install registered (pass-10 per-PR verification V-01): "
+        "_regrain_step_shape asks the target and the registered step but not the registered anchor, so a "
+        "whole-millisecond target on a uuidv7 grid anchored half a millisecond off the unit is accepted, every "
+        "fine bound is off the unit, and a row deleted mid-regrain comes back at the swap. One clause: the "
+        "anchor test. tests/308 catches it at set_regrain's and regrain_step's refusals of hu (anchor 500 us "
+        "off) and ht (a text_time anchor half a second off) and the target a refused call must not store; "
+        "hs's off-unit step is still refused.",
+        [("""      if mod((extract(epoch from cfg.partition_anchor::timestamptz) - extract(epoch from v_enc_epoch)) * 1000000,
+             case v_enc_prec when 0 then 1000000 else 1000 end) <> 0
+         or v_enc_unit is not null then
+""",
+          "      if v_enc_unit is not null then\n", 1)],
+    ),
+    "regrain_step_registered_step_unasked": (
+        "bench/regrain_target_encoded_unit.sh",
+        "Pre-#1039 at regrain for a grid an older install registered with a step off the unit: "
+        "_regrain_step_shape asks the registered anchor but not the registered step, so a uuidv7 grid of "
+        "'4500 microseconds' cells (each source cell's own bounds off the millisecond) takes a "
+        "whole-millisecond target. One clause: the step test. tests/308 catches it at set_regrain's refusal "
+        "of hs and the target that refusal must not store; the anchor refusals still pass.",
+        [("         or v_enc_unit is not null then\n", "         then\n", 1)],
+    ),
     # #669-#671: three transmute contract gaps, each caught by its own pgTAP file through a wrapper in
     # bench/transmute_abort_owner.sh's shape.
     "carried_index_name_by_pattern": (

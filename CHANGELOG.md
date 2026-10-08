@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- **A regrain on a `uuidv7` or `text_time` key stays on the encoding's unit** (#1039, bullet 2).
+  `_regrain_step_shape` held a target to a `timestamp(p)` column's precision (#980) and asked nothing of an
+  encoded key, so `'1.5 seconds'` on an ObjectId key (unit a second) or `'1500 microseconds'` on a `uuidv7` key
+  (unit a millisecond) was accepted: the copy encoded each fine bound by flooring it to the unit while the
+  reconcile placed a captured change by the unfloored grid, so a row deleted mid-regrain was consumed against
+  the wrong copy and the swap brought it back. The same rule now asks the precision the encoding keeps (a
+  millisecond for `uuidv7`, the `text_time_unit` for `text_time`) of the target and of the grid's registered
+  `partition_anchor` and `partition_step`, so `set_regrain`, `regrain_step`, `regrain()`, `regrain_history()`
+  and every tick refuse a target that is not whole units, and any target on a grid an older install
+  registered off the unit, before anything is copied. `transmute` now holds a `uuidv7` step and `p_anchor` to
+  whole milliseconds, as it holds a `text_time` key's to its unit (#989), so no such grid is registered again
+  (#1113: a `'500 microseconds'` step had committed and validated the monolith's bound CHECK and then died at
+  the cutover on `empty range bound`, leaving the table rejecting current writes). Test `tests/308`, guard
+  `bench/regrain_target_encoded_unit.sh`, mutations `regrain_step_unit_uuidv7_unasked`,
+  `regrain_step_unit_text_time_seconds_unread`, `transmute_uuidv7_anchor_unasked`,
+  `transmute_uuidv7_step_unasked`, `regrain_step_registered_anchor_unasked` and
+  `regrain_step_registered_step_unasked`.
+
 - **A regrain's fine children are created in the parent's tablespace** (#1075). `regrain_step` creates each
   fine child as a standalone `CREATE TABLE (LIKE ...)`, which carries no tablespace, and named none, so after a
   regrain of a table `transmute` had placed in its own tablespace the fine children, and every row the regrain
