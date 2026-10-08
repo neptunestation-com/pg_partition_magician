@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+- **Both change captures write their delta only while they hold it** (#1057, bullet 3). #1051 (regrain,
+  `_regrain_capture_install`) and #1037 (`from_hypertable_copy`'s tracking copy) kept a fast path that checked
+  the minted name with `to_regclass`, which takes no lock, and then ran the static insert, which looked the
+  name up again after queueing on the delta's lock. A write that arrived while an operator's transaction held
+  the delta to rename it passed the check, waited, and once the rename committed put its keys into whatever
+  held the name by then: a table the operator created under the freed name in the same transaction (the swap
+  never reads it, so a committed regrain update was reverted; the hypertable cutover refused its swap), or
+  nothing, and the write died 42P01. Each capture now takes `ROW EXCLUSIVE` on the delta through the name it
+  is about to use and writes through that name only if, with the lock held, it still leads to the recorded
+  oid, so a rename, move or drop of the delta waits for the writer; a lock that landed elsewhere, or was
+  refused, sends it to the delta's current name, locked and re-checked the same way. Measured on 100,000-row
+  updates on PG 15: about 1 microsecond more a captured write on the fast path (4.6 to 5.5), and no change
+  after a rename (about 10.5). Tests `tests/290` and `tests/timescale/db/57`, guards
+  `bench/regrain_capture_delta_held.sh` and `bench/hypertable_capture_delta_held.sh`, mutations
+  `regrain_capture_fast_path_unlocked` and `hypertable_capture_fast_path_unlocked`.
+
 - **A Parquet export reads the relation it was handed, never a namesake** (#1055, bullet 1).
   `archive._pq_to_parquet` and the range encoder took a schema and a name from the relation's oid before their
   column loop, and `archive._pq_snapshot` read the rows by that name after it. `ALTER SCHEMA ... RENAME` takes

@@ -4740,51 +4740,88 @@ begin
   -- the name alone. A static `insert into <rel>_pgpm_regrain_delta` resolved that name at every write, so a
   -- delta the operator renamed mid-regrain refused every write into the source (42P01) for the life of the
   -- regrain, and a table later created under the name took the keys the reconcile and the swap never read.
-  -- The static insert stays as the fast path, taken only while the minted name still leads to the delta's
-  -- oid: one name lookup a row, and the insert keeps its cached plan. (It is also the body text the #969
-  -- upgrade proof above recognises a pgpm-minted capture by.) Once it does not (the delta renamed or moved,
-  -- or another relation under the name), the oid is rendered to the delta's current name (regclass output,
-  -- qualified wherever the writer's search_path would not find it) and the insert is dynamic, the key values
-  -- bound. A delta that is gone refuses the write as 42P01, as the static insert did, naming the parent and
-  -- the remedy (the next tick restarts the run and re-mints capture: _regrain_capture_drift), rather than as
-  -- a syntax error at the bare oid.
+  -- #1057: and it writes through a name only while it HOLDS the delta, so the name cannot move under it.
+  -- #1051's fast path checked the minted name with to_regclass, which takes no lock, and the insert then
+  -- looked the name up again after queueing on the delta's lock: a writer that arrived while an operator's
+  -- transaction held the delta to rename it passed the check, waited, and once the rename committed wrote
+  -- its keys into whatever held the name by then (a table the operator created under it in the same
+  -- transaction, which the swap never reads, so the committed write was reverted), or died 42P01 when
+  -- nothing did. So every write first takes ROW EXCLUSIVE on the delta (the lock its insert takes anyway)
+  -- through the name it is about to use, and uses the name only if, once the lock is held, the name still
+  -- leads to the recorded oid. A rename, a SET SCHEMA or a DROP of the delta needs ACCESS EXCLUSIVE, so
+  -- from then until the writer commits the delta keeps that name and nothing else can take it. LOCK TABLE
+  -- resolves the name again after any wait, so a lock that landed on another relation (the name moved
+  -- while it waited) fails the re-check, and so does one refused because that relation is not the
+  -- writer's to lock or because the name is gone (caught, in a subtransaction: the error is the signal,
+  -- not the outcome). The fast path, while the minted name still leads to the delta: the static LOCK and
+  -- insert, which keep their cached plans (and the insert is the body text the #969 upgrade proof above
+  -- recognises a pgpm-minted capture by). Otherwise the oid is rendered to the delta's current name
+  -- (regclass output, qualified wherever the writer's search_path would not find it), locked and
+  -- re-checked the same way, retried from a fresh rendering for as long as a rename keeps landing between
+  -- the two (each retry needs another committed rename of the delta, so it ends), and the insert is
+  -- dynamic, the key values bound. A delta that is gone refuses the write as 42P01, as the static insert
+  -- did, naming the parent and the remedy (the next tick restarts the run and re-mints capture:
+  -- _regrain_capture_drift), rather than as a syntax error at the bare oid.
   execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$
     declare
       d regclass;
+      n text;
     begin
-      if pg_catalog.to_regclass(%L) is distinct from %s::pg_catalog.oid::pg_catalog.regclass then
-        select c.oid::pg_catalog.regclass into d from pg_catalog.pg_class c where c.oid = %s;
-        if d is null then
+      if pg_catalog.to_regclass(%L) = %s::pg_catalog.oid::pg_catalog.regclass then
+        begin
+          lock table only %I.%I in row exclusive mode;
+        exception when undefined_table or invalid_schema_name or insufficient_privilege then
+          null;
+        end;
+        if pg_catalog.to_regclass(%L) = %s::pg_catalog.oid::pg_catalog.regclass then
+          if tg_op = ''DELETE'' then
+            insert into %I.%I (%s) values (%s); return old;
+          elsif tg_op = ''UPDATE'' then
+            insert into %I.%I (%s) values (%s), (%s); return new;   -- old + new: a key change dirties both
+          else
+            insert into %I.%I (%s) values (%s); return new;
+          end if;
+        end if;
+      end if;
+      loop
+        d := %s::pg_catalog.oid::pg_catalog.regclass;
+        n := d::pg_catalog.text;
+        if pg_catalog.pg_table_is_visible(d) is null then
           raise exception using errcode = ''undefined_table'',
             message = pg_catalog.format(%L, %s::pg_catalog.oid::pg_catalog.regclass);
         end if;
-        if tg_op = ''DELETE'' then
-          execute ''insert into '' || d::text || %L using %s; return old;
-        elsif tg_op = ''UPDATE'' then
-          execute ''insert into '' || d::text || %L using %s, %s; return new;
-        else
-          execute ''insert into '' || d::text || %L using %s; return new;
-        end if;
-      end if;
+        begin
+          execute ''lock table only '' || n || '' in row exclusive mode'';
+        exception when undefined_table or invalid_schema_name or insufficient_privilege then
+          if d::pg_catalog.text = n and pg_catalog.pg_table_is_visible(d) is not null then
+            raise;
+          end if;
+          continue;
+        end;
+        exit when pg_catalog.to_regclass(n) = d;
+      end loop;
       if tg_op = ''DELETE'' then
-        insert into %I.%I (%s) values (%s); return old;
+        execute ''insert into '' || n || %L using %s; return old;
       elsif tg_op = ''UPDATE'' then
-        insert into %I.%I (%s) values (%s), (%s); return new;   -- old + new: a key change dirties both
+        execute ''insert into '' || n || %L using %s, %s; return new;
       else
-        insert into %I.%I (%s) values (%s); return new;
+        execute ''insert into '' || n || %L using %s; return new;
       end if;
     end $pgpm$',
     v_nsp, v_fn,
-    format('%I.%I', v_nsp, v_delta), v_delta_reg::oid, v_delta_reg::oid,
+    format('%I.%I', v_nsp, v_delta), v_delta_reg::oid,
+    v_nsp, v_delta,
+    format('%I.%I', v_nsp, v_delta), v_delta_reg::oid,
+    v_nsp, v_delta, v_keycols_q, v_oldvals_q,
+    v_nsp, v_delta, v_keycols_q, v_oldvals_q, v_newvals_q,
+    v_nsp, v_delta, v_keycols_q, v_newvals_q,
+    v_delta_reg::oid,
     format('pg_partition_magician: the regrain change capture of %%s has lost the delta table the prepare tick recorded for it (oid %s), so no write to the regraining partition can be logged. The next pgpm.regrain_step tick on the table restarts the regrain and mints a fresh delta, or pgpm.regrain_cancel ends it.',
            v_delta_reg::oid),
     p_parent::oid,
     format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_oldvals_q,
     format(' (%s) values (%s), (%s)', v_keycols_q, v_oldargs, v_newargs), v_oldvals_q, v_newvals_q,
-    format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_newvals_q,
-    v_nsp, v_delta, v_keycols_q, v_oldvals_q,
-    v_nsp, v_delta, v_keycols_q, v_oldvals_q, v_newvals_q,
-    v_nsp, v_delta, v_keycols_q, v_newvals_q);
+    format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_newvals_q);
 
   -- #950: owned like the parent too, so the role that owns the parent when the next regrain re-mints capture can
   -- drop it (it used to stay the role's that ran this tick).
