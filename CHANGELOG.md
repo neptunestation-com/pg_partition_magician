@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **A regrain's fine children are created in the parent's tablespace** (#1075). `regrain_step` creates each
+  fine child as a standalone `CREATE TABLE (LIKE ...)`, which carries no tablespace, and named none, so after a
+  regrain of a table `transmute` had placed in its own tablespace the fine children, and every row the regrain
+  moved into them, were in the database default, where the documentation promises every partition pgpm mints
+  lands in the table's. The create now names the parent's tablespace, read when the fine child is created, the
+  one `_create_partition`'s `PARTITION OF` takes for obtain and `extend_to`; a parent in the database default
+  leaves the create as it was. The role that drives a regrain therefore needs `CREATE` on that tablespace, as
+  the maintenance role already did for obtain. Test `tests/296`, guard `bench/regrain_children_tablespace.sh`,
+  mutation `regrain_children_tablespace_dropped`.
+
 - **A synchronous export resolves its child under one catalog snapshot** (#1062, bullet 2).
   `archive._resolve_child` read the parent's schema name in one statement and looked the child up by that
   name in the next, so a second session that swapped two schemas' names between them (the parent's schema

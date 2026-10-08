@@ -128,7 +128,8 @@ deferred check keep working on every partition; its monolith copy is renamed `pg
 handed back by `untransmute` too. A bare unique index is carried as a partitioned index `<index>_pgpm`. The
 parent is created in the table's **tablespace**, so every partition pgpm mints from it lands there as well
 (a table in the database default stays there). That needs `CREATE` on the tablespace: `transmute` refuses a
-caller without it, and the role that runs maintenance needs it too, since it creates the forward partitions.
+caller without it, and the role that runs maintenance needs it too, since it creates the forward partitions
+and a regrain's fine children.
 A sequence the table
 **owns** through a column (a `serial`, or an explicit `OWNED BY`) is handed to the same column of the
 parent, so retention can drop the monolith like any other partition. All of it is
@@ -1481,7 +1482,9 @@ Splits one **frozen** coarse child `p_child` into finer children of width `p_tar
 `config.partition_step`), returning the number of fine children created. It **copies** rows into standalone
 children in budget-sized microbatches, then swaps them in for the coarse child and drops that source whole,
 rows and all. It never deletes from the source, which is what keeps a read of the parent from ever being
-short mid-regrain; the fine children are insert-only, so the product has no bloat. The whole call runs in
+short mid-regrain; the fine children are insert-only, so the product has no bloat. They are created in the
+parent's tablespace, as every partition pgpm mints is, so the rows stay on the volume the table is on (a
+parent in the database default leaves them there). The whole call runs in
 one transaction, so it is **atomic and gap-free**. Retention-aware: a sub-range entirely below the horizon
 is reclaimed, never materialized. Refuses (as an exception) when the child is not frozen, the target step
 does not subdivide it, the target step is zero or negative or has a shape the grid cannot place (the
