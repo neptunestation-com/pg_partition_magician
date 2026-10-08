@@ -2484,7 +2484,12 @@ step finer than a `numeric(p,s)` column's scale, such as `'0.5'` on `numeric(12,
 `numeric(12,1)`, whose fine bounds `ATTACH` would round until two of them meet; likewise a fixed step that is
 not a whole number of a `timestamp(p)` or `timestamptz(p)` column's smallest unit (`10^-p` seconds), such as
 `'500 milliseconds'` on `timestamptz(0)` or `'1.5 seconds'` there, while a month step and any step on an
-unconstrained `timestamp` or `timestamptz` (which keeps microseconds) pass; a domain is judged by its
+unconstrained `timestamp` or `timestamptz` (which keeps microseconds) pass; likewise a fixed step that is not
+a whole number of an encoded key's unit, a millisecond for `uuidv7` and the `text_time_unit` (a second or a
+millisecond) for `text_time`, such as `'1500 microseconds'` on a `uuidv7` key or `'1.5 seconds'` on an
+ObjectId key, finer or coarser than the unit: each fine bound is encoded by flooring it to the unit, so the
+run would copy a row into one cell and apply a change made to it during the run to another, and a row
+deleted mid-regrain would come back at the swap; a domain is judged by its
 base type and typmod; a fractional step on an unconstrained `numeric` column is allowed), one coarser than
 `partition_step` (auto-regrain would reselect the same unsplittable child forever), and one whose fine
 names `<rel>_p<label>` would exceed PostgreSQL's 63-byte identifier limit.

@@ -5731,6 +5731,29 @@ $$;''',
         [("    if v_time_unit is not null then\n",
           "    if false then\n", 1)],
     ),
+    "regrain_step_unit_uuidv7_unasked": (
+        "bench/regrain_target_encoded_unit.sh",
+        "Pre-#1039 for a uuidv7 key (pass 10 F3-04): _regrain_step_shape gives a uuidv7 key no encoded unit, so "
+        "'1500 microseconds' is stored and run: the copy floors each fine bound to the millisecond while the "
+        "reconcile places a captured key by its unfloored grid cell, so a row deleted mid-regrain is consumed "
+        "against the wrong copy and the swap brings it back. One clause: the uuidv7 arm of the unit CASE. "
+        "tests/308 catches it at the uuidv7 refusals (set_regrain, regrain_step, regrain() and the tick) and the "
+        "valid target a refused call must leave in place; its ObjectId and hex-ms refusals still pass, which is "
+        "what shows the mutant is this arm alone.",
+        [("                    when 'uuidv7' then 3\n",
+          "                    when 'uuidv7' then null\n", 1)],
+    ),
+    "regrain_step_unit_text_time_seconds_unread": (
+        "bench/regrain_target_encoded_unit.sh",
+        "Pre-#1039 for a seconds text_time key (pass 10 F3-01): _regrain_step_shape holds every text_time key to a "
+        "millisecond whatever its text_time_unit, so '1.5 seconds' on an ObjectId key is stored and run, the copy "
+        "floors the fine bounds to the second while the reconcile does not, and a row deleted mid-regrain comes "
+        "back at the swap. One clause: the text_time_unit read. tests/308 catches it at the ObjectId refusals of "
+        "1.5 seconds (set_regrain, regrain_step, regrain() and the tick); its uuidv7 and hex-ms refusals still "
+        "pass, since a millisecond is the unit those keys do keep.",
+        [("                    when 'text_time' then case cfg.text_time_unit when 's' then 0 else 3 end\n",
+          "                    when 'text_time' then 3\n", 1)],
+    ),
     # #669-#671: three transmute contract gaps, each caught by its own pgTAP file through a wrapper in
     # bench/transmute_abort_owner.sh's shape.
     "carried_index_name_by_pattern": (

@@ -5798,6 +5798,8 @@ $$;
 -- the anchor (null: not asked, as for a regrain target, whose grid keeps the registered anchor) pass, and
 -- otherwise what the column keeps and the unit to give the step in, for the caller's own refusal:
 -- _regrain_step_shape for a regrain target, _time_unit_contract for transmute's partition step.
+-- _regrain_step_shape also asks it of an encoded key (uuidv7, text_time) as the timestamptz(3) or
+-- timestamptz(0) its encoding keeps (#1039).
 create or replace function pgpm._time_unit_breach(p_type oid, p_typmod int, p_step text, p_anchor text,
                                                   out r_keeps text, out r_unit text)
 returns record language plpgsql stable as $$
@@ -5843,12 +5845,16 @@ $$;
 --     failed 'empty range bound' after the copies were made. The step must be a whole number of the
 --     column's smallest unit (10^-p seconds; one microsecond for an unconstrained timestamp, which an
 --     interval cannot go below, so the rule then refuses nothing). A month step is always whole seconds.
+--   * a fixed step that is not a whole number of an encoded key's unit (#1039): a millisecond for uuidv7, the
+--     text_time_unit (a second or a millisecond) for text_time. '1.5 seconds' on an ObjectId key was copied
+--     by bounds floored to the second and reconciled by unfloored ones, so a row deleted mid-regrain came
+--     back at the swap. The same rule as a timestamp(p) key's, asked of the precision the encoding keeps.
 -- Called from _regrain_step_forward, so set_regrain (at call time) and regrain_step (which regrain(),
 -- regrain_history() and maintain go through) refuse it alike.
 create or replace function pgpm._regrain_step_shape(p_parent regclass, p_step text)
 returns void language plpgsql stable as $$
 declare cfg pgpm.config; v_typname name; v_type oid; v_typmod int; v_scale int; v_months numeric; v_rest interval;
-        v_time_keeps text; v_time_unit text;
+        v_time_keeps text; v_time_unit text; v_enc_prec int; v_enc_unit text;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
@@ -5912,6 +5918,29 @@ begin
     if v_time_unit is not null then
       raise exception 'pg_partition_magician: regrain target step % for % is finer than its control column % can hold: it is %, which keeps % -- ATTACH PARTITION would round the fine cells'' bounds to that precision, adjacent bounds would round to the same instant, and every swap would fail (empty range bound) after the run had copied the rows; give a step that is a multiple of %',
         p_step, p_parent, quote_ident(cfg.control_column), format_type(v_type, v_typmod), v_time_keeps, v_time_unit;
+    end if;
+    -- #1039: and a fixed step that is not a whole number of an ENCODED key's unit. A uuidv7 key holds whole
+    -- milliseconds, a text_time key whole text_time_units (a second for ObjectId and KSUID, a millisecond for
+    -- cuid and ULID), so the key is judged as the timestamptz of that precision it is. The copy encodes each
+    -- fine bound by flooring it to the unit, while the reconcile places a captured key by _grid_floor of its
+    -- decoded instant: with '1.5 seconds' on an ObjectId key the row at T+1s is copied into [T+1.5s, T+3s)
+    -- and a DELETE of it is applied to [T, T+1.5s), so the swap brought the deleted row back; a step finer
+    -- than the unit floors two adjacent bounds to one key. Finer or coarser, a step that is not whole units
+    -- is refused. The anchor is the registered one and is not asked here: transmute holds a text_time
+    -- anchor to its unit (#989).
+    v_enc_prec := case cfg.control_kind
+                    when 'uuidv7' then 3
+                    when 'text_time' then case cfg.text_time_unit when 's' then 0 else 3 end
+                  end;
+    if v_enc_prec is not null then
+      select b.r_unit into v_enc_unit
+        from pgpm._time_unit_breach('timestamptz'::regtype, v_enc_prec, p_step, null) b;
+      if v_enc_unit is not null then
+        raise exception 'pg_partition_magician: regrain target step % for % is not a whole number of its control column %''s encoded unit: it is a % key, which encodes whole %s -- every fine cell''s bound is encoded by flooring it to that unit, so the copy would place a row in one cell while the run''s reconcile applies a change made to it during the run to another (a row deleted mid-regrain would come back at the swap), and adjacent bounds could floor to the same key; give a step that is a multiple of 1 %',
+          p_step, p_parent, quote_ident(cfg.control_column), cfg.control_kind,
+          case v_enc_prec when 0 then 'second' else 'millisecond' end,
+          case v_enc_prec when 0 then 'second' else 'millisecond' end;
+      end if;
     end if;
   end if;
 end;
