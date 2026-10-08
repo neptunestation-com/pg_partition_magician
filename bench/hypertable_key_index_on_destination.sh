@@ -6,10 +6,12 @@
 # The files are plain pgTAP and the timescale track runs them already; this wrapper is the standing proof that
 # their assertions DISCRIMINATE. The subject is how the tracking copy and the cutover agree on a key's index
 # (#175): by an index under the temp name ON THE DESTINATION (pg_index.indrelid), not by whatever relation
-# holds the name. The defect shows after an abandoned tracking copy and a RENAME of the hypertable, whose key
-# keeps its name: the stale copy's index is taken for the key's and the swap fails adopting it (44); the
-# renamed table's own copy dies 'already exists' building its key index (45); or the copy builds under the oid
-# form and the cutover, not asking the copy's question, builds a second index under that name and dies (45).
+# holds the name. The defect shows when a relation pgpm does not own holds <conname>_pgpm_new: in both files an
+# operator's index on a table of their own, after a RENAME of the hypertable, whose key keeps its name. The
+# operator's index is taken for the key's and the swap fails adopting it (44); the renamed table's own copy
+# dies 'already exists' building its key index (45); or the copy builds under the oid form and the cutover,
+# not asking the copy's question, builds a second index under that name and dies (45). (An abandoned tracking
+# copy of the table under its old name used to be that relation; since #1083 the re-run drops it by its record.)
 #
 # The mutations it is required to fail against (bench/mutations/mutate.py):
 #   hypertable_key_index_by_name        -- the pre-#768 check: the build is skipped when anything holds the name

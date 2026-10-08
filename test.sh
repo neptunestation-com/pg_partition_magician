@@ -1062,7 +1062,7 @@ run_perf() {
     "bench/dropped_fk_reconcile.sh pgpm_perf109"
     "bench/regrain_target_shape.sh pgpm_perf97"
     "bench/regrain_target_integral.sh pgpm_perf98"
-    "bench/carried_index_quoted_name.sh pgpm_perf116"
+    "bench/carried_index_quoted_name.sh pgpm_perf312"
     "bench/transmute_identity_options.sh pgpm_perf117"
     "bench/transmute_type_squatter.sh pgpm_perf118"
     "bench/transmute_future_maximum.sh pgpm_perf115"
@@ -1183,7 +1183,7 @@ run_perf() {
     "bench/regrain_capture_view_writer.sh pgpm_perf304"
     "bench/obtain_backoff_hole.sh pgpm_perf305"
     "bench/check_text_time_contract.sh pgpm_perf309"
-    "bench/hypertable_handoff_remedy.sh pgpm_perf111"
+    "bench/hypertable_handoff_remedy.sh pgpm_perf311"
   )
   local selected=()
   local n=${#guards[@]} idx

@@ -1696,9 +1696,9 @@ MUTATIONS = {
     "hypertable_key_index_by_name": (
         "bench/hypertable_key_index_on_destination.sh",
         "Pre-#768 (F6-09) from_hypertable_cutover: a key's index build is skipped whenever ANY relation holds "
-        "its temp name, so after an abandoned tracking copy and a RENAME of the hypertable (whose key keeps "
-        "its name) the stale copy's index is taken for the key's and the swap fails adopting it, after the "
-        "whole copy. tests/timescale/db/44's migration of the renamed table fails.",
+        "its temp name, so when an operator's index on a table of their own holds that name after a RENAME of "
+        "the hypertable (whose key keeps its name), that index is taken for the key's and the swap fails "
+        "adopting it, after the whole copy. tests/timescale/db/44's migration of the renamed table fails.",
         [(HT_CUTOVER_KEY_TMP_BLOCK, """    v_tmp := pgpm._from_hypertable_tmp_name(k.conname, k.conindid);
     if to_regclass(format('%I.%I', v_nsp, v_tmp)) is null then   -- MUTANT: by name, anywhere in the schema
       execute pgpm._from_hypertable_index_ddl(k.conindid, v_tmp, v_nsp, v_dest);
@@ -7893,15 +7893,15 @@ select ok(
     "hypertable_copy_key_tmp_by_name": (
         "bench/hypertable_key_index_on_destination.sh",
         "Issue #872 bullet 4 put back in from_hypertable_copy: the tracked key's index is pre-built under the "
-        "bare temp name <conname>_pgpm_new whatever holds it, so after an abandoned tracking copy and a RENAME "
-        "of the hypertable (whose key keeps its name) the copy dies 'already exists' before copying a row. One "
-        "site. tests/timescale/db/45 catches it.",
+        "bare temp name <conname>_pgpm_new whatever holds it, so when an operator's index on a table of their "
+        "own holds that name after a RENAME of the hypertable (whose key keeps its name) the copy dies 'already "
+        "exists' before copying a row. One site. tests/timescale/db/45 catches it.",
         [("    v_keytmp := pgpm._from_hypertable_key_tmp(v_keyconname, v_keyidx, v_nsp, v_destreg);\n",
           "    v_keytmp := pgpm._from_hypertable_tmp_name(v_keyconname, v_keyidx);   -- MUTANT: by name\n", 1)],
     ),
     "hypertable_cutover_key_tmp_unshared": (
         "bench/hypertable_key_index_on_destination.sh",
-        "Issue #872 bullet 4, the half-fix: the copy takes the oid form when an abandoned copy holds the temp "
+        "Issue #872 bullet 4, the half-fix: the copy takes the oid form when an operator's index holds the temp "
         "name, but the cutover keeps its #768 choice, which builds under the oid form without asking whether "
         "the copy already put that index on the destination, so the cutover of the renamed table dies 'already "
         "exists' after the whole copy. One site. tests/timescale/db/45 catches it.",
