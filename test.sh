@@ -1169,7 +1169,7 @@ run_perf() {
     "bench/date_key_anchor_midnight.sh pgpm_perf126"
     "bench/regrain_delta_seq_name.sh pgpm_perf302"
     "bench/archive_covered_hi_column_type.sh pgpm_perf303"
-    "bench/regrain_capture_view_writer.sh pgpm_perf104"
+    "bench/regrain_capture_view_writer.sh pgpm_perf304"
   )
   local selected=()
   local n=${#guards[@]} idx

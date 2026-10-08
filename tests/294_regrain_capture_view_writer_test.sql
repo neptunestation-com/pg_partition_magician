@@ -7,9 +7,10 @@
 -- the parent and the source, so a view writer got 42501 'permission denied for table <rel>_pgpm_regrain_delta'
 -- on every write into the regraining partition for the life of the regrain. The capture function now writes
 -- the delta as its owner (SECURITY DEFINER, owned like the parent and the delta), whatever path the write
--- took. Two clauses go with a definer function, and each is held here by a behaviour, not by its spelling:
--- its search_path is pinned (a writer's own `=` ahead of pg_catalog never runs as the table's owner), and
--- its EXECUTE is the owner's alone (no role can attach it to a table of its own). And a capture minted
+-- took. Its search_path is pinned (a writer's own `=` ahead of pg_catalog never runs as the table's owner),
+-- held here by a behaviour, not by its spelling. Its EXECUTE stays PUBLIC's default: TimescaleDB re-creates
+-- the trigger on each new chunk as the hypertable's owner, and a key another role adds to the delta through a
+-- table of its own changes no row, since the reconcile takes every key from the source. And a capture minted
 -- before the change (an in-flight regrain carried across the upgrade) is armed by the next tick.
 --
 -- Fixture, asymmetric on purpose: g294 holds ids 1..200 in one monolith [0, 300), owned by g294_own, which
@@ -19,7 +20,9 @@
 --   (A) after the prepare tick: update 10, delete 20, captured as keys 10, 10, 20;
 --   (B) after a copy tick, with a schema of the writer's own (holding an `=` on regclass that records the
 --       role it ran as) ahead of pg_catalog: delete 120 and insert 205; the `=` never ran as g294_own;
---   (C) the EXECUTE of the capture function: g294_other cannot attach it to a table of its own;
+--   (C) the EXECUTE of the capture function stays PUBLIC's: g294_other attaches it to a table of its own
+--       and adds keys 7 (a row of the source) and 999 (none) to the delta; after the swap row 7 is as the
+--       source holds it and there is no row 999;
 --   (D) the capture disarmed by hand to the pre-fix shape (SECURITY INVOKER, no search_path, EXECUTE to
 --       PUBLIC) refuses the view writer, and the next tick arms it again: update 40 then goes through;
 --   (E) the run swaps, and the table holds exactly those changes.
@@ -29,12 +32,18 @@
 --       g294f_app, which holds DML on the table, USAGE on the schema and INSERT on the delta, updates id 10,
 --       deletes ids 20 and 30 and inserts id 205 into the regraining partition (two out, one in): captured,
 --       and in the table after the swap.
+--   (G) a third table, g294m, whose delta is moved mid-run (SET SCHEMA) into g294m2, a schema its owner
+--       holds no USAGE on and the writer g294m_w does: the next tick puts the writer-run capture back, and
+--       g294m_w's two deletes and one insert are captured in the moved delta and in the table after the swap.
+--       (Between the move and that tick the definer capture cannot name the delta: a documented one-tick
+--       window, not asserted here.)
 -- bench/regrain_capture_view_writer.sh runs this file against the mutants capture_definer_dropped,
--- capture_definer_search_path_unpinned, capture_definer_execute_kept, capture_definer_not_rearmed and
--- capture_definer_owner_reach_unchecked, so it is also required to FAIL there.
+-- capture_definer_search_path_unpinned, capture_definer_execute_owner_only, capture_definer_not_rearmed,
+-- capture_definer_owner_reach_unchecked and capture_definer_reach_by_fn_schema, so it is also required to
+-- FAIL there.
 create extension if not exists pgtap;
 set client_min_messages = warning;
-select plan(24);
+select plan(33);
 
 do $$ begin create role g294_own;   exception when duplicate_object then null; end $$;
 do $$ begin create role g294_vw;    exception when duplicate_object then null; end $$;
@@ -117,18 +126,15 @@ select is((select array_agg(distinct who order by who) from public.g294_seen), a
 -- (C)
 create table public.g294_mine (id bigint primary key, payload text);
 alter table public.g294_mine owner to g294_other;
-create function public.g294_mine_fn() returns trigger language plpgsql as $f$ begin return null; end $f$;
-alter function public.g294_mine_fn() owner to g294_other;
-select ok(not has_function_privilege('g294_other', 'public.g294_pgpm_regrain_capture()', 'EXECUTE')
-          and not has_function_privilege('g294_vw', 'public.g294_pgpm_regrain_capture()', 'EXECUTE'),
-          'no role but its owner holds EXECUTE on the capture function, PUBLIC included');
 set role g294_other;
-select lives_ok($$ create trigger g294_mine_own after delete on public.g294_mine for each row execute function public.g294_mine_fn() $$,
-                'LIVENESS: g294_other may put a trigger on a table of its own');
-select throws_ok($$ create trigger g294_mine_capture after delete on public.g294_mine for each row execute function public.g294_pgpm_regrain_capture() $$,
-                 '42501', NULL,
-                 'so g294_other cannot attach the capture function, which writes the delta as the table''s owner, to a table of its own');
+select lives_ok($$ create trigger g294_mine_capture after insert on public.g294_mine for each row execute function public.g294_pgpm_regrain_capture() $$,
+                'EXECUTE on the capture function stays PUBLIC''s: a role other than its owner creates a trigger with it, as TimescaleDB does on each new chunk as the hypertable''s owner');
+select lives_ok($$ insert into public.g294_mine values (7, 'forged'), (999, 'forged') $$,
+                'and that trigger fires on g294_other''s own table');
 reset role;
+select ok(exists (select 1 from public.g294_pgpm_regrain_delta where id = 7)
+          and exists (select 1 from public.g294_pgpm_regrain_delta where id = 999),
+          'LIVENESS: the keys g294_other wrote through its own table are in the delta');
 
 -- (D) the capture as a release before this one minted it
 alter function public.g294_pgpm_regrain_capture() security invoker;
@@ -141,9 +147,8 @@ select throws_ok($$ update public.g294_v set payload = 'vw-40' where id = 40 $$,
 reset role;
 call pgpm.maintain('public.g294');   -- a resuming tick
 select ok((select prosecdef and proconfig = array['search_path=pg_catalog, pg_temp']
-             from pg_proc where oid = 'public.g294_pgpm_regrain_capture()'::regprocedure)
-          and not has_function_privilege('g294_other', 'public.g294_pgpm_regrain_capture()', 'EXECUTE'),
-          'the next tick arms the capture again: it writes as its owner, its search_path pinned, its EXECUTE the owner''s alone');
+             from pg_proc where oid = 'public.g294_pgpm_regrain_capture()'::regprocedure),
+          'the next tick arms the capture again: it writes as its owner, its search_path pinned');
 set role g294_vw;
 select lives_ok($$ update public.g294_v set payload = 'vw-40' where id = 40 $$,
                 'and the view writer updates a row of the regraining partition through the view again');
@@ -160,10 +165,10 @@ select ok(exists (select 1 from pgpm.log where parent_table = 'public.g294'::reg
                    and action = 'regrain' and method = 'copy_swap_drop' and lo = '0' and hi = '300'),
           'LIVENESS: the regrain swapped the monolith into fine children');
 select is((select array_agg(id || ':' || payload order by id) from public.g294
-            where id in (9, 10, 11, 19, 20, 21, 39, 40, 41, 119, 120, 121, 199, 200, 204, 205, 206)),
-          array['9:a9', '10:vw-10', '11:a11', '19:a19', '21:a21', '39:a39', '40:vw-40', '41:a41',
+            where id in (7, 9, 10, 11, 19, 20, 21, 39, 40, 41, 119, 120, 121, 199, 200, 204, 205, 206, 999)),
+          array['7:a7', '9:a9', '10:vw-10', '11:a11', '19:a19', '21:a21', '39:a39', '40:vw-40', '41:a41',
                 '119:a119', '121:a121', '199:a199', '200:a200', '205:vw-205'],
-          'after the swap every write through the view is in the table: the two updates hold, the two deleted rows are gone, the inserted one is there, their neighbours are untouched');
+          'after the swap every write through the view is in the table: the two updates hold, the two deleted rows are gone, the inserted one is there, their neighbours are untouched; and the keys g294_other added changed no row (7 as the source holds it, no 999)');
 select is((select count(*)::int from public.g294), 200,
           'and the table holds its 201 rows less the two deleted plus the one inserted');
 
@@ -214,8 +219,64 @@ select is((select array_agg(id || ':' || payload order by id) from g294f.t
 select is((select count(*)::int from g294f.t), 200,
           'and the table holds its 201 rows less the two deleted plus the one inserted');
 
+-- (G)
+do $$ begin create role g294m_own; exception when duplicate_object then null; end $$;
+do $$ begin create role g294m_w;   exception when duplicate_object then null; end $$;
+grant usage on schema public to g294m_own, g294m_w;
+create table public.g294m (id bigint primary key, payload text);
+insert into public.g294m select g, 'a' || g from generate_series(1, 200) g;
+call pgpm.transmute('public.g294m', 'id', 100, p_obtain => 3, p_regrain_batch => 1000, p_paused => false);
+select pgpm.obtain('public.g294m');
+insert into public.g294m values (450, 'frontier');   -- the monolith [0, 300) freezes
+alter table public.g294m owner to g294m_own;
+grant select, insert, update, delete on public.g294m to g294m_w;
+create schema g294m2;
+revoke all on schema g294m2 from public;
+grant usage on schema g294m2 to g294m_w;
+select pgpm.set_regrain('public.g294m', '50');
+call pgpm.maintain('public.g294m');   -- prepare: the definer capture, the delta in public
+select ok((select prosecdef from pg_proc where oid = 'public.g294m_pgpm_regrain_capture()'::regprocedure),
+          'LIVENESS: the prepare tick armed the definer capture, its owner able to reach the delta in public');
+alter table public.g294m_pgpm_regrain_delta set schema g294m2;   -- a superuser moves the delta mid-run
+call pgpm.maintain('public.g294m');   -- the next tick
+select ok(to_regclass('g294m2.g294m_pgpm_regrain_delta') is not null
+          and not has_schema_privilege('g294m_own', 'g294m2', 'USAGE')
+          and has_schema_privilege('g294m_w', 'g294m2', 'USAGE')
+          and has_table_privilege('g294m_w', 'g294m2.g294m_pgpm_regrain_delta', 'INSERT')
+          and pgpm._regrain_capture_active('public.g294m', 'g294m_p0000000000000000000_to_0000000000000000300'),
+          'LIVENESS: the delta was moved mid-run into a schema its owner cannot use and the writer can; capture is still on');
+select ok((select not prosecdef and proconfig is null from pg_proc where oid = 'public.g294m_pgpm_regrain_capture()'::regprocedure),
+          'the tick after the move put the writer-run capture back, the owner unable to reach the delta where it now is');
+set role g294m_w;
+select lives_ok($$ delete from public.g294m where id in (20, 30) $$,
+                'the writer deletes two rows of the regraining partition after the move');
+select lives_ok($$ insert into public.g294m values (205, 'w-205') $$, 'and inserts one');
+reset role;
+select is((select array_agg(id order by pgpm_seq) from g294m2.g294m_pgpm_regrain_delta where id in (20, 30, 205)),
+          array[20, 30, 205]::bigint[], 'all three are captured in the moved delta, by key');
+do $$ declare v_st text; begin
+  for i in 1..20 loop
+    call pgpm.maintain('public.g294m', v_st);
+    exit when v_st like '%regrain=swapped:%';
+  end loop;
+end $$;
+select ok(exists (select 1 from pgpm.log where parent_table = 'public.g294m'::regclass
+                   and action = 'regrain' and method = 'copy_swap_drop' and lo = '0' and hi = '300'),
+          'LIVENESS: the regrain of g294m swapped the monolith into fine children');
+select is((select array_agg(id || ':' || payload order by id) from public.g294m
+            where id in (19, 20, 21, 29, 30, 31, 199, 200, 205)),
+          array['19:a19', '21:a21', '29:a29', '31:a31', '199:a199', '200:a200', '205:w-205'],
+          'after the swap the writer''s changes are in the table: the two deleted rows are gone, the inserted one is there');
+select is((select count(*)::int from public.g294m), 200,
+          'and the table holds its 201 rows less the two deleted plus the one inserted');
+
 select * from finish();
 
+drop table public.g294m;
+drop schema g294m2 cascade;
+drop owned by g294m_own, g294m_w cascade;
+drop role g294m_own;
+drop role g294m_w;
 drop schema g294f cascade;
 drop owned by g294f_own, g294f_app cascade;
 drop role g294f_own;

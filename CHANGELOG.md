@@ -11,18 +11,21 @@
   `from_hypertable_copy`'s online window, on `<rel>_pgpm_delta`). Both capture functions now write their delta
   as their owner, the table's (`pgpm._capture_definer`): `SECURITY DEFINER`, owned by the table's owner as
   the delta is, `search_path` pinned to `pg_catalog, pg_temp` so a writer's own operators never run as the
-  owner, and `EXECUTE` held by the owner alone so no role can attach the function to a table of its own.
-  Only while the owner can reach the delta: an owner without `USAGE` on the table's schema keeps the
-  writer-run capture (`SECURITY INVOKER`), which captures every role granted `INSERT` on the delta, as
-  before. Armed where each is minted and decided again by every regrain tick and every drain, drain step
+  owner; `EXECUTE` keeps PostgreSQL's default, since TimescaleDB re-creates the trigger on each new chunk
+  as the hypertable's owner. Only while the owner can reach the delta: an owner without `USAGE` on the
+  delta's schema keeps the writer-run capture (`SECURITY INVOKER`), which captures every role granted
+  `INSERT` on the delta, as before. Armed where each is minted and decided again by every regrain tick and every drain, drain step
   and cutover (`_scratch_owner_follow`), so a capture minted by an earlier release becomes
   `SECURITY DEFINER` at the first of them after the upgrade, and until then still writes as the writer; a
-  `USAGE` granted to or revoked from the owner mid-run takes effect from the next one. The writer grants
-  are still made. The capture's lost-delta refusal now names the table schema-qualified.
+  `USAGE` granted to or revoked from the owner, or a delta moved into a schema the owner cannot use, takes
+  effect from the next one (until then such a revoke or move refuses writes into the source). The writer
+  grants are still made. The capture's lost-delta refusal now names the table schema-qualified.
   Measured on 100,000-row updates of a capturing source on PG 15: about 2 to 3 microseconds more a captured
   write (the pinned `search_path`; the definer switch alone measured no difference). Tests `tests/294` and
   `tests/timescale/db/61`, guard
   `bench/regrain_capture_view_writer.sh`, mutations `capture_definer_dropped`,
+  `capture_definer_search_path_unpinned`, `capture_definer_execute_owner_only`, `capture_definer_not_rearmed`,
+  `capture_definer_owner_reach_unchecked` and `capture_definer_reach_by_fn_schema`.
   `capture_definer_search_path_unpinned`, `capture_definer_execute_kept`, `capture_definer_not_rearmed` and
   `capture_definer_owner_reach_unchecked`.
   `capture_definer_search_path_unpinned`, `capture_definer_execute_kept` and `capture_definer_not_rearmed`.

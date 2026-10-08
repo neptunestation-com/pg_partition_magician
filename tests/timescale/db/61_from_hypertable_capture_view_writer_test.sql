@@ -6,13 +6,13 @@
 -- _regrain_capture_grant gives INSERT on the delta only to the hypertable's grantees and owner, so a role
 -- whose only grant was on a view got 42501 'permission denied for table <rel>_pgpm_delta' on every write for
 -- the whole online window. The capture function now writes the delta as its owner (pgpm._capture_definer:
--- SECURITY DEFINER, search_path pinned, EXECUTE the owner's alone), armed where from_hypertable_copy mints it
+-- SECURITY DEFINER, search_path pinned, EXECUTE left at PUBLIC's default), armed where from_hypertable_copy mints it
 -- and re-armed by every drain, drain step and cutover, so a capture minted by an earlier release is armed by
 -- the first step after the upgrade.
 --
 --   (A) the view writer deletes id 5, updates id 6 and inserts id 1001 through the view: captured by key;
 --       a drain step applies them to the copy (5 gone, 6 updated, 1001 there, 4 and 7 untouched);
---   (B) no role but the owner holds EXECUTE on the capture function;
+--   (B) EXECUTE on the capture function keeps PUBLIC's default (part E is why);
 --   (C) the capture disarmed by hand to the pre-fix shape refuses the view writer (LIVENESS), and the next
 --       drain step arms it again: the view writer's update of id 7 is then captured;
 --   (D) a second hypertable, h61.g, whose OWNER loses USAGE on its schema during the online window (REVOKE
@@ -23,11 +23,16 @@
 --       application role's write (LIVENESS, the window up to the next step; P1-02 on PR #1132); the next drain
 --       step puts the writer-run capture back, and w61_app, which holds DML on the hypertable, USAGE on the
 --       schema and INSERT on the delta, deletes ids 5 and 8 and inserts id 1001 (two out, one in): captured,
---       and drained into the copy.
+--       and drained into the copy;
+--   (E) a third hypertable, h61e, handed to a new owner (ALTER TABLE ... OWNER TO) during the online window,
+--       before any step hands the capture function over: TimescaleDB creates the capture trigger on a new
+--       chunk as the hypertable's new owner, which must hold EXECUTE on the old owner's function, so an insert
+--       that creates a chunk (5001) is accepted and captured, as is one into an existing chunk (5002). An
+--       owner-only EXECUTE refused the first (P1-02 on PR #1132's second verification).
 -- ASYMMETRIC: one row out, one in, one changed, then a second change, so a lost write and a resurrected one
 -- cannot cancel. Roles are named, created only when absent, granted to postgres by name (this session writes
 -- as one below), and dropped at the end. The core half's guard is bench/regrain_capture_view_writer.sh.
-select plan(22);
+select plan(27);
 
 do $$ begin
   if not exists (select 1 from pg_roles where rolname = 'w61_vw') then create role w61_vw; end if;
@@ -83,9 +88,8 @@ select is(w61_dest_rows(), array['4:4', '6:66', '7:7', '1001:11'],
   'and the copy holds the view writer''s changes: 5 gone, 6 updated, 1001 there, 4 and 7 untouched');
 
 -- (B)
-select ok(not has_function_privilege('w61_other', :'fn', 'EXECUTE')
-          and not has_function_privilege('w61_vw', :'fn', 'EXECUTE'),
-  'no role but its owner holds EXECUTE on the capture function, PUBLIC included');
+select ok(has_function_privilege('w61_other', :'fn', 'EXECUTE'),
+  'EXECUTE on the capture function keeps PUBLIC''s default (TimescaleDB re-creates the trigger on each new chunk as the hypertable''s owner: part E)');
 
 -- (C) the capture as a release before this one minted it
 alter function :fn security invoker;
@@ -97,9 +101,8 @@ select throws_ok($$ update public.g61_v set v = 77 where id = 7 $$, '42501', 'pe
 reset role;
 select is(pgpm.from_hypertable_drain_delta_step('public.g61', 'ts'), 0::bigint,
   'LIVENESS: the next drain step ran, with nothing to drain');
-select ok((select prosecdef and proconfig = array['search_path=pg_catalog, pg_temp'] from pg_proc where oid = :'fn'::regprocedure)
-          and not has_function_privilege('w61_other', :'fn', 'EXECUTE'),
-  'the drain step armed the capture again: it writes as its owner, its search_path pinned, its EXECUTE the owner''s alone');
+select ok((select prosecdef and proconfig = array['search_path=pg_catalog, pg_temp'] from pg_proc where oid = :'fn'::regprocedure),
+  'the drain step armed the capture again: it writes as its owner, its search_path pinned');
 set role w61_vw;
 select lives_ok($$ update public.g61_v set v = 77 where id = 7 $$,
   'the view writer updates a row through the view again');
@@ -165,6 +168,44 @@ select is(pgpm.from_hypertable_drain_delta_step('h61.g', 'ts'), 3::bigint,
 select is(w61_h_dest_rows(), array['4:4', '7:7', '9:9', '1001:11'],
   'and the copy holds the application role''s changes: 5 and 8 gone, 1001 there, 4, 7 and 9 untouched');
 
+-- (E)
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'w61_eold') then create role w61_eold; end if;
+  if not exists (select 1 from pg_roles where rolname = 'w61_enew') then create role w61_enew; end if;
+end $$;
+grant w61_eold, w61_enew to postgres;   -- by name: re-owning a hypertable needs membership in both
+grant usage, create on schema public to w61_eold, w61_enew;
+create table public.h61e (ts timestamptz not null, id bigint not null, v int, primary key (id, ts));
+alter table public.h61e owner to w61_eold;
+-- chunks in public: re-owning a hypertable re-owns its chunks, and this image's postgres cannot reach
+-- _timescaledb_internal (tests/timescale/db/53 does the same)
+select create_hypertable('public.h61e', 'ts', chunk_time_interval => interval '1 day', associated_schema_name => 'public');
+insert into public.h61e select timestamptz '2024-01-01 00:00+00' + n * interval '2 hours', n, n from generate_series(1, 30) n;
+call pgpm.from_hypertable_copy('public.h61e', 'ts', p_track_changes => true);
+select p.oid::regprocedure::text as efn from pg_proc p
+ where p.oid = (select s.obj from pgpm.scratch s where s.parent_oid = 'public.h61e'::regclass::oid and s.kind = 'hypertable_delta_fn') \gset
+create function w61_e_delta_ids() returns bigint[] language plpgsql as $f$
+declare v bigint[];
+begin
+  execute format('select array_agg(id order by pgpm_seq) from %s', pgpm._scratch_rel('public.h61e', 'hypertable_delta')) into v;
+  return v;
+end $f$;
+alter table public.h61e owner to w61_enew;   -- the documented hand-over, mid-window, before any step
+select ok((select pg_get_userbyid(relowner) = 'w61_enew' from pg_class where oid = 'public.h61e'::regclass)
+          and (select pg_get_userbyid(proowner) = 'w61_eold' from pg_proc where oid = :'efn'::regprocedure)
+          and w61_e_delta_ids() is null
+          and not exists (select 1 from timescaledb_information.chunks
+                           where hypertable_name = 'h61e' and range_start <= '2024-03-01 00:00+00' and range_end > '2024-03-01 00:00+00'),
+  'LIVENESS: h61e is the new owner''s, its capture function still the old owner''s, its delta empty, and no chunk covers 2024-03-01 yet');
+select lives_ok($$ insert into public.h61e values ('2024-01-01 05:00+00', 5002, 2) $$,
+  'an insert into an existing chunk goes through after the owner change');
+select lives_ok($$ insert into public.h61e values ('2024-03-01 00:00+00', 5001, 1) $$,
+  'and so does an insert that creates a new chunk, its capture trigger created as the new owner');
+select ok(exists (select 1 from timescaledb_information.chunks
+                   where hypertable_name = 'h61e' and range_start <= '2024-03-01 00:00+00' and range_end > '2024-03-01 00:00+00'),
+  'LIVENESS: that insert created the chunk covering 2024-03-01');
+select is(w61_e_delta_ids(), array[5002, 5001]::bigint[], 'and both inserts are captured, by key, in order');
+
 select * from finish();
 
 -- roles are cluster-wide: leave none behind. Everything they hold a grant on goes first.
@@ -176,3 +217,11 @@ revoke usage on schema public from w61_vw, w61_other;
 drop role w61_vw, w61_other;
 drop schema h61 cascade;
 drop role w61_hown, w61_app;
+select pgpm._scratch_rel('public.h61e', 'hypertable_delta')::text as edelta \gset
+select pgpm._scratch_rel('public.h61e', 'hypertable_dest')::text as edest \gset
+drop table public.h61e;
+drop table :edelta, :edest;
+drop function :efn;
+drop function w61_e_delta_ids();
+revoke usage, create on schema public from w61_eold, w61_enew;
+drop role w61_eold, w61_enew;

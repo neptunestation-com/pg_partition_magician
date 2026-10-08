@@ -2237,13 +2237,21 @@ $$;
 -- SECURITY DEFINER, and its owner is the delta's: both are owned like the parent from the tick that mints them
 -- and follow it together (_scratch_owner_follow). Any write the table accepts, by whatever path, is captured
 -- (but see ONLY WHILE below).
--- A definer function runs the writer's input as its owner, so two more clauses go with it. Its search_path is
--- pinned to pg_catalog (then pg_temp, so it is never searched first): the body names the delta schema-
+-- A definer function runs the writer's input as its owner, so one more clause goes with it: its search_path is
+-- pinned to pg_catalog (then pg_temp, so it is never searched first). The body names the delta schema-
 -- qualified, but its operators (the regclass `=`, `||`) resolve through the search_path, and a writer who put
--- a schema of its own ahead of pg_catalog would otherwise run its own `=` as the table's owner. And EXECUTE is
--- the owner's alone: PostgreSQL checks it at CREATE TRIGGER and never when a trigger fires, so revoking it
--- costs the capture nothing, while PUBLIC's default grant (or a role's ALTER DEFAULT PRIVILEGES on functions)
--- let any role attach the function to a table of its own and write keys into the delta as the owner.
+-- a schema of its own ahead of pg_catalog would otherwise run its own `=` as the table's owner.
+-- EXECUTE is left as the function was created, PUBLIC's default included. It is checked at CREATE TRIGGER, and
+-- TimescaleDB runs one, as the hypertable's owner, for every chunk it creates: after ALTER TABLE <hypertable>
+-- OWNER TO during the online window the function stays the old owner's until a step hands it over, so an
+-- owner-only EXECUTE refused every insert that needed a new chunk (P1-02 on PR #1132). A trigger function
+-- cannot be called from SQL at all, so EXECUTE gates nothing else. What PUBLIC's EXECUTE does allow: a role
+-- that can create a table with the key's columns can attach the function to it and add keys to the delta as
+-- the owner. A key in the delta changes no row: the regrain's reconcile (_regrain_reconcile) and the
+-- hypertable's drains and cutover take the SOURCE as the authority for every key they consume, deleting the
+-- key's copy and re-reading it from the source, and a key below the cursor that the source does not hold has
+-- no copy to delete. It costs that reconcile work, as the keys every writer of the table can already insert
+-- through its INSERT on the delta (_regrain_capture_grant) do.
 -- ONLY WHILE THE OWNER CAN REACH THE DELTA. A definer writes the delta by its schema-qualified name, which
 -- needs the owner's USAGE on the delta's schema (and INSERT on the delta, which an owner has). A table owner
 -- may lack that USAGE: REVOKE ALL ON SCHEMA ... FROM PUBLIC with USAGE granted to the application's roles
@@ -2255,13 +2263,19 @@ $$;
 -- as it was before (no role in the write can reach the delta). Re-decided on every tick, so a USAGE granted
 -- to the owner, or revoked from it, mid-run takes effect from the next tick; until that tick a write into
 -- the source meets the capture as the previous tick left it.
+-- The decision is the delta's CURRENT schema's, read at the step, so a delta moved (SET SCHEMA) into a schema
+-- its owner cannot use is put back on the writer-run capture by the next step too; between the move and that
+-- step the definer capture cannot name it and every write into the source is refused, 'permission denied for
+-- schema', where the writer-run capture would have written it where it now is. A definer function cannot fall
+-- back to the writer's privileges inside one call, so that window is the price of the definer; it is one
+-- step long, and documented.
 -- Called where a capture function is minted (_regrain_capture_install, from_hypertable_copy) and by every tick
 -- that works one (_scratch_owner_follow), so a capture minted before this change is armed by the first tick
 -- that resumes it. Issues no DDL, and returns false, when the function is already as it should be. A delta
--- that is gone (p_delta null) changes nothing but the EXECUTE grants.
+-- that is gone (p_delta null) changes nothing.
 create or replace function pgpm._capture_definer(p_fn regprocedure, p_delta regclass)
 returns boolean language plpgsql as $$
-declare v_g record; v_did boolean := false; v_reach boolean;
+declare v_did boolean := false; v_reach boolean;
 begin
   select has_schema_privilege(p.proowner, c.relnamespace, 'USAGE') and has_table_privilege(p.proowner, c.oid, 'INSERT')
     into v_reach
@@ -2278,15 +2292,6 @@ begin
       v_did := true;
     end if;
   end if;
-  for v_g in
-    select distinct a.grantee
-      from pg_proc p cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
-     where p.oid = p_fn and a.grantee <> p.proowner
-  loop
-    execute format('revoke all on function %s from %s cascade', p_fn::text,
-                   case when v_g.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(v_g.grantee)) end);
-    v_did := true;
-  end loop;
   return v_did;
 end;
 $$;

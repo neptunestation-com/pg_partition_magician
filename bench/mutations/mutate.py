@@ -10317,13 +10317,17 @@ MUTATIONS["capture_definer_search_path_unpinned"] = (
     [("      execute format('alter function %s security definer set search_path = pg_catalog, pg_temp', p_fn::text);\n",
       "      execute format('alter function %s security definer', p_fn::text);\n", 1)],
 )
-MUTATIONS["capture_definer_execute_kept"] = (
+MUTATIONS["capture_definer_execute_owner_only"] = (
     "bench/regrain_capture_view_writer.sh",
-    "The capture is SECURITY DEFINER but keeps PUBLIC's default EXECUTE, so any role may attach it to a table of "
-    "its own (CREATE TRIGGER checks EXECUTE) and write keys into the delta as the table's owner. One clause, the "
-    "revoke. tests/294 parts C and D catch it (g294_other holds EXECUTE and attaches the function).",
-    [("    execute format('revoke all on function %s from %s cascade', p_fn::text,\n",
-      "    perform format('revoke all on function %s from %s cascade', p_fn::text,\n", 1)],
+    "The definer capture's EXECUTE is revoked from PUBLIC, leaving it to the function's owner. TimescaleDB "
+    "re-creates the capture trigger on each new chunk as the hypertable's owner, and CREATE TRIGGER checks "
+    "EXECUTE, so after ALTER TABLE <hypertable> OWNER TO during the online window every insert that needs a new "
+    "chunk is refused until a step hands the function over (P1-02 on PR #1132's second verification). One "
+    "clause, the revoke. tests/294 part C catches it (a role other than the owner cannot create a trigger with "
+    "the function); tests/timescale/db/61 part E shows the chunk refusal on the timescale track.",
+    [("      execute format('alter function %s security definer set search_path = pg_catalog, pg_temp', p_fn::text);\n",
+      "      execute format('alter function %s security definer set search_path = pg_catalog, pg_temp', p_fn::text);\n"
+      "      execute format('revoke execute on function %s from public', p_fn::text);\n", 1)],
 )
 MUTATIONS["capture_definer_not_rearmed"] = (
     "bench/regrain_capture_view_writer.sh",
@@ -10343,6 +10347,16 @@ MUTATIONS["capture_definer_owner_reach_unchecked"] = (
     "writes of every role granted INSERT on the delta (P1-02 on PR #1132). One clause, the reach test. "
     "tests/294 part F catches it (the application role is refused and its writes never reach the table).",
     [("  if v_reach then\n", "  if v_reach is not null then\n", 1)],
+)
+MUTATIONS["capture_definer_reach_by_fn_schema"] = (
+    "bench/regrain_capture_view_writer.sh",
+    "The reach test reads the capture FUNCTION's schema instead of the delta's current one, so a delta moved "
+    "(SET SCHEMA) mid-run into a schema its owner cannot use keeps the definer capture at every later tick, and "
+    "every write into the regraining partition is refused 'permission denied for schema' until the swap "
+    "(V-01 on PR #1132). One clause, whose schema. tests/294 part G catches it (the tick leaves the definer and "
+    "the writer is refused).",
+    [("  select has_schema_privilege(p.proowner, c.relnamespace, 'USAGE') and has_table_privilege(p.proowner, c.oid, 'INSERT')\n",
+      "  select has_schema_privilege(p.proowner, p.pronamespace, 'USAGE') and has_table_privilege(p.proowner, c.oid, 'INSERT')\n", 1)],
 )
 
 

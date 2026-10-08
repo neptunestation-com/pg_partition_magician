@@ -750,7 +750,9 @@ capture function, are recorded in [`pgpm.scratch`](#pgpmscratch) as they are cre
 capture trigger, which writes the delta through its recorded oid, so a delta renamed during the online
 window goes on logging every write, and a table you create under the name it gave up takes none. Each write
 holds the delta while it writes it, so a rename, move or drop of the delta waits for the writes in flight, and
-a write that arrives while one is pending waits for it and then writes the delta where it now is. They are owned
+a write that arrives while one is pending waits for it and then writes the delta where it now is (a move into
+a schema the hypertable's owner cannot use refuses writes until the next step: see the regrain capture's
+`SECURITY DEFINER` below, which this capture shares). They are owned
 like the hypertable, with no grant beyond the owner's (the delta also grants `INSERT` to every role that can
 write the hypertable), from the moment they are created, as
 is the delta's `pgpm_seq` identity sequence, so no role the migrating role's default privileges name reads
@@ -1644,8 +1646,9 @@ from the parent when the prepare tick mints them and found
 by **oid** from then on (`config.regrain_delta_oid`, `config.regrain_capture_fn_oid`), so renaming the parent
 mid-regrain changes nothing: the trigger keeps writing the delta it was given, and the reconcile, the swap
 gate and the swap read that same relation, in the schema it is in. The trigger reaches the delta through
-that oid too, so a delta you rename or move mid-regrain goes on taking every change, and a table you create
-under the name it gave up takes none. Each write holds the delta while it writes it (`ROW EXCLUSIVE`, the
+that oid too, so a delta you rename or move mid-regrain goes on taking every change (with one exception, a
+move into a schema the table's owner cannot use, below), and a table you create under the name it gave up
+takes none. Each write holds the delta while it writes it (`ROW EXCLUSIVE`, the
 lock its insert takes anyway), so a rename, move or drop of the delta waits for the writes in flight, and a
 write that arrives while one is pending waits for it and then writes the delta where it now is, even when
 the same transaction gives the freed name to a table of yours. A delta you drop refuses every write into the regraining partition
@@ -1663,23 +1666,30 @@ it is then, so a key column renamed between two regrains is picked up rather tha
 the source; a relation already holding the name it would mint under, other than the one this parent recorded,
 is refused rather than adopted. The capture function writes the delta as its **owner**, the parent's, never
 as the writer: it is `SECURITY DEFINER`, owned by the table's owner (as the delta is, and both follow the
-table's owner together), with its `search_path` pinned to `pg_catalog, pg_temp` and `EXECUTE` held by its
-owner alone (PostgreSQL checks `EXECUTE` when a trigger is
-created, never when it fires, so no role can attach it to a table of its own). So every write the table
+table's owner together), with its `search_path` pinned to `pg_catalog, pg_temp`. Its `EXECUTE` keeps
+PostgreSQL's default (`PUBLIC`): TimescaleDB re-creates a hypertable's triggers on each new chunk as the
+hypertable's owner, which after `ALTER TABLE ... OWNER TO` is not yet the function's. So a role able to
+create a table with the key's columns can attach the function to it and add keys to the delta, and a key in
+the delta changes no row: the reconcile, the drains and the cutover take the source's row for every key they
+consume. So every write the table
 accepts is captured whatever path it took: directly, through the parent or the partition, or through an
 ordinary **view** over the table, which PostgreSQL checks as the view's owner while the table's triggers fire
 as the session's role, so the writer needs no privilege on the delta. The same holds for a
 `from_hypertable_copy` tracking delta. One layout keeps the writer-run capture: a definer names the delta
 by its schema, so it needs the owner's `USAGE` on that schema, and a table whose owner holds none (`REVOKE
 ALL ON SCHEMA ... FROM PUBLIC` with `USAGE` granted to the application's roles alone) keeps a `SECURITY
-INVOKER` capture, which writes as the writer exactly as before 0.6.0's next release: every role granted
+INVOKER` capture, which writes as the writer: every role granted
 `INSERT` on the delta (below) is captured, and a role that writes only through a view is refused. The
 capture is set up this way where it is minted and decided again on every regrain tick and every drain,
 drain step and cutover, so a capture minted by an earlier release becomes `SECURITY DEFINER` at the first
 of them after the upgrade (until that tick it still writes as the writer, and a role that writes through a
 view is refused as before), and a `USAGE` on the schema granted to the owner, or revoked from it, mid-run
 takes effect from the next one (until then the capture is as the last one left it, so a revoke refuses
-every write into the source, `permission denied for schema`, until that tick). The delta is owned like the
+every write into the source, `permission denied for schema`, until that tick). The same holds for the
+delta itself: the decision reads the schema the delta is in at that tick, so a delta moved (`ALTER TABLE
+... SET SCHEMA`) into a schema the table's owner cannot use gets the writer-run capture from the next tick,
+and until that tick every write into the source is refused, `permission denied for schema`; a definer
+cannot fall back to the writer's privileges within one write. The delta is owned like the
 parent, and every role holding
 `INSERT`, `UPDATE` or `DELETE` on the parent, or on the regraining partition itself (which PostgreSQL lets a
 role write directly with no grant on the parent), table- or column-level, is still granted `INSERT` on it, and
