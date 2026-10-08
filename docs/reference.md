@@ -166,8 +166,10 @@ option, so the role that made it can still revoke it on the parent. That needs t
 `transmute` to be able to become each such role (a superuser can, any other role only one it is a member
 of) and the role to hold `USAGE` on the schema; a table with a grant by a role it cannot become is refused
 before anything is committed, naming the roles. Run the conversion as a member of each, or have each revoke
-its grants and the owner make them. `from_hypertable`'s swap and `untransmute` carry grants the same way, and
-refuse the same way inside their own transaction, which then rolls back whole.
+its grants and the owner make them. The table's identity sequences are carried the same way onto the
+parent's (their grantors are asked about up front too). `from_hypertable`'s swap and `untransmute` carry
+grants the same way (`untransmute` the identity sequences' as well), and refuse the same way inside their own
+transaction, which then rolls back whole.
 
 Policies live on the parent, and only on the parent: a parent policy governs parent-routed reads into a
 partition, and reaching a partition directly needs grants that live on the parent anyway. Each is created
@@ -247,7 +249,12 @@ the form it had (`ALWAYS` or `BY DEFAULT`) and with its sequence's options (`INC
 the sequence itself, which `ALTER SEQUENCE` has to wait for (it takes no lock on the table), so a change
 committed while the conversion runs is either carried or waits until the cutover commits. Its new sequence
 takes the original's name (`t_id_seq`, or whatever the original was renamed to), not the staging parent's
-`t_pgpm_new_id_seq`, so a `setval`, `GRANT ... ON SEQUENCE` or `ALTER SEQUENCE` naming it keeps working. It
+`t_pgpm_new_id_seq`, so a `setval`, `GRANT ... ON SEQUENCE` or `ALTER SEQUENCE` naming it keeps working,
+and it ends with exactly the original sequence's grants, carried the way the table's are (below): reset, then
+replayed under their grantors, so a role you granted `USAGE` keeps it and one you revoked does not get it back
+from the converting role's default privileges. They are read in the cutover the statement before the
+original is dropped; a `GRANT` or `REVOKE` on it committed in the instant between is not carried, and one
+still open at the drop fails the cutover, so make privilege changes before or after it. It
 is set from three values read under
 the cutover's lock: the original sequence's own next value, and the column's largest and smallest ids. The
 largest and smallest are re-read there only when an index leading with the column answers them, which also
