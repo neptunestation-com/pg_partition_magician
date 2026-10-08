@@ -1134,6 +1134,7 @@ run_perf() {
     "bench/uninstall_scratch_by_record.sh pgpm_perf272"
     "bench/transmute_step_precision.sh pgpm_perf284"
     "bench/archive_partition_whole_contract.sh pgpm_perf282"
+    "bench/regrain_capture_delta_by_record.sh pgpm_perf289"
   )
   local selected=()
   local n=${#guards[@]} idx

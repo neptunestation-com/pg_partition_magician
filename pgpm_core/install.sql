@@ -4639,6 +4639,7 @@ declare
   cfg pgpm.config; v_nsp name; v_delta name; v_fn name; v_delta_reg regclass; v_taken regclass; v_taken_fn regprocedure;
   v_keyidx oid; v_keycols_q text; v_newvals_q text; v_oldvals_q text; v_bad_q text;
   v_src regclass;   -- the source, as pgpm.part recorded it (#768), never <parent's schema>.<name>
+  v_nkeys int; v_oldargs text; v_newargs text;   -- #1051: the capture's insert by the record, its bind parameters
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
@@ -4673,12 +4674,16 @@ begin
 
   select string_agg(quote_ident(a.attname), ', ' order by k.ord),
          string_agg('new.' || quote_ident(a.attname), ', ' order by k.ord),
-         string_agg('old.' || quote_ident(a.attname), ', ' order by k.ord)
-    into v_keycols_q, v_newvals_q, v_oldvals_q
+         string_agg('old.' || quote_ident(a.attname), ', ' order by k.ord),
+         count(*)
+    into v_keycols_q, v_newvals_q, v_oldvals_q, v_nkeys
     from pg_index i
     cross join lateral unnest(i.indkey) with ordinality as k(attnum, ord)
     join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
    where i.indexrelid = v_keyidx;
+  -- the capture's bind parameters: $1..$n for one key row, $n+1..$2n for an UPDATE's second
+  select string_agg('$' || g, ', ' order by g) into v_oldargs from generate_series(1, v_nkeys) g;
+  select string_agg('$' || g, ', ' order by g) into v_newargs from generate_series(v_nkeys + 1, 2 * v_nkeys) g;
 
   -- The names are the parent's current relname plus a suffix, and a relation already under one of them that
   -- is not the one this parent recorded is somebody else's (#496): refuse rather than adopt it. Before,
@@ -4731,8 +4736,36 @@ begin
   perform pgpm._scratch_mint(p_parent, v_delta_reg);
   perform pgpm._regrain_capture_grant(p_parent, v_delta_reg, v_src);
 
+  -- #1051: the capture reaches the delta by the oid recorded below, as every reader does (#496), never by
+  -- the name alone. A static `insert into <rel>_pgpm_regrain_delta` resolved that name at every write, so a
+  -- delta the operator renamed mid-regrain refused every write into the source (42P01) for the life of the
+  -- regrain, and a table later created under the name took the keys the reconcile and the swap never read.
+  -- The static insert stays as the fast path, taken only while the minted name still leads to the delta's
+  -- oid: one name lookup a row, and the insert keeps its cached plan. (It is also the body text the #969
+  -- upgrade proof above recognises a pgpm-minted capture by.) Once it does not (the delta renamed or moved,
+  -- or another relation under the name), the oid is rendered to the delta's current name (regclass output,
+  -- qualified wherever the writer's search_path would not find it) and the insert is dynamic, the key values
+  -- bound. A delta that is gone refuses the write as 42P01, as the static insert did, naming the parent and
+  -- the remedy (the next tick restarts the run and re-mints capture: _regrain_capture_drift), rather than as
+  -- a syntax error at the bare oid.
   execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$
+    declare
+      d regclass;
     begin
+      if pg_catalog.to_regclass(%L) is distinct from %s::pg_catalog.oid::pg_catalog.regclass then
+        select c.oid::pg_catalog.regclass into d from pg_catalog.pg_class c where c.oid = %s;
+        if d is null then
+          raise exception using errcode = ''undefined_table'',
+            message = pg_catalog.format(%L, %s::pg_catalog.oid::pg_catalog.regclass);
+        end if;
+        if tg_op = ''DELETE'' then
+          execute ''insert into '' || d::text || %L using %s; return old;
+        elsif tg_op = ''UPDATE'' then
+          execute ''insert into '' || d::text || %L using %s, %s; return new;
+        else
+          execute ''insert into '' || d::text || %L using %s; return new;
+        end if;
+      end if;
       if tg_op = ''DELETE'' then
         insert into %I.%I (%s) values (%s); return old;
       elsif tg_op = ''UPDATE'' then
@@ -4742,6 +4775,13 @@ begin
       end if;
     end $pgpm$',
     v_nsp, v_fn,
+    format('%I.%I', v_nsp, v_delta), v_delta_reg::oid, v_delta_reg::oid,
+    format('pg_partition_magician: the regrain change capture of %%s has lost the delta table the prepare tick recorded for it (oid %s), so no write to the regraining partition can be logged. The next pgpm.regrain_step tick on the table restarts the regrain and mints a fresh delta, or pgpm.regrain_cancel ends it.',
+           v_delta_reg::oid),
+    p_parent::oid,
+    format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_oldvals_q,
+    format(' (%s) values (%s), (%s)', v_keycols_q, v_oldargs, v_newargs), v_oldvals_q, v_newvals_q,
+    format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_newvals_q,
     v_nsp, v_delta, v_keycols_q, v_oldvals_q,
     v_nsp, v_delta, v_keycols_q, v_oldvals_q, v_newvals_q,
     v_nsp, v_delta, v_keycols_q, v_newvals_q);

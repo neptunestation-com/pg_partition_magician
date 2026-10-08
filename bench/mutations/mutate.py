@@ -9637,6 +9637,53 @@ MUTATIONS["hypertable_capture_delta_by_name"] = (
 MUTATION_SRC["hypertable_capture_delta_by_name"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_capture_delta_by_name"] = "timescale"
 
+# #1051: regrain's change capture writes its delta through the oid the prepare tick recorded.
+MUTATIONS["regrain_capture_delta_insert_by_name"] = (
+    "bench/regrain_capture_delta_by_record.sh",
+    "Pre-#1051 _regrain_capture_install: the capture function it mints inserts into "
+    "<schema>.<rel>_pgpm_regrain_delta by NAME alone (the fast path without the by-oid fallback), while the "
+    "reconcile, the swap gate, the swap and regrain_cancel find the delta by pgpm.config.regrain_delta_oid "
+    "(#496). Rename the recorded delta mid-regrain and every write into the regraining source dies 42P01 for "
+    "the life of the regrain; a table the operator then creates under the freed name takes the captured keys, "
+    "which nothing reconciles, so the swap attaches copies that miss them. tests/288 catches it: the three "
+    "writes after the rename die, the renamed delta holds no keys, the operator's table holds 9600, a288 "
+    "after the swap still has row 8 and lacks 9500 and 9600, and a dropped delta dies with PostgreSQL's "
+    "message instead of pgpm's.",
+    [("""  execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$
+    declare
+      d regclass;
+    begin
+      if pg_catalog.to_regclass(%L) is distinct from %s::pg_catalog.oid::pg_catalog.regclass then
+        select c.oid::pg_catalog.regclass into d from pg_catalog.pg_class c where c.oid = %s;
+        if d is null then
+          raise exception using errcode = ''undefined_table'',
+            message = pg_catalog.format(%L, %s::pg_catalog.oid::pg_catalog.regclass);
+        end if;
+        if tg_op = ''DELETE'' then
+          execute ''insert into '' || d::text || %L using %s; return old;
+        elsif tg_op = ''UPDATE'' then
+          execute ''insert into '' || d::text || %L using %s, %s; return new;
+        else
+          execute ''insert into '' || d::text || %L using %s; return new;
+        end if;
+      end if;
+      if tg_op = ''DELETE'' then
+""", """  execute format('create or replace function %I.%I() returns trigger language plpgsql as $pgpm$
+    begin
+      if tg_op = ''DELETE'' then
+""", 1),
+     ("""    v_nsp, v_fn,
+    format('%I.%I', v_nsp, v_delta), v_delta_reg::oid, v_delta_reg::oid,
+    format('pg_partition_magician: the regrain change capture of %%s has lost the delta table the prepare tick recorded for it (oid %s), so no write to the regraining partition can be logged. The next pgpm.regrain_step tick on the table restarts the regrain and mints a fresh delta, or pgpm.regrain_cancel ends it.',
+           v_delta_reg::oid),
+    p_parent::oid,
+    format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_oldvals_q,
+    format(' (%s) values (%s), (%s)', v_keycols_q, v_oldargs, v_newargs), v_oldvals_q, v_newvals_q,
+    format(' (%s) values (%s)', v_keycols_q, v_oldargs), v_newvals_q,
+""", """    v_nsp, v_fn,
+""", 1)],
+)
+
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
