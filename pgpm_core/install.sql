@@ -7612,14 +7612,15 @@ $$;
 --
 -- A fresh id bound's refusal names a smaller step as a remedy only when one would work (#1088). p_min and
 -- p_frontier are the oldest and newest values the fresh bound was computed from, and p_headroom the extra grid
--- steps it was pushed out by. A smaller step only moves the bound toward them, so the tightest bound any step
--- can give is the finest one's: the column's unit (1, or 10^-s for a negative scale s, which _id_step_contract
--- holds every step to), with the same headroom. When the column's type cannot store even that bound (the
--- newest key is the type's maximum, 9999 in numeric(4,0): every step puts hi at 10000 or past it), the step
--- remedy is one the operator follows only to be refused again, so the refusal names the wider type alone. The
--- finest bound is tried in the base type (through any domain, with its typmod): a precision or a range limit
--- only grows worse with a coarser step, a domain's CHECK need not, so a bound only a domain refuses keeps the
--- step remedy.
+-- steps it was pushed out by. Every step is a multiple of the column's unit (1, or 10^-s for a negative scale
+-- s, which _id_step_contract holds every step and anchor to), so every grid line is one of the unit's: no step
+-- puts lo above the unit's line at or below p_min, nor hi below the unit's next line above p_frontier plus the
+-- same headroom in units. That finest step's bound is the tightest any step can give. When the column's type
+-- cannot store even that bound (the newest key is the type's maximum, 9999 in numeric(4,0): every step puts hi
+-- at 10000 or past it), the step remedy is one the operator follows only to be refused again, so the refusal
+-- names the wider type alone. The finest bound is tried in the base type (through any domain, with its typmod,
+-- though transmute refuses a domain-typed id column before asking): a precision or a range limit only grows
+-- worse with a coarser step, where a domain's CHECK need not.
 drop function if exists pgpm._control_bound_contract(regclass, name, text, text, text, boolean);
 create or replace function pgpm._control_bound_contract(p_parent regclass, p_control name, p_kind text,
                                                         p_lo text, p_hi text, p_resumed boolean,

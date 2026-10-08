@@ -1194,7 +1194,7 @@ run_perf() {
     "bench/transmute_publication_change_refused.sh pgpm_perf314"
     "bench/adopt_partition.sh pgpm_perf315"
     "bench/write_block_skips_hand_detached.sh pgpm_perf316"
-    "bench/bound_contract_remedy.sh pgpm_perf120"
+    "bench/bound_contract_remedy.sh pgpm_perf318"
   )
   local selected=()
   local n=${#guards[@]} idx
