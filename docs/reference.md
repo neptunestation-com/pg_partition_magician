@@ -780,7 +780,11 @@ names this copy mints (`<rel>_pgpm_dest`, and for `p_track_changes` `<rel>_pgpm_
 `<rel>_pgpm_delta_fn()` and the trigger `<rel>_pgpm_delta_trg` on the hypertable) that is not this
 hypertable's recorded copy is **refused**, never dropped or replaced: rename or drop it and re-run. A copy
 an earlier release made carries no record if it predates the comment (pgpm 0.6.0 and earlier) and is
-refused the same way; drop it, and this copy rebuilds it. A re-run replaces this hypertable's previous copy.
+refused the same way; drop it, and this copy rebuilds it. A re-run replaces this hypertable's previous copy:
+the copy, delta and capture function [`pgpm.scratch`](#pgpmscratch) records for it are dropped by their oids
+wherever they are now, with the triggers firing that function on the hypertable. So a re-run after the
+hypertable was renamed or moved with `ALTER TABLE ... SET SCHEMA` (after a move the cutover finds no copy
+beside it and names this re-run) leaves nothing of the previous copy behind.
 Each chunk's bounds are
 applied in the dimension's own type (`timestamptz`, `timestamp` without time zone, or `date`), so the copy is exact under any
 session `TimeZone` and `DateStyle`; a hypertable on a dimension of any other type is refused here. The same

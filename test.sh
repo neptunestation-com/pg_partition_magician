@@ -572,6 +572,10 @@ run_timescale() {
     # of the pairs discriminate.sh completes with its three mutants.
     echo "--- from_hypertable and the cutover ask transmute's argument rules before the swap (issue #1085) ---"
     bash "$(dirname "$0")/bench/hypertable_argument_rules.sh" pgpm_test-timescale pgpm_perf110 || fail=1
+    # #1083's guard, the same way: it re-runs tests/timescale/db/60 against the real install, the clean-code half
+    # of the pair discriminate.sh completes with the hypertable_copy_rerun_*_by_name mutations.
+    echo "--- a re-run copy replaces the recorded copy, wherever it lives (issue #1083) ---"
+    bash "$(dirname "$0")/bench/hypertable_copy_rerun_by_record.sh" pgpm_test-timescale pgpm_perf116 || fail=1
 
     echo "--- discriminate (timescale-scoped mutations) ---"
     bash "$(dirname "$0")/bench/discriminate.sh" --track=timescale pgpm_test-timescale || fail=1

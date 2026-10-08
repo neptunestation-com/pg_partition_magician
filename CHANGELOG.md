@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **A re-run of `from_hypertable_copy` replaces the previous copy by its record, wherever it lives** (#1083).
+  The re-run replaced the copy, delta and capture function `pgpm.scratch` recorded only while they sat under
+  the names it mints in the hypertable's current schema. After `ALTER TABLE <hypertable> SET SCHEMA` (when the
+  cutover finds no copy and names this re-run as the remedy) a tracking re-run died raw 42710 on the capture
+  trigger the table carried with it, which `_from_hypertable_scratch_check` had accepted as recorded, and either
+  re-run left the previous copy, a full second copy of the rows, in the old schema with its record overwritten;
+  one without tracking also left the old capture firing into a delta nothing recorded. A RENAME of the
+  hypertable left the previous apparatus the same way, under its old name. The re-run now drops each recorded
+  object by its oid, and the hypertable's triggers firing the recorded function, so every name the check lets
+  through is free when the copy mints it. Test `tests/timescale/db/60`, guard
+  `bench/hypertable_copy_rerun_by_record.sh`, mutations `hypertable_copy_rerun_capture_by_name`,
+  `hypertable_copy_rerun_delta_by_name` and `hypertable_copy_rerun_dest_by_name`.
+
 - **A refused hypertable handoff no longer loses the retention it carried** (#1079). When
   `from_hypertable_cutover`'s handoff to `transmute` refused after the swap had committed, the reference's
   remedy (fix what the refusal names, call `pgpm.transmute` on the table) registered the table with no
