@@ -910,6 +910,10 @@ run_archive() {
   # like the parent, sampled after the read, and left out of the NDJSON strategy.
   echo "--- a Parquet export reads the relation it was handed, never a namesake guard (issue #1055) ---"
   bash "$(dirname "$0")/bench/archive_parquet_read_by_regclass.sh" pgpm_test-archive pgpm_perf292 || fail=1
+  # The one-snapshot guard (#1062) re-runs tests/archive/db/47 for the same reason: the clean-code half of the
+  # pair bench/discriminate.sh completes with the child resolved in two statements again.
+  echo "--- archive._resolve_child resolves the child under one snapshot guard (issue #1062) ---"
+  bash "$(dirname "$0")/bench/archive_resolve_child_one_snapshot.sh" pgpm_test-archive pgpm_perf297 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi

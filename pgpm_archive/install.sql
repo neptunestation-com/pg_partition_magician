@@ -3125,25 +3125,54 @@ $$;
 -- relation by its name in that window had the export read the NEW relation's rows and PUT them under the
 -- OLD relation's claim, over its export: after the documented export-then-drop workflow, the only copy of
 -- those rows. Held, a concurrent DROP, RENAME or ALTER of the child waits until the export has committed.
--- LOCK TABLE resolves the name again once the lock is granted, so the oid read after it is the relation
--- held; one that differs from the first resolution was dropped or replaced while this waited, and is
--- refused rather than exported in its place.
+-- LOCK TABLE resolves the name again once the lock is granted; a relation that by then is no longer the
+-- first resolution's (dropped or replaced while this waited) is refused rather than exported in its place.
+--
+-- The schema and the child are read in ONE statement, joined through the parent's relnamespace, so one
+-- catalog snapshot answers both (#1062). They used to be two: the parent's schema NAME first, then
+-- `<that name>.p_child` by name, and a second session that swapped two schemas' names between them (the
+-- parent's schema renamed away, another given its name) had this resolve, hold and return the namesake in
+-- the schema that took the name. The anchor below refused that for a recorded child, but a relation
+-- pgpm.part has no row for came back as the namesake, and archive.to_s3 exported the namesake's rows under
+-- the named relation's key. The LOCK still goes by name, since LOCK TABLE takes nothing else, so the same
+-- swap landing between that statement and the LOCK makes the LOCK meet the namesake. Hence the check after
+-- it is by IDENTITY, never by name: the relation named p_child in the parent's schema, read again through
+-- relnamespace, must still be the one resolved, and pg_locks must show THIS backend holding it. A name that
+-- led to another relation because its schema was renamed meanwhile is resolved again (three tries, then
+-- refused); the stray lock it took is released with the transaction.
 create or replace function archive._resolve_child(p_parent regclass, p_child name, p_caller text)
 returns regclass language plpgsql as $$
-declare v_nsp name; v_now regclass; v_held regclass; v_anchor oid;
+declare v_nsp name; v_now regclass; v_held regclass; v_locked boolean; v_anchor oid; v_tries int := 0;
 begin
-  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
-  v_now := to_regclass(format('%I.%I', v_nsp, p_child));
-  if v_now is null then
-    raise exception 'pg_partition_magician: %.% does not exist; % resolves p_child in the schema of p_parent, not through search_path',
-      quote_ident(v_nsp), quote_ident(p_child), p_caller;
-  end if;
-  execute format('lock table %I.%I in access share mode', v_nsp, p_child);
-  v_held := to_regclass(format('%I.%I', v_nsp, p_child));
-  if v_held is distinct from v_now then
-    raise exception 'pg_partition_magician: %.% was dropped or replaced while % was resolving it (oid % then, % now); refusing to export it',
-      quote_ident(v_nsp), quote_ident(p_child), p_caller, v_now::oid, coalesce(v_held::oid::text, 'none');
-  end if;
+  loop
+    v_tries := v_tries + 1;
+    -- one statement, one snapshot: the parent's schema and the relation of that name in it (#1062)
+    select n.nspname, c.oid::regclass into v_nsp, v_now
+      from pg_class p join pg_namespace n on n.oid = p.relnamespace
+      left join pg_class c on c.relnamespace = p.relnamespace and c.relname = p_child
+     where p.oid = p_parent;
+    if v_now is null then
+      raise exception 'pg_partition_magician: %.% does not exist; % resolves p_child in the schema of p_parent, not through search_path',
+        quote_ident(v_nsp), quote_ident(p_child), p_caller;
+    end if;
+    execute format('lock table %I.%I in access share mode', v_nsp, p_child);
+    v_locked := exists (select 1 from pg_locks l
+                         where l.locktype = 'relation' and l.relation = v_now::oid and l.pid = pg_backend_pid() and l.granted
+                           and l.database = (select d.oid from pg_database d where d.datname = current_database()));
+    -- under the lock, by identity again: still p_child in the parent's schema, and the relation held
+    select c.oid::regclass into v_held
+      from pg_class p join pg_class c on c.relnamespace = p.relnamespace and c.relname = p_child
+     where p.oid = p_parent;
+    exit when v_locked and v_held = v_now;
+    if v_held is distinct from v_now then
+      raise exception 'pg_partition_magician: %.% was dropped or replaced while % was resolving it (oid % then, % now); refusing to export it',
+        quote_ident(v_nsp), quote_ident(p_child), p_caller, v_now::oid, coalesce(v_held::oid::text, 'none');
+    end if;
+    if v_tries >= 3 then
+      raise exception 'pg_partition_magician: %.% led to another relation each of the % times % locked it (its schema was renamed meanwhile); refusing to export it',
+        quote_ident(v_nsp), quote_ident(p_child), v_tries, p_caller;
+    end if;
+  end loop;
   select p.child_oid into v_anchor from pgpm.part p where p.parent_table = p_parent and p.child_name = p_child;
   if v_anchor is not null and v_now::oid <> v_anchor then
     raise exception 'pg_partition_magician: %.% is oid % now, not the oid % recorded for this partition; refusing to archive it',

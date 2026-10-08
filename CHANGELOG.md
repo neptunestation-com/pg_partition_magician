@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **A synchronous export resolves its child under one catalog snapshot** (#1062, bullet 2).
+  `archive._resolve_child` read the parent's schema name in one statement and looked the child up by that
+  name in the next, so a second session that swapped two schemas' names between them (the parent's schema
+  renamed away, another given its name) had it resolve, hold and return the namesake in the schema that took
+  the name: the `pgpm.part` anchor refused that for a recorded child, but for a relation `pgpm.part` has no row
+  for, which the synchronous functions accept, `archive.to_s3` exported the namesake's rows under the named
+  relation's key with no error. It now reads the schema and the child in one statement, joined through the
+  parent's `relnamespace`, and checks after its by-name `LOCK` by identity that this backend holds that very
+  relation; a lock the swap sent to a namesake is retried, and refused after three tries. Test
+  `tests/archive/db/47`, guard `bench/archive_resolve_child_one_snapshot.sh`, mutation
+  `archive_resolve_child_two_statements`.
+
 - **Both change captures write their delta only while they hold it** (#1057, bullet 3). #1051 (regrain,
   `_regrain_capture_install`) and #1037 (`from_hypertable_copy`'s tracking copy) kept a fast path that checked
   the minted name with `to_regclass`, which takes no lock, and then ran the static insert, which looked the

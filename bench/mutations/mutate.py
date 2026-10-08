@@ -9072,9 +9072,11 @@ MUTATION_SRC["archive_chunk_claim_relation_unrecorded"] = "pgpm_archive/install.
 # that puts both back (the defect as reported, the one the issue's reproduction fails against). All are caught by
 # tests/archive/db/45 (bench/archive_to_s3_child_held.sh, against the archive image and MinIO).
 _RESOLVE_HOLD = (
-    "  execute format('lock table %I.%I in access share mode', v_nsp, p_child);\n"
-    "  v_held := to_regclass(format('%I.%I', v_nsp, p_child));\n",
-    "  v_held := v_now;\n", 1)
+    "    execute format('lock table %I.%I in access share mode', v_nsp, p_child);\n"
+    "    v_locked := exists (select 1 from pg_locks l\n"
+    "                         where l.locktype = 'relation' and l.relation = v_now::oid and l.pid = pg_backend_pid() and l.granted\n"
+    "                           and l.database = (select d.oid from pg_database d where d.datname = current_database()));\n",
+    "    v_locked := true;\n", 1)
 _TO_S3_READS_BY_NAME = [
     ("order by t.%I, t.ctid limit $3) s',\n        pcfg.control_column, v_child::text, pcfg.control_column, v_ctltype, pcfg.control_column)",
      "order by t.%I, t.ctid limit $3) s',\n        pcfg.control_column, v_nsp, p_child, pcfg.control_column, v_ctltype, pcfg.control_column)", 1),
@@ -9109,6 +9111,44 @@ MUTATIONS["archive_to_s3_reads_child_by_name"] = (
     _TO_S3_READS_BY_NAME,
 )
 MUTATION_SRC["archive_to_s3_reads_child_by_name"] = "pgpm_archive/install.sql"
+
+# Issue #1062 (bullet 2, A1062-2): archive._resolve_child reads the parent's schema and the child in ONE catalog
+# statement and checks the relation it locked by identity. This puts back the resolution the issue reported: the
+# schema NAME read first, the child looked up by that name in a second statement, and the lock re-checked by
+# name, so a schema swap committed between the two statements resolves, holds and returns the namesake in the
+# schema that took the name. Caught by tests/archive/db/47 parts A, B and D (bench/archive_resolve_child_one_snapshot.sh,
+# against the archive image and MinIO), and by the issue's two-session reproduction.
+MUTATIONS["archive_resolve_child_two_statements"] = (
+    "bench/archive_resolve_child_one_snapshot.sh",
+    "Pre-#1062 archive._resolve_child: the parent's schema name is read in one statement and the child looked up "
+    "by that name in the next, and the hold is re-checked by name, so a second session's schema swap between the "
+    "two has the export of a relation pgpm.part has no row for read and PUT the namesake's rows under the named "
+    "relation's key, and a recorded child refused by its anchor. One site, the resolution. tests/archive/db/47 "
+    "catches it (part A's object holds 10:namesake, part B is refused, part D returns the namesake).",
+    [(
+        "  loop\n"
+        "    v_tries := v_tries + 1;\n"
+        "    -- one statement, one snapshot: the parent's schema and the relation of that name in it (#1062)\n"
+        "    select n.nspname, c.oid::regclass into v_nsp, v_now\n"
+        "      from pg_class p join pg_namespace n on n.oid = p.relnamespace\n"
+        "      left join pg_class c on c.relnamespace = p.relnamespace and c.relname = p_child\n"
+        "     where p.oid = p_parent;\n",
+        "  loop\n"
+        "    v_tries := v_tries + 1;\n"
+        "    select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;\n"
+        "    v_now := to_regclass(format('%I.%I', v_nsp, p_child));\n", 1),
+     (
+        "    v_locked := exists (select 1 from pg_locks l\n"
+        "                         where l.locktype = 'relation' and l.relation = v_now::oid and l.pid = pg_backend_pid() and l.granted\n"
+        "                           and l.database = (select d.oid from pg_database d where d.datname = current_database()));\n"
+        "    -- under the lock, by identity again: still p_child in the parent's schema, and the relation held\n"
+        "    select c.oid::regclass into v_held\n"
+        "      from pg_class p join pg_class c on c.relnamespace = p.relnamespace and c.relname = p_child\n"
+        "     where p.oid = p_parent;\n",
+        "    v_locked := true;\n"
+        "    v_held := to_regclass(format('%I.%I', v_nsp, p_child));\n", 1)],
+)
+MUTATION_SRC["archive_resolve_child_two_statements"] = "pgpm_archive/install.sql"
 
 # #975 (pass 9 F5-03, F5-04): an archive_fn strategy writes over the object pgpm.archive_ledger records a chunk at
 # only when the call reproduces that chunk. One mutation per encoder's call of the shared refusal, and one per rule
