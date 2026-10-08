@@ -11,11 +11,13 @@
 # cell obtain only logs. The file is the acceptance test; this wrapper exists so the mutations have a guard
 # the discriminate track can run against the mutant, in the shape of bench/retain_recall_moved_parent.sh.
 #
-# TWO mutations are required to fail against it (bench/mutations/mutate.py):
+# THREE mutations are required to fail against it (bench/mutations/mutate.py):
 #   obtain_backoff_counts_hole         -- the walk's _cell_attached read as the bare row overlap, the
 #                                         pre-fix judgement of a step. Parts A, C and D.
 #   obtain_backoff_bypasses_held_name  -- the walk's _obtain_name dropped, so a held-name hole bypasses
 #                                         the back-off. Part F.
+#   obtain_backoff_walk_commits_forget -- the walk's writes (its _cell_attached forgets) committed rather
+#                                         than rolled back, so a forget stands under a lost race. Part G.
 #
 # Runs on the plain core image (pgtap, dblink and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's
 # path inside the container, for a worktree mounted somewhere other than /repo.

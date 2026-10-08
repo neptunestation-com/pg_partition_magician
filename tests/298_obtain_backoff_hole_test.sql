@@ -28,6 +28,10 @@
 --           contention (a second session holds the parent across both ticks) the tick after the lost race
 --           honours the back-off and queues no second lock attempt, though the top cell [4000, 5000) is
 --           missing too and obtain would have tried for it.
+--   PART G  the walk only decides: under sustained contention a tick that bypasses the back-off for a
+--           dropped [2000, 3000) and then loses the lock race leaves no forget_dropped_partition behind
+--           and the dead row in place, so the log never says a cell was forgotten "so the range is built
+--           again" when nothing was built; the tick that wins logs the forget and then the obtain.
 -- The fixtures are asymmetric on purpose: the hole sits at a different step in each part (first, third,
 -- second, the frontier's own), so a walk that counted holes, or always bypassed, or never did, cannot pass;
 -- and F's unbuildable hole sits where A's buildable one would bypass.
@@ -35,7 +39,7 @@ create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
 
-select plan(40);
+select plan(46);
 
 -- ==================== (A) the issue's reproduction: a real lock race, first forward cell dropped ====================
 create table public.bh298a (id bigint primary key, payload text);
@@ -253,5 +257,43 @@ select is((select array_agg(action || ':' || lo order by id) from pgpm.log
               and (action in ('fail_obtain_name', 'skip_obtain') or (action = 'forget_dropped_partition' and lo = '4000'))),
   array['fail_obtain_name:2000', 'forget_dropped_partition:4000'],
   'F witness: it cannot build [2000, 3000) (fail_obtain_name) and rebuilds [4000, 5000)');
+
+-- ==================== (G) the walk's forget is not committed without obtain's build ====================
+create table public.bh298g (id bigint primary key, payload text);
+insert into public.bh298g select g, 'x' from generate_series(1, 500) g;
+call pgpm.transmute('public.bh298g', 'id', 1000::bigint, p_obtain => 4, p_paused => false);
+select child_name as g_hole, child_oid as g_hole_oid from pgpm.part
+ where parent_table = 'public.bh298g'::regclass and lo = '2000' \gset
+select format('drop table public.%I', :'g_hole') \gexec
+
+select dblink_connect('bh298g', format('dbname=%s user=postgres', current_database())) as g_conn \gset
+select dblink_exec('bh298g', 'begin') as g_begin \gset
+select dblink_exec('bh298g', 'lock table public.bh298g in access share mode') as g_lock \gset
+call pgpm.maintain_obtain('public.bh298g') \gset g_race_
+create temporary table mark298g as select coalesce(max(id), 0) as id from pgpm.log;
+call pgpm.maintain_obtain('public.bh298g') \gset g_tick_
+select dblink_exec('bh298g', 'commit') as g_commit \gset
+select dblink_disconnect('bh298g') as g_disc \gset
+
+select is(:'g_race_p_status'::text, 'obtained=0 obtain_deferred'::text, 'LIVENESS: G''s first tick lost the lock race');
+select is(:'g_tick_p_status'::text, 'obtained=0 obtain_backoff_bypassed obtain_deferred'::text,
+  'LIVENESS: G''s second tick walked to the hole, bypassed the back-off and lost the race again');
+select is((select array_agg(action order by id) from pgpm.log
+            where parent_table = 'public.bh298g'::regclass and id > (select id from mark298g)),
+  array['skip_obtain'], 'G: that tick logged its deferral and nothing else, no forget for a cell it did not build');
+select ok(exists (select 1 from pgpm.part where parent_table = 'public.bh298g'::regclass and attached
+                   and lo = '2000' and child_oid = :'g_hole_oid'::oid),
+  'G: the dead row of [2000, 3000) is still in place for the obtain that builds the cell');
+
+-- the witness: contention gone, the back-off still armed, the next tick forgets the row and builds the cell
+create temporary table mark298g2 as select coalesce(max(id), 0) as id from pgpm.log;
+call pgpm.maintain_obtain('public.bh298g') \gset g_wit_
+select is(:'g_wit_p_status'::text, 'obtained=1 obtain_backoff_bypassed'::text,
+  'G witness: the tick that wins the lock builds the one cell');
+select is((select array_agg(action || ':' || lo order by id) from pgpm.log
+            where parent_table = 'public.bh298g'::regclass and id > (select id from mark298g2)
+              and action in ('forget_dropped_partition', 'obtain')),
+  array['forget_dropped_partition:2000', 'obtain:2000'],
+  'G witness: it logs the forget and then the obtain of [2000, 3000)');
 
 select * from finish();

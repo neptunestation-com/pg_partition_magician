@@ -11435,8 +11435,8 @@ begin
   -- bypassed the back-off every tick and retried obtain's ACCESS EXCLUSIVE while it still had room (review
   -- on #386). Steps are walked from the frontier's cell up to max(hi), and each one, the frontier's own cell
   -- first, is asked the question obtain asks of it (#1078): _cell_attached (is a partition BUILT there,
-  -- forgetting a row whose partition was dropped or detached by hand, exactly as obtain would), then
-  -- _obtain_name (could obtain build it). A step counts as coverage when obtain would leave it alone, and
+  -- forgetting a row whose partition was dropped or detached by hand, exactly as obtain would, in a block
+  -- whose writes are rolled back, see below), then _obtain_name (could obtain build it). A step counts as coverage when obtain would leave it alone, and
   -- ends the walk when obtain would build it. Coverage is not contiguous just because obtain and extend_to
   -- build it end to end: a forward cell dropped or detached by hand is a hole inside the span whose
   -- pgpm.part row stays attached, and counted as coverage it kept the back-off honoured while every write
@@ -11477,8 +11477,17 @@ begin
       end loop;
       v_try := v_ahead < ceil(cfg.obtain / 2.0);
       if v_try then v_note := v_note || ' obtain_backoff_bypassed'; end if;
-    exception when others then
-      v_try := false;
+      -- The walk only decides. Its _cell_attached forgets a dead row and logs forget_dropped_partition or
+      -- forget_detached_partition, and committed here that row would stand even when the obtain after it
+      -- loses the lock race: a cell logged as forgotten "so the range is built again" with no obtain row
+      -- after it. So the walk's writes are rolled back with this block (the decision is in variables,
+      -- which a rollback does not touch), and obtain repeats the forget atomically with its build.
+      raise sqlstate 'PGPMW';
+    exception
+      when sqlstate 'PGPMW' then
+        null;
+      when others then
+        v_try := false;
     end;
   end if;
   if v_try then

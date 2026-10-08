@@ -2514,6 +2514,15 @@ begin
         [("          exit when pgpm._obtain_name(p_parent, cfg, v_nsp, v_rel, v_cell, v_next) is not null;\n",
           "          exit;\n", 1)],
     ),
+    "obtain_backoff_walk_commits_forget": (
+        "bench/obtain_backoff_hole.sh",
+        "#1078's second cut (PR #1107, P1-04): the back-off walk's _cell_attached forgets a dead row and "
+        "logs forget_dropped_partition in maintain_obtain's own step, which commits even when the obtain "
+        "after it loses the lock race, so the log says the cell was forgotten so the range is built again "
+        "while it stays a hole. One clause, the raise that rolls the walk's writes back. tests/298 part G "
+        "catches it.",
+        [("      raise sqlstate 'PGPMW';\n", "", 1)],
+    ),
     "set_regrain_off_keeps_regrain": (
         "bench/set_regrain_off_midflight.sh",
         "Pre-#516 set_regrain: turning auto-regrain off writes regrain_to and nothing else, so the run in "

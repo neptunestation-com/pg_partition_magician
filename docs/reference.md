@@ -1938,7 +1938,10 @@ the question `obtain` itself asks: would it build that cell? A cell in that span
 dropped or detached by hand is a hole `obtain` would build, so it bypasses the back-off too and `obtain`
 rebuilds it (logging `forget_dropped_partition` or `forget_detached_partition`). A hole whose name is
 held by something pgpm does not own is one `obtain` cannot build (it only logs `fail_obtain_name`), so it
-does not bypass the back-off. A hole further out waits for the back-off to expire. A no-op while paused, checked independently: it does not assume
+does not bypass the back-off. A hole further out waits for the back-off to expire. The judgement writes
+nothing: a tick that bypasses the back-off and then loses the lock race again logs only `skip_obtain`, and
+the cell stays a hole, its `pgpm.part` row in place, until a tick wins the lock and logs the forget and
+then `obtain`. A no-op while paused, checked independently: it does not assume
 `maintain` ran first, or at all, in the same tick. Around `pgpm.obtain()` it is the same operational
 wrapper (lock timeout, back-off, exception handling, logging, transaction boundary) that `maintain`
 provides for its own steps. The back-off's own writes never stop `maintain_obtain_all`: while another
