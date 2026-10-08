@@ -102,7 +102,8 @@
   column (`pgpm._delta_seq`) rather than by name: the regrain reconcile, the drift check (which by name dropped
   the key's own `pgpm_seq` and would have restarted the run every tick), the hypertable drains and the
   cutover. A delta an earlier release minted carries `pgpm_seq` as its identity column and reads the same.
-  Test `tests/295`, guard `bench/regrain_delta_seq_name.sh`, mutation `delta_seq_fixed_name`.
+  Tests `tests/295` and `tests/timescale/db/62`, guard `bench/regrain_delta_seq_name.sh`, mutation
+  `delta_seq_fixed_name`.
 
 - **A synchronous export resolves its child under one catalog snapshot** (#1062, bullet 2).
   `archive._resolve_child` read the parent's schema name in one statement and looked the child up by that
