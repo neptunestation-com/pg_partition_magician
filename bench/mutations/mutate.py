@@ -10306,16 +10306,16 @@ MUTATIONS["capture_definer_dropped"] = (
     "(checked as the view's owner, but the trigger fires as the session's role) holds no INSERT on the delta and "
     "gets 42501 on every write into the regraining partition until the swap. One clause, SECURITY DEFINER. "
     "tests/294 parts A, B, D and E catch it (the view writer is refused, the writes never reach the table).",
-    [("    execute format('alter function %s security definer set search_path = pg_catalog, pg_temp', p_fn::text);\n",
-      "    execute format('alter function %s set search_path = pg_catalog, pg_temp', p_fn::text);\n", 1)],
+    [("      execute format('alter function %s security definer set search_path = pg_catalog, pg_temp', p_fn::text);\n",
+      "      execute format('alter function %s set search_path = pg_catalog, pg_temp', p_fn::text);\n", 1)],
 )
 MUTATIONS["capture_definer_search_path_unpinned"] = (
     "bench/regrain_capture_view_writer.sh",
     "The capture is SECURITY DEFINER but its search_path is the writer's, so the regclass `=` in its body resolves "
     "through a schema the writer put ahead of pg_catalog, and the writer's own operator runs as the table's owner. "
     "One clause, the pinned search_path. tests/294 part B catches it (the operator ran as g294_own).",
-    [("    execute format('alter function %s security definer set search_path = pg_catalog, pg_temp', p_fn::text);\n",
-      "    execute format('alter function %s security definer', p_fn::text);\n", 1)],
+    [("      execute format('alter function %s security definer set search_path = pg_catalog, pg_temp', p_fn::text);\n",
+      "      execute format('alter function %s security definer', p_fn::text);\n", 1)],
 )
 MUTATIONS["capture_definer_execute_kept"] = (
     "bench/regrain_capture_view_writer.sh",
@@ -10331,8 +10331,18 @@ MUTATIONS["capture_definer_not_rearmed"] = (
     "flight across the upgrade keeps the pre-#1073 capture and refuses every view writer until the swap. One "
     "site, the arming in _scratch_owner_follow. tests/294 part D catches it (the tick leaves the capture as it "
     "was and the view writer is still refused).",
-    [("      perform pgpm._capture_definer(r.oid::regprocedure);\n    exception when insufficient_privilege then\n",
-      "      perform r.oid::regprocedure;\n    exception when insufficient_privilege then\n", 1)],
+    [("      perform pgpm._capture_definer(r.oid::regprocedure,\n"
+      "                                    (select c.oid::regclass from pg_class c where c.oid = r.delta));\n",
+      "      perform r.delta;\n", 1)],
+)
+MUTATIONS["capture_definer_owner_reach_unchecked"] = (
+    "bench/regrain_capture_view_writer.sh",
+    "The capture is armed SECURITY DEFINER whether or not its owner can reach the delta, so a table whose owner "
+    "holds no USAGE on its own schema (REVOKE ALL ... FROM PUBLIC, USAGE to the application roles) refuses every "
+    "write into the regraining partition 'permission denied for schema', where the writer-run capture took the "
+    "writes of every role granted INSERT on the delta (P1-02 on PR #1132). One clause, the reach test. "
+    "tests/294 part F catches it (the application role is refused and its writes never reach the table).",
+    [("  if v_reach then\n", "  if v_reach is not null then\n", 1)],
 )
 
 

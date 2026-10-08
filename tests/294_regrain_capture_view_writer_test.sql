@@ -23,12 +23,18 @@
 --   (D) the capture disarmed by hand to the pre-fix shape (SECURITY INVOKER, no search_path, EXECUTE to
 --       PUBLIC) refuses the view writer, and the next tick arms it again: update 40 then goes through;
 --   (E) the run swaps, and the table holds exactly those changes.
+--   (F) a second table, g294f.t, whose OWNER holds no USAGE on its schema (REVOKE ALL ... FROM PUBLIC,
+--       USAGE granted to the application role g294f_app alone). A definer capture could not name the delta
+--       there and refused every write into the source (P1-02); the capture stays the writer-run one, and
+--       g294f_app, which holds DML on the table, USAGE on the schema and INSERT on the delta, updates id 10,
+--       deletes ids 20 and 30 and inserts id 205 into the regraining partition (two out, one in): captured,
+--       and in the table after the swap.
 -- bench/regrain_capture_view_writer.sh runs this file against the mutants capture_definer_dropped,
--- capture_definer_search_path_unpinned, capture_definer_execute_kept and capture_definer_not_rearmed, so it
--- is also required to FAIL there.
+-- capture_definer_search_path_unpinned, capture_definer_execute_kept, capture_definer_not_rearmed and
+-- capture_definer_owner_reach_unchecked, so it is also required to FAIL there.
 create extension if not exists pgtap;
 set client_min_messages = warning;
-select plan(16);
+select plan(24);
 
 do $$ begin create role g294_own;   exception when duplicate_object then null; end $$;
 do $$ begin create role g294_vw;    exception when duplicate_object then null; end $$;
@@ -161,8 +167,59 @@ select is((select array_agg(id || ':' || payload order by id) from public.g294
 select is((select count(*)::int from public.g294), 200,
           'and the table holds its 201 rows less the two deleted plus the one inserted');
 
+-- (F)
+do $$ begin create role g294f_own; exception when duplicate_object then null; end $$;
+do $$ begin create role g294f_app; exception when duplicate_object then null; end $$;
+create schema g294f;
+revoke all on schema g294f from public;
+grant usage on schema g294f to g294f_app;
+create table g294f.t (id bigint primary key, payload text);
+insert into g294f.t select g, 'a' || g from generate_series(1, 200) g;
+call pgpm.transmute('g294f.t', 'id', 100, p_obtain => 3, p_regrain_batch => 1000, p_paused => false);
+select pgpm.obtain('g294f.t');
+insert into g294f.t values (450, 'frontier');   -- the monolith [0, 300) freezes
+alter table g294f.t owner to g294f_own;          -- by a superuser, as an ownership role is assigned
+grant select, insert, update, delete on g294f.t to g294f_app;
+select pgpm.set_regrain('g294f.t', '50');
+call pgpm.maintain('g294f.t');   -- prepare: capture on the source, the delta minted, owned by g294f_own
+select ok(not has_schema_privilege('g294f_own', 'g294f', 'USAGE')
+          and has_schema_privilege('g294f_app', 'g294f', 'USAGE')
+          and (select pg_get_userbyid(proowner) = 'g294f_own' from pg_proc where oid = 'g294f.t_pgpm_regrain_capture()'::regprocedure)
+          and (select pg_get_userbyid(relowner) = 'g294f_own' from pg_class where oid = 'g294f.t_pgpm_regrain_delta'::regclass)
+          and has_table_privilege('g294f_app', 'g294f.t_pgpm_regrain_delta', 'INSERT')
+          and exists (select 1 from pg_trigger where tgname = 'pgpm_regrain_capture'
+                       and tgrelid = 'g294f.t_p0000000000000000000_to_0000000000000000300'::regclass),
+          'LIVENESS: capture is on; the table''s owner owns the capture and the delta and holds no USAGE on their schema, and the application role holds USAGE and INSERT on the delta');
+set role g294f_app;
+select lives_ok($$ update g294f.t set payload = 'app-10' where id = 10 $$,
+                'with the owner unable to name its own schema, the application role updates a row of the regraining partition');
+select lives_ok($$ delete from g294f.t where id in (20, 30) $$, 'deletes two');
+select lives_ok($$ insert into g294f.t values (205, 'app-205') $$, 'and inserts one');
+reset role;
+select is((select array_agg(id order by pgpm_seq) from g294f.t_pgpm_regrain_delta), array[10, 10, 20, 30, 205]::bigint[],
+          'all three writes were captured, by key');
+do $$ declare v_st text; begin
+  for i in 1..20 loop
+    call pgpm.maintain('g294f.t', v_st);
+    exit when v_st like '%regrain=swapped:%';
+  end loop;
+end $$;
+select ok(exists (select 1 from pgpm.log where parent_table = 'g294f.t'::regclass
+                   and action = 'regrain' and method = 'copy_swap_drop' and lo = '0' and hi = '300'),
+          'LIVENESS: the regrain of g294f.t swapped the monolith into fine children');
+select is((select array_agg(id || ':' || payload order by id) from g294f.t
+            where id in (9, 10, 11, 19, 20, 21, 29, 30, 31, 199, 200, 205)),
+          array['9:a9', '10:app-10', '11:a11', '19:a19', '21:a21', '29:a29', '31:a31', '199:a199', '200:a200', '205:app-205'],
+          'after the swap the application role''s writes are in the table: the update holds, the two deleted rows are gone, the inserted one is there');
+select is((select count(*)::int from g294f.t), 200,
+          'and the table holds its 201 rows less the two deleted plus the one inserted');
+
 select * from finish();
 
+drop schema g294f cascade;
+drop owned by g294f_own, g294f_app cascade;
+drop role g294f_own;
+drop role g294f_app;
 drop schema g294_evil cascade;
 drop table public.g294_mine, public.g294_seen, public.g294_outcome;
 drop view public.g294_v;

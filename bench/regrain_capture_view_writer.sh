@@ -11,13 +11,15 @@
 # acceptance test; this wrapper exists so the mutations have a guard the discriminate track can run against
 # the mutant, in the shape of bench/retain_recall_moved_parent.sh.
 #
-# FOUR mutations are required to fail against it (bench/mutations/mutate.py), one per clause of the lever:
+# FIVE mutations are required to fail against it (bench/mutations/mutate.py), one per clause of the lever:
 #   capture_definer_dropped               -- the function runs as the writer again. Parts A, B, D and E.
 #   capture_definer_search_path_unpinned  -- definer, but its operators resolve through the writer's
 #                                            search_path, so the writer's own `=` runs as the owner. Part B.
 #   capture_definer_execute_kept          -- definer, but PUBLIC keeps EXECUTE, so any role can attach it to
 #                                            a table of its own. Parts C and D.
 #   capture_definer_not_rearmed           -- a tick never arms a capture minted before the fix. Part D.
+#   capture_definer_owner_reach_unchecked -- definer even where the owner holds no USAGE on the delta's
+#                                            schema, so every write into the source is refused. Part F.
 #
 # Runs on the plain core image (pgtap and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path
 # inside the container, for a worktree mounted somewhere other than /repo.

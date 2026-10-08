@@ -14,11 +14,20 @@
 --       a drain step applies them to the copy (5 gone, 6 updated, 1001 there, 4 and 7 untouched);
 --   (B) no role but the owner holds EXECUTE on the capture function;
 --   (C) the capture disarmed by hand to the pre-fix shape refuses the view writer (LIVENESS), and the next
---       drain step arms it again: the view writer's update of id 7 is then captured.
+--       drain step arms it again: the view writer's update of id 7 is then captured;
+--   (D) a second hypertable, h61.g, whose OWNER loses USAGE on its schema during the online window (REVOKE
+--       ALL ... FROM PUBLIC, USAGE granted to the application role w61_app alone). A tracking copy cannot be
+--       started in that layout at all, before or after #1073 (TimescaleDB creates the capture trigger on each
+--       chunk as the owner, which then cannot name the function), so the copy is made while the owner holds
+--       USAGE and it is revoked afterwards. The definer capture can no longer name the delta, and refuses the
+--       application role's write (LIVENESS, the window up to the next step; P1-02 on PR #1132); the next drain
+--       step puts the writer-run capture back, and w61_app, which holds DML on the hypertable, USAGE on the
+--       schema and INSERT on the delta, deletes ids 5 and 8 and inserts id 1001 (two out, one in): captured,
+--       and drained into the copy.
 -- ASYMMETRIC: one row out, one in, one changed, then a second change, so a lost write and a resurrected one
 -- cannot cancel. Roles are named, created only when absent, granted to postgres by name (this session writes
 -- as one below), and dropped at the end. The core half's guard is bench/regrain_capture_view_writer.sh.
-select plan(13);
+select plan(22);
 
 do $$ begin
   if not exists (select 1 from pg_roles where rolname = 'w61_vw') then create role w61_vw; end if;
@@ -98,6 +107,64 @@ reset role;
 select is(w61_delta_ids(), array[7, 7]::bigint[],
   'and the view writer''s update of id 7 through the view is captured again');
 
+-- (D)
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'w61_hown') then create role w61_hown; end if;
+  if not exists (select 1 from pg_roles where rolname = 'w61_app') then create role w61_app; end if;
+end $$;
+grant w61_hown, w61_app to postgres;   -- by name: this session owns as one and writes as the other
+create schema h61;
+revoke all on schema h61 from public;
+grant usage on schema h61 to w61_app;
+grant usage, create on schema h61 to w61_hown;   -- until the copy is up
+create table h61.g (ts timestamptz not null, id bigint not null, v int, primary key (id, ts));
+alter table h61.g owner to w61_hown;   -- before any chunk exists, so no chunk needs re-owning
+select create_hypertable('h61.g', 'ts', chunk_time_interval => interval '1 day');
+insert into h61.g select timestamptz '2024-01-01 00:00+00' + n * interval '2 hours', n, n from generate_series(1, 30) n;
+grant select, insert, update, delete on h61.g to w61_app;
+call pgpm.from_hypertable_copy('h61.g', 'ts', p_track_changes => true);
+select pgpm._scratch_rel('h61.g', 'hypertable_delta')::text as hdelta \gset
+select p.oid::regprocedure::text as hfn from pg_proc p
+ where p.oid = (select s.obj from pgpm.scratch s where s.parent_oid = 'h61.g'::regclass::oid and s.kind = 'hypertable_delta_fn') \gset
+revoke usage on schema h61 from w61_hown;   -- the hardening, applied during the online window
+create function w61_h_delta_ids() returns bigint[] language plpgsql as $f$
+declare v bigint[];
+begin
+  execute format('select array_agg(id order by pgpm_seq) from %s', pgpm._scratch_rel('h61.g', 'hypertable_delta')) into v;
+  return v;
+end $f$;
+create function w61_h_dest_rows() returns text[] language plpgsql as $f$
+declare v text[];
+begin
+  execute format('select array_agg(id || '':'' || v order by id) from %s where id in (4, 5, 7, 8, 9, 1001)',
+                 pgpm._scratch_rel('h61.g', 'hypertable_dest')) into v;
+  return v;
+end $f$;
+select ok(:'hdelta' is not null
+          and not has_schema_privilege('w61_hown', 'h61', 'USAGE')
+          and has_schema_privilege('w61_app', 'h61', 'USAGE')
+          and (select pg_get_userbyid(c.relowner) = 'w61_hown' from pg_class c where c.oid = :'hdelta'::regclass)
+          and (select pg_get_userbyid(p.proowner) = 'w61_hown' from pg_proc p where p.oid = :'hfn'::regprocedure)
+          and has_table_privilege('w61_app', :'hdelta', 'INSERT'),
+  'LIVENESS: the tracking copy of h61.g is up; its owner owns the capture and the delta and no longer holds USAGE on their schema, and the application role holds USAGE and INSERT on the delta');
+set role w61_app;
+select throws_ok($$ delete from h61.g where id = 4 $$, '42501', 'permission denied for schema h61',
+  'LIVENESS: until the next step the definer capture, armed while the owner could reach the delta, refuses the application role''s write');
+reset role;
+select is(pgpm.from_hypertable_drain_delta_step('h61.g', 'ts'), 0::bigint, 'LIVENESS: the next drain step ran, with nothing to drain');
+select ok((select not prosecdef and proconfig is null from pg_proc where oid = :'hfn'::regprocedure),
+  'that step put the writer-run capture back, its owner being unable to reach the delta');
+set role w61_app;
+select lives_ok($$ delete from h61.g where id in (5, 8) $$,
+  'with the owner unable to name its own schema, the application role deletes two rows of the hypertable');
+select lives_ok($$ insert into h61.g values ('2024-01-02 01:00+00', 1001, 11) $$, 'and inserts one');
+reset role;
+select is(w61_h_delta_ids(), array[5, 8, 1001]::bigint[], 'all three writes were captured, by key');
+select is(pgpm.from_hypertable_drain_delta_step('h61.g', 'ts'), 3::bigint,
+  'LIVENESS: a drain step reconciled the three keys');
+select is(w61_h_dest_rows(), array['4:4', '7:7', '9:9', '1001:11'],
+  'and the copy holds the application role''s changes: 5 and 8 gone, 1001 there, 4, 7 and 9 untouched');
+
 select * from finish();
 
 -- roles are cluster-wide: leave none behind. Everything they hold a grant on goes first.
@@ -107,3 +174,5 @@ drop table public.g61;
 drop table :delta, :dest;
 revoke usage on schema public from w61_vw, w61_other;
 drop role w61_vw, w61_other;
+drop schema h61 cascade;
+drop role w61_hown, w61_app;

@@ -2173,7 +2173,8 @@ $$;
 -- parent's grants and its row security. The resets used to come later (a fine child's at the end of its
 -- sub-range, the hypertable copy's at the swap) or never (the deltas), and the gap between creation and
 -- reset was the window (#949). A delta then gets INSERT for the parent's writers (_regrain_capture_grant),
--- and nothing else; its capture function writes it as the function's owner, the delta's (_capture_definer).
+-- and nothing else; its capture function writes it as the function's owner, the delta's, whenever that owner
+-- can reach it (_capture_definer).
 --
 -- RESOLVED from the record made in that same transaction, never from a name rendered from the parent's:
 -- pgpm.config.regrain_delta_oid and regrain_capture_fn_oid (_regrain_capture_names), pgpm.part.child_oid
@@ -2213,8 +2214,8 @@ end;
 $$;
 
 -- The function half of _scratch_mint: a capture function owned like the parent, so whichever role owns the
--- parent later can drop it when the next regrain re-mints capture, and armed to write its delta as that owner
--- (_capture_definer, #1073).
+-- parent later can drop it when the next regrain re-mints capture. Its minter then arms it to write its delta
+-- as that owner (_capture_definer, #1073), which needs the delta too.
 create or replace function pgpm._scratch_mint_fn(p_parent regclass, p_fn regprocedure)
 returns void language plpgsql as $$
 declare v_owner oid;
@@ -2223,7 +2224,6 @@ begin
   if v_owner is distinct from (select proowner from pg_proc where oid = p_fn) then
     execute format('alter function %s owner to %I', p_fn::text, pg_get_userbyid(v_owner));
   end if;
-  perform pgpm._capture_definer(p_fn);
 end;
 $$;
 
@@ -2235,7 +2235,8 @@ $$;
 -- denied for table <rel>_pgpm_regrain_delta' on every write into the regraining partition for the life of
 -- the regrain (and on every write into a hypertable for the length of its online window). So the function is
 -- SECURITY DEFINER, and its owner is the delta's: both are owned like the parent from the tick that mints them
--- and follow it together (_scratch_owner_follow). Any write the table accepts, by whatever path, is captured.
+-- and follow it together (_scratch_owner_follow). Any write the table accepts, by whatever path, is captured
+-- (but see ONLY WHILE below).
 -- A definer function runs the writer's input as its owner, so two more clauses go with it. Its search_path is
 -- pinned to pg_catalog (then pg_temp, so it is never searched first): the body names the delta schema-
 -- qualified, but its operators (the regclass `=`, `||`) resolve through the search_path, and a writer who put
@@ -2243,17 +2244,39 @@ $$;
 -- the owner's alone: PostgreSQL checks it at CREATE TRIGGER and never when a trigger fires, so revoking it
 -- costs the capture nothing, while PUBLIC's default grant (or a role's ALTER DEFAULT PRIVILEGES on functions)
 -- let any role attach the function to a table of its own and write keys into the delta as the owner.
--- Called where a capture function is minted (_scratch_mint_fn) and by every tick that works one
--- (_scratch_owner_follow), so a capture minted before this change is armed by the first tick that resumes it.
--- Issues no DDL, and returns false, when the function is already armed.
-create or replace function pgpm._capture_definer(p_fn regprocedure)
+-- ONLY WHILE THE OWNER CAN REACH THE DELTA. A definer writes the delta by its schema-qualified name, which
+-- needs the owner's USAGE on the delta's schema (and INSERT on the delta, which an owner has). A table owner
+-- may lack that USAGE: REVOKE ALL ON SCHEMA ... FROM PUBLIC with USAGE granted to the application's roles
+-- alone leaves an ownership role able to own the table and not to name it. A definer capture then refused
+-- every write into the source, 'permission denied for schema', where a writer-run capture accepted the
+-- writes of every role _regrain_capture_grant gave INSERT on the delta. So when p_fn's owner cannot reach
+-- p_delta, the function is left (or put back) as the writer-run capture it was before #1073: SECURITY
+-- INVOKER, no search_path of its own. That is the one layout where a write through a view is still refused,
+-- as it was before (no role in the write can reach the delta). Re-decided on every tick, so a USAGE granted
+-- to the owner, or revoked from it, mid-run takes effect from the next tick; until that tick a write into
+-- the source meets the capture as the previous tick left it.
+-- Called where a capture function is minted (_regrain_capture_install, from_hypertable_copy) and by every tick
+-- that works one (_scratch_owner_follow), so a capture minted before this change is armed by the first tick
+-- that resumes it. Issues no DDL, and returns false, when the function is already as it should be. A delta
+-- that is gone (p_delta null) changes nothing but the EXECUTE grants.
+create or replace function pgpm._capture_definer(p_fn regprocedure, p_delta regclass)
 returns boolean language plpgsql as $$
-declare v_g record; v_did boolean := false;
+declare v_g record; v_did boolean := false; v_reach boolean;
 begin
-  if not exists (select 1 from pg_proc p where p.oid = p_fn and p.prosecdef
-                    and p.proconfig = array['search_path=pg_catalog, pg_temp']) then
-    execute format('alter function %s security definer set search_path = pg_catalog, pg_temp', p_fn::text);
-    v_did := true;
+  select has_schema_privilege(p.proowner, c.relnamespace, 'USAGE') and has_table_privilege(p.proowner, c.oid, 'INSERT')
+    into v_reach
+    from pg_proc p, pg_class c where p.oid = p_fn and c.oid = p_delta;
+  if v_reach then
+    if not exists (select 1 from pg_proc p where p.oid = p_fn and p.prosecdef
+                      and p.proconfig = array['search_path=pg_catalog, pg_temp']) then
+      execute format('alter function %s security definer set search_path = pg_catalog, pg_temp', p_fn::text);
+      v_did := true;
+    end if;
+  elsif not v_reach then
+    if exists (select 1 from pg_proc p where p.oid = p_fn and (p.prosecdef or p.proconfig is not null)) then
+      execute format('alter function %s security invoker reset search_path', p_fn::text);
+      v_did := true;
+    end if;
   end if;
   for v_g in
     select distinct a.grantee
@@ -2362,9 +2385,20 @@ begin
   -- #1073: and every capture function writes its delta as its owner, a capture minted before that rule
   -- included (an in-flight regrain or hypertable copy carried across the upgrade), from this tick on. A
   -- session that may not alter the function leaves it as it was, which is no worse than before.
-  for r in select p.oid from pg_proc p where p.oid = any(v_objs.fns) order by p.oid loop
+  -- Each with the delta it writes: the regrain's pair in pgpm.config, the hypertable copy's in pgpm.scratch.
+  for r in select p.oid, d.delta
+             from pg_proc p
+             join (select f.regrain_capture_fn_oid as fn, f.regrain_delta_oid as delta
+                     from pgpm.config f where f.parent_table = p_parent
+                   union all
+                   select s.obj, (select t.obj from pgpm.scratch t
+                                   where t.parent_oid = s.parent_oid and t.kind = 'hypertable_delta')
+                     from pgpm.scratch s where s.parent_oid = p_parent::oid and s.kind = 'hypertable_delta_fn') d
+               on d.fn = p.oid
+            where p.oid = any(v_objs.fns) order by p.oid loop
     begin
-      perform pgpm._capture_definer(r.oid::regprocedure);
+      perform pgpm._capture_definer(r.oid::regprocedure,
+                                    (select c.oid::regclass from pg_class c where c.oid = r.delta));
     exception when insufficient_privilege then
       null;
     end;
@@ -4692,7 +4726,8 @@ $$;
 -- every non-owner role holding DML on the parent got 42501 on every write into the regraining child for the
 -- life of the regrain. These grants were the answer, and they could only ever name the roles an ACL or an
 -- owner shows: a role that writes through a view holds none of them, so since #1073 the capture function
--- writes the delta as its owner instead (_capture_definer) and no longer depends on them. Every grantee of INSERT, UPDATE or
+-- writes the delta as its owner instead (_capture_definer), and depends on them only where that owner
+-- cannot reach the delta (a schema it holds no USAGE on). Every grantee of INSERT, UPDATE or
 -- DELETE, table- or column-level (PUBLIC included), gets INSERT on the delta: of the parent, AND of the
 -- source partition itself (#843). PostgreSQL lets a role granted DML on a partition write it directly
 -- without any grant on the parent, and the trigger fires for that write as that role, so with the parent's
@@ -4984,6 +5019,7 @@ begin
   -- #950: owned like the parent too, so the role that owns the parent when the next regrain re-mints capture can
   -- drop it (it used to stay the role's that ran this tick).
   perform pgpm._scratch_mint_fn(p_parent, format('%I.%I()', v_nsp, v_fn)::regprocedure);
+  perform pgpm._capture_definer(format('%I.%I()', v_nsp, v_fn)::regprocedure, v_delta_reg);   -- #1073
   execute format('create trigger pgpm_regrain_capture after insert or update or delete on %s for each row execute function %I.%I()',
                  v_src::text, v_nsp, v_fn);
   -- ENABLE ALWAYS (#450). CREATE TRIGGER leaves a trigger origin-only, which a session running as
