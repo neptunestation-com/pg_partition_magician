@@ -70,9 +70,12 @@ jobs:
         run: |
           VER="${{ steps.v.outputs.version }}"; NUM="${VER#v}"
           mkdir -p release-assets
-          # Self-contained bundle (dashboard SQL editor) and minified dbdev/TLE package.
+          # Self-contained bundle (dashboard SQL editor) and minified dbdev/TLE package. The package is
+          # built with PGPM_DBDEV_CAP=warn, as the merge gate builds it (#764): a tree over database.dev's
+          # 250,000-char cap merges by design, and a strict build here failed this step, so a tag cut from
+          # such a tree published no GitHub Release at all (#1077). The strict refusal is publish-dbdev.yml's.
           scripts/build_install_bundle.sh pgpm_core/install.sql "release-assets/pg_partition_magician-${VER}-bundle.sql"
-          scripts/build_dbdev_package.sh  pgpm_core/install.sql "release-assets/pg_partition_magician--${NUM}.sql"
+          PGPM_DBDEV_CAP=warn scripts/build_dbdev_package.sh pgpm_core/install.sql "release-assets/pg_partition_magician--${NUM}.sql"
           # Source tarball.
           tar -czf "release-assets/pg_partition_magician-${VER}.tar.gz" \
             pgpm_core/install.sql pgpm_core/uninstall.sql pgpm_core/extension.control README.md ONBOARDING.md \

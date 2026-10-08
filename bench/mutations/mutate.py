@@ -4805,6 +4805,15 @@ $$;''',
           "# cluster, name a tag that ships it (TS_VERSIONS='2.9.1' TS_PG_TAGS='15.14.1.127 <tag>' ./test.sh timescale)\n",
           1)],
     ),
+    "release_dbdev_build_strict": (
+        "bench/release_assets_over_cap.sh",
+        "Pre-#1077 .github/workflows/release.yml: the Build release assets step builds the dbdev package with "
+        "build_dbdev_package.sh in its default strict mode, never moved to PGPM_DBDEV_CAP=warn when #764 made the "
+        "cap advisory, so while the package is over database.dev's 250,000-char cap the step exits 1 before "
+        "Publish GitHub Release and a v* tag publishes no release at all. One clause, the warn setting, removed.",
+        [('PGPM_DBDEV_CAP=warn scripts/build_dbdev_package.sh pgpm_core/install.sql "release-assets/',
+          'scripts/build_dbdev_package.sh pgpm_core/install.sql "release-assets/', 1)],
+    ),
     "runbook_retain_count_of_intervals": (
         "bench/doc_retain_unit.sh",
         "Pre-#676 docs/runbook.md: 'Storage is not dropping despite a retention policy' calls an id grid's "
@@ -8890,6 +8899,7 @@ MUTATION_SRC = {
     "keep_both_two_way_only": "scripts/review/keep_both.py",
     "onboarding_ts_versions": "ONBOARDING.md",
     "onboarding_unread_knob_first": "ONBOARDING.md",
+    "release_dbdev_build_strict": ".github/workflows/release.yml",
     "runbook_retain_count_of_intervals": "docs/runbook.md",
     "reference_archive_identity_forget_missing": "docs/reference.md",
     "reference_fks_suspended_dead_swap": "docs/reference.md",

@@ -1023,6 +1023,7 @@ run_perf() {
     "bench/doc_monolith_retention.sh pgpm_perf144"
     "bench/doc_remedy_and_symptom.sh pgpm_perf243"
     "bench/doc_transmute_no_default.sh pgpm_perf278"
+    "bench/release_assets_over_cap.sh pgpm_perf307"
     "bench/classify_claims_tap.sh pgpm_perf79"
     "bench/tap_verdict.sh pgpm_perf80"
     "bench/retire_straddle.sh pgpm_perf81"

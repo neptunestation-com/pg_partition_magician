@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **A `v*` tag publishes its GitHub Release while the dbdev package is over database.dev's cap** (#1077).
+  `release.yml`'s Build release assets step ran `scripts/build_dbdev_package.sh` in its default strict mode,
+  never moved to `PGPM_DBDEV_CAP=warn` when #764 made the 250,000-character cap advisory on the merge path, so
+  while the package is over the cap (355,712 characters today) the step exited 1 before Publish GitHub
+  Release and a tag published no release at all: no bundle, no tarball, no notes. The step now builds the
+  package in warn mode, as the merge gate does; the strict refusal stays in `publish-dbdev.yml`, which is
+  where `RELEASING.md` puts it. Guard `bench/release_assets_over_cap.sh` (runs both workflows' build steps on
+  a tree padded over the cap), mutation `release_dbdev_build_strict`.
+
 - **The zone a grid is recorded in is never one of `pg_timezone_names`' pseudo-entries** (#1086).
   `pgpm._canonical_tz` accepted any name that view lists, and three of them are not zones: `localtime` (on a
   `--with-system-tzdata` build, a link to the host's `/etc/localtime`), `posixrules` and `Factory`. So
