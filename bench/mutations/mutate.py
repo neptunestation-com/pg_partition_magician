@@ -2324,7 +2324,7 @@ MUTATIONS = {
         "final delete, and gone unapplied. The fine child keeps the pre-change row and the swap "
         "attaches it. tests/124 fails against this on id 150000 reading 'orig' after a clean swap, on "
         "the witness that T1's capture survived the tick, and on the tick's consumed-row count.",
-        [("  execute format('delete from %I.%I where pgpm_seq = any($1)', v_dnsp, v_delta) using v_seqs;\n",
+        [("  execute format('delete from %I.%I k where %s', v_dnsp, v_delta, v_batch) using v_seqs, v_rows;\n",
           "  execute format('delete from %I.%I where pgpm_seq <= %s and %s', v_dnsp, v_delta,\n"
           "                 (select max(s) from unnest(v_seqs) s), v_elig);\n", 1)],
     ),
@@ -10007,6 +10007,33 @@ MUTATIONS["regrain_capture_fast_path_unlocked"] = (
     "the operator's table and row 7 reads 'orig' after the swap, c290's write dies 42P01, d290's dies 42501 on "
     "the operator's table, and no renamed delta holds a key.",
     [(CAPTURE_HELD_CORE, CAPTURE_UNLOCKED_CORE, 1)],
+)
+# #1070: a reconcile tick addresses the batch it judged by the rows themselves (their ctids), never by pgpm_seq.
+MUTATIONS["regrain_reconcile_batch_by_seq"] = (
+    "bench/regrain_reconcile_judged_rows.sh",
+    "Pre-#1070 _regrain_reconcile: every statement after the batch is cut addresses the delta by the judged "
+    "rows' pgpm_seq values alone, without their ctids, so it reaches every row on those values, not those rows "
+    "alone. pgpm_seq is not unique and every writer of the table holds INSERT on the delta, which allows "
+    "OVERRIDING SYSTEM VALUE, so a role with INSERT alone puts a key from the sub-range still being copied on "
+    "an eligible row's pgpm_seq: the tick writes it into the part-copied sub-range, the copy resumes above it "
+    "and the swap drops the rows it skipped with the source. tests/291 catches it: the tick reconciles 3 rows, "
+    "not 2, the delta keeps nothing instead of key 18, [10, 20) holds 18 ahead of 16, and after the swap row "
+    "16 is gone.",
+    [("  v_batch := 'k.pgpm_seq = any($1) and k.ctid = any($2)';\n",
+      "  v_batch := 'k.pgpm_seq = any($1)';\n", 1)],
+)
+# #1070: the swap gate's purge discards every delta row the swap's reconcile can never consume, NULL control included.
+MUTATIONS["regrain_delta_purge_null_blind"] = (
+    "bench/regrain_reconcile_judged_rows.sh",
+    "Pre-#1070 _regrain_delta_purge: it deletes the rows where `not (<ctl> in range)`, which is NULL for a "
+    "delta row whose control value is NULL, so such a row is never purged, never eligible and never "
+    "reconciled, while the swap gate counts every delta row. Every writer of the table holds INSERT on the "
+    "delta, so a role with INSERT alone writes more NULL-key rows than the batch and the regrain sits at "
+    "reconciling:N on every tick after the copy has finished, until regrain_cancel. tests/291 catches it: the "
+    "tick after the copy reads reconciling:4, not swapped:10, no regrain_delta_purge row is logged, and the run "
+    "never swaps.",
+    [("  execute format('delete from %I.%I where (%3$s >= %4$L and %3$s < %5$L) is not true',\n",
+      "  execute format('delete from %I.%I where not (%3$s >= %4$L and %3$s < %5$L)',\n", 1)],
 )
 MUTATIONS["hypertable_capture_fast_path_unlocked"] = (
     "bench/hypertable_capture_delta_held.sh",

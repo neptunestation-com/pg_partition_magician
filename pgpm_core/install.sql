@@ -2146,8 +2146,10 @@ $$;
 --
 -- Everything the mint creates, including the sequences a minted relation OWNS (#974): a delta's pgpm_seq
 -- identity column makes <delta>_pgpm_seq_seq, born like the delta with the minting role's default
--- privileges, and pgpm_seq is the identity the reconcile addresses delta rows by (#497), so a role those
--- privileges name could setval it into duplicate values and make one tick consume a key it had not applied.
+-- privileges, and the reconcile addressed delta rows by pgpm_seq alone (#497), so a role those privileges
+-- name could setval it into duplicate values and make one tick consume a key it had not applied. (The
+-- reconcile now addresses each row as itself, its ctid beside its pgpm_seq, since a writer's INSERT on the
+-- delta repeats a pgpm_seq value without touching the sequence at all, #1070.)
 -- Each owned sequence gets the same owner-only ACL here. It needs no record of its own and no owner step:
 -- PostgreSQL refuses to re-own a sequence linked to a table and ALTER TABLE ... OWNER carries it, so it is
 -- found through its table (pg_depend, deptype 'a' for OWNED BY, 'i' for identity) and follows its table's
@@ -4948,6 +4950,15 @@ $$;
 -- apply AND can never become eligible, so leaving it forever would wedge the swap gate, which counts every
 -- delta row.
 --
+-- And every other row the reconcile's eligibility can never accept (#1070): one whose control value is NULL.
+-- The capture never writes one (the key's columns are NOT NULL, see _regrain_capture_install), but the delta
+-- is CREATE TABLE AS, with no NOT NULL of its own, and every writer of the table holds INSERT on it, so any
+-- of them can. The range test is NULL for such a row, and `not (NULL)` is NULL, so the purge kept it while
+-- the gate counted it: more of them than the batch held the regrain at reconciling:N on every tick, with the
+-- copy finished, until regrain_cancel. The predicate is `is not true`, so a row is kept only when the range
+-- test is TRUE, which is exactly the set the swap's reconcile (eligible below a cursor at hi) can consume.
+-- What it discards is logged as regrain_delta_purge (rows = how many), so a discard is counted, not silent.
+--
 -- Deliberately NOT part of the per-tick reconcile. The predicate is a negated range, which no index serves,
 -- so running it per tick meant a seq scan of the whole delta on every tick -- O(delta) work per tick and
 -- O(delta^2 / batch) overall, which is the same shape #272 removed from the watermark query and which the
@@ -4955,16 +4966,21 @@ $$;
 -- affect, so it runs once, immediately before that gate.
 create or replace function pgpm._regrain_delta_purge(p_parent regclass, p_lo text, p_hi text)
 returns void language plpgsql as $$
-declare cfg pgpm.config; v_nsp name; v_delta name;
+declare cfg pgpm.config; v_nsp name; v_delta name; v_n bigint;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
   -- the delta's own schema and name, by its recorded oid (#555), never the parent's current schema
   select nsp, delta into v_nsp, v_delta from pgpm._regrain_capture_names(p_parent);
   if v_delta is null then return; end if;   -- #955: nothing recorded, nothing to purge
-  execute format('delete from %I.%I where not (%3$s >= %4$L and %3$s < %5$L)',
+  execute format('delete from %I.%I where (%3$s >= %4$L and %3$s < %5$L) is not true',
                  v_nsp, v_delta, quote_ident(cfg.control_column),
                  pgpm._encode(cfg.control_kind, p_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz), pgpm._encode(cfg.control_kind, p_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));
+  get diagnostics v_n = row_count;
+  if v_n > 0 then
+    insert into pgpm.log (parent_table, action, lo, hi, rows)
+      values (p_parent, 'regrain_delta_purge', p_lo, p_hi, v_n);
+  end if;
 end;
 $$;
 
@@ -4996,7 +5012,10 @@ create or replace function pgpm._regrain_reconcile(
 ) returns int language plpgsql as $$
 declare
   cfg pgpm.config; v_delta name; v_ncast text; v_keycols_q text; v_dkey_q text;
-  v_skey_q text; v_cols_q text; v_seqs bigint[]; v_elig text; v_ctl_q text; v_sub_name name; v_n int := 0; r record;
+  v_skey_q text; v_cols_q text; v_seqs bigint[]; v_elig text;
+  v_rows tid[];           -- the batch's rows themselves, by tuple identity (#1070)
+  v_batch text;           -- the predicate that addresses exactly those rows, as delta alias k
+  v_ctl_q text; v_sub_name name; v_n int := 0; r record;
   v_sub_rel regclass;     -- the fine child pgpm.part recorded, never whatever bears its name (#723)
   v_kctl_native_q text;   -- a delta row's control value, read as a NATIVE grid value (#455)
   v_lo_lit text; v_hi_lit text; v_cur_lit text; v_sub_lo text; v_sub_hi text; v_boundary text;
@@ -5080,23 +5099,37 @@ begin
   -- ("pgpm_seq <= wm and eligible") was a different set of rows in each of them: the apply statements
   -- could not see that late-committing row, the final delete could, and it took the row unapplied. The
   -- fine child kept the pre-change row and the swap attached it: a committed UPDATE reverted, measured.
-  -- So the batch is materialised here as the pgpm_seq values of the eligible rows visible NOW, and every
-  -- later statement, the final delete included, addresses the delta by that set and nothing else. A
-  -- delta row is never updated, only inserted and (here) deleted, so a row in the set stays visible to
-  -- every statement of this tick; a row not in the set is neither applied nor consumed, and waits for
-  -- the next tick, which is the tick that applies it.
-  execute format('select array_agg(pgpm_seq) from (select pgpm_seq from %I.%I where %s order by pgpm_seq limit %s) t',
-                 v_dnsp, v_delta, v_elig, greatest(p_batch, 1)) into v_seqs;
+  -- So the batch is materialised here as the eligible rows visible NOW, and every later statement, the
+  -- final delete included, addresses the delta by that set and nothing else.
+  --
+  -- By the rows THEMSELVES (#1070): their tuple identities (ctid), with their pgpm_seq values beside them
+  -- only so the pgpm_seq index can find them (a ctid list alone plans a seq scan of the delta once the
+  -- batch is large, the cost bench/regrain_perf.sh bounds). pgpm_seq alone does not name a row: it is
+  -- GENERATED ALWAYS but not unique, and every writer of the table holds INSERT on the delta (the capture
+  -- trigger writes it as the writer), which allows OVERRIDING SYSTEM VALUE. A role with INSERT alone wrote
+  -- two rows on one pgpm_seq, a key below the cursor and a key in the sub-range still being copied; the
+  -- batch, addressed by the eligible row's pgpm_seq, applied and consumed both, the second key landed in
+  -- the part-copied sub-range ahead of the rows not yet copied, the copy resumed above it (it resumes at
+  -- max(dest.ctl)) and the swap dropped those rows with the source. A ctid names one row: a delta row is
+  -- never updated, only inserted and (here) deleted, so a row in the set keeps its ctid and stays visible
+  -- to every statement of this tick; the tick holds ACCESS SHARE on the delta from the read below to its
+  -- commit, so nothing rewrites the delta (VACUUM FULL, CLUSTER, TRUNCATE) in between; and a ctid is
+  -- reused only after its row is deleted and vacuumed away, which only the delta's owner can do to a row
+  -- in the set. A row not in the set, whatever pgpm_seq it carries, is neither applied nor consumed, and
+  -- waits for the tick that judges it eligible.
+  execute format('select array_agg(pgpm_seq), array_agg(ctid) from (select pgpm_seq, ctid from %I.%I where %s order by pgpm_seq limit %s) t',
+                 v_dnsp, v_delta, v_elig, greatest(p_batch, 1)) into v_seqs, v_rows;
   if v_seqs is null then return 0; end if;
+  v_batch := 'k.pgpm_seq = any($1) and k.ctid = any($2)';
 
   -- one pair of set-based statements per distinct fine child touched, not per key
   for r in execute format(
     'select distinct pgpm._grid_floor(%L, %L, %L, pgpm._decode(%L, %s, %L, %L, %L, %L, %L, %L, %L), %L) as sub_lo
-       from %I.%I k where k.pgpm_seq = any($1)',
+       from %I.%I k where %s',
     cfg.control_kind, p_step, cfg.partition_anchor, cfg.control_kind, v_kctl_native_q,
     cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
     cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz,
-    v_dnsp, v_delta) using v_seqs
+    v_dnsp, v_delta, v_batch) using v_seqs, v_rows
   loop
     -- #446: find the fine child by RANGE in pgpm.part, never by re-rendering its name. regrain_step
     -- clamps the first sub-range to the coarse child's own lo when that lo is off the target grid (a
@@ -5144,25 +5177,26 @@ begin
     -- tick after the copy has its name back.
     v_sub_rel := pgpm._regrain_copy_rel(p_parent, v_sub_name, 'reconcile captured changes into');
     execute format(
-      'delete from %s d where %s in (select %s from %I.%I k where k.pgpm_seq = any($1)
+      'delete from %s d where %s in (select %s from %I.%I k where %s
           and pgpm._grid_floor(%L, %L, %L, pgpm._decode(%L, %s, %L, %L, %L, %L, %L, %L, %L), %L) = %L)',
-      v_sub_rel::text, v_dkey_q, v_keycols_q, v_dnsp, v_delta,
+      v_sub_rel::text, v_dkey_q, v_keycols_q, v_dnsp, v_delta, v_batch,
       cfg.control_kind, p_step, cfg.partition_anchor, cfg.control_kind, v_kctl_native_q,
       cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
       cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz, r.sub_lo)
-      using v_seqs;
+      using v_seqs, v_rows;
     execute format(
-      'insert into %s (%s) select %s from %s s where %s in (select %s from %I.%I k where k.pgpm_seq = any($1)
+      'insert into %s (%s) select %s from %s s where %s in (select %s from %I.%I k where %s
           and pgpm._grid_floor(%L, %L, %L, pgpm._decode(%L, %s, %L, %L, %L, %L, %L, %L, %L), %L) = %L)',
-      v_sub_rel::text, v_cols_q, v_cols_q, v_src::text, v_skey_q, v_keycols_q, v_dnsp, v_delta,
+      v_sub_rel::text, v_cols_q, v_cols_q, v_src::text, v_skey_q, v_keycols_q, v_dnsp, v_delta, v_batch,
       cfg.control_kind, p_step, cfg.partition_anchor, cfg.control_kind, v_kctl_native_q,
       cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
       cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz, r.sub_lo)
-      using v_seqs;
+      using v_seqs, v_rows;
   end loop;
 
-  -- consume exactly the rows the statements above addressed: by identity, never by watermark (#497)
-  execute format('delete from %I.%I where pgpm_seq = any($1)', v_dnsp, v_delta) using v_seqs;
+  -- consume exactly the rows the statements above addressed: by identity, never by watermark (#497) and
+  -- never by pgpm_seq alone (#1070)
+  execute format('delete from %I.%I k where %s', v_dnsp, v_delta, v_batch) using v_seqs, v_rows;
   get diagnostics v_n = row_count;
   if v_n > 0 then
     insert into pgpm.log (parent_table, action, lo, hi, rows)
