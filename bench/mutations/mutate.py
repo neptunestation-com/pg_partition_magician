@@ -8407,7 +8407,8 @@ select ok(
         "so a fresh bound past the column's precision (numeric(4,0), hi 10000) commits and dies in the "
         "cutover, and a resumed one is reused as recorded (a pre-#922 claim's hi = NaN completes a monolith "
         "[0, NaN)). One site. tests/268 part B3 and tests/269 parts A and B catch it.",
-        [("  perform pgpm._control_bound_contract(p_parent, p_control, p_control_kind, v_lo_native, v_hi_native, v_resumed);\n",
+        [("  perform pgpm._control_bound_contract(p_parent, p_control, p_control_kind, v_lo_native, v_hi_native, v_resumed,\n"
+          "                                       v_min_native, v_frontier_native, p_bound_headroom);\n",
           "", 1)],
     ),
     "bound_contract_finiteness_dropped": (
@@ -8432,6 +8433,33 @@ select ok(
           v_why := format('%s cannot be stored in it at all (%s)', v_v, sqlerrm);
         end;
 """, "        null;   -- MUTANT: no round trip through the column's type\n", 1)],
+    ),
+    # Issue #1088: the fresh-bound refusal's step remedy, offered only when the finest step's bound fits.
+    "bound_contract_finest_step_unchecked": (
+        "bench/bound_contract_remedy.sh",
+        "Issue #1088, the pre-fix behaviour: the finest step's bound is never tried in the column's type, so "
+        "the fresh-bound refusal offers 'or use a smaller step' whatever the bound, also when the newest key "
+        "is the type's maximum (9999 in numeric(4,0)) and step 1 is refused on the same bound [9000, 10000). "
+        "One site, the round trip. tests/305 parts A, C, E and F catch it.",
+        [("      execute format('select %L::%s::numeric = %L::numeric', v_t, format_type(v_base, v_typmod), v_t) into v_fits;\n",
+          "      v_fits := v_t is not null;\n", 1)],
+    ),
+    "bound_contract_finest_step_headroom": (
+        "bench/bound_contract_remedy.sh",
+        "Issue #1088, half the finest bound: p_bound_headroom left out of it, so a refusal whose finest step "
+        "would still overflow because of the headroom (newest 9990, headroom 9: step 1 gives hi 10000) offers "
+        "the smaller step, which is refused again. One site, the finest hi. tests/305 part E catches it.",
+        [("v_thi := trim_scale(v_unit * floor(p_frontier::numeric / v_unit) + v_unit * (1 + greatest(coalesce(p_headroom, 0), 0)));",
+          "v_thi := trim_scale(v_unit * floor(p_frontier::numeric / v_unit) + v_unit);", 1)],
+    ),
+    "bound_contract_finest_step_unit_one": (
+        "bench/bound_contract_remedy.sh",
+        "Issue #1088, the column's unit ignored: the finest step is taken as 1 whatever the scale, so on a "
+        "numeric(4,-2) key (which holds only multiples of 100, and whose steps _id_step_contract holds to "
+        "them) the finest bound is one the column rounds, and the refusal withholds a step of 100 that works "
+        "and names a step the preflight refuses. One site, the unit. tests/305 part C catches it.",
+        [("    if v_scale < 0 then\n      v_unit := trim_scale(power(10::numeric, -v_scale));\n    end if;\n",
+          "", 1)],
     ),
     "incoming_gate_shared_check_dropped": (
         "bench/shared_preflight_conformance.sh",

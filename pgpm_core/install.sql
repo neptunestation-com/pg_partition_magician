@@ -7609,10 +7609,25 @@ $$;
 -- completed a monolith [0, NaN) that takes every future id (#952 bullet 2); one that predates this contract
 -- recorded a hi its column cannot hold. Each bound must be finite and, on an id grid, survive a round trip
 -- through the column's declared type unchanged (the coercion the cutover's ATTACH applies, domain included).
+--
+-- A fresh id bound's refusal names a smaller step as a remedy only when one would work (#1088). p_min and
+-- p_frontier are the oldest and newest values the fresh bound was computed from, and p_headroom the extra grid
+-- steps it was pushed out by. A smaller step only moves the bound toward them, so the tightest bound any step
+-- can give is the finest one's: the column's unit (1, or 10^-s for a negative scale s, which _id_step_contract
+-- holds every step to), with the same headroom. When the column's type cannot store even that bound (the
+-- newest key is the type's maximum, 9999 in numeric(4,0): every step puts hi at 10000 or past it), the step
+-- remedy is one the operator follows only to be refused again, so the refusal names the wider type alone. The
+-- finest bound is tried in the base type (through any domain, with its typmod): a precision or a range limit
+-- only grows worse with a coarser step, a domain's CHECK need not, so a bound only a domain refuses keeps the
+-- step remedy.
+drop function if exists pgpm._control_bound_contract(regclass, name, text, text, text, boolean);
 create or replace function pgpm._control_bound_contract(p_parent regclass, p_control name, p_kind text,
-                                                        p_lo text, p_hi text, p_resumed boolean)
+                                                        p_lo text, p_hi text, p_resumed boolean,
+                                                        p_min text, p_frontier text, p_headroom int)
 returns void language plpgsql as $$
 declare v_type text; v_v text; v_back numeric; v_why text;
+        v_base oid; v_typmod int; v_scale int; v_unit numeric := 1; v_t numeric; v_tlo numeric; v_thi numeric;
+        v_fits boolean := true; v_head text := '';
 begin
   select format_type(a.atttypid, a.atttypmod) into v_type
     from pg_attribute a where a.attrelid = p_parent and a.attname = p_control and not a.attisdropped;
@@ -7642,8 +7657,44 @@ begin
     raise exception 'pg_partition_magician: cannot resume the transmute of % on %: the bound [%, %) an earlier attempt recorded (and put in the pgpm_monolith_bound CHECK) cannot be a partition bound of the column, which is %: %. A resume reuses the recorded bound, so it would commit a monolith on it, or fail in the cutover on every retry. Call pgpm.transmute_abort(%) to drop the bound and the claim, then re-run transmute, which computes a fresh bound.',
       p_parent, quote_ident(p_control), p_lo, p_hi, v_type, v_why, p_parent;
   end if;
-  raise exception 'pg_partition_magician: cannot partition % on %: the monolith''s bound [%, %) cannot be stored in the column, which is %: %. The cutover''s ATTACH would fail on it after the bound had been committed, leaving the table rejecting every write past it. Give the column a type that holds the bound (ALTER TABLE % ALTER COLUMN % TYPE ...), or use a smaller step, then re-run transmute.',
-    p_parent, quote_ident(p_control), p_lo, p_hi, v_type, v_why, p_parent::text, quote_ident(p_control);
+  if p_kind <> 'id' then
+    raise exception 'pg_partition_magician: cannot partition % on %: the monolith''s bound [%, %) cannot be stored in the column, which is %: %. The cutover''s ATTACH would fail on it after the bound had been committed, leaving the table rejecting every write past it. Give the column a type that holds the bound (ALTER TABLE % ALTER COLUMN % TYPE ...), or use a smaller step, then re-run transmute.',
+      p_parent, quote_ident(p_control), p_lo, p_hi, v_type, v_why, p_parent::text, quote_ident(p_control);
+  end if;
+  -- #1088: the finest step's bound, tried in the base type (see the header)
+  select a.atttypid, a.atttypmod into v_base, v_typmod
+    from pg_attribute a where a.attrelid = p_parent and a.attname = p_control and not a.attisdropped;
+  while exists (select 1 from pg_type t where t.oid = v_base and t.typtype = 'd') loop   -- through any domain
+    select t.typbasetype, case when v_typmod = -1 then t.typtypmod else v_typmod end into v_base, v_typmod
+      from pg_type t where t.oid = v_base;
+  end loop;
+  if v_base = 'numeric'::regtype and v_typmod >= 4 then
+    v_scale := (((v_typmod - 4) & 2047) # 1024) - 1024;
+    if v_scale < 0 then
+      v_unit := trim_scale(power(10::numeric, -v_scale));
+    end if;
+  end if;
+  v_tlo := trim_scale(v_unit * floor(p_min::numeric / v_unit));
+  v_thi := trim_scale(v_unit * floor(p_frontier::numeric / v_unit) + v_unit * (1 + greatest(coalesce(p_headroom, 0), 0)));
+  foreach v_t in array array[v_tlo, v_thi] loop
+    begin
+      execute format('select %L::%s::numeric = %L::numeric', v_t, format_type(v_base, v_typmod), v_t) into v_fits;
+    exception when others then
+      v_fits := false;
+    end;
+    exit when not v_fits;
+  end loop;
+  if v_fits then
+    raise exception 'pg_partition_magician: cannot partition % on %: the monolith''s bound [%, %) cannot be stored in the column, which is %: %. The cutover''s ATTACH would fail on it after the bound had been committed, leaving the table rejecting every write past it. Give the column a type that holds the bound (ALTER TABLE % ALTER COLUMN % TYPE ...), or use a smaller step (the finest step the column admits, %, gives [%, %)), then re-run transmute.',
+      p_parent, quote_ident(p_control), p_lo, p_hi, v_type, v_why, p_parent::text, quote_ident(p_control),
+      v_unit, v_tlo, v_thi;
+  end if;
+  if coalesce(p_headroom, 0) > 0 then
+    v_head := format(' with p_bound_headroom => %s', p_headroom);
+  end if;
+  raise exception 'pg_partition_magician: cannot partition % on %: the monolith''s bound [%, %) cannot be stored in the column, which is %: %. The cutover''s ATTACH would fail on it after the bound had been committed, leaving the table rejecting every write past it. No smaller step avoids it: the finest step the column admits, %, gives [%, %)%, which the column cannot store either. Give the column a type that holds the bound (ALTER TABLE % ALTER COLUMN % TYPE ...), then re-run transmute.',
+    p_parent, quote_ident(p_control), p_lo, p_hi, v_type, v_why, v_unit, v_tlo, v_thi, v_head,
+    p_parent::text, quote_ident(p_control);
 end;
 $$;
 
@@ -9246,7 +9297,8 @@ begin
   -- attempt, possibly by an install that did not refuse what this one does (a pre-#922 claim with hi = NaN
   -- resumed into a monolith [0, NaN) after the upgrade). Still the first transaction: the raise rolls the
   -- claim, or the take-over, back. See _control_bound_contract.
-  perform pgpm._control_bound_contract(p_parent, p_control, p_control_kind, v_lo_native, v_hi_native, v_resumed);
+  perform pgpm._control_bound_contract(p_parent, p_control, p_control_kind, v_lo_native, v_hi_native, v_resumed,
+                                       v_min_native, v_frontier_native, p_bound_headroom);
   -- #574: and the bound has to lie on the grid THIS call registers. The claim records the bound and its
   -- zone but not the step and anchor it was computed on, and a re-run given another step reused the bound
   -- and registered the new step: the recorded hi was not a boundary of the new grid, so obtain skipped the

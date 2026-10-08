@@ -455,8 +455,10 @@ control column cannot hold the grid's bounds: a `numeric` with a negative scale 
 unit (100 for `numeric(6,-2)`), so a `p_step` or `p_anchor` that is not one is refused, since the cutover's
 `ATTACH` (and each forward partition's) would round a bound between two of them; and a monolith bound the
 column's type cannot store (past a `numeric`'s precision or an integer type's range, such as `10000` on a
-`numeric(4,0)` key) is refused, since the `ATTACH` would fail on it after the bound had been committed; a
-resumed claim's recorded bound is not finite or cannot be stored in the column (an older install could
+`numeric(4,0)` key) is refused, since the `ATTACH` would fail on it after the bound had been committed (the
+refusal offers a smaller step only when the finest step the column admits, with the same `p_bound_headroom`,
+gives a bound its type can store, and names that bound; when the newest key is the type's maximum, `9999` on a
+`numeric(4,0)` key, no step can, and it names a wider type alone); a resumed claim's recorded bound is not finite or cannot be stored in the column (an older install could
 record one, such as `hi = NaN` for a key that held a `NaN` row): call [`transmute_abort`](#transmute_abort), then re-run, which
 computes a fresh bound; on PostgreSQL 18, a foreign key on or to the table is `NOT ENFORCED`, in either
 direction (pgpm carries a key only as an enforced one: drop it, or `ALTER TABLE <table> ALTER CONSTRAINT
