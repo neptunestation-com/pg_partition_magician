@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **A regrain reconcile tick applies and consumes only the delta rows it judged eligible** (#1070, Tier 1).
+  `_regrain_reconcile` cut its batch from the eligible rows (keys in a sub-range the copy has finished) and
+  then addressed it, in every later statement, by those rows' `pgpm_seq` values. `pgpm_seq` is not unique,
+  and every writer of the table holds `INSERT` on the delta (the capture trigger writes it as the writer),
+  which allows `OVERRIDING SYSTEM VALUE`, so a role with `INSERT` alone put a key from the sub-range still
+  being copied on an eligible row's `pgpm_seq`: the tick wrote it into that half-copied sub-range, the copy
+  resumed above it, and the swap dropped the rows it skipped with the source. The batch is now addressed by
+  the rows themselves (their tuple identities, read in the snapshot that judged them, with their `pgpm_seq`
+  values beside them only for the index), so a row the tick did not judge is neither applied nor consumed,
+  whatever `pgpm_seq` it carries. Test `tests/291`, guard `bench/regrain_reconcile_judged_rows.sh`, mutation
+  `regrain_reconcile_batch_by_seq`.
+
 - **A regrain on a `uuidv7` or `text_time` key stays on the encoding's unit** (#1039, bullet 2).
   `_regrain_step_shape` held a target to a `timestamp(p)` column's precision (#980) and asked nothing of an
   encoded key, so `'1.5 seconds'` on an ObjectId key (unit a second) or `'1500 microseconds'` on a `uuidv7` key

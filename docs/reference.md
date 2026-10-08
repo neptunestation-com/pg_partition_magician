@@ -1622,7 +1622,11 @@ name them in `DISABLE TRIGGER` rather than using `USER` or `ALL`, and the run is
 The reconcile is bounded by the same budget as the copy and takes the tick when there is work,
 so a burst of DML paces itself rather than landing inside the swap. A pass consumes from the delta exactly
 the captured rows it applied, so a change that commits while a pass is running is neither lost nor
-consumed early: it stays in the delta for the next pass. If writes outpace it the regrain stalls
+consumed early: it stays in the delta for the next pass. It applies only the rows it selected as eligible
+(their keys in a sub-range already copied), each addressed as that row, never by its `pgpm_seq` ordering
+value alone: every role that can write the table holds `INSERT` on the delta and so can repeat a
+`pgpm_seq` value, and a key in the sub-range still being copied that rode in on one is left in the delta
+until the copy has finished that sub-range. If writes outpace it the regrain stalls
 at `reconciling:N` rather than swapping: the source stays attached, reads are unaffected, and no unbounded
 work is done under the swap's lock.
 
