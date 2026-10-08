@@ -92,6 +92,18 @@
   the maintenance role already did for obtain. Test `tests/296`, guard `bench/regrain_children_tablespace.sh`,
   mutation `regrain_children_tablespace_dropped`.
 
+- **A table whose key has a column named `pgpm_seq` can be regrained** (#1074). Both change-capture deltas
+  (the regrain's, and `from_hypertable_copy`'s with `p_track_changes`) are minted from the key's columns and
+  then given an ordering identity column under the fixed name `pgpm_seq`, so a key with a column of that name
+  failed the prepare tick 42701 (column already exists) on every call: `regrain()`, `regrain_history()` and
+  auto-regrain could never make progress on a table transmute had accepted, and such a hypertable could not be
+  tracked. The ordering column is now minted under a name no column of the delta holds (`pgpm_seq`, else
+  `pgpm_seq_1`, `pgpm_seq_2`, ...; `pgpm._delta_seq_add`), and every reader finds it as the delta's identity
+  column (`pgpm._delta_seq`) rather than by name: the regrain reconcile, the drift check (which by name dropped
+  the key's own `pgpm_seq` and would have restarted the run every tick), the hypertable drains and the
+  cutover. A delta an earlier release minted carries `pgpm_seq` as its identity column and reads the same.
+  Test `tests/295`, guard `bench/regrain_delta_seq_name.sh`, mutation `delta_seq_fixed_name`.
+
 - **A synchronous export resolves its child under one catalog snapshot** (#1062, bullet 2).
   `archive._resolve_child` read the parent's schema name in one statement and looked the child up by that
   name in the next, so a second session that swapped two schemas' names between them (the parent's schema

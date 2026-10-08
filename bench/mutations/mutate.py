@@ -2325,7 +2325,7 @@ MUTATIONS = {
         "attaches it. tests/124 fails against this on id 150000 reading 'orig' after a clean swap, on "
         "the witness that T1's capture survived the tick, and on the tick's consumed-row count.",
         [("  execute format('delete from %I.%I k where %s', v_dnsp, v_delta, v_batch) using v_seqs, v_rows;\n",
-          "  execute format('delete from %I.%I where pgpm_seq <= %s and %s', v_dnsp, v_delta,\n"
+          "  execute format('delete from %I.%I where %I <= %s and %s', v_dnsp, v_delta, v_seq,\n"
           "                 (select max(s) from unnest(v_seqs) s), v_elig);\n", 1)],
     ),
     "set_archive_fn_no_return_type_check": (
@@ -2575,9 +2575,9 @@ begin
           "  execute format('create table %I.%I as select %s from %s with no data', v_nsp, v_delta, v_keycols_q, p_parent::text);\n",
           "  if to_regclass(format('%I.%I', v_nsp, v_delta)) is null then\n"
           "  execute format('create table %I.%I as select %s from %s with no data', v_nsp, v_delta, v_keycols_q, p_parent::text);\n", 1),
-         ("  execute format('create index on %I.%I (pgpm_seq)', v_nsp, v_delta);\n"
-          "  v_delta_reg := format('%I.%I', v_nsp, v_delta)::regclass;\n",
-          "  execute format('create index on %I.%I (pgpm_seq)', v_nsp, v_delta);\n"
+         ("  v_delta_reg := format('%I.%I', v_nsp, v_delta)::regclass;\n"
+          "  perform pgpm._delta_seq_add(v_delta_reg);\n",
+          "  perform pgpm._delta_seq_add(format('%I.%I', v_nsp, v_delta)::regclass);\n"
           "  end if;\n"
           "  execute format('truncate %I.%I', v_nsp, v_delta);\n"
           "  v_delta_reg := format('%I.%I', v_nsp, v_delta)::regclass;\n", 1)],
@@ -10141,8 +10141,8 @@ MUTATIONS["regrain_reconcile_batch_by_seq"] = (
     "and the swap drops the rows it skipped with the source. tests/291 catches it: the tick reconciles 3 rows, "
     "not 2, the delta keeps nothing instead of key 18, [10, 20) holds 18 ahead of 16, and after the swap row "
     "16 is gone.",
-    [("  v_batch := 'k.pgpm_seq = any($1) and k.ctid = any($2)';\n",
-      "  v_batch := 'k.pgpm_seq = any($1)';\n", 1)],
+    [("  v_batch := format('k.%I = any($1) and k.ctid = any($2)', v_seq);\n",
+      "  v_batch := format('k.%I = any($1)', v_seq);\n", 1)],
 )
 # #1070: the swap gate's purge discards every delta row the swap's reconcile can never consume, NULL control included.
 MUTATIONS["regrain_delta_purge_null_blind"] = (
@@ -10254,6 +10254,20 @@ MUTATIONS["archive_ndjson_single_unchecked"] = (
     [("  perform archive._refuse_foreign_read('archive._encode_upload_ndjson_single', p_parent, v_held);\n", "", 1)],
 )
 MUTATION_SRC["archive_ndjson_single_unchecked"] = "pgpm_archive/install.sql"
+
+# #1074: a capture delta's ordering column is minted under a name no key column holds.
+MUTATIONS["delta_seq_fixed_name"] = (
+    "bench/regrain_delta_seq_name.sh",
+    "Pre-#1074 pgpm._delta_seq_add: the ordering identity column is added to the delta under the fixed name "
+    "pgpm_seq whatever the delta already holds. The delta is minted from the key's columns first, so a table "
+    "whose key has a column named pgpm_seq fails the prepare tick 42701 (column already exists) on every call "
+    "and can never be regrained. tests/295 catches it: ps295's prepare dies, no delta is recorded, the drift "
+    "check reports the missing delta, and neither ps295 nor pq295 reaches its swap; the control still swaps.",
+    [("  while exists (select 1 from pg_attribute where attrelid = p_delta and attnum > 0 and attname = v_seq) loop\n"
+      "    v_n := v_n + 1;\n"
+      "    v_seq := 'pgpm_seq_' || v_n;\n"
+      "  end loop;\n", "", 1)],
+)
 
 
 

@@ -4664,6 +4664,37 @@ returns regclass language sql stable as $$
     from pgpm.part p where p.parent_table = p_parent and p.child_name = p_child;
 $$;
 
+-- A capture delta's ORDERING column (#1074): the identity column both deltas carry beside the key, which a
+-- reconcile pass batches by and consumes by (#497, #170). A delta is minted as `create table <delta> as select
+-- <key columns> from <parent>` and the ordering column added after, so its name is chosen here to be one no
+-- column of the delta already holds: pgpm_seq, or pgpm_seq_1, pgpm_seq_2, ... when a key column took it. Under
+-- the fixed name pgpm_seq a key with a column of that name failed the prepare 42701 on every call, so the table
+-- could never be regrained (nor a hypertable of that shape tracked), though transmute had accepted it and no
+-- document reserved the name. Every reader finds the column as the delta's identity column (_delta_seq),
+-- never by its name: a key column CREATE TABLE AS carried over is never an identity column, and a delta an
+-- earlier release minted carries pgpm_seq as one, so the same reader serves both.
+create or replace function pgpm._delta_seq_add(p_delta regclass)
+returns name language plpgsql as $$
+declare v_seq name := 'pgpm_seq'; v_n int := 0;
+begin
+  while exists (select 1 from pg_attribute where attrelid = p_delta and attnum > 0 and attname = v_seq) loop
+    v_n := v_n + 1;
+    v_seq := 'pgpm_seq_' || v_n;
+  end loop;
+  execute format('alter table %s add column %I bigint generated always as identity', p_delta::text, v_seq);
+  execute format('create index on %s (%I)', p_delta::text, v_seq);
+  return v_seq;
+end;
+$$;
+
+-- The name of a capture delta's ordering column, which _delta_seq_add minted: its identity column (#1074).
+create or replace function pgpm._delta_seq(p_delta regclass)
+returns name language sql stable as $$
+  select attname from pg_attribute
+   where attrelid = p_delta and attnum > 0 and not attisdropped and attidentity = 'a'
+   order by attnum desc limit 1;
+$$;
+
 -- Install capture for a regrain of p_child: mint the per-parent delta table and trigger function (tearing
 -- down what an earlier regrain of this parent left, by the oids pgpm.config recorded) and put the trigger on
 -- the source child. CREATE TRIGGER takes SHARE ROW EXCLUSIVE, which conflicts with ROW EXCLUSIVE, so
@@ -4761,10 +4792,10 @@ begin
   -- (#497), never "everything at or below a watermark". The value is assigned when the trigger fires,
   -- inside the writer's transaction, so a row can commit later than rows carrying higher values; a
   -- pass addresses the delta by the identity of the rows it saw, and a late-committing row waits for
-  -- the next pass. Excluded by name wherever key columns are introspected.
-  execute format('alter table %I.%I add column pgpm_seq bigint generated always as identity', v_nsp, v_delta);
-  execute format('create index on %I.%I (pgpm_seq)', v_nsp, v_delta);
+  -- the next pass. Minted under a name no key column holds, and found as the delta's identity column wherever
+  -- key columns are introspected, never by that name (#1074, see _delta_seq_add).
   v_delta_reg := format('%I.%I', v_nsp, v_delta)::regclass;
+  perform pgpm._delta_seq_add(v_delta_reg);
   -- The trigger runs as the WRITER, so the delta is owned like the parent and every role that can write the
   -- parent gets INSERT on it (#496; see _regrain_capture_grant).
   -- #949: and its ACL reset to the owner's alone, here, in the tick that creates it, before the grants: created
@@ -5057,6 +5088,7 @@ declare
   v_reltuples real; v_delta_has_rows boolean;   -- the delta's row estimate, and whether it holds a row (#710)
   v_dnsp name;            -- the delta's own schema, by its recorded oid (#555), not the parent's current one
   v_src regclass;         -- the source the rows are reread from, as pgpm.part recorded it (#768)
+  v_seq name;             -- the delta's ordering column, found as its identity column (#1074)
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
@@ -5068,13 +5100,14 @@ begin
       p_parent, p_child;
   end if;
   v_ncast := pgpm._native_type(cfg.control_kind);
+  v_seq := pgpm._delta_seq(format('%I.%I', v_dnsp, v_delta)::regclass);
 
   select string_agg(quote_ident(attname), ', ' order by attnum),
          '(' || string_agg('d.' || quote_ident(attname), ', ' order by attnum) || ')',
          '(' || string_agg('s.' || quote_ident(attname), ', ' order by attnum) || ')'
     into v_keycols_q, v_dkey_q, v_skey_q
     from pg_attribute where attrelid = format('%I.%I', v_dnsp, v_delta)::regclass
-      and attnum > 0 and not attisdropped and attname <> 'pgpm_seq';
+      and attnum > 0 and not attisdropped and attname is distinct from v_seq;
   -- generated columns are omitted from the reinsert: they recompute, they are never inserted into
   select string_agg(quote_ident(attname), ', ' order by attnum) into v_cols_q
     from pg_attribute where attrelid = p_parent and attnum > 0 and not attisdropped and attgenerated = '';
@@ -5152,10 +5185,11 @@ begin
   -- reused only after its row is deleted and vacuumed away, which only the delta's owner can do to a row
   -- in the set. A row not in the set, whatever pgpm_seq it carries, is neither applied nor consumed, and
   -- waits for the tick that judges it eligible.
-  execute format('select array_agg(pgpm_seq), array_agg(ctid) from (select pgpm_seq, ctid from %I.%I where %s order by pgpm_seq limit %s) t',
-                 v_dnsp, v_delta, v_elig, greatest(p_batch, 1)) into v_seqs, v_rows;
+  -- The ordering column is the delta's identity column, under whatever name the mint gave it (#1074).
+  execute format('select array_agg(%1$I), array_agg(ctid) from (select %1$I, ctid from %2$I.%3$I where %4$s order by %1$I limit %5$s) t',
+                 v_seq, v_dnsp, v_delta, v_elig, greatest(p_batch, 1)) into v_seqs, v_rows;
   if v_seqs is null then return 0; end if;
-  v_batch := 'k.pgpm_seq = any($1) and k.ctid = any($2)';
+  v_batch := format('k.%I = any($1) and k.ctid = any($2)', v_seq);
 
   -- one pair of set-based statements per distinct fine child touched, not per key
   for r in execute format(
@@ -5465,7 +5499,8 @@ begin
   select string_agg(format('%I %s', attname, format_type(atttypid, atttypmod)), ', ' order by attnum)
     into v_has_q
     from pg_attribute
-   where attrelid = v_delta_reg and attnum > 0 and not attisdropped and attname <> 'pgpm_seq';
+   where attrelid = v_delta_reg and attnum > 0 and not attisdropped
+     and attname is distinct from pgpm._delta_seq(v_delta_reg);   -- #1074: the ordering column, by identity
   if v_has_q is not distinct from v_want_q then return null; end if;
   return format('change capture records the key as (%s) and the parent''s key is now (%s); change capture is re-minted for the key as it is now',
                 v_has_q, v_want_q);

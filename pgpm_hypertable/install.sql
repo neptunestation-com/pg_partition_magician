@@ -1014,12 +1014,12 @@ begin
                    v_nsp, v_delta, v_keycols_q, v_nsp, v_rel);
     -- Append a monotonic ordering column (highest attnum) so the online delta-drain (from_hypertable_drain_delta,
     -- issue #170) can batch by a pgpm_seq watermark: a batch processes+deletes rows with pgpm_seq <= watermark,
-    -- and any change that arrives mid-batch lands at a higher seq for the next pass. The cutover's key
-    -- introspection EXCLUDES pgpm_seq by name so it is not mistaken for a key column; the trigger inserts only
-    -- the key columns (by an explicit list), so identity auto-populates pgpm_seq. Indexed so the watermark
-    -- offset/limit and the range delete are index-assisted at scale.
-    execute format('alter table %I.%I add column pgpm_seq bigint generated always as identity', v_nsp, v_delta);
-    execute format('create index on %I.%I (pgpm_seq)', v_nsp, v_delta);
+    -- and any change that arrives mid-batch lands at a higher seq for the next pass. Minted under a name no key
+    -- column holds (#1074: a key column named pgpm_seq failed this 42701), and the drains' and the cutover's
+    -- key introspection EXCLUDES it as the delta's identity column, never by its name (pgpm._delta_seq); the
+    -- trigger inserts only the key columns (by an explicit list), so identity auto-populates it. Indexed so
+    -- the watermark offset/limit and the range delete are index-assisted at scale.
+    perform pgpm._delta_seq_add(format('%I.%I', v_nsp, v_delta)::regclass);
     -- #949: owned like the hypertable with an owner-only ACL from this transaction on, as core's regrain delta is
     -- minted (_scratch_mint), rather than with the migrating role's default privileges, under which a role they
     -- name read the keys of every write to a hypertable it holds no grant on. The capture trigger writes it as
@@ -1274,6 +1274,7 @@ declare
   v_nsp name; v_rel name; v_dest name; v_delta name;
   v_keycols_q text; v_dkey_q text; v_skey_q text; v_cols_q text;
   v_ctl_type text; v_min_ctl text; v_max_ctl text; v_watermark bigint; v_keys bigint;
+  v_seq name;   -- the delta's ordering column, found as its identity column (#1074)
 begin
   -- #951: refused before anything is read or committed; no argument here has a null meaning
   perform pgpm._refuse_null_arguments('from_hypertable_drain_delta_step', json_build_object(
@@ -1295,14 +1296,15 @@ begin
   perform pgpm._refuse_filtered_reads(p_hypertable, 'drain changes from hypertable',
     'the copy would be brought up to date with those rows alone');
 
-  -- key columns = every delta column EXCEPT the pgpm_seq ordering column, in attnum order (the same order
-  -- the cutover uses, so the row constructors line up). d./s. variants for the dest delete + source insert.
+  -- key columns = every delta column EXCEPT the ordering column, in attnum order (the same order the cutover
+  -- uses, so the row constructors line up). d./s. variants for the dest delete + source insert.
+  v_seq := pgpm._delta_seq(format('%I.%I', v_nsp, v_delta)::regclass);
   select string_agg(quote_ident(attname), ', ' order by attnum),
          '(' || string_agg('d.' || quote_ident(attname), ', ' order by attnum) || ')',
          '(' || string_agg('s.' || quote_ident(attname), ', ' order by attnum) || ')'
     into v_keycols_q, v_dkey_q, v_skey_q
     from pg_attribute where attrelid = format('%I.%I', v_nsp, v_delta)::regclass
-      and attnum > 0 and not attisdropped and attname <> 'pgpm_seq';
+      and attnum > 0 and not attisdropped and attname is distinct from v_seq;
   -- the source/dest column list for the reinsert (generated columns omitted: they recompute on insert)
   select string_agg(quote_ident(attname), ', ' order by attnum) into v_cols_q
     from pg_attribute where attrelid = p_hypertable and attnum > 0 and not attisdropped and attgenerated = '';
@@ -1310,9 +1312,9 @@ begin
   -- the dest's per-batch delete uses the reused-key index that from_hypertable_copy built on the dest (#175,
   -- the same index the cutover adopts); no separate throwaway index is built here.
 
-  -- batch boundary: the pgpm_seq of the p_batch-th oldest delta row (or max when fewer remain)
-  execute format('select coalesce((select pgpm_seq from %I.%I order by pgpm_seq offset %s limit 1), (select max(pgpm_seq) from %I.%I))',
-                 v_nsp, v_delta, greatest(p_batch - 1, 0), v_nsp, v_delta) into v_watermark;
+  -- batch boundary: the ordering value of the p_batch-th oldest delta row (or max when fewer remain)
+  execute format('select coalesce((select %1$I from %2$I.%3$I order by %1$I offset %4$s limit 1), (select max(%1$I) from %2$I.%3$I))',
+                 v_seq, v_nsp, v_delta, greatest(p_batch - 1, 0)) into v_watermark;
   if v_watermark is null then return 0; end if;   -- delta empty
 
   -- materialize this batch's distinct keys authoritatively by DELETING them: delete-returning is the source
@@ -1324,9 +1326,9 @@ begin
   -- holding one read that table as the batch, consuming the real batch's keys without applying them.
   execute 'drop table if exists pg_temp.pgpm_dbatch';
   execute format('create temp table pg_temp.pgpm_dbatch on commit drop as
-                  with d as (delete from %I.%I where pgpm_seq <= %s returning %s)
+                  with d as (delete from %I.%I where %I <= %s returning %s)
                   select distinct %s from d',
-                 v_nsp, v_delta, v_watermark, v_keycols_q, v_keycols_q);
+                 v_nsp, v_delta, v_seq, v_watermark, v_keycols_q, v_keycols_q);
   get diagnostics v_keys = row_count;
 
   -- bound the source read to the batch's touched control range, as literal constants, for chunk exclusion
@@ -1381,8 +1383,8 @@ begin
 
   loop
     -- residual <= threshold? EXISTS at offset stops at the first row past the threshold (count > threshold)
-    execute format('select exists(select 1 from %I.%I order by pgpm_seq offset %s limit 1)',
-                   v_nsp, v_delta, p_threshold) into v_more;
+    execute format('select exists(select 1 from %I.%I order by %I offset %s limit 1)',
+                   v_nsp, v_delta, pgpm._delta_seq(format('%I.%I', v_nsp, v_delta)::regclass), p_threshold) into v_more;
     exit when not v_more;
     perform pgpm.from_hypertable_drain_delta_step(p_hypertable, p_control, p_batch);
     commit;
@@ -1864,7 +1866,8 @@ begin
            string_agg(quote_ident(attname), ', ' order by attnum)
       into v_dkey_q, v_skey_q, v_keycols_q
       from pg_attribute where attrelid = format('%I.%I', v_nsp, v_delta)::regclass
-        and attnum > 0 and not attisdropped and attname <> 'pgpm_seq';   -- exclude the ordering column (#170)
+        and attnum > 0 and not attisdropped   -- exclude the ordering column (#170), as the identity column (#1074)
+        and attname is distinct from pgpm._delta_seq(format('%I.%I', v_nsp, v_delta)::regclass);
     v_subsel_q := format('select distinct %s from %I.%I', v_keycols_q, v_nsp, v_delta);
     -- The delta was just populated by the trigger, so it has no stats; ANALYZE it so the planner sizes
     -- the semi-joins correctly (the dest was already ANALYZEd at the end of the copy). Shared helper (#164).
