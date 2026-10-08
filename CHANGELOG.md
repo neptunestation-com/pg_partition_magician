@@ -11,8 +11,13 @@
   resumed above it, and the swap dropped the rows it skipped with the source. The batch is now addressed by
   the rows themselves (their tuple identities, read in the snapshot that judged them, with their `pgpm_seq`
   values beside them only for the index), so a row the tick did not judge is neither applied nor consumed,
-  whatever `pgpm_seq` it carries. Test `tests/291`, guard `bench/regrain_reconcile_judged_rows.sh`, mutation
-  `regrain_reconcile_batch_by_seq`.
+  whatever `pgpm_seq` it carries. And the swap gate's purge now discards every delta row no reconcile could
+  consume: it deleted `not (<control> in range)`, which is `NULL` for a row whose control value is `NULL`, so
+  a writer that put more such rows in the delta than the batch held the regrain at `reconciling:N` on every
+  tick after the copy finished, until `regrain_cancel`. It deletes the rows whose range test is not true, and
+  logs what it discards as `regrain_delta_purge`. Test `tests/291`, guard
+  `bench/regrain_reconcile_judged_rows.sh`, mutations `regrain_reconcile_batch_by_seq` and
+  `regrain_delta_purge_null_blind`.
 
 - **A regrain on a `uuidv7` or `text_time` key stays on the encoding's unit** (#1039, bullet 2).
   `_regrain_step_shape` held a target to a `timestamp(p)` column's precision (#980) and asked nothing of an

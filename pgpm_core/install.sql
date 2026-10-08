@@ -4950,6 +4950,15 @@ $$;
 -- apply AND can never become eligible, so leaving it forever would wedge the swap gate, which counts every
 -- delta row.
 --
+-- And every other row the reconcile's eligibility can never accept (#1070): one whose control value is NULL.
+-- The capture never writes one (the key's columns are NOT NULL, see _regrain_capture_install), but the delta
+-- is CREATE TABLE AS, with no NOT NULL of its own, and every writer of the table holds INSERT on it, so any
+-- of them can. The range test is NULL for such a row, and `not (NULL)` is NULL, so the purge kept it while
+-- the gate counted it: more of them than the batch held the regrain at reconciling:N on every tick, with the
+-- copy finished, until regrain_cancel. The predicate is `is not true`, so a row is kept only when the range
+-- test is TRUE, which is exactly the set the swap's reconcile (eligible below a cursor at hi) can consume.
+-- What it discards is logged as regrain_delta_purge (rows = how many), so a discard is counted, not silent.
+--
 -- Deliberately NOT part of the per-tick reconcile. The predicate is a negated range, which no index serves,
 -- so running it per tick meant a seq scan of the whole delta on every tick -- O(delta) work per tick and
 -- O(delta^2 / batch) overall, which is the same shape #272 removed from the watermark query and which the
@@ -4957,16 +4966,21 @@ $$;
 -- affect, so it runs once, immediately before that gate.
 create or replace function pgpm._regrain_delta_purge(p_parent regclass, p_lo text, p_hi text)
 returns void language plpgsql as $$
-declare cfg pgpm.config; v_nsp name; v_delta name;
+declare cfg pgpm.config; v_nsp name; v_delta name; v_n bigint;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
   -- the delta's own schema and name, by its recorded oid (#555), never the parent's current schema
   select nsp, delta into v_nsp, v_delta from pgpm._regrain_capture_names(p_parent);
   if v_delta is null then return; end if;   -- #955: nothing recorded, nothing to purge
-  execute format('delete from %I.%I where not (%3$s >= %4$L and %3$s < %5$L)',
+  execute format('delete from %I.%I where (%3$s >= %4$L and %3$s < %5$L) is not true',
                  v_nsp, v_delta, quote_ident(cfg.control_column),
                  pgpm._encode(cfg.control_kind, p_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz), pgpm._encode(cfg.control_kind, p_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));
+  get diagnostics v_n = row_count;
+  if v_n > 0 then
+    insert into pgpm.log (parent_table, action, lo, hi, rows)
+      values (p_parent, 'regrain_delta_purge', p_lo, p_hi, v_n);
+  end if;
 end;
 $$;
 

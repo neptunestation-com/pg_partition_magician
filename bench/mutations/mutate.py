@@ -10022,6 +10022,19 @@ MUTATIONS["regrain_reconcile_batch_by_seq"] = (
     [("  v_batch := 'k.pgpm_seq = any($1) and k.ctid = any($2)';\n",
       "  v_batch := 'k.pgpm_seq = any($1)';\n", 1)],
 )
+# #1070: the swap gate's purge discards every delta row the swap's reconcile can never consume, NULL control included.
+MUTATIONS["regrain_delta_purge_null_blind"] = (
+    "bench/regrain_reconcile_judged_rows.sh",
+    "Pre-#1070 _regrain_delta_purge: it deletes the rows where `not (<ctl> in range)`, which is NULL for a "
+    "delta row whose control value is NULL, so such a row is never purged, never eligible and never "
+    "reconciled, while the swap gate counts every delta row. Every writer of the table holds INSERT on the "
+    "delta, so a role with INSERT alone writes more NULL-key rows than the batch and the regrain sits at "
+    "reconciling:N on every tick after the copy has finished, until regrain_cancel. tests/291 catches it: the "
+    "tick after the copy reads reconciling:4, not swapped:10, no regrain_delta_purge row is logged, and the run "
+    "never swaps.",
+    [("  execute format('delete from %I.%I where (%3$s >= %4$L and %3$s < %5$L) is not true',\n",
+      "  execute format('delete from %I.%I where not (%3$s >= %4$L and %3$s < %5$L)',\n", 1)],
+)
 MUTATIONS["hypertable_capture_fast_path_unlocked"] = (
     "bench/hypertable_capture_delta_held.sh",
     "#1037's from_hypertable_copy: the capture function it mints checks the minted name with to_regclass, "

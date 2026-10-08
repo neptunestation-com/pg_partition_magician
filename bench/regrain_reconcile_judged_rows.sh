@@ -11,9 +11,14 @@
 # The file is the acceptance test; this wrapper exists so the mutation has a guard the discriminate track can
 # run against the mutant, in the shape of bench/retain_recall_moved_parent.sh.
 #
-# The mutation it is required to fail against (bench/mutations/mutate.py):
+# And the junk no reconcile can consume, which the swap gate's purge must discard: a delta row whose control
+# value is NULL (any writer can write one) was never purged (`not (NULL)` is NULL) but always counted, so more
+# of them than the batch held the regrain at reconciling:N on every tick after the copy had finished.
+#
+# The mutations it is required to fail against (bench/mutations/mutate.py):
 #   regrain_reconcile_batch_by_seq -- the reconcile addresses the judged rows by their pgpm_seq values alone,
 #                                     without their ctids, as before #1070.
+#   regrain_delta_purge_null_blind -- the purge deletes `not (<ctl> in range)` again, which keeps a NULL-key row.
 #
 # Runs on the plain core image (pgtap and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path inside
 # the container, for a worktree mounted somewhere other than /repo.

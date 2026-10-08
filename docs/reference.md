@@ -1626,9 +1626,13 @@ consumed early: it stays in the delta for the next pass. It applies only the row
 (their keys in a sub-range already copied), each addressed as that row, never by its `pgpm_seq` ordering
 value alone: every role that can write the table holds `INSERT` on the delta and so can repeat a
 `pgpm_seq` value, and a key in the sub-range still being copied that rode in on one is left in the delta
-until the copy has finished that sub-range. If writes outpace it the regrain stalls
-at `reconciling:N` rather than swapping: the source stays attached, reads are unaffected, and no unbounded
-work is done under the swap's lock.
+until the copy has finished that sub-range. Before it counts the backlog, the swap gate discards every delta
+row no reconcile could ever consume: a key whose control value has left the source's range (the old half of
+an update that moved the row to another partition, whose other half already covers it) and a key whose
+control value is `NULL` (which capture never writes, but a writer can). It logs `regrain_delta_purge` with
+`rows` = how many when it discards any, so such rows never hold the swap. If writes outpace the reconcile
+the regrain stalls at `reconciling:N` rather than swapping: the source stays attached, reads are
+unaffected, and no unbounded work is done under the swap's lock.
 
 The delta table and its trigger function live in the parent's schema as `<table>_pgpm_regrain_delta` and
 `<table>_pgpm_regrain_capture()`, or, where that name would exceed 63 bytes (a table name over 44 or 42
@@ -3056,7 +3060,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `retain_detach` / `retain_crossing` / `detach_reap` | a concurrent detach dispatched for a referenced partition / rows deleted to honour a crossing FK's declared `ON DELETE` / an abandoned concurrent detach finalized |
 | `retain_recall` / `retain_reattach` | retention stopped reaching a partition whose retirement was under way: its dispatched detach was recalled and the `pgpm_detach` job returned to idle / the detach had already landed, and the partition was re-attached on its own bounds (see [`retire`](#retire)) |
 | `regrain_copy` / `regrain_aged` / `regrain_attach` / `regrain` | a regrain microbatch copied rows into a fine child / skipped a below-horizon sub-range that has no fine child yet (only when `archive_fn` is unset; discarded with the source, never copied, once the swap has re-checked that it is still below the horizon) / attached a fine child (`method` = `check_skip`) / completed (`method` = `copy_swap_drop`) |
-| `regrain_prepare` / `regrain_capture_orphan` / `regrain_reconcile` / `regrain_reconcile_aged` / `regrain_rename` / `regrain_restart` / `regrain_cancel` | the cross-tick regrain's own steps: change capture installed / a leftover capture table cleared / the source-is-authority reconcile before the swap (and its below-horizon counterpart) / the source renamed onto the target grid / a stale run restarted (copies that predate capture, or copies a parent altered mid-regrain made stale: their columns or `CHECK` constraints no longer match, the source was rewritten or had a column replaced, or change capture no longer fits the key, or copies no recorded source mark vouches for, as a run in flight across an upgrade has, or change capture's trigger found disabled, origin-only or replica-only rather than enabled `ALWAYS`) / a run cancelled by `regrain_cancel()`, or by `retire` dropping the run's source whole (`method` names `retire`, `rows` counts the copies discarded) |
+| `regrain_prepare` / `regrain_capture_orphan` / `regrain_reconcile` / `regrain_reconcile_aged` / `regrain_delta_purge` / `regrain_rename` / `regrain_restart` / `regrain_cancel` | the cross-tick regrain's own steps: change capture installed / a leftover capture table cleared / the source-is-authority reconcile before the swap (and its below-horizon counterpart) / captured keys the swap gate discarded because no reconcile could consume them (out of the source's range, or a `NULL` control value; `rows` counts them) / the source renamed onto the target grid / a stale run restarted (copies that predate capture, or copies a parent altered mid-regrain made stale: their columns or `CHECK` constraints no longer match, the source was rewritten or had a column replaced, or change capture no longer fits the key, or copies no recorded source mark vouches for, as a run in flight across an upgrade has, or change capture's trigger found disabled, origin-only or replica-only rather than enabled `ALWAYS`) / a run cancelled by `regrain_cancel()`, or by `retire` dropping the run's source whole (`method` names `retire`, `rows` counts the copies discarded) |
 | `drop_incoming_fk` / `suspend_incoming_fk` / `restore_incoming_fk` / `validate_incoming_fk` | preserve-FK lifecycle events |
 | `from_hypertable_carry_fk` | (`pgpm_hypertable` only) an outgoing FK re-added onto the migrated destination during `from_hypertable_copy` |
 | `forget_missing` | `forget_missing()` cleared a parent's registration because its relation no longer exists; `rows` carries how many partition rows were cleared with it |
