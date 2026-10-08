@@ -1190,6 +1190,7 @@ run_perf() {
     "bench/hypertable_handoff_remedy.sh pgpm_perf311"
     "bench/transmute_cutover_names_held.sh pgpm_perf313"
     "bench/transmute_publication_change_refused.sh pgpm_perf314"
+    "bench/adopt_partition.sh pgpm_perf115"
   )
   local selected=()
   local n=${#guards[@]} idx

@@ -430,9 +430,18 @@ failure blocks that one partition on purpose (`retain_drop_failures` climbing in
 
    Neither **ever** clears itself, which is what separates them from everything else in this list:
    there is no later tick on which the name goes back to meaning the right relation. Find out what
-   took it, then either put the intended relation back under that name or clear the stale bookkeeping
-   with `pgpm.forget_missing()` (if the parent itself is gone) or `delete from pgpm.part where
-   parent_table = ... and child_name = ...`. Renaming a partition is safe if you update
+   took it. When it is the partition itself come back as a new relation (restored from a dump under its
+   own name, say) and still attached to the table, record that relation with
+   `select pgpm.adopt_partition('public.events', 'public.<partition>')`: pgpm re-anchors the row to it,
+   discards any archive coverage recorded under the name (that coverage was earned by the relation that
+   is gone), and from the next tick write-blocks, archives and retires it like any other partition. It
+   refuses a relation that is not attached to the table, one pgpm already records, and a range another
+   `pgpm.part` row records; if that other row is stale too, delete it first. When the relation holding
+   the name is not one pgpm should manage, detach it from the table first, then clear the stale row with
+   `delete from pgpm.part where parent_table = ... and child_name = ...`. Never delete the row of a
+   partition that stays attached: nothing would write-block, archive, retire or count it again, so its
+   rows would outlive the retention policy for good. Run `pgpm.forget_missing()` only if the parent
+   itself is gone. Renaming a partition is safe if you update
    `pgpm.part.child_name` and `pgpm.archive_ledger.child_name` in the same transaction: a rename does
    not change an oid, so the recorded identity stays right, and the ledger matches archived chunks to
    their partition by name, so carrying it keeps the coverage attached (the guide has the three

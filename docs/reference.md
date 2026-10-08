@@ -1498,7 +1498,9 @@ carrying the name, and a row whose relation is gone takes the parent's.
 That refusal is permanent, not retryable: no later tick makes the name mean the right object again. On the
 detach path it shows up as `retain_detaching` stuck non-zero with `retain_drop_failures` climbing; on the
 one-step path as `retain_backlog` flat with the same count climbing. Recovery is an operator decision --
-put the intended relation back under that name, or delete the `pgpm.part` row if it is gone for good. A
+put the intended relation back under that name, record the relation now holding it with
+[`adopt_partition`](#adopt_partition) when it is the partition restored as a new relation and attached to
+the table on the one-step path, or delete the `pgpm.part` row if it is gone for good. A
 null anchor is not consulted at all: `retiring_oid` is null for every partition on the one-step path and
 for a retirement already in flight when the column was added, and `child_oid` is null for a row whose name
 no longer resolved when the backfill ran. Both read as unanchored and behave as they did before.
@@ -2198,9 +2200,14 @@ substituted relation.
 
 Like `fail_retain_identity`, the refusal is permanent rather than retryable: no later tick makes the
 name mean the right relation again. It counts in `status().retain_drop_failures`, and shows up as
-`retain_backlog` flat while that count climbs. Recovery is an operator decision -- put the intended
-relation back under that name, or delete the stale `pgpm.part` row (`delete from pgpm.part where
-parent_table = ... and child_name = ...`), after which the archive step moves on to the next partition.
+`retain_backlog` flat while that count climbs. Recovery is an operator decision. When the relation holding
+the name is the partition itself come back as a new relation (restored from a dump under its own name) and
+attached to the table, [`adopt_partition`](#adopt_partition) records it: the row is re-anchored to its oid
+and the partition is archived and retired like any other. When it is not one pgpm should manage, detach it
+and then delete the stale `pgpm.part` row (`delete from pgpm.part where parent_table = ... and child_name =
+...`), after which the archive step moves on to the next partition. Deleting the row of a partition that
+stays attached clears the wedge and nothing else: the partition is then recorded by nothing, so its rows are
+never archived or retired and `status()` stops counting it.
 [`forget_missing`](#forget_missing) is not the tool here: it clears only a parent whose relation no longer
 exists, and this check only ever runs for a live one. At `archive_batch`'s default of `1` a wedged
 partition also holds up that parent's other partitions, which is deliberate: pgpm's catalog is
@@ -2588,6 +2595,49 @@ principle name a same-named table in an unrelated schema. Read the schema before
 
 Find candidates with `status().parent_missing`; see the runbook's
 [a managed table was dropped without untransmute](runbook.md#a-managed-table-was-dropped-without-untransmute).
+
+### `adopt_partition`
+
+```sql
+pgpm.adopt_partition(p_parent regclass, p_child regclass) returns text
+```
+
+Records `p_child`, a partition attached to the managed table `p_parent`, as one of that table's partitions
+by its oid, and returns what it did (the same text it logs). It is the repair for an identity wedge
+(`fail_write_block_identity`, `fail_archive_identity`, `fail_retain_identity`) whose cause is the partition
+itself come back as a new relation: restored from a dump under its own name, its rows and write-block trigger
+with it, but under a new oid, which pgpm rightly refuses to take for the one it recorded. Putting "the
+intended relation" back under the name is not possible then, because the name already holds it and the
+recorded relation is gone, and deleting the stale `pgpm.part` row clears the wedge and nothing else: the
+partition stays attached with its rows and is recorded by nothing, so it is never archived or retired and
+`status().n_partitions` stops counting it.
+
+- **A row of the same name over the same range** (the stale one) is re-anchored: its `child_oid` becomes
+  `p_child`'s oid, and nothing else about it changes.
+- **No row of that name** (it was deleted) means the partition is recorded afresh, over the bounds the catalog
+  holds for it, decoded onto the grid the way every other bound is.
+
+Either way, `pgpm.archive_ledger` rows recorded under the partition's name are discarded (logged
+`archive_coverage_reset`), because that coverage was earned by whatever held the name before, and the
+partition is archived again from its own `lo`. The call is logged `adopt_partition`, with `method` naming the
+relation, its oid and, for a re-anchored row, the oid it replaced. It changes nothing but pgpm's own
+bookkeeping: no DDL, no rows read or moved. From the next tick the partition is write-blocked, archived and
+retired like any other.
+
+It refuses, writing nothing:
+
+- a `p_parent` pgpm does not manage, or a `p_child` that is not attached to it (a partition in the middle of
+  a detach is leaving it), or one that is not a plain table;
+- a `p_child` `pgpm.part` already records by oid (there is nothing to adopt);
+- a row of the same name over a different range, or one a retirement or a regrain is in flight on;
+- a range that overlaps another `pgpm.part` row of the table. If that row is stale too (its relation was
+  dropped, or restored under another name), delete it first: the call does not guess which record is wrong;
+- bounds the grid cannot express: `DEFAULT`, `MINVALUE`, `MAXVALUE`, or a value that does not come back
+  unchanged through the grid's encoding (a `uuid` bound with random bits on a `uuidv7` grid, say).
+
+It holds the table's regrain lock and a `SHARE UPDATE EXCLUSIVE` lock on `p_child` while it judges, so the
+partition cannot be detached or dropped between the check and the row; reads and writes of the partition are
+not blocked. The bounds are read the same way whatever the caller's `DateStyle` and `TimeZone`.
 
 ### `resume` / `pause`
 
@@ -3229,7 +3279,8 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `forget_detached_partition` | `obtain` or `extend_to` found an attached `pgpm.part` row over a cell it was about to judge whose partition still exists but is no longer a partition of the table, with no retirement of pgpm's in flight on it (detached by hand, outside pgpm), forgot the row and built a fresh empty partition over the range (logged `obtain` next), under the cell's explicit-range name while the detached table holds the plain one. The detached table is left exactly as it is, rows and all. `method` names it and its OID. Logged once per detached partition |
 | `forget_incoming_fk` | a `pgpm.dropped_fk` record was forgotten because the catalog no longer backs it: its referencing table was dropped, or a key recorded as re-added is no longer on that table (see [`pgpm.dropped_fk`](#pgpmdropped_fk)). `method` names the key and which of the two it was |
 | `adopt_incoming_fk` | a `pgpm.dropped_fk` record still marked dropped was marked re-added because its key is live again, re-added by hand on its referencing table under its name and against this table (see [`pgpm.dropped_fk`](#pgpmdropped_fk)). `method` names the key, and says `NOT VALID` when the live key is not validated yet |
-| `archive_coverage_reset` | `pgpm.archive_ledger` rows were discarded because the coverage they record cannot be vouched for; `rows` carries how many chunks and `method` says why. Three causes: the partition they were recorded for has no write block in force on it (absent, disabled, or origin-only: coverage nothing has been guarding, see [`maintain`](#maintain) and [`retire`](#retire)); they were recorded under a `child_name` that is no longer a tracked partition of the parent, over a range a tracked partition now holds (a partition renamed without carrying the ledger, see [the archive step](#byte-budget-chunked-archiving)); or a `regrain` swap dropped a partly archived source, whose chunks go with it (see [`regrain`](#regrain)). In every case the partition holding the range archives again from its own `lo` |
+| `adopt_partition` | `adopt_partition()` recorded an attached partition by its oid: a stale row of the same name re-anchored, or a partition with no row recorded afresh over its catalog bounds (see [`adopt_partition`](#adopt_partition)). `method` names the relation, its oid and, for a re-anchored row, the oid it replaced |
+| `archive_coverage_reset` | `pgpm.archive_ledger` rows were discarded because the coverage they record cannot be vouched for; `rows` carries how many chunks and `method` says why. Four causes: the partition they were recorded for has no write block in force on it (absent, disabled, or origin-only: coverage nothing has been guarding, see [`maintain`](#maintain) and [`retire`](#retire)); they were recorded under a `child_name` that is no longer a tracked partition of the parent, over a range a tracked partition now holds (a partition renamed without carrying the ledger, see [the archive step](#byte-budget-chunked-archiving)); a `regrain` swap dropped a partly archived source, whose chunks go with it (see [`regrain`](#regrain)); or `adopt_partition()` recorded a new relation under the name they were recorded for (see [`adopt_partition`](#adopt_partition)). In every case the partition holding the range archives again from its own `lo` |
 | `warn_replica_identity_nothing` | a partition was minted (by `obtain`, `extend_to` or a regrain's swap) for a parent whose `REPLICA IDENTITY USING INDEX` index was dropped, a state PostgreSQL treats as `NOTHING`, so the partition took `NOTHING` (see the replica identity paragraph under `transmute`). Logged at most once per transaction for the parent; `method` names the first such partition. Each one keeps `NOTHING` after the parent is given an identity again, so give it the identity by hand |
 | `warn_obtain_unscheduled` | logged at most once per `maintain_all` sweep, with a null `parent_table`, when the `pgpm` cron job exists but `pgpm_obtain` doesn't -- obtain is silently not running |
 | `skip_obtain` / `skip_retain` / `skip_regrain` / `skip_regrain_capture` / `skip_archive` / `skip_write_block` / `skip_restore_fk` / `skip_validate_fk` | a step deferred (lock race or transient error; `method` carries the reason) |

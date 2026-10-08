@@ -4856,14 +4856,16 @@ $$;''',
         "fail_archive_identity wedge to clear the stale row with forget_missing, which clears only a parent "
         "whose relation is gone, while fail_archive_identity is only ever logged for a live one: the advice "
         "clears nothing and the wedge (at archive_batch 1, the table's whole archiving and retention) stays. "
-        "The exact pre-#739 text.",
-        [("relation back under that name, or delete the stale `pgpm.part` row (`delete from pgpm.part where\n"
-          "parent_table = ... and child_name = ...`), after which the archive step moves on to the next partition.\n"
+        "The pre-#739 advice, in place of the delete repair and its forget_missing caveat.",
+        [("and then delete the stale `pgpm.part` row (`delete from pgpm.part where parent_table = ... and child_name =\n"
+          "...`), after which the archive step moves on to the next partition. Deleting the row of a partition that\n"
+          "stays attached clears the wedge and nothing else: the partition is then recorded by nothing, so its rows are\n"
+          "never archived or retired and `status()` stops counting it.\n"
           "[`forget_missing`](#forget_missing) is not the tool here: it clears only a parent whose relation no longer\n"
           "exists, and this check only ever runs for a live one. At `archive_batch`'s default of `1` a wedged\n"
           "partition also holds up that parent's other partitions, which is deliberate: pgpm's catalog is\n"
           "demonstrably wrong about which relation is which, and retention should not march on past that.",
-          "relation back under that name, or clear the stale row with\n"
+          "and then clear the stale row with\n"
           "[`forget_missing`](#forget_missing). At `archive_batch`'s default of `1` a wedged partition also\n"
           "holds up that parent's other partitions, which is deliberate: pgpm's catalog is demonstrably wrong\n"
           "about which relation is which, and retention should not march on past that.", 1)],
@@ -8962,6 +8964,43 @@ select is((select count(*) || '/' || string_agg(device_id::text, ',' order by de
   'every row of the source, the 240 copied and the 5 late appends, is in the migrated table exactly as often as it was in the source: none lost, none held twice, none altered');
 """, """select is((select count(*)::int from hp_d1), 245, 'all 245 rows present (240 copied + 5 late appends)');
 """, 1)],
+    ),
+    "adopt_partition_keeps_stale_oid": (
+        "bench/adopt_partition.sh",
+        "Issue #1082: adopt_partition finds the stale same-named row and leaves its oid where it was, so the "
+        "identity wedge on a partition restored from a dump under its own name stands: nothing is archived or "
+        "retired, rows far below the horizon stay for good. One site, the re-anchoring UPDATE. tests/303 part A "
+        "catches it.",
+        [("    update pgpm.part set child_oid = p_child::oid\n"
+          "     where parent_table = p_parent and child_name = v_rel;\n",
+          "    update pgpm.part set child_oid = child_oid\n"
+          "     where parent_table = p_parent and child_name = v_rel;\n", 1)],
+    ),
+    "adopt_partition_records_nothing": (
+        "bench/adopt_partition.sh",
+        "Issue #1082, the state the old repair left: a partition whose stale pgpm.part row was deleted is not "
+        "recorded afresh, so it stays attached with its rows and no row, retention never reaches it and "
+        "status() undercounts the table. One site, the INSERT. tests/303 parts B and D catch it.",
+        [("    insert into pgpm.part (parent_table, child_name, lo, hi, child_oid)\n"
+          "      values (p_parent, v_rel, v_lo, v_hi, p_child::oid);\n"
+          "    v_method := format('%s (oid %s) is a partition of this table that pgpm.part had no row for;",
+          "    v_method := format('%s (oid %s) is a partition of this table that pgpm.part had no row for;", 1)],
+    ),
+    "adopt_partition_unlocked": (
+        "bench/adopt_partition.sh",
+        "Issue #1082: adopt_partition judges the partition attached without locking it, so a DETACH (or a DROP) "
+        "in a second session lands between the judgement and the commit, and the row it records is for a "
+        "relation no longer in the table. One site, the lock on the partition. tests/303 part E catches it.",
+        [("  execute format('lock table %s in share update exclusive mode', p_child::text);\n", "", 1)],
+    ),
+    "adopt_partition_credits_old_coverage": (
+        "bench/adopt_partition.sh",
+        "Issue #1082, the over-trusting repair: adopt_partition keeps the pgpm.archive_ledger coverage recorded "
+        "under the partition's name, which the OLD relation earned, so the adopted relation is archived only "
+        "from the old watermark and retire() drops rows the strategy was never handed. One site, the ledger "
+        "discard. tests/303 part A's ledger identity catches it.",
+        [("l.parent_table = p_parent and l.child_name = v_rel returning 1)",
+          "l.parent_table = p_parent and l.child_name = v_rel and false returning 1)", 1)],
     ),
 }
 
