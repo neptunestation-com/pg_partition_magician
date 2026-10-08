@@ -1390,7 +1390,8 @@ A partition that is no longer attached to the parent but carries no `retiring_at
 something other than pgpm (an operator's own `DETACH PARTITION`, to keep the table or to archive it by
 hand), and `retire` leaves it alone, whether or not anything references the parent: it returns `false`,
 logs `fail_retain_drop` for the partition's range with `method` saying why, and neither write-blocks nor
-drops the table. Its `pgpm.part` row stays, so every later `retain` refuses and logs it again and
+drops the table; `maintain`'s write-block and archive steps leave it alone too (see [`maintain`](#maintain)).
+Its `pgpm.part` row stays, so every later `retain` refuses and logs it again and
 `status().retain_drop_failures` counts it. To end that, attach the table back to the parent or delete its
 `pgpm.part` row. A partition pgpm's own retirement detached carries `retiring_at` and is dropped as usual
 (see below).
@@ -1950,11 +1951,22 @@ taken a partition's name, the tick refuses on identity (`fail_write_block_identi
 the real partition's coverage alone. Write-blocked is one of `retire()`'s drop preconditions (see
 [`retire`](#retire)).
 
+A partition detached by hand (an operator's own `DETACH PARTITION`, to keep the table) is not walked at
+all, though its `pgpm.part` row still says attached: the step asks the catalog, as `obtain` does, and a
+child whose table still exists, is no longer a partition of the parent and carries no `retiring_at` is the
+operator's. No write block goes on it however far retention reaches, none is lifted from it and its
+coverage is not judged, and nothing is logged by this step; `retire` refuses the same table and logs
+`fail_retain_drop` (see [`retire`](#retire)). A block pgpm put on the partition before it was detached
+stays, since pgpm no longer touches the table; drop the trigger `pgpm_write_block` by hand to write to it.
+A partition `retire` is detaching concurrently (`retiring_at` set) is still pgpm's and stays blocked, and
+one dropped by hand is still attempted and logged `skip_write_block`.
+
 Chunked archiving: `archived=N` counts how many chunks this tick recorded via
 `pgpm._archive_step` -- see [Archive strategy contract](#archive-strategy-contract) for the
 mechanism. It only ever considers a child the write-block step above has already protected, so it
-always runs after write-blocking within the same tick. Archive coverage is `retire()`'s other drop
-precondition.
+always runs after write-blocking within the same tick. A partition detached by hand is not a candidate
+even when it carries the block pgpm put on it before the detach: it is never handed to the strategy and
+no coverage is recorded for it. Archive coverage is `retire()`'s other drop precondition.
 
 ### `maintain_all`
 

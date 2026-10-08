@@ -2108,6 +2108,28 @@ returns boolean language sql stable as $$
   end;
 $$;
 
+-- _part_detached_by_hand: whether an ATTACHED pgpm.part row of p_parent stands for a table the operator
+-- DETACHed by hand, i.e. one pgpm no longer manages (#705). True when the row's relation (by child_oid)
+-- still exists and is not built in _part_built's sense: not a partition of p_parent, and no retirement of
+-- pgpm's in flight on it (retiring_at). pgpm.part.attached says what pgpm did, not what the catalog holds,
+-- and an operator's own DETACH PARTITION never touches it, so every maintain() step that acts on an
+-- attached row asks this first: _enforce_write_blocks (no write block goes on the operator's table) and
+-- _archive_step (it is not handed to the strategy, and no coverage is recorded for it). retire() refuses the
+-- same table (#652) and logs it fail_retain_drop on every call, which is why its row is LEFT, not forgotten
+-- as _cell_attached forgets a forward cell's: the row is what keeps that refusal counted in status().
+--
+-- One-directional, like _part_built. A child pgpm's own retirement detached (retiring_at set) is still
+-- pgpm's. A row whose relation is gone is not a table anyone keeps: it stays on the paths that report it
+-- (skip_write_block from the write-block step, tests/94; fail_retain_identity from retire()). A row with no
+-- recorded oid (an upgrade from before #421) cannot be told apart from a renamed partition and is left to
+-- behave as it did before.
+create or replace function pgpm._part_detached_by_hand(p_parent regclass, p_child_oid oid, p_retiring_at timestamptz)
+returns boolean language sql stable as $$
+  select p_child_oid is not null
+     and not pgpm._part_built(p_parent, p_child_oid, p_retiring_at)
+     and exists (select 1 from pg_class c where c.oid = p_child_oid);
+$$;
+
 -- _cell_attached: whether an attached partition of p_parent overlaps the cell [p_lo, p_hi), the question
 -- obtain and extend_to (its dry count and its walk) ask of every cell before building it. Half-open
 -- [p_lo, p_hi) overlaps [p.lo, p.hi) iff p.hi > p_lo and p_hi > p.lo.
@@ -3996,7 +4018,10 @@ begin
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   v_boundary := pgpm._retain_boundary(cfg);
 
+  -- #705: a table the operator detached by hand is theirs, not a partition: no block goes on it and none
+  -- is lifted or its coverage judged (see _part_detached_by_hand; retire() refuses and logs it)
   for r in select child_name, lo, hi, child_oid from pgpm.part where parent_table = p_parent and attached
+                  and not pgpm._part_detached_by_hand(p_parent, child_oid, retiring_at)
     order by hi asc
   loop
     begin
@@ -4499,10 +4524,13 @@ begin
   -- eligibility checks live in the WHERE clause (not a `continue` inside the loop, the old shape)
   -- specifically so `limit` bounds the right set: every row this query returns is a genuine
   -- candidate, so archive_batch caps how many DIFFERENT partitions get a turn this call, not how
-  -- many rows happen to be scanned before finding that many.
+  -- many rows happen to be scanned before finding that many. A table the operator detached by hand is
+  -- not one (#705, _part_detached_by_hand), even when it carries the block pgpm put on it before the
+  -- detach: it is never handed to the strategy and no coverage is recorded for it.
   for r in execute format(
     'select p.child_name, p.child_oid, p.lo, p.hi from pgpm.part p
       where p.parent_table = %L::regclass and p.attached
+        and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)
         and pgpm._is_write_blocked(%L::regclass, p.child_name)
         and not pgpm._archive_fully_covered(%L::regclass, p.child_name)
       order by p.lo::%s

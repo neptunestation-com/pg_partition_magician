@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **`maintain` leaves a partition detached by hand alone** (#705, bullets 1 and 2). `_enforce_write_blocks`
+  and `_archive_step` read `pgpm.part.attached`, which an operator's own `DETACH PARTITION` never touches, so
+  once retention reached a table the operator had detached to keep, a tick put `pgpm_write_block` on it and
+  every write to it was refused "past its retention boundary", and a table detached after pgpm had blocked it
+  was handed to the archive strategy and had coverage recorded for it, while `retire` refused it as detached
+  by the operator (#652). Both now ask `pgpm._part_detached_by_hand`, built on `_part_built`: a child whose
+  table exists, is not a partition of the parent and carries no `retiring_at` is skipped, and its row stays
+  for `retire` to refuse and log. A partition `retire` is detaching concurrently stays pgpm's, and one dropped
+  by hand still logs `skip_write_block`. Test `tests/307`, guard `bench/write_block_skips_hand_detached.sh`,
+  mutations `write_block_trusts_part_attached`, `archive_trusts_part_attached`,
+  `detached_by_hand_ignores_retiring_at`, `detached_by_hand_counts_dropped`.
+
 - **`pgpm.adopt_partition` repairs an identity wedge without orphaning the partition** (#1082). A partition
   restored from a dump under its own name is a new oid, which the write-block, archive and retire steps refuse
   on identity, and the documented repair (delete the stale `pgpm.part` row) cleared the wedge and nothing else:
