@@ -2908,13 +2908,21 @@ The `text_time` analogue of `check_uuidv7`: samples a `text`/`varchar` column ag
 (the same `p_tt_prefix`/`p_tt_width`/`p_tt_radix`/`p_tt_unit` `transmute` takes) and reports the fraction
 that both match the shape and decode to a plausible recent time. A value that does not even match the
 shape counts as implausible directly, rather than raising -- one malformed row must not abort the sample.
-A heuristic, not a proof; this is the check `transmute` runs to gate the text_time kind.
+So does a value that matches the shape but spells a count past what the decode can hold (an interval holds
+about 9.2e12 seconds, and a `timestamptz` ends in 294276 AD): nine base-36 digits of seconds can spell
+about 1e14. A heuristic, not a proof; this is the check `transmute` runs to gate the text_time kind.
+`p_epoch` is read as the instant it is, whatever the session's DateStyle and TimeZone.
 
 `newest_decoded` and `newest_in_future` are [`check_uuidv7`](#check_uuidv7)'s: the column's actual maximum
 (not the sample's, and NULLs skipped), decoded, and whether it sits more than one hour past `now()`. A
-maximum that does not match the declared shape reports `null` rather than raising. Rows to delete or
+maximum that does not match the declared shape, or that the decode cannot hold, reports `null` rather than
+raising. Rows to delete or
 correct before a refused `transmute` are the ones sorting above
 `pgpm._ts_to_text_time(now() + <step> + interval '1 hour', <prefix>, <width>, <radix>, <unit>, ...)`.
+
+Refuses a radix `transmute` refuses: below 2 with a supplied `p_alphabet` (`p_radix must be at least 2`,
+the rule `transmute` applies to `p_tt_radix`), outside 2-36 without one, and an alphabet whose length is
+not `p_radix`.
 
 Refuses, with the same message `transmute` gives, when the control column's collation does not order the
 declared alphabet the way base-`p_radix` place value does (a mixed-case alphabet such as KSUID's base62

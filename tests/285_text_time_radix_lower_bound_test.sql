@@ -18,12 +18,16 @@ select plan(6);
 create table public.one_char (id text collate "C" primary key, v int);
 insert into public.one_char select 'c' || repeat('x', 8) || lpad(i::text, 6, '0'), i from generate_series(1, 20) i;
 
--- 1: LIVENESS. Everything about this shape other than its radix is accepted: check_text_time, the
--- read-only diagnostic, decodes every sampled row with it. So a refusal below is the radix's.
+-- 1: LIVENESS. Everything about this shape other than its radix is accepted: every row has the shape and the
+-- decoder reads each one with it. So a refusal below is the radix's. (This used to be check_text_time's
+-- sample count, until check_text_time refused the radix too, #1039; the shape gate and the decoder it
+-- sampled with are what it witnessed.)
 select is(
-  (select sampled from pgpm.check_text_time('public.one_char', 'id', 'c', 8, 1, 'ms', 1000, 'x')),
+  (select count(*) from public.one_char
+    where pgpm._text_time_shaped(id, 'c', 8, 1, 'x')
+      and pgpm._text_time_to_ts(id, 'c', 8, 1, 'ms', 'x') = timestamptz '1970-01-01 00:00:00+00'),
   20::bigint,
-  'check_text_time samples all twenty rows under radix 1 with alphabet ''x'''
+  'all twenty rows have the shape and decode under radix 1 with alphabet ''x'''
 );
 
 -- The error a statement raised, its SQLSTATE first; 'completed' if it raised none.

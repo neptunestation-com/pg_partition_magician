@@ -1177,6 +1177,7 @@ run_perf() {
     "bench/archive_covered_hi_column_type.sh pgpm_perf303"
     "bench/regrain_capture_view_writer.sh pgpm_perf304"
     "bench/obtain_backoff_hole.sh pgpm_perf305"
+    "bench/check_text_time_contract.sh pgpm_perf114"
   )
   local selected=()
   local n=${#guards[@]} idx

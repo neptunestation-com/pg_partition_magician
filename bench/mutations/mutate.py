@@ -8613,12 +8613,7 @@ select ok(
         "and repeats, so p_tt_radix => 1 with alphabet 'x' passes and _radix_encode's div(v, 1) loop never ends: "
         "transmute spins at the frontier encode until statement_timeout. tests/285 assertions 2 and 3 catch it "
         "(the file sets statement_timeout around both, so the mutant fails rather than hangs).",
-        [("      if p_tt_radix < 2 then\n"
-          "        raise exception 'pg_partition_magician: p_tt_radix must be at least 2 (got %) -- a base-% encoding "
-          "has no place value to order bounds by; supply an alphabet of two or more characters, one per digit', "
-          "p_tt_radix, p_tt_radix;\n"
-          "      end if;\n",
-          "", 1)],
+        [("      perform pgpm._text_time_radix_floor(p_tt_radix, 'p_tt_radix');\n", "", 1)],
     ),
     "transmute_time_unit_contract_dropped": (
         "bench/transmute_step_precision.sh",
@@ -8631,6 +8626,41 @@ select ok(
           "    -- be too, or the cutover's ATTACH rounds a bound between two of them. See _time_unit_contract.\n"
           "    perform pgpm._time_unit_contract(p_parent, p_control, p_step, p_anchor);\n",
           "    null;\n", 1)],
+    ),
+    # pass 10 G14: check_text_time's contract (#1081, #1084, #1039 bullet 3), one clause each;
+    # bench/check_text_time_contract.sh runs tests/301 and tests/302 against them.
+    "check_text_time_epoch_spliced": (
+        "bench/check_text_time_contract.sh",
+        "Pre-#1081 check_text_time: p_epoch is spliced into the dynamic query with %L again, a bare render under "
+        "the session's DateStyle and TimeZone that the query parses back, so under 'SQL, DMY' in Asia/Kolkata "
+        "the epoch reads back with IST as Israel's +02 and every decoded instant is 3.5 hours late (one hour "
+        "early in Europe/Dublin). Both decodes, the sample's and the maximum's. tests/301 assertions 5-8 and "
+        "10-12 catch it below PostgreSQL 18.",
+        [("           select pgpm._text_time_to_ts_bounded(v, %4$L, %5$s, %7$s, %8$L, %9$L, %10$s, $1) as ts from shaped\n",
+          "           select pgpm._text_time_to_ts_bounded(v, %4$L, %5$s, %7$s, %8$L, %9$L, %10$s, %11$L) as ts from shaped\n", 1),
+         ("                       then pgpm._text_time_to_ts_bounded(v, %4$L, %5$s, %7$s, %8$L, %9$L, %10$s, $1)\n",
+          "                       then pgpm._text_time_to_ts_bounded(v, %4$L, %5$s, %7$s, %8$L, %9$L, %10$s, %11$L)\n", 1),
+         ("      p_alphabet, p_discard_bits)\n    using p_epoch;\n",
+          "      p_alphabet, p_discard_bits, p_epoch);\n", 1)],
+    ),
+    "check_text_time_decode_unbounded": (
+        "bench/check_text_time_contract.sh",
+        "Pre-#1084 check_text_time: _text_time_to_ts_bounded without its range check, so a value with the "
+        "declared shape whose count overflows an interval or the timestamptz range reaches _text_time_to_ts, "
+        "which raises, and the whole report raises with it instead of counting the row implausible and "
+        "reporting that maximum null. One site, the helper both decodes ask. tests/302 assertions 3-5 and 9 "
+        "catch it.",
+        [("  if v_secs >= 9223372036853\n"
+          "     or (isfinite(p_epoch) and extract(epoch from p_epoch) + v_secs >= 9224318015999) then\n"
+          "    return null;\n"
+          "  end if;\n", "", 1)],
+    ),
+    "check_text_time_radix_floor_dropped": (
+        "bench/check_text_time_contract.sh",
+        "Pre-#1039 (bullet 3) check_text_time: the supplied-alphabet branch checks the alphabet's length alone, "
+        "so radix 1 with alphabet 'x' (and radix 0 with '') is sampled and reported where transmute refuses "
+        "the shape (#990). One site. tests/302 assertions 12 and 13 catch it.",
+        [("    perform pgpm._text_time_radix_floor(p_radix, 'p_radix');\n", "", 1)],
     ),
     "time_unit_anchor_unchecked": (
         "bench/transmute_step_precision.sh",
