@@ -1263,11 +1263,17 @@ $$;
 -- that parses it: checked as one instant by the tick and stored verbatim, it read as another to retire() in
 -- another zone, which dropped a partition with rows the strategy was never handed. Called in the session
 -- whose parse the check accepted, so what is stored is the instant that was checked, with its offset.
+--
+-- An id value the same way, at its least scale (#1071): the stored hi becomes the next chunk's lo, which
+-- _next_archive_chunk compares with the control column as a literal, and an integer column reads
+-- '15000.0000000000000000' (what (lo + hi) / 2 renders as numeric) as invalid input, not as 15000. The
+-- contract check has already held the value to one the column holds (_archive_contract_breach), so at its
+-- least scale it is text the column's own type parses.
 create or replace function pgpm._native_text(p_kind text, p_value text)
 returns text language plpgsql stable as $$
 begin
   if p_value is null then return null; end if;
-  if p_kind = 'id' then return p_value::numeric::text; end if;
+  if p_kind = 'id' then return trim_scale(p_value::numeric)::text; end if;
   return pgpm._ts_text(p_value::timestamptz);
 end;
 $$;
@@ -4169,8 +4175,24 @@ $$;
 -- the ledger, which maintain() would have reported as a skip_archive deferral, tick after tick, for
 -- what is a permanent strategy bug. A strategy that genuinely cannot make progress on a call should
 -- raise (see pgpm.archive_result's note): that IS the deferral path, and it retries the same chunk.
-create or replace function pgpm._archive_contract_breach(p_kind text, p_lo text, p_hi text, p_covered_hi text)
-returns text language plpgsql immutable as $$
+--
+-- A native value is not yet a value of the COLUMN (#1071). An id grid's native type is numeric, and an
+-- integer key holds whole numbers only: a strategy returning (lo + hi) / 2 got 22.5 past the bounds above,
+-- the ledger stored it, and every later tick's _next_archive_chunk, which compares the column with the
+-- stored hi as a literal, raised 22P02 (skip_archive, tick after tick), while a corrected strategy could not
+-- help, since the ledger row stayed. So an id value is also held to a round trip through the control column's
+-- type: cast to it and back, it must be the same number. The type is the column's BASE type with no typmod,
+-- because that is what every later read parses the stored text as (a comparison resolves a domain to its
+-- base type, and a literal takes no typmod), not the declared type _control_bound_contract holds a bound to
+-- (#952), whose reader is ATTACH: a numeric(12, 2) key reads '15000.555' as a literal without complaint, and
+-- refusing it would wedge a strategy that bisects a chunk. The cast is from numeric, not from the text, so an
+-- integral value spelt with a scale ('15000.0') is the whole number it is; the ledger records it at its least
+-- scale (_native_text), which the type parses.
+drop function if exists pgpm._archive_contract_breach(text, text, text, text);
+create or replace function pgpm._archive_contract_breach(p_parent regclass, p_kind text, p_lo text, p_hi text,
+                                                         p_covered_hi text)
+returns text language plpgsql stable as $$
+declare cfg pgpm.config; v_type oid; v_back numeric;
 begin
   if p_covered_hi is null then
     return 'covered_hi is null; the contract requires the native value up to which [lo, ...) is now archived';
@@ -4181,6 +4203,20 @@ begin
     end if;
     if pgpm._native_gt(p_kind, p_covered_hi, p_hi) then
       return 'covered_hi must not exceed hi: the strategy is claiming coverage of a range it was not handed';
+    end if;
+    if p_kind = 'id' then
+      select * into cfg from pgpm.config where parent_table = p_parent;
+      cfg := pgpm._control_followed(cfg);
+      select a.atttypid into v_type
+        from pg_attribute a where a.attrelid = p_parent and a.attname = cfg.control_column and not a.attisdropped;
+      while (select d.typtype from pg_type d where d.oid = v_type) = 'd' loop   -- a domain reads as its base type
+        select d.typbasetype into v_type from pg_type d where d.oid = v_type;
+      end loop;
+      execute format('select %L::numeric::%s::numeric', p_covered_hi, format_type(v_type, -1)) into v_back;
+      if v_back <> p_covered_hi::numeric then
+        return format('covered_hi must be a value of the control column, which is %1$s: %2$s is not one (as %1$s it is %3$s), and every later tick reading the partition from it would fail',
+                      format_type(v_type, -1), p_covered_hi, v_back);
+      end if;
     end if;
   exception when data_exception then
     return format('covered_hi is not a %s value (%s)', pgpm._native_type(p_kind), sqlerrm);
@@ -4340,7 +4376,7 @@ begin
       -- where the ledger honestly stands. Until then it logs once per tick, counts in
       -- status().retain_drop_failures, and at archive_batch's default of 1 holds up this parent's other
       -- partitions, which is right: the strategy is provably wrong about what it archived.
-      v_breach := pgpm._archive_contract_breach(cfg.control_kind, v_range.lo, v_range.hi, v_result.covered_hi);
+      v_breach := pgpm._archive_contract_breach(p_parent, cfg.control_kind, v_range.lo, v_range.hi, v_result.covered_hi);
       if v_breach is not null then
         insert into pgpm.log (parent_table, action, lo, hi, method)
           values (p_parent, 'fail_archive_contract', v_range.lo, v_range.hi,

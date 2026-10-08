@@ -45,7 +45,8 @@
 --
 -- THE STRATEGY'S RETURN IS HELD TO THE ARCHIVE CONTRACT, the one pgpm._archive_step holds it to
 -- (issue #454): a covered_hi that is null, not above the range's lo, past its hi, or not a value of
--- the control's type is refused BEFORE anything is written to pgpm.archive_ledger (retire()'s drop
+-- the control's type (on an id grid, of the control column's own type: a fraction on an integer key, #1071)
+-- is refused BEFORE anything is written to pgpm.archive_ledger (retire()'s drop
 -- precondition), logged fail_archive_contract, and reported in the returned message. Nothing is
 -- recorded, so the partition stays unarchived and undroppable until the strategy is fixed. And a
 -- caller whose reads of the parent or the partition row-level security filters is refused before the
@@ -61,7 +62,8 @@
 --
 -- Requires pgpm_core (any version that ships pgpm._run_archive_strategy/_is_write_blocked/
 -- _archive_fully_covered/_native_type/_native_gt -- these predate this script, not new in any
--- particular release), plus pgpm._archive_contract_breach (issue #454), pgpm._native_text (issue
+-- particular release), plus pgpm._archive_contract_breach (issue #454; the five-argument form that takes the
+-- parent and holds an id grid's covered_hi to the control column's type, issue #1071), pgpm._native_text (issue
 -- #977) and pgpm._refuse_filtered_reads (issue #873) for the contract check, the ledger's canonical
 -- hi and the row-level security refusal, pgpm._max_hi_native (issue #500) for the canonical resume
 -- watermark and pgpm._child_nsp (issue #727) for the partition's own schema, plus pgpm.part.child_oid for the identity check below (issue #421; added after this
@@ -170,7 +172,7 @@ begin
   -- ledger on its primary key. Unlike the identity refusal above this one IS logged, as the
   -- fail_archive_contract _archive_step writes: the defect is the configured strategy's, maintain()'s next
   -- tick meets it too, and status() counts the action whichever path met it first.
-  v_breach := pgpm._archive_contract_breach(cfg.control_kind, v_resume_lo, r.hi, v_result.covered_hi);
+  v_breach := pgpm._archive_contract_breach(p_parent, cfg.control_kind, v_resume_lo, r.hi, v_result.covered_hi);
   if v_breach is not null then
     insert into pgpm.log (parent_table, action, lo, hi, method)
       values (p_parent, 'fail_archive_contract', v_resume_lo, r.hi,

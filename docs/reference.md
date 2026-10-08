@@ -1974,8 +1974,9 @@ upload functions implement.
 
 The core holds a strategy to that promise. Before a ledger row is written from a call's result,
 `covered_hi` must be a native grid value strictly above the `p_lo` the call was handed and no greater
-than its `p_hi`. A return that breaks this (null, at or below `p_lo`, past `p_hi`, or not a native
-value at all) is not recorded: the step logs one `fail_archive_contract` row naming the strategy, the
+than its `p_hi`, and on an `id` grid a value the control column holds. A return that breaks this (null,
+at or below `p_lo`, past `p_hi`, not a native value at all, or a fraction on an integer key) is not
+recorded: the step logs one `fail_archive_contract` row naming the strategy, the
 chunk, the value returned and the rule it broke, skips that partition for the tick, and counts the
 refusal in `status().retain_drop_failures`; see
 [the archive step's contract check](#the-archive-steps-contract-check). A strategy that cannot make
@@ -2121,7 +2122,7 @@ written from it is what opens `retire()`'s drop gate. Recorded verbatim, a strat
 chunk `[0, 15)` with `covered_hi = 15000` marked the whole partition covered on the spot, and the next
 `retain()` dropped it with nothing archived. So before writing the row, `_archive_step` checks the
 returned `covered_hi` against the `[p_lo, p_hi)` it passed: it must be a native grid value with
-`p_lo < covered_hi <= p_hi`.
+`p_lo < covered_hi <= p_hi`, and on an `id` grid a value of the control column's type.
 
 Each bound closes a different hole. Past `p_hi` is the drop with nothing archived. At or below `p_lo`
 is "no progress", which recorded as a `(lo, lo)` ledger row wedged the ledger for good: the next tick
@@ -2130,6 +2131,30 @@ key, every tick from then on. A null `covered_hi` is refused for the same reason
 watermark). And a value that is not a native value at all is refused here rather than left in the
 text `hi` column, where every later coverage check would have raised, and `maintain()` would have
 reported that as a `skip_archive` deferral, tick after tick, for what is a permanent strategy bug.
+
+A native value is not yet a value of the column. An `id` grid's native type is `numeric`, but an
+integer key holds whole numbers only, and the ledger's `hi` is the next chunk's `lo`, which the next
+tick compares with the column as a literal. So on an `id` grid `covered_hi` is also held to a round
+trip through the control column's type (its base type, through any domain, without a typmod, since
+that is what the comparison parses it as): cast to it and back, it must be the same number. A
+strategy that bisects its chunk and returns `(lo + hi) / 2` unrounded on a `bigint` key gets `22.5`
+refused, where it used to be recorded, after which every tick raised `invalid input syntax for type
+bigint` as a `skip_archive` deferral and pointing `pgpm.set_archive_fn` at a corrected strategy did
+not help, because the recorded row stayed. On a `numeric` key the same `22.5` is a value of the
+column and is recorded. An integral value written with a scale (`15000.0000000000000000`) is the
+whole number it is, and is recorded as `15000`.
+
+A ledger row an earlier pgpm already recorded with such a value is not rewritten: the next tick that
+reads the partition still raises, logs `skip_archive` over the partition's range, and does so every
+tick, so the partition is neither archived further nor retired. On an integer key (and only there: on
+a `numeric` key such a row is a value of the column and rounding it would claim ids nothing archived),
+writing that `hi` as the next whole number at or above it covers exactly the ids the recorded value
+did, and the next tick resumes from it:
+
+```sql
+update pgpm.archive_ledger set hi = ceil(hi::numeric)::text
+ where parent_table = 'public.orders'::regclass and hi <> ceil(hi::numeric)::text;
+```
 
 On a breach nothing is recorded. The step logs `fail_archive_contract`, with the strategy, the chunk,
 the value it returned and the rule it broke in `method`, skips that partition for the tick, and
@@ -2158,7 +2183,8 @@ what it is.
 
 A return that keeps the promise is recorded as the instant the check accepted, not as the text the
 strategy wrote: the ledger's `hi` is that value rendered canonically (ISO 8601 with its offset for a
-time grid, as every other stored bound is; plain numeric text for an `id` grid). The check parses
+time grid, as every other stored bound is; plain numeric text at its least scale for an `id` grid, so
+`15000`, never `15000.0000`). The check parses
 `covered_hi` in the archiving session, so a value written without an offset
 (`'2026-03-01 00:00:00'`) is read in that session's zone, and the canonical text names that same
 instant from every other session. Recorded verbatim, such a value checked in a UTC tick as short of `hi` read as
@@ -3093,7 +3119,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `fail_retain_reattach` | a partition retention no longer reaches, which its dispatched detach had already taken out of the parent, could not be re-attached (a lock timeout, or something else now holds its range). The table and its rows are left whole, `method` carries the error, and the next tick tries again. Counts in `status().retain_drop_failures` |
 | `fail_retain_identity` / `fail_archive_identity` / `fail_write_block_identity` | a partition's name no longer resolves to the relation pgpm recorded for it, so `retire` refused to detach or drop it (see [identity](#what-retire-checks-a-partitions-identity-against)) / the archive step refused to read it (see [the archive step's identity check](#the-archive-steps-identity-check)) / the write-block step refused to put its trigger on it. `method` names the OIDs and, for the first, which anchor disagreed. None clears itself on a later tick |
 | `fail_obtain_name` | `obtain` or `extend_to` left the cell `[lo, hi)` unbuilt because its name is held by a relation that is not one of the table's partitions or by a type (an enum, domain or range type, since a table's row type takes its name), or its explicit-range stand-in is taken or over 63 bytes, or its own name is over 63 bytes (see [Partition naming](#partition-naming)); every write into the range is refused until the name is freed. `method` names what holds it, or for a name over 63 bytes gives the name, its length and the bytes to shorten the table name by. Repeats once per tick until the cell is built |
-| `fail_archive_contract` | the archive step refused what the archive strategy returned: `covered_hi` was null, not above the chunk's `lo`, past its `hi`, or not a native value, so no ledger row was written and coverage did not advance (see [the archive step's contract check](#the-archive-steps-contract-check)). `method` names the strategy, the chunk, the value returned and the rule it broke. Repeats once per tick until the strategy is corrected, and clears itself once it is |
+| `fail_archive_contract` | the archive step refused what the archive strategy returned: `covered_hi` was null, not above the chunk's `lo`, past its `hi`, not a native value, or on an `id` grid not a value of the control column's type, so no ledger row was written and coverage did not advance (see [the archive step's contract check](#the-archive-steps-contract-check)). `method` names the strategy, the chunk, the value returned and the rule it broke. Repeats once per tick until the strategy is corrected, and clears itself once it is |
 
 ### `pgpm.dropped_fk`
 
