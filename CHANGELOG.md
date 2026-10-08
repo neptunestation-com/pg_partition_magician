@@ -11,12 +11,15 @@
   guard, had its rows copied and then failed every swap, wedging auto-regrain on it. `retire` already refused
   such a table (#652). All three now ask `pgpm._part_detached_by_hand`, built on `_part_built` (and
   `progress().coarse_frozen` mirrors the scan): a child whose table exists, is not a partition of the parent
-  and carries no `retiring_at` is skipped, and its row stays for `retire` to refuse and log. A partition
-  `retire` is detaching concurrently stays pgpm's, and one dropped by hand still logs `skip_write_block`.
-  Test `tests/307`, guard `bench/write_block_skips_hand_detached.sh`, mutations
-  `write_block_trusts_part_attached`, `archive_trusts_part_attached`, `regrain_trusts_part_attached`,
-  `progress_coarse_counts_hand_detached`, `detached_by_hand_ignores_retiring_at`,
-  `detached_by_hand_counts_dropped`.
+  and carries no `retiring_at` is skipped, and its row stays for `retire` to refuse and log. A regrain
+  already in flight when its source is detached by hand is ended by the next tick's janitor, scoped to that
+  source as `retire`'s reclaim is (triggers off the operator's table, copies dropped, delta emptied, cursor
+  cleared), and logged with the new action `regrain_source_detached`. A partition `retire` is detaching
+  concurrently stays pgpm's, and one dropped by hand still logs `skip_write_block`. Test `tests/307`, guard
+  `bench/write_block_skips_hand_detached.sh`, mutations `write_block_trusts_part_attached`,
+  `archive_trusts_part_attached`, `regrain_trusts_part_attached`, `progress_coarse_counts_hand_detached`,
+  `regrain_detached_source_orphaned`, `regrain_detached_logged_as_cancel`,
+  `detached_by_hand_ignores_retiring_at`, `detached_by_hand_counts_dropped`.
 
 - **`pgpm.adopt_partition` repairs an identity wedge without orphaning the partition** (#1082). A partition
   restored from a dump under its own name is a new oid, which the write-block, archive and retire steps refuse

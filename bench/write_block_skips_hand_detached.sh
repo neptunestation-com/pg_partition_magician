@@ -7,11 +7,12 @@
 # pgpm.part.attached, which an operator's own DETACH PARTITION never touches, so a maintain() tick put
 # pgpm_write_block on a table the operator had detached to keep (every write to it refused "past its
 # retention boundary"), the archive step handed such a table to the strategy and recorded coverage for it,
-# and auto-regrain put its capture and TRUNCATE guard on a detached coarse child and wedged on it, while
-# retire() refused it as detached by the operator (#652). The file is the acceptance test; this wrapper exists so the mutations have a guard the
+# and auto-regrain put its capture and TRUNCATE guard on a detached coarse child and wedged on it (or, for a
+# run already in flight when the source was detached, left it there for good), while retire() refused it
+# as detached by the operator (#652). The file is the acceptance test; this wrapper exists so the mutations have a guard the
 # discriminate track can run against the mutant, in the shape of bench/obtain_rebuilds_detached_cell.sh.
 #
-# SIX mutations are required to fail against it (bench/mutations/mutate.py):
+# EIGHT mutations are required to fail against it (bench/mutations/mutate.py):
 #   write_block_trusts_part_attached     -- _enforce_write_blocks walks every attached row again, the
 #                                           pre-fix shape. Part A.
 #   archive_trusts_part_attached         -- _archive_step's candidate query trusts attached again, the
@@ -26,6 +27,9 @@
 #                                           pre-fix shape. Part E.
 #   progress_coarse_counts_hand_detached -- progress().coarse_frozen stops mirroring that scan and counts
 #                                           the detached coarse child. Part E.
+#   regrain_detached_source_orphaned     -- a run already in flight when its source is detached by hand is
+#                                           never ended: triggers, copies and cursor stay. Part F.
+#   regrain_detached_logged_as_cancel    -- the run is ended but logged regrain_cancel. Part F.
 #
 # Runs on the plain core image (pgtap and pg_prove). TAP_GUARD_TEST_FILE overrides the test
 # file's path inside the container, for a worktree mounted somewhere other than /repo.

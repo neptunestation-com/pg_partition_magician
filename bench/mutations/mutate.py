@@ -7862,6 +7862,22 @@ select ok(
         [("         and not pgpm._part_detached_by_hand(r.parent_table, p.child_oid, p.retiring_at)   -- #705, as maintain asks\n",
           "", 1)],
     ),
+    "regrain_detached_source_orphaned": (
+        "bench/write_block_skips_hand_detached.sh",
+        "Issue #705, the scan-only fix: auto-regrain no longer picks a coarse child detached by hand, but a run "
+        "already in flight when its source is detached is never ended, so its capture and TRUNCATE guard stay "
+        "on the operator's table, its copies stay unattached and the cursor stays set. One site, the "
+        "janitor's reclaim. tests/307 part F catches it.",
+        [("      perform pgpm._regrain_reclaim(p_parent, r.child_name, r.lo, r.hi, true);\n", "      null;\n", 1)],
+    ),
+    "regrain_detached_logged_as_cancel": (
+        "bench/write_block_skips_hand_detached.sh",
+        "Issue #705: the run on a source detached by hand is ended but logged regrain_cancel, retire's wording, "
+        "as if an operator or retention had asked for it. One site, _regrain_reclaim's log. tests/307 part F "
+        "catches it.",
+        [("  if p_detached and (v_capture or v_cursor_in or v_dropped > 0) then\n",
+          "  if false and (v_capture or v_cursor_in or v_dropped > 0) then\n", 1)],
+    ),
     "crossing_keys_bare_text": (
         "bench/crossing_keys_datestyle.sh",
         "Pre-#814 (F4-01) _crossing_keys: a timestamptz referencing key is read back with a bare ::text, so "

@@ -1790,7 +1790,9 @@ partitions until the swap), so the swap would put every truncated row back. Whil
 `TRUNCATE` of the parent or of the coarse child fails with `pg_partition_magician: cannot TRUNCATE ... a
 regrain is in flight on it` before anything is truncated, including from a session with
 `session_replication_role = replica`. Cancel the regrain with `regrain_cancel` first, or truncate after the
-swap. The refusal holds for a regrain already in flight when you upgrade from a release that did not have
+swap. A coarse child detached by hand while a regrain was in flight on it is the operator's table: the next
+`maintain` tick ends that run (logged `regrain_source_detached`), taking the guard and the capture off it,
+and from then on it can be truncated like any table. The refusal holds for a regrain already in flight when you upgrade from a release that did not have
 it: re-running `install.sql` puts it on every source still regraining, and each `regrain_step` tick that
 resumes a regrain puts it back if it is missing.
 
@@ -2676,7 +2678,9 @@ while a tick is in an earlier step (archiving, say) stops that tick from startin
 only a frozen coarse child the target subdivides, so a child the target cannot split (a 30-day cell that
 starts in February, on a monthly grid) is left alone rather than retried forever; it stays counted in
 `status().coarse_partitions`. A coarse child detached by hand is not selected either: it is the operator's
-table, so no capture or `TRUNCATE` guard goes on it and nothing is copied out of it. A `p_target_step` coarser than `partition_step` (compared at
+table, so no capture or `TRUNCATE` guard goes on it and nothing is copied out of it. A run already in
+flight on a child when it is detached by hand is ended by the next `maintain` tick, which takes the capture
+and the guard back off it, drops the run's copies and clears the cursor (`regrain_source_detached`). A `p_target_step` coarser than `partition_step` (compared at
 `partition_anchor`) is refused.
 
 Four kinds of target are refused at call time rather than left to wedge every tick: a `p_target_step` of
@@ -3285,6 +3289,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `retain_recall` / `retain_reattach` | retention stopped reaching a partition whose retirement was under way: its dispatched detach was recalled and the `pgpm_detach` job returned to idle / the detach had already landed, and the partition was re-attached on its own bounds (see [`retire`](#retire)) |
 | `regrain_copy` / `regrain_aged` / `regrain_attach` / `regrain` | a regrain microbatch copied rows into a fine child / skipped a below-horizon sub-range that has no fine child yet (only when `archive_fn` is unset; discarded with the source, never copied, once the swap has re-checked that it is still below the horizon) / attached a fine child (`method` = `check_skip`) / completed (`method` = `copy_swap_drop`) |
 | `regrain_prepare` / `regrain_capture_orphan` / `regrain_reconcile` / `regrain_reconcile_aged` / `regrain_delta_purge` / `regrain_rename` / `regrain_restart` / `regrain_cancel` | the cross-tick regrain's own steps: change capture installed / a leftover capture table cleared / the source-is-authority reconcile before the swap (and its below-horizon counterpart) / captured keys the swap gate discarded because no reconcile could consume them (out of the source's range, or a `NULL` control value; `rows` counts them) / the source renamed onto the target grid / a stale run restarted (copies that predate capture, or copies a parent altered mid-regrain made stale: their columns or `CHECK` constraints no longer match, the source was rewritten or had a column replaced, or change capture no longer fits the key, or copies no recorded source mark vouches for, as a run in flight across an upgrade has, or change capture's trigger found disabled, origin-only or replica-only rather than enabled `ALWAYS`) / a run cancelled by `regrain_cancel()`, or by `retire` dropping the run's source whole (`method` names `retire`, `rows` counts the copies discarded) |
+| `regrain_source_detached` | a `maintain` tick found a regrain in flight whose source partition had been detached by hand (it is no longer a partition of the table and carries no `retiring_at`), so the run could never swap, and ended it: the capture trigger and `TRUNCATE` guard taken off the detached table, the fine copies inside its range dropped, the captured changes discarded and `config.regrain_cursor` cleared. The detached table is left as it is, rows and all. `rows` counts the copies discarded, `method` names the table. Logged once per run ended |
 | `drop_incoming_fk` / `suspend_incoming_fk` / `restore_incoming_fk` / `validate_incoming_fk` | preserve-FK lifecycle events |
 | `from_hypertable_carry_fk` | (`pgpm_hypertable` only) an outgoing FK re-added onto the migrated destination during `from_hypertable_copy` |
 | `forget_missing` | `forget_missing()` cleared a parent's registration because its relation no longer exists; `rows` carries how many partition rows were cleared with it |

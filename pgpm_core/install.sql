@@ -5581,6 +5581,23 @@ begin
   cfg := pgpm._control_followed(cfg);
   if not found then return; end if;
 
+  -- #705: a regrain whose SOURCE the operator detached by hand can never swap, and the auto-regrain scan
+  -- no longer picks that child, so the run is ended here, on whatever tick first sees the detach: its
+  -- capture and TRUNCATE guard come off the operator's table, its copies are dropped, its delta emptied and
+  -- the cursor cleared (_regrain_reclaim, scoped to that source; logged regrain_source_detached, and only
+  -- when there was a run to end). Per child, isolated like the loop below.
+  for r in select child_name, lo, hi from pgpm.part
+            where parent_table = p_parent and attached
+              and pgpm._part_detached_by_hand(p_parent, child_oid, retiring_at)
+  loop
+    begin
+      perform pgpm._regrain_reclaim(p_parent, r.child_name, r.lo, r.hi, true);
+    exception when others then
+      insert into pgpm.log (parent_table, action, lo, hi, method)
+        values (p_parent, 'skip_regrain_capture', r.lo, r.hi, left(sqlerrm, 200));
+    end;
+  end loop;
+
   for r in select child_name, lo, hi from pgpm.part where parent_table = p_parent
   loop
     begin
@@ -6030,7 +6047,17 @@ $$;
 -- Logged as regrain_cancel with `method` naming retire, because that is what it is: the same statement
 -- the operator verb makes, made by retention. `rows` is the number of copies discarded, so a reader of
 -- pgpm.log can tell a cancel that reclaimed real work from one that cleared a stale cursor.
-create or replace function pgpm._regrain_reclaim(p_parent regclass, p_child name, p_lo text, p_hi text)
+--
+-- p_detached (#705): the maintain() janitor's call, for a source the operator DETACHed by hand mid-run
+-- (_part_detached_by_hand). The same three effects, for the same reason: the swap needs its source to be a
+-- partition, so the run can never finish, and the auto-regrain scan no longer picks the child, so nothing
+-- else would ever end it. It left the capture and TRUNCATE guard on the operator's table (TRUNCATE of it
+-- refused, every write captured), its copies unattached and the cursor set, for good. Logged as
+-- regrain_source_detached, not regrain_cancel: no operator asked for a cancel, and the operator's table is
+-- left exactly as they detached it, rows and all.
+drop function if exists pgpm._regrain_reclaim(regclass, name, text, text);
+create or replace function pgpm._regrain_reclaim(p_parent regclass, p_child name, p_lo text, p_hi text,
+                                                 p_detached boolean default false)
 returns int language plpgsql as $$
 declare
   cfg pgpm.config; v_nsp name; v_ncast text; v_delta name; v_capture boolean; v_cursor_in boolean;
@@ -6084,7 +6111,14 @@ begin
     update pgpm.config set regrain_cursor = null where parent_table = p_parent;
   end if;
 
-  if v_capture or v_cursor_in or v_dropped > 0 then
+  if p_detached and (v_capture or v_cursor_in or v_dropped > 0) then
+    insert into pgpm.log (parent_table, action, lo, hi, rows, method)
+      values (p_parent, 'regrain_source_detached', p_lo, p_hi, v_dropped,
+              format('%I.%I, the source of this regrain, was detached from the table by hand, so the run cannot swap and is ended; its capture and TRUNCATE guard are off the detached table, which is left as it is, rows and all; %s fine cop%s discarded, %s captured change%s discarded, regrain_cursor %s',
+                     pgpm._child_nsp(p_parent, p_child), p_child, v_dropped, case when v_dropped = 1 then 'y' else 'ies' end,
+                     v_purged, case when v_purged = 1 then '' else 's' end,
+                     case when v_cursor_in then 'cleared' else 'left alone (it is not this child''s)' end));
+  elsif v_capture or v_cursor_in or v_dropped > 0 then
     insert into pgpm.log (parent_table, action, lo, hi, rows, method)
       values (p_parent, 'regrain_cancel', p_lo, p_hi, v_dropped,
               format('retire dropped %I.%I, the source of this regrain, whole: its range is past the retention horizon and archiving covers it, so the regrain had nothing left to win for retention; %s fine cop%s discarded, %s captured change%s discarded, regrain_cursor %s',

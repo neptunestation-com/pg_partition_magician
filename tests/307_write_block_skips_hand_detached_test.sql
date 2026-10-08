@@ -24,7 +24,7 @@
 -- horizon beside the one detached, so a block missing from one and present on another cannot cancel.
 set client_min_messages = warning;
 create extension if not exists pgtap;
-select plan(36);
+select plan(47);
 
 create schema pgpm_test307;
 
@@ -264,5 +264,66 @@ select is((select count(*) from pgpm.log where parent_table = 'public.rg307'::re
   'auto-regrain logged no skip_regrain: it is not stuck failing a swap on the detached monolith');
 select lives_ok(format('truncate public.%I', :'rg_mono'),
   'the operator can TRUNCATE the table they detached');
+
+-- ============== part F: a regrain in flight when its source is detached by hand is ended ==============
+-- Auto-regrain starts on the frozen coarse monolith [0, 20000) of ids 1..15000 (a prepare tick and a copy
+-- tick), and the operator then detaches the monolith. The swap needs its source to be a partition and the
+-- scan no longer picks the child, so the run would stay in flight for good with pgpm's capture and TRUNCATE
+-- guard on the operator's table. The next tick ends it: logged regrain_source_detached once (not
+-- regrain_cancel: nobody asked), the triggers off the table, the copies dropped, the cursor cleared, and the
+-- table's rows untouched.
+create table public.rf307 (id bigint primary key, payload text);
+insert into public.rf307 select g, 'hist' from generate_series(1, 15000) g;
+call pgpm.transmute('public.rf307', 'id', 10000, p_paused => false);
+select pgpm.obtain('public.rf307');
+insert into public.rf307 values (55000, 'frontier');
+update pgpm.config set regrain_batch = 2000 where parent_table = 'public.rf307'::regclass;
+select pgpm.set_regrain('public.rf307', '5000');
+select child_name as rf_mono, child_oid as rf_mono_oid from pgpm.part
+ where parent_table = 'public.rf307'::regclass and lo = '0' \gset
+call pgpm.maintain('public.rf307');
+call pgpm.maintain('public.rf307');
+create table pgpm_test307.rf_copies as
+  select child_name, child_oid from pgpm.part where parent_table = 'public.rf307'::regclass and not attached;
+
+select ok((select regrain_cursor from pgpm.config where parent_table = 'public.rf307'::regclass) is not null,
+  'LIVENESS: a regrain of rf307''s monolith is in flight (regrain_cursor set)');
+select is((select array_agg(tgname::text order by tgname) from pg_trigger
+            where tgrelid = :'rf_mono_oid'::oid and not tgisinternal and tgname like 'pgpm%'),
+  array['pgpm_regrain_capture', 'pgpm_regrain_truncate_guard'],
+  'LIVENESS: the monolith carries the run''s capture and TRUNCATE guard');
+select ok((select count(*) from pgpm_test307.rf_copies) > 0
+          and (select bool_and(exists (select 1 from pg_class c where c.oid = k.child_oid)) from pgpm_test307.rf_copies k),
+  'LIVENESS: the run has built unattached copies, and their tables exist');
+
+select format('alter table public.rf307 detach partition public.%I', :'rf_mono') \gexec
+select ok(not exists (select 1 from pg_inherits where inhparent = 'public.rf307'::regclass and inhrelid = :'rf_mono_oid'::oid)
+          and (select attached and retiring_at is null from pgpm.part where child_oid = :'rf_mono_oid'::oid),
+  'LIVENESS: the monolith is detached by hand mid-run, its pgpm.part row still attached with no retiring_at');
+
+call pgpm.maintain('public.rf307');
+call pgpm.maintain('public.rf307');
+
+select is((select array_agg(lo || ':' || hi) from pgpm.log
+            where parent_table = 'public.rf307'::regclass and action = 'regrain_source_detached'),
+  array['0:20000'],
+  'the tick ended the run on the detached source, logged regrain_source_detached once over its range');
+select is((select count(*) from pgpm.log where parent_table = 'public.rf307'::regclass and action = 'regrain_cancel'),
+  0::bigint,
+  'it is not logged as regrain_cancel: no operator asked for a cancel');
+select is((select array_agg(tgname::text order by tgname) from pg_trigger
+            where tgrelid = :'rf_mono_oid'::oid and not tgisinternal and tgname like 'pgpm%'),
+  null,
+  'no pgpm trigger is left on the operator''s detached table');
+select ok(not exists (select 1 from pgpm.part where parent_table = 'public.rf307'::regclass and not attached)
+          and not exists (select 1 from pgpm_test307.rf_copies k join pg_class c on c.oid = k.child_oid),
+  'no copy of the detached source is left, neither its pgpm.part row nor its table');
+select is((select regrain_cursor from pgpm.config where parent_table = 'public.rf307'::regclass), null,
+  'regrain_cursor is cleared: the run is no longer in flight');
+select results_eq(format('select count(*), min(id), max(id) from public.%I', :'rf_mono'),
+  $$values (15000::bigint, 1::bigint, 15000::bigint)$$,
+  'the detached table keeps exactly its rows 1..15000');
+select lives_ok(format('truncate public.%I', :'rf_mono'),
+  'the operator can TRUNCATE the table they detached mid-regrain');
 
 select * from finish();
