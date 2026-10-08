@@ -38,7 +38,7 @@ container up yourself:
 
 ```bash
 docker compose --profile pg15 up -d
-psql 'postgresql://postgres:postgres@127.0.0.1:5515/postgres' \
+psql 'postgresql://postgres:postgres@127.0.0.1:5515/postgres' -v ON_ERROR_STOP=1 \
   -c 'create extension pg_cron; create extension pgtap;' \
   -f pgpm_core/install.sql -f fixtures/demo.sql
 psql 'postgresql://postgres:postgres@127.0.0.1:5515/postgres' -c 'select * from pgpm.status();'

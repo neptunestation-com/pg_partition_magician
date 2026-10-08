@@ -7,8 +7,8 @@ module.
 ## Install
 
 ```bash
-psql "$DATABASE_URL" -f pgpm_core/install.sql
-psql "$DATABASE_URL" -f pgpm_archive/install.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction -f pgpm_core/install.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f pgpm_archive/install.sql
 ```
 
 Store your S3 credentials in [Vault](https://supabase.com/docs/guides/database/vault), once, as a

@@ -26,7 +26,10 @@ and manages the whole lifecycle:
 - **`retain`**: drop partitions past a policy. Set `config.archive_fn` to a resumable archive
   strategy -- e.g. archive to long-term storage, see the optional [`pgpm_archive`](#archiving-optional)
   add-on for ready-made ones -- and a partition only drops once it's fully archived, never before.
-- **`maintain`**: the one procedure `pg_cron` calls (`obtain`, `retain`, optional auto-`regrain`).
+- **`maintain`** and **`maintain_obtain`**: the two procedures `pg_cron` calls, on two jobs that
+  `pgpm.schedule()` creates together. `maintain_obtain` (the `pgpm_obtain` job) runs `obtain`; `maintain`
+  runs everything else (archive, `retain`, optional auto-`regrain`) and never obtains, so scheduling
+  `maintain` alone builds no forward partitions and writes past the grid start being refused.
 
 The schema is `pgpm`. Think "a slice of `pg_partman`, installable as plain SQL."
 
@@ -59,11 +62,15 @@ subset in any order is fine.
 ## Install
 
 ```bash
-psql "$DATABASE_URL" -f pgpm_core/install.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction -f pgpm_core/install.sql
 ```
 
-Re-running that file over an existing install is the supported upgrade path. `select pgpm.version()`
-reports what is installed, and `pgpm.installed` records one row per install.sql run.
+Re-running that file over an existing install is the supported upgrade path. Keep both flags: without
+`ON_ERROR_STOP` psql reports an error and runs the rest of the file anyway, so an upgrade that refuses
+("Nothing has been changed") goes on to change things and records the new version over a half-upgraded
+install; `--single-transaction` makes the run all or nothing. `select pgpm.version()` reports what is
+installed, and `pgpm.installed` records one row per install.sql run (with both flags, only a run that
+completed without an error leaves one).
 
 The [install page](https://neptunestation-com.github.io/pg_partition_magician/install.html) has dashboard
 copy-paste bundles and the registry command; the [guide](docs/guide.md#install) covers all three channels
@@ -124,7 +131,7 @@ history cannot be regrained into fine partitions that would age out one at a tim
 It is an optional add-on, loaded only where the `timescaledb` extension exists:
 
 ```bash
-psql "$DATABASE_URL" -f pgpm_hypertable/install.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f pgpm_hypertable/install.sql
 ```
 
 See the [reference](docs/reference.md#migrating-from-timescaledb-from_hypertable) for the phases and knobs.
@@ -159,7 +166,7 @@ select pgpm.set_archive_fn('public.events', 'pgpm.archive_to_s3_parquet(regclass
 Load it on top of the core:
 
 ```bash
-psql "$DATABASE_URL" -f pgpm_archive/install.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f pgpm_archive/install.sql
 ```
 
 See [`pgpm_archive/README.md`](pgpm_archive/README.md) for the full picture: connection setup,

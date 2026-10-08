@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+- **The docs no longer say a `maintain` pass obtains** (#1087). README.md called `maintain` "the one procedure
+  `pg_cron` calls (`obtain`, `retain`, optional auto-`regrain`)" and docs/runbook.md's retention entry annotated
+  `call pgpm.maintain(...)` as "one pass: obtain, archive, retain", while obtain has been `maintain_obtain`'s, on
+  its own `pgpm_obtain` job, since #347, and `maintain` builds no forward partition: an operator who scheduled
+  or ran `maintain` alone ran out of grid and had writes refused. Both now say `maintain_obtain` obtains and
+  `maintain` runs the rest. Guard `bench/doc_maintain_does_not_obtain.sh` measures `maintain` and `maintain_all`
+  building no cell while `maintain_obtain` builds the due ones, then reads every sentence and fenced line of
+  the docs for a claim that `maintain` obtains; mutation `readme_maintain_obtains`.
+
+- **The documented install command stops at the first error** (#1090). README.md, docs/guide.md,
+  pgpm_archive/README.md and the site's index.html gave `psql "$DATABASE_URL" -f pgpm_core/install.sql` with no
+  `ON_ERROR_STOP`, so an upgrade that met `_surface_prepare()`'s refusal ("Nothing has been changed") ran the
+  rest of the file anyway: it dropped the columns the file retires, passed over `_surface_settled()`'s error,
+  recorded the new version over a half-upgraded install and exited 0. The core command is now
+  `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction -f pgpm_core/install.sql` (the file has no
+  top-level `COMMIT`, so one transaction makes a run all or nothing), and the module and ONBOARDING commands
+  carry `-v ON_ERROR_STOP=1`. Guard `bench/doc_install_stops_on_error.sh` runs each documented command's flags
+  over a script that fails in its middle and, for the core command, over an install that has to refuse;
+  mutation `readme_install_runs_past_error`.
+
 - **`maintain` leaves a partition detached by hand alone** (#705, bullets 1 and 2). `_enforce_write_blocks`,
   `_archive_step` and the auto-regrain candidate scan read `pgpm.part.attached`, which an operator's own
   `DETACH PARTITION` never touches, so once retention reached a table the operator had detached to keep, a

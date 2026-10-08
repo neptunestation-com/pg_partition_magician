@@ -488,7 +488,7 @@ failure blocks that one partition on purpose (`retain_drop_failures` climbing in
 3. Run a maintenance pass, or force the reclaim by hand:
 
    ```sql
-   call pgpm.maintain('public.events');       -- one pass: obtain, archive, retain (and auto-regrain)
+   call pgpm.maintain('public.events');       -- one pass: archive, retain (and auto-regrain); obtain is maintain_obtain's
    -- or catch up now, synchronously:
    select pgpm.retain('public.events');       -- drop aged partitions now
    select pgpm.retire('public.events', 'events_p...');  -- or surgically: drop ONE eligible partition

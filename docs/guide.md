@@ -115,8 +115,15 @@ metacommands. It ships through three channels, all built from that one file.
 The simplest path, on any Postgres you can run SQL against:
 
 ```bash
-psql "$DATABASE_URL" -f pgpm_core/install.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction -f pgpm_core/install.sql
 ```
+
+Keep both flags, for an install and for every upgrade. Without `ON_ERROR_STOP` psql reports an error and
+carries on with the rest of the file, so a run that fails or refuses partway still executes everything
+after it and appends a row to `pgpm.installed` as if it had completed. `--single-transaction` runs the
+file as one transaction (it has no top-level `COMMIT`; the commits inside its procedures run only when
+those procedures are called), so a run that stops changes nothing at all. The cost is that each lock an
+upgrade takes is held until the whole file commits, not just until its own statement ends.
 
 For a SQL client that does not process psql metacommands (a dashboard editor, say), build a
 self-contained `BEGIN/COMMIT`-wrapped bundle and paste it in:
@@ -138,9 +145,10 @@ You also need `pg_cron` enabled to run scheduled maintenance.
 **Upgrade** by re-running the same file. Your views over pgpm's functions (`status()`, `progress()`,
 `observe_window()`, `check_uuidv7()`, `check_text_time()`) survive it: a function whose shape is unchanged is
 replaced in place. When an upgrade changes one's result or arguments and a view of yours depends on it, the
-run refuses before it has changed anything, naming the function and the view (SQLSTATE `2BP01`). Save the
-view's definition (`select pg_get_viewdef('<view>'::regclass, true)`), drop it, re-run the file, then
-recreate the view against the new shape.
+run refuses before it has changed anything, naming the function and the view (SQLSTATE `2BP01`), and the
+flags above make that refusal stop the run. Save the view's definition
+(`select pg_get_viewdef('<view>'::regclass, true)`), drop it, re-run the file, then recreate the view
+against the new shape.
 
 **Uninstall** removes the manager and leaves your data. Gone: the `pgpm` schema (configuration,
 registry, log, every function and view), its cron jobs, the write-block triggers on frozen children, and
