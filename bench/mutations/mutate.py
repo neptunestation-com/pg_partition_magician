@@ -10295,6 +10295,15 @@ MUTATIONS["archive_ndjson_single_unchecked"] = (
     [("  perform archive._refuse_foreign_read('archive._encode_upload_ndjson_single', p_parent, v_held);\n", "", 1)],
 )
 MUTATION_SRC["archive_ndjson_single_unchecked"] = "pgpm_archive/install.sql"
+MUTATIONS["canonical_tz_admits_localtime"] = (
+    "bench/canonical_tz_pseudo_zones.sh",
+    "Pre-#1086 (F14-06) _canonical_tz for 'localtime': the name drops out of the refused pseudo-entries, so "
+    "set_partition_tz and a transmute under that session zone record a grid zone that follows the host's "
+    "/etc/localtime, and a restore on another host moves every calendar boundary. One clause, one name; "
+    "posixrules and Factory stay refused. tests/304 catches it.",
+    [("     and lower(regexp_replace(name, '^.*/', '')) not in ('localtime', 'posixrules', 'factory')\n",
+      "     and lower(regexp_replace(name, '^.*/', '')) not in ('posixrules', 'factory')\n", 1)],
+)
 
 # #1074: a capture delta's ordering column is minted under a name no key column holds.
 MUTATIONS["delta_seq_fixed_name"] = (

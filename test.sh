@@ -1112,6 +1112,7 @@ run_perf() {
     "bench/retire_one_step_disarm.sh pgpm_perf192"
     "bench/extend_to_edge_cell_count.sh pgpm_perf193"
     "bench/crossing_keys_datestyle.sh pgpm_perf194"
+    "bench/canonical_tz_pseudo_zones.sh pgpm_perf306"
     "bench/transmute_grant_carry_resets_acl.sh pgpm_perf200"
     "bench/regrain_capture_source_grantees.sh pgpm_perf208"
     "bench/regrain_moved_parent_identity.sh pgpm_perf209"
