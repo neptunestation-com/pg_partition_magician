@@ -9,7 +9,11 @@
 # The signatures are deliberately narrow, so a real regression is never retried:
 #   lock_guard_probe   bench/regrain_outgoing_fk_lock.sh's probe assertion, with its liveness witness
 #                      PASSED and no other FAIL line in the job (issue #556: the count of 50 ms timeouts
-#                      cannot discriminate on a loaded runner; five occurrences, always exactly 20)
+#                      cannot discriminate on a loaded runner; five occurrences, always exactly 20); and,
+#                      since 2026-10-08, bench/restore_fk_lock.sh's identical assertion with ITS two
+#                      liveness witnesses PASSED ("the probe was writing before the restore began",
+#                      "attempts overlapped the restore's own window") and "the FK was actually re-added"
+#                      PASSED (issue #1066: 1 of 66 overlapping writes timed out in #1063's merge group)
 #   registry_quota     a third-party image pull refused with toomanyrequests / Data limit exceeded, and
 #                      no test output at all (the job never ran a test)
 #   regrain_perf_discriminate  a discriminate shard whose ONLY non-discriminating guard is bench/regrain_perf.sh
@@ -100,6 +104,12 @@ while IFS=$'\t' read -r j status concl steps name; do
      && [ "$other_fails" = "0" ] \
      && grep -qE "^PASS +the probe overlapped a running swap" <<<"$log"; then
     echo "job $j: known flake lock_guard_probe (regrain_outgoing_fk_lock's probe timed out under load; liveness passed; #556)"
+  elif grep -qE "^FAIL +writes to the MANAGED PARENT are not blocked +got [0-9]+, want 0" <<<"$log" \
+     && [ "$other_fails" = "0" ] \
+     && grep -qE "^PASS +LIVENESS: the probe was writing before the restore began" <<<"$log" \
+     && grep -qE "^PASS +LIVENESS: attempts overlapped the restore's own window" <<<"$log" \
+     && grep -qE "^PASS +the FK was actually re-added" <<<"$log"; then
+    echo "job $j: known flake lock_guard_probe (restore_fk_lock's probe timed out under load; both liveness witnesses and the re-add passed; #1066)"
   elif grep -qE "toomanyrequests|Data limit exceeded" <<<"$log" && ! grep -qE "^FAIL |not ok" <<<"$log"; then
     echo "job $j: known flake registry_quota (third-party image pull refused; no test ran)"
   elif [ "$(grep -cE '^FAIL +bench/[^ ]+ PASSED against its own defect' <<<"$log")" = "1" ] \
