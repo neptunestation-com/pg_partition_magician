@@ -12216,8 +12216,8 @@ begin
   perform pgpm._refuse_null_arguments('adopt_partition', json_build_object('p_parent', p_parent, 'p_child', p_child));
   perform pgpm._regrain_lock(p_parent);
   select * into cfg from pgpm.config where parent_table = p_parent for key share;
-  if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   cfg := pgpm._control_followed(cfg);
+  if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
 
   if not exists (select 1 from pg_inherits i
                   where i.inhparent = p_parent and i.inhrelid = p_child and not i.inhdetachpending) then

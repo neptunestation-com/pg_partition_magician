@@ -355,6 +355,7 @@ select is((select count(*)::int from pgpm.check_uuidv7('public.ck241', 'id')), 1
 create temp table t241_entry (sig text primary key, verdict text not null check (verdict in ('refuses', 'null answer', 'no user rows')),
                               what text not null);
 insert into t241_entry values
+  ('pgpm.adopt_partition(regclass,regclass)', 'no user rows', 'pgpm state and the catalog: the partition''s bounds from pg_class'),
   ('pgpm.check_text_time(regclass,name,text,integer,integer,text,integer,text,integer,timestamp with time zone)', 'refuses', 'samples the table (C7)'),
   ('pgpm.check_time_monotonic(regclass,name,name,integer)', 'refuses', 'samples the table (C8)'),
   ('pgpm.check_uuidv7(regclass,name,integer)', 'refuses', 'samples the table (C6)'),
