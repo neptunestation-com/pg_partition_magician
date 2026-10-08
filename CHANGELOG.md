@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **`from_hypertable_copy`'s change capture writes its delta by the oid it recorded** (#1037, bullet 1). The
+  drains, the cutover and uninstall have found the delta by its `pgpm.scratch` oid since #955, but the
+  capture function the copy minted inserted into `<rel>_pgpm_delta` by name, so renaming the recorded delta
+  during the online window refused every insert, update and delete on the live hypertable (42P01) until it
+  was renamed back, and a table created under the freed name took the captured keys, which nothing drained.
+  The function keeps its static insert only while the minted name still leads to the recorded oid; once it
+  does not, it renders the oid to the delta's current name and inserts through it dynamically, the key
+  values bound, and a delta that is gone refuses the write as 42P01, naming the remedy. Measured on
+  100,000-row inserts on PG 15: the name check costs about 0.3 microseconds a captured row, and a write
+  after the rename about 11 more. Test `tests/timescale/db/56`, guard
+  `bench/hypertable_capture_delta_by_record.sh`, mutation `hypertable_capture_delta_by_name`.
+
 - **`transmute` refuses a partition step or anchor a `timestamp(p)` key cannot hold, before anything
   commits** (#1039 bullet 1). The preflight held a `date` key to whole days and never a `timestamp(p)` key to
   its precision, so `'500 milliseconds'` on a `timestamptz(0)` key committed and validated the
