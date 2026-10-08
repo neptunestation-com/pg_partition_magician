@@ -1,7 +1,9 @@
 -- The tracking delta follows the hypertable's writers through the online window (issue #979).
 --
--- A tracking from_hypertable_copy's capture trigger writes the delta (<rel>_pgpm_delta) as the WRITER (pgpm has
--- no SECURITY DEFINER), so every role that can write the hypertable needs INSERT on it. The copy granted that
+-- A tracking from_hypertable_copy's capture trigger wrote the delta (<rel>_pgpm_delta) as the WRITER, so every
+-- role that could write the hypertable needed INSERT on it (since #1073 the capture is SECURITY DEFINER and
+-- writes as its owner, so a write no longer depends on these grants; the grants are still made and re-synced,
+-- and this file checks them by the delta's privileges). The copy granted that
 -- once, to the roles that could write the hypertable at copy time (_regrain_capture_grant), and nothing granted
 -- again: a role granted DML on the hypertable during the online window had every write refused 'permission
 -- denied for table <rel>_pgpm_delta' until the cutover. Core's regrain re-grants on every tick (#496); the

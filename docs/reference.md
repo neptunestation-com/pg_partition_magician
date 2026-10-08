@@ -1662,14 +1662,17 @@ the sub-ranges begun after it are named from the new one. Every prepare tick dro
 it is then, so a key column renamed between two regrains is picked up rather than tripping every write into
 the source; a relation already holding the name it would mint under, other than the one this parent recorded,
 is refused rather than adopted. The capture function writes the delta as its **owner**, the parent's, never
-as the writer: it is `SECURITY DEFINER`, owned like the delta, with its `search_path` pinned to
-`pg_catalog, pg_temp` and `EXECUTE` held by its owner alone (PostgreSQL checks `EXECUTE` when a trigger is
+as the writer: it is `SECURITY DEFINER`, owned by the table's owner (as the delta is, and both follow the
+table's owner together), with its `search_path` pinned to `pg_catalog, pg_temp` and `EXECUTE` held by its
+owner alone (PostgreSQL checks `EXECUTE` when a trigger is
 created, never when it fires, so no role can attach it to a table of its own). So every write the table
 accepts is captured whatever path it took: directly, through the parent or the partition, or through an
 ordinary **view** over the table, which PostgreSQL checks as the view's owner while the table's triggers fire
 as the session's role, so the writer needs no privilege on the delta. The same holds for a
-`from_hypertable_copy` tracking delta, and a capture minted by an earlier release is armed this way by the
-first tick (or drain step) that resumes it. The delta is owned like the parent, and every role holding
+`from_hypertable_copy` tracking delta. The capture is armed this way where it is minted and re-armed on
+every regrain tick and every drain, drain step and cutover, so a capture minted by an earlier release
+becomes `SECURITY DEFINER` at the first of them after the upgrade; until that tick it still writes as the
+writer, and a role that writes through a view is refused as before. The delta is owned like the parent, and every role holding
 `INSERT`, `UPDATE` or `DELETE` on the parent, or on the regraining partition itself (which PostgreSQL lets a
 role write directly with no grant on the parent), table- or column-level, is still granted `INSERT` on it, and
 so are the **owners** of the parent and of that partition, whose rights no ACL lists: after `ALTER TABLE

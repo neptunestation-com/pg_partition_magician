@@ -9,13 +9,16 @@
   over the table got 42501 `permission denied for table <rel>_pgpm_regrain_delta` on every write into the
   regraining partition until the swap (and on every write into a hypertable during a tracking
   `from_hypertable_copy`'s online window, on `<rel>_pgpm_delta`). Both capture functions now write their delta
-  as their owner, the table's (`pgpm._capture_definer`): `SECURITY DEFINER`, `search_path` pinned to
-  `pg_catalog, pg_temp` so a writer's own operators never run as the owner, and `EXECUTE` held by the owner
-  alone so no role can attach the function to a table of its own. Armed where each is minted
-  (`_scratch_mint_fn`) and by every tick, drain step and cutover (`_scratch_owner_follow`), so a capture
-  minted by an earlier release is armed by the first one that resumes it. The writer grants are still made.
+  as their owner, the table's (`pgpm._capture_definer`): `SECURITY DEFINER`, owned by the table's owner as
+  the delta is, `search_path` pinned to `pg_catalog, pg_temp` so a writer's own operators never run as the
+  owner, and `EXECUTE` held by the owner alone so no role can attach the function to a table of its own.
+  Armed where each is minted (`_scratch_mint_fn`) and re-armed by every regrain tick and every drain, drain
+  step and cutover (`_scratch_owner_follow`), so a capture minted by an earlier release becomes
+  `SECURITY DEFINER` at the first of them after the upgrade, and until then still writes as the writer. The
+  writer grants are still made. The capture's lost-delta refusal now names the table schema-qualified.
   Measured on 100,000-row updates of a capturing source on PG 15: about 2 to 3 microseconds more a captured
-  write (the pinned `search_path`; the definer switch alone measured no difference). Test `tests/294`, guard
+  write (the pinned `search_path`; the definer switch alone measured no difference). Tests `tests/294` and
+  `tests/timescale/db/61`, guard
   `bench/regrain_capture_view_writer.sh`, mutations `capture_definer_dropped`,
   `capture_definer_search_path_unpinned`, `capture_definer_execute_kept` and `capture_definer_not_rearmed`.
 - **The archive contract holds an `id` grid's `covered_hi` to the control column's own type** (#1071).

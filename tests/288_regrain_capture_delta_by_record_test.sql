@@ -143,7 +143,7 @@ select is((select string_agg(id::text, ',' order by pgpm_seq) from public.c288_p
   'LIVENESS: c288''s capture logs a write into its delta before the delta is dropped');
 drop table public.c288_pgpm_regrain_delta;
 select throws_like($$update public.c288 set payload = 'refused' where id = 4$$,
-  'pg_partition_magician: the regrain change capture of c288 has lost the delta table the prepare tick recorded%The next pgpm.regrain_step tick%restarts the regrain%',
+  'pg_partition_magician: the regrain change capture of public.c288 has lost the delta table the prepare tick recorded%The next pgpm.regrain_step tick%restarts the regrain%',
   'a write into a source whose recorded delta is gone is refused by pgpm, naming the remedy');
 select matches(pgpm.regrain_step('public.c288', 'c288_p0000000000000000000_to_0000000000000200000', '20000', 5000),
   '^restarted:', 'the remedy the refusal names works: the next tick restarts the regrain');

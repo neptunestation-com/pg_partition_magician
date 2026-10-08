@@ -1,7 +1,9 @@
 -- A role granted DML on the regraining partition itself can write it mid-regrain (issue #843).
 --
--- The capture trigger inserts into the delta with the WRITER's privileges (pgpm has no SECURITY DEFINER),
--- so every role that can write the source needs INSERT on the delta. _regrain_capture_grant gave it to the
+-- The capture trigger inserted into the delta with the WRITER's privileges, so every role that could write
+-- the source needed INSERT on the delta (since #1073 the capture is SECURITY DEFINER and writes as its
+-- owner, so the writes below no longer depend on these grants; the grants are still made, and this file
+-- checks them by the delta's ACL). _regrain_capture_grant gave it to the
 -- grantees of DML on the PARENT only. PostgreSQL lets a role granted UPDATE or DELETE directly on a
 -- partition write it with no grant on the parent, and such a role got 42501 'permission denied for table
 -- <rel>_pgpm_regrain_delta' on every write into the source for the life of the regrain. The contract: the
