@@ -2252,11 +2252,18 @@ range [lo, hi) of <table> -- it is empty or inverted, ...`). `pgpm._next_archive
 the refusal is for a direct call. A range of the right shape is not enough either: once `pgpm.archive_ledger`
 records a chunk at the key a call would write, the call is written only when it reproduces that chunk, with
 the chunk's own `[lo, hi)` (compared as the grid's native type) and a read that finds the rows the chunk
-recorded, which is the re-run of a live, write-blocked chunk. A shorter or longer range at that key, or the
-chunk's own range after `retire()` has dropped its partition (the read finds no row), is refused before the
-PUT, naming the recorded chunk and the key (`pg_partition_magician: archive_to_s3_ndjson refuses to write
-[lo, hi) of <table> to the object key <key>: pgpm.archive_ledger records the chunk [lo, hi) of <n> row(s)
-there, and ...`). `pgpm._next_archive_chunk` never hands a strategy a key the ledger records. Connection settings
+recorded, which is the re-run of a live, write-blocked chunk. The rows are compared by identity, not by
+number: every write a strategy makes records a digest of the rows it wrote on the key's whole-key claim
+(`archive.object_key_claim.rows_digest`, the md5 of the sorted md5s of each row's JSON text, rendered under
+pinned settings so a re-run from a session in another time zone or with another `IntervalStyle` finds the same
+rows, in whatever order it reads them), and a later write at a recorded chunk's key must bring that digest. A
+shorter or longer range at that key, the chunk's own range after `retire()` has dropped its partition (the
+read finds no row), the same range read off a partition re-created over it holding as many rows but other
+ones, and any write at a chunk whose claim records no digest (one archived before pgpm_archive recorded them,
+which can no longer be re-run) are refused before the PUT, naming the recorded chunk and the key (`pg_partition_magician:
+archive_to_s3_ndjson refuses to write [lo, hi) of <table> to the object key <key>: pgpm.archive_ledger records
+the chunk [lo, hi) of <n> row(s) there, and ...`). `pgpm._next_archive_chunk` never hands a strategy a key the
+ledger records. Connection settings
 (bucket, region, endpoint, prefix, vault key names, compression) still come from `archive.config`,
 the same one config surface the synchronous functions use -- setting `archive_fn` this way needs no
 second, independently configured surface. An `archive_fn` cannot issue `COMMIT`: it is a plain function

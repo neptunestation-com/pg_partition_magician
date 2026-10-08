@@ -115,14 +115,24 @@ create table if not exists archive.object_key_owner (
 -- as a re-run and PUT over the first export, the only copy of x's rows. Null on a claim made before the
 -- column existed: install records a chunk's (its parent), and an export's is not known, so no export may
 -- write over it (archive._record_claim_relations, archive._owned_key).
+--
+-- rows_digest identifies the rows the last archive_fn write put at a chunk key (#1069): the md5 of their
+-- archive._row_digest values in sorted order, so it is the digest of the rows as a multiset, whatever order a
+-- read returned them in, and the same whichever session reads them. archive._refuse_recorded_chunk_overwrite
+-- records it with every write it admits and admits a later write at a key pgpm.archive_ledger records a chunk at
+-- only when its read's digest is this one: a row COUNT, all #975 compared, is the same for the same number of
+-- different rows. Null on an export's claim, and on a chunk's claimed before the column existed, which no write
+-- may then replace.
 create table if not exists archive.object_key_claim (
   object_key   text        primary key,
   parent_oid   oid         not null,
   kind         text        not null check (kind in ('chunk', 'export')),
   claimed_at   timestamptz not null default now(),
-  relation_oid oid
+  relation_oid oid,
+  rows_digest  text
 );
 alter table archive.object_key_claim add column if not exists relation_oid oid;
+alter table archive.object_key_claim add column if not exists rows_digest text;
 
 -- Operator interface for archive.config: an upsert with every connection-setting column as a
 -- named, defaulted parameter, guarding that p_parent is actually pgpm-managed first -- an operator
@@ -2504,6 +2514,24 @@ $$;
 -- the gate.
 -- ---------------------------------------------------------------------------
 
+-- One row's part of the digest archive.object_key_claim.rows_digest records (#1069): the md5 of the row's JSON
+-- text, as 16 bytes. A chunk's digest is the md5 of these concatenated in sorted order, so it names the rows as a
+-- multiset: no order of the read changes it (rows tied on the control column come back in any order), and no
+-- other set of rows reaches it short of an md5 collision. A sum of per-row hashes, the shape of archive.to_s3's
+-- conservation check (#673), would be order-free too, but it is linear: different rows whose hashes add up the
+-- same pass it, and with enough rows such a set can be searched for. The text is rendered here, under settings
+-- pinned for the call, never the caller's: a timestamptz renders in the session's TimeZone, an interval in its
+-- IntervalStyle, a bytea in its bytea_output, money in its lc_monetary, a float by extra_float_digits, a range
+-- or a nested value's text output by DateStyle. So the same rows have the same digest whichever session archived
+-- them and whichever re-runs them, which the NDJSON payload itself does not (it is rendered in the caller's
+-- session). Called once per row, inside the read that produces the object's rows, so the digest is of the rows
+-- the object holds and of no later read; it costs a few microseconds a row, the sort included.
+create or replace function archive._row_digest(p_row anyelement) returns bytea
+language sql stable
+set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'postgres'
+set extra_float_digits = 1 set bytea_output = 'hex' set lc_monetary = 'C'
+as $$ select pg_catalog.decode(pg_catalog.md5(pg_catalog.row_to_json(p_row)::text), 'hex') $$;
+
 -- archive._pq_to_parquet_range_counted: reads [p_lo, p_hi) of p_control off p_parent (typically a
 -- partitioned parent), relying on Postgres's own partition pruning, and returns the file (p_file)
 -- together with the number of rows it holds (p_num_rows), both from the one snapshot
@@ -2519,11 +2547,17 @@ $$;
 -- every caller that only wants the file (scripts/verify_parquet_range.py, the bench/ memory guards)
 -- and is a one-line wrapper over this, so there is exactly one encoder. Exceptions raised here are
 -- worded under the wrapper's name, which is the name callers know.
+--
+-- p_rows_digest is the digest of the rows the file holds (#1069; archive._row_digest), taken from the same
+-- materialised snapshot the columns are encoded from, so it is of exactly those rows. Adding it changed the
+-- function's result type, which CREATE OR REPLACE cannot do, hence the drop.
+drop function if exists archive._pq_to_parquet_range_counted(regclass, name, text, text, boolean);
 create or replace function archive._pq_to_parquet_range_counted(
   p_parent regclass, p_control name, p_lo text, p_hi text, p_compress boolean,
-  out p_file bytea, out p_num_rows bigint)
+  out p_file bytea, out p_num_rows bigint, out p_rows_digest text)
 language plpgsql as $$
 declare
+  v_cols_q text;
   v_order_cols name[]; v_key_cols name[];
   v_col record;
   v_col_names text[] := '{}';
@@ -2662,6 +2696,12 @@ begin
 
   v_schema_list := array_prepend(archive._pq_build_schema_root(v_ncols), v_schema_elements);
   v_footer := archive._pq_build_file_metadata(v_schema_list, v_num_rows, array[v_row_group]);
+
+  -- the rows the file holds, read off the snapshot before it is emptied: the parent's columns, in its order
+  select string_agg(quote_ident(c), ', ' order by o) into v_cols_q from unnest(v_col_names) with ordinality u(c, o);
+  execute format('select pg_catalog.md5(coalesce(string_agg(archive._row_digest(s), %L::bytea order by archive._row_digest(s)), %L::bytea))
+                    from (select %s from pg_temp.archive_pq_snapshot) s',
+                 '', '', v_cols_q) into p_rows_digest;
 
   truncate pg_temp.archive_pq_snapshot;  -- emptied, not dropped: the next encode reuses it (#632)
   p_file := v_body || v_footer || archive._pq_reverse_bytes(int4send(length(v_footer))) || v_magic;
@@ -2924,12 +2964,23 @@ do $$ begin perform archive._record_claim_relations(); end $$;
 -- nothing at, which is every key pgpm._archive_step hands a strategy (it resumes past what is recorded), is not
 -- this function's business. Looked up within p_parent's own rows: another relation's ledger row cannot name a
 -- key p_parent holds, because archive._owned_key has already refused a key claimed by anyone else.
+--
+-- "The rows the chunk recorded" is compared by IDENTITY, not by number (#1069). A count is the same for the same
+-- number of different rows, and it was the only thing compared: after retire() dropped the chunk's partition, a
+-- partition re-created over the range by plain DDL, holding as many rows as the chunk did but other ones, had a
+-- direct call PUT them over the only copy. So every write this admits records, on the key's whole-key claim, the
+-- digest of the rows it writes (p_rows_digest, taken by the strategy in the read that produced them; see
+-- archive._row_digest), and a write at a key the ledger records a chunk at must bring the digest recorded
+-- there. A claim with none (a chunk archived before the digest existed) admits no write: nothing says which
+-- rows its object holds, and refusing a re-run is the safe side of not knowing.
+drop function if exists archive._refuse_recorded_chunk_overwrite(text, regclass, text, text, text, text, bigint);
 create or replace function archive._refuse_recorded_chunk_overwrite(
-  p_routine text, p_parent regclass, p_kind text, p_key text, p_lo text, p_hi text, p_rows bigint)
+  p_routine text, p_parent regclass, p_kind text, p_key text, p_lo text, p_hi text, p_rows bigint, p_rows_digest text)
 returns void language plpgsql as $$
 declare l record; v_why text;
 begin
-  for l in select a.lo, a.hi, a.rows_archived from pgpm.archive_ledger a
+  for l in select a.lo, a.hi, a.rows_archived, k.rows_digest
+             from pgpm.archive_ledger a left join archive.object_key_claim k on k.object_key = a.s3_key
             where a.parent_table = p_parent and a.s3_key = p_key loop
     if pgpm._native_gt(p_kind, l.lo, p_lo) or pgpm._native_gt(p_kind, p_lo, l.lo)
        or pgpm._native_gt(p_kind, l.hi, p_hi) or pgpm._native_gt(p_kind, p_hi, l.hi) then
@@ -2937,12 +2988,20 @@ begin
     elsif (l.rows_archived is null and coalesce(p_rows, 0) = 0)
           or (l.rows_archived is not null and p_rows is distinct from l.rows_archived) then
       v_why := format('the read found %s row(s) in it now', coalesce(p_rows, 0));
+    elsif l.rows_digest is null or p_rows_digest is distinct from l.rows_digest then
+      v_why := case when l.rows_digest is null
+        then 'no digest of the rows written there is recorded (archive.object_key_claim.rows_digest is null: the chunk was archived before pgpm_archive recorded one), so nothing shows that the rows this read found are the chunk''s'
+        else format('the read found %s row(s) in it now, but not the rows the chunk recorded (their digest is not the one archive.object_key_claim recorded when the chunk was written)', coalesce(p_rows, 0)) end;
     end if;
     if v_why is not null then
       raise exception 'pg_partition_magician: % refuses to write [%, %) of % to the object key %: pgpm.archive_ledger records the chunk [%, %) of % row(s) there, and %. That object is the record of the chunk, and once retire() has dropped its partition the only copy of its rows; a re-run may only reproduce it: the chunk''s own [lo, hi), while its rows are still in the table.',
         p_routine, p_lo, p_hi, p_parent, p_key, l.lo, l.hi, coalesce(l.rows_archived::text, 'an unrecorded number of'), v_why;
     end if;
   end loop;
+  -- Which rows this write puts at the key, for the next write there to be compared with (#1069). Reached only by
+  -- a write the loop admitted, so at a recorded chunk's key it records the digest already there; the PUT
+  -- follows in the same transaction, and a PUT that fails rolls this back with it.
+  update archive.object_key_claim set rows_digest = p_rows_digest where object_key = p_key;
 end;
 $$;
 
@@ -2963,6 +3022,7 @@ declare
   v_payload text; v_body bytea; v_key text;
   v_held oid[];
   v_key_id text; v_secret text; v_resp record; h record; v_etag text; v_rows bigint;   -- records: no http type named (#984)
+  v_rows_digest text;   -- which rows the payload holds, not only how many (#1069)
 begin
   select * into cfg from archive.config where parent_table = p_parent;
   if not found then raise exception 'archive._encode_upload_ndjson_single: % has no archive.config row', p_parent; end if;
@@ -2984,9 +3044,13 @@ begin
   --
   -- The parent is read as p_parent, rendered in this statement, never as a schema and a name looked up
   -- in an earlier one, and what the read reached is checked after it (#1055; see archive._refuse_foreign_read).
+  --
+  -- The same statement digests the rows it renders (#1069; archive._row_digest), so the digest
+  -- archive._refuse_recorded_chunk_overwrite compares and records is of exactly the payload's rows.
   v_held := archive._held_relations();
   execute format(
     'select coalesce(string_agg(row_to_json(t.*)::text, e''\n'' order by t.%I), ''''), count(*)
+            , pg_catalog.md5(coalesce(string_agg(archive._row_digest(t.*), ''''::bytea order by archive._row_digest(t.*)), ''''::bytea))
        from %s t where t.%I >= %L and t.%I < %L',
     pcfg.control_column, p_parent, pcfg.control_column,
     pgpm._encode(pcfg.control_kind, p_lo, pcfg.text_time_prefix, pcfg.text_time_width,
@@ -2996,7 +3060,7 @@ begin
     pgpm._encode(pcfg.control_kind, p_hi, pcfg.text_time_prefix, pcfg.text_time_width,
                  pcfg.text_time_radix, pcfg.text_time_unit, pcfg.text_time_alphabet,
                  pcfg.text_time_discard_bits, pcfg.text_time_epoch, pcfg.partition_tz))
-    into v_payload, v_rows;
+    into v_payload, v_rows, v_rows_digest;
   perform archive._refuse_foreign_read('archive._encode_upload_ndjson_single', p_parent, v_held);
 
   select decrypted_secret into v_key_id from vault.decrypted_secrets where name = cfg.vault_key_id;
@@ -3009,7 +3073,7 @@ begin
   v_key := archive._object_key(p_parent, cfg.prefix, pcfg.control_kind, p_lo,
                                case when p_compress then '.ndjson.gz' else '.ndjson' end);
   -- #975: never over a recorded chunk this read does not reproduce
-  perform archive._refuse_recorded_chunk_overwrite('archive_to_s3_ndjson', p_parent, pcfg.control_kind, v_key, p_lo, p_hi, v_rows);
+  perform archive._refuse_recorded_chunk_overwrite('archive_to_s3_ndjson', p_parent, pcfg.control_kind, v_key, p_lo, p_hi, v_rows, v_rows_digest);
   if p_compress then
     v_body := archive._pq_gzip_compress_dynamic(convert_to(v_payload, 'UTF8'));
     v_resp := archive.s3_signed_request_bytea('PUT', cfg.endpoint, cfg.bucket, cfg.region, v_key, '',
@@ -3046,6 +3110,7 @@ declare
   cfg archive.config; pcfg pgpm.config;
   v_payload bytea; v_key text; v_key_id text; v_secret text; v_lo_lit text; v_hi_lit text;
   v_resp record; h record; v_etag text; v_rows bigint;   -- records: no http type named (#984)
+  v_rows_digest text;   -- which rows the file holds, not only how many (#1069)
 begin
   select * into cfg from archive.config where parent_table = p_parent;
   if not found then raise exception 'archive._encode_upload_parquet: % has no archive.config row', p_parent; end if;
@@ -3064,7 +3129,7 @@ begin
   -- run after the encode, a statement later and a snapshot apart, so under a concurrent write it
   -- matched neither the file nor the child. The counted encoder reports how many rows the one
   -- snapshot it encoded held, which is what the ledger row is meant to record.
-  select c.p_file, c.p_num_rows into v_payload, v_rows
+  select c.p_file, c.p_num_rows, c.p_rows_digest into v_payload, v_rows, v_rows_digest
     from archive._pq_to_parquet_range_counted(p_parent, pcfg.control_column, v_lo_lit, v_hi_lit, p_compress) c;
 
   select decrypted_secret into v_key_id from vault.decrypted_secrets where name = cfg.vault_key_id;
@@ -3075,7 +3140,7 @@ begin
 
   v_key := archive._object_key(p_parent, cfg.prefix, pcfg.control_kind, p_lo, '.parquet');
   -- #975: as _encode_upload_ndjson_single's
-  perform archive._refuse_recorded_chunk_overwrite('archive_to_s3_parquet', p_parent, pcfg.control_kind, v_key, p_lo, p_hi, v_rows);
+  perform archive._refuse_recorded_chunk_overwrite('archive_to_s3_parquet', p_parent, pcfg.control_kind, v_key, p_lo, p_hi, v_rows, v_rows_digest);
   v_resp := archive.s3_signed_request_bytea('PUT', cfg.endpoint, cfg.bucket, cfg.region, v_key, '',
                                             'application/vnd.apache.parquet', v_payload, v_key_id, v_secret);
   if v_resp.status not between 200 and 299 then

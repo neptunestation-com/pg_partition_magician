@@ -914,6 +914,11 @@ run_archive() {
   # pair bench/discriminate.sh completes with the child resolved in two statements again.
   echo "--- archive._resolve_child resolves the child under one snapshot guard (issue #1062) ---"
   bash "$(dirname "$0")/bench/archive_resolve_child_one_snapshot.sh" pgpm_test-archive pgpm_perf297 || fail=1
+  # The recorded-chunk rows guard (#1069) re-runs tests/archive/db/48 for the same reason: the clean-code half of
+  # the pairs bench/discriminate.sh completes with the rows' digest never compared, never recorded, and
+  # rendered in the caller's time zone.
+  echo "--- no archive_fn strategy writes other rows over a recorded chunk guard (issue #1069) ---"
+  bash "$(dirname "$0")/bench/archive_recorded_chunk_rows_identity.sh" pgpm_test-archive pgpm_perf100 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi
