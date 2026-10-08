@@ -9317,6 +9317,28 @@ MUTATIONS["archive_row_digest_search_path"] = (
     [("set search_path = pg_catalog\nas $$ select pg_catalog.decode(", "as $$ select pg_catalog.decode(", 1)],
 )
 MUTATION_SRC["archive_row_digest_search_path"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_pq_row_digest_alias_shadowed"] = (
+    "bench/archive_recorded_chunk_rows_identity.sh",
+    "archive._pq_to_parquet_range_counted digests the snapshot's rows as archive._row_digest(s), the bare alias, so "
+    "on a table with a column named s the column shadows the row (#821's shape), row_to_json(text) does not exist, "
+    "and every Parquet archive of the table raises: each tick logs skip_archive and nothing is archived or retired "
+    "(#1069 P1-02). One site, the Parquet digest's row reference. tests/archive/db/48 catches it (t48.ps, whose "
+    "column is named s, is never archived).",
+    [("string_agg(archive._row_digest(s.*), %L::bytea order by archive._row_digest(s.*))",
+      "string_agg(archive._row_digest(s), %L::bytea order by archive._row_digest(s))", 1)],
+)
+MUTATION_SRC["archive_pq_row_digest_alias_shadowed"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_ndjson_row_digest_alias_shadowed"] = (
+    "bench/archive_recorded_chunk_rows_identity.sh",
+    "archive._encode_upload_ndjson_single digests its rows as archive._row_digest(t), the bare alias, so on a table "
+    "with a column named t the column shadows the row (#821's shape) and the digest is of that column alone, or "
+    "the call raises for a type row_to_json does not take: a text column t raises on every tick, which logs "
+    "skip_archive and archives nothing. One site, the NDJSON digest's row reference. tests/archive/db/48 catches "
+    "it (t48.nt, whose column is named t, is never archived).",
+    [("string_agg(archive._row_digest(t.*), ''''::bytea order by archive._row_digest(t.*))",
+      "string_agg(archive._row_digest(t), ''''::bytea order by archive._row_digest(t))", 1)],
+)
+MUTATION_SRC["archive_ndjson_row_digest_alias_shadowed"] = "pgpm_archive/install.sql"
 MUTATIONS["archive_recorded_chunk_claim_unlocked"] = (
     "bench/archive_recorded_chunk_tick_race.sh",
     "archive._refuse_recorded_chunk_overwrite reads pgpm.archive_ledger without first locking the key's claim row, "

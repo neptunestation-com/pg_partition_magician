@@ -23,6 +23,10 @@
 #                                                 (the live re-run from another zone is refused)
 #   archive_row_digest_search_path             -- the digest renders a regclass under the caller's search_path
 #                                                 (the live re-run under search_path t48 is refused)
+#   archive_pq_row_digest_alias_shadowed       -- the Parquet digest passes the bare alias s, which a column
+#                                                 named s shadows (t48.ps is never archived or retired)
+#   archive_ndjson_row_digest_alias_shadowed   -- the NDJSON digest passes the bare alias t, the same way
+#                                                 (t48.nt is never archived)
 # The race between a direct call and a tick archiving the same chunk is bench/archive_recorded_chunk_tick_race.sh's.
 #
 # Usage: archive_recorded_chunk_rows_identity.sh <container> <db> [archive install.sql]

@@ -23,7 +23,7 @@
 -- refusal is about the rows, not about the caller's session, and not a blanket one after retire().
 -- bench/archive_recorded_chunk_rows_identity.sh runs this file against the module's mutants.
 set client_min_messages = warning;
-select plan(29);
+select plan(37);
 
 create schema t48;
 
@@ -215,6 +215,65 @@ select throws_like($$ select * from pgpm.archive_to_s3_ndjson('t48.nd', 'unused'
   'and a refusal records none, so the next call is refused the same way');
 select is(t48.rows(:'knd'), t48.expect('n', 1, 90),
   'the NDJSON object is untouched by the refused calls');
+
+-- ======================================================================================================
+-- A column named after the digest's row alias does not shadow the row (#821's shape, review P1-02)
+-- ======================================================================================================
+-- The Parquet digest reads its snapshot under the alias s and the NDJSON one its parent under the alias t. A bare
+-- alias resolves as a COLUMN first, so a table with a column of that name would have its digest taken of that
+-- column, or raise on every tick, and never be archived or retired. One table of each, asymmetric (60 rows as
+-- Parquet with a column s, 40 as NDJSON with a column t), archived and retired by maintain() alone.
+create table t48.ps (id bigint primary key, s text not null);
+insert into t48.ps select g, 's' || g from generate_series(1, 60) g;
+call pgpm.transmute('t48.ps', 'id', 100::bigint, p_retain => 100::bigint, p_paused => false);
+insert into t48.ps values (450, 'frontier');
+select archive.configure('t48.ps', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
+select pgpm.set_archive_fn('t48.ps', 'pgpm.archive_to_s3_parquet(regclass,name,text,text)'::regprocedure);
+create table t48.nt (id bigint primary key, t text not null);
+insert into t48.nt select g, 't' || g from generate_series(1, 40) g;
+call pgpm.transmute('t48.nt', 'id', 100::bigint, p_retain => 100::bigint, p_paused => false);
+insert into t48.nt values (450, 'frontier');
+select archive.configure('t48.nt', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
+select pgpm.set_archive_fn('t48.nt', 'pgpm.archive_to_s3_ndjson(regclass,name,text,text)'::regprocedure);
+create temp table t48_alias_child as
+  select parent_table::text as parent, child_name from pgpm.part
+   where parent_table in ('t48.ps'::regclass, 't48.nt'::regclass) and lo = '0';
+call pgpm.maintain('t48.ps');
+call pgpm.maintain('t48.nt');
+call pgpm.maintain('t48.ps');
+call pgpm.maintain('t48.nt');
+
+select is((select string_agg(c.relname || '.' || a.attname, ',' order by c.relname)
+             from pg_attribute a join pg_class c on c.oid = a.attrelid
+            where a.attrelid in ('t48.ps'::regclass, 't48.nt'::regclass) and a.attname in ('s', 't') and not a.attisdropped),
+  'nt.t,ps.s', 'LIVENESS: t48.ps has a column named s and t48.nt one named t, the digests'' row aliases');
+select is((select count(*)::int from t48_alias_child), 2,
+  'LIVENESS: each table had a partition at [0, 100) for the tick to archive');
+select is((select count(*)::int from pgpm.part where parent_table in ('t48.ps'::regclass, 't48.nt'::regclass)
+             and child_name in (select child_name from t48_alias_child) and pgpm._is_write_blocked(parent_table, child_name))
+          + (select count(*)::int from t48_alias_child c where to_regclass('t48.' || quote_ident(c.child_name)) is null), 2,
+  'LIVENESS: the tick ran on both: each [0, 100) partition was write-blocked or is already gone');
+select is((select array_agg(parent_table::text || ':' || coalesce(method, '') order by parent_table::text) from pgpm.log
+            where parent_table in ('t48.ps'::regclass, 't48.nt'::regclass) and action = 'skip_archive'),
+  null::text[], 'neither tick logged skip_archive');
+select is(
+  (select string_agg(parent_table::text || ' [' || lo || ', ' || hi || ') ' || rows_archived, '; ' order by parent_table::text)
+     from pgpm.archive_ledger where parent_table in ('t48.ps'::regclass, 't48.nt'::regclass) and lo = '0'),
+  't48.nt [0, 100) 40; t48.ps [0, 100) 60',
+  'the tick archived [0, 100) of each: 60 rows as Parquet with a column s, 40 as NDJSON with a column t');
+select is(
+  (select string_agg(l.parent_table::text || ' ' || (k.rows_digest ~ '^[0-9a-f]{32}$')::text, '; ' order by l.parent_table::text)
+     from pgpm.archive_ledger l join archive.object_key_claim k on k.object_key = l.s3_key
+    where l.parent_table in ('t48.ps'::regclass, 't48.nt'::regclass) and l.lo = '0'),
+  't48.nt true; t48.ps true',
+  'and each chunk''s key records a digest of its rows');
+select is((select string_agg((l::jsonb ->> 'id') || ':' || (l::jsonb ->> 't'), ',' order by (l::jsonb ->> 'id')::bigint)
+             from regexp_split_to_table((t48.req('GET', (select s3_key from pgpm.archive_ledger where parent_table = 't48.nt'::regclass and lo = '0'))).content, e'\n') l
+            where l <> ''),
+  (select string_agg(g || ':t' || g, ',' order by g) from generate_series(1, 40) g),
+  'the NDJSON object holds exactly ids 1..40, each with its own t');
+select is((select count(*)::int from t48_alias_child c where to_regclass('t48.' || quote_ident(c.child_name)) is null), 2,
+  'and retire() dropped both archived partitions on that record');
 
 -- ======================================================================================================
 -- The record maintain() wrote is the record still there

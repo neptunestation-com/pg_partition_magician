@@ -916,7 +916,8 @@ run_archive() {
   bash "$(dirname "$0")/bench/archive_resolve_child_one_snapshot.sh" pgpm_test-archive pgpm_perf297 || fail=1
   # The recorded-chunk rows guard (#1069) re-runs tests/archive/db/48 for the same reason: the clean-code half of
   # the pairs bench/discriminate.sh completes with the rows' digest never compared, never recorded, and
-  # rendered in the caller's time zone or under the caller's search_path.
+  # rendered in the caller's time zone or under the caller's search_path, or taken of a column named like its
+  # row alias.
   echo "--- no archive_fn strategy writes other rows over a recorded chunk guard (issue #1069) ---"
   bash "$(dirname "$0")/bench/archive_recorded_chunk_rows_identity.sh" pgpm_test-archive pgpm_perf100 || fail=1
   # The recorded-chunk race guard (#1069) holds a tick inside its refusal and sends a direct call into the window,
@@ -1038,7 +1039,7 @@ run_perf() {
     "bench/obtain_explicit_name_too_long.sh pgpm_perf92"
     "bench/config_stamp_lock.sh pgpm_perf101"
     "bench/transmute_reap_lock_timeout.sh pgpm_perf99"
-    "bench/hypertable_cutover_lock_timeout.sh pgpm_perf100"
+    "bench/hypertable_cutover_lock_timeout.sh pgpm_perf300"
     "bench/grid_floor_exact.sh pgpm_perf110"
     "bench/regrain_drivers_serialize.sh pgpm_perf94"
     "bench/set_partition_tz_midflight.sh pgpm_perf95"

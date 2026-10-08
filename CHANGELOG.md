@@ -20,7 +20,8 @@
   are unaffected. Test `tests/archive/db/48`, guards `bench/archive_recorded_chunk_rows_identity.sh` and
   `bench/archive_recorded_chunk_tick_race.sh`, mutations `archive_recorded_chunk_identity_unchecked`,
   `archive_recorded_chunk_identity_unrecorded`, `archive_row_digest_session_zone`,
-  `archive_row_digest_search_path` and `archive_recorded_chunk_claim_unlocked`.
+  `archive_row_digest_search_path`, `archive_pq_row_digest_alias_shadowed`,
+  `archive_ndjson_row_digest_alias_shadowed` and `archive_recorded_chunk_claim_unlocked`.
 
 - **A regrain reconcile tick applies and consumes only the delta rows it judged eligible** (#1070, Tier 1).
   `_regrain_reconcile` cut its batch from the eligible rows (keys in a sub-range the copy has finished) and

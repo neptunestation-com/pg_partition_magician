@@ -2699,9 +2699,11 @@ begin
   v_schema_list := array_prepend(archive._pq_build_schema_root(v_ncols), v_schema_elements);
   v_footer := archive._pq_build_file_metadata(v_schema_list, v_num_rows, array[v_row_group]);
 
-  -- the rows the file holds, read off the snapshot before it is emptied: the parent's columns, in its order
+  -- the rows the file holds, read off the snapshot before it is emptied: the parent's columns, in its order. The
+  -- row is passed as s.*, never as the bare alias s, which a column named s would shadow (#821's shape): a bare
+  -- name resolves as a column before it is tried as a whole-row reference.
   select string_agg(quote_ident(c), ', ' order by o) into v_cols_q from unnest(v_col_names) with ordinality u(c, o);
-  execute format('select pg_catalog.md5(coalesce(string_agg(archive._row_digest(s), %L::bytea order by archive._row_digest(s)), %L::bytea))
+  execute format('select pg_catalog.md5(coalesce(string_agg(archive._row_digest(s.*), %L::bytea order by archive._row_digest(s.*)), %L::bytea))
                     from (select %s from pg_temp.archive_pq_snapshot) s',
                  '', '', v_cols_q) into p_rows_digest;
 
