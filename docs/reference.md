@@ -2332,6 +2332,19 @@ A child dropped or replaced while the call waited for that lock is refused, `<sc
 replaced while archive.to_s3 was resolving it`, and nothing is written. An export run inside a longer
 transaction keeps the hold until that transaction ends.
 
+A schema rename is the one change that hold does not stop: `ALTER SCHEMA ... RENAME` takes no lock that
+conflicts with it, and it moves every name in the schema at once, so a second session that swaps the child's
+schema with another holding a same-named table can make a name looked up a moment earlier reach that table.
+`archive.to_s3_parquet`, and the `pgpm.archive_to_s3_parquet` and `pgpm.archive_to_s3_ndjson` strategies that
+read the parent, therefore name the relation from its oid in the statement that reads it, never as a schema and
+name taken earlier, and then check which relations the read reached. One that reached any relation but the one
+it was handed (and that relation's partitions, indexes and TOAST tables) is refused before anything is written:
+`<function> reached <relation> (oid N) while reading <relation> (oid M): the name it read by named another
+relation by the time the read was parsed (a schema renamed meanwhile) ...; nothing was written, run it again`.
+A strategy's refusal is logged `skip_archive` and retried on the next tick. The check sees the relations the
+read newly locked, so a same-named table the calling transaction had already read before the export is the
+one case it cannot tell apart.
+
 ## Scheduling
 
 ### `schedule`

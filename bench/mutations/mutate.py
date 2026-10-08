@@ -4649,10 +4649,10 @@ $$;''',
         "float4 to 6 while the ledger records the chunk archived. One site, the function's SET clause.",
         [("returns table(s3_key text, etag text, rows_archived bigint)\n"
           "language plpgsql set extra_float_digits = 1 as $$\n"
-          "declare\n  cfg archive.config; pcfg pgpm.config; v_nsp name; v_rel name;\n",
+          "declare\n  cfg archive.config; pcfg pgpm.config;\n",
           "returns table(s3_key text, etag text, rows_archived bigint)\n"
           "language plpgsql as $$   -- MUTANT: pre-#781, the caller's extra_float_digits\n"
-          "declare\n  cfg archive.config; pcfg pgpm.config; v_nsp name; v_rel name;\n", 1)],
+          "declare\n  cfg archive.config; pcfg pgpm.config;\n", 1)],
     ),
     "to_s3_float_digits_unpinned": (
         "bench/archive_float_digits_pinned.sh",
@@ -9722,6 +9722,61 @@ MUTATIONS["regrain_capture_delta_insert_by_name"] = (
 """, """    v_nsp, v_fn,
 """, 1)],
 )
+
+# Issue #1055 (bullet 1, A1055-1): a Parquet export reads the relation it was handed, never a namesake its old
+# spelling reaches once a schema is renamed. Three parts in archive._pq_snapshot, which both encoders read
+# through: the relation is rendered from its regclass for the statement that reads it, the snapshot table's
+# ROW EXCLUSIVE is taken before that rendering (so the INSERT's parse takes no new lock, and with it no catalog
+# news, between the rendering and the lookup), and archive._refuse_foreign_read checks what the read reached.
+# All are caught by tests/archive/db/46 (bench/archive_parquet_read_by_regclass.sh, against the archive image
+# and MinIO), whose instrument commits a schema swap from a second session between the encoder's start and its
+# read.
+_PQ_SNAPSHOT_RENDER = "  v_from_q := archive._pq_from_relation(p_relation, p_control, p_lo, p_hi);\n"
+_PQ_SNAPSHOT_WITNESS = ("  perform archive._refuse_foreign_read('archive._pq_snapshot', p_relation, v_held, array[v_snap]);\n", "", 1)
+_PQ_SNAPSHOT_NEWS = ("  lock table pg_temp.archive_pq_snapshot in row exclusive mode;\n", "", 1)
+MUTATIONS["archive_pq_snapshot_reads_by_name"] = (
+    "bench/archive_parquet_read_by_regclass.sh",
+    "Pre-#1055 Parquet read: archive._pq_snapshot reads the relation by a schema and a name taken from its oid "
+    "when the encode began (the encoders took them before their column loop), and nothing checks what the read "
+    "reached. A second session that swaps the relation's schema with another holding a same-shaped namesake, "
+    "committed before the read, has archive.to_s3_parquet PUT the namesake's rows under the child's key and the "
+    "range encoder return the namesake parent's rows. tests/archive/db/46 parts A and B catch it (the file holds "
+    "row 9 or row 8 and none of the relation's own).",
+    [("  v_held oid[] := archive._held_relations();   -- before anything below reads by a name (#1055)\n",
+      "  v_nsp name := (select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_relation);\n"
+      "  v_rel name := (select c.relname from pg_class c where c.oid = p_relation);\n", 1),
+     (_PQ_SNAPSHOT_RENDER, "  v_from_q := archive._pq_from_item(v_nsp, v_rel, p_control, p_lo, p_hi);\n", 2),
+     _PQ_SNAPSHOT_WITNESS],
+)
+MUTATION_SRC["archive_pq_snapshot_reads_by_name"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_pq_snapshot_render_only"] = (
+    "bench/archive_parquet_read_by_regclass.sh",
+    "archive._pq_snapshot renders the regclass for its read and does nothing else: the INSERT's own parse takes "
+    "the snapshot table's ROW EXCLUSIVE first, which brings in a schema rename committed after the rendering, "
+    "so the name rendered a moment ago is looked up in a catalog that has moved and reaches the namesake, and "
+    "nothing checks what the read reached. tests/archive/db/46 parts A and B catch it (the file holds the "
+    "namesake's row).",
+    [_PQ_SNAPSHOT_NEWS, _PQ_SNAPSHOT_WITNESS],
+)
+MUTATION_SRC["archive_pq_snapshot_render_only"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_pq_snapshot_render_before_news"] = (
+    "bench/archive_parquet_read_by_regclass.sh",
+    "archive._pq_snapshot renders the regclass before taking the snapshot table's ROW EXCLUSIVE, so the INSERT's "
+    "parse takes that lock, and a rename committed after the rendering with it, between the rendering and the "
+    "lookup: the read reaches the namesake, and archive._refuse_foreign_read refuses the export instead of "
+    "reading the relation it was handed. tests/archive/db/46 parts A and B catch it (both encodes fail).",
+    [_PQ_SNAPSHOT_NEWS],
+)
+MUTATION_SRC["archive_pq_snapshot_render_before_news"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_read_witness_inert"] = (
+    "bench/archive_parquet_read_by_regclass.sh",
+    "archive._refuse_foreign_read finds the relation a read reached outside the one meant and lets it pass, so a "
+    "read whose name reached a namesake goes on with that relation's rows. One site, the refusal. "
+    "tests/archive/db/46 part C catches it (a read of another relation is not refused).",
+    [("  if v_stray is not null then\n    raise exception 'pg_partition_magician: % reached",
+      "  if false then\n    raise exception 'pg_partition_magician: % reached", 1)],
+)
+MUTATION_SRC["archive_read_witness_inert"] = "pgpm_archive/install.sql"
 
 
 
