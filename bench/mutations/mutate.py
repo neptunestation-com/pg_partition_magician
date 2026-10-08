@@ -9213,6 +9213,81 @@ MUTATIONS["uninstall_scratch_record_skips_capture_fn"] = (
 MUTATION_SRC["uninstall_scratch_record_skips_capture_fn"] = "pgpm_core/uninstall.sql"
 MUTATION_TRACK["uninstall_scratch_record_skips_capture_fn"] = "timescale"
 
+# Issue #1030 bullet 3: scripts/archive_partition_whole.sql holds its strategy's return to #454's contract, as
+# _archive_step does. One mutation per site of the script's change, each caught by tests/286 through
+# bench/archive_partition_whole_contract.sh. The source is the script, which nothing installs.
+MUTATIONS["archive_whole_contract_unchecked"] = (
+    "bench/archive_partition_whole_contract.sh",
+    "Pre-#1030 scripts/archive_partition_whole.sql: pgpm_archive_next_partition_whole writes the strategy's "
+    "covered_hi into pgpm.archive_ledger without pgpm._archive_contract_breach, so a strategy that answers "
+    "[0, 1000) with 1000000 and archives nothing marks the partition covered and retire() drops it, and one "
+    "that answers lo writes the (lo, lo) row. One site, the check and its log row. tests/286 parts A and B "
+    "catch it (A's ledger row, retire() drops ids 1 to 7; B's (0, 0) row; no fail_archive_contract).",
+    [("""
+  -- Hold the return to the range it was handed, BEFORE any ledger write: the same contract, through the same
+  -- function, that pgpm._archive_step holds it to (issue #454; issue #1030). The ledger row is retire()'s drop
+  -- precondition, so a covered_hi past hi, which a strategy that archived nothing can return, would open the
+  -- drop gate on rows nothing archived, and a covered_hi at lo would write the (lo, lo) row that wedges the
+  -- ledger on its primary key. Unlike the identity refusal above this one IS logged, as the
+  -- fail_archive_contract _archive_step writes: the defect is the configured strategy's, maintain()'s next
+  -- tick meets it too, and status() counts the action whichever path met it first.
+  v_breach := pgpm._archive_contract_breach(cfg.control_kind, v_resume_lo, r.hi, v_result.covered_hi);
+  if v_breach is not null then
+    insert into pgpm.log (parent_table, action, lo, hi, method)
+      values (p_parent, 'fail_archive_contract', v_resume_lo, r.hi,
+              format('%s returned covered_hi %s for %I.%I chunk [%s, %s): %s; refusing to record it',
+                     cfg.archive_fn::text, coalesce(quote_literal(v_result.covered_hi), 'null'),
+                     v_nsp, r.child_name, v_resume_lo, r.hi, v_breach));
+    return format('%s: REFUSING to record what %s returned for [%s, %s) (covered_hi %s): %s. Nothing was recorded '
+                  'and the partition stays unarchived; fix the strategy (pgpm.set_archive_fn) and call again.',
+                  r.child_name, cfg.archive_fn::text, v_resume_lo, r.hi,
+                  coalesce(quote_literal(v_result.covered_hi), 'null'), v_breach);
+  end if;
+""", "", 1)],
+)
+MUTATION_SRC["archive_whole_contract_unchecked"] = "scripts/archive_partition_whole.sql"
+MUTATIONS["archive_whole_partial_compared_as_text"] = (
+    "bench/archive_partition_whole_contract.sh",
+    "Pre-#1030 scripts/archive_partition_whole.sql: partial or whole is decided by text inequality between "
+    "covered_hi and pgpm.part.hi, so a whole cover spelt differently ('1000.0' for hi 1000) is reported as "
+    "PARTIAL and the operator is told to call again over a partition already covered. One site, the "
+    "comparison. tests/286 part C catches it (the message for the '1000.0' cover).",
+    [("""  -- partial or whole by VALUE: the check above holds covered_hi at or below hi, and the same value can be
+  -- spelt more than one way ('1000.0' is hi 1000; a timestamp in another zone or DateStyle), so text
+  -- inequality would report a whole cover as partial
+  if pgpm._native_gt(cfg.control_kind, r.hi, v_result.covered_hi) then
+""", "  if v_result.covered_hi is distinct from r.hi then\n", 1)],
+)
+MUTATION_SRC["archive_whole_partial_compared_as_text"] = "scripts/archive_partition_whole.sql"
+MUTATIONS["archive_whole_rls_unrefused"] = (
+    "bench/archive_partition_whole_contract.sh",
+    "Pre-#1030 scripts/archive_partition_whole.sql without #873's lever: pgpm_archive_next_partition_whole runs "
+    "the strategy under the caller's row-level security, so a non-BYPASSRLS owner of a FORCE ROW LEVEL SECURITY "
+    "table archives only the rows its policy admits, records whole coverage, and retire() drops the hidden rows "
+    "never archived. One site, both _refuse_filtered_reads calls and their skip_archive. tests/286 part E "
+    "catches it (no refusal, the strategy called, a ledger row, retire() drops ids 3 and 6).",
+    [("""  -- Refuse a caller whose reads row-level security filters, BEFORE the strategy runs: the lever (#873)
+  -- pgpm._archive_step applies to the same two relations, with the same calls. The strategy reads the rows as
+  -- this caller, through the parent (pgpm_archive's transports) or the partition itself, and the ledger row it
+  -- leads to opens retire()'s drop gate; under a FORCE ROW LEVEL SECURITY policy the strategy would archive
+  -- only the rows the policy admits, report the whole range covered, and retire() would drop the others with
+  -- the partition. Logged as the skip_archive _archive_step's handler writes for this refusal, over the
+  -- partition's range, and returned as the message; nothing is read or recorded.
+  begin
+    perform pgpm._refuse_filtered_reads(p_parent, 'archive a partition of',
+      'an archive strategy reading the partition through it would archive only those rows, and retention would drop the others with the partition');
+    perform pgpm._refuse_filtered_reads(v_now, 'archive',
+      'the partition would be archived from those rows alone, and retention would drop the others with the partition');
+  exception when raise_exception then
+    insert into pgpm.log (parent_table, action, lo, hi, method)
+      values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 200));
+    return format('%s: REFUSING to archive it: %s', r.child_name, sqlerrm);
+  end;
+
+""", "", 1)],
+)
+MUTATION_SRC["archive_whole_rls_unrefused"] = "scripts/archive_partition_whole.sql"
+
 # pass 9 G18: #994, #995, #1002. Four test files that counted where their own comments promised to name, each
 # judged by bench/tests_fail_on_defect.sh against a defect it plants in install.sql. One mutation per site, each
 # the site's exact pre-fix text, so the file under it passes against that defect.

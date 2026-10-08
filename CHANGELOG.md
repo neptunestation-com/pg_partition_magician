@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **`scripts/archive_partition_whole.sql` holds its archive strategy to the contract `_archive_step` does**
+  (#1030, bullet 3). The operator utility wrote the strategy's `covered_hi` into `pgpm.archive_ledger` with
+  none of #454's check, so a strategy that answered `[0, 1000)` with `1000000` and archived nothing marked the
+  partition covered and `retire()` dropped it with nothing archived; one that answered `lo` wrote the `(lo, lo)`
+  row that wedges the ledger. It now calls `pgpm._archive_contract_breach` before any ledger write, and on a
+  breach records nothing, logs `fail_archive_contract` over the range it handed and returns the refusal. Its
+  partial-or-whole message compares by value, not as text, so a whole cover spelt `1000.0` no longer reads as
+  partial. It also refuses, before the strategy runs, a caller whose reads of the parent or the partition
+  row-level security filters (the #873 lever `_archive_step` applies, logged `skip_archive`): a non-`BYPASSRLS`
+  owner of a `FORCE ROW LEVEL SECURITY` table archived only the rows its policy admitted, recorded whole
+  coverage, and `retire()` dropped the hidden ones. Test `tests/286`, guard
+  `bench/archive_partition_whole_contract.sh`, mutations `archive_whole_contract_unchecked`,
+  `archive_whole_partial_compared_as_text` and `archive_whole_rls_unrefused`.
+
 - **`from_hypertable_copy`'s change capture writes its delta by the oid it recorded** (#1037, bullet 1). The
   drains, the cutover and uninstall have found the delta by its `pgpm.scratch` oid since #955, but the
   capture function the copy minted inserted into `<rel>_pgpm_delta` by name, so renaming the recorded delta

@@ -43,6 +43,15 @@
 -- primary key. Returns a plain status message when nothing is eligible, rather than an error, so
 -- repeated calls are always safe to make (e.g. from \watch) without checking state first.
 --
+-- THE STRATEGY'S RETURN IS HELD TO THE ARCHIVE CONTRACT, the one pgpm._archive_step holds it to
+-- (issue #454): a covered_hi that is null, not above the range's lo, past its hi, or not a value of
+-- the control's type is refused BEFORE anything is written to pgpm.archive_ledger (retire()'s drop
+-- precondition), logged fail_archive_contract, and reported in the returned message. Nothing is
+-- recorded, so the partition stays unarchived and undroppable until the strategy is fixed. And a
+-- caller whose reads of the parent or the partition row-level security filters is refused before the
+-- strategy runs, as _archive_step refuses it, logged skip_archive: run it as a role with BYPASSRLS (or
+-- a superuser) on a table with FORCE ROW LEVEL SECURITY.
+--
 -- STATEMENT_TIMEOUT IS THE ONE THING LEFT TO SIZE, AND IT'S ON YOU: pgpm never manages
 -- statement_timeout itself. Size it from a real measured single-partition archive time, not a
 -- guess. A partition too large to finish inside it (or too large for Parquet's own ~1 GiB bytea
@@ -51,8 +60,10 @@
 -- ordinary chunking).
 --
 -- Requires pgpm_core (any version that ships pgpm._run_archive_strategy/_is_write_blocked/
--- _archive_fully_covered/_native_type -- these predate this script, not new in any particular
--- release), plus pgpm.part.child_oid for the identity check below (issue #421; added after this
+-- _archive_fully_covered/_native_type/_native_gt -- these predate this script, not new in any
+-- particular release), plus pgpm._archive_contract_breach (issue #454), pgpm._native_text (issue
+-- #977) and pgpm._refuse_filtered_reads (issue #873) for the contract check, the ledger's canonical
+-- hi and the row-level security refusal, plus pgpm.part.child_oid for the identity check below (issue #421; added after this
 -- script, so an older core needs that check removed along with the column reference). Not part of pgpm_core/install.sql and never will be without a real feature proposal
 -- and its own issue/PR -- this is scratch space for an operator to paste into a session and run,
 -- not a shipped, versioned function.
@@ -72,6 +83,7 @@ declare
   v_nsp name;
   v_now regclass;
   v_result pgpm.archive_result;
+  v_breach text;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   if not found then
@@ -99,10 +111,10 @@ begin
   -- writes the same kind of pgpm.archive_ledger row and that ledger is retire()'s drop precondition:
   -- a coverage claim built by reading whatever answers to child_name is what authorises dropping the
   -- partition that name was recorded for. Returned as a message rather than logged as
-  -- fail_archive_identity -- this is a hand-run function, so its caller is reading the output, and it
-  -- has no business writing into pgpm's own audit trail. Unlike _archive_step's check, nothing in
-  -- bench/ guards this one: the script is scratch space with no harness at all, which is a reason to
-  -- keep it consistent with the shipped path, not a reason to leave the gap open here.
+  -- fail_archive_identity -- this is a hand-run function, so its caller is reading the output. Unlike
+  -- _archive_step's check, nothing guards this one (tests/286 guards the contract check below, not
+  -- this), which is a reason to keep it consistent with the shipped path, not a reason to leave the
+  -- gap open here.
   select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
   v_now := to_regclass(format('%I.%I', v_nsp, r.child_name));
   if r.child_oid is not null and v_now::oid is distinct from r.child_oid then
@@ -110,6 +122,24 @@ begin
                   'Something took the name. Put the intended relation back under it, or clear the stale pgpm.part row.',
                   v_nsp, r.child_name, coalesce(v_now::oid::text, 'nothing'), r.child_oid);
   end if;
+
+  -- Refuse a caller whose reads row-level security filters, BEFORE the strategy runs: the lever (#873)
+  -- pgpm._archive_step applies to the same two relations, with the same calls. The strategy reads the rows as
+  -- this caller, through the parent (pgpm_archive's transports) or the partition itself, and the ledger row it
+  -- leads to opens retire()'s drop gate; under a FORCE ROW LEVEL SECURITY policy the strategy would archive
+  -- only the rows the policy admits, report the whole range covered, and retire() would drop the others with
+  -- the partition. Logged as the skip_archive _archive_step's handler writes for this refusal, over the
+  -- partition's range, and returned as the message; nothing is read or recorded.
+  begin
+    perform pgpm._refuse_filtered_reads(p_parent, 'archive a partition of',
+      'an archive strategy reading the partition through it would archive only those rows, and retention would drop the others with the partition');
+    perform pgpm._refuse_filtered_reads(v_now, 'archive',
+      'the partition would be archived from those rows alone, and retention would drop the others with the partition');
+  exception when raise_exception then
+    insert into pgpm.log (parent_table, action, lo, hi, method)
+      values (p_parent, 'skip_archive', r.lo, r.hi, left(sqlerrm, 200));
+    return format('%s: REFUSING to archive it: %s', r.child_name, sqlerrm);
+  end;
 
   -- resume from wherever this child's ledger coverage already left off, the same watermark
   -- _next_archive_chunk itself reads -- NOT always the child's own lo.
@@ -119,6 +149,27 @@ begin
   v_resume_lo := coalesce(v_resume_lo, r.lo);
 
   v_result := pgpm._run_archive_strategy(p_parent, r.child_name, v_resume_lo, r.hi);
+
+  -- Hold the return to the range it was handed, BEFORE any ledger write: the same contract, through the same
+  -- function, that pgpm._archive_step holds it to (issue #454; issue #1030). The ledger row is retire()'s drop
+  -- precondition, so a covered_hi past hi, which a strategy that archived nothing can return, would open the
+  -- drop gate on rows nothing archived, and a covered_hi at lo would write the (lo, lo) row that wedges the
+  -- ledger on its primary key. Unlike the identity refusal above this one IS logged, as the
+  -- fail_archive_contract _archive_step writes: the defect is the configured strategy's, maintain()'s next
+  -- tick meets it too, and status() counts the action whichever path met it first.
+  v_breach := pgpm._archive_contract_breach(cfg.control_kind, v_resume_lo, r.hi, v_result.covered_hi);
+  if v_breach is not null then
+    insert into pgpm.log (parent_table, action, lo, hi, method)
+      values (p_parent, 'fail_archive_contract', v_resume_lo, r.hi,
+              format('%s returned covered_hi %s for %I.%I chunk [%s, %s): %s; refusing to record it',
+                     cfg.archive_fn::text, coalesce(quote_literal(v_result.covered_hi), 'null'),
+                     v_nsp, r.child_name, v_resume_lo, r.hi, v_breach));
+    return format('%s: REFUSING to record what %s returned for [%s, %s) (covered_hi %s): %s. Nothing was recorded '
+                  'and the partition stays unarchived; fix the strategy (pgpm.set_archive_fn) and call again.',
+                  r.child_name, cfg.archive_fn::text, v_resume_lo, r.hi,
+                  coalesce(quote_literal(v_result.covered_hi), 'null'), v_breach);
+  end if;
+
   -- the instant this session reads, in canonical text, as pgpm._archive_step records it (#977): a strategy's
   -- offset-less text stored verbatim reads as a different instant, past hi, from a session in another zone
   v_result.covered_hi := pgpm._native_text(cfg.control_kind, v_result.covered_hi);
@@ -126,7 +177,10 @@ begin
   insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, s3_key, etag, rows_archived)
   values (p_parent, v_resume_lo, v_result.covered_hi, r.child_name, v_result.s3_key, v_result.etag, v_result.rows_archived);
 
-  if v_result.covered_hi is distinct from r.hi then
+  -- partial or whole by VALUE: the check above holds covered_hi at or below hi, and the same value can be
+  -- spelt more than one way ('1000.0' is hi 1000; a timestamp in another zone or DateStyle), so text
+  -- inequality would report a whole cover as partial
+  if pgpm._native_gt(cfg.control_kind, r.hi, v_result.covered_hi) then
     return format('%s: PARTIAL only (requested hi %s, got %s) -- probably hit statement_timeout or a size limit; call again',
       r.child_name, r.hi, v_result.covered_hi);
   end if;
