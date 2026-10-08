@@ -61,14 +61,16 @@ CLASSES = ("regression", "pre_existing", "fixed", "seed_hit", "not_reproduced", 
            "hypothesis", "invalid_claim")
 
 
-def pr_class(runs):
+def pr_class(runs, acceptance=False):
     """The class from the runs ({'base': {...}, 'head': {...}, 'review': {...}}), each a classify_claims.py
-    runner result: fails True/False/None, liveness_failed True when only premise checks failed."""
+    runner result: fails True/False/None, liveness_failed True when only premise checks failed. An acceptance
+    claim (the issue's reproduction) has no finder's tree: a head run that failed only its liveness checks is
+    not an invalid reproduction but the fix refusing the fixture's premise, read as `fixed` with the note."""
     b, h = runs["base"], runs["head"]
     rv = runs.get("review") or h
     if any(r.get("fails") is None for r in (b, h, rv)):
         return "not_run", None
-    if rv.get("liveness_failed"):
+    if rv.get("liveness_failed") and not acceptance:
         return "invalid_repro", "the reproduction's own LIVENESS/GUARD/fixture checks failed on the tree the finder reviewed, so it never reached the defect"
     H, B, R = bool(h["fails"]), bool(b["fails"]), bool(rv["fails"])
     if "review" in runs and R and not H:
@@ -131,7 +133,7 @@ def run_all(claims, trees, runner, seeds=(), acceptance="ACC"):
         if is_acc:
             for name, path in sorted(mutants.items()):
                 runs["mutant:" + name] = runner(path, c, "m_" + name)
-        cls, note = pr_class(runs)
+        cls, note = pr_class(runs, acceptance=is_acc)
         rec.update({"runs": runs, "class": cls})
         if note:
             rec["note"] = note
@@ -207,8 +209,10 @@ def selftest():
     assert pr_class({"base": P, "head": P, "review": L})[0] == "invalid_repro"
     # a base run that never reached the defect does not make a head failure a regression
     cls, note = pr_class({"base": L, "head": F}); assert cls == "pre_existing" and "rebuild" in note, (cls, note)
-    # the fix refusing the fixture's premise reads as fixed, flagged
+    # the fix refusing the fixture's premise reads as fixed, flagged; for an acceptance claim even with no review tree
     cls, note = pr_class({"base": F, "head": L, "review": P}); assert cls == "fixed" and "refuses" in note, (cls, note)
+    assert pr_class({"base": F, "head": L})[0] == "invalid_repro"
+    cls, note = pr_class({"base": F, "head": L}, acceptance=True); assert cls == "fixed" and "refuses" in note, (cls, note)
 
     import tempfile
     with tempfile.TemporaryDirectory() as d:

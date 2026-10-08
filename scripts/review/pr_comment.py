@@ -9,7 +9,9 @@ verifiers' verdicts and the coverage score, decide whether the PR may land, and 
 `gh pr comment`. Exit 0 when the PR may land, 1 when landing is BLOCKED, 2 on bad input.
 
 The landing policy (docs/adversarial-review.md, "Per-PR verification"), applied here and nowhere else:
-  blocked   an acceptance reproduction that does not fail on the base, or does not pass on the head, or
+  blocked   an acceptance reproduction that does not fail on the base, or does not pass on the head (unless its
+            head run failed only its liveness checks and a verifier ruled `premise_removed`: the fix took away
+            the fixture's premise and the defect checks pass, pass 9's F5-05 shape), or
             that the PR's mutation does not make fail again (the mutation restores a cousin, so the guard
             it certifies is not this fix's); a verified `regression` of any tier; a verified `pre_existing`
             of Tier 1 or 2 INSIDE the PR's surface (its file:line in a touched unit, a caller, or a touched
@@ -70,7 +72,11 @@ def decide(classified, verdicts, acceptance="ACC", surface=None):
             if a["fails_on_base"] is not True:
                 reasons.append(f"{cid}: the acceptance reproduction does not fail on the base, so it does not demonstrate the defect the PR says it fixes")
             if a["passes_on_head"] is not True:
-                reasons.append(f"{cid}: the acceptance reproduction does not pass on the head" + (" (it failed only its liveness checks: the fix refuses the fixture)" if c.get("note") and "refuses" in c["note"] else ""))
+                premise = bool(c.get("note") and "refuses" in c["note"])
+                if premise and verdicts.get(cid, {}).get("verdict") == "premise_removed":
+                    pass   # a verifier ruled that the fix removed the fixture's premise and the defect checks pass (F5-05's shape)
+                else:
+                    reasons.append(f"{cid}: the acceptance reproduction does not pass on the head" + (" (it failed only its liveness checks: the fix refuses the fixture's premise; a verifier's `premise_removed` verdict lifts this)" if premise else ""))
             any_restores = a["any_restores"] if "any_restores" in a else a.get("mutant_restores")   # legacy bool shape
             if any_restores is False:
                 names = ", ".join(a["mutant_restores"]) if isinstance(a.get("mutant_restores"), dict) else "the PR's mutations"
@@ -125,7 +131,10 @@ def render(classified, verdicts, coverage, surface, sealed, pr, head, base, budg
                 mr = {"(the PR's mutations together)": mr}   # the record's first shape, one combined mutant tree
             mr = mr or {}
             cell = ("; ".join(f"`{k}`: {yn(v)}" for k, v in mr.items()) if mr else "no mutant tree (not checked)")
-            out.append(f"| `{c['id']}` {c.get('scenario') or ''} | {yn(a['fails_on_base'])} | {yn(a['passes_on_head'])} | {cell} | {a.get('note') or c.get('note') or ''} |")
+            ph = yn(a['passes_on_head'])
+            if a['passes_on_head'] is not True and verdicts.get(c["id"], {}).get("verdict") == "premise_removed":
+                ph = "premise removed by the fix (verifier: " + (verdicts[c["id"]].get("reason") or "")[:160] + ")"
+            out.append(f"| `{c['id']}` {c.get('scenario') or ''} | {yn(a['fails_on_base'])} | {ph} | {cell} | {a.get('note') or c.get('note') or ''} |")
     else:
         out.append("No acceptance reproduction was given (the PR does not close a verified issue).")
     closing = verdicts.get("closing")
@@ -257,6 +266,12 @@ def selftest():
     assert decide(legacy, {})[0] and "restore a different defect" in decide(legacy, {})[1][0]
     legacy["claims"][0]["acceptance"]["mutant_restores"] = True
     assert not decide(legacy, {})[0] and "mutations together)`: yes" in render(legacy, {}, None, None, None, 1, "a", "b")[1]
+    # an acceptance whose head run failed only its liveness checks blocks until a verifier rules premise_removed
+    prem = {"acceptance": "ACC", "claims": [{"id": "ACC-01", "finder": "ACC", "class": "fixed", "scenario": "s", "note": "the head run failed only its liveness/guard checks: the fix refuses the fixture's premise; a verifier must say whether that refusal is the behaviour the issue asked for",
+                                                 "acceptance": {"fails_on_base": True, "passes_on_head": False, "mutant_restores": {"m": True}, "any_restores": True}}]}
+    assert decide(prem, {})[0] and "premise_removed" in decide(prem, {})[1][0]
+    assert not decide(prem, {"ACC-01": {"verdict": "premise_removed", "reason": "the watermark is canonical now"}})[0]
+    assert "premise removed by the fix" in render(prem, {"ACC-01": {"verdict": "premise_removed", "reason": "r"}}, None, None, None, 1, "a", "b")[1]
     # a missed seed is reported, not blocking
     verdicts["closing"]["verdict"] = "holds"
     classified["claims"][4]["class"] = "not_reproduced"
