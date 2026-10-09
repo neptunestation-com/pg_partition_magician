@@ -1208,6 +1208,7 @@ run_perf() {
     "bench/bound_contract_remedy.sh pgpm_perf318"
     "bench/liveness_witness_labels.sh pgpm_perf322"
     "bench/transmute_claim_owner_under_set_role.sh pgpm_perf325"
+    "bench/retain_horizon_ambiguous_wall_time.sh pgpm_perf326"
   )
   local selected=()
   local n=${#guards[@]} idx

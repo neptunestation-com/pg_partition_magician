@@ -11056,6 +11056,21 @@ MUTATIONS["transmute_claim_without_identity"] = (
 )
 
 
+# Issue #627: the retain horizon's time part is instant arithmetic, and a retain with no calendar part takes no
+# wall-clock round trip at all. bench/retain_horizon_ambiguous_wall_time.sh runs tests/311 against the mutant.
+MUTATIONS["retain_horizon_wall_round_trip"] = (
+    "bench/retain_horizon_ambiguous_wall_time.sh",
+    "Pre-#627 retain horizon: the whole retain is taken on the wall clock in partition_tz and converted back, "
+    "((now() at time zone tz) - retain) at time zone tz, so at 01:30 EDT on the first pass through a fall-back "
+    "hour retain '0' resolves to 01:30 EST, an hour past now(), and retain() drops the hourly partition taking "
+    "writes. One site, the body of _retain_horizon, the helper both _retain_boundary and regrain_step call.",
+    [("  if v_cal = interval '0' then\n"
+      "    return now() - p_retain;\n"
+      "  end if;\n"
+      "  return (((now() at time zone p_tz) - v_cal) at time zone p_tz) - (p_retain - v_cal);\n",
+      "  return ((now() at time zone p_tz) - p_retain) at time zone p_tz;\n", 1)],
+)
+
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a

@@ -1332,6 +1332,15 @@ Drops every partition whose whole range is older than the retention horizon (`co
 the count dropped. A coarse partition that merely *straddles* the horizon is **not** dropped, since it
 still holds within-horizon data, so its aged span is not reclaimed for as long as it straddles.
 
+An interval retain's horizon is taken in `config.partition_tz`, whatever zone the session is in. Its
+calendar part (months and days) moves the wall clock back, so `'1 day'` is the same wall time yesterday,
+23 or 25 hours ago across a daylight-saving change, and `'1 month'` the same wall time a month ago. Its
+time part (hours, minutes, seconds) is fixed-length and is taken off the instant, never off the wall clock.
+The horizon is therefore never later than `now()` minus the time part: `'0'` and `'30 minutes'` keep the
+partition taking writes through the repeated hour of a fall-back too, where a wall time converted back
+would resolve to the later of its two instants, an hour in the future. `regrain` judges its aged
+sub-ranges against the same horizon.
+
 A coarse child is **not exempt from retention, only all-or-nothing about it**: once its whole range is
 past the horizon it drops like any other partition, in one step, even while a `regrain` is splitting it
 (see [`retire`](#retire) for what becomes of that regrain). What `regrain` changes is the

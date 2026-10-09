@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **The retain horizon never lands past `now()` in a fall-back hour** (#627). `_retain_boundary` and its twin
+  in `regrain_step` took the whole retain off the wall clock in `partition_tz` and converted the result back
+  with `at time zone`, which resolves an ambiguous wall time to its later instant: at 01:30 EDT on the first
+  pass through the repeated hour, retain `'0'` gave 06:30Z, an hour past `now()`, so on an hourly grid
+  `retain()` dropped the partition taking writes with its rows, and `regrain_step` discarded the same
+  sub-range as aged at its swap. Both now call one helper, `_retain_horizon`: the retain's calendar part
+  (months and days) is still taken on the wall clock (#455), its time part is subtracted from the instant,
+  and a retain with no calendar part takes no wall-clock round trip at all. Guard
+  `bench/retain_horizon_ambiguous_wall_time.sh` (`tests/311`: five clocks, four retains, hourly and daily
+  grids, and a regrain), mutation `retain_horizon_wall_round_trip`.
+
 - **A transmute claim taken under `SET ROLE` records its owner's identity** (#771 bullet 3). The claim insert
   read the session's `backend_start` from `pg_stat_activity` as the current role, which masks the session's
   own row under `SET ROLE` to a role that is not a member of the session user, so the claim recorded NULL:
