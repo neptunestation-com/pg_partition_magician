@@ -4427,31 +4427,35 @@ end;
 $$;
 
 -- The upgrade's half of the above, run once, when the column is added. A row recorded before it gets the oid
--- pgpm.part records for its name: the relation it was archived from, as far as pgpm knows. Every other row is
--- marked retired: one whose name no pgpm.part row records, whether or not a relation has the name now (a
--- partition dropped by hand and re-created under its own name has the name and none of the rows), and one whose
--- pgpm.part row is UNANCHORED (no child_oid). That second case reads the #421 backfill of pgpm.part.child_oid,
+-- pgpm.part records for its name ONLY when that relation is the one the name resolves to and carries pgpm's write
+-- block (enabled ALWAYS): the #452 rule, a watermark describes a relation's contents only because the block has
+-- been on THAT relation since the first chunk. A name alone cannot tell the partition pgpm archived from a
+-- successor created under it after a hand drop (the #421 backfill anchors pgpm.part to whatever holds the name),
+-- and only the archived one carries the block. Every other row is marked retired: one under an unblocked
+-- relation (a successor, or a partition whose block an operator lifted, whose coverage #452's reset would discard
+-- anyway: marking it is the safe side of the same judgement), one whose name no pgpm.part row records, whether or
+-- not a relation has the name now, one with no name, and one whose pgpm.part row is UNANCHORED (no child_oid). That second case reads the #421 backfill of pgpm.part.child_oid,
 -- which runs earlier in this file on every install (it comes first in the text, so a fresh run and a re-run
 -- alike have anchored every row it can before this runs): a row it could not anchor is one whose partition no
 -- longer exists, dropped outside pgpm, so nothing vouches the chunk's rows are anywhere but its object. The safe
 -- side of not knowing is to hold whatever partition is adopted over the range, which the logged remedy
 -- recovers, rather than leave a row a later discard would delete and a later archive write over. Then every row
--- whose recorded oid no longer exists is marked retired by pgpm._mark_gone_chunks. The invariant afterwards: no
--- row recorded before the column has both child_oid and retired_at null. Returns how many rows it marked.
+-- whose recorded oid no longer exists is marked retired by pgpm._mark_gone_chunks. The invariant afterwards: every
+-- row recorded before the column is attributed to a write-blocked relation pgpm.part records for its name, or is
+-- marked retired. Returns how many rows it marked.
 create or replace function pgpm._backfill_chunk_oids() returns int language plpgsql as $$
 declare r record; v_n int;
 begin
   update pgpm.archive_ledger l set child_oid = p.child_oid
     from pgpm.part p
    where p.parent_table = l.parent_table and p.child_name = l.child_name
-     and l.child_oid is null and l.retired_at is null and p.child_oid is not null;
+     and l.child_oid is null and l.retired_at is null and p.child_oid is not null
+     and to_regclass(format('%I.%I', pgpm._child_nsp(l.parent_table, l.child_name), l.child_name))::oid = p.child_oid
+     and pgpm._is_write_blocked(l.parent_table, l.child_name);
   with gone as (
     update pgpm.archive_ledger l set retired_at = now()
       from pgpm.config c
      where c.parent_table = l.parent_table and l.retired_at is null and l.child_oid is null
-       and l.child_name is not null
-       and not exists (select 1 from pgpm.part p where p.parent_table = l.parent_table and p.child_name = l.child_name
-                          and p.child_oid is not null)
     returning 1)
   select count(*)::int into v_n from gone;
   for r in select distinct parent_table from pgpm.archive_ledger where retired_at is null and child_oid is not null loop
@@ -4739,13 +4743,23 @@ begin
   select pgpm._native_type(c.control_kind) into v_ncast from pgpm.config c where c.parent_table = p_parent;
   if not found then return; end if;
   return query execute format(
-    'with led as materialized (select l.lo, l.hi, l.child_name, l.s3_key from pgpm.archive_ledger l
+    'with led as materialized (select l.lo, l.hi, l.child_name, l.s3_key,
+                                     case when l.child_oid is not null
+                                          then case when not exists (select 1 from pg_class c where c.oid = l.child_oid)
+                                                    then '', whose relation no longer exists,'' else '''' end
+                                          when l.child_name is null
+                                            or to_regclass(format(''%%I.%%I'', pgpm._child_nsp(%2$L::regclass, l.child_name),
+                                                                  l.child_name)) is null
+                                          then '', whose relation no longer exists,''
+                                          else '', which pgpm cannot tie to the relation holding that name now,'' end as fate
+                                from pgpm.archive_ledger l
                                 where l.parent_table = %2$L::regclass and l.retired_at is not null),
           mine as materialized (select p.child_name, p.lo, p.hi from pgpm.part p
                                  where p.parent_table = %2$L::regclass and p.attached)
      select m.child_name, m.lo, m.hi,
-            string_agg(format(''[%%s, %%s) of %%s at %%s'', l.lo, l.hi,
+            string_agg(format(''[%%s, %%s) recorded for %%s%%s at %%s'', l.lo, l.hi,
                               coalesce(quote_ident(l.child_name), ''an unnamed partition''),
+                              l.fate,
                               coalesce(l.s3_key, ''no object key'')),
                        ''; '' order by l.lo::%1$s),
             string_agg(distinct quote_ident(l.child_name), '', '')

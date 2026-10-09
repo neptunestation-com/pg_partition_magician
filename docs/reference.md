@@ -3465,7 +3465,13 @@ adopted, is held like any partition over a retired chunk (its rows are already i
 
 Re-running `install.sql` over an install that predates the columns adds them. `retired_at` is set on the
 chunks already retired where `pgpm.log` shows it: a row archived no later than a `retain_drop` logged over a
-range holding it. `child_oid` is set from the oid `pgpm.part` records for the row's name. A row whose name no
+range holding it. `child_oid` is set from the oid `pgpm.part` records for the row's name, but only when the
+relation holding that name is that oid and carries pgpm's write block (enabled `ALWAYS`): a chunk describes a
+relation's contents only because the block has been on that relation since its first chunk, and a name alone
+cannot tell the partition pgpm archived from one re-created under its name after a hand drop, which the upgrade's
+anchoring of `pgpm.part` attaches to whatever holds the name. A row under an unblocked relation is marked retired
+instead (a partition whose block was lifted by hand would have had that coverage discarded by the next tick
+anyway; marking it is the safe side of the same judgement). A row whose name no
 `pgpm.part` row records is marked retired, whether or not a relation has that name now: nothing vouches that the
 relation is the one the chunk was read from (a partition dropped by hand and re-created under its own name has
 the name and none of the rows), so a partition adopted over its range is held, recoverable by the logged remedy,
@@ -3474,8 +3480,8 @@ anchor, because its partition no longer exists), and a row whose recorded oid no
 renamed before the upgrade, its coverage left under the old name, looks the same as one dropped by hand, so the
 renamed partition is held too; its `skip_archive_retired_range` row then also names the remedy that is safe for a
 rename only: delete the retired rows recorded under the old name, once you have confirmed the partition holds the
-range, and it archives afresh. Afterwards no row
-recorded before the columns is both oid-less and unmarked, and every row pgpm writes since carries an oid, so a
+range, and it archives afresh. Afterwards every row recorded before the columns is attributed to a write-blocked
+relation `pgpm.part` records for its name, or is marked retired, and every row pgpm writes since carries an oid, so a
 null `child_oid` comes only from a row written by hand; such a row counts as its partition's by name, and is
 marked retired by the first step that finds its name resolving to no relation.
 

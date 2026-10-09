@@ -32,7 +32,7 @@
 -- 'late<id>'; A's second partition holds ids 101..107 'mid<id>'. Each check names the rows or the chunk.
 create extension if not exists pgtap;
 set client_min_messages = warning;
-select plan(95);
+select plan(101);
 
 create schema t309;
 -- every call the strategy gets, with the rows it was handed
@@ -108,7 +108,7 @@ select is((select string_agg(format('%s|%s', lo, hi), ',') from pgpm.log
             where parent_table = 't309.a'::regclass and action = 'skip_archive_retired_range'),
   '0|100', 'A: the skip is logged once, over the re-created partition''s range, across two ticks');
 select ok((select method from pgpm.log where parent_table = 't309.a'::regclass and action = 'skip_archive_retired_range')
-            like format('t309.a\_late holds [0, 100), over chunk(s) pgpm.archive\_ledger marks retired: [0, 100) of %s at t309.a/0.%%archive.to\_s3%%', :'a0'),
+            like format('t309.a\_late holds [0, 100), over chunk(s) pgpm.archive\_ledger marks retired: [0, 100) recorded for %s, whose relation no longer exists, at t309.a/0.%%archive.to\_s3%%', :'a0'),
   'A: its method names the retired chunk, its object key and the remedy');
 select is((select string_agg(id || ':' || payload, ',' order by id) from t309.a where id < 100), t309.expect('late', 1, 40),
   'A: the re-created partition keeps ids 1..40 late<id>');
@@ -536,10 +536,55 @@ begin
 exception when others then
   return 'raised: ' || sqlerrm;
 end $$;
-select ok(pg_temp.t309_chunks('t309.f') like '%[50, 60) of an unnamed partition at no object key%',
+select ok(pg_temp.t309_chunks('t309.f') like '%[50, 60) recorded for an unnamed partition, whose relation no longer exists, at no object key%',
   'R: a retired chunk with no child_name is described, not refused');
 call pgpm.maintain('t309.f');
 select is((select array_agg(method) from pgpm.log where parent_table = 't309.f'::regclass and action = 'skip_archive'),
   null::text[], 'R: and the tick over it logs no skip_archive');
+
+-- ============================ PART S: a same-name successor the #421 backfill anchored, on upgrade ======
+-- A pre-#421 install: [0, 100) archived, dropped by hand and re-created under its own name, its pgpm.part row
+-- kept. The #421 backfill anchors that row to whatever holds the name, the successor, which carries no write
+-- block. The chunk's backfill attributes a chunk only to a write-blocked relation, so the dropped relation's
+-- chunk is marked retired and the successor is held. CONTROL: [100, 200), live, write-blocked and archived, is
+-- attributed and retired as usual.
+call t309.mk('s', 100);
+insert into t309.s select g, 'mid' || g from generate_series(101, 107) g;
+update pgpm.config set archive_batch = null where parent_table = 't309.s'::regclass;
+select child_name as s0 from pgpm.part where parent_table = 't309.s'::regclass and lo = '0' \gset
+select child_name as s1 from pgpm.part where parent_table = 't309.s'::regclass and lo = '100' \gset
+call pgpm.maintain('t309.s');
+select format('drop table t309.%I', :'s0') as drop_s \gset
+:drop_s;
+select format('create table t309.%I partition of t309.s for values from (0) to (100)', :'s0') as mk_s \gset
+:mk_s;
+insert into t309.s select g, 'late' || g from generate_series(1, 40) g;
+-- what the older install leaves once the columns are added, and the #421 backfill has run
+update pgpm.part set child_oid = to_regclass('t309.' || quote_ident(:'s0'))::oid
+ where parent_table = 't309.s'::regclass and child_name = :'s0';
+update pgpm.archive_ledger set child_oid = null, retired_at = null
+ where parent_table = 't309.s'::regclass and lo in ('0', '100');
+select ok(not pgpm._is_write_blocked('t309.s', :'s0') and pgpm._is_write_blocked('t309.s', :'s1')
+          and (select count(*) from pgpm.archive_ledger where parent_table = 't309.s'::regclass
+                and lo in ('0', '100') and child_oid is null and retired_at is null) = 2,
+  'LIVENESS: S: the successor of [0, 100) is unblocked, [100, 200) is blocked, and both chunks are unattributed');
+select pgpm._backfill_chunk_oids();
+select is((select string_agg(format('%s|%s|%s', lo, child_oid is null, retired_at is not null), '; ' order by lo::numeric)
+             from pgpm.archive_ledger where parent_table = 't309.s'::regclass and lo in ('0', '100')),
+  '0|t|t; 100|f|f',
+  'S: the dropped relation''s chunk is marked retired, not attributed to the successor; the blocked one is attributed');
+select is((select child_oid = to_regclass('t309.' || quote_ident(:'s1'))::oid from pgpm.archive_ledger
+            where parent_table = 't309.s'::regclass and lo = '100'), true,
+  'S: CONTROL: [100, 200)''s chunk has its relation''s oid');
+update pgpm.config set retain_batch = null where parent_table = 't309.s'::regclass;
+call pgpm.maintain('t309.s');
+select is((select body from t309.objects where key = 't309.s/0'), t309.expect('old', 1, 90),
+  'S: the dropped relation''s object still holds ids 1..90 old<id>');
+select ok(to_regclass('t309.' || quote_ident(:'s0')) is not null
+          and (select method from pgpm.log where parent_table = 't309.s'::regclass and action = 'skip_archive_retired_range')
+              like format('%%[0, 100) recorded for %s, which pgpm cannot tie to the relation holding that name now,%%archive.to\_s3%%', :'s0'),
+  'S: the successor is held, and its skip row says the chunk is not tied to it and names the export remedy');
+select ok(to_regclass('t309.' || quote_ident(:'s1')) is null,
+  'S: CONTROL: the attributed [100, 200) is retired as usual');
 
 select * from finish();

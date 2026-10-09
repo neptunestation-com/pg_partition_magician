@@ -11282,19 +11282,20 @@ MUTATIONS["retain_held_partition_attempted"] = (
 MUTATIONS["archive_ledger_oid_backfill_unanchored"] = (
     _G1141,
     "The upgrade gives no chunk recorded before child_oid existed the oid pgpm.part records for its name, so every "
-    "existing chunk stays matched by name alone and a later hand drop of its partition is not seen. One clause. "
+    "existing chunk, the live write-blocked partitions' coverage included, is marked retired and every partition with "
+    "coverage is held for good. One clause. "
     "tests/309 part L catches it.",
-    [("     and l.child_oid is null and l.retired_at is null and p.child_oid is not null;\n",
-      "     and false;\n", 1)],
+    [("     and l.child_oid is null and l.retired_at is null and p.child_oid is not null\n",
+      "     and false\n", 1)],
 )
 MUTATIONS["archive_ledger_backfill_gone_kept"] = (
     _G1141,
     "The upgrade marks no chunk recorded before child_oid existed under a name pgpm.part does not record, a partition "
     "dropped by hand, so the next orphan discard deletes it and the next archive writes over its object. One clause. "
     "tests/309 part L catches it.",
-    [("       and not exists (select 1 from pgpm.part p where p.parent_table = l.parent_table and p.child_name = l.child_name\n"
-      "                          and p.child_oid is not null)\n"
+    [("     where c.parent_table = l.parent_table and l.retired_at is null and l.child_oid is null\n"
       "    returning 1)\n",
+      "     where c.parent_table = l.parent_table and l.retired_at is null and l.child_oid is null\n"
       "       and false\n"
       "    returning 1)\n", 1)],
 )
@@ -11304,13 +11305,12 @@ MUTATIONS["archive_ledger_backfill_namesake_kept"] = (
     "relation has now: a partition dropped by hand and re-created under its own name, its stale pgpm.part row deleted. "
     "Once the operator adopts it, adopt_partition discards the chunk by name and the next tick archives over the only "
     "copy (PR #1152 round 2, P1-03). One clause. tests/309 part L catches it.",
-    [("       and not exists (select 1 from pgpm.part p where p.parent_table = l.parent_table and p.child_name = l.child_name\n"
-      "                          and p.child_oid is not null)\n"
+    [("     where c.parent_table = l.parent_table and l.retired_at is null and l.child_oid is null\n"
       "    returning 1)\n",
-      "       and not exists (select 1 from pgpm.part p where p.parent_table = l.parent_table and p.child_name = l.child_name\n"
-      "                          and p.child_oid is not null)\n"
-      "       and to_regclass(format('%I.%I', (select n.nspname from pg_class k join pg_namespace n on n.oid = k.relnamespace\n"
-      "                                         where k.oid = l.parent_table), l.child_name)) is null\n"
+      "     where c.parent_table = l.parent_table and l.retired_at is null and l.child_oid is null\n"
+      "       and (exists (select 1 from pgpm.part p where p.parent_table = l.parent_table and p.child_name = l.child_name)\n"
+      "            or to_regclass(format('%I.%I', (select n.nspname from pg_class k join pg_namespace n on n.oid = k.relnamespace\n"
+      "                                         where k.oid = l.parent_table), l.child_name)) is null)\n"
       "    returning 1)\n", 1)],
 )
 MUTATIONS["archive_ledger_backfill_unanchored_kept"] = (
@@ -11320,9 +11320,12 @@ MUTATIONS["archive_ledger_backfill_unanchored_kept"] = (
     "its own name and adopted, adopt_partition discards the chunk by name; re-created under another name, the orphan "
     "discard does; either way the next tick archives over the only copy (PR #1152 round 3). One clause. tests/309 "
     "part L catches it.",
-    [("       and not exists (select 1 from pgpm.part p where p.parent_table = l.parent_table and p.child_name = l.child_name\n"
-      "                          and p.child_oid is not null)\n",
-      "       and not exists (select 1 from pgpm.part p where p.parent_table = l.parent_table and p.child_name = l.child_name)\n", 1)],
+    [("     where c.parent_table = l.parent_table and l.retired_at is null and l.child_oid is null\n"
+      "    returning 1)\n",
+      "     where c.parent_table = l.parent_table and l.retired_at is null and l.child_oid is null\n"
+      "       and not exists (select 1 from pgpm.part p where p.parent_table = l.parent_table and p.child_name = l.child_name\n"
+      "                        and p.child_oid is null)\n"
+      "    returning 1)\n", 1)],
 )
 MUTATIONS["archive_gone_null_oid_kept"] = (
     _G1141,
@@ -11347,6 +11350,15 @@ MUTATIONS["archive_retired_unnamed_raises"] = (
     "retain() raise. One clause. tests/309 part R catches it.",
     [("                              coalesce(quote_ident(l.child_name), ''an unnamed partition''),\n",
       "                              format(''%%I'', l.child_name),\n", 1)],
+)
+MUTATIONS["archive_ledger_backfill_unblocked_attributed"] = (
+    _G1141,
+    "The upgrade attributes a pre-existing chunk to the relation pgpm.part records for its name whether or not that "
+    "relation carries the write block, so a partition dropped by hand and re-created under its own name (its "
+    "pgpm.part row kept, anchored by #421 to the successor) inherits the dropped relation's chunk: #452's reset "
+    "discards it on the next tick and the archive step writes over the only copy (PR #1152 round 4). One clause. "
+    "tests/309 part S catches it.",
+    [("     and pgpm._is_write_blocked(l.parent_table, l.child_name);\n", "     and true;\n", 1)],
 )
 MUTATIONS["archive_retired_orphan_delete_unfiltered"] = (
     _G1141,
