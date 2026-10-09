@@ -3236,9 +3236,9 @@ $$;''',
         "already dropped the first table's partition. One site: every key is assembled in the one "
         "function, and only the chunk half (no p_child) is put back, so a synchronous export's key "
         "keeps its schema.",
-        [("  select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(coalesce(p_child, c.relname))\n",
-          "  select p_prefix || case when p_child is null then p_parent::text\n"
-          "                          else quote_ident(n.nspname) || '.' || quote_ident(p_child) end   -- MUTANT\n", 1)],
+        [("  v_base_q := p_prefix || quote_ident(v_nsp) || '.' || quote_ident(v_name);\n",
+          "  v_base_q := p_prefix || case when p_child is null then p_parent::text\n"
+          "                               else quote_ident(v_nsp) || '.' || quote_ident(v_name) end;   -- MUTANT\n", 1)],
     ),
     "archive_object_key_session_zone": (
         "bench/archive_object_key_session.sh",
@@ -3294,9 +3294,9 @@ $$;''',
         [("returns text language sql as $$\n"
           "  select archive._owned_key(p_parent, p_prefix, p_child, p_ext);\n",
           "returns text language sql stable as $$   -- MUTANT: the pre-#872 unclaimed export key\n"
-          "  select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(p_child) || p_ext\n"
+          "  select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || p_ext\n"
           "    from pg_class c join pg_namespace n on n.oid = c.relnamespace\n"
-          "   where c.oid = p_parent;\n", 1)],
+          "   where c.oid = p_child;\n", 1)],
     ),
     "archive_object_key_unclaimed": (
         "bench/archive_key_owner_every_path.sh",
@@ -3314,7 +3314,7 @@ $$;''',
         "archive.to_s3 builds its plain NDJSON key inline, <prefix><schema>.<child>.ndjson, instead of "
         "asking archive._child_object_key, so the export PUTs to a key nothing claimed and a namesake's "
         "export replaces a dropped table's. One site, the uncompressed key line.",
-        [("    v_key := archive._child_object_key(p_parent, cfg.prefix, p_child, '.ndjson');    v_ctype := 'application/x-ndjson';\n",
+        [("    v_key := archive._child_object_key(p_parent, cfg.prefix, v_child, '.ndjson');    v_ctype := 'application/x-ndjson';\n",
           "    v_key := cfg.prefix || quote_ident(v_nsp) || '.' || quote_ident(p_child) || '.ndjson';    v_ctype := 'application/x-ndjson';   -- MUTANT\n", 1)],
     ),
     "archive_to_s3_gz_key_inline": (
@@ -3322,7 +3322,7 @@ $$;''',
         "archive.to_s3 builds its compressed key inline, <prefix><schema>.<child>.ndjson.gz, instead of "
         "asking archive._child_object_key, so a compressed export PUTs to a key nothing claimed and a "
         "namesake's export replaces a dropped table's. One site, the compressed key line.",
-        [("    v_key := archive._child_object_key(p_parent, cfg.prefix, p_child, '.ndjson.gz'); v_ctype := 'application/gzip';\n",
+        [("    v_key := archive._child_object_key(p_parent, cfg.prefix, v_child, '.ndjson.gz'); v_ctype := 'application/gzip';\n",
           "    v_key := cfg.prefix || quote_ident(v_nsp) || '.' || quote_ident(p_child) || '.ndjson.gz'; v_ctype := 'application/gzip';   -- MUTANT\n", 1)],
     ),
     "archive_to_s3_parquet_key_inline": (
@@ -3330,7 +3330,7 @@ $$;''',
         "archive.to_s3_parquet builds its key inline, <prefix><schema>.<child>.parquet, instead of asking "
         "archive._child_object_key, so the export PUTs to a key nothing claimed and a namesake's file "
         "replaces a dropped table's. One site.",
-        [("  v_key := archive._child_object_key(p_parent, cfg.prefix, p_child, '.parquet');   -- named with its schema (#711)\n",
+        [("  v_key := archive._child_object_key(p_parent, cfg.prefix, v_child, '.parquet');   -- named with its schema (#711), by oid (#1064)\n",
           "  v_key := cfg.prefix || quote_ident((select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace\n"
           "                                     where c.oid = p_parent)) || '.' || quote_ident(p_child) || '.parquet';   -- MUTANT\n", 1)],
     ),
@@ -4654,9 +4654,9 @@ $$;''',
         "child's bare relname. Two parents named evt in two schemas sharing a prefix export their [0, 10000) "
         "partitions to one key, and the second export replaces the first. One site, the one function "
         "every key is assembled in, its export half only (a chunk's key keeps its schema).",
-        [("  select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(coalesce(p_child, c.relname))\n",
-          "  select p_prefix || case when p_child is null then quote_ident(n.nspname) || '.' || quote_ident(c.relname)\n"
-          "                          else p_child end   -- MUTANT: the pre-#711 bare-child key\n", 1)],
+        [("  v_base_q := p_prefix || quote_ident(v_nsp) || '.' || quote_ident(v_name);\n",
+          "  v_base_q := p_prefix || case when p_child is null then quote_ident(v_nsp) || '.' || quote_ident(v_name)\n"
+          "                               else v_name end;   -- MUTANT: the pre-#711 bare-child key\n", 1)],
     ),
     "parquet_tstz_no_logical_type": (
         "bench/archive_edges_pass5.sh",
@@ -9696,6 +9696,31 @@ MUTATIONS["archive_resolve_child_two_statements"] = (
         "    v_held := to_regclass(format('%I.%I', v_nsp, p_child));\n", 1)],
 )
 MUTATION_SRC["archive_resolve_child_two_statements"] = "pgpm_archive/install.sql"
+
+# Issue #1064: after archive._resolve_child returns, the export's key and claim take the relation it resolved BY
+# OID. This puts back the lookup the issue reported in archive._owned_key: the relation looked up again by its name
+# in the parent's CURRENT schema, for the key base and for the claim alike, so ALTER TABLE <parent> SET SCHEMA
+# committed between the hold and the key has the resolved relation's rows keyed and claimed as the destination
+# schema's namesake, whose later export PUTs over them. A chunk (p_child null) resolves to the parent, as before.
+# Caught by tests/archive/db/49 parts A and B (bench/archive_key_by_resolved_oid.sh, against the archive image and
+# MinIO), by scripts/check_archive_child_by_oid.py (a relname compared outside archive._resolve_child), which the
+# same guard runs on the module under test, and by the issue's two-session reproduction.
+MUTATIONS["archive_owned_key_resolves_by_name"] = (
+    "bench/archive_key_by_resolved_oid.sh",
+    "Pre-#1064 archive._owned_key: the relation whose rows the object holds is looked up again by name in the "
+    "parent's current schema, not taken by the oid archive._resolve_child returned, so a second session's "
+    "ALTER TABLE <parent> SET SCHEMA inside the export keys and claims the resolved relation's rows as the "
+    "namesake standing in the destination schema, and the namesake's own later export passes that claim and "
+    "PUTs over them. One site, the lookup. tests/archive/db/49 parts A and B catch it (the object lands at the "
+    "namesake's key, its claim names the namesake).",
+    [("    from pg_class c join pg_namespace n on n.oid = c.relnamespace\n"
+      "   where c.oid = coalesce(p_child, p_parent);\n",
+      "    from pg_class p join pg_namespace n on n.oid = p.relnamespace\n"
+      "    join pg_class c on c.relnamespace = p.relnamespace\n"
+      "                   and c.relname = (select k.relname from pg_class k where k.oid = coalesce(p_child, p_parent))\n"
+      "   where p.oid = p_parent;\n", 1)],
+)
+MUTATION_SRC["archive_owned_key_resolves_by_name"] = "pgpm_archive/install.sql"
 
 # #975 (pass 9 F5-03, F5-04): an archive_fn strategy writes over the object pgpm.archive_ledger records a chunk at
 # only when the call reproduces that chunk. One mutation per encoder's call of the shared refusal, and one per rule

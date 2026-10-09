@@ -76,6 +76,14 @@ jobs:
         run: |
           python3 scripts/check_archive_object_keys.py --selftest
           python3 scripts/check_archive_object_keys.py
+      # scripts/check_archive_child_by_oid.py holds the synchronous exports to the relation archive._resolve_child
+      # returned (#1064): outside the resolver no relname is compared, a child name goes only to the resolver or
+      # into a message, and to_regclass() reads only a literal. Its --selftest runs FIRST, on fixtures that include
+      # the real pre-#1064 archive._owned_key, so a lexer that has stopped reading fails here.
+      - name: No archive child is looked up by name after archive._resolve_child
+        run: |
+          python3 scripts/check_archive_child_by_oid.py --selftest
+          python3 scripts/check_archive_child_by_oid.py
 
   minifier:
     name: dbdev minifier

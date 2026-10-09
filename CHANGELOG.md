@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **A synchronous export keys and claims the relation it resolved, by oid** (#1064). `archive._resolve_child`
+  resolves and holds the export's child and returns its regclass, but `archive.to_s3` and
+  `archive.to_s3_parquet` handed `archive._child_object_key` the child's NAME, and `archive._owned_key` looked
+  it up again in the parent's current schema for the key and for the claim. The hold is on the child only, so
+  `ALTER TABLE <parent> SET SCHEMA` inside the export had the resolved relation's rows keyed and claimed as a
+  same-named table in the destination schema, whose own later export passed that claim and PUT over the only
+  copy. Both functions now take the regclass, the key spells the relation's own schema and name read off its
+  oid, and the claim records it. A static check, `scripts/check_archive_child_by_oid.py` (the `Archive object
+  keys` lint job), refuses any relname compared, any child name used except to resolve or report it, and any
+  `to_regclass()` of a computed name outside `archive._resolve_child`; its selftest carries the pre-fix
+  `_owned_key` verbatim. Test `tests/archive/db/49`, guard `bench/archive_key_by_resolved_oid.sh`, mutation
+  `archive_owned_key_resolves_by_name`.
+
 - **The retain horizon never lands past `now()` in a fall-back hour** (#627). `_retain_boundary` and its twin
   in `regrain_step` took the whole retain off the wall clock in `partition_tz` and converted the result back
   with `at time zone`, which resolves an ambiguous wall time to its later instant: at 01:30 EDT on the first
