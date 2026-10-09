@@ -2999,6 +2999,43 @@ drop function  if exists pgpm.drain_step(regclass, int, boolean);
 
 
 
+-- The retention horizon of an interval retain, as an instant, before it is floored onto the grid: the one
+-- expression _retain_boundary and regrain_step both use, so the two cannot drift apart again (#627).
+--
+-- A retain's CALENDAR part (months and days, date_trunc('day', retain)) is calendar arithmetic on the wall
+-- clock in partition_tz (#455): '1 month' or '1 day' lands on the same wall time a month or a day ago, which
+-- across a transition is 23 or 25 hours, whatever zone the session is in. Its TIME part (hours, minutes,
+-- seconds, retain minus the calendar part) is fixed-length and is subtracted from the instant, never taken
+-- on the wall clock. With no calendar part there is no wall-clock round trip at all.
+--
+-- The round trip is the defect this split removes. `at time zone` resolves an ambiguous wall time (the
+-- repeated hour of a fall-back) to its LATER instant, so converting now()'s own wall reading back, as the
+-- single expression ((now() at time zone tz) - retain) at time zone tz did, turned 01:30 EDT on the first
+-- pass through the repeated hour into 01:30 EST, an hour past now(): with retain '0' or '30 minutes' on an
+-- hourly grid the horizon floored past the partition taking writes, and retain() dropped it with its rows.
+-- A wall time a day or more back (a calendar part of at least one day) converts to an instant no later than
+-- now(): it lies a day back on the wall clock, and no zone's offset has ever moved by more than a day (the
+-- largest, Pacific/Apia and Pacific/Fakaofo skipping 2011-12-30, gives exactly now() for '1 day' back into
+-- the skipped day, never later; a sweep of every zone through 2011 and 2026 found none later). Where that
+-- earlier wall time is itself ambiguous it resolves to its LATER instant, PostgreSQL's rule, which is in the
+-- past either way. The calendar part's result is deliberately not capped at now() minus 24 hours: after a
+-- spring-forward '1 day' is 23 hours, the documented calendar meaning. So the horizon is never later than
+-- now() minus the time part; tests/311 holds it to that at both passes through a fall-back hour, a
+-- spring-forward morning, a plain day and the morning after a fall-back. Callers have refused a negative
+-- field first (_retain_nonnegative), so a calendar part comparing equal to zero has no months and no days.
+-- Not pinned to a search_path: the unqualified now() is what tests/311 instruments with a clock shim.
+create or replace function pgpm._retain_horizon(p_retain interval, p_tz text)
+returns timestamptz language plpgsql stable as $$
+declare
+  v_cal interval := date_trunc('day', p_retain);   -- months and days: the wall clock's business
+begin
+  if v_cal = interval '0' then
+    return now() - p_retain;
+  end if;
+  return (((now() at time zone p_tz) - v_cal) at time zone p_tz) - (p_retain - v_cal);
+end;
+$$;
+
 -- the retention horizon on the native grid: the grid-floored boundary at/below which a partition's
 -- whole range has aged out. null = no retention policy. Shared by retain() (what to drop now) and
 -- status() (retain_backlog: what is eligible but not yet dropped).
@@ -3024,9 +3061,10 @@ begin
   else
     -- a calendar step back from now, taken on the wall clock in partition_tz (#455): on a timestamptz,
     -- `- interval '1 month'` or `- '1 day'` is calendar arithmetic in the SESSION's zone, so two sessions
-    -- could put the horizon on different sides of a grid boundary
+    -- could put the horizon on different sides of a grid boundary; the time part is instant arithmetic, so
+    -- a fall-back hour cannot put the horizon past now() (#627, _retain_horizon)
     return pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor,
-                            pgpm._ts_text(((now() at time zone cfg.partition_tz) - cfg.retain::interval) at time zone cfg.partition_tz),
+                            pgpm._ts_text(pgpm._retain_horizon(cfg.retain::interval, cfg.partition_tz)),
                             cfg.partition_tz);
   end if;
 end;
@@ -6776,8 +6814,8 @@ begin
       then v_retain_boundary := pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor,
                                   (v_frontier::numeric - cfg.retain::numeric)::text, cfg.partition_tz);
       else v_retain_boundary := pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor,
-                                  pgpm._ts_text(((now() at time zone cfg.partition_tz) - cfg.retain::interval) at time zone cfg.partition_tz),
-                                  cfg.partition_tz);   -- on the wall clock in partition_tz, as _retain_boundary (#455)
+                                  pgpm._ts_text(pgpm._retain_horizon(cfg.retain::interval, cfg.partition_tz)),
+                                  cfg.partition_tz);   -- the one horizon _retain_boundary computes (#455, #627)
     end if;
   end if;
 
