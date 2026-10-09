@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+- **`pgpm.adopt_partition` repairs an identity wedge without orphaning the partition** (#1082). A partition
+  restored from a dump under its own name is a new oid, which the write-block, archive and retire steps refuse
+  on identity, and the documented repair (delete the stale `pgpm.part` row) cleared the wedge and nothing else:
+  the restored relation stayed attached with its rows and recorded by nothing, so retention marched past it,
+  its rows outlived the policy for good, and `status().n_partitions` stopped counting it. The new
+  `pgpm.adopt_partition(parent, partition)` records an attached partition by its oid: a stale row of the same
+  name over the same range is re-anchored, and a partition with no row is recorded afresh over its catalog
+  bounds (read the same way under any `DateStyle` or `TimeZone`). Archive coverage recorded under the name is
+  discarded (`archive_coverage_reset`), since the relation that earned it is gone, and the call is logged
+  `adopt_partition`. It refuses a parent pgpm does not manage, a relation not attached to it, one already
+  recorded, a same-named row over another range or with a retirement or regrain in flight, a range another row
+  records, and bounds the grid cannot express. The runbook, the reference and the guide now give it as the
+  repair, and say to detach a relation pgpm should not manage before deleting its row. Test `tests/303`, guard
+  `bench/adopt_partition.sh`, mutations `adopt_partition_keeps_stale_oid`, `adopt_partition_records_nothing`,
+  `adopt_partition_credits_old_coverage` and `adopt_partition_unlocked`.
+
 - **A re-run of `from_hypertable_copy` replaces the previous copy by its record, wherever it lives** (#1083).
   The re-run replaced the copy, delta and capture function `pgpm.scratch` recorded only while they sat under
   the names it mints in the hypertable's current schema. After `ALTER TABLE <hypertable> SET SCHEMA` (when the

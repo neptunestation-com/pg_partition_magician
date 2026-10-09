@@ -712,7 +712,10 @@ lets the real partition be dropped. So pgpm records each partition's oid when it
 every step that would act on the name checks it first: you get `fail_write_block_identity`,
 `fail_archive_identity` or `fail_retain_identity` in the log, depending on how far the partition got,
 and a partition that stays put rather than a wrong object in your bucket and a drop authorised by it.
-All three stay wedged until you sort the name out. If you do need to rename one, update
+All three stay wedged until you sort the name out. A partition restored from a dump under its own name is
+a new relation as far as pgpm can tell, so it wedges the same way: record it with
+`select pgpm.adopt_partition('public.events', 'public.<partition>')` rather than deleting its `pgpm.part`
+row, which would leave it attached and never archived or retired. If you do need to rename one, update
 `pgpm.part.child_name` and `pgpm.archive_ledger.child_name` in the same transaction: a rename does
 not change an oid, so the recorded identity is still right afterwards, and the ledger matches a
 partition's archived chunks by name, so carrying the name keeps its coverage attached and archiving

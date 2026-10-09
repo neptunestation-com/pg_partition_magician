@@ -12169,6 +12169,165 @@ begin
 end;
 $$;
 
+-- adopt_partition(): record an ATTACHED partition that pgpm's catalog has lost track of (issue #1082).
+--
+-- The identity wedge (fail_write_block_identity, fail_archive_identity, fail_retain_identity) is pgpm refusing
+-- a partition whose name no longer resolves to the oid pgpm.part recorded for it, and the commonest way in is
+-- a restore from a dump: the partition comes back under its own name, rows and write-block trigger included,
+-- as a NEW relation. The repair used to be "delete the stale pgpm.part row". That clears the wedge and nothing
+-- else: the restored relation stays attached with its rows, and with no row nothing archives, retires or
+-- counts it again, so its rows outlive the retention policy for good and status().n_partitions stops counting
+-- it. Putting the intended relation back under the name is not an option either, because the name already
+-- holds the restored relation and the recorded one is gone.
+--
+-- So this is the repair: name the parent and the attached partition, and pgpm records THAT relation by its oid.
+-- A row of the same name over the same range (the stale one) is re-anchored to it; with no such row (it was
+-- deleted, the old repair) the partition is recorded afresh, its bounds read from the catalog and decoded
+-- onto the grid. It changes nothing but pgpm's bookkeeping: no DDL, no rows read or moved.
+--
+-- What it refuses, each before anything is written:
+--   * a parent pgpm does not manage, or a relation that is not attached to it (a partition being detached is
+--     leaving it), or one that is not a plain table;
+--   * a relation pgpm.part already records by oid: there is nothing to adopt;
+--   * a same-named row over another range, or one a retirement or a regrain is in the middle of;
+--   * a range that overlaps another pgpm.part row of this parent: if that row is stale too, the operator
+--     deletes it first, deliberately, rather than this guessing which record is wrong;
+--   * bounds the grid cannot express (DEFAULT, MINVALUE, MAXVALUE, or a value that does not come back
+--     unchanged through the grid's encoding, such as a uuid bound with random bits on a uuidv7 grid).
+--
+-- Coverage recorded in pgpm.archive_ledger under the partition's name is DISCARDED (logged
+-- archive_coverage_reset), for the reason _archive_step's own discard gives: a watermark describes a
+-- partition's contents only because the write block has been on that relation since the first chunk, and
+-- these chunks were earned by whatever held the name before. Crediting them would let retire() drop rows the
+-- strategy was never handed; the adopted partition archives again from its own lo instead.
+--
+-- Locks: the regrain lock (so no regrain step swaps partitions under the judgement), the config row FOR KEY
+-- SHARE (as obtain reads it, so a zone change waits), and the partition itself in SHARE UPDATE EXCLUSIVE
+-- mode, which conflicts with DETACH in both forms and with DROP but with no read or write, so the relation
+-- judged attached is still attached when its row commits. The SET clause pins the rendering of the catalog's
+-- bounds to ISO, the one form every session parses alike (see _ts_text).
+create or replace function pgpm.adopt_partition(p_parent regclass, p_child regclass)
+returns text language plpgsql set datestyle = 'ISO, MDY' as $$
+declare
+  cfg pgpm.config; v_rel name; v_relkind "char"; v_bound text; v_m text[];
+  v_lo_raw text; v_hi_raw text; v_lo text; v_hi text; v_coltype text; v_exact boolean;
+  v_row pgpm.part; v_had boolean; v_tracked name; v_clash_q text; v_chunks int; v_was text; v_method text;
+begin
+  perform pgpm._refuse_null_arguments('adopt_partition', json_build_object('p_parent', p_parent, 'p_child', p_child));
+  perform pgpm._regrain_lock(p_parent);
+  select * into cfg from pgpm.config where parent_table = p_parent for key share;
+  cfg := pgpm._control_followed(cfg);
+  if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
+
+  if not exists (select 1 from pg_inherits i
+                  where i.inhparent = p_parent and i.inhrelid = p_child and not i.inhdetachpending) then
+    raise exception 'pg_partition_magician: % is not a partition of %: adopt_partition records a relation attached to the table, and a partition being detached is leaving it',
+      p_child, p_parent;
+  end if;
+  execute format('lock table %s in share update exclusive mode', p_child::text);
+  select c.relname, c.relkind, pg_get_expr(c.relpartbound, c.oid) into v_rel, v_relkind, v_bound
+    from pg_class c join pg_inherits i on i.inhrelid = c.oid
+   where c.oid = p_child and i.inhparent = p_parent and not i.inhdetachpending;
+  if not found then
+    raise exception 'pg_partition_magician: % is not a partition of % any more (detached while this call waited for it)',
+      p_child, p_parent;
+  end if;
+  if v_relkind <> 'r' then
+    raise exception 'pg_partition_magician: cannot adopt %: it is a %, and pgpm manages only partitions that are plain tables',
+      p_child, pgpm._relkind_noun(v_relkind);
+  end if;
+  select p.child_name into v_tracked from pgpm.part p where p.parent_table = p_parent and p.child_oid = p_child::oid;
+  if found then
+    raise exception 'pg_partition_magician: pgpm.part already records % (as %) for %; there is nothing to adopt',
+      p_child, quote_ident(v_tracked), p_parent;
+  end if;
+
+  -- the catalog's bounds, as pgpm's native grid values: every range bound renders quoted, so a bound that is
+  -- not 'v' to 'v' is a DEFAULT, MINVALUE or MAXVALUE one
+  v_m := regexp_match(v_bound, '^FOR VALUES FROM \(''((?:[^'']|'''')*)''\) TO \(''((?:[^'']|'''')*)''\)$');
+  if v_m is null then
+    raise exception 'pg_partition_magician: cannot adopt %: its bounds (%) are not a range from one value to another, which pgpm''s grid cannot express',
+      p_child, v_bound;
+  end if;
+  v_lo_raw := replace(v_m[1], '''''', '''');
+  v_hi_raw := replace(v_m[2], '''''', '''');
+  select format_type(a.atttypid, a.atttypmod) into v_coltype
+    from pg_attribute a where a.attrelid = p_parent and a.attname = cfg.control_column;
+  begin
+    v_lo := pgpm._native_text(cfg.control_kind, pgpm._col_to_native(cfg, v_lo_raw));
+    v_hi := pgpm._native_text(cfg.control_kind, pgpm._col_to_native(cfg, v_hi_raw));
+    execute format('select %L::%s = %L::%s and %L::%s = %L::%s',
+                   pgpm._encode(cfg.control_kind, v_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix,
+                                cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits,
+                                cfg.text_time_epoch, cfg.partition_tz), v_coltype, v_lo_raw, v_coltype,
+                   pgpm._encode(cfg.control_kind, v_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix,
+                                cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits,
+                                cfg.text_time_epoch, cfg.partition_tz), v_coltype, v_hi_raw, v_coltype)
+      into v_exact;
+  exception when others then
+    v_exact := false;
+  end;
+  if not coalesce(v_exact, false) then
+    raise exception 'pg_partition_magician: cannot adopt %: its bounds (%) are not values pgpm''s % grid can express (they do not come back unchanged through its encoding)',
+      p_child, v_bound, cfg.control_kind;
+  end if;
+
+  -- a row of the same name is the stale one only when it records exactly this range and nothing is in flight on it
+  select * into v_row from pgpm.part p where p.parent_table = p_parent and p.child_name = v_rel for update;
+  v_had := found;
+  if v_had then
+    if pgpm._native_gt(cfg.control_kind, v_row.lo, v_lo) or pgpm._native_gt(cfg.control_kind, v_lo, v_row.lo)
+       or pgpm._native_gt(cfg.control_kind, v_row.hi, v_hi) or pgpm._native_gt(cfg.control_kind, v_hi, v_row.hi) then
+      raise exception 'pg_partition_magician: cannot adopt %: pgpm.part records % over [%, %), and the relation holds [%, %). If that row is stale, delete it, then adopt',
+        p_child, quote_ident(v_rel), v_row.lo, v_row.hi, v_lo, v_hi;
+    end if;
+    if v_row.retiring_at is not null or not v_row.attached then
+      raise exception 'pg_partition_magician: cannot adopt %: pgpm.part''s row for % is in the middle of a %, and adopt_partition does not re-anchor a row something is in flight on',
+        p_child, quote_ident(v_rel), case when v_row.retiring_at is not null then 'retirement' else 'regrain' end;
+    end if;
+  end if;
+  -- any OTHER row of this parent over part of the range (filtered by parent first, #973: the casts below
+  -- must never meet another parent's bounds)
+  with mine as materialized (select p.child_name, p.lo, p.hi from pgpm.part p where p.parent_table = p_parent)
+  select string_agg(format('%I [%s, %s)', m.child_name, m.lo, m.hi), ', ' order by m.child_name) into v_clash_q
+    from mine m
+   where m.child_name <> v_rel
+     and pgpm._native_gt(cfg.control_kind, m.hi, v_lo) and pgpm._native_gt(cfg.control_kind, v_hi, m.lo);
+  if v_clash_q is not null then
+    raise exception 'pg_partition_magician: cannot adopt %: its range [%, %) overlaps what pgpm.part records for % (%). If that row is stale (its relation dropped or replaced), delete it, then adopt',
+      p_child, v_lo, v_hi, p_parent, v_clash_q;
+  end if;
+
+  if v_had then
+    v_was := case when v_row.child_oid is null then 'no oid (unanchored)'
+                  when exists (select 1 from pg_class c where c.oid = v_row.child_oid)
+                  then format('oid %s, which is no longer a partition of this table', v_row.child_oid)
+                  else format('oid %s, which no longer exists', v_row.child_oid) end;
+    update pgpm.part set child_oid = p_child::oid
+     where parent_table = p_parent and child_name = v_rel;
+    v_method := format('%s (oid %s) holds the range pgpm.part recorded under its name with %s; the row now records oid %s',
+                       p_child, p_child::oid, v_was, p_child::oid);
+  else
+    insert into pgpm.part (parent_table, child_name, lo, hi, child_oid)
+      values (p_parent, v_rel, v_lo, v_hi, p_child::oid);
+    v_method := format('%s (oid %s) is a partition of this table that pgpm.part had no row for; recorded over its catalog bounds',
+                       p_child, p_child::oid);
+  end if;
+
+  with gone as (delete from pgpm.archive_ledger l where l.parent_table = p_parent and l.child_name = v_rel returning 1)
+  select count(*)::int into v_chunks from gone;
+  if v_chunks > 0 then
+    insert into pgpm.log (parent_table, action, lo, hi, rows, method)
+      values (p_parent, 'archive_coverage_reset', v_lo, v_hi, v_chunks,
+              format('%s archived chunk(s) were recorded under the name of %s, which adopt_partition has just recorded as oid %s; nothing guarded that coverage across the change, so it is discarded and the partition archives from its own lo',
+                     v_chunks, p_child, p_child::oid));
+  end if;
+  insert into pgpm.log (parent_table, action, lo, hi, method)
+    values (p_parent, 'adopt_partition', v_lo, v_hi, v_method);
+  return v_method;
+end;
+$$;
+
 -- check_default removed with the DEFAULT partition (#288).
 
 -- check_uuidv7(): sanity-sample a uuid column. Genuine UUIDv7/ULID values decode
