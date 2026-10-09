@@ -9516,7 +9516,7 @@ MUTATIONS["archive_whole_contract_unchecked"] = (
   -- ledger on its primary key. Unlike the identity refusal above this one IS logged, as the
   -- fail_archive_contract _archive_step writes: the defect is the configured strategy's, maintain()'s next
   -- tick meets it too, and status() counts the action whichever path met it first.
-  v_breach := pgpm._archive_contract_breach(cfg.control_kind, v_resume_lo, r.hi, v_result.covered_hi);
+  v_breach := pgpm._archive_contract_breach(p_parent, cfg.control_kind, v_resume_lo, r.hi, v_result.covered_hi);
   if v_breach is not null then
     insert into pgpm.log (parent_table, action, lo, hi, method)
       values (p_parent, 'fail_archive_contract', v_resume_lo, r.hi,
@@ -9534,9 +9534,11 @@ MUTATION_SRC["archive_whole_contract_unchecked"] = "scripts/archive_partition_wh
 MUTATIONS["archive_whole_partial_compared_as_text"] = (
     "bench/archive_partition_whole_contract.sh",
     "Pre-#1030 scripts/archive_partition_whole.sql: partial or whole is decided by text inequality between "
-    "covered_hi and pgpm.part.hi, so a whole cover spelt differently ('1000.0' for hi 1000) is reported as "
-    "PARTIAL and the operator is told to call again over a partition already covered. One site, the "
-    "comparison. tests/286 part C catches it (the message for the '1000.0' cover).",
+    "covered_hi and pgpm.part.hi, so a whole cover spelt differently (a time grid's hi recorded with another "
+    "zone's offset) is reported as PARTIAL and the operator is told to call again over a partition already "
+    "covered. One site, the comparison. tests/286 part F catches it (the message for the cover recorded from "
+    "an Asia/Kolkata session). Part C's '1000.0' no longer does: since #1071 the ledger records an id value "
+    "at its least scale, so it is compared as '1000'.",
     [("""  -- partial or whole by VALUE: the check above holds covered_hi at or below hi, and the same value can be
   -- spelt more than one way ('1000.0' is hi 1000; a timestamp in another zone or DateStyle), so text
   -- inequality would report a whole cover as partial
@@ -10267,6 +10269,32 @@ MUTATIONS["delta_seq_fixed_name"] = (
       "    v_n := v_n + 1;\n"
       "    v_seq := 'pgpm_seq_' || v_n;\n"
       "  end loop;\n", "", 1)],
+)
+
+# Issue #1071: the archive contract holds an id grid's covered_hi to the control column's own type, and the
+# ledger records it at its least scale. One mutation per clause; bench/archive_covered_hi_column_type.sh runs
+# tests/292 against each.
+MUTATIONS["archive_covered_hi_scale_kept"] = (
+    "bench/archive_covered_hi_column_type.sh",
+    "Pre-#1071 pgpm._native_text: an id value is recorded as numeric text at the strategy's own scale, so a "
+    "resumable strategy's (lo + hi) / 2 on a bigint key is stored as '15.0000000000000000', and every later "
+    "tick's _next_archive_chunk compares the column with that literal and raises 22P02 (skip_archive): never "
+    "archived further, never retired. One site, the rendering. tests/292 parts A, B and C catch it (the "
+    "ledger's spelling; A's skip_archive and unretired monolith).",
+    [("  if p_kind = 'id' then return trim_scale(p_value::numeric)::text; end if;\n",
+      "  if p_kind = 'id' then return p_value::numeric::text; end if;\n", 1)],
+)
+MUTATIONS["archive_contract_column_type_unchecked"] = (
+    "bench/archive_covered_hi_column_type.sh",
+    "Pre-#1071 pgpm._archive_contract_breach: an id grid's covered_hi is judged as numeric only, so a "
+    "fractional value on a bigint key (22.5) is recorded, and every later tick's _next_archive_chunk raises "
+    "22P02 on it (skip_archive) while a corrected strategy cannot help. One site, the comparison after the "
+    "round trip through the column's type. tests/292 parts A and B catch it (A's ledger row from 22.5, its "
+    "skip_archive and unretired monolith; B's recorded third).",
+    [("      if v_back <> p_covered_hi::numeric then\n"
+      "        return format('covered_hi must be a value of the control column, which is %1$s: %2$s is not one (as %1$s it is %3$s), and every later tick reading the partition from it would fail',\n"
+      "                      format_type(v_type, -1), p_covered_hi, v_back);\n"
+      "      end if;\n", "", 1)],
 )
 
 

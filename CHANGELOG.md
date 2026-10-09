@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+- **The archive contract holds an `id` grid's `covered_hi` to the control column's own type** (#1071).
+  `pgpm._archive_contract_breach` judged it as `numeric` only, so a resumable strategy returning
+  `(lo + hi) / 2` on a `bigint` key had `22.5000000000000000` (or `15000.0000000000000000`) recorded, and
+  every later tick's `_next_archive_chunk`, which compares the column with the ledger's `hi` as a literal,
+  raised `invalid input syntax for type bigint`, logged `skip_archive`: the partition was never archived
+  further or retired, and pointing `pgpm.set_archive_fn` at a corrected strategy did not recover it. The check
+  now also requires the value to survive a round trip through the control column's base type (a fraction on
+  an integer key is refused, `fail_archive_contract`, nothing recorded; a fraction on a `numeric` key is
+  still a value of the column), and the ledger records an `id` value at its least scale (`15000`), so an
+  integral value written with a scale is the whole number it is. One check, so `_archive_step` and
+  `scripts/archive_partition_whole.sql` both apply it; the function now takes the parent
+  (`pgpm._archive_contract_breach(parent, kind, lo, hi, covered_hi)`, the four-argument form dropped). A
+  ledger row an earlier install already recorded with such a value is not rewritten and still fails each
+  tick; `docs/reference.md` gives the one-statement repair for an integer key. Test `tests/292`, guard
+  `bench/archive_covered_hi_column_type.sh`, mutations `archive_covered_hi_scale_kept` and
+  `archive_contract_column_type_unchecked`.
+
 - **A cell whose own label makes its plain name too long is a hole, not the end of the tick** (#1072).
   An id label widens from 19 to 20 digits at 10^19, so on a `numeric` key a 42-byte table name fits every cell
   below that edge and none past it. `_obtain_name` caught `_part_name`'s over-63-byte refusal only for the

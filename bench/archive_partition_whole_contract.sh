@@ -17,7 +17,10 @@
 #   archive_whole_contract_unchecked        -- the script records the strategy's covered_hi unchecked again,
 #                                              the pre-fix shape. Parts A and B.
 #   archive_whole_partial_compared_as_text  -- partial or whole decided by text inequality again, so a whole
-#                                              cover spelt '1000.0' reads as partial. Part C.
+#                                              cover spelt differently reads as partial. Part F (a time
+#                                              grid's hi recorded with another zone's offset); part C's
+#                                              '1000.0' is recorded as '1000' since #1071 and no longer
+#                                              catches it.
 #   archive_whole_rls_unrefused             -- the strategy runs under the caller's row-level security again
 #                                              (#873's refusal removed), so a FORCE RLS owner's call archives
 #                                              the visible rows and retire() drops the hidden ones. Part E.
