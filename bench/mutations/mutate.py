@@ -5132,6 +5132,25 @@ $$;''',
         "plan completed (psql exits 2, no ERROR:, nothing short) is PASSED where pg_prove fails it. One site.",
         [('  out=$(q -d "$DB" -tAq -f "$TEST_FILE" 2>&1); rc=$?\n', '  out=$(q -d "$DB" -tAq -f "$TEST_FILE" 2>&1); rc=0\n', 1)],
     ),
+    "witness_label_unprefixed": (
+        "bench/liveness_witness_labels.sh",
+        "Pre-#1095 bench/maintain_lock.sh: the witness that the measured tick really dropped mg_ret's partition "
+        "(retain_drop, the step whose ACCESS EXCLUSIVE the reader probe is there to catch) prints with no "
+        "LIVENESS: prefix, so a mutant that starves retain into skip_retain, which takes no lock at all, fails "
+        "only that witness and bench/discriminate.sh certifies maintain_lock.sh as catching a defect it never "
+        "reached. One site: the label's prefix.",
+        [('check "LIVENESS: the tick did the work that takes the lock (retain)" \\\n',
+          'check "the tick did the work that takes the lock (retain)" \\\n', 1)],
+    ),
+    "witness_label_prefix_behind_tag": (
+        "bench/liveness_witness_labels.sh",
+        "The tagged half of #1095, a plausible wrong fix: obtain_backoff_headroom.sh's lock-race witness carries "
+        "its LIVENESS: prefix behind the table tag, `ob_race: LIVENESS: the lock race really happened`, where "
+        "bench/discriminate.sh's starved() (which reads only the head of a FAIL line) cannot see it, so a run "
+        "whose tick never lost the race and failed only that witness is certified as a catch. One site.",
+        [('  check "LIVENESS: $2: the lock race really happened: skip_obtain with a lock timeout" \\\n',
+          '  check "$2: LIVENESS: the lock race really happened: skip_obtain with a lock timeout" \\\n', 1)],
+    ),
     "discriminate_counts_uninstallable": (
         "bench/discriminate_installs.sh",
         "Pre-#601 bench/discriminate.sh: a mutant is never installed before its guard runs, so a mutation "
@@ -9275,6 +9294,9 @@ MUTATION_SRC = {
     "wrapper_verdict_no_shortfall_check": "bench/hypertable_late_appends.sh",
     "wrapper_verdict_ignores_exit": "bench/hypertable_cutover_identity.sh",
     "wrapper_verdict_time_rendering_hand_rolled": "bench/hypertable_time_rendering.sh",
+    # #1095: a guard's liveness witness printed where discriminate.sh's starved() cannot read it.
+    "witness_label_unprefixed": "bench/maintain_lock.sh",
+    "witness_label_prefix_behind_tag": "bench/obtain_backoff_headroom.sh",
     "discriminate_counts_uninstallable": "bench/discriminate.sh",
     "discriminate_list_on_stdin": "bench/discriminate.sh",
     "discriminate_counts_liveness_only": "bench/discriminate.sh",

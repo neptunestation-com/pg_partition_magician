@@ -21,9 +21,10 @@
 #   1. LIVENESS: transmute built the grid (the fixture is live), and the 30-step lookahead from the
 #      frontier cell really does cross 2^31-1, so every tick below meets the ceiling. Without that the
 #      "no skip_obtain" assertions would pass on a tick that never reached the defect.
-#   2. Tick 1 did the work: the obtain row for the LAST expressible cell [2147470000, 2147480000) is in
+#   2. LIVENESS: tick 1 did the work: the obtain row for the LAST expressible cell [2147470000, 2147480000) is in
 #      pgpm.log, and nothing past it was built. A tick that built nothing (backed off, paused, not run)
-#      cannot satisfy this, so the negatives after it are not vacuous.
+#      cannot satisfy this, so the negatives after it are not vacuous. 1 and 2 print as LIVENESS: lines,
+#      the prefix bench/discriminate.sh reads to refuse a mutant run that failed only them (#713, #1095).
 #   3. Per tick: no skip_obtain row for the table, no back-off, and a write of a tick-specific id lands
 #      BY IDENTITY in the partition obtain built for [2147400000, 2147410000), not merely "did not raise".
 #
@@ -67,7 +68,7 @@ for tick in 1 2 3; do
   run "call pgpm.maintain_obtain_all()" >/dev/null
 
   if [ "$tick" = 1 ]; then
-    check "tick 1 did the work: obtain logged the last expressible cell" \
+    check "LIVENESS: tick 1 did the work: obtain logged the last expressible cell" \
       "$(q "select count(*) from pgpm.log where parent_table = 'public.oic'::regclass
              and action = 'obtain' and lo = '2147470000' and hi = '2147480000'")" \
       "1"

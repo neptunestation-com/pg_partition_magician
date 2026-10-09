@@ -106,10 +106,14 @@ EXPECT_LEN=$((ROWS * (PAYLOAD_BYTES + 4)))
 got_len=$(grep -E '^encode_len=[0-9]+$' "$LOG" | head -n1 | cut -d= -f2)
 n_err=$(grep -c 'ERROR:' "$LOG")
 
-# Liveness witnesses first: a probe that sampled nothing, or a call that failed, would otherwise let
-# the bound below pass vacuously.
-check "the probe found the backend pid"         "$PID"  "$([ -n "$PID" ] && echo 1 || echo 0)"
-check "the encode call was sampled while it ran" "n=$n"  "$([ "$n" -gt 0 ] && echo 1 || echo 0)"
+# Liveness witnesses first: a probe that sampled nothing would otherwise let the bound below pass
+# vacuously. They print as LIVENESS: lines, the prefix bench/discriminate.sh reads to refuse a mutant run
+# that failed only these as a starved fixture (#713, #1095).
+check "LIVENESS: the probe found the backend pid" "$PID"  "$([ -n "$PID" ] && echo 1 || echo 0)"
+check "LIVENESS: the encode call was sampled while it ran" "n=$n"  "$([ "$n" -gt 0 ] && echo 1 || echo 0)"
+# The call's own result. A call that failed would let the bound pass vacuously too, but these two are NOT
+# premise witnesses: a call that raised after doing the whole encode (archive_encode_raises, #912) is the
+# defect they exist to catch, and it fails only these, so they stay defect checks (no LIVENESS: prefix).
 check "the encode call returned the whole column" "len=${got_len:-none} want=$EXPECT_LEN" \
       "$([ "${got_len:-}" = "$EXPECT_LEN" ] && echo 1 || echo 0)"
 check "the probe session raised no ERROR"        "$n_err" "$([ "$n_err" = 0 ] && echo 1 || echo 0)"
