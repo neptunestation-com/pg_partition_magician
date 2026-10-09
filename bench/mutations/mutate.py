@@ -626,7 +626,9 @@ ARCHIVE_LEDGER_ORPHAN_SWEEP = """  -- COVERAGE UNDER A NAME NO LONGER TRACKED IS
   -- range a partition re-created after the drop now holds they are exactly what this used to discard: the
   -- record of the only copy, deleted, after which the re-created partition's first chunk was archived to the
   -- same object key (parent and lo) and replaced the retired rows' object. They never collide here either,
-  -- because the step below does not archive a partition over a retired chunk's range.
+  -- because the step below does not archive a partition over a retired chunk's range. Nor is a chunk whose
+  -- relation no longer exists, whoever dropped it: those are marked retired first (pgpm._mark_gone_chunks).
+  perform pgpm._mark_gone_chunks(p_parent);
   for r in execute format(
     'select l.child_name, count(*) as chunks, min(l.lo::%1$s)::text as lo, max(l.hi::%1$s)::text as hi
        from pgpm.archive_ledger l
@@ -679,6 +681,7 @@ REGRAIN_SWAP_LEDGER_RETIRE = """  -- The source's archive coverage goes with it 
   -- under their own blocks; the objects the source's chunks already wrote stay in the archive,
   -- unreferenced. A retired chunk recorded under the source's name (a partition re-created under a dropped
   -- one's name, #1141) is not the source's coverage and stays: it is the record of the only copy.
+  perform pgpm._mark_gone_chunks(p_parent, v_child_name);
   delete from pgpm.archive_ledger where parent_table = p_parent and child_name = v_child_name and retired_at is null;
   get diagnostics v_rec = row_count;
   if v_rec > 0 then
@@ -10049,10 +10052,12 @@ MUTATIONS["archive_whole_resume_session_render"] = (
     "parse it and every maintain() tick logs skip_archive. One site, the watermark read. tests/289 part B "
     "catches it (the ledger lo and the strategy's p_lo by value, the next partition never archived, "
     "skip_archive logged).",
-    [("""  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null',
-                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, r.child_name)""",
-      """  execute format('select max(hi::%s)::text from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null',
-                 v_ncast, p_parent::text, r.child_name)""", 1)],
+    [("""  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null
+                    and (child_oid is null or child_oid = %L::oid)',
+                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, r.child_name, v_now::oid)""",
+      """  execute format('select max(hi::%s)::text from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null
+                    and (child_oid is null or child_oid = %L::oid)',
+                 v_ncast, p_parent::text, r.child_name, v_now::oid)""", 1)],
 )
 MUTATION_SRC["archive_whole_resume_session_render"] = "scripts/archive_partition_whole.sql"
 MUTATIONS["archive_whole_parent_schema"] = (
@@ -11152,26 +11157,31 @@ MUTATIONS["archive_retired_regrain_rename_carried"] = (
 )
 MUTATIONS["archive_retired_coverage_counted"] = (
     _G1141,
-    "_archive_fully_covered reads the retired chunk recorded under a re-created partition's name as that partition's "
-    "coverage, so retire() drops the re-created partition with rows no strategy was handed. One clause. tests/309 "
+    "_archive_fully_covered reads a retired chunk with no child_oid (recorded before the column existed) under a "
+    "re-created partition's name as that partition's coverage, so retire() drops the re-created partition with rows no strategy was handed. One clause. tests/309 "
     "part B catches it.",
-    [("  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null',\n"
-      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child)\n"
-      "    into v_watermark;\n",
-      "  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L',\n"
-      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child)\n"
-      "    into v_watermark;\n", 1)],
+    [("  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null\n"
+      "                    and (child_oid is null or child_oid = %L::oid)',\n"
+      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
+      "                 to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)\n",
+      "  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L\n"
+      "                    and (child_oid is null or child_oid = %L::oid)',\n"
+      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
+      "                 to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)\n", 1)],
 )
 MUTATIONS["archive_retired_next_chunk_resumes"] = (
     _G1141,
-    "_next_archive_chunk resumes a re-created partition from the retired chunk's watermark recorded under its name, "
+    "_next_archive_chunk resumes a re-created partition from a retired chunk's watermark recorded under its name "
+    "with no child_oid (recorded before the column existed), "
     "past rows nothing has archived. One clause. tests/309 part B catches it.",
-    [("  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null',\n"
-      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child)\n"
-      "    into v_lo;\n",
-      "  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L',\n"
-      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child)\n"
-      "    into v_lo;\n", 1)],
+    [("  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null\n"
+      "                    and (child_oid is null or child_oid = %L::oid)',\n"
+      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
+      "                 to_regclass(format('%I.%I', v_nsp, p_child))::oid)\n",
+      "  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L\n"
+      "                    and (child_oid is null or child_oid = %L::oid)',\n"
+      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
+      "                 to_regclass(format('%I.%I', v_nsp, p_child))::oid)\n", 1)],
 )
 MUTATIONS["archive_retired_reoccupied_archived"] = (
     _G1141,
@@ -11187,6 +11197,95 @@ MUTATIONS["archive_retired_unmarked"] = (
     "partition and every reset site discards them again. One statement. tests/309 parts A, B, C and E catch it.",
     [("    update pgpm.archive_ledger set retired_at = now()\n"
       "     where parent_table = p_parent and child_name = p_child and retired_at is null;\n", "", 1)],
+)
+# #1141 round 2 (PR #1152, V-01 and V-02): a chunk's partition is known by the oid it was read from
+# (pgpm.archive_ledger.child_oid), every reset site marks retired the chunks of a relation that no longer exists
+# (dropped outside retire()) instead of discarding them, and retain() spends no batch slot on a held partition.
+MUTATIONS["archive_gone_step_discard"] = (
+    _G1141,
+    "_archive_step does not first mark retired the chunks whose relation was dropped outside retire(), so after an "
+    "operator drops an archived partition by hand, deletes its stale pgpm.part row and adopts a partition re-created "
+    "over the range under another name, the orphan discard deletes the chunk's row and the tick archives the new "
+    "partition to the same key, over the only copy. One statement. tests/309 part F catches it.",
+    [("  perform pgpm._mark_gone_chunks(p_parent);\n", "", 1)],
+)
+MUTATIONS["archive_gone_retire_discard"] = (
+    _G1141,
+    "retire()'s #564 discard deletes by name the chunks of a relation of that name that was dropped by hand (an "
+    "unanchored pgpm.part row lets retire() reach the same-named successor). One statement. tests/309 part H "
+    "catches it.",
+    [("  perform pgpm._mark_gone_chunks(p_parent, p_child);   -- #1141: a dropped relation's chunks are marked, never discarded\n",
+      "", 1)],
+)
+MUTATIONS["archive_gone_write_block_discard"] = (
+    _G1141,
+    "_enforce_write_blocks' #452 discard deletes by name the chunks of a relation of that name that was dropped by "
+    "hand. One statement. tests/309 part I catches it.",
+    [("      perform pgpm._mark_gone_chunks(p_parent, r.child_name);\n", "", 1)],
+)
+MUTATIONS["archive_gone_swap_discard"] = (
+    _G1141,
+    "regrain's swap deletes, with the source's coverage, the chunks recorded under the source's name by a relation "
+    "of that name that was dropped by hand. One statement. tests/309 part J catches it.",
+    [("  perform pgpm._mark_gone_chunks(p_parent, v_child_name);\n", "", 1)],
+)
+MUTATIONS["archive_gone_adopt_discard"] = (
+    _G1141,
+    "adopt_partition deletes the chunks recorded under the adopted name by a relation of that name that was dropped "
+    "by hand, the re-anchoring repair its own docs describe. One statement. tests/309 part G catches it.",
+    [("  perform pgpm._mark_gone_chunks(p_parent, v_rel);\n", "", 1)],
+)
+MUTATIONS["archive_successor_coverage_counted"] = (
+    _G1141,
+    "_archive_fully_covered matches chunks by name alone, so a partition re-created under the name of one dropped by "
+    "hand reads the dropped relation's chunks as its own coverage and retire() may drop rows nothing archived. One "
+    "clause, the oid match. tests/309 part G catches it.",
+    [("                    and (child_oid is null or child_oid = %L::oid)',\n"
+      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
+      "                 to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)\n",
+      "                    ',\n"
+      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
+      "                 to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)\n", 1)],
+)
+MUTATIONS["archive_successor_next_chunk_resumes"] = (
+    _G1141,
+    "_next_archive_chunk matches chunks by name alone, so a partition re-created under the name of one dropped by "
+    "hand resumes from the dropped relation's watermark, past rows nothing archived. One clause, the oid match. "
+    "tests/309 part G catches it.",
+    [("                    and (child_oid is null or child_oid = %L::oid)',\n"
+      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
+      "                 to_regclass(format('%I.%I', v_nsp, p_child))::oid)\n",
+      "                    ',\n"
+      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
+      "                 to_regclass(format('%I.%I', v_nsp, p_child))::oid)\n", 1)],
+)
+MUTATIONS["archive_ledger_oid_unrecorded"] = (
+    _G1141,
+    "_archive_step records no oid with a chunk, so nothing can tell a relation dropped by hand from a live one and "
+    "every reset site discards its chunks as before. One value. tests/309 part F catches it.",
+    [("              v_now::oid);\n", "              null);\n", 1)],
+)
+MUTATIONS["retain_held_partition_attempted"] = (
+    _G1141,
+    "retain() keeps a partition held over a retired chunk's range among its candidates: never covered, it is the "
+    "oldest eligible and takes every retain_batch slot of every tick, so the parent's other archived, past-horizon "
+    "partitions are never dropped and nothing counts it (PR #1152 V-02). One clause. tests/309 part K catches it.",
+    [("        and child_name <> all (%L::name[])\n", "        and (%L::name[]) is not null\n", 1)],
+)
+MUTATIONS["archive_ledger_oid_backfill_unanchored"] = (
+    _G1141,
+    "The upgrade gives no chunk recorded before child_oid existed the oid pgpm.part records for its name, so every "
+    "existing chunk stays matched by name alone and a later hand drop of its partition is not seen. One clause. "
+    "tests/309 part L catches it.",
+    [("     and l.child_oid is null and l.retired_at is null and p.child_oid is not null;\n",
+      "     and false;\n", 1)],
+)
+MUTATIONS["archive_ledger_backfill_gone_kept"] = (
+    _G1141,
+    "The upgrade leaves unmarked a chunk recorded before child_oid existed under a name that no tracked partition and "
+    "no relation has, a partition dropped by hand, so the next orphan discard deletes it. One clause. tests/309 part "
+    "L catches it.",
+    [("       and to_regclass(format('%I.%I', n.nspname, l.child_name)) is null\n", "       and false\n", 1)],
 )
 MUTATIONS["archive_retired_backfill_untimed"] = (
     _G1141,

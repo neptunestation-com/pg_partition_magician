@@ -1355,7 +1355,10 @@ scheduled path, later `maintain` ticks, each its own transaction. `null` (the de
 cap bounds attempts, not successes: an unexpected drop failure at the head of the backlog defers
 everything behind it until it clears (the wedge shows as a flat `status().retain_backlog` with climbing
 `retain_drop_failures`). A child whose chunked archiving simply hasn't caught up yet is *not* a wedge --
-`retain_drop_failures` stays at zero for that; see [`retire`](#retire).
+`retain_drop_failures` stays at zero for that; see [`retire`](#retire). Nor does a partition held over a
+retired chunk's range (`skip_archive_retired_range`) take a slot: it is never covered, so `retain` leaves it out
+of the eligible set while an archive strategy is set, and the partitions behind it are attempted as usual. It
+stays in `status().retain_backlog` until the operator resolves it.
 
 `retain()` is a loop over [`retire`](#retire): it picks the eligible set and `retire` carries the
 per-partition protocol. Every eligible partition is write-blocked before it is dropped, and the block
@@ -2188,11 +2191,14 @@ byte-budget chunker: never archive a whole large partition as one giant operatio
   The archive step leaves it out of its candidates, before `archive_batch`'s limit, so the same tick archives
   the parent's next partition instead; it logs `skip_archive_retired_range` once for the partition, with
   `method` naming the retired chunks, their object keys and the remedy. With no coverage, `retire()` never
-  drops it (unless the strategy is `none`). The remedy: export its rows with `archive.to_s3`, whose key is
+  drops it (unless the strategy is `none`), and `retain()` leaves it out of its batch, so it takes no
+  `retain_batch` slot from the partitions behind it. The remedy: export its rows with `archive.to_s3`, whose key is
   named after the partition and so is not the chunk's, then detach it, drop it and delete its `pgpm.part`
-  row. `pgpm._next_archive_chunk` and `pgpm._archive_fully_covered` never read a retired chunk as a
-  partition's coverage, so a partition re-created under the dropped one's own name (the name pgpm would
-  give it) does not start past rows nothing archived.
+  row. `pgpm._next_archive_chunk` and `pgpm._archive_fully_covered` never read a retired chunk, or a chunk
+  read from another relation (`child_oid`), as a partition's coverage, so a partition re-created under the
+  dropped one's own name (the name pgpm would give it) does not start past rows nothing archived. A chunk
+  whose partition was dropped outside `retire()` (by hand) is marked retired by the step that finds its
+  relation gone (`archive_chunk_retired`) and holds the range the same way.
 - `config.archive_batch` (default **1**; `null` = unbounded) caps how many *different* partitions
   one `_archive_step` call touches -- the same shape as `retain_batch` (nullable `int`, `null`
   means unlimited, caps attempts not successes), but a different default, and for a reason worth
@@ -2677,7 +2683,11 @@ Either way, `pgpm.archive_ledger` rows recorded under the partition's name are d
 `archive_coverage_reset`), because that coverage was earned by whatever held the name before, and the
 partition is archived again from its own `lo`. A chunk `retire()` marked retired is the exception: it records
 the only copy of rows a partition of that name held before it was dropped, so it stays, and a partition
-re-created over its range is not archived (see [the archive step](#byte-budget-chunked-archiving)). The call is logged `adopt_partition`, with `method` naming the
+re-created over its range is not archived (see [the archive step](#byte-budget-chunked-archiving)). So is a
+chunk whose relation (`pgpm.archive_ledger.child_oid`) no longer exists, which `adopt_partition` marks retired
+rather than discarding (logged `archive_chunk_retired`): pgpm cannot tell a partition dropped by hand from one
+restored from a dump, so a restored partition over chunks its earlier incarnation archived is held too, and its
+rows are already in their objects. The call is logged `adopt_partition`, with `method` naming the
 relation, its oid and, for a re-anchored row, the oid it replaced. It changes nothing but pgpm's own
 bookkeeping: no DDL, no rows read or moved. From the next tick the partition is write-blocked, archived and
 retired like any other.
@@ -3343,6 +3353,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `adopt_incoming_fk` | a `pgpm.dropped_fk` record still marked dropped was marked re-added because its key is live again, re-added by hand on its referencing table under its name and against this table (see [`pgpm.dropped_fk`](#pgpmdropped_fk)). `method` names the key, and says `NOT VALID` when the live key is not validated yet |
 | `adopt_partition` | `adopt_partition()` recorded an attached partition by its oid: a stale row of the same name re-anchored, or a partition with no row recorded afresh over its catalog bounds (see [`adopt_partition`](#adopt_partition)). `method` names the relation, its oid and, for a re-anchored row, the oid it replaced |
 | `archive_coverage_reset` | `pgpm.archive_ledger` rows were discarded because the coverage they record cannot be vouched for; `rows` carries how many chunks and `method` says why. Four causes: the partition they were recorded for has no write block in force on it (absent, disabled, or origin-only: coverage nothing has been guarding, see [`maintain`](#maintain) and [`retire`](#retire)); they were recorded under a `child_name` that is no longer a tracked partition of the parent, over a range a tracked partition now holds (a partition renamed without carrying the ledger, see [the archive step](#byte-budget-chunked-archiving)); a `regrain` swap dropped a partly archived source, whose chunks go with it (see [`regrain`](#regrain)); or `adopt_partition()` recorded a new relation under the name they were recorded for (see [`adopt_partition`](#adopt_partition)). In every case the partition holding the range archives again from its own `lo`. A chunk `retire()` marked retired (`pgpm.archive_ledger.retired_at`) is never discarded, by any of the four |
+| `archive_chunk_retired` | a step about to discard chunks by name, or as an orphan, found `pgpm.archive_ledger` rows whose relation (`child_oid`) no longer exists: their partition was dropped outside `retire()`, so their objects are the only copy of its rows. They were marked retired (`retired_at`) instead of discarded; `rows` carries how many chunks, `method` names the relation and its oid, and no partition over their range is archived (see [the ledger](#pgpmarchive_ledger)) |
 | `warn_replica_identity_nothing` | a partition was minted (by `obtain`, `extend_to` or a regrain's swap) for a parent whose `REPLICA IDENTITY USING INDEX` index was dropped, a state PostgreSQL treats as `NOTHING`, so the partition took `NOTHING` (see the replica identity paragraph under `transmute`). Logged at most once per transaction for the parent; `method` names the first such partition. Each one keeps `NOTHING` after the parent is given an identity again, so give it the identity by hand |
 | `warn_obtain_unscheduled` | logged at most once per `maintain_all` sweep, with a null `parent_table`, when the `pgpm` cron job exists but `pgpm_obtain` doesn't -- obtain is silently not running |
 | `skip_obtain` / `skip_retain` / `skip_regrain` / `skip_regrain_capture` / `skip_archive` / `skip_write_block` / `skip_restore_fk` / `skip_validate_fk` | a step deferred (lock race or transient error; `method` carries the reason) |
@@ -3421,16 +3432,33 @@ One row per archived chunk. See [Byte-budget chunked archiving](#byte-budget-chu
 | `etag` | `text` | set by a real transport strategy; null for a strategy with nothing object-store-shaped to name |
 | `rows_archived` | `bigint` | rows this chunk archived; null if the strategy reported no progress |
 | `archived_at` | `timestamptz` | when this chunk was recorded |
-| `retired_at` | `timestamptz` | when `retire()` dropped the partition this chunk was archived from, set in the transaction of the drop; null while the partition lives |
+| `retired_at` | `timestamptz` | when the partition this chunk was archived from was dropped: set by `retire()` in the transaction of the drop, or by the first step that finds the relation `child_oid` names gone (dropped outside `retire()`); null while the partition lives |
+| `child_oid` | `oid` | the relation the chunk was read from; null on a row recorded before the column existed that the upgrade could not attribute, which is matched by `child_name` alone |
 
 A row with `retired_at` set is the record of the only copy of its chunk's rows: its partition is gone and its
 object holds them. No coverage reset discards it under any name (not `maintain`'s write-block and archive
 steps, `retire`, a `regrain` swap or `adopt_partition`), no coverage reader counts it as a live partition's,
 and the archive step does not archive a partition over its range (`skip_archive_retired_range`, see
-[the archive step](#byte-budget-chunked-archiving)). Re-running `install.sql` over an install that predates
-the column adds it and marks the chunks already retired, where `pgpm.log` shows it: a row archived no later
-than a `retain_drop` logged over a range holding it. A chunk of a partition dropped by anything other than
-`retire` (a `DROP TABLE` by hand), or whose `retain_drop` row was deleted from `pgpm.log`, is not marked.
+[the archive step](#byte-budget-chunked-archiving)).
+
+A chunk belongs to the relation its `child_oid` names, not to whatever holds its `child_name` now. The
+coverage readers (`pgpm._next_archive_chunk`, `pgpm._archive_fully_covered`, the operator script
+`scripts/archive_partition_whole.sql`) count a chunk for a partition only when its `child_oid` is that
+relation's (or is null), so a partition re-created under a dropped one's name never inherits its coverage.
+And before any of those five sites discards a chunk, it marks retired every chunk it would reach whose relation
+no longer exists, whoever dropped it, logged `archive_chunk_retired` once per relation: a partition dropped by
+hand leaves its objects as the only copy of its rows exactly as `retire()` does. A chunk whose relation still
+exists under another name (a partition renamed without carrying the ledger) is discarded as before; its rows
+are safe in that relation. What pgpm cannot tell apart: a partition **restored from a dump** is a new relation,
+so the chunks its earlier incarnation archived read as a dropped relation's, and the restored partition, once
+adopted, is held like any partition over a retired chunk (its rows are already in those objects).
+
+Re-running `install.sql` over an install that predates the columns adds them. `retired_at` is set on the
+chunks already retired where `pgpm.log` shows it: a row archived no later than a `retain_drop` logged over a
+range holding it. `child_oid` is set from the oid `pgpm.part` records for the row's name; a row whose name no
+tracked partition and no relation in the parent's schema has is marked retired (its partition dropped by hand),
+and so is a row whose recorded oid no longer exists. Not marked: a chunk of a partition dropped by hand whose
+name a relation has taken since, which keeps no oid and is matched by name as before.
 
 ## Partition naming
 

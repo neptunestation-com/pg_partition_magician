@@ -411,7 +411,12 @@ failure blocks that one partition on purpose (`retain_drop_failures` climbing in
    `paused = true` means maintenance is doing nothing. A flat `retain_backlog` with `retain_drop_failures`
    also flat at zero, and `archive_fn` set, means chunked archiving simply hasn't caught up yet for the
    partitions at the head of the backlog -- not a failure, just run more maintenance ticks (or check
-   `pgpm.archive_ledger`/`pgpm._archive_fully_covered` for that child directly). A flat `retain_backlog`
+   `pgpm.archive_ledger`/`pgpm._archive_fully_covered` for that child directly). The one exception that more
+   ticks never clear: a partition created over the range of a partition that was already archived and dropped
+   is held for good, so it stays in `retain_backlog` while retention goes on past it. Look for its one
+   `skip_archive_retired_range` row in `pgpm.log`; `method` names the archived objects that are the only copy of
+   the dropped rows, and the remedy (export the partition with `archive.to_s3`, then detach and drop it and
+   delete its `pgpm.part` row). A flat `retain_backlog`
    with `retain_drop_failures` actually **climbing** is a real failure: the reason is in the log
    (`fail_retain_drop`, `fail_retain_crossing`, `fail_retain_detach`, `fail_retain_identity`,
    `fail_archive_identity`, `fail_write_block_identity` or `fail_archive_contract` rows, `method`).

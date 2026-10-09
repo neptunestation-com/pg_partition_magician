@@ -13,12 +13,20 @@
   backfilled on upgrade from the `retain_drop` rows in `pgpm.log`), no reset site discards a marked row, no
   coverage reader counts one, and the archive step (and `scripts/archive_partition_whole.sql`) leaves a
   partition over a retired chunk's range out of its candidates, logged once as `skip_archive_retired_range`
-  with the remedy, archiving the parent's next partition in the same tick. Tests `tests/309` and
-  `tests/archive/db/50`; guard `bench/archive_retired_chunk_kept.sh`, mutations `archive_retired_orphan_discard`,
+  with the remedy, archiving the parent's next partition in the same tick; `retain()` leaves it out of its
+  batch too. A chunk now records the relation it was read from (`pgpm.archive_ledger.child_oid`, new,
+  backfilled from `pgpm.part`): the coverage readers match it by that oid, so a same-named successor inherits
+  nothing, and every reset site marks retired (`archive_chunk_retired`), never discards, the chunks of a
+  relation dropped outside `retire()`. Tests `tests/309` and `tests/archive/db/50`; guard
+  `bench/archive_retired_chunk_kept.sh`, mutations `archive_retired_orphan_discard`,
   `archive_retired_adopt_discard`, `archive_retired_retire_discard`, `archive_retired_write_block_discard`,
   `archive_retired_regrain_swap_discard`, `archive_retired_regrain_rename_carried`,
   `archive_retired_coverage_counted`, `archive_retired_next_chunk_resumes`, `archive_retired_reoccupied_archived`,
-  `archive_retired_unmarked` and `archive_retired_backfill_untimed`.
+  `archive_retired_unmarked`, `archive_retired_backfill_untimed`, `archive_gone_step_discard`,
+  `archive_gone_retire_discard`, `archive_gone_write_block_discard`, `archive_gone_swap_discard`,
+  `archive_gone_adopt_discard`, `archive_successor_coverage_counted`, `archive_successor_next_chunk_resumes`,
+  `archive_ledger_oid_unrecorded`, `retain_held_partition_attempted`, `archive_ledger_oid_backfill_unanchored`
+  and `archive_ledger_backfill_gone_kept`.
 
 - **A synchronous export keys and claims the relation it resolved, by oid** (#1064). `archive._resolve_child`
   resolves and holds the export's child and returns its regclass, but `archive.to_s3` and
