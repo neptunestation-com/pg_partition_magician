@@ -1696,9 +1696,9 @@ MUTATIONS = {
     "hypertable_key_index_by_name": (
         "bench/hypertable_key_index_on_destination.sh",
         "Pre-#768 (F6-09) from_hypertable_cutover: a key's index build is skipped whenever ANY relation holds "
-        "its temp name, so after an abandoned tracking copy and a RENAME of the hypertable (whose key keeps "
-        "its name) the stale copy's index is taken for the key's and the swap fails adopting it, after the "
-        "whole copy. tests/timescale/db/44's migration of the renamed table fails.",
+        "its temp name, so when an operator's index on a table of their own holds that name after a RENAME of "
+        "the hypertable (whose key keeps its name), that index is taken for the key's and the swap fails "
+        "adopting it, after the whole copy. tests/timescale/db/44's migration of the renamed table fails.",
         [(HT_CUTOVER_KEY_TMP_BLOCK, """    v_tmp := pgpm._from_hypertable_tmp_name(k.conname, k.conindid);
     if to_regclass(format('%I.%I', v_nsp, v_tmp)) is null then   -- MUTANT: by name, anywhere in the schema
       execute pgpm._from_hypertable_index_ddl(k.conindid, v_tmp, v_nsp, v_dest);
@@ -7893,15 +7893,15 @@ select ok(
     "hypertable_copy_key_tmp_by_name": (
         "bench/hypertable_key_index_on_destination.sh",
         "Issue #872 bullet 4 put back in from_hypertable_copy: the tracked key's index is pre-built under the "
-        "bare temp name <conname>_pgpm_new whatever holds it, so after an abandoned tracking copy and a RENAME "
-        "of the hypertable (whose key keeps its name) the copy dies 'already exists' before copying a row. One "
-        "site. tests/timescale/db/45 catches it.",
+        "bare temp name <conname>_pgpm_new whatever holds it, so when an operator's index on a table of their "
+        "own holds that name after a RENAME of the hypertable (whose key keeps its name) the copy dies 'already "
+        "exists' before copying a row. One site. tests/timescale/db/45 catches it.",
         [("    v_keytmp := pgpm._from_hypertable_key_tmp(v_keyconname, v_keyidx, v_nsp, v_destreg);\n",
           "    v_keytmp := pgpm._from_hypertable_tmp_name(v_keyconname, v_keyidx);   -- MUTANT: by name\n", 1)],
     ),
     "hypertable_cutover_key_tmp_unshared": (
         "bench/hypertable_key_index_on_destination.sh",
-        "Issue #872 bullet 4, the half-fix: the copy takes the oid form when an abandoned copy holds the temp "
+        "Issue #872 bullet 4, the half-fix: the copy takes the oid form when an operator's index holds the temp "
         "name, but the cutover keeps its #768 choice, which builds under the oid form without asking whether "
         "the copy already put that index on the destination, so the cutover of the renamed table dies 'already "
         "exists' after the whole copy. One site. tests/timescale/db/45 catches it.",
@@ -8319,7 +8319,7 @@ select ok(
         [("  if v_held is not null and v_held is distinct from pgpm._scratch_rel(p_hypertable, 'hypertable_dest') then\n",
           "  if false and v_held is not null and v_held is distinct from pgpm._scratch_rel(p_hypertable, 'hypertable_dest') then\n", 1),
          ("  v_prev := pgpm._scratch_rel(p_hypertable, 'hypertable_dest');\n"
-          "  if v_prev is not null and v_prev = to_regclass(format('%I.%I', v_nsp, v_dest)) then\n"
+          "  if v_prev is not null then\n"
           "    execute format('drop table %s', v_prev::text);\n"
           "  end if;\n",
           "  execute format('drop table if exists %I.%I', v_nsp, v_dest);   -- MUTANT: by name\n", 1)],
@@ -8332,7 +8332,7 @@ select ok(
         [("  if v_held is not null and v_held is distinct from pgpm._scratch_rel(p_hypertable, 'hypertable_delta') then\n",
           "  if false and v_held is not null and v_held is distinct from pgpm._scratch_rel(p_hypertable, 'hypertable_delta') then\n", 1),
          ("  v_prev := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');\n"
-          "  if v_prev is not null and v_prev = to_regclass(format('%I.%I', v_nsp, v_delta)) then\n"
+          "  if v_prev is not null then\n"
           "    execute format('drop table %s', v_prev::text);\n"
           "  end if;\n",
           "  if p_track_changes then execute format('drop table if exists %I.%I', v_nsp, v_delta); end if;   -- MUTANT: by name\n", 1)],
@@ -10571,6 +10571,50 @@ MUTATIONS["reference_handoff_remedy_without_restore"] = (
     [("select pgpm.restore_incoming_fks('app.events');\nselect pgpm.validate_incoming_fks('app.events');\n", "", 1)],
 )
 MUTATION_SRC["reference_handoff_remedy_without_restore"] = "docs/reference.md"
+
+# Issue #1083: a re-run of from_hypertable_copy replaces the previous copy by what pgpm.scratch records, wherever
+# it lives now. One mutation per object the re-run replaces, each putting back the one clause that confined it
+# to the name this copy mints in the hypertable's current schema. tests/timescale/db/60 catches each
+# (bench/hypertable_copy_rerun_by_record.sh).
+MUTATIONS["hypertable_copy_rerun_capture_by_name"] = (
+    "bench/hypertable_copy_rerun_by_record.sh",
+    "Pre-#1083 from_hypertable_copy: the re-run finds the previous capture function only under the name it "
+    "mints, in the hypertable's CURRENT schema. After ALTER TABLE <hypertable> SET SCHEMA the function stays "
+    "behind while the trigger moves with the table, so _from_hypertable_scratch_check accepts the trigger (it "
+    "fires the recorded function), this step drops nothing, and the tracking re-run the cutover names as the "
+    "remedy dies raw 42710 creating the trigger; a re-run without tracking leaves the old capture firing. "
+    "tests/timescale/db/60 catches it (a60's re-run errors, b60 and c60r keep the old trigger and function).",
+    [("   where sc.parent_oid = p_hypertable::oid and sc.kind = 'hypertable_delta_fn';\n  if v_prev_fn is not null then\n",
+      "   where sc.parent_oid = p_hypertable::oid and sc.kind = 'hypertable_delta_fn'\n"
+      "     and f.pronamespace = (select oid from pg_namespace where nspname = v_nsp) and f.proname = v_trgfn;\n"
+      "  if v_prev_fn is not null then\n", 1)],
+)
+MUTATION_SRC["hypertable_copy_rerun_capture_by_name"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_copy_rerun_capture_by_name"] = "timescale"
+MUTATIONS["hypertable_copy_rerun_delta_by_name"] = (
+    "bench/hypertable_copy_rerun_by_record.sh",
+    "Pre-#1083 from_hypertable_copy: the re-run drops the previous recorded delta only while it answers to "
+    "<rel>_pgpm_delta in the hypertable's current schema, then forgets it, so after a SET SCHEMA or RENAME of "
+    "the hypertable the old delta is left behind unrecorded. tests/timescale/db/60 catches it (each moved or "
+    "renamed table's previous delta survives its re-run).",
+    [("  v_prev := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');\n  if v_prev is not null then\n",
+      "  v_prev := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');\n"
+      "  if v_prev is not null and v_prev = to_regclass(format('%I.%I', v_nsp, v_delta)) then\n", 1)],
+)
+MUTATION_SRC["hypertable_copy_rerun_delta_by_name"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_copy_rerun_delta_by_name"] = "timescale"
+MUTATIONS["hypertable_copy_rerun_dest_by_name"] = (
+    "bench/hypertable_copy_rerun_by_record.sh",
+    "Pre-#1083 from_hypertable_copy: the re-run drops the previous recorded copy only while it answers to "
+    "<rel>_pgpm_dest in the hypertable's current schema, then records the new copy over it, so after a SET "
+    "SCHEMA or RENAME of the hypertable a full second copy of the rows is left behind, unknown to pgpm. "
+    "tests/timescale/db/60 catches it (each moved or renamed table's previous copy survives its re-run).",
+    [("  v_prev := pgpm._scratch_rel(p_hypertable, 'hypertable_dest');\n  if v_prev is not null then\n",
+      "  v_prev := pgpm._scratch_rel(p_hypertable, 'hypertable_dest');\n"
+      "  if v_prev is not null and v_prev = to_regclass(format('%I.%I', v_nsp, v_dest)) then\n", 1)],
+)
+MUTATION_SRC["hypertable_copy_rerun_dest_by_name"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_copy_rerun_dest_by_name"] = "timescale"
 
 
 

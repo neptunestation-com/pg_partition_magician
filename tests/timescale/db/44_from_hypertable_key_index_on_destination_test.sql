@@ -3,29 +3,33 @@
 -- cutover skips building one when that name is taken, to adopt the copy's (#175). It asked only whether the
 -- NAME resolved, anywhere in the schema, never whether the index was on THIS cutover's destination. A key
 -- keeps its name when its table is renamed, so after a tracking copy of z44 that was never cut over (its
--- z44_pgpm_dest keeps z44_pkey_pgpm_new) and ALTER TABLE z44 RENAME TO z44b, migrating z44b skipped its own
+-- z44_pgpm_dest kept z44_pkey_pgpm_new) and ALTER TABLE z44 RENAME TO z44b, migrating z44b skipped its own
 -- key build and failed adopting the stale index ('does not belong to table "z44b"') after the whole copy.
+-- Since #1083 the migration's own copy drops that abandoned copy by its record first, so here the name is
+-- held by an operator's index on a table of their own, which pgpm never drops.
 -- The cutover now adopts an index under the temp name only when it is on the destination (pg_index.indrelid),
 -- and builds its own under the oid form of the temp name when something else holds it.
 --
 -- ASYMMETRIC FIXTURE. z44 has a primary key AND a unique constraint, and only the primary key's temp name is
--- held by the stale copy (a tracking copy builds the tracked key's index alone), so one key is built under
+-- held by the operator's index, so one key is built under
 -- the fallback name and the other under its usual one. A second hypertable, t44, is copied with tracking and
 -- cut over normally, so the copy's own index is still the one adopted (by its oid, not rebuilt).
--- WITNESSES: the stale index sits on the old copy and the renamed key kept its name; each migration completed
--- with every row by id; the stale copy and its index are left exactly as they were.
+-- WITNESSES: the operator's index sits on their table and the renamed key kept its name; each migration
+-- completed with every row by id; the operator's index is left exactly as it was.
 select plan(12);
 
 create table public.z44 (id bigint not null, ts timestamptz not null, v int not null, primary key (id, ts),
                          constraint z44_v_key unique (v, ts));
 select create_hypertable('public.z44', 'ts', chunk_time_interval => interval '1 day');
 insert into public.z44 select g, now() - g * interval '3 hours', g * 10 from generate_series(1, 20) g;
-call pgpm.from_hypertable_copy('public.z44', 'ts', p_track_changes => true);   -- abandoned, never cut over
+create table public.z44_old (id bigint not null, ts timestamptz not null);
+insert into public.z44_old values (4, now());
+create unique index z44_pkey_pgpm_new on public.z44_old (id, ts);   -- the operator's, under the key's temp name
 alter table public.z44 rename to z44b;
 select 'public.z44_pkey_pgpm_new'::regclass::oid as stale_idx \gset
 
 select is((select i.indrelid::regclass::text from pg_index i where i.indexrelid = 'public.z44_pkey_pgpm_new'::regclass),
-          'z44_pgpm_dest', 'LIVENESS: the abandoned copy''s key index z44_pkey_pgpm_new sits on the old copy z44_pgpm_dest');
+          'z44_old', 'LIVENESS: the operator''s index z44_pkey_pgpm_new sits on z44_old');
 select is((select string_agg(conname, ',' order by conname) from pg_constraint
             where conrelid = 'public.z44b'::regclass and contype in ('p', 'u')),
           'z44_pkey,z44_v_key', 'LIVENESS: the renamed hypertable''s keys kept their names');
@@ -49,7 +53,7 @@ select throws_ok($$ insert into public.z44b select id, ts, -1 from public.z44b w
           'and its primary key is enforced');
 select is((select i.indrelid::regclass::text from pg_index i where i.indexrelid = :'stale_idx'::oid)
           || '/' || (select relname::text from pg_class where oid = :'stale_idx'::oid),
-          'z44_pgpm_dest/z44_pkey_pgpm_new', 'the stale copy''s index is left where it was, under its name');
+          'z44_old/z44_pkey_pgpm_new', 'the operator''s index is left where it was, under its name');
 
 -- the copy's own pre-built key index is still the one adopted
 create table public.t44 (id bigint not null, ts timestamptz not null, v int, primary key (id, ts));

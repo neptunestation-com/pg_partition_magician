@@ -962,14 +962,21 @@ begin
   v_trgfn := v_rel || '_pgpm_delta_fn';
   v_trg   := v_rel || '_pgpm_delta_trg';
   -- #955: a re-run replaces the previous copy's change capture, tracking or not: found by the oids it recorded,
-  -- and only under the names this copy mints (an apparatus a copy left under the table's OLD name, before a
-  -- RENAME, is left where it is and forgotten, as it always was left). The function's triggers on the
-  -- hypertable first (by the function they fire, not by name), then the function, then the delta. A copy
-  -- without p_track_changes then forgets the delta and the function it did not mint, so the cutover does not
-  -- take a previous copy's for its change log. In the same transaction as whatever this copy commits first.
+  -- and only by them, WHEREVER that apparatus lives now (#1083). The function's triggers on the hypertable
+  -- first (by the function they fire, not by name), then the function, then the delta. A copy without
+  -- p_track_changes then forgets the delta and the function it did not mint, so the cutover does not take a
+  -- previous copy's for its change log. In the same transaction as whatever this copy commits first.
+  -- #1083: this step used to replace the recorded apparatus only while it sat under the names this copy mints,
+  -- in the hypertable's CURRENT schema. After ALTER TABLE <hypertable> SET SCHEMA the function and the delta
+  -- stay in the old schema while the trigger moves with the table under the same name, so
+  -- _from_hypertable_scratch_check accepted that trigger (it fires the recorded function) and this step,
+  -- not finding the function in the new schema, dropped nothing: the re-run died raw 42710 creating the
+  -- trigger, and it is the remedy the cutover names once the copy sits outside the hypertable's schema. And a
+  -- previous apparatus under another name or schema was left firing into a delta nothing recorded or drained.
+  -- The check accepts only what pgpm.scratch records, and this drops everything it records, so a name the
+  -- check let through is always free by the time the copy mints it.
   select f.oid::regprocedure into v_prev_fn from pgpm.scratch sc join pg_proc f on f.oid = sc.obj
-   where sc.parent_oid = p_hypertable::oid and sc.kind = 'hypertable_delta_fn'
-     and f.pronamespace = (select oid from pg_namespace where nspname = v_nsp) and f.proname = v_trgfn;
+   where sc.parent_oid = p_hypertable::oid and sc.kind = 'hypertable_delta_fn';
   if v_prev_fn is not null then
     for r in select t.tgname from pg_trigger t
               where t.tgrelid = p_hypertable and t.tgfoid = v_prev_fn and not t.tgisinternal loop
@@ -978,7 +985,7 @@ begin
     execute format('drop function %s', v_prev_fn::text);
   end if;
   v_prev := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');
-  if v_prev is not null and v_prev = to_regclass(format('%I.%I', v_nsp, v_delta)) then
+  if v_prev is not null then
     execute format('drop table %s', v_prev::text);
   end if;
   if not p_track_changes then
@@ -1150,10 +1157,14 @@ begin
   end if;
 
   -- destination skeleton: structure but no indexes/key, so the bulk load maintains no per-row index.
-  -- #955: a re-run replaces the previous copy, found by its recorded oid under this name (anything else here
-  -- was refused before anything was created).
+  -- #955: a re-run replaces the previous copy, found by its recorded oid (anything else under this name was
+  -- refused before anything was created). #1083: wherever it lives now, as the capture above. Matched only
+  -- under <rel>_pgpm_dest in the hypertable's current schema, a copy left behind by ALTER TABLE <hypertable>
+  -- SET SCHEMA (or RENAME) was neither dropped nor, once _scratch_record below took the new copy's oid,
+  -- recorded: a full second copy of the rows that pgpm had forgotten, where the reference promises a re-run
+  -- replaces the hypertable's previous copy.
   v_prev := pgpm._scratch_rel(p_hypertable, 'hypertable_dest');
-  if v_prev is not null and v_prev = to_regclass(format('%I.%I', v_nsp, v_dest)) then
+  if v_prev is not null then
     execute format('drop table %s', v_prev::text);
   end if;
   execute format('create table %I.%I (like %I.%I including defaults including constraints including generated including comments)',

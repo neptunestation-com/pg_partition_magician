@@ -3,25 +3,29 @@
 --
 -- A tracking copy pre-builds the reused key's index on its destination under the temp name <conname>_pgpm_new,
 -- and the cutover adopts it (#175). The name is schema-wide and a key keeps its name across ALTER TABLE ...
--- RENAME, so a tracking copy taken under the table's old name and abandoned (its <old>_pgpm_dest still holds
--- <conname>_pgpm_new) made the renamed table's copy die 'relation ... already exists' before copying a row.
+-- RENAME, so a relation pgpm did not record for this table that holds <conname>_pgpm_new made the renamed
+-- table's copy die 'relation ... already exists' before copying a row. (An abandoned tracking copy of the table
+-- under its old name used to be that relation; since #1083 the re-run drops it by its record, so here the
+-- name is held by an operator's index.)
 -- The cutover had learnt in #768 to adopt only an index ON its destination and to build under the oid form
 -- otherwise; the copy had not. Both now ask pgpm._from_hypertable_key_tmp, which picks, of the usual name and
 -- the oid form, one already on the destination, else one nothing holds, so the copy builds under the oid form
 -- and the cutover ADOPTS that index (by its oid, not rebuilt) rather than building a second one or dying on
 -- the name.
 --
--- ASYMMETRIC FIXTURE. z45 holds ids 1..20 except the multiples of 3 (14 rows); the abandoned copy took them
--- all, and the renamed table then gains id 31 and loses id 2 before its own copy, so a destination built from
--- the stale copy, or one that missed the late writes, holds a different id set.
--- WITNESSES: the stale index sits on the old copy and the renamed key kept its name; the stale copy is left
--- exactly as it was.
+-- ASYMMETRIC FIXTURE. z45 holds ids 1..20 except the multiples of 3 (14 rows); the operator's z45_old holds
+-- one row, id 2, and the renamed table then gains id 31 and loses id 2 before its copy, so a destination built
+-- from the wrong relation, or one that missed the late writes, holds a different id set.
+-- WITNESSES: the operator's index sits on z45_old and the renamed key kept its name; the operator's index
+-- is left exactly as it was.
 select plan(10);
 
 create table public.z45 (id bigint not null, ts timestamptz not null, v int not null, primary key (id, ts));
 select create_hypertable('public.z45', 'ts', chunk_time_interval => interval '1 day');
 insert into public.z45 select g, now() - g * interval '3 hours', g * 10 from generate_series(1, 20) g where g % 3 <> 0;
-call pgpm.from_hypertable_copy('public.z45', 'ts', p_track_changes => true);   -- abandoned, never cut over
+create table public.z45_old (id bigint not null, ts timestamptz not null);
+insert into public.z45_old values (2, now());
+create unique index z45_pkey_pgpm_new on public.z45_old (id, ts);   -- the operator's, under the key's temp name
 alter table public.z45 rename to z45b;
 insert into public.z45b values (31, now() - interval '1 hour', 310);
 delete from public.z45b where id = 2;
@@ -29,9 +33,9 @@ select 'public.z45_pkey_pgpm_new'::regclass::oid as stale_idx \gset
 select conindid as key_idx from pg_constraint where conrelid = 'public.z45b'::regclass and contype = 'p' \gset
 
 select is((select i.indrelid::regclass::text from pg_index i where i.indexrelid = :'stale_idx'::oid),
-          'z45_pgpm_dest', 'LIVENESS: the abandoned copy''s key index z45_pkey_pgpm_new sits on the old copy z45_pgpm_dest');
+          'z45_old', 'LIVENESS: the operator''s index z45_pkey_pgpm_new sits on z45_old');
 select is((select conname::text from pg_constraint where conrelid = 'public.z45b'::regclass and contype = 'p'),
-          'z45_pkey', 'LIVENESS: the renamed hypertable''s key kept its name, so it asks for the temp name the stale copy holds');
+          'z45_pkey', 'LIVENESS: the renamed hypertable''s key kept its name, so it asks for the temp name the operator''s index holds');
 
 call pgpm.from_hypertable_copy('public.z45b', 'ts', p_track_changes => true);
 
@@ -60,6 +64,6 @@ select throws_ok($$ insert into public.z45b select id, ts, -1 from public.z45b w
           'and its primary key is enforced');
 select is((select i.indrelid::regclass::text || '/' || (select relname::text from pg_class where oid = :'stale_idx'::oid)
              from pg_index i where i.indexrelid = :'stale_idx'::oid),
-          'z45_pgpm_dest/z45_pkey_pgpm_new', 'the stale copy''s index is left where it was, under its name');
+          'z45_old/z45_pkey_pgpm_new', 'the operator''s index is left where it was, under its name');
 
 select * from finish();

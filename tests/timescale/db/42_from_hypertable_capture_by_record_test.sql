@@ -36,6 +36,11 @@ call pgpm.from_hypertable_copy('public.z42', 'ts', p_track_changes => true);   -
 call pgpm.from_hypertable_copy('public.y42', 'ts', p_track_changes => true);   -- abandoned, never cut over
 insert into public.z42 values (50, now() - interval '5 hours', 50);
 insert into public.y42 values (60, now() - interval '5 hours', 60), (61, now() - interval '6 hours', 61);
+-- #1083: a re-run of the copy (the migration below runs one) drops a capture pgpm.scratch records for the table,
+-- wherever it lives, so the stale capture this file is about is one the record no longer names
+-- (deleted here: no released version leaves a capture with the horizon comment and no record, so this is the
+-- only way left to reach the carry's comment-record arm)
+delete from pgpm.scratch where parent_oid in ('public.z42'::regclass, 'public.y42'::regclass);
 alter table public.z42 set schema app42;
 alter table public.y42 rename to y42r;
 truncate public.audit42;

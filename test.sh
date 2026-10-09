@@ -572,6 +572,10 @@ run_timescale() {
     # of the pairs discriminate.sh completes with its three mutants.
     echo "--- from_hypertable and the cutover ask transmute's argument rules before the swap (issue #1085) ---"
     bash "$(dirname "$0")/bench/hypertable_argument_rules.sh" pgpm_test-timescale pgpm_perf110 || fail=1
+    # #1083's guard, the same way: it re-runs tests/timescale/db/60 against the real install, the clean-code half
+    # of the pair discriminate.sh completes with the hypertable_copy_rerun_*_by_name mutations.
+    echo "--- a re-run copy replaces the recorded copy, wherever it lives (issue #1083) ---"
+    bash "$(dirname "$0")/bench/hypertable_copy_rerun_by_record.sh" pgpm_test-timescale pgpm_perf116 || fail=1
 
     echo "--- discriminate (timescale-scoped mutations) ---"
     bash "$(dirname "$0")/bench/discriminate.sh" --track=timescale pgpm_test-timescale || fail=1
@@ -1058,7 +1062,7 @@ run_perf() {
     "bench/dropped_fk_reconcile.sh pgpm_perf109"
     "bench/regrain_target_shape.sh pgpm_perf97"
     "bench/regrain_target_integral.sh pgpm_perf98"
-    "bench/carried_index_quoted_name.sh pgpm_perf116"
+    "bench/carried_index_quoted_name.sh pgpm_perf312"
     "bench/transmute_identity_options.sh pgpm_perf117"
     "bench/transmute_type_squatter.sh pgpm_perf118"
     "bench/transmute_future_maximum.sh pgpm_perf115"
@@ -1179,7 +1183,7 @@ run_perf() {
     "bench/regrain_capture_view_writer.sh pgpm_perf304"
     "bench/obtain_backoff_hole.sh pgpm_perf305"
     "bench/check_text_time_contract.sh pgpm_perf309"
-    "bench/hypertable_handoff_remedy.sh pgpm_perf111"
+    "bench/hypertable_handoff_remedy.sh pgpm_perf311"
   )
   local selected=()
   local n=${#guards[@]} idx
