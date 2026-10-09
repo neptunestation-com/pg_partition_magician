@@ -4916,6 +4916,27 @@ $$;''',
           "  safety net. The cutover is one read-only scan plus a metadata flip: no rebuild, no row rewrite, and **no\n"
           "  lock that scales with row count** -- the scan runs under a lock that blocks neither readers nor writers\n", 1)],
     ),
+    "readme_maintain_obtains": (
+        "bench/doc_maintain_does_not_obtain.sh",
+        "Pre-#1087 README.md: the maintain bullet calls it 'the one procedure `pg_cron` calls (`obtain`, "
+        "`retain`, optional auto-`regrain`)', while obtain is maintain_obtain's, on its own pgpm_obtain job, and "
+        "maintain builds no forward partition, so an operator who schedules maintain alone runs out of grid and "
+        "has writes refused. The exact pre-#1087 text.",
+        [("- **`maintain`** and **`maintain_obtain`**: the two procedures `pg_cron` calls, on two jobs that\n"
+          "  `pgpm.schedule()` creates together. `maintain_obtain` (the `pgpm_obtain` job) runs `obtain`; `maintain`\n"
+          "  runs everything else (archive, `retain`, optional auto-`regrain`) and never obtains, so scheduling\n"
+          "  `maintain` alone builds no forward partitions and writes past the grid start being refused.\n",
+          "- **`maintain`**: the one procedure `pg_cron` calls (`obtain`, `retain`, optional auto-`regrain`).\n", 1)],
+    ),
+    "readme_install_runs_past_error": (
+        "bench/doc_install_stops_on_error.sh",
+        "Pre-#1090 README.md: the install and upgrade command is `psql \"$DATABASE_URL\" -f pgpm_core/install.sql`, "
+        "with no ON_ERROR_STOP, so psql runs the rest of the file past _surface_prepare()'s refusal, drops the "
+        "columns the file retires, records the new version over a half-upgraded install and exits 0. The exact "
+        "pre-#1090 command.",
+        [("psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 --single-transaction -f pgpm_core/install.sql\n",
+          "psql \"$DATABASE_URL\" -f pgpm_core/install.sql\n", 1)],
+    ),
     "runbook_fk_validate_by_restore": (
         "bench/doc_remedy_and_symptom.sh",
         "Pre-#910 docs/runbook.md: the Prevent step after a preserve conversion tells the operator to call "
@@ -9204,6 +9225,8 @@ MUTATION_SRC = {
     "reference_fks_suspended_dead_swap": "docs/reference.md",
     "reference_keyless_monolith_dormant": "docs/reference.md",
     "readme_transmute_fresh_default": "README.md",
+    "readme_maintain_obtains": "README.md",
+    "readme_install_runs_past_error": "README.md",
     "runbook_fk_validate_by_restore": "docs/runbook.md",
     "runbook_dropped_table_syntax_symptom": "docs/runbook.md",
     "classify_tap_needs_description": "scripts/review/classify_claims.py",
