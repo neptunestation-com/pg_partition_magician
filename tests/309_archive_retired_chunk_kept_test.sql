@@ -32,7 +32,7 @@
 -- 'late<id>'; A's second partition holds ids 101..107 'mid<id>'. Each check names the rows or the chunk.
 create extension if not exists pgtap;
 set client_min_messages = warning;
-select plan(74);
+select plan(78);
 
 create schema t309;
 -- every call the strategy gets, with the rows it was handed
@@ -375,8 +375,9 @@ select ok(to_regclass('t309.' || quote_ident(:'k1')) is null,
 
 -- ============================ PART L: the upgrade backfill of child_oid ============================
 -- What an install from before the column leaves: rows with no oid. A's live [100, 200) has a tracked name; a
--- row under a name nothing has, and one whose oid names no relation, are a dropped relation's; a row under an
--- untracked name some relation still has stays as it was.
+-- row under a name nothing has, and one whose oid names no relation, are a dropped relation's; and a row under a
+-- name pgpm.part does not record but a relation has (a partition dropped by hand and re-created under its own
+-- name, its stale row deleted, not yet adopted) is marked too: nothing vouches that relation is the chunk's.
 create table t309.a_kept (id bigint);
 insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, rows_archived, child_oid)
   values ('t309.a', '600', '650', 'a_nothing', 1, null), ('t309.a', '800', '850', 'a_kept', 1, null),
@@ -386,13 +387,45 @@ create temp table t309_live as select parent_table, lo from pgpm.archive_ledger 
 select pgpm._backfill_chunk_oids();
 select is((select string_agg(format('%s [%s, %s)', l.parent_table, l.lo, l.hi), '; ' order by l.parent_table::text, l.lo::numeric)
              from pgpm.archive_ledger l join t309_live v using (parent_table, lo) where l.retired_at is not null),
-  't309.a [300, 400); t309.a [600, 650); t309.a [900, 950)',
-  'L: the backfill marks the rows of relations that no longer exist, and only those');
+  't309.a [300, 400); t309.a [600, 650); t309.a [800, 850); t309.a [900, 950)',
+  'L: the backfill marks every row pgpm.part does not vouch for (untracked names, gone oids), and only those');
 select is((select child_oid = to_regclass('t309.' || quote_ident(:'a1'))::oid from pgpm.archive_ledger
             where parent_table = 't309.a'::regclass and lo = '100'), true,
   'L: a live row gets the oid pgpm.part records for its name');
-select is((select format('%s|%s', child_oid is null, retired_at is null) from pgpm.archive_ledger
-            where parent_table = 't309.a'::regclass and lo = '800'), 't|t',
-  'L: a row under an untracked name a relation still has stays unmarked, with no oid');
+select ok(to_regclass('t309.a_kept') is not null
+          and (select retired_at is not null from pgpm.archive_ledger where parent_table = 't309.a'::regclass and lo = '800'),
+  'L: a row under an untracked name a relation has now is marked retired, not left to be discarded by name');
+
+-- ============================ PART M: the orphan discard deletes only unretired chunks of its name ======
+-- [0, 100) is archived and retired under m0's name; the operator then gives [200, 300) that name (renaming the
+-- partition and its pgpm.part row), it is archived under it, and is renamed again to m_moved. The next tick
+-- discards [200, 300)'s chunk as an orphan (its relation lives on as m_moved, which archives afresh), and the
+-- retired [0, 100) under the same name stays.
+call t309.mk('m', 100);
+insert into t309.m select g, 'far' || g from generate_series(201, 203) g;
+update pgpm.config set archive_batch = null where parent_table = 't309.m'::regclass;
+select child_name as m0 from pgpm.part where parent_table = 't309.m'::regclass and lo = '0' \gset
+select child_name as m2 from pgpm.part where parent_table = 't309.m'::regclass and lo = '200' \gset
+call pgpm.maintain('t309.m');
+select ok(pgpm.retire('t309.m', :'m0'), 'LIVENESS: M: retire() dropped the covered partition [0, 100)');
+delete from pgpm.archive_ledger where parent_table = 't309.m'::regclass and lo = '200';
+select format('alter table t309.%I rename to %I', :'m2', :'m0') as ren_m \gset
+:ren_m;
+update pgpm.part set child_name = :'m0' where parent_table = 't309.m'::regclass and child_name = :'m2';
+call pgpm.maintain('t309.m');
+select is((select string_agg(format('%s [%s, %s) %s', child_name = :'m0', lo, hi, retired_at is not null), '; ' order by lo::numeric)
+             from pgpm.archive_ledger where parent_table = 't309.m'::regclass and lo in ('0', '200')),
+  't [0, 100) t; t [200, 300) f',
+  'LIVENESS: M: a retired and a live chunk are recorded under one name');
+select format('alter table t309.%I rename to m_moved', :'m0') as ren_m2 \gset
+:ren_m2;
+update pgpm.part set child_name = 'm_moved' where parent_table = 't309.m'::regclass and child_name = :'m0';
+call pgpm.maintain('t309.m');
+select is((select format('%s|%s', lo, rows) from pgpm.log where parent_table = 't309.m'::regclass and action = 'archive_coverage_reset'),
+  '200|1', 'LIVENESS: M: the tick discarded the renamed partition''s chunk as an orphan');
+select is((select format('%s|%s|%s', child_name, rows_archived, retired_at is not null) from pgpm.archive_ledger
+            where parent_table = 't309.m'::regclass and lo = '0'),
+          format('%s|90|t', :'m0'),
+  'M: the retired chunk under the same name stays');
 
 select * from finish();

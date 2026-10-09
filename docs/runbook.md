@@ -413,7 +413,8 @@ failure blocks that one partition on purpose (`retain_drop_failures` climbing in
    partitions at the head of the backlog -- not a failure, just run more maintenance ticks (or check
    `pgpm.archive_ledger`/`pgpm._archive_fully_covered` for that child directly). The one exception that more
    ticks never clear: a partition created over the range of a partition that was already archived and dropped
-   is held for good, so it stays in `retain_backlog` while retention goes on past it. Look for its one
+   (by retention or by hand), or a partition restored from a dump over chunks archived before the restore, is
+   held for good, so it stays in `retain_backlog` while retention goes on past it. Look for its one
    `skip_archive_retired_range` row in `pgpm.log`; `method` names the archived objects that are the only copy of
    the dropped rows, and the remedy (export the partition with `archive.to_s3`, then detach and drop it and
    delete its `pgpm.part` row). A flat `retain_backlog`
@@ -438,8 +439,14 @@ failure blocks that one partition on purpose (`retain_drop_failures` climbing in
    took it. When it is the partition itself come back as a new relation (restored from a dump under its
    own name, say) and still attached to the table, record that relation with
    `select pgpm.adopt_partition('public.events', 'public.<partition>')`: pgpm re-anchors the row to it,
-   discards any archive coverage recorded under the name (that coverage was earned by the relation that
-   is gone), and from the next tick write-blocks, archives and retires it like any other partition. It
+   and if the relation that is gone had no archived chunks, from the next tick write-blocks, archives and
+   retires it like any other partition. If it had, those chunks are the record of the only copy pgpm can
+   vouch for: they are marked retired (logged `archive_chunk_retired`), not discarded, and the restored
+   partition is held for good (one `skip_archive_retired_range` row; the archive step logs no
+   `fail_archive_identity` for it, and retention moves on past it). Its rows are in those objects only as
+   far as the chunks covered them and only if nothing was written to it after they were archived (a dump
+   taken while it was write-blocked); once you have confirmed that, detach and drop it and delete its
+   `pgpm.part` row, or export it first with `archive.to_s3`, which writes to a key of its own. It
    refuses a relation that is not attached to the table, one pgpm already records, and a range another
    `pgpm.part` row records; if that other row is stale too, delete it first. When the relation holding
    the name is not one pgpm should manage, detach it from the table first, then clear the stale row with

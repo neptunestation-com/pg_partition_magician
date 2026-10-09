@@ -4420,13 +4420,15 @@ begin
 end;
 $$;
 
--- The upgrade's half of the above, run once, when the column is added: a row recorded before it gets the oid
--- pgpm.part records for its name (the relation it was archived from, as far as pgpm knows); a row whose name no
--- tracked partition holds and no relation in the parent's schema has is marked retired, its relation gone
--- (dropped outside retire()); a row under an untracked name some relation still has stays as it was (null:
--- matched by name, and discarded by the orphan sweep as before). Then every row whose recorded oid no longer
--- exists is marked retired by pgpm._mark_gone_chunks. Not decidable, and not marked: a chunk of a partition
--- dropped by hand whose name a relation has taken since. Returns how many rows it marked retired.
+-- The upgrade's half of the above, run once, when the column is added. A row recorded before it gets the oid
+-- pgpm.part records for its name: the relation it was archived from, as far as pgpm knows. A row whose name no
+-- pgpm.part row records is marked retired, whether or not a relation has the name now: nothing vouches that such
+-- a relation is the one the chunk was read from (a partition dropped by hand and re-created under its own name
+-- has the name and none of the rows), and the safe side of not knowing is to hold whatever partition is adopted
+-- over the range, which the logged remedy recovers, rather than leave a row a later discard would delete and a
+-- later archive write over. Then every row whose recorded oid no longer exists is marked retired by
+-- pgpm._mark_gone_chunks. Left with no oid, and matched by name as before: only a row under a name whose
+-- pgpm.part row itself has no oid (unanchored). Returns how many rows it marked retired.
 create or replace function pgpm._backfill_chunk_oids() returns int language plpgsql as $$
 declare r record; v_n int;
 begin
@@ -4436,11 +4438,10 @@ begin
      and l.child_oid is null and l.retired_at is null and p.child_oid is not null;
   with gone as (
     update pgpm.archive_ledger l set retired_at = now()
-      from pgpm.config c join pg_class k on k.oid = c.parent_table join pg_namespace n on n.oid = k.relnamespace
+      from pgpm.config c
      where c.parent_table = l.parent_table and l.retired_at is null and l.child_oid is null
        and l.child_name is not null
        and not exists (select 1 from pgpm.part p where p.parent_table = l.parent_table and p.child_name = l.child_name)
-       and to_regclass(format('%I.%I', n.nspname, l.child_name)) is null
     returning 1)
   select count(*)::int into v_n from gone;
   for r in select distinct parent_table from pgpm.archive_ledger where retired_at is null and child_oid is not null loop
@@ -4808,7 +4809,8 @@ begin
       group by l.child_name',
     v_ncast, p_parent::text)
   loop
-    delete from pgpm.archive_ledger where parent_table = p_parent and child_name = r.child_name;
+    -- by name, as the query above grouped: a retired chunk under the same name stays (#1141)
+    delete from pgpm.archive_ledger where parent_table = p_parent and child_name = r.child_name and retired_at is null;
     insert into pgpm.log (parent_table, action, lo, hi, rows, method)
       values (p_parent, 'archive_coverage_reset', r.lo, r.hi, r.chunks,
               format('%s archived chunk(s) were recorded for %I.%I, which is no longer a tracked partition of %s, over a range a tracked partition now holds; nothing guarded that coverage across the change, so it is discarded and the partition holding the range archives from its own lo',

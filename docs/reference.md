@@ -2256,7 +2256,15 @@ name mean the right relation again. It counts in `status().retain_drop_failures`
 `retain_backlog` flat while that count climbs. Recovery is an operator decision. When the relation holding
 the name is the partition itself come back as a new relation (restored from a dump under its own name) and
 attached to the table, [`adopt_partition`](#adopt_partition) records it: the row is re-anchored to its oid
-and the partition is archived and retired like any other. When it is not one pgpm should manage, detach it
+and, if the relation it replaces had no archived chunks, the partition is archived and retired like any other.
+A partition restored this way whose earlier incarnation had archived chunks is the exception: those chunks
+name a relation that no longer exists, so they are marked retired (`archive_chunk_retired`), not discarded,
+and the restored partition is held for good like any partition over a retired chunk
+(`skip_archive_retired_range`, logged once; the archive step logs no `fail_archive_identity` for it, and
+retention moves on past it). Its rows are in those objects only as far as the chunks covered them and only if
+nothing was written to it after they were archived (a dump taken while it was write-blocked). Once you have
+confirmed that, detach and drop it and delete its `pgpm.part` row; otherwise export it first with
+`archive.to_s3`, which writes to a key of its own. When it is not one pgpm should manage, detach it
 and then delete the stale `pgpm.part` row (`delete from pgpm.part where parent_table = ... and child_name =
 ...`), after which the archive step moves on to the next partition. Deleting the row of a partition that
 stays attached clears the wedge and nothing else: the partition is then recorded by nothing, so its rows are
@@ -2690,7 +2698,9 @@ restored from a dump, so a restored partition over chunks its earlier incarnatio
 rows are already in their objects. The call is logged `adopt_partition`, with `method` naming the
 relation, its oid and, for a re-anchored row, the oid it replaced. It changes nothing but pgpm's own
 bookkeeping: no DDL, no rows read or moved. From the next tick the partition is write-blocked, archived and
-retired like any other.
+retired like any other, unless its range overlaps a chunk marked retired: then it is held as described above,
+and for a restored partition the remedy is to confirm its rows are in those chunks' objects and drop it by hand,
+or export it with `archive.to_s3` first.
 
 It refuses, writing nothing:
 
@@ -3455,10 +3465,12 @@ adopted, is held like any partition over a retired chunk (its rows are already i
 
 Re-running `install.sql` over an install that predates the columns adds them. `retired_at` is set on the
 chunks already retired where `pgpm.log` shows it: a row archived no later than a `retain_drop` logged over a
-range holding it. `child_oid` is set from the oid `pgpm.part` records for the row's name; a row whose name no
-tracked partition and no relation in the parent's schema has is marked retired (its partition dropped by hand),
-and so is a row whose recorded oid no longer exists. Not marked: a chunk of a partition dropped by hand whose
-name a relation has taken since, which keeps no oid and is matched by name as before.
+range holding it. `child_oid` is set from the oid `pgpm.part` records for the row's name. A row whose name no
+`pgpm.part` row records is marked retired, whether or not a relation has that name now: nothing vouches that the
+relation is the one the chunk was read from (a partition dropped by hand and re-created under its own name has
+the name and none of the rows), so a partition adopted over its range is held, recoverable by the logged remedy,
+rather than archived over the only copy. A row whose recorded oid no longer exists is marked retired too. The one
+row left with no oid, matched by name as before, is one under a name whose own `pgpm.part` row has no oid.
 
 ## Partition naming
 
