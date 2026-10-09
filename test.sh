@@ -1179,6 +1179,7 @@ run_perf() {
     "bench/regrain_capture_view_writer.sh pgpm_perf304"
     "bench/obtain_backoff_hole.sh pgpm_perf305"
     "bench/check_text_time_contract.sh pgpm_perf309"
+    "bench/hypertable_handoff_remedy.sh pgpm_perf111"
   )
   local selected=()
   local n=${#guards[@]} idx

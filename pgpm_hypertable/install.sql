@@ -2170,6 +2170,18 @@ begin
     insert into pgpm.log (parent_table, action, method) values (v_dest_oid, 'drop_incoming_fk', k.conname);
   end loop;
 
+  -- The retention this handoff passes transmute (p_retain, or the drop_chunks interval read above), RECORDED
+  -- HERE, in the swap transaction, for the same reason as the keys above (#1079). The handoff below can still
+  -- refuse after this commits, and the reference's remedy is the operator's own transmute call on the table;
+  -- the interval used to live only in v_retain, and the hypertable and its policy job go with the swap, so
+  -- that call registered the table with no retention at all. Recorded against v_dest_oid, the table this swap
+  -- puts in place, which transmute reads it by when called with p_retain null, and deletes when it registers
+  -- the table (pgpm.handoff). A row already under that oid (its table gone, the oid since reused) is replaced.
+  delete from pgpm.handoff where table_oid = v_dest_oid::oid;
+  if v_retain is not null then
+    insert into pgpm.handoff (table_oid, retain) values (v_dest_oid::oid, v_retain);
+  end if;
+
   -- What CREATE TABLE ... LIKE left off the copy (#787), read here, under the ACCESS EXCLUSIVE and with the
   -- source about to go, and replayed below once the copy has its name. See _from_hypertable_carried_ddl.
   v_carried_ddl := pgpm._from_hypertable_carried_ddl(p_hypertable);
