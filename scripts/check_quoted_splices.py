@@ -37,6 +37,10 @@ Only `text` locals are considered, which is why the declare blocks are parsed at
 format('%I.%I', v_nsp, p_child)::regclass` quotes identifiers on its way to an OID, and an OID is not
 a fragment anyone can splice wrong. Every DECLARE section of a body is read, a nested block's as well
 as the top level's (#1004: a quoted list declared in a nested block was never typed, so never checked).
+A local's type is its declared type with CONSTANT, COLLATE, NOT NULL and the initialiser set aside (#1096:
+`text default ''` was typed as that whole text, so never judged), and an initialiser (`:=`, `=` or DEFAULT)
+is an assignment like any other, for both checks. A body assignment is read wherever a statement starts,
+not only at the start of a line (#1031: `if p then v := quote_ident(x); end if;` was never read).
 
   ./scripts/check_quoted_splices.py            # check the module
   ./scripts/check_quoted_splices.py --selftest # prove the checks fail when their defect is present
@@ -151,23 +155,49 @@ def bodies(text: str):
         offset += len(chunk) + 2
 
 
-def declared_types(body: str) -> dict:
-    """Map local name -> the set of types it is declared with, over EVERY DECLARE section of the body.
+# Where a declaration's initialiser starts: PL/pgSQL takes `:=`, `=` and DEFAULT alike (#1096).
+DECL_INIT = re.compile(r"(?is):=|=|\bdefault\b")
+
+
+def declarations(body: str):
+    """Yield (name, type, initialiser or None, offset of the initialiser) for every local of EVERY
+    DECLARE section of the body.
 
     A nested `declare ... begin` block declares locals as real as the top-level ones, and reading only
     the first section left them untyped, so CHECK 1 never judged a quoted list declared there (issue
-    #1004). A name declared in more than one block keeps every type it is given: the checks ask whether
-    it is ever a `text` local, and the assignments are not scoped to the block that declares them.
+    #1004).
+
+    The type is the declaration's TYPE, not the rest of its text (#1096). PL/pgSQL reads
+    `name [constant] type [collate c] [not null] [{default | := | =} expr]`, and taking everything after
+    the name typed `v text default ''` as "text default ''", `v text not null` as "text not null" and
+    `v constant text` as "constant text", none of them `text`, so neither check ever judged them. The
+    initialiser is returned as an assignment of its own (#1031, A1031-3): `v_cols text :=
+    quote_ident(...)` gives v_cols its value exactly as a body assignment does.
+    """
+    for m in re.finditer(r"(?is)\bdeclare\b(.*?)\bbegin\b", body):
+        pos = m.start(1)
+        for decl in m.group(1).split(";"):
+            start, pos = pos, pos + len(decl) + 1
+            init = DECL_INIT.search(decl)
+            head = decl[:init.start()] if init else decl
+            head = re.sub(r"(?is)\bcollate\s+\S+|\bnot\s+null\b", " ", head)
+            parts = head.split()
+            if len(parts) >= 2 and parts[1].lower() == "constant":
+                del parts[1]
+            if len(parts) >= 2 and re.fullmatch(r"[a-z_][a-z0-9_]*", parts[0]):
+                expr = decl[init.end():].strip() if init else None
+                yield (parts[0], " ".join(parts[1:]).lower(), expr or None,
+                       start + (init.end() if init else 0))
+
+
+def declared_types(body: str) -> dict:
+    """Map local name -> the set of types it is declared with (see declarations()). A name declared in
+    more than one block keeps every type it is given: the checks ask whether it is ever a `text` local,
+    and the assignments are not scoped to the block that declares them.
     """
     types = {}
-    for m in re.finditer(r"(?is)\bdeclare\b(.*?)\bbegin\b", body):
-        for decl in m.group(1).split(";"):
-            decl = re.sub(r"(?s):=.*", "", decl).strip()
-            if not decl:
-                continue
-            parts = decl.split()
-            if len(parts) >= 2 and re.fullmatch(r"[a-z_][a-z0-9_]*", parts[0]):
-                types.setdefault(parts[0], set()).add(" ".join(parts[1:]).lower())
+    for name, typ, _, _ in declarations(body):
+        types.setdefault(name, set()).add(typ)
     return types
 
 
@@ -193,10 +223,15 @@ SELECT_INTO = re.compile(
     r"(?is)\bselect\b(?P<list>[^;]*?)\binto\b\s+(?:strict\s+)?"
     r"(?P<targets>[a-z_][a-z0-9_]*(?:\s*,\s*[a-z_][a-z0-9_]*)*)")
 
-# A plain assignment. Anchored to the start of a line: `:=` also appears in DECLARE initialisers
-# and in named-notation arguments (`p_x => ...` does not, but a default does), and a statement in
-# this module always begins its own line.
-ASSIGN = re.compile(r"(?im)^[ \t]*(?P<target>[a-z_][a-z0-9_]*)\s*:=\s*(?P<expr>[^;]+);")
+# A plain assignment: `name :=` where a STATEMENT starts, which is the start of the body, after a `;`,
+# or after the block keyword a statement can follow (`begin`, `then`, `else`, `loop`). Anchored there
+# rather than at the start of a line (#1031, A1031-3 and F8-01): `if p then v := quote_ident(x); end
+# if;` is a statement that does not begin its own line, and the line anchor never read it. `:=` also
+# appears in named-notation arguments (`f(p_x := ...)`), after a `(` or a `,`, which is no statement
+# start, and in DECLARE initialisers, which declarations() reads with the type between.
+ASSIGN = re.compile(
+    r"(?is)(?:\A|(?<=;)|(?<=\bbegin)|(?<=\bthen)|(?<=\belse)|(?<=\bloop))\s*"
+    r"\b(?P<target>[a-z_][a-z0-9_]*)\s*:=\s*(?P<expr>[^;]+);")
 
 
 def assignments(clean: str):
@@ -216,7 +251,11 @@ def assignments(clean: str):
             yield target, expr, m.start()
 
     for m in ASSIGN.finditer(clean):
-        yield m.group("target"), m.group("expr"), m.start()
+        yield m.group("target"), m.group("expr"), m.start("target")
+
+    for name, _, expr, pos in declarations(clean):
+        if expr is not None:
+            yield name, expr, pos
 
 
 def line_of(text: str, index: int) -> int:
@@ -283,6 +322,37 @@ $$;
 NESTED_MARKED_FIXTURE = NESTED_FIXTURE.replace("v_cols", "v_cols_q")
 LYING_FIXTURE = CLEAN_FIXTURE.replace("v_elig text", "v_elig_q text").replace("v_elig :=", "v_elig_q :=")
 
+# Review pass 10 and #1031: the #409 shape in the three places the parser did not read it. Each body
+# assigns one quoted list, unmarked, and the marked twin of each must pass check 1 and still be counted
+# (a twin that starts out as '' is check 2's business, judged below).
+SHAPE_BODY = """
+create or replace function h(p_on boolean) returns bigint language plpgsql as $$
+declare v_nsp name := 'public'; {decl}; v_n bigint;
+begin
+  {stmt}
+  execute format('select count(*) from (select %s from %I.t) s', v_cols, v_nsp) into v_n;
+  return v_n;
+end;
+$$;
+"""
+SHAPES = {
+    # #1096 (F8-04): the type is `text`, whatever follows it or precedes it in the declaration
+    "declared `text default ''`": ("v_cols text default ''", "v_cols := quote_ident('c');"),
+    "declared `text not null := ''`": ("v_cols text not null := ''", "v_cols := quote_ident('c');"),
+    "declared `constant text`": ("v_cols constant text := quote_ident('c')", "null;"),
+    # #1031 A1031-3 (G21): the DECLARE initialiser is an assignment, in either spelling
+    "quoted in its DECLARE initialiser": ("v_cols text := quote_ident('c')", "null;"),
+    "quoted in a DEFAULT initialiser": ("v_cols text default format('%I', 'c')", "null;"),
+    # #1031 (F8-01): a statement that does not begin its own line
+    "assigned in a one-line if": ("v_cols text", "if p_on then v_cols := quote_ident('c'); end if;"),
+}
+
+
+def shape_fixture(name: str, marked: bool) -> str:
+    decl, stmt = SHAPES[name]
+    src = SHAPE_BODY.format(decl=decl, stmt=stmt)
+    return src.replace("v_cols", "v_cols_q") if marked else src
+
 
 def selftest() -> int:
     """Prove both checks fail when their defect is present. A check only verified against correct
@@ -345,6 +415,52 @@ def selftest() -> int:
         failures += 1
     else:
         print("SELFTEST PASS  check 2 catches a _q suffix on an unquoted value")
+
+    for name in SHAPES:
+        v, _ = check_text("shape.sql", shape_fixture(name, False))
+        mv, mq = check_text("shape_q.sql", shape_fixture(name, True))
+        if not any("not _q-suffixed" in x and "v_cols " in x for x in v):
+            print(f"SELFTEST FAIL  check 1 did not catch an unmarked quoted list {name}")
+            failures += 1
+        elif any("not _q-suffixed" in x for x in mv) or mq != 1:
+            print(f"SELFTEST FAIL  the marked twin of a quoted list {name} should pass check 1 and be counted "
+                  f"once, saw {mq} quoting assignment(s) and {mv}")
+            failures += 1
+        else:
+            print(f"SELFTEST PASS  check 1 catches an unmarked quoted list {name}; its marked twin passes it")
+
+    # #1096: check 2 reads the same declarations, so an unearned _q declared `text default ''` is judged
+    lying_default = SHAPE_BODY.format(decl="v_cols_q text default ''",
+                                      stmt="v_cols_q := 'nothing quoted here';").replace("v_cols,", "v_cols_q,")
+    v, _ = check_text("lying_default.sql", lying_default)
+    if not any("nothing in its assignment" in x and "v_cols_q" in x for x in v):
+        print("SELFTEST FAIL  check 2 did not catch a _q suffix on an unquoted value declared `text default ''`")
+        failures += 1
+    else:
+        print("SELFTEST PASS  check 2 catches a _q suffix on an unquoted value declared `text default ''`")
+
+    # An initialiser is an assignment for check 2 as well: a _q local that starts out as '' holds nothing
+    # quoted, exactly as `v_q := ''` in the body does
+    lying_init = SHAPE_BODY.format(decl="v_cols_q text := ''", stmt="null;").replace("v_cols,", "v_cols_q,")
+    v, _ = check_text("lying_init.sql", lying_init)
+    if not any("nothing in its assignment" in x and "v_cols_q" in x for x in v):
+        print("SELFTEST FAIL  check 2 did not judge a _q local's DECLARE initialiser")
+        failures += 1
+    else:
+        print("SELFTEST PASS  check 2 judges a _q local's DECLARE initialiser")
+
+    # A named-notation argument is not an assignment, though it sits in a statement after `then`: an
+    # unmarked text local named as the argument must not be judged, while the statement beside it is
+    named = SHAPE_BODY.format(decl="v_cols_q text; v_arg text",
+                              stmt="if p_on then perform g(v_arg := quote_ident('c')); end if; "
+                                   "v_cols_q := quote_ident('d');").replace("v_cols,", "v_cols_q,")
+    v, q = check_text("named.sql", named)
+    if v or q != 1:
+        print(f"SELFTEST FAIL  a named-notation argument beside a marked assignment: expected no violation and "
+              f"the assignment counted once, saw {q} quoting assignment(s) and {v}")
+        failures += 1
+    else:
+        print("SELFTEST PASS  a named-notation argument is not read as an assignment")
 
     print()
     if failures:

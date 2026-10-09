@@ -10921,6 +10921,47 @@ MUTATIONS["hypertable_copy_rerun_dest_by_name"] = (
 MUTATION_SRC["hypertable_copy_rerun_dest_by_name"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_copy_rerun_dest_by_name"] = "timescale"
 
+# Issues #1094, #1096 and #1031 (bullet A1031-3, with F8-01): the two source lints CLAUDE.md says fail CI judge
+# the value, not its spelling. Their defects live in the scripts, so that is what these mutate.
+MUTATIONS["archive_keys_quoted_ident_spelled"] = (
+    "bench/lint_value_not_spelling.sh",
+    "Pre-#1094 scripts/check_archive_object_keys.py: the lexer keeps a double-quoted identifier's quotes, so "
+    "cfg.\"prefix\", the same column as cfg.prefix, is no prefix reference and a second object key assembled "
+    "from it passes the lint. One site, the lexer's identifier token.",
+    [('            toks.append(("ID", canonical(m.group(0)), line))\n',
+      '            toks.append(("ID", m.group(0).lower(), line))\n', 1)],
+)
+MUTATION_SRC["archive_keys_quoted_ident_spelled"] = "scripts/check_archive_object_keys.py"
+MUTATIONS["quoted_splices_type_rest_of_decl"] = (
+    "bench/lint_value_not_spelling.sh",
+    "Pre-#1096 scripts/check_quoted_splices.py: only `:=` ends a declaration's type, so a local declared "
+    "`text default ''` is typed \"text default ''\", never `text`, and neither check judges what it is "
+    "assigned (an unmarked quoted list passes, and so does an unearned _q). One site, the initialiser pattern.",
+    [('DECL_INIT = re.compile(r"(?is):=|=|\\bdefault\\b")\n', 'DECL_INIT = re.compile(r"(?is):=")\n', 1)],
+)
+MUTATION_SRC["quoted_splices_type_rest_of_decl"] = "scripts/check_quoted_splices.py"
+MUTATIONS["quoted_splices_assign_line_anchored"] = (
+    "bench/lint_value_not_spelling.sh",
+    "Pre-#1031 (F8-01) scripts/check_quoted_splices.py: a body assignment is read only where it begins its own "
+    "line, so `if p then v_cols := quote_ident(c); end if;` is never judged and an unmarked quoted list "
+    "assigned there passes. One site, the assignment pattern's anchor.",
+    [('    r"(?is)(?:\\A|(?<=;)|(?<=\\bbegin)|(?<=\\bthen)|(?<=\\belse)|(?<=\\bloop))\\s*"\n',
+      '    r"(?im)^[ \\t]*"\n', 1)],
+)
+MUTATION_SRC["quoted_splices_assign_line_anchored"] = "scripts/check_quoted_splices.py"
+MUTATIONS["quoted_splices_initialiser_unread"] = (
+    "bench/lint_value_not_spelling.sh",
+    "Pre-#1031 (A1031-3) scripts/check_quoted_splices.py: a DECLARE initialiser is not an assignment, so "
+    "`v_cols text := quote_ident(c)` is never judged and an unmarked quoted list initialised there passes. One "
+    "site, the initialisers assignments() yields.",
+    [("""
+    for name, _, expr, pos in declarations(clean):
+        if expr is not None:
+            yield name, expr, pos
+""", "", 1)],
+)
+MUTATION_SRC["quoted_splices_initialiser_unread"] = "scripts/check_quoted_splices.py"
+
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

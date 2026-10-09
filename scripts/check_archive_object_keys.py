@@ -18,7 +18,10 @@ and the check follows that value rather than a spelling of it (#914: the rule th
 prefix only by the names `prefix` and `p_prefix` beside `||`, so a scalar subquery or a helper whose
 parameter had another name assembled a second key it passed). A PREFIX REFERENCE is
 
-  * the column, however qualified (`prefix`, `cfg.prefix`, `excluded.prefix`), or `p_prefix`;
+  * the column, however qualified and however quoted (`prefix`, `cfg.prefix`, `excluded.prefix`,
+    `cfg."prefix"`, `archive.config.prefix`), or `p_prefix`. Identifiers are compared as the names they
+    denote, not as spelled (#1094: the lexer kept a double-quoted part's quotes, so `cfg."prefix"`, the
+    same column, was no prefix reference at all and a second key built from it passed);
   * a parameter of a function this file defines, whatever its name, when some call in the file hands
     that parameter a prefix reference (by position or by name). That is a fixed point: a parameter
     that carries it can hand it on to the next function's parameter;
@@ -72,8 +75,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TARGET = "pgpm_archive/install.sql"
 
-# The names a key prefix goes by in this file: the column and the parameter that carries it.
-PREFIX_NAME = re.compile(r"^(?:[a-z_][a-z0-9_]*\.)?(?:p_)?prefix$")
+# The names a key prefix goes by in this file: the column and the parameter that carries it, matched on
+# the canonical() token, so behind any qualifier, quoted or not, and however many parts it has.
+PREFIX_NAME = re.compile(r'^(?:(?:[a-z_][a-z0-9_$]*|"(?:[^"]|"")*")\.)*(?:p_)?prefix$')
 CLAIM_TABLE = "archive.object_key_owner"
 # A prefix reference followed by one of these is a declaration (a parameter, a column, a local).
 TYPE_WORDS = {"text", "varchar", "character", "name"}
@@ -98,8 +102,32 @@ NOT_BARE = {"is", "like", "ilike", "in", "not", "between", "similar", "and", "or
 STATEMENT_STARTS = {";", "begin", "then", "else", "loop", "declare"}
 # The floor: fewer prefix references than this and the lexer is no longer reading the module.
 MIN_PREFIX_REFS = 8
+# Every word the scanner reads as a keyword; a lone double-quoted one is an identifier and stays quoted.
+KEYWORDS = NOT_CALLS | RELATION_BEFORE | PARAM_MODES | CLAUSE_WORDS | NOT_BARE | STATEMENT_STARTS | {
+    "function", "procedure", "create", "replace", "execute", "loop", "distinct", "e"}
 
 IDENT = re.compile(r'(?:[A-Za-z_][A-Za-z0-9_$]*|"(?:[^"]|"")*")(?:\.(?:[A-Za-z_][A-Za-z0-9_$]*|"(?:[^"]|"")*"|\*))*')
+IDENT_PART = re.compile(r'[A-Za-z_][A-Za-z0-9_$]*|"(?:[^"]|"")*"|\*')
+PLAIN = re.compile(r"[a-z_][a-z0-9_$]*")
+
+
+def canonical(ident):
+    """An identifier as the name it denotes (#1094): each part case-folded when bare and unquoted when
+    double-quoted, so `cfg."prefix"` is `cfg.prefix`, the same column, and not a spelling the checker
+    passes. A quoted part that would not read back as the same name bare keeps its quotes: `"Prefix"` is
+    another column, and `"a.b"` one name, not a qualified one. So does a lone quoted word the scanner
+    reads as a keyword (`"select"` is a column, not a clause)."""
+    parts = []
+    for p in IDENT_PART.findall(ident):
+        if p.startswith('"'):
+            inner = p[1:-1].replace('""', '"')
+            p = inner if PLAIN.fullmatch(inner) else p
+        else:
+            p = p.lower()
+        parts.append(p)
+    if len(parts) == 1 and parts[0] in KEYWORDS and ident.startswith('"'):
+        return ident
+    return ".".join(parts)
 
 
 def lex(src):
@@ -161,7 +189,7 @@ def lex(src):
                 continue
         m = IDENT.match(src, i)
         if m:
-            toks.append(("ID", m.group(0).lower(), line))
+            toks.append(("ID", canonical(m.group(0)), line))
             i = m.end()
             continue
         for op in ("||", ":=", "::", "<>", ">=", "<=", "=>", "!="):
@@ -746,6 +774,42 @@ end;
 $$;
 """)
 
+# Real instance: review pass 10 (F8-02, issue #1094). The column double-quoted, then behind a quoted
+# qualifier, then qualified by schema and table: each is the same column, and a second key built from it
+# is a second key. "Prefix" is ANOTHER column (a quoted name keeps its case), so building from it is not.
+QUOTED_COLUMN_SECOND = with_extra(r"""
+create or replace function archive.to_s3_parquet(p_parent regclass, p_child name) returns void language plpgsql as $$
+declare cfg archive.config; v_key text;
+begin
+  select * into cfg from archive.config where parent_table = p_parent;
+  v_key := cfg."prefix" || quote_ident(p_child) || '.parquet';
+end;
+$$;
+""")
+QUOTED_QUALIFIER_SECOND = with_extra(r"""
+create or replace function archive._quoted_cfg_key(p_parent regclass, p_child name) returns text language plpgsql as $$
+declare "Cfg" archive.config;
+begin
+  select * into "Cfg" from archive.config where parent_table = p_parent;
+  return "Cfg".prefix || quote_ident(p_child);
+end;
+$$;
+""")
+SCHEMA_QUALIFIED_SECOND = with_extra(r"""
+create or replace function archive._qualified_key(p_parent regclass, p_child name) returns text language sql as $$
+  select archive.config.prefix || quote_ident(p_child) from archive.config where parent_table = p_parent;
+$$;
+""")
+OTHER_COLUMN_QUOTED = with_extra(r"""
+create or replace function archive._other_column(p_parent regclass, p_child name) returns text language plpgsql as $$
+declare cfg record;
+begin
+  select 'x' as "Prefix" into cfg;
+  return cfg."Prefix" || quote_ident(p_child);
+end;
+$$;
+""")
+
 NO_CLAIM = CLEAN.replace("""  insert into archive.object_key_owner (key_base, parent_oid) values (v_base_q, p_parent::oid)
     on conflict (key_base) do nothing returning parent_oid into v_owner;
 """, "")
@@ -802,6 +866,14 @@ def selftest():
            True, owner="archive._owned_key")
     expect("an unpaired parenthesis in an executed literal does not hide the format() around it",
            UNPAIRED_PAREN_SECOND, False, "archive._split_key (line")
+    expect("F8-02: a second assembly from the double-quoted column cfg.\"prefix\"", QUOTED_COLUMN_SECOND,
+           False, "archive.to_s3_parquet (line")
+    expect("a second assembly from the column behind a quoted qualifier", QUOTED_QUALIFIER_SECOND, False,
+           "archive._quoted_cfg_key (line")
+    expect("a second assembly from the column qualified by schema and table", SCHEMA_QUALIFIED_SECOND, False,
+           "archive._qualified_key (line")
+    expect("a quoted \"Prefix\" is another column, not the prefix", OTHER_COLUMN_QUOTED, True,
+           owner="archive._owned_key")
     expect("the one assembling function never claims", NO_CLAIM, False, "never names archive.object_key_owner")
     expect("no assembly visible at all", NO_ASSEMBLY, False, "no function assembles")
 

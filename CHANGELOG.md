@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+- **The archive object-key lint follows the prefix column however it is quoted** (#1094).
+  `scripts/check_archive_object_keys.py` recognised the prefix by its token's spelling, and its lexer kept a
+  double-quoted identifier's quotes, so a second object key assembled from `cfg."prefix"`, the same column as
+  `cfg.prefix`, passed it. The lexer now emits each identifier as the name it denotes (a bare part case-folded,
+  a quoted part unquoted when it reads back as the same name, `"Prefix"` and `"a.b"` left quoted as the other
+  names they are), and the prefix is matched behind any qualifier (`"Cfg".prefix`, `archive.config.prefix`).
+  The module reads exactly as before (18 prefix references, one owner). Guard
+  `bench/lint_value_not_spelling.sh`, mutation `archive_keys_quoted_ident_spelled`.
+
+- **The `_q` lint types a local by its declared type** (#1096). `scripts/check_quoted_splices.py` took all the
+  text after a local's name as its type, with only a `:=` initialiser set aside, so a quoted list declared
+  `text default ''`, `text not null := ''` or `constant text` was never a `text` local and neither check judged
+  it. CONSTANT, COLLATE, NOT NULL and the initialiser (`:=`, `=` or DEFAULT) are now set aside first. Guard
+  `bench/lint_value_not_spelling.sh`, mutation `quoted_splices_type_rest_of_decl`.
+
+- **The `_q` lint reads every assignment** (#1031, bullet A1031-3). `scripts/check_quoted_splices.py` read an
+  assignment only where it began its own line, so `if p then v_cols := quote_ident(c); end if;` and a DECLARE
+  initialiser `v_cols text := quote_ident(c)` were never judged. A body assignment is now read wherever a
+  statement starts (the start of the body, after `;`, `begin`, `then`, `else` or `loop`), and every initialiser
+  is an assignment for both checks, so a `_q` local initialised to `''` is refused as `v_q := ''` already was.
+  The three install files judge 42 more assignments, none of them a violation. Guard
+  `bench/lint_value_not_spelling.sh`, mutations `quoted_splices_assign_line_anchored` and
+  `quoted_splices_initialiser_unread`.
+
 - **A bound refusal offers a smaller step only when one would work** (#1088). `_control_bound_contract`'s
   refusal of a fresh monolith bound the `id` column cannot store always ended "or use a smaller step", also when
   the newest key was the type's maximum (`9999` on a `numeric(4,0)` key): the bound's `hi` is the grid line
