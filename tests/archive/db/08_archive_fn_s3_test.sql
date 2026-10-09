@@ -15,7 +15,13 @@
 -- retain_batch is forced to 0 on both fixtures so pgpm.maintain()'s own pgpm.retain() call never
 -- drops what this test wants to keep inspecting via pgpm.part/_archive_fully_covered afterward --
 -- this test is about the archive_fn adapter, not retire()'s drop precondition (tests/64 covers that).
-select plan(19);
+--
+-- Both formats are read back (issue #1093). The Parquet half used to assert only the ledger's own
+-- bookkeeping (rows_archived, a .parquet key, an ETag), so it stayed green against a transport that
+-- uploaded the 4-byte magic PAR1 and reported 5000 rows. Each Parquet object is now fetched from MinIO
+-- and compared, byte for byte, with the file of the rows its range holds (as tests/archive/db/15 and 31
+-- read theirs back): Part B per ledger row, Parts C and D for their direct calls.
+select plan(22);
 
 -- --- Part A: pgpm.archive_to_s3_ndjson -------------------------------------------------
 
@@ -96,6 +102,33 @@ select is(
     (select s3_key from pgpm.archive_ledger where parent_table = 'public.a8'::regclass and lo = '0')),
   5000, 'the monolith''s uploaded NDJSON object round-trips exactly 5000 lines');
 
+-- The object at p_key, fetched straight back from MinIO. pgsql-http hands binary content back as text;
+-- text_to_bytea reverses that byte for byte.
+create function pgpm_test08.fetch_object(p_parent regclass, p_key text) returns bytea
+language plpgsql as $$
+declare cfg archive.config; v_key_id text; v_secret text; v_resp http_response;
+begin
+  select * into cfg from archive.config where parent_table = p_parent;
+  select decrypted_secret into v_key_id from vault.decrypted_secrets where name = cfg.vault_key_id;
+  select decrypted_secret into v_secret from vault.decrypted_secrets where name = cfg.vault_secret;
+  v_resp := archive.s3_signed_request('GET', cfg.endpoint, cfg.bucket, cfg.region, p_key, '', 'text/plain', '', v_key_id, v_secret);
+  if v_resp.status not between 200 and 299 then
+    raise exception 'fetch of % failed: HTTP %', p_key, v_resp.status;
+  end if;
+  return text_to_bytea(v_resp.content);
+end;
+$$;
+
+-- Whether the object at p_key is the Parquet file of p_parent's rows in [p_lo, p_hi), byte for byte: the file
+-- archive._pq_to_parquet_range encodes from the rows that range holds now (nothing writes them after the
+-- export), under the table's own compress setting.
+create function pgpm_test08.parquet_object_holds(p_parent regclass, p_key text, p_lo text, p_hi text) returns boolean
+language sql as $$
+  select pgpm_test08.fetch_object(p_parent, p_key)
+         = archive._pq_to_parquet_range(p_parent, 'id', p_lo, p_hi,
+                                        (select compress from archive.config where parent_table = p_parent));
+$$;
+
 -- --- Part B: pgpm.archive_to_s3_parquet -------------------------------------------------
 
 call mk_archive_table('a8p', 5000, 1000, 3000, p_paused => false);
@@ -125,6 +158,13 @@ select is(
 select ok(
   pgpm._archive_fully_covered('public.a8p', (select child_name from pgpm.part where parent_table = 'public.a8p'::regclass and lo = '0')),
   'the monolith is fully covered after the single tick (parquet)');
+
+select is(
+  (select string_agg(lo || ':' || rows_archived || ':' || pgpm_test08.parquet_object_holds(parent_table, s3_key, lo, hi),
+                     ',' order by lo::bigint)
+     from pgpm.archive_ledger where parent_table = 'public.a8p'::regclass),
+  '0:5000:true,6000:5:true,7000:5:true',
+  'each Parquet object, fetched back from MinIO, is the file of its chunk''s rows: the monolith''s 5000 and the two live 5s');
 
 -- --- Part C: text_time bounds carry their stored codec configuration -------------------
 
@@ -189,6 +229,12 @@ select ok(
   (select rows_archived = 2 and s3_key like '%.parquet' and etag is not null from a8t_parquet_result),
   'Parquet text_time strategy reports the same live two-row range');
 
+select ok(
+  pgpm_test08.parquet_object_holds('public.a8t', (select s3_key from a8t_parquet_result),
+    pgpm._ts_to_text_time('2026-01-01 00:00:00+00', 't', 8, 16, 's', '0123456789ABCDEF', 4, '2026-01-01 00:00:00+00'),
+    pgpm._ts_to_text_time('2026-03-01 00:00:00+00', 't', 8, 16, 's', '0123456789ABCDEF', 4, '2026-01-01 00:00:00+00')),
+  'the Parquet text_time object, fetched back from MinIO, is the file of the two in-range rows');
+
 -- --- Part D: a PascalCase (quoted-identifier) table name survives the S3 key -----------
 
 -- archive._encode_upload_ndjson_single/_encode_upload_parquet build their S3 key from
@@ -229,5 +275,9 @@ select (r).* from (select pgpm.archive_to_s3_parquet('public."A8Pascal"'::regcla
 select ok(
   (select rows_archived = 50 and s3_key like '%.parquet' and etag is not null from a8pascal_parquet_result),
   'Parquet archive of a PascalCase (quoted-identifier) table succeeds too');
+
+select ok(
+  pgpm_test08.parquet_object_holds('public."A8Pascal"', (select s3_key from a8pascal_parquet_result), '0', '51'),
+  'the PascalCase table''s Parquet object, fetched back from MinIO under its quoted key, is the file of its 50 rows');
 
 select * from finish();

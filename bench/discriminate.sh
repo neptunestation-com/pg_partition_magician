@@ -15,8 +15,8 @@
 # require the guard to FAIL. A guard that stays green on its own mutant is not testing anything.
 #
 # Usage: discriminate.sh [--track=NAME] <container> [<archive container>]
-# The second container is only needed for mutations scoped to pgpm_archive/install.sql (which
-# requires the archive track's own image -- pgsql-http isn't in the plain core image); a mutation
+# The second container is only needed for mutations scoped to pgpm_archive/install.sql or to a file under
+# tests/archive/ (which require the archive track's own image -- pgsql-http isn't in the plain core image); a mutation
 # whose src needs it, with no such container supplied, is a FAILURE of this check, not a skip --
 # same principle as a stale pattern: a guard this script never actually ran is unverified.
 #
@@ -157,7 +157,8 @@ while IFS=$'\t' read -r name guard why src <&3; do
   printf '\n--- %s\n    breaks: %s\n    src: %s\n    defect: %s\n' "$name" "$guard" "$src" "$why"
 
   case "$src" in
-    pgpm_archive/install.sql) target_c="$CA" ;;
+    # A test file of the archive track runs where its module does (#1093: tests/archive/db/08's mutant).
+    pgpm_archive/install.sql|tests/archive/*) target_c="$CA" ;;
     *) target_c="$C" ;;
   esac
   if [ -z "$target_c" ]; then

@@ -580,6 +580,12 @@ run_timescale() {
     # clean-code half of the pair discriminate.sh completes with its two isolation mutants.
     echo "--- from_hypertable refuses a stricter isolation level before the copy and the swap (issue #1105) ---"
     bash "$(dirname "$0")/bench/hypertable_isolation_refused.sh" pgpm_test-timescale pgpm_tsiso || fail=1
+    # #1091's guard, the same way: tests_fail_on_defect.sh judges tests/timescale/db/33 only when named, so the
+    # clean-code half of the pair discriminate.sh completes with hypertable_cutover_capture_fn_drop_concatenated
+    # runs here, on this container.
+    echo "--- tests/timescale/db/33 fails when the cutover keeps the capture function (issue #1091) ---"
+    bash "$(dirname "$0")/bench/tests_fail_on_defect.sh" pgpm_test-timescale pgpm_perf121 \
+      /repo/tests/timescale/db/33_from_hypertable_cutover_carries_access_test.sql || fail=1
 
     echo "--- discriminate (timescale-scoped mutations) ---"
     bash "$(dirname "$0")/bench/discriminate.sh" --track=timescale pgpm_test-timescale || fail=1
@@ -937,6 +943,10 @@ run_archive() {
   # claim row left unlocked before the ledger lookup.
   echo "--- a direct archive_fn call racing a tick on the same chunk is refused guard (issue #1069) ---"
   bash "$(dirname "$0")/bench/archive_recorded_chunk_tick_race.sh" pgpm_test-archive pgpm_g1race || fail=1
+  # The read-back guard (#1093) re-runs tests/archive/db/08 for the same reason: the clean-code half of the pair
+  # bench/discriminate.sh completes with archive_fn_parquet_readback_trusted.
+  echo "--- tests/archive/db/08 reads its Parquet objects back guard (issue #1093) ---"
+  bash "$(dirname "$0")/bench/archive_fn_s3_readback.sh" pgpm_test-archive pgpm_perf123 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi
@@ -1065,7 +1075,7 @@ run_perf() {
     "bench/reread_under_lock_tap.sh pgpm_perf89"
     "bench/reread_under_lock_remaining_tap.sh pgpm_perf319"
     "bench/frontier_malformed_max.sh pgpm_perf111"
-    "bench/transmute_resume_control_column.sh pgpm_perf121"
+    "bench/transmute_resume_control_column.sh pgpm_perf320"
     "bench/dropped_fk_reconcile.sh pgpm_perf109"
     "bench/regrain_target_shape.sh pgpm_perf97"
     "bench/regrain_target_integral.sh pgpm_perf98"
@@ -1078,7 +1088,7 @@ run_perf() {
     "bench/transmute_uncarriable_shapes.sh pgpm_perf127"
     "bench/transmute_key_deferrability.sh pgpm_perf128"
     "bench/maintain_sweep_reads_tap.sh pgpm_perf138"
-    "bench/regrain_reconcile_identity.sh pgpm_perf123"
+    "bench/regrain_reconcile_identity.sh pgpm_perf321"
     "bench/regrain_child_oid_sites.sh pgpm_perf124"
     "bench/retain_recall_armed_detach.sh pgpm_perf145"
     "bench/moved_parent_lifecycle.sh pgpm_perf148"
