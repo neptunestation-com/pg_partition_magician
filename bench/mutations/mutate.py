@@ -338,8 +338,29 @@ TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the N
   -- pgpm_monolith_bound CHECK (already validated on p_parent by phase 2), which must NOT constrain the
   -- parent (it would reject any row at/after B), so drop it from the parent immediately; the monolith keeps
   -- its own copy for the metadata-only attach below, dropped separately afterward.
-  execute format('create table %I.%I (like %s including defaults including generated including storage including constraints) partition by range (%I)',
-                 v_nsp, v_staging, p_parent::text, p_control);
+  --
+  -- The staging name is asked again from this CREATE's own failure (#1080, #1105): a relation or a type
+  -- committed at it since the preflight fails the CREATE with 42P07 or 42710, and one a still-open
+  -- transaction is creating makes it wait (up to this phase's lock_timeout) and fail with 23505 (or XX000)
+  -- once that commits; either way the helpers then see the holder and refuse in pgpm's words, the
+  -- preflight's for the staging name itself, _transmute_refuse_names_held's for the rest it takes.
+  v_pre_names := pgpm._transmute_names_present(v_nsp, array[v_staging]);
+  begin
+    execute format('create table %I.%I (like %s including defaults including generated including storage including constraints) partition by range (%I)',
+                   v_nsp, v_staging, p_parent::text, p_control);
+  exception
+    when duplicate_table or duplicate_object or unique_violation then
+      perform pgpm._transmute_refuse_staging_squatter(v_nsp, v_staging);
+      perform pgpm._transmute_refuse_names_held(v_nsp, array[v_staging],
+        format('CREATE of the new parent %I.%I', v_nsp, v_staging));
+      raise;
+    when internal_error then
+      if sqlerrm = 'tuple concurrently updated' then   -- a new holder only, see _transmute_refuse_names_held
+        perform pgpm._transmute_refuse_names_held(v_nsp, array[v_staging],
+          format('CREATE of the new parent %I.%I', v_nsp, v_staging), p_skip => v_pre_names);
+      end if;
+      raise;
+  end;
   v_parent := format('%I.%I', v_nsp, v_staging)::regclass;
   execute format('alter table %s drop constraint if exists pgpm_monolith_bound', v_parent::text);
   -- 0b (owner, RLS). After the LIKE, under its ACCESS SHARE (see 0b).
@@ -556,8 +577,9 @@ MAINTAIN_NO_COMMITS_EDITS = [
 # transmute's two #509 precondition blocks. Each is one contiguous block anchored on its opening comment
 # AND its closing raise, so a rewrite of anything between them fails the count instead of quietly yielding
 # a clean copy. The shape block is the four refusals (pgpm.config row, relkind, partition or inheritance
-# child, inheritance parent) between the nsp/rel lookup and `v_default :=`; the name block is the
-# to_regclass check on the monolith's own name, just after the claim has made the bound final.
+# child, inheritance parent) between the nsp/rel lookup and `v_default :=`; the name block is the check on
+# the monolith's own name (relation and type, _transmute_refuse_monolith_squatter), just after the claim has
+# made the bound final.
 TRANSMUTE_SHAPE_PRECONDITION_RE = re.compile(
     r"  -- #509: transmute converts an ORDINARY table, once\..*?"
     r"refuses to attach an inheritance parent as a partition\.',\n"
@@ -567,7 +589,7 @@ TRANSMUTE_SHAPE_PRECONDITION_RE = re.compile(
 )
 TRANSMUTE_MONOLITH_NAME_RE = re.compile(
     r"  -- #509: the cutover RENAMEs the table to this name.*?"
-    r"      v_nsp, v_monolith, v_lo_native, v_hi_native;\n  end if;\n",
+    r"  perform pgpm\._transmute_refuse_monolith_squatter\(v_nsp, v_monolith, v_lo_native, v_hi_native\);\n",
     re.DOTALL,
 )
 # The three places #511 made pgpm.archive_ledger follow the partition rather than a stale name, each
@@ -2068,10 +2090,10 @@ MUTATIONS = {
         "the FIRST 'partition by range' in _transmute's source, which is a preamble comment, so it passed this "
         "copy (12231 < 96413); transmute_cutover_late_build moves the RLS replay too and so never tested that "
         "check. The copy installs (plpgsql bodies are not resolved at CREATE), which is all the guard reads.",
-        [("  execute format('create table %I.%I (like %s including defaults including generated including storage including constraints) partition by range (%I)',\n"
-          "                 v_nsp, v_staging, p_parent::text, p_control);\n", "", 1),
-         ("  execute format('alter table %s rename to %I', v_parent::text, v_rel);\n",
-          "  execute format('alter table %s rename to %I', v_parent::text, v_rel);\n"
+        [("    execute format('create table %I.%I (like %s including defaults including generated including storage including constraints) partition by range (%I)',\n"
+          "                   v_nsp, v_staging, p_parent::text, p_control);\n", "", 1),
+         ("    execute format('alter table %s rename to %I', v_parent::text, v_rel);\n",
+          "    execute format('alter table %s rename to %I', v_parent::text, v_rel);\n"
           "  execute format('create table %I.%I (like %s including defaults including generated including storage including constraints) partition by range (%I)',\n"
           "                 v_nsp, v_staging, p_parent::text, p_control);\n", 1)],
     ),
@@ -2094,8 +2116,8 @@ MUTATIONS = {
         "parent exactly as it failed on the staging parent. Only the capture check can catch it; the copy "
         "installs, which is all the guard reads.",
         [(TRANSMUTE_POLICY_CAPTURE, "", 1),
-         ("  execute format('alter table %s rename to %I', v_parent::text, v_rel);\n",
-          "  execute format('alter table %s rename to %I', v_parent::text, v_rel);\n" + TRANSMUTE_POLICY_CAPTURE, 1)],
+         ("    execute format('alter table %s rename to %I', v_parent::text, v_rel);\n",
+          "    execute format('alter table %s rename to %I', v_parent::text, v_rel);\n" + TRANSMUTE_POLICY_CAPTURE, 1)],
     ),
     "transmute_policies_on_staging": (
         "bench/transmute_self_naming_policy.sh",
@@ -3149,10 +3171,10 @@ $$;''',
         "replicated. The up-front refusal of a filtered leaf-publishing membership is left in place, "
         "so the mutant is exactly 'the membership is not carried', and tests/132's membership and "
         "pg_publication_tables assertions are what catch it.",
-        [("""    execute format('alter publication %I add table %s%s%s', v_pub.pubname, v_parent::text,
-                   case when v_pub.cols_q is not null then ' (' || v_pub.cols_q || ')' else '' end,
-                   case when v_pub.qual is not null then ' where (' || v_pub.qual || ')' else '' end);
-""", "    null;\n", 1)],
+        [("""      execute format('alter publication %I add table %s%s%s', v_pub.pubname, v_parent::text,
+                     case when v_pub.cols_q is not null then ' (' || v_pub.cols_q || ')' else '' end,
+                     case when v_pub.qual is not null then ' where (' || v_pub.qual || ')' else '' end);
+""", "      null;\n", 1)],
     ),
     "transmute_serial_owner_not_moved": (
         "bench/transmute_serial_sequence_owner.sh",
@@ -6041,6 +6063,99 @@ $$;''',
         [("  perform pgpm._transmute_refuse_generated_control(p_parent, p_control);\n"
           "  perform pgpm._transmute_refuse_uncarried_constraints(p_parent);\n",
           "  perform pgpm._transmute_refuse_uncarried_constraints(p_parent);\n", 1)],
+    ),
+    # #1080, #1104, #1105: every name the cutover's three naming statements take is asked again from that
+    # statement's own failure, and the publication refusals from step 7c's. One mutation per helper call
+    # each handler makes (and one for the XX000 arm), each leaving its handler to raise the raw error.
+    "transmute_staging_name_preflight_only": (
+        "bench/transmute_cutover_names_held.sh",
+        "Pre-#1080 transmute: the staging name <table>_pgpm_new is asked to be free (#344 as a relation, #671 "
+        "as a type) in the preflight only. A table (tests/299 (A)) or an enum (B) committed at it after the "
+        "preflight, with phase 1's bound, or a table a transaction still open is creating (D, #1105), reaches "
+        "the cutover, whose CREATE TABLE ... LIKE dies raw (42P07, 42710, or 23505 on pg_type's name index "
+        "once the other transaction commits) after phases 1 and 2 committed the bound and the claim. One "
+        "site: the CREATE's handler no longer asks the staging-name helper.",
+        [("      perform pgpm._transmute_refuse_staging_squatter(v_nsp, v_staging);\n      perform pgpm._transmute_refuse_names_held(v_nsp, array[v_staging],\n",
+          "      perform pgpm._transmute_refuse_names_held(v_nsp, array[v_staging],\n", 1)],
+    ),
+    "transmute_monolith_name_preflight_only": (
+        "bench/transmute_cutover_names_held.sh",
+        "Pre-#1104 transmute: the monolith's name <table>_p<lo>_to_<hi> is asked to be free (#509, #671) in "
+        "phase 1's transaction only. A table committed at it with phase 1's bound (tests/299 (C)) reaches the "
+        "cutover, whose RENAME dies raw (42P07) after phases 1 and 2 committed the bound and the claim. One "
+        "site: the first RENAME's handler no longer asks the monolith-name helper. The general helper it asks "
+        "next names (C)'s and (E)'s holders in its own words rather than the up-front ones, which both pin.",
+        [("      perform pgpm._transmute_refuse_monolith_squatter(v_nsp, v_monolith, v_lo_native, v_hi_native);\n", "", 1)],
+    ),
+    "transmute_create_held_names_unchecked": (
+        "bench/transmute_cutover_names_held.sh",
+        "#1105 put back at step 5's CREATE: its handler asks the staging-name helper only, not the general "
+        "one, so a holder of a name the CREATE takes besides the staging name's relation and plain type, its "
+        "array type name (tests/299 (G)) or the staging name as another type's implicit array type (J, a "
+        "table named _<x>), that a still-open transaction was creating makes the CREATE die raw 23505 once it "
+        "commits, after phases 1 and 2 committed the bound and the claim. One site: that handler's call.",
+        [("      perform pgpm._transmute_refuse_names_held(v_nsp, array[v_staging],\n"
+          "        format('CREATE of the new parent %I.%I', v_nsp, v_staging));\n", "", 1)],
+    ),
+    "transmute_rename_held_names_unchecked": (
+        "bench/transmute_cutover_names_held.sh",
+        "#1104/#1105 put back at step 1's first RENAME: its 23505 arm asks the monolith-name helper only, not "
+        "the general one, so an in-flight holder of the monolith's array type name (tests/299 (H)) or of the "
+        "monolith's name as another type's implicit array type (K) makes the RENAME die raw 23505 once it "
+        "commits. "
+        "One site: that handler's call in its 23505 arm.",
+        [("      perform pgpm._transmute_refuse_names_held(v_nsp, array[v_monolith],\n"
+          "        format('RENAME of %I.%I to the monolith''s name', v_nsp, v_rel), array[p_parent], array[v_own_arr]);\n", "", 1)],
+    ),
+    "transmute_final_rename_unhandled": (
+        "bench/transmute_cutover_names_held.sh",
+        "#1105 put back at step 1's second RENAME (the new parent to the table's name): its handler asks "
+        "nothing, so a type a still-open transaction was creating at the array type name it takes, _<table> "
+        "(tests/299 (L), a table whose own array type is named otherwise), makes it die raw 23505 once that "
+        "commits, after phases 1 and 2 committed the bound and the claim. One site: that handler's call.",
+        [("      perform pgpm._transmute_refuse_names_held(v_nsp, array[v_rel],\n"
+          "        format('RENAME of the new parent to %I.%I', v_nsp, v_rel), array[v_parent, v_monreg]);\n", "", 1)],
+    ),
+    "transmute_own_array_unchecked": (
+        "bench/transmute_cutover_names_held.sh",
+        "#1105 put back for the first RENAME's XX000: its handler lets 'tuple concurrently updated' through raw, "
+        "which the RENAME raises when a transaction that was creating a type named _<table> (and so moved the "
+        "table's own array type aside) commits while the RENAME waits on it (tests/299 (I)). One site: the "
+        "first RENAME's XX000 test.",
+        [("      if sqlerrm = 'tuple concurrently updated' then   -- a new holder only, see _transmute_refuse_names_held\n"
+          "        perform pgpm._transmute_refuse_names_held(v_nsp, array[v_monolith],\n",
+          "      if false and sqlerrm = 'tuple concurrently updated' then\n"
+          "        perform pgpm._transmute_refuse_names_held(v_nsp, array[v_monolith],\n", 1)],
+    ),
+    "transmute_xx000_blames_preexisting": (
+        "bench/transmute_cutover_names_held.sh",
+        "The first RENAME's XX000 arm without its record of what was already there: 'tuple concurrently "
+        "updated' from any concurrent catalog update, such as a GRANT on the table committed while the RENAME "
+        "waits (tests/299 (M)), is blamed on a holder that existed before the statement and that PostgreSQL "
+        "steps around (another monolith's implicit array type, equal to this table's monolith name), with a "
+        "remedy that does not apply. One site: the arm's p_skip argument.",
+        [("array[p_parent], array[v_own_arr], v_pre_names);\n", "array[p_parent], array[v_own_arr]);\n", 1)],
+    ),
+    "transmute_isolation_unchecked": (
+        "bench/transmute_cutover_names_held.sh",
+        "Pre-#1105 transmute: no isolation level is refused. Under default_transaction_isolation = 'repeatable "
+        "read' the cutover's handlers ask their helpers from the transaction's first snapshot, which predates "
+        "the commit the failing statement waited for, so the helper finds nothing and the raw error goes out "
+        "after phases 1 and 2 committed the bound and the claim (tests/299 (F): 23505 on pg_type's name index "
+        "from the staging CREATE). One site: _transmute's call of the shared refusal.",
+        [("  perform pgpm._refuse_strict_isolation('transmute', p_parent);\n", "", 1)],
+    ),
+    "transmute_publication_preflight_only": (
+        "bench/transmute_publication_change_refused.sh",
+        "Pre-#766 (bullet 4) transmute: the publication refusals, a row filter or column list without "
+        "publish_via_partition_root (#566) and a publication the caller does not own (#710), are asked in the "
+        "preflight only. A publication naming the table committed after it (tests/300 (A), (B), created with "
+        "phase 1's bound), or publish_via_partition_root turned off inside the cutover while step 7a waits on "
+        "a referenced table (C, #1105), reaches step 7c, whose ALTER PUBLICATION ... ADD TABLE dies raw "
+        "('cannot use publication WHERE clause for relation', 'must be owner of publication') after phases 1 "
+        "and 2 committed the bound and the claim. One site: 7c's handler no longer asks the publication helper.",
+        [("    perform pgpm._transmute_refuse_publications(p_parent, v_parent);\n    raise;\n",
+          "    raise;\n", 1)],
     ),
     "transmute_key_immediate": (
         "bench/transmute_key_deferrability.sh",
@@ -10304,6 +10419,43 @@ MUTATIONS["hypertable_capture_fast_path_unlocked"] = (
 MUTATION_SRC["hypertable_capture_fast_path_unlocked"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_capture_fast_path_unlocked"] = "timescale"
 
+# #1105 on the hypertable side: from_hypertable and from_hypertable_cutover ask the core's isolation refusal
+# before the copy and before the swap. One mutation per entry point, each dropping that entry point's call.
+MUTATIONS["from_hypertable_isolation_unchecked"] = (
+    "bench/hypertable_isolation_refused.sh",
+    "#1105 put back at from_hypertable: no isolation refusal before the copy. Under default_transaction_isolation "
+    "= 'repeatable read' it pays for the whole online copy before from_hypertable_cutover refuses it "
+    "(tests/timescale/db/63 (A): refused as from_hypertable_cutover, with the copy left behind). One site: "
+    "from_hypertable's call of the shared refusal.",
+    [("  perform pgpm._refuse_strict_isolation('from_hypertable', p_hypertable);\n", "", 1)],
+)
+MUTATION_SRC["from_hypertable_isolation_unchecked"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["from_hypertable_isolation_unchecked"] = "timescale"
+MUTATIONS["from_hypertable_cutover_isolation_unchecked"] = (
+    "bench/hypertable_isolation_refused.sh",
+    "#1105 put back at from_hypertable_cutover: no isolation refusal before the swap. Under "
+    "default_transaction_isolation = 'repeatable read' the swap drops the hypertable and commits, and only the "
+    "handoff to transmute refuses, leaving the table plain and unregistered (tests/timescale/db/63 (B)). One "
+    "site: from_hypertable_cutover's call of the shared refusal.",
+    [("  perform pgpm._refuse_strict_isolation('from_hypertable_cutover', p_hypertable);\n", "", 1)],
+)
+MUTATION_SRC["from_hypertable_cutover_isolation_unchecked"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["from_hypertable_cutover_isolation_unchecked"] = "timescale"
+MUTATIONS["hypertable_isolation_unchecked"] = (
+    "bench/hypertable_isolation_refused.sh",
+    "#1105 put back on the hypertable side whole, the pre-fix module: neither from_hypertable nor "
+    "from_hypertable_cutover asks the isolation refusal. Under default_transaction_isolation = 'repeatable read' "
+    "from_hypertable copies, swaps, drops the hypertable and commits, and only the handoff to transmute refuses, "
+    "leaving the table plain and unregistered (the PR #1102 verification's claim V-01; tests/timescale/db/63 (A) "
+    "and (B)). Each entry point's own mutation above leaves the other's refusal standing, which still stops "
+    "from_hypertable before its swap; this one is the shape the claim was built on.",
+    [("  perform pgpm._refuse_strict_isolation('from_hypertable', p_hypertable);\n", "", 1),
+     ("  perform pgpm._refuse_strict_isolation('from_hypertable_cutover', p_hypertable);\n", "", 1)],
+)
+MUTATION_SRC["hypertable_isolation_unchecked"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_isolation_unchecked"] = "timescale"
+
+
 # Issue #1055 (bullet 1, A1055-1): a Parquet export reads the relation it was handed, never a namesake its old
 # spelling reaches once a schema is renamed. Three parts in archive._pq_snapshot, which both encoders read
 # through: the relation is rendered from its regclass for the statement that reads it, the snapshot table's
@@ -10746,3 +10898,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

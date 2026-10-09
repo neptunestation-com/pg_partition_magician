@@ -222,6 +222,24 @@ or re-create it without `NO INHERIT`); and a generated control column, which Pos
 by (partition on a plain column). These are asked again at the start of the cutover, under the table lock
 it takes before building the new parent, so one committed while the conversion runs is refused with the
 same message and remedy, leaving the resumable state a failed cutover leaves (the bound and the claim).
+The two publication refusals are asked again when the cutover adds the new parent to the table's
+publications: a publication that comes to name the table while the conversion runs with a row filter or a
+column list, one whose `publish_via_partition_root` is turned off meanwhile, or one handed to another role, is
+refused there with the same message and remedy, leaving the same resumable state. So are the two names the
+cutover takes, the staging name `<table>_pgpm_new` and the monolith's name: a table or type that holds either
+by the time the cutover takes it is refused with the up-front message and remedy. One that a transaction is
+still creating at that moment is waited for, up to `p_lock_timeout` like every other wait in the cutover, and
+refused once it commits. The same holds for every name the cutover's three naming statements take (the
+staging `CREATE`, the `RENAME` to the monolith's name, and the `RENAME` of the new parent to the table's
+name): each relation name, its row type, and its array type `_<name>`, plus the table's own array type,
+which the first `RENAME` renames. Whatever a transaction is still creating at any of them, a relation or a
+type of any kind (another type's implicit array type included, as for a table whose name starts with an
+underscore), is waited for and refused once it commits. A type committed at an array type name, or an
+implicit array type committed at a relation's name, is no obstacle: PostgreSQL steps around it, so neither
+is refused up front. These second askings need a snapshot taken after the wait, so `transmute` must run in
+`READ COMMITTED` transactions (the default): when the calling transaction or the session's
+`default_transaction_isolation` is stricter, it refuses up front, before anything is committed. So do
+`from_hypertable` and `from_hypertable_cutover`, which end in this cutover, before their copy and their swap.
 The trigger refusal is asked again under the cutover's lock, so a trigger of that shape created while the
 conversion runs is refused the same way. So is every object that
 names the table by its oid rather than its name: a **view** or **materialized view** over it, a **rule** whose

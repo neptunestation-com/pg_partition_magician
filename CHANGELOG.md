@@ -272,6 +272,52 @@
   Tests `tests/295` and `tests/timescale/db/62`, guard `bench/regrain_delta_seq_name.sh`, mutation
   `delta_seq_fixed_name`.
 
+- **`transmute` refuses a table or type created at its staging name while it runs** (#1080, #1105 bullet 1).
+  The staging name `<table>_pgpm_new` was asked to be free (as a relation, and as a type) in the preflight
+  only, so a table or a type committed at it after the preflight, while phases 1 and 2 had let go of the
+  table, made the cutover's `CREATE TABLE ... LIKE` die raw (42P07 'relation ... already exists', 42710 'type
+  ... already exists') after phases 1 and 2 had committed the write-rejecting bound and the claim; one that a
+  transaction was still creating when the cutover reached it made the `CREATE` wait and die with 23505 on
+  `pg_type_typname_nsp_index` once that committed. The `CREATE` now asks the preflight's check
+  (`_transmute_refuse_staging_squatter`) again from its own failure, when the holder is committed and
+  visible, and refuses in the preflight's words with its remedy; the refusal rolls the cutover back to the
+  resumable phase-2 state. The rule is general: each of the cutover's three naming statements (the staging
+  `CREATE`, the `RENAME` to the monolith's name, the `RENAME` of the new parent to the table's name) asks,
+  from its own failure (42P07, 42710, 23505, or XX000 'tuple concurrently updated'), every name it takes:
+  each relation name, its row type, its array type `_<name>`, and the table's own array type, and names
+  whatever holds one, another type's implicit array type included (`_transmute_refuse_names_held`;
+  mutations `transmute_create_held_names_unchecked`, `transmute_rename_held_names_unchecked`,
+  `transmute_final_rename_unhandled`, `transmute_own_array_unchecked`). That second asking, like the monolith `RENAME`'s and step 7c's below, needs a
+  snapshot taken after the wait, so `transmute` now refuses up front, before anything is committed, when the
+  calling transaction or the session's `default_transaction_isolation` is stricter than READ COMMITTED, as
+  `untransmute` does, and so do `from_hypertable` (before its copy) and `from_hypertable_cutover` (before its
+  swap), which hand off to transmute only after the swap has dropped the hypertable. `tests/299` (new) under
+  the guard `bench/transmute_cutover_names_held.sh`, mutations `transmute_staging_name_preflight_only` and
+  `transmute_isolation_unchecked`; `tests/timescale/db/63` (new) under the guard
+  `bench/hypertable_isolation_refused.sh`, mutations `from_hypertable_isolation_unchecked`,
+  `from_hypertable_cutover_isolation_unchecked` and `hypertable_isolation_unchecked`.
+
+- **`transmute` refuses a table or type created at the monolith's name while it runs** (#1104). The name the
+  cutover renames the table to, `<table>_p<lo>_to_<hi>`, was asked to be free in phase 1's transaction only,
+  so a table or type that held it by the time of the cutover's `RENAME`, committed after that asking or
+  created by a transaction still open, made the `RENAME` die raw (42P07, 42710, or 23505) after phases 1
+  and 2 had committed the bound and the claim. The `RENAME` now asks phase 1's check
+  (`_transmute_refuse_monolith_squatter`) again from its own failure and refuses in its words. `tests/299`
+  under the same guard; mutation `transmute_monolith_name_preflight_only`.
+
+- **`transmute` refuses a publication change made while it runs that the cutover cannot carry** (#766 bullet
+  4, #1105 bullet 2). The publication refusals (a row filter or a column list without
+  `publish_via_partition_root`, and a publication the caller does not own) were asked in the preflight only,
+  so a publication change committed after it (a filtered or unowned membership added while phases 1 and 2
+  had let go of the table, or `publish_via_partition_root` turned off, or the publication handed to another
+  role, which take no lock on the table and so can land inside the cutover while it waits on a referenced
+  table) made step 7c's `ALTER PUBLICATION ... ADD TABLE` die raw ('cannot use publication WHERE clause for
+  relation', 'must be owner of publication') after phases 1 and 2 had committed the bound and the claim.
+  Step 7c now asks the preflight's check (`_transmute_refuse_publications`) again from its own failure and
+  refuses in the preflight's words; the refusal rolls the cutover back to the resumable phase-2 state.
+  `tests/300` (new) under the guard `bench/transmute_publication_change_refused.sh`; mutation
+  `transmute_publication_preflight_only`.
+
 - **A synchronous export resolves its child under one catalog snapshot** (#1062, bullet 2).
   `archive._resolve_child` read the parent's schema name in one statement and looked the child up by that
   name in the next, so a second session that swapped two schemas' names between them (the parent's schema

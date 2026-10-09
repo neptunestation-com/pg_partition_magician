@@ -576,6 +576,10 @@ run_timescale() {
     # of the pair discriminate.sh completes with the hypertable_copy_rerun_*_by_name mutations.
     echo "--- a re-run copy replaces the recorded copy, wherever it lives (issue #1083) ---"
     bash "$(dirname "$0")/bench/hypertable_copy_rerun_by_record.sh" pgpm_test-timescale pgpm_perf116 || fail=1
+    # #1105's hypertable guard, the same way: it re-runs tests/timescale/db/63 against the real install, the
+    # clean-code half of the pair discriminate.sh completes with its two isolation mutants.
+    echo "--- from_hypertable refuses a stricter isolation level before the copy and the swap (issue #1105) ---"
+    bash "$(dirname "$0")/bench/hypertable_isolation_refused.sh" pgpm_test-timescale pgpm_tsiso || fail=1
 
     echo "--- discriminate (timescale-scoped mutations) ---"
     bash "$(dirname "$0")/bench/discriminate.sh" --track=timescale pgpm_test-timescale || fail=1
@@ -1184,6 +1188,8 @@ run_perf() {
     "bench/obtain_backoff_hole.sh pgpm_perf305"
     "bench/check_text_time_contract.sh pgpm_perf309"
     "bench/hypertable_handoff_remedy.sh pgpm_perf311"
+    "bench/transmute_cutover_names_held.sh pgpm_perf313"
+    "bench/transmute_publication_change_refused.sh pgpm_perf314"
   )
   local selected=()
   local n=${#guards[@]} idx
