@@ -2418,10 +2418,10 @@ begin
         "assertion instead and look like a catch for the wrong reason.",
         [("  if not v_try then\n"
           "    begin\n"
-          "      -- the first grid boundary past the frontier's own cell, and the top of attached coverage\n",
+          "      select n.nspname, c.relname into v_nsp, v_rel\n",
           "  if false then\n"
           "    begin\n"
-          "      -- the first grid boundary past the frontier's own cell, and the top of attached coverage\n", 1)],
+          "      select n.nspname, c.relname into v_nsp, v_rel\n", 1)],
     ),
     "obtain_headroom_ignores_monolith": (
         "bench/obtain_backoff_headroom.sh",
@@ -2432,18 +2432,24 @@ begin
         "contention while the table still has grid. Swaps the coverage walk back for that row count and "
         "leaves the bypass itself intact, so the guard's forward-grid assertions still pass and only the "
         "monolith-headroom one can catch it.",
-        [("      -- the first grid boundary past the frontier's own cell, and the top of attached coverage\n"
-          "      v_cell := pgpm._grid_next(cfg.control_kind, cfg.partition_step,\n"
-          "                  pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor,\n"
-          "                                   pgpm._frontier_native(p_parent), cfg.partition_tz), cfg.partition_tz);\n"
+        [("      -- the frontier's own grid cell, and the top of attached coverage\n"
+          "      v_cell := pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor,\n"
+          "                                 pgpm._frontier_native(p_parent), cfg.partition_tz);\n"
           "      execute format('select %s from pgpm.part where parent_table = %L::regclass and attached',\n"
           "                     pgpm._max_hi_native(cfg.control_kind), p_parent::text) into v_top;\n"
-          "      v_ahead := 0;\n"
-          "      while v_top is not null and v_ahead < ceil(cfg.obtain / 2.0)\n"
-          "            and not pgpm._native_gt(cfg.control_kind,\n"
-          "                  pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_cell, cfg.partition_tz), v_top) loop\n"
+          "      -- the frontier's own cell is walked but not counted, so it starts the count one below zero\n"
+          "      v_ahead := -1;\n"
+          "      loop\n"
+          "        v_next := pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_cell, cfg.partition_tz);\n"
+          "        exit when v_ahead >= ceil(cfg.obtain / 2.0) or v_top is null\n"
+          "               or (v_ahead >= 0 and pgpm._native_gt(cfg.control_kind, v_next, v_top));\n"
+          "        -- in obtain's order, as separate statements: _cell_attached forgets a detached cell's row first, and\n"
+          "        -- until it has, _obtain_name reads the detached table holding the cell's name as a stranger's\n"
+          "        if not pgpm._cell_attached(p_parent, cfg, v_cell, v_next) then\n"
+          "          exit when pgpm._obtain_name(p_parent, cfg, v_nsp, v_rel, v_cell, v_next) is not null;\n"
+          "        end if;\n"
           "        v_ahead := v_ahead + 1;\n"
-          "        v_cell := pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_cell, cfg.partition_tz);\n"
+          "        v_cell := v_next;\n"
           "      end loop;\n",
           "      select count(*) into v_ahead\n"
           "        from pgpm.part p\n"
@@ -2483,6 +2489,39 @@ begin
           "    if cfg.obtain_retry_after is not null and not v_skipped then v_skipped := true; continue; end if;\n"
           "    perform pgpm._create_partition(cfg, v_nsp, v_rel, null, v_name, v_lo, v_hi);\n"
           "    v_made := v_made + 1;\n", 1)],
+    ),
+    # Issue #1078: the back-off walk judges each step by a built partition.
+    "obtain_backoff_counts_hole": (
+        "bench/obtain_backoff_hole.sh",
+        "Pre-#1078 maintain_obtain: the back-off walk counts a step as coverage when an attached pgpm.part "
+        "row overlaps it, without asking whether its partition is still there, so a cell dropped or detached "
+        "by hand inside the frontier's cell or the ceil(obtain / 2) steps past it keeps the back-off "
+        "honoured while every write into the hole is refused. One clause, the walk's _cell_attached read "
+        "as the bare row overlap. tests/298 parts A, C and D catch it.",
+        [("        if not pgpm._cell_attached(p_parent, cfg, v_cell, v_next) then\n",
+          "        if not exists (select 1 from pgpm.part p\n"
+          "                        where p.parent_table = p_parent and p.attached\n"
+          "                          and pgpm._native_gt(cfg.control_kind, p.hi, v_cell)\n"
+          "                          and pgpm._native_gt(cfg.control_kind, v_next, p.lo)) then\n", 1)],
+    ),
+    "obtain_backoff_bypasses_held_name": (
+        "bench/obtain_backoff_hole.sh",
+        "#1078's first cut (PR #1107, V-01): the back-off walk ends at any cell without a built partition, "
+        "including one obtain cannot build because a relation or type pgpm does not own holds its name "
+        "(fail_obtain_name, #710), so while the stranger holds it every tick bypasses the back-off and "
+        "queues another ACCESS EXCLUSIVE behind the contention for a cell obtain only logs. One clause, the "
+        "walk's _obtain_name. tests/298 part F catches it.",
+        [("          exit when pgpm._obtain_name(p_parent, cfg, v_nsp, v_rel, v_cell, v_next) is not null;\n",
+          "          exit;\n", 1)],
+    ),
+    "obtain_backoff_walk_commits_forget": (
+        "bench/obtain_backoff_hole.sh",
+        "#1078's second cut (PR #1107, P1-04): the back-off walk's _cell_attached forgets a dead row and "
+        "logs forget_dropped_partition in maintain_obtain's own step, which commits even when the obtain "
+        "after it loses the lock race, so the log says the cell was forgotten so the range is built again "
+        "while it stays a hole. One clause, the raise that rolls the walk's writes back. tests/298 part G "
+        "catches it.",
+        [("      raise sqlstate 'PGPMW';\n", "", 1)],
     ),
     "set_regrain_off_keeps_regrain": (
         "bench/set_regrain_off_midflight.sh",

@@ -249,8 +249,11 @@ held by something pgpm does not own (logged `fail_obtain_name`, see
 [Partition naming](reference.md#partition-naming)), or one of the forward partitions was dropped or
 detached by hand. `obtain` rebuilds such a cell when it lies within its lookahead (from the write frontier's
 cell forward), empty, and logs `forget_dropped_partition` (dropped) or `forget_detached_partition`
-(detached) naming the partition, so the hole closes on the obtain job's next tick; run `pgpm.obtain` (or
-`extend_to` past the hole) to close it now. Rows that were in a dropped partition are gone with it. A
+(detached) naming the partition, so the hole closes on the obtain job's next tick, even while a lost lock
+race has it backing off, as long as the hole lies in the frontier's cell or the `ceil(obtain / 2)` cells
+past it (a hole further out waits up to 30 seconds for the back-off to expire); run `pgpm.obtain` (or
+`extend_to` past the hole) to close it now. A hole whose name is held (`fail_obtain_name`) stays open
+until you free the name, and does not cut the back-off short. Rows that were in a dropped partition are gone with it. A
 detached one keeps its rows and is left alone, no longer tracked by pgpm: the cell is rebuilt beside it
 under its explicit-range name, so to put those rows back, insert them through the parent.
 
