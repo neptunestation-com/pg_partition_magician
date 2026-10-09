@@ -9,8 +9,10 @@
 -- The delta kept the key columns of the FIRST regrain while the trigger function was regenerated from the
 -- CURRENT key, so a key column renamed between two regrains made every write into the source raise for the
 -- life of the next one. (3) The delta was created by whoever ran regrain_step, with no grants, and the
--- trigger runs as the writer (pgpm has no SECURITY DEFINER anywhere), so every non-owner role with DML on
--- the parent got 42501 on every write into the regraining child.
+-- trigger ran as the writer, so every non-owner role with DML on the parent got 42501 on every write into
+-- the regraining child. (Since #1073 the capture function is SECURITY DEFINER and writes the delta as its
+-- owner, the parent's, so a writer needs no grant on the delta at all; the grants below are still made and
+-- re-synced, and section (C) checks them by the grant state.)
 --
 -- The fix records the delta's and the function's oids in pgpm.config at prepare and resolves them from
 -- there (falling back to the derived name only when nothing is recorded); drops and re-mints the delta on
@@ -24,7 +26,7 @@
 -- (regrain_capture_by_name, regrain_delta_reused, regrain_delta_ungranted), so it is also required to
 -- FAIL there.
 create extension if not exists pgtap;
-select plan(49);
+select plan(50);
 
 -- drive a regrain to its swap. regrain_step commits nothing itself, so a loop in one function is fine for
 -- the identity assertions below; nothing here reads the counters this repo warns about.
@@ -181,11 +183,14 @@ select lives_ok($$ update public.pv set payload = 'owner-during' where id = 9 $$
   'the parent''s owner, who holds no explicit grant, can write too');
 reset role;
 
--- a role granted DML on the parent AFTER the prepare tick: the next tick re-syncs the delta's grants
+-- a role granted DML on the parent AFTER the prepare tick: the next tick re-syncs the delta's grants. The
+-- late role writes before that tick too: the capture writes as its owner (#1073), not as the writer.
 grant select, insert, update, delete on public.pv to t124_late;   -- SELECT too: an UPDATE ... WHERE reads
-set role t124_late;
-select throws_ok($$ update public.pv set payload = 'too-early' where id = 10 $$, '42501', null,
+select ok(not has_table_privilege('t124_late', 'public.pv_pgpm_regrain_delta', 'INSERT'),
   'WITNESS: until a tick runs, a grant made after prepare has not reached the delta');
+set role t124_late;
+select lives_ok($$ update public.pv set payload = 'too-early' where id = 10 $$,
+  'and the late role writes anyway: the capture writes the delta as its owner, not as the writer (#1073)');
 reset role;
 select matches(pgpm.regrain_step('public.pv', 'pv_p0000000000000000000_to_0000000000000200000', '20000', 5000),
   '^copied:', 'the next tick copies');

@@ -1,7 +1,9 @@
 -- The OWNERS of the regraining partition and of the parent can write it mid-regrain (issue #906).
 --
--- The capture trigger inserts into the delta with the WRITER's privileges (pgpm has no SECURITY DEFINER), so
--- every role that can write the source needs INSERT on the delta. _regrain_capture_grant gave it to the
+-- The capture trigger inserted into the delta with the WRITER's privileges, so every role that could write
+-- the source needed INSERT on the delta (since #1073 the capture is SECURITY DEFINER and writes as its
+-- owner, so the writes below no longer depend on these grants; the grants are still made, and this file
+-- checks them by the delta's ACL). _regrain_capture_grant gave it to the
 -- roles an ACL of the parent or the source lists (#496, #843), and _own_like_parent gives the delta the
 -- parent's owner as it stood at the prepare tick. An owner writes with implicit rights that no ACL lists, so
 -- a source owned by anyone else was missed: after ALTER TABLE <parent> OWNER TO <new> (which, as
