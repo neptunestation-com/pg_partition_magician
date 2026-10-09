@@ -1080,6 +1080,35 @@ begin
 end;
 $$;
 
+-- _text_time_to_ts for a reader that counts a value it cannot decode rather than raising on it
+-- (check_text_time, #1084): null when the decoded count lies past what the decode's arithmetic holds. The
+-- shape gate (_text_time_shaped, which the caller has already asked) bounds the characters, not the number
+-- they spell, so a shaped value with the declared prefix, width and alphabet can still decode past an
+-- interval's range (9 base-36 digits of seconds is ~1e14 s) and _text_time_to_ts raises 'interval out of
+-- range' or 'timestamp out of range' on it. The decode adds count * interval '1 second' to p_epoch: an
+-- interval holds at most 2^63 - 1 microseconds (9223372036854.775807 s) and a timestamptz ends at
+-- 294277-01-01 00:00:00+00 (9224318016000 s after the Unix epoch). Both bounds are one second short of
+-- the edge, so the float8 the interval product goes through cannot round past either. The caller has
+-- already refused a unit other than 'ms' or 's' (check_text_time does, before it reads a row): this treats any
+-- unit but 'ms' as seconds, and a count past the limits returns null before _text_time_to_ts, which checks
+-- the unit first, is reached, so on its own it would report an unknown unit as an undecodable value.
+create or replace function pgpm._text_time_to_ts_bounded(p_value text, p_prefix text, p_width int, p_radix int,
+  p_unit text, p_alphabet text default null, p_discard_bits int default 0,
+  p_epoch timestamptz default '1970-01-01 00:00:00+00')
+returns timestamptz language plpgsql stable as $$
+declare v_secs numeric;
+begin
+  v_secs := pgpm._floor_div(pgpm._radix_decode(substr(p_value, length(p_prefix) + 1, p_width), p_radix, p_alphabet),
+                            power(2::numeric, p_discard_bits));
+  if p_unit = 'ms' then v_secs := v_secs / 1000; end if;
+  if v_secs >= 9223372036853
+     or (isfinite(p_epoch) and extract(epoch from p_epoch) + v_secs >= 9224318015999) then
+    return null;
+  end if;
+  return pgpm._text_time_to_ts(p_value, p_prefix, p_width, p_radix, p_unit, p_alphabet, p_discard_bits, p_epoch);
+end;
+$$;
+
 -- The boundary this produces is deliberately MINIMAL: prefix + the zero-padded digits, nothing
 -- appended after. That is still a correct half-open range edge, because any REAL value sharing that
 -- exact prefix+timestamp with a nonempty suffix (the counter/fingerprint/random fields real ids carry)
@@ -7386,6 +7415,38 @@ begin
 end;
 $$;
 
+-- _text_time_radix_floor: the radix floor of a text_time shape with a SUPPLIED alphabet, whose length is its
+-- only other check (#990). A one-character alphabet has no place value: _radix_encode's v := div(v, 1) never
+-- reaches 0, so transmute's frontier encode spun until statement_timeout, and check_text_time, which asked
+-- only the length, sampled the shape transmute refuses and reported a fraction for it (#1039). One rule for
+-- every entry point that takes a declared shape, named by the caller's argument (p_tt_radix, p_radix). The
+-- default 0-9a-z alphabet has its own 2-36 range check at each caller.
+create or replace function pgpm._text_time_radix_floor(p_radix int, p_arg text)
+returns void language plpgsql immutable as $$
+begin
+  if p_radix < 2 then
+    raise exception 'pg_partition_magician: % must be at least 2 (got %) -- a base-% encoding has no place value to order bounds by; supply an alphabet of two or more characters, one per digit', p_arg, p_radix, p_radix;
+  end if;
+end;
+$$;
+
+-- _text_time_shape_floor: the width and discard-bits rules of a declared text_time shape, for every entry point
+-- that takes one (#1120). transmute refused a width below 1 and negative discard bits at its preflight;
+-- check_text_time asked neither, so it sampled and reported on shapes transmute refuses: width 0 decodes every
+-- value to the epoch itself, and discard bits -1 doubles every count (a column of half-counts read 100%
+-- plausible). p_arg_prefix names the caller's arguments ('p_tt_' for transmute, 'p_' for check_text_time).
+create or replace function pgpm._text_time_shape_floor(p_width int, p_discard_bits int, p_arg_prefix text)
+returns void language plpgsql immutable as $$
+begin
+  if p_width < 1 then
+    raise exception 'pg_partition_magician: %width must be positive (got %)', p_arg_prefix, p_width;
+  end if;
+  if p_discard_bits < 0 then
+    raise exception 'pg_partition_magician: %discard_bits must not be negative (got %)', p_arg_prefix, p_discard_bits;
+  end if;
+end;
+$$;
+
 -- _text_time_unit_contract: the step and the anchor of a text_time grid, before the table is read (#989).
 -- _ts_to_text_time encodes a bound as the whole number of units (a second, or a millisecond) since p_tt_epoch,
 -- flooring whatever is finer, so a grid whose boundaries fall between two units is recorded in pgpm.part at
@@ -8224,9 +8285,7 @@ begin
     if p_tt_alphabet is not null then
       -- #990: and the floor is 2 either way. A one-character alphabet has no place value: _radix_encode's
       -- v := div(v, 1) never reaches 0, so the frontier encode spun until statement_timeout.
-      if p_tt_radix < 2 then
-        raise exception 'pg_partition_magician: p_tt_radix must be at least 2 (got %) -- a base-% encoding has no place value to order bounds by; supply an alphabet of two or more characters, one per digit', p_tt_radix, p_tt_radix;
-      end if;
+      perform pgpm._text_time_radix_floor(p_tt_radix, 'p_tt_radix');
       if length(p_tt_alphabet) <> p_tt_radix then
         raise exception 'pg_partition_magician: p_tt_alphabet % has length %, which does not match p_tt_radix %', p_tt_alphabet, length(p_tt_alphabet), p_tt_radix;
       end if;
@@ -8236,14 +8295,9 @@ begin
     elsif p_tt_radix < 2 or p_tt_radix > 36 then
       raise exception 'pg_partition_magician: p_tt_radix must be 2-36 for the default 0-9a-z alphabet (got %); supply p_tt_alphabet for a wider or different one', p_tt_radix;
     end if;
-    if p_tt_width < 1 then
-      raise exception 'pg_partition_magician: p_tt_width must be positive (got %)', p_tt_width;
-    end if;
+    perform pgpm._text_time_shape_floor(p_tt_width, p_tt_discard_bits, 'p_tt_');
     if p_tt_unit not in ('ms', 's') then
       raise exception 'pg_partition_magician: p_tt_unit must be ''ms'' or ''s'' (got %)', p_tt_unit;
-    end if;
-    if p_tt_discard_bits < 0 then
-      raise exception 'pg_partition_magician: p_tt_discard_bits must not be negative (got %)', p_tt_discard_bits;
     end if;
     -- #989: and an anchor and a step the encoding can express. See _text_time_unit_contract.
     perform pgpm._text_time_unit_contract(p_parent, p_control, p_step, p_anchor, p_tt_unit, p_tt_epoch);
@@ -11846,6 +11900,17 @@ $$;
 -- past now(). A maximum that does not match the declared shape reports null rather than raising, for the
 -- same reason a malformed sampled row counts as implausible rather than aborting the sample. NULLs are
 -- skipped in the read's WHERE clause, as in check_uuidv7 and for its reason (#734).
+--
+-- A shaped value can still be one the decode cannot hold (#1084): the shape bounds the characters, not the
+-- number they spell, so both decodes go through _text_time_to_ts_bounded, which reports null for a count
+-- past an interval's or a timestamptz's range. A sampled row like that counts as implausible and such a
+-- maximum reports null, as a shape failure does. p_epoch reaches the dynamic query as a bound parameter
+-- (#1081), never as text: %L rendered it under the session's DateStyle and TimeZone and the query parsed
+-- it back, so under 'SQL, DMY' in Asia/Kolkata the epoch became '01/01/1970 05:30:00 IST' and read back
+-- with IST as Israel's +02, every decoded instant 3.5 hours late. A supplied alphabet holds to the radix
+-- floor transmute applies (_text_time_radix_floor, #1039), and the width, discard bits and unit hold to
+-- transmute's rules too (_text_time_shape_floor and the unit check below, #1120). Those are the shared rules;
+-- transmute's refusal of an alphabet with a repeated character is not one of them.
 -- Its shape is declared in pgpm._surface_shapes() (#983): change that row with it.
 create or replace function pgpm.check_text_time(
   p_table regclass, p_control name, p_prefix text, p_width int, p_radix int, p_unit text,
@@ -11861,7 +11926,16 @@ begin
   perform pgpm._refuse_null_arguments('check_text_time', json_build_object(
     'p_table', p_table, 'p_control', p_control, 'p_prefix', p_prefix, 'p_width', p_width, 'p_radix', p_radix,
     'p_unit', p_unit, 'p_sample', p_sample, 'p_discard_bits', p_discard_bits, 'p_epoch', p_epoch));
+  -- #1120: the rest of the shape transmute refuses, refused here too, before a row is read. The unit with the
+  -- decoder's own message: _text_time_to_ts_bounded returns null for a count past its limits before the
+  -- decoder's unit check is reached, so without this a column whose shaped values all overflow reported on
+  -- an unknown unit, and a column with no shaped value always did.
+  perform pgpm._text_time_shape_floor(p_width, p_discard_bits, 'p_');
+  if p_unit not in ('ms', 's') then
+    raise exception 'pg_partition_magician: unknown text_time unit % (expected ms or s)', p_unit;
+  end if;
   if p_alphabet is not null then
+    perform pgpm._text_time_radix_floor(p_radix, 'p_radix');
     if length(p_alphabet) <> p_radix then
       raise exception 'pg_partition_magician: alphabet % has length %, which does not match radix %', p_alphabet, length(p_alphabet), p_radix;
     end if;
@@ -11886,12 +11960,12 @@ begin
               and pgpm._text_time_shaped(v, %4$L, %5$s, %7$s, %6$L)
          ),
          decoded as (
-           select pgpm._text_time_to_ts(v, %4$L, %5$s, %7$s, %8$L, %9$L, %10$s, %11$L) as ts from shaped
+           select pgpm._text_time_to_ts_bounded(v, %4$L, %5$s, %7$s, %8$L, %9$L, %10$s, $1) as ts from shaped
          ),
          m as (select t.%1$I::text as v from %2$s t where t.%1$I is not null order by t.%1$I desc limit 1),
          m_decoded as (
            select case when pgpm._text_time_shaped(v, %4$L, %5$s, %7$s, %6$L)
-                       then pgpm._text_time_to_ts(v, %4$L, %5$s, %7$s, %8$L, %9$L, %10$s, %11$L)
+                       then pgpm._text_time_to_ts_bounded(v, %4$L, %5$s, %7$s, %8$L, %9$L, %10$s, $1)
                   end as ts
              from m
          )
@@ -11905,7 +11979,8 @@ begin
            (select ts from m_decoded),
            (select ts > now() + interval '1 hour' from m_decoded)
   $q$, p_control, p_table::text, p_sample, p_prefix, p_width, v_class, p_radix, p_unit,
-      p_alphabet, p_discard_bits, p_epoch);
+      p_alphabet, p_discard_bits)
+    using p_epoch;
 end;
 $$;
 

@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+- **`check_text_time` decodes against `p_epoch` as an instant, in every session** (#1081). It spliced the
+  epoch into its dynamic query with `%L`, a text render under the session's DateStyle and TimeZone that the
+  query parsed back, so under `SQL, DMY` in Asia/Kolkata the Unix epoch became `01/01/1970 05:30:00 IST`,
+  read back with IST as Israel's +02: every decoded instant was 3.5 hours late (one hour early in
+  Europe/Dublin), `newest_decoded` was wrong, a maximum two hours old was reported as `newest_in_future`, and
+  rows near either end of the plausible window were miscounted. The epoch is now a bound parameter of that
+  query, for the sample's decode and the maximum's. The misreading was measured on PostgreSQL 15 and 17; 18
+  reads the session zone's own abbreviations first, so in these zones a bare render round-trips there. Test
+  `tests/301`, guard
+  `bench/check_text_time_contract.sh`, mutation `check_text_time_epoch_spliced`.
+
+- **One shaped row past the decode's range no longer aborts `check_text_time`** (#1084). The shape gate bounds
+  the characters, not the number they spell, so a value with the declared prefix, width and alphabet whose
+  count overflowed an interval or the `timestamptz` range (nine base-36 digits of seconds is about 1e14 s)
+  reached `_text_time_to_ts`, which raised `interval out of range`, and the whole report raised with it. Both
+  decodes now go through `_text_time_to_ts_bounded`, which reports null for such a count: the row counts as
+  implausible and such a maximum reports a null `newest_decoded`, as a value that fails the shape does. Test
+  `tests/302` part A, guard `bench/check_text_time_contract.sh`, mutation `check_text_time_decode_unbounded`.
+
+- **`check_text_time` refuses a supplied alphabet's radix below 2, as `transmute` does** (#1039, bullet 3). The
+  radix floor sat only on its default-alphabet branch, so radix 1 with alphabet `x` (or radix 0 with an empty
+  one) was sampled and reported where `transmute` refuses the shape (#990). Both now ask one rule,
+  `_text_time_radix_floor`, naming the caller's argument (`p_radix`, `p_tt_radix`). Test `tests/302` part B,
+  guard `bench/check_text_time_contract.sh`, mutation `check_text_time_radix_floor_dropped`; `tests/285`'s
+  first witness now asks the shape gate and the decoder directly instead of `check_text_time`.
+
+- **`check_text_time` refuses the width, discard bits and unit `transmute` refuses, before it reads a row**
+  (#1120). It checked none of them, so `p_width` 0 (every value decodes to the epoch) and `p_discard_bits` -1
+  (every count doubled, so a column of half-counts read 100% plausible) were sampled and reported on, and an
+  unknown `p_unit` was refused only when a shaped value in range reached the decoder: never on an empty
+  column, and, once #1084's bounded decode returned null for an overflowing count first, not on a column whose
+  shaped values all overflow either (found by PR #1115's verification). The width and discard-bits rules are
+  now one rule, `_text_time_shape_floor`, that `transmute` and `check_text_time` both ask, naming the
+  caller's arguments; the unit is refused up front with the decoder's message. Test `tests/302` part C, guard
+  `bench/check_text_time_contract.sh`, mutations `check_text_time_shape_floor_dropped` and
+  `check_text_time_unit_after_decode`.
 - **`from_hypertable` and its cutover ask `transmute`'s argument rules before the swap** (#1085; #966 W2).
   A negative `p_retain` or `p_obtain`, or a `p_interval` that is not positive, was refused only by
   `transmute` at the handoff, after the cutover's swap had committed and dropped the hypertable, leaving a
