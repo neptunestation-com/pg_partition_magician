@@ -411,7 +411,13 @@ failure blocks that one partition on purpose (`retain_drop_failures` climbing in
    `paused = true` means maintenance is doing nothing. A flat `retain_backlog` with `retain_drop_failures`
    also flat at zero, and `archive_fn` set, means chunked archiving simply hasn't caught up yet for the
    partitions at the head of the backlog -- not a failure, just run more maintenance ticks (or check
-   `pgpm.archive_ledger`/`pgpm._archive_fully_covered` for that child directly). A flat `retain_backlog`
+   `pgpm.archive_ledger`/`pgpm._archive_fully_covered` for that child directly). The one exception that more
+   ticks never clear: a partition created over the range of a partition that was already archived and dropped
+   (by retention or by hand), or a partition restored from a dump over chunks archived before the restore, is
+   held for good, so it stays in `retain_backlog` while retention goes on past it. Look for its one
+   `skip_archive_retired_range` row in `pgpm.log`; `method` names the archived objects that are the only copy of
+   the dropped rows, and the remedy (export the partition with `archive.to_s3`, then detach and drop it and
+   delete its `pgpm.part` row). A flat `retain_backlog`
    with `retain_drop_failures` actually **climbing** is a real failure: the reason is in the log
    (`fail_retain_drop`, `fail_retain_crossing`, `fail_retain_detach`, `fail_retain_identity`,
    `fail_archive_identity`, `fail_write_block_identity` or `fail_archive_contract` rows, `method`).
@@ -433,8 +439,14 @@ failure blocks that one partition on purpose (`retain_drop_failures` climbing in
    took it. When it is the partition itself come back as a new relation (restored from a dump under its
    own name, say) and still attached to the table, record that relation with
    `select pgpm.adopt_partition('public.events', 'public.<partition>')`: pgpm re-anchors the row to it,
-   discards any archive coverage recorded under the name (that coverage was earned by the relation that
-   is gone), and from the next tick write-blocks, archives and retires it like any other partition. It
+   and if the relation that is gone had no archived chunks, from the next tick write-blocks, archives and
+   retires it like any other partition. If it had, those chunks are the record of the only copy pgpm can
+   vouch for: they are marked retired (logged `archive_chunk_retired`), not discarded, and the restored
+   partition is held for good (one `skip_archive_retired_range` row; the archive step logs no
+   `fail_archive_identity` for it, and retention moves on past it). Its rows are in those objects only as
+   far as the chunks covered them and only if nothing was written to it after they were archived (a dump
+   taken while it was write-blocked); once you have confirmed that, detach and drop it and delete its
+   `pgpm.part` row, or export it first with `archive.to_s3`, which writes to a key of its own. It
    refuses a relation that is not attached to the table, one pgpm already records, and a range another
    `pgpm.part` row records; if that other row is stale too, delete it first. When the relation holding
    the name is not one pgpm should manage, detach it from the table first, then clear the stale row with
@@ -445,9 +457,18 @@ failure blocks that one partition on purpose (`retain_drop_failures` climbing in
    `pgpm.part.child_name` and `pgpm.archive_ledger.child_name` in the same transaction: a rename does
    not change an oid, so the recorded identity stays right, and the ledger matches archived chunks to
    their partition by name, so carrying it keeps the coverage attached (the guide has the three
-   statements). Leaving the ledger behind does not wedge anything: the next archive tick discards the
-   coverage left under the old name (logged once as `archive_coverage_reset`) and archives the
-   partition again from its `lo`.
+   statements). Leaving the ledger behind after a rename on this release does not wedge anything: each
+   chunk records the relation it was read from, so the next archive tick sees that relation still exists,
+   discards the coverage left under the old name (logged once as `archive_coverage_reset`) and archives
+   the partition again from its `lo`. A rename made before upgrading to this release is different, and
+   does hold the partition: the upgrade cannot tell coverage left under an old name from that of a
+   partition dropped by hand, so it marks it retired, and the renamed partition is then held, with one
+   `skip_archive_retired_range` row naming both remedies. For a rename the safe one is the ledger delete,
+   safe precisely because the rows are in the live partition: once you have confirmed the renamed
+   partition holds the range,
+   `delete from pgpm.archive_ledger where parent_table = ... and child_name = <old name> and retired_at is not null`,
+   and the next tick archives it afresh. Never run that delete for a partition that was dropped: those rows
+   are the record of the only copy.
 
    **`fail_archive_contract` is the archive step refusing what your archive strategy returned**, not a
    problem with the partition: `config.archive_fn` answered a chunk with a `covered_hi` that was null,

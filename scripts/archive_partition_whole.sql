@@ -66,7 +66,8 @@
 -- parent and holds an id grid's covered_hi to the control column's type, issue #1071), pgpm._native_text (issue
 -- #977) and pgpm._refuse_filtered_reads (issue #873) for the contract check, the ledger's canonical
 -- hi and the row-level security refusal, pgpm._max_hi_native (issue #500) for the canonical resume
--- watermark and pgpm._child_nsp (issue #727) for the partition's own schema, plus pgpm.part.child_oid for the identity check below (issue #421; added after this
+-- watermark, pgpm._child_nsp (issue #727) for the partition's own schema, pgpm.archive_ledger.retired_at and
+-- pgpm._over_retired_chunks and pgpm.archive_ledger.child_oid (issue #1141) to leave retired chunks and the partitions over them alone, plus pgpm.part.child_oid for the identity check below (issue #421; added after this
 -- script, so an older core needs that check removed along with the column reference). Not part of pgpm_core/install.sql and never will be without a real feature proposal
 -- and its own issue/PR -- this is scratch space for an operator to paste into a session and run,
 -- not a shipped, versioned function.
@@ -97,19 +98,25 @@ begin
     return format('%s has no archive_fn configured -- nothing to do', p_parent);
   end if;
   v_ncast := pgpm._native_type(cfg.control_kind);
+  -- #1141: chunks whose relation was dropped outside retire() are marked retired first, as a tick marks them,
+  -- so the partition over their range is held below rather than written over their objects
+  perform pgpm._mark_gone_chunks(p_parent);
 
   -- Oldest first in the control's NATIVE order, as pgpm._archive_step orders its candidates: pgpm.part.lo is
   -- text, and as text '1000' sorts before '200', so an id grid crossing a power of ten handed out a newer
   -- partition ahead of an older one (issue #1054). EXECUTE does not set FOUND, so the row count says whether
-  -- anything was eligible.
+  -- anything was eligible. A partition over the range of a chunk retire() marked retired is not one, as it is
+  -- not one of _archive_step's (#1141): archived, it would go to the retired chunk's object key, over the only
+  -- copy of the rows that drop removed; the tick logs skip_archive_retired_range for it, with the remedy.
   execute format(
     'select p.child_name, p.lo, p.hi, p.child_oid from pgpm.part p
       where p.parent_table = %L::regclass and p.attached
         and pgpm._is_write_blocked(%L::regclass, p.child_name)
         and not pgpm._archive_fully_covered(%L::regclass, p.child_name)
+        and p.child_name not in (select o.child_name from pgpm._over_retired_chunks(%L::regclass) o)
       order by p.lo::%s
       limit 1',
-    p_parent::text, p_parent::text, p_parent::text, v_ncast)
+    p_parent::text, p_parent::text, p_parent::text, p_parent::text, v_ncast)
     into r;
   get diagnostics v_found = row_count;
 
@@ -157,9 +164,12 @@ begin
   -- through pgpm._max_hi_native (#500): it is written below as the next ledger row's lo, which every other
   -- session reads back. A bare ::text rendered it in the CALLER's DateStyle ('13/08/2026 12:00:00 UTC'
   -- under SQL, DMY), and once the partition was retired _archive_step's #511 discard query cast that lo
-  -- under the default DateStyle and raised on every tick (issue #1054).
-  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L',
-                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, r.child_name)
+  -- under the default DateStyle and raised on every tick (issue #1054). A retired chunk is no live
+  -- partition's coverage, as _next_archive_chunk reads it (#1141), and neither is a chunk read from another
+  -- relation of the name (its child_oid is not this relation's).
+  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null
+                    and (child_oid is null or child_oid = %L::oid)',
+                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, r.child_name, v_now::oid)
     into v_resume_lo;
   v_resume_lo := coalesce(v_resume_lo, r.lo);
 
@@ -189,8 +199,9 @@ begin
   -- offset-less text stored verbatim reads as a different instant, past hi, from a session in another zone
   v_result.covered_hi := pgpm._native_text(cfg.control_kind, v_result.covered_hi);
 
-  insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, s3_key, etag, rows_archived)
-  values (p_parent, v_resume_lo, v_result.covered_hi, r.child_name, v_result.s3_key, v_result.etag, v_result.rows_archived);
+  insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, s3_key, etag, rows_archived, child_oid)
+  values (p_parent, v_resume_lo, v_result.covered_hi, r.child_name, v_result.s3_key, v_result.etag, v_result.rows_archived,
+          v_now::oid);
 
   -- partial or whole by VALUE: the check above holds covered_hi at or below hi, and the same value can be
   -- spelt more than one way ('1000.0' is hi 1000; a timestamp in another zone or DateStyle), so text

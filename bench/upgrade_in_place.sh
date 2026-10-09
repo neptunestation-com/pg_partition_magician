@@ -153,6 +153,8 @@ pgpm.transmute_inflight:control_attnum
 pgpm.dropped_fk:restored_at
 pgpm.dropped_fk:validated_at
 pgpm.dropped_fk:validate_retry_after
+pgpm.archive_ledger:retired_at
+pgpm.archive_ledger:child_oid
 "
 N_DEGRADE=$(echo "$DEGRADE_COLS" | grep -c ':')
 

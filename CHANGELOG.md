@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+- **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
+  (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
+  and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's
+  `pgpm.archive_ledger` row and archive the new partition to the same object key (parent and `lo`), over the
+  only copy of the dropped rows; under the dropped partition's own name, `adopt_partition`, `retire()`, the
+  write-block step and a regrain's swap deleted it by name, and `_next_archive_chunk` and
+  `_archive_fully_covered` read it as the new partition's coverage, so `retire()` could drop rows nothing had
+  archived. `retire()` now marks the chunks of the partition it drops (`pgpm.archive_ledger.retired_at`, new,
+  backfilled on upgrade from the `retain_drop` rows in `pgpm.log`), no reset site discards a marked row, no
+  coverage reader counts one, and the archive step (and `scripts/archive_partition_whole.sql`) leaves a
+  partition over a retired chunk's range out of its candidates, logged once as `skip_archive_retired_range`
+  with the remedy, archiving the parent's next partition in the same tick; `retain()` leaves it out of its
+  batch too. A chunk now records the relation it was read from (`pgpm.archive_ledger.child_oid`, new,
+  attributed on upgrade only to a write-blocked relation `pgpm.part` records for its name, every other
+  pre-existing chunk marked retired): the coverage readers match it by that oid, so a same-named successor inherits
+  nothing, and every reset site marks retired (`archive_chunk_retired`), never discards, the chunks of a
+  relation dropped outside `retire()`. Tests `tests/309` and `tests/archive/db/50`; guard
+  `bench/archive_retired_chunk_kept.sh`, mutations `archive_retired_orphan_discard`,
+  `archive_retired_adopt_discard`, `archive_retired_retire_discard`, `archive_retired_write_block_discard`,
+  `archive_retired_regrain_swap_discard`, `archive_retired_regrain_rename_carried`,
+  `archive_retired_coverage_counted`, `archive_retired_next_chunk_resumes`, `archive_retired_reoccupied_archived`,
+  `archive_retired_unmarked`, `archive_retired_backfill_untimed`, `archive_gone_step_discard`,
+  `archive_gone_retire_discard`, `archive_gone_write_block_discard`, `archive_gone_swap_discard`,
+  `archive_gone_adopt_discard`, `archive_successor_coverage_counted`, `archive_successor_next_chunk_resumes`,
+  `archive_ledger_oid_unrecorded`, `retain_held_partition_attempted`, `archive_ledger_oid_backfill_unanchored`,
+  `archive_ledger_backfill_gone_kept`, `archive_ledger_backfill_namesake_kept`,
+  `archive_ledger_backfill_unanchored_kept`, `archive_gone_null_oid_kept`, `archive_retired_rename_remedy_unnamed`,
+  `archive_retired_unnamed_raises`, `archive_ledger_backfill_unblocked_attributed` and `archive_retired_orphan_delete_unfiltered`.
+
 - **A synchronous export keys and claims the relation it resolved, by oid** (#1064). `archive._resolve_child`
   resolves and holds the export's child and returns its regclass, but `archive.to_s3` and
   `archive.to_s3_parquet` handed `archive._child_object_key` the child's NAME, and `archive._owned_key` looked
