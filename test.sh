@@ -947,6 +947,11 @@ run_archive() {
   # bench/discriminate.sh completes with archive_fn_parquet_readback_trusted.
   echo "--- tests/archive/db/08 reads its Parquet objects back guard (issue #1093) ---"
   bash "$(dirname "$0")/bench/archive_fn_s3_readback.sh" pgpm_test-archive pgpm_perf123 || fail=1
+  # The key-by-resolved-oid guard (#1064) re-runs tests/archive/db/49 for the same reason, and runs
+  # scripts/check_archive_child_by_oid.py on the module: the clean-code half of the pair bench/discriminate.sh
+  # completes with archive._owned_key looking the export's relation up by name again.
+  echo "--- a synchronous export keys and claims the relation it resolved, by oid guard (issue #1064) ---"
+  bash "$(dirname "$0")/bench/archive_key_by_resolved_oid.sh" pgpm_test-archive pgpm_perf323 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi

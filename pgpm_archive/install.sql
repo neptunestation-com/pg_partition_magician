@@ -2794,8 +2794,8 @@ $$;
 
 -- Every object key this module writes is assembled here and nowhere else (#872), and every key is CLAIMED
 -- here before anything is PUT to it. A key is <base>[.<oid>]<tail>: the base is <prefix><schema>.<name>, the
--- name being p_child when one is given (a synchronous export names its partition) and p_parent's own relname
--- when it is null (an archive_fn chunk names its table); the tail is whatever follows the name, the chunk's
+-- schema and the name being p_child's own when one is given (a synchronous export names its partition) and
+-- p_parent's own when it is null (an archive_fn chunk names its table); the tail is whatever follows the name, the chunk's
 -- _<stem><ext> or the export's <ext>. archive._object_key and archive._child_object_key are the two shapes'
 -- entry points, and both only call this. scripts/check_archive_object_keys.py fails CI when a prefix is
 -- assembled into a string anywhere else in this file, and tests/archive/db/39 takes every path that writes
@@ -2837,31 +2837,42 @@ $$;
 -- relation in its schema, so a re-run export and the export of a new relation that took a dropped one's
 -- name were one writer to the claim, and the second PUT over the first export, after the documented
 -- export-then-drop workflow the only copy of the dropped relation's rows. So the claim also records the
--- relation whose rows the object holds (the parent itself for a chunk), resolved here by name in the
--- parent's schema as archive._resolve_child resolved it, and a key held for another relation of the same
--- parent and kind is refused outright: the oid shape names the parent, which is this writer too, so there
--- is no key of its own to divert to. A claim whose relation is unrecorded (made before #976) is refused the
--- same way, since nothing says the relation now spelling its key is the one it holds.
-create or replace function archive._owned_key(p_parent regclass, p_prefix text, p_child name, p_tail text)
+-- relation whose rows the object holds (the parent itself for a chunk), and a key held for another relation
+-- of the same parent and kind is refused outright: the oid shape names the parent, which is this writer too,
+-- so there is no key of its own to divert to. A claim whose relation is unrecorded (made before #976) is
+-- refused the same way, since nothing says the relation now spelling its key is the one it holds.
+--
+-- That relation is taken BY OID, never looked up again by name (#1064). An export passes p_child, the
+-- regclass archive._resolve_child resolved and holds; a chunk passes null, and its relation is p_parent
+-- itself, named by oid as it always was. The schema and the name in the key base are read off that oid, in the
+-- same statement that finds it. This used to take the child's NAME and look it up again in the parent's
+-- CURRENT schema, both for the base and for the claim, and the hold is on the child only: ALTER TABLE <parent>
+-- SET SCHEMA between the two lookups keyed and claimed the resolved relation's rows as the destination
+-- schema's namesake, whose own later export passed that claim and PUT over the only copy. Read off the oid,
+-- the key names the relation as it stands wherever its parent has gone. The hold keeps the relation's name
+-- and its schema's oid fixed; ALTER SCHEMA ... RENAME takes no lock that conflicts with it, so the schema's
+-- NAME may still change before the base is read, and the key then spells the new name. That cannot reach
+-- another relation's object: the claim records the held relation, and a key another relation's claim holds is
+-- diverted or refused below. scripts/check_archive_child_by_oid.py keeps the class closed: outside
+-- archive._resolve_child nothing in this file compares a relname or does anything with a child's name but
+-- resolve it there, report it or render it.
+drop function if exists archive._child_object_key(regclass, text, name, text);
+drop function if exists archive._owned_key(regclass, text, name, text);
+create or replace function archive._owned_key(p_parent regclass, p_prefix text, p_child regclass, p_tail text)
 returns text language plpgsql as $$
 declare v_base_q text; v_owner oid; v_key text; v_held archive.object_key_claim; v_relation oid; v_name name;
         v_nsp name; v_kind text := case when p_child is null then 'chunk' else 'export' end;
 begin
-  select p_prefix || quote_ident(n.nspname) || '.' || quote_ident(coalesce(p_child, c.relname))
-    into v_base_q
+  -- the relation whose rows the object holds (#976), by oid (#1064): the parent for a chunk, the held child for
+  -- an export, with its own schema and name
+  select c.oid, n.nspname, c.relname into v_relation, v_nsp, v_name
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
-   where c.oid = p_parent;
-  -- the relation whose rows the object holds (#976): the parent for a chunk, the child for an export
-  select n.nspname, coalesce(p_child, c.relname),
-         case when p_child is null then c.oid
-              else (select r.oid from pg_class r where r.relnamespace = n.oid and r.relname = p_child) end
-    into v_nsp, v_name, v_relation
-    from pg_class c join pg_namespace n on n.oid = c.relnamespace
-   where c.oid = p_parent;
+   where c.oid = coalesce(p_child, p_parent);
   if v_relation is null then
-    raise exception 'pg_partition_magician: %.% does not exist; no object key is claimed for it',
-      quote_ident(v_nsp), quote_ident(p_child);
+    raise exception 'pg_partition_magician: relation % does not exist; no object key is claimed for it',
+      coalesce(p_child, p_parent)::oid;
   end if;
+  v_base_q := p_prefix || quote_ident(v_nsp) || '.' || quote_ident(v_name);
   insert into archive.object_key_owner (key_base, parent_oid) values (v_base_q, p_parent::oid)
     on conflict (key_base) do nothing
     returning parent_oid into v_owner;
@@ -3265,14 +3276,16 @@ $$;
 -- The object key of a synchronous export, <prefix><schema>.<child><ext>, or <prefix><schema>.<child>.<oid><ext>
 -- for a parent that did not claim the name first, or whose plain key a chunk already holds (#890: a child
 -- named <table>_<stem> spells a chunk key of <table>; archive._owned_key, above, which assembles every key).
--- The child is named by IDENTITY with p_parent's schema, the one _resolve_child read the child from.
+-- p_child is the regclass archive._resolve_child returned, never a name (#1064): the key names that relation by
+-- IDENTITY, with its own schema and name read off its oid, so a parent moved to another schema after the
+-- resolution cannot have the export keyed and claimed as a namesake standing there.
 -- archive.to_s3 and archive.to_s3_parquet keyed on <prefix><child><ext>, the bare name, and pgpm names a
 -- child after its parent's relname, so two parents named `evt` in two schemas sharing a prefix exported
 -- their [0, 10000) partitions to ONE key (#711). Then the schema-qualified key had no owner, so a table
 -- created after the first was dropped and forgotten exported its same-named partition over the first one's
 -- export, after the documented to_s3-then-drop workflow the only copy of those rows (#872). Both functions
 -- take their key from here and nowhere else.
-create or replace function archive._child_object_key(p_parent regclass, p_prefix text, p_child name, p_ext text)
+create or replace function archive._child_object_key(p_parent regclass, p_prefix text, p_child regclass, p_ext text)
 returns text language sql as $$
   select archive._owned_key(p_parent, p_prefix, p_child, p_ext);
 $$;
@@ -3433,19 +3446,19 @@ begin
   -- the caller and would agree on an object holding only the rows its policies admit
   v_child := archive._resolve_child(p_parent, p_child, 'archive.to_s3');
   perform pgpm._refuse_filtered_reads(v_child, 'export', 'the object would hold only those rows');
-  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+  select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_child;
   select a.atttypid::regtype::text into v_ctltype
     from pg_attribute a where a.attrelid = p_parent and a.attname = pcfg.control_column;
   -- The object's form follows archive.config.compress, as it does on every other path this module
   -- ships (#520): plain NDJSON at <prefix><schema>.<child>.ndjson or, with the flag on, a GZIP stream
   -- at <prefix><schema>.<child>.ndjson.gz, the suffix the automatic NDJSON strategy already uses for a
   -- compressed object. The flag is read here, once, and nowhere else in this function. The key names
-  -- the child with its schema (archive._child_object_key, #711).
+  -- the child with its schema (archive._child_object_key, #711), the relation resolved and held, by its oid (#1064).
   v_gzip := cfg.compress;
   if v_gzip then
-    v_key := archive._child_object_key(p_parent, cfg.prefix, p_child, '.ndjson.gz'); v_ctype := 'application/gzip';
+    v_key := archive._child_object_key(p_parent, cfg.prefix, v_child, '.ndjson.gz'); v_ctype := 'application/gzip';
   else
-    v_key := archive._child_object_key(p_parent, cfg.prefix, p_child, '.ndjson');    v_ctype := 'application/x-ndjson';
+    v_key := archive._child_object_key(p_parent, cfg.prefix, v_child, '.ndjson');    v_ctype := 'application/x-ndjson';
   end if;
 
   -- Conservation (#673): every page's rows are summed into a count AND a content fingerprint (a sum of
@@ -3658,7 +3671,7 @@ begin
   v_child := archive._resolve_child(p_parent, p_child, 'archive.to_s3_parquet');
   perform pgpm._refuse_filtered_reads(v_child, 'export', 'the object would hold only those rows');   -- #873
   v_payload := archive._pq_to_parquet(v_child, cfg.compress);
-  v_key := archive._child_object_key(p_parent, cfg.prefix, p_child, '.parquet');   -- named with its schema (#711)
+  v_key := archive._child_object_key(p_parent, cfg.prefix, v_child, '.parquet');   -- named with its schema (#711), by oid (#1064)
 
   v_resp := archive.s3_signed_request_bytea('PUT', cfg.endpoint, cfg.bucket, cfg.region, v_key, '',
                                             'application/vnd.apache.parquet', v_payload, v_key_id, v_secret);

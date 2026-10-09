@@ -2471,8 +2471,8 @@ archived before this release keeps its keys and its objects are protected the sa
 the database: two databases writing one bucket under one prefix are not told apart, so give each its own
 prefix.
 
-The synchronous functions write one object per call, named after the partition with its parent's
-schema: `archive.to_s3` to `<prefix><schema>.<child>.ndjson` (`.ndjson.gz` when compressed) and
+The synchronous functions write one object per call, named after the partition with its own schema (the
+parent's, where the call resolves it): `archive.to_s3` to `<prefix><schema>.<child>.ndjson` (`.ndjson.gz` when compressed) and
 `archive.to_s3_parquet` to `<prefix><schema>.<child>.parquet`, quoted the same way, so two parents with
 one name in two schemas sharing a prefix export their same-named partitions to two objects. They used to
 write `<prefix><child>.<ext>`, and an object written under that shape stays where it is. Their keys are
@@ -2542,6 +2542,15 @@ a namesake in the schema that took the name, whether or not `pgpm.part` records 
 between the resolution and the lock is resolved again; one that keeps landing there is refused after three
 tries, `<schema>.<child> led to another relation each of the 3 times archive.to_s3 locked it`, and nothing
 is written.
+
+After the resolution the export takes that relation by its oid alone: its key spells the relation's own
+schema and name, read off the oid, and its claim records that relation. So a parent moved to another schema
+during the call (`ALTER TABLE ... SET SCHEMA`, which the hold on the child does not stop) does not have the
+export keyed or claimed as a same-named table standing in the parent's new schema; the object stays at
+`<prefix><child's schema>.<child>.ndjson`, and that table's own export later writes its own key. A schema
+renamed during the call changes the schema name the key spells, and nothing more: the claim still records the
+held relation, so a key another relation's claim holds is diverted to the oid shape or refused, as above,
+never written over.
 
 ## Scheduling
 
