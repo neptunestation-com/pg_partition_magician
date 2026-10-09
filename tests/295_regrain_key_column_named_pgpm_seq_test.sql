@@ -30,7 +30,7 @@ create schema pgpm_test295;
 create function pgpm_test295.to_copied(p_parent regclass) returns void language plpgsql as $f$
 declare s text; n int := 0; v_cur text; v_child name;
 begin
-  select child_name into v_child from pgpm.part where parent_table = p_parent and lo = '0';
+  select child_name into v_child from pgpm.part where parent_table = p_parent and lo = '0' and attached;
   loop
     select regrain_cursor into v_cur from pgpm.config where parent_table = p_parent;
     exit when v_cur is not null and v_cur::numeric >= 100;
@@ -52,7 +52,7 @@ end $f$;
 create function pgpm_test295.to_swap(p_parent regclass) returns text language plpgsql as $f$
 declare s text; n int := 0; v_child name;
 begin
-  select child_name into v_child from pgpm.part where parent_table = p_parent and lo = '0';
+  select child_name into v_child from pgpm.part where parent_table = p_parent and lo = '0' and attached;
   loop
     s := pgpm.regrain_step(p_parent, v_child, '100', 50);
     exit when s like 'swapped:%';
