@@ -7408,6 +7408,37 @@ select ok(
           "    execute format('alter table %s set schema %I', v_restored::text, v_nsp);\n"
           "  end if;\n", 1)],
     ),
+    "identity_sequence_acl_unreset": (
+        "bench/identity_sequence_grants.sh",
+        "Issue #1076's carry without its reset: _identity_acl_carry_ddl replays the source identity sequence's "
+        "grants onto the one transmute builds on the parent and the one untransmute builds on the restored "
+        "table, and drops _acl_carry_ddl's first statement, so what the creating role's ALTER DEFAULT "
+        "PRIVILEGES gave the new sequence stays: a role the operator revoked from <table>_id_seq gets UPDATE "
+        "(setval) back. One site, the shared helper, so both conversions; tests/297 parts A, B and C catch it.",
+        [("    v_ddl := v_ddl || pgpm._acl_carry_ddl(pg_get_serial_sequence(p_src::text, p_cols[v_i])::regclass,\n"
+          "                                         format('%I.%I', p_dst_nsp, p_dst_names[v_i]));\n",
+          "    v_ddl := v_ddl || (pgpm._acl_carry_ddl(pg_get_serial_sequence(p_src::text, p_cols[v_i])::regclass,\n"
+          "                                          format('%I.%I', p_dst_nsp, p_dst_names[v_i])))[2:];\n", 1)],
+    ),
+    "transmute_identity_seq_grantor_unchecked": (
+        "bench/identity_sequence_grants.sh",
+        "Issue #1076's preflight without the sequences: transmute asks _acl_may_grant_as about the grantors of "
+        "the table's grants and not of its identity sequences', so a grant on <table>_id_seq made through a "
+        "grant option by a role the session cannot become is replayed in the cutover by _acl_grant_as, which "
+        "refuses there, after phases 1 and 2 committed the bound and the claim. One site, the two branches the "
+        "fix added to the grantor query; tests/297 part D catches it.",
+        [("           where att.attrelid = p_parent and att.attnum > 0 and not att.attisdropped and att.attacl is not null\n"
+          "          union\n"
+          "          select a.grantor from pg_depend d join pg_class s on s.oid = d.objid, aclexplode(s.relacl) a\n"
+          "           where d.classid = 'pg_class'::regclass and d.refclassid = 'pg_class'::regclass\n"
+          "             and d.refobjid = p_parent and d.deptype = 'i' and s.relkind = 'S' and s.relacl is not null\n"
+          "          union\n"
+          "          select a.grantor from pg_depend d join pg_attribute att on att.attrelid = d.objid, aclexplode(att.attacl) a\n"
+          "           where d.classid = 'pg_class'::regclass and d.refclassid = 'pg_class'::regclass\n"
+          "             and d.refobjid = p_parent and d.deptype = 'i' and att.attnum > 0 and att.attacl is not null) g\n",
+          "           where att.attrelid = p_parent and att.attnum > 0 and not att.attisdropped and att.attacl is not null) g\n",
+          1)],
+    ),
     "untransmute_replica_identity_not_restored": (
         "bench/untransmute_replica_identity.sh",
         "Pre-#815 (F1-06) untransmute: the parent's replica identity is read and never applied, so the "

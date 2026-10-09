@@ -8058,6 +8058,29 @@ begin
   return v_ddl;
 end $$;
 
+-- _identity_acl_carry_ddl: _acl_carry_ddl for a table's identity sequences (#1076), one per column of
+-- p_cols, from p_src's sequence for that column onto the sequence that will be named p_dst_nsp.p_dst_names[i].
+-- transmute's step 6 and untransmute's re-add of identity each make a NEW sequence and hand it the source's
+-- name (#877), and nothing carried the source's privileges: the new one was born with the creating role's
+-- ALTER DEFAULT PRIVILEGES (a role the operator had REVOKEd from the sequence got UPDATE, setval, back) and the
+-- grants made on the source were gone (the app's USAGE and SELECT, so nextval and currval by name failed
+-- 42501). So the destination ends with exactly the source sequence's grants, table and column level, each
+-- under its grantor, as the table does. Built while the source sequence exists (transmute's step 3 drops it
+-- with the monolith's identity) and run once the destination has the name and its final owner, which ALTER
+-- TABLE ... OWNER gives an identity sequence with its table.
+create or replace function pgpm._identity_acl_carry_ddl(p_src regclass, p_cols name[], p_dst_nsp name,
+                                                        p_dst_names name[])
+returns text[] language plpgsql stable as $$
+declare
+  v_ddl text[] := '{}'; v_i int;
+begin
+  for v_i in 1 .. coalesce(array_length(p_cols, 1), 0) loop
+    v_ddl := v_ddl || pgpm._acl_carry_ddl(pg_get_serial_sequence(p_src::text, p_cols[v_i])::regclass,
+                                         format('%I.%I', p_dst_nsp, p_dst_names[v_i]));
+  end loop;
+  return v_ddl;
+end $$;
+
 -- ============================== transmute ==============================
 
 -- #275 turned these from FUNCTIONs into PROCEDUREs. CREATE OR REPLACE cannot change that, so the old
@@ -8117,6 +8140,7 @@ declare
   v_idmin bigint[]; v_mmin bigint;   -- #670: min(identity), for a descending identity's reseed
   v_idopts text[]; v_opt text;      -- #732: the sequence options step 6 used, and their re-read under the lock
   v_idseqs name[]; v_seq regclass;  -- #877: each original identity sequence's name, read under that lock
+  v_seqgrants text[];               -- #1076: the original identity sequences' grants, for the parent's
   v_keyshape text;                  -- #706: what the preflight planned the key and identity from
   v_ra record;                       -- #656/#670: one identity column's refreshed (next, max, min)
   v_monolith name; v_monreg regclass;
@@ -8620,13 +8644,23 @@ begin
   -- parent under its grantor (_acl_carry_ddl), which takes SET ROLE to that role, and a session that may not
   -- become it died inside the cutover, after phases 1 and 2 had committed the bound and the claim; replayed
   -- as this role instead, the grant was recorded under the owner and its grantor could no longer revoke it.
-  -- Refused here, before anything is committed.
+  -- Refused here, before anything is committed. The table's identity sequences too (#1076): their grants are
+  -- replayed onto the parent's the same way (_identity_acl_carry_ddl), and an identity sequence's owner is
+  -- its table's (deptype 'i' in pg_depend, table and column level as for the table).
   select string_agg(distinct quote_ident(pg_get_userbyid(g.grantor)), ', '
                     order by quote_ident(pg_get_userbyid(g.grantor))) into v_grantors_q
     from (select a.grantor from pg_class c, aclexplode(c.relacl) a where c.oid = p_parent and c.relacl is not null
           union
           select a.grantor from pg_attribute att, aclexplode(att.attacl) a
-           where att.attrelid = p_parent and att.attnum > 0 and not att.attisdropped and att.attacl is not null) g
+           where att.attrelid = p_parent and att.attnum > 0 and not att.attisdropped and att.attacl is not null
+          union
+          select a.grantor from pg_depend d join pg_class s on s.oid = d.objid, aclexplode(s.relacl) a
+           where d.classid = 'pg_class'::regclass and d.refclassid = 'pg_class'::regclass
+             and d.refobjid = p_parent and d.deptype = 'i' and s.relkind = 'S' and s.relacl is not null
+          union
+          select a.grantor from pg_depend d join pg_attribute att on att.attrelid = d.objid, aclexplode(att.attacl) a
+           where d.classid = 'pg_class'::regclass and d.refclassid = 'pg_class'::regclass
+             and d.refobjid = p_parent and d.deptype = 'i' and att.attnum > 0 and att.attacl is not null) g
    where g.grantor <> (select c.relowner from pg_class c where c.oid = p_parent)
      and not pgpm._acl_may_grant_as(g.grantor, p_parent);
   if v_grantors_q is not null then
@@ -9309,6 +9343,11 @@ begin
 
   -- 2. the existing PK is KEPT in place; step 8 reconciles the monolith's promoted index (metadata-only).
 
+  -- #1076: the original identity sequences' grants, which 3a hands the parent's along with their names. Read
+  -- in the statement before the drop of identity below takes the originals with it. GRANT and REVOKE take no
+  -- lock, so a lock cannot hold them still; one still open at the drop holds the sequence's catalog row, and
+  -- the drop waits for it and then fails "tuple concurrently updated", rolling the cutover back.
+  v_seqgrants := pgpm._identity_acl_carry_ddl(p_parent, v_idcols, v_nsp, v_idseqs);
   -- 3. drop identity on the monolith; key columns NOT NULL (metadata no-ops: PK => NOT NULL)
   if v_idcols is not null then
     foreach v_col in array v_idcols loop
@@ -9331,6 +9370,12 @@ begin
       end if;
     end loop;
   end if;
+  -- and their grants (#1076): each sequence's ACL reset, the owner included, and the original's grants
+  -- replayed, each under its grantor, as 7b does for the table. Step 6 made it under this role's ALTER DEFAULT
+  -- PRIVILEGES. After the OWNER TO (7b), which the parent's sequences follow and the reset needs.
+  foreach v_grant in array v_seqgrants loop
+    execute v_grant;
+  end loop;
   -- 3b. hand every sequence the table OWNS through a column (a serial, or an explicit OWNED BY) to the
   -- same column of the new parent (#573). CREATE TABLE ... LIKE INCLUDING DEFAULTS copied the column's
   -- nextval() default onto the parent, but the ownership stayed with the oid the rename just made the
@@ -10108,6 +10153,7 @@ declare
   v_idcols name[]; v_idmax bigint[]; v_col name; v_m bigint; v_i int; v_idnext numeric[]; v_seq regclass;
   v_idmin bigint[]; v_mmin bigint; v_idopts text[];   -- #670: min(identity) and the sequence options, per column
   v_idseqs name[];                                    -- #877: each parent identity sequence's name, read under the lock
+  v_seqgrantdefs text[];                              -- #1076: the parent identity sequences' grants, for the restored ones
   v_ra record;                                        -- #656/#670: one identity column's refreshed (next, max, min)
   v_idkinds text[];   -- #308: 'a' (ALWAYS) or 'd' (BY DEFAULT) per v_idcols entry, same order
   r pgpm.dropped_fk%rowtype; v_cdelta name; v_cfn name; v_cnsp name;
@@ -10300,6 +10346,9 @@ begin
     v_idseqs[v_i] := (select s.relname from pg_class s
                        where s.oid = pg_get_serial_sequence(p_parent::text, v_idcols[v_i])::regclass);
   end loop;
+  -- #1076: and each parent sequence's grants, replayed below onto the restored table's sequence under that
+  -- name, as the parent's own grants are onto the restored table. The parent's DROP takes these sequences.
+  v_seqgrantdefs := pgpm._identity_acl_carry_ddl(p_parent, v_idcols, v_nsp, v_idseqs);
   -- Capture the parent's privileges and row security (#667), here, under the lock: GRANT, REVOKE and the
   -- RLS and policy DDL all change the parent, the table the application uses by name, and none of them
   -- recurses to a partition, so the monolith still carries whatever the table had at the conversion. The
@@ -10569,6 +10618,13 @@ begin
     execute format('alter table %s owner to %I', v_restored::text, pg_get_userbyid(v_owner));
   end if;
   foreach v_tdef in array v_comdefs loop
+    execute v_tdef;
+  end loop;
+  -- The identity sequences' grants (#1076): each restored sequence, re-added above under the creating role's
+  -- ALTER DEFAULT PRIVILEGES and renamed to the managed one's name, has its ACL reset, the owner included, and
+  -- the managed sequence's grants replayed, each under its grantor. After the OWNER TO just above, which an
+  -- identity sequence follows with its table and the reset needs.
+  foreach v_tdef in array v_seqgrantdefs loop
     execute v_tdef;
   end loop;
 

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **The table's identity sequences keep their grants through `transmute` and `untransmute`** (#1076). Both
+  re-add identity, which makes a new sequence, and since #877 hand it the source sequence's name, but the new
+  one was born with the converting role's `ALTER DEFAULT PRIVILEGES` and none of the source's grants: the app
+  lost `USAGE` and `SELECT` on `t_id_seq` (`nextval` or `currval` by name failed 42501) and a role the operator
+  had revoked got `UPDATE` (`setval`) back. One helper, `_identity_acl_carry_ddl`, now builds the carry for
+  both from `_acl_carry_ddl` (reset, owner included, then every table and column grant under its grantor):
+  transmute reads it off each original the statement before step 3 drops it and runs it after 3a's rename,
+  untransmute reads it off the parent's under its lock and runs it after the owner step. transmute's up-front
+  grantor check (#903) asks about the identity sequences' grants too. Test `tests/297`, guard
+  `bench/identity_sequence_grants.sh`, mutations `identity_sequence_acl_unreset` and
+  `transmute_identity_seq_grantor_unchecked`.
+
 - **`check_text_time` decodes against `p_epoch` as an instant, in every session** (#1081). It spliced the
   epoch into its dynamic query with `%L`, a text render under the session's DateStyle and TimeZone that the
   query parsed back, so under `SQL, DMY` in Asia/Kolkata the Unix epoch became `01/01/1970 05:30:00 IST`,
