@@ -621,11 +621,18 @@ ARCHIVE_LEDGER_ORPHAN_SWEEP = """  -- COVERAGE UNDER A NAME NO LONGER TRACKED IS
   -- Where pgpm itself changes a name or replaces a partition it keeps the ledger consistent in the
   -- same transaction (regrain_step's transitional rename carries the rows, its swap retires the
   -- source's), so on a current install this finds only what an operator or an older pgpm left.
+  --
+  -- A RETIRED CHUNK IS NOT AN ORPHAN (#1141). The rows retire() leaves are marked retired_at, and over a
+  -- range a partition re-created after the drop now holds they are exactly what this used to discard: the
+  -- record of the only copy, deleted, after which the re-created partition's first chunk was archived to the
+  -- same object key (parent and lo) and replaced the retired rows' object. They never collide here either,
+  -- because the step below does not archive a partition over a retired chunk's range.
   for r in execute format(
     'select l.child_name, count(*) as chunks, min(l.lo::%1$s)::text as lo, max(l.hi::%1$s)::text as hi
        from pgpm.archive_ledger l
       where l.parent_table = %2$L::regclass
         and l.child_name is not null
+        and l.retired_at is null
         and not exists (select 1 from pgpm.part p
                          where p.parent_table = l.parent_table and p.child_name = l.child_name)
         and exists (select 1 from pgpm.part t
@@ -670,8 +677,9 @@ REGRAIN_SWAP_LEDGER_RETIRE = """  -- The source's archive coverage goes with it 
   -- adopted as that partition's watermark. The ledger should not lean on a backstop for a state the
   -- swap can simply not leave behind. The fine children hold every row and archive from their own lo
   -- under their own blocks; the objects the source's chunks already wrote stay in the archive,
-  -- unreferenced.
-  delete from pgpm.archive_ledger where parent_table = p_parent and child_name = v_child_name;
+  -- unreferenced. A retired chunk recorded under the source's name (a partition re-created under a dropped
+  -- one's name, #1141) is not the source's coverage and stays: it is the record of the only copy.
+  delete from pgpm.archive_ledger where parent_table = p_parent and child_name = v_child_name and retired_at is null;
   get diagnostics v_rec = row_count;
   if v_rec > 0 then
     insert into pgpm.log (parent_table, action, lo, hi, rows, method)
@@ -689,7 +697,7 @@ REGRAIN_RENAME_LEDGER_CARRY = """    -- ...and its archive coverage with it (#51
     -- only the #452 no-block reset between them and adoption. Same relation, same transaction, block
     -- untouched, so carrying the rows keeps every #452 invariant.
     update pgpm.archive_ledger set child_name = v_src_name
-     where parent_table = p_parent and child_name = v_child_name;
+     where parent_table = p_parent and child_name = v_child_name and retired_at is null;   -- #1141: not a retired chunk's
 """
 
 # _next_archive_chunk's extension past the encoding's unit (#513), whole. The `if` that opens it shares
@@ -1506,10 +1514,10 @@ MUTATIONS = {
         "Adds one install ahead of the ledger read (the original install below stays, and is idempotent), "
         "which is the smallest edit that makes that mistake. Part A of tests/130 catches it.",
         [("  select count(*) into v_chunks from pgpm.archive_ledger\n"
-          "   where parent_table = p_parent and child_name = p_child;\n",
+          "   where parent_table = p_parent and child_name = p_child and retired_at is null;\n",
           "  perform pgpm._install_write_block(p_parent, p_child);\n"
           "  select count(*) into v_chunks from pgpm.archive_ledger\n"
-          "   where parent_table = p_parent and child_name = p_child;\n", 1)],
+          "   where parent_table = p_parent and child_name = p_child and retired_at is null;\n", 1)],
     ),
     "hypertable_cutover_unverified_source": (
         "bench/hypertable_cutover_identity.sh",
@@ -9130,8 +9138,8 @@ select is((select count(*) || '/' || string_agg(device_id::text, ',' order by de
         "under the partition's name, which the OLD relation earned, so the adopted relation is archived only "
         "from the old watermark and retire() drops rows the strategy was never handed. One site, the ledger "
         "discard. tests/303 part A's ledger identity catches it.",
-        [("l.parent_table = p_parent and l.child_name = v_rel returning 1)",
-          "l.parent_table = p_parent and l.child_name = v_rel and false returning 1)", 1)],
+        [("l.parent_table = p_parent and l.child_name = v_rel and l.retired_at is null returning 1)",
+          "l.parent_table = p_parent and l.child_name = v_rel and l.retired_at is null and false returning 1)", 1)],
     ),
 }
 
@@ -10041,9 +10049,9 @@ MUTATIONS["archive_whole_resume_session_render"] = (
     "parse it and every maintain() tick logs skip_archive. One site, the watermark read. tests/289 part B "
     "catches it (the ledger lo and the strategy's p_lo by value, the next partition never archived, "
     "skip_archive logged).",
-    [("""  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L',
+    [("""  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null',
                  pgpm._max_hi_native(cfg.control_kind), p_parent::text, r.child_name)""",
-      """  execute format('select max(hi::%s)::text from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L',
+      """  execute format('select max(hi::%s)::text from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null',
                  v_ncast, p_parent::text, r.child_name)""", 1)],
 )
 MUTATION_SRC["archive_whole_resume_session_render"] = "scripts/archive_partition_whole.sql"
@@ -11078,6 +11086,114 @@ MUTATIONS["transmute_claim_without_identity"] = (
     "refused before anything is changed. tests/310 part D catches it.",
     [("  if v_own_start is null then\n    raise exception 'pg_partition_magician: cannot claim the transmute",
       "  if false then\n    raise exception 'pg_partition_magician: cannot claim the transmute", 1)],
+)
+
+# #1141 bullet 1: the ledger row of a chunk whose partition retire() dropped is the record of the only copy of its
+# rows (pgpm.archive_ledger.retired_at). No archive_coverage_reset site deletes it, no coverage reader counts it,
+# and _archive_step does not archive a partition over its range. One mutation per site, each removing that site's
+# retired_at clause; all are caught by tests/309 through bench/archive_retired_chunk_kept.sh.
+_G1141 = "bench/archive_retired_chunk_kept.sh"
+MUTATIONS["archive_retired_orphan_discard"] = (
+    _G1141,
+    "_archive_step's orphan discard takes a retired chunk for an orphan: after retire() dropped [0, 100) and a "
+    "partition re-created over the range under another name was adopted, the next tick deletes the retired chunk's "
+    "ledger row (archive_coverage_reset) and archives the new partition to the same object key, over the only copy "
+    "of the retired rows. One clause, the discard's retired_at filter. tests/309 part A catches it (the retired "
+    "chunk's row and object are replaced by the late rows).",
+    [("        and l.child_name is not null\n"
+      "        and l.retired_at is null\n"
+      "        and not exists (select 1 from pgpm.part p\n",
+      "        and l.child_name is not null\n"
+      "        and not exists (select 1 from pgpm.part p\n", 1)],
+)
+MUTATIONS["archive_retired_adopt_discard"] = (
+    _G1141,
+    "adopt_partition discards the retired chunk recorded under the adopted partition's name, which is the dropped "
+    "partition's own when it was re-created under it. One clause. tests/309 part B catches it.",
+    [("l.child_name = v_rel and l.retired_at is null returning 1)", "l.child_name = v_rel returning 1)", 1)],
+)
+MUTATIONS["archive_retired_retire_discard"] = (
+    _G1141,
+    "retire()'s #564 discard (coverage found without its block) counts and deletes the retired chunk recorded under "
+    "the name of the unblocked partition it reaches, a partition re-created under the dropped one's name. One site, "
+    "its retired_at filter. tests/309 part B catches it.",
+    [("   where parent_table = p_parent and child_name = p_child and retired_at is null;\n"
+      "  if v_chunks > 0 and not pgpm._is_write_blocked(p_parent, p_child) then\n"
+      "    delete from pgpm.archive_ledger where parent_table = p_parent and child_name = p_child and retired_at is null;\n",
+      "   where parent_table = p_parent and child_name = p_child;\n"
+      "  if v_chunks > 0 and not pgpm._is_write_blocked(p_parent, p_child) then\n"
+      "    delete from pgpm.archive_ledger where parent_table = p_parent and child_name = p_child;\n", 1)],
+)
+MUTATIONS["archive_retired_write_block_discard"] = (
+    _G1141,
+    "_enforce_write_blocks' #452 discard counts and deletes the retired chunk recorded under the name of an unblocked "
+    "partition re-created under the dropped one's name. One site, its retired_at filter. tests/309 part B catches it.",
+    [("       where parent_table = p_parent and child_name = r.child_name and retired_at is null;\n"
+      "      if v_chunks > 0 and not v_substituted and not pgpm._is_write_blocked(p_parent, r.child_name) then\n"
+      "        delete from pgpm.archive_ledger where parent_table = p_parent and child_name = r.child_name and retired_at is null;\n",
+      "       where parent_table = p_parent and child_name = r.child_name;\n"
+      "      if v_chunks > 0 and not v_substituted and not pgpm._is_write_blocked(p_parent, r.child_name) then\n"
+      "        delete from pgpm.archive_ledger where parent_table = p_parent and child_name = r.child_name;\n", 1)],
+)
+MUTATIONS["archive_retired_regrain_swap_discard"] = (
+    _G1141,
+    "regrain's swap discards, with the source's coverage, the retired chunk recorded under the source's name (a "
+    "coarse partition re-created under the dropped one's name and regrained). One clause. tests/309 part C catches it.",
+    [("delete from pgpm.archive_ledger where parent_table = p_parent and child_name = v_child_name and retired_at is null;",
+      "delete from pgpm.archive_ledger where parent_table = p_parent and child_name = v_child_name;", 1)],
+)
+MUTATIONS["archive_retired_regrain_rename_carried"] = (
+    _G1141,
+    "regrain's #266 transitional rename carries the retired chunk recorded under the source's name to the source's "
+    "transitional name, so the record names a relation that never held its rows. One clause. tests/309 part B "
+    "catches it (the chunk is no longer recorded under the dropped partition's name).",
+    [("     where parent_table = p_parent and child_name = v_child_name and retired_at is null;   -- #1141: not a retired chunk's\n",
+      "     where parent_table = p_parent and child_name = v_child_name;\n", 1)],
+)
+MUTATIONS["archive_retired_coverage_counted"] = (
+    _G1141,
+    "_archive_fully_covered reads the retired chunk recorded under a re-created partition's name as that partition's "
+    "coverage, so retire() drops the re-created partition with rows no strategy was handed. One clause. tests/309 "
+    "part B catches it.",
+    [("  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null',\n"
+      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child)\n"
+      "    into v_watermark;\n",
+      "  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L',\n"
+      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child)\n"
+      "    into v_watermark;\n", 1)],
+)
+MUTATIONS["archive_retired_next_chunk_resumes"] = (
+    _G1141,
+    "_next_archive_chunk resumes a re-created partition from the retired chunk's watermark recorded under its name, "
+    "past rows nothing has archived. One clause. tests/309 part B catches it.",
+    [("  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null',\n"
+      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child)\n"
+      "    into v_lo;\n",
+      "  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L',\n"
+      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child)\n"
+      "    into v_lo;\n", 1)],
+)
+MUTATIONS["archive_retired_reoccupied_archived"] = (
+    _G1141,
+    "_archive_step logs skip_archive_retired_range for a partition over a retired chunk's range and then hands it to "
+    "the strategy anyway: its first chunk is archived to the retired chunk's object key and its ledger INSERT "
+    "collides with the retired row, so at archive_batch 1 the parent's next partition is never archived (#511's "
+    "wedge). One clause, the candidate query's exclusion. tests/309 part A catches it.",
+    [("        and p.child_name <> all (%L::name[])\n", "        and (%L::name[]) is not null\n", 1)],
+)
+MUTATIONS["archive_retired_unmarked"] = (
+    _G1141,
+    "retire() drops a partition without marking its chunks retired, so nothing tells them from coverage of a live "
+    "partition and every reset site discards them again. One statement. tests/309 parts A, B, C and E catch it.",
+    [("    update pgpm.archive_ledger set retired_at = now()\n"
+      "     where parent_table = p_parent and child_name = p_child and retired_at is null;\n", "", 1)],
+)
+MUTATIONS["archive_retired_backfill_untimed"] = (
+    _G1141,
+    "The upgrade backfill marks every chunk inside a range a retain_drop was logged over, including one archived "
+    "after that drop, which is coverage of the partition re-created there, not a retired chunk. One clause. "
+    "tests/309 part E catches it.",
+    [(" and d.at >= l.archived_at", "", 1)],
 )
 
 
