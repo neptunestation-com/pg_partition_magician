@@ -57,12 +57,13 @@ code=$(docker run --rm --network "$NET" curlimages/curl -s -o /dev/null -w '%{ht
 if [ "$code" != 200 ] && [ "$code" != 409 ]; then say FAIL "the MinIO bucket exists" "PUT returned $code"; exit 1; fi
 
 # The DEFECT copy of the module: the Parquet strategy's PUT sends PAR1 and nothing else, and the transport still
-# reports the file's row count. The pattern must match exactly once (the discipline of mutate.py).
+# reports the file's row count. The pattern must match exactly once (the discipline of mutate.py): the refusal
+# line (its #1069 digest argument included) pins the strategy's PUT apart from archive.to_s3_parquet's identical one.
 if ! python3 - "$ROOT/pgpm_archive/install.sql" "$work/par1_only.sql" <<'PY'
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 t = open(src).read()
-find = ("  perform archive._refuse_recorded_chunk_overwrite('archive_to_s3_parquet', p_parent, pcfg.control_kind, v_key, p_lo, p_hi, v_rows);\n"
+find = ("  perform archive._refuse_recorded_chunk_overwrite('archive_to_s3_parquet', p_parent, pcfg.control_kind, v_key, p_lo, p_hi, v_rows, v_rows_digest);\n"
         "  v_resp := archive.s3_signed_request_bytea('PUT', cfg.endpoint, cfg.bucket, cfg.region, v_key, '',\n"
         "                                            'application/vnd.apache.parquet', v_payload, v_key_id, v_secret);\n")
 n = t.count(find)
