@@ -412,7 +412,8 @@ alter table pgpm.part add column if not exists retiring_at timestamptz;
 alter table pgpm.part add column if not exists retiring_oid oid;
 alter table pgpm.part add column if not exists child_oid oid;
 
--- Backfill child_oid (issue #421). `where child_oid is null` makes this a one-time adoption per row:
+-- Backfill child_oid (issue #421). pgpm._backfill_chunk_oids, far below, reads what this leaves unanchored, so
+-- this must stay ahead of it in the file. `where child_oid is null` makes this a one-time adoption per row:
 -- re-running this installer never re-adopts, so a row anchored at one upgrade is not silently
 -- re-pointed at whatever holds its name at the next one.
 --
@@ -4385,7 +4386,9 @@ end $$;
 -- reset site first marks retired (instead of discarding) the rows whose relation no longer exists: their
 -- objects are the only copy of its rows, whoever dropped it. Rows whose relation still exists under another
 -- name (#511's rename) are still discarded as before; the rows are safe in it. Logged as
--- archive_chunk_retired, once per relation, with how many chunks. Returns how many rows it marked. p_child
+-- archive_chunk_retired, once per relation, with how many chunks. A row with no oid (one written by hand: the
+-- upgrade leaves none, see pgpm._backfill_chunk_oids) is judged by its name: gone when the name resolves to no
+-- relation. Returns how many rows it marked. p_child
 -- confines it to the rows recorded under that name, for a site that discards by name; null is every row of the
 -- parent, for _archive_step's orphan discard, which discards by the absence of a tracked name.
 --
@@ -4402,9 +4405,11 @@ begin
   if not found then return 0; end if;
   for r in execute format(
     'with gone as (update pgpm.archive_ledger l set retired_at = now()
-                    where l.parent_table = %2$L::regclass and l.retired_at is null and l.child_oid is not null
+                    where l.parent_table = %2$L::regclass and l.retired_at is null
                       and (%3$L::name is null or l.child_name = %3$L::name)
-                      and not exists (select 1 from pg_class c where c.oid = l.child_oid)
+                      and ((l.child_oid is not null and not exists (select 1 from pg_class c where c.oid = l.child_oid))
+                           or (l.child_oid is null and l.child_name is not null
+                               and to_regclass(format(''%%I.%%I'', pgpm._child_nsp(l.parent_table, l.child_name), l.child_name)) is null))
                    returning l.child_name, l.child_oid, l.lo, l.hi)
      select child_name, child_oid, count(*) as chunks, min(lo::%1$s)::text as lo, max(hi::%1$s)::text as hi
        from gone group by child_name, child_oid',
@@ -4412,8 +4417,9 @@ begin
   loop
     insert into pgpm.log (parent_table, action, lo, hi, rows, method)
       values (p_parent, 'archive_chunk_retired', r.lo, r.hi, r.chunks,
-              format('%s archived chunk(s) were recorded for %I (oid %s), which no longer exists: it was dropped outside retire(), so their objects are the only copy of its rows; marked retired, not discarded, and no partition over their range is archived',
-                     r.chunks, r.child_name, r.child_oid));
+              format('%s archived chunk(s) were recorded for %s (oid %s), a relation that no longer exists (dropped outside retire(), or, with no oid recorded, no relation has the name), so nothing vouches their rows are anywhere but their objects; marked retired, not discarded, and no partition over their range is archived',
+                     r.chunks, coalesce(quote_ident(r.child_name), 'an unnamed partition'),
+                     coalesce(r.child_oid::text, 'not recorded')));
     v_n := v_n + r.chunks;
   end loop;
   return v_n;
@@ -4421,14 +4427,17 @@ end;
 $$;
 
 -- The upgrade's half of the above, run once, when the column is added. A row recorded before it gets the oid
--- pgpm.part records for its name: the relation it was archived from, as far as pgpm knows. A row whose name no
--- pgpm.part row records is marked retired, whether or not a relation has the name now: nothing vouches that such
--- a relation is the one the chunk was read from (a partition dropped by hand and re-created under its own name
--- has the name and none of the rows), and the safe side of not knowing is to hold whatever partition is adopted
--- over the range, which the logged remedy recovers, rather than leave a row a later discard would delete and a
--- later archive write over. Then every row whose recorded oid no longer exists is marked retired by
--- pgpm._mark_gone_chunks. Left with no oid, and matched by name as before: only a row under a name whose
--- pgpm.part row itself has no oid (unanchored). Returns how many rows it marked retired.
+-- pgpm.part records for its name: the relation it was archived from, as far as pgpm knows. Every other row is
+-- marked retired: one whose name no pgpm.part row records, whether or not a relation has the name now (a
+-- partition dropped by hand and re-created under its own name has the name and none of the rows), and one whose
+-- pgpm.part row is UNANCHORED (no child_oid). That second case reads the #421 backfill of pgpm.part.child_oid,
+-- which runs earlier in this file on every install (it comes first in the text, so a fresh run and a re-run
+-- alike have anchored every row it can before this runs): a row it could not anchor is one whose partition no
+-- longer exists, dropped outside pgpm, so nothing vouches the chunk's rows are anywhere but its object. The safe
+-- side of not knowing is to hold whatever partition is adopted over the range, which the logged remedy
+-- recovers, rather than leave a row a later discard would delete and a later archive write over. Then every row
+-- whose recorded oid no longer exists is marked retired by pgpm._mark_gone_chunks. The invariant afterwards: no
+-- row recorded before the column has both child_oid and retired_at null. Returns how many rows it marked.
 create or replace function pgpm._backfill_chunk_oids() returns int language plpgsql as $$
 declare r record; v_n int;
 begin
@@ -4441,7 +4450,8 @@ begin
       from pgpm.config c
      where c.parent_table = l.parent_table and l.retired_at is null and l.child_oid is null
        and l.child_name is not null
-       and not exists (select 1 from pgpm.part p where p.parent_table = l.parent_table and p.child_name = l.child_name)
+       and not exists (select 1 from pgpm.part p where p.parent_table = l.parent_table and p.child_name = l.child_name
+                          and p.child_oid is not null)
     returning 1)
   select count(*)::int into v_n from gone;
   for r in select distinct parent_table from pgpm.archive_ledger where retired_at is null and child_oid is not null loop
@@ -4491,6 +4501,9 @@ begin
   -- re-created partition's name, which is the dropped one's, it would start the new partition past rows
   -- nothing has archived. Nor is a chunk read from another relation of the name (its child_oid is not the
   -- relation's now); a row with no oid (recorded before the column) is matched by name alone.
+  -- A row with no child_oid is matched by name: after the upgrade's backfill no row written before the column is
+  -- left both unmarked and oid-less, and every row pgpm writes since carries one, so only a row written by hand
+  -- can be null here.
   execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null
                     and (child_oid is null or child_oid = %L::oid)',
                  pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,
@@ -4623,6 +4636,7 @@ begin
   -- for its reason too (#1141): read as a same-named re-created partition's coverage, they opened retire()'s
   -- drop gate on rows no strategy was handed. And so is a chunk read from another relation of the name, by
   -- child_oid, as there.
+  -- (a null child_oid: see _next_archive_chunk, above)
   execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null
                     and (child_oid is null or child_oid = %L::oid)',
                  pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,
@@ -4710,8 +4724,16 @@ $$;
 -- operator's call, so the archive step does not archive such a partition at all. Filtered by parent first, in
 -- materialized CTEs, so the casts never meet another parent's bounds (#973); the join runs only for
 -- partitions starting below the newest retired hi, which is none in the ordinary run of things.
+--
+-- other_names lists the names those chunks were recorded under when they are not the partition's own (null when
+-- every one is). That is the shape a partition renamed before an upgrade leaves, its ledger rows left under the
+-- old name: the upgrade cannot tell that from a partition dropped by hand (both are a name no relation and no
+-- pgpm.part row has), marks the rows retired, and holds the live renamed partition. The skip row names the remedy
+-- that is safe only then. A chunk with no child_name (a row written before pgpm recorded one) is described as
+-- such rather than raising: format's %I refuses a null.
+drop function if exists pgpm._over_retired_chunks(regclass);
 create or replace function pgpm._over_retired_chunks(p_parent regclass)
-returns table(child_name name, lo text, hi text, chunks text) language plpgsql stable as $$
+returns table(child_name name, lo text, hi text, chunks text, other_names text) language plpgsql stable as $$
 declare v_ncast text;
 begin
   select pgpm._native_type(c.control_kind) into v_ncast from pgpm.config c where c.parent_table = p_parent;
@@ -4722,8 +4744,12 @@ begin
           mine as materialized (select p.child_name, p.lo, p.hi from pgpm.part p
                                  where p.parent_table = %2$L::regclass and p.attached)
      select m.child_name, m.lo, m.hi,
-            string_agg(format(''[%%s, %%s) of %%I at %%s'', l.lo, l.hi, l.child_name, coalesce(l.s3_key, ''no object key'')),
-                       ''; '' order by l.lo::%1$s)
+            string_agg(format(''[%%s, %%s) of %%s at %%s'', l.lo, l.hi,
+                              coalesce(quote_ident(l.child_name), ''an unnamed partition''),
+                              coalesce(l.s3_key, ''no object key'')),
+                       ''; '' order by l.lo::%1$s),
+            string_agg(distinct quote_ident(l.child_name), '', '')
+              filter (where l.child_name is distinct from m.child_name)
        from mine m join led l on l.lo::%1$s < m.hi::%1$s and l.hi::%1$s > m.lo::%1$s
       where m.lo::%1$s < (select max(x.hi::%1$s) from led x)
       group by m.child_name, m.lo, m.hi',
@@ -4829,8 +4855,11 @@ begin
                       and lo = r.lo and hi = r.hi) then
       insert into pgpm.log (parent_table, action, lo, hi, method)
         values (p_parent, 'skip_archive_retired_range', r.lo, r.hi,
-                format('%I.%I holds [%s, %s), over the retired chunk(s) %s, whose partition retire() dropped, so their objects are the only copy of those rows; archived, its first chunk would go to the same object key (a strategy keys a chunk by parent and lo), so it is not archived, and with no coverage retire() will not drop it. Export its rows with archive.to_s3 (keyed by the partition''s own name), then detach and drop it and delete its pgpm.part row',
-                       pgpm._child_nsp(p_parent, r.child_name), r.child_name, r.lo, r.hi, r.chunks));
+                format('%I.%I holds [%s, %s), over chunk(s) pgpm.archive_ledger marks retired: %s. Marked because the relation they were read from no longer exists (dropped by retire() or by hand) or, when an upgrade marked them, because nothing vouches where their rows are, so their objects are the only copy pgpm can vouch for. Archived, its first chunk would go to the same object key (a strategy keys a chunk by parent and lo), so it is not archived, and with no coverage retire() will not drop it. If its rows are not the chunks'' rows, export them with archive.to_s3 (keyed by the partition''s own name), then detach and drop it and delete its pgpm.part row%s',
+                       pgpm._child_nsp(p_parent, r.child_name), r.child_name, r.lo, r.hi, r.chunks,
+                       case when r.other_names is not null then format(
+                         '. If they are, because %I is the relation those chunks were read from, renamed (an upgrade cannot tell that from a drop), the rows are in a live partition: once you have confirmed it holds them, delete the retired rows recorded under %s (delete from pgpm.archive_ledger where parent_table = %L::regclass and child_name = <that name> and retired_at is not null) and it archives afresh',
+                         r.child_name, r.other_names, p_parent::text) else '' end));
     end if;
   end loop;
 
@@ -7416,6 +7445,9 @@ begin
     insert into pgpm.log (parent_table, action, lo, hi, method) values (p_parent, 'regrain_attach', r.lo, r.hi, 'check_skip');
     v_made := v_made + 1;
   end loop;
+  -- #1141: chunks under the source's name whose relation was dropped (not the source's: it still exists) are marked
+  -- retired before the discard below; while the source's pgpm.part row stands, so its name is resolved where it is
+  perform pgpm._mark_gone_chunks(p_parent, v_child_name);
   delete from pgpm.part where parent_table = p_parent and child_name = v_child_name;   -- not p_child: #266 may have renamed it
   -- The source's archive coverage goes with it (#511). A partly archived child can be regrained
   -- (#278), and its chunks sit in pgpm.archive_ledger keyed (parent_table, lo) under its name. Left
@@ -7431,7 +7463,6 @@ begin
   -- under their own blocks; the objects the source's chunks already wrote stay in the archive,
   -- unreferenced. A retired chunk recorded under the source's name (a partition re-created under a dropped
   -- one's name, #1141) is not the source's coverage and stays: it is the record of the only copy.
-  perform pgpm._mark_gone_chunks(p_parent, v_child_name);
   delete from pgpm.archive_ledger where parent_table = p_parent and child_name = v_child_name and retired_at is null;
   get diagnostics v_rec = row_count;
   if v_rec > 0 then

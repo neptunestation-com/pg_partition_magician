@@ -457,9 +457,18 @@ failure blocks that one partition on purpose (`retain_drop_failures` climbing in
    `pgpm.part.child_name` and `pgpm.archive_ledger.child_name` in the same transaction: a rename does
    not change an oid, so the recorded identity stays right, and the ledger matches archived chunks to
    their partition by name, so carrying it keeps the coverage attached (the guide has the three
-   statements). Leaving the ledger behind does not wedge anything: the next archive tick discards the
-   coverage left under the old name (logged once as `archive_coverage_reset`) and archives the
-   partition again from its `lo`.
+   statements). Leaving the ledger behind after a rename on this release does not wedge anything: each
+   chunk records the relation it was read from, so the next archive tick sees that relation still exists,
+   discards the coverage left under the old name (logged once as `archive_coverage_reset`) and archives
+   the partition again from its `lo`. A rename made before upgrading to this release is different, and
+   does hold the partition: the upgrade cannot tell coverage left under an old name from that of a
+   partition dropped by hand, so it marks it retired, and the renamed partition is then held, with one
+   `skip_archive_retired_range` row naming both remedies. For a rename the safe one is the ledger delete,
+   safe precisely because the rows are in the live partition: once you have confirmed the renamed
+   partition holds the range,
+   `delete from pgpm.archive_ledger where parent_table = ... and child_name = <old name> and retired_at is not null`,
+   and the next tick archives it afresh. Never run that delete for a partition that was dropped: those rows
+   are the record of the only copy.
 
    **`fail_archive_contract` is the archive step refusing what your archive strategy returned**, not a
    problem with the partition: `config.archive_fn` answered a chunk with a `covered_hi` that was null,

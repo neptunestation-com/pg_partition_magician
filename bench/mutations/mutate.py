@@ -682,7 +682,6 @@ REGRAIN_SWAP_LEDGER_RETIRE = """  -- The source's archive coverage goes with it 
   -- under their own blocks; the objects the source's chunks already wrote stay in the archive,
   -- unreferenced. A retired chunk recorded under the source's name (a partition re-created under a dropped
   -- one's name, #1141) is not the source's coverage and stays: it is the record of the only copy.
-  perform pgpm._mark_gone_chunks(p_parent, v_child_name);
   delete from pgpm.archive_ledger where parent_table = p_parent and child_name = v_child_name and retired_at is null;
   get diagnostics v_rec = row_count;
   if v_rec > 0 then
@@ -11293,7 +11292,8 @@ MUTATIONS["archive_ledger_backfill_gone_kept"] = (
     "The upgrade marks no chunk recorded before child_oid existed under a name pgpm.part does not record, a partition "
     "dropped by hand, so the next orphan discard deletes it and the next archive writes over its object. One clause. "
     "tests/309 part L catches it.",
-    [("       and not exists (select 1 from pgpm.part p where p.parent_table = l.parent_table and p.child_name = l.child_name)\n"
+    [("       and not exists (select 1 from pgpm.part p where p.parent_table = l.parent_table and p.child_name = l.child_name\n"
+      "                          and p.child_oid is not null)\n"
       "    returning 1)\n",
       "       and false\n"
       "    returning 1)\n", 1)],
@@ -11304,12 +11304,49 @@ MUTATIONS["archive_ledger_backfill_namesake_kept"] = (
     "relation has now: a partition dropped by hand and re-created under its own name, its stale pgpm.part row deleted. "
     "Once the operator adopts it, adopt_partition discards the chunk by name and the next tick archives over the only "
     "copy (PR #1152 round 2, P1-03). One clause. tests/309 part L catches it.",
-    [("       and not exists (select 1 from pgpm.part p where p.parent_table = l.parent_table and p.child_name = l.child_name)\n"
+    [("       and not exists (select 1 from pgpm.part p where p.parent_table = l.parent_table and p.child_name = l.child_name\n"
+      "                          and p.child_oid is not null)\n"
       "    returning 1)\n",
-      "       and not exists (select 1 from pgpm.part p where p.parent_table = l.parent_table and p.child_name = l.child_name)\n"
+      "       and not exists (select 1 from pgpm.part p where p.parent_table = l.parent_table and p.child_name = l.child_name\n"
+      "                          and p.child_oid is not null)\n"
       "       and to_regclass(format('%I.%I', (select n.nspname from pg_class k join pg_namespace n on n.oid = k.relnamespace\n"
       "                                         where k.oid = l.parent_table), l.child_name)) is null\n"
       "    returning 1)\n", 1)],
+)
+MUTATIONS["archive_ledger_backfill_unanchored_kept"] = (
+    _G1141,
+    "The upgrade leaves unmarked and oid-less a chunk recorded before child_oid existed under a name whose pgpm.part "
+    "row the #421 backfill could not anchor, a partition dropped by hand before pgpm recorded oids. Re-created under "
+    "its own name and adopted, adopt_partition discards the chunk by name; re-created under another name, the orphan "
+    "discard does; either way the next tick archives over the only copy (PR #1152 round 3). One clause. tests/309 "
+    "part L catches it.",
+    [("       and not exists (select 1 from pgpm.part p where p.parent_table = l.parent_table and p.child_name = l.child_name\n"
+      "                          and p.child_oid is not null)\n",
+      "       and not exists (select 1 from pgpm.part p where p.parent_table = l.parent_table and p.child_name = l.child_name)\n", 1)],
+)
+MUTATIONS["archive_gone_null_oid_kept"] = (
+    _G1141,
+    "_mark_gone_chunks judges only rows with a child_oid, so a row with none whose name resolves to no relation is "
+    "left for a reset site to discard by name. One clause. tests/309 part L catches it.",
+    [("                           or (l.child_oid is null and l.child_name is not null\n",
+      "                           or (false and l.child_name is not null\n", 1)],
+)
+MUTATIONS["archive_retired_rename_remedy_unnamed"] = (
+    _G1141,
+    "The skip row of a partition held over retired chunks recorded under another name (a pre-upgrade rename the "
+    "backfill could not tell from a drop) names only the export-then-drop remedy, which would drop the live partition "
+    "holding the chunks' rows, and not the ledger delete that is safe for a rename. One clause. tests/309 part Q "
+    "catches it.",
+    [("                       case when r.other_names is not null then format(\n",
+      "                       case when false then format(\n", 1)],
+)
+MUTATIONS["archive_retired_unnamed_raises"] = (
+    _G1141,
+    "_over_retired_chunks describes a retired chunk with format's %I over its child_name, which raises on a null "
+    "name, so a legacy ledger row with no child_name under a re-created partition makes every tick's archive step and "
+    "retain() raise. One clause. tests/309 part R catches it.",
+    [("                              coalesce(quote_ident(l.child_name), ''an unnamed partition''),\n",
+      "                              format(''%%I'', l.child_name),\n", 1)],
 )
 MUTATIONS["archive_retired_orphan_delete_unfiltered"] = (
     _G1141,

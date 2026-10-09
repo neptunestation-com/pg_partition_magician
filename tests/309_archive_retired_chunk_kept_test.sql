@@ -32,7 +32,7 @@
 -- 'late<id>'; A's second partition holds ids 101..107 'mid<id>'. Each check names the rows or the chunk.
 create extension if not exists pgtap;
 set client_min_messages = warning;
-select plan(78);
+select plan(95);
 
 create schema t309;
 -- every call the strategy gets, with the rows it was handed
@@ -108,7 +108,7 @@ select is((select string_agg(format('%s|%s', lo, hi), ',') from pgpm.log
             where parent_table = 't309.a'::regclass and action = 'skip_archive_retired_range'),
   '0|100', 'A: the skip is logged once, over the re-created partition''s range, across two ticks');
 select ok((select method from pgpm.log where parent_table = 't309.a'::regclass and action = 'skip_archive_retired_range')
-            like format('t309.a\_late holds [0, 100), over the retired chunk(s) [0, 100) of %s at t309.a/0,%%archive.to\_s3%%', :'a0'),
+            like format('t309.a\_late holds [0, 100), over chunk(s) pgpm.archive\_ledger marks retired: [0, 100) of %s at t309.a/0.%%archive.to\_s3%%', :'a0'),
   'A: its method names the retired chunk, its object key and the remedy');
 select is((select string_agg(id || ':' || payload, ',' order by id) from t309.a where id < 100), t309.expect('late', 1, 40),
   'A: the re-created partition keeps ids 1..40 late<id>');
@@ -427,5 +427,119 @@ select is((select format('%s|%s|%s', child_name, rows_archived, retired_at is no
             where parent_table = 't309.m'::regclass and lo = '0'),
           format('%s|90|t', :'m0'),
   'M: the retired chunk under the same name stays');
+
+-- ============================ PARTS N and O: a chunk under an UNANCHORED pgpm.part row, on upgrade ======
+-- An install from before pgpm.part.child_oid had an archived partition dropped by hand: the #421 backfill cannot
+-- anchor its row (the relation is gone), so the chunk's backfill finds a pgpm.part row with no oid. It vouches
+-- for nothing, so the chunk is marked retired. Then the partition is re-created: N under its own name (adopt
+-- re-anchors the stale row), O under another (the stale row deleted first, as adopt's refusal says). Either
+-- way the next tick holds it, and the object keeps ids 1..90.
+create procedure t309.mk_unanchored(p_rel text) language plpgsql as $$
+declare v_c name; v_s text;   -- v_s receives maintain's INOUT status
+begin
+  call t309.mk(p_rel, 100);
+  select child_name into v_c from pgpm.part where parent_table = ('t309.' || p_rel)::regclass and lo = '0';
+  call pgpm.maintain(('t309.' || p_rel)::regclass, v_s);
+  execute format('drop table t309.%I', v_c);
+  -- what that older install leaves once the columns are added
+  update pgpm.part set child_oid = null where parent_table = ('t309.' || p_rel)::regclass and child_name = v_c;
+  update pgpm.archive_ledger set child_oid = null, retired_at = null
+   where parent_table = ('t309.' || p_rel)::regclass and lo = '0';
+end $$;
+call t309.mk_unanchored('n');
+call t309.mk_unanchored('o');
+select child_name as n0 from pgpm.part where parent_table = 't309.n'::regclass and lo = '0' \gset
+select child_name as o0 from pgpm.part where parent_table = 't309.o'::regclass and lo = '0' \gset
+select is((select string_agg(format('%s [%s, %s) %s|%s', parent_table, lo, hi, child_oid is null, retired_at is null), '; '
+                             order by parent_table::text)
+             from pgpm.archive_ledger where parent_table in ('t309.n'::regclass, 't309.o'::regclass) and lo = '0'),
+  't309.n [0, 100) t|t; t309.o [0, 100) t|t',
+  'LIVENESS: N, O: each dropped partition''s chunk has no oid and no mark, under an unanchored pgpm.part row');
+select pgpm._backfill_chunk_oids();
+select is((select string_agg(format('%s|%s', parent_table, retired_at is not null), '; ' order by parent_table::text)
+             from pgpm.archive_ledger where parent_table in ('t309.n'::regclass, 't309.o'::regclass) and lo = '0'),
+  't309.n|t; t309.o|t',
+  'N, O: the backfill marks a chunk whose pgpm.part row is unanchored retired');
+select is((select count(*)::int from pgpm.archive_ledger where child_oid is null and retired_at is null
+            and child_name not in ('a_late', 'a_kept')), 0,
+  'N, O: after the backfill no row is both oid-less and unmarked but the ones this file wrote by hand');
+-- N: re-created under its own name, adopted (the stale row is re-anchored)
+select format('create table t309.%I partition of t309.n for values from (0) to (100)', :'n0') as mk_n \gset
+:mk_n;
+insert into t309.n select g, 'late' || g from generate_series(1, 40) g;
+select lives_ok(format('select pgpm.adopt_partition(%L, %L)', 't309.n', 't309.' || quote_ident(:'n0')),
+  'LIVENESS: N: adopt_partition re-anchors the stale row to the re-created partition');
+call pgpm.maintain('t309.n');
+select is((select format('%s|%s|%s', child_name, rows_archived, retired_at is not null) from pgpm.archive_ledger
+            where parent_table = 't309.n'::regclass and lo = '0'),
+          format('%s|90|t', :'n0'),
+  'N: the chunk is still recorded, retired, after adopt and a tick');
+select is((select body from t309.objects where key = 't309.n/0'), t309.expect('old', 1, 90),
+  'N: its object still holds ids 1..90 old<id>');
+-- O: re-created under another name, the stale row deleted, adopted
+delete from pgpm.part where parent_table = 't309.o'::regclass and child_name = :'o0';
+create table t309.o_late partition of t309.o for values from (0) to (100);
+insert into t309.o select g, 'late' || g from generate_series(1, 40) g;
+select lives_ok($$ select pgpm.adopt_partition('t309.o', 't309.o_late') $$,
+  'LIVENESS: O: adopt_partition records the partition re-created under another name');
+call pgpm.maintain('t309.o');
+select is((select format('%s|%s|%s', child_name, rows_archived, retired_at is not null) from pgpm.archive_ledger
+            where parent_table = 't309.o'::regclass and lo = '0'),
+          format('%s|90|t', :'o0'),
+  'O: the chunk is still recorded, retired, after adopt and a tick');
+select is((select body from t309.objects where key = 't309.o/0'), t309.expect('old', 1, 90),
+  'O: its object still holds ids 1..90 old<id>');
+
+-- ============================ PART P: a row with no oid whose name resolves to nothing is gone ==========
+insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, rows_archived)
+  values ('t309.a', '1000', '1050', 'a_never', 1);
+select is(pgpm._mark_gone_chunks('t309.a'), 1, 'P: _mark_gone_chunks marks one row');
+select is((select retired_at is not null from pgpm.archive_ledger where parent_table = 't309.a'::regclass and lo = '1000'), true,
+  'P: it is the oid-less row under a name no relation has');
+
+-- ============================ PART Q: a partition renamed before the upgrade ============================
+-- The #511 case: the operator renamed a partly archived partition and updated pgpm.part.child_name, leaving its
+-- ledger rows under the old name. The upgrade cannot tell that from a partition dropped by hand (both: a name no
+-- relation and no pgpm.part row has), so it marks the rows retired and the live renamed partition is held. The
+-- skip row names the remedy that is safe because its rows are the chunks' rows, and once it is applied the
+-- partition archives afresh.
+call t309.mk('q', 100);
+select child_name as q0 from pgpm.part where parent_table = 't309.q'::regclass and lo = '0' \gset
+call pgpm.maintain('t309.q');
+select format('alter table t309.%I rename to q_renamed', :'q0') as ren_q \gset
+:ren_q;
+update pgpm.part set child_name = 'q_renamed' where parent_table = 't309.q'::regclass and child_name = :'q0';
+update pgpm.archive_ledger set child_oid = null, retired_at = null where parent_table = 't309.q'::regclass and lo = '0';
+select pgpm._backfill_chunk_oids();
+select is((select format('%s|%s', child_name, retired_at is not null) from pgpm.archive_ledger
+            where parent_table = 't309.q'::regclass and lo = '0'),
+  format('%s|t', :'q0'), 'LIVENESS: Q: the upgrade marked the old name''s chunk retired, as it would a dropped partition''s');
+call pgpm.maintain('t309.q');
+select ok((select method from pgpm.log where parent_table = 't309.q'::regclass and action = 'skip_archive_retired_range')
+            like format('%%because q\_renamed is the relation those chunks were read from, renamed%%delete the retired rows recorded under %s%%', :'q0'),
+  'Q: the held partition''s skip row names the rename remedy, with the old name');
+select is((select count(*)::int from pgpm.log where parent_table = 't309.q'::regclass and action = 'skip_archive_retired_range'
+            and method like '%retire() dropped%'), 0,
+  'Q: and does not say retire() dropped a partition nothing dropped');
+delete from pgpm.archive_ledger where parent_table = 't309.q'::regclass and child_name = :'q0' and retired_at is not null;
+call pgpm.maintain('t309.q');
+select is((select format('%s|%s|%s', child_name, rows_archived, retired_at is null) from pgpm.archive_ledger
+            where parent_table = 't309.q'::regclass and lo = '0'),
+  'q_renamed|90|t', 'Q: after the remedy the renamed partition archives afresh, all 90 rows');
+
+-- ============================ PART R: a retired chunk with no child_name ============================
+insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, rows_archived, retired_at)
+  values ('t309.f', '50', '60', null, 1, now());
+create function pg_temp.t309_chunks(p_parent regclass) returns text language plpgsql as $$
+begin
+  return (select string_agg(chunks, ' | ') from pgpm._over_retired_chunks(p_parent));
+exception when others then
+  return 'raised: ' || sqlerrm;
+end $$;
+select ok(pg_temp.t309_chunks('t309.f') like '%[50, 60) of an unnamed partition at no object key%',
+  'R: a retired chunk with no child_name is described, not refused');
+call pgpm.maintain('t309.f');
+select is((select array_agg(method) from pgpm.log where parent_table = 't309.f'::regclass and action = 'skip_archive'),
+  null::text[], 'R: and the tick over it logs no skip_archive');
 
 select * from finish();
