@@ -2108,6 +2108,30 @@ returns boolean language sql stable as $$
   end;
 $$;
 
+-- _part_detached_by_hand: whether an ATTACHED pgpm.part row of p_parent stands for a table the operator
+-- DETACHed by hand, i.e. one pgpm no longer manages (#705). True when the row's relation (by child_oid)
+-- still exists and is not built in _part_built's sense: not a partition of p_parent, and no retirement of
+-- pgpm's in flight on it (retiring_at). pgpm.part.attached says what pgpm did, not what the catalog holds,
+-- and an operator's own DETACH PARTITION never touches it, so every maintain() step that acts on an
+-- attached row asks this first: _enforce_write_blocks (no write block goes on the operator's table),
+-- _archive_step (it is not handed to the strategy, and no coverage is recorded for it) and the auto-regrain
+-- candidate scan (no capture or TRUNCATE guard goes on it, nothing is copied out of it), with
+-- progress().coarse_frozen mirroring that scan. retire() refuses the same table (#652) and logs it
+-- fail_retain_drop on every call, which is why its row is LEFT, not forgotten as _cell_attached forgets a
+-- forward cell's: the row is what keeps that refusal counted in status().
+--
+-- One-directional, like _part_built. A child pgpm's own retirement detached (retiring_at set) is still
+-- pgpm's. A row whose relation is gone is not a table anyone keeps: it stays on the paths that report it
+-- (skip_write_block from the write-block step, tests/94; fail_retain_identity from retire()). A row with no
+-- recorded oid (an upgrade from before #421) cannot be told apart from a renamed partition and is left to
+-- behave as it did before.
+create or replace function pgpm._part_detached_by_hand(p_parent regclass, p_child_oid oid, p_retiring_at timestamptz)
+returns boolean language sql stable as $$
+  select p_child_oid is not null
+     and not pgpm._part_built(p_parent, p_child_oid, p_retiring_at)
+     and exists (select 1 from pg_class c where c.oid = p_child_oid);
+$$;
+
 -- _cell_attached: whether an attached partition of p_parent overlaps the cell [p_lo, p_hi), the question
 -- obtain and extend_to (its dry count and its walk) ask of every cell before building it. Half-open
 -- [p_lo, p_hi) overlaps [p.lo, p.hi) iff p.hi > p_lo and p_hi > p.lo.
@@ -3996,7 +4020,10 @@ begin
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
   v_boundary := pgpm._retain_boundary(cfg);
 
+  -- #705: a table the operator detached by hand is theirs, not a partition: no block goes on it and none
+  -- is lifted or its coverage judged (see _part_detached_by_hand; retire() refuses and logs it)
   for r in select child_name, lo, hi, child_oid from pgpm.part where parent_table = p_parent and attached
+                  and not pgpm._part_detached_by_hand(p_parent, child_oid, retiring_at)
     order by hi asc
   loop
     begin
@@ -4499,10 +4526,13 @@ begin
   -- eligibility checks live in the WHERE clause (not a `continue` inside the loop, the old shape)
   -- specifically so `limit` bounds the right set: every row this query returns is a genuine
   -- candidate, so archive_batch caps how many DIFFERENT partitions get a turn this call, not how
-  -- many rows happen to be scanned before finding that many.
+  -- many rows happen to be scanned before finding that many. A table the operator detached by hand is
+  -- not one (#705, _part_detached_by_hand), even when it carries the block pgpm put on it before the
+  -- detach: it is never handed to the strategy and no coverage is recorded for it.
   for r in execute format(
     'select p.child_name, p.child_oid, p.lo, p.hi from pgpm.part p
       where p.parent_table = %L::regclass and p.attached
+        and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)
         and pgpm._is_write_blocked(%L::regclass, p.child_name)
         and not pgpm._archive_fully_covered(%L::regclass, p.child_name)
       order by p.lo::%s
@@ -5551,6 +5581,23 @@ begin
   cfg := pgpm._control_followed(cfg);
   if not found then return; end if;
 
+  -- #705: a regrain whose SOURCE the operator detached by hand can never swap, and the auto-regrain scan
+  -- no longer picks that child, so the run is ended here, on whatever tick first sees the detach: its
+  -- capture and TRUNCATE guard come off the operator's table, its copies are dropped, its delta emptied and
+  -- the cursor cleared (_regrain_reclaim, scoped to that source; logged regrain_source_detached, and only
+  -- when there was a run to end). Per child, isolated like the loop below.
+  for r in select child_name, lo, hi from pgpm.part
+            where parent_table = p_parent and attached
+              and pgpm._part_detached_by_hand(p_parent, child_oid, retiring_at)
+  loop
+    begin
+      perform pgpm._regrain_reclaim(p_parent, r.child_name, r.lo, r.hi, true);
+    exception when others then
+      insert into pgpm.log (parent_table, action, lo, hi, method)
+        values (p_parent, 'skip_regrain_capture', r.lo, r.hi, left(sqlerrm, 200));
+    end;
+  end loop;
+
   for r in select child_name, lo, hi from pgpm.part where parent_table = p_parent
   loop
     begin
@@ -6000,7 +6047,17 @@ $$;
 -- Logged as regrain_cancel with `method` naming retire, because that is what it is: the same statement
 -- the operator verb makes, made by retention. `rows` is the number of copies discarded, so a reader of
 -- pgpm.log can tell a cancel that reclaimed real work from one that cleared a stale cursor.
-create or replace function pgpm._regrain_reclaim(p_parent regclass, p_child name, p_lo text, p_hi text)
+--
+-- p_detached (#705): the maintain() janitor's call, for a source the operator DETACHed by hand mid-run
+-- (_part_detached_by_hand). The same three effects, for the same reason: the swap needs its source to be a
+-- partition, so the run can never finish, and the auto-regrain scan no longer picks the child, so nothing
+-- else would ever end it. It left the capture and TRUNCATE guard on the operator's table (TRUNCATE of it
+-- refused, every write captured), its copies unattached and the cursor set, for good. Logged as
+-- regrain_source_detached, not regrain_cancel: no operator asked for a cancel, and the operator's table is
+-- left exactly as they detached it, rows and all.
+drop function if exists pgpm._regrain_reclaim(regclass, name, text, text);
+create or replace function pgpm._regrain_reclaim(p_parent regclass, p_child name, p_lo text, p_hi text,
+                                                 p_detached boolean default false)
 returns int language plpgsql as $$
 declare
   cfg pgpm.config; v_nsp name; v_ncast text; v_delta name; v_capture boolean; v_cursor_in boolean;
@@ -6054,7 +6111,14 @@ begin
     update pgpm.config set regrain_cursor = null where parent_table = p_parent;
   end if;
 
-  if v_capture or v_cursor_in or v_dropped > 0 then
+  if p_detached and (v_capture or v_cursor_in or v_dropped > 0) then
+    insert into pgpm.log (parent_table, action, lo, hi, rows, method)
+      values (p_parent, 'regrain_source_detached', p_lo, p_hi, v_dropped,
+              format('%I.%I, the source of this regrain, was detached from the table by hand, so the run cannot swap and is ended; its capture and TRUNCATE guard are off the detached table, which is left as it is, rows and all; %s fine cop%s discarded, %s captured change%s discarded, regrain_cursor %s',
+                     pgpm._child_nsp(p_parent, p_child), p_child, v_dropped, case when v_dropped = 1 then 'y' else 'ies' end,
+                     v_purged, case when v_purged = 1 then '' else 's' end,
+                     case when v_cursor_in then 'cleared' else 'left alone (it is not this child''s)' end));
+  elsif v_capture or v_cursor_in or v_dropped > 0 then
     insert into pgpm.log (parent_table, action, lo, hi, rows, method)
       values (p_parent, 'regrain_cancel', p_lo, p_hi, v_dropped,
               format('retire dropped %I.%I, the source of this regrain, whole: its range is past the retention horizon and archiving covers it, so the regrain had nothing left to win for retention; %s fine cop%s discarded, %s captured change%s discarded, regrain_cursor %s',
@@ -11616,6 +11680,11 @@ begin
   -- and inside the handler so a holder defers the step like any other lock race. Only while the top-of-tick
   -- read had auto-regrain on: a parent that never had it takes no regrain lock, and one turned on mid-tick
   -- starts next tick. tests/191 and bench/maintain_sweep_reads_tap.sh guard it.
+  --
+  -- A coarse child the operator DETACHed by hand is not a candidate (#705, _part_detached_by_hand), as it
+  -- is not one for the write-block and archive steps: picked, it got the capture and TRUNCATE-guard
+  -- triggers on the operator's table and its rows copied, then every swap failed on it ("is not a
+  -- partition") and, being the oldest, it held auto-regrain there for good.
   if cfg.regrain_to is not null then
     begin   -- #590: the candidate search is part of the regrain step
       perform pgpm._regrain_lock(p_parent);   -- #729: before the re-read
@@ -11623,6 +11692,7 @@ begin
       if v_regrain_to is not null then   -- #729: off since the top of the tick, so no candidate either
         execute format(
         'select child_name from pgpm.part p where p.parent_table = %L::regclass and p.attached'
+        || ' and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)'   -- #705
         || ' and pgpm._native_gt(%L, p.hi, pgpm._grid_next(%L, %L, p.lo, %L))'
         || ' and pgpm._native_gt(%L, p.hi, pgpm._grid_next(%L, %L, p.lo, %L))'   -- #515: the target subdivides it
         || ' and not pgpm._native_gt(%L, p.hi, %L) order by p.lo::%s asc limit 1',
@@ -12765,6 +12835,7 @@ begin
       v_floor := pgpm._grid_floor(r.control_kind, r.partition_step, r.partition_anchor, v_frontier, r.partition_tz);
       select count(*) into coarse_frozen from pgpm.part p
        where p.parent_table = r.parent_table and p.attached
+         and not pgpm._part_detached_by_hand(r.parent_table, p.child_oid, p.retiring_at)   -- #705, as maintain asks
          and pgpm._native_gt(r.control_kind, p.hi, pgpm._grid_next(r.control_kind, r.partition_step, p.lo, r.partition_tz))
          and pgpm._native_gt(r.control_kind, p.hi, pgpm._grid_next(r.control_kind, coalesce(r.regrain_to, r.partition_step), p.lo, r.partition_tz))
          and not pgpm._native_gt(r.control_kind, p.hi, v_floor);

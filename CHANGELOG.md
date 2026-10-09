@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- **`maintain` leaves a partition detached by hand alone** (#705, bullets 1 and 2). `_enforce_write_blocks`,
+  `_archive_step` and the auto-regrain candidate scan read `pgpm.part.attached`, which an operator's own
+  `DETACH PARTITION` never touches, so once retention reached a table the operator had detached to keep, a
+  tick put `pgpm_write_block` on it and every write to it was refused "past its retention boundary"; a table
+  detached after pgpm had blocked it was handed to the archive strategy and had coverage recorded for it; and
+  a detached coarse child, being the oldest, was picked for auto-regrain, got the capture and `TRUNCATE`
+  guard, had its rows copied and then failed every swap, wedging auto-regrain on it. `retire` already refused
+  such a table (#652). All three now ask `pgpm._part_detached_by_hand`, built on `_part_built` (and
+  `progress().coarse_frozen` mirrors the scan): a child whose table exists, is not a partition of the parent
+  and carries no `retiring_at` is skipped, and its row stays for `retire` to refuse and log. A regrain
+  already in flight when its source is detached by hand is ended by the next tick's janitor, scoped to that
+  source as `retire`'s reclaim is (triggers off the operator's table, copies dropped, delta emptied, cursor
+  cleared), and logged with the new action `regrain_source_detached`. A partition `retire` is detaching
+  concurrently stays pgpm's, and one dropped by hand still logs `skip_write_block`. Test `tests/307`, guard
+  `bench/write_block_skips_hand_detached.sh`, mutations `write_block_trusts_part_attached`,
+  `archive_trusts_part_attached`, `regrain_trusts_part_attached`, `progress_coarse_counts_hand_detached`,
+  `regrain_detached_source_orphaned`, `regrain_detached_logged_as_cancel`,
+  `detached_by_hand_ignores_retiring_at`, `detached_by_hand_counts_dropped`.
+
 - **`pgpm.adopt_partition` repairs an identity wedge without orphaning the partition** (#1082). A partition
   restored from a dump under its own name is a new oid, which the write-block, archive and retire steps refuse
   on identity, and the documented repair (delete the stale `pgpm.part` row) cleared the wedge and nothing else:

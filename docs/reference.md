@@ -1390,7 +1390,8 @@ A partition that is no longer attached to the parent but carries no `retiring_at
 something other than pgpm (an operator's own `DETACH PARTITION`, to keep the table or to archive it by
 hand), and `retire` leaves it alone, whether or not anything references the parent: it returns `false`,
 logs `fail_retain_drop` for the partition's range with `method` saying why, and neither write-blocks nor
-drops the table. Its `pgpm.part` row stays, so every later `retain` refuses and logs it again and
+drops the table; `maintain`'s write-block and archive steps leave it alone too (see [`maintain`](#maintain)).
+Its `pgpm.part` row stays, so every later `retain` refuses and logs it again and
 `status().retain_drop_failures` counts it. To end that, attach the table back to the parent or delete its
 `pgpm.part` row. A partition pgpm's own retirement detached carries `retiring_at` and is dropped as usual
 (see below).
@@ -1789,7 +1790,9 @@ partitions until the swap), so the swap would put every truncated row back. Whil
 `TRUNCATE` of the parent or of the coarse child fails with `pg_partition_magician: cannot TRUNCATE ... a
 regrain is in flight on it` before anything is truncated, including from a session with
 `session_replication_role = replica`. Cancel the regrain with `regrain_cancel` first, or truncate after the
-swap. The refusal holds for a regrain already in flight when you upgrade from a release that did not have
+swap. A coarse child detached by hand while a regrain was in flight on it is the operator's table: the next
+`maintain` tick ends that run (logged `regrain_source_detached`), taking the guard and the capture off it,
+and from then on it can be truncated like any table. The refusal holds for a regrain already in flight when you upgrade from a release that did not have
 it: re-running `install.sql` puts it on every source still regraining, and each `regrain_step` tick that
 resumes a regrain puts it back if it is missing.
 
@@ -1950,11 +1953,22 @@ taken a partition's name, the tick refuses on identity (`fail_write_block_identi
 the real partition's coverage alone. Write-blocked is one of `retire()`'s drop preconditions (see
 [`retire`](#retire)).
 
+A partition detached by hand (an operator's own `DETACH PARTITION`, to keep the table) is not walked at
+all, though its `pgpm.part` row still says attached: the step asks the catalog, as `obtain` does, and a
+child whose table still exists, is no longer a partition of the parent and carries no `retiring_at` is the
+operator's. No write block goes on it however far retention reaches, none is lifted from it and its
+coverage is not judged, and nothing is logged by this step; `retire` refuses the same table and logs
+`fail_retain_drop` (see [`retire`](#retire)). A block pgpm put on the partition before it was detached
+stays, since pgpm no longer touches the table; drop the trigger `pgpm_write_block` by hand to write to it.
+A partition `retire` is detaching concurrently (`retiring_at` set) is still pgpm's and stays blocked, and
+one dropped by hand is still attempted and logged `skip_write_block`.
+
 Chunked archiving: `archived=N` counts how many chunks this tick recorded via
 `pgpm._archive_step` -- see [Archive strategy contract](#archive-strategy-contract) for the
 mechanism. It only ever considers a child the write-block step above has already protected, so it
-always runs after write-blocking within the same tick. Archive coverage is `retire()`'s other drop
-precondition.
+always runs after write-blocking within the same tick. A partition detached by hand is not a candidate
+even when it carries the block pgpm put on it before the detach: it is never handed to the strategy and
+no coverage is recorded for it. Archive coverage is `retire()`'s other drop precondition.
 
 ### `maintain_all`
 
@@ -2663,7 +2677,10 @@ while a tick is in an earlier step (archiving, say) stops that tick from startin
 `regrain_step` enforces its own preconditions, so an un-meetable tick simply retries, and `maintain` selects
 only a frozen coarse child the target subdivides, so a child the target cannot split (a 30-day cell that
 starts in February, on a monthly grid) is left alone rather than retried forever; it stays counted in
-`status().coarse_partitions`. A `p_target_step` coarser than `partition_step` (compared at
+`status().coarse_partitions`. A coarse child detached by hand is not selected either: it is the operator's
+table, so no capture or `TRUNCATE` guard goes on it and nothing is copied out of it. A run already in
+flight on a child when it is detached by hand is ended by the next `maintain` tick, which takes the capture
+and the guard back off it, drops the run's copies and clears the cursor (`regrain_source_detached`). A `p_target_step` coarser than `partition_step` (compared at
 `partition_anchor`) is refused.
 
 Four kinds of target are refused at call time rather than left to wedge every tick: a `p_target_step` of
@@ -2928,7 +2945,7 @@ produced, not what you meant them to.
   `freeze_margin` instead.
 - `coarse_frozen` -- coarse partitions whose whole range is already behind the frontier: frozen, and
   eligible for regrain; with `regrain_to` set, only those the target subdivides, which is exactly what
-  `maintain` will select. `coarse_frozen > 0` beside a null `regrain_to` is a history that is not going to
+  `maintain` will select. A coarse partition detached by hand is not counted. `coarse_frozen > 0` beside a null `regrain_to` is a history that is not going to
   split by itself. `coarse_frozen = 0` beside `coarse_partitions > 0` and a set `regrain_to` is coarse
   history that is either not frozen yet (see `freeze_in`) or that the target cannot split.
 
@@ -3272,6 +3289,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `retain_recall` / `retain_reattach` | retention stopped reaching a partition whose retirement was under way: its dispatched detach was recalled and the `pgpm_detach` job returned to idle / the detach had already landed, and the partition was re-attached on its own bounds (see [`retire`](#retire)) |
 | `regrain_copy` / `regrain_aged` / `regrain_attach` / `regrain` | a regrain microbatch copied rows into a fine child / skipped a below-horizon sub-range that has no fine child yet (only when `archive_fn` is unset; discarded with the source, never copied, once the swap has re-checked that it is still below the horizon) / attached a fine child (`method` = `check_skip`) / completed (`method` = `copy_swap_drop`) |
 | `regrain_prepare` / `regrain_capture_orphan` / `regrain_reconcile` / `regrain_reconcile_aged` / `regrain_delta_purge` / `regrain_rename` / `regrain_restart` / `regrain_cancel` | the cross-tick regrain's own steps: change capture installed / a leftover capture table cleared / the source-is-authority reconcile before the swap (and its below-horizon counterpart) / captured keys the swap gate discarded because no reconcile could consume them (out of the source's range, or a `NULL` control value; `rows` counts them) / the source renamed onto the target grid / a stale run restarted (copies that predate capture, or copies a parent altered mid-regrain made stale: their columns or `CHECK` constraints no longer match, the source was rewritten or had a column replaced, or change capture no longer fits the key, or copies no recorded source mark vouches for, as a run in flight across an upgrade has, or change capture's trigger found disabled, origin-only or replica-only rather than enabled `ALWAYS`) / a run cancelled by `regrain_cancel()`, or by `retire` dropping the run's source whole (`method` names `retire`, `rows` counts the copies discarded) |
+| `regrain_source_detached` | a `maintain` tick found a regrain in flight whose source partition had been detached by hand (it is no longer a partition of the table and carries no `retiring_at`), so the run could never swap, and ended it: the capture trigger and `TRUNCATE` guard taken off the detached table, the fine copies inside its range dropped, the captured changes discarded and `config.regrain_cursor` cleared. The detached table is left as it is, rows and all. `rows` counts the copies discarded, `method` names the table. Logged once per run ended |
 | `drop_incoming_fk` / `suspend_incoming_fk` / `restore_incoming_fk` / `validate_incoming_fk` | preserve-FK lifecycle events |
 | `from_hypertable_carry_fk` | (`pgpm_hypertable` only) an outgoing FK re-added onto the migrated destination during `from_hypertable_copy` |
 | `forget_missing` | `forget_missing()` cleared a parent's registration because its relation no longer exists; `rows` carries how many partition rows were cleared with it |

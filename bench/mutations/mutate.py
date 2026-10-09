@@ -7815,6 +7815,69 @@ select ok(
         [("\n         or (p_retiring_at is not null and exists (select 1 from pg_class c where c.oid = p_child_oid))\n",
           "\n", 1)],
     ),
+    # Issue #705: a table the operator DETACHed by hand is not write-blocked or archived by maintain().
+    "write_block_trusts_part_attached": (
+        "bench/write_block_skips_hand_detached.sh",
+        "Pre-#705 _enforce_write_blocks: every pgpm.part row marked attached is walked, so a table the operator "
+        "detached by hand gets pgpm_write_block once retention reaches its range and refuses every write. One "
+        "site, the loop's query. tests/307 part A catches it.",
+        [("                  and not pgpm._part_detached_by_hand(p_parent, child_oid, retiring_at)\n", "", 1)],
+    ),
+    "archive_trusts_part_attached": (
+        "bench/write_block_skips_hand_detached.sh",
+        "Pre-#705 _archive_step: the candidate query trusts pgpm.part.attached, so a table the operator detached "
+        "after pgpm blocked it is handed to the strategy and coverage is recorded for it. One site, the "
+        "candidate query. tests/307 part B catches it.",
+        [("        and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)\n", "", 1)],
+    ),
+    "detached_by_hand_ignores_retiring_at": (
+        "bench/write_block_skips_hand_detached.sh",
+        "Issue #705, the over-correction: any anchored child outside pg_inherits reads as detached by hand, "
+        "retiring_at or not, so a partition pgpm's own retirement detached is no longer write-blocked. One "
+        "site, _part_detached_by_hand. tests/307 part C catches it.",
+        [("     and not pgpm._part_built(p_parent, p_child_oid, p_retiring_at)\n",
+          "     and not exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = p_child_oid)\n",
+          1)],
+    ),
+    "detached_by_hand_counts_dropped": (
+        "bench/write_block_skips_hand_detached.sh",
+        "Issue #705, the over-correction: a row whose relation is gone reads as detached by hand, so the "
+        "write-block step skips a partition dropped by hand silently instead of logging skip_write_block. One "
+        "site, _part_detached_by_hand. tests/307 part D catches it.",
+        [("\n     and exists (select 1 from pg_class c where c.oid = p_child_oid);\n", ";\n", 1)],
+    ),
+    "regrain_trusts_part_attached": (
+        "bench/write_block_skips_hand_detached.sh",
+        "Pre-#705 maintain(): the auto-regrain candidate scan trusts pgpm.part.attached, so a coarse child the "
+        "operator detached by hand is picked first, its table gets the capture and TRUNCATE-guard triggers and "
+        "its rows are copied, and every swap after fails on it. One site, the scan. tests/307 part E catches it.",
+        [("        || ' and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)'   -- #705\n",
+          "", 1)],
+    ),
+    "progress_coarse_counts_hand_detached": (
+        "bench/write_block_skips_hand_detached.sh",
+        "Issue #705: progress().coarse_frozen stops mirroring the auto-regrain scan and counts a coarse child "
+        "the operator detached by hand, which auto-regrain will never work. One site, progress(). tests/307 "
+        "part E catches it.",
+        [("         and not pgpm._part_detached_by_hand(r.parent_table, p.child_oid, p.retiring_at)   -- #705, as maintain asks\n",
+          "", 1)],
+    ),
+    "regrain_detached_source_orphaned": (
+        "bench/write_block_skips_hand_detached.sh",
+        "Issue #705, the scan-only fix: auto-regrain no longer picks a coarse child detached by hand, but a run "
+        "already in flight when its source is detached is never ended, so its capture and TRUNCATE guard stay "
+        "on the operator's table, its copies stay unattached and the cursor stays set. One site, the "
+        "janitor's reclaim. tests/307 part F catches it.",
+        [("      perform pgpm._regrain_reclaim(p_parent, r.child_name, r.lo, r.hi, true);\n", "      null;\n", 1)],
+    ),
+    "regrain_detached_logged_as_cancel": (
+        "bench/write_block_skips_hand_detached.sh",
+        "Issue #705: the run on a source detached by hand is ended but logged regrain_cancel, retire's wording, "
+        "as if an operator or retention had asked for it. One site, _regrain_reclaim's log. tests/307 part F "
+        "catches it.",
+        [("  if p_detached and (v_capture or v_cursor_in or v_dropped > 0) then\n",
+          "  if false and (v_capture or v_cursor_in or v_dropped > 0) then\n", 1)],
+    ),
     "crossing_keys_bare_text": (
         "bench/crossing_keys_datestyle.sh",
         "Pre-#814 (F4-01) _crossing_keys: a timestamptz referencing key is read back with a bare ::text, so "
