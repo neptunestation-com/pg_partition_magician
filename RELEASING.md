@@ -133,6 +133,9 @@ Three install channels exist, and they are not equally exercised:
   enforce it: `test.sh` and the Lint minifier job build the package with `PGPM_DBDEV_CAP=warn`, and the
   Test Suite's `dbdev package size (informational)` job, off the required path and always green, reports
   the size in its job summary and raises a `::warning::` annotation while it is over the cap.
+  `release.yml` builds its release assets with `PGPM_DBDEV_CAP=warn` too, so a tag cut from such a tree
+  still publishes the GitHub Release, the over-cap package among its assets (#1077;
+  `bench/release_assets_over_cap.sh` runs both build steps on an over-cap tree to keep it so).
   `publish-dbdev.yml` builds strictly and refuses to publish until the package is under 250,000
   characters again. The remedy (split the extension into two
   TLE packages, or cut the package by about 20,000 characters, most of it raise-message text) is a
