@@ -31,9 +31,15 @@
 --           strategy is never called, no ledger row, skip_archive logged over the range as _archive_step
 --           logs it, retire() refuses, and the 2 hidden rows (ids 3 and 6) are still there. CONTROL: a
 --           superuser's call archives all 7, the hidden two included, and retire() then drops them.
+--   PART F  a whole cover spelt differently from pgpm.part.hi is reported as whole: a time grid's hi,
+--           recorded from a UTC session ('...+00'), handed back verbatim by the strategy and recorded from
+--           an Asia/Kolkata session, where the ledger's canonical text carries '+05:30'. Since #1071 the
+--           ledger records an id grid's value at its least scale, so C's '1000.0' is recorded as '1000'
+--           and no longer tells a text comparison from a value comparison; a zone still does.
 --
 -- ASYMMETRIC FIXTURE. Five tables with different row sets (7, 3, 5, 4 and 7 rows in [0, 1000)); A and B
--- keep theirs, C loses its 5, D keeps its 4, E keeps its 7 (2 of them hidden) until the control call.
+-- keep theirs, C loses its 5, D keeps its 4, E keeps its 7 (2 of them hidden) until the control call;
+-- F is a time grid with 6 rows.
 -- Every strategy records the calls it gets, so "what the strategy was handed" is read back by identity.
 --
 -- bench/archive_partition_whole_contract.sh runs this file against the script with
@@ -50,7 +56,7 @@ set client_min_messages = warning;
 \endif
 \i :archive_whole_script
 
-select plan(39);
+select plan(44);
 
 create schema t286;
 create table t286.calls (strategy text, p_child name, p_lo text, p_hi text);
@@ -304,5 +310,46 @@ select is_empty($$ select id from public.t286_rls where id < 1000 $$,
 
 drop owned by t286_owner;
 drop role t286_owner;
+
+-- ---------------------------------------------------------------- PART F: whole, spelt in another zone
+-- A 1 s grid with a retain of 0, so the monolith ages within the test (tests/273's fixture shape).
+create function t286.as_handed(p_parent regclass, p_child name, p_lo text, p_hi text)
+returns pgpm.archive_result language plpgsql as $$
+declare v pgpm.archive_result;
+begin
+  insert into t286.calls values ('as_handed', p_child, p_lo, p_hi);
+  v.covered_hi := p_hi;   -- exactly hi, as handed
+  v.rows_archived := 6;
+  return v;
+end $$;
+
+set timezone = 'UTC';
+create table public.t286_zone (ts timestamptz not null, payload text);
+insert into public.t286_zone select now() - g * interval '1 hour', 'zone' from generate_series(1, 6) g;
+call pgpm.transmute('public.t286_zone', 'ts', interval '1 second', 3, p_retain => interval '0 seconds', p_paused => false);
+select child_name as ch_zone, lo as zone_lo, hi as zone_hi from pgpm.part
+ where parent_table = 'public.t286_zone'::regclass order by lo::timestamptz limit 1 \gset
+select pg_sleep(2.5);   -- the monolith ages past a retain of 0 on its 1 s grid
+select pgpm._enforce_write_blocks('public.t286_zone');
+select pgpm.set_archive_fn('public.t286_zone', 't286.as_handed(regclass,name,text,text)'::regprocedure);
+
+set timezone = 'Asia/Kolkata';
+select pgpm_archive_next_partition_whole('public.t286_zone'::regclass) as msg_zone \gset
+set timezone = 'UTC';
+select diag('F: ' || :'msg_zone');
+
+select results_eq($$ select p_child, p_lo, p_hi from t286.calls where strategy = 'as_handed' $$,
+  format($$ values (%L::name, %L::text, %L::text) $$, :'ch_zone', :'zone_lo', :'zone_hi'),
+  'LIVENESS: F: the script handed the strategy the monolith''s whole recorded [lo, hi)');
+select results_eq(
+  $$ select l.hi <> p.hi, l.hi::timestamptz = p.hi::timestamptz from pgpm.archive_ledger l
+       join pgpm.part p using (parent_table, child_name) where l.parent_table = 'public.t286_zone'::regclass $$,
+  $$ values (true, true) $$,
+  'LIVENESS: F: the ledger''s hi is the partition''s hi as a value, spelt differently (another zone''s offset)');
+select ok(:'msg_zone' like '%fully archived in one file (6 rows%',
+  'F: the message says fully archived: covered_hi equals hi as a value, whatever its spelling');
+select ok(:'msg_zone' not like '%PARTIAL%', 'F: and does not report a partial cover');
+select ok(pgpm._archive_fully_covered('public.t286_zone', :'ch_zone'), 'LIVENESS: F: the coverage gate opens');
+reset timezone;
 
 select * from finish();

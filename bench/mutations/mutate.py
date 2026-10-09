@@ -9534,9 +9534,11 @@ MUTATION_SRC["archive_whole_contract_unchecked"] = "scripts/archive_partition_wh
 MUTATIONS["archive_whole_partial_compared_as_text"] = (
     "bench/archive_partition_whole_contract.sh",
     "Pre-#1030 scripts/archive_partition_whole.sql: partial or whole is decided by text inequality between "
-    "covered_hi and pgpm.part.hi, so a whole cover spelt differently ('1000.0' for hi 1000) is reported as "
-    "PARTIAL and the operator is told to call again over a partition already covered. One site, the "
-    "comparison. tests/286 part C catches it (the message for the '1000.0' cover).",
+    "covered_hi and pgpm.part.hi, so a whole cover spelt differently (a time grid's hi recorded with another "
+    "zone's offset) is reported as PARTIAL and the operator is told to call again over a partition already "
+    "covered. One site, the comparison. tests/286 part F catches it (the message for the cover recorded from "
+    "an Asia/Kolkata session). Part C's '1000.0' no longer does: since #1071 the ledger records an id value "
+    "at its least scale, so it is compared as '1000'.",
     [("""  -- partial or whole by VALUE: the check above holds covered_hi at or below hi, and the same value can be
   -- spelt more than one way ('1000.0' is hi 1000; a timestamp in another zone or DateStyle), so text
   -- inequality would report a whole cover as partial
