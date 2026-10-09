@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **A bound refusal offers a smaller step only when one would work** (#1088). `_control_bound_contract`'s
+  refusal of a fresh monolith bound the `id` column cannot store always ended "or use a smaller step", also when
+  the newest key was the type's maximum (`9999` on a `numeric(4,0)` key): the bound's `hi` is the grid line
+  above it, `10000` or past it whatever the step, so an operator who re-ran with step 1 was refused on the same
+  bound. The refusal now works out the bound the finest step the column admits would give (step 1, or the
+  column's unit on a negative-scale `numeric`, with the same `p_bound_headroom`), offers a smaller step and
+  names that bound only when the column's type can store it, and otherwise says no smaller step avoids it and
+  names a wider type alone. Test `tests/305`, guard `bench/bound_contract_remedy.sh`, mutations
+  `bound_contract_finest_step_unchecked`, `bound_contract_finest_step_headroom` and
+  `bound_contract_finest_step_unit_one`.
+
 - **The docs no longer say a `maintain` pass obtains** (#1087). README.md called `maintain` "the one procedure
   `pg_cron` calls (`obtain`, `retain`, optional auto-`regrain`)" and docs/runbook.md's retention entry annotated
   `call pgpm.maintain(...)` as "one pass: obtain, archive, retain", while obtain has been `maintain_obtain`'s, on
