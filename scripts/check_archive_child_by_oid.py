@@ -17,18 +17,26 @@ this check closes the class in the module's text, so the next by-name lookup fai
 THE RULES, over pgpm_archive/install.sql, every one of them outside the body of archive._resolve_child (the one
 place a child is resolved by name) and none of them naming any other site:
 
-  1. No relname is compared. A pg_class row found by its relname is a relation looked up by name: the column
-     `relname`, however qualified or quoted, may not stand beside a comparison (`=`, `<>`, `in`, `like`, `is`
-     ...), nor anywhere in a WHERE, ON, HAVING or USING clause (a row comparison, a cast, a function of it). A
-     relname in a select list, read off an oid, is reading a name, not looking one up.
+  1. No relation is found by its name. A name column (pg_class's `relname`, and the same name as the catalog
+     views and information_schema call it: `tablename`, `table_name`, `viewname`, `matviewname`,
+     `sequencename`, `sequence_name`), however qualified or quoted, may be read only in the select list of a
+     statement's own query, off a row found otherwise, and only under its own name. It may not stand beside a
+     comparison (`=`, `<>`, `in`, `like`, `is` ...), anywhere in a WHERE, ON, HAVING or USING clause (a row
+     comparison, a cast, a function of it), in the select list of any subquery (a derived table, a CTE, a
+     scalar or IN subquery: an outer query can filter on what it projects under any name, which is how the
+     first version of this rule passed `(select k.relname as rn ...) q ... q.rn = <name>`, P1-02 of #1150's
+     verification), or under an alias (`as rn`, or a bare `rn`). No NATURAL JOIN, which compares same-named
+     columns without naming one. A local a name column is selected INTO (item for target) may not be compared,
+     stand in a lookup clause, go to format(), to_regclass() or regclassin(), or be cast to regclass. And
+     nothing is cast to regclass from a parenthesised expression (`(v_nsp || '.' || v_rel)::regclass`).
   2. A child name only goes to the resolver, or into a message. In every function with a `name`-typed
      parameter p_child, each use of p_child is a bare argument of archive._resolve_child, of a RAISE, or of
      json_build_object (the null-argument refusal renders it as JSON). Anything else (handing it to another
      function of this file, comparing it, casting it, splicing it with format() or ||, binding it with USING)
      fails: that is how a child name reaches the catalog again, and it is what archive.to_s3 did when it handed
      p_child to archive._child_object_key.
-  3. to_regclass() reads only a literal: the module's own fixed names (pg_temp.archive_pq_snapshot), never a
-     name computed at run time.
+  3. to_regclass() and regclassin() read only a literal: the module's own fixed names
+     (pg_temp.archive_pq_snapshot), never a name computed at run time.
 
 Dynamic SQL is code: every literal an EXECUTE runs is lexed as the SQL it is, by the lexer of
 scripts/check_archive_object_keys.py (one lexer for the module's two static checks), so `execute 'select ... where
@@ -39,12 +47,18 @@ archive._resolve_child is defined once, with a `name`-typed p_child, and compare
 (rule 1's witness); and at least two functions hand their child name to it (rule 2's: archive.to_s3 and
 archive.to_s3_parquet do today).
 
-What this cannot see. A child name that never travels as a parameter called p_child (a parameter named
-otherwise, a column read into a local); a by-name lookup that compares no relname and calls no to_regclass,
-such as a `::regclass` cast of text built from names read off an oid, or a by-name read in dynamic SQL
-(`format('%I.%I', v_nsp, v_rel)`): the module does those for its own pg_temp snapshot table, so the rule could
-not be exception-free there. tests/archive/db/49 proves the contract itself on both exports, with a second
-session moving the parent between the hold and the key.
+What this cannot see. It follows a name only as far as the text shows it. A child name that never travels as a
+parameter called p_child (a parameter named otherwise, a column read into a local). A relname that leaves its
+statement by any way but INTO a local named item for target: selected into a record or a row of other arity
+(`select c.* into r`, then `r.relname` is still caught, but a field renamed by a composite type is not), returned
+by a function, passed to one as an argument (whose parameter the callee may compare: caught there only if the
+callee compares a name column or a p_child), or copied from the local into another (`v2 := v_rel`). A name
+spliced into dynamic SQL text other than through format() (`'lock table ' || quote_ident(v_rel)`), and a
+`::regclass` cast of a lone identifier holding text: the module casts oids that way (`v_stray::regclass`), and
+a lexer cannot tell their types apart. A by-name read in dynamic SQL from parameters (`format('%I.%I', p_schema,
+p_table)`): the module does that for its own pg_temp snapshot table, so the rule could not be exception-free
+there. tests/archive/db/49 proves the contract itself on both exports, with a second session moving the parent
+between the hold and the key.
 
   ./scripts/check_archive_child_by_oid.py              # check pgpm_archive/install.sql
   ./scripts/check_archive_child_by_oid.py <file.sql>   # check another copy (a mutant, an old release)
@@ -70,6 +84,12 @@ CLAUSE_WORDS = LOOKUP_CLAUSES | {"select", "from", "into", "values", "set", "gro
                                  "limit", "offset", "union", "intersect", "except", "join", "when", "then",
                                  "else", "end", "loop", "begin", "declare", "return", "perform", "execute"}
 MIN_RESOLVING_CALLERS = 2
+# The columns that hold a relation's name: pg_class's own, and the catalog views' and information_schema's
+# names for the same thing, so a lookup through pg_tables or information_schema.tables is the lookup it is.
+NAME_COLUMNS = {"relname", "tablename", "table_name", "viewname", "matviewname", "sequencename", "sequence_name"}
+# What may follow a name column in a select list without being an alias of it.
+ALIAS_STOP = CLAUSE_WORDS | COMPARE_WORDS | NOT_CALLS | {"and", "or", "asc", "desc", "nulls", "escape", "first",
+                                                         "last"}
 
 
 def last_part(ident):
@@ -128,35 +148,107 @@ def scope_of(defs, k):
     return None
 
 
-def relname_comparisons(toks, defs):
-    """[(k, why)] for every relname rule 1 refuses, anywhere in the file, the resolver's body included (the
-    caller tells the two apart)."""
-    found, stack = [], [None]
+def name_lookups(toks):
+    """([(k, why)], clause_at): every name-column reference rule 1 refuses, anywhere in the file (the caller
+    tells the resolver's body apart), and the clause in force at each token, which the INTO pass reuses."""
+    found, frames = [], [{"clause": None, "sub": False}]
+    clause_at = [None] * len(toks)
     for k, (kind, text, _) in enumerate(toks):
+        top = frames[-1]
+        clause_at[k] = top["clause"]
         if text == "(":
-            stack.append(stack[-1])
+            frames.append({"clause": top["clause"], "sub": top["sub"]})
             continue
         if text == ")":
-            if len(stack) > 1:
-                stack.pop()
+            if len(frames) > 1:
+                frames.pop()
             continue
         if text == ";" or kind == "DOLLAR":
-            stack = [None]
+            frames = [{"clause": None, "sub": False}]
             continue
         if kind != "ID":
             continue
-        if text in CLAUSE_WORDS:
-            stack[-1] = text
+        if text == "natural":
+            found.append((k, "a NATURAL JOIN compares every same-named column, relname included, without naming "
+                             "one"))
             continue
-        if last_part(text) != "relname":
+        if text in CLAUSE_WORDS:
+            top["clause"] = text
+            if text == "select" and len(frames) > 1:
+                top["sub"] = True
+            continue
+        if last_part(text) not in NAME_COLUMNS:
             continue
         prev = toks[k - 1] if k else ("", "", 0)
         nxt = toks[k + 1] if k + 1 < len(toks) else ("", "", 0)
         if prev[1] in COMPARE_OPS or nxt[1] in COMPARE_OPS or (nxt[0] == "ID" and nxt[1] in COMPARE_WORDS):
             found.append((k, f"{text} is compared"))
-        elif stack[-1] in LOOKUP_CLAUSES:
-            found.append((k, f"{text} stands in the {stack[-1].upper()} clause of a query"))
-    return found
+        elif top["clause"] in LOOKUP_CLAUSES:
+            found.append((k, f"{text} stands in the {top['clause'].upper()} clause of a query"))
+        elif top["sub"]:
+            found.append((k, f"{text} is projected out of a subquery (a derived table, a CTE, a scalar or IN "
+                             f"subquery), where an outer query can filter on it under any name"))
+        elif nxt[0] == "ID" and (nxt[1] == "as" or nxt[1] not in ALIAS_STOP):
+            found.append((k, f"{text} is given an alias, a name this check would not follow"))
+    return found, clause_at
+
+
+def split_top(toks, a, b):
+    """The comma-separated parts of toks[a:b] at their own depth, as [(start, end)]."""
+    parts, depth, s = [], 0, a
+    for k in range(a, b):
+        t = toks[k][1]
+        if t == "(":
+            depth += 1
+        elif t == ")":
+            depth -= 1
+        elif t == "," and depth == 0:
+            parts.append((s, k))
+            s = k + 1
+    parts.append((s, b))
+    return parts
+
+
+def run_end(toks, start, e, stops):
+    """The first token of toks[start:e] at its own depth that is one of the words in stops, or e."""
+    depth = 0
+    for j in range(start, e):
+        t = toks[j][1]
+        depth += (t == "(") - (t == ")")
+        if depth == 0 and toks[j][0] == "ID" and t in stops:
+            return j
+    return e
+
+
+def tainted_locals(toks, a, b):
+    """{local: the INTO token's index}: every variable a statement of the body toks[a:b] selects a name column
+    INTO, item for target (`select c.oid, c.relname into v_oid, v_rel` marks v_rel only)."""
+    out, k = {}, a
+    stops = {"from", "where", "group", "order", "limit", "union", "loop", "into", "having"}
+    while k < b:
+        e = k
+        while e < b and toks[e][1] != ";":
+            e += 1
+        depth, sel, into = 0, None, None
+        for j in range(k, e):
+            t = toks[j][1]
+            depth += (t == "(") - (t == ")")
+            if depth == 0 and toks[j][0] == "ID":
+                if t == "select" and sel is None:
+                    sel = j
+                elif t == "into" and sel is not None and into is None:
+                    into = j
+        if sel is not None and into is not None and into + 1 < e:
+            items = split_top(toks, sel + 1, min(into, run_end(toks, sel + 1, e, stops)))
+            t0 = into + 1 + (toks[into + 1][1] == "strict")
+            targets = split_top(toks, t0, run_end(toks, t0, e, stops))
+            if len(items) == len(targets):
+                for (i0, i1), (g0, g1) in zip(items, targets):
+                    named = any(toks[j][0] == "ID" and last_part(toks[j][1]) in NAME_COLUMNS for j in range(i0, i1))
+                    if named and g1 - g0 == 1 and toks[g0][0] == "ID":
+                        out[toks[g0][1]] = g0
+        k = e + 1
+    return out
 
 
 def callee_of(toks, k, a):
@@ -214,9 +306,31 @@ def check_text(src):
     if (CHILD, ["name"]) not in rparams:
         v.append(f"{RESOLVER} takes no name-typed {CHILD}: the resolver is not the one this check knows")
 
-    # rule 1
+    # rule 1: the name columns, then the locals one was selected into, then a cast of an expression to regclass
     inside = 0
-    for k, why in relname_comparisons(toks, defs):
+    found, clause_at = name_lookups(toks)
+    for name, _, a, b, _ in defs:
+        if name == RESOLVER or a is None:
+            continue
+        for local, at in tainted_locals(toks, a, b).items():
+            held = f"{local}, which holds a relname selected into it,"
+            for k in range(a, b):
+                if k == at or toks[k][0] != "ID" or toks[k][1] != local:
+                    continue
+                prev, nxt = toks[k - 1], toks[k + 1]
+                callee, _ = callee_of(toks, k, a)
+                if prev[1] in COMPARE_OPS or nxt[1] in COMPARE_OPS or (nxt[0] == "ID" and nxt[1] in COMPARE_WORDS):
+                    found.append((k, f"{held} is compared"))
+                elif clause_at[k] in LOOKUP_CLAUSES:
+                    found.append((k, f"{held} stands in the {clause_at[k].upper()} clause of a query"))
+                elif callee in ("format", "to_regclass", "regclassin"):
+                    found.append((k, f"{held} is handed to {callee}(), to name a relation again"))
+                elif nxt[1] == "::" and toks[k + 2][1] == "regclass":
+                    found.append((k, f"{held} is cast to regclass, to name a relation again"))
+    for k, (kind, text, _) in enumerate(toks):
+        if text == "::" and 0 < k < len(toks) - 1 and toks[k + 1][1] == "regclass" and toks[k - 1][1] == ")":
+            found.append((k, "an expression is cast to regclass, a relation found by a name built at run time"))
+    for k, why in sorted(set(found)):
         if ra is not None and ra <= k < rb:
             inside += 1
             continue
@@ -255,14 +369,15 @@ def check_text(src):
     # rule 3
     regclass_calls = 0
     for k, (kind, text, line) in enumerate(toks):
-        if kind == "ID" and last_part(text) == "to_regclass" and k + 1 < len(toks) and toks[k + 1][1] == "(":
+        if kind == "ID" and last_part(text) in ("to_regclass", "regclassin") and k + 1 < len(toks) \
+                and toks[k + 1][1] == "(":
             regclass_calls += 1
             if not (k + 3 < len(toks) and toks[k + 2][0] == "STR" and toks[k + 3][1] == ")"):
                 v.append(f"{scope_of(defs, k) or 'top level'} (line {line}): to_regclass() of something other than a "
                          f"literal, a relation looked up by a name computed at run time")
-    summary = (f"{RESOLVER} is the one place a child is resolved by name ({inside} relname comparison(s) in it); "
-               f"{callers} function(s) hand it their child name and otherwise only report it; no relname is "
-               f"compared elsewhere; {regclass_calls} to_regclass() call(s), each of a literal")
+    summary = (f"{RESOLVER} is the one place a child is resolved by name ({inside} lookup(s) by name in it); "
+               f"{callers} function(s) hand it their child name and otherwise only report it; no relation is "
+               f"found by its name elsewhere; {regclass_calls} to_regclass() call(s), each of a literal")
     return v, summary
 
 
@@ -417,11 +532,25 @@ MUTANT_JOIN = CLEAN.replace(
    where p.oid = p_parent;
 """)
 
+# THE REAL INSTANCE the per-PR verification of #1150 built (P1-02), verbatim: the same by-name lookup with relname
+# projected out of a derived table under an alias and compared as q.rn. The first version of rule 1 read only the
+# token `relname` beside a comparison or in a WHERE/ON clause and printed PASS for it; installed, it is #1064.
+MUTANT_ALIAS = CLEAN.replace(
+    """    from pg_class c join pg_namespace n on n.oid = c.relnamespace
+   where c.oid = coalesce(p_child, p_parent);
+""",
+    """    from pg_class p join pg_namespace n on n.oid = p.relnamespace
+    join (select k.oid as koid, k.relname as rn, k.relnamespace as ns from pg_class k) q
+      on q.ns = p.relnamespace and q.rn = (select k2.relname from pg_class k2 where k2.oid = coalesce(p_child, p_parent))
+    join pg_class c on c.oid = q.koid
+   where p.oid = p_parent;
+""")
+
 
 def plant(body, params="p_parent regclass, p_child name", name="archive._planted"):
     return CLEAN + f"""
 create or replace function {name}({params}) returns void language plpgsql as $$
-declare v_nsp name; v_rel name; v_x regclass; v_oid oid;
+declare v_nsp name; v_rel name; v_x regclass; v_oid oid; v_rec record;
 begin
 {body}
 end;
@@ -442,6 +571,27 @@ COMPUTED_REGCLASS = plant("  v_x := to_regclass(format('%I.%I', v_nsp, v_rel));"
 RENDERED_FROM_OID = plant("  select c.relname, n.nspname into v_rel, v_nsp from pg_class c\n"
                           "    join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;\n"
                           "  raise notice '%.%', v_nsp, v_rel;", params="p_parent regclass")
+CTE_PROJECTED = plant("  with q as (select oid as o, relname as rn from pg_class)\n"
+                      "  select q.o into v_oid from q where q.rn = v_rel;", params="p_parent regclass")
+COLUMN_LIST_ALIAS = plant("  select q.o into v_oid from (select k.oid, k.relname from pg_class k) q(o, rn)\n"
+                          "   where q.rn = v_rel;", params="p_parent regclass")
+IMPLICIT_ALIAS_LOOP = plant("  for v_rec in select c.oid, c.relname rn from pg_class c loop\n"
+                            "    if v_rec.rn = v_rel then v_oid := v_rec.oid; end if;\n"
+                            "  end loop;", params="p_parent regclass")
+NATURAL = plant("  select c.oid into v_oid from pg_class c natural join (select v_rel::name) w;",
+                params="p_parent regclass")
+USING_JOIN = plant("  select c.oid into v_oid from pg_class c join pg_temp.wanted w using (relname);",
+                   params="p_parent regclass")
+INFORMATION_SCHEMA = plant("  select (t.table_schema || '.' || t.table_name)::regclass into v_x\n"
+                           "    from information_schema.tables t where t.table_name = v_rel;",
+                           params="p_parent regclass")
+EXPRESSION_CAST = plant("  v_x := (v_nsp || '.' || v_rel)::regclass;", params="p_parent regclass")
+INTO_COMPARED = plant("  select c.oid, c.relname into v_oid, v_rel from pg_class c where c.oid = p_parent;\n"
+                      "  if v_rel = 'evt' then v_x := p_parent; end if;", params="p_parent regclass")
+INTO_FORMATTED = plant("  select n.nspname, c.relname into v_nsp, v_rel from pg_class c\n"
+                       "    join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;\n"
+                       "  execute format('lock table %I.%I in access share mode', v_nsp, v_rel);",
+                       params="p_parent regclass")
 DO_BLOCK = CLEAN + """
 do $$ begin
   perform 1 from pg_class where relname = 'evt';
@@ -497,6 +647,25 @@ def selftest():
            "argument of quote_ident()")
     expect("to_regclass() of a name computed at run time", COMPUTED_REGCLASS, False, "to_regclass() of something")
     expect("a relation's name read off its oid and reported", RENDERED_FROM_OID, True)
+    expect("P1-02, the real instance: relname projected out of a derived table as rn, compared as q.rn",
+           MUTANT_ALIAS, False, "projected out of a subquery")
+    expect("relname projected out of a CTE and compared under its alias", CTE_PROJECTED, False,
+           "projected out of a subquery")
+    expect("relname renamed by a derived table's column list q(o, rn)", COLUMN_LIST_ALIAS, False,
+           "projected out of a subquery")
+    expect("relname given an implicit alias in a FOR loop's query, compared in plpgsql", IMPLICIT_ALIAS_LOOP, False,
+           "given an alias")
+    expect("a NATURAL JOIN on relname", NATURAL, False, "NATURAL JOIN")
+    expect("a JOIN ... USING (relname)", USING_JOIN, False, "USING clause")
+    expect("information_schema.tables found by table_name", INFORMATION_SCHEMA, False, "table_name is compared")
+    expect("information_schema.tables' schema and name cast to regclass", INFORMATION_SCHEMA, False,
+           "an expression is cast to regclass")
+    expect("a schema and name concatenated and cast to regclass", EXPRESSION_CAST, False,
+           "an expression is cast to regclass")
+    expect("a relname selected INTO a local, the local compared", INTO_COMPARED, False,
+           "v_rel, which holds a relname selected into it, is compared")
+    expect("a relname selected INTO a local, the local spliced by format() into a LOCK", INTO_FORMATTED, False,
+           "is handed to format()")
     expect("a lookup by relname in a DO block", DO_BLOCK, False, "top level")
     expect("floor: no archive._resolve_child at all", NO_RESOLVER, False, "defined 0 time(s)")
     expect("floor: a resolver that compares no relname", RESOLVER_BLIND, False, "rule 1's witness")
