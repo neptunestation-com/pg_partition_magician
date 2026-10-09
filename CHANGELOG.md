@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **A transmute claim taken under `SET ROLE` records its owner's identity** (#771 bullet 3). The claim insert
+  read the session's `backend_start` from `pg_stat_activity` as the current role, which masks the session's
+  own row under `SET ROLE` to a role that is not a member of the session user, so the claim recorded NULL:
+  after a cutover failure the owning session's re-run was refused as "already in progress in another session"
+  until it disconnected, and a `maintain_all` run by a role that could see `backend_start` read the
+  still-connected owner as dead and undid its bound. The claim now takes the start from
+  `pgpm._own_backend_start()`, which falls back to a `SECURITY DEFINER` read of the caller's own row only, and
+  `transmute` refuses up front when even that cannot see it; `_session_alive` judges the caller's own pid by
+  that same identity and reads a NULL start as dead from any role. Guard
+  `bench/transmute_claim_owner_under_set_role.sh` (tests/310), mutations `transmute_claim_owner_start_masked`,
+  `session_alive_self_masked` and `transmute_claim_without_identity`.
+
 - **The liveness witnesses of eight shell guards print as lines `discriminate.sh` reads as premises**
   (#1095). Its starved-fixture rule (#713) refuses a mutant run whose every failure begins `LIVENESS:`,
   `GUARD:` or `fixture:`, reading only the head of each FAIL line, but `maintain_lock`,

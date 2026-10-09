@@ -499,6 +499,29 @@ alter table pgpm.transmute_inflight add column if not exists owner_backend_start
 alter table pgpm.transmute_inflight add column if not exists partition_tz text;
 alter table pgpm.transmute_inflight add column if not exists control_attnum smallint;
 
+-- This session's own backend_start, the half of a transmute claim's owner identity that a recycled pid
+-- cannot forge (#771). pg_stat_activity shows a backend's backend_start only to a role with the privileges
+-- of that backend's session user (or pg_read_all_stats), and the CURRENT role is what it checks: under
+-- SET ROLE to a role that is not a member of the session user, the session's OWN row is masked too, so the
+-- claim insert read NULL, recorded an owner nothing could match, and #509's same-session resume was
+-- refused to the very session that owned the claim while a privileged reaper read it as dead.
+--
+-- So the read happens twice: as the current role, which is all an install needs when the session has not
+-- changed role, and then as pgpm's owner, through _own_backend_start_definer. That one is SECURITY DEFINER
+-- and returns the row WHERE pid = pg_backend_pid() and nothing else: the calling session's own start, a
+-- fact about itself the session could read anyway by RESET ROLE. Nothing about any other backend leaves
+-- it. NULL when neither role can see it (pgpm owned by a role without the session user's privileges or
+-- pg_read_all_stats, and the session under SET ROLE); the claim insert refuses then rather than record it.
+create or replace function pgpm._own_backend_start_definer()
+returns timestamptz language sql stable security definer set search_path = pg_catalog, pg_temp as $$
+  select a.backend_start from pg_catalog.pg_stat_activity a where a.pid operator(pg_catalog.=) pg_catalog.pg_backend_pid();
+$$;
+create or replace function pgpm._own_backend_start()
+returns timestamptz language sql stable as $$
+  select coalesce((select a.backend_start from pg_catalog.pg_stat_activity a where a.pid = pg_catalog.pg_backend_pid()),
+                  pgpm._own_backend_start_definer());
+$$;
+
 -- Is the session that claimed a conversion still alive? (#405)
 --
 -- This is the liveness signal transmute's claim protocol rests on. It has to tell "the conversion is still
@@ -520,13 +543,24 @@ alter table pgpm.transmute_inflight add column if not exists control_attnum smal
 -- never a column pg_monitor masks (tests/41_no_pg_monitor_dep_test.sql pins it).
 --
 -- A null p_pid is never alive: there is no session to be alive. That covers both a pre-#405 claim and a row
--- constructed by a test to stand in for a died-mid-run conversion.
+-- constructed by a test to stand in for a died-mid-run conversion. A null p_backend_start is never alive
+-- either (#771): an owner recorded with no start cannot be told from a recycled pid, and before #771 the
+-- answer depended on who asked (dead to a reader that could see backend_start, alive to one that could
+-- not). Only a claim taken under SET ROLE before #771 carries one; the claim insert now refuses instead.
+--
+-- The caller's OWN pid is judged by pgpm._own_backend_start(), the identity the claim insert records, and
+-- not by pg_stat_activity: under SET ROLE that masks the session's own row too, so a session that reused a
+-- dead owner's pid read the claim as its own live one and was refused its take-over (#771). When even that
+-- helper cannot see it, a pid that is this session's reads as alive, the under-reap side of the degrade.
 create or replace function pgpm._session_alive(p_pid int, p_backend_start timestamptz)
 returns boolean language sql stable as $$
-  select p_pid is not null
-     and exists (select 1 from pg_stat_activity
-                  where pid = p_pid
-                    and (backend_start = p_backend_start or backend_start is null));
+  select p_pid is not null and p_backend_start is not null
+     and case when p_pid = pg_backend_pid()
+              then coalesce(p_backend_start = pgpm._own_backend_start(), true)
+              else exists (select 1 from pg_stat_activity
+                            where pid = p_pid
+                              and (backend_start = p_backend_start or backend_start is null))
+         end;
 $$;
 
 -- A pg_class relkind as an English noun, for a refusal that names the relation standing in the way of a
@@ -8465,6 +8499,7 @@ language plpgsql as $$
 declare
   v_nsp name; v_rel name; v_relkind "char"; v_default name; v_staging name; v_parent regclass;
   v_resumed boolean := false;
+  v_own_start timestamptz;   -- #771: this session's backend_start, the claim's owner identity
   v_typname text; v_oldpk text[]; v_pkcols text[]; v_idcols name[]; v_pkname name; v_col name;
   v_idkinds text[];   -- #308: 'a' (ALWAYS) or 'd' (BY DEFAULT) per v_idcols entry, same order
   v_idx_names text[]; v_idx_defs text[]; v_ctl_attnum int; v_old name; v_new name; v_pdef_q text; j int;
@@ -9244,10 +9279,22 @@ begin
   -- failed attempt: resuming it is exactly what a take-over does. Matched on both columns, the identity
   -- we are about to record; a recycled pid with an older backend_start fails the match and is caught by
   -- the first arm instead, because its owner is dead.
+  --
+  -- #771: the identity comes from _own_backend_start, which sees this session's start whatever role it has
+  -- SET, and a claim is never recorded without one: an owner with a NULL start matches nothing, so the
+  -- second arm never resumed it and every reader judged it by its own privileges instead of by the claim.
+  v_own_start := pgpm._own_backend_start();
+  if v_own_start is null then
+    raise exception 'pg_partition_magician: cannot claim the transmute of %: the claim records this session''s identity (its pid and backend_start) so that a resume and the reaper can tell it from a dead session, and backend_start is hidden from both the current role % and pgpm''s owner % (pg_stat_activity shows it only to a role with the privileges of the session user %, or pg_read_all_stats). Nothing was changed. RESET ROLE and re-run, or grant pg_read_all_stats to %.',
+      p_parent, current_user,
+      (select pg_get_userbyid(proowner) from pg_proc where oid = 'pgpm._own_backend_start_definer()'::regprocedure),
+      session_user,
+      (select pg_get_userbyid(proowner) from pg_proc where oid = 'pgpm._own_backend_start_definer()'::regprocedure);
+  end if;
   insert into pgpm.transmute_inflight (parent_table, nsp, rel, control_kind, lo, hi, partition_tz,
                                        control_attnum, owner_pid, owner_backend_start)
   values (p_parent, v_nsp, v_rel, p_control_kind, v_lo_native, v_hi_native, v_tz, v_ctl_attnum,
-          pg_backend_pid(), (select backend_start from pg_stat_activity where pid = pg_backend_pid()))
+          pg_backend_pid(), v_own_start)
       on conflict (parent_table) do update
          set owner_pid           = excluded.owner_pid,
              owner_backend_start = excluded.owner_backend_start

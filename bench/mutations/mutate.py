@@ -11021,6 +11021,39 @@ MUTATIONS["archive_fn_parquet_readback_trusted"] = (
       "  select p_key is not null;\n", 1)],
 )
 MUTATION_SRC["archive_fn_parquet_readback_trusted"] = "tests/archive/db/08_archive_fn_s3_test.sql"
+# #771 bullet 3: a transmute claim taken under SET ROLE recorded a NULL owner_backend_start. Judged by
+# bench/transmute_claim_owner_under_set_role.sh (tests/310).
+MUTATIONS["transmute_claim_owner_start_masked"] = (
+    "bench/transmute_claim_owner_under_set_role.sh",
+    "Issue #771 bullet 3, the pre-fix shape at the one site that records the identity: the claim insert reads "
+    "its owner's backend_start from pg_stat_activity as the current role, which masks the session's own row "
+    "under SET ROLE to a role that is not a member of the session user, so the claim records NULL. A "
+    "privileged reaper reads the still-connected owner as dead and undoes its bound, and the claim names no "
+    "start. tests/310 part B catches it.",
+    [("          pg_backend_pid(), v_own_start)\n",
+      "          pg_backend_pid(), (select backend_start from pg_stat_activity where pid = pg_backend_pid()))\n", 1)],
+)
+MUTATIONS["session_alive_self_masked"] = (
+    "bench/transmute_claim_owner_under_set_role.sh",
+    "Issue #771 bullet 3, the reader half: _session_alive judges the caller's own pid through pg_stat_activity "
+    "like any other backend's, so under SET ROLE the session's own masked row reads as alive whatever start "
+    "the claim recorded. A session that reused a dead owner's pid is refused its take-over as 'already in "
+    "progress in another session'. tests/310 part C catches it.",
+    [("     and case when p_pid = pg_backend_pid()\n"
+      "              then coalesce(p_backend_start = pgpm._own_backend_start(), true)\n"
+      "              else exists",
+      "     and case when false\n"
+      "              then coalesce(p_backend_start = pgpm._own_backend_start(), true)\n"
+      "              else exists", 1)],
+)
+MUTATIONS["transmute_claim_without_identity"] = (
+    "bench/transmute_claim_owner_under_set_role.sh",
+    "Issue #771 bullet 3, the refusal: when neither the current role nor pgpm's owner can see the session's "
+    "backend_start, the claim is taken anyway with a NULL owner start that nothing can match, instead of "
+    "refused before anything is changed. tests/310 part D catches it.",
+    [("  if v_own_start is null then\n    raise exception 'pg_partition_magician: cannot claim the transmute",
+      "  if false then\n    raise exception 'pg_partition_magician: cannot claim the transmute", 1)],
+)
 
 
 
