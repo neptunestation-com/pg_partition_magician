@@ -1348,9 +1348,21 @@ $$;
 -- from that view are ever stored: an abbreviation ('EST') or a POSIX rule ('EST5EDT', 'XYZ5') is also
 -- accepted by `set timezone`, but the stored value has to mean the same instants for the life of the
 -- table, and only a named zone carries its own rules.
+--
+-- And not every name in that view is a zone (#1086). It lists every file under the tzdata directory, and
+-- three of them stand for something else: 'localtime' (on a --with-system-tzdata build, a link to the
+-- host's /etc/localtime), 'posixrules' (the DST dates a POSIX TZ string borrows, a link to whatever zone
+-- the tzdata package chose) and 'Factory' (the "-00" placeholder for a host whose zone was never set).
+-- Recorded, 'localtime' made the grid's zone whatever the host of the day is set to, so a restore on
+-- another host moved every calendar boundary with nothing recorded. They are refused by name, in any
+-- casing and under any directory prefix (a distribution's posix/ tree repeats them), so transmute and
+-- set_partition_tz, the two callers, refuse them alike.
 create or replace function pgpm._canonical_tz(p_tz text)
 returns text language sql stable as $$
-  select name from pg_timezone_names where lower(name) = lower(p_tz) order by name limit 1;
+  select name from pg_timezone_names
+   where lower(name) = lower(p_tz)
+     and lower(regexp_replace(name, '^.*/', '')) not in ('localtime', 'posixrules', 'factory')
+   order by name limit 1;
 $$;
 
 -- The config row with control_column set to the control column's CURRENT name (#826). pgpm.config records
@@ -8242,7 +8254,7 @@ begin
   else
     v_tz := pgpm._canonical_tz(current_setting('TimeZone'));
     if v_tz is null then
-      raise exception 'pg_partition_magician: this session''s TimeZone (%) is not a name in pg_timezone_names, and pgpm records the transmuting session''s zone as the one the partition grid is computed in for the life of the table. Set a named zone first (set timezone = ''UTC'' for UTC-aligned boundaries, the usual choice) and re-run.', current_setting('TimeZone');
+      raise exception 'pg_partition_magician: this session''s TimeZone (%) is not a zone pgpm can record: it must be a name in pg_timezone_names other than localtime, posixrules or Factory (which stand for the host''s setting, a POSIX-rule default and a placeholder, not zones with rules of their own), and pgpm records the transmuting session''s zone as the one the partition grid is computed in for the life of the table. Set a named zone first (set timezone = ''UTC'' for UTC-aligned boundaries, the usual choice) and re-run.', current_setting('TimeZone');
     end if;
   end if;
 
@@ -10936,7 +10948,7 @@ begin
   end if;
   v_tz := pgpm._canonical_tz(p_tz);
   if v_tz is null then
-    raise exception 'pg_partition_magician: % is not a time zone name in pg_timezone_names', p_tz;
+    raise exception 'pg_partition_magician: % is not a zone pgpm can record: it must be a name in pg_timezone_names other than localtime, posixrules or Factory (which stand for the host''s setting, a POSIX-rule default and a placeholder, not zones with rules of their own)', p_tz;
   end if;
   -- #660: a zone CHANGE while a regrain is in flight is refused. The checks below judge only the ATTACHED
   -- bounds; a run's copies are not attached, they sit in pgpm.part on the lattice of the zone the run was

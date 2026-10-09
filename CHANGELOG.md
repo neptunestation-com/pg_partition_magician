@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **The zone a grid is recorded in is never one of `pg_timezone_names`' pseudo-entries** (#1086).
+  `pgpm._canonical_tz` accepted any name that view lists, and three of them are not zones: `localtime` (on a
+  `--with-system-tzdata` build, a link to the host's `/etc/localtime`), `posixrules` and `Factory`. So
+  `set_partition_tz(t, 'localtime')`, or a transmute under `set timezone = 'localtime'`, recorded a grid zone
+  that follows whatever the host is set to, and a restore on another host moved every calendar boundary with
+  nothing recorded. `_canonical_tz` now refuses those three names in any casing (and under a directory
+  prefix), so both callers refuse them with a message that names the rule. Test `tests/304`, guard
+  `bench/canonical_tz_pseudo_zones.sh`, mutation `canonical_tz_admits_localtime`.
+
 - **A hole in the lookahead bypasses the obtain back-off** (#1078). After a lost lock race armed
   `config.obtain_retry_after`, `maintain_obtain` honoured the back-off while `ceil(obtain / 2)` grid steps
   past the frontier's cell were covered, and measured that by walking from the frontier's cell up to the

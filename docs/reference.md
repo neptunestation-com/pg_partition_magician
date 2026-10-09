@@ -79,8 +79,10 @@ first instant of that day where the zone's clocks skipped midnight, and at the s
 midnights where a fall-back repeated it, so the hour between belongs to the previous month's partition);
 day and shorter steps are a fixed
 number of seconds from the anchor, named by the UTC date or hour they start at. For UTC-aligned boundaries, run `set timezone = 'UTC'` first. The call refuses a session zone that is
-not a name in `pg_timezone_names` (a POSIX rule or a bare abbreviation), and the zone can be changed
-afterwards only with [`set_partition_tz`](#set_partition_tz).
+not a name in `pg_timezone_names` (a POSIX rule or a bare abbreviation), and the three names that view lists
+that are not zones with rules of their own: `localtime` (the host's `/etc/localtime`, which a restore on
+another host changes), `posixrules` and `Factory`. The zone can be changed afterwards only with
+[`set_partition_tz`](#set_partition_tz).
 
 A `timestamp` or `date` control column carries no zone, so its grid is computed on the column's **own
 wall clock** whatever the session's zone: a day is `[D 00:00, D+1 00:00)` in the column's values, an hour
@@ -2692,7 +2694,9 @@ it whatever zone the maintaining session runs in, so this is normally never call
 upgrade case: an install that predates the column has it backfilled to `UTC`, and a table whose grid was
 built from a non-UTC session has to be told which zone that was.
 
-`p_tz` must be a name in `pg_timezone_names` (any casing; the canonical spelling is stored). An `id` grid
+`p_tz` must be a name in `pg_timezone_names` (any casing; the canonical spelling is stored) other than
+`localtime`, `posixrules` and `Factory`, which that view lists but which stand for the host's
+`/etc/localtime`, a POSIX-rule default and a placeholder rather than zones with rules of their own. An `id` grid
 is refused: it has no calendar and never reads the zone. A `timestamp` or `date` control column is
 refused too: it carries no zone, its grid is its own wall clock (recorded as `UTC`), and the zone also
 decides how its bound literals are rendered and read, so a change would shift every new partition
