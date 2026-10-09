@@ -7781,6 +7781,211 @@ begin
 end;
 $$;
 
+-- The two names the cutover takes, refused when held. Each is asked up front and asked again by the cutover
+-- statement that takes the name, from its own failure (#1080, #1104, #1105): no lock on the table keeps a
+-- name in its schema free, so a relation or a type committed at it after the up-front asking (while phases 1
+-- and 2 had let go of the table), or created by a transaction still open when the cutover reaches it, made
+-- that statement die raw (42P07, 42710, or 23505 on the catalog's name index once the other transaction
+-- committed) after the write-rejecting bound and the claim had committed. The cutover now catches exactly
+-- those from the CREATE or the RENAME and asks the up-front question again, which by then sees the
+-- committed holder and refuses in the up-front words; the refusal rolls the cutover back to the resumable
+-- phase-2 state. Whatever it does not recognise is raised as it came.
+--
+-- The relation half reads pg_class under the statement's snapshot, not through to_regclass. In the
+-- cutover's handler the holder committed while this backend waited for it, and the CREATE or RENAME that
+-- waited had already looked the name up and cached that nothing held it; to_regclass answers from the same
+-- cache without taking a lock, so nothing makes it process the invalidation the commit sent, and it could
+-- still say the name was free (measured on PostgreSQL 18, where the RENAME's handler then raised the raw
+-- 23505). A query on pg_class sees what the snapshot sees.
+--
+-- The name PostgreSQL gives a table's implicit array type: an underscore before the table's name, cut on the
+-- right, on a character boundary, to the 63-byte identifier limit (makeArrayTypeName's first candidate,
+-- measured on PostgreSQL 15: a 63-byte name loses its last character, a name ending in a two-byte one loses
+-- both bytes).
+create or replace function pgpm._array_type_name(p_name name)
+returns name language plpgsql immutable as $$
+declare v text := '_' || p_name;
+begin
+  while octet_length(v) > 63 loop
+    v := left(v, -1);
+  end loop;
+  return v::name;
+end;
+$$;
+
+-- Every name a cutover statement takes, refused when held, from that statement's own failure (#1105). Each of
+-- the three statements that name a relation, step 5's CREATE of the staging parent and step 1's two RENAMEs,
+-- takes, for each relation name N it gives: N in pg_class, N in pg_type (the relation's row type), and N's
+-- array type name in pg_type (see _array_type_name); the first RENAME also updates the table's own array
+-- type, whose current name it passes in p_also. A holder COMMITTED before the statement runs is either
+-- refused up front (a relation, or a type that is not an implicit array type: the staging and monolith
+-- helpers below) or stepped around by PostgreSQL itself (an implicit array type at N is moved aside, and a
+-- taken array name is passed over), so the up-front checks ask no more than they do, and refusing more would
+-- refuse conversions that succeed. A holder that a still-open transaction is creating is invisible to all of
+-- that, so the statement waits for it and, once it commits, fails: 23505 on pg_class's or pg_type's name
+-- index, or XX000 "tuple concurrently updated" when the other transaction had moved a pg_type row the
+-- statement updates (CREATE TYPE _<table> moves the table's own array type aside, an uncommitted update with
+-- no lock on the table). Each statement's handler asks this then, when the holder is committed and visible,
+-- and it names whatever holds any of those names, a relation or a type of any kind, an implicit array type
+-- included (named as the array type of its element type). p_own lists the relations the statement acts on,
+-- whose own row and array types are not holders.
+--
+-- p_skip is for the XX000 arm. 23505, 42P07 and 42710 are name collisions by definition, but "tuple
+-- concurrently updated" is any concurrent update of a catalog row the statement also updates, a GRANT on the
+-- table (which takes no lock on it) as much as a CREATE TYPE that moved the table's array type aside. So that
+-- arm passes the holders that were already there before the statement ran (_transmute_names_present, read
+-- just before it): a holder among them is one PostgreSQL steps around, not the cause, and only a holder that
+-- appeared during the wait is named. With none, the arm re-raises the error as it came.
+create or replace function pgpm._transmute_taken_names(p_names name[], p_also name[] default '{}')
+returns name[] language sql immutable as $$
+  select p_names || array(select pgpm._array_type_name(x) from unnest(p_names) x) || p_also;
+$$;
+
+-- What holds any of those names right now, as 'r<pg_class oid>' and 't<pg_type oid>' keys (see above).
+create or replace function pgpm._transmute_names_present(p_nsp name, p_names name[], p_also name[] default '{}')
+returns text[] language sql stable as $$
+  select array(select 'r' || c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                where n.nspname = p_nsp and c.relname = any(pgpm._transmute_taken_names(p_names, p_also))
+               union all
+               select 't' || t.oid from pg_type t join pg_namespace n on n.oid = t.typnamespace
+                where n.nspname = p_nsp and t.typname = any(pgpm._transmute_taken_names(p_names, p_also)));
+$$;
+
+create or replace function pgpm._transmute_refuse_names_held(p_nsp name, p_names name[], p_what text,
+                                                             p_own regclass[] default '{}', p_also name[] default '{}',
+                                                             p_skip text[] default '{}')
+returns void language plpgsql stable as $$
+declare
+  v_name name; v_kind text;
+  v_own_types oid[] := array(select c.reltype from pg_class c where c.oid = any(p_own::oid[])
+                             union all
+                             select t.typarray from pg_class c join pg_type t on t.oid = c.reltype
+                              where c.oid = any(p_own::oid[]));
+begin
+  foreach v_name in array pgpm._transmute_taken_names(p_names, p_also) loop
+    select case when pgpm._relkind_noun(c.relkind) ~ '^[aeiou]' then 'an ' else 'a ' end || pgpm._relkind_noun(c.relkind)
+      into v_kind
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = p_nsp and c.relname = v_name and c.oid <> all(p_own::oid[])
+       and ('r' || c.oid) <> all(p_skip);
+    if v_kind is null then
+      select coalesce(pgpm._type_squatter(p_nsp, v_name),
+                      case when t.typrelid <> 0 then 'the row type of ' || t.typrelid::regclass::text
+                           when exists (select 1 from pg_type e where e.typarray = t.oid)
+                             then 'the array type of ' || format_type(t.typelem, null)
+                           else 'a type' end)
+        into v_kind
+        from pg_type t join pg_namespace n on n.oid = t.typnamespace
+       where n.nspname = p_nsp and t.typname = v_name and t.oid <> all(v_own_types)
+         and ('t' || t.oid) <> all(p_skip);
+    end if;
+    if v_kind is not null then
+      raise exception 'pg_partition_magician: %.% already exists as %, and the cutover''s % takes that name (for a relation, its row type, or its array type, which PostgreSQL names by an underscore before the relation''s name), so it could not proceed once the transaction creating it committed. Drop or rename it, then retry transmute.',
+        p_nsp, v_name, v_kind, p_what;
+    end if;
+  end loop;
+end;
+$$;
+
+-- The staging name the new parent is built under, <table>_pgpm_new, free as a relation (#344) and as a type
+-- (#671: a table's row type takes its name). Asked in the preflight and from step 5's CREATE TABLE, whose
+-- handler then asks the rest of what it takes (see above).
+create or replace function pgpm._transmute_refuse_staging_squatter(p_nsp name, p_staging name)
+returns void language plpgsql stable as $$
+begin
+  if exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+              where n.nspname = p_nsp and c.relname = p_staging) then
+    raise exception 'pg_partition_magician: %.% already exists, and transmute needs it as a staging name for the new parent. Most likely a leftover from an interrupted run. Drop it (drop table %.%) and retry transmute.',
+      p_nsp, p_staging, quote_ident(p_nsp), quote_ident(p_staging);
+  end if;
+  if pgpm._type_squatter(p_nsp, p_staging) is not null then
+    raise exception 'pg_partition_magician: %.% already exists as %, and transmute needs that name as a staging name for the new parent (a table''s row type takes its name, so no type may hold it). Drop or rename the type, then retry transmute.',
+      p_nsp, p_staging, pgpm._type_squatter(p_nsp, p_staging);
+  end if;
+end;
+$$;
+
+-- The monolith's name, <table>_p<lo>_to_<hi>, which the cutover RENAMEs the table to: free as a relation
+-- (#509) and as a type (#671). Asked in phase 1's transaction, once the bound is final and before the ADD of
+-- it, and from step 1's RENAME (#1104), whose handler then asks the rest of what it takes (see above).
+create or replace function pgpm._transmute_refuse_monolith_squatter(p_nsp name, p_monolith name, p_lo text, p_hi text)
+returns void language plpgsql stable as $$
+begin
+  if exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+              where n.nspname = p_nsp and c.relname = p_monolith) then
+    raise exception 'pg_partition_magician: %.% already exists, and transmute needs that name for the monolith (the partition the converted table becomes, covering [%, %)). Most likely a leftover from an earlier conversion of a table by this name. Drop or rename it and retry transmute.',
+      p_nsp, p_monolith, p_lo, p_hi;
+  end if;
+  if pgpm._type_squatter(p_nsp, p_monolith) is not null then
+    raise exception 'pg_partition_magician: %.% already exists as %, and transmute needs that name for the monolith (the partition the converted table becomes, covering [%, %)); a table''s row type takes its name, so no type may hold it. Drop or rename the type, then retry transmute.',
+      p_nsp, p_monolith, pgpm._type_squatter(p_nsp, p_monolith), p_lo, p_hi;
+  end if;
+end;
+$$;
+
+-- Publication membership the cutover cannot carry, refused (#566, #710). Step 7c adds the new parent to every
+-- publication that names the table, with the same row filter and column list, and two shapes cannot make
+-- that trip: a row filter or a column list in a publication with publish_via_partition_root = false, which
+-- PostgreSQL does not allow on a partitioned table, and a publication the caller does not own, which ALTER
+-- PUBLICATION ... ADD TABLE needs. Asked twice by _transmute (#766, #1105): in the preflight, and again by
+-- step 7c from its own failure. Asked in the preflight only, a publication change committed after it failed
+-- 7c's ALTER PUBLICATION raw, after the write-rejecting bound and the claim had committed. The cutover's
+-- ACCESS EXCLUSIVE keeps a new membership out (CREATE PUBLICATION ... FOR TABLE and ALTER PUBLICATION ... ADD
+-- TABLE take SHARE UPDATE EXCLUSIVE on the table), but ALTER PUBLICATION ... SET (publish_via_partition_root
+-- = false) and OWNER TO take no lock on it, and one can commit while the cutover waits in step 7a for a lock
+-- on a referenced table, so the only asking that sees every change is the one 7c's own failure prompts.
+-- p_label is how the message names the table: after the cutover's renames p_parent (the oid the
+-- memberships are on) is the monolith, and the name the operator knows is the new parent's.
+create or replace function pgpm._transmute_refuse_publications(p_parent regclass, p_label regclass default null)
+returns void language plpgsql stable as $$
+declare v_bad_pub text; v_unowned_pub_q text;
+begin
+  -- A publication FOR ALL TABLES or FOR TABLES IN SCHEMA needs nothing: the parent is covered by it the
+  -- moment it exists, in the same schema. There is no faithful way to carry a filtered membership without
+  -- publish_via_partition_root: dropping the filter or the list would start replicating rows or columns the
+  -- operator excluded, and leaving the parent out is the #566 defect itself.
+  select string_agg(p.pubname::text, ', ' order by p.pubname) into v_bad_pub
+    from pg_publication_rel r join pg_publication p on p.oid = r.prpubid
+   where r.prrelid = p_parent and not p.pubviaroot
+     and (r.prqual is not null or r.prattrs is not null);
+  if v_bad_pub is not null then
+    raise exception 'pg_partition_magician: cannot transmute % -- the publication(s) (%) name it with a row filter or a column list and publish_via_partition_root = false, which PostgreSQL does not allow for a partitioned table, so the new parent could not take the table''s place in them. Set publish_via_partition_root = true on them (ALTER PUBLICATION ... SET (publish_via_partition_root = true)), or drop the filter and column list, then re-run transmute.',
+      coalesce(p_label, p_parent), v_bad_pub;
+  end if;
+  -- and a publication the caller cannot alter (#710, see above _transmute)
+  select string_agg(quote_ident(p.pubname), ', ' order by p.pubname) into v_unowned_pub_q
+    from pg_publication_rel r join pg_publication p on p.oid = r.prpubid
+   where r.prrelid = p_parent and not pg_has_role(current_user, p.pubowner, 'USAGE');
+  if v_unowned_pub_q is not null then
+    raise exception 'pg_partition_magician: cannot transmute % as % -- the publication(s) (%) name it, and adding the new parent to them (ALTER PUBLICATION ... ADD TABLE) needs their owner. Run transmute as a role that owns them, or have their owner hand them over (ALTER PUBLICATION ... OWNER TO), then re-run transmute.',
+      coalesce(p_label, p_parent), quote_ident(current_user), v_unowned_pub_q;
+  end if;
+end;
+$$;
+
+-- READ COMMITTED only, for every entry point that ends in transmute's cutover (#1105): transmute itself, and
+-- pgpm_hypertable's from_hypertable and from_hypertable_cutover, which hand off to it after their swap. The
+-- cutover asks its up-front checks again from a statement's own failure (the staging CREATE, the monolith
+-- RENAME, step 7c's ALTER PUBLICATION), after that statement waited for another transaction to commit, and
+-- the second answer is only worth something from a snapshot taken after the wait. READ COMMITTED takes one
+-- per statement; REPEATABLE READ and SERIALIZABLE keep the transaction's first, so the helper would not see
+-- the holder or the change that made the statement fail, and the raw error would go out after phases 1 and 2
+-- had committed the bound and the claim. Both settings are asked: this transaction's, and the session's
+-- default, which every transaction a committing procedure commits into takes. Asked by each entry point
+-- before anything is committed: a from_hypertable refused only at its handoff would already have swapped
+-- and dropped the hypertable. untransmute refuses the same way, for the same reason (#443). (READ
+-- UNCOMMITTED is READ COMMITTED in PostgreSQL and passes too.)
+create or replace function pgpm._refuse_strict_isolation(p_routine text, p_table regclass)
+returns void language plpgsql stable as $$
+begin
+  if current_setting('transaction_isolation') not in ('read committed', 'read uncommitted')
+     or current_setting('default_transaction_isolation') not in ('read committed', 'read uncommitted') then
+    raise exception 'pg_partition_magician: %(%) must run in READ COMMITTED transactions (this one is %, and default_transaction_isolation, which every transaction it commits into takes, is %): transmute''s cutover asks its up-front checks again after waiting for another transaction to commit, and needs a snapshot taken after that wait, which a stricter isolation level cannot provide. SET default_transaction_isolation = ''read committed'', then re-run %.',
+      p_routine, p_table, current_setting('transaction_isolation'), current_setting('default_transaction_isolation'), p_routine;
+  end if;
+end;
+$$;
+
 -- Objects that name a table by its OID, refused (#779). A view's query, a materialized view's, a rule's
 -- action, a SQL-standard function body (BEGIN ATOMIC) and a policy's expression are stored as parse
 -- trees that name each relation by oid, not by name. transmute's cutover renames the original table, and
@@ -8161,6 +8366,8 @@ declare
   v_keyshape text;                  -- #706: what the preflight planned the key and identity from
   v_ra record;                       -- #656/#670: one identity column's refreshed (next, max, min)
   v_monolith name; v_monreg regclass;
+  v_own_arr name;   -- #1105: the table's own array type's name, which the first RENAME updates
+  v_pre_names text[];   -- #1105: what held a naming statement's names just before it ran (XX000 arm)
   v_tz text;   -- #455: the zone the grid is computed in, recorded in config.partition_tz
   v_claim_tz text;   -- #506: the zone recorded with the claim, which a resume adopts along with the bound
   v_claim_attnum smallint;   -- #628: the control column recorded with the claim, which a resume must match
@@ -8174,11 +8381,10 @@ declare
   v_trgdefs text[] := '{}'; v_grant text; v_g record;
   v_trgnames text[] := '{}'; v_trgstates text[] := '{}';   -- #499: tgname and tgenabled, index-aligned with v_trgdefs
   v_poldefs text[] := '{}'; v_poldef text;   -- #897: the policies, captured as statements naming the table
-  v_bad_pub text; v_pub record;   -- #566: publication membership, refused or carried
+  v_pub record;   -- #566: publication membership, carried (_transmute_refuse_publications refuses)
   v_key_defer text := '';         -- #731: the reused key's DEFERRABLE / INITIALLY DEFERRED, carried onto the parent
   v_key_name name; v_key_idx oid; -- #789: the reused key's constraint name, which the parent takes, and its index
   v_replident "char"; v_ri_idx name;   -- #782: the table's replica identity, and the parent index it maps to
-  v_unowned_pub_q text;
   v_grantors_q text;   -- #903: the grantors of the table's grants this session cannot replay them as
   v_sq record;                    -- #573: sequences the table owns through a column
   -- #828: a carried secondary UNIQUE constraint: its name (the parent takes it), its index, its definition,
@@ -8217,6 +8423,8 @@ begin
   if p_retain is null and p_control_kind = 'time' then
     select h.retain::text into p_retain from pgpm.handoff h where h.table_oid = p_parent::oid;
   end if;
+  -- #1105: READ COMMITTED only, refused here, before anything is committed; see the helper.
+  perform pgpm._refuse_strict_isolation('transmute', p_parent);
   -- #451, #581: the argument rules, before anything is read or committed. One function, so that the entry
   -- points that reach this procedure only after committing work of their own (from_hypertable, whose
   -- cutover swap commits before the handoff) can ask exactly these rules first (#1085).
@@ -8444,17 +8652,11 @@ begin
   -- either rename (so that none of its setup work adds to the outage), which means that name must be
   -- free. Refuse up front, same shape as the orphan-child check just above and the <index>_pgpm check
   -- below -- most likely a leftover from an interrupted prior attempt.
-  if to_regclass(format('%I.%I', v_nsp, v_staging)) is not null then
-    raise exception 'pg_partition_magician: %.% already exists, and transmute needs it as a staging name for the new parent. Most likely a leftover from an interrupted run. Drop it (drop table %.%) and retry transmute.',
-      v_nsp, v_staging, quote_ident(v_nsp), quote_ident(v_staging);
-  end if;
   -- #671: and free as a TYPE name. The CREATE TABLE in phase 3 needs it free in pg_type too (a table's row
-  -- type takes its name), which to_regclass cannot see, so an enum or domain holding it passed this guard
-  -- and the cutover died on a raw 42710 after phases 1 and 2 had committed the bound and the claim.
-  if pgpm._type_squatter(v_nsp, v_staging) is not null then
-    raise exception 'pg_partition_magician: %.% already exists as %, and transmute needs that name as a staging name for the new parent (a table''s row type takes its name, so no type may hold it). Drop or rename the type, then retry transmute.',
-      v_nsp, v_staging, pgpm._type_squatter(v_nsp, v_staging);
-  end if;
+  -- type takes its name), which a lookup of relations cannot see, so an enum or domain holding it passed
+  -- this guard and the cutover died on a raw 42710 after phases 1 and 2 had committed the bound and the
+  -- claim. Both are asked again by the cutover's CREATE (#1080), see the helper.
+  perform pgpm._transmute_refuse_staging_squatter(v_nsp, v_staging);
 
   -- uuidv7 sanity check (issue #96): a uuid control column is TREATED as uuidv7 on assumption, so we
   -- sample it. Genuine UUIDv7/ULID decodes to plausible recent timestamps (~1.0); random UUIDv4 scores
@@ -8636,27 +8838,10 @@ begin
   -- Publication membership (#566): the cutover adds the new parent to every publication that names this
   -- table (step 7c), and PostgreSQL refuses a row filter or a column list on a PARTITIONED table in a
   -- publication with publish_via_partition_root = false ("cannot use publication WHERE clause for
-  -- relation"). There is no faithful way to carry that shape: dropping the filter or the list would
-  -- start replicating rows or columns the operator excluded, and leaving the parent out is the defect
-  -- itself. So it is refused HERE, before anything is committed, rather than failing inside the cutover.
-  -- A publication FOR ALL TABLES or FOR TABLES IN SCHEMA needs nothing: the parent is covered by it the
-  -- moment it exists, in the same schema.
-  select string_agg(p.pubname::text, ', ' order by p.pubname) into v_bad_pub
-    from pg_publication_rel r join pg_publication p on p.oid = r.prpubid
-   where r.prrelid = p_parent and not p.pubviaroot
-     and (r.prqual is not null or r.prattrs is not null);
-  if v_bad_pub is not null then
-    raise exception 'pg_partition_magician: cannot transmute % -- the publication(s) (%) name it with a row filter or a column list and publish_via_partition_root = false, which PostgreSQL does not allow for a partitioned table, so the new parent could not take the table''s place in them. Set publish_via_partition_root = true on them (ALTER PUBLICATION ... SET (publish_via_partition_root = true)), or drop the filter and column list, then re-run transmute.',
-      p_parent, v_bad_pub;
-  end if;
-  -- and a publication the caller cannot alter is refused (#710, see above _transmute)
-  select string_agg(quote_ident(p.pubname), ', ' order by p.pubname) into v_unowned_pub_q
-    from pg_publication_rel r join pg_publication p on p.oid = r.prpubid
-   where r.prrelid = p_parent and not pg_has_role(current_user, p.pubowner, 'USAGE');
-  if v_unowned_pub_q is not null then
-    raise exception 'pg_partition_magician: cannot transmute % as % -- the publication(s) (%) name it, and adding the new parent to them (ALTER PUBLICATION ... ADD TABLE) needs their owner. Run transmute as a role that owns them, or have their owner hand them over (ALTER PUBLICATION ... OWNER TO), then re-run transmute.',
-      p_parent, quote_ident(current_user), v_unowned_pub_q;
-  end if;
+  -- relation"), and the ADD TABLE in a publication the caller does not own (#710). Both are refused HERE,
+  -- before anything is committed, rather than failing inside the cutover, and asked again by step 7c's own
+  -- failure (#766, #1105), see the helper.
+  perform pgpm._transmute_refuse_publications(p_parent);
   -- The table's tablespace (#829): the cutover creates the parent in it, so that every partition minted from
   -- it lands there as well, and creating a relation in a tablespace other than the database's default needs
   -- CREATE on it. A caller without that privilege died with a raw 42501 inside the cutover, after phases 1
@@ -9025,16 +9210,10 @@ begin
   -- Checked HERE rather than beside the other name guards because the name depends on the bound, and the
   -- bound is only final once the claim has decided fresh-vs-resume and headroom has been applied. This is
   -- still the first transaction: nothing is committed, and the raise rolls the claim row back with it.
-  if to_regclass(format('%I.%I', v_nsp, v_monolith)) is not null then
-    raise exception 'pg_partition_magician: %.% already exists, and transmute needs that name for the monolith (the partition the converted table becomes, covering [%, %)). Most likely a leftover from an earlier conversion of a table by this name. Drop or rename it and retry transmute.',
-      v_nsp, v_monolith, v_lo_native, v_hi_native;
-  end if;
   -- #671: the RENAME renames the table's row type with it, so the name has to be free in pg_type as well,
-  -- which to_regclass cannot see: a type holding it failed the cutover with a raw 42710, same as above.
-  if pgpm._type_squatter(v_nsp, v_monolith) is not null then
-    raise exception 'pg_partition_magician: %.% already exists as %, and transmute needs that name for the monolith (the partition the converted table becomes, covering [%, %)); a table''s row type takes its name, so no type may hold it. Drop or rename the type, then retry transmute.',
-      v_nsp, v_monolith, pgpm._type_squatter(v_nsp, v_monolith), v_lo_native, v_hi_native;
-  end if;
+  -- which a lookup of relations cannot see: a type holding it failed the cutover with a raw 42710, same as above.
+  -- Both are asked again by the cutover's RENAME (#1104), see the helper.
+  perform pgpm._transmute_refuse_monolith_squatter(v_nsp, v_monolith, v_lo_native, v_hi_native);
 
   -- #309: bound the wait for the ADD's ACCESS EXCLUSIVE. Re-applied per phase rather than set once,
   -- because `set local` does not survive a COMMIT -- the same caution maintain() records at its own
@@ -9114,8 +9293,29 @@ begin
   -- pgpm_monolith_bound CHECK (already validated on p_parent by phase 2), which must NOT constrain the
   -- parent (it would reject any row at/after B), so drop it from the parent immediately; the monolith keeps
   -- its own copy for the metadata-only attach below, dropped separately afterward.
-  execute format('create table %I.%I (like %s including defaults including generated including storage including constraints) partition by range (%I)',
-                 v_nsp, v_staging, p_parent::text, p_control);
+  --
+  -- The staging name is asked again from this CREATE's own failure (#1080, #1105): a relation or a type
+  -- committed at it since the preflight fails the CREATE with 42P07 or 42710, and one a still-open
+  -- transaction is creating makes it wait (up to this phase's lock_timeout) and fail with 23505 (or XX000)
+  -- once that commits; either way the helpers then see the holder and refuse in pgpm's words, the
+  -- preflight's for the staging name itself, _transmute_refuse_names_held's for the rest it takes.
+  v_pre_names := pgpm._transmute_names_present(v_nsp, array[v_staging]);
+  begin
+    execute format('create table %I.%I (like %s including defaults including generated including storage including constraints) partition by range (%I)',
+                   v_nsp, v_staging, p_parent::text, p_control);
+  exception
+    when duplicate_table or duplicate_object or unique_violation then
+      perform pgpm._transmute_refuse_staging_squatter(v_nsp, v_staging);
+      perform pgpm._transmute_refuse_names_held(v_nsp, array[v_staging],
+        format('CREATE of the new parent %I.%I', v_nsp, v_staging));
+      raise;
+    when internal_error then
+      if sqlerrm = 'tuple concurrently updated' then   -- a new holder only, see _transmute_refuse_names_held
+        perform pgpm._transmute_refuse_names_held(v_nsp, array[v_staging],
+          format('CREATE of the new parent %I.%I', v_nsp, v_staging), p_skip => v_pre_names);
+      end if;
+      raise;
+  end;
   v_parent := format('%I.%I', v_nsp, v_staging)::regclass;
   execute format('alter table %s drop constraint if exists pgpm_monolith_bound', v_parent::text);
   -- 0b (owner, RLS). After the LIKE, under its ACCESS SHARE (see 0b).
@@ -9365,9 +9565,46 @@ begin
   -- immediately after -- before anything else runs -- means the live
   -- name already resolves to the correctly-positioned parent by the time the trigger replay below (the one
   -- step that needs the literal name, not just the OID) executes.
-  execute format('alter table %s rename to %I', p_parent::text, v_monolith);
+  --
+  -- Each RENAME asks the names it takes again from its own failure (#1104, #1105), as step 5's CREATE does:
+  -- a relation or a type committed at the monolith's name since phase 1 asked fails the first with 42P07 or
+  -- 42710, and a holder a still-open transaction is creating, of any name either takes, makes it wait and
+  -- fail with 23505 (or XX000, see _transmute_refuse_names_held) once that commits. The first also updates
+  -- the table's own array type, so it asks that type's current name too, read here under the lock.
+  v_own_arr := (select t.typname from pg_class c join pg_type r on r.oid = c.reltype join pg_type t on t.oid = r.typarray
+                 where c.oid = p_parent);
+  v_pre_names := pgpm._transmute_names_present(v_nsp, array[v_monolith], array[v_own_arr]);
+  begin
+    execute format('alter table %s rename to %I', p_parent::text, v_monolith);
+  exception
+    when duplicate_table or duplicate_object or unique_violation then
+      perform pgpm._transmute_refuse_monolith_squatter(v_nsp, v_monolith, v_lo_native, v_hi_native);
+      perform pgpm._transmute_refuse_names_held(v_nsp, array[v_monolith],
+        format('RENAME of %I.%I to the monolith''s name', v_nsp, v_rel), array[p_parent], array[v_own_arr]);
+      raise;
+    when internal_error then
+      if sqlerrm = 'tuple concurrently updated' then   -- a new holder only, see _transmute_refuse_names_held
+        perform pgpm._transmute_refuse_names_held(v_nsp, array[v_monolith],
+          format('RENAME of %I.%I to the monolith''s name', v_nsp, v_rel), array[p_parent], array[v_own_arr], v_pre_names);
+      end if;
+      raise;
+  end;
   v_monreg := format('%I.%I', v_nsp, v_monolith)::regclass;
-  execute format('alter table %s rename to %I', v_parent::text, v_rel);
+  v_pre_names := pgpm._transmute_names_present(v_nsp, array[v_rel]);
+  begin
+    execute format('alter table %s rename to %I', v_parent::text, v_rel);
+  exception
+    when duplicate_table or duplicate_object or unique_violation then
+      perform pgpm._transmute_refuse_names_held(v_nsp, array[v_rel],
+        format('RENAME of the new parent to %I.%I', v_nsp, v_rel), array[v_parent, v_monreg]);
+      raise;
+    when internal_error then
+      if sqlerrm = 'tuple concurrently updated' then   -- a new holder only, see _transmute_refuse_names_held
+        perform pgpm._transmute_refuse_names_held(v_nsp, array[v_rel],
+          format('RENAME of the new parent to %I.%I', v_nsp, v_rel), array[v_parent, v_monreg], '{}', v_pre_names);
+      end if;
+      raise;
+  end;
 
   -- 2. the existing PK is KEPT in place; step 8 reconciles the monolith's promoted index (metadata-only).
 
@@ -9538,18 +9775,29 @@ begin
   -- publishes it through the parent). Retention's drop of the monolith removes it with the table.
   -- Column names, not prattrs' attnums: the parent's attnums are dense, the original's may have holes
   -- where a column was dropped.
-  for v_pub in
-    select p.pubname, pg_get_expr(r.prqual, r.prrelid) as qual,
-           (select string_agg(quote_ident(a.attname), ', ' order by a.attnum)
-              from pg_attribute a where a.attrelid = r.prrelid and a.attnum = any(r.prattrs::int2[])) as cols_q
-      from pg_publication_rel r join pg_publication p on p.oid = r.prpubid
-     where r.prrelid = p_parent
-     order by p.pubname
-  loop
-    execute format('alter publication %I add table %s%s%s', v_pub.pubname, v_parent::text,
-                   case when v_pub.cols_q is not null then ' (' || v_pub.cols_q || ')' else '' end,
-                   case when v_pub.qual is not null then ' where (' || v_pub.qual || ')' else '' end);
-  end loop;
+  --
+  -- The refusals are asked again from this step's own failure (#766, #1105): a publication change committed
+  -- since the preflight (a filtered membership added, publish_via_partition_root turned off, the
+  -- publication handed to another role, none of which this cutover's locks all exclude) fails the ALTER
+  -- PUBLICATION, and the helper then names it in the preflight's words. p_parent is the monolith's oid by
+  -- now, where the memberships are; v_parent carries the name the operator knows.
+  begin
+    for v_pub in
+      select p.pubname, pg_get_expr(r.prqual, r.prrelid) as qual,
+             (select string_agg(quote_ident(a.attname), ', ' order by a.attnum)
+                from pg_attribute a where a.attrelid = r.prrelid and a.attnum = any(r.prattrs::int2[])) as cols_q
+        from pg_publication_rel r join pg_publication p on p.oid = r.prpubid
+       where r.prrelid = p_parent
+       order by p.pubname
+    loop
+      execute format('alter publication %I add table %s%s%s', v_pub.pubname, v_parent::text,
+                     case when v_pub.cols_q is not null then ' (' || v_pub.cols_q || ')' else '' end,
+                     case when v_pub.qual is not null then ' where (' || v_pub.qual || ')' else '' end);
+    end loop;
+  exception when others then
+    perform pgpm._transmute_refuse_publications(p_parent, v_parent);
+    raise;
+  end;
 
   -- 8. parent key -- adopts the monolith's kept constraint index (metadata-only, no rebuild): a PRIMARY
   -- KEY when the reused key was the PK, a UNIQUE constraint when it was a unique constraint.

@@ -1616,6 +1616,10 @@ begin
     'p_hypertable', p_hypertable, 'p_control', p_control, 'p_interval', p_interval, 'p_obtain', p_obtain,
     'p_drain_batch', p_drain_batch, 'p_anchor', p_anchor, 'p_paused', p_paused, 'p_predrain', p_predrain,
     'p_lock_timeout', p_lock_timeout, 'p_force_frontier', p_force_frontier));
+  -- #1105: READ COMMITTED only, before the pre-drain or the swap commits anything: the handoff to transmute
+  -- refuses a stricter isolation level, and refused only there it would come after the swap had dropped the
+  -- hypertable. See the core helper.
+  perform pgpm._refuse_strict_isolation('from_hypertable_cutover', p_hypertable);
   -- #665: validate the lock timeout HERE, before the pre-drain commits anything or the index pre-builds
   -- spend their O(rows), exactly as transmute validates its own (#309). The prior value is restored at
   -- once, so the check has no side effect and the set_config at the swap is what applies the bound.
@@ -2344,6 +2348,9 @@ begin
     'p_drain_batch', p_drain_batch, 'p_anchor', p_anchor, 'p_paused', p_paused,
     'p_track_changes', p_track_changes, 'p_predrain', p_predrain, 'p_lock_timeout', p_lock_timeout,
     'p_force_frontier', p_force_frontier));
+  -- #1105: READ COMMITTED only, before the copy: the cutover would refuse it anyway, once the whole online
+  -- copy had been paid for. See the core helper.
+  perform pgpm._refuse_strict_isolation('from_hypertable', p_hypertable);
   -- #665: refuse a bad p_lock_timeout before the copy, not from inside the cutover once the whole online
   -- copy has been paid for. No side effect: the prior value goes straight back.
   begin
