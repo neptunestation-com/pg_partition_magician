@@ -420,7 +420,11 @@ call's grid (its `lo` or `hi` is not a boundary of `p_step` and `p_anchor` in th
 computed in: re-run with the step and anchor of the attempt that recorded it, or abort it), or was
 recorded on another control column (the bound's `CHECK` is on that column, so it cannot certify this one's
 partition bound and the cutover would scan the whole table under `ACCESS EXCLUSIVE`: re-run on the column
-that attempt used, which a rename in between does not change, or abort it); the table is already converted (it has a `pgpm.config`
+that attempt used, which a rename in between does not change, or abort it); the session's own
+`backend_start` is visible neither to the current role nor to pgpm's owner (a session under `SET ROLE` to a
+role without the session user's privileges, with pgpm owned by a role that has neither those nor
+`pg_read_all_stats`: the claim records it as its owner's identity, which a resume and the reaper match on,
+so `RESET ROLE` or grant `pg_read_all_stats` to pgpm's owner); the table is already converted (it has a `pgpm.config`
 row: `transmute` converts a table once, and a retry whose earlier cutover did commit has nothing to resume),
 is not a plain table (partitioned, a view, a foreign table), or is a partition, an inheritance child or an
 inheritance parent; a relation of any kind already holds the name the monolith will take
