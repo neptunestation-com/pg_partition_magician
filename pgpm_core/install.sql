@@ -1311,6 +1311,52 @@ begin
 end;
 $$;
 
+-- _refuse_bad_transmute_arguments: transmute's rules for its grid arguments, the ones a value alone breaks
+-- (#451, #581): a retain that is negative, a step that is not positive, a lookahead that is negative or null.
+-- Each is refused before anything is read or committed, because a typo should cost nothing. _transmute asks
+-- it first thing, and so does every entry point that reaches transmute only after committing work of its
+-- own: pgpm_hypertable's from_hypertable before its copy and from_hypertable_cutover before its pre-drain,
+-- whose swap drops the hypertable and commits before the handoff (#1085). One function, not a copy per
+-- entry point, so the rules cannot drift between them. p_step and p_retain are text in p_control_kind's
+-- native form, the way _transmute takes them: an interval for time, uuidv7 and text_time, an integer for id.
+create or replace function pgpm._refuse_bad_transmute_arguments(
+  p_control_kind text, p_step text, p_obtain int, p_retain text
+) returns void language plpgsql stable as $$
+begin
+  -- #451: retain cannot be negative. Nothing checked its sign, so `p_retain => interval '-1 day'` (a typo
+  -- away from the intended value) registered a horizon in the FUTURE, and the first maintenance tick
+  -- write-blocked and dropped every partition, the one taking writes included; the next insert failed with
+  -- `no partition of relation ... found for row`. Refused before anything is committed, for the same reason
+  -- transmute's lock-timeout check is: a typo should cost nothing. Zero is allowed: it keeps only the
+  -- partition taking writes. set_retain applies the same rule, and _retain_boundary refuses a value that
+  -- reached config by any other route (a hand edit).
+  if p_retain is not null and not pgpm._retain_nonnegative(p_control_kind, p_retain) then
+    raise exception 'pg_partition_magician: p_retain cannot be negative (got %) -- a negative retain puts the retention horizon past the partition taking writes, so the first maintenance tick would drop every partition, that one included; zero keeps only the partition taking writes, null keeps everything', p_retain;
+  end if;
+  -- #581: the step must be positive, which nothing checked either. A negative one made _grid_floor and
+  -- _grid_next yield lo > hi, so phase 1 committed an unsatisfiable pgpm_monolith_bound CHECK, phase 2's
+  -- VALIDATE failed, and the live table rejected every write until an abort (a corrected re-run resumed
+  -- the same recorded bound and failed again); a zero one divided by zero. "Positive" is read the way the
+  -- grid functions read the step: a whole number of months (a calendar step), or else a duration whose
+  -- length in seconds is positive. A negative month count is refused whatever else the interval holds.
+  if p_control_kind = 'id' then
+    if p_step::numeric <= 0 then
+      raise exception 'pg_partition_magician: the partition step must be positive (got %) -- a step that is not makes every partition''s lower bound its upper one or past it, so the monolith''s bound CHECK could admit no row and the table would reject every write', p_step;
+    end if;
+  elsif (extract(year from p_step::interval) * 12 + extract(month from p_step::interval)) < 0
+     or ((extract(year from p_step::interval) * 12 + extract(month from p_step::interval)) = 0
+         and extract(epoch from p_step::interval) <= 0) then
+    raise exception 'pg_partition_magician: the partition step must be positive (got %) -- a step that is not makes every partition''s lower bound its upper one or past it, so the monolith''s bound CHECK could admit no row and the table would reject every write', p_step;
+  end if;
+  -- #581: and the lookahead cannot be negative or null, the rule set_obtain applies. obtain's
+  -- `for k in 0 .. cfg.obtain` never runs for a negative value, so the conversion completed with no forward
+  -- partition, no tick ever built one, and the first write past the monolith's hi failed.
+  if p_obtain is null or p_obtain < 0 then
+    raise exception 'pg_partition_magician: p_obtain must be a non-negative integer (got %)', p_obtain;
+  end if;
+end;
+$$;
+
 -- where x sits between lo and hi on the native grid, as a fraction: (x - lo) / (hi - lo). The one place
 -- pgpm subtracts native values rather than comparing them; progress() uses it to turn config.regrain_cursor
 -- into an exact fraction of the coarse child's RANGE (issue #343). null for an empty range (hi <= lo), so
@@ -8041,7 +8087,8 @@ begin
   -- #896: every argument with no null meaning, refused here, before anything below reads or commits. Not
   -- listed: p_retain (null keeps everything), and the four text_time shape arguments and p_tt_alphabet (null
   -- outside text_time; the text_time block requires the four). p_obtain is listed since #951, so its null is
-  -- refused the way every public routine refuses one (the #581 check below still refuses a negative one).
+  -- refused the way every public routine refuses one (_refuse_bad_transmute_arguments below still refuses a
+  -- negative one).
   -- The step is named as the caller's overload spells it.
   perform pgpm._refuse_null_arguments('transmute', json_build_object(
     'p_parent', p_parent, 'p_control', p_control, 'p_control_kind', p_control_kind,
@@ -8057,37 +8104,10 @@ begin
   if p_incoming_fks not in ('error', 'drop', 'preserve') then
     raise exception 'pg_partition_magician: p_incoming_fks must be ''error'', ''drop'', or ''preserve'' (got %)', p_incoming_fks;
   end if;
-  -- #451: retain cannot be negative. Nothing checked its sign, so `p_retain => interval '-1 day'` (a typo
-  -- away from the intended value) registered a horizon in the FUTURE, and the first maintenance tick
-  -- write-blocked and dropped every partition, the one taking writes included; the next insert failed with
-  -- `no partition of relation ... found for row`. Refused HERE, before anything is committed, for the same
-  -- reason the lock-timeout check below is: a typo should cost nothing. Zero is allowed: it keeps only the
-  -- partition taking writes. set_retain applies the same rule, and _retain_boundary refuses a value that
-  -- reached config by any other route (a hand edit).
-  if p_retain is not null and not pgpm._retain_nonnegative(p_control_kind, p_retain) then
-    raise exception 'pg_partition_magician: p_retain cannot be negative (got %) -- a negative retain puts the retention horizon past the partition taking writes, so the first maintenance tick would drop every partition, that one included; zero keeps only the partition taking writes, null keeps everything', p_retain;
-  end if;
-  -- #581: the step must be positive, which nothing checked either. A negative one made _grid_floor and
-  -- _grid_next yield lo > hi, so phase 1 committed an unsatisfiable pgpm_monolith_bound CHECK, phase 2's
-  -- VALIDATE failed, and the live table rejected every write until an abort (a corrected re-run resumed
-  -- the same recorded bound and failed again); a zero one divided by zero. "Positive" is read the way the
-  -- grid functions read the step: a whole number of months (a calendar step), or else a duration whose
-  -- length in seconds is positive. A negative month count is refused whatever else the interval holds.
-  if p_control_kind = 'id' then
-    if p_step::numeric <= 0 then
-      raise exception 'pg_partition_magician: the partition step must be positive (got %) -- a step that is not makes every partition''s lower bound its upper one or past it, so the monolith''s bound CHECK could admit no row and the table would reject every write', p_step;
-    end if;
-  elsif (extract(year from p_step::interval) * 12 + extract(month from p_step::interval)) < 0
-     or ((extract(year from p_step::interval) * 12 + extract(month from p_step::interval)) = 0
-         and extract(epoch from p_step::interval) <= 0) then
-    raise exception 'pg_partition_magician: the partition step must be positive (got %) -- a step that is not makes every partition''s lower bound its upper one or past it, so the monolith''s bound CHECK could admit no row and the table would reject every write', p_step;
-  end if;
-  -- #581: and the lookahead cannot be negative or null, the rule set_obtain applies. obtain's
-  -- `for k in 0 .. cfg.obtain` never runs for a negative value, so the conversion completed with no forward
-  -- partition, no tick ever built one, and the first write past the monolith's hi failed.
-  if p_obtain is null or p_obtain < 0 then
-    raise exception 'pg_partition_magician: p_obtain must be a non-negative integer (got %)', p_obtain;
-  end if;
+  -- #451, #581: the argument rules, before anything is read or committed. One function, so that the entry
+  -- points that reach this procedure only after committing work of their own (from_hypertable, whose
+  -- cutover swap commits before the handoff) can ask exactly these rules first (#1085).
+  perform pgpm._refuse_bad_transmute_arguments(p_control_kind, p_step, p_obtain, p_retain);
   -- #309: validate the lock timeout HERE, before anything is committed. set_config raises on a bad value
   -- anyway, but it would do so from inside phase 1 or, worse, phase 3 -- after the O(rows) validation
   -- scan the operator has already waited through. A typo should cost nothing.

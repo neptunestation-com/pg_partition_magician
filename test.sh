@@ -568,6 +568,10 @@ run_timescale() {
     # half of the pair discriminate.sh completes with hypertable_capture_fast_path_unlocked.
     echo "--- the change capture writes its delta only while it holds it (issue #1057) ---"
     bash "$(dirname "$0")/bench/hypertable_capture_delta_held.sh" pgpm_test-timescale pgpm_perf295 || fail=1
+    # #1085's guard, the same way: it re-runs tests/timescale/db/58 against the real install, the clean-code half
+    # of the pairs discriminate.sh completes with its three mutants.
+    echo "--- from_hypertable and the cutover ask transmute's argument rules before the swap (issue #1085) ---"
+    bash "$(dirname "$0")/bench/hypertable_argument_rules.sh" pgpm_test-timescale pgpm_perf110 || fail=1
 
     echo "--- discriminate (timescale-scoped mutations) ---"
     bash "$(dirname "$0")/bench/discriminate.sh" --track=timescale pgpm_test-timescale || fail=1
@@ -1042,7 +1046,7 @@ run_perf() {
     "bench/config_stamp_lock.sh pgpm_perf101"
     "bench/transmute_reap_lock_timeout.sh pgpm_perf99"
     "bench/hypertable_cutover_lock_timeout.sh pgpm_perf300"
-    "bench/grid_floor_exact.sh pgpm_perf110"
+    "bench/grid_floor_exact.sh pgpm_perf308"
     "bench/regrain_drivers_serialize.sh pgpm_perf94"
     "bench/set_partition_tz_midflight.sh pgpm_perf95"
     "bench/set_partition_tz_grid_lock.sh pgpm_perf146"

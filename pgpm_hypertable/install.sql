@@ -409,6 +409,23 @@ exception when others then
     p_hypertable, p_interval, regexp_replace(sqlerrm, '^pg_partition_magician: ', '');
 end $$;
 
+-- _from_hypertable_check_arguments: transmute's argument rules (#451, #581), asked of the hypertable path's
+-- arguments before anything is read or committed (#1085). A negative p_retain or p_obtain, or a p_interval
+-- that is not positive, was refused only by transmute, at the handoff, after the cutover's swap had committed
+-- and dropped the hypertable; and a negative p_interval met the frontier check first, whose limit now() +
+-- p_interval + 1 hour then lay in the past, so it refused with a remedy that deleted the newest rows. The
+-- rules are transmute's own, pgpm._refuse_bad_transmute_arguments, with transmute's messages. 'time' is the
+-- kind transmute gives the column this path hands it (the dimension check refuses any other type), and the
+-- step and retain are rendered the way transmute's interval overload renders them. Asked by from_hypertable
+-- before its copy and by from_hypertable_cutover before its pre-drain, each ahead of every check that reads
+-- the table, so the frontier check never sees a step that is not positive.
+create or replace function pgpm._from_hypertable_check_arguments(
+  p_interval interval, p_obtain int, p_retain interval
+) returns void language plpgsql stable as $$
+begin
+  perform pgpm._refuse_bad_transmute_arguments('time', p_interval::text, p_obtain, p_retain::text);
+end $$;
+
 -- _from_hypertable_check_frontier: transmute's frontier refusal (#457), asked of the hypertable before the
 -- swap (#792). A newest row further ahead of now() than one step plus an hour (a device with a wrong clock)
 -- is refused by transmute unless p_force_frontier, and that came after the swap had committed, with the
@@ -1598,6 +1615,9 @@ begin
   exception when others then
     raise exception 'pg_partition_magician: p_lock_timeout must be a valid lock_timeout value (got %): %', p_lock_timeout, sqlerrm;
   end;
+  -- #1085: transmute's argument rules, before the pre-drain commits anything and before any check reads the
+  -- table: refused only by transmute, they came after the swap had dropped the hypertable
+  perform pgpm._from_hypertable_check_arguments(p_interval, p_obtain, p_retain);
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
@@ -2310,6 +2330,9 @@ begin
   exception when others then
     raise exception 'pg_partition_magician: p_lock_timeout must be a valid lock_timeout value (got %): %', p_lock_timeout, sqlerrm;
   end;
+  -- #1085: and transmute's argument rules, before the copy and ahead of the frontier check below, which would
+  -- read a step that is not positive as a frontier to delete rows for
+  perform pgpm._from_hypertable_check_arguments(p_interval, p_obtain, p_retain);
   -- #707: likewise the monolith name transmute derives from p_interval, which the copy alone cannot check
   -- (after the module's own names, #552, so a name too long for both is told the same thing as by the copy)
   perform pgpm._from_hypertable_check_names(p_hypertable);

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **`from_hypertable` and its cutover ask `transmute`'s argument rules before the swap** (#1085; #966 W2).
+  A negative `p_retain` or `p_obtain`, or a `p_interval` that is not positive, was refused only by
+  `transmute` at the handoff, after the cutover's swap had committed and dropped the hypertable, leaving a
+  plain, unmanaged table under its name (every row kept); and a negative `p_interval` met the frontier check
+  first, whose limit then lay in the past, so it was refused with a remedy that said to delete the newest
+  rows, or to pass `p_force_frontier`, which committed the swap. `transmute`'s three rules now live in one
+  function, `pgpm._refuse_bad_transmute_arguments`, which `transmute` asks, and which `from_hypertable` asks
+  before its copy and `from_hypertable_cutover` before its pre-drain, ahead of every check that reads the
+  table, with `transmute`'s messages. Test `tests/timescale/db/58`, guard
+  `bench/hypertable_argument_rules.sh`, mutations `hypertable_arguments_unchecked`,
+  `hypertable_arguments_unchecked_up_front` and `hypertable_cutover_arguments_unchecked`.
+
 - **A `v*` tag publishes its GitHub Release while the dbdev package is over database.dev's cap** (#1077).
   `release.yml`'s Build release assets step ran `scripts/build_dbdev_package.sh` in its default strict mode,
   never moved to `PGPM_DBDEV_CAP=warn` when #764 made the 250,000-character cap advisory on the merge path, so
