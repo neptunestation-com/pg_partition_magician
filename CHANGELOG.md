@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **`from_hypertable` refuses a step its time dimension's type cannot hold before the copy, not after the
+  swap** (#1118). `pgpm._from_hypertable_check_arguments` (#1085) asked only the rules a value alone breaks,
+  so a sub-day `p_interval` on a `date` dimension (#581), or one finer than a `timestamp(p)` dimension keeps
+  (#1039), ran the whole copy, committed the cutover's swap that drops the hypertable, and was refused by
+  `transmute` only at the handoff, leaving a plain table pgpm does not manage (rows intact). It now asks
+  `pgpm._time_unit_contract` of the hypertable's own column too, in `from_hypertable` before its copy and in
+  `from_hypertable_cutover` before its pre-drain and its swap, with `transmute`'s messages; the #581 date-step
+  rule moved into that function from `transmute`'s preflight, so both ask one rule. Test
+  `tests/timescale/db/66`; guard `bench/hypertable_column_unit_rules.sh`, mutation
+  `hypertable_column_unit_rules_unchecked`.
+- **`from_hypertable` refuses a `date` dimension's anchor off 00:00 UTC before the copy** (#1138 bullet 2).
+  The #769 anchor rule, and a `timestamp(p)` dimension's anchor finer than its precision, are asked by the same
+  up-front check as #1118's step rule, so `p_anchor => '2000-01-01 12:00:00+00'` on a `date` hypertable is
+  refused with the hypertable untouched. Same test, guard and mutation as #1118.
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's

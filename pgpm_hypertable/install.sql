@@ -419,11 +419,21 @@ end $$;
 -- step and retain are rendered the way transmute's interval overload renders them. Asked by from_hypertable
 -- before its copy and by from_hypertable_cutover before its pre-drain, each ahead of every check that reads
 -- the table, so the frontier check never sees a step that is not positive.
+-- #1118, #1138: and the rules the dimension's TYPE puts on the step and the anchor, which transmute asks of
+-- the column through pgpm._time_unit_contract: a date key's step in whole days or months (#581) and its anchor
+-- at 00:00 UTC (#769), a timestamp(p) key's step and anchor in whole multiples of 10^-p seconds (#1039). They
+-- read only the catalog's column type, which the copy carries unchanged (CREATE TABLE LIKE) to the plain
+-- table the handoff gives transmute, so asked of the hypertable's column they answer what transmute will, with
+-- transmute's messages; the step and the anchor are rendered the way transmute's interval overload renders
+-- them. A column that is not a timestamp or a date is the dimension check's to refuse, not these rules'.
+drop function if exists pgpm._from_hypertable_check_arguments(interval, int, interval);
 create or replace function pgpm._from_hypertable_check_arguments(
-  p_interval interval, p_obtain int, p_retain interval
+  p_hypertable regclass, p_control name, p_interval interval, p_anchor timestamptz, p_obtain int,
+  p_retain interval
 ) returns void language plpgsql stable as $$
 begin
   perform pgpm._refuse_bad_transmute_arguments('time', p_interval::text, p_obtain, p_retain::text);
+  perform pgpm._time_unit_contract(p_hypertable, p_control, p_interval::text, pgpm._ts_text(p_anchor));
 end $$;
 
 -- _from_hypertable_check_frontier: transmute's frontier refusal (#457), asked of the hypertable before the
@@ -1632,7 +1642,7 @@ begin
   end;
   -- #1085: transmute's argument rules, before the pre-drain commits anything and before any check reads the
   -- table: refused only by transmute, they came after the swap had dropped the hypertable
-  perform pgpm._from_hypertable_check_arguments(p_interval, p_obtain, p_retain);
+  perform pgpm._from_hypertable_check_arguments(p_hypertable, p_control, p_interval, p_anchor, p_obtain, p_retain);
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   perform pgpm._from_hypertable_check_names(p_hypertable);   -- #552: before any DDL
@@ -2362,7 +2372,7 @@ begin
   end;
   -- #1085: and transmute's argument rules, before the copy and ahead of the frontier check below, which would
   -- read a step that is not positive as a frontier to delete rows for
-  perform pgpm._from_hypertable_check_arguments(p_interval, p_obtain, p_retain);
+  perform pgpm._from_hypertable_check_arguments(p_hypertable, p_control, p_interval, p_anchor, p_obtain, p_retain);
   -- #707: likewise the monolith name transmute derives from p_interval, which the copy alone cannot check
   -- (after the module's own names, #552, so a name too long for both is told the same thing as by the copy)
   perform pgpm._from_hypertable_check_names(p_hypertable);

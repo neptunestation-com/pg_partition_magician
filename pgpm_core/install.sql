@@ -7939,15 +7939,29 @@ $$;
 -- rule is _time_unit_breach's, the one a regrain target answers to (#980). A date key is asked too (#769): its
 -- anchor at noon converted with every recorded bound at noon and every attached one at its whole date. A
 -- domain is not unwrapped: the time kind's type check above refuses a domain-typed column before this is asked.
+-- The date key's step rule (#581) is here too, asked first, so that this one function holds every rule a time
+-- key's TYPE puts on the grid arguments: pgpm_hypertable asks it of the hypertable's dimension before its copy
+-- and before its swap (#1118, #1138), where transmute's own asking would come only after the swap had dropped
+-- the hypertable. A column that is not a timestamp or a date is not this function's (the rules return null).
 create or replace function pgpm._time_unit_contract(p_parent regclass, p_control name, p_step text, p_anchor text)
 returns void language plpgsql stable as $$
 declare v_type oid; v_typmod int; v_keeps text; v_unit text;
 begin
   select a.atttypid, a.atttypmod into v_type, v_typmod
     from pg_attribute a where a.attrelid = p_parent and a.attname = p_control and not a.attisdropped;
+  if v_type = 'date'::regtype
+     and (extract(year from p_step::interval) * 12 + extract(month from p_step::interval)) = 0
+     and extract(epoch from p_step::interval)::numeric % 86400 <> 0 then
+    -- #581: a date holds whole days, and every bound literal a finer step renders is truncated to its date,
+    -- so the monolith's CHECK became dt < current_date (validated in phase 2) and the cutover died on the
+    -- first hourly cell, whose two bounds read as the same date, leaving the table rejecting every row
+    -- dated today. A calendar step (months) is whole days by construction; a duration has to be a whole
+    -- number of 86400 s days.
+    raise exception 'pg_partition_magician: the date column % holds whole days, so its partition step must be a whole number of days or months (got %) -- a finer step''s bounds truncate to dates, so the monolith''s bound CHECK would reject every row dated today and the cutover would fail on an empty partition range', quote_ident(p_control), p_step;
+  end if;
   select b.r_keeps, b.r_unit into v_keeps, v_unit from pgpm._time_unit_breach(v_type, v_typmod, p_step, p_anchor) b;
   -- #769: a date's unit is a day on the UTC lattice, and what it asks of the operator is an anchor at 00:00
-  -- UTC (the #581 branch before this has already held the step to whole days), so it is named that way:
+  -- UTC (the #581 rule above has already held the step to whole days), so it is named that way:
   -- widening the column's precision is not a remedy for a date.
   if v_unit is not null and v_type = 'date'::regtype then
     raise exception 'pg_partition_magician: cannot partition % on % with step % and anchor % -- the column is a date, which holds whole days and has no zone, so its grid is computed in UTC and every partition bound must fall at 00:00 UTC; this anchor falls at % UTC, and every bound literal would be attached at the date it falls in while pgpm records the instant: rows dated a partition''s first day would sit outside its recorded range, and the monolith''s bound CHECK could exclude the table''s own newest rows. Give an anchor at 00:00 UTC (the default ''2000-01-01 00:00:00+00'', or any date written with +00: a literal without an offset is read in the session''s time zone, %) and a step that is a whole number of days or months, then re-run transmute; if an earlier attempt left a pgpm_monolith_bound CHECK on the table, call pgpm.transmute_abort(%) first, since a re-run resumes its recorded bound.',
@@ -8983,16 +8997,9 @@ begin
   perform pgpm._transmute_refuse_generated_control(p_parent, p_control);
   if p_control_kind = 'time' and v_typname not in ('timestamptz', 'timestamp', 'date') then
     raise exception 'pg_partition_magician: control_kind time needs a timestamp/date column (got %)', v_typname;
-  elsif p_control_kind = 'time' and v_typname = 'date'
-        and (extract(year from p_step::interval) * 12 + extract(month from p_step::interval)) = 0
-        and extract(epoch from p_step::interval)::numeric % 86400 <> 0 then
-    -- #581: a date holds whole days, and every bound literal a finer step renders is truncated to its date,
-    -- so the monolith's CHECK became dt < current_date (validated in phase 2) and the cutover died on the
-    -- first hourly cell, whose two bounds read as the same date, leaving the table rejecting every row
-    -- dated today. A calendar step (months) is whole days by construction; a duration has to be a whole
-    -- number of 86400 s days.
-    raise exception 'pg_partition_magician: the date column % holds whole days, so its partition step must be a whole number of days or months (got %) -- a finer step''s bounds truncate to dates, so the monolith''s bound CHECK would reject every row dated today and the cutover would fail on an empty partition range', quote_ident(p_control), p_step;
   elsif p_control_kind = 'time' then
+    -- #581: a date key's step is whole days or months (and #769: its anchor at 00:00 UTC), asked by
+    -- _time_unit_contract since #1118 so that pgpm_hypertable can ask the same rules before its swap.
     -- #1039: and a timestamp(p) key holds whole multiples of 10^-p seconds, so the step and the anchor must
     -- be too, or the cutover's ATTACH rounds a bound between two of them. See _time_unit_contract.
     perform pgpm._time_unit_contract(p_parent, p_control, p_step, p_anchor);
