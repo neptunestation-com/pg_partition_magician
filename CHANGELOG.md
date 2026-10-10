@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **The documented-install guard judges a command that feeds install.sql on stdin** (#1178). The parser of
+  `bench/doc_install_stops_on_error.sh` kept a psql command only when it named install.sql through `-f`, so a
+  documented `psql "$DATABASE_URL" < pgpm_core/install.sql` (which runs past the first error and exits 0) was
+  dropped without a word and a doc carrying it beside a correct `-f` command passed. A command that reads the
+  file on stdin (`< file`, `<file`, `-f - < file`, a redirect before `psql`, or a pipe into `psql` from a
+  command naming the file) is now run on stdin, as written, and judged like a `-f` one (so is `-ffile`), and a
+  command that names install.sql and runs it neither way (`-c '\i install.sql'`) fails the guard as unparsed
+  instead of being skipped. Guard `bench/doc_install_guard_judges_stdin.sh`, mutations
+  `doc_install_stdin_dropped` and `doc_install_unplaced_dropped`.
+
 - **`archive.to_s3` pages every row of a relation with more than one heap** (#1168). The synchronous export
   accepts any relation in the parent's schema, a partitioned table or an inheritance parent included, and its
   keyset cursor was (control, ctid), a total order within one heap only: two heaps holding a row of the same
