@@ -11469,22 +11469,33 @@ MUTATIONS["to_s3_cursor_type_typmod_dropped"] = (
     "re-reads 'abc': a quiescent export never ends; for bit(3) the bare `bit` is bit(1), which cuts the cursor to its "
     "first bit the same way. One clause, the spelling. tests/archive/db/51 parts H and J catch it (both cancelled by "
     "the statement_timeout).",
-    [("  select format_type(a.atttypid, a.atttypmod) into v_ctltype\n",
-      "  select a.atttypid::regtype::text into v_ctltype\n", 1)],
+    [("  v_ctltype := format_type(v_ctl_typ, v_ctl_mod);\n",
+      "  v_ctltype := v_ctl_typ::regtype::text;\n", 1)],
 )
 MUTATION_SRC["to_s3_cursor_type_typmod_dropped"] = "pgpm_archive/install.sql"
 
-# PR #1213's fourth verification round (V-01): archive.to_s3's two runs are `not (control is null)` and
-# `control is null`, a partition of the rows for every type. Caught by tests/archive/db/51 part K.
-MUTATIONS["to_s3_cursor_first_run_row_gap"] = (
+# PR #1213's fourth and fifth verification rounds (V-01; P1-02, P1-03): archive.to_s3 pages only a scalar with a
+# btree ordering, refusing anything else by name, and pages a domain as its base type. Caught by tests/archive/db/51
+# parts K to N through bench/archive_to_s3_multi_heap.sh.
+MUTATIONS["to_s3_cursor_type_unrefused"] = (
     "bench/archive_to_s3_multi_heap.sh",
-    "archive.to_s3's first run reads `control is not null` instead of `not (control is null)`. For a scalar the two "
-    "agree, but a composite control value such as ROW(1, NULL) is neither IS NULL nor IS NOT NULL, so neither run "
-    "reads that row and the conservation check refuses the quiescent export on every retry. One clause. "
-    "tests/archive/db/51 part K catches it (refused, and no object lands).",
-    [("else not (t.%1$I is null) and ($1 is null or", "else t.%1$I is not null and ($1 is null or", 1)],
+    "archive.to_s3 pages a control-named column of any type instead of refusing one it cannot page. An array's "
+    "cursor is built by array_agg as a two-dimensional array whose [1] is NULL, so the read restarts forever; a "
+    "composite such as ROW(1, NULL) is neither IS NULL nor IS NOT NULL; a type with no ordering fails on an unnamed "
+    "operator error. One clause, the refusal. tests/archive/db/51 parts K, L and M catch it (none is refused by name; "
+    "L is cancelled by the statement_timeout).",
+    [("  if not v_ctl_ordered then\n", "  if false then\n", 1)],
 )
-MUTATION_SRC["to_s3_cursor_first_run_row_gap"] = "pgpm_archive/install.sql"
+MUTATION_SRC["to_s3_cursor_type_unrefused"] = "pgpm_archive/install.sql"
+MUTATIONS["to_s3_cursor_domain_checked"] = (
+    "bench/archive_to_s3_multi_heap.sh",
+    "archive.to_s3 casts the cursor as the column's declared type, a domain included, instead of the domain's base "
+    "type, so the cast runs the domain's CHECK constraints and a row a NOT VALID constraint does not admit makes the "
+    "next page raise, on every retry. One clause, the cast type. tests/archive/db/51 part N catches it.",
+    [("  v_ctltype := format_type(v_ctl_typ, v_ctl_mod);\n", "  v_ctltype := v_ctl_col;\n", 1)],
+)
+MUTATION_SRC["to_s3_cursor_domain_checked"] = "pgpm_archive/install.sql"
+
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

@@ -2551,6 +2551,17 @@ A child dropped or replaced while the call waited for that lock is refused, `<sc
 replaced while archive.to_s3 was resolving it`, and nothing is written. An export run inside a longer
 transaction keeps the hold until that transaction ends.
 
+`archive.to_s3` pages the relation it exports by that relation's own column of the control column's name, which
+need not have the parent's type, and with nothing writing to the relation it reads every row once: a relation of
+several heaps (a partitioned table, an inheritance parent) and rows whose control value is NULL (read after every
+other row) included. The rule for that column: it must be a scalar type with a btree ordering, that is a base or
+enum type that is not an array, or a domain over one. A domain is paged as its base type, so a domain constraint
+added `NOT VALID` does not stop the export of rows it does not admit. Anything else (an array, a composite, a range
+or multirange, or a type with no ordering such as `json`) is refused before anything is read or sent:
+`archive.to_s3 pages <relation> by its column <column>, of type <type>, which it cannot page by: ...`. A relation
+with no column of that name is refused the same way: `<relation> has no column <column>, the control column of
+<parent> that archive.to_s3 pages it by`.
+
 A schema rename is the one change that hold does not stop: `ALTER SCHEMA ... RENAME` takes no lock that
 conflicts with it, and it moves every name in the schema at once, so a second session that swaps the child's
 schema with another holding a same-named table can make a name looked up a moment earlier reach that table.
