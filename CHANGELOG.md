@@ -23,6 +23,19 @@
   judges it against a transmute that reads a `timestamptz` maximum a day late; mutation
   `transmute_day_out_write_by_count`.
 
+- **`tests/archive/db/50` reaches the digest check it names** (#1173). Its "refused by the digest check"
+  assertion re-created the retired range with 40 rows against a 90-row chunk, so the refusal's count arm
+  refused first and the file passed with the digest comparison removed. The re-created partition now holds 90
+  other rows over the same ids, and the assertion pins the digest arm's message. Guard
+  `bench/archive_retired_chunk_digest_layer.sh`; mutation `archive_recorded_chunk_digest_compare_dropped`.
+
+- **`tests/295` tells a reconcile keyed on the whole key from one keyed on `id` alone** (#1174). Its twin row
+  `(20, 1000)` was said to make the two leave different rows, but a reconcile deletes and rereads every source
+  row matching a captured key, so one keyed on `id` alone rereads the twin unchanged and ends in the same
+  table. The file now reads each row of id 20 in the fine child by its `xmin` after the copy and after the
+  swap: the reconcile rewrote `(20, 2)` and left the twin as the copy wrote it. Guard
+  `bench/regrain_delta_seq_name.sh`; mutation `regrain_reconcile_keyed_on_id_alone`.
+
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's

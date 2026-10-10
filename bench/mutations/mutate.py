@@ -11499,6 +11499,32 @@ select is((select c.relname::text from public.ts_ev e join pg_class c on c.oid =
 )
 MUTATION_SRC["transmute_day_out_write_by_count"] = "tests/141_transmute_step_obtain_preflight_test.sql"
 
+# pass 11 G15 (#1173, #1174): two files whose fixture could not reach the check they named. Each mutation puts
+# back the defect the file says it catches; the file's own wrapper runs it against the mutant.
+MUTATIONS["archive_recorded_chunk_digest_compare_dropped"] = (
+    "bench/archive_retired_chunk_digest_layer.sh",
+    "archive._refuse_recorded_chunk_overwrite refuses a claim that records no digest and never compares one it "
+    "does record, so after retire() a partition re-created over the chunk's range with as many rows as the chunk "
+    "held, but other ones, is PUT over the only copy by a direct strategy call (#1069). One clause, the digest "
+    "comparison; the count arm and the null-digest arm stay. tests/archive/db/50 catches it (the direct "
+    "archive_to_s3_ndjson call over the 90 late<id> rows is not refused, and the object no longer holds old<id>).",
+    [("    elsif l.rows_digest is null or p_rows_digest is distinct from l.rows_digest then\n",
+      "    elsif l.rows_digest is null then\n", 1)],
+)
+MUTATION_SRC["archive_recorded_chunk_digest_compare_dropped"] = "pgpm_archive/install.sql"
+MUTATIONS["regrain_reconcile_keyed_on_id_alone"] = (
+    "bench/regrain_delta_seq_name.sh",
+    "pgpm._regrain_reconcile reads the delta's key columns as every column but its ordering column AND any "
+    "column named pgpm_seq, so on a key (id, pgpm_seq) it deletes and rereads every row sharing a captured id, "
+    "rows with no captured change included: the by-name reader #1074 removed, now beside the identity-column "
+    "reader. One clause of the key reader. tests/295 catches it (the reconcile of (20, 2) rewrites the twin "
+    "(20, 1000) in the fine child).",
+    [("      and attnum > 0 and not attisdropped and attname is distinct from v_seq;\n"
+      "  -- generated columns are omitted from the reinsert",
+      "      and attnum > 0 and not attisdropped and attname is distinct from v_seq and attname <> 'pgpm_seq';\n"
+      "  -- generated columns are omitted from the reinsert", 1)],
+)
+
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a

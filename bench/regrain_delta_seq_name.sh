@@ -9,9 +9,13 @@
 # reconcile and swap, and a control); this wrapper exists so the mutation has a guard the discriminate track
 # can run against the mutant, in the shape of bench/retain_recall_moved_parent.sh.
 #
-# The mutation it is required to fail against (bench/mutations/mutate.py):
-#   delta_seq_fixed_name -- pgpm._delta_seq_add mints the ordering column as pgpm_seq whatever the delta
-#                           already holds, the pre-fix name.
+# The mutations it is required to fail against (bench/mutations/mutate.py):
+#   delta_seq_fixed_name                -- pgpm._delta_seq_add mints the ordering column as pgpm_seq whatever
+#                                          the delta already holds, the pre-fix name.
+#   regrain_reconcile_keyed_on_id_alone -- pgpm._regrain_reconcile's key reader also drops a column named
+#                                          pgpm_seq, so the reconcile keys (id, pgpm_seq) on id alone (#1174):
+#                                          the file reads the twin (20, 1000) in the fine child by its xmin, since
+#                                          the rows alone end the same either way.
 #
 # Runs on the plain core image (pgtap and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path
 # inside the container, for a worktree mounted somewhere other than /repo.
