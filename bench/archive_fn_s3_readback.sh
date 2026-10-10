@@ -12,9 +12,12 @@
 # HOW. Each run in a fresh <db> in <container> (the archive track's image: pgsql-http, pgcrypto and pgtap, with
 # MinIO reachable as minio:9000), holding tests/archive/fixtures.sql, the core and pgpm_archive:
 #   CONTROL   the file passes, every planned assertion ok, against the clean module;
-#   DEFECT    the file reports at least one `not ok` (and runs to its end) against this checkout's
-#             pgpm_archive/install.sql with archive._encode_upload_parquet's PUT sending the first four bytes
-#             of the file (PAR1) instead of the file;
+#   DEFECT    the file reports at least one `not ok` that is not a premise (and runs to its end) against this
+#             checkout's pgpm_archive/install.sql with archive._encode_upload_parquet's PUT sending the first
+#             four bytes of the file (PAR1) instead of the file. A file whose only failures are LIVENESS:, GUARD:
+#             or fixture: premises did not catch the defect (#1176): that is bench/discriminate.sh's starved()
+#             rule, read out of that script by the defect-verdict block below. A file that reached no assertion
+#             failed on its fixture, so that line is printed as a `fixture:` premise (#1177);
 #   LIVENESS  read from the database each run leaves: a8p's monolith is recorded as 5000 rows archived, and the
 #             object at its key, fetched back, is more than PAR1 under the clean module and exactly the 4 bytes
 #             PAR1 under the defect. A defect that was never planted would make the file's failure meaningless.
@@ -43,6 +46,15 @@ cleanup() { q -d postgres -q -c "drop database if exists $DB" </dev/null >/dev/n
 trap cleanup EXIT
 
 if [ ! -f "$SRC" ]; then say FAIL "the test file to judge exists" "$SRC"; exit 1; fi
+
+# The premise rule is bench/discriminate.sh's starved(), read out of it rather than restated (#1176).
+starved_fn=$(sed -n '/^starved() {/,/^}/p' "$ROOT/bench/discriminate.sh")
+if [ -z "$starved_fn" ]; then say FAIL "GUARD: starved() was read out of bench/discriminate.sh" "not found"; exit 1; fi
+eval "$starved_fn"
+# >>> defect verdict: the same in every inverted wrapper; bench/wrapper_premise_rule.sh evaluates it.
+# caught <the judged file's TAP output>: exit 0 when the file failed an assertion that is not a premise.
+caught() { grep -qE '^not ok [0-9]+' "$1" && ! starved "$1"; }
+# <<< defect verdict
 
 # --- MinIO: ready, and the bucket the fixtures point at exists ------------------------------------
 ready=""
@@ -89,23 +101,31 @@ fresh() {
 # judge <label> <expect: pass|fail>: run the file in <db> and read its TAP (pg_prove's verdict: the plan, every
 # assertion run, psql's exit, no raw error).
 judge() {
-  local label="$1" expect="$2" out rc planned oks notoks
+  local label="$1" expect="$2" out rc planned oks notoks unreached=""
   out=$(q -d "$DB" -v ON_ERROR_STOP=1 -tA -f - <"$SRC" 2>&1); rc=$?
   planned=$(sed -nE 's/^1\.\.([0-9]+)$/\1/p' <<<"$out" | head -1)
   oks=$(grep -cE '^ok [0-9]+' <<<"$out")
   notoks=$(grep -cE '^not ok [0-9]+' <<<"$out")
   if [ "$rc" != 0 ] || [ -z "$planned" ] || [ $((oks + notoks)) != "$planned" ]; then
-    say FAIL "$label: the file ran to its end" "psql exit $rc, plan ${planned:-none}, $oks ok, $notoks not ok"
+    # A file that reached no assertion failed on its fixture: a premise, not a catch (#1177).
+    [ $((oks + notoks)) -gt 0 ] || unreached="fixture: "
+    say FAIL "$unreached$label: the file ran to its end" "psql exit $rc, plan ${planned:-none}, $oks ok, $notoks not ok"
     grep -E 'ERROR|^not ok' <<<"$out" | head -5 | sed 's/^/      /'
     fail=1; return
   fi
   if [ "$expect" = pass ]; then
     if [ "$notoks" = 0 ]; then say PASS "$label" "$oks/$planned ok"
     else say FAIL "$label" "$notoks not ok of $planned"; grep -E '^not ok' <<<"$out" | sed 's/^/      /'; fail=1; fi
-  elif [ "$notoks" -gt 0 ]; then
-    say PASS "$label" "$(grep -E '^not ok' <<<"$out" | head -1 | cut -c1-70)"
   else
-    say FAIL "$label" "all $planned ok against the defect: the file passes for the wrong reason"; fail=1
+    printf '%s\n' "$out" >"$work/judged.tap"
+    if caught "$work/judged.tap"; then
+      say PASS "$label" "$(grep -E '^not ok' <<<"$out" | grep -vE '^not ok [0-9]+ - (LIVENESS|GUARD|fixture):' | head -1 | cut -c1-70)"
+    elif [ "$notoks" -gt 0 ]; then
+      say FAIL "$label" "$notoks not ok of $planned, every one a premise: the file passes for the wrong reason"
+      grep -E '^not ok' <<<"$out" | sed 's/^/      /'; fail=1
+    else
+      say FAIL "$label" "all $planned ok against the defect: the file passes for the wrong reason"; fail=1
+    fi
   fi
 }
 
