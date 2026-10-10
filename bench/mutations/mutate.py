@@ -2416,26 +2416,27 @@ begin
         "#898 added to _regrain_shape_drift, because with that arm in place a copy without the parent's key "
         "is drift, the run restarts on every tick, and the ATTACH scan the guard measures is never reached; "
         "pre-#348 code had neither.",
-        [("""      -- #348: give the fine child its own already-validated copy of every outgoing FK the parent
-      -- has, the same trick the bound CHECK above uses. The child is still empty here (this runs
-      -- before the first row is copied in below), so VALIDATE costs nothing -- exactly how an empty
-      -- CHECK validates for free. Every row copied in afterward is checked at INSERT time by the
-      -- ordinary FK machinery regardless, so this one-time, zero-row validation is the only one this
-      -- constraint will ever need; by the swap's ATTACH (below), Postgres adopts it instead of
-      -- re-scanning, the same adoption transmute already relies on for the monolith
-      -- (install.sql:2841-2851). A NOT VALID outgoing FK on the parent is left alone (the
-      -- convalidated filter skips it): that matches today's behavior for it exactly, and transmute
-      -- already refuses a NOT VALID outgoing FK at conversion time, so this only matters if one was
-      -- added directly to the parent afterward.
-      for r in
-        select conname, pg_get_constraintdef(oid) as def
-          from pg_constraint
-         where conrelid = p_parent and contype = 'f' and confrelid <> p_parent and conparentid = 0
-           and convalidated
-      loop
-        execute format('alter table %I.%I add constraint %I %s not valid', v_sub_nsp, v_sub_name, r.conname, r.def);
-        execute format('alter table %I.%I validate constraint %I', v_sub_nsp, v_sub_name, r.conname);
-      end loop;
+        [("""  -- #348: give the fine child its own already-validated copy of every outgoing FK the parent
+  -- has, the same trick regrain_step's bound CHECK uses. The child is still empty here (this runs
+  -- before the first row is copied in), so VALIDATE costs nothing -- exactly how an empty
+  -- CHECK validates for free. Every row copied in afterward is checked at INSERT time by the
+  -- ordinary FK machinery regardless, so this one-time, zero-row validation is the only one this
+  -- constraint will ever need; by the swap's ATTACH (below), Postgres adopts it instead of
+  -- re-scanning, the same adoption transmute already relies on for the monolith
+  -- (install.sql:2841-2851). A NOT VALID outgoing FK on the parent is left off here (the
+  -- convalidated filter skips it): on the copy it would enforce every row copied in, and refuse
+  -- the orphan the parent's key tolerates. On PostgreSQL 18 pgpm's own restore_incoming_fks leaves
+  -- one on a managed referencer (#633), and the swap carries it onto the copy, NOT VALID, just
+  -- before the ATTACH, where it checks no row and is adopted as it is.
+  for r in
+    select conname, pg_get_constraintdef(oid) as def
+      from pg_constraint
+     where conrelid = p_parent and contype = 'f' and confrelid <> p_parent and conparentid = 0
+       and convalidated
+  loop
+    execute format('alter table %I.%I add constraint %I %s not valid', p_nsp, p_name, r.conname, r.def);
+    execute format('alter table %I.%I validate constraint %I', p_nsp, p_name, r.conname);
+  end loop;
 """, "", 1),
          ("     where k.contype = 'f' and k.conparentid = 0\n",
           "     where k.contype = 'f' and k.conparentid = 0 and false\n", 1)],
@@ -6911,9 +6912,9 @@ select ok(
         "exist'), a DROP COLUMN or a TYPE change fails the swap's ATTACH, and the run never moves again. One "
         "site, the restart branch, switched off. tests/211 parts A and B catch it.",
         [("  if v_drift <> '' or v_capture_drift is not null then\n"
-          "    for r in execute format(\n",
+          "    -- #633: a restart is bounded.",
           "  if false then\n"
-          "    for r in execute format(\n", 1)],
+          "    -- #633: a restart is bounded.", 1)],
     ),
     "regrain_shape_restart_keeps_cursor": (
         "bench/regrain_survives_parent_ddl.sh",
@@ -7101,11 +7102,11 @@ select ok(
         "Issue #1075 put back: regrain_step's standalone CREATE TABLE (LIKE ...) for a fine child splices no "
         "tablespace clause, so the fine children, and the rows a regrain moves into them, land in the database "
         "default whatever tablespace the parent mints its partitions in. One clause, the splice dropped from "
-        "the create; tests/296's parts A and B catch it, while part C's database-default table still passes.",
+        "the create (in _regrain_copy_make, #633); tests/296's parts A and B catch it, while part C's database-default table still passes.",
         [("including indexes including constraints excluding identity)%s',\n"
-          "                     v_sub_nsp, v_sub_name, v_nsp, v_rel, v_spc_q);\n",
+          "                 p_nsp, p_name, v_nsp, v_rel, p_spc_q);\n",
           "including indexes including constraints excluding identity)',\n"
-          "                     v_sub_nsp, v_sub_name, v_nsp, v_rel, v_spc_q);\n", 1)],
+          "                 p_nsp, p_name, v_nsp, v_rel, p_spc_q);\n", 1)],
     ),
     "unbuilt_cell_type_holder_unnamed": (
         "bench/unbuilt_cell_type_holder.sh",
@@ -11436,12 +11437,12 @@ MUTATIONS["archive_retired_unnamed_raises"] = (
 )
 MUTATIONS["archive_ledger_backfill_unblocked_attributed"] = (
     _G1141,
-    "The upgrade attributes a pre-existing chunk to the relation pgpm.part records for its name whether or not that "
-    "relation carries the write block, so a partition dropped by hand and re-created under its own name (its "
-    "pgpm.part row kept, anchored by #421 to the successor) inherits the dropped relation's chunk: #452's reset "
-    "discards it on the next tick and the archive step writes over the only copy (PR #1152 round 4). One clause. "
-    "tests/309 part S catches it.",
-    [("     and pgpm._is_write_blocked(l.parent_table, l.child_name);\n", "     and true;\n", 1)],
+    "The upgrade attributes a pre-existing chunk to the relation pgpm.part records for its name even when that "
+    "anchor is one its own #421 backfill adopted from whatever held the name, so a partition dropped by hand and "
+    "re-created under its own name (its pgpm.part row kept) inherits the dropped relation's chunk: #452's reset "
+    "discards it on the next tick and the archive step writes over the only copy (PR #1152 round 4; since #1160 the "
+    "anchor, not the block, is what vouches). One clause. tests/309 part S catches it.",
+    [("     and not (p.child_oid = any (v_adopted))\n", "", 1)],
 )
 MUTATIONS["archive_retired_orphan_delete_unfiltered"] = (
     _G1141,
@@ -11464,6 +11465,57 @@ MUTATIONS["archive_retired_backfill_untimed"] = (
 )
 
 
+# Issue #1160: the upgrade backfill attributes a pre-existing chunk on identity (an anchor pgpm recorded, not one the
+# same upgrade adopted, still held by the name), whatever pgpm left the block as (ALWAYS, origin-only, absent), and
+# retires one under a block an operator disabled or set replica-only. One mutation per clause, all caught by
+# bench/ledger_backfill_origin_only_block.sh (tests/314 and an install.sql round trip).
+_G1160 = "bench/ledger_backfill_origin_only_block.sh"
+_C1160 = ("     and not exists (select 1 from pg_trigger t\n"
+          "                      where t.tgrelid = p.child_oid and t.tgname = 'pgpm_write_block' and t.tgenabled not in ('A', 'O'));\n")
+MUTATIONS["archive_ledger_backfill_origin_only_retired"] = (
+    _G1160,
+    "The upgrade retires a pre-existing chunk whose partition's pgpm_write_block is origin-only, the state every "
+    "release through v0.6.0 created it in (repaired only by the first tick after the upgrade), so every live archived "
+    "partition of such an install is held for good (skip_archive_retired_range, never archived again or dropped). "
+    "One clause, the origin-only state. tests/314 catches it.",
+    [("t.tgname = 'pgpm_write_block' and t.tgenabled not in ('A', 'O'));\n",
+      "t.tgname = 'pgpm_write_block' and t.tgenabled not in ('A'));\n", 1)],
+)
+MUTATIONS["archive_ledger_backfill_lifted_retired"] = (
+    _G1160,
+    "The upgrade attributes a pre-existing chunk only when its partition carries a block, so a partition whose block "
+    "v0.6.0's own tick removed (retention no longer reached it, its chunks kept) is held for good although its "
+    "anchor proves it is the relation archived. The first fix for #1160 had this shape. tests/314 and the round "
+    "trip catch it.",
+    [(_C1160,
+      "     and exists (select 1 from pg_trigger t\n"
+      "                  where t.tgrelid = p.child_oid and t.tgname = 'pgpm_write_block' and t.tgenabled in ('A', 'O'));\n", 1)],
+)
+MUTATIONS["archive_ledger_backfill_hand_state_attributed"] = (
+    _G1160,
+    "The upgrade attributes a pre-existing chunk under a block an operator disabled or set replica-only, coverage "
+    "nothing kept, which the first tick then discards and archives over. One clause. tests/314 catches it.",
+    [(_C1160, "     and true;\n", 1)],
+)
+MUTATIONS["archive_ledger_backfill_adopted_blocked_attributed"] = (
+    _G1160,
+    "The upgrade lets a write block vouch for an anchor its own #421 backfill adopted: a successor re-created by hand "
+    "under a dropped partition's name and write-blocked by a pgpm before #429 inherits the dropped relation's chunk, "
+    "the first tick discards it and archives the successor from lo over the only copy (PR #1188 verification, "
+    "P1-02). tests/314 and the round trip catch it.",
+    [("     and not (p.child_oid = any (v_adopted))\n",
+      "     and (not (p.child_oid = any (v_adopted))\n"
+      "          or exists (select 1 from pg_trigger b where b.tgrelid = p.child_oid and b.tgname = 'pgpm_write_block'))\n", 1)],
+)
+MUTATIONS["archive_ledger_upgrade_adoption_unrecorded"] = (
+    _G1160,
+    "install.sql records no anchor as adopted before its #421 backfill, so the ledger's backfill reads a successor's "
+    "adopted oid as identity and attributes the dropped relation's chunk to it. One clause. Only the round trip "
+    "catches it (tests/314 records the adoption itself).",
+    [("      select parent_table, child_name from pgpm.part where child_oid is null\n",
+      "      select parent_table, child_name from pgpm.part where child_oid is null and false\n", 1)],
+)
+
 # Issue #627: the retain horizon's time part is instant arithmetic, and a retain with no calendar part takes no
 # wall-clock round trip at all. bench/retain_horizon_ambiguous_wall_time.sh runs tests/311 against the mutant.
 MUTATIONS["retain_horizon_wall_round_trip"] = (
@@ -11477,6 +11529,33 @@ MUTATIONS["retain_horizon_wall_round_trip"] = (
       "  end if;\n"
       "  return (((now() at time zone p_tz) - v_cal) at time zone p_tz) - (p_retain - v_cal);\n",
       "  return ((now() at time zone p_tz) - p_retain) at time zone p_tz;\n", 1)],
+)
+# #709 (pass 11 F3-01, #1123 P1-02): the regrain reconcile decodes a captured key only when it has the declared
+# text_time shape, and places one that does not by its encoded value.
+MUTATIONS["regrain_reconcile_decodes_unshaped_key"] = (
+    "bench/regrain_reconcile_unshaped_key.sh",
+    "Pre-#709 _regrain_reconcile: no shape test before the per-row decode, so every captured key is handed to "
+    "_decode, which raises 22P02 on a text_time key the table accepts but that is too short or holds a "
+    "character outside the alphabet. One such key in the delta (an ordinary DELETE of a row the copy already "
+    "moved, or a row any role with INSERT writes into the delta) raises on every tick and at the swap, and the "
+    "run is wedged until regrain_cancel. tests/323 catches it: tick 5 dies 22P02, the delta keeps its seven "
+    "keys, the fine children keep oa and lack oc, the run never swaps, and the aged and refused off-shape keys "
+    "of parts B and C die 22P02 instead of being logged or refused with pgpm's message.",
+    [("  v_kshaped := case when cfg.control_kind = 'text_time'\n"
+      "                    then format('pgpm._text_time_shaped(%s, %L, %s, %s, %L)', v_kctl_native_q,\n"
+      "                                cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_alphabet)\n"
+      "                    else 'true' end;\n",
+      "  v_kshaped := 'true';\n", 1)],
+)
+MUTATIONS["regrain_reconcile_drops_unshaped_key"] = (
+    "bench/regrain_reconcile_unshaped_key.sh",
+    "The plausible-but-wrong #709 fix: an off-shape text_time key no longer reaches _decode, but it is skipped "
+    "rather than placed by its encoded value, so the tick consumes it unapplied. The copy had already moved its "
+    "row into a fine child: a captured DELETE comes back at the swap, an UPDATE is reverted and an INSERT is "
+    "lost with the source. tests/323 catches it: after tick 5 S1's child still holds oa, S0's holds ob without "
+    "its update and S2's lacks oc, and after the swap the day reads oa, ob and lacks oc-inserted.",
+    [("    if r.sub_lo is null then v_unshaped := true; continue; end if;",
+      "    if r.sub_lo is null then continue; end if;", 1)],
 )
 
 
@@ -11544,6 +11623,66 @@ MUTATIONS["hypertable_drain_delta_step_takes_delta_first"] = (
 )
 MUTATION_SRC["hypertable_drain_delta_step_takes_delta_first"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_drain_delta_step_takes_delta_first"] = "timescale"
+MUTATIONS["restore_one_step_no_backoff"] = (
+    "bench/restore_one_step_backoff.sh",
+    "Pre-fix restore_incoming_fks (#633, PR verification P1-02): a key whose one-step validating re-add "
+    "failed on an orphan (a partitioned or self-referential referencer, before PostgreSQL 18) is not parked, "
+    "so every call without p_ids, which is maintain's every tick, scans the whole managed table again under "
+    "SHARE ROW EXCLUSIVE on it to fail on the same orphan. Removes only the skip; the failure still sets "
+    "validate_retry_after, so the mutant differs from the fix in the one clause that reads it.",
+    [("    if v_is_part and p_ids is null\n"
+      "       and coalesce(r.validate_retry_after, '-infinity'::timestamptz) > clock_timestamp() then\n"
+      "      continue;\n"
+      "    end if;\n",
+      "", 1)],
+)
+
+
+# #1161: regrain_step's swap attaches every fine child in one transaction, so it gets the lock budget obtain (#786)
+# and extend_to (#591) have: refused at the prepare tick and at the swap, warned of by set_regrain. One mutation per
+# clause of it, each caught by tests/315 through
+# bench/regrain_swap_lock_budget.sh.
+_G1161 = "bench/regrain_swap_lock_budget.sh"
+MUTATIONS["regrain_swap_no_prepare_budget"] = (
+    _G1161,
+    "Pre-#1161 prepare tick: nothing refuses a run whose swap cannot attach its fine children inside half the shared "
+    "lock table, so a run of more children than that is prepared, copied sub-range by sub-range, and only then meets "
+    "the swap (which dies 53200 `out of shared memory` at an ATTACH on every tick once the children outnumber the "
+    "whole table). One clause, the refusal's branch made unreachable; set_regrain's warning still fires. tests/315 "
+    "part A catches it (the cap + 1 run is prepared).",
+    [("    else\n      raise exception 'pg_partition_magician: cannot regrain % of % at target step % -- %.",
+      "    elsif false then\n      raise exception 'pg_partition_magician: cannot regrain % of % at target step % -- %.", 1)],
+)
+MUTATIONS["regrain_set_regrain_no_budget_warning"] = (
+    _G1161,
+    "set_regrain stores a target whose run the prepare tick will refuse and says nothing: no WARNING and no "
+    "warn_regrain_lock_budget row, so an operator learns of it only from skip_regrain on every tick. One site, the "
+    "warning branch emptied. tests/315 part A catches it (the WARNING text and the log row are both missing).",
+    [("    if p_warn then\n      raise warning 'pg_partition_magician: set_regrain(%, %) stores the target, but the run that would split % -- %. regrain_step''s prepare tick will refuse that run before copying anything. %',\n"
+      "        p_parent, p_step, p_child, v_what, v_split;\n"
+      "      insert into pgpm.log (parent_table, action, lo, hi, rows, method)\n"
+      "        values (p_parent, 'warn_regrain_lock_budget', p_lo, p_hi, v_n,\n"
+      "                format('target %s for %s: %s; the prepare tick will refuse it', p_step, p_child, v_what));\n",
+      "    if p_warn then\n      null;\n", 1)],
+)
+MUTATIONS["regrain_swap_no_measured_budget"] = (
+    _G1161,
+    "Pre-#1161 swap: nothing measures what the swap's ATTACHes cost, so a run the floor admits but whose children cost "
+    "more than two slots each (thirty outgoing foreign keys: 62 a child) attaches every child in one transaction, "
+    "holding more than half the shared lock table (4308 of 6400 measured on PostgreSQL 15). One site, the measured "
+    "refusal made unreachable, so the measurement still runs. tests/315 parts D and E catch it (both swaps swap).",
+    [("      if v_projected > v_slots / 2 then\n        raise exception 'pg_partition_magician: cannot swap the regrain",
+      "      if false then\n        raise exception 'pg_partition_magician: cannot swap the regrain", 1)],
+)
+MUTATIONS["regrain_swap_incoming_fk_uncharged"] = (
+    _G1161,
+    "The swap's measured budget without its charge for the incoming foreign keys it suspends and re-adds against "
+    "every partition after the last ATTACH: the second ATTACH's two slots are all it projects, so a plain table "
+    "referenced by twenty keys swaps holding more than half the shared lock table (4071 of 6400 measured on "
+    "PostgreSQL 15). One clause, the charge. tests/315 part E catches it; part D still refuses.",
+    [("      v_per := greatest(v_locks2 - v_locks1, 2) + case when v_fk > 0 then 2 + 2 * v_fk else 0 end;\n",
+      "      v_per := greatest(v_locks2 - v_locks1, 2);\n", 1)],
+)
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
