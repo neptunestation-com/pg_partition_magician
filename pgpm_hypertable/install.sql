@@ -163,8 +163,12 @@ end $$;
 -- 'hypertable_delta', a tracking copy's delta) that pgpm.scratch records for p_hypertable (#955), or null when
 -- none is recorded, it is gone, or it no longer sits in the hypertable's own schema (the swap renames the copy
 -- into the hypertable's place, so a copy moved elsewhere cannot be swapped in). Every step after the copy (the
--- two drains and their steps, the cutover) finds the copy and the delta through here, by the oid the copy
--- recorded when it created them. They used to render <rel>_pgpm_dest and <rel>_pgpm_delta from the
+-- two drains and their steps, the cutover) finds the copy through here, by the oid the copy recorded when it
+-- created it. The delta they find by its record too, but through pgpm._scratch_rel, wherever it lives (#1057):
+-- the swap only reads and drops the delta, so nothing ties it to the hypertable's schema, and a delta moved
+-- with SET SCHEMA read through here as no delta at all (the cutover ran the append-only catch-up for a tracking
+-- copy and left the moved delta and its capture function behind the records it deleted). They used to render
+-- <rel>_pgpm_dest and <rel>_pgpm_delta from the
 -- hypertable's current name, and an operator's own table under one of those names was drained into, read
 -- as the delta and emptied, or swapped in as the migrated table. The name returned is the recorded
 -- relation's own, in the hypertable's schema, so the %I.%I splices that follow name exactly that relation.
@@ -1303,7 +1307,8 @@ create or replace function pgpm.from_hypertable_drain_delta_step(
   p_hypertable regclass, p_control name, p_batch int default 5000
 ) returns bigint language plpgsql as $$
 declare
-  v_nsp name; v_rel name; v_dest name; v_delta name;
+  v_nsp name; v_rel name; v_dest name;
+  v_delta regclass;   -- the recorded delta, by oid, wherever it lives (#1057); spliced as %s, its own rendering
   v_keycols_q text; v_dkey_q text; v_skey_q text; v_cols_q text;
   v_ctl_type text; v_min_ctl text; v_max_ctl text; v_watermark bigint; v_keys bigint;
   v_seq name;   -- the delta's ordering column, found as its identity column (#1074)
@@ -1316,7 +1321,7 @@ begin
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');     -- #955: by record (drain_delta_step)
-  v_delta := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_delta');   -- #955: by record (drain_delta_step)
+  v_delta := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');   -- #955 #1057: by record, any schema (drain_delta_step)
   if v_delta is null then
     raise exception 'pg_partition_magician: from_hypertable_drain_delta_step(%) found no delta -- change tracking was not enabled by from_hypertable_copy', p_hypertable;
   end if;
@@ -1330,12 +1335,12 @@ begin
 
   -- key columns = every delta column EXCEPT the ordering column, in attnum order (the same order the cutover
   -- uses, so the row constructors line up). d./s. variants for the dest delete + source insert.
-  v_seq := pgpm._delta_seq(format('%I.%I', v_nsp, v_delta)::regclass);
+  v_seq := pgpm._delta_seq(v_delta);
   select string_agg(quote_ident(attname), ', ' order by attnum),
          '(' || string_agg('d.' || quote_ident(attname), ', ' order by attnum) || ')',
          '(' || string_agg('s.' || quote_ident(attname), ', ' order by attnum) || ')'
     into v_keycols_q, v_dkey_q, v_skey_q
-    from pg_attribute where attrelid = format('%I.%I', v_nsp, v_delta)::regclass
+    from pg_attribute where attrelid = v_delta
       and attnum > 0 and not attisdropped and attname is distinct from v_seq;
   -- the source/dest column list for the reinsert (generated columns omitted: they recompute on insert)
   select string_agg(quote_ident(attname), ', ' order by attnum) into v_cols_q
@@ -1345,8 +1350,8 @@ begin
   -- the same index the cutover adopts); no separate throwaway index is built here.
 
   -- batch boundary: the ordering value of the p_batch-th oldest delta row (or max when fewer remain)
-  execute format('select coalesce((select %1$I from %2$I.%3$I order by %1$I offset %4$s limit 1), (select max(%1$I) from %2$I.%3$I))',
-                 v_seq, v_nsp, v_delta, greatest(p_batch - 1, 0)) into v_watermark;
+  execute format('select coalesce((select %1$I from %2$s order by %1$I offset %3$s limit 1), (select max(%1$I) from %2$s))',
+                 v_seq, v_delta, greatest(p_batch - 1, 0)) into v_watermark;
   if v_watermark is null then return 0; end if;   -- delta empty
 
   -- materialize this batch's distinct keys authoritatively by DELETING them: delete-returning is the source
@@ -1358,9 +1363,9 @@ begin
   -- holding one read that table as the batch, consuming the real batch's keys without applying them.
   execute 'drop table if exists pg_temp.pgpm_dbatch';
   execute format('create temp table pg_temp.pgpm_dbatch on commit drop as
-                  with d as (delete from %I.%I where %I <= %s returning %s)
+                  with d as (delete from %s where %I <= %s returning %s)
                   select distinct %s from d',
-                 v_nsp, v_delta, v_seq, v_watermark, v_keycols_q, v_keycols_q);
+                 v_delta, v_seq, v_watermark, v_keycols_q, v_keycols_q);
   get diagnostics v_keys = row_count;
 
   -- bound the source read to the batch's touched control range, as literal constants, for chunk exclusion
@@ -1396,7 +1401,8 @@ create or replace procedure pgpm.from_hypertable_drain_delta(
   p_threshold bigint default 0, p_max_iter int default 1000000, p_best_effort boolean default false
 ) language plpgsql as $$
 declare
-  v_nsp name; v_rel name; v_dest name; v_delta name;
+  v_nsp name; v_rel name; v_dest name;
+  v_delta regclass;   -- the recorded delta, by oid, wherever it lives (#1057)
   v_iter int := 0; v_more boolean;
 begin
   -- #951: refused before anything is read or committed; no argument here has a null meaning
@@ -1408,15 +1414,15 @@ begin
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_hypertable;
   v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');     -- #955: by record (drain_delta)
-  v_delta := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_delta');   -- #955: by record (drain_delta)
+  v_delta := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');   -- #955 #1057: by record, any schema (drain_delta)
   if v_delta is null then
     raise exception 'pg_partition_magician: from_hypertable_drain_delta(%) found no delta -- change tracking was not enabled by from_hypertable_copy', p_hypertable;
   end if;
 
   loop
     -- residual <= threshold? EXISTS at offset stops at the first row past the threshold (count > threshold)
-    execute format('select exists(select 1 from %I.%I order by %I offset %s limit 1)',
-                   v_nsp, v_delta, pgpm._delta_seq(format('%I.%I', v_nsp, v_delta)::regclass), p_threshold) into v_more;
+    execute format('select exists(select 1 from %s order by %I offset %s limit 1)',
+                   v_delta, pgpm._delta_seq(v_delta), p_threshold) into v_more;
     exit when not v_more;
     perform pgpm.from_hypertable_drain_delta_step(p_hypertable, p_control, p_batch);
     commit;
@@ -1589,7 +1595,8 @@ declare
   v_nsp name; v_rel name; v_dest name; v_cols_q text; v_retain interval;
   v_watermark text;   -- the column's own text (#791), never a timestamptz: see _from_hypertable_ctl_text
   v_orig regclass; k record;
-  v_delta name; v_trgfn_oid oid; v_track boolean; v_keycols_q text; v_dkey_q text; v_skey_q text; v_subsel_q text;
+  v_delta regclass;   -- the recorded delta, by oid, wherever it lives (#1057); spliced as %s, its own rendering
+  v_trgfn_oid oid; v_track boolean; v_keycols_q text; v_dkey_q text; v_skey_q text; v_subsel_q text;
   v_ctl_type text; v_min_ctl text; v_max_ctl text;
   v_ident_cols name[]; v_ident_kinds text[]; v_ident_opts text[]; v_ident_next numeric[]; v_srcseq regclass;
   v_pseq regclass; v_i int;
@@ -1683,7 +1690,13 @@ begin
   -- so the two phases cannot disagree about the catch-up mode (no matching flag to pass through).
   -- #955: the delta it RECORDED, by its oid, and the function the same way; never <rel>_pgpm_delta by name, which
   -- read an operator's table of that name as the change log, reconciled the copy from it and dropped it at the swap.
-  v_delta := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_delta');   -- #955: by record (cutover)
+  -- #1057: WHEREVER it lives now, as the capture writes it and the drains read it. Unlike the copy, which the
+  -- swap renames into the hypertable's place and so must sit beside it, the delta is only read and dropped,
+  -- and a delta moved with ALTER TABLE ... SET SCHEMA during the window read here as no delta at all: the
+  -- cutover ran the append-only catch-up for a tracking copy (the conservation check refusing it whenever an
+  -- update or a delete had been captured) and, on a clean swap, deleted the records while leaving the moved
+  -- delta and the capture function in place, nothing naming them any more.
+  v_delta := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');   -- #955 #1057: by record, any schema (cutover)
   v_trgfn_oid := (select f.oid from pgpm.scratch sc join pg_proc f on f.oid = sc.obj
                    where sc.parent_oid = p_hypertable::oid and sc.kind = 'hypertable_delta_fn');
   v_track := v_delta is not null;
@@ -1863,7 +1876,7 @@ begin
   -- is the hypertable's owner's, or this refuses (42501) and the swap rolls back whole. A copy owned by another
   -- role than the source therefore never reaches the sequence carry or the owner carry below.
   if v_track then
-    execute format('lock table %I.%I in access exclusive mode', v_nsp, v_delta);
+    execute format('lock table %s in access exclusive mode', v_delta);
   end if;
   perform pgpm._from_hypertable_scratch_follow(p_hypertable, 'from_hypertable_cutover');
   -- THE SHAPE, UNDER THE LOCK (#738). The check up front saw the source as it was then, and the source has
@@ -1904,13 +1917,13 @@ begin
            '(' || string_agg('s.' || quote_ident(attname), ', ' order by attnum) || ')',
            string_agg(quote_ident(attname), ', ' order by attnum)
       into v_dkey_q, v_skey_q, v_keycols_q
-      from pg_attribute where attrelid = format('%I.%I', v_nsp, v_delta)::regclass
+      from pg_attribute where attrelid = v_delta
         and attnum > 0 and not attisdropped   -- exclude the ordering column (#170), as the identity column (#1074)
-        and attname is distinct from pgpm._delta_seq(format('%I.%I', v_nsp, v_delta)::regclass);
-    v_subsel_q := format('select distinct %s from %I.%I', v_keycols_q, v_nsp, v_delta);
+        and attname is distinct from pgpm._delta_seq(v_delta);
+    v_subsel_q := format('select distinct %s from %s', v_keycols_q, v_delta);
     -- The delta was just populated by the trigger, so it has no stats; ANALYZE it so the planner sizes
     -- the semi-joins correctly (the dest was already ANALYZEd at the end of the copy). Shared helper (#164).
-    perform pgpm._analyze(format('%I.%I', v_nsp, v_delta)::regclass);
+    perform pgpm._analyze(v_delta);
     -- Bound the source read to the delta's touched control-column range, as LITERAL constants, so
     -- TimescaleDB excludes untouched chunks at plan time -- the reconcile then reads only the chunks that
     -- actually changed, not the whole hypertable. (A min()/max() subquery is a runtime value and does NOT
@@ -1920,8 +1933,8 @@ begin
     -- needed source row can be excluded -- the worst case (changes spanning all history) just prunes nothing.
     select format_type(atttypid, atttypmod) into v_ctl_type
       from pg_attribute where attrelid = p_hypertable and attname = p_control and not attisdropped;
-    execute format('select pgpm._from_hypertable_ctl_text(min(%I)), pgpm._from_hypertable_ctl_text(max(%I)) from %I.%I',
-                   p_control, p_control, v_nsp, v_delta)
+    execute format('select pgpm._from_hypertable_ctl_text(min(%I)), pgpm._from_hypertable_ctl_text(max(%I)) from %s',
+                   p_control, p_control, v_delta)
       into v_min_ctl, v_max_ctl;
     -- Each write reports what it changed through RETURNING, so the conservation baseline follows the
     -- destination by identity, not only by row_count (#653).
@@ -2019,7 +2032,7 @@ begin
     -- during the window) sending the whole chunk through the decompressing verification. OFFSET 0 keeps
     -- each subquery from being flattened into its aggregates, which would evaluate the probe once per
     -- aggregate that reads kt (twice, measured) instead of once per row.
-    v_horizon := substring(obj_description(format('%I.%I', v_nsp, v_delta)::regclass, 'pg_class')
+    v_horizon := substring(obj_description(v_delta, 'pg_class')
                            from '^pgpm from_hypertable horizon ([0-9]+)$')::bigint;
     if v_horizon is not null
        and pg_snapshot_xmax(pg_current_snapshot())::text::bigint - v_horizon < 2000000000 then
@@ -2204,12 +2217,15 @@ begin
   if v_track then
     -- the trigger went with the source; drop the now-orphaned delta table and trigger function. This is
     -- inside the swap transaction, so an aborted cutover leaves the apparatus intact with the source.
-    execute format('drop table %I.%I', v_nsp, v_delta);
-    -- #955: the function the copy recorded, by its oid, never <rel>_pgpm_delta_fn rendered from the current name,
-    -- which after a RENAME of the hypertable is an operator's function, or nothing
-    if v_trgfn_oid is not null and exists (select 1 from pg_proc where oid = v_trgfn_oid) then
-      execute format('drop function %s', v_trgfn_oid::regprocedure::text);
-    end if;
+    -- #1057: the delta the copy recorded, by its oid, in whatever schema it sits now.
+    execute format('drop table %s', v_delta);
+  end if;
+  -- #955: the function the copy recorded, by its oid, never <rel>_pgpm_delta_fn rendered from the current name,
+  -- which after a RENAME of the hypertable is an operator's function, or nothing. #1057: whether or not the
+  -- delta is still there: the records go below, and a function left behind them would be named by nothing
+  -- (a delta dropped by hand leaves its capture function recorded, and the cutover runs append-only).
+  if v_trgfn_oid is not null and exists (select 1 from pg_proc where oid = v_trgfn_oid) then
+    execute format('drop function %s', v_trgfn_oid::regprocedure::text);
   end if;
   -- #955: the copy is the table now and the delta and its function are gone: none of them is scratch any more
   delete from pgpm.scratch where parent_oid = p_hypertable::oid;

@@ -893,8 +893,8 @@ if sel ts33; then
   ts_judge_on "$ROOT/pgpm_hypertable/install.sql" "CONTROL: $TS33 passes against the clean module" pass
   expect_v "clean, hg33 migrated, delta and capture function gone" "p|true|false" "$HG33"
   if plant_file "$ROOT/pgpm_hypertable/install.sql" "$work/cutover_keeps_capture_fn.sql" \
-       "      execute format('drop function %s', v_trgfn_oid::regprocedure::text);
-" "      null;
+       "    execute format('drop function %s', v_trgfn_oid::regprocedure::text);
+" "    null;
 "; then
     ts_judge_on "$work/cutover_keeps_capture_fn.sql" "DEFECT: $TS33 fails when the cutover keeps the capture fn" fail
     expect_v "defect, hg33 migrated, delta gone, capture function kept" "p|true|true" "$HG33"
