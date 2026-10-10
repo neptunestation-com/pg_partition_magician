@@ -2789,8 +2789,12 @@ not-yet-attached copy, or change capture on a child). The run's copies and curso
 started at, which nothing else records, and the rest of the run would be computed on the new step's grid,
 collide with them and fail on every tick. Let the run finish (watch [`progress`](#progress)), or abandon it
 with [`regrain_cancel`](#regrain_cancel) and set the new target then. Re-stating the target already set is
-not a change and is accepted. With auto-regrain off and an operator-driven run in flight, any target is
-refused, since that run's step is not recorded.
+not a change and is accepted, in any spelling of the same step: two targets are the same step when they lay
+the same grid, so an id step is compared as a number (`'010'` is `'10'`) and a time step by its whole months
+and, with none, its fixed seconds (`'1 mon'` is `'1 month'`, `'24 hours'` is `'1 day'`). `'30 days'` is not
+`'1 month'`, though interval comparison calls them equal: the grid walks the first as a fixed 30 days and
+the second as a calendar month, so it is a change and refused. With auto-regrain off and an operator-driven
+run in flight, any target is refused, since that run's step is not recorded.
 
 ### `set_obtain`
 
