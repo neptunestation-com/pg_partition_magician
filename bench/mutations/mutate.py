@@ -11397,6 +11397,28 @@ MUTATIONS["retain_horizon_wall_round_trip"] = (
 )
 
 
+# Issue #1183: `./test.sh ci` runs lint.yml's jobs, each with the commands CI runs for it. Both mutate test.sh;
+# bench/ci_runs_lint_jobs.sh holds its lint track to the workflow.
+MUTATIONS["ci_lint_job_dropped"] = (
+    "bench/ci_runs_lint_jobs.sh",
+    "Pre-#1183 for one job: the lint track has no track-filters job (its function and its run_lint entry are "
+    "gone), so `./test.sh ci` passes a tree whose path filters have drifted while lint.yml's Lint summary is red. "
+    "The same shape a job added to lint.yml and never to test.sh leaves. Two sites, one job.",
+    [("lint_job_track_filters() {\n"
+      "  python3 scripts/check_track_filters.py --selftest\n"
+      "  python3 scripts/check_track_filters.py\n"
+      "}\n", "", 1),
+     ("    track-filters\n", "", 1)],
+)
+MUTATION_SRC["ci_lint_job_dropped"] = "test.sh"
+MUTATIONS["ci_skips_lint_track"] = (
+    "bench/ci_runs_lint_jobs.sh",
+    "Pre-#1183 `ci`: the lint track is defined but `ci` never runs it, so `./test.sh ci` prints PASS without "
+    "having run one lint.yml job. One site, the call.",
+    [('  lint_rc=0; PGPM_LINT_SKIPPED="$lint_skips" "$0" lint || lint_rc=$?\n', "  lint_rc=0\n", 1)],
+)
+MUTATION_SRC["ci_skips_lint_track"] = "test.sh"
+
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
 # cost), and discriminate.sh's --shard=I/N interleaves that list, so the heavy ones spread over the

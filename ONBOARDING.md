@@ -29,7 +29,9 @@ psql, or other tooling needed on the host.
                     # for S3, its own image, NOT in the default matrix
 ./test.sh perf      # the data-coupled lock and work guards under bench/ (PG17); CI runs it as --shard=I/N slices
 ./test.sh discriminate  # prove each perf guard FAILS against its bench/mutations/ defect
-./test.sh ci        # EVERY track CI runs, each as its own child run (use before pushing)
+./test.sh lint      # every job of lint.yml's required Lint summary, run locally (no Docker)
+./test.sh ci        # the lint track and EVERY test track CI runs, each as its own child run
+                    # (use before pushing; a lint job whose tool is missing here is SKIPPED, by name)
 ```
 
 `test.sh` exercises all three install channels (`psql`, bundle, dbdev) against a
@@ -99,7 +101,7 @@ needs to be kept in sync.
 ./test.sh 15                  # one version, all channels (~3-5 min on a cold image)
 ./test.sh 15 --channel=psql   # fastest: just the psql channel
 ./test.sh all                 # full version matrix PG 15-18
-./test.sh ci                  # every CI track, before pushing anything touching pgpm_core
+./test.sh ci                  # every CI track and lint job, before pushing anything touching pgpm_core
 ```
 
 Each run starts from a fresh container and tears it down, so tests never depend on
