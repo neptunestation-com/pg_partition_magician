@@ -10135,6 +10135,26 @@ MUTATIONS["archive_whole_hold_skipped"] = (
 """, "", 1)],
 )
 MUTATION_SRC["archive_whole_hold_skipped"] = "scripts/archive_partition_whole.sql"
+# #1159's own defect, whole. Since V-01 the script has two independent defences against a table detached by
+# hand before the call (the candidate-query predicate and the hold), so each single-clause mutation above leaves
+# the issue's reproductions passing; this one removes both, the script as it was before this fix, so the
+# acceptance reproductions (F9-04, F6-03) fail against a mutation of the PR.
+MUTATIONS["archive_whole_unfiltered_and_unheld"] = (
+    "bench/archive_whole_skips_hand_detached.sh",
+    "Pre-#1159 scripts/archive_partition_whole.sql: neither the candidate query's "
+    "`not pgpm._part_detached_by_hand(...)` clause nor the pgpm._archive_hold_partition call, so a table detached "
+    "by hand is handed to the strategy, which reading through the parent finds none of its rows, and [lo, hi) is "
+    "recorded as covered with 0 rows; retain() drops the table once it is attached back. Both of the script's "
+    "defences, the issue's defect whole. tests/313 parts A and B catch it.",
+    [("        and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)\n", "", 1),
+     ("""  if not pgpm._archive_hold_partition(p_parent, r.child_oid, r.retiring_at) then
+    return format('%I.%I is no longer a partition of %s (detached or dropped by hand), so it was not '
+                  'archived and nothing was recorded for it. Call again for the next partition.',
+                  v_nsp, r.child_name, p_parent);
+  end if;
+""", "", 1)],
+)
+MUTATION_SRC["archive_whole_unfiltered_and_unheld"] = "scripts/archive_partition_whole.sql"
 
 # pass 9 G18: #994, #995, #1002. Four test files that counted where their own comments promised to name, each
 # judged by bench/tests_fail_on_defect.sh against a defect it plants in install.sql. One mutation per site, each

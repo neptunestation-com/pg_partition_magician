@@ -13,9 +13,12 @@
 # script's path, which the test file reads through its archive_whole_script psql variable; pgpm_core is always
 # the tree's own.
 #
-# ONE mutation is required to fail against it (bench/mutations/mutate.py):
-#   archive_whole_trusts_part_attached -- the candidate query's `not pgpm._part_detached_by_hand(...)` clause
-#                                         removed, the pre-fix shape. Part A.
+# TWO mutations are required to fail against it (bench/mutations/mutate.py):
+#   archive_whole_trusts_part_attached  -- the candidate query's `not pgpm._part_detached_by_hand(...)` clause
+#                                          removed: the hold then refuses the table, so the call's turn does
+#                                          not go to the next partition. Part A.
+#   archive_whole_unfiltered_and_unheld -- that clause and the pgpm._archive_hold_partition call both removed,
+#                                          the pre-fix script: coverage recorded for the table. Parts A and B.
 #
 # A copy of the script that does not even load is not a catch: that is reported as a `fixture:` failure,
 # which bench/discriminate.sh reads as a starved fixture rather than as discrimination.
