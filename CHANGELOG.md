@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+- **`transmute` asks again, under the cutover's lock, whether anything holds a forward partition's name**
+  (#1167). The orphan-child guard (a relation of any kind that is not itself a partition, or a type that is
+  neither a table's row type nor an implicit array type, at a name pgpm could give a fine child,
+  `<table>_p<label>`) was asked in the preflight only, so a table or a
+  type committed at a forward cell's name after it, while phases 1 and 2 had let go of the table or while
+  the conversion waited for a lock, was stepped over by the cutover's `obtain`: the conversion completed
+  with that cell unbuilt (`fail_obtain_name`) and every write into its range was refused. The cutover now
+  asks the guard again once its `obtain` has built the forward grid and refuses in the up-front words,
+  rolling back to the resumable phase-2 state (the bound and the claim). Test `tests/321`; guard
+  `bench/transmute_child_names_under_lock.sh`, mutation `transmute_child_names_preflight_only`.
+- **A forward partition's name that another transaction is still creating is refused in pgpm's words when
+  the cutover's `obtain` reaches it** (#1135). That holder is invisible to `obtain`'s asking, so the
+  partition's `CREATE TABLE` waited for it and, once it committed, the cutover died with a raw 23505 after
+  phases 1 and 2 had committed the bound and the claim. The cutover's `obtain` now catches a name collision
+  (23505, 42P07, 42710) and asks the orphan-child guard, then every name the forward partitions' `CREATE`s
+  take (each cell's name, its row type and its array type `_<name>`), refusing in the guard's or the general
+  helper's words, as the staging `CREATE` and the two `RENAME`s do (#1105). A type committed at a cell's
+  array type name before `obtain` ran is no obstacle and is not blamed for the collision; whatever neither
+  recognises is raised as it came. Test `tests/321`; guard
+  `bench/transmute_child_names_under_lock.sh`, mutations `transmute_forward_create_unhandled`,
+  `transmute_forward_orphan_unasked`, `transmute_forward_held_names_unchecked`,
+  `transmute_forward_blames_preexisting`.
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's
