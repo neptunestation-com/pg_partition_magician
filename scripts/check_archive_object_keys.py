@@ -26,7 +26,17 @@ parameter had another name assembled a second key it passed). A PREFIX REFERENCE
     that parameter a prefix reference (by position or by name). That is a fixed point: a parameter
     that carries it can hand it on to the next function's parameter;
   * a scalar subquery that selects one (`(select prefix from archive.config where ...)`), where the
-    subquery stands.
+    subquery stands;
+  * the column read out of a row value by its name (#1181: `(to_jsonb(cfg) ->> 'prefix') || p_child`, the
+    same configured prefix as `cfg.prefix`, assembled a second key this check passed). A literal that names
+    the column as data (`'prefix'`, a path `'{prefix}'`, a jsonpath `'$.prefix'`) is a prefix reference, and
+    the reference is the whole read: `j ->> 'prefix'` and the other field operators (`->`, `#>`, `#>>`)
+    from the value they read on, `j['prefix']`, and a `json[b]_extract_path[_text](j, 'prefix')` call. A
+    literal naming the column is read as the column wherever it stands, so `format('%s', 'prefix')` is
+    refused as `format('%s', cfg.prefix)` is; a message names it as an argument of RAISE, or another way.
+
+A reference is the whole value it stands for: parentheses that only group it (`(cfg.prefix) || x`), a cast
+or a field read after it, and the parenthesised row a field is selected from (`(cfg).prefix`) are part of it.
 
 Dynamic SQL is code (#1001: `execute 'select prefix from archive.config ...' into v` read the prefix
 inside a literal the lexer kept opaque, so a second key built from `v` passed). Every single-quoted
@@ -61,7 +71,9 @@ asserts the first relation's object survives by key and content, and its Part 0 
 write the installed module makes and requires the key each one gets to come from a key helper. Nor does
 this see dynamic SQL whose text is not a literal it can read where EXECUTE runs it: a statement selected
 INTO a local, returned by another function, or spelled in pieces that only name the prefix once
-concatenated (`'select pre' || 'fix'`).
+concatenated (`'select pre' || 'fix'`). And it cannot see a row read without the column's name: a field
+picked by position or out of the row's text (`split_part(cfg::text, ',', 2)`), a row walked as key-value
+pairs (`jsonb_each_text(to_jsonb(cfg))`), or a field name computed at run time (`j ->> ('pre' || 'fix')`).
 
   ./scripts/check_archive_object_keys.py              # check pgpm_archive/install.sql
   ./scripts/check_archive_object_keys.py <file.sql>   # check another copy (a mutant, an old release)
@@ -102,6 +114,15 @@ NOT_BARE = {"is", "like", "ilike", "in", "not", "between", "similar", "and", "or
 STATEMENT_STARTS = {";", "begin", "then", "else", "loop", "declare"}
 # The floor: fewer prefix references than this and the lexer is no longer reading the module.
 MIN_PREFIX_REFS = 8
+# A literal that names the column as data, the way a row value is read by field name (#1181): the key
+# `'prefix'`, a text[] path `'{prefix}'`, a jsonpath `'$.prefix'`, the name double-quoted or not. A JSON key
+# is case-sensitive, so `'Prefix'` names another field and is not one.
+NAMES_COLUMN = re.compile(r'(?:(?:strict|lax)\s+)?(?:\$\s*\.\s*)?(\{\s*)?("?)prefix\2(?(1)\s*\})')
+# The operators that read a field out of a json, jsonb or hstore value, as the lexer splits them.
+FIELD_OPS = (("-", ">", ">"), ("#", ">", ">"), ("-", ">"), ("#", ">"))
+# The functions that read a field out of a json or jsonb value by a path of names given after the first
+# argument: the call is the reference, judged where it closes.
+EXTRACT_FUNCS = {"jsonb_extract_path_text", "json_extract_path_text", "jsonb_extract_path", "json_extract_path"}
 # Every word the scanner reads as a keyword; a lone double-quoted one is an identifier and stays quoted.
 KEYWORDS = NOT_CALLS | RELATION_BEFORE | PARAM_MODES | CLAUSE_WORDS | NOT_BARE | STATEMENT_STARTS | {
     "function", "procedure", "create", "replace", "execute", "loop", "distinct", "e"}
@@ -215,6 +236,11 @@ def _literal_sql(text):
     else:
         inner = text[1:-1]
     return inner.replace("''", "'")
+
+
+def names_column(tok):
+    """Is this STR token the prefix column's name as data (NAMES_COLUMN), a field read out of a row?"""
+    return tok[0] == "STR" and NAMES_COLUMN.fullmatch(_literal_sql(tok[1]).strip()) is not None
 
 
 def _relex(tok):
@@ -348,18 +374,78 @@ def _scan_once(toks, defined, carriers):
     def tok(i):
         return toks[i] if 0 <= i < len(toks) else ("", "", 0)
 
-    def after(i):
-        """The token after the expression ending at i, past any `::type` casts."""
+    def match(i, step):
+        """The index of the bracket matching the one at i, scanning forward (step 1) or back (step -1)."""
+        pair = {"(": ")", "[": "]", ")": "(", "]": "["}
+        here, there, depth = tok(i)[1], pair[tok(i)[1]], 0
+        while 0 <= i < len(toks):
+            depth += (tok(i)[1] == here) - (tok(i)[1] == there)
+            if depth == 0:
+                return i
+            i += step
+        return i
+
+    def field_op(i, ending):
+        """The length of a field-reading operator (FIELD_OPS) starting at i, or ending at i, or 0."""
+        for op in FIELD_OPS:
+            first = i - len(op) + 1 if ending else i
+            if tuple(tok(first + j)[1] for j in range(len(op))) == op and all(
+                    tok(first + j)[0] == "OP" for j in range(len(op))):
+                return len(op)
+        return 0
+
+    def operand_start(i):
+        """The first token of the operand that ends at i: a call or a parenthesised value with its
+        brackets, and whatever it continues (a cast's type, a field selection `(cfg).f`, a subscript, a
+        field read `j -> 'k'`) back to the value it starts from."""
+        while True:
+            t = tok(i)[1]
+            if t == ")":
+                i = match(i, -1)
+                if tok(i - 1)[0] == "ID" and tok(i - 1)[1] not in NOT_CALLS:
+                    i -= 1
+            elif t == "]":
+                i = match(i, -1) - 1
+                continue
+            if tok(i - 1)[1] in ("::", "."):
+                i -= 2
+            elif field_op(i - 1, True):
+                i -= 1 + field_op(i - 1, True)
+            else:
+                return i
+
+    def after_idx(i):
+        """The index of the token after the expression ending at i, past what continues it: `::type`
+        casts, subscripts and field reads (`->> 'k'`, `#>> '{k}'`)."""
         i += 1
-        while tok(i)[1] == "::":
-            i += 2
-        return tok(i)
+        while True:
+            if tok(i)[1] == "::":
+                i += 2
+            elif tok(i)[1] == "[":
+                i = match(i, 1) + 1
+            elif field_op(i, False):
+                i += field_op(i, False)
+                i = (match(i, 1) if tok(i)[1] in ("(", "[") else i) + 1
+            else:
+                return i
+
+    def after(i):
+        """The token after the expression ending at i (after_idx)."""
+        return tok(after_idx(i))
 
     def judge(s, e, line, label):
         """Is the prefix reference spanning tokens s..e assembly? Records it, or records the parameter
-        it is handed to when that is a parameter of a function this file defines."""
+        it is handed to when that is a parameter of a function this file defines.
+
+        The reference is the whole value it stands for, so parentheses that only group it are part of
+        it: `(cfg.prefix) || x` and `v := (to_jsonb(cfg) ->> 'prefix')` are judged at the parentheses."""
+        depth = 0
+        while tok(s - 1)[1] == "(" and tok(after_idx(e))[1] == ")" and len(parens) > depth \
+                and parens[-1 - depth]["start"] == s - 1 and parens[-1 - depth]["callee"] is None \
+                and not parens[-1 - depth]["subq"]:
+            s, e, depth = s - 1, after_idx(e), depth + 1
         prev, nxt = tok(s - 1)[1], after(e)[1]
-        level = parens[-1] if parens else stmt
+        level = parens[-1 - depth] if len(parens) > depth else stmt
         call = level.get("callee")
         named = None
         if prev in ("=>", ":=") and tok(s - 2)[0] == "ID" and tok(s - 3)[1] in ("(", ",") and call:
@@ -428,11 +514,31 @@ def _scan_once(toks, defined, carriers):
         if kind == "OP" and text == ")":
             if parens:
                 closed = parens.pop()
-                if closed["selects"]:
+                if closed["selects"] and closed["callee"] is not None:
+                    judge(closed["start"] - 1, k, toks[closed["start"]][2],
+                          f"{closed['callee']}() reading the prefix by name")
+                elif closed["selects"]:
                     judge(closed["start"], k, toks[closed["start"]][2], "a subquery selecting the prefix")
             continue
         if kind == "OP" and text == "," and parens:
             parens[-1]["arg"] += 1
+            continue
+
+        # the column named as data (#1181): a field read out of a row value, `to_jsonb(cfg) ->> 'prefix'`,
+        # `row_to_json(cfg) -> 'prefix'`, `j['prefix']`, `jsonb_extract_path_text(j, 'prefix')`, is the
+        # prefix, and the reference is the whole read
+        if kind == "STR" and names_column(toks[k]):
+            refs += 1
+            level = parens[-1] if parens else stmt
+            label = f"the prefix read by name ({text})"
+            if level.get("callee") in EXTRACT_FUNCS and level["arg"] >= 1:
+                level["selects"] = True      # the call is the reference; judged where it closes
+            elif prev[1] == "[" and nxt[1] == "]":
+                judge(operand_start(k - 2), k + 1, line, label)
+            elif field_op(k - 1, True):
+                judge(operand_start(k - 1 - field_op(k - 1, True)), k, line, label)
+            else:
+                judge(k, k, line, label)
             continue
 
         if kind != "ID":
@@ -446,7 +552,8 @@ def _scan_once(toks, defined, carriers):
         refs += 1
         if nxt[1] in TYPE_WORDS or nxt[1] in ("=>", ":="):
             continue  # a declaration, the label of a named argument, or the target of an assignment
-        judge(k, k, line, text)
+        # a field selected out of a parenthesised row, `(cfg).prefix`, is a reference from the row on
+        judge(operand_start(k - 2) if prev[1] == "." else k, k, line, text)
     return refs, assembly, claims, found
 
 
@@ -810,6 +917,54 @@ end;
 $$;
 """)
 
+# Real instance: review pass 11 (F8-06, issue #1181). The same configured prefix read out of the config row
+# as JSON, by the column's name in a literal: to_jsonb, row_to_json and jsonb_extract_path_text, each the
+# whole value a second key is built from. The read is the reference, wherever its parentheses put it.
+def _row_read_second(fn, expr):
+    return with_extra(f"""
+create or replace function {fn}(p_parent regclass, p_child name) returns void language plpgsql as $$
+declare cfg archive.config; v_key text;
+begin
+  select * into cfg from archive.config where parent_table = p_parent;
+  v_key := {expr} || p_child || '.parquet';
+end;
+$$;
+""")
+
+
+TO_JSONB_SECOND = _row_read_second("archive._jsonb_key", "(to_jsonb(cfg) ->> 'prefix')")
+ROW_TO_JSON_SECOND = _row_read_second("archive._json_key", "(row_to_json(cfg) ->> 'prefix')")
+EXTRACT_PATH_SECOND = _row_read_second("archive._path_key", "jsonb_extract_path_text(to_jsonb(cfg), 'prefix')")
+TEXT_PATH_SECOND = _row_read_second("archive._text_path_key", "(row_to_json(cfg)::jsonb #>> '{prefix}')")
+# Parentheses that only group a reference are part of it, for the column as much as for a read by name, and
+# a field selected out of a parenthesised row is the column too.
+PARENTHESISED_SECOND = _row_read_second("archive._paren_key", "(cfg.prefix)")
+FIELD_SELECTED_SECOND = with_extra(r"""
+create or replace function archive._field_key(p_parent regclass, p_child name) returns text language plpgsql as $$
+declare cfg archive.config; v_base text;
+begin
+  select * into cfg from archive.config where parent_table = p_parent;
+  v_base := (cfg).prefix;
+  return v_base || quote_ident(p_child);
+end;
+$$;
+""")
+# Read by name and handed only to the key function, and the name in a message or a test: following the read
+# must not mean refusing it, and "Prefix" (a JSON key is case-sensitive) names another field.
+ROW_READ_CLEAN = with_extra(r"""
+create or replace function archive.to_s3_jsonl(p_parent regclass, p_child name) returns text language plpgsql as $$
+declare cfg archive.config;
+begin
+  select * into cfg from archive.config where parent_table = p_parent;
+  if (to_jsonb(cfg) ->> 'prefix') is null or (to_jsonb(cfg) ->> 'Prefix') is not null then
+    raise exception 'archive.config has no % for %', 'prefix', p_parent;
+  end if;
+  return archive._child_object_key(p_parent, (to_jsonb(cfg) ->> 'prefix'), p_child,
+                                   coalesce(to_jsonb(cfg) ->> 'Prefix', '') || '.jsonl');
+end;
+$$;
+""")
+
 NO_CLAIM = CLEAN.replace("""  insert into archive.object_key_owner (key_base, parent_oid) values (v_base_q, p_parent::oid)
     on conflict (key_base) do nothing returning parent_oid into v_owner;
 """, "")
@@ -873,6 +1028,20 @@ def selftest():
     expect("a second assembly from the column qualified by schema and table", SCHEMA_QUALIFIED_SECOND, False,
            "archive._qualified_key (line")
     expect("a quoted \"Prefix\" is another column, not the prefix", OTHER_COLUMN_QUOTED, True,
+           owner="archive._owned_key")
+    expect("F8-06: a second assembly from to_jsonb(cfg) ->> 'prefix'", TO_JSONB_SECOND, False,
+           "archive._jsonb_key (line")
+    expect("F8-06: a second assembly from row_to_json(cfg) ->> 'prefix'", ROW_TO_JSON_SECOND, False,
+           "archive._json_key (line")
+    expect("F8-06: a second assembly from jsonb_extract_path_text(to_jsonb(cfg), 'prefix')", EXTRACT_PATH_SECOND,
+           False, "archive._path_key (line")
+    expect("a second assembly from the text path #>> '{prefix}'", TEXT_PATH_SECOND, False,
+           "archive._text_path_key (line")
+    expect("a second assembly from the parenthesised column (cfg.prefix)", PARENTHESISED_SECOND, False,
+           "archive._paren_key (line")
+    expect("a second assembly from the field selected out of a row, (cfg).prefix", FIELD_SELECTED_SECOND, False,
+           "archive._field_key (line")
+    expect("the prefix read by name and handed only to the key function", ROW_READ_CLEAN, True,
            owner="archive._owned_key")
     expect("the one assembling function never claims", NO_CLAIM, False, "never names archive.object_key_owner")
     expect("no assembly visible at all", NO_ASSEMBLY, False, "no function assembles")

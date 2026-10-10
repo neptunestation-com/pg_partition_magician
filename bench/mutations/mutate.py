@@ -11021,6 +11021,20 @@ MUTATIONS["quoted_splices_initialiser_unread"] = (
 """, "", 1)],
 )
 MUTATION_SRC["quoted_splices_initialiser_unread"] = "scripts/check_quoted_splices.py"
+# Issue #1181 (review pass 11, F8-06): scripts/check_archive_object_keys.py follows the prefix read out of the
+# config row by the column's name. The mutation drops the one clause that makes a field operator's read the
+# reference, so `'prefix'` after `->>` or `#>>` is judged as the literal alone, and the parentheses around
+# `(to_jsonb(cfg) ->> 'prefix')` no longer hold the reference that touches `||`.
+MUTATIONS["archive_keys_field_read_unjudged"] = (
+    "bench/archive_keys_row_read.sh",
+    "Pre-#1181 scripts/check_archive_object_keys.py: a read of the prefix through a field operator is judged at "
+    "the literal alone, so a second, unclaimed key assembled as (to_jsonb(cfg) ->> 'prefix') || p_child or "
+    "(row_to_json(cfg) ->> 'prefix') || p_child passes the lint, the shape cfg.prefix || p_child is refused for. "
+    "One site, the field-operator clause of the literal's judgement.",
+    [("            elif field_op(k - 1, True):\n"
+      "                judge(operand_start(k - 1 - field_op(k - 1, True)), k, line, label)\n", "", 1)],
+)
+MUTATION_SRC["archive_keys_field_read_unjudged"] = "scripts/check_archive_object_keys.py"
 # pass 10 G20 (#1091, #1092, #1093): three test files that passed against the defect they name, each back to
 # the shape that passed. Judged by bench/tests_fail_on_defect.sh (tests/07, tests/timescale/db/33) and
 # bench/archive_fn_s3_readback.sh (tests/archive/db/08), each against an injection of that defect.

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **The archive object-key lint follows the prefix read out of the config row by name** (#1181).
+  `scripts/check_archive_object_keys.py` knew the prefix only as an identifier or a subquery selecting one, so a
+  second, unclaimed object key assembled from the same configured prefix read as JSON
+  (`(to_jsonb(cfg) ->> 'prefix') || p_child`, `row_to_json(cfg) ->> 'prefix'`,
+  `jsonb_extract_path_text(to_jsonb(cfg), 'prefix')`) passed it with no violation. A literal naming the column
+  (`'prefix'`, `'{prefix}'`, `'$.prefix'`) is now a prefix reference, and a reference is judged as the whole
+  value it stands for: the field read (`->`, `->>`, `#>`, `#>>`, a subscript, a `json[b]_extract_path[_text]`
+  call), the parentheses that only group it (`(cfg.prefix) || x` passed too), and the row a field is selected
+  from (`v := (cfg).prefix`). The module reads exactly as before (18 prefix references, one owner). Guard
+  `bench/archive_keys_row_read.sh`, mutation `archive_keys_field_read_unjudged`.
+
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's
