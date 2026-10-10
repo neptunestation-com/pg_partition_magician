@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- **The hypertable drains and cutover follow a tracking copy's delta by its record, wherever it lives**
+  (#1057, bullet 1). The capture trigger writes the recorded delta by its oid, so one moved with
+  `ALTER TABLE ... SET SCHEMA` during the window went on taking every change, but `from_hypertable_drain_delta`,
+  its step and `from_hypertable_cutover` looked the record up only in the hypertable's own schema (the copy's
+  rule) and read a moved delta as no delta: the drains refused it, and the cutover ran the append-only
+  catch-up for a tracking copy (its conservation check refusing whenever an update or delete had been
+  captured) and, on a clean swap, deleted the records while the moved delta and its capture function stayed
+  behind, named by nothing. The three now resolve the delta by its recorded oid in any schema, and the swap
+  drops the recorded capture function whether or not the delta is still there (one dropped by hand left it
+  behind too). Test `tests/timescale/db/65`, guard `bench/hypertable_cutover_delta_by_record.sh`, mutations
+  `hypertable_cutover_delta_in_hypertable_schema`, `hypertable_drain_delta_in_hypertable_schema`,
+  `hypertable_drain_delta_step_in_hypertable_schema` and `hypertable_cutover_capture_fn_drop_tracking_only`; the
+  find patterns of `hypertable_drain_delta_step_by_name`, `hypertable_drain_delta_by_name`,
+  `hypertable_cutover_delta_by_name` and `hypertable_cutover_drops_fn_by_name` follow the changed code.
+
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's

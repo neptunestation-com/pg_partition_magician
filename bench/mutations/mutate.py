@@ -8644,8 +8644,9 @@ select ok(
         "<rel>_pgpm_delta by name, so with no copy recorded it drains an operator's table of the delta's name, "
         "deleting its rows. tests/timescale/db/49 stage B catches it.",
         [("  v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');     -- #955: by record (drain_delta_step)\n"
-          "  v_delta := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_delta');   -- #955: by record (drain_delta_step)\n",
-          "  v_dest := v_rel || '_pgpm_dest';    -- MUTANT: by name\n  v_delta := v_rel || '_pgpm_delta';\n", 1)],
+          "  v_delta := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');   -- #955 #1057: by record, any schema (drain_delta_step)\n",
+          "  v_dest := v_rel || '_pgpm_dest';    -- MUTANT: by name\n"
+          "  v_delta := to_regclass(format('%I.%I', v_nsp, v_rel || '_pgpm_delta'));\n", 1)],
     ),
     "hypertable_drain_delta_by_name": (
         "bench/scratch_relations.sh",
@@ -8653,8 +8654,9 @@ select ok(
         "reads an operator's table of that name as the backlog and drives the step at it. "
         "tests/timescale/db/49 stage B catches it (the refusal is not its own).",
         [("  v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');     -- #955: by record (drain_delta)\n"
-          "  v_delta := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_delta');   -- #955: by record (drain_delta)\n",
-          "  v_dest := v_rel || '_pgpm_dest';    -- MUTANT: by name\n  v_delta := v_rel || '_pgpm_delta';\n", 1)],
+          "  v_delta := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');   -- #955 #1057: by record, any schema (drain_delta)\n",
+          "  v_dest := v_rel || '_pgpm_dest';    -- MUTANT: by name\n"
+          "  v_delta := to_regclass(format('%I.%I', v_nsp, v_rel || '_pgpm_delta'));\n", 1)],
     ),
     "hypertable_drain_appends_step_by_name": (
         "bench/scratch_relations.sh",
@@ -8688,20 +8690,18 @@ select ok(
         "Pre-#955 from_hypertable_cutover: change tracking is detected by <rel>_pgpm_delta's existence, so after "
         "an append-only copy an operator's table of that name is taken for the change log (its pre-drain "
         "refuses, or its keys reconcile the copy and the swap drops it). tests/timescale/db/49 stage B catches it.",
-        [("  v_delta := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_delta');   -- #955: by record (cutover)\n",
-          "  v_delta := v_rel || '_pgpm_delta';   -- MUTANT: by name\n", 1),
-         ("  v_track := v_delta is not null;\n",
-          "  v_track := to_regclass(format('%I.%I', v_nsp, v_delta)) is not null;\n", 1)],
+        [("  v_delta := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');   -- #955 #1057: by record, any schema (cutover)\n",
+          "  v_delta := to_regclass(format('%I.%I', v_nsp, v_rel || '_pgpm_delta'));   -- MUTANT: by name\n", 1)],
     ),
     "hypertable_cutover_drops_fn_by_name": (
         "bench/scratch_relations.sh",
         "Pre-#955 from_hypertable_cutover: the swap drops <rel>_pgpm_delta_fn() by the hypertable's CURRENT name, "
         "so after a RENAME since the copy it drops an operator's function of the new name and leaves the "
         "copy's. tests/timescale/db/49 stage B catches it.",
-        [("    if v_trgfn_oid is not null and exists (select 1 from pg_proc where oid = v_trgfn_oid) then\n"
-          "      execute format('drop function %s', v_trgfn_oid::regprocedure::text);\n"
-          "    end if;\n",
-          "    execute format('drop function if exists %I.%I()', v_nsp, v_rel || '_pgpm_delta_fn');   -- MUTANT: by name\n", 1)],
+        [("  if v_trgfn_oid is not null and exists (select 1 from pg_proc where oid = v_trgfn_oid) then\n"
+          "    execute format('drop function %s', v_trgfn_oid::regprocedure::text);\n"
+          "  end if;\n",
+          "  execute format('drop function if exists %I.%I()', v_nsp, v_rel || '_pgpm_delta_fn');   -- MUTANT: by name\n", 1)],
     ),
     "hypertable_swap_keeps_scratch_record": (
         "bench/scratch_relations.sh",
@@ -11395,6 +11395,59 @@ MUTATIONS["retain_horizon_wall_round_trip"] = (
       "  return (((now() at time zone p_tz) - v_cal) at time zone p_tz) - (p_retain - v_cal);\n",
       "  return ((now() at time zone p_tz) - p_retain) at time zone p_tz;\n", 1)],
 )
+
+
+# Issue #1057 bullet 1 (A1057-1, F6-04): the drains and the cutover find a tracking copy's delta by its record,
+# wherever it lives, and the swap drops the recorded capture function whether or not the delta is still there.
+# Each lookup mutation puts back the one clause that confined the record to the hypertable's own schema (the
+# copy's rule, which _from_hypertable_scratch applies). tests/timescale/db/65 catches each
+# (bench/hypertable_cutover_delta_by_record.sh).
+_DELTA_IN_HT_SCHEMA = ("(select d from pgpm._scratch_rel(p_hypertable, 'hypertable_delta') d join pg_class c on c.oid = d"
+                       " where c.relnamespace = (select h.relnamespace from pg_class h where h.oid = p_hypertable))")
+MUTATIONS["hypertable_cutover_delta_in_hypertable_schema"] = (
+    "bench/hypertable_cutover_delta_by_record.sh",
+    "Pre-#1057 from_hypertable_cutover: the recorded delta counts only while it sits in the hypertable's schema, "
+    "so after ALTER TABLE <delta> SET SCHEMA the cutover reads a tracking copy as untracked, runs the "
+    "append-only catch-up (its conservation check refusing a captured update or delete) and, on a clean swap, "
+    "deletes the records while the moved delta is left behind, named by nothing. tests/timescale/db/65 catches "
+    "it (a65's cutover refuses; A1057-1 and F6-04 keep the moved delta).",
+    [("  v_delta := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');   -- #955 #1057: by record, any schema (cutover)\n",
+      "  v_delta := " + _DELTA_IN_HT_SCHEMA + ";   -- #955 #1057: by record, any schema (cutover)\n", 1)],
+)
+MUTATION_SRC["hypertable_cutover_delta_in_hypertable_schema"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_cutover_delta_in_hypertable_schema"] = "timescale"
+MUTATIONS["hypertable_drain_delta_in_hypertable_schema"] = (
+    "bench/hypertable_cutover_delta_by_record.sh",
+    "Pre-#1057 from_hypertable_drain_delta: the recorded delta counts only while it sits in the hypertable's "
+    "schema, so a delta moved with SET SCHEMA is refused as 'found no delta' and nothing the capture logged into "
+    "it is drained. tests/timescale/db/65 catches it (the drain of a65's W2).",
+    [("  v_delta := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');   -- #955 #1057: by record, any schema (drain_delta)\n",
+      "  v_delta := " + _DELTA_IN_HT_SCHEMA + ";   -- #955 #1057: by record, any schema (drain_delta)\n", 1)],
+)
+MUTATION_SRC["hypertable_drain_delta_in_hypertable_schema"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_drain_delta_in_hypertable_schema"] = "timescale"
+MUTATIONS["hypertable_drain_delta_step_in_hypertable_schema"] = (
+    "bench/hypertable_cutover_delta_by_record.sh",
+    "Pre-#1057 from_hypertable_drain_delta_step: the recorded delta counts only while it sits in the hypertable's "
+    "schema, so one moved with SET SCHEMA is refused as 'found no delta'. tests/timescale/db/65 catches it (the "
+    "step after a65's W1).",
+    [("  v_delta := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');   -- #955 #1057: by record, any schema (drain_delta_step)\n",
+      "  v_delta := " + _DELTA_IN_HT_SCHEMA + ";   -- #955 #1057: by record, any schema (drain_delta_step)\n", 1)],
+)
+MUTATION_SRC["hypertable_drain_delta_step_in_hypertable_schema"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_drain_delta_step_in_hypertable_schema"] = "timescale"
+MUTATIONS["hypertable_cutover_capture_fn_drop_tracking_only"] = (
+    "bench/hypertable_cutover_delta_by_record.sh",
+    "Pre-#1057 from_hypertable_cutover: the swap drops the recorded capture function only on the tracking path, "
+    "so a copy whose delta was dropped by hand is cut over append-only and its capture function outlives the "
+    "records the swap deletes. tests/timescale/db/65 catches it (b65's function survives).",
+    [("  if v_trgfn_oid is not null and exists (select 1 from pg_proc where oid = v_trgfn_oid) then\n"
+      "    execute format('drop function %s', v_trgfn_oid::regprocedure::text);\n",
+      "  if v_track and v_trgfn_oid is not null and exists (select 1 from pg_proc where oid = v_trgfn_oid) then\n"
+      "    execute format('drop function %s', v_trgfn_oid::regprocedure::text);\n", 1)],
+)
+MUTATION_SRC["hypertable_cutover_capture_fn_drop_tracking_only"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_cutover_capture_fn_drop_tracking_only"] = "timescale"
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

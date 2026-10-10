@@ -876,7 +876,10 @@ re-insert its current source row), which is what makes incremental draining safe
 source, so a change is never deleted-without-applying; the source read is bounded per batch to the touched
 control range for chunk exclusion. The driver **commits per batch** (so WAL recycles); `_step` does one
 batch (no commit, returns the keys it cleared). No throwaway index is built or dropped for it: the
-per-batch delete uses the key index the cutover later adopts.
+per-batch delete uses the key index the cutover later adopts. Both read the delta
+[`pgpm.scratch`](#pgpmscratch) records for the hypertable, by its oid, wherever it lives now: one you
+renamed or moved with `ALTER TABLE ... SET SCHEMA` during the window is the delta the capture trigger goes on
+writing, and the one they drain.
 
 - `p_batch` -- micro-batch size (delta rows processed per batch, bounded by a `pgpm_seq` watermark).
 - `p_threshold` -- stop once the residual is at/below this many delta rows (`0` = drain to empty). Under
@@ -931,7 +934,10 @@ Phase 2: the cutover. It cuts over only the copy `from_hypertable_copy` recorded
 [`pgpm.scratch`](#pgpmscratch), and takes change tracking from the delta recorded there, never from a relation
 that merely carries the name `<rel>_pgpm_dest` or `<rel>_pgpm_delta`: with no copy recorded it refuses
 (`found no copy to cut over`), and so do the drains. A copy made by pgpm 0.6.0 or earlier carries no record;
-drop it and re-run `from_hypertable_copy`. The swap drops the recorded delta and capture function and
+drop it and re-run `from_hypertable_copy`. The copy must still sit in the hypertable's schema (the swap
+renames it into the hypertable's place); the delta is found by its oid wherever it lives now, renamed or
+moved with `ALTER TABLE ... SET SCHEMA`, so a tracking copy is cut over as one. The swap drops the recorded
+delta and capture function by their oids, the function even when the delta was dropped by hand, and
 removes the records, the copy being the migrated table by then. When `p_predrain` is `true` (the default), it first **pre-drains the catch-up backlog
 online** (best-effort, using `p_drain_batch` as the batch size and residual threshold) -- the change delta
 (`from_hypertable_drain_delta`) when tracking is on, else the appended-rows tail
