@@ -14,7 +14,8 @@
 #   ./test.sh discriminate               # prove each of those guards fails when its defect is present
 #   ./test.sh locktrace                  # eBPF lock-boundary observation (PG17, Linux only)
 #   ./test.sh lockview                   # the lock-sequence renderer's eBPF capture (PG17, Linux only)
-#   ./test.sh ci                         # EVERY track CI runs, in one go
+#   ./test.sh lint                       # every job lint.yml's required Lint summary needs (no Docker)
+#   ./test.sh ci                         # every track CI runs AND the lint track, in one go
 #
 # `all` means all four PostgreSQL VERSIONS, not all tracks. The timescale, observe, archive, perf,
 # discriminate, locktrace and lockview tracks each need their own image or service, so `./test.sh all` deliberately skips them
@@ -87,8 +88,9 @@ for arg in "$@"; do
     discriminate) TRACK="discriminate" ;;
     locktrace) TRACK="locktrace" ;;
     lockview) TRACK="lockview" ;;
+    lint) TRACK="lint" ;;
     ci) TRACK="ci" ;;
-    *) echo "usage: ./test.sh [15|16|17|18|all] [--channel=psql|bundle|dbdev|all] | timescale | observe | archive | perf [--shard=I/N] [--list] | discriminate [--shard=I/N] [--list] | locktrace | lockview | ci"; exit 1 ;;
+    *) echo "usage: ./test.sh [15|16|17|18|all] [--channel=psql|bundle|dbdev|all] | timescale | observe | archive | perf [--shard=I/N] [--list] | discriminate [--shard=I/N] [--list] | locktrace | lockview | lint | ci"; exit 1 ;;
   esac
 done
 
@@ -1215,6 +1217,7 @@ run_perf() {
     "bench/transmute_claim_owner_under_set_role.sh pgpm_perf325"
     "bench/retain_horizon_ambiguous_wall_time.sh pgpm_perf326"
     "bench/archive_retired_chunk_kept.sh pgpm_perf324"
+    "bench/ci_runs_lint_jobs.sh pgpm_perf351"
   )
   local selected=()
   local n=${#guards[@]} idx
@@ -1456,6 +1459,141 @@ run_lockview() {
   echo "lockview track: PASS"
 }
 
+# The `lint` track: every job .github/workflows/lint.yml's required `Lint summary` needs, run here the way
+# CI runs it (#1183). `./test.sh ci` used to run every TEST track and none of these, so it printed PASS over
+# a tree whose Lint summary was red, while saying it ran everything CI runs.
+#
+# One function per lint.yml job, named lint_job_<job id with - as _>. A job's `run:` blocks are copied in
+# VERBATIM, command for command, and its `uses:` actions (other than the checkout) are replaced by the
+# local tool the action wraps, at the version the action pins. bench/ci_runs_lint_jobs.sh holds the two
+# together in both directions: run_lint's job list must be exactly the summary's `needs`, every command
+# of every `run:` block must appear in its job's function in order, and every action must have the local
+# equivalent its table names. So a job added to lint.yml, or a command added to one, fails the perf track
+# until it is added here too.
+#
+# A job whose tool is not installed here is reported SKIPPED, by job name, never folded into a PASS: the
+# run has not verified it, and CI's job of the same name is what covers it. `ci` says so in its verdict.
+lint_job_markdown_lint() {
+  # DavidAnson/markdownlint-cli2-action@v16 bundles markdownlint v0.34.0, as markdownlint-cli2@0.13.0 does.
+  # The action lints `**/*.md` of a checkout, minus the frozen design doc; a checkout is the tracked set,
+  # so the tracked set is named, never globbed (a glob walks gitignored scratch CI never sees).
+  git ls-files -z '*.md' | grep -zv '^frozen/postgresql_online_partition_migration_summary\.md$' \
+    | xargs -0 npx -y markdownlint-cli2@0.13.0
+}
+lint_job_living_docs() {
+  bash scripts/check_living_docs.sh --selftest
+  bash scripts/check_living_docs.sh
+}
+lint_job_quoted_splices() {
+  python3 scripts/check_quoted_splices.py --selftest
+  python3 scripts/check_quoted_splices.py
+}
+lint_job_archive_object_keys() {
+  python3 scripts/check_archive_object_keys.py --selftest
+  python3 scripts/check_archive_object_keys.py
+  python3 scripts/check_archive_child_by_oid.py --selftest
+  python3 scripts/check_archive_child_by_oid.py
+}
+lint_job_minifier() {
+  python3 scripts/minify_sql.py --selftest
+  PGPM_DBDEV_CAP=warn scripts/build_dbdev_package.sh pgpm_core/install.sql dist/minifier-check.sql
+}
+lint_job_track_filters() {
+  python3 scripts/check_track_filters.py --selftest
+  python3 scripts/check_track_filters.py
+}
+lint_job_review_tooling_selftest() {
+  python3 scripts/review/plant_seeds.py --selftest
+  python3 scripts/review/classify_claims.py --selftest
+  python3 scripts/review/pass_metrics.py --selftest
+  python3 scripts/review/keep_both.py --selftest
+  python3 scripts/review/coverage.py --selftest
+  python3 scripts/review/close_comments.py --selftest
+  python3 scripts/review/file_issues.py --selftest
+  python3 scripts/review/landing_stats.py --selftest
+  python3 scripts/review/pr_surface.py --selftest
+  python3 scripts/review/pr_classify.py --selftest
+  python3 scripts/review/pr_comment.py --selftest
+}
+lint_job_shellcheck() {
+  # ludeeus/action-shellcheck@master with scandir '.' and severity warning: every shell script of the
+  # checkout. The action also finds an extensionless script by its shebang; the tracked tree has none.
+  # The action runs the current stable shellcheck, so an older local one can disagree with it.
+  git ls-files -z '*.sh' '*.bash' '*.ksh' '*.bats' | xargs -0 shellcheck --severity=warning
+  bash scripts/image_build_key.sh --selftest
+}
+lint_job_lock_view_selftest() {
+  python3 -m venv .venv-lockview
+  .venv-lockview/bin/pip install --quiet matplotlib
+  .venv-lockview/bin/python bench/lock_view_selftest.py
+}
+lint_job_sql_syntax() {
+  awk '
+    /\$\$/ { n=gsub(/\$\$/,"&"); dq += n }
+    END {
+      if (dq % 2 != 0) { print "Unbalanced $$ dollar quotes"; exit 1 }
+      print "dollar-quote check passed"
+    }
+  ' pgpm_core/install.sql
+}
+
+run_lint() {
+  # Exactly lint.yml's `summary.needs`, in its order (bench/ci_runs_lint_jobs.sh).
+  local lint_jobs=(
+    markdown-lint
+    living-docs
+    quoted-splices
+    archive-object-keys
+    minifier
+    track-filters
+    review-tooling-selftest
+    shellcheck
+    lock-view-selftest
+    sql-syntax
+  )
+  local job fn tool failed="" skipped=""
+  for job in "${lint_jobs[@]}"; do
+    fn="lint_job_${job//-/_}"
+    case "$job" in
+      markdown-lint) tool="npx" ;;
+      shellcheck) tool="shellcheck" ;;
+      sql-syntax) tool="awk" ;;
+      *) tool="python3" ;;
+    esac
+    echo; echo ">>> lint: $job (lint.yml)"
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "SKIPPED  lint.yml job $job: $tool is not installed here, so this run did not check it"
+      skipped="$skipped $job"
+      continue
+    fi
+    # A CHILD bash with -e, for the reason `ci` runs each track as a child: under `if` (or `||`) errexit is
+    # off for everything the condition runs, a function included, so a job's first failing command would
+    # not end it and a later passing one would decide its verdict. GitHub runs each `run:` block with
+    # `bash -e`, and so does this; pipefail besides, which only the local equivalents' pipes can meet.
+    if bash -e -o pipefail -c "$(declare -f "$fn"); $fn"; then
+      echo "PASS  lint.yml job $job"
+    else
+      echo "FAIL  lint.yml job $job"
+      failed="$failed $job"
+    fi
+  done
+  # `ci` reads the skipped jobs from here, to name them in its own verdict.
+  if [ -n "${PGPM_LINT_SKIPPED:-}" ]; then printf '%s' "$skipped" > "$PGPM_LINT_SKIPPED"; fi
+  echo
+  if [ -n "$failed" ]; then echo "lint track: FAIL --$failed"; return 1; fi
+  if [ -n "$skipped" ]; then
+    echo "lint track: PASS, except SKIPPED --$skipped (CI runs each as the lint.yml job of that name)"
+    return 3
+  fi
+  echo "lint track: PASS (every job lint.yml's Lint summary needs)"
+}
+
+if [ "$TRACK" = "lint" ]; then
+  # 3 = nothing failed but a job was SKIPPED: not a pass, so not 0, and not a failure `ci` must report as one.
+  lint_rc=0; run_lint || lint_rc=$?
+  exit "$lint_rc"
+fi
+
 if [ "$TRACK" = "perf" ]; then
   run_perf
   echo; echo "All requested tests passed."
@@ -1498,9 +1636,12 @@ if [ "$TRACK" = "archive" ]; then
   exit 0
 fi
 
-# `ci`: everything the CI workflows run, in one invocation, so "green locally" can mean the same thing
-# as "green in CI". Every track runs to completion rather than stopping at the first failure, because
-# when a core change breaks several you want the whole list.
+# `ci`: every test track the CI workflows run (test.yml's matrix and packages, timescale, observe, archive,
+# perf, discriminate, locktrace, lockview) AND the lint track (every job lint.yml's required Lint summary
+# needs), in one invocation, so "green locally" can mean the same thing as "green in CI" for the three
+# summaries main requires. Nothing else: pages.yml, release.yml and publish-dbdev.yml publish rather than
+# check, and test.yml's dbdev-cap job is informational. Every track runs to completion rather than
+# stopping at the first failure, because when a core change breaks several you want the whole list.
 #
 # Each track is a CHILD INVOCATION of this script, not a direct call to its run_* function. Two reasons.
 # `cmd || handler` disables errexit for the whole of cmd, including inside a function it calls, and
@@ -1513,6 +1654,19 @@ if [ "$TRACK" = "ci" ]; then
   # "unbound variable" error -- so the all-passed path would be the one that broke.
   ci_failed=""
   ci_skipped=""
+  ci_skip_note=""
+  # The lint track first: it needs no Docker and takes about a minute, so a red Lint summary shows at once.
+  # Exit 3 is its "nothing failed, but a job was SKIPPED" (a tool not installed here), which is neither.
+  lint_skips=$(mktemp "${TMPDIR:-/tmp}/pgpm_lint_skipped.XXXXXX")
+  lint_rc=0; PGPM_LINT_SKIPPED="$lint_skips" "$0" lint || lint_rc=$?
+  case "$lint_rc" in
+    0) ;;
+    3) ci_skipped="$ci_skipped lint.yml job(s)$(cat "$lint_skips") (a tool they need is not installed here);"
+       ci_skip_note="$ci_skip_note
+    The skipped lint jobs are run by CI as the .github/workflows/lint.yml jobs of the same name." ;;
+    *) ci_failed="$ci_failed lint" ;;
+  esac
+  rm -f "$lint_skips"
   for v in 15 16 17 18; do "$0" "$v" || ci_failed="$ci_failed pg$v"; done
   for t in timescale observe archive perf discriminate; do
     "$0" "$t" || ci_failed="$ci_failed $t"
@@ -1534,7 +1688,9 @@ if [ "$TRACK" = "ci" ]; then
     "$0" locktrace || ci_failed="$ci_failed locktrace"
     "$0" lockview  || ci_failed="$ci_failed lockview"
   else
-    ci_skipped=" locktrace and lockview (need Linux; eBPF cannot run on $(uname -s))"
+    ci_skipped="$ci_skipped locktrace and lockview (need Linux; eBPF cannot run on $(uname -s));"
+    ci_skip_note="$ci_skip_note
+    CI does run locktrace and lockview on Linux (.github/workflows/locktrace.yml and lockview.yml)."
   fi
 
   echo; echo "========================================="
@@ -1543,10 +1699,9 @@ if [ "$TRACK" = "ci" ]; then
       # Deliberately NOT folded into the PASS line's meaning: this run did not verify that track, and
       # saying so plainly is the whole point of reporting a skip at all.
       echo "ci: PASS, except SKIPPED --$ci_skipped"
-      echo "    Those tracks were NOT verified on this machine. CI does run them on Linux"
-      echo "    (.github/workflows/locktrace.yml and lockview.yml), so a PR still covers them."
+      echo "    Those were NOT verified on this machine; a PR's own jobs still cover them.$ci_skip_note"
     else
-      echo "ci: PASS (every track CI runs)"
+      echo "ci: PASS (every test track CI runs, and every lint.yml job its Lint summary needs)"
     fi
     echo; echo "All requested tests passed."
     exit 0

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **`./test.sh ci` runs lint.yml's jobs, not only the test tracks** (#1183). It said it ran everything the CI
+  workflows run and printed `ci: PASS (every track CI runs)`, but ran none of the ten jobs the required Lint
+  summary needs (markdownlint, the living-docs, quoted-splices, object-key and child-by-oid lints, the minifier,
+  track-filter and review-tooling self-tests, shellcheck, the lock-view self-test and the SQL syntax check), so
+  it passed a tree whose Lint summary was red. A new `./test.sh lint` track runs each of those jobs with the
+  commands CI runs for it, the actions replaced by the tools they wrap at the pinned versions; `ci` runs it
+  first and reports a job whose tool is not installed as SKIPPED by name, never as passed. Guard
+  `bench/ci_runs_lint_jobs.sh` holds the track to `lint.yml` (every needed job, every `run:` command in order,
+  every action's options and local equivalent, and the `ci` call); mutations `ci_lint_job_dropped` and
+  `ci_skips_lint_track`.
+
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's

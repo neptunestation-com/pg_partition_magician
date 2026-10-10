@@ -189,7 +189,7 @@ for manual, one-off archiving instead of the automatic `archive_fn` path.
 ```bash
 ./test.sh        # full matrix: PG 15-18 x all install channels
 ./test.sh 15     # one version, all channels
-./test.sh ci     # every track CI runs, including the ones the matrix skips
+./test.sh ci     # every test track CI runs, and every job of lint.yml's Lint summary
 ```
 
 pgTAP on Docker. `./test.sh` covers the four PostgreSQL versions but skips the `timescale`, `observe`,
