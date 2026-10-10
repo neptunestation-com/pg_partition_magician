@@ -643,8 +643,10 @@ select format('alter table %s validate constraint %I', conrelid::regclass, conna
 Validate them before converting the table again with `p_incoming_fks => 'preserve'`, too: `transmute`
 refuses an incoming key that is `NOT VALID` (see `p_incoming_fks` under [`transmute`](#transmute-time--uuidv7--text_time-grid)).
 
-A partitioned referencing table cannot hold a `NOT VALID` key, so its key is re-added validated in one step,
-as `restore_incoming_fks` does.
+On PostgreSQL 18 a key on a partitioned referencing table comes back `NOT VALID` too, with the same
+`NOTICE`. Before 18 a partitioned referencing table cannot hold a `NOT VALID` key, so its key is re-added
+validated in one step, as `restore_incoming_fks` does there: the scan of the referencing table runs under the
+`ACCESS EXCLUSIVE` this call holds on the restored table, and an orphan in it fails the reverse.
 
 It is a **one-way door** once any row lives outside the monolith's range -- a forward partition after the
 frontier crosses `B`, or the finer children a regrain's swap has put in the monolith's place -- because a
@@ -3236,6 +3238,21 @@ That split is deliberate. The re-add briefly blocks writes to **both** the refer
 managed parent; validating in the same statement would hold that block across a full scan of the
 referencing table, so writes to your managed table would stall for a time set by a table pgpm does not
 own. Split, the blocking part is instant and the scan runs later under a lock that blocks no writes.
+
+The split covers a **partitioned** referencing table, and a self-referential key (whose referencing table
+is the managed table itself), on PostgreSQL 18 only. PostgreSQL 15 to 17 refuse `NOT VALID` on a
+partitioned referencing table, so there pgpm re-adds such a key **validated in one step**: the statement
+scans the whole referencing table (for a self-referential key, the whole managed table) while it blocks
+writes to it and to the managed table: at the re-add after the conversion, and again at every regrain
+swap, inside the swap's `ACCESS EXCLUSIVE`. An orphan written while the key was suspended fails that
+validation and leaves the key dropped, logged `fail_restore_incoming_fk`, until you delete the orphan.
+The only scan-free route those versions offer, a `NOT VALID` key on every partition, validated and then
+adopted by the parent's `ADD`, creates a constraint with its triggers for every pair of referencing and
+referenced partitions, and the adopting `ADD` locks every one of them: measured on PostgreSQL 15, 40
+partitions of a self-referential table made 1,640 such constraints and the `ADD` took 5,056 locks, which a
+default `max_locks_per_transaction` stops allowing a few partitions later. So pgpm does not take it. If the
+scan is a write pause you cannot afford, upgrade to PostgreSQL 18: the version is read at each re-add, so
+from then on these keys come back `NOT VALID` as well.
 
 ### `validate_incoming_fks`
 

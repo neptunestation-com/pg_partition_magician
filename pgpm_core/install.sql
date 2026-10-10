@@ -11517,8 +11517,9 @@ begin
   -- table's name only while the parent was neither renamed nor moved since: replayed verbatim it named a
   -- table that is not there (42P01, the reverse rolled back) or whatever had taken that name. Mirror
   -- restore_incoming_fks:
-  -- a partitioned referencer validates in one step (Postgres forbids NOT VALID there), anything else
-  -- comes back NOT VALID, which enforces every new write from this statement on.
+  -- before PostgreSQL 18 a partitioned referencer validates in one step (PostgreSQL forbids NOT VALID
+  -- there until 18, #633), anything else comes back NOT VALID, which enforces every new write from this
+  -- statement on.
   --
   -- And stays NOT VALID (#577). The VALIDATE used to follow here, and it scans the whole REFERENCING
   -- table: this is a function, one transaction, holding ACCESS EXCLUSIVE on the restored table since the
@@ -11529,7 +11530,10 @@ begin
   -- the operator's, run in its own transaction after this one, where it takes only SHARE UPDATE EXCLUSIVE
   -- on the referencing table and ROW SHARE on this one and blocks neither. The notice names it.
   for r in select * from pgpm.dropped_fk where parent_table = p_parent order by id loop
-    if (select relkind from pg_class where oid = r.referencing_table) = 'p' then
+    -- #633: before PostgreSQL 18 only (as in restore_incoming_fks, which says why): 18 takes NOT VALID on a
+    -- partitioned referencing table too, so there it comes back NOT VALID with the notice, like any other.
+    if (select relkind from pg_class where oid = r.referencing_table) = 'p'
+       and current_setting('server_version_num')::int < 180000 then
       execute format('alter table %s add constraint %I %s',
                      r.referencing_table::text, r.constraint_name,
                      pgpm._fk_readd_definition(r.definition, v_restored));   -- #872: the restored table by oid
@@ -13743,13 +13747,27 @@ begin
             where parent_table = p_parent and restored_at is null
               and (p_ids is null or id = any(p_ids))
             order by id loop
-    v_is_part := (select relkind from pg_class where oid = r.referencing_table) = 'p';
+    -- #633: a self-referential key (its referencing table IS the managed parent) or one declared on another
+    -- partitioned table. PostgreSQL 18 takes NOT VALID there like anywhere else, so it gets the same split
+    -- as a plain referencer: the ADD below scans nothing, and validate_incoming_fks validates it on a later
+    -- tick under locks that block no writes. It used to be added validating on every version, which scanned
+    -- the whole referencing table (for a self-referential key, the whole MANAGED table) inside this
+    -- statement's SHARE ROW EXCLUSIVE on the parent, and inside the DETACH's ACCESS EXCLUSIVE when regrain's
+    -- swap calls this: every write to the managed table waited out an O(rows) scan.
+    v_is_part := (select relkind from pg_class where oid = r.referencing_table) = 'p'
+                 and current_setting('server_version_num')::int < 180000;
     v_readded := false;
     begin
       if v_is_part then
-        -- self-referential / partitioned referencer: Postgres forbids NOT VALID FKs here, so add it
-        -- validating in one step (all-or-nothing). A pre-existing orphan leaves it DROPPED and logged,
-        -- without bricking the other FKs; self-ref / partitioned-referencer FKs are typically small.
+        -- Before 18 PostgreSQL refuses NOT VALID on a partitioned referencing table ("cannot add NOT VALID
+        -- foreign key on partitioned table"), so the key is added validating in one step (all-or-nothing),
+        -- and that scan does run under the lock above. The one route around it there, a NOT VALID key per
+        -- partition, validated, then adopted by the parent's ADD, creates one constraint and trigger pair per
+        -- (referencing partition x referenced partition), and the adopting ADD locks each: measured on 15,
+        -- 40 partitions of a self-referential table made 1640 constraint rows and the ADD took 5056 locks,
+        -- and the default lock table (64 per connection, 100 connections) runs out a few partitions later.
+        -- docs/reference.md names the exception. A pre-existing orphan leaves the key DROPPED and logged,
+        -- without bricking the other FKs.
         execute format('alter table %s add constraint %I %s',
                        r.referencing_table::text, r.constraint_name,
                        pgpm._fk_readd_definition(r.definition, p_parent));   -- #872: the parent by oid

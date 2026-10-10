@@ -851,6 +851,13 @@ select pgpm.validate_incoming_fks('public.events');        -- validates the now-
 For the full step-by-step recovery, see the runbook entry
 [Referential-integrity violations after a `preserve` conversion](runbook.md#referential-integrity-violations-after-a-preserve-conversion).
 
+One exception on PostgreSQL 15 to 17: a key whose referencing table is **partitioned**, which includes a
+self-referential key of the table you converted, cannot be re-added `NOT VALID` there, so it comes back
+validated in one step. That re-add scans the whole referencing table while it blocks writes to the managed
+table, and an orphan fails it and leaves the key dropped until you remove the orphan. PostgreSQL 18 takes
+`NOT VALID` on a partitioned table, and there such a key gets the same split as any other. See
+[`restore_incoming_fks`](reference.md#restore_incoming_fks) for why pgpm does not work around it.
+
 **Once restored, it stays restored.** Nothing in a maintenance tick suspends a managed FK again;
 `pgpm.suspend_incoming_fks` has exactly one caller left, described next. Referential actions,
 `DEFERRABLE`-ness, and self-referential FKs are all preserved across the drop-and-restore.
