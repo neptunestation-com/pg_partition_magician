@@ -11436,14 +11436,12 @@ MUTATIONS["archive_retired_unnamed_raises"] = (
 )
 MUTATIONS["archive_ledger_backfill_unblocked_attributed"] = (
     _G1141,
-    "The upgrade attributes a pre-existing chunk to the relation pgpm.part records for its name whether or not that "
-    "relation carries the write block, so a partition dropped by hand and re-created under its own name (its "
-    "pgpm.part row kept, anchored by #421 to the successor) inherits the dropped relation's chunk: #452's reset "
-    "discards it on the next tick and the archive step writes over the only copy (PR #1152 round 4). One clause. "
-    "tests/309 part S catches it.",
-    [("     and exists (select 1 from pg_trigger t\n"
-      "                  where t.tgrelid = p.child_oid and t.tgname = 'pgpm_write_block' and t.tgenabled in ('A', 'O'));\n",
-      "     and true;\n", 1)],
+    "The upgrade attributes a pre-existing chunk to the relation pgpm.part records for its name even when that "
+    "anchor is one its own #421 backfill adopted from whatever held the name, so a partition dropped by hand and "
+    "re-created under its own name (its pgpm.part row kept) inherits the dropped relation's chunk: #452's reset "
+    "discards it on the next tick and the archive step writes over the only copy (PR #1152 round 4; since #1160 the "
+    "anchor, not the block, is what vouches). One clause. tests/309 part S catches it.",
+    [("     and not (p.child_oid = any (v_adopted))\n", "", 1)],
 )
 MUTATIONS["archive_retired_orphan_delete_unfiltered"] = (
     _G1141,
@@ -11466,17 +11464,55 @@ MUTATIONS["archive_retired_backfill_untimed"] = (
 )
 
 
-# Issue #1160: the upgrade backfill counts pgpm's write block in either state pgpm installs it. Every release through
-# v0.6.0 created it origin-only, and the repair to ALWAYS waits for the first tick after the upgrade.
+# Issue #1160: the upgrade backfill attributes a pre-existing chunk on identity (an anchor pgpm recorded, not one the
+# same upgrade adopted, still held by the name), whatever pgpm left the block as (ALWAYS, origin-only, absent), and
+# retires one under a block an operator disabled or set replica-only. One mutation per clause, all caught by
+# bench/ledger_backfill_origin_only_block.sh (tests/314 and an install.sql round trip).
+_G1160 = "bench/ledger_backfill_origin_only_block.sh"
+_C1160 = ("     and not exists (select 1 from pg_trigger t\n"
+          "                      where t.tgrelid = p.child_oid and t.tgname = 'pgpm_write_block' and t.tgenabled not in ('A', 'O'));\n")
 MUTATIONS["archive_ledger_backfill_origin_only_retired"] = (
-    "bench/ledger_backfill_origin_only_block.sh",
-    "The upgrade attributes a pre-existing chunk only to a relation whose pgpm_write_block is enabled ALWAYS, so on an "
-    "upgrade from v0.6.0 or older (blocks origin-only until the first tick repairs them) every live archived "
-    "partition's chunk is marked retired and _over_retired_chunks holds the partition for good "
-    "(skip_archive_retired_range, never archived again or dropped). One clause, the origin-only state. tests/314 "
-    "catches it.",
-    [("t.tgname = 'pgpm_write_block' and t.tgenabled in ('A', 'O'));\n",
-      "t.tgname = 'pgpm_write_block' and t.tgenabled in ('A'));\n", 1)],
+    _G1160,
+    "The upgrade retires a pre-existing chunk whose partition's pgpm_write_block is origin-only, the state every "
+    "release through v0.6.0 created it in (repaired only by the first tick after the upgrade), so every live archived "
+    "partition of such an install is held for good (skip_archive_retired_range, never archived again or dropped). "
+    "One clause, the origin-only state. tests/314 catches it.",
+    [("t.tgname = 'pgpm_write_block' and t.tgenabled not in ('A', 'O'));\n",
+      "t.tgname = 'pgpm_write_block' and t.tgenabled not in ('A'));\n", 1)],
+)
+MUTATIONS["archive_ledger_backfill_lifted_retired"] = (
+    _G1160,
+    "The upgrade attributes a pre-existing chunk only when its partition carries a block, so a partition whose block "
+    "v0.6.0's own tick removed (retention no longer reached it, its chunks kept) is held for good although its "
+    "anchor proves it is the relation archived. The first fix for #1160 had this shape. tests/314 and the round "
+    "trip catch it.",
+    [(_C1160,
+      "     and exists (select 1 from pg_trigger t\n"
+      "                  where t.tgrelid = p.child_oid and t.tgname = 'pgpm_write_block' and t.tgenabled in ('A', 'O'));\n", 1)],
+)
+MUTATIONS["archive_ledger_backfill_hand_state_attributed"] = (
+    _G1160,
+    "The upgrade attributes a pre-existing chunk under a block an operator disabled or set replica-only, coverage "
+    "nothing kept, which the first tick then discards and archives over. One clause. tests/314 catches it.",
+    [(_C1160, "     and true;\n", 1)],
+)
+MUTATIONS["archive_ledger_backfill_adopted_blocked_attributed"] = (
+    _G1160,
+    "The upgrade lets a write block vouch for an anchor its own #421 backfill adopted: a successor re-created by hand "
+    "under a dropped partition's name and write-blocked by a pgpm before #429 inherits the dropped relation's chunk, "
+    "the first tick discards it and archives the successor from lo over the only copy (PR #1188 verification, "
+    "P1-02). tests/314 and the round trip catch it.",
+    [("     and not (p.child_oid = any (v_adopted))\n",
+      "     and (not (p.child_oid = any (v_adopted))\n"
+      "          or exists (select 1 from pg_trigger b where b.tgrelid = p.child_oid and b.tgname = 'pgpm_write_block'))\n", 1)],
+)
+MUTATIONS["archive_ledger_upgrade_adoption_unrecorded"] = (
+    _G1160,
+    "install.sql records no anchor as adopted before its #421 backfill, so the ledger's backfill reads a successor's "
+    "adopted oid as identity and attributes the dropped relation's chunk to it. One clause. Only the round trip "
+    "catches it (tests/314 records the adoption itself).",
+    [("      select parent_table, child_name from pgpm.part where child_oid is null\n",
+      "      select parent_table, child_name from pgpm.part where child_oid is null and false\n", 1)],
 )
 
 # Issue #627: the retain horizon's time part is instant arithmetic, and a retain with no calendar part takes no
