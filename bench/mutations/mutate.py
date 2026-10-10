@@ -2416,27 +2416,27 @@ begin
         "#898 added to _regrain_shape_drift, because with that arm in place a copy without the parent's key "
         "is drift, the run restarts on every tick, and the ATTACH scan the guard measures is never reached; "
         "pre-#348 code had neither.",
-        [("""      -- #348: give the fine child its own already-validated copy of every outgoing FK the parent
-      -- has, the same trick the bound CHECK above uses. The child is still empty here (this runs
-      -- before the first row is copied in below), so VALIDATE costs nothing -- exactly how an empty
-      -- CHECK validates for free. Every row copied in afterward is checked at INSERT time by the
-      -- ordinary FK machinery regardless, so this one-time, zero-row validation is the only one this
-      -- constraint will ever need; by the swap's ATTACH (below), Postgres adopts it instead of
-      -- re-scanning, the same adoption transmute already relies on for the monolith
-      -- (install.sql:2841-2851). A NOT VALID outgoing FK on the parent is left off here (the
-      -- convalidated filter skips it): on the copy it would enforce every row copied in, and refuse
-      -- the orphan the parent's key tolerates. On PostgreSQL 18 pgpm's own restore_incoming_fks leaves
-      -- one on a managed referencer (#633), and the swap carries it onto the copy, NOT VALID, just
-      -- before the ATTACH, where it checks no row and is adopted as it is.
-      for r in
-        select conname, pg_get_constraintdef(oid) as def
-          from pg_constraint
-         where conrelid = p_parent and contype = 'f' and confrelid <> p_parent and conparentid = 0
-           and convalidated
-      loop
-        execute format('alter table %I.%I add constraint %I %s not valid', v_sub_nsp, v_sub_name, r.conname, r.def);
-        execute format('alter table %I.%I validate constraint %I', v_sub_nsp, v_sub_name, r.conname);
-      end loop;
+        [("""  -- #348: give the fine child its own already-validated copy of every outgoing FK the parent
+  -- has, the same trick regrain_step's bound CHECK uses. The child is still empty here (this runs
+  -- before the first row is copied in), so VALIDATE costs nothing -- exactly how an empty
+  -- CHECK validates for free. Every row copied in afterward is checked at INSERT time by the
+  -- ordinary FK machinery regardless, so this one-time, zero-row validation is the only one this
+  -- constraint will ever need; by the swap's ATTACH (below), Postgres adopts it instead of
+  -- re-scanning, the same adoption transmute already relies on for the monolith
+  -- (install.sql:2841-2851). A NOT VALID outgoing FK on the parent is left off here (the
+  -- convalidated filter skips it): on the copy it would enforce every row copied in, and refuse
+  -- the orphan the parent's key tolerates. On PostgreSQL 18 pgpm's own restore_incoming_fks leaves
+  -- one on a managed referencer (#633), and the swap carries it onto the copy, NOT VALID, just
+  -- before the ATTACH, where it checks no row and is adopted as it is.
+  for r in
+    select conname, pg_get_constraintdef(oid) as def
+      from pg_constraint
+     where conrelid = p_parent and contype = 'f' and confrelid <> p_parent and conparentid = 0
+       and convalidated
+  loop
+    execute format('alter table %I.%I add constraint %I %s not valid', p_nsp, p_name, r.conname, r.def);
+    execute format('alter table %I.%I validate constraint %I', p_nsp, p_name, r.conname);
+  end loop;
 """, "", 1),
          ("     where k.contype = 'f' and k.conparentid = 0\n",
           "     where k.contype = 'f' and k.conparentid = 0 and false\n", 1)],
@@ -7102,11 +7102,11 @@ select ok(
         "Issue #1075 put back: regrain_step's standalone CREATE TABLE (LIKE ...) for a fine child splices no "
         "tablespace clause, so the fine children, and the rows a regrain moves into them, land in the database "
         "default whatever tablespace the parent mints its partitions in. One clause, the splice dropped from "
-        "the create; tests/296's parts A and B catch it, while part C's database-default table still passes.",
+        "the create (in _regrain_copy_make, #633); tests/296's parts A and B catch it, while part C's database-default table still passes.",
         [("including indexes including constraints excluding identity)%s',\n"
-          "                     v_sub_nsp, v_sub_name, v_nsp, v_rel, v_spc_q);\n",
+          "                 p_nsp, p_name, v_nsp, v_rel, p_spc_q);\n",
           "including indexes including constraints excluding identity)',\n"
-          "                     v_sub_nsp, v_sub_name, v_nsp, v_rel, v_spc_q);\n", 1)],
+          "                 p_nsp, p_name, v_nsp, v_rel, p_spc_q);\n", 1)],
     ),
     "unbuilt_cell_type_holder_unnamed": (
         "bench/unbuilt_cell_type_holder.sh",

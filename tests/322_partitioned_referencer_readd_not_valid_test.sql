@@ -26,7 +26,7 @@
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(49);
+select plan(59);
 
 select current_setting('server_version_num')::int >= 180000 as pg18 \gset
 
@@ -345,7 +345,10 @@ select is((select restored_at is not null and validated_at is not null and valid
 -- On 18 a managed table can hold one definition twice, h_fk validated and h_fk2 NOT VALID. Each copy carries
 -- h_fk (validated); that is the parent's validated key under its own name, not drift, so the run neither
 -- restarts nor stalls, and swaps. The copy-side exclusion used to match a NOT VALID parent key by definition
--- alone, which left h_fk out on every copy and restarted the run on every other tick for good.
+-- alone, which left h_fk out on every copy and restarted the run on every other tick for good. And the swap
+-- carries the twin h_fk2 onto each copy NOT VALID under its own name (round 3, V-01): matched by definition,
+-- the carry skipped it because the copy held h_fk, and ATTACH cloned h_fk2 and validated it on every copy,
+-- scanning them under the swap's ACCESS EXCLUSIVE (failing outright on an orphan).
 create table public.hr (id bigint primary key);
 insert into public.hr select generate_series(1, 50);
 create table public.h322 (id bigint primary key, rid bigint constraint h_fk references public.hr (id));
@@ -368,44 +371,155 @@ select is(
   (select array_agg(conname || ':' || convalidated::text order by conname) from pg_constraint
     where conrelid = 'public.h322'::regclass and contype = 'f'),
   array['h_fk:true', 'h_fk2:false'], 'LIVENESS (H): h322 holds one definition twice, h_fk validated and h_fk2 NOT VALID');
-create temp table h_steps as select g as n, pg_temp.h_tick() as s from generate_series(1, 12) g;
+-- every tick up to, not including, the swap: until the cursor reaches the source's hi (or a tick ends the run)
+create temp table h_steps (n int, s text);
+do $h$
+declare i int := 0; v_cur text; v_hi text; v_s text;
+begin
+  select hi into v_hi from pgpm.part where parent_table = 'public.h322'::regclass
+     and child_oid = (select monolith_oid from pgpm.config where parent_table = 'public.h322'::regclass);
+  loop
+    i := i + 1;
+    exit when i > 12;
+    select regrain_cursor into v_cur from pgpm.config where parent_table = 'public.h322'::regclass;
+    exit when v_cur is not null and v_cur::numeric >= v_hi::numeric;
+    v_s := pg_temp.h_tick();
+    insert into h_steps values (i, v_s);
+    exit when v_s not like 'copied:%' and v_s not like 'reconciled:%' and v_s <> 'prepared';
+  end loop;
+end $h$;
 select ok(exists (select 1 from h_steps where s like 'copied:%'), 'LIVENESS (H): the run made copies for the drift check to read');
+select coalesce((select array_agg(child_oid order by child_oid) from pgpm.part
+                  where parent_table = 'public.h322'::regclass and not attached), '{}')::text as h_copies \gset
+-- The copies' read counters, before and after the swap tick, each sampled in a later transaction than the
+-- work it measures: pg_stat_force_next_flush() makes the end of its own statement publish this backend's
+-- counts, and pg_stat_clear_snapshot() drops the snapshot the next read would otherwise reuse.
+create function pg_temp.h_reads(p_rels oid[]) returns bigint language sql as $f$
+  select coalesce(sum(seq_tup_read + coalesce(idx_tup_fetch, 0)), 0)::bigint
+    from pg_stat_user_tables where relid = any(p_rels)
+$f$;
+select pg_stat_force_next_flush();
+select pg_stat_clear_snapshot();
+select pg_temp.h_reads(:'h_copies'::oid[]) as h_before \gset
+select pg_temp.h_tick() as h_swap \gset
+select pg_stat_force_next_flush();
+select pg_stat_clear_snapshot();
+select pg_temp.h_reads(:'h_copies'::oid[]) as h_after \gset
+select matches(:'h_swap'::text, '^swapped:', '(H) the next tick swaps the copies in, the twin notwithstanding');
+select is(:h_after::bigint - :h_before::bigint, 0::bigint,
+  '(H) and reads no row of them doing it: no key was validated on a copy under the swap''s ACCESS EXCLUSIVE');
+select is(
+  (select array_agg(distinct ks order by ks) from (
+     select string_agg(k.conname || ':' || k.convalidated::text, ',' order by k.conname) as ks
+       from unnest(:'h_copies'::oid[]) c(oid)
+       join pg_constraint k on k.conrelid = c.oid and k.contype = 'f' and k.conparentid <> 0
+      group by c.oid) x),
+  array['h_fk:true,h_fk2:false'],
+  '(H) every attached copy holds both keys under the parent''s names, h_fk validated and the twin h_fk2 NOT VALID');
 select is((select count(*)::int from pgpm.log where parent_table = 'public.h322'::regclass and action = 'regrain_restart')
            + (select count(*)::int from h_steps where s like 'refused:%'),
   0, '(H) no tick restarted the run, or refused to');
-select ok(exists (select 1 from h_steps where s like 'swapped:%'), '(H) and it swapped within 12 steps');
+-- the instrument can see a read: one plain scan of one former copy moves the same counters by its rows
+select (select count(*) from public.h322_p0000000000000000000)::bigint as h_rows \gset
+select pg_stat_force_next_flush();
+select pg_stat_clear_snapshot();
+select is(pg_temp.h_reads(:'h_copies'::oid[]) - :h_after::bigint, :h_rows::bigint,
+  'LIVENESS (H): the counters see a scan of a former copy, so the zero above is not a counter standing still');
 \else
-select skip('PostgreSQL before 18 cannot hold a NOT VALID key on a partitioned table, so there is no twin', 4);
+select skip('PostgreSQL before 18 cannot hold a NOT VALID key on a partitioned table, so there is no twin', 7);
 \endif
 
 -- ======================================================================================================
--- I: a restart that cannot cure the drift is refused, not repeated
+-- I: a restart is refused only when it could not cure the drift
 -- ======================================================================================================
--- A CHECK added to i322 after its copies were made is drift, and the run restarts, which remakes the copies
--- with it. If a copy made since lacks it again (dropped by hand here, standing in for any difference a
--- restart does not cure), the next drift is exactly the last restart's: that tick refuses, saying so, and
--- drops nothing, rather than discarding and recopying the range on every other tick for good.
-create table public.i322 (id bigint primary key, v int);
-insert into public.i322 select g, g from generate_series(1, 45) g;
-call pgpm.transmute('public.i322', 'id', 10::bigint, p_obtain => 2);
-insert into public.i322 values (55, 1), (65, 2);
-create function pg_temp.i_tick() returns text language plpgsql as $f$
+-- A restart cures drift by making the copies again from the parent as it is, so it is refused only when a copy
+-- made now would differ too. Three runs:
+--   I1 (every version): a CHECK added, dropped before the copy is remade, then added again. The copy, made
+--      while the parent had no CHECK, lacks it; the same drift as the first restart's, and a restart cures it.
+--   I2 (18): the same with no DDL on the table at all. A key b3 holds goes NOT VALID at a3's swap and is
+--      validated again on a3's next tick; a copy made in between lacks it, twice over. Each time a restart cures it.
+--   I3 (every version): an event trigger adds a column to every table created under i3's name, copies
+--      included, so no copy can ever match i3. That is refused on the first drift, with what differs, instead of
+--      restarting on every other tick for good, and nothing is dropped.
+create function pg_temp.tick(p_parent regclass, p_step text, p_batch int) returns text language plpgsql as $f$
 declare v name;
 begin
-  select child_name into v from pgpm.part where parent_table = 'public.i322'::regclass
-     and child_oid = (select monolith_oid from pgpm.config where parent_table = 'public.i322'::regclass);
-  return pgpm.regrain_step('public.i322', v, '10', 100);
+  select child_name into v from pgpm.part where parent_table = p_parent
+     and child_oid = (select monolith_oid from pgpm.config where parent_table = p_parent);
+  if v is null then return 'no monolith'; end if;
+  return pgpm.regrain_step(p_parent, v, p_step, p_batch);
+exception when others then
+  return 'refused: ' || sqlerrm;                             -- asserted below, not fatal to the file
 end $f$;
-select is(array[pg_temp.i_tick(), pg_temp.i_tick()], array['prepared', 'copied:9'], 'LIVENESS (I): the run prepared and copied');
-alter table public.i322 add constraint i322_v_pos check (v > 0);
-select is(pg_temp.i_tick(), 'restarted:1', 'LIVENESS (I): the CHECK added since is drift, and the run restarts once');
-select is(pg_temp.i_tick(), 'copied:9', 'LIVENESS (I): the next tick copies again, the copy carrying the CHECK');
-alter table public.i322_p0000000000000000000 drop constraint i322_v_pos;   -- the same difference, again
-select throws_like($$ select pg_temp.i_tick() $$, '%refusing to restart the regrain of % again%i322_v_pos%regrain_cancel%',
-  '(I) the same drift again is refused, naming it and the way out, instead of a second restart');
+
+create table public.i1 (id bigint primary key, v int);
+insert into public.i1 select g, g from generate_series(1, 45) g;
+call pgpm.transmute('public.i1', 'id', 10::bigint, p_obtain => 2);
+insert into public.i1 values (55, 1), (65, 2);
+select is(array[pg_temp.tick('public.i1', '5', 100), pg_temp.tick('public.i1', '5', 100)], array['prepared', 'copied:4'],
+  'LIVENESS (I1): the run prepared and made its first copy');
+alter table public.i1 add constraint i1_v_pos check (v > 0);
+select is(pg_temp.tick('public.i1', '5', 100), 'restarted:1', 'LIVENESS (I1): the CHECK added since is drift, and the run restarts');
+alter table public.i1 drop constraint i1_v_pos;
+select is(pg_temp.tick('public.i1', '5', 100), 'copied:4', 'LIVENESS (I1): the copy is remade from i1 as it is, without the CHECK');
+alter table public.i1 add constraint i1_v_pos check (v > 0);
+select is(pg_temp.tick('public.i1', '5', 100), 'restarted:1',
+  '(I1) the CHECK back again is the same drift, and a restart cures it: the run restarts rather than refusing');
+select ok((select bool_or(s like 'swapped:%') from (select pg_temp.tick('public.i1', '5', 100) as s from generate_series(1, 20)) t),
+  '(I1) and the run swaps');
+
+\if :pg18
+create table public.a3 (id bigint primary key);
+insert into public.a3 select generate_series(1, 15);
+create table public.b3 (id bigint primary key, a_id bigint constraint b3_a_fk references public.a3 (id));
+insert into public.b3 select g, (g % 15) + 1 from generate_series(1, 45) g;
+call pgpm.transmute('public.a3', 'id', 10::bigint, p_incoming_fks => 'preserve', p_obtain => 2);
+call pgpm.transmute('public.b3', 'id', 10::bigint, p_obtain => 2);
+insert into public.b3 values (55, 1), (65, 2);
+select pgpm.restore_incoming_fks('public.a3');
+select pgpm.validate_incoming_fks('public.a3');
+create function pg_temp.a3_swap() returns int[] language sql as $f$
+  select array[pgpm.suspend_incoming_fks('public.a3', true),
+               pgpm.restore_incoming_fks('public.a3', (select array_agg(id) from pgpm.dropped_fk where parent_table = 'public.a3'::regclass))]
+$f$;
+select is(array[pg_temp.tick('public.b3', '5', 100), (pg_temp.a3_swap())::text, pg_temp.tick('public.b3', '5', 100),
+                pgpm.validate_incoming_fks('public.a3')::text, pg_temp.tick('public.b3', '5', 100)],
+  array['prepared', '{1,1}', 'copied:4', '1', 'restarted:1'],
+  'LIVENESS (I2): a3''s swap made b3_a_fk NOT VALID, a copy was made without it, a3 validated it, and b3''s run restarted');
+select is(array[(pg_temp.a3_swap())::text, pg_temp.tick('public.b3', '5', 100),
+                pgpm.validate_incoming_fks('public.a3')::text, pg_temp.tick('public.b3', '5', 100)],
+  array['{1,1}', 'copied:4', '1', 'restarted:1'],
+  '(I2) the same again, with no DDL on b3, is cured by a restart too: the run restarts rather than refusing');
+select ok((select bool_or(s like 'swapped:%') from (select pg_temp.tick('public.b3', '5', 100) as s from generate_series(1, 20)) t),
+  '(I2) and the run swaps');
+\else
+select skip('PostgreSQL before 18 cannot hold a NOT VALID key on a partitioned table, so pgpm never toggles one', 3);
+\endif
+
+create table public.i3 (id bigint primary key, v int);
+insert into public.i3 select g, g from generate_series(1, 45) g;
+call pgpm.transmute('public.i3', 'id', 10::bigint, p_obtain => 2);
+insert into public.i3 values (55, 1), (65, 2);
+select is(pg_temp.tick('public.i3', '5', 100), 'prepared', 'LIVENESS (I3): the run prepared');
+create function public.i3_stamp() returns event_trigger language plpgsql as $f$
+declare r record;
+begin
+  for r in select * from pg_event_trigger_ddl_commands()
+            where command_tag = 'CREATE TABLE' and object_identity like 'public.i3\_%' loop
+    execute format('alter table %s add column if not exists stamped int', r.object_identity);
+  end loop;
+end $f$;
+create event trigger i3_stamp on ddl_command_end when tag in ('CREATE TABLE') execute function public.i3_stamp();
+select is(pg_temp.tick('public.i3', '5', 100), 'copied:4', 'LIVENESS (I3): the first copy is made, and stamped');
+select matches(pg_temp.tick('public.i3', '5', 100),
+  '^refused: .*refusing to restart the regrain of .*stamped.*a copy made from the parent now would differ from it too.*regrain_cancel',
+  '(I3) the drift no copy can cure is refused, naming the difference and the way out');
 select is(
-  (select array[(select count(*)::int from pgpm.log where parent_table = 'public.i322'::regclass and action = 'regrain_restart'),
-                (select count(*)::int from pgpm.part where parent_table = 'public.i322'::regclass and not attached)]),
-  array[1, 1], '(I) one restart in all, and the copy is still there: the refused tick dropped nothing');
+  (select array[(select count(*)::int from pgpm.log where parent_table = 'public.i3'::regclass and action = 'regrain_restart'),
+                (select count(*)::int from pgpm.part where parent_table = 'public.i3'::regclass and not attached),
+                (select count(*)::int from pg_class where relname like 'i3%probe%')]),
+  array[0, 1, 0], '(I3) with no restart, the copy still there and no probe left behind: the refused tick dropped nothing');
+drop event trigger i3_stamp;
+drop function public.i3_stamp();
 
 select * from finish();

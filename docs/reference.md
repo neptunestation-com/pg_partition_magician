@@ -1717,8 +1717,11 @@ drops and re-adds any incoming FK within that single transaction. Outgoing FKs a
 child while it is still empty, so the swap never validates one under its lock. A `NOT VALID` outgoing key
 on the parent (on PostgreSQL 18, `restore_incoming_fks` leaves one on a managed table that references another
 managed one while an orphan keeps it from validating) cannot go on a copy then, since it would refuse that
-orphan as it is copied in; the swap adds it to each copy `NOT VALID` just before the `ATTACH`, which checks no
-row and adopts it as it is, so the parent keeps it `NOT VALID` and `validate_incoming_fks` validates it later.
+orphan as it is copied in; the swap adds it to each copy `NOT VALID`, under its own name, just before the
+`ATTACH`, which checks no row and adopts it as it is, so the parent keeps it `NOT VALID` and
+`validate_incoming_fks` validates it later. A copy that already holds a key under that name (made while the
+parent's was still validated) keeps it instead; one that holds only a validated twin of the same definition
+under another name gets the `NOT VALID` one as well, so each parent key has its own copy key to adopt.
 
 Committed DML against the source while a regrain is in flight is honoured. A trigger on the source records
 changed keys into a per-parent delta table, and a reconcile pass treats the **source** as the authority for
@@ -1873,10 +1876,12 @@ took for a new column: a volatile default (`nextval`, `clock_timestamp()`) gave 
 `now()` the instant of the `ALTER`, which re-evaluating the default in a copy would not reproduce. A
 restart costs the copying done so far, so schedule such migrations between regrains of a large partition
 when you can. A rewrite that changes no value (`VACUUM FULL`, `CLUSTER`, `SET TABLESPACE` on the source)
-cannot be told from one that does, so it restarts the run too. A restart that would repeat the run's last
-one exactly (the copies made since, from the parent as it is, differ from it the same way) is refused
-instead, the tick dropping nothing and raising with what differs: restarting again could not cure it. Change
-the parent so that its copies can match it, or abandon the run with `regrain_cancel`. Defaults, statistics targets, storage and
+cannot be told from one that does, so it restarts the run too. Before restarting for its copies' shape, the
+tick makes one probe copy from the parent as it is, the way it makes its copies, compares it the same way and
+drops it. If even that copy differs from the parent (something alters every table created, such as an event
+trigger), a restart could not cure the drift, so the tick refuses instead, dropping nothing and raising with
+what differs; remove the cause, or abandon the run with `regrain_cancel`. Any drift a fresh copy does not
+show, however often it recurs, restarts the run. Defaults, statistics targets, storage and
 indexes are not compared: the copy inserts explicit values, and `ATTACH` builds an index the parent gained.
 A run that has copies but no recorded mark restarts the same way, since nothing says what its copies were
 made from. That is a regrain already in flight when you upgrade from a release that did not record the

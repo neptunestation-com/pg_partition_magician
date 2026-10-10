@@ -14,10 +14,12 @@
   few dozen of them, so on those versions the one-step validation stays, and `docs/reference.md` and
   `docs/guide.md` now say so. Two consequences are handled with it. On 18 a managed table that references
   another managed one can now hold that key `NOT VALID` (an orphan keeps it from validating), so its own
-  regrain's swap adds the key to each copy `NOT VALID` just before the `ATTACH`, which adopts it without a scan,
+  regrain's swap adds the key to each copy `NOT VALID`, under its own name (a validated twin of the same
+  definition does not stand in for it), just before the `ATTACH`, which adopts it without a scan,
   and its drift check no longer reads a copy's validated key, carried under the name of the key the parent now
   holds `NOT VALID`, as drift (by name and definition, so a validated key with a `NOT VALID` twin still matches),
-  and a restart that would repeat the run's last one exactly is refused rather than repeated; before,
+  and a restart that could not cure the drift (a probe copy made from the parent as it is differs from it too)
+  is refused rather than repeated; before,
   the `ATTACH` validated it on every copy under `ACCESS EXCLUSIVE` and failed on the orphan every tick. And on
   15 to 17 a one-step re-add that fails on an orphan is parked for five minutes (`dropped_fk.validate_retry_after`,
   noted in its `fail_restore_incoming_fk` row) instead of rescanning the managed table under `SHARE ROW
