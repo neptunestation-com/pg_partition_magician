@@ -1413,7 +1413,11 @@ silence triggers, is refused exactly as an ordinary session is. A block an older
 origin-only state is brought up to `ALWAYS` by the first `maintain` tick after `install.sql` is re-run.
 Only a block enabled `ALWAYS` counts as a write block: one in any other state (origin-only, or disabled
 by hand) is treated as no block at all, so the coverage recorded under it is discarded as described
-below, and the archive step does not archive the partition until the block is `ALWAYS`.
+below, and the archive step does not archive the partition until the block is `ALWAYS`. The one reader
+that looks at the block's state for another purpose is the upgrade that adds
+`pgpm.archive_ledger.child_oid`, which uses it only to tell a state pgpm leaves (`ALWAYS`, origin-only,
+absent) from one only an operator leaves (disabled, replica-only); what it attributes a chunk on is the
+partition's recorded oid (see [the ledger](#pgpmarchive_ledger)).
 
 `retire` never widens what retention may drop -- a caller only picks **which** eligible partition and
 **when**. It refuses (raises) an unmanaged table, a table with no retention policy (`config.retain` is
@@ -1889,6 +1893,13 @@ whose sub-range has **no** fine child is discarded, and logged `regrain_reconcil
 sub-range lies below the retention horizon, which is the one case in which no child was ever made. In any
 other case the tick fails rather than discarding the change, and the key stays in the delta; under
 `maintain` that surfaces as a `skip_regrain` row carrying the error.
+
+On a `text_time` key, a captured value the table accepted but that lacks the declared shape (shorter than
+the prefix and digit width, or holding a character outside the alphabet) is never decoded: it is reconciled
+into the fine child whose encoded bounds hold it, which is where the copy put its row, and counted in the
+same `regrain_reconcile` row as every other key. When no fine child holds it, the same horizon rule decides,
+over the run of sub-ranges with no child that it falls in: discarded and logged `regrain_reconcile_aged`
+when that run lies below the horizon, a failed tick otherwise.
 
 The first tick installs the capture and copies nothing, so budget one tick more than the microbatch count.
 
@@ -3497,13 +3508,25 @@ adopted, is held like any partition over a retired chunk (its rows are already i
 
 Re-running `install.sql` over an install that predates the columns adds them. `retired_at` is set on the
 chunks already retired where `pgpm.log` shows it: a row archived no later than a `retain_drop` logged over a
-range holding it. `child_oid` is set from the oid `pgpm.part` records for the row's name, but only when the
-relation holding that name is that oid and carries pgpm's write block (enabled `ALWAYS`): a chunk describes a
-relation's contents only because the block has been on that relation since its first chunk, and a name alone
-cannot tell the partition pgpm archived from one re-created under its name after a hand drop, which the upgrade's
-anchoring of `pgpm.part` attaches to whatever holds the name. A row under an unblocked relation is marked retired
-instead (a partition whose block was lifted by hand would have had that coverage discarded by the next tick
-anyway; marking it is the safe side of the same judgement). A row whose name no
+range holding it. `child_oid` is set from the oid `pgpm.part` records for the row's name when that oid is the
+partition's identity: an oid pgpm recorded when it created the partition (every release from v0.6.0 records
+one), still held by the name. An oid this same upgrade adopted for a row that had none (an install from before
+v0.6.0, whose `pgpm.part` rows are anchored to whatever holds each name as `install.sql` runs) is not identity,
+because a name alone cannot tell the partition pgpm archived from one re-created under its name after a hand drop,
+and a pgpm before v0.6.0 write-blocked such a successor just as it did the original: a chunk under an adopted oid
+is marked retired, whatever the block, and the partition over its range is held rather than archived over the
+only copy. So an upgrade straight from v0.5.0 or older holds every partition it had archived, recoverable by the
+logged remedy; one from v0.6.0 does not. What this cannot see: an install upgraded to v0.6.0 from an older
+release had its oids adopted by that upgrade, which recorded nothing about it, so they count as recorded here, and
+a partition re-created by hand under a dropped one's name before that upgrade (and not dropped by it since) is
+attributed the dropped one's chunks. Under an identity oid, the block decides only whether pgpm kept the
+coverage: a block enabled `ALWAYS`, origin-only (how every release through v0.6.0 created it; the first
+`maintain` tick after the upgrade brings it up to `ALWAYS`) or absent (v0.6.0 removed the block from a partition
+retention no longer reached, and kept its chunks) attributes the chunk. The first tick then discards the coverage
+it finds under a block that is not `ALWAYS` (`archive_coverage_reset`, see [`maintain`](#maintain)) and the
+partition is archived again from its `lo` and retired as usual. A block present but disabled or set replica-only
+is a state only an operator leaves, so its chunk is marked retired instead (the next tick would discard that
+coverage anyway; marking it is the safe side of the same judgement). A row whose name no
 `pgpm.part` row records is marked retired, whether or not a relation has that name now: nothing vouches that the
 relation is the one the chunk was read from (a partition dropped by hand and re-created under its own name has
 the name and none of the rows), so a partition adopted over its range is held, recoverable by the logged remedy,
@@ -3512,8 +3535,8 @@ anchor, because its partition no longer exists), and a row whose recorded oid no
 renamed before the upgrade, its coverage left under the old name, looks the same as one dropped by hand, so the
 renamed partition is held too; its `skip_archive_retired_range` row then also names the remedy that is safe for a
 rename only: delete the retired rows recorded under the old name, once you have confirmed the partition holds the
-range, and it archives afresh. Afterwards every row recorded before the columns is attributed to a write-blocked
-relation `pgpm.part` records for its name, or is marked retired, and every row pgpm writes since carries an oid, so a
+range, and it archives afresh. Afterwards every row recorded before the columns is attributed to the relation
+pgpm created under its name, or is marked retired, and every row pgpm writes since carries an oid, so a
 null `child_oid` comes only from a row written by hand; such a row counts as its partition's by name, and is
 marked retired by the first step that finds its name resolving to no relation.
 

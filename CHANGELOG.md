@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+- **A regrain no longer wedges on a captured `text_time` key that lacks the declared shape** (#709, the
+  reconcile's decode). `_regrain_reconcile` placed every captured key by `_grid_floor(_decode(key))`, and
+  `_decode` raises `22P02` on a value the table accepts but that is too short or holds a character outside
+  the alphabet; one such key in the delta (an ordinary `DELETE` of a row the copy had already moved, or a row
+  any role with `INSERT` on the table writes into the delta) raised on every tick and at the swap until
+  `regrain_cancel`. The reconcile now decodes a key only when `_text_time_shaped` accepts it, and reconciles an
+  off-shape key into the fine child whose encoded bounds hold it, where the copy put its row; one no fine
+  child holds is discarded as `regrain_reconcile_aged` below the retention horizon and refused above it, as a
+  decoded key is. Test `tests/323`; guard `bench/regrain_reconcile_unshaped_key.sh`, mutations
+  `regrain_reconcile_decodes_unshaped_key` and `regrain_reconcile_drops_unshaped_key`.
+- **An upgrade from v0.6.0 no longer holds its archived partitions for good** (#1160). The upgrade that adds
+  `pgpm.archive_ledger.child_oid` attributed a pre-existing chunk only to a partition whose write block was enabled
+  `ALWAYS`, but every release through v0.6.0 created the block origin-only (only the first `maintain` tick after
+  the upgrade repairs it) and v0.6.0 removed it from a partition retention stopped reaching, so the upgrade marked
+  every live archived partition's chunks retired and the partition was held (`skip_archive_retired_range`), never
+  archived again or dropped. The backfill now attributes on identity: the oid pgpm recorded when it created the
+  partition, still held by its name, with the block `ALWAYS`, origin-only or absent; the first tick then discards
+  that coverage (`archive_coverage_reset`), archives the partition again from its `lo`, and retention drops it as
+  before. An oid the same upgrade adopted from whatever held the name (an upgrade straight from v0.5.0 or older,
+  recorded in a table that lives only until the backfill has run) vouches for nothing, whatever the block, so its
+  chunk is still marked retired and a partition re-created by hand under a dropped one's name is held rather than
+  archived over the only copy; so is one under a block disabled or set replica-only by hand. Test `tests/314`
+  (and `tests/309` part S now records the adoption it simulates); guard
+  `bench/ledger_backfill_origin_only_block.sh`, mutations `archive_ledger_backfill_origin_only_retired`,
+  `archive_ledger_backfill_lifted_retired`, `archive_ledger_backfill_hand_state_attributed`,
+  `archive_ledger_backfill_adopted_blocked_attributed`, `archive_ledger_upgrade_adoption_unrecorded`, and
+  `archive_ledger_backfill_unblocked_attributed` re-pointed at the adoption clause.
+
 - **`from_hypertable_cutover` reads the copy only under a lock that keeps the drains out of it until the swap**
   (#1158). The cutover read the copy's catch-up watermark and its conservation baseline before it locked
   anything, assuming nothing wrote the copy from there to the swap, but the drains (documented as drivable

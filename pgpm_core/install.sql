@@ -412,6 +412,31 @@ alter table pgpm.part add column if not exists retiring_at timestamptz;
 alter table pgpm.part add column if not exists retiring_oid oid;
 alter table pgpm.part add column if not exists child_oid oid;
 
+-- WHICH ANCHORS THIS UPGRADE ADOPTS (#1160). An oid adopted here is "whatever holds the name now", not the relation
+-- pgpm created, and the archive ledger's own upgrade far below (pgpm._backfill_chunk_oids) must not read it as
+-- identity: a partition dropped by hand and re-created under its own name, attached, is adopted here exactly as the
+-- one pgpm archived would be, and a pgpm before #429 write-blocked it all the same. So when that upgrade is still to
+-- run (the ledger exists without its child_oid column), the rows about to be adopted are recorded first, in a table
+-- that lives only until it has run (dropped just after it, below). A table, not session state, so an install
+-- interrupted in between, or run through a pooler that changes backends between statements, still knows on the
+-- re-run which anchors it adopted; and nothing is ever deleted from it before the ledger's upgrade has read it.
+do $$
+begin
+  -- to_regclass, not ::regclass: on a fresh install the ledger does not exist yet, and a cast would raise
+  if to_regclass('pgpm.archive_ledger') is not null
+     and not exists (select 1 from pg_attribute where attrelid = to_regclass('pgpm.archive_ledger')
+                                                 and attname = 'child_oid' and not attisdropped) then
+    create table if not exists pgpm.upgrade_adopted_anchor (
+      parent_table regclass not null,
+      child_name   name     not null,
+      primary key (parent_table, child_name)
+    );
+    insert into pgpm.upgrade_adopted_anchor (parent_table, child_name)
+      select parent_table, child_name from pgpm.part where child_oid is null
+      on conflict do nothing;
+  end if;
+end $$;
+
 -- Backfill child_oid (issue #421). pgpm._backfill_chunk_oids, far below, reads what this leaves unanchored, so
 -- this must stay ahead of it in the file. `where child_oid is null` makes this a one-time adoption per row:
 -- re-running this installer never re-adopts, so a row anchored at one upgrade is not silently
@@ -4427,31 +4452,52 @@ end;
 $$;
 
 -- The upgrade's half of the above, run once, when the column is added. A row recorded before it gets the oid
--- pgpm.part records for its name ONLY when that relation is the one the name resolves to and carries pgpm's write
--- block (enabled ALWAYS): the #452 rule, a watermark describes a relation's contents only because the block has
--- been on THAT relation since the first chunk. A name alone cannot tell the partition pgpm archived from a
--- successor created under it after a hand drop (the #421 backfill anchors pgpm.part to whatever holds the name),
--- and only the archived one carries the block. Every other row is marked retired: one under an unblocked
--- relation (a successor, or a partition whose block an operator lifted, whose coverage #452's reset would discard
--- anyway: marking it is the safe side of the same judgement), one whose name no pgpm.part row records, whether or
--- not a relation has the name now, one with no name, and one whose pgpm.part row is UNANCHORED (no child_oid). That second case reads the #421 backfill of pgpm.part.child_oid,
--- which runs earlier in this file on every install (it comes first in the text, so a fresh run and a re-run
--- alike have anchored every row it can before this runs): a row it could not anchor is one whose partition no
--- longer exists, dropped outside pgpm, so nothing vouches the chunk's rows are anywhere but its object. The safe
--- side of not knowing is to hold whatever partition is adopted over the range, which the logged remedy
--- recovers, rather than leave a row a later discard would delete and a later archive write over. Then every row
--- whose recorded oid no longer exists is marked retired by pgpm._mark_gone_chunks. The invariant afterwards: every
--- row recorded before the column is attributed to a write-blocked relation pgpm.part records for its name, or is
--- marked retired. Returns how many rows it marked.
+-- pgpm.part records for its name ONLY when that oid is IDENTITY (#1160): an anchor pgpm recorded when it created
+-- the partition (every release from v0.6.0 does), not one the #421 backfill adopted in this same upgrade from
+-- whatever held the name (pgpm.upgrade_adopted_anchor, recorded just before that backfill, lists those), and
+-- the relation the name resolves to now is that oid. A name alone, or an adopted anchor, cannot tell the
+-- partition pgpm archived from a successor created under it after a hand drop, and a pgpm before #429 put its
+-- write block on that successor exactly as on the partition it archived, so no state of the block vouches for it
+-- either: a chunk under an adopted anchor is marked retired whatever its block, and the successor is held (the
+-- logged remedy recovers it) rather than archived from lo over the dropped rows' only object.
+--
+-- Under an identity anchor the block's state decides nothing about WHICH relation this is, only whether the
+-- coverage was kept by pgpm: enabled ALWAYS, origin-only (how every release through v0.6.0 created it, repaired
+-- only by the first tick AFTER this upgrade, see _install_write_block), or absent (v0.6.0's tick removed the block
+-- from a partition retention no longer reached, partly archived or not, and kept its chunks) are each a state
+-- pgpm itself leaves, and the chunk is attributed; the first tick's #452/#651 discard then drops that coverage
+-- (the block is not ALWAYS when it reads the ledger) and the partition is archived again from lo under a block,
+-- as before #1141. Asking for an ALWAYS block here marked every live archived partition of a v0.6.0 install
+-- retired, and _over_retired_chunks held each for good. A block present but DISABLED or replica-only is a state
+-- only an operator leaves, so nothing says its rows are still the chunks' rows: that chunk is marked retired.
+--
+-- Every other row is marked retired too: one whose name no pgpm.part row records, whether or not a relation has
+-- the name now, one with no name, one whose pgpm.part row is UNANCHORED (no child_oid), and one whose name now
+-- resolves to another relation. The unanchored case reads the #421 backfill of pgpm.part.child_oid, which runs
+-- earlier in this file on every install: a row it could not anchor is one whose partition no longer exists,
+-- dropped outside pgpm, so nothing vouches the chunk's rows are anywhere but its object. The safe side of not
+-- knowing is to hold whatever partition is adopted over the range, which the logged remedy recovers, rather than
+-- leave a row a later discard would delete and a later archive write over. Then every row whose recorded oid no
+-- longer exists is marked retired by pgpm._mark_gone_chunks. The invariant afterwards: every row recorded before
+-- the column is attributed to the relation pgpm created under its name, or is marked retired. Returns how many
+-- rows it marked. Called with no adopted-anchor table (a fresh install, or a test), no anchor counts as adopted.
 create or replace function pgpm._backfill_chunk_oids() returns int language plpgsql as $$
-declare r record; v_n int;
+declare r record; v_n int; v_adopted oid[] := '{}';
 begin
+  if to_regclass('pgpm.upgrade_adopted_anchor') is not null then
+    execute 'select coalesce(array_agg(p.child_oid), ''{}'') from pgpm.part p
+               join pgpm.upgrade_adopted_anchor a on a.parent_table = p.parent_table and a.child_name = p.child_name
+              where p.child_oid is not null'
+      into v_adopted;
+  end if;
   update pgpm.archive_ledger l set child_oid = p.child_oid
     from pgpm.part p
    where p.parent_table = l.parent_table and p.child_name = l.child_name
      and l.child_oid is null and l.retired_at is null and p.child_oid is not null
+     and not (p.child_oid = any (v_adopted))
      and to_regclass(format('%I.%I', pgpm._child_nsp(l.parent_table, l.child_name), l.child_name))::oid = p.child_oid
-     and pgpm._is_write_blocked(l.parent_table, l.child_name);
+     and not exists (select 1 from pg_trigger t
+                      where t.tgrelid = p.child_oid and t.tgname = 'pgpm_write_block' and t.tgenabled not in ('A', 'O'));
   with gone as (
     update pgpm.archive_ledger l set retired_at = now()
       from pgpm.config c
@@ -4470,6 +4516,16 @@ begin
                                               and attname = 'child_oid' and not attisdropped) then
     alter table pgpm.archive_ledger add column if not exists child_oid oid;
     perform pgpm._backfill_chunk_oids();
+  end if;
+end $$;
+-- the adopted anchors were recorded for the backfill above alone (#1160): dropped once the column it adds exists,
+-- so an install that stopped before the backfill keeps them for the re-run
+do $$
+begin
+  if to_regclass('pgpm.upgrade_adopted_anchor') is not null
+     and exists (select 1 from pg_attribute where attrelid = 'pgpm.archive_ledger'::regclass
+                                              and attname = 'child_oid' and not attisdropped) then
+    drop table pgpm.upgrade_adopted_anchor;
   end if;
 end $$;
 
@@ -5756,6 +5812,9 @@ declare
   v_src regclass;         -- the source the rows are reread from, as pgpm.part recorded it (#768)
   v_seq name;             -- the delta's ordering column, found as its identity column (#1074)
   v_seq_q text;           -- the same, quoted for the batch predicate
+  v_kshaped text;         -- does a delta row's key decode: _text_time_shaped of it, or true (#709)
+  v_kfloor text;          -- a delta row's sub-range lo on the target grid, null when its key does not decode
+  v_unshaped boolean := false;   -- the batch holds a key that does not decode (#709)
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
@@ -5826,6 +5885,26 @@ begin
   -- eligible: in this child's range AND behind the cursor
   v_elig := format('%1$s >= %2$L and %1$s < %3$L and %1$s < %4$L', v_ctl_q, v_lo_lit, v_hi_lit, v_cur_lit);
 
+  -- Where a delta row's key goes: the sub-range lo, on the target grid, of its decoded value (#709). A text_time
+  -- key the table accepts need not have the declared shape (too short, or a character outside the alphabet: the
+  -- column is text and a partition bound only compares strings, and _frontier_native treats such a value as
+  -- reachable, #661), and _decode raises 22P02 on one. Decoded unguarded, a single such key in the batch, from an
+  -- ordinary DELETE of a row the copy had already moved or written into the delta by any role with INSERT on
+  -- the table, raised on every tick and at the swap, the cursor never moved, and only regrain_cancel ended
+  -- the run. So the decode is asked only of a key _text_time_shaped accepts (inside CASE, which fixes the
+  -- order: a bare AND lets the planner evaluate either side first), and an off-shape key floors to null.
+  -- It is not discarded: the copy moved its row without decoding it, into the fine child whose ENCODED bounds
+  -- hold it, so a discarded DELETE would come back at the swap and a discarded UPDATE or INSERT be lost. It is
+  -- reconciled there, by the same encoded comparison, below the per-sub-range loop.
+  v_kshaped := case when cfg.control_kind = 'text_time'
+                    then format('pgpm._text_time_shaped(%s, %L, %s, %s, %L)', v_kctl_native_q,
+                                cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_alphabet)
+                    else 'true' end;
+  v_kfloor := format('pgpm._grid_floor(%L, %L, %L, case when %s then pgpm._decode(%L, %s, %L, %L, %L, %L, %L, %L, %L) end, %L)',
+                     cfg.control_kind, p_step, cfg.partition_anchor, v_kshaped, cfg.control_kind, v_kctl_native_q,
+                     cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
+                     cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz);
+
   -- ONE snapshot decides the batch (#497). pgpm_seq is an identity column, assigned when the capture
   -- trigger fires INSIDE the writer's transaction, so a row can commit later than rows that already
   -- carry higher values: a writer that captured a change and then held its transaction open across
@@ -5860,14 +5939,10 @@ begin
   v_batch := format('k.%s = any($1) and k.ctid = any($2)', v_seq_q);
 
   -- one pair of set-based statements per distinct fine child touched, not per key
-  for r in execute format(
-    'select distinct pgpm._grid_floor(%L, %L, %L, pgpm._decode(%L, %s, %L, %L, %L, %L, %L, %L, %L), %L) as sub_lo
-       from %I.%I k where %s',
-    cfg.control_kind, p_step, cfg.partition_anchor, cfg.control_kind, v_kctl_native_q,
-    cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
-    cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz,
-    v_dnsp, v_delta, v_batch) using v_seqs, v_rows
+  for r in execute format('select distinct %s as sub_lo from %I.%I k where %s', v_kfloor, v_dnsp, v_delta, v_batch)
+    using v_seqs, v_rows
   loop
+    if r.sub_lo is null then v_unshaped := true; continue; end if;   -- #709: placed by its encoded value, below
     -- #446: find the fine child by RANGE in pgpm.part, never by re-rendering its name. regrain_step
     -- clamps the first sub-range to the coarse child's own lo when that lo is off the target grid (a
     -- weekly target on a monthly monolith; a 7000 target on a child starting at 20000) and names the
@@ -5914,22 +5989,69 @@ begin
     -- tick after the copy has its name back.
     v_sub_rel := pgpm._regrain_copy_rel(p_parent, v_sub_name, 'reconcile captured changes into');
     execute format(
-      'delete from %s d where %s in (select %s from %I.%I k where %s
-          and pgpm._grid_floor(%L, %L, %L, pgpm._decode(%L, %s, %L, %L, %L, %L, %L, %L, %L), %L) = %L)',
-      v_sub_rel::text, v_dkey_q, v_keycols_q, v_dnsp, v_delta, v_batch,
-      cfg.control_kind, p_step, cfg.partition_anchor, cfg.control_kind, v_kctl_native_q,
-      cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
-      cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz, r.sub_lo)
+      'delete from %s d where %s in (select %s from %I.%I k where %s and %s = %L)',
+      v_sub_rel::text, v_dkey_q, v_keycols_q, v_dnsp, v_delta, v_batch, v_kfloor, r.sub_lo)
       using v_seqs, v_rows;
     execute format(
-      'insert into %s (%s) select %s from %s s where %s in (select %s from %I.%I k where %s
-          and pgpm._grid_floor(%L, %L, %L, pgpm._decode(%L, %s, %L, %L, %L, %L, %L, %L, %L), %L) = %L)',
+      'insert into %s (%s) select %s from %s s where %s in (select %s from %I.%I k where %s and %s = %L)',
       v_sub_rel::text, v_cols_q, v_cols_q, v_src::text, v_skey_q, v_keycols_q, v_dnsp, v_delta, v_batch,
-      cfg.control_kind, p_step, cfg.partition_anchor, cfg.control_kind, v_kctl_native_q,
-      cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
-      cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz, r.sub_lo)
+      v_kfloor, r.sub_lo)
       using v_seqs, v_rows;
   end loop;
+
+  -- #709: the keys that do not decode, placed as the copy placed their rows, by ENCODED value: each goes to the
+  -- fine child of this regrain whose [_encode(lo), _encode(hi)) holds it, compared under the column's own
+  -- collation exactly as the copy's range test and the eligibility above are (_check_text_time_collation
+  -- holds that collation to the alphabet's place-value order, so encoded order is native order and the fine
+  -- children's encoded ranges tile the copied part of the source as their native ones do). A key no fine child
+  -- holds lies in a run of sub-ranges regrain_step skipped as aged, or in one whose child is gone: the run's hi
+  -- is the lo of the next fine child up (or the cursor, when there is none), and it is judged against the
+  -- retention horizon exactly as a decoded key's sub-range is above: discarded and logged as
+  -- regrain_reconcile_aged when the run lies below it, refused otherwise. pgpm.part's rows are filtered to this
+  -- parent in a MATERIALIZED CTE before any bound is encoded (#973). This branch runs only on a batch that
+  -- holds such a key, so the common tick pays nothing but the shape test.
+  if v_unshaped then
+    for r in execute format(
+      'with f as materialized (select child_name, lo, hi from pgpm.part where parent_table = $3 and child_name <> $4),
+            g as materialized (select child_name, lo, hi,
+                                      pgpm._encode($5, lo, %1$L, %2$L, %3$L, %4$L, %5$L, %6$L, %7$L, %8$L) as lo_lit,
+                                      pgpm._encode($5, hi, %1$L, %2$L, %3$L, %4$L, %5$L, %6$L, %7$L, %8$L) as hi_lit
+                                 from f where not pgpm._native_gt($5, $6, lo) and not pgpm._native_gt($5, hi, $7)),
+            u as (select k.%9$I as c from %10$I.%11$I k where %12$s and not %13$s)
+       select distinct m.child_name, m.lo_lit, m.hi_lit,
+              case when m.child_name is null
+                   then coalesce((select g.hi from g where g.hi_lit <= u.c order by g.hi::%14$s desc limit 1), $6) end as gap_lo,
+              case when m.child_name is null
+                   then coalesce((select g.lo from g where g.lo_lit > u.c order by g.lo::%14$s limit 1), $8) end as gap_hi
+         from u left join g m on u.c >= m.lo_lit and u.c < m.hi_lit',
+      cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
+      cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz,
+      cfg.control_column, v_dnsp, v_delta, v_batch, v_kshaped, v_ncast)
+      using v_seqs, v_rows, p_parent, p_child, cfg.control_kind, p_lo, p_hi, p_cursor
+    loop
+      if r.child_name is null then
+        v_boundary := pgpm._retain_boundary(cfg);
+        if v_boundary is null or pgpm._native_gt(cfg.control_kind, r.gap_hi, v_boundary) then
+          raise exception 'pg_partition_magician: internal error reconciling % -- captured changes in sub-range [%, %) have no fine child to land in, and the range is not below the retention horizon (%); refusing rather than discarding them.',
+            p_child, r.gap_lo, r.gap_hi, coalesce(v_boundary, 'no retention policy');
+        end if;
+        insert into pgpm.log (parent_table, action, lo, hi)
+          values (p_parent, 'regrain_reconcile_aged', r.gap_lo, r.gap_hi);
+        continue;
+      end if;
+      v_sub_rel := pgpm._regrain_copy_rel(p_parent, r.child_name, 'reconcile captured changes into');
+      execute format(
+        'delete from %s d where %s in (select %s from %I.%I k where %s and not %s and %s >= %L and %s < %L)',
+        v_sub_rel::text, v_dkey_q, v_keycols_q, v_dnsp, v_delta, v_batch, v_kshaped,
+        v_ctl_q, r.lo_lit, v_ctl_q, r.hi_lit)
+        using v_seqs, v_rows;
+      execute format(
+        'insert into %s (%s) select %s from %s s where %s in (select %s from %I.%I k where %s and not %s and %s >= %L and %s < %L)',
+        v_sub_rel::text, v_cols_q, v_cols_q, v_src::text, v_skey_q, v_keycols_q, v_dnsp, v_delta, v_batch, v_kshaped,
+        v_ctl_q, r.lo_lit, v_ctl_q, r.hi_lit)
+        using v_seqs, v_rows;
+    end loop;
+  end if;
 
   -- consume exactly the rows the statements above addressed: by identity, never by watermark (#497) and
   -- never by pgpm_seq alone (#1070)

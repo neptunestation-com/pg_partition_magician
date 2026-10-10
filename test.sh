@@ -1222,6 +1222,8 @@ run_perf() {
     "bench/retain_horizon_ambiguous_wall_time.sh pgpm_perf326"
     "bench/archive_retired_chunk_kept.sh pgpm_perf324"
     "bench/untransmute_pending_detach.sh pgpm_perf327"
+    "bench/ledger_backfill_origin_only_block.sh pgpm_perf330"
+    "bench/regrain_reconcile_unshaped_key.sh pgpm_perf353"
   )
   local selected=()
   local n=${#guards[@]} idx

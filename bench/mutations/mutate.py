@@ -11436,12 +11436,12 @@ MUTATIONS["archive_retired_unnamed_raises"] = (
 )
 MUTATIONS["archive_ledger_backfill_unblocked_attributed"] = (
     _G1141,
-    "The upgrade attributes a pre-existing chunk to the relation pgpm.part records for its name whether or not that "
-    "relation carries the write block, so a partition dropped by hand and re-created under its own name (its "
-    "pgpm.part row kept, anchored by #421 to the successor) inherits the dropped relation's chunk: #452's reset "
-    "discards it on the next tick and the archive step writes over the only copy (PR #1152 round 4). One clause. "
-    "tests/309 part S catches it.",
-    [("     and pgpm._is_write_blocked(l.parent_table, l.child_name);\n", "     and true;\n", 1)],
+    "The upgrade attributes a pre-existing chunk to the relation pgpm.part records for its name even when that "
+    "anchor is one its own #421 backfill adopted from whatever held the name, so a partition dropped by hand and "
+    "re-created under its own name (its pgpm.part row kept) inherits the dropped relation's chunk: #452's reset "
+    "discards it on the next tick and the archive step writes over the only copy (PR #1152 round 4; since #1160 the "
+    "anchor, not the block, is what vouches). One clause. tests/309 part S catches it.",
+    [("     and not (p.child_oid = any (v_adopted))\n", "", 1)],
 )
 MUTATIONS["archive_retired_orphan_delete_unfiltered"] = (
     _G1141,
@@ -11464,6 +11464,57 @@ MUTATIONS["archive_retired_backfill_untimed"] = (
 )
 
 
+# Issue #1160: the upgrade backfill attributes a pre-existing chunk on identity (an anchor pgpm recorded, not one the
+# same upgrade adopted, still held by the name), whatever pgpm left the block as (ALWAYS, origin-only, absent), and
+# retires one under a block an operator disabled or set replica-only. One mutation per clause, all caught by
+# bench/ledger_backfill_origin_only_block.sh (tests/314 and an install.sql round trip).
+_G1160 = "bench/ledger_backfill_origin_only_block.sh"
+_C1160 = ("     and not exists (select 1 from pg_trigger t\n"
+          "                      where t.tgrelid = p.child_oid and t.tgname = 'pgpm_write_block' and t.tgenabled not in ('A', 'O'));\n")
+MUTATIONS["archive_ledger_backfill_origin_only_retired"] = (
+    _G1160,
+    "The upgrade retires a pre-existing chunk whose partition's pgpm_write_block is origin-only, the state every "
+    "release through v0.6.0 created it in (repaired only by the first tick after the upgrade), so every live archived "
+    "partition of such an install is held for good (skip_archive_retired_range, never archived again or dropped). "
+    "One clause, the origin-only state. tests/314 catches it.",
+    [("t.tgname = 'pgpm_write_block' and t.tgenabled not in ('A', 'O'));\n",
+      "t.tgname = 'pgpm_write_block' and t.tgenabled not in ('A'));\n", 1)],
+)
+MUTATIONS["archive_ledger_backfill_lifted_retired"] = (
+    _G1160,
+    "The upgrade attributes a pre-existing chunk only when its partition carries a block, so a partition whose block "
+    "v0.6.0's own tick removed (retention no longer reached it, its chunks kept) is held for good although its "
+    "anchor proves it is the relation archived. The first fix for #1160 had this shape. tests/314 and the round "
+    "trip catch it.",
+    [(_C1160,
+      "     and exists (select 1 from pg_trigger t\n"
+      "                  where t.tgrelid = p.child_oid and t.tgname = 'pgpm_write_block' and t.tgenabled in ('A', 'O'));\n", 1)],
+)
+MUTATIONS["archive_ledger_backfill_hand_state_attributed"] = (
+    _G1160,
+    "The upgrade attributes a pre-existing chunk under a block an operator disabled or set replica-only, coverage "
+    "nothing kept, which the first tick then discards and archives over. One clause. tests/314 catches it.",
+    [(_C1160, "     and true;\n", 1)],
+)
+MUTATIONS["archive_ledger_backfill_adopted_blocked_attributed"] = (
+    _G1160,
+    "The upgrade lets a write block vouch for an anchor its own #421 backfill adopted: a successor re-created by hand "
+    "under a dropped partition's name and write-blocked by a pgpm before #429 inherits the dropped relation's chunk, "
+    "the first tick discards it and archives the successor from lo over the only copy (PR #1188 verification, "
+    "P1-02). tests/314 and the round trip catch it.",
+    [("     and not (p.child_oid = any (v_adopted))\n",
+      "     and (not (p.child_oid = any (v_adopted))\n"
+      "          or exists (select 1 from pg_trigger b where b.tgrelid = p.child_oid and b.tgname = 'pgpm_write_block'))\n", 1)],
+)
+MUTATIONS["archive_ledger_upgrade_adoption_unrecorded"] = (
+    _G1160,
+    "install.sql records no anchor as adopted before its #421 backfill, so the ledger's backfill reads a successor's "
+    "adopted oid as identity and attributes the dropped relation's chunk to it. One clause. Only the round trip "
+    "catches it (tests/314 records the adoption itself).",
+    [("      select parent_table, child_name from pgpm.part where child_oid is null\n",
+      "      select parent_table, child_name from pgpm.part where child_oid is null and false\n", 1)],
+)
+
 # Issue #627: the retain horizon's time part is instant arithmetic, and a retain with no calendar part takes no
 # wall-clock round trip at all. bench/retain_horizon_ambiguous_wall_time.sh runs tests/311 against the mutant.
 MUTATIONS["retain_horizon_wall_round_trip"] = (
@@ -11477,6 +11528,33 @@ MUTATIONS["retain_horizon_wall_round_trip"] = (
       "  end if;\n"
       "  return (((now() at time zone p_tz) - v_cal) at time zone p_tz) - (p_retain - v_cal);\n",
       "  return ((now() at time zone p_tz) - p_retain) at time zone p_tz;\n", 1)],
+)
+# #709 (pass 11 F3-01, #1123 P1-02): the regrain reconcile decodes a captured key only when it has the declared
+# text_time shape, and places one that does not by its encoded value.
+MUTATIONS["regrain_reconcile_decodes_unshaped_key"] = (
+    "bench/regrain_reconcile_unshaped_key.sh",
+    "Pre-#709 _regrain_reconcile: no shape test before the per-row decode, so every captured key is handed to "
+    "_decode, which raises 22P02 on a text_time key the table accepts but that is too short or holds a "
+    "character outside the alphabet. One such key in the delta (an ordinary DELETE of a row the copy already "
+    "moved, or a row any role with INSERT writes into the delta) raises on every tick and at the swap, and the "
+    "run is wedged until regrain_cancel. tests/323 catches it: tick 5 dies 22P02, the delta keeps its seven "
+    "keys, the fine children keep oa and lack oc, the run never swaps, and the aged and refused off-shape keys "
+    "of parts B and C die 22P02 instead of being logged or refused with pgpm's message.",
+    [("  v_kshaped := case when cfg.control_kind = 'text_time'\n"
+      "                    then format('pgpm._text_time_shaped(%s, %L, %s, %s, %L)', v_kctl_native_q,\n"
+      "                                cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_alphabet)\n"
+      "                    else 'true' end;\n",
+      "  v_kshaped := 'true';\n", 1)],
+)
+MUTATIONS["regrain_reconcile_drops_unshaped_key"] = (
+    "bench/regrain_reconcile_unshaped_key.sh",
+    "The plausible-but-wrong #709 fix: an off-shape text_time key no longer reaches _decode, but it is skipped "
+    "rather than placed by its encoded value, so the tick consumes it unapplied. The copy had already moved its "
+    "row into a fine child: a captured DELETE comes back at the swap, an UPDATE is reverted and an INSERT is "
+    "lost with the source. tests/323 catches it: after tick 5 S1's child still holds oa, S0's holds ob without "
+    "its update and S2's lacks oc, and after the swap the day reads oa, ob and lacks oc-inserted.",
+    [("    if r.sub_lo is null then v_unshaped := true; continue; end if;",
+      "    if r.sub_lo is null then continue; end if;", 1)],
 )
 
 
