@@ -1080,6 +1080,7 @@ run_perf() {
     "bench/classify_claims_tap.sh pgpm_perf79"
     "bench/lint_value_not_spelling.sh pgpm_perf125"
     "bench/archive_keys_row_read.sh pgpm_perf349"
+    "bench/lint_child_by_oid_inverse.sh pgpm_perf348"
     "bench/tap_verdict.sh pgpm_perf80"
     "bench/retire_straddle.sh pgpm_perf81"
     "bench/archive_overclaim.sh pgpm_perf82"
