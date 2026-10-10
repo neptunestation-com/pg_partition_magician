@@ -11545,6 +11545,28 @@ returns text language sql immutable as $$
               else pgpm._ts_text(p_native::timestamptz - interval '1 microsecond') end
 $$;
 
+-- Whether two steps of one grid are the SAME step (#1165): whether they lay the same lattice from the same
+-- anchor, which is what a step means to everything that walks it. Not text: '050' is '50', '1 mon' is
+-- '1 month' and '24 hours' is '1 day'. And not interval equality either, which normalises a month to 30 days
+-- and calls '1 month' and '30 days' equal, though the grid reads the first as one calendar month and the
+-- second as 2592000 fixed seconds (_grid_floor, _grid_next), and _part_name labels them differently. So an
+-- id step is compared as a number, and a time step by the two things the grid reads off it: its whole
+-- months, and what is left of it in seconds (a shape that has both is refused by _regrain_step_shape before
+-- anyone asks). A null is the same as a null only.
+create or replace function pgpm._same_step(p_kind text, a text, b text)
+returns boolean language plpgsql immutable as $$
+declare v_ma int; v_mb int;
+begin
+  if a is null or b is null then return a is null and b is null; end if;
+  if p_kind = 'id' then return a::numeric = b::numeric; end if;
+  v_ma := (extract(year from a::interval) * 12 + extract(month from a::interval))::int;
+  v_mb := (extract(year from b::interval) * 12 + extract(month from b::interval))::int;
+  return v_ma = v_mb
+     and extract(epoch from a::interval - make_interval(months => v_ma))
+       = extract(epoch from b::interval - make_interval(months => v_mb));
+end;
+$$;
+
 -- Operator switch for auto-regrain (REDESIGN.md sec 12). p_target_step (an interval for time/uuidv7, a
 -- bigint step as text for id) turns it on: each maintenance tick feathers the oldest frozen coarse child
 -- one budget-sized microbatch toward that granularity. null turns it off (regrain stays operator-driven via
@@ -11632,9 +11654,11 @@ begin
   -- no child with the new grid's bounds and refused as if retention had been loosened, on every tick until
   -- the operator found regrain_cancel. Refused rather than abandoned (as #516 does for null): a new target
   -- is a request for more regraining, and throwing away the copy work is the operator's call to make. The
-  -- target already set is not a change, so re-stating it passes; and with regrain_to null an
+  -- target already set is not a change, so re-stating it passes, in any spelling of the same step (#1165:
+  -- compared as text, '050' was refused as a change from '50', and the remedy offered was regrain_cancel,
+  -- which throws the copy work away; _same_step says what "the same" means); and with regrain_to null an
   -- operator-driven run is in flight at a step pgpm does not know, so any target is a change.
-  if p_target_step is not null and p_target_step is distinct from cfg.regrain_to
+  if p_target_step is not null and not pgpm._same_step(cfg.control_kind, p_target_step, cfg.regrain_to)
      and pgpm._regrain_in_flight(p_parent) then
     raise exception 'pg_partition_magician: set_regrain(%, %) refused -- a regrain of % is in flight (config.regrain_cursor = %) at %, and its copies were cut on that step''s grid; the rest of the run would be computed on the new one, collide with them and wedge every tick. Let it finish, or abandon it with pgpm.regrain_cancel(%) (the source still holds every row) and set the new target then.',
       p_parent, p_target_step, p_parent, coalesce(cfg.regrain_cursor, 'null'),

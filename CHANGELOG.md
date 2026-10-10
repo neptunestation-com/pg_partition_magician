@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **`set_regrain` accepts the in-flight run's own target in any spelling of the same step** (#1165). Its
+  #554 refusal of a change of target while a run is in flight compared the new target with
+  `config.regrain_to` as text, so with a run in flight at `'10'` the call `set_regrain(t, '010')` was refused
+  as a change, against the reference's promise that re-stating the target already set is accepted, and the
+  remedy it named was `regrain_cancel`, which throws the copy work away. The comparison is now
+  `pgpm._same_step`, the grid's own reading of a step: an id step as a number, a time step by its whole
+  months and, past them, its fixed seconds. So `'010'` is `'10'`, `'1 mon'` is `'1 month'` and `'24 hours'`
+  is `'1 day'`, while `'30 days'`, which interval comparison calls equal to `'1 month'`, lays another grid and
+  stays refused. Test `tests/319`; guard `bench/set_regrain_restated_target.sh`, mutations
+  `same_step_id_compared_as_text` and `same_step_interval_equality`.
+
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's

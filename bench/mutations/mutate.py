@@ -5625,7 +5625,7 @@ $$;''',
         "half-built run on the new grid against copies cut on the old one: a CHECK violation on the old "
         "first child, or a swap re-check refusing as if retention had been loosened, on every tick. Removes "
         "only the refusal; the lock stays, so tests/162's sections (A) and (B) are what catch it.",
-        [("""  if p_target_step is not null and p_target_step is distinct from cfg.regrain_to
+        [("""  if p_target_step is not null and not pgpm._same_step(cfg.control_kind, p_target_step, cfg.regrain_to)
      and pgpm._regrain_in_flight(p_parent) then
 """, """  if false then
 """, 1)],
@@ -11396,6 +11396,32 @@ MUTATIONS["retain_horizon_wall_round_trip"] = (
       "  return ((now() at time zone p_tz) - p_retain) at time zone p_tz;\n", 1)],
 )
 
+
+# Issue #1165: set_regrain's #554 in-flight refusal asks whether the target CHANGES by _same_step, the grid's
+# own reading of a step. bench/set_regrain_restated_target.sh runs tests/319 against each mutant.
+MUTATIONS["same_step_id_compared_as_text"] = (
+    "bench/set_regrain_restated_target.sh",
+    "Pre-#1165 (F3-03) set_regrain for an id key: _same_step compares the two steps as text, so with a run "
+    "in flight at '50' re-stating the target as '050' is refused as a change of target, and the remedy the "
+    "message offers is regrain_cancel, which throws the copy work away. One clause, the id branch; a time "
+    "step is still read off the grid. tests/319 part A catches it.",
+    [("  if p_kind = 'id' then return a::numeric = b::numeric; end if;\n"
+      "  v_ma := (extract(year from a::interval) * 12 + extract(month from a::interval))::int;\n",
+      "  if p_kind = 'id' then return a = b; end if;\n"
+      "  v_ma := (extract(year from a::interval) * 12 + extract(month from a::interval))::int;\n", 1)],
+)
+MUTATIONS["same_step_interval_equality"] = (
+    "bench/set_regrain_restated_target.sh",
+    "Issue #1165, the plausible-but-wrong fix: _same_step compares two time steps as intervals, and interval "
+    "equality counts a month as 30 days, so with a run in flight at '1 month' set_regrain(t, '30 days') is "
+    "accepted as the same target, though the grid walks it as 2592000 fixed seconds: the rest of the run is "
+    "computed on a lattice the copies were not cut on, the #554 wedge. One clause, the time branch's "
+    "comparison. tests/319 part B catches it.",
+    [("  return v_ma = v_mb\n"
+      "     and extract(epoch from a::interval - make_interval(months => v_ma))\n"
+      "       = extract(epoch from b::interval - make_interval(months => v_mb));\n",
+      "  return a::interval = b::interval;\n", 1)],
+)
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
