@@ -11021,6 +11021,30 @@ MUTATIONS["quoted_splices_initialiser_unread"] = (
 """, "", 1)],
 )
 MUTATION_SRC["quoted_splices_initialiser_unread"] = "scripts/check_quoted_splices.py"
+# Issues #1154 and #1180: scripts/check_archive_child_by_oid.py's rule 1 is the inverse rule, a name read only
+# alone in a select item or a RAISE argument, and it reads a regclass rendered as text as a name. One mutation per
+# issue, each taking out one clause of the fix; bench/lint_child_by_oid_inverse.sh catches both, on fixtures built
+# from the real module.
+MUTATIONS["archive_child_by_oid_clause_list"] = (
+    "bench/lint_child_by_oid_inverse.sh",
+    "Pre-#1154 scripts/check_archive_child_by_oid.py: rule 1 refuses a name only where it lists (beside a "
+    "comparison operator, in a WHERE/ON/HAVING/USING clause, projected out of a subquery, under an alias) and "
+    "lets it stand anywhere else, so archive._owned_key finding its relation by `order by case c.relname when "
+    "k.relname then 0 else 1 end limit 1` passes, and installed it is #1064. One site, the catch-all refusal.",
+    [("    return (f\"{what} stands {where}; a name may be read only alone as an item of a statement's own select "
+      "list or \"\n"
+      "            f\"of a RAISE, or as a bare argument of quote_ident(), format() or json_build_object() there\")\n",
+      "    return None\n", 1)],
+)
+MUTATION_SRC["archive_child_by_oid_clause_list"] = "scripts/check_archive_child_by_oid.py"
+MUTATIONS["archive_child_by_oid_rendered_exempt"] = (
+    "bench/lint_child_by_oid_inverse.sh",
+    "Pre-#1180 scripts/check_archive_child_by_oid.py: a regclass rendered as text is no name to rule 1 anywhere, "
+    "not only in archive._refuse_foreign_read, so a lookup by `where c.oid::regclass::text = v_rel` passes while "
+    "`c.relname = v_rel` is refused. One site, the rendered-name exemption's scope.",
+    [("        if rendered and scope_of(defs, k) == RENDERED_NAME_SITE:\n", "        if rendered:\n", 1)],
+)
+MUTATION_SRC["archive_child_by_oid_rendered_exempt"] = "scripts/check_archive_child_by_oid.py"
 # pass 10 G20 (#1091, #1092, #1093): three test files that passed against the defect they name, each back to
 # the shape that passed. Judged by bench/tests_fail_on_defect.sh (tests/07, tests/timescale/db/33) and
 # bench/archive_fn_s3_readback.sh (tests/archive/db/08), each against an injection of that defect.
