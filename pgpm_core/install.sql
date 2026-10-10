@@ -412,6 +412,31 @@ alter table pgpm.part add column if not exists retiring_at timestamptz;
 alter table pgpm.part add column if not exists retiring_oid oid;
 alter table pgpm.part add column if not exists child_oid oid;
 
+-- WHICH ANCHORS THIS UPGRADE ADOPTS (#1160). An oid adopted here is "whatever holds the name now", not the relation
+-- pgpm created, and the archive ledger's own upgrade far below (pgpm._backfill_chunk_oids) must not read it as
+-- identity: a partition dropped by hand and re-created under its own name, attached, is adopted here exactly as the
+-- one pgpm archived would be, and a pgpm before #429 write-blocked it all the same. So when that upgrade is still to
+-- run (the ledger exists without its child_oid column), the rows about to be adopted are recorded first, in a table
+-- that lives only until it has run (dropped just after it, below). A table, not session state, so an install
+-- interrupted in between, or run through a pooler that changes backends between statements, still knows on the
+-- re-run which anchors it adopted; and nothing is ever deleted from it before the ledger's upgrade has read it.
+do $$
+begin
+  -- to_regclass, not ::regclass: on a fresh install the ledger does not exist yet, and a cast would raise
+  if to_regclass('pgpm.archive_ledger') is not null
+     and not exists (select 1 from pg_attribute where attrelid = to_regclass('pgpm.archive_ledger')
+                                                 and attname = 'child_oid' and not attisdropped) then
+    create table if not exists pgpm.upgrade_adopted_anchor (
+      parent_table regclass not null,
+      child_name   name     not null,
+      primary key (parent_table, child_name)
+    );
+    insert into pgpm.upgrade_adopted_anchor (parent_table, child_name)
+      select parent_table, child_name from pgpm.part where child_oid is null
+      on conflict do nothing;
+  end if;
+end $$;
+
 -- Backfill child_oid (issue #421). pgpm._backfill_chunk_oids, far below, reads what this leaves unanchored, so
 -- this must stay ahead of it in the file. `where child_oid is null` makes this a one-time adoption per row:
 -- re-running this installer never re-adopts, so a row anchored at one upgrade is not silently
@@ -4427,31 +4452,52 @@ end;
 $$;
 
 -- The upgrade's half of the above, run once, when the column is added. A row recorded before it gets the oid
--- pgpm.part records for its name ONLY when that relation is the one the name resolves to and carries pgpm's write
--- block (enabled ALWAYS): the #452 rule, a watermark describes a relation's contents only because the block has
--- been on THAT relation since the first chunk. A name alone cannot tell the partition pgpm archived from a
--- successor created under it after a hand drop (the #421 backfill anchors pgpm.part to whatever holds the name),
--- and only the archived one carries the block. Every other row is marked retired: one under an unblocked
--- relation (a successor, or a partition whose block an operator lifted, whose coverage #452's reset would discard
--- anyway: marking it is the safe side of the same judgement), one whose name no pgpm.part row records, whether or
--- not a relation has the name now, one with no name, and one whose pgpm.part row is UNANCHORED (no child_oid). That second case reads the #421 backfill of pgpm.part.child_oid,
--- which runs earlier in this file on every install (it comes first in the text, so a fresh run and a re-run
--- alike have anchored every row it can before this runs): a row it could not anchor is one whose partition no
--- longer exists, dropped outside pgpm, so nothing vouches the chunk's rows are anywhere but its object. The safe
--- side of not knowing is to hold whatever partition is adopted over the range, which the logged remedy
--- recovers, rather than leave a row a later discard would delete and a later archive write over. Then every row
--- whose recorded oid no longer exists is marked retired by pgpm._mark_gone_chunks. The invariant afterwards: every
--- row recorded before the column is attributed to a write-blocked relation pgpm.part records for its name, or is
--- marked retired. Returns how many rows it marked.
+-- pgpm.part records for its name ONLY when that oid is IDENTITY (#1160): an anchor pgpm recorded when it created
+-- the partition (every release from v0.6.0 does), not one the #421 backfill adopted in this same upgrade from
+-- whatever held the name (pgpm.upgrade_adopted_anchor, recorded just before that backfill, lists those), and
+-- the relation the name resolves to now is that oid. A name alone, or an adopted anchor, cannot tell the
+-- partition pgpm archived from a successor created under it after a hand drop, and a pgpm before #429 put its
+-- write block on that successor exactly as on the partition it archived, so no state of the block vouches for it
+-- either: a chunk under an adopted anchor is marked retired whatever its block, and the successor is held (the
+-- logged remedy recovers it) rather than archived from lo over the dropped rows' only object.
+--
+-- Under an identity anchor the block's state decides nothing about WHICH relation this is, only whether the
+-- coverage was kept by pgpm: enabled ALWAYS, origin-only (how every release through v0.6.0 created it, repaired
+-- only by the first tick AFTER this upgrade, see _install_write_block), or absent (v0.6.0's tick removed the block
+-- from a partition retention no longer reached, partly archived or not, and kept its chunks) are each a state
+-- pgpm itself leaves, and the chunk is attributed; the first tick's #452/#651 discard then drops that coverage
+-- (the block is not ALWAYS when it reads the ledger) and the partition is archived again from lo under a block,
+-- as before #1141. Asking for an ALWAYS block here marked every live archived partition of a v0.6.0 install
+-- retired, and _over_retired_chunks held each for good. A block present but DISABLED or replica-only is a state
+-- only an operator leaves, so nothing says its rows are still the chunks' rows: that chunk is marked retired.
+--
+-- Every other row is marked retired too: one whose name no pgpm.part row records, whether or not a relation has
+-- the name now, one with no name, one whose pgpm.part row is UNANCHORED (no child_oid), and one whose name now
+-- resolves to another relation. The unanchored case reads the #421 backfill of pgpm.part.child_oid, which runs
+-- earlier in this file on every install: a row it could not anchor is one whose partition no longer exists,
+-- dropped outside pgpm, so nothing vouches the chunk's rows are anywhere but its object. The safe side of not
+-- knowing is to hold whatever partition is adopted over the range, which the logged remedy recovers, rather than
+-- leave a row a later discard would delete and a later archive write over. Then every row whose recorded oid no
+-- longer exists is marked retired by pgpm._mark_gone_chunks. The invariant afterwards: every row recorded before
+-- the column is attributed to the relation pgpm created under its name, or is marked retired. Returns how many
+-- rows it marked. Called with no adopted-anchor table (a fresh install, or a test), no anchor counts as adopted.
 create or replace function pgpm._backfill_chunk_oids() returns int language plpgsql as $$
-declare r record; v_n int;
+declare r record; v_n int; v_adopted oid[] := '{}';
 begin
+  if to_regclass('pgpm.upgrade_adopted_anchor') is not null then
+    execute 'select coalesce(array_agg(p.child_oid), ''{}'') from pgpm.part p
+               join pgpm.upgrade_adopted_anchor a on a.parent_table = p.parent_table and a.child_name = p.child_name
+              where p.child_oid is not null'
+      into v_adopted;
+  end if;
   update pgpm.archive_ledger l set child_oid = p.child_oid
     from pgpm.part p
    where p.parent_table = l.parent_table and p.child_name = l.child_name
      and l.child_oid is null and l.retired_at is null and p.child_oid is not null
+     and not (p.child_oid = any (v_adopted))
      and to_regclass(format('%I.%I', pgpm._child_nsp(l.parent_table, l.child_name), l.child_name))::oid = p.child_oid
-     and pgpm._is_write_blocked(l.parent_table, l.child_name);
+     and not exists (select 1 from pg_trigger t
+                      where t.tgrelid = p.child_oid and t.tgname = 'pgpm_write_block' and t.tgenabled not in ('A', 'O'));
   with gone as (
     update pgpm.archive_ledger l set retired_at = now()
       from pgpm.config c
@@ -4470,6 +4516,16 @@ begin
                                               and attname = 'child_oid' and not attisdropped) then
     alter table pgpm.archive_ledger add column if not exists child_oid oid;
     perform pgpm._backfill_chunk_oids();
+  end if;
+end $$;
+-- the adopted anchors were recorded for the backfill above alone (#1160): dropped once the column it adds exists,
+-- so an install that stopped before the backfill keeps them for the re-run
+do $$
+begin
+  if to_regclass('pgpm.upgrade_adopted_anchor') is not null
+     and exists (select 1 from pg_attribute where attrelid = 'pgpm.archive_ledger'::regclass
+                                              and attname = 'child_oid' and not attisdropped) then
+    drop table pgpm.upgrade_adopted_anchor;
   end if;
 end $$;
 
