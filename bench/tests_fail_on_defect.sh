@@ -258,13 +258,18 @@ if sel 18; then
   else
     say FAIL "the clean install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
   fi
+  # The guard lives in pgpm._transmute_refuse_child_holders (#1167), which the preflight and the cutover
+  # both call, so the plant makes the helper's two relation raises unreachable at every asking.
   if plant no_orphan_guard \
-       "    if v_orphan is not null and v_orphan_kind = 'r' then
-" "    if false then
+       "   limit 1;
+  if v_orphan is not null and v_orphan_kind = 'r' then
+" "   limit 1;
+  if false then
 " \
-       "    elsif v_orphan is not null then
-" "    elsif false then
-"; then
+       "  elsif v_orphan is not null then
+    raise exception 'pg_partition_magician: %.% already exists as a % matching this parent''s partition naming" \
+       "  elsif false then
+    raise exception 'pg_partition_magician: %.% already exists as a % matching this parent''s partition naming"; then
     if fresh && install "$work/no_orphan_guard.sql"; then
       probe=$(q -d "$DB" -q -f - <<<"$ORPHAN_PROBE" 2>&1 | grep -o 'PROBE .*' | head -1)
       if [[ "$probe" == "PROBE P0001 "* && "$probe" != *"$ORPHAN_MSG"* ]]; then
