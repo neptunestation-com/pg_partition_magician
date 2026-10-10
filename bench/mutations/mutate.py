@@ -11529,6 +11529,33 @@ MUTATIONS["retain_horizon_wall_round_trip"] = (
       "  return (((now() at time zone p_tz) - v_cal) at time zone p_tz) - (p_retain - v_cal);\n",
       "  return ((now() at time zone p_tz) - p_retain) at time zone p_tz;\n", 1)],
 )
+# #709 (pass 11 F3-01, #1123 P1-02): the regrain reconcile decodes a captured key only when it has the declared
+# text_time shape, and places one that does not by its encoded value.
+MUTATIONS["regrain_reconcile_decodes_unshaped_key"] = (
+    "bench/regrain_reconcile_unshaped_key.sh",
+    "Pre-#709 _regrain_reconcile: no shape test before the per-row decode, so every captured key is handed to "
+    "_decode, which raises 22P02 on a text_time key the table accepts but that is too short or holds a "
+    "character outside the alphabet. One such key in the delta (an ordinary DELETE of a row the copy already "
+    "moved, or a row any role with INSERT writes into the delta) raises on every tick and at the swap, and the "
+    "run is wedged until regrain_cancel. tests/323 catches it: tick 5 dies 22P02, the delta keeps its seven "
+    "keys, the fine children keep oa and lack oc, the run never swaps, and the aged and refused off-shape keys "
+    "of parts B and C die 22P02 instead of being logged or refused with pgpm's message.",
+    [("  v_kshaped := case when cfg.control_kind = 'text_time'\n"
+      "                    then format('pgpm._text_time_shaped(%s, %L, %s, %s, %L)', v_kctl_native_q,\n"
+      "                                cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_alphabet)\n"
+      "                    else 'true' end;\n",
+      "  v_kshaped := 'true';\n", 1)],
+)
+MUTATIONS["regrain_reconcile_drops_unshaped_key"] = (
+    "bench/regrain_reconcile_unshaped_key.sh",
+    "The plausible-but-wrong #709 fix: an off-shape text_time key no longer reaches _decode, but it is skipped "
+    "rather than placed by its encoded value, so the tick consumes it unapplied. The copy had already moved its "
+    "row into a fine child: a captured DELETE comes back at the swap, an UPDATE is reverted and an INSERT is "
+    "lost with the source. tests/323 catches it: after tick 5 S1's child still holds oa, S0's holds ob without "
+    "its update and S2's lacks oc, and after the swap the day reads oa, ob and lacks oc-inserted.",
+    [("    if r.sub_lo is null then v_unshaped := true; continue; end if;",
+      "    if r.sub_lo is null then continue; end if;", 1)],
+)
 
 
 

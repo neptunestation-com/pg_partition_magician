@@ -1894,6 +1894,13 @@ sub-range lies below the retention horizon, which is the one case in which no ch
 other case the tick fails rather than discarding the change, and the key stays in the delta; under
 `maintain` that surfaces as a `skip_regrain` row carrying the error.
 
+On a `text_time` key, a captured value the table accepted but that lacks the declared shape (shorter than
+the prefix and digit width, or holding a character outside the alphabet) is never decoded: it is reconciled
+into the fine child whose encoded bounds hold it, which is where the copy put its row, and counted in the
+same `regrain_reconcile` row as every other key. When no fine child holds it, the same horizon rule decides,
+over the run of sub-ranges with no child that it falls in: discarded and logged `regrain_reconcile_aged`
+when that run lies below the horizon, a failed tick otherwise.
+
 The first tick installs the capture and copies nothing, so budget one tick more than the microbatch count.
 
 ### `regrain_cancel`

@@ -5812,6 +5812,9 @@ declare
   v_src regclass;         -- the source the rows are reread from, as pgpm.part recorded it (#768)
   v_seq name;             -- the delta's ordering column, found as its identity column (#1074)
   v_seq_q text;           -- the same, quoted for the batch predicate
+  v_kshaped text;         -- does a delta row's key decode: _text_time_shaped of it, or true (#709)
+  v_kfloor text;          -- a delta row's sub-range lo on the target grid, null when its key does not decode
+  v_unshaped boolean := false;   -- the batch holds a key that does not decode (#709)
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
@@ -5882,6 +5885,26 @@ begin
   -- eligible: in this child's range AND behind the cursor
   v_elig := format('%1$s >= %2$L and %1$s < %3$L and %1$s < %4$L', v_ctl_q, v_lo_lit, v_hi_lit, v_cur_lit);
 
+  -- Where a delta row's key goes: the sub-range lo, on the target grid, of its decoded value (#709). A text_time
+  -- key the table accepts need not have the declared shape (too short, or a character outside the alphabet: the
+  -- column is text and a partition bound only compares strings, and _frontier_native treats such a value as
+  -- reachable, #661), and _decode raises 22P02 on one. Decoded unguarded, a single such key in the batch, from an
+  -- ordinary DELETE of a row the copy had already moved or written into the delta by any role with INSERT on
+  -- the table, raised on every tick and at the swap, the cursor never moved, and only regrain_cancel ended
+  -- the run. So the decode is asked only of a key _text_time_shaped accepts (inside CASE, which fixes the
+  -- order: a bare AND lets the planner evaluate either side first), and an off-shape key floors to null.
+  -- It is not discarded: the copy moved its row without decoding it, into the fine child whose ENCODED bounds
+  -- hold it, so a discarded DELETE would come back at the swap and a discarded UPDATE or INSERT be lost. It is
+  -- reconciled there, by the same encoded comparison, below the per-sub-range loop.
+  v_kshaped := case when cfg.control_kind = 'text_time'
+                    then format('pgpm._text_time_shaped(%s, %L, %s, %s, %L)', v_kctl_native_q,
+                                cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_alphabet)
+                    else 'true' end;
+  v_kfloor := format('pgpm._grid_floor(%L, %L, %L, case when %s then pgpm._decode(%L, %s, %L, %L, %L, %L, %L, %L, %L) end, %L)',
+                     cfg.control_kind, p_step, cfg.partition_anchor, v_kshaped, cfg.control_kind, v_kctl_native_q,
+                     cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
+                     cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz);
+
   -- ONE snapshot decides the batch (#497). pgpm_seq is an identity column, assigned when the capture
   -- trigger fires INSIDE the writer's transaction, so a row can commit later than rows that already
   -- carry higher values: a writer that captured a change and then held its transaction open across
@@ -5916,14 +5939,10 @@ begin
   v_batch := format('k.%s = any($1) and k.ctid = any($2)', v_seq_q);
 
   -- one pair of set-based statements per distinct fine child touched, not per key
-  for r in execute format(
-    'select distinct pgpm._grid_floor(%L, %L, %L, pgpm._decode(%L, %s, %L, %L, %L, %L, %L, %L, %L), %L) as sub_lo
-       from %I.%I k where %s',
-    cfg.control_kind, p_step, cfg.partition_anchor, cfg.control_kind, v_kctl_native_q,
-    cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
-    cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz,
-    v_dnsp, v_delta, v_batch) using v_seqs, v_rows
+  for r in execute format('select distinct %s as sub_lo from %I.%I k where %s', v_kfloor, v_dnsp, v_delta, v_batch)
+    using v_seqs, v_rows
   loop
+    if r.sub_lo is null then v_unshaped := true; continue; end if;   -- #709: placed by its encoded value, below
     -- #446: find the fine child by RANGE in pgpm.part, never by re-rendering its name. regrain_step
     -- clamps the first sub-range to the coarse child's own lo when that lo is off the target grid (a
     -- weekly target on a monthly monolith; a 7000 target on a child starting at 20000) and names the
@@ -5970,22 +5989,69 @@ begin
     -- tick after the copy has its name back.
     v_sub_rel := pgpm._regrain_copy_rel(p_parent, v_sub_name, 'reconcile captured changes into');
     execute format(
-      'delete from %s d where %s in (select %s from %I.%I k where %s
-          and pgpm._grid_floor(%L, %L, %L, pgpm._decode(%L, %s, %L, %L, %L, %L, %L, %L, %L), %L) = %L)',
-      v_sub_rel::text, v_dkey_q, v_keycols_q, v_dnsp, v_delta, v_batch,
-      cfg.control_kind, p_step, cfg.partition_anchor, cfg.control_kind, v_kctl_native_q,
-      cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
-      cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz, r.sub_lo)
+      'delete from %s d where %s in (select %s from %I.%I k where %s and %s = %L)',
+      v_sub_rel::text, v_dkey_q, v_keycols_q, v_dnsp, v_delta, v_batch, v_kfloor, r.sub_lo)
       using v_seqs, v_rows;
     execute format(
-      'insert into %s (%s) select %s from %s s where %s in (select %s from %I.%I k where %s
-          and pgpm._grid_floor(%L, %L, %L, pgpm._decode(%L, %s, %L, %L, %L, %L, %L, %L, %L), %L) = %L)',
+      'insert into %s (%s) select %s from %s s where %s in (select %s from %I.%I k where %s and %s = %L)',
       v_sub_rel::text, v_cols_q, v_cols_q, v_src::text, v_skey_q, v_keycols_q, v_dnsp, v_delta, v_batch,
-      cfg.control_kind, p_step, cfg.partition_anchor, cfg.control_kind, v_kctl_native_q,
-      cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
-      cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz, r.sub_lo)
+      v_kfloor, r.sub_lo)
       using v_seqs, v_rows;
   end loop;
+
+  -- #709: the keys that do not decode, placed as the copy placed their rows, by ENCODED value: each goes to the
+  -- fine child of this regrain whose [_encode(lo), _encode(hi)) holds it, compared under the column's own
+  -- collation exactly as the copy's range test and the eligibility above are (_check_text_time_collation
+  -- holds that collation to the alphabet's place-value order, so encoded order is native order and the fine
+  -- children's encoded ranges tile the copied part of the source as their native ones do). A key no fine child
+  -- holds lies in a run of sub-ranges regrain_step skipped as aged, or in one whose child is gone: the run's hi
+  -- is the lo of the next fine child up (or the cursor, when there is none), and it is judged against the
+  -- retention horizon exactly as a decoded key's sub-range is above: discarded and logged as
+  -- regrain_reconcile_aged when the run lies below it, refused otherwise. pgpm.part's rows are filtered to this
+  -- parent in a MATERIALIZED CTE before any bound is encoded (#973). This branch runs only on a batch that
+  -- holds such a key, so the common tick pays nothing but the shape test.
+  if v_unshaped then
+    for r in execute format(
+      'with f as materialized (select child_name, lo, hi from pgpm.part where parent_table = $3 and child_name <> $4),
+            g as materialized (select child_name, lo, hi,
+                                      pgpm._encode($5, lo, %1$L, %2$L, %3$L, %4$L, %5$L, %6$L, %7$L, %8$L) as lo_lit,
+                                      pgpm._encode($5, hi, %1$L, %2$L, %3$L, %4$L, %5$L, %6$L, %7$L, %8$L) as hi_lit
+                                 from f where not pgpm._native_gt($5, $6, lo) and not pgpm._native_gt($5, hi, $7)),
+            u as (select k.%9$I as c from %10$I.%11$I k where %12$s and not %13$s)
+       select distinct m.child_name, m.lo_lit, m.hi_lit,
+              case when m.child_name is null
+                   then coalesce((select g.hi from g where g.hi_lit <= u.c order by g.hi::%14$s desc limit 1), $6) end as gap_lo,
+              case when m.child_name is null
+                   then coalesce((select g.lo from g where g.lo_lit > u.c order by g.lo::%14$s limit 1), $8) end as gap_hi
+         from u left join g m on u.c >= m.lo_lit and u.c < m.hi_lit',
+      cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit,
+      cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz,
+      cfg.control_column, v_dnsp, v_delta, v_batch, v_kshaped, v_ncast)
+      using v_seqs, v_rows, p_parent, p_child, cfg.control_kind, p_lo, p_hi, p_cursor
+    loop
+      if r.child_name is null then
+        v_boundary := pgpm._retain_boundary(cfg);
+        if v_boundary is null or pgpm._native_gt(cfg.control_kind, r.gap_hi, v_boundary) then
+          raise exception 'pg_partition_magician: internal error reconciling % -- captured changes in sub-range [%, %) have no fine child to land in, and the range is not below the retention horizon (%); refusing rather than discarding them.',
+            p_child, r.gap_lo, r.gap_hi, coalesce(v_boundary, 'no retention policy');
+        end if;
+        insert into pgpm.log (parent_table, action, lo, hi)
+          values (p_parent, 'regrain_reconcile_aged', r.gap_lo, r.gap_hi);
+        continue;
+      end if;
+      v_sub_rel := pgpm._regrain_copy_rel(p_parent, r.child_name, 'reconcile captured changes into');
+      execute format(
+        'delete from %s d where %s in (select %s from %I.%I k where %s and not %s and %s >= %L and %s < %L)',
+        v_sub_rel::text, v_dkey_q, v_keycols_q, v_dnsp, v_delta, v_batch, v_kshaped,
+        v_ctl_q, r.lo_lit, v_ctl_q, r.hi_lit)
+        using v_seqs, v_rows;
+      execute format(
+        'insert into %s (%s) select %s from %s s where %s in (select %s from %I.%I k where %s and not %s and %s >= %L and %s < %L)',
+        v_sub_rel::text, v_cols_q, v_cols_q, v_src::text, v_skey_q, v_keycols_q, v_dnsp, v_delta, v_batch, v_kshaped,
+        v_ctl_q, r.lo_lit, v_ctl_q, r.hi_lit)
+        using v_seqs, v_rows;
+    end loop;
+  end if;
 
   -- consume exactly the rows the statements above addressed: by identity, never by watermark (#497) and
   -- never by pgpm_seq alone (#1070)
