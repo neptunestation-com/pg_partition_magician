@@ -11397,6 +11397,18 @@ MUTATIONS["retain_horizon_wall_round_trip"] = (
 )
 
 
+# #1164: forget_missing() names every pgpm.archive_ledger row of the parent it forgets (range, object key, retired)
+# in its forget_missing log row before it deletes them, so the record of where a retired chunk's rows went (the
+# only copy) outlives the ledger rows. The mutation leaves the retired chunks out of that list.
+MUTATIONS["forget_missing_retired_keys_unlogged"] = (
+    "bench/forget_missing_logs_object_keys.sh",
+    "forget_missing's log row names only the chunks of partitions still live at the DROP, not the ones retire() "
+    "had dropped, whose objects are the only copy of their rows: after drop-then-forget nothing in pgpm says where "
+    "the retired rows went (issue #1164). One clause, the gather's filter. tests/318 catches it.",
+    [("      from pgpm.archive_ledger l\n     where l.parent_table = r.parent_table;\n",
+      "      from pgpm.archive_ledger l\n     where l.parent_table = r.parent_table and l.retired_at is null;\n", 1)],
+)
+
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
 # cost), and discriminate.sh's --shard=I/N interleaves that list, so the heavy ones spread over the

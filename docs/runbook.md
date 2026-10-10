@@ -702,6 +702,15 @@ one day believing it manages an unrelated table that lands on that oid.
    No argument, on purpose: it can only ever match rows whose relation is already gone, so it cannot touch a
    live managed table. It is a no-op if nothing is missing.
 
+   If the table was archiving, its `pgpm.archive_ledger` rows go too, and the objects they named now hold the
+   only copy of those rows. The `forget_missing` log row keeps the record: its `method` lists every chunk's
+   range and object key, marking `retired` the ones whose partition `retire()` had dropped. Copy it somewhere
+   your team will find it:
+
+   ```sql
+   select method from pgpm.log where action = 'forget_missing' and parent_table::oid = <parent_oid>;
+   ```
+
 3. **Check `orphan_tables`.** Non-empty means partitions survived their parent's `DROP` and **still hold
    data**. That happens when a partition was detached first -- which is exactly the state a referenced
    partition's retirement sits in between the cron detach and the completing drop (see
