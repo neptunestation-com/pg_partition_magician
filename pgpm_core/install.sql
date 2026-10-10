@@ -6632,7 +6632,7 @@ create or replace function pgpm._regrain_step_shape(p_parent regclass, p_step te
 returns void language plpgsql stable as $$
 declare cfg pgpm.config; v_typname name; v_type oid; v_typmod int; v_scale int; v_months numeric; v_rest interval;
         v_time_keeps text; v_time_unit text; v_enc_prec int; v_enc_unit text;
-        v_enc_epoch timestamptz;
+        v_enc_epoch timestamptz; v_grid_keeps text; v_grid_unit text;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
@@ -6686,11 +6686,31 @@ begin
       raise exception 'pg_partition_magician: regrain target step % for % is not a whole number of days, but its control column % is a date, which holds whole days -- the fine cells'' bounds would truncate to dates and two cells would read as one; give a whole number of days or months',
         p_step, p_parent, quote_ident(cfg.control_column);
     end if;
+    -- #1117: and the REGISTERED grid, asked the same rule as the target below. The fine bounds are the
+    -- target's multiples from the registered anchor, and the source cell's own bounds are the registered
+    -- step's, so an anchor or a step off the column's unit puts the bounds off it whatever the target: ATTACH
+    -- reads each one at another instant than pgpm records (a date reads it as the date it falls in), and the
+    -- run copied every sub-range before every swap failed (empty range bound, or a partition constraint
+    -- violated by some row), leaving the copies, the capture trigger and the TRUNCATE refusal on the source
+    -- until regrain_cancel. transmute holds both to the unit (#1039 for a timestamp(p) key, #769 for a date),
+    -- but an install before those registered what it was given (a timestamptz(0) key anchored 0.4 s off the
+    -- second, a date key anchored at noon), as the encoded-unit check below says of a uuidv7 or text_time key.
+    -- So the registered grid is asked here too, and a run on such a grid, fresh or resumed, is refused before
+    -- anything is copied. The upgrade logs such a grid as warn_grid_off_unit (the block after
+    -- _regrain_step_forward).
+    select b.r_keeps, b.r_unit into v_grid_keeps, v_grid_unit
+      from pgpm._time_unit_breach(v_type, v_typmod, cfg.partition_step, cfg.partition_anchor) b;
+    if v_grid_unit is not null then
+      raise exception 'pg_partition_magician: cannot regrain % -- its grid is not on its control column %''s unit: the column is %, which keeps %, and the registered partition_anchor % and partition_step % do not both fall on whole multiples of %, so every bound of the grid and of any regrain of it is attached at another instant than pgpm records for it, and the run would copy every sub-range before every swap failed (ATTACH PARTITION refusing a fine range that reads as empty, or a row outside the bounds it attaches). An install that did not hold the grid to the unit registered it: convert the table back with pgpm.untransmute and transmute it again with an anchor and a step that are whole multiples of %',
+        p_parent, quote_ident(cfg.control_column), format_type(v_type, v_typmod), v_grid_keeps,
+        cfg.partition_anchor, cfg.partition_step, v_grid_unit,
+        case when v_type = 'date'::regtype then '1 day (an anchor at 00:00 UTC)' else v_grid_unit end;
+    end if;
     -- #980: and a fixed step finer than a timestamp(p) column's precision. Every fine bound is a multiple
     -- of the step from the anchor, and ATTACH rounds each one to p fractional-second digits, so two
     -- adjacent bounds can round to the same instant: refused here, before a run copies anything it could
     -- never swap in. The rule is _time_unit_breach's, which transmute's partition step answers to as well
-    -- (#1039); the anchor is the registered one, which transmute already held to it.
+    -- (#1039); the anchor is the registered one, asked above.
     select b.r_keeps, b.r_unit into v_time_keeps, v_time_unit
       from pgpm._time_unit_breach(v_type, v_typmod, p_step, null) b;
     if v_time_unit is not null then
@@ -6767,6 +6787,48 @@ begin
   perform pgpm._regrain_step_shape(p_parent, p_step);   -- #674, #641: and a step the grid can place
 end;
 $$;
+
+-- Upgrade path (#1139 bullet 1, #1117): a time grid an older install registered off its control column's unit,
+-- an anchor or a step that is not a whole multiple of what the column keeps (a date key anchored at noon before
+-- #769's rule, a timestamptz(0) key anchored 0.4 s off the second before #1039's), is one transmute refuses
+-- today and nothing else re-asks: obtain goes on minting partitions whose recorded bounds the catalog attached
+-- at other instants (pgpm.part says [D 12:00, D+1 12:00) over FOR VALUES FROM ('D') TO ('D+1')), so extend_to
+-- can report a range covered that a write into it is refused, and any regrain of it is refused up front
+-- (_regrain_step_shape above). The upgrade cannot repair such a grid (its recorded bounds and its catalog
+-- disagree, and only a reconversion makes them agree), so it says so: one warn_grid_off_unit row per grid,
+-- naming the anchor, the step, the unit and the remedy, logged once (a re-run of this file finds the row and
+-- does not repeat it) and raised as a WARNING to the session running the upgrade on every run that finds the
+-- grid. The column is resolved as _regrain_step_shape resolves it: by the partition key's attnum (a renamed
+-- control column), through any domain. A parent that no longer exists is left to forget_missing.
+do $$
+declare
+  cfg pgpm.config; v_type oid; v_typmod int; v_keeps text; v_unit text; v_msg_q text;
+begin
+  for cfg in select * from pgpm.config c where c.control_kind = 'time' order by c.parent_table::oid loop
+    continue when not exists (select 1 from pg_class k where k.oid = cfg.parent_table);
+    cfg := pgpm._control_followed(cfg);
+    select a.atttypid, a.atttypmod into v_type, v_typmod
+      from pg_attribute a
+     where a.attrelid = cfg.parent_table and a.attname = cfg.control_column and not a.attisdropped;
+    continue when v_type is null;
+    while exists (select 1 from pg_type t where t.oid = v_type and t.typtype = 'd') loop
+      select t.typbasetype, case when v_typmod = -1 then t.typtypmod else v_typmod end into v_type, v_typmod
+        from pg_type t where t.oid = v_type;
+    end loop;
+    select b.r_keeps, b.r_unit into v_keeps, v_unit
+      from pgpm._time_unit_breach(v_type, v_typmod, cfg.partition_step, cfg.partition_anchor) b;
+    continue when v_unit is null;
+    v_msg_q := format('the grid of %s is not on its control column %s''s unit: the column is %s, which keeps %s, and the registered partition_anchor %s and partition_step %s do not both fall on whole multiples of %s (an install before transmute held a grid to its column''s unit registered it). Every partition obtain mints is attached at other bounds than pgpm.part records for it, and every regrain of the table is refused. Convert the table back with pgpm.untransmute(%L) and transmute it again with an anchor and a step that are whole multiples of %s',
+                    cfg.parent_table::text, quote_ident(cfg.control_column), format_type(v_type, v_typmod), v_keeps,
+                    cfg.partition_anchor, cfg.partition_step, v_unit, cfg.parent_table::text,
+                    case when v_type = 'date'::regtype then '1 day (an anchor at 00:00 UTC)' else v_unit end);
+    raise warning 'pg_partition_magician: %', v_msg_q;
+    if not exists (select 1 from pgpm.log l
+                    where l.parent_table = cfg.parent_table and l.action = 'warn_grid_off_unit' and l.method = v_msg_q) then
+      insert into pgpm.log (parent_table, action, method) values (cfg.parent_table, 'warn_grid_off_unit', v_msg_q);
+    end if;
+  end loop;
+end $$;
 
 -- one resumable microbatch of regrain work on coarse child p_child toward target step p_target_step.
 -- Returns: 'copied:N' (copied N rows into the current fine child), 'swapped:K' (cursor reached hi -> detached

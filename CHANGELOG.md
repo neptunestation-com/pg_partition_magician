@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+- **A regrain asks a time grid's registered anchor and step, not the target alone** (#1117). transmute holds a
+  time grid to what its control column keeps (#1039 for a `timestamp(p)` key, #769 for a `date`), but an
+  install before those registered what it was given: a `timestamptz(0)` key anchored 0.4 s off the second, a
+  `date` key anchored at 12:00 UTC. `_regrain_step_shape` asked the unit rule of the regrain target only, on
+  the premise that the registered anchor was already held to it, so a regrain of such a grid was accepted,
+  prepared and copied, and every swap then failed (a fine range a `date` reads as empty, or a row outside the
+  whole-second bounds ATTACH attached), leaving the copies, the capture trigger and the `TRUNCATE` refusal on
+  the source until `regrain_cancel`. The registered anchor and step are now asked too, as a `uuidv7` or
+  `text_time` key's registered grid already was (#1039), so `set_regrain`, `regrain_step`, `regrain()` and the tick's auto-regrain refuse such a
+  grid before anything is copied, naming the anchor, the step, the column's unit and the remedy (reconvert
+  with `pgpm.untransmute` and `transmute`). Test `tests/324`; guard
+  `bench/regrain_registered_grid_off_unit.sh`, mutation `regrain_step_registered_time_anchor_unasked`.
+
+- **The upgrade flags a time grid an older install registered off its column's unit** (#1139 bullet 1).
+  Nothing re-read `pgpm.config` for such a grid after the upgrade, and obtain went on minting partitions
+  whose recorded bounds the catalog attached at other instants (a `date` grid anchored at noon records
+  `[D 12:00, D+1 12:00)` over `FOR VALUES FROM ('D') TO ('D+1')`). Re-running `install.sql` now logs each
+  such grid once as `warn_grid_off_unit`, naming the anchor, the step, the unit and the remedy, and raises
+  it as a `WARNING` to the upgrading session on every run that finds it. The grid itself is not repaired
+  (only a reconversion makes its records and its catalog agree), and obtain's behaviour on it is unchanged.
+  Test `tests/324`; guard `bench/regrain_registered_grid_off_unit.sh`, mutation
+  `upgrade_grid_off_unit_unflagged`.
+
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's
