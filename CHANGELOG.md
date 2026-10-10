@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **A tick that builds nothing costs the lookahead, not the lookahead times the partitions** (#1162).
+  `obtain`'s walk asked `_cell_attached` of every lookahead cell, and each ask scanned every attached
+  `pgpm.part` row of the parent through `_native_gt`, so a no-op tick did lookahead x partitions comparisons
+  (81,204 `_native_gt` calls at lookahead 200, 1,284,804 at 800, about 3 s at 1440) on every run of the
+  every-minute obtain job; `extend_to`'s walk did the same. Both walks now read the parent's attached rows
+  once (`_cell_walk_rows`, each with `_part_built`'s verdict) and judge each ascending cell against that read
+  (`_cell_walk_step`): a cell a built row covers and no dead row overlaps is skipped, and every other cell is
+  still asked of `_cell_attached`, so a hand-dropped or hand-detached cell is forgotten, logged and rebuilt as
+  before. `maintain_obtain`'s back-off walk still asks per step. Test `tests/316`; guard
+  `bench/obtain_walk_reads_rows_once.sh`, mutations `obtain_walk_scans_per_cell`,
+  `extend_to_walk_scans_per_cell`, `cell_walk_trusts_built_over_dead_row`.
+
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's
