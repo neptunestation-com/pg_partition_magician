@@ -9,14 +9,21 @@
 # with nothing writing to it, and its object holds every row once. An export that never put a page
 # boundary between two rows of the same control value at the same ctid in two heaps satisfies that too,
 # so the file pins the premise with witnesses (a page is one row; each relation holds its twins at (0,1)
-# in two heaps) and states each object by its rows' identities, and pointing it at the mutant every CI
-# run checks that those assertions fail when the cursor leaves the heap out again.
+# in two heaps) and states each object by its rows' identities, and pointing it at the mutants every CI
+# run checks that those assertions fail when the cursor leaves the heap out again. The same holds for a
+# relation whose control column holds NULL (parts C and D): such a row is paged in a run of its own after
+# every other row, and the file bounds every export with a statement_timeout, so the mutant whose export
+# never ends fails an assertion by name instead of hanging the run.
 #
-# The mutation it is required to fail against (bench/mutations/mutate.py):
-#   to_s3_cursor_heap_unkeyed -- archive.to_s3's next-page predicate compares (control, ctid) with the
-#                                cursor, without the heap, so the second twin is skipped and the
-#                                conservation check refuses the quiescent export, in both of the
-#                                file's shapes
+# The mutations it is required to fail against (bench/mutations/mutate.py):
+#   to_s3_cursor_heap_unkeyed    -- the next-page predicate compares (control, ctid) with the cursor,
+#                                   without the heap, so the second twin is skipped and the conservation
+#                                   check refuses the quiescent export (parts A and B)
+#   to_s3_cursor_null_blind      -- the cursor as it was, NULL-blind: a NULL control value is never paged
+#                                   with small pages (part C, refused), and a page ending on one restarts
+#                                   the read forever (part D, cancelled)
+#   to_s3_cursor_null_restart    -- the first run admits a NULL control value, so part D never ends
+#   to_s3_cursor_null_run_unread -- no NULL run follows the first, so parts C and D are refused
 #
 # Usage: archive_to_s3_multi_heap.sh <container> <db> [archive install.sql]
 # Needs the archive image (pgsql-http + pgtap + pg_prove) AND MinIO on the same network: the file PUTs
@@ -79,8 +86,8 @@ if [ "$fail" = 0 ]; then
   # failure from a run that never reached the database, which discriminate.sh would otherwise read as
   # "the guard caught the defect".
   ran=$(echo "$out" | grep -cE '^(not )?ok [0-9]+ -')
-  if [ "$rc" = 0 ]; then printf 'PASS  %-58s %s\n' "to_s3 of a multi-heap relation pages every row (#1168)" "$ran ran"
-  else printf 'FAIL  %-58s %s\n' "to_s3 of a multi-heap relation pages every row (#1168)" "$ran ran"; fail=1; fi
+  if [ "$rc" = 0 ]; then printf 'PASS  %-58s %s\n' "to_s3 pages every row, multi-heap or NULL control (#1168)" "$ran ran"
+  else printf 'FAIL  %-58s %s\n' "to_s3 pages every row, multi-heap or NULL control (#1168)" "$ran ran"; fail=1; fi
   # A failure is only evidence against the code when the setup it depends on held. Name any
   # LIVENESS witness that failed, so a mutant run that fails for the fixture's sake reads as that.
   if echo "$out" | grep -qE '^not ok [0-9]+ - .*LIVENESS'; then

@@ -16,7 +16,16 @@
 -- (and one more row). The fixtures are asymmetric (two rows in one heap, one in the other) so a skipped row and a
 -- doubled one cannot cancel, and each object is stated by identity: its rows' (id, payload) pairs. Each object's
 -- key is cleared and witnessed absent first, because the bucket outlives the test database.
-select plan(12);
+--
+-- The same contract holds for a relation whose control column holds NULL (pgpm's own partitions cannot, but a
+-- relation the synchronous export accepts can). The keyset predicate compared a NULL control value as NULL, so
+-- such a row was never paged and the export was refused as a write (part C, V-01 of the PR's verification), and
+-- a page ending on such a row set the cursor to NULL, which reads as "no cursor": the next page started over and
+-- the export never ended (part D, V-02). The NULL rows are now read after every other row, in a run of their
+-- own paged by (tableoid, ctid). Part C pages one row at a time over two heaps with a NULL twin pair at (0,1);
+-- part D reads a whole relation in one page. Every export runs under a statement_timeout, and t51.try_export
+-- reports a cancel by name, so an export that never ends fails its assertion instead of hanging the file.
+select plan(24);
 
 create schema t51;
 create table t51.evt (id bigint primary key, payload text not null);
@@ -36,6 +45,19 @@ create table t51.inh (id bigint, payload text);
 create table t51.inh_c () inherits (t51.inh);
 insert into t51.inh values (1, 'p');
 insert into t51.inh_c values (1, 'q'), (4, 'r');
+-- C: two heaps, a NULL-control twin pair at (0,1), leaf a also holding 1:a and 3:c
+create table t51.nul (id bigint, k int, payload text) partition by list (k);
+create table t51.nul_a partition of t51.nul for values in (1);
+create table t51.nul_b partition of t51.nul for values in (2);
+insert into t51.nul values (null, 1, 'n'), (null, 2, 'm'), (1, 1, 'a'), (3, 1, 'c');
+-- D: one heap, one NULL-control row, exported under a second parent whose page holds the whole relation
+create table t51.evt2 (id bigint primary key, payload text not null);
+insert into t51.evt2 values (1, 'evt');
+call pgpm.transmute('t51.evt2', 'id', 10000::bigint, p_paused => true);
+select archive.configure('t51.evt2', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p',
+                         p_fetch_rows => 1000);
+create table t51.one (id bigint, payload text);
+insert into t51.one values (1, 'a'), (null, 'n'), (2, 'b');
 
 create function t51.req(p_method text, p_key text) returns http_response language sql as $$
   select archive.s3_signed_request(p_method, 'http://minio:9000', 'archive-test-bucket', 'us-east-1', p_key, '',
@@ -48,19 +70,31 @@ create function t51.rows(p_key text) returns text[] language plpgsql as $$
 declare v http_response := t51.req('GET', p_key); r text[];
 begin
   if v.status <> 200 then return null; end if;
-  select array_agg((l::jsonb ->> 'id') || ':' || (l::jsonb ->> 'payload')
+  select array_agg(coalesce(l::jsonb ->> 'id', 'NULL') || ':' || (l::jsonb ->> 'payload')
                    order by (l::jsonb ->> 'id')::bigint, l::jsonb ->> 'payload')
     into r
     from regexp_split_to_table(v.content, e'\n') as s(l) where l <> '';
   return r;
 end $$;
--- runs archive.to_s3 over the relation and reports 'ok' or the error it raised
-create function t51.try_export(p_child name) returns text language plpgsql as $$
+-- runs archive.to_s3 over the relation under p_parent and reports 'ok', the error it raised, or that the
+-- statement_timeout cancelled it (which `when others` does not catch)
+create function t51.try_export(p_child name, p_parent regclass default 't51.evt') returns text language plpgsql as $$
 begin
-  perform archive.to_s3('t51.evt', p_child, null, null);
+  perform archive.to_s3(p_parent, p_child, null, null);
   return 'ok';
-exception when others then return sqlerrm;
+exception
+  when query_canceled then return 'cancelled by statement_timeout: the export did not end';
+  when others then return sqlerrm;
 end $$;
+-- the id:payload pairs a relation holds, sorted the way t51.rows sorts an object's
+create function t51.held(p_rel regclass) returns text[] language plpgsql as $$
+declare r text[];
+begin
+  execute format('select array_agg(coalesce(id::text, ''NULL'') || '':'' || payload order by id, payload) from %s', p_rel)
+    into r;
+  return r;
+end $$;
+set statement_timeout = '20s';
 
 -- 1-2. The premises both shapes share: a page is one row, and the twins share a ctid in two heaps.
 select is((select fetch_rows from archive.config where parent_table = 't51.evt'::regclass), 1,
@@ -95,5 +129,34 @@ select is(t51.rows(:'kb'), array['1:p', '1:q', '4:r'],
 select is((select array_agg(id || ':' || payload order by id, payload) from t51.inh), array['1:p', '1:q', '4:r'],
   'LIVENESS: the inheritance parent still holds exactly those rows (nothing wrote to it)');
 select is(t51.clear(:'kb'), 404, 'LIVENESS: the inheritance parent''s object is cleared after the check');
+
+-- 13-18. C: NULL control values across two heaps, a page of one row.
+select is((select string_agg(tableoid::regclass::text || ':' || ctid::text || ':' || payload, ',' order by payload desc)
+             from t51.nul where id is null),
+  't51.nul_a:(0,1):n,t51.nul_b:(0,1):m',
+  'LIVENESS: the relation holds two rows whose control value is NULL, at the same ctid (0,1) in two heaps');
+select :'p' || 't51.nul.ndjson' as kc \gset
+select is(t51.clear(:'kc'), 404, 'LIVENESS: no object at the NULL-control relation''s key before its export');
+select is(t51.try_export('nul'), 'ok',
+  'archive.to_s3 of a relation holding NULL control values, nothing writing to it, completes');
+select is(t51.rows(:'kc'), array['1:a', '3:c', 'NULL:m', 'NULL:n'],
+  'its object holds rows 1:a and 3:c and both NULL-control rows NULL:m (leaf b) and NULL:n (leaf a), each once');
+select is(t51.held('t51.nul'), array['1:a', '3:c', 'NULL:m', 'NULL:n'],
+  'LIVENESS: the relation still holds exactly those rows (nothing wrote to it)');
+select is(t51.clear(:'kc'), 404, 'LIVENESS: the NULL-control relation''s object is cleared after the check');
+
+-- 19-24. D: one page holds the whole relation, a NULL-control row among its rows.
+select is((select fetch_rows from archive.config where parent_table = 't51.evt2'::regclass), 1000,
+  'LIVENESS: under t51.evt2 a page is 1000 rows, so the first page holds every row of t51.one, the NULL one last');
+select :'p' || 't51.one.ndjson' as kd \gset
+select is(t51.clear(:'kd'), 404, 'LIVENESS: no object at the one-page relation''s key before its export');
+select is(t51.try_export('one', 't51.evt2'), 'ok',
+  'archive.to_s3 of a one-page relation ending on a NULL control value ends, and completes');
+select is(t51.rows(:'kd'), array['1:a', '2:b', 'NULL:n'],
+  'its object holds rows 1:a, 2:b and NULL:n, each once');
+select is(t51.held('t51.one'), array['1:a', '2:b', 'NULL:n'],
+  'LIVENESS: the one-page relation still holds exactly those rows (nothing wrote to it)');
+select is(t51.clear(:'kd'), 404, 'LIVENESS: the one-page relation''s object is cleared after the check');
+reset statement_timeout;
 
 select * from finish();

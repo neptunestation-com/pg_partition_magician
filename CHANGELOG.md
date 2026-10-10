@@ -8,6 +8,12 @@
   control value at the same ctid, with a page boundary between them, had the next page skip the second, and the
   conservation check refused the export as "a write changed the partition" with nothing writing, on every retry.
   The cursor is now (control, tableoid, ctid), unique across the heaps a read reaches and, on a relation of one
+  heap, the same order as before. Such a relation can also hold a NULL control value, which the row comparison
+  never paged (refused the same way) and which, ending a page, set the cursor to NULL and restarted the read, so
+  an export whose first page held the whole relation never ended. Rows with a NULL control value are now paged
+  in a run of their own after every other row, by (tableoid, ctid). `tests/archive/db/51` under
+  `bench/archive_to_s3_multi_heap.sh`, with the mutations `to_s3_cursor_heap_unkeyed`, `to_s3_cursor_null_blind`,
+  `to_s3_cursor_null_restart` and `to_s3_cursor_null_run_unread`.
   heap, the same order as before. `tests/archive/db/51` under `bench/archive_to_s3_multi_heap.sh`, with the
   mutation `to_s3_cursor_heap_unkeyed`.
 - **`from_hypertable` refuses a step its time dimension's type cannot hold before the copy, not after the

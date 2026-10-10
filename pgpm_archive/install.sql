@@ -3397,6 +3397,7 @@ declare
   v_key_id text; v_secret text; v_nsp name; v_key text;
   v_child regclass;   -- the relation resolved, held and claimed; every read below goes by it, never by name (#1030)
   v_part_payload text; v_chunk text; v_cursor text; v_cursor_rel oid; v_cursor_tid tid; v_done boolean := false;
+  v_null_run boolean := false;   -- paging the rows whose control value is NULL, after every other row
   v_page_rows bigint; v_written bigint := 0; v_expected bigint;
   v_page_h numeric; v_written_h numeric := 0; v_expected_h numeric;   -- the rows' identity, not only their count (#673)
   v_upload_id text; v_part int := 0; v_etag text; v_parts_xml text := '';
@@ -3499,19 +3500,34 @@ begin
       -- v_child, the relation resolved and claimed, never as its schema and name (#1030): a regclass renders
       -- as the name that reaches that oid in this session at the moment of rendering, so a schema renamed
       -- away and a namesake created in its place cannot stand in for it.
+      --
+      -- A control value of NULL is paged too, in a run of its own after every other row. pgpm's partitions
+      -- cannot hold one (the column is NOT NULL), but a relation this function accepts can, and NULL took
+      -- the order apart twice: the row comparison is NULL for such a row, so once a cursor was set it was
+      -- never paged and the conservation check refused the export, and a page ending on one set the cursor
+      -- to NULL, which is "no cursor", so the next page read from the top again and the export never ended
+      -- (it re-read the relation and uploaded a part every part_bytes until cancelled). Now the first run
+      -- reads only non-NULL control values, so its cursor is never NULL; when it runs dry the NULL run
+      -- starts, keyed by (tableoid, ctid) alone, which is total over those rows. Each run is one simple
+      -- predicate once $5 is known (EXECUTE binds the parameters as constants), so the index on the
+      -- control column still drives the first, and the second is an IS NULL condition.
       execute format(
         'select coalesce(string_agg(j, e''\n'' order by k, r, c), ''''),
                 archive._cursor_text((array_agg(k order by k desc, r desc, c desc))[1]),
                 (array_agg(r order by k desc, r desc, c desc))[1],
                 (array_agg(c order by k desc, r desc, c desc))[1],
                 count(*), coalesce(sum(hashtextextended(j, 0)), 0)
-           from (select row_to_json(t.*)::text as j, t.%I as k, t.tableoid as r, t.ctid as c from %s t
-                  where $1 is null or (t.%I, t.tableoid, t.ctid) > ($1::%s, $2, $3)
-                  order by t.%I, t.tableoid, t.ctid limit $4) s',
-        pcfg.control_column, v_child::text, pcfg.control_column, v_ctltype, pcfg.control_column)
+           from (select row_to_json(t.*)::text as j, t.%1$I as k, t.tableoid as r, t.ctid as c from %2$s t
+                  where case when $5 then t.%1$I is null and ($3 is null or (t.tableoid, t.ctid) > ($2, $3))
+                             else t.%1$I is not null and ($1 is null or (t.%1$I, t.tableoid, t.ctid) > ($1::%3$s, $2, $3))
+                        end
+                  order by t.%1$I, t.tableoid, t.ctid limit $4) s',
+        pcfg.control_column, v_child::text, v_ctltype)
         into v_chunk, v_cursor, v_cursor_rel, v_cursor_tid, v_page_rows, v_page_h
-        using v_cursor, v_cursor_rel, v_cursor_tid, cfg.fetch_rows;
-      if v_page_rows = 0 then v_done := true;
+        using v_cursor, v_cursor_rel, v_cursor_tid, cfg.fetch_rows, v_null_run;
+      if v_page_rows = 0 and not v_null_run then
+        v_null_run := true; v_cursor := null; v_cursor_rel := null; v_cursor_tid := null;
+      elsif v_page_rows = 0 then v_done := true;
       else
         v_written := v_written + v_page_rows; v_written_h := v_written_h + v_page_h;
         v_part_payload := v_part_payload || v_chunk || e'\n';
