@@ -8400,6 +8400,66 @@ begin
 end;
 $$;
 
+-- The orphan-child guard: nothing may hold a name pgpm could give one of this table's fine children,
+-- <rel>_p<label>. Asked in the preflight, and by the cutover twice more (#1135, #1167), see below.
+--
+-- Regrain creates each fine child as a standalone table (CREATE TABLE ... LIKE) and only ATTACHes it at the
+-- swap. An interrupted regrain therefore leaves an un-attached child, which DROP TABLE <parent> CASCADE does
+-- NOT remove (an un-attached table has no dependency on the parent). If the table is later recreated or
+-- reloaded and re-transmuted, the next regrain reuses the orphan by name and INSERTs rows whose keys already
+-- live in it: a cryptic mid-regrain "duplicate key" deep inside regrain_step. So any standalone (un-attached)
+-- relation in this schema whose name matches this parent's child-partition naming is refused. starts_with
+-- handles the (un-escaped) rel prefix; _is_fine_child_label decides whether the suffix is a fine child's
+-- label, the same helper restore_incoming_fks's in-flight gate asks (#726).
+--
+-- Any relkind, not tables only (#509): a sequence, view or index holding a child's name occupies that name
+-- just the same, and the relkind filter this once had let it through to obtain, which skips any candidate
+-- whose name is taken. The conversion then COMPLETED with no forward partition. Only a table can be a regrain
+-- orphan, so only a table gets that diagnosis; anything else is named for what it is. The monolith's own
+-- coarse name is a different shape (<rel>_p<lo>_to_<hi>) and is checked separately (see above).
+--
+-- #707: and in pg_type. A partition's CREATE TABLE needs its name free there too (a table's row type takes
+-- its name), which pg_class cannot show, so an enum or domain named like a child passed this guard and
+-- obtain's CREATE TABLE met it with 42710. The same name shape, asked of _type_squatter (#671), which leaves
+-- a relation's own row type and an implicit array type alone. The suffix is recognised by
+-- _is_fine_child_label, as in pg_class above (#794).
+--
+-- In the cutover a partition attached to the new parent is not a holder (it is in pg_inherits), nor is its
+-- row type (_type_squatter), so the guard asks the same question there and refuses only what the preflight
+-- would have. It reads pg_class and pg_type under the statement's snapshot, not through to_regclass, for the
+-- reason _transmute_refuse_names_held gives.
+create or replace function pgpm._transmute_refuse_child_holders(p_nsp name, p_rel name, p_control_kind text)
+returns void language plpgsql stable as $$
+declare v_orphan name; v_orphan_kind "char";
+begin
+  select c.relname, c.relkind into v_orphan, v_orphan_kind
+    from pg_class c
+   where c.relnamespace = (select n.oid from pg_namespace n where n.nspname = p_nsp)
+     and starts_with(c.relname, p_rel || '_p')
+     and pgpm._is_fine_child_label(p_control_kind, substr(c.relname, length(p_rel) + 3))
+     and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid)
+   limit 1;
+  if v_orphan is not null and v_orphan_kind = 'r' then
+    raise exception 'pg_partition_magician: %.% already exists as a standalone table matching this parent''s partition naming -- most likely an orphan left by an interrupted regrain. Drop it (drop table %.%) and retry transmute.',
+      p_nsp, v_orphan, quote_ident(p_nsp), quote_ident(v_orphan);
+  elsif v_orphan is not null then
+    raise exception 'pg_partition_magician: %.% already exists as a % matching this parent''s partition naming, and the conversion would collide with it when it creates that partition. Drop or rename it and retry transmute.',
+      p_nsp, v_orphan, pgpm._relkind_noun(v_orphan_kind);
+  end if;
+  select t.typname into v_orphan
+    from pg_type t
+   where t.typnamespace = (select n.oid from pg_namespace n where n.nspname = p_nsp)
+     and starts_with(t.typname, p_rel || '_p')
+     and pgpm._is_fine_child_label(p_control_kind, substr(t.typname, length(p_rel) + 3))
+     and pgpm._type_squatter(p_nsp, t.typname) is not null
+   limit 1;
+  if v_orphan is not null then
+    raise exception 'pg_partition_magician: %.% already exists as % matching this parent''s partition naming, and the conversion would collide with it when it creates that partition (a table''s row type takes its name, so no type may hold it). Drop or rename the type, then retry transmute.',
+      p_nsp, v_orphan, pgpm._type_squatter(p_nsp, v_orphan);
+  end if;
+end;
+$$;
+
 -- Publication membership the cutover cannot carry, refused (#566, #710). Step 7c adds the new parent to every
 -- publication that names the table, with the same row filter and column list, and two shapes cannot make
 -- that trip: a row filter or a column list in a publication with publish_via_partition_root = false, which
@@ -8846,6 +8906,7 @@ declare
   v_monolith name; v_monreg regclass;
   v_own_arr name;   -- #1105: the table's own array type's name, which the first RENAME updates
   v_pre_names text[];   -- #1105: what held a naming statement's names just before it ran (XX000 arm)
+  v_fwd_names name[] := '{}'; v_fwd_lo text; v_fwd_hi text;   -- #1135: the forward cells' names, for a failed obtain
   v_tz text;   -- #455: the zone the grid is computed in, recorded in config.partition_tz
   v_claim_tz text;   -- #506: the zone recorded with the claim, which a resume adopts along with the bound
   v_claim_attnum smallint;   -- #628: the control column recorded with the claim, which a resume must match
@@ -9070,61 +9131,9 @@ begin
     end if;
   end if;
 
-  -- Orphaned-child guard (REDESIGN.md): regrain creates each fine child as a standalone table
-  -- (CREATE TABLE ... LIKE) and only ATTACHes it at the swap. An interrupted regrain therefore
-  -- leaves an un-attached child -- which DROP TABLE <parent> CASCADE does NOT remove (an
-  -- un-attached table has no dependency on the parent). If the table is later recreated/reloaded
-  -- and re-transmuted, the next regrain reuses the orphan by name and INSERTs rows whose keys
-  -- already live in it: a cryptic mid-regrain "duplicate key" deep inside regrain_step.
-  -- Refuse up front -- any standalone (un-attached) table in this schema whose name matches this
-  -- parent's child-partition naming (<rel>_p<label>) is an orphan. starts_with handles the
-  -- (un-escaped) rel prefix; _is_fine_child_label decides whether the suffix is a fine child's label,
-  -- the same helper restore_incoming_fks's in-flight gate asks (#726).
-  --
-  -- Any relkind, not tables only (#509): a sequence, view or index holding a child's name occupies that
-  -- name just the same, and the relkind filter this once had let it through to obtain, which skips any
-  -- candidate whose name is taken (`continue when to_regclass(...) is not null`, its way of recognising
-  -- a partition it already made). The conversion then COMPLETED with no forward partition and nothing
-  -- logged: the first write past hi failed with "no partition of relation ... found for row", and every
-  -- later tick skipped the name again. Only a table can be a regrain orphan, so only a table gets that
-  -- diagnosis; anything else is named for what it is. The monolith's own coarse name is a different
-  -- shape (<rel>_p<lo>_to_<hi>) and is checked separately, just before phase 1, once the bound that
-  -- determines it is final.
-  declare v_orphan name; v_orphan_kind "char";
-  begin
-    select c.relname, c.relkind into v_orphan, v_orphan_kind
-      from pg_class c
-     where c.relnamespace = (select n.oid from pg_namespace n where n.nspname = v_nsp)
-       and starts_with(c.relname, v_rel || '_p')
-       and pgpm._is_fine_child_label(p_control_kind, substr(c.relname, length(v_rel) + 3))
-       and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid)
-     limit 1;
-    if v_orphan is not null and v_orphan_kind = 'r' then
-      raise exception 'pg_partition_magician: %.% already exists as a standalone table matching this parent''s partition naming -- most likely an orphan left by an interrupted regrain. Drop it (drop table %.%) and retry transmute.',
-        v_nsp, v_orphan, quote_ident(v_nsp), quote_ident(v_orphan);
-    elsif v_orphan is not null then
-      raise exception 'pg_partition_magician: %.% already exists as a % matching this parent''s partition naming, and the conversion would collide with it when it creates that partition. Drop or rename it and retry transmute.',
-        v_nsp, v_orphan, pgpm._relkind_noun(v_orphan_kind);
-    end if;
-    -- #707: and in pg_type. A partition's CREATE TABLE needs its name free there too (a table's row type
-    -- takes its name), which pg_class cannot show, so an enum or domain named like a child passed this
-    -- guard and obtain's CREATE TABLE met it with 42710. The same name shape, asked of _type_squatter
-    -- (#671), which leaves a relation's own row type and an implicit array type alone. The suffix is
-    -- recognised by _is_fine_child_label, as in pg_class above (#794): this half kept '^[0-9]{19}$' when
-    -- #726 moved that one, so a type under a 20-digit, fractional or short negative cell's name passed
-    -- and obtain left that cell unbuilt.
-    select t.typname into v_orphan
-      from pg_type t
-     where t.typnamespace = (select n.oid from pg_namespace n where n.nspname = v_nsp)
-       and starts_with(t.typname, v_rel || '_p')
-       and pgpm._is_fine_child_label(p_control_kind, substr(t.typname, length(v_rel) + 3))
-       and pgpm._type_squatter(v_nsp, t.typname) is not null
-     limit 1;
-    if v_orphan is not null then
-      raise exception 'pg_partition_magician: %.% already exists as % matching this parent''s partition naming, and the conversion would collide with it when it creates that partition (a table''s row type takes its name, so no type may hold it). Drop or rename the type, then retry transmute.',
-        v_nsp, v_orphan, pgpm._type_squatter(v_nsp, v_orphan);
-    end if;
-  end;
+  -- Orphaned-child guard (REDESIGN.md, #509, #707): nothing may hold a name pgpm could give one of this
+  -- table's fine children. See the helper, which the cutover asks again (#1135, #1167).
+  perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind);
 
   -- Staging-name collision guard (#344): phase 3 builds the new parent under a temporary name BEFORE
   -- either rename (so that none of its setup work adds to the outage), which means that name must be
@@ -10475,7 +10484,46 @@ begin
   -- these exist, so they are created here rather than waiting for the first maintenance tick. obtain needs
   -- no special casing: the frontier sits inside the monolith, so its k=0 candidate overlaps and is skipped,
   -- and k=1 onward lays down [B, B + obtain x step) flush against the monolith's upper bound.
-  perform pgpm.obtain(v_parent);
+  --
+  -- The names those partitions take, asked again (#1135, #1167). The preflight's orphan-child guard asked
+  -- them once, and no lock on the table keeps a name in its schema free. A holder committed after that
+  -- (while phases 1 and 2 had let go of the table, or while the conversion waited for a lock) is stepped over
+  -- by obtain (_obtain_name), which left that cell unbuilt and the conversion complete with a hole in its
+  -- grid (fail_obtain_name), where the preflight refuses the same name; so the guard is asked again once
+  -- obtain has asked, when every holder obtain stepped over is visible to it, and refuses in the up-front
+  -- words. And a holder a still-open transaction is creating is invisible to obtain's asking, so the
+  -- partition's CREATE TABLE waits for it (up to this phase's lock_timeout) and, once it commits, fails:
+  -- 23505 on pg_class's or pg_type's name index (or 42P07, 42710 for one committed between obtain's asking
+  -- and its CREATE). That failure asks the guard, and then _transmute_refuse_names_held over the forward
+  -- cells' names (each CREATE also takes its cell's array type name), as the staging CREATE and the RENAMEs
+  -- do (#1105). Either refusal rolls the cutover back to the resumable phase-2 state; whatever neither
+  -- recognises is raised as it came. The general helper passes over what held those names before obtain
+  -- ran (p_skip): a type committed at a cell's array type name is no obstacle, since PostgreSQL steps around
+  -- it, so it cannot be what the CREATE collided with, and only a holder that appeared during the wait is.
+  --
+  -- Every forward cell's name this obtain could create, its lookahead past the monolith, and what holds
+  -- any of the names their CREATEs take now.
+  v_fwd_lo := v_hi_native;
+  for v_k in 1 .. p_obtain loop
+    begin
+      v_fwd_hi := pgpm._grid_next(p_control_kind, p_step, v_fwd_lo, v_tz);
+      v_fwd_names := v_fwd_names || pgpm._part_name(v_rel, p_control_kind, p_step, v_fwd_lo, v_fwd_hi, v_tz);
+    exception when raise_exception or datetime_field_overflow or numeric_value_out_of_range then
+      exit;   -- past the grid's end, or a cell no name fits: obtain creates none there either
+    end;
+    v_fwd_lo := v_fwd_hi;
+  end loop;
+  v_pre_names := pgpm._transmute_names_present(v_nsp, v_fwd_names);
+  begin
+    perform pgpm.obtain(v_parent);
+  exception
+    when duplicate_table or duplicate_object or unique_violation then
+      perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind);
+      perform pgpm._transmute_refuse_names_held(v_nsp, v_fwd_names, 'CREATE of a forward partition',
+                                                p_skip => v_pre_names);
+      raise;
+  end;
+  perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind);
 
   -- the conversion is complete: deleting the claim row IS releasing the claim, and nothing is left for the
   -- reaper to undo.

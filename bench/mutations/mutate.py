@@ -1237,11 +1237,11 @@ MUTATIONS = {
         "same call converting once the squatter is gone.",
         [
             (TRANSMUTE_MONOLITH_NAME_RE, "", 1),
-            ("     where c.relnamespace = (select n.oid from pg_namespace n where n.nspname = v_nsp)\n"
-             "       and starts_with(c.relname, v_rel || '_p')\n",
-             "     where c.relnamespace = (select n.oid from pg_namespace n where n.nspname = v_nsp)\n"
-             "       and c.relkind = 'r'\n"
-             "       and starts_with(c.relname, v_rel || '_p')\n", 1),
+            ("   where c.relnamespace = (select n.oid from pg_namespace n where n.nspname = p_nsp)\n"
+             "     and starts_with(c.relname, p_rel || '_p')\n",
+             "   where c.relnamespace = (select n.oid from pg_namespace n where n.nspname = p_nsp)\n"
+             "     and c.relkind = 'r'\n"
+             "     and starts_with(c.relname, p_rel || '_p')\n", 1),
         ],
     ),
     "transmute_claim_refuses_own_session": (
@@ -4392,8 +4392,8 @@ $$;''',
         "Issue #707 (transmute) put back: the orphan-child guard looks in pg_class alone, so a domain or enum "
         "named like one of the parent's children passes the conversion and obtain meets it later. One site: "
         "the pg_type half of the guard matches nothing. tests/184 (E) catches it: the call is not refused.",
-        [("       and pgpm._type_squatter(v_nsp, t.typname) is not null\n     limit 1;\n",
-          "       and false\n     limit 1;\n", 1)],
+        [("     and pgpm._type_squatter(p_nsp, t.typname) is not null\n   limit 1;\n",
+          "     and false\n   limit 1;\n", 1)],
     ),
     "regrain_step_sign_unchecked": (
         "bench/regrain_step_positive.sh",
@@ -7126,11 +7126,11 @@ select ok(
         "does (#726). A type under a 20-digit, fractional or short negative cell's name passes, the "
         "conversion completes, and obtain leaves that cell unbuilt. One site, the pg_type query's label "
         "test; tests/215's three refusals catch it, while its 19-digit control still passes.",
-        [("       and pgpm._is_fine_child_label(p_control_kind, substr(t.typname, length(v_rel) + 3))\n",
-          "       and case when p_control_kind = 'id'\n"
-          "                then substr(t.typname, length(v_rel) + 3) ~ '^[0-9]{19}$'\n"
-          "                else substr(t.typname, length(v_rel) + 3) ~ '^[0-9]{4}(_[0-9]+)*$'\n"
-          "           end\n", 1)],
+        [("     and pgpm._is_fine_child_label(p_control_kind, substr(t.typname, length(p_rel) + 3))\n",
+          "     and case when p_control_kind = 'id'\n"
+          "              then substr(t.typname, length(p_rel) + 3) ~ '^[0-9]{19}$'\n"
+          "              else substr(t.typname, length(p_rel) + 3) ~ '^[0-9]{4}(_[0-9]+)*$'\n"
+          "         end\n", 1)],
     ),
     # Issue #825, one mutation per site that asks pgpm._refuse_filtered_reads.
     "transmute_reads_under_caller_rls": (
@@ -11396,6 +11396,57 @@ MUTATIONS["retain_horizon_wall_round_trip"] = (
       "  return ((now() at time zone p_tz) - p_retain) at time zone p_tz;\n", 1)],
 )
 
+
+# Issues #1167 and #1135: the names the cutover's forward partitions take, asked again by the cutover: the
+# orphan-child guard once obtain has asked, and the guard and the general names helper from the forward
+# CREATE's own failure. bench/transmute_child_names_under_lock.sh runs tests/321 against each mutant.
+MUTATIONS["transmute_child_names_preflight_only"] = (
+    "bench/transmute_child_names_under_lock.sh",
+    "Pre-#1167 transmute: the orphan-child guard (a relation or a type at a child name <rel>_p<label>) is asked "
+    "in the preflight only. A table (tests/321 (A)) or an enum (B) committed at a forward cell's name after it "
+    "is stepped over by the cutover's obtain, and the conversion completes with that cell unbuilt "
+    "(fail_obtain_name): every write into it is refused. One site: the cutover's asking after its obtain.",
+    [("      raise;\n  end;\n  perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind);\n",
+      "      raise;\n  end;\n", 1)],
+)
+MUTATIONS["transmute_forward_create_unhandled"] = (
+    "bench/transmute_child_names_under_lock.sh",
+    "Pre-#1135 transmute: the cutover's obtain has no handler for 23505, so a holder of a name a forward "
+    "partition's CREATE takes that a still-open transaction was creating, the cell's own name (tests/321 (C)) "
+    "or its array type name (D), makes the cutover die raw once it commits, after phases 1 and 2 committed the "
+    "bound and the claim. One site: the unique_violation arm of the handler around the cutover's obtain.",
+    [("    when duplicate_table or duplicate_object or unique_violation then\n"
+      "      perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind);\n",
+      "    when duplicate_table or duplicate_object then\n"
+      "      perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind);\n", 1)],
+)
+MUTATIONS["transmute_forward_orphan_unasked"] = (
+    "bench/transmute_child_names_under_lock.sh",
+    "#1135 with the forward CREATE's handler asking the general names helper only, not the orphan-child "
+    "guard: a table an open transaction was creating at a forward cell's name (tests/321 (C)) is refused in "
+    "the general helper's words, not the up-front ones the file pins. One site: that handler's guard call.",
+    [("unique_violation then\n      perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind);\n"
+      "      perform pgpm._transmute_refuse_names_held(v_nsp, v_fwd_names,",
+      "unique_violation then\n      perform pgpm._transmute_refuse_names_held(v_nsp, v_fwd_names,", 1)],
+)
+MUTATIONS["transmute_forward_held_names_unchecked"] = (
+    "bench/transmute_child_names_under_lock.sh",
+    "#1135 with the forward CREATE's handler asking the orphan-child guard only: a type an open transaction "
+    "was creating at a forward partition's array type name, _<cell> (tests/321 (D)), which the guard's "
+    "<rel>_p<label> shape does not match, makes the cutover die raw 23505 once it commits. One site: that "
+    "handler's call of _transmute_refuse_names_held.",
+    [("      perform pgpm._transmute_refuse_names_held(v_nsp, v_fwd_names, 'CREATE of a forward partition',\n"
+      "                                                p_skip => v_pre_names);\n",
+      "", 1)],
+)
+MUTATIONS["transmute_forward_blames_preexisting"] = (
+    "bench/transmute_child_names_under_lock.sh",
+    "#1135's handler without its record of what was already there: when a still-open transaction was creating "
+    "a type at the second forward cell's array type name (tests/321 (F)), the refusal blames the type "
+    "committed at the FIRST cell's array type name before obtain ran, which PostgreSQL steps around, and "
+    "names a remedy that does not apply. One site: the general helper's p_skip argument there.",
+    [(",\n                                                p_skip => v_pre_names);\n", ");\n", 1)],
+)
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
