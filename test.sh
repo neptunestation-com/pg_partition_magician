@@ -1256,6 +1256,7 @@ run_perf() {
     "bench/transmute_child_names_under_lock.sh pgpm_perf337"
     "bench/obtain_walk_reads_rows_once.sh pgpm_perf332"
     "bench/ci_runs_lint_jobs.sh pgpm_perf351"
+    "bench/throws_pinned_sites.sh pgpm_perf350"
   )
   local selected=()
   local n=${#guards[@]} idx
