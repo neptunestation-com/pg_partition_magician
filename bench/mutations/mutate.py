@@ -9144,6 +9144,34 @@ select is((select count(*) || '/' || string_agg(device_id::text, ',' order by de
         [("l.parent_table = p_parent and l.child_name = v_rel and l.retired_at is null returning 1)",
           "l.parent_table = p_parent and l.child_name = v_rel and l.retired_at is null and false returning 1)", 1)],
     ),
+    # Issue #1162: obtain's and extend_to's walks read the attached rows once, not once per cell.
+    "obtain_walk_scans_per_cell": (
+        "bench/obtain_walk_reads_rows_once.sh",
+        "Pre-#1162 obtain: every cell of the lookahead walk is asked of _cell_attached, which scans every "
+        "attached pgpm.part row of the parent through _native_gt, so a tick that builds nothing does lookahead "
+        "x partitions comparisons (about 16x the calls at 4x the lookahead). One clause, the walk's verdict "
+        "from its one read. tests/316 part A catches it.",
+        [("    continue when v_covered or pgpm._cell_attached(p_parent, cfg, v_lo, v_hi);\n",
+          "    continue when pgpm._cell_attached(p_parent, cfg, v_lo, v_hi);\n", 1)],
+    ),
+    "extend_to_walk_scans_per_cell": (
+        "bench/obtain_walk_reads_rows_once.sh",
+        "Pre-#1162 extend_to: every cell of the walk is asked of _cell_attached, a scan of every attached row of "
+        "the parent per cell, so a walk over a built range costs cells x partitions. One clause, the walk's "
+        "verdict from its one read. tests/316 part C catches it.",
+        [("    if not (v_covered or pgpm._cell_attached(p_parent, cfg, v_lo, v_hi)) then\n",
+          "    if not pgpm._cell_attached(p_parent, cfg, v_lo, v_hi) then\n", 1)],
+    ),
+    "cell_walk_trusts_built_over_dead_row": (
+        "bench/obtain_walk_reads_rows_once.sh",
+        "Issue #1162, the plausible-but-wrong fix: the one read's verdict is any BUILT row overlapping the "
+        "cell, so a cell a dead row ALSO overlaps (a relation dropped by hand, recorded over a built cell) is "
+        "skipped without asking _cell_attached, and the dead row is never forgotten or logged. One clause, "
+        "the dead-row test in _cell_walk_step. tests/316 parts B and D catch it.",
+        [("  p_covered := p_reach is not null and pgpm._native_gt(p_kind, p_reach, p_lo)\n"
+          "               and (p_dead_reach is null or not pgpm._native_gt(p_kind, p_dead_reach, p_lo));\n",
+          "  p_covered := p_reach is not null and pgpm._native_gt(p_kind, p_reach, p_lo);\n", 1)],
+    ),
 }
 
 # name -> source file (repo-relative), for mutations that don't touch pgpm_core/install.sql.

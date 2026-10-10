@@ -2228,6 +2228,71 @@ begin
 end;
 $$;
 
+-- _cell_walk_rows and _cell_walk_step (#1162): a walk over ascending grid cells (obtain's lookahead,
+-- extend_to's walk) reads the parent's attached rows ONCE and judges every cell against what it read,
+-- instead of asking _cell_attached of each cell. _cell_attached scans every attached row of the parent
+-- (pgpm.part's only index is (parent_table, child_name), and the bounds are native text compared through
+-- _native_gt), so a walk that asked it per cell did lookahead x partitions comparisons: 81,204 _native_gt
+-- calls for a no-op obtain at lookahead 200 and 1,284,804 at 800, about 3 s at 1440, on every run of the
+-- every-minute obtain job. The walk is now linear in the lookahead plus the partitions it reads.
+--
+-- _cell_walk_rows reads, once, the parent's attached rows that can overlap a cell at or past p_from (hi >
+-- p_from), in native lo order, each with _part_built's verdict on it (the one rule, see above). Filtered
+-- to this parent in a MATERIALIZED CTE before any bound is cast (#973). The order is total over the three
+-- columns returned, so the three arrays stay aligned.
+--
+-- _cell_walk_step is handed the next cell [p_lo, p_hi) of an ASCENDING walk and the state it returned for
+-- the previous one (p_at, the first row not yet passed; p_reach and p_dead_reach, the greatest hi of the
+-- BUILT rows and of the rows that are not built, among the rows passed). A row is passed once its lo is
+-- below the cell's hi, and since the walk only climbs it stays passed, so each row is read once per walk.
+-- A row not yet passed starts at or past the cell's hi and cannot overlap it; a passed row overlaps it iff
+-- its hi is above the cell's lo, so the greatest hi answers for all of them. p_covered is true only when a
+-- BUILT row overlaps the cell and no row that is NOT built does: exactly the cells _cell_attached would
+-- answer true for without forgetting anything. Every other cell (nothing overlaps it, or a dead row does
+-- and must be forgotten and logged, #908 #956 #981) is still asked of _cell_attached by the caller, so the
+-- hole-rebuild path, its log rows and the fresh read before a build are unchanged. A cell the walk itself
+-- built is not in the read and cannot mislead it: the walk's later cells start at or past its hi.
+-- One-directional: true comes only from a built row the read saw, since a wrong true skips a cell that
+-- needs building, while a false costs only the per-cell ask it replaced. maintain_obtain's back-off walk
+-- (at most ceil(obtain / 2) + 1 steps, and only while a back-off is armed) still asks per step.
+create or replace function pgpm._cell_walk_rows(p_parent regclass, p_kind text, p_from text,
+                                                  out los text[], out his text[], out built boolean[])
+language sql stable as $$
+  with mine as materialized (
+    select p.lo, p.hi, p.child_oid, p.retiring_at
+      from pgpm.part p
+     where p.parent_table = p_parent and p.attached),
+  ahead as materialized (
+    select m.lo, m.hi, pgpm._part_built(p_parent, m.child_oid, m.retiring_at) as built,
+           case when p_kind = 'id' then m.lo::numeric end as lo_n,
+           case when p_kind <> 'id' then m.lo::timestamptz end as lo_t
+      from mine m
+     where pgpm._native_gt(p_kind, m.hi, p_from))
+  select coalesce(array_agg(a.lo order by a.lo_n, a.lo_t, a.lo, a.hi, a.built), '{}'),
+         coalesce(array_agg(a.hi order by a.lo_n, a.lo_t, a.lo, a.hi, a.built), '{}'),
+         coalesce(array_agg(a.built order by a.lo_n, a.lo_t, a.lo, a.hi, a.built), '{}')
+    from ahead a;
+$$;
+
+create or replace function pgpm._cell_walk_step(p_kind text, p_lo text, p_hi text,
+                                                  p_los text[], p_his text[], p_built boolean[],
+                                                  inout p_at int, inout p_reach text, inout p_dead_reach text,
+                                                  out p_covered boolean)
+language plpgsql stable as $$
+begin
+  while p_at <= cardinality(p_los) and pgpm._native_gt(p_kind, p_hi, p_los[p_at]) loop
+    if p_built[p_at] then
+      if p_reach is null or pgpm._native_gt(p_kind, p_his[p_at], p_reach) then p_reach := p_his[p_at]; end if;
+    elsif p_dead_reach is null or pgpm._native_gt(p_kind, p_his[p_at], p_dead_reach) then
+      p_dead_reach := p_his[p_at];
+    end if;
+    p_at := p_at + 1;
+  end loop;
+  p_covered := p_reach is not null and pgpm._native_gt(p_kind, p_reach, p_lo)
+               and (p_dead_reach is null or not pgpm._native_gt(p_kind, p_dead_reach, p_lo));
+end;
+$$;
+
 -- the write frontier in native terms: now() (time), max(control) (id/uuidv7)
 create or replace function pgpm._frontier_native(p_parent regclass)
 returns text language plpgsql as $$
@@ -2744,6 +2809,9 @@ declare
   v_slots bigint := current_setting('max_locks_per_transaction')::bigint
                     * (current_setting('max_connections')::bigint + current_setting('max_prepared_transactions')::bigint);
   v_locks0 bigint; v_locks1 bigint; v_locks2 bigint;
+  -- the walk's one read of the attached rows, and its state (#1162, see _cell_walk_step)
+  v_los text[]; v_his text[]; v_built boolean[];
+  v_at int := 1; v_reach text; v_dead_reach text; v_covered boolean;
 begin
   -- #951: refused before anything is read or committed; no argument here has a null meaning
   perform pgpm._refuse_null_arguments('obtain', json_build_object('p_parent', p_parent));
@@ -2765,6 +2833,10 @@ begin
   -- are not charged to the cells this call builds, and before the walk, so everything the walk itself
   -- takes is (the first partition's cost includes the walk's own reads up to it)
   select count(*) into v_locks0 from pg_locks where pid = pg_backend_pid() and not fastpath;
+  -- #1162: the attached rows the walk can meet, read once (after the budget's zero, where the first cell's
+  -- _cell_attached used to read them), so a tick costs the lookahead plus the partitions, not their product
+  select r.los, r.his, r.built into v_los, v_his, v_built
+    from pgpm._cell_walk_rows(p_parent, cfg.control_kind, v_lo) r;
 
   for k in 0 .. cfg.obtain loop
     if k > 0 then v_lo := pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_lo, cfg.partition_tz); end if;
@@ -2793,8 +2865,13 @@ begin
     -- covers the active interval, REDESIGN.md section 7). Creating it would error on an overlapping
     -- partition; pgpm.part is the source of truth, and the non-overlap invariant holds over attached rows
     -- only, once a row whose partition was dropped by hand is forgotten (#908, see _cell_attached). Asked
-    -- BEFORE the name (#572): a taken name does not mean the cell is built, see _obtain_name.
-    continue when pgpm._cell_attached(p_parent, cfg, v_lo, v_hi);
+    -- BEFORE the name (#572): a taken name does not mean the cell is built, see _obtain_name. A cell the
+    -- walk's one read shows built, with no dead row to forget, is skipped without asking again (#1162);
+    -- every other cell is asked of _cell_attached, which forgets and logs a dead row first.
+    select w.p_at, w.p_reach, w.p_dead_reach, w.p_covered into v_at, v_reach, v_dead_reach, v_covered
+      from pgpm._cell_walk_step(cfg.control_kind, v_lo, v_hi, v_los, v_his, v_built,
+                                v_at, v_reach, v_dead_reach) w;
+    continue when v_covered or pgpm._cell_attached(p_parent, cfg, v_lo, v_hi);
     v_name := pgpm._obtain_name(p_parent, cfg, v_nsp, v_rel, v_lo, v_hi);
     -- a hole in the grid, so it is logged (#710)
     if v_name is null then
@@ -2893,6 +2970,9 @@ declare
   v_slots bigint := current_setting('max_locks_per_transaction')::bigint
                     * (current_setting('max_connections')::bigint + current_setting('max_prepared_transactions')::bigint);
   v_locks0 bigint; v_locks1 bigint; v_locks2 bigint; v_projected bigint;
+  -- the walk's one read of the attached rows, and its state (#1162, see _cell_walk_step)
+  v_los text[]; v_his text[]; v_built boolean[];
+  v_at int := 1; v_reach text; v_dead_reach text; v_covered boolean;
 begin
   -- #896: none of the three has a null meaning. A null p_max made every cap test below null, so the dry
   -- count neither exited nor refused and a typo'd p_value was walked grid step by grid step.
@@ -2938,6 +3018,9 @@ begin
   end if;
 
   v_lo := pgpm._grid_floor(cfg.control_kind, cfg.partition_step, cfg.partition_anchor, v_frontier, cfg.partition_tz);
+  -- #1162: the attached rows the walk can meet, read once, as obtain reads them
+  select r.los, r.his, r.built into v_los, v_his, v_built
+    from pgpm._cell_walk_rows(p_parent, cfg.control_kind, v_lo) r;
   loop
     v_hi := pgpm._grid_next(cfg.control_kind, cfg.partition_step, v_lo, cfg.partition_tz);
     -- the grid can run out (#299): a uuidv7 grid stops at the 48-bit ceiling. obtain() exits quietly
@@ -2950,8 +3033,12 @@ begin
       raise exception 'pg_partition_magician: extend_to(%, %) reaches the % grid''s ceiling before covering it; cannot extend that far',
         p_parent, p_value, cfg.control_kind;
     end;
-    -- overlap first, then the name (#572, see _obtain_name), exactly as obtain asks (#908: _cell_attached)
-    if not pgpm._cell_attached(p_parent, cfg, v_lo, v_hi) then
+    -- overlap first, then the name (#572, see _obtain_name), exactly as obtain asks (#908: _cell_attached,
+    -- skipped for a cell the walk's one read shows built with no dead row to forget, #1162)
+    select w.p_at, w.p_reach, w.p_dead_reach, w.p_covered into v_at, v_reach, v_dead_reach, v_covered
+      from pgpm._cell_walk_step(cfg.control_kind, v_lo, v_hi, v_los, v_his, v_built,
+                                v_at, v_reach, v_dead_reach) w;
+    if not (v_covered or pgpm._cell_attached(p_parent, cfg, v_lo, v_hi)) then
       v_name := pgpm._obtain_name(p_parent, cfg, v_nsp, v_rel, v_lo, v_hi);
       -- a hole in the grid, so it is logged (#710), as obtain does
       if v_name is null then
