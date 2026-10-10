@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+- **The inverted wrappers apply `discriminate.sh`'s premise rule to the file they judge** (#1176).
+  `hypertable_catchup_identity.sh`, `archive_fn_s3_readback.sh` and `tests_fail_on_defect.sh` certify a pgTAP
+  file by its FAILING against a planted defect, and counted any `not ok`, so a file whose only failure under
+  the defect was a `LIVENESS:` witness was reported as catching it. Each DEFECT verdict now goes through one
+  `# >>> defect verdict` block that reads `starved()` out of `bench/discriminate.sh` and requires a failed
+  assertion that is not a `LIVENESS:`, `GUARD:` or `fixture:` premise. `bench/wrapper_premise_rule.sh`
+  evaluates each block and runs `tests_fail_on_defect.sh` on a copy of tests/90 whose length refusal is
+  relabelled a premise; mutations `inverted_verdict_counts_premises`,
+  `archive_readback_verdict_counts_premises` and `tests_fail_on_defect_counts_premises`.
+
+- **A wrapper whose pgTAP file reached no assertion is a starved fixture, not a catch** (#1177). When no
+  `not ok` was printed, `starved()` read every `FAIL` line as a check, the wrapper's restated verdict
+  (`FAIL  <label>  0 ran`) and the unprefixed "the assertions were reached at all" line included, so a mutant
+  whose fixture raised certified its guard. The restated verdict (`N ran`, `N ran, M failed`) is now set
+  aside in that fallback too, the reached-at-all line prints as `LIVENESS:` in all 201 wrappers that have
+  one, and the timescale wrappers' shared verdict block (38 copies) prints its raw-error, psql-exit and
+  shortfall lines as `fixture:` when no assertion ran, as the inverted wrappers' "ran to its end" line now
+  does. `bench/wrapper_premise_rule.sh` runs `obtain_lock_budget.sh` and every timescale block on a file
+  that raises before its first assertion; mutations `starved_counts_restated_verdict`,
+  `reached_line_unprefixed` and `timescale_verdict_unreached_as_check`.
+
 - **`obtain_backoff_headroom.sh`'s back-off premise prints as a premise** (#1175). The check that the back-off
   is still in the future before the low-headroom tick (header item 4, there so assertion 5 cannot pass because
   30 s elapsed) printed without `LIVENESS:`, so a run whose back-off lapsed and which failed only that premise
