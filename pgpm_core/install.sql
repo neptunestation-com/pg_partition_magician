@@ -6195,12 +6195,19 @@ $$;
 -- the copy under the swap's ACCESS EXCLUSIVE on the parent; one the parent dropped or changed stayed on
 -- the fine child. A NOT VALID key and a self-reference are left out on the parent's side because regrain
 -- never makes a copy with them, and a key's clones onto the partitions of a partitioned referenced table
--- (conparentid set) on both sides. A copy's key with the definition of one the parent holds NOT VALID is
--- left out on the copy's side (#633): on PostgreSQL 18 restore_incoming_fks re-adds a key NOT VALID on a
--- partitioned referencing table, regrain's swap of the table it references re-adds it so mid-run, and a
--- copy made while it was validated still carries it validated; that is not drift, since the swap's ATTACH
--- adopts the copy's key as it is, and a restart would discard every copy for nothing. The name is not compared: ATTACH matches a key by its definition, so a
--- renamed key is still adopted. A copy is made LIKE its parent,
+-- (conparentid set) on both sides. A copy's key that is the one the parent now holds NOT VALID, under the
+-- same name and definition, is left out on the copy's side (#633): on PostgreSQL 18 restore_incoming_fks
+-- re-adds a key NOT VALID on a partitioned referencing table, regrain's swap of the table it references
+-- re-adds it so mid-run (under its recorded name), and a copy made while it was validated still carries it
+-- validated; that is not drift, since the swap's ATTACH adopts the copy's key as it is, and a restart would
+-- discard every copy for nothing. By name as well as definition, so that only the key it was carried from
+-- excuses it: a parent can hold a validated key and a NOT VALID twin of the same definition (PostgreSQL 18
+-- accepts one), the copy carries the validated one under ITS name, and matching on the definition alone
+-- left that key out, read the parent's validated key as missing from every copy, and restarted the run on
+-- every other tick for good. A copy made from the parent as it is never holds a key under the name of a
+-- NOT VALID parent key (it is given the validated ones only), so a restart always clears this case. Apart
+-- from that the name is not compared: ATTACH matches a key by its definition, so a renamed key is still
+-- adopted. A copy is made LIKE its parent,
 -- so the two differ only when the parent has been altered since; regrain_step restarts the run when they
 -- do. One statement over every copy, comparing each relation's column list as one string, and the
 -- difference spelt out for the first that differs only: asked on every resumed tick, and a run toward a
@@ -6234,7 +6241,7 @@ returns text language sql stable as $$
             or (k.conrelid = any(p_copies)
                 and not exists (select 1 from pg_constraint nv     -- #633: the swap's to settle, not drift
                                  where nv.conrelid = p_parent and nv.contype = 'f' and nv.conparentid = 0
-                                   and not nv.convalidated
+                                   and not nv.convalidated and nv.conname = k.conname
                                    and pgpm._fk_def_unvalidated(nv.oid) = pgpm._fk_def_unvalidated(k.oid))))
   ),
   sig as (select attrelid, string_agg(col, ', ' order by col) as s from cols group by attrelid),
@@ -7244,6 +7251,23 @@ begin
     v_unarmed || ', so change capture is re-minted ENABLE ALWAYS');
   v_capture_drift := coalesce(v_capture_drift, v_unarmed);
   if v_drift <> '' or v_capture_drift is not null then
+    -- #633: a restart is bounded. One whose copies, made again from the parent as it is, differ from it
+    -- exactly as the last restart of this run said they did cannot be cured by restarting again: the run
+    -- would discard and recopy its range on every other tick for good. Refused instead, with the difference,
+    -- before anything is dropped (this tick rolls back whole), until the parent changes or the run is
+    -- cancelled. Only for shape or source drift; a capture re-mint is not a restart that can repeat itself.
+    if v_drift <> '' and exists (
+         select 1 from pgpm.log l
+          where l.parent_table = p_parent and l.action = 'regrain_restart' and l.lo = v_lo and l.hi = v_hi
+            and l.id > coalesce((select max(lp.id) from pgpm.log lp
+                                  where lp.parent_table = p_parent and lp.action = 'regrain_prepare'
+                                    and lp.lo = v_lo and lp.hi = v_hi), 0)
+            and l.method = format('%s; the copies are discarded and the range is copied again from the source', v_restart_why)
+            and l.id = (select max(l2.id) from pgpm.log l2
+                         where l2.parent_table = p_parent and l2.action = 'regrain_restart')) then
+      raise exception 'pg_partition_magician: refusing to restart the regrain of % again -- %; the last restart of this run found exactly this, and the copies made since, from the parent as it is, still differ from it the same way, so another restart would only repeat it. Nothing was dropped. Change the parent so that its copies can match it, or abandon the run with pgpm.regrain_cancel(%).',
+        v_child_name, v_restart_why, p_parent;
+    end if;
     for r in execute format(
       'select child_name from pgpm.part where parent_table = %L::regclass and not attached'
       || ' and lo::%s >= %L::%s and hi::%s <= %L::%s',

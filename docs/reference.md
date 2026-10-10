@@ -1857,7 +1857,7 @@ while the copy, the reconcile and the swap's `ATTACH` all need the parent's curr
 constraints. Every tick that resumes a run compares each copy's columns (name, type, collation, `NOT
 NULL`, generated), `CHECK` constraints (name and expression) and outgoing foreign keys (definition; a
 `NOT VALID` key on the parent is carried by the swap rather than onto the copy, so it is not compared, nor is a
-copy's key with the same definition) with the parent's first. A copy made
+copy's key under that key's own name and definition, made while it was still validated) with the parent's first. A copy made
 before a key was added would otherwise reach the swap without it, and `ATTACH` would validate the key by
 scanning the copy under the swap's lock; restarted, every copy is made again carrying the key, validated
 while it is empty. It also compares the source with what the run recorded when it began copying
@@ -1873,7 +1873,10 @@ took for a new column: a volatile default (`nextval`, `clock_timestamp()`) gave 
 `now()` the instant of the `ALTER`, which re-evaluating the default in a copy would not reproduce. A
 restart costs the copying done so far, so schedule such migrations between regrains of a large partition
 when you can. A rewrite that changes no value (`VACUUM FULL`, `CLUSTER`, `SET TABLESPACE` on the source)
-cannot be told from one that does, so it restarts the run too. Defaults, statistics targets, storage and
+cannot be told from one that does, so it restarts the run too. A restart that would repeat the run's last
+one exactly (the copies made since, from the parent as it is, differ from it the same way) is refused
+instead, the tick dropping nothing and raising with what differs: restarting again could not cure it. Change
+the parent so that its copies can match it, or abandon the run with `regrain_cancel`. Defaults, statistics targets, storage and
 indexes are not compared: the copy inserts explicit values, and `ATTACH` builds an index the parent gained.
 A run that has copies but no recorded mark restarts the same way, since nothing says what its copies were
 made from. That is a regrain already in flight when you upgrade from a release that did not record the

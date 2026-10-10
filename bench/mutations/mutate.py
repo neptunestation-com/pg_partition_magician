@@ -6912,9 +6912,9 @@ select ok(
         "exist'), a DROP COLUMN or a TYPE change fails the swap's ATTACH, and the run never moves again. One "
         "site, the restart branch, switched off. tests/211 parts A and B catch it.",
         [("  if v_drift <> '' or v_capture_drift is not null then\n"
-          "    for r in execute format(\n",
+          "    -- #633: a restart is bounded.",
           "  if false then\n"
-          "    for r in execute format(\n", 1)],
+          "    -- #633: a restart is bounded.", 1)],
     ),
     "regrain_shape_restart_keeps_cursor": (
         "bench/regrain_survives_parent_ddl.sh",

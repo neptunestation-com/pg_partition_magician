@@ -26,7 +26,7 @@
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(40);
+select plan(49);
 
 select current_setting('server_version_num')::int >= 180000 as pg18 \gset
 
@@ -337,5 +337,75 @@ select is(pgpm.restore_incoming_fks('public.g322', array[:g_fk]::bigint[]), 1, '
 select is((select restored_at is not null and validated_at is not null and validate_retry_after is null
              from pgpm.dropped_fk where id = :g_fk), true,
   '(G) the key ends restored, validated and not parked');
+
+
+-- ======================================================================================================
+-- H (PR verification round 2, P1-02): a validated key and a NOT VALID twin of it on the regrained parent
+-- ======================================================================================================
+-- On 18 a managed table can hold one definition twice, h_fk validated and h_fk2 NOT VALID. Each copy carries
+-- h_fk (validated); that is the parent's validated key under its own name, not drift, so the run neither
+-- restarts nor stalls, and swaps. The copy-side exclusion used to match a NOT VALID parent key by definition
+-- alone, which left h_fk out on every copy and restarted the run on every other tick for good.
+create table public.hr (id bigint primary key);
+insert into public.hr select generate_series(1, 50);
+create table public.h322 (id bigint primary key, rid bigint constraint h_fk references public.hr (id));
+insert into public.h322 select g, (g % 50) + 1 from generate_series(1, 45) g;
+call pgpm.transmute('public.h322', 'id', 10::bigint, p_obtain => 2);
+insert into public.h322 values (55, 1), (65, 2);
+create function pg_temp.h_tick() returns text language plpgsql as $f$
+declare v name;
+begin
+  select child_name into v from pgpm.part where parent_table = 'public.h322'::regclass
+     and child_oid = (select monolith_oid from pgpm.config where parent_table = 'public.h322'::regclass);
+  if v is null then return 'no monolith'; end if;
+  return pgpm.regrain_step('public.h322', v, '10', 100);
+exception when others then
+  return 'refused: ' || sqlerrm;                             -- counted below, not fatal to the file
+end $f$;
+\if :pg18
+alter table public.h322 add constraint h_fk2 foreign key (rid) references public.hr (id) not valid;
+select is(
+  (select array_agg(conname || ':' || convalidated::text order by conname) from pg_constraint
+    where conrelid = 'public.h322'::regclass and contype = 'f'),
+  array['h_fk:true', 'h_fk2:false'], 'LIVENESS (H): h322 holds one definition twice, h_fk validated and h_fk2 NOT VALID');
+create temp table h_steps as select g as n, pg_temp.h_tick() as s from generate_series(1, 12) g;
+select ok(exists (select 1 from h_steps where s like 'copied:%'), 'LIVENESS (H): the run made copies for the drift check to read');
+select is((select count(*)::int from pgpm.log where parent_table = 'public.h322'::regclass and action = 'regrain_restart')
+           + (select count(*)::int from h_steps where s like 'refused:%'),
+  0, '(H) no tick restarted the run, or refused to');
+select ok(exists (select 1 from h_steps where s like 'swapped:%'), '(H) and it swapped within 12 steps');
+\else
+select skip('PostgreSQL before 18 cannot hold a NOT VALID key on a partitioned table, so there is no twin', 4);
+\endif
+
+-- ======================================================================================================
+-- I: a restart that cannot cure the drift is refused, not repeated
+-- ======================================================================================================
+-- A CHECK added to i322 after its copies were made is drift, and the run restarts, which remakes the copies
+-- with it. If a copy made since lacks it again (dropped by hand here, standing in for any difference a
+-- restart does not cure), the next drift is exactly the last restart's: that tick refuses, saying so, and
+-- drops nothing, rather than discarding and recopying the range on every other tick for good.
+create table public.i322 (id bigint primary key, v int);
+insert into public.i322 select g, g from generate_series(1, 45) g;
+call pgpm.transmute('public.i322', 'id', 10::bigint, p_obtain => 2);
+insert into public.i322 values (55, 1), (65, 2);
+create function pg_temp.i_tick() returns text language plpgsql as $f$
+declare v name;
+begin
+  select child_name into v from pgpm.part where parent_table = 'public.i322'::regclass
+     and child_oid = (select monolith_oid from pgpm.config where parent_table = 'public.i322'::regclass);
+  return pgpm.regrain_step('public.i322', v, '10', 100);
+end $f$;
+select is(array[pg_temp.i_tick(), pg_temp.i_tick()], array['prepared', 'copied:9'], 'LIVENESS (I): the run prepared and copied');
+alter table public.i322 add constraint i322_v_pos check (v > 0);
+select is(pg_temp.i_tick(), 'restarted:1', 'LIVENESS (I): the CHECK added since is drift, and the run restarts once');
+select is(pg_temp.i_tick(), 'copied:9', 'LIVENESS (I): the next tick copies again, the copy carrying the CHECK');
+alter table public.i322_p0000000000000000000 drop constraint i322_v_pos;   -- the same difference, again
+select throws_like($$ select pg_temp.i_tick() $$, '%refusing to restart the regrain of % again%i322_v_pos%regrain_cancel%',
+  '(I) the same drift again is refused, naming it and the way out, instead of a second restart');
+select is(
+  (select array[(select count(*)::int from pgpm.log where parent_table = 'public.i322'::regclass and action = 'regrain_restart'),
+                (select count(*)::int from pgpm.part where parent_table = 'public.i322'::regclass and not attached)]),
+  array[1, 1], '(I) one restart in all, and the copy is still there: the refused tick dropped nothing');
 
 select * from finish();
