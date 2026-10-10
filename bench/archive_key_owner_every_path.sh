@@ -103,7 +103,7 @@ if [ "$fail" = 0 ]; then
     fail=1
   fi
   if [ "$ran" -eq 0 ]; then
-    printf 'FAIL  %-58s %s\n' "the assertions were reached at all" "0 ran"
+    printf 'FAIL  %-58s %s\n' "LIVENESS: the assertions were reached at all" "0 ran"
     echo "$out" | tail -20 | sed 's/^/      /'
     fail=1
   fi

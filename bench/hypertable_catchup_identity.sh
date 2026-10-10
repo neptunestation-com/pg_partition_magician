@@ -12,9 +12,11 @@
 # HOW. Each run in a fresh <db> in <container> (the timescale track's fleet image: TimescaleDB, pgtap, the core,
 # pgpm_hypertable and tests/timescale/fixtures.sql):
 #   CONTROL   the file passes, every planned assertion ok, as written;
-#   DEFECT    the file reports at least one `not ok` (and runs to its end) with two statements spliced in right
-#             after its call of pgpm.from_hypertable_cutover: one copied row (device_id < 1000) deleted, another
-#             copied row inserted a second time;
+#   DEFECT    the file reports at least one `not ok` that is not a premise (and runs to its end) with two
+#             statements spliced in right after its call of pgpm.from_hypertable_cutover: one copied row
+#             (device_id < 1000) deleted, another copied row inserted a second time. A file whose only failures
+#             are LIVENESS:, GUARD: or fixture: premises did not catch the defect (#1176): that is
+#             bench/discriminate.sh's starved() rule, read out of that script by the defect-verdict block below;
 #   LIVENESS  the defect was really planted: read after the DEFECT run against a copy of the source the splice
 #             took just before the cutover, the migrated table is partitioned, holds the source's 245 rows by
 #             count, and differs from the source by exactly one row each way (EXCEPT ALL 1 and 1).
@@ -45,6 +47,15 @@ cleanup() {
 trap cleanup EXIT
 
 if [ ! -f "$SRC" ]; then printf 'FAIL  %-58s %s\n' "the test file to judge exists" "$SRC"; exit 1; fi
+
+# The premise rule is bench/discriminate.sh's starved(), read out of it rather than restated (#1176).
+starved_fn=$(sed -n '/^starved() {/,/^}/p' "$ROOT/bench/discriminate.sh")
+if [ -z "$starved_fn" ]; then printf 'FAIL  %-58s %s\n' "GUARD: starved() was read out of bench/discriminate.sh" "not found"; exit 1; fi
+eval "$starved_fn"
+# >>> defect verdict: the same in every inverted wrapper; bench/wrapper_premise_rule.sh evaluates it.
+# caught <the judged file's TAP output>: exit 0 when the file failed an assertion that is not a premise.
+caught() { grep -qE '^not ok [0-9]+' "$1" && ! starved "$1"; }
+# <<< defect verdict
 
 # fresh: a new <db> with TimescaleDB, pgtap, the core, the module and the fixtures. Exit 0 when all loaded.
 fresh() {
@@ -97,18 +108,21 @@ tap_verdict() {
   # psql exit other than 0, which is how a session that died part-way (FATAL, no ERROR:) shows, since it
   # never reaches finish() to print "# Looks like you planned" (#795); and a count of assertions
   # that is not the 1..N plan's, which a silently skipped assertion leaves (#601, #712).
+  # A file that reached no assertion failed on its fixture, whatever stopped it, so its setup lines are
+  # premises then and discriminate.sh's starved() does not read them as a catch (#1177).
+  unreached=""; [ "$ran" -gt 0 ] || unreached="fixture: "
   if echo "$out" | grep -qE '^ERROR:|^psql:.*ERROR:'; then
-    printf 'FAIL  %-58s %s\n' "the file ran without a raw error" "see below"
+    printf 'FAIL  %-58s %s\n' "${unreached}the file ran without a raw error" "see below"
     echo "$out" | grep -E 'ERROR:' | head -5 | sed 's/^/      /'
     fail=1
   fi
   if [ "$rc" != 0 ]; then
-    printf 'FAIL  %-58s %s\n' "psql ran the file to its end" "exit $rc"
+    printf 'FAIL  %-58s %s\n' "${unreached}psql ran the file to its end" "exit $rc"
     echo "$out" | grep -E 'FATAL:|connection' | head -5 | sed 's/^/      /'
     fail=1
   fi
   if [ -z "$planned" ] || [ "$ran" != "$planned" ]; then
-    printf 'FAIL  %-58s %s\n' "the file ran every assertion it planned" "planned ${planned:-nothing}, $ran ran"
+    printf 'FAIL  %-58s %s\n' "${unreached}the file ran every assertion it planned" "planned ${planned:-nothing}, $ran ran"
     echo "$out" | tail -20 | sed 's/^/      /'
     fail=1
   fi
@@ -136,12 +150,13 @@ if fresh; then
   tap_verdict >"$work/defect.verdict"
   dfail=$fail; fail=$saved
   grep -E '^    not ok' "$work/defect.verdict"
-  if [ "$dfail" = 1 ] && [ "$bad" -gt 0 ] && [ -n "$planned" ] && [ "$ran" = "$planned" ] && [ "$rc" = 0 ] \
+  printf '%s\n' "$out" >"$work/defect.tap"
+  if [ "$dfail" = 1 ] && caught "$work/defect.tap" && [ -n "$planned" ] && [ "$ran" = "$planned" ] && [ "$rc" = 0 ] \
      && ! grep -q 'the file ran without a raw error' "$work/defect.verdict"; then
     printf 'PASS  %-58s %s\n' "DEFECT: the file fails on one row lost, one held twice" "$bad of $ran not ok"
   else
     printf 'FAIL  %-58s %s\n' "DEFECT: the file fails on one row lost, one held twice" \
-      "$bad of $ran not ok (plan ${planned:-none}, psql exit $rc): it passes for the wrong reason"
+      "$bad of $ran not ok, $(grep -cE '^not ok [0-9]+ - (LIVENESS|GUARD|fixture):' "$work/defect.tap") of them premises (plan ${planned:-none}, psql exit $rc): it passes for the wrong reason"
     grep -E '^FAIL' "$work/defect.verdict" | sed 's/^/      /'
     fail=1
   fi

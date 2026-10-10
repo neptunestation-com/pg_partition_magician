@@ -66,7 +66,7 @@ if [ "$fail" = 0 ]; then
   if [ "$rc" = 0 ]; then printf 'PASS  %-70s %s\n' "re-running install.sql keeps the views over pgpm's functions" "$ran ran"
   else printf 'FAIL  %-70s %s\n' "re-running install.sql keeps the views over pgpm's functions" "$ran ran"; fail=1; fi
   if [ "$ran" -eq 0 ]; then
-    printf 'FAIL  %-70s %s\n' "the assertions were reached at all" "0 ran"
+    printf 'FAIL  %-70s %s\n' "LIVENESS: the assertions were reached at all" "0 ran"
     echo "$out" | tail -20 | sed 's/^/      /'
     fail=1
   fi
