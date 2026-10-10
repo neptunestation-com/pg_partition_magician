@@ -551,7 +551,9 @@ whose grid the bound is not on is refused, since registering it would leave a ho
 You mostly will not need to call this. Every `maintain_all` tick sweeps for abandoned conversions and
 undoes them, and it decides "abandoned" from whether the session that claimed the conversion is still
 connected rather than from a timeout, so a long validation scan is never mistaken for a dead one and an
-operator whose session is still open keeps the right to retry. Both this function and the sweep find the
+operator whose session is still open keeps the right to retry. The sweep takes that decision again under
+the table's lock, from the claim as it stands then, so a conversion you resumed with `transmute` while the
+sweep was waiting is left to finish rather than undone. Both this function and the sweep find the
 table by the identity the claim recorded, not by its name, so a half-converted table that was renamed or
 moved to another schema after its conversion failed is still found and has its bound dropped; the sweep
 forgets a claim without acting only when that table no longer exists at all. The sweep waits at most 5 s
