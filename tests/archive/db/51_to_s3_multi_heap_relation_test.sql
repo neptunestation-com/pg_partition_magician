@@ -37,7 +37,13 @@
 -- round). Part I pages a numeric(10,2) column, a typmod the cast must also carry and keep exact. Part J pages a
 -- bit(3) column, whose bare `bit` is bit(1): an explicit cast that way cut the cursor to its first bit, and the
 -- export never ended the same way.
-select plan(52);
+--
+-- The two runs partition the rows for every type: the first reads `not (control is null)`, the second
+-- `control is null`. For a scalar `not (x is null)` is `x is not null`, but for a composite they differ: ROW(1,
+-- NULL) is neither IS NULL nor IS NOT NULL, so runs split on IS NOT NULL / IS NULL read such a row in neither, and
+-- the quiescent export was refused (part K, V-01 of the fourth round). ROW(NULL, NULL) IS NULL, and is read in the
+-- second run with the scalar NULLs.
+select plan(59);
 
 create schema t51;
 create table t51.evt (id bigint primary key, payload text not null);
@@ -95,6 +101,10 @@ insert into t51.num values (1.50, 'u'), (1.25, 't'), (2.00, 'v');
 -- J: a relation whose id is bit(3), under t51.evt
 create table t51.bits (id bit(3), payload text);
 insert into t51.bits values (B'101', 'f'), (B'011', 'e'), (B'110', 'g');
+-- K: a relation whose id is a composite, holding a plain value, a half-NULL one and an all-NULL one
+create type t51.pair as (a int, b int);
+create table t51.cmp (id t51.pair, payload text);
+insert into t51.cmp values (row(2, 2), 'two'), (row(1, null), 'half'), (row(null, null), 'none'), (row(1, 1), 'one');
 -- G: a relation with no column named id, the control column of t51.evt
 create table t51.nocol (x int, payload text);
 insert into t51.nocol values (1, 'q');
@@ -275,6 +285,19 @@ select is(t51.clear(:'kj'), 404, 'LIVENESS: no object at the bit(3) relation''s 
 select is(t51.try_export('bits'), 'ok', 'archive.to_s3 of a bit(3) relation, one row per page, ends, and completes');
 select is(t51.payloads(:'kj'), array['e', 'f', 'g'], 'its object holds rows e, f and g, each once');
 select is(t51.clear(:'kj'), 404, 'LIVENESS: the bit(3) relation''s object is cleared after the check');
+
+-- 53-59. K: a composite control column holding ROW(1, NULL), which is neither IS NULL nor IS NOT NULL.
+select is((select string_agg(payload, ',' order by payload) from t51.cmp where not (id is null) and not (id is not null)),
+  'half', 'LIVENESS: the row half''s control value ROW(1, NULL) is neither IS NULL nor IS NOT NULL');
+select is((select string_agg(payload, ',' order by payload) from t51.cmp where id is null),
+  'none', 'LIVENESS: the row none''s control value ROW(NULL, NULL) IS NULL');
+select is((select string_agg(payload, ',' order by payload) from t51.cmp where id is not null),
+  'one,two', 'LIVENESS: only the rows one and two have a control value that IS NOT NULL');
+select :'p' || 't51.cmp.ndjson' as kk \gset
+select is(t51.clear(:'kk'), 404, 'LIVENESS: no object at the composite relation''s key before its export');
+select is(t51.try_export('cmp'), 'ok', 'archive.to_s3 of a composite-control relation, one row per page, ends, and completes');
+select is(t51.payloads(:'kk'), array['half', 'none', 'one', 'two'], 'its object holds rows half, none, one and two, each once');
+select is(t51.clear(:'kk'), 404, 'LIVENESS: the composite relation''s object is cleared after the check');
 reset statement_timeout;
 
 select * from finish();

@@ -3526,7 +3526,12 @@ begin
       -- reads only non-NULL control values, so its cursor is never NULL; when it runs dry the NULL run
       -- starts, keyed by (tableoid, ctid) alone, which is total over those rows. Each run is one simple
       -- predicate once $5 is known (EXECUTE binds the parameters as constants), so the index on the
-      -- control column still drives the first, and the second is an IS NULL condition.
+      -- control column still drives the first, and the second is an IS NULL condition. The two runs are
+      -- `not (control is null)` and `control is null`, a partition of the rows for EVERY type: for a scalar the
+      -- first is IS NOT NULL (the planner folds it so), but a composite such as ROW(1, NULL) is neither IS NULL
+      -- nor IS NOT NULL, and runs split on those two read it in neither, so the quiescent export was refused.
+      -- It is paged in the first run, where record comparison orders it (a NULL field sorts last), and
+      -- ROW(NULL, NULL), which IS NULL, in the second.
       execute format(
         'select coalesce(string_agg(j, e''\n'' order by k, r, c), ''''),
                 archive._cursor_text((array_agg(k order by k desc, r desc, c desc))[1]),
@@ -3535,7 +3540,7 @@ begin
                 count(*), coalesce(sum(hashtextextended(j, 0)), 0)
            from (select row_to_json(t.*)::text as j, t.%1$I as k, t.tableoid as r, t.ctid as c from %2$s t
                   where case when $5 then t.%1$I is null and ($3 is null or (t.tableoid, t.ctid) > ($2, $3))
-                             else t.%1$I is not null and ($1 is null or (t.%1$I, t.tableoid, t.ctid) > ($1::%3$s, $2, $3))
+                             else not (t.%1$I is null) and ($1 is null or (t.%1$I, t.tableoid, t.ctid) > ($1::%3$s, $2, $3))
                         end
                   order by t.%1$I, t.tableoid, t.ctid limit $4) s',
         pcfg.control_column, v_child::text, v_ctltype)
