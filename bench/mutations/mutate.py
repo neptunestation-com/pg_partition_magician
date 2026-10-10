@@ -11447,6 +11447,22 @@ MUTATIONS["to_s3_cursor_null_run_unread"] = (
 )
 MUTATION_SRC["to_s3_cursor_null_run_unread"] = "pgpm_archive/install.sql"
 
+# PR #1213's second verification round (V-01, P1-02): archive.to_s3 casts its cursor back as the type of the column
+# it pages, the exported relation's, not the parent's. Caught by tests/archive/db/51 parts E, F and G through
+# bench/archive_to_s3_multi_heap.sh; the file's statement_timeout bounds the export that never ends.
+MUTATIONS["to_s3_cursor_parent_type"] = (
+    "bench/archive_to_s3_multi_heap.sh",
+    "archive.to_s3 reads the cursor's type off the PARENT's control column, not the exported relation's column of "
+    "that name. Under a date parent a timestamptz relation's cursor of noon reads back as midnight, and under a "
+    "timestamp parent a timestamptz cursor loses its offset, so each page re-admits the row it ended on and a "
+    "quiescent export never ends (east of UTC for the second); a relation with no such column fails on an unnamed "
+    "error instead of the refusal. One clause, the relation the type is read from. tests/archive/db/51 parts E and F "
+    "(cancelled by the statement_timeout) and G (not the refusal) catch it.",
+    [("   where a.attrelid = v_child and a.attname = pcfg.control_column and a.attnum > 0 and not a.attisdropped;\n",
+      "   where a.attrelid = p_parent and a.attname = pcfg.control_column and a.attnum > 0 and not a.attisdropped;\n", 1)],
+)
+MUTATION_SRC["to_s3_cursor_parent_type"] = "pgpm_archive/install.sql"
+
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a

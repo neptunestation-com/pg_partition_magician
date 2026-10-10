@@ -11,9 +11,13 @@
   heap, the same order as before. Such a relation can also hold a NULL control value, which the row comparison
   never paged (refused the same way) and which, ending a page, set the cursor to NULL and restarted the read, so
   an export whose first page held the whole relation never ended. Rows with a NULL control value are now paged
-  in a run of their own after every other row, by (tableoid, ctid). `tests/archive/db/51` under
-  `bench/archive_to_s3_multi_heap.sh`, with the mutations `to_s3_cursor_heap_unkeyed`, `to_s3_cursor_null_blind`,
-  `to_s3_cursor_null_restart` and `to_s3_cursor_null_run_unread`.
+  in a run of their own after every other row, by (tableoid, ctid). And the cursor was cast back as the PARENT's
+  control column type, while the column it pages is the relation's: a timestamptz relation under a date parent
+  read its cursor of noon back as midnight (under a timestamp parent, east of UTC, it lost its offset), so every
+  page re-admitted the row it ended on and a quiescent export never ended. The cast now takes the relation's own
+  type, and a relation with no column of that name is refused by name before anything is read. `tests/archive/db/51`
+  under `bench/archive_to_s3_multi_heap.sh`, with the mutations `to_s3_cursor_heap_unkeyed`, `to_s3_cursor_null_blind`,
+  `to_s3_cursor_null_restart`, `to_s3_cursor_null_run_unread` and `to_s3_cursor_parent_type`.
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's
