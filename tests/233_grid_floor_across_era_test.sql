@@ -15,14 +15,14 @@
 --
 -- Every BC claim is paired with an AD control through the same code (the branch works away from the era,
 -- the injected failure leaves the AD table resumable and it resumes), and the regrain fixture is
--- asymmetric (two rows in the first yearly cell, one in the next) and asserted by identity.
+-- asymmetric (two rows in the first cell, one in the next) and asserted by identity.
 -- bench/grid_floor_across_era.sh runs this file against the mutant grid_floor_calendar_no_year_zero (the
 -- pre-fix count), so it is also required to FAIL there.
 create extension if not exists pgtap;
 set client_min_messages = warning;
 set timezone = 'UTC';
 set datestyle = 'ISO, MDY';
-select plan(18);
+select plan(20);
 
 -- ============================ the function, from the default 2000 anchor ============================
 select is(pgpm._grid_floor('time', '1 mon', '2000-01-01 00:00:00+00', '0100-06-15 00:00:00+00 BC', 'UTC')::timestamptz,
@@ -132,16 +132,35 @@ begin
   execute format('select array_agg(body order by body)::text from %s', p_rel) into v;
   return v;
 end $f$;
+-- A two-year target (#1161): a yearly one over 100 BC to now is about 2126 fine children, more than half the
+-- shared lock table holds at two slots each on stock settings, so its prepare tick refuses it. Two-year cells
+-- from the 2000 anchor fall on even astronomical years, 101 BC and 99 BC January among them, so the first
+-- (clamped) cell is the yearly target's [100 BC June, 99 BC January) exactly, and the third tick has to cross
+-- onto the next cell [99 BC January, 97 BC January), which only an exact floor of 99 BC January can find.
 create temp table steps233 (g int, st text);
-insert into steps233 select 1, pgpm.regrain_step('public.rg233', pg_temp.mono233(), '1 year', null);
-insert into steps233 select 2, pgpm.regrain_step('public.rg233', pg_temp.mono233(), '1 year', null);
-select is((select array_agg(st order by g) from steps233), array['prepared', 'copied:2'],
-  'regrain_step prepares, then copies the first yearly sub-range''s two rows');
-select is((select string_agg(c.child_name || ' [' || c.lo || ', ' || c.hi || ') ' || pg_temp.bodies(c.child_oid::regclass), '; ')
-             from pgpm.part c where c.parent_table = 'public.rg233'::regclass and not c.attached),
+insert into steps233 select 1, pgpm.regrain_step('public.rg233', pg_temp.mono233(), '2 years', null);
+insert into steps233 select 2, pgpm.regrain_step('public.rg233', pg_temp.mono233(), '2 years', null);
+do $$
+begin
+  insert into steps233 select 3, pgpm.regrain_step('public.rg233', pg_temp.mono233(), '2 years', null);
+exception when others then
+  insert into steps233 values (3, 'raised: ' || sqlerrm);
+end $$;
+select is((select array_agg(st order by g) from steps233 where g <= 2), array['prepared', 'copied:2'],
+  'regrain_step prepares, then copies the first two-year sub-range''s two rows');
+select is((with c as materialized (select * from pgpm.part where parent_table = 'public.rg233'::regclass and not attached)
+           select string_agg(c.child_name || ' [' || c.lo || ', ' || c.hi || ') ' || pg_temp.bodies(c.child_oid::regclass), '; ')
+             from c where c.lo::timestamptz < '0099-01-01 00:00:00+00 BC'),
   -- clamped to the monolith's lo (100 BC June, off the January year lattice), so it is labelled to the month
   -- its bounds read exactly, as every clamped calendar cell is (#904); the year label is the lattice cell's
   'rg233_p0100_06_bc [0100-06-01 00:00:00+00 BC, 0099-01-01 00:00:00+00 BC) {bc100-june,bc100-sept}',
   'the first copy child is [100 BC June, 99 BC January), not inverted, and holds bc100-june and bc100-sept, not bc99-march');
+select is((select st from steps233 where g = 3), 'copied:1',
+  'the third tick floors 99 BC January to itself and copies the next cell''s one row');
+select is((with c as materialized (select * from pgpm.part where parent_table = 'public.rg233'::regclass and not attached)
+           select string_agg(c.child_name || ' [' || c.lo || ', ' || c.hi || ') ' || pg_temp.bodies(c.child_oid::regclass), '; ')
+             from c where c.lo::timestamptz >= '0099-01-01 00:00:00+00 BC'),
+  'rg233_p0099_bc [0099-01-01 00:00:00+00 BC, 0097-01-01 00:00:00+00 BC) {bc99-march}',
+  'the second copy child is [99 BC January, 97 BC January) and holds bc99-march alone');
 
 select * from finish();

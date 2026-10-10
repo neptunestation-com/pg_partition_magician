@@ -11638,6 +11638,53 @@ MUTATIONS["restore_one_step_no_backoff"] = (
 )
 
 
+# #1161: regrain_step's swap attaches every fine child in one transaction, so it gets the lock budget obtain (#786)
+# and extend_to (#591) have: refused at the prepare tick and at the swap, warned of by set_regrain. One mutation per
+# clause of it, each caught by tests/315 through
+# bench/regrain_swap_lock_budget.sh.
+_G1161 = "bench/regrain_swap_lock_budget.sh"
+MUTATIONS["regrain_swap_no_prepare_budget"] = (
+    _G1161,
+    "Pre-#1161 prepare tick: nothing refuses a run whose swap cannot attach its fine children inside half the shared "
+    "lock table, so a run of more children than that is prepared, copied sub-range by sub-range, and only then meets "
+    "the swap (which dies 53200 `out of shared memory` at an ATTACH on every tick once the children outnumber the "
+    "whole table). One clause, the refusal's branch made unreachable; set_regrain's warning still fires. tests/315 "
+    "part A catches it (the cap + 1 run is prepared).",
+    [("    else\n      raise exception 'pg_partition_magician: cannot regrain % of % at target step % -- %.",
+      "    elsif false then\n      raise exception 'pg_partition_magician: cannot regrain % of % at target step % -- %.", 1)],
+)
+MUTATIONS["regrain_set_regrain_no_budget_warning"] = (
+    _G1161,
+    "set_regrain stores a target whose run the prepare tick will refuse and says nothing: no WARNING and no "
+    "warn_regrain_lock_budget row, so an operator learns of it only from skip_regrain on every tick. One site, the "
+    "warning branch emptied. tests/315 part A catches it (the WARNING text and the log row are both missing).",
+    [("    if p_warn then\n      raise warning 'pg_partition_magician: set_regrain(%, %) stores the target, but the run that would split % -- %. regrain_step''s prepare tick will refuse that run before copying anything. %',\n"
+      "        p_parent, p_step, p_child, v_what, v_split;\n"
+      "      insert into pgpm.log (parent_table, action, lo, hi, rows, method)\n"
+      "        values (p_parent, 'warn_regrain_lock_budget', p_lo, p_hi, v_n,\n"
+      "                format('target %s for %s: %s; the prepare tick will refuse it', p_step, p_child, v_what));\n",
+      "    if p_warn then\n      null;\n", 1)],
+)
+MUTATIONS["regrain_swap_no_measured_budget"] = (
+    _G1161,
+    "Pre-#1161 swap: nothing measures what the swap's ATTACHes cost, so a run the floor admits but whose children cost "
+    "more than two slots each (thirty outgoing foreign keys: 62 a child) attaches every child in one transaction, "
+    "holding more than half the shared lock table (4308 of 6400 measured on PostgreSQL 15). One site, the measured "
+    "refusal made unreachable, so the measurement still runs. tests/315 parts D and E catch it (both swaps swap).",
+    [("      if v_projected > v_slots / 2 then\n        raise exception 'pg_partition_magician: cannot swap the regrain",
+      "      if false then\n        raise exception 'pg_partition_magician: cannot swap the regrain", 1)],
+)
+MUTATIONS["regrain_swap_incoming_fk_uncharged"] = (
+    _G1161,
+    "The swap's measured budget without its charge for the incoming foreign keys it suspends and re-adds against "
+    "every partition after the last ATTACH: the second ATTACH's two slots are all it projects, so a plain table "
+    "referenced by twenty keys swaps holding more than half the shared lock table (4071 of 6400 measured on "
+    "PostgreSQL 15). One clause, the charge. tests/315 part E catches it; part D still refuses.",
+    [("      v_per := greatest(v_locks2 - v_locks1, 2) + case when v_fk > 0 then 2 + 2 * v_fk else 0 end;\n",
+      "      v_per := greatest(v_locks2 - v_locks1, 2);\n", 1)],
+)
+
+
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
 # cost), and discriminate.sh's --shard=I/N interleaves that list, so the heavy ones spread over the
