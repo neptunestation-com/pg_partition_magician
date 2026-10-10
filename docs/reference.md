@@ -234,7 +234,12 @@ staging `CREATE`, the `RENAME` to the monolith's name, and the `RENAME` of the n
 name): each relation name, its row type, and its array type `_<name>`, plus the table's own array type,
 which the first `RENAME` renames. Whatever a transaction is still creating at any of them, a relation or a
 type of any kind (another type's implicit array type included, as for a table whose name starts with an
-underscore), is waited for and refused once it commits. A type committed at an array type name, or an
+underscore), is waited for and refused once it commits. So are the names of the forward partitions the
+cutover builds (its `obtain`): the up-front refusal of a child-partition name's holder is asked again once
+the forward grid is built, so a holder it names that committed while the conversion ran is refused with
+the same message and remedy, rather than leaving that cell unbuilt; and one a transaction is still creating when the
+cutover creates that partition, at the cell's name, its row type or its array type `_<name>`, is waited
+for and refused once it commits. A type committed at an array type name, or an
 implicit array type committed at a relation's name, is no obstacle: PostgreSQL steps around it, so neither
 is refused up front. These second askings need a snapshot taken after the wait, so `transmute` must run in
 `READ COMMITTED` transactions (the default): when the calling transaction or the session's
