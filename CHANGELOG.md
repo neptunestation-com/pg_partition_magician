@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **`forget_missing()` logs where every chunk of the table it forgets was archived** (#1164). It deleted every
+  `pgpm.archive_ledger` row of a parent whose relation is gone, retired rows included, and its `forget_missing`
+  log row named no object key, so after the runbook's path for a table past its monolith (drop it, run
+  `pgpm.forget_missing()`) nothing in pgpm said where the only copy of the rows `retire()` had dropped was. The
+  `forget_missing` row's `method` now names every ledger row of the parent, before they go: its range, its
+  object key (or `no object key`), and `retired` for a chunk whose partition `retire()` dropped. The rows
+  themselves are still cleared, since the dead oid can be reused by a later table. Test `tests/318`; guard
+  `bench/forget_missing_logs_object_keys.sh`, mutation `forget_missing_retired_keys_unlogged`.
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's

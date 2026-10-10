@@ -12592,10 +12592,18 @@ $$;
 -- forgotten), so the command is recognised by the partition it names, and CONDITIONALLY, the #407 rule:
 -- never when a LIVE retirement owns that exact text. A namesake that has already armed its own retirement
 -- of the same-named partition holds a command identical to the forgotten one, and that one stays armed.
+--
+-- THE LEDGER ROWS GO, AND THE FORGET ROW SAYS WHERE THEIR CHUNKS WENT (issue #1164). A pgpm.archive_ledger row
+-- retire() marked retired is the record of the only copy of its chunk's rows, and after a hand DROP every other
+-- archived chunk's object is in the same position. Those rows cannot stay where they are: the parent's oid is
+-- dead and PostgreSQL reuses oids, so a row left under it would read as a later table's retired range and
+-- collide with that table's first chunk. So before the rows are deleted, every one of them (range, object key
+-- or `no object key`, and `retired` when retire() dropped its partition) is written into the forget_missing log
+-- row's method, and pgpm.log is the append-only trail nothing deletes from.
 create or replace function pgpm.forget_missing()
 returns table (parent_oid oid, partitions_forgotten int, orphan_tables text[])
 language plpgsql as $$
-declare r record; v_orphans text[]; v_parts int; v_retiring name[]; v_cmd text;
+declare r record; v_orphans text[]; v_parts int; v_retiring name[]; v_cmd text; v_chunks text;
 begin
   for r in
     select c.parent_table, c.parent_table::oid as oid
@@ -12623,6 +12631,14 @@ begin
     select count(*)::int into v_parts from pgpm.part where parent_table = r.parent_table;
     select array_agg(child_name) into v_retiring
       from pgpm.part where parent_table = r.parent_table and retiring_at is not null;
+
+    -- #1164: every chunk the ledger records for it, read before its rows are deleted, for the log row below.
+    select string_agg(format('[%s, %s) %s%s', l.lo, l.hi, coalesce(quote_literal(l.s3_key), 'no object key'),
+                             case when l.retired_at is not null then ' retired' else '' end),
+                      ', ' order by l.archived_at, l.lo)
+      into v_chunks
+      from pgpm.archive_ledger l
+     where l.parent_table = r.parent_table;
 
     delete from pgpm.transmute_inflight where parent_table = r.parent_table;
     delete from pgpm.archive_ledger     where parent_table = r.parent_table;
@@ -12655,10 +12671,12 @@ begin
 
     insert into pgpm.log (parent_table, action, rows, method)
       values (r.parent_table, 'forget_missing', v_parts,
-              case when coalesce(array_length(v_orphans, 1), 0) = 0
-                   then 'relation was gone; pgpm state cleared'
-                   else format('relation was gone; pgpm state cleared. LEFT IN PLACE (still hold data): %s',
-                               array_to_string(v_orphans, ', ')) end);
+              'relation was gone; pgpm state cleared'
+              || case when coalesce(array_length(v_orphans, 1), 0) = 0 then ''
+                      else format('. LEFT IN PLACE (still hold data): %s', array_to_string(v_orphans, ', ')) end
+              || case when v_chunks is null then ''
+                      else format('. ARCHIVED CHUNKS, their pgpm.archive_ledger rows cleared (each chunk''s range, '
+                                  'then the object its rows were written to): %s', v_chunks) end);
 
     parent_oid := r.oid; partitions_forgotten := v_parts; orphan_tables := v_orphans;
     return next;

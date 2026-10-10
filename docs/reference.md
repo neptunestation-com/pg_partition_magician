@@ -2651,6 +2651,20 @@ left in place -- destroying data as a side effect of a cleanup command would be 
 of "forget". Deal with those by hand. `pgpm.log` is also left intact, as the append-only audit trail it is;
 the clearance itself is logged `forget_missing`, naming any orphans in `method`.
 
+**It logs where every archived chunk went.** The parent's `pgpm.archive_ledger` rows are deleted with the
+rest, retired ones included: the dead oid can be reused, and a row left under it would read as a later
+table's retired range. Before they go, the `forget_missing` row's `method` names every one of them, after
+`ARCHIVED CHUNKS`: its range, its object key (quoted, or `no object key` for a strategy that names none), and
+`retired` for a chunk whose partition `retire()` dropped. After a `DROP`, those objects are the only copy of
+the archived rows (unless a partition is listed in `orphan_tables`), and that log row is pgpm's only record of
+where they are:
+
+```sql
+select method from pgpm.log where action = 'forget_missing' and parent_table::oid = <parent_oid>;
+-- relation was gone; pgpm state cleared. ARCHIVED CHUNKS, their pgpm.archive_ledger rows cleared (each
+-- chunk's range, then the object its rows were written to): [0, 100) 'public.events/0' retired, ...
+```
+
 **It returns `pgpm_detach` to idle when it forgets the retirement that armed it.** A referenced
 partition's retirement arms the standing job with `ALTER TABLE <parent> DETACH PARTITION <child>
 CONCURRENTLY`, by name. Left armed past the retirement it belonged to, that command would detach the
@@ -3356,7 +3370,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `regrain_source_detached` | a `maintain` tick found a regrain in flight whose source partition had been detached by hand (it is no longer a partition of the table and carries no `retiring_at`), so the run could never swap, and ended it: the capture trigger and `TRUNCATE` guard taken off the detached table, the fine copies inside its range dropped, the captured changes discarded and `config.regrain_cursor` cleared. The detached table is left as it is, rows and all. `rows` counts the copies discarded, `method` names the table. Logged once per run ended |
 | `drop_incoming_fk` / `suspend_incoming_fk` / `restore_incoming_fk` / `validate_incoming_fk` | preserve-FK lifecycle events |
 | `from_hypertable_carry_fk` | (`pgpm_hypertable` only) an outgoing FK re-added onto the migrated destination during `from_hypertable_copy` |
-| `forget_missing` | `forget_missing()` cleared a parent's registration because its relation no longer exists; `rows` carries how many partition rows were cleared with it |
+| `forget_missing` | `forget_missing()` cleared a parent's registration because its relation no longer exists; `rows` carries how many partition rows were cleared with it, and `method` names any orphans left in place and every `pgpm.archive_ledger` row cleared (range, object key, `retired`) |
 | `forget_dropped_partition` | `obtain` or `extend_to` found an attached `pgpm.part` row over a cell it was about to judge whose partition no longer exists (dropped by hand, outside pgpm), forgot the row and built the cell again, empty (logged `obtain` next, or `fail_obtain_name` if something else holds its name). `method` names the dropped partition and its OID, or says the row had no recorded OID (an upgrade from 0.5.0 or older could not resolve it). Logged once per dropped partition |
 | `forget_detached_partition` | `obtain` or `extend_to` found an attached `pgpm.part` row over a cell it was about to judge whose partition still exists but is no longer a partition of the table, with no retirement of pgpm's in flight on it (detached by hand, outside pgpm), forgot the row and built a fresh empty partition over the range (logged `obtain` next), under the cell's explicit-range name while the detached table holds the plain one. The detached table is left exactly as it is, rows and all. `method` names it and its OID. Logged once per detached partition |
 | `forget_incoming_fk` | a `pgpm.dropped_fk` record was forgotten because the catalog no longer backs it: its referencing table was dropped, or a key recorded as re-added is no longer on that table (see [`pgpm.dropped_fk`](#pgpmdropped_fk)). `method` names the key and which of the two it was |
@@ -3449,7 +3463,9 @@ A row with `retired_at` set is the record of the only copy of its chunk's rows: 
 object holds them. No coverage reset discards it under any name (not `maintain`'s write-block and archive
 steps, `retire`, a `regrain` swap or `adopt_partition`), no coverage reader counts it as a live partition's,
 and the archive step does not archive a partition over its range (`skip_archive_retired_range`, see
-[the archive step](#byte-budget-chunked-archiving)).
+[the archive step](#byte-budget-chunked-archiving)). Of pgpm's functions only [`forget_missing`](#forget_missing)
+deletes it, once the parent itself is gone, and it writes the row's range and object key into its
+`forget_missing` log row first.
 
 A chunk belongs to the relation its `child_oid` names, not to whatever holds its `child_name` now. The
 coverage readers (`pgpm._next_archive_chunk`, `pgpm._archive_fully_covered`, the operator script
