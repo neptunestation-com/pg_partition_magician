@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **A regrain no longer wedges on a captured `text_time` key that lacks the declared shape** (#709, the
+  reconcile's decode). `_regrain_reconcile` placed every captured key by `_grid_floor(_decode(key))`, and
+  `_decode` raises `22P02` on a value the table accepts but that is too short or holds a character outside
+  the alphabet; one such key in the delta (an ordinary `DELETE` of a row the copy had already moved, or a row
+  any role with `INSERT` on the table writes into the delta) raised on every tick and at the swap until
+  `regrain_cancel`. The reconcile now decodes a key only when `_text_time_shaped` accepts it, and reconciles an
+  off-shape key into the fine child whose encoded bounds hold it, where the copy put its row; one no fine
+  child holds is discarded as `regrain_reconcile_aged` below the retention horizon and refused above it, as a
+  decoded key is. Test `tests/323`; guard `bench/regrain_reconcile_unshaped_key.sh`, mutations
+  `regrain_reconcile_decodes_unshaped_key` and `regrain_reconcile_drops_unshaped_key`.
 - **An upgrade from v0.6.0 no longer holds its archived partitions for good** (#1160). The upgrade that adds
   `pgpm.archive_ledger.child_oid` attributed a pre-existing chunk only to a partition whose write block was enabled
   `ALWAYS`, but every release through v0.6.0 created the block origin-only (only the first `maintain` tick after
