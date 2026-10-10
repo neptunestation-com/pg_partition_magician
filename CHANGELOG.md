@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+- **A regrain asks a time grid's registered anchor, step and zone, not the target alone** (#1117). transmute
+  holds a time grid to what its control column keeps (#1039 for a `timestamp(p)` key, #769 for a `date`, and
+  #504 records a `date` or `timestamp` key's grid in UTC), but an install before those registered what it was
+  given: a `timestamptz(0)` key anchored 0.4 s off the second, a `date` key anchored at 12:00 UTC, a `date` key
+  converted in a New York session recorded in `America/New_York`. `_regrain_step_shape` asked the unit rule of
+  the regrain target only, on the premise that the registered grid was already held to it, so a regrain of
+  such a grid was accepted, prepared and copied, and every swap then failed (a fine range a `date` reads as
+  empty, or a row outside the whole-second bounds ATTACH attached), leaving the copies, the capture trigger
+  and the `TRUNCATE` refusal on the source until `regrain_cancel`. The registered anchor and step are now asked
+  too, as a `uuidv7` or `text_time` key's registered grid already was (#1039), and so is a naive key's
+  registered zone for a fixed target (a whole-month one round-trips and is still accepted; a zero-offset zone
+  such as `Etc/UTC` counts as UTC). `set_regrain`, `regrain_step`, `regrain()` and the tick's auto-regrain
+  refuse such a grid before anything is copied, naming what is off and the remedy. The remedy text, shared
+  with #1039's encoded-unit refusal, now says that `untransmute` hands the table back only while every row is
+  in its monolith and what to do past that (copy the rows into a new table and transmute it). Test
+  `tests/324`; guard `bench/regrain_registered_grid_off_unit.sh`, mutations
+  `regrain_step_registered_time_anchor_unasked` and `regrain_step_registered_zone_unasked`.
+
+- **The upgrade flags a time grid an older install registered off its column's unit or clock** (#1139 bullet
+  1). Nothing re-read `pgpm.config` for such a grid after the upgrade, and obtain went on minting partitions
+  whose recorded bounds the catalog attached at other instants (a `date` grid anchored at noon records
+  `[D 12:00, D+1 12:00)` over `FOR VALUES FROM ('D') TO ('D+1')`). Re-running `install.sql` now logs each
+  such grid once as `warn_grid_off_unit` (an anchor or step off the unit, or a `date` or `timestamp` grid
+  recorded in a zone other than UTC), naming what is off and the remedy, and raises it as a `WARNING` to the
+  upgrading session on every run that finds it. The grid itself is not repaired (only a reconversion makes
+  its records and its catalog agree), and obtain's behaviour on it is unchanged. Test `tests/324`; guard
+  `bench/regrain_registered_grid_off_unit.sh`, mutations `upgrade_grid_off_unit_unflagged` and
+  `upgrade_grid_zone_unflagged`.
+
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's

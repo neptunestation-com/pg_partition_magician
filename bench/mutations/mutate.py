@@ -5958,6 +5958,55 @@ $$;''',
         "of hs and the target that refusal must not store; the anchor refusals still pass.",
         [("         or v_enc_unit is not null then\n", "         then\n", 1)],
     ),
+    "regrain_step_registered_time_anchor_unasked": (
+        "bench/regrain_registered_grid_off_unit.sh",
+        "Issue #1117 put back (pass 11 F2-02 for a date key): _regrain_step_shape asks a time key's registered "
+        "step but not its registered anchor, so a grid an older install anchored off the column's unit (a date "
+        "key at 12:00 UTC, a timestamptz(0) key 0.4 s off the second) takes a regrain: the run prepares and "
+        "copies, and every swap fails (a fine range a date reads as empty, a row outside the whole-second bounds "
+        "ATTACH attached), leaving the copies, the capture trigger and the TRUNCATE refusal until regrain_cancel. "
+        "One clause: the anchor argument. tests/324 catches it at set_regrain's, regrain_step's, regrain()'s and "
+        "the tick's refusals of d324 and t324 and the copies a refusal must not leave; s324's off-unit step is "
+        "still refused and the upgrade still flags all three, which is what shows the mutant is this clause alone.",
+        [("      from pgpm._time_unit_breach(v_type, v_typmod, cfg.partition_step, cfg.partition_anchor) b;\n"
+          "    if v_grid_unit is not null then\n",
+          "      from pgpm._time_unit_breach(v_type, v_typmod, cfg.partition_step, null) b;\n"
+          "    if v_grid_unit is not null then\n", 1)],
+    ),
+    "regrain_step_registered_zone_unasked": (
+        "bench/regrain_registered_grid_off_unit.sh",
+        "#1117's zone half put back (pass-11 per-PR verification V-01): _regrain_step_shape asks a time key's "
+        "registered anchor and step but not its registered zone, so a date or timestamp grid an install before "
+        "#504 recorded in the converting session's zone (America/New_York), every bound at that zone's midnight, "
+        "takes a regrain toward a fixed step: on a date key the run copies every sub-range and its swap fails "
+        "'empty range bound', leaving the copies and the capture trigger until regrain_cancel. One clause: the "
+        "zone test at the regrain refusal. tests/324 catches it at z324's day and w324's hour refusals and the "
+        "copies a refusal must not leave; the anchor and step refusals and the upgrade's zone flag still pass.",
+        [("    if v_months = 0 and pgpm._naive_grid_zone_off(v_type, cfg.partition_tz) then\n",
+          "    if v_months = 0 and false then\n", 1)],
+    ),
+    "upgrade_grid_zone_unflagged": (
+        "bench/regrain_registered_grid_off_unit.sh",
+        "The upgrade half of V-01 put back: the upgrade block asks a time grid's registered anchor and step but "
+        "not a naive key's registered zone, so a date grid an install before #504 recorded in America/New_York "
+        "is not logged as warn_grid_off_unit, and nothing says why every regrain of it toward a day is refused. "
+        "One clause: the zone test in the upgrade block. tests/324 catches it at the warn_grid_off_unit rows the "
+        "upgrade must write for w324 and z324 and z324's zone; the anchor and step rows and every regrain refusal "
+        "still pass.",
+        [("    v_zone_off := pgpm._naive_grid_zone_off(v_type, cfg.partition_tz);\n",
+          "    v_zone_off := false;\n", 1)],
+    ),
+    "upgrade_grid_off_unit_unflagged": (
+        "bench/regrain_registered_grid_off_unit.sh",
+        "Issue #1139 bullet 1 put back: the upgrade finds a time grid an older install registered off its control "
+        "column's unit (a date key anchored at noon before #769's rule) and records nothing, so pgpm.log never "
+        "says why obtain's partitions are attached at other bounds than pgpm.part records and why every regrain "
+        "of the table is refused. One clause: the log insert (the session's WARNING is left). tests/324 catches "
+        "it at the warn_grid_off_unit rows the upgrade must write for d324, s324 and t324 and their remedy; its "
+        "regrain refusals still pass, which is what shows the mutant is this clause alone.",
+        [("      insert into pgpm.log (parent_table, action, method) values (cfg.parent_table, 'warn_grid_off_unit', v_msg_q);\n",
+          "      null;\n", 1)],
+    ),
     # #669-#671: three transmute contract gaps, each caught by its own pgTAP file through a wrapper in
     # bench/transmute_abort_owner.sh's shape.
     "carried_index_name_by_pattern": (
