@@ -66,12 +66,12 @@ do $$ declare s text; n int := 0; v_cur text; begin
   end loop;
 end $$;
 select is((select payload from public.ev_p0000000000000000000 where id = 7), 'orig',
-  'WITNESS: row 7 is already copied into its fine child, so the copy itself will never see what follows');
+  'LIVENESS: row 7 is already copied into its fine child, so the copy itself will never see what follows');
 
 -- the operator renames the managed table: an ordinary ALTER TABLE, which pgpm.config follows by oid
 alter table public.ev rename to events;
 select is((select delta from pgpm._regrain_capture_derive('public.events')), 'events_pgpm_regrain_delta',
-  'WITNESS: the name derived from the parent now differs from the delta the trigger was given');
+  'LIVENESS: the name derived from the parent now differs from the delta the trigger was given');
 select is((select delta from pgpm._regrain_capture_names('public.events')), 'ev_pgpm_regrain_delta',
   'the readers resolve the delta by its recorded oid, not by the parent''s current name');
 select is((select fn from pgpm._regrain_capture_names('public.events')), 'ev_pgpm_regrain_capture',
@@ -82,7 +82,7 @@ update public.events set payload = 'updated' where id = 7;
 delete from public.events where id = 8;
 insert into public.events values (9500, 'inserted');
 select is((select string_agg(id::text, ',' order by id) from public.ev_pgpm_regrain_delta), '7,7,8,9500',
-  'WITNESS: the trigger captured all three (the update as old + new) into the delta it was given');
+  'LIVENESS: the trigger captured all three (the update as old + new) into the delta it was given');
 select is(pgpm._regrain_delta_count('public.events'), 4::bigint,
   'and the swap gate counts those 4 as pending, not 0');
 
@@ -107,7 +107,7 @@ select is(pgpm.regrain('public.b', 'b_p0000000000000000000_to_000000000000000300
   'first regrain: the monolith becomes three 1000-wide children');
 select is((select array_agg(attname::text order by attnum) from pg_attribute
             where attrelid = 'public.b_pgpm_regrain_delta'::regclass and attnum > 0 and not attisdropped),
-  array['id', 'k2', 'pgpm_seq'], 'WITNESS: the first regrain minted the delta with the key (id, k2)');
+  array['id', 'k2', 'pgpm_seq'], 'LIVENESS: the first regrain minted the delta with the key (id, k2)');
 select regrain_delta_oid as b_delta1 from pgpm.config where parent_table = 'public.b'::regclass \gset
 
 alter table public.b rename column k2 to k3;   -- propagates to every partition
@@ -170,7 +170,7 @@ select is((select pg_get_userbyid(relowner) from pg_class where oid = 'public.pv
 select ok(has_table_privilege('t124_writer', 'public.pv_pgpm_regrain_delta', 'INSERT'),
   'the writer role holds INSERT on the delta, mirroring its DML on the parent');
 select ok(not has_table_privilege('t124_late', 'public.pv_pgpm_regrain_delta', 'INSERT'),
-  'WITNESS: a role with no grant on the parent gets none on the delta');
+  'LIVENESS: a role with no grant on the parent gets none on the delta');
 
 set role t124_writer;
 select lives_ok($$ update public.pv set payload = 'during' where id = 6 $$,
@@ -187,7 +187,7 @@ reset role;
 -- late role writes before that tick too: the capture writes as its owner (#1073), not as the writer.
 grant select, insert, update, delete on public.pv to t124_late;   -- SELECT too: an UPDATE ... WHERE reads
 select ok(not has_table_privilege('t124_late', 'public.pv_pgpm_regrain_delta', 'INSERT'),
-  'WITNESS: until a tick runs, a grant made after prepare has not reached the delta');
+  'LIVENESS: until a tick runs, a grant made after prepare has not reached the delta');
 set role t124_late;
 select lives_ok($$ update public.pv set payload = 'too-early' where id = 10 $$,
   'and the late role writes anyway: the capture writes the delta as its owner, not as the writer (#1073)');

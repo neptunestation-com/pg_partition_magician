@@ -31,7 +31,7 @@ insert into public.t247_nan select i, i from generate_series(1, 500) i;
 insert into public.t247_nan values ('NaN', 0);
 select oid as nan_oid from pg_class where oid = 'public.t247_nan'::regclass \gset
 select is((select max(id)::text from public.t247_nan), 'NaN',
-  'A LIVENESS: t247_nan''s greatest id is NaN');
+  'LIVENESS: (A) t247_nan''s greatest id is NaN');
 select throws_like($$ call pgpm.transmute('public.t247_nan', 'id', 100::bigint, p_obtain => 2) $$,
   '%t247_nan cannot be partitioned on an id grid using id: it holds a non-finite value (its newest value is NaN, its oldest 1)%Delete or correct the rows whose id is NaN, Infinity or -Infinity and re-run.',
   'A: a NaN maximum is refused before anything is committed');
@@ -80,7 +80,7 @@ create table public.t247_neg (id numeric primary key, v int);
 insert into public.t247_neg values ('-Infinity', 0), (7, 7), (21, 21), (35, 35);
 select oid as neg_oid from pg_class where oid = 'public.t247_neg'::regclass \gset
 select is((select max(id)::text from public.t247_neg), '35',
-  'C LIVENESS: t247_neg''s greatest id is finite, so only the minimum is non-finite');
+  'LIVENESS: (C) t247_neg''s greatest id is finite, so only the minimum is non-finite');
 select throws_like($$ call pgpm.transmute('public.t247_neg', 'id', 10::bigint, p_obtain => 2) $$,
   '%t247_neg cannot be partitioned on an id grid using id: it holds a non-finite value (its newest value is 35, its oldest -Infinity)%',
   'C: a -Infinity minimum is refused');

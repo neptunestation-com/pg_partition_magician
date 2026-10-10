@@ -104,11 +104,11 @@ select ok(not exists (select 1 from pgpm.transmute_inflight where parent_table =
 -- LIVENESS: the same table converts once the nulls are gone, and a documented null (p_retain) is accepted
 call pgpm.transmute('public.n_ts', 'ts', interval '1 month', p_retain => null, p_obtain => 2);
 select is((select relkind::text from pg_class where oid = 'public.n_ts'::regclass), 'p',
-  'A LIVENESS: n_ts converts with every argument set, p_retain => null included');
+  'LIVENESS: (A) n_ts converts with every argument set, p_retain => null included');
 select is((select (retain is null) and regrain_batch = 5000 and paused from pgpm.config where parent_table = 'public.n_ts'::regclass), true,
-  'A LIVENESS: registered with retain null (keep everything) and the defaults the refused nulls stood for');
+  'LIVENESS: (A) registered with retain null (keep everything) and the defaults the refused nulls stood for');
 select is((select array_agg(id order by id) from public.n_ts), array[1, 2]::bigint[],
-  'A LIVENESS: n_ts holds exactly rows 1 and 2');
+  'LIVENESS: (A) n_ts holds exactly rows 1 and 2');
 
 -- ======================= B. p_incoming_fks => null on a table with an incoming key =======================
 create table public.n_pa (id bigint not null, ts timestamptz not null, primary key (id, ts));
@@ -121,7 +121,7 @@ select throws_like(
   $$ select dblink_exec('dbname=' || current_database(),
        $c$ call pgpm.transmute('public.n_pa', 'ts', interval '1 month') $c$) $$,
   'pg_partition_magician: n_pa has incoming foreign key(s) (n_ch_fk on n_ch)%',
-  'B WITNESS: with the default p_incoming_fks the incoming key n_ch_fk is refused');
+  'LIVENESS: (B) with the default p_incoming_fks the incoming key n_ch_fk is refused');
 select throws_like(
   $$ select dblink_exec('dbname=' || current_database(),
        $c$ call pgpm.transmute('public.n_pa', 'ts', interval '1 month', p_incoming_fks => null) $c$) $$,
@@ -138,9 +138,9 @@ select ok(not exists (select 1 from pgpm.dropped_fk where constraint_name = 'n_c
 -- LIVENESS: 'preserve' converts it and records the key against the new parent
 call pgpm.transmute('public.n_pa', 'ts', interval '1 month', p_incoming_fks => 'preserve', p_obtain => 2);
 select is((select relkind::text from pg_class where oid = 'public.n_pa'::regclass), 'p',
-  'B LIVENESS: n_pa converts with p_incoming_fks => ''preserve''');
+  'LIVENESS: (B) n_pa converts with p_incoming_fks => ''preserve''');
 select is((select parent_table::text from pgpm.dropped_fk where constraint_name = 'n_ch_fk'), 'n_pa',
-  'B LIVENESS: and n_ch_fk is recorded against n_pa for restore');
+  'LIVENESS: (B) and n_ch_fk is recorded against n_pa for restore');
 
 -- ======================= C. p_force_frontier => null on a row a year ahead =======================
 create table public.n_ff (id bigint not null, ts timestamptz not null, primary key (id, ts));
@@ -150,7 +150,7 @@ select throws_like(
   $$ select dblink_exec('dbname=' || current_database(),
        $c$ call pgpm.transmute('public.n_ff', 'ts', interval '1 month') $c$) $$,
   'pg_partition_magician: n_ff cannot be partitioned on a time grid using ts: its newest value is %',
-  'C WITNESS: with the default p_force_frontier (false) the far frontier is refused for this data');
+  'LIVENESS: (C) with the default p_force_frontier (false) the far frontier is refused for this data');
 select throws_like(
   $$ select dblink_exec('dbname=' || current_database(),
        $c$ call pgpm.transmute('public.n_ff', 'ts', interval '1 month', p_force_frontier => null) $c$) $$,
@@ -168,7 +168,7 @@ call pgpm.transmute('public.n_ff', 'ts', interval '1 month', p_force_frontier =>
 select ok((select p.hi::timestamptz > now() + interval '6 months'
              from pgpm.part p join pgpm.config c on c.parent_table = p.parent_table
             where p.parent_table = 'public.n_ff'::regclass and p.child_oid = c.monolith_oid),
-  'C LIVENESS: p_force_frontier => true converts n_ff with its monolith hi months ahead');
+  'LIVENESS: (C) p_force_frontier => true converts n_ff with its monolith hi months ahead');
 
 -- ======================= D. the id overload =======================
 create table public.n_id (id bigint primary key, body text);
@@ -207,12 +207,12 @@ delete from public.n_id where id = 25;
 call pgpm.transmute('public.n_id', 'id', 10::bigint, p_retain => null, p_obtain => 2);
 select is((select string_agg('[' || lo || ',' || hi || ')', ' ' order by lo::numeric) from pgpm.part
             where parent_table = 'public.n_id'::regclass and attached),
-  '[0,20) [20,30) [30,40)', 'D LIVENESS: n_id converts on the id grid, monolith [0, 20) and two forward cells');
+  '[0,20) [20,30) [30,40)', 'LIVENESS: (D) n_id converts on the id grid, monolith [0, 20) and two forward cells');
 select is((select retain from pgpm.config where parent_table = 'public.n_id'::regclass), null,
-  'D LIVENESS: registered with retain null');
+  'LIVENESS: (D) registered with retain null');
 insert into public.n_id values (25, 'twenty-five');
 select is((select c.relname::text from public.n_id e join pg_class c on c.oid = e.tableoid where e.id = 25),
-  'n_id_p0000000000000000020', 'D LIVENESS: id 25 lands in the forward partition [20, 30)');
+  'n_id_p0000000000000000020', 'LIVENESS: (D) id 25 lands in the forward partition [20, 30)');
 select is((select count(*)::int from pgpm.transmute_inflight
             where parent_table in ('public.n_ts'::regclass, 'public.n_pa'::regclass, 'public.n_ff'::regclass, 'public.n_id'::regclass)),
   0, 'LIVENESS: every liveness conversion completed and released its claim');

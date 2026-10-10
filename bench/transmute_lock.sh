@@ -69,7 +69,7 @@ CAUGHT=$(q "select caught::text from public.probe limit 1")
 MODES=$(q  "select modes        from public.probe limit 1")
 READ=$(q   "select rd           from public.probe limit 1")
 
-check "the probe caught the validation scan in progress" "$CAUGHT" "true"
+check "LIVENESS: the probe caught the validation scan in progress" "$CAUGHT" "true"
 # The question is precisely: WHILE the validate holds SHARE UPDATE EXCLUSIVE, is ACCESS EXCLUSIVE also
 # held? Before the split it was, because the preceding ADD never released it.
 case "$MODES" in

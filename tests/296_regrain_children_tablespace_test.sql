@@ -43,12 +43,12 @@ select child_name as a_mono, child_oid as a_mono_oid from pgpm.part
 select is((select reltablespace::text || ' ' || (select reltablespace from pg_class where oid = :'a_mono_oid'::oid)::text
              from pg_class where oid = 'public.ta296'::regclass),
   :'ts_oid' || ' ' || :'ts_oid',
-  'A LIVENESS: the parent and the monolith holding ids 1..150 are both in pgpm_t296_<database>');
-select is(pgpm.regrain('public.ta296', :'a_mono', '50'), 4, 'A LIVENESS: the regrain swapped in four fine children');
+  'LIVENESS: (A) the parent and the monolith holding ids 1..150 are both in pgpm_t296_<database>');
+select is(pgpm.regrain('public.ta296', :'a_mono', '50'), 4, 'LIVENESS: (A) the regrain swapped in four fine children');
 select is((select array_agg(lo || '-' || hi order by lo::numeric) from pgpm.part
             where parent_table = 'public.ta296'::regclass and attached and lo::numeric < 200),
   array['0-50', '50-100', '100-150', '150-200'],
-  'A LIVENESS: and they replaced the monolith over [0, 200)');
+  'LIVENESS: (A) and they replaced the monolith over [0, 200)');
 select is((select array_agg(c.relname::text || ':' || coalesce(t.spcname::text, 'database default') order by p.lo::numeric)
              from pgpm.part p join pg_class c on c.oid = p.child_oid
              left join pg_tablespace t on t.oid = c.reltablespace
@@ -73,11 +73,11 @@ select child_name as b_mono, child_oid as b_mono_oid from pgpm.part
 select is((select reltablespace::text || ' ' || (select reltablespace from pg_class where oid = :'b_mono_oid'::oid)::text
              from pg_class where oid = 'public.tb296'::regclass),
   :'ts_oid' || ' 0',
-  'B LIVENESS: the parent is in pgpm_t296_<database> now, while the monolith holding ids 1..60 is still in the database default');
+  'LIVENESS: (B) the parent is in pgpm_t296_<database> now, while the monolith holding ids 1..60 is still in the database default');
 select is((select c.reltablespace from pgpm.part p join pg_class c on c.oid = p.child_oid
             where p.parent_table = 'public.tb296'::regclass and p.child_name = 'tb296_p0000000000000000400'),
-  :'ts_oid'::oid, 'B LIVENESS: a partition extend_to mints after the move is in pgpm_t296_<database>, the parent''s');
-select is(pgpm.regrain('public.tb296', :'b_mono', '50'), 2, 'B LIVENESS: the regrain swapped in two fine children');
+  :'ts_oid'::oid, 'LIVENESS: (B) a partition extend_to mints after the move is in pgpm_t296_<database>, the parent''s');
+select is(pgpm.regrain('public.tb296', :'b_mono', '50'), 2, 'LIVENESS: (B) the regrain swapped in two fine children');
 select is((select array_agg(c.relname::text || ':' || coalesce(t.spcname::text, 'database default') order by p.lo::numeric)
              from pgpm.part p join pg_class c on c.oid = p.child_oid
              left join pg_tablespace t on t.oid = c.reltablespace
@@ -98,8 +98,8 @@ select pgpm.obtain('public.tc296');
 select child_name as c_mono from pgpm.part
  where parent_table = 'public.tc296'::regclass and attached and lo = '0' \gset
 select is((select reltablespace from pg_class where oid = 'public.tc296'::regclass), 0::oid,
-  'C LIVENESS: tc296''s parent is in the database default');
-select is(pgpm.regrain('public.tc296', :'c_mono', '25'), 4, 'C LIVENESS: the regrain swapped in four fine children');
+  'LIVENESS: (C) tc296''s parent is in the database default');
+select is(pgpm.regrain('public.tc296', :'c_mono', '25'), 4, 'LIVENESS: (C) the regrain swapped in four fine children');
 select is((select array_agg(c.relname::text || ':' || c.reltablespace::text order by p.lo::numeric)
              from pgpm.part p join pg_class c on c.oid = p.child_oid
             where p.parent_table = 'public.tc296'::regclass and p.attached and p.lo::numeric < 100),
@@ -108,7 +108,7 @@ select is((select array_agg(c.relname::text || ':' || c.reltablespace::text orde
   'C: and every one of them is in the database default (reltablespace 0), not in pgpm_t296_<database>');
 select is((select array_agg(id order by id) from public.tc296 where id < 100),
   (select array_agg(g::bigint order by g) from generate_series(1, 30) g),
-  'C LIVENESS: the fine children hold exactly ids 1..30');
+  'LIVENESS: (C) the fine children hold exactly ids 1..30');
 
 -- ==================== the tablespace holds exactly what it should ====================
 select is((select array_agg(c.relname::text order by c.relname::text) from pg_class c

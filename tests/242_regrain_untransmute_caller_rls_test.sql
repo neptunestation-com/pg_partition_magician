@@ -86,16 +86,16 @@ reset role;
 
 -- ================= WITNESSES =================
 select is((select (not rolsuper and not rolbypassrls)::text from pg_roles where rolname = 't242_owner'), 'true',
-  'WITNESS: t242_owner is neither a superuser nor BYPASSRLS');
+  'LIVENESS: t242_owner is neither a superuser nor BYPASSRLS');
 select is((select relrowsecurity::text || '/' || relforcerowsecurity::text || '/' || pg_get_userbyid(relowner)
              from pg_class where oid = format('public.%I', :'rg_mono')::regclass), 'true/true/t242_owner',
-  'WITNESS A: the monolith kept ENABLE + FORCE row-level security, and is t242_owner''s');
+  'LIVENESS: (A) the monolith kept ENABLE + FORCE row-level security, and is t242_owner''s');
 select is(:'owner_rg_rls'::text || '/' || :'owner_rg_mono_rls'::text, 'false/true',
-  'WITNESS A: the parent (NO FORCE since the conversion) does not filter the owner, the monolith does');
+  'LIVENESS: (A) the parent (NO FORCE since the conversion) does not filter the owner, the monolith does');
 select is(:'owner_rg_parent'::text || '/' || :'owner_rg_mono_direct'::text, '60/52',
-  'WITNESS A: through the parent the owner sees all 60 rows; reading the monolith directly, 52');
+  'LIVENESS: (A) through the parent the owner sees all 60 rows; reading the monolith directly, 52');
 select is(:'owner_ut_outside'::text || '/' || (select string_agg(id::text, ',') from public.ut242 where id >= :'ut_hi'::bigint),
-  '0/45', 'WITNESS C: the owner sees no row of ut242 past its monolith; row 45 is there');
+  '0/45', 'LIVENESS: (C) the owner sees no row of ut242 past its monolith; row 45 is there');
 
 -- ================= A. regrain of a monolith that filters the owner: refused, every row kept =================
 select throws_like(format($$ select public.t242_as_owner('select pgpm.regrain(''public.rg242'', ''%s'', ''10'')') $$, :'rg_mono'),
@@ -135,7 +135,7 @@ select is((select string_agg(id::text, ',' order by id) from public.rp242 where 
 -- ================= C. untransmute with a hidden row outside the monolith: refused =================
 select throws_like($$ select pgpm.untransmute('public.ut242') $$,
   'pg_partition_magician: cannot untransmute ut242 -- rows now live outside the original monolith%',
-  'C LIVENESS: read by a role the lever passes (first, so nothing the owner''s call does can bear on it), the gate sees row 45 and refuses as the one-way door');
+  'LIVENESS: (C) read by a role the lever passes (first, so nothing the owner''s call does can bear on it), the gate sees row 45 and refuses as the one-way door');
 select throws_like($$ select public.t242_as_owner('select pgpm.untransmute(''public.ut242'')') $$,
   'pg_partition_magician: cannot untransmute ut242 as t242_owner -- row-level security is active on it for that role (FORCE ROW LEVEL SECURITY holds even the table''s owner to the policies, and the role has no BYPASSRLS)%the check that every row still lives in the monolith would pass with rows outside it, and the reverse would drop them with the parent. Run it as a role with BYPASSRLS (or a superuser); nothing was changed.',
   'C: untransmute refuses the owner whose gate would not see row 45');

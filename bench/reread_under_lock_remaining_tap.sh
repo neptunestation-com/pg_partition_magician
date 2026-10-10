@@ -67,7 +67,7 @@ for f in $FILES; do
   if [ "$rc" = 0 ]; then printf 'PASS  %-66s %s\n' "$f" "$ran ran"
   else printf 'FAIL  %-66s %s\n' "$f" "$ran ran"; fail=1; fi
   if [ "$ran" -eq 0 ]; then
-    printf 'FAIL  %-66s %s\n' "$f: the assertions were reached at all" "0 ran"
+    printf 'FAIL  %-66s %s\n' "LIVENESS: $f: the assertions were reached at all" "0 ran"
     echo "$out" | tail -20 | sed 's/^/      /'
     fail=1
   fi

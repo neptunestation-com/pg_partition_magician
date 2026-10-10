@@ -75,7 +75,7 @@ $$;
 
 -- 1-2. The instrument: it sees this backend's locks at all, and it sees the defect's mechanism.
 select cmp_ok(cardinality(t22.my_locks()), '>', 0,
-  'witness: pg_locks shows this backend''s own lock entries from inside its transaction');
+  'LIVENESS: pg_locks shows this backend''s own lock entries from inside its transaction');
 select cmp_ok(t22.lock_growth('select t22.temp_table_round_trip()', 5), '>=', 5,
   'control: five temp tables created and dropped in one transaction leave their lock entries held '
   'to its end (the defect''s mechanism, so a zero below is not an instrument that sees nothing)');
@@ -84,16 +84,16 @@ select cmp_ok(t22.lock_growth('select t22.temp_table_round_trip()', 5), '>=', 5,
 select is(t22.lock_growth('select archive._pq_huffman_lengths((select f from t22.freqs), 15)', 20), 0,
   'twenty _pq_huffman_lengths calls in one transaction add no lock-table entry');
 select is((select count(*) from unnest(archive._pq_huffman_lengths((select f from t22.freqs), 15)) l where l > 0),
-  286::bigint, 'witness: those calls assign a code length to all 286 symbols');
+  286::bigint, 'LIVENESS: those calls assign a code length to all 286 symbols');
 select is((select sum(power(2, 15 - l)::bigint) from unnest(archive._pq_huffman_lengths((select f from t22.freqs), 15)) l
             where l > 0),
-  32768::numeric, 'witness: and the code they return is exactly complete within 15 bits (Kraft sum 2^15)');
+  32768::numeric, 'LIVENESS: and the code they return is exactly complete within 15 bits (Kraft sum 2^15)');
 
 -- 6-7. The whole GZIP encode, the unit the issue counts (three Huffman builds each).
 select is(t22.lock_growth('select archive._pq_gzip_compress_dynamic(t22.payload())', 10), 0,
   'ten dynamic-Huffman GZIP encodes in one transaction add no lock-table entry');
 select is((get_byte(archive._pq_gzip_compress_dynamic(t22.payload()), 10) >> 1) & 3, 2,
-  'witness: that encode''s first DEFLATE block is BTYPE=10, dynamic Huffman, the path that builds three codes');
+  'LIVENESS: that encode''s first DEFLATE block is BTYPE=10, dynamic Huffman, the path that builds three codes');
 
 -- 8-15. Known answers, computed with the temp-table implementation at db64096: the new data
 -- structure must build the same codes, ties included.

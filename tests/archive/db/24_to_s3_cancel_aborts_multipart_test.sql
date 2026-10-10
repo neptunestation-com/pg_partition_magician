@@ -180,9 +180,9 @@ call t24.export('A', 'public.ca24');
 select is((select (sqlstate, msg)::text from outcome where label = 'A'), '(57014,"t24: cancel inside the transport")',
   'A: the stand-in''s cancel propagates out of archive.to_s3 as itself, not swallowed by the cleanup');
 select is(array[t24.n('t24.initiated'), t24.n('t24.parts')], array[1, 3]::bigint[],
-  'A LIVENESS: the export initiated one upload and stored three parts before the cancel');
+  'LIVENESS: (A) the export initiated one upload and stored three parts before the cancel');
 select is(t24.n('t24.seen'), 1::bigint,
-  'A LIVENESS: one upload was in flight at the key when the cancel landed');
+  'LIVENESS: (A) one upload was in flight at the key when the cancel landed');
 select is(t24.n('t24.aborts'), 1::bigint, 'A: archive.to_s3 sent the abort for it');
 select is(t24.inflight('public.ca24', :'ka'), '{}'::text[],
   'A: no multipart upload is left in flight at the key after the cancelled export');
@@ -196,9 +196,9 @@ call t24.export('B', 'public.cb24');
 reset statement_timeout;
 
 select is((select sqlstate from outcome where label = 'B'), '57014',
-  'B LIVENESS: the export was ended by statement_timeout');
+  'LIVENESS: (B) the export was ended by statement_timeout');
 select ok(t24.n('t24.initiated') = 1 and t24.n('t24.parts') >= 1,
-  'B LIVENESS: it had initiated its upload and stored parts before the timeout: ' || t24.n('t24.parts') || ' part(s)');
+  'LIVENESS: (B) it had initiated its upload and stored parts before the timeout: ' || t24.n('t24.parts') || ' part(s)');
 select cmp_ok(t24.n('t24.aborts'), '>=', 1::bigint, 'B: archive.to_s3 sent the abort');
 select is(t24.inflight('public.cb24', :'kb'), '{}'::text[],
   'B: no multipart upload is left in flight at the key after the timed-out export');
@@ -211,11 +211,11 @@ select set_config('t24.mode', 'pending', false), set_config('t24.at_part', '3', 
 call t24.export('C', 'public.cc24');
 
 select is((select (sqlstate, msg)::text from outcome where label = 'C'), '(57014,"canceling statement due to user request")',
-  'C LIVENESS: the pending cancel surfaced as query_canceled after the transport error');
+  'LIVENESS: (C) the pending cancel surfaced as query_canceled after the transport error');
 select is(array[t24.n('t24.initiated'), t24.n('t24.parts')], array[1, 3]::bigint[],
-  'C LIVENESS: the export initiated one upload and stored three parts before the transport error');
+  'LIVENESS: (C) the export initiated one upload and stored three parts before the transport error');
 select is(t24.n('t24.seen'), 1::bigint,
-  'C LIVENESS: one upload was in flight at the key when the transport failed');
+  'LIVENESS: (C) one upload was in flight at the key when the transport failed');
 select is(t24.n('t24.aborts'), 1::bigint, 'C: archive.to_s3 sent the abort even though the cancel cut its first handler short');
 select is(t24.inflight('public.cc24', :'kc'), '{}'::text[],
   'C: no multipart upload is left in flight at the key');

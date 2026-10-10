@@ -2,6 +2,56 @@
 
 ## [Unreleased]
 
+- **The inverted wrappers apply `discriminate.sh`'s premise rule to the file they judge** (#1176).
+  `hypertable_catchup_identity.sh`, `archive_fn_s3_readback.sh` and `tests_fail_on_defect.sh` certify a pgTAP
+  file by its FAILING against a planted defect, and counted any `not ok`, so a file whose only failure under
+  the defect was a `LIVENESS:` witness was reported as catching it. Each DEFECT verdict now goes through one
+  `# >>> defect verdict` block that reads `starved()` out of `bench/discriminate.sh` and requires a failed
+  assertion that is not a `LIVENESS:`, `GUARD:` or `fixture:` premise. `bench/wrapper_premise_rule.sh`
+  evaluates each block and runs `tests_fail_on_defect.sh` on a copy of tests/90 whose length refusal is
+  relabelled a premise; mutations `inverted_verdict_counts_premises`,
+  `archive_readback_verdict_counts_premises` and `tests_fail_on_defect_counts_premises`.
+
+- **A wrapper whose pgTAP file reached no assertion is a starved fixture, not a catch** (#1177). When no
+  `not ok` was printed, `starved()` read every `FAIL` line as a check, the wrapper's restated verdict
+  (`FAIL  <label>  0 ran`) and the unprefixed "the assertions were reached at all" line included, so a mutant
+  whose fixture raised certified its guard. The restated verdict (`N ran`, `N ran, M failed`) is now set
+  aside in that fallback too, the reached-at-all line prints as `LIVENESS:` in all 201 wrappers that have
+  one, and the timescale wrappers' shared verdict block (38 copies) prints its raw-error, psql-exit and
+  shortfall lines as `fixture:` when no assertion ran, as the inverted wrappers' "ran to its end" line now
+  does. `bench/wrapper_premise_rule.sh` runs `obtain_lock_budget.sh` and every timescale block on a file
+  that raises before its first assertion; mutations `starved_counts_restated_verdict`,
+  `reached_line_unprefixed` and `timescale_verdict_unreached_as_check`.
+
+- **`obtain_backoff_headroom.sh`'s back-off premise prints as a premise** (#1175). The check that the back-off
+  is still in the future before the low-headroom tick (header item 4, there so assertion 5 cannot pass because
+  30 s elapsed) printed without `LIVENESS:`, so a run whose back-off lapsed and which failed only that premise
+  was certified by `discriminate.sh` as a catch. It now leads with `LIVENESS:`, and
+  `bench/liveness_witness_labels.sh` holds it in its floor; mutation `witness_label_backoff_unprefixed`.
+
+- **Fifteen more shell guards print their premises as premises** (#1146, bullet 1). `transmute_lock`,
+  `untransmute_race`, `transmute_lock_timeout`, `archive_recorded_chunk_tick_race`, `throws_pinned`,
+  `tests_fail_on_defect` ("planted the defect" and the install-loaded lines), `transmute_claim_squat`,
+  `regrain_outgoing_fk_lock`, `retire_detach_lock`, `upgrade_in_place`, `upgrade_from_release`,
+  `upgrade_unanchored_cell`, `regrain_truncate_guard_upgrade` and `lock_trace` printed the witnesses and
+  setup checks their headers name without a premise prefix (or as `WITNESS:`/`precondition:`), so a mutant
+  that starved one was certified as catching its defect; each now leads with `LIVENESS:`, `GUARD:` or
+  `fixture:`, and `scripts/review/flake_check.sh` reads the relabelled swap witness. `upgrade_in_place`'s
+  "DEGRADE_COLS names every backfilled column" stays unprefixed: it is the check
+  `upgrade_degrade_list_drift` exists to fail. `bench/liveness_witness_labels.sh` holds every site in its
+  floor (rendered through each guard's own `check()`, `say()`, `printf` format or `echo`), with a defect
+  check of each guard that must stay certified; mutations `witness_label_scan_witness_unprefixed`,
+  `witness_label_on_defect_check` and `witness_label_precondition_word`.
+
+- **The pgTAP files the bench wrappers run spell their premises the way `discriminate.sh` reads them**
+  (#1033, bullet 3). About 900 assertion descriptions in 116 wrapper-run files led with a tag or another word
+  (`A LIVENESS:`, `LIVENESS (A):`, `LIVENESS A:`, `WITNESS:`, `witness:`, `setup:`, `fixture (A):`,
+  `precondition:`), which `starved()` reads as defect checks, so a mutant that starved such a file's fixture
+  was certified by its wrapper. They now read `LIVENESS: (A) ...` or `fixture: (A) ...`, and
+  `bench/liveness_witness_labels.sh` holds every test file a `bench/*.sh` names (by path or by stem) to that
+  head form, and every `bench/*.sh` label to it for those words; mutation
+  `witness_label_test_tag_before_prefix`.
+
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's

@@ -105,16 +105,16 @@ select ok((select array_agg(note order by id) from s216.want_a where id in (10, 
           and s216.copy_note('rg216a', 10) = 'old10'
           and (select format_type(atttypid, atttypmod) from pg_attribute
                 where attrelid = 'public.rg216a'::regclass and attname = 'note') = 'text',
-          'LIVENESS A: the source reads note = new (late for id 30) and the copy made before the ALTERs still holds old10, under an unchanged signature');
+          'LIVENESS: (A) the source reads note = new (late for id 30) and the copy made before the ALTERs still holds old10, under an unchanged signature');
 select ok((select note from s216.want_b where id = 10) = 'OLD10' and s216.copy_note('rg216b', 10) = 'old10',
-          'LIVENESS B: the rewrite gave the source OLD10 and the copy made before it still holds old10');
+          'LIVENESS: (B) the rewrite gave the source OLD10 and the copy made before it still holds old10');
 select ok(exists (select 1 from pg_constraint where conrelid = 'public.rg216c'::regclass and conname = 'rg216c_new')
           and not exists (select 1 from pg_constraint where conrelid = 'public.rg216c'::regclass and conname = 'rg216c_old')
           and exists (select 1 from pg_constraint k join s216.copies c on k.conrelid = c.child_oid
                        where c.parent_table = 'public.rg216c'::regclass and k.conname = 'rg216c_old')
           and not exists (select 1 from pg_constraint k join s216.copies c on k.conrelid = c.child_oid
                            where c.parent_table = 'public.rg216c'::regclass and k.conname = 'rg216c_new'),
-          'LIVENESS C: the parent swapped CHECK rg216c_old for rg216c_new and the copy made before still has only the old one');
+          'LIVENESS: (C) the parent swapped CHECK rg216c_old for rg216c_new and the copy made before still has only the old one');
 
 do $$ declare v text; begin for i in 1..30 loop
   call pgpm.maintain('public.rg216a', v); call pgpm.maintain('public.rg216b', v);

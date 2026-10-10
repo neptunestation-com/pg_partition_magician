@@ -40,7 +40,7 @@ create table e_parts as
 
 select throws_like($$ select pgpm.extend_to('public.e_id', '20000', 1000) $$,
   'pg_partition_magician: extend_to(e_id, 20000) would need more than 1000 new partitions%',
-  'A WITNESS: with p_max => 1000 the far value is refused at once by the dry count');
+  'LIVENESS: (A) with p_max => 1000 the far value is refused at once by the dry count');
 set statement_timeout = '5s';
 select throws_like($$ select pgpm.extend_to('public.e_id', '20000', null) $$,
   'pg_partition_magician: extend_to does not accept null for p_max: %',
@@ -59,13 +59,13 @@ select is((select string_agg('[' || lo || ',' || hi || ')', ' ' order by lo::num
             where parent_table = 'public.e_id'::regclass and attached),
   (select cells from e_parts), 'A: no refused call changed e_id''s partitions');
 select is((select cells from e_parts), '[0,10) [10,20) [20,30)',
-  'A WITNESS: those are the monolith and the two forward cells the conversion built');
+  'LIVENESS: (A) those are the monolith and the two forward cells the conversion built');
 
 -- LIVENESS: a near value with a number for p_max is extended
-select is(pgpm.extend_to('public.e_id', '45', 5), 2, 'A LIVENESS: extend_to(e_id, 45, 5) creates two partitions');
+select is(pgpm.extend_to('public.e_id', '45', 5), 2, 'LIVENESS: (A) extend_to(e_id, 45, 5) creates two partitions');
 select is((select string_agg('[' || lo || ',' || hi || ')', ' ' order by lo::numeric) from pgpm.part
             where parent_table = 'public.e_id'::regclass and attached),
-  '[0,10) [10,20) [20,30) [30,40) [40,50)', 'A LIVENESS: the grid now reaches the cell holding 45');
+  '[0,10) [10,20) [20,30) [30,40) [40,50)', 'LIVENESS: (A) the grid now reaches the cell holding 45');
 
 -- ======================= B. p_force_uuidv7 => null on a column that samples as implausible =======================
 -- uuids whose leading 48 bits encode instants in 2001: they decode, far from now, and far from the
@@ -77,12 +77,12 @@ insert into public.u_uu
     from generate_series(1, 50) g;
 
 select ok((select fraction from pgpm.check_uuidv7('public.u_uu', 'id', 1000)) < 0.5,
-  'B WITNESS: u_uu samples as implausible (below the 0.5 floor)');
+  'LIVENESS: (B) u_uu samples as implausible (below the 0.5 floor)');
 select throws_like(
   $$ select dblink_exec('dbname=' || current_database(),
        $c$ call pgpm.transmute('public.u_uu', 'id', interval '1 month') $c$) $$,
   'pg_partition_magician: only 0.0% of 50 sampled id values decode to plausible recent timestamps%',
-  'B WITNESS: with the default p_force_uuidv7 (false) the conversion is refused for this column');
+  'LIVENESS: (B) with the default p_force_uuidv7 (false) the conversion is refused for this column');
 select throws_like(
   $$ select dblink_exec('dbname=' || current_database(),
        $c$ call pgpm.transmute('public.u_uu', 'id', interval '1 month', p_force_uuidv7 => null) $c$) $$,
@@ -96,7 +96,7 @@ select ok(not exists (select 1 from pgpm.config where parent_table = 'public.u_u
 -- LIVENESS: => true overrides the refusal knowingly, which is what the null did
 call pgpm.transmute('public.u_uu', 'id', interval '1 month', p_force_uuidv7 => true, p_obtain => 1);
 select is((select control_kind from pgpm.config where parent_table = 'public.u_uu'::regclass), 'uuidv7',
-  'B LIVENESS: p_force_uuidv7 => true converts u_uu on a uuidv7 grid');
+  'LIVENESS: (B) p_force_uuidv7 => true converts u_uu on a uuidv7 grid');
 
 -- ======================= C. the text_time arguments =======================
 create table public.t_tt (id text collate "C" primary key, v int);
@@ -105,7 +105,7 @@ insert into public.t_tt
     from generate_series(0, 300) i;
 
 select is((select fraction from pgpm.check_text_time('public.t_tt', 'id', 'c', 8, 36, 'ms')), 1.0000::numeric,
-  'C WITNESS: t_tt is well-formed cuid that decodes plausibly under the default epoch');
+  'LIVENESS: (C) t_tt is well-formed cuid that decodes plausibly under the default epoch');
 select throws_like(
   $$ select dblink_exec('dbname=' || current_database(),
        $c$ call pgpm.transmute('public.t_tt', 'id', interval '1 month',
@@ -140,15 +140,15 @@ select is((select count(*)::int from public.t_tt where v = -1), 1, 'C: and holds
 call pgpm.transmute('public.t_tt', 'id', interval '1 month',
                     p_tt_prefix => 'c', p_tt_width => 8, p_tt_radix => 36, p_tt_unit => 'ms', p_obtain => 1);
 select is((select relkind::text from pg_class where oid = 'public.t_tt'::regclass), 'p',
-  'C LIVENESS: t_tt converts with every text_time argument set');
+  'LIVENESS: (C) t_tt converts with every text_time argument set');
 select is((select text_time_epoch = timestamptz '1970-01-01 00:00:00+00' and text_time_discard_bits = 0
                   and text_time_alphabet is null
              from pgpm.config where parent_table = 'public.t_tt'::regclass), true,
-  'C LIVENESS: registered with the default epoch and discard bits, and the null (default) alphabet');
+  'LIVENESS: (C) registered with the default epoch and discard bits, and the null (default) alphabet');
 select lives_ok(
   format($$ insert into public.t_tt values (%L, -2) $$, pgpm._ts_to_text_time(now(), 'c', 8, 36, 'ms') || 'yyyy'),
-  'C LIVENESS: the converted t_tt takes a current write');
+  'LIVENESS: (C) the converted t_tt takes a current write');
 select is((select count(*)::int from public.t_tt where v in (-1, -2)), 2,
-  'C LIVENESS: and holds both current writes');
+  'LIVENESS: (C) and holds both current writes');
 
 select * from finish();

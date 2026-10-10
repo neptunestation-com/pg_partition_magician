@@ -66,9 +66,9 @@ $$;
 select mk_keyed_hypertable('hc17a', 60, '1 day', '10 days');
 call pgpm.from_hypertable_copy('hc17a', 'ts');
 
-select is((select count(*)::int from hc17a), 60, 'setup: the source holds its 60 rows');
-select is((select count(*)::int from hc17a_pgpm_dest), 60, 'setup: the copy phase produced a populated destination');
-select ok(not t17_fired(), 'setup: the lever has not fired yet');
+select is((select count(*)::int from hc17a), 60, 'fixture: the source holds its 60 rows');
+select is((select count(*)::int from hc17a_pgpm_dest), 60, 'fixture: the copy phase produced a populated destination');
+select ok(not t17_fired(), 'fixture: the lever has not fired yet');
 
 -- arm it: the next CREATE INDEX renames the source aside and puts a plain impostor under its name
 insert into t17_lever values ('hc17a', null);
@@ -116,7 +116,7 @@ select ok(to_regclass('public.hc17a_moved') is null,
 select mk_keyed_hypertable('hc17b', 40, '1 day', '10 days');
 call pgpm.from_hypertable_copy('hc17b', 'ts');
 
-select is((select count(*)::int from hc17b_pgpm_dest), 40, 'setup: the real destination holds 40 rows');
+select is((select count(*)::int from hc17b_pgpm_dest), 40, 'fixture: the real destination holds 40 rows');
 
 alter sequence t17_fired restart;
 update t17_lever set target = 'hc17b_pgpm_dest',

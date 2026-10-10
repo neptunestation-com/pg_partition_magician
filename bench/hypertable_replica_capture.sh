@@ -72,18 +72,21 @@ if [ "$fail" = 0 ]; then
   # psql exit other than 0, which is how a session that died part-way (FATAL, no ERROR:) shows, since it
   # never reaches finish() to print "# Looks like you planned" (#795); and a count of assertions
   # that is not the 1..N plan's, which a silently skipped assertion leaves (#601, #712).
+  # A file that reached no assertion failed on its fixture, whatever stopped it, so its setup lines are
+  # premises then and discriminate.sh's starved() does not read them as a catch (#1177).
+  unreached=""; [ "$ran" -gt 0 ] || unreached="fixture: "
   if echo "$out" | grep -qE '^ERROR:|^psql:.*ERROR:'; then
-    printf 'FAIL  %-58s %s\n' "the file ran without a raw error" "see below"
+    printf 'FAIL  %-58s %s\n' "${unreached}the file ran without a raw error" "see below"
     echo "$out" | grep -E 'ERROR:' | head -5 | sed 's/^/      /'
     fail=1
   fi
   if [ "$rc" != 0 ]; then
-    printf 'FAIL  %-58s %s\n' "psql ran the file to its end" "exit $rc"
+    printf 'FAIL  %-58s %s\n' "${unreached}psql ran the file to its end" "exit $rc"
     echo "$out" | grep -E 'FATAL:|connection' | head -5 | sed 's/^/      /'
     fail=1
   fi
   if [ -z "$planned" ] || [ "$ran" != "$planned" ]; then
-    printf 'FAIL  %-58s %s\n' "the file ran every assertion it planned" "planned ${planned:-nothing}, $ran ran"
+    printf 'FAIL  %-58s %s\n' "${unreached}the file ran every assertion it planned" "planned ${planned:-nothing}, $ran ran"
     echo "$out" | tail -20 | sed 's/^/      /'
     fail=1
   fi

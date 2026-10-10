@@ -21,11 +21,11 @@ select plan(19);
 -- 2saK... carries the LATER timestamp (bytewise 'a' > 'P'); en_US puts it first.
 select is(
   ('2saKm0v8KSvNNElXuBiHn4cxHCt' collate "en_US.utf8") < ('2sPrMA6tMjurYkk7wnGc3E1fiV6' collate "en_US.utf8"),
-  true, 'witness: under en_US.utf8 the later KSUID sorts BEFORE the earlier one'
+  true, 'LIVENESS: under en_US.utf8 the later KSUID sorts BEFORE the earlier one'
 );
 select is(
   ('2saKm0v8KSvNNElXuBiHn4cxHCt' collate "C") < ('2sPrMA6tMjurYkk7wnGc3E1fiV6' collate "C"),
-  false, 'witness: under "C" the same pair sorts in timestamp (bytewise) order'
+  false, 'LIVENESS: under "C" the same pair sorts in timestamp (bytewise) order'
 );
 
 -- KSUID with a RANDOM 128-bit payload, which is what real ones carry and what tests/91's bound-shaped
@@ -62,7 +62,7 @@ select e.id
         and (e.id collate "en_US.utf8") <  (public.ksuid_bound(public.ksuid_month(e.id) + interval '1 month') collate "en_US.utf8"));
 select cmp_ok(
   (select count(*) from _misordered_en), '>', 0::bigint,
-  'witness: the en_US fixture contains rows that sort outside their own month under en_US.utf8'
+  'LIVENESS: the en_US fixture contains rows that sort outside their own month under en_US.utf8'
 );
 
 -- --------------------------------------------------------------------- refusal on an en_US.utf8 column
@@ -101,7 +101,7 @@ select throws_like(
 -- for the operator to recognise it.
 select is(
   (select datcollate from pg_database where datname = current_database()),
-  'en_US.utf8', 'witness: this database''s default collation is en_US.utf8 (the trigger for the defect)'
+  'en_US.utf8', 'LIVENESS: this database''s default collation is en_US.utf8 (the trigger for the defect)'
 );
 create table public.tt_ksuid_default (id text primary key, body text);
 insert into public.tt_ksuid_default select id, body from public.tt_ksuid_en;
@@ -144,7 +144,7 @@ select child_name, lo::timestamptz as lo, hi::timestamptz as hi
   from pgpm.part where parent_table = 'public.tt_ksuid_c'::regclass and attached and lo::timestamptz > now();
 select cmp_ok(
   (select count(*) from _fine_c), '>=', 2::bigint,
-  'witness: at least two fine month partitions exist ahead of the monolith'
+  'LIVENESS: at least two fine month partitions exist ahead of the monolith'
 );
 insert into public.tt_ksuid_c (id, body)
 select public.mk_ksuid(f.lo + (f.hi - f.lo) * (k / 4.0)), 'fresh_' || f.child_name || '_' || k
@@ -159,7 +159,7 @@ select cmp_ok(
      where not ((id collate "en_US.utf8") >= (public.ksuid_bound(public.ksuid_month(id)) collate "en_US.utf8")
             and (id collate "en_US.utf8") <  (public.ksuid_bound(public.ksuid_month(id) + interval '1 month') collate "en_US.utf8"))),
   '>', 0::bigint,
-  'witness: some of the fresh rows would sort outside their own month under en_US.utf8'
+  'LIVENESS: some of the fresh rows would sort outside their own month under en_US.utf8'
 );
 select is(
   (select array_agg(body order by body collate "C") from _fresh_c where actual_child is distinct from expected_child),
@@ -183,7 +183,7 @@ select public.mk_ulid(now() - interval '14 months' + (g * interval '6 hours')), 
 select ok(
   exists (select 1 from public.tt_ulid_en where substr(id, 11, 1) ~ '[0-9]')
   and exists (select 1 from public.tt_ulid_en where substr(id, 11, 1) ~ '[A-Z]'),
-  'witness: the ULID payloads start with both digits and letters'
+  'LIVENESS: the ULID payloads start with both digits and letters'
 );
 select cmp_ok(
   (select fraction from pgpm.check_text_time('public.tt_ulid_en', 'id', '', 10, 32, 'ms', 1000, '0123456789ABCDEFGHJKMNPQRSTVWXYZ')),
@@ -211,7 +211,7 @@ select u.id, u.body, (select relname from pg_class where oid = u.tableoid) as ac
          where f.lo <= pgpm._text_time_to_ts(u.id, '', 10, 32, 'ms', '0123456789ABCDEFGHJKMNPQRSTVWXYZ')
            and pgpm._text_time_to_ts(u.id, '', 10, 32, 'ms', '0123456789ABCDEFGHJKMNPQRSTVWXYZ') < f.hi) as expected_child
   from public.tt_ulid_en u where u.body like 'fresh_%';
-select cmp_ok((select count(*) from _fresh_u), '>=', 8::bigint, 'witness: fresh ULID rows were inserted across the fine partitions');
+select cmp_ok((select count(*) from _fresh_u), '>=', 8::bigint, 'LIVENESS: fresh ULID rows were inserted across the fine partitions');
 select is(
   (select array_agg(body order by body collate "C") from _fresh_u where actual_child is distinct from expected_child),
   null,

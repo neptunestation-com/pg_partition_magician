@@ -186,21 +186,21 @@ routines() { q "$1" "$ROUTINES_SQL" | LC_ALL=C sort; }
 docker exec "$C" psql -U postgres -q -c "drop database if exists $FRESH" >/dev/null 2>&1
 docker exec "$C" psql -U postgres -q -c "create database $FRESH" >/dev/null 2>&1
 if ! install_into "$FRESH" >/tmp/up_fresh.log 2>&1; then
-  echo "FAIL  the fresh oracle install did not complete"; sed 's/^/      /' /tmp/up_fresh.log; exit 1
+  echo "FAIL  fixture: the fresh oracle install did not complete"; sed 's/^/      /' /tmp/up_fresh.log; exit 1
 fi
 catalog "$FRESH" > /tmp/up_fresh_catalog.txt
 # The catalog oracle must have read columns AND constraints, and some NOT NULL column among them, or the
 # comparison below is empty-equals-empty in the half that went unread.
 N_CATALOG=$(grep -c . /tmp/up_fresh_catalog.txt)
 if ! grep -q '^column .* nullable=NO ' /tmp/up_fresh_catalog.txt || ! grep -q '^constraint ' /tmp/up_fresh_catalog.txt; then
-  echo "FAIL  the fresh catalog oracle read no NOT NULL column or no constraint: the catalog comparison would compare nothing"
+  echo "FAIL  GUARD: the fresh catalog oracle read no NOT NULL column or no constraint: the catalog comparison would compare nothing"
   sed 's/^/      /' /tmp/up_fresh_catalog.txt | head -5; exit 1
 fi
 routines "$FRESH" > /tmp/up_fresh_routines.txt
 # The routine oracle must have read SOMETHING, or the identity comparison below is empty-equals-empty.
 N_ROUTINES=$(grep -c . /tmp/up_fresh_routines.txt)
 if [ "$N_ROUTINES" -lt 1 ]; then
-  echo "FAIL  the fresh oracle lists no routines at all: the routine comparison would compare nothing"; exit 1
+  echo "FAIL  GUARD: the fresh oracle lists no routines at all: the routine comparison would compare nothing"; exit 1
 fi
 
 # PRECONDITION: every column this guard intends to drop must exist in a fresh install. If the product
@@ -210,7 +210,7 @@ present=$(echo "$DEGRADE_COLS" | grep ':' | while IFS=: read -r t c; do
   q "$FRESH" "select 1 from information_schema.columns
                where table_schema='pgpm' and table_name='${t#pgpm.}' and column_name='$c'"
 done | grep -c 1)
-check "precondition: all degrade-list columns exist when fresh" "$present" "$N_DEGRADE"
+check "GUARD: all degrade-list columns exist when fresh" "$present" "$N_DEGRADE"
 if [ "$present" != "$N_DEGRADE" ]; then
   echo "      the DEGRADE_COLS list is stale; fix it before trusting anything below"; exit 1
 fi
@@ -232,7 +232,7 @@ fi
 BACKFILL_RAW=$(docker exec "$C" grep -i 'add column if not exists' "$INSTALL" | grep -v '^[[:space:]]*--')
 N_LOOSE=$(printf '%s\n' "$BACKFILL_RAW" | grep -c .)
 if [ "$N_LOOSE" -lt 1 ]; then
-  echo "FAIL  found no backfill lines at all in $INSTALL: this precondition is reading nothing"; exit 1
+  echo "FAIL  GUARD: found no backfill lines at all in $INSTALL: this precondition is reading nothing"; exit 1
 fi
 # The loose match above is case-insensitive and this strict parse is not, on purpose: a backfill line
 # written in a style this regex cannot read shows up as a count mismatch and fails loudly, rather than
@@ -241,7 +241,7 @@ fi
 BACKFILLED=$(printf '%s\n' "$BACKFILL_RAW" \
   | sed -nE 's/^[[:space:]]*alter table ([a-z_]+\.[a-z_]+) add column if not exists ([a-z_]+).*/\1:\2/p')
 N_BACKFILL=$(printf '%s\n' "$BACKFILLED" | grep -c ':')
-check "precondition: every backfill line parsed" "$N_BACKFILL" "$N_LOOSE"
+check "GUARD: every backfill line parsed" "$N_BACKFILL" "$N_LOOSE"
 if [ "$N_BACKFILL" != "$N_LOOSE" ]; then
   echo "      a backfill line this parser cannot read is a column it cannot check for; fix the regex"; exit 1
 fi
@@ -250,7 +250,11 @@ unlisted=$(printf '%s\n' "$BACKFILLED" | grep ':' | while read -r col; do
   printf '%s\n' "$DEGRADE_COLS" | grep -qxF "$col" || printf '%s ' "$col"
 done)
 unlisted="${unlisted% }"
-check "precondition: every backfilled column is degraded" "${unlisted:-none}" "none"
+# Deliberately NOT a premise label (#1175): this is the one check mutation upgrade_degrade_list_drift exists
+# to fail, the defect it models being in this guard's own list, so discriminate.sh must read its failure as
+# the catch. Prefixed LIVENESS:/GUARD:/fixture:, that mutant would be refused as a starved fixture.
+# bench/liveness_witness_labels.sh's FLOOR holds it as a defect check.
+check "DEGRADE_COLS names every backfilled column" "${unlisted:-none}" "none"
 if [ -n "$unlisted" ]; then
   echo "      add them to DEGRADE_COLS; their backfill lines are exercised by nothing until you do"; exit 1
 fi
@@ -266,7 +270,7 @@ NOTNULL_COLS="${NOTNULL_COLS% }"
 docker exec "$C" psql -U postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
 docker exec "$C" psql -U postgres -q -c "create database $DB" >/dev/null 2>&1
 if ! install_into "$DB" >/tmp/up_old.log 2>&1; then
-  echo "FAIL  the initial install did not complete"; sed 's/^/      /' /tmp/up_old.log; exit 1
+  echo "FAIL  fixture: the initial install did not complete"; sed 's/^/      /' /tmp/up_old.log; exit 1
 fi
 
 # A managed table with real rows, created BEFORE the upgrade. Asymmetric: 3 in, 1 out, so a lost
@@ -333,7 +337,7 @@ ns_setup() {
                as 'begin insert into public.up_ns_audit values (1); return null; end'"
 }
 if ! ns_setup >/tmp/up_ns_setup.log 2>&1; then
-  echo "FAIL  the up_ns namesake fixture did not load"; sed 's/^/      /' /tmp/up_ns_setup.log; exit 1
+  echo "FAIL  fixture: the up_ns namesake fixture did not load"; sed 's/^/      /' /tmp/up_ns_setup.log; exit 1
 fi
 NS_DELTA=$(q "$DB" "select 'public.up_ns_pgpm_regrain_delta'::regclass::oid")
 NS_FN=$(q "$DB" "select 'public.up_ns_pgpm_regrain_capture()'::regprocedure::oid")
@@ -366,7 +370,7 @@ still=$(echo "$DEGRADE_COLS" | grep ':' | while IFS=: read -r t c; do
   q "$DB" "select 1 from information_schema.columns
             where table_schema='pgpm' and table_name='${t#pgpm.}' and column_name='$c'"
 done | grep -c 1)
-check "the degrade really removed all $N_DEGRADE columns" "$still" "0"
+check "LIVENESS: the degrade really removed all $N_DEGRADE columns" "$still" "0"
 
 # ---------------------------------------------------------------------------- the upgrade
 if ! install_into "$DB" >/tmp/up_upgrade.log 2>&1; then
@@ -473,9 +477,9 @@ CHILDREN_AFTER=$(q "$DB" "select string_agg(child_name, ',' order by child_name)
 new=$(comm -13 <(echo "$CHILDREN_BEFORE" | tr ',' '\n' | sort) \
                <(echo "$CHILDREN_AFTER"  | tr ',' '\n' | sort) | tr '\n' ' ')
 if [ -n "${new// /}" ]; then
-  printf 'PASS  %-58s %s\n' "maintain_obtain() still mints partitions after the upgrade" "new: ${new% }"
+  printf 'PASS  %-58s %s\n' "LIVENESS: maintain_obtain() still mints partitions after the upgrade" "new: ${new% }"
 else
-  printf 'FAIL  %-58s %s\n' "maintain_obtain() minted nothing after the upgrade" "children: $CHILDREN_AFTER"
+  printf 'FAIL  %-58s %s\n' "LIVENESS: maintain_obtain() minted nothing after the upgrade" "children: $CHILDREN_AFTER"
   fail=1
 fi
 
@@ -490,20 +494,20 @@ ORIGIN_SQL="$OUT/upgrade-in-place-origin-$ORIGIN_TAG.sql"
 mkdir -p "$OUT"
 if ! git -C "$ROOT" rev-parse -q --verify "refs/tags/$ORIGIN_TAG^{commit}" >/dev/null 2>&1; then
   if ! out=$(git -C "$ROOT" fetch --no-tags --depth=1 origin tag "$ORIGIN_TAG" 2>&1); then
-    echo "FAIL  could not fetch tag $ORIGIN_TAG; the in-flight regrain stage has no origin and verifies nothing"
+    echo "FAIL  fixture: could not fetch tag $ORIGIN_TAG; the in-flight regrain stage has no origin and verifies nothing"
     printf '%s\n' "$out" | sed 's/^/      /'; exit 1
   fi
 fi
 if ! git -C "$ROOT" show "$ORIGIN_TAG:pgpm_core/install.sql" > "$ORIGIN_SQL" 2>/tmp/up_inflight_show.err \
    || [ ! -s "$ORIGIN_SQL" ]; then
-  echo "FAIL  git show $ORIGIN_TAG:pgpm_core/install.sql produced nothing; the in-flight regrain stage verifies nothing"
+  echo "FAIL  fixture: git show $ORIGIN_TAG:pgpm_core/install.sql produced nothing; the in-flight regrain stage verifies nothing"
   sed 's/^/      /' /tmp/up_inflight_show.err; exit 1
 fi
 docker exec "$C" psql -U postgres -q -c "drop database if exists $IDB" >/dev/null 2>&1
 docker exec "$C" psql -U postgres -q -c "create database $IDB" >/dev/null 2>&1
 if ! docker exec -i -e PGOPTIONS='-c client_min_messages=warning' "$C" \
        psql -U postgres -q -d "$IDB" -v ON_ERROR_STOP=1 -f - < "$ORIGIN_SQL" >/tmp/up_inflight_origin.log 2>&1; then
-  echo "FAIL  the origin install ($ORIGIN_TAG) did not complete"; sed 's/^/      /' /tmp/up_inflight_origin.log; exit 1
+  echo "FAIL  fixture: the origin install ($ORIGIN_TAG) did not complete"; sed 's/^/      /' /tmp/up_inflight_origin.log; exit 1
 fi
 check "LIVENESS: the $ORIGIN_TAG origin has no regrain_source_mark" \
   "$(q "$IDB" "select count(*) from information_schema.columns

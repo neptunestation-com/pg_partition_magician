@@ -62,18 +62,18 @@ reset role;
 
 -- ================= WITNESSES =================
 select is((select (not rolsuper and not rolbypassrls)::text from pg_roles where rolname = 't218_owner'), 'true',
-  'WITNESS: t218_owner is neither a superuser nor BYPASSRLS');
+  'LIVENESS: t218_owner is neither a superuser nor BYPASSRLS');
 select is((select string_agg(relname || ':' || pg_get_userbyid(relowner) || ':' || relrowsecurity || '/' || relforcerowsecurity,
                              ',' order by relname)
              from pg_class where oid in ('public.fa218'::regclass, 'public.nb218'::regclass, 'public.fc218'::regclass)),
   'fa218:t218_owner:true/true,fc218:t218_owner:true/true,nb218:t218_owner:true/false',
-  'WITNESS: all three are t218_owner''s; fa218 and fc218 FORCE row-level security, nb218 only ENABLEs it');
+  'LIVENESS: all three are t218_owner''s; fa218 and fc218 FORCE row-level security, nb218 only ENABLEs it');
 select is(:'owner_sees_fa'::text, '1,2,3,4',
-  'WITNESS: under FORCE the owner sees only the four new rows of fa218, none of the three old ones');
+  'LIVENESS: under FORCE the owner sees only the four new rows of fa218, none of the three old ones');
 select is(:'owner_sees_nb'::text, '1,2,3,4,5,6,7',
-  'WITNESS: without FORCE the owner sees every row of nb218');
+  'LIVENESS: without FORCE the owner sees every row of nb218');
 select is((select string_agg(id::text, ',' order by id) from public.fa218), '1,2,3,4,5,6,7',
-  'WITNESS: fa218 holds all seven rows (read by the harness''s superuser)');
+  'LIVENESS: fa218 holds all seven rows (read by the harness''s superuser)');
 
 -- ================= A. the owner on a FORCE'd table: refused up front =================
 select dblink_connect('t218a', 'dbname=' || current_database());
@@ -106,7 +106,7 @@ call pgpm.transmute('public.nb218', 'ts', interval '1 day', p_paused => true);
 reset role;
 select is((select relkind::text || '/' || (select count(*) from pgpm.config where parent_table = 'public.nb218'::regclass)
              from pg_class where oid = 'public.nb218'::regclass), 'p/1',
-  'B LIVENESS: the owner converted nb218, whose policy does not apply to it');
+  'LIVENESS: (B) the owner converted nb218, whose policy does not apply to it');
 select is((select string_agg(id || ':' || tenant, ',' order by id) from public.nb218),
   '1:new,2:new,3:new,4:new,5:old,6:old,7:old', 'B: nb218 holds every row by identity, the old tenant''s included');
 select is((select relrowsecurity::text || '/' || relforcerowsecurity from pg_class where oid = 'public.nb218'::regclass),
@@ -117,11 +117,11 @@ select ok(not exists (select 1 from pg_constraint
 
 -- ================= C. a superuser on a FORCE'd table: converts, FORCE carried =================
 select is((select (rolsuper or rolbypassrls)::text from pg_roles where rolname = current_user), 'true',
-  'C WITNESS: the converting role (the harness''s) bypasses row-level security');
+  'LIVENESS: (C) the converting role (the harness''s) bypasses row-level security');
 call pgpm.transmute('public.fc218', 'ts', interval '1 day', p_paused => true);
 select is((select relkind::text || '/' || (select count(*) from pgpm.config where parent_table = 'public.fc218'::regclass)
              from pg_class where oid = 'public.fc218'::regclass), 'p/1',
-  'C LIVENESS: a role that bypasses row-level security converted the FORCE''d fc218');
+  'LIVENESS: (C) a role that bypasses row-level security converted the FORCE''d fc218');
 select is((select string_agg(id || ':' || tenant, ',' order by id) from public.fc218),
   '1:new,2:new,3:new,4:new,5:old,6:old,7:old', 'C: fc218 holds every row by identity, the three its owner cannot see included');
 select is((select relrowsecurity::text || '/' || relforcerowsecurity from pg_class where oid = 'public.fc218'::regclass),

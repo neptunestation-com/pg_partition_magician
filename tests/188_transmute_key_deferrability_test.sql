@@ -32,9 +32,9 @@ insert into public.dpk select g, date_trunc('month', now()) - (g || ' days')::in
 select conindid as dpk_idx, (select relfilenode from pg_class where oid = conindid) as dpk_fn
   from pg_constraint where conrelid = 'public.dpk'::regclass and contype = 'p' \gset
 select lives_ok($$ update public.dpk set id = 31 - id $$,
-  'A LIVENESS: before the conversion dpk accepts a key swap in one statement');
+  'LIVENESS: (A) before the conversion dpk accepts a key swap in one statement');
 call pgpm.transmute('public.dpk', 'ts', interval '1 month', p_obtain => 2);
-select is((select relkind::text from pg_class where oid = 'public.dpk'::regclass), 'p', 'A LIVENESS: dpk is converted');
+select is((select relkind::text from pg_class where oid = 'public.dpk'::regclass), 'p', 'LIVENESS: (A) dpk is converted');
 select is((select condeferrable::text || ' ' || condeferred::text from pg_constraint
             where conrelid = 'public.dpk'::regclass and contype = 'p'),
   'true true', 'A: the parent''s primary key is DEFERRABLE INITIALLY DEFERRED, as the reused key was');
@@ -50,7 +50,7 @@ select (select hi::timestamptz from pgpm.part where parent_table = 'public.dpk':
 insert into public.dpk values (100, :'dpk_fwd', 'a'), (101, :'dpk_fwd', 'b');
 select ok((select count(distinct tableoid) = 1 and bool_and(tableoid <> (select monolith_oid from pgpm.config where parent_table = 'public.dpk'::regclass))
              from public.dpk where id in (100, 101)),
-  'A LIVENESS: rows 100 and 101 landed together in one forward partition');
+  'LIVENESS: (A) rows 100 and 101 landed together in one forward partition');
 select is((select c.condeferrable::text || ' ' || c.condeferred::text from pg_constraint c
             where c.contype = 'p' and c.conrelid = (select tableoid from public.dpk where id = 100)),
   'true true', 'A: that forward partition''s key is DEFERRABLE INITIALLY DEFERRED too');
@@ -70,7 +70,7 @@ create table public.duq (id bigint not null, ts timestamptz not null, payload te
 insert into public.duq select g, date_trunc('month', now()) - (g || ' days')::interval, 'u' || g
   from generate_series(1, 20) g;
 call pgpm.transmute('public.duq', 'ts', interval '1 month', p_obtain => 2);
-select is((select relkind::text from pg_class where oid = 'public.duq'::regclass), 'p', 'B LIVENESS: duq is converted');
+select is((select relkind::text from pg_class where oid = 'public.duq'::regclass), 'p', 'LIVENESS: (B) duq is converted');
 select is((select condeferrable::text || ' ' || condeferred::text from pg_constraint
             where conrelid = 'public.duq'::regclass and contype = 'u'),
   'true false', 'B: the parent''s unique constraint is DEFERRABLE and initially IMMEDIATE, as the reused key was');
@@ -80,7 +80,7 @@ select (select hi::timestamptz from pgpm.part where parent_table = 'public.duq':
 insert into public.duq values (50, :'duq_fwd', 'x'), (51, :'duq_fwd', 'y');
 select ok((select count(distinct tableoid) = 1 and bool_and(tableoid <> (select monolith_oid from pgpm.config where parent_table = 'public.duq'::regclass))
              from public.duq where id in (50, 51)),
-  'B LIVENESS: rows 50 and 51 landed together in one forward partition');
+  'LIVENESS: (B) rows 50 and 51 landed together in one forward partition');
 select lives_ok($$ update public.duq set id = 101 - id where id in (50, 51) $$,
   'B: a key swap in one statement is accepted in the forward partition');
 select is((select string_agg(id || payload, ' ' order by id) from public.duq where id in (50, 51)), '50y 51x',
@@ -91,7 +91,7 @@ create table public.dim (id bigint, ts timestamptz not null, payload text, const
 insert into public.dim select g, date_trunc('month', now()) - (g || ' days')::interval, 'i' || g
   from generate_series(1, 10) g;
 call pgpm.transmute('public.dim', 'ts', interval '1 month', p_obtain => 2);
-select is((select relkind::text from pg_class where oid = 'public.dim'::regclass), 'p', 'C LIVENESS: dim is converted');
+select is((select relkind::text from pg_class where oid = 'public.dim'::regclass), 'p', 'LIVENESS: (C) dim is converted');
 select is((select condeferrable::text || ' ' || condeferred::text from pg_constraint
             where conrelid = 'public.dim'::regclass and contype = 'p'),
   'false false', 'C: the parent''s primary key is not deferrable, as the reused key was not');
@@ -101,7 +101,7 @@ select (select hi::timestamptz from pgpm.part where parent_table = 'public.dim':
 insert into public.dim values (70, :'dim_fwd', 'p'), (71, :'dim_fwd', 'q');
 select ok((select count(distinct tableoid) = 1 and bool_and(tableoid <> (select monolith_oid from pgpm.config where parent_table = 'public.dim'::regclass))
              from public.dim where id in (70, 71)),
-  'C LIVENESS: rows 70 and 71 landed together in one forward partition');
+  'LIVENESS: (C) rows 70 and 71 landed together in one forward partition');
 select throws_ok($$ update public.dim set id = 141 - id where id in (70, 71) $$, '23505', NULL,
   'C: the same one-statement swap is refused there with a duplicate key (an immediate key checks per row)');
 

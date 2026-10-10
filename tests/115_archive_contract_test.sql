@@ -86,9 +86,9 @@ select child_name as ac_child from pgpm.part
   where parent_table = 'public.ac115'::regclass and lo = '0' \gset
 
 select is((select count(*)::int from public.ac115 where id < 1000), 7,
-  'setup: the monolith holds 7 rows');
+  'fixture: the monolith holds 7 rows');
 select is((select pgpm._retain_boundary(c) from pgpm.config c where c.parent_table = 'public.ac115'::regclass),
-  '1000', 'setup: the retention horizon is exactly the monolith''s hi, so it is the only eligible partition');
+  '1000', 'fixture: the retention horizon is exactly the monolith''s hi, so it is the only eligible partition');
 
 -- the write block a maintain() tick installs; archiving only ever picks up an already-blocked child
 select pgpm._enforce_write_blocks('public.ac115');
@@ -110,7 +110,7 @@ select is(pgpm._archive_step('public.ac115'), 0,
 select results_eq(
   $$ select p_child, p_lo, p_hi from pgpm_test115.calls where strategy = 'overshoot' $$,
   format($$ values (%L::name, '0'::text, '1000'::text) $$, :'ac_child'),
-  'WITNESS: the strategy was called exactly once, for the monolith''s chunk [0, 1000)');
+  'LIVENESS: the strategy was called exactly once, for the monolith''s chunk [0, 1000)');
 select is((select count(*)::int from pgpm.archive_ledger where parent_table = 'public.ac115'::regclass), 0,
   'overshoot: no ledger row was written from the claim');
 select results_eq(
@@ -137,7 +137,7 @@ select is(pgpm._archive_step('public.ac115'), 0,
 select results_eq(
   $$ select p_child, p_lo, p_hi from pgpm_test115.calls where strategy = 'stall' $$,
   format($$ values (%L::name, '0'::text, '1000'::text) $$, :'ac_child'),
-  'WITNESS: the stalling strategy was handed the same chunk [0, 1000)');
+  'LIVENESS: the stalling strategy was handed the same chunk [0, 1000)');
 select is((select count(*)::int from pgpm.archive_ledger where parent_table = 'public.ac115'::regclass), 0,
   'stall: no (lo, lo) ledger row was written');
 select ok(
@@ -150,7 +150,7 @@ select ok(
 select is(pgpm._archive_step('public.ac115'), 0,
   'stall: a second tick is refused again rather than dying on the ledger''s primary key');
 select is((select count(*)::int from pgpm_test115.calls where strategy = 'stall'), 2,
-  'WITNESS: the stalling strategy was called on both ticks');
+  'LIVENESS: the stalling strategy was called on both ticks');
 
 -- ============================ blank: covered_hi null ============================
 select pgpm.set_archive_fn('public.ac115', 'pgpm_test115.blank(regclass,name,text,text)'::regprocedure);
@@ -160,7 +160,7 @@ select is(pgpm._archive_step('public.ac115'), 0,
 select results_eq(
   $$ select p_child, p_lo, p_hi from pgpm_test115.calls where strategy = 'blank' $$,
   format($$ values (%L::name, '0'::text, '1000'::text) $$, :'ac_child'),
-  'WITNESS: the null-returning strategy was handed the same chunk [0, 1000)');
+  'LIVENESS: the null-returning strategy was handed the same chunk [0, 1000)');
 select is((select count(*)::int from pgpm.archive_ledger where parent_table = 'public.ac115'::regclass), 0,
   'null: no ledger row was written');
 select ok(
@@ -181,7 +181,7 @@ call pgpm.maintain('public.ac115');
 select results_eq(
   $$ select p_child, p_lo, p_hi from pgpm_test115.calls where strategy = 'garbage' $$,
   format($$ values (%L::name, '0'::text, '1000'::text) $$, :'ac_child'),
-  'WITNESS: the garbage-returning strategy was handed the same chunk [0, 1000) by the maintain() tick');
+  'LIVENESS: the garbage-returning strategy was handed the same chunk [0, 1000) by the maintain() tick');
 select is((select count(*)::int from pgpm.archive_ledger where parent_table = 'public.ac115'::regclass), 0,
   'garbage: no ledger row was written, so nothing downstream ever casts it');
 select ok(

@@ -126,11 +126,11 @@ select c.relname as gz_child from public.gz t join pg_class c on c.oid = t.table
 select lo as gz_lo, hi as gz_hi from pgpm.part where parent_table = 'public.gz'::regclass and child_name = :'gz_child' \gset
 
 select is((select count(distinct tableoid)::int from public.gz), 1,
-  'setup: all 40 rows sit in the one partition being exported');
+  'fixture: all 40 rows sit in the one partition being exported');
 select is(t16.clear_object('public.gz', 'gz/public.' || :'gz_child' || '.ndjson'), 404,
-  'setup: no object at the plain key before the export');
+  'fixture: no object at the plain key before the export');
 select is(t16.clear_object('public.gz', 'gz/public.' || :'gz_child' || '.ndjson.gz'), 404,
-  'setup: no object at the .gz key before the export');
+  'fixture: no object at the .gz key before the export');
 
 -- the other synchronous function honours the flag on this same table, so the flag reaches the synchronous
 -- path and what follows is about archive.to_s3, not about config plumbing
@@ -175,9 +175,9 @@ insert into t16.obj (label, bytes, expected_md5, expected_ids)
 -- the object at the .gz key is always a gzip file a reader can open, never a zero-byte object
 select child_name as empty_child from pgpm.part where parent_table = 'public.gz'::regclass and lo = '60' \gset
 select is((select count(*)::int from public.gz where id >= 60 and id < 70), 0,
-  'setup: the [60, 70) partition holds no rows');
+  'fixture: the [60, 70) partition holds no rows');
 select is(t16.clear_object('public.gz', 'gz/public.' || :'empty_child' || '.ndjson.gz'), 404,
-  'setup: no object at its .gz key before the export');
+  'fixture: no object at its .gz key before the export');
 select lives_ok(
   format($$ select archive.to_s3('public.gz', %L, '60', '70') $$, :'empty_child'),
   'archive.to_s3 exports the empty partition with compress on');
@@ -200,7 +200,7 @@ select c.relname as gzm_child from public.gzm t join pg_class c on c.oid = t.tab
 select lo as gzm_lo, hi as gzm_hi from pgpm.part where parent_table = 'public.gzm'::regclass and child_name = :'gzm_child' \gset
 
 select is((select count(distinct tableoid)::int from public.gzm), 1,
-  'setup: all 16000 rows sit in the one partition being exported');
+  'fixture: all 16000 rows sit in the one partition being exported');
 
 create temporary table gzm_expect as
   select convert_to(t16.expected_text(format('public.%I', :'gzm_child')::regclass), 'UTF8') as bytes;
@@ -209,9 +209,9 @@ select cmp_ok((select octet_length(bytes) from gzm_expect), '>=', 3 * 5 * 1024 *
   'LIVENESS: the partition''s NDJSON spans at least three 5 MiB text chunks, so the export compresses several members and must fill more than one part');
 
 select is(t16.clear_object('public.gzm', 'gzm/public.' || :'gzm_child' || '.ndjson'), 404,
-  'setup: no object at the plain key before the export');
+  'fixture: no object at the plain key before the export');
 select is(t16.clear_object('public.gzm', 'gzm/public.' || :'gzm_child' || '.ndjson.gz'), 404,
-  'setup: no object at the .gz key before the export');
+  'fixture: no object at the .gz key before the export');
 
 select lives_ok(
   format($$ select archive.to_s3('public.gzm', %L, %L, %L) $$, :'gzm_child', :'gzm_lo', :'gzm_hi'),
@@ -247,9 +247,9 @@ select c.relname as ctl_child from public.gz t join pg_class c on c.oid = t.tabl
 select lo as ctl_lo, hi as ctl_hi from pgpm.part where parent_table = 'public.gz'::regclass and child_name = :'ctl_child' \gset
 
 select is(t16.clear_object('public.gz', 'gz/public.' || :'ctl_child' || '.ndjson'), 404,
-  'setup: no object at the plain key before the control export');
+  'fixture: no object at the plain key before the control export');
 select is(t16.clear_object('public.gz', 'gz/public.' || :'ctl_child' || '.ndjson.gz'), 404,
-  'setup: no object at the .gz key before the control export');
+  'fixture: no object at the .gz key before the control export');
 
 select lives_ok(
   format($$ select archive.to_s3('public.gz', %L, %L, %L) $$, :'ctl_child', :'ctl_lo', :'ctl_hi'),

@@ -5162,6 +5162,53 @@ $$;''',
         [('  check "LIVENESS: $2: the lock race really happened: skip_obtain with a lock timeout" \\\n',
           '  check "$2: LIVENESS: the lock race really happened: skip_obtain with a lock timeout" \\\n', 1)],
     ),
+    "witness_label_backoff_unprefixed": (
+        "bench/liveness_witness_labels.sh",
+        "Pre-#1175 bench/obtain_backoff_headroom.sh: the premise that the back-off is still in the future before "
+        "the low-headroom tick (header item 4, there so assertion 5 cannot pass merely because 30 s elapsed) "
+        "prints without its LIVENESS: prefix, so a run whose back-off lapsed, the bypass under test never "
+        "exercised, and which failed only that premise is certified by bench/discriminate.sh as a catch. One "
+        "site: the label's prefix.",
+        [('check "LIVENESS: ob_race: the back-off is still in the future before the low-headroom tick" \\\n',
+          'check "ob_race: the back-off is still in the future before the low-headroom tick" \\\n', 1)],
+    ),
+    "witness_label_scan_witness_unprefixed": (
+        "bench/liveness_witness_labels.sh",
+        "Pre-#1146 bench/transmute_lock.sh: the witness that the probe caught the validation scan in progress "
+        "(the header's positive evidence that the lock question was asked inside the window) prints without its "
+        "LIVENESS: prefix, so a probe that sampled outside the scan and failed only that witness is certified by "
+        "bench/discriminate.sh as catching transmute_no_commits. One site: the label's prefix.",
+        [('check "LIVENESS: the probe caught the validation scan in progress" "$CAUGHT" "true"\n',
+          'check "the probe caught the validation scan in progress" "$CAUGHT" "true"\n', 1)],
+    ),
+    "witness_label_on_defect_check": (
+        "bench/liveness_witness_labels.sh",
+        "The plausible wrong fix of #1146 (F8-09 proposes it): bench/upgrade_in_place.sh's check that "
+        "DEGRADE_COLS names every backfilled column reads like a precondition and is given a GUARD: prefix, but "
+        "it is the one check mutation upgrade_degrade_list_drift exists to fail, so bench/discriminate.sh now "
+        "refuses that mutant's catch as a starved fixture and the guard reads unverified. One site: the prefix.",
+        [('check "DEGRADE_COLS names every backfilled column" "${unlisted:-none}" "none"\n',
+          'check "GUARD: DEGRADE_COLS names every backfilled column" "${unlisted:-none}" "none"\n', 1)],
+    ),
+    "witness_label_precondition_word": (
+        "bench/liveness_witness_labels.sh",
+        "Pre-#1033 bench/upgrade_unanchored_cell.sh: the premise that the origin release has no "
+        "pgpm.part.child_oid is labelled `precondition:`, a word bench/discriminate.sh's starved() does not "
+        "read, so a run whose origin already had the column, the unanchored state never built, and which "
+        "failed only that premise is certified as a catch. One site: the label's word.",
+        [('check "LIVENESS: the origin has no pgpm.part.child_oid" \\\n',
+          'check "precondition: the origin has no pgpm.part.child_oid" \\\n', 1)],
+    ),
+    "witness_label_test_tag_before_prefix": (
+        "bench/liveness_witness_labels.sh",
+        "Pre-#1033 tests/296_regrain_children_tablespace_test.sql (F15r2-02): the file's first witness carries "
+        "its part tag before the LIVENESS marker, `A LIVENESS: ...`. bench/regrain_children_tablespace.sh "
+        "echoes the file's `not ok` lines and bench/discriminate.sh's starved() reads a premise only at the head "
+        "of a description, so a mutant that starved the conversion and failed only that witness is certified "
+        "as a catch. One site: the label's tag.",
+        [("  'LIVENESS: (A) the parent and the monolith holding ids 1..150 are both in pgpm_t296_<database>');\n",
+          "  'A LIVENESS: the parent and the monolith holding ids 1..150 are both in pgpm_t296_<database>');\n", 1)],
+    ),
     "discriminate_counts_uninstallable": (
         "bench/discriminate_installs.sh",
         "Pre-#601 bench/discriminate.sh: a mutant is never installed before its guard runs, so a mutation "
@@ -5198,6 +5245,55 @@ $$;''',
           "reached the defect, so the guard is unverified\\n' \"$guard\"\n"
           "    grep -E '^[[:space:]]*not ok|^FAIL' \"$OUT/$name.log\" | sed 's/^[[:space:]]*/      guard: /'\n"
           "    fail=1\n", "", 1)],
+    ),
+    # #1176 and #1177: the premise rule (bench/discriminate.sh's starved()) where a wrapper prints or reads it.
+    "starved_counts_restated_verdict": (
+        "bench/wrapper_premise_rule.sh",
+        "Pre-#1177 bench/discriminate.sh: when a guard printed no `not ok`, starved() reads every FAIL line as a "
+        "check, a pgTAP wrapper's restated verdict (`FAIL  <label>  0 ran`) included, so a wrapper whose file "
+        "raised before its first assertion failed a 'check' and its mutant certified it. One site: the fallback "
+        "no longer sets the restatement aside.",
+        [('    descs=$(grep -E "$premise" <<<"$fails"; grep -vE "$premise" <<<"$fails" | grep -vE "$restated")\n',
+          '    descs=$(grep -E "$premise" <<<"$fails"; grep -vE "$premise" <<<"$fails")\n', 1)],
+    ),
+    "reached_line_unprefixed": (
+        "bench/wrapper_premise_rule.sh",
+        "Pre-#1177 bench/obtain_lock_budget.sh: the line it prints when its file reached no assertion is "
+        "unprefixed, so bench/discriminate.sh reads it as a defect check and a mutant whose fixture raises "
+        "certifies the guard. One site: the label's prefix.",
+        [("    printf 'FAIL  %-58s %s\\n' \"LIVENESS: the assertions were reached at all\" \"0 ran\"\n",
+          "    printf 'FAIL  %-58s %s\\n' \"the assertions were reached at all\" \"0 ran\"\n", 1)],
+    ),
+    "timescale_verdict_unreached_as_check": (
+        "bench/wrapper_premise_rule.sh",
+        "Pre-#1177 shared pgTAP verdict block in bench/hypertable_index_names.sh: a file that reached no "
+        "assertion still prints its raw-error and shortfall lines as checks, so bench/discriminate.sh reads a "
+        "mutant whose fixture raises as the guard catching it. One site: the zero-assertion prefix never set.",
+        [('  unreached=""; [ "$ran" -gt 0 ] || unreached="fixture: "\n', '  unreached=""\n', 1)],
+    ),
+    "inverted_verdict_counts_premises": (
+        "bench/wrapper_premise_rule.sh",
+        "Pre-#1176 bench/hypertable_catchup_identity.sh (F7-09): its DEFECT verdict counts any `not ok` of the "
+        "judged file, a LIVENESS: premise included, so a file whose only failure under the planted loss is a "
+        "premise is certified as catching it. One site: the premise clause of the defect-verdict block.",
+        [("caught() { grep -qE '^not ok [0-9]+' \"$1\" && ! starved \"$1\"; }\n",
+          "caught() { grep -qE '^not ok [0-9]+' \"$1\"; }\n", 1)],
+    ),
+    "archive_readback_verdict_counts_premises": (
+        "bench/wrapper_premise_rule.sh",
+        "Pre-#1176 bench/archive_fn_s3_readback.sh (F7-08): judge()'s DEFECT verdict counts any `not ok` of "
+        "tests/archive/db/08, so a copy whose only failure under the PAR1-only upload is a LIVENESS: witness is "
+        "certified as failing against its defect. One site: the premise clause of the defect-verdict block.",
+        [("caught() { grep -qE '^not ok [0-9]+' \"$1\" && ! starved \"$1\"; }\n",
+          "caught() { grep -qE '^not ok [0-9]+' \"$1\"; }\n", 1)],
+    ),
+    "tests_fail_on_defect_counts_premises": (
+        "bench/wrapper_premise_rule.sh",
+        "Pre-#1176 bench/tests_fail_on_defect.sh: judge()'s DEFECT verdict counts any `not ok` of the judged "
+        "file, so a file whose one defect check is relabelled a LIVENESS: premise is certified as failing "
+        "against its defect. One site: the premise clause of the defect-verdict block.",
+        [("caught() { grep -qE '^not ok [0-9]+' \"$1\" && ! starved \"$1\"; }\n",
+          "caught() { grep -qE '^not ok [0-9]+' \"$1\"; }\n", 1)],
     ),
     "retire_straddles_horizon": (
         "bench/retire_straddle.sh",
@@ -9308,9 +9404,21 @@ MUTATION_SRC = {
     # #1095: a guard's liveness witness printed where discriminate.sh's starved() cannot read it.
     "witness_label_unprefixed": "bench/maintain_lock.sh",
     "witness_label_prefix_behind_tag": "bench/obtain_backoff_headroom.sh",
+    # #1175, #1146 b1, #1033 b3: premises unprefixed, misspelled, or a defect check prefixed.
+    "witness_label_backoff_unprefixed": "bench/obtain_backoff_headroom.sh",
+    "witness_label_scan_witness_unprefixed": "bench/transmute_lock.sh",
+    "witness_label_on_defect_check": "bench/upgrade_in_place.sh",
+    "witness_label_precondition_word": "bench/upgrade_unanchored_cell.sh",
+    "witness_label_test_tag_before_prefix": "tests/296_regrain_children_tablespace_test.sql",
     "discriminate_counts_uninstallable": "bench/discriminate.sh",
     "discriminate_list_on_stdin": "bench/discriminate.sh",
     "discriminate_counts_liveness_only": "bench/discriminate.sh",
+    "starved_counts_restated_verdict": "bench/discriminate.sh",
+    "reached_line_unprefixed": "bench/obtain_lock_budget.sh",
+    "timescale_verdict_unreached_as_check": "bench/hypertable_index_names.sh",
+    "inverted_verdict_counts_premises": "bench/hypertable_catchup_identity.sh",
+    "archive_readback_verdict_counts_premises": "bench/archive_fn_s3_readback.sh",
+    "tests_fail_on_defect_counts_premises": "bench/tests_fail_on_defect.sh",
     # #742 to #744: a lint's document and three test files, each judged by the guard that runs it.
     "runbook_phantom_alert_action": "docs/runbook.md",
     "runbook_alert_on_method": "docs/runbook.md",
@@ -11427,6 +11535,13 @@ MUTATION_COST = {
     "hypertable_handoff_validate_no_lock_timeout": 25,
     "upgrade_backfill_drops_not_null": 22,
     "upgrade_regrain_capture_backfill_noop": 22,
+    # bench/wrapper_premise_rule.sh, measured 2026-10-10 on the core image: about 22 s whatever it is handed.
+    "starved_counts_restated_verdict": 22,
+    "reached_line_unprefixed": 22,
+    "timescale_verdict_unreached_as_check": 22,
+    "inverted_verdict_counts_premises": 22,
+    "archive_readback_verdict_counts_premises": 22,
+    "tests_fail_on_defect_counts_premises": 22,
     "upgrade_child_oid_backfill_noop": 21,
     "upgrade_regrain_mark_block_noop": 21,
     "scratch_upgrade_fill_dropped": 20,

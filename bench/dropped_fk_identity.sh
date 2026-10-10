@@ -68,7 +68,7 @@ if [ "$fail" = 0 ]; then
   if [ "$rc" = 0 ]; then printf 'PASS  %-58s %s\n' "dropped_fk records anchor the key by identity, from any session" "$ran ran"
   else printf 'FAIL  %-58s %s\n' "dropped_fk records anchor the key by identity, from any session" "$ran ran"; fail=1; fi
   if [ "$ran" -eq 0 ]; then
-    printf 'FAIL  %-58s %s\n' "the assertions were reached at all" "0 ran"
+    printf 'FAIL  %-58s %s\n' "LIVENESS: the assertions were reached at all" "0 ran"
     echo "$out" | tail -20 | sed 's/^/      /'
     fail=1
   fi
