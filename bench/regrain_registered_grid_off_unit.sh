@@ -4,10 +4,11 @@
 # Run tests/324_regrain_registered_grid_off_unit_test.sql against an ARBITRARY copy of pgpm_core/install.sql, so
 # that bench/discriminate.sh can show the file catches the defects its mutations put back (#1117, #1139 bullet
 # 1): a time grid an older install registered off its control column's unit (a date key anchored at noon, a
-# timestamptz(0) key anchored 0.4 s off the second) was not re-asked at regrain, since _regrain_step_shape asked
-# the unit rule of the target only, so the run copied every sub-range and every swap then failed, leaving the
-# copies, the capture trigger and the TRUNCATE refusal on the source until regrain_cancel; and nothing on the
-# upgrade flagged such a grid.
+# timestamptz(0) key anchored 0.4 s off the second, a date or timestamp key recorded in the converting session's
+# zone before #504) was not re-asked at regrain, since _regrain_step_shape asked the unit rule of the target
+# only, so the run copied every sub-range and every swap then failed, leaving the copies, the capture trigger
+# and the TRUNCATE refusal on the source until regrain_cancel; and nothing on the upgrade flagged such a grid.
+# The file also pins the remedy each refusal names (untransmute only while every row is in the monolith).
 # The file is the acceptance test; this wrapper exists so the mutations have a guard the discriminate track can
 # run against the mutant, in the shape of bench/regrain_target_time_precision.sh. The file re-runs the install
 # with \ir, handed the copy under test as the psql variable `install` (as bench/install_keeps_dependent_views.sh
@@ -16,7 +17,10 @@
 # Mutations (bench/mutations/mutate.py):
 #   regrain_step_registered_time_anchor_unasked  -- _regrain_step_shape asks a time key's registered step but
 #                                                  not its registered anchor (the anchor clause alone).
+#   regrain_step_registered_zone_unasked         -- _regrain_step_shape does not ask a naive key's registered
+#                                                  zone (the zone test at the refusal alone).
 #   upgrade_grid_off_unit_unflagged              -- the upgrade block finds the off-unit grid and logs nothing.
+#   upgrade_grid_zone_unflagged                  -- the upgrade block does not ask a naive key's zone.
 #
 # Runs on the plain core image (pgtap and pg_prove). The install path is read inside the container.
 # TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree mounted somewhere
