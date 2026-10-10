@@ -11396,6 +11396,62 @@ MUTATIONS["retain_horizon_wall_round_trip"] = (
       "  return ((now() at time zone p_tz) - p_retain) at time zone p_tz;\n", 1)],
 )
 
+# #1141 bullet 3: bench/doc_archive_identity_recovery.sh follows the documented adopt_partition repair, names
+# the restored rows retention must retire, requires the identity-wedge sections to name adopt_partition, and
+# refuses a pgpm.part delete not confined to a detached or gone relation. One mutation per check.
+_G1141_DOC = "bench/doc_archive_identity_recovery.sh"
+MUTATIONS["adopt_partition_deletes_stale_row"] = (
+    _G1141_DOC,
+    "Pre-#1082 repair, as adopt_partition: the stale same-named row of a partition restored from a dump and "
+    "still attached is deleted rather than re-anchored. The wedge clears, the archive step moves on and retain() "
+    "drops [20,30), so a guard looking at the next partition's rows (25 gone, 55 kept) passes, while the restored "
+    "partition is recorded by nothing and its rows 1, 2, 15 outlive retention for good. One site, the "
+    "re-anchoring statement. Caught by the guard's ids of ai after the repair.",
+    [("    update pgpm.part set child_oid = p_child::oid\n"
+      "     where parent_table = p_parent and child_name = v_rel;\n",
+      "    delete from pgpm.part\n"
+      "     where parent_table = p_parent and child_name = v_rel;\n", 1)],
+)
+MUTATIONS["runbook_identity_wedge_delete_repair"] = (
+    _G1141_DOC,
+    "Pre-#1082 docs/runbook.md: the identity-wedge repair is forget_missing for a gone parent or deleting the "
+    "pgpm.part row, with no word of adopt_partition and no detach, so an operator whose partition was restored "
+    "from a dump and is still attached deletes its row and its rows outlive retention for good. The exact "
+    "pre-#1082 text in place of the adopt_partition repair and its caveats.",
+    [("   took it. When it is the partition itself come back as a new relation (restored from a dump under its\n"
+      "   own name, say) and still attached to the table, record that relation with\n"
+      "   `select pgpm.adopt_partition('public.events', 'public.<partition>')`: pgpm re-anchors the row to it,\n"
+      "   and if the relation that is gone had no archived chunks, from the next tick write-blocks, archives and\n"
+      "   retires it like any other partition. If it had, those chunks are the record of the only copy pgpm can\n"
+      "   vouch for: they are marked retired (logged `archive_chunk_retired`), not discarded, and the restored\n"
+      "   partition is held for good (one `skip_archive_retired_range` row; the archive step logs no\n"
+      "   `fail_archive_identity` for it, and retention moves on past it). Its rows are in those objects only as\n"
+      "   far as the chunks covered them and only if nothing was written to it after they were archived (a dump\n"
+      "   taken while it was write-blocked); once you have confirmed that, detach and drop it and delete its\n"
+      "   `pgpm.part` row, or export it first with `archive.to_s3`, which writes to a key of its own. It\n"
+      "   refuses a relation that is not attached to the table, one pgpm already records, and a range another\n"
+      "   `pgpm.part` row records; if that other row is stale too, delete it first. When the relation holding\n"
+      "   the name is not one pgpm should manage, detach it from the table first, then clear the stale row with\n"
+      "   `delete from pgpm.part where parent_table = ... and child_name = ...`. Never delete the row of a\n"
+      "   partition that stays attached: nothing would write-block, archive, retire or count it again, so its\n"
+      "   rows would outlive the retention policy for good. Run `pgpm.forget_missing()` only if the parent\n"
+      "   itself is gone. Renaming a partition is safe if you update\n",
+      "   took it, then either put the intended relation back under that name or clear the stale bookkeeping\n"
+      "   with `pgpm.forget_missing()` (if the parent itself is gone) or `delete from pgpm.part where\n"
+      "   parent_table = ... and child_name = ...`. Renaming a partition is safe if you update\n", 1)],
+)
+MUTATION_SRC["runbook_identity_wedge_delete_repair"] = "docs/runbook.md"
+MUTATIONS["reference_identity_wedge_delete_attached"] = (
+    _G1141_DOC,
+    "docs/reference.md's archive step identity check without its detach: for a relation holding the name that "
+    "pgpm should not manage it says to delete the stale pgpm.part row, the partition still attached, which "
+    "clears the wedge and leaves the partition's rows in the table for good, recorded by nothing. One site, "
+    "the 'detach it and then' of that sentence.",
+    [("When it is not one pgpm should manage, detach it\nand then delete the stale `pgpm.part` row",
+      "When it is not one pgpm should manage,\ndelete the stale `pgpm.part` row", 1)],
+)
+MUTATION_SRC["reference_identity_wedge_delete_attached"] = "docs/reference.md"
+
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a

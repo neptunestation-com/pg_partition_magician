@@ -31,6 +31,18 @@
   `archive_ledger_backfill_unanchored_kept`, `archive_gone_null_oid_kept`, `archive_retired_rename_remedy_unnamed`,
   `archive_retired_unnamed_raises`, `archive_ledger_backfill_unblocked_attributed` and `archive_retired_orphan_delete_unfiltered`.
 
+- **The identity-wedge doc guard follows the documented `adopt_partition` repair** (#1141, bullet 3).
+  `bench/doc_archive_identity_recovery.sh` still measured the pre-#1082 repair, deleting the stale `pgpm.part`
+  row of a restored partition left attached, and looked only at the next partition's rows (25 and 55), so it
+  never saw the restored rows 1, 2 and 15 outlive retention for good; its doc check accepted any sentence
+  deleting a `pgpm.part` row, so a doc giving that advice without `adopt_partition` passed. It now measures
+  `adopt_partition` on the restored partition and names the rows retention must retire, measures the delete
+  only after a detach (and, on a third table, what the delete does to a partition left attached), requires the
+  identity-wedge sections of `docs/runbook.md` and `docs/reference.md` to name `adopt_partition`, and refuses a
+  sentence there that deletes a `pgpm.part` row without confining it to a relation detached or gone. Mutations
+  `adopt_partition_deletes_stale_row`, `runbook_identity_wedge_delete_repair` and
+  `reference_identity_wedge_delete_attached`.
+
 - **A synchronous export keys and claims the relation it resolved, by oid** (#1064). `archive._resolve_child`
   resolves and holds the export's child and returns its regclass, but `archive.to_s3` and
   `archive.to_s3_parquet` handed `archive._child_object_key` the child's NAME, and `archive._owned_key` looked
