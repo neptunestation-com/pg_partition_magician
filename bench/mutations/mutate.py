@@ -909,7 +909,8 @@ TRANSMUTE_RESUME_COLUMN_RE = re.compile(
     re.DOTALL,
 )
 # #581's three transmute refusals: the step's sign and the lookahead's, which sit together after the
-# retain check, and the date column's whole-day rule, which sits in the control-type chain.
+# retain check, and the date column's whole-day rule, which sits at the head of _time_unit_contract (the
+# control-type chain asks it there since #1118, so pgpm_hypertable can ask the same rule before its swap).
 TRANSMUTE_STEP_OBTAIN_PREFLIGHT_RE = re.compile(
     r"  -- #581: the step must be positive, which nothing checked either\..*?"
     r"    raise exception 'pg_partition_magician: p_obtain must be a non-negative integer \(got %\)', p_obtain;\n"
@@ -917,8 +918,9 @@ TRANSMUTE_STEP_OBTAIN_PREFLIGHT_RE = re.compile(
     re.DOTALL,
 )
 TRANSMUTE_DATE_WHOLE_DAYS_RE = re.compile(
-    r"  elsif p_control_kind = 'time' and v_typname = 'date'\n.*?"
-    r"the cutover would fail on an empty partition range', quote_ident\(p_control\), p_step;\n",
+    r"  if v_type = 'date'::regtype\n     and \(extract\(year from p_step::interval\).*?"
+    r"the cutover would fail on an empty partition range', quote_ident\(p_control\), p_step;\n"
+    r"  end if;\n",
     re.DOTALL,
 )
 # archive.to_s3's enclosing query_canceled handler (#595), whole, so the mutant reads as the function
@@ -10870,11 +10872,11 @@ MUTATIONS["capture_definer_reach_by_fn_schema"] = (
 # tests/timescale/db/58 (bench/hypertable_argument_rules.sh, on the timescale track).
 _HT_ARGS_DRIVER = ("""  -- #1085: and transmute's argument rules, before the copy and ahead of the frontier check below, which would
   -- read a step that is not positive as a frontier to delete rows for
-  perform pgpm._from_hypertable_check_arguments(p_interval, p_obtain, p_retain);
+  perform pgpm._from_hypertable_check_arguments(p_hypertable, p_control, p_interval, p_anchor, p_obtain, p_retain);
 """, "", 1)
 _HT_ARGS_CUTOVER = ("""  -- #1085: transmute's argument rules, before the pre-drain commits anything and before any check reads the
   -- table: refused only by transmute, they came after the swap had dropped the hypertable
-  perform pgpm._from_hypertable_check_arguments(p_interval, p_obtain, p_retain);
+  perform pgpm._from_hypertable_check_arguments(p_hypertable, p_control, p_interval, p_anchor, p_obtain, p_retain);
 """, "", 1)
 MUTATIONS["hypertable_arguments_unchecked"] = (
     "bench/hypertable_argument_rules.sh",
@@ -10906,6 +10908,23 @@ for _name in ("hypertable_arguments_unchecked", "hypertable_arguments_unchecked_
               "hypertable_cutover_arguments_unchecked"):
     MUTATION_SRC[_name] = "pgpm_hypertable/install.sql"
     MUTATION_TRACK[_name] = "timescale"
+
+# Issues #1118 and #1138 bullet 2: _from_hypertable_check_arguments also asks the rules the dimension's type puts
+# on the step and the anchor (pgpm._time_unit_contract: #581, #769, #1039), so both entry points refuse them before
+# the copy and the swap. tests/timescale/db/66 (bench/hypertable_column_unit_rules.sh, on the timescale track).
+MUTATIONS["hypertable_column_unit_rules_unchecked"] = (
+    "bench/hypertable_column_unit_rules.sh",
+    "Pre-#1118 pgpm_hypertable: _from_hypertable_check_arguments asks only the rules a value alone breaks, never "
+    "the ones the dimension's type puts on the grid arguments, so a sub-day step on a date dimension, an anchor "
+    "off 00:00 UTC on one, or a step or anchor finer than a timestamptz(0) dimension keeps is refused only by "
+    "transmute at the handoff, after the cutover's swap has committed and dropped the hypertable. One clause, "
+    "the _time_unit_contract call. tests/timescale/db/66 parts A and B fail: the copy's or the swap's COMMIT dies "
+    "2D000 inside throws_like.",
+    [("  perform pgpm._time_unit_contract(p_hypertable, p_control, p_interval::text, pgpm._ts_text(p_anchor));\n",
+      "", 1)],
+)
+MUTATION_SRC["hypertable_column_unit_rules_unchecked"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_column_unit_rules_unchecked"] = "timescale"
 
 # Issues #1079 and #1089: the remedy for a refused hypertable handoff keeps the carried retention and re-adds the
 # keys. bench/hypertable_handoff_remedy.sh runs the reference's own remedy block after a refused handoff.

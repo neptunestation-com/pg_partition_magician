@@ -758,7 +758,9 @@ migration does not need to interleave application writes between the phases. `p_
 to `transmute` (see there); `p_control` is the time dimension column; `p_track_changes`, `p_predrain` and
 `p_lock_timeout` are described under `from_hypertable_copy` and `from_hypertable_cutover` (a bad
 `p_lock_timeout` is refused before the copy starts, and so is a negative `p_retain` or `p_obtain`, a
-`p_interval` that is not positive, a `p_interval` whose monolith name would not fit, a key that is a bare
+`p_interval` that is not positive, a `p_interval` or `p_anchor` the dimension's type cannot hold (a `date`
+step finer than a day, a `date` anchor off 00:00 UTC, a step or anchor finer than a `timestamp(p)` dimension
+keeps), a `p_interval` whose monolith name would not fit, a key that is a bare
 unique index, and a newest row past `transmute`'s frontier bound, see `from_hypertable_cutover`). `p_force_frontier` is passed through to the cutover and on to `transmute`.
 When `p_retain` is left `null`, the source's `drop_chunks` policy interval (if any) is carried in.
 
@@ -1007,7 +1009,12 @@ first, ahead of every check that reads the table, and refuse with `transmute`'s 
 (`pg_partition_magician: p_retain cannot be negative ...`, `... p_obtain must be a non-negative integer ...`,
 `... the partition step must be positive ...`), with the hypertable untouched. A negative `p_interval` is
 therefore refused as a step, with or without `p_force_frontier`, never by the frontier check, whose remedy
-(correct the newest rows) does not apply to it.
+(correct the newest rows) does not apply to it. The rules the time dimension's type puts on `p_interval` and
+`p_anchor` are asked there too, of the hypertable's own column, with `transmute`'s messages: on a `date`
+dimension a step that is a whole number of days or months (`... the date column ... holds whole days ...`)
+and an anchor at 00:00 UTC (`... the column is a date ...`), and on a `timestamp(p)` or `timestamptz(p)`
+dimension a step and an anchor in whole multiples of its precision (`... the column is timestamp(0) with
+time zone, which keeps whole seconds only ...`).
 
 **The handoff runs after the swap has committed, and can still refuse.** `transmute` applies its own
 preconditions to the plain table (for example, a secondary index whose name leaves no room for the `_pgpm`
