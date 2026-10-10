@@ -15,9 +15,11 @@
   control column type, while the column it pages is the relation's: a timestamptz relation under a date parent
   read its cursor of noon back as midnight (under a timestamp parent, east of UTC, it lost its offset), so every
   page re-admitted the row it ended on and a quiescent export never ended. The cast now takes the relation's own
-  type, and a relation with no column of that name is refused by name before anything is read. `tests/archive/db/51`
+  type with its typmod (a bare `character` or `bit` is one wide and would cut a char(n) or bit(n) cursor the same
+  way), and a relation with no column of that name is refused by name before anything is read. `tests/archive/db/51`
   under `bench/archive_to_s3_multi_heap.sh`, with the mutations `to_s3_cursor_heap_unkeyed`, `to_s3_cursor_null_blind`,
-  `to_s3_cursor_null_restart`, `to_s3_cursor_null_run_unread` and `to_s3_cursor_parent_type`.
+  `to_s3_cursor_null_restart`, `to_s3_cursor_null_run_unread`, `to_s3_cursor_parent_type` and
+  `to_s3_cursor_type_typmod_dropped`.
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's

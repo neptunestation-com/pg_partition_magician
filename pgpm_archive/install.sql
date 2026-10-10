@@ -3455,8 +3455,11 @@ begin
   -- ended; under a timestamp parent a timestamptz cursor lost its offset and, east of UTC, did the same. The type
   -- is used for that cast and nowhere else (the object key, the conservation check and the lines do not read it),
   -- so nothing else here assumes the parent's type. A relation with no such column cannot be paged at all, and is
-  -- refused by name before anything is read or sent.
-  select a.atttypid::regtype::text into v_ctltype
+  -- refused by name before anything is read or sent. The type is spelled WITH its typmod (format_type): the bare
+  -- name loses it, and for char(n) the bare `character` is char(1), so a cursor of 'abc' was cast back as 'a' and
+  -- every later page re-read 'abc' (bit(n) the same: the bare `bit` is bit(1)). With the typmod the cast reads back
+  -- the value it was rendered from (a bpchar is padded back to its width, a numeric keeps its scale).
+  select format_type(a.atttypid, a.atttypmod) into v_ctltype
     from pg_attribute a
    where a.attrelid = v_child and a.attname = pcfg.control_column and a.attnum > 0 and not a.attisdropped;
   if v_ctltype is null then

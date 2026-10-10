@@ -11462,6 +11462,17 @@ MUTATIONS["to_s3_cursor_parent_type"] = (
       "   where a.attrelid = p_parent and a.attname = pcfg.control_column and a.attnum > 0 and not a.attisdropped;\n", 1)],
 )
 MUTATION_SRC["to_s3_cursor_parent_type"] = "pgpm_archive/install.sql"
+MUTATIONS["to_s3_cursor_type_typmod_dropped"] = (
+    "bench/archive_to_s3_multi_heap.sh",
+    "archive.to_s3 spells the cursor's type as the bare type name (atttypid::regtype), dropping the typmod. For a "
+    "char(3) column the bare `character` is char(1), so a cursor of 'abc' is cast back as 'a' and every later page "
+    "re-reads 'abc': a quiescent export never ends; for bit(3) the bare `bit` is bit(1), which cuts the cursor to its "
+    "first bit the same way. One clause, the spelling. tests/archive/db/51 parts H and J catch it (both cancelled by "
+    "the statement_timeout).",
+    [("  select format_type(a.atttypid, a.atttypmod) into v_ctltype\n",
+      "  select a.atttypid::regtype::text into v_ctltype\n", 1)],
+)
+MUTATION_SRC["to_s3_cursor_type_typmod_dropped"] = "pgpm_archive/install.sql"
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
