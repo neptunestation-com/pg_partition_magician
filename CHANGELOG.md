@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **The reaper re-reads a claim under the table's lock and leaves one a live session took over** (#1166).
+  `_transmute_reap` judged each claim by the row its loop read when the sweep began, so while it waited
+  (up to its 5 s lock timeout) on one abandoned table, an operator's re-run of `transmute` on another, the
+  documented resume, could take that dead claim over and go on into phase 2, and the sweep then reached it
+  with the stale owner, dropped the live conversion's validated bound, deleted its claim and logged
+  `transmute_reap`: the cutover failed and the table was left plain. The sweep now takes the table's
+  `ACCESS EXCLUSIVE` first and re-reads the claim `FOR UPDATE SKIP LOCKED` under it; a claim that is gone,
+  locked by another transaction, or owned by a live session by then is left as it is, and the lock taken on
+  its table is released at once rather than held until `maintain_all` commits. A reaped claim's log row
+  carries the bound read under the lock. Guard `bench/transmute_reap_reread.sh` (tests/320), mutation
+  `transmute_reap_reread_ignores_owner`.
+
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's

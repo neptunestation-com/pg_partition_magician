@@ -10667,11 +10667,23 @@ $$;
 -- A timeout DEFERS that table alone: skip_transmute_reap is logged, the claim and the bound stay exactly
 -- as they were, and the next tick tries again. Any other error still propagates, as it always has.
 -- bench/transmute_reap_lock_timeout.sh guards it.
+--
+-- The verdict is taken again under the table's lock (#1166). The loop's row is the claim as it stood when
+-- the sweep began, and that wait is exactly the window in which an operator re-runs transmute on the table,
+-- the documented resume: it takes the dead claim over, records itself as the owner and goes on into phase
+-- 2. Acting on the loop's row then dropped a LIVE conversion's validated bound and deleted its claim, and
+-- its cutover failed. So the table's ACCESS EXCLUSIVE comes first and the claim is re-read FOR UPDATE under
+-- it, SKIP LOCKED so the re-read never waits on a row while holding that lock (a claim another transaction
+-- is writing right now is not one to judge). A claim that is gone, or locked, or whose owner is alive by
+-- then, is left as it is, and the block is rolled back (sqlstate PGPMR) so the lock it took on that table
+-- is given back at once rather than held, ahead of the live conversion's own cutover, until maintain_all
+-- commits. tests/320 and bench/transmute_reap_reread.sh guard it.
 create or replace function pgpm._transmute_reap()
 returns int language plpgsql
 set lock_timeout = '5s'
 as $$
 declare r pgpm.transmute_inflight%rowtype; v_n int := 0;
+        v_claim pgpm.transmute_inflight%rowtype;   -- #1166: the claim as it stands under the table's lock
 begin
   for r in select * from pgpm.transmute_inflight loop
     -- the relation itself is gone: nothing to undo, just forget it. Decided by the claim's oid (#575), not
@@ -10687,15 +10699,25 @@ begin
       continue;   -- still running; leave it alone
     end if;
     begin
+      -- #1166: the lock first, then the claim as it stands under it; see the header
+      execute format('lock table %s in access exclusive mode', r.parent_table::text);
+      select * into v_claim from pgpm.transmute_inflight
+       where parent_table = r.parent_table for update skip locked;
+      if not found or pgpm._session_alive(v_claim.owner_pid, v_claim.owner_backend_start) then
+        raise sqlstate 'PGPMR';   -- taken over or finished while the sweep waited: roll back, lock released
+      end if;
       execute format('alter table %s drop constraint if exists pgpm_monolith_bound', r.parent_table::text);
       delete from pgpm.transmute_inflight where parent_table = r.parent_table;
       insert into pgpm.log (parent_table, action, lo, hi, method)
-        values (r.parent_table, 'transmute_reap', r.lo, r.hi,
+        values (r.parent_table, 'transmute_reap', v_claim.lo, v_claim.hi,
                 'abandoned conversion undone: the bound was rejecting out-of-range writes');
       v_n := v_n + 1;
-    exception when lock_not_available then   -- #657: defer this table to the next tick, never stall on it
-      insert into pgpm.log (parent_table, action, lo, hi, method)
-        values (r.parent_table, 'skip_transmute_reap', r.lo, r.hi, left(sqlerrm, 200));
+    exception
+      when sqlstate 'PGPMR' then
+        null;
+      when lock_not_available then   -- #657: defer this table to the next tick, never stall on it
+        insert into pgpm.log (parent_table, action, lo, hi, method)
+          values (r.parent_table, 'skip_transmute_reap', r.lo, r.hi, left(sqlerrm, 200));
     end;
   end loop;
   return v_n;

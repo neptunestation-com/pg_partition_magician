@@ -11397,6 +11397,19 @@ MUTATIONS["retain_horizon_wall_round_trip"] = (
 )
 
 
+# Issue #1166: _transmute_reap re-reads the claim FOR UPDATE under the table's lock and leaves one whose
+# owner is alive by then. bench/transmute_reap_reread.sh runs tests/320 against the mutant.
+MUTATIONS["transmute_reap_reread_ignores_owner"] = (
+    "bench/transmute_reap_reread.sh",
+    "Pre-#1166 _transmute_reap: the verdict is the claim row the sweep's cursor read when it began. The lock "
+    "and the re-read stay, and only the re-read's test of the owner it reads goes, so a dead claim an "
+    "operator's re-run transmute took over while the sweep waited on another table is reaped as abandoned: "
+    "the live conversion's bound dropped, its claim deleted, transmute_reap logged, its cutover failed.",
+    [("      if not found or pgpm._session_alive(v_claim.owner_pid, v_claim.owner_backend_start) then\n",
+      "      if not found then\n", 1)],
+)
+
+
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
 # cost), and discriminate.sh's --shard=I/N interleaves that list, so the heavy ones spread over the
