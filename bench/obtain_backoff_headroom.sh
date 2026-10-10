@@ -118,7 +118,7 @@ check "ob_race: ample headroom: the back-off holds, nothing created" "$(cells pu
 
 # Frontier into [4000,5000): nothing covered beyond it.
 run "insert into public.ob_race (id, body) values (4001, 'frontier')" >/dev/null
-check "ob_race: the back-off is still in the future before the low-headroom tick" \
+check "LIVENESS: ob_race: the back-off is still in the future before the low-headroom tick" \
   "$(q "select obtain_retry_after > clock_timestamp() from pgpm.config where parent_table = 'public.ob_race'::regclass")" "t"
 
 run "call pgpm.maintain_obtain('public.ob_race')" >/dev/null

@@ -118,9 +118,9 @@ select 't47a.evt'::regclass::oid as a_parent, 't47a.loose'::regclass::oid as a_l
 select :'p' || 't47a_o.loose.ndjson' as a_key, :'p' || 't47a.loose.ndjson' as a_old_key \gset
 
 select ok(t47.clear(:'a_key') = 404 and t47.clear(:'a_old_key') = 404,
-  'A fixture: nothing at either schema''s key for loose before the work');
+  'fixture: (A) nothing at either schema''s key for loose before the work');
 select is((select count(*)::int from pgpm.part where parent_table = :'a_parent'::oid::regclass and child_name = 'loose'), 0,
-  'A fixture: pgpm.part has no row for loose, so no anchor stands behind its resolution');
+  'fixture: (A) pgpm.part has no row for loose, so no anchor stands behind its resolution');
 
 -- the statement is spelled before the shim is on the search_path, so only the export's own calls can fire it
 select format('select archive.to_s3(%s::oid::regclass, %L, null, null)', :'a_parent', 'loose') as a_sql \gset
@@ -134,9 +134,9 @@ reset search_path;
 -- disarmed here too: a failed export rolls the shim's own disarm back
 select set_config('t47.part', '', false) as disarmed \gset discard_
 select is((select outcome from t47.seen where part = 'A'), 'done',
-  'A LIVENESS: the second session swapped the two schemas'' names inside the export');
+  'LIVENESS: (A) the second session swapped the two schemas'' names inside the export');
 select ok(to_regclass('t47a_o.loose')::oid = :'a_loose'::oid and to_regclass('t47a.loose')::oid = :'a_namesake'::oid,
-  'A LIVENESS: the parent''s schema now has the other name, and the name it had leads to the namesake');
+  'LIVENESS: (A) the parent''s schema now has the other name, and the name it had leads to the namesake');
 select is(t47.rows(:'a_key'), '1:mine,2:mine',
   'A: the object holds exactly the named relation''s rows 1 and 2, not the namesake''s row 10');
 select is((select relation_oid from archive.object_key_claim where object_key = :'a_key'), :'a_loose'::oid,
@@ -155,10 +155,10 @@ select child_name as b_child, child_oid as b_oid from pgpm.part
  where parent_table = 't47b.evt'::regclass and lo = '0' \gset
 select format('create table t47b_o.%I (id bigint, payload text); insert into t47b_o.%I values (20, %L)',
               :'b_child', :'b_child', 'namesake') as b_namesake_sql \gset
-select lives_ok(:'b_namesake_sql', 'B fixture: a namesake of the recorded child, row 20, in the other schema');
+select lives_ok(:'b_namesake_sql', 'fixture: (B) a namesake of the recorded child, row 20, in the other schema');
 select 't47b.evt'::regclass::oid as b_parent \gset
 select :'p' || 't47b_o.' || :'b_child' || '.ndjson' as b_key \gset
-select is(t47.clear(:'b_key'), 404, 'B fixture: nothing at the export''s key before the work');
+select is(t47.clear(:'b_key'), 404, 'fixture: (B) nothing at the export''s key before the work');
 
 select format('select archive.to_s3(%s::oid::regclass, %L, null, null)', :'b_parent', :'b_child') as b_sql \gset
 select t47.arm('B', :'b_child',
@@ -170,10 +170,10 @@ select lives_ok(:'b_sql',
 reset search_path;
 select set_config('t47.part', '', false) as disarmed \gset discard_
 select is((select outcome from t47.seen where part = 'B'), 'done',
-  'B LIVENESS: the second session swapped the two schemas'' names inside the export');
+  'LIVENESS: (B) the second session swapped the two schemas'' names inside the export');
 select ok(to_regclass(format('t47b_o.%I', :'b_child'))::oid = :'b_oid'::oid
           and to_regclass(format('t47b.%I', :'b_child'))::oid is distinct from :'b_oid'::oid,
-  'B LIVENESS: the recorded child moved with its schema, and its old spelling leads to the namesake');
+  'LIVENESS: (B) the recorded child moved with its schema, and its old spelling leads to the namesake');
 select is(t47.rows(:'b_key'), '5:first,6:first',
   'B: the object holds exactly the recorded child''s rows 5 and 6, not the namesake''s row 20');
 select is((select relation_oid from archive.object_key_claim where object_key = :'b_key'), :'b_oid'::oid,
@@ -192,10 +192,10 @@ select child_name as c_child, child_oid as c_oid from pgpm.part
 select :'p' || 't47c.' || :'c_child' || '.ndjson' as c_key \gset
 select format('alter table t47c.%I rename to %I; create table t47c.%I (id bigint, payload text); insert into t47c.%I values (30, %L)',
               :'c_child', :'c_child' || '_was', :'c_child', :'c_child', 'namesake') as c_sql \gset
-select lives_ok(:'c_sql', 'C fixture: the recorded child renamed away and a namesake, row 30, created by its name');
+select lives_ok(:'c_sql', 'fixture: (C) the recorded child renamed away and a namesake, row 30, created by its name');
 select ok(to_regclass(format('t47c.%I', :'c_child'))::oid is distinct from :'c_oid'::oid,
-  'C LIVENESS: the recorded child''s name now leads to another relation');
-select is(t47.clear(:'c_key'), 404, 'C fixture: nothing at the export''s key before the work');
+  'LIVENESS: (C) the recorded child''s name now leads to another relation');
+select is(t47.clear(:'c_key'), 404, 'fixture: (C) nothing at the export''s key before the work');
 select throws_like(format('select archive.to_s3(%L, %L, null, null)', 't47c.evt', :'c_child'),
   format('%%t47c.%s is oid %% now, not the oid %s recorded for this partition; refusing to archive it%%', :'c_child', :'c_oid'),
   'C: the namesake standing at the recorded child''s name is refused by the pgpm.part anchor');
@@ -212,10 +212,10 @@ set local search_path = t47hook, pg_catalog, public;
 select archive._resolve_child(:'a_parent'::oid::regclass, 'loose', 'tests/archive/db/47')::oid as d_got \gset
 reset search_path;
 select is((select outcome from t47.seen where part = 'D'), 'done',
-  'D LIVENESS: the second session swapped the schemas'' names back inside archive._resolve_child');
+  'LIVENESS: (D) the second session swapped the schemas'' names back inside archive._resolve_child');
 select ok(exists (select 1 from pg_locks l
                    where l.locktype = 'relation' and l.relation = :'a_namesake'::oid and l.pid = pg_backend_pid() and l.granted),
-  'D LIVENESS: a LOCK inside the call met the namesake, so the swap landed inside the window the hold must close');
+  'LIVENESS: (D) a LOCK inside the call met the namesake, so the swap landed inside the window the hold must close');
 select is(:'d_got'::oid, :'a_loose'::oid,
   'D: archive._resolve_child returned the relation the caller named, not the namesake now at its old spelling');
 select ok(exists (select 1 from pg_locks l

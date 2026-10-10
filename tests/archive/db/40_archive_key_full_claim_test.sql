@@ -76,23 +76,23 @@ select pgpm.set_archive_fn('t40.evt', 'pgpm.archive_to_s3_ndjson(regclass,name,t
 select 't40.evt'::regclass::oid as evt_oid \gset
 
 select is(t40.clear(:'p' || 't40.evt_0.ndjson') || '/' || t40.clear(:'p' || 't40.evt_0.' || :'evt_oid' || '.ndjson'), '404/404',
-  'A fixture: nothing at the chunk key nor at the export''s oid-shaped key before the work');
+  'fixture: (A) nothing at the chunk key nor at the export''s oid-shaped key before the work');
 call pgpm.maintain('t40.evt');
 select is((select s3_key from pgpm.archive_ledger where parent_table = 't40.evt'::regclass and lo = '0'),
           :'p' || 't40.evt_0.ndjson',
-  'A LIVENESS: the chunk [0, 10000) of t40.evt is recorded at <p>t40.evt_0.ndjson');
+  'LIVENESS: (A) the chunk [0, 10000) of t40.evt is recorded at <p>t40.evt_0.ndjson');
 select is(t40.rows(:'p' || 't40.evt_0.ndjson') || '/' || coalesce((select string_agg(id::text, ',') from t40.evt where id < 10000), 'none'),
   '1:old,2:old/none',
-  'A LIVENESS: the object holds rows 1:old and 2:old, and retire() dropped them, so it is their only copy');
+  'LIVENESS: (A) the object holds rows 1:old and 2:old, and retire() dropped them, so it is their only copy');
 select is(t40.holder(:'p' || 't40.evt_0.ndjson'), 't40.evt/chunk', 'A: the chunk claimed its whole key, as t40.evt''s chunk');
 
 -- a relation in the parent's schema, named like the chunk, that pgpm does not track
 create table t40.evt_0 (id bigint primary key, payload text not null);
 insert into t40.evt_0 values (7, 'export'), (8, 'export');
 select lives_ok($$ select archive.to_s3('t40.evt', 'evt_0', null, null) $$,
-  'A LIVENESS: archive.to_s3 of the untracked t40.evt_0 completed');
+  'LIVENESS: (A) archive.to_s3 of the untracked t40.evt_0 completed');
 select is((select parent_oid from archive.object_key_owner where key_base = :'p' || 't40.evt_0'), :'evt_oid'::oid,
-  'A LIVENESS: the export claimed the base <p>t40.evt_0, a base of its own, so a base claim alone saw no conflict');
+  'LIVENESS: (A) the export claimed the base <p>t40.evt_0, a base of its own, so a base claim alone saw no conflict');
 
 select is(t40.rows(:'p' || 't40.evt_0.ndjson'), '1:old,2:old',
   'A: the chunk object still holds the retired rows 1:old and 2:old after the export whose key spelled it');
@@ -123,9 +123,9 @@ create table t40.ev2_0 (id bigint primary key, payload text not null);
 insert into t40.ev2_0 values (7, 'export');
 
 select is(t40.clear(:'p' || 't40.ev2_0.ndjson') || '/' || t40.clear(:'p' || 't40.ev2.' || :'ev2_oid' || '_0.ndjson'), '404/404',
-  'B fixture: nothing at the shared key nor at the chunk''s oid-shaped key before the work');
-select lives_ok($$ select archive.to_s3('t40.log', 'ev2_0', null, null) $$, 'B LIVENESS: t40.log exported t40.ev2_0');
-select is(t40.rows(:'p' || 't40.ev2_0.ndjson'), '7:export', 'B LIVENESS: the export is at <p>t40.ev2_0.ndjson');
+  'fixture: (B) nothing at the shared key nor at the chunk''s oid-shaped key before the work');
+select lives_ok($$ select archive.to_s3('t40.log', 'ev2_0', null, null) $$, 'LIVENESS: (B) t40.log exported t40.ev2_0');
+select is(t40.rows(:'p' || 't40.ev2_0.ndjson'), '7:export', 'LIVENESS: (B) the export is at <p>t40.ev2_0.ndjson');
 select is(t40.holder(:'p' || 't40.ev2_0.ndjson'), 't40.log/export', 'B: and claimed that key as t40.log''s export');
 
 insert into t40.ev2 values (45000, 'frontier');
@@ -149,18 +149,18 @@ select pgpm.set_archive_fn('t40.gz', 'pgpm.archive_to_s3_ndjson(regclass,name,te
 select 't40.gz'::regclass::oid as gz_oid \gset
 
 select is(t40.clear(:'p' || 't40.gz_0.ndjson.gz') || '/' || t40.clear(:'p' || 't40.gz_0.' || :'gz_oid' || '.ndjson.gz'), '404/404',
-  'C fixture: nothing at the compressed chunk key nor at the export''s oid-shaped key before the work');
+  'fixture: (C) nothing at the compressed chunk key nor at the export''s oid-shaped key before the work');
 call pgpm.maintain('t40.gz');
 select is((select s3_key from pgpm.archive_ledger where parent_table = 't40.gz'::regclass and lo = '0'),
           :'p' || 't40.gz_0.ndjson.gz',
-  'C LIVENESS: the compressed chunk [0, 10000) of t40.gz is recorded at <p>t40.gz_0.ndjson.gz');
+  'LIVENESS: (C) the compressed chunk [0, 10000) of t40.gz is recorded at <p>t40.gz_0.ndjson.gz');
 select t40.bytes(:'p' || 't40.gz_0.ndjson.gz') as gz_chunk \gset
 select is(t40.holder(:'p' || 't40.gz_0.ndjson.gz'), 't40.gz/chunk',
   'C: the claim names the whole key the PUT wrote, .gz included');
 create table t40.gz_0 (id bigint primary key, payload text not null);
 insert into t40.gz_0 values (7, 'export');
 select lives_ok($$ select archive.to_s3('t40.gz', 'gz_0', null, null) $$,
-  'C LIVENESS: the compressed export of the untracked t40.gz_0 completed');
+  'LIVENESS: (C) the compressed export of the untracked t40.gz_0 completed');
 select ok(:'gz_chunk'::bytea is not null and t40.bytes(:'p' || 't40.gz_0.ndjson.gz') = :'gz_chunk'::bytea,
   'C: the compressed chunk object is byte for byte what it was before the compressed export');
 select ok(t40.bytes(:'p' || 't40.gz_0.' || :'gz_oid' || '.ndjson.gz') is not null
@@ -175,7 +175,7 @@ insert into t40.evt_10000 values (9, 'refused');
 insert into archive.object_key_claim (object_key, parent_oid, kind) values
   (:'p' || 't40.evt_10000.ndjson', 1, 'chunk'), (:'p' || 't40.evt_10000.' || :'evt_oid' || '.ndjson', 1, 'chunk');
 select is(t40.clear(:'p' || 't40.evt_10000.ndjson') || '/' || t40.clear(:'p' || 't40.evt_10000.' || :'evt_oid' || '.ndjson'), '404/404',
-  'D fixture: nothing at either key before the export');
+  'fixture: (D) nothing at either key before the export');
 select throws_like($$ select archive.to_s3('t40.evt', 'evt_10000', null, null) $$,
   'pg_partition_magician: the object key %t40.evt_10000.' || :'evt_oid' || '.ndjson is already claimed by the chunk of relation 1; refusing to write the export of %',
   'D: the export whose plain and oid-shaped keys are both another writer''s is refused');
@@ -188,7 +188,7 @@ select is((select count(*)::int from archive.object_key_owner where key_base = :
 -- An installation upgraded to this release has ledger rows and no whole-key claims; the seed is what an
 -- install runs. Taken out for Part A's chunk key and run again, it must claim that key for t40.evt.
 delete from archive.object_key_claim where object_key = :'p' || 't40.evt_0.ndjson';
-select is(t40.holder(:'p' || 't40.evt_0.ndjson'), null, 'E fixture: the chunk key has no whole-key claim, as before an upgrade');
+select is(t40.holder(:'p' || 't40.evt_0.ndjson'), null, 'fixture: (E) the chunk key has no whole-key claim, as before an upgrade');
 select is(archive._claim_archived_keys(), 1, 'E: the seed claimed exactly one key, the only ledger key without a claim');
 select is(t40.holder(:'p' || 't40.evt_0.ndjson'), 't40.evt/chunk',
   'E: the seed claimed the chunk key pgpm.archive_ledger records, for the table that archived it');

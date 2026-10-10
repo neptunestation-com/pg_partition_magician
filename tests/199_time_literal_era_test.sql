@@ -36,12 +36,12 @@ create temp table era_case as
    cross join (values ('UTC'), ('Asia/Kolkata'), ('America/New_York')) z(tz);
 
 select is((select count(*)::int from era_case where (ts at time zone tz) < timestamp '0001-01-01 00:00:00'), 9,
-  'A LIVENESS: nine of the fifteen wall times are before 1 AD');
+  'LIVENESS: (A) nine of the fifteen wall times are before 1 AD');
 select is((select array_agg(tz || ' ' || (ts at time zone tz)::text order by tz)
              from era_case
             where (ts at time zone tz < timestamp '0001-01-01') <> (ts at time zone 'UTC' < timestamp '0001-01-01')),
   array['America/New_York 0001-12-31 19:03:58 BC', 'Asia/Kolkata 0001-01-01 05:53:27.999999'],
-  'A LIVENESS: exactly two wall times are in the other era from their instant''s UTC reading');
+  'LIVENESS: (A) exactly two wall times are in the other era from their instant''s UTC reading');
 select is((select array_agg(pgpm._time_literal(ts, tz) order by ts, tz) from era_case where tz <> 'UTC' and ts < '0001-01-01 00:00:00+00'
              and ts > '0002-01-01 00:00:00+00 BC'),
   array['0001-12-31 19:03:57.999999-04:56:02 BC', '0001-01-01 05:53:27.999999+05:53:28'],
@@ -80,7 +80,7 @@ insert into public.era_tz values (1, '0100-06-01 00:00:00+00 BC'), (2, now() - i
                                  (3, now() - interval '2 hours');
 select oid as era_tz_oid from pg_class where oid = 'public.era_tz'::regclass \gset
 select is((select array_agg(id order by id) from public.era_tz where at < '0001-01-01 00:00:00+00'), array[1]::bigint[],
-  'B LIVENESS: era_tz''s oldest row (id 1) is before 1 AD, and only it');
+  'LIVENESS: (B) era_tz''s oldest row (id 1) is before 1 AD, and only it');
 call pgpm.transmute('public.era_tz', 'at', interval '1 year', p_obtain => 1);
 select is((select relkind::text from pg_class where oid = 'public.era_tz'::regclass), 'p', 'B: era_tz converted');
 select is((select array_agg(id order by id) from public.era_tz where tableoid = :era_tz_oid), array[1, 2, 3]::bigint[],
@@ -104,7 +104,7 @@ create table public.era_d (id bigint not null, d date not null, primary key (id,
 insert into public.era_d values (1, date '0100-06-01 BC'), (2, current_date - 1);
 select oid as era_d_oid from pg_class where oid = 'public.era_d'::regclass \gset
 select is((select array_agg(id order by id) from public.era_d where d < date '0001-01-01'), array[1]::bigint[],
-  'C LIVENESS: era_d''s oldest row (id 1) is before 1 AD, and only it');
+  'LIVENESS: (C) era_d''s oldest row (id 1) is before 1 AD, and only it');
 call pgpm.transmute('public.era_d', 'd', interval '1 year', p_obtain => 1);
 select is((select relkind::text from pg_class where oid = 'public.era_d'::regclass), 'p', 'C: era_d converted');
 select is((select array_agg(id order by id) from public.era_d where tableoid = :era_d_oid), array[1, 2]::bigint[],

@@ -59,7 +59,7 @@ select ok(exists (select 1 from pgpm.log where parent_table = 'public.rg217a'::r
                    and action = 'regrain_copy' and lo = '0' and hi = '50' and rows = 49)
           and pgpm._regrain_delta_count('public.rg217a'::regclass) = 2
           and s217.delta_cols('rg217a') = 'k bigint, n bigint',
-          'LIVENESS A: the run is mid-flight and the UPDATE of n = 10 is captured (old + new key) under the key k, n');
+          'LIVENESS: (A) the run is mid-flight and the UPDATE of n = 10 is captured (old + new key) under the key k, n');
 
 alter table public.rg217a rename column k to kk;
 
@@ -120,7 +120,7 @@ alter table public.rg217b alter column k type bigint;
 select ok(s217.delta_cols('rg217b') = 'k integer, n bigint'
           and (select format_type(atttypid, atttypmod) from pg_attribute
                 where attrelid = 'public.rg217b'::regclass and attname = 'k') = 'bigint',
-          'LIVENESS B: the parent''s key column k is bigint now and the delta minted at prepare still holds it as integer');
+          'LIVENESS: (B) the parent''s key column k is bigint now and the delta minted at prepare still holds it as integer');
 select throws_ok($$insert into public.rg217b values (3000000000, 20, 'early wide')$$, '22003', null,
                  'B: until the next tick, a key the delta minted as integer cannot hold is refused (it raises)');
 

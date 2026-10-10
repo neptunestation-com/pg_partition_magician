@@ -65,10 +65,10 @@ select is((select partition_tz || ' ' || partition_step::interval::text || ' '
                   || (partition_anchor::timestamptz at time zone 'America/New_York')::text
              from pgpm.config where parent_table = 'public.ny'::regclass),
   'America/New_York 1 mon 1999-12-31 19:00:00',
-  'A LIVENESS: a monthly New York grid whose default anchor reads December there, so year cells start on 1 December');
+  'LIVENESS: (A) a monthly New York grid whose default anchor reads December there, so year cells start on 1 December');
 select is((select (lo::timestamptz at time zone 'America/New_York')::text from pgpm.part
             where parent_table = 'public.ny'::regclass and attached order by lo::timestamptz limit 1),
-  '2023-03-01 00:00:00', 'A LIVENESS: the monolith starts 2023-03-01, off the year lattice');
+  '2023-03-01 00:00:00', 'LIVENESS: (A) the monolith starts 2023-03-01, off the year lattice');
 select is(array[pgpm._regrain_sub_name('ny', c, '1 year', pgpm._ts_text('2023-03-01 00:00-05'), pgpm._ts_text('2023-12-01 00:00-05')),
                 pgpm._regrain_sub_name('ny', c, '1 year', pgpm._ts_text('2023-12-01 00:00-05'), pgpm._ts_text('2024-12-01 00:00-05'))],
           array['ny_p2023_03', 'ny_p2023']::name[],
@@ -89,7 +89,7 @@ select ok(not exists ((select id from ny_before except select id from public.ny)
                       union all (select id from public.ny except select id from ny_before)),
   'A: the table holds exactly the rows it held before the regrain');
 select is((select count(*)::int from public.ny), (select count(*)::int from ny_before),
-  'A LIVENESS: and those are every row the fixture wrote, so the comparison above was over something');
+  'LIVENESS: (A) and those are every row the fixture wrote, so the comparison above was over something');
 
 -- ==================== (B) UTC, p_anchor in April: year cells start on 1 April ====================
 set timezone = 'UTC';
@@ -109,10 +109,10 @@ insert into public.ap values (pg_temp.tt(date_trunc('month', now()) + interval '
 create temp table ap_before as select id from public.ap;
 select is((select (lo::timestamptz at time zone 'UTC')::text from pgpm.part
             where parent_table = 'public.ap'::regclass and attached order by lo::timestamptz limit 1),
-  '2023-02-01 00:00:00', 'B LIVENESS: the monolith starts 2023-02-01, off the April year lattice');
+  '2023-02-01 00:00:00', 'LIVENESS: (B) the monolith starts 2023-02-01, off the April year lattice');
 select is(pgpm._grid_floor('text_time', '1 year', (select partition_anchor from pgpm.config where parent_table = 'public.ap'::regclass),
                            '2023-02-01 00:00+00', 'UTC')::timestamptz,
-  '2022-04-01 00:00+00'::timestamptz, 'B LIVENESS: the year lattice cell around it starts in April');
+  '2022-04-01 00:00+00'::timestamptz, 'LIVENESS: (B) the year lattice cell around it starts in April');
 select lives_ok($$ select pgpm.regrain_history('public.ap', '1 year') $$,
   'B: regrain_history(.., ''1 year'') splits the monolith into years');
 select is(pg_temp.cell('public.ap', '2023-02-01 00:00+00', '2023-04-01 00:00+00'),
@@ -125,7 +125,7 @@ select ok(not exists ((select id from ap_before except select id from public.ap)
                       union all (select id from public.ap except select id from ap_before)),
   'B: the table holds exactly the rows it held before the regrain');
 select is((select count(*)::int from public.ap), (select count(*)::int from ap_before),
-  'B LIVENESS: and those are every row the fixture wrote');
+  'LIVENESS: (B) and those are every row the fixture wrote');
 
 -- ==================== (C) the naming rule itself ====================
 -- a January lattice (UTC, the default anchor): a child's last cell [2023-01-01, 2023-03-01) is a lattice
@@ -148,7 +148,7 @@ select is(array[pgpm._regrain_sub_name('x', u, '2 years', pgpm._ts_text('2023-01
 select is(array[pgpm._part_name('x', 'text_time', '2 years', pgpm._ts_text('2023-01-01 00:00+00'), pgpm._ts_text('2024-01-01 00:00+00'), 'UTC'),
                 pgpm._part_name('x', 'text_time', '3 months', pgpm._ts_text('2023-02-01 00:00+00'), pgpm._ts_text('2023-04-01 00:00+00'), 'UTC')],
           array['x_p2023', 'x_p2023_02']::name[],
-  'C LIVENESS: those _part_name names are the plain year and month labels, so the comparison above pinned something');
+  'LIVENESS: (C) those _part_name names are the plain year and month labels, so the comparison above pinned something');
 select is(pgpm._regrain_sub_name('x', c, '1 year', pgpm._ts_text('2023-03-01 00:00+00'), pgpm._ts_text('2023-12-01 00:00+00')),
           'x_p2023_03_01'::name,
   'C: a New York year clamp whose bounds are UTC midnights reads exactly only to the day, and is labelled to it')

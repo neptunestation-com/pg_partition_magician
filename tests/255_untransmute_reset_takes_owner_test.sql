@@ -53,7 +53,7 @@ call pgpm.transmute('t255s.ex', 'id', 100::bigint, p_obtain => 2);
 
 -- ================= (A) a monolith at the NULL default =================
 select ok((select relacl is null from pg_class where oid = pg_temp.monolith255('t255s.na')),
-  'A LIVENESS: the monolith untransmute will restore has the NULL (owner-implicit) ACL');
+  'LIVENESS: (A) the monolith untransmute will restore has the NULL (owner-implicit) ACL');
 revoke truncate, delete on t255s.na from t255_owner;
 grant select on t255s.na to t255_kept;
 create temp table parent255na as select pg_temp.acl255('t255s.na') as acl;
@@ -61,11 +61,11 @@ select ok(not has_table_privilege('t255_owner', 't255s.na', 'truncate')
           and not has_table_privilege('t255_owner', 't255s.na', 'delete')
           and has_table_privilege('t255_owner', 't255s.na', 'select')
           and has_table_privilege('t255_kept', 't255s.na', 'select'),
-  'A LIVENESS: on the managed table the owner holds no TRUNCATE or DELETE, keeps SELECT, and t255_kept holds SELECT');
-select is(pgpm.untransmute('t255s.na')::text, 't255s.na', 'A LIVENESS: untransmute restored t255s.na');
+  'LIVENESS: (A) on the managed table the owner holds no TRUNCATE or DELETE, keeps SELECT, and t255_kept holds SELECT');
+select is(pgpm.untransmute('t255s.na')::text, 't255s.na', 'LIVENESS: (A) untransmute restored t255s.na');
 select is((select relkind::text || ' ' || (select string_agg(id::text, ',' order by id) from t255s.na)
              from pg_class where oid = 't255s.na'::regclass),
-  'r 1,2,3,4,5,6,7', 'A LIVENESS: t255s.na is an ordinary table again, holding rows 1 to 7');
+  'r 1,2,3,4,5,6,7', 'LIVENESS: (A) t255s.na is an ordinary table again, holding rows 1 to 7');
 select is(pg_temp.acl255('t255s.na'), (select acl from parent255na),
   'A: the restored table holds exactly the parent''s privileges, the owner''s included');
 select ok(not has_table_privilege('t255_owner', 't255s.na', 'truncate')
@@ -78,18 +78,18 @@ select ok(has_table_privilege('t255_owner', 't255s.na', 'insert')
 -- ================= (B) a monolith with an explicit ACL =================
 select ok((select acl from (select pg_temp.acl255(pg_temp.monolith255('t255s.ex')) as acl) m)
             @> array['t255_kept:INSERT/t255_owner', 't255_kept:UPDATE/t255_owner', 't255_owner:UPDATE/t255_owner'],
-  'B LIVENESS: the monolith carries the conversion-time grants: t255_kept INSERT and UPDATE, the owner UPDATE');
+  'LIVENESS: (B) the monolith carries the conversion-time grants: t255_kept INSERT and UPDATE, the owner UPDATE');
 revoke update on t255s.ex from t255_owner;
 revoke insert on t255s.ex from t255_kept;
 grant select (v) on t255s.ex to t255_kept;
 create temp table parent255ex as select pg_temp.acl255('t255s.ex') as acl;
 select ok(not has_table_privilege('t255_owner', 't255s.ex', 'update')
           and has_column_privilege('t255_kept', 't255s.ex', 'v', 'select'),
-  'B LIVENESS: on the managed table the owner holds no UPDATE, and t255_kept holds SELECT (v)');
-select is(pgpm.untransmute('t255s.ex')::text, 't255s.ex', 'B LIVENESS: untransmute restored t255s.ex');
+  'LIVENESS: (B) on the managed table the owner holds no UPDATE, and t255_kept holds SELECT (v)');
+select is(pgpm.untransmute('t255s.ex')::text, 't255s.ex', 'LIVENESS: (B) untransmute restored t255s.ex');
 select is((select relkind::text || ' ' || (select string_agg(id::text, ',' order by id) from t255s.ex)
              from pg_class where oid = 't255s.ex'::regclass),
-  'r 1,2,3,4', 'B LIVENESS: t255s.ex is an ordinary table again, holding rows 1 to 4');
+  'r 1,2,3,4', 'LIVENESS: (B) t255s.ex is an ordinary table again, holding rows 1 to 4');
 select is(pg_temp.acl255('t255s.ex'), (select acl from parent255ex),
   'B: the restored table holds exactly the parent''s privileges');
 select ok(not has_table_privilege('t255_owner', 't255s.ex', 'update')

@@ -33,16 +33,16 @@ call pgpm.maintain_all();   -- retention retires [0, 10) (the monolith) and [10,
 delete from public.rt177 where id = 35;
 
 select ok(not exists (select 1 from pg_class where oid = (select oid from orig177)),
-  'LIVENESS (A): the original table (the monolith) has been retired by retention');
+  'LIVENESS: (A) the original table (the monolith) has been retired by retention');
 select is((select array_agg(id order by id) from public.rt177), array[25]::bigint[],
-  'LIVENESS (A): the one remaining row is 25');
+  'LIVENESS: (A) the one remaining row is 25');
 select is(
   (select p.lo || '/' || p.hi from pgpm.part p
     where p.parent_table = 'public.rt177'::regclass and p.attached order by p.lo::numeric limit 1),
   '20/30',
-  'LIVENESS (A): the smallest-lo attached partition is now [20, 30), a forward partition obtain minted');
+  'LIVENESS: (A) the smallest-lo attached partition is now [20, 30), a forward partition obtain minted');
 select is((select count(*)::int from public.rt177 where id >= 20 and id < 30), 1,
-  'LIVENESS (A): and it holds every remaining row, so the outside-rows door alone would let it through');
+  'LIVENESS: (A) and it holds every remaining row, so the outside-rows door alone would let it through');
 
 select throws_like($$ select pgpm.untransmute('public.rt177') $$,
   '%cannot untransmute %rt177 -- the original table%is no longer one of its partitions%',
@@ -68,19 +68,19 @@ insert into public.rg177 values (250, 'frontier');   -- past B: the monolith is 
 select child_name as mon177b from pgpm.part
  where parent_table = 'public.rg177'::regclass and child_oid = (select oid from orig177b) \gset
 select is(pgpm.regrain('public.rg177', :'mon177b', '50'), 4,
-  'LIVENESS (B): the regrain swapped the monolith for four fine children');
+  'LIVENESS: (B) the regrain swapped the monolith for four fine children');
 delete from public.rg177 where id in (150, 250);
 
 select ok(not exists (select 1 from pg_class where oid = (select oid from orig177b)),
-  'LIVENESS (B): the original table (the monolith) is gone, dropped by the swap');
+  'LIVENESS: (B) the original table (the monolith) is gone, dropped by the swap');
 select is((select array_agg(id order by id) from public.rg177), array[1, 2, 3]::bigint[],
-  'LIVENESS (B): ids 1, 2 and 3 remain');
+  'LIVENESS: (B) ids 1, 2 and 3 remain');
 select is(
   (select p.lo || '/' || p.hi || '/' || (select count(*) from public.rg177 where id >= 0 and id < 50)
      from pgpm.part p
     where p.parent_table = 'public.rg177'::regclass and p.attached order by p.lo::numeric limit 1),
   '0/50/3',
-  'LIVENESS (B): the smallest-lo attached partition is the fine child [0, 50), holding all three rows');
+  'LIVENESS: (B) the smallest-lo attached partition is the fine child [0, 50), holding all three rows');
 
 select throws_like($$ select pgpm.untransmute('public.rg177') $$,
   '%cannot untransmute %rg177 -- the original table%is no longer one of its partitions%',

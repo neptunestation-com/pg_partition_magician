@@ -59,13 +59,13 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 if [ -z "$ready" ]; then
-  printf 'FAIL  %-58s %s\n' "MinIO reported ready (/minio/health/cluster)" "not within 60 s"; exit 1
+  printf 'FAIL  %-58s %s\n' "fixture: MinIO reported ready (/minio/health/cluster)" "not within 60 s"; exit 1
 fi
 code=$(docker run --rm --network "$NET" curlimages/curl -s -o /dev/null -w '%{http_code}' \
          --aws-sigv4 aws:amz:us-east-1:s3 -u minioadmin:minioadmin \
          -X PUT http://minio:9000/archive-test-bucket) || code="curl exit $?"
 if [ "$code" != 200 ] && [ "$code" != 409 ]; then
-  printf 'FAIL  %-58s %s\n' "the MinIO bucket exists" "PUT returned $code"; exit 1
+  printf 'FAIL  %-58s %s\n' "fixture: the MinIO bucket exists" "PUT returned $code"; exit 1
 fi
 
 # --- the database: fixtures, core, and the archive module under test ------------------------------
@@ -74,10 +74,10 @@ if ! q -v ON_ERROR_STOP=1 -q -c "create database $DB" >/dev/null 2>&1 \
    || ! q -d "$DB" -v ON_ERROR_STOP=1 -q -c "create extension if not exists http; create extension if not exists pgcrypto;" >/dev/null 2>&1 \
    || ! q -d "$DB" -v ON_ERROR_STOP=1 -q -f /repo/tests/archive/fixtures.sql >/dev/null 2>&1 \
    || ! q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f /repo/pgpm_core/install.sql >/dev/null 2>&1; then
-  printf 'FAIL  %-58s %s\n' "the database, its extensions, the fixtures and pgpm_core were set up" "no"; exit 1
+  printf 'FAIL  %-58s %s\n' "fixture: the database, its extensions, the fixtures and pgpm_core were set up" "no"; exit 1
 fi
 if ! q -d "$DB" -v ON_ERROR_STOP=1 -q -f "$ARCHIVE_INSTALL" >/dev/null 2>&1; then
-  printf 'FAIL  %-58s %s\n' "the archive module under test installed" "$ARCHIVE_INSTALL"; exit 1
+  printf 'FAIL  %-58s %s\n' "fixture: the archive module under test installed" "$ARCHIVE_INSTALL"; exit 1
 fi
 
 # One id grid of step 60, retention 60: the transmute monolith [0, 180) holds ids 1..179 once the frontier
@@ -110,7 +110,7 @@ begin
 end \$f\$;
 SQL
 then
-  printf 'FAIL  %-58s %s\n' "the fixture was built" "no"; sed 's/^/      /' "$work/setup.err" | head -5; exit 1
+  printf 'FAIL  %-58s %s\n' "fixture: the race fixture was built" "no"; sed 's/^/      /' "$work/setup.err" | head -5; exit 1
 fi
 child=$(v "select child_name from pgpm.part where parent_table = 'public.race'::regclass and lo = '0'")
 # A direct call at the chunk's key before the ledger records anything there (documented: admitted), so the key's

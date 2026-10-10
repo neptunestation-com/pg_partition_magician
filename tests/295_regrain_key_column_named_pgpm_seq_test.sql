@@ -87,7 +87,7 @@ insert into public.ps295 values (20000, 1, 'frontier');
 
 select ok(exists (select 1 from pgpm.part where parent_table = 'public.ps295'::regclass
                     and lo = '0' and hi = '3000' and attached),
-  'setup: ps295 has the frozen monolith [0, 3000) to regrain');
+  'fixture: ps295 has the frozen monolith [0, 3000) to regrain');
 
 select lives_ok($$ select pgpm.regrain_step('public.ps295',
                      (select child_name from pgpm.part where parent_table = 'public.ps295'::regclass and lo = '0'),
@@ -102,9 +102,9 @@ select is(
     (select indexrelid from pg_index where indrelid = 'public.ps295'::regclass and indisprimary)),
   null, 'the drift check reads the delta as minted for the key (id, pgpm_seq), so the next tick does not restart the run');
 
-select lives_ok($$ select pgpm_test295.to_copied('public.ps295') $$, 'setup: sub-range [0, 100) is copied');
+select lives_ok($$ select pgpm_test295.to_copied('public.ps295') $$, 'fixture: sub-range [0, 100) is copied');
 select is((select count(*)::int from pgpm.part where parent_table = 'public.ps295'::regclass and not attached and lo = '0' and hi = '100'),
-  1, 'witness: the fine child [0, 100) exists, detached, before the writes');
+  1, 'LIVENESS: the fine child [0, 100) exists, detached, before the writes');
 -- each row of id 20 as the copy wrote it into the fine child ('' when the copy did not)
 select coalesce(pgpm_test295.fine_xmin('public.ps295', 20, 1000), '') as twin_x0,
        coalesce(pgpm_test295.fine_xmin('public.ps295', 20, 2), '') as upd_x0 \gset
@@ -121,12 +121,12 @@ select is(
 
 select alike(pgpm_test295.to_swap('public.ps295'), 'swapped:%', 'the regrain of ps295 runs to its swap');
 select ok(exists (select 1 from pgpm.log where parent_table = 'public.ps295'::regclass and action = 'regrain_reconcile'),
-  'witness: the captured changes went through the reconcile');
+  'LIVENESS: the captured changes went through the reconcile');
 select ok(not exists (select 1 from pgpm.log where parent_table = 'public.ps295'::regclass and action = 'regrain_restart'),
   'and the run was never restarted for a key drift it did not have');
 select ok(exists (select 1 from pgpm.part where parent_table = 'public.ps295'::regclass and lo = '0' and hi = '100' and attached)
           and not exists (select 1 from pgpm.part where parent_table = 'public.ps295'::regclass and lo = '0' and hi = '3000'),
-  'witness: the fine child [0, 100) is attached and the monolith is gone');
+  'LIVENESS: the fine child [0, 100) is attached and the monolith is gone');
 
 select set_eq(
   $$ select id, pgpm_seq, payload from public.ps295 where id < 100 $$,

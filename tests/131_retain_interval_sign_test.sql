@@ -75,7 +75,7 @@ insert into public.rs131t (ts, payload) values (now() - interval '1 hour', 'h1')
 select child_name as t_write from pgpm.part
   where parent_table = 'public.rs131t'::regclass and attached
     and not pgpm._native_gt('time', lo, now()::text) and pgpm._native_gt('time', hi, now()::text) \gset
-select ok(:'t_write' is not null, 'setup: a partition holds now(): ' || :'t_write');
+select ok(:'t_write' is not null, 'fixture: a partition holds now(): ' || :'t_write');
 
 -- ======================= (C) set_retain refuses =======================
 select throws_like(

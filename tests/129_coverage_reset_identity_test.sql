@@ -69,17 +69,17 @@ call pgpm.maintain('public.cr129a');   -- block, and the first chunk
 
 select is(
   (select child_oid from pgpm.part where parent_table = 'public.cr129a'::regclass and child_name = :'a_doomed'),
-  :'a_real'::oid, 'LIVENESS A: pgpm.part records WHICH relation the monolith is, by oid');
+  :'a_real'::oid, 'LIVENESS: (A) pgpm.part records WHICH relation the monolith is, by oid');
 select ok(exists (select 1 from pg_trigger where tgrelid = :'a_real'::oid and tgname = 'pgpm_write_block'),
-  'LIVENESS A: the monolith carries its write block');
+  'LIVENESS: (A) the monolith carries its write block');
 select results_eq(
   $$ select child_name, lo, hi from pgpm.archive_ledger where parent_table = 'public.cr129a'::regclass $$,
   format($$ values (%L::name, '0'::text, '2'::text) $$, :'a_doomed'),
-  'LIVENESS A: one chunk of coverage, [0, 2), is recorded for the monolith under its name');
+  'LIVENESS: (A) one chunk of coverage, [0, 2), is recorded for the monolith under its name');
 select results_eq(
   $$ select id from pgpm_test129.handed where parent = 'public.cr129a'::regclass order by id $$,
   $$ values (1::bigint) $$,
-  'LIVENESS A: id 1 is the one row handed so far, so the watermark is real and partial');
+  'LIVENESS: (A) id 1 is the one row handed so far, so the watermark is real and partial');
 
 -- THE SUBSTITUTION: the real partition moves aside (still attached, still blocked) and a plain table
 -- with no trigger on it takes the name.
@@ -88,14 +88,14 @@ select format('create table public.%I (id bigint primary key, payload text)', :'
 select format('public.%I', :'a_doomed')::regclass::oid as a_impostor \gset
 
 select isnt(:'a_impostor'::oid, :'a_real'::oid,
-  'LIVENESS A: the name now answers to a DIFFERENT relation than pgpm recorded');
+  'LIVENESS: (A) the name now answers to a DIFFERENT relation than pgpm recorded');
 select is((select count(*)::int from pg_inherits
             where inhparent = 'public.cr129a'::regclass and inhrelid = :'a_real'::oid),
-  1, 'LIVENESS A: the relation pgpm meant is still a live partition of the parent, merely renamed');
+  1, 'LIVENESS: (A) the relation pgpm meant is still a live partition of the parent, merely renamed');
 select ok(exists (select 1 from pg_trigger where tgrelid = :'a_real'::oid and tgname = 'pgpm_write_block'),
-  'LIVENESS A: and still has the trigger nothing has removed, so its coverage is true');
+  'LIVENESS: (A) and still has the trigger nothing has removed, so its coverage is true');
 select ok(not pgpm._is_write_blocked('public.cr129a', :'a_doomed'),
-  'LIVENESS A: the substitute has no trigger, so a by-name test reads "coverage without its block"');
+  'LIVENESS: (A) the substitute has no trigger, so a by-name test reads "coverage without its block"');
 
 call pgpm.maintain('public.cr129a');
 
@@ -104,7 +104,7 @@ select results_eq(
   $$ select action, lo, hi from pgpm.log
       where parent_table = 'public.cr129a'::regclass and action = 'fail_write_block_identity' $$,
   $$ values ('fail_write_block_identity'::text, '0'::text, '1000'::text) $$,
-  'LIVENESS A: the tick saw the identity mismatch and refused, once, against the monolith''s range');
+  'LIVENESS: (A) the tick saw the identity mismatch and refused, once, against the monolith''s range');
 
 -- The witness that the tick's archive step ran and simply passed over the substituted name: with the
 -- monolith no longer a candidate (the name it would be found under has no trigger), the one chunk
@@ -112,7 +112,7 @@ select results_eq(
 select results_eq(
   format($$ select lo, hi from pgpm.archive_ledger where parent_table = 'public.cr129a'::regclass and child_name = %L $$, :'a_sib'),
   $$ values ('1000'::text, '1002'::text) $$,
-  'LIVENESS A: the archive step ran this tick, recording the sibling''s first chunk, so it did reach the ledger');
+  'LIVENESS: (A) the archive step ran this tick, recording the sibling''s first chunk, so it did reach the ledger');
 
 -- THE PROPERTY: the real partition's coverage is not discarded on the strength of a relation that is not it.
 select results_eq(
@@ -140,7 +140,7 @@ select results_eq(
 select format('drop table public.%I', :'a_doomed') \gexec
 select format('alter table public.cr129a_kept rename to %I', :'a_doomed') \gexec
 select is(format('public.%I', :'a_doomed')::regclass::oid, :'a_real'::oid,
-  'LIVENESS A: the name resolves to the recorded relation again');
+  'LIVENESS: (A) the name resolves to the recorded relation again');
 
 call pgpm.maintain('public.cr129a');
 
@@ -172,16 +172,16 @@ call pgpm.maintain('public.cr129b');
 select results_eq(
   $$ select child_name, lo, hi from pgpm.archive_ledger where parent_table = 'public.cr129b'::regclass $$,
   format($$ values (%L::name, '0'::text, '2'::text) $$, :'b_doomed'),
-  'LIVENESS B: one chunk of coverage is recorded for the monolith');
+  'LIVENESS: (B) one chunk of coverage is recorded for the monolith');
 
 select format('drop trigger pgpm_write_block on public.%I', :'b_doomed') \gexec
 
 select is(
   (select child_oid from pgpm.part where parent_table = 'public.cr129b'::regclass and child_name = :'b_doomed'),
   format('public.%I', :'b_doomed')::regclass::oid,
-  'LIVENESS B: the name resolves to the recorded relation: identity is intact');
+  'LIVENESS: (B) the name resolves to the recorded relation: identity is intact');
 select ok(not pgpm._is_write_blocked('public.cr129b', :'b_doomed'),
-  'LIVENESS B: and its block is really gone while the coverage remains');
+  'LIVENESS: (B) and its block is really gone while the coverage remains');
 
 call pgpm.maintain('public.cr129b');
 
@@ -216,16 +216,16 @@ call pgpm.maintain('public.cr129c');
 select results_eq(
   $$ select child_name, lo, hi from pgpm.archive_ledger where parent_table = 'public.cr129c'::regclass $$,
   format($$ values (%L::name, '0'::text, '2'::text) $$, :'c_doomed'),
-  'LIVENESS C: one chunk of coverage is recorded for the monolith');
+  'LIVENESS: (C) one chunk of coverage is recorded for the monolith');
 
 update pgpm.part set child_oid = null where parent_table = 'public.cr129c'::regclass and child_name = :'c_doomed';
 select format('drop trigger pgpm_write_block on public.%I', :'c_doomed') \gexec
 
 select is(
   (select child_oid from pgpm.part where parent_table = 'public.cr129c'::regclass and child_name = :'c_doomed'),
-  null::oid, 'LIVENESS C: the monolith has no recorded oid, as on an install upgrading into identity anchoring');
+  null::oid, 'LIVENESS: (C) the monolith has no recorded oid, as on an install upgrading into identity anchoring');
 select ok(not pgpm._is_write_blocked('public.cr129c', :'c_doomed'),
-  'LIVENESS C: and its block is really gone while the coverage remains');
+  'LIVENESS: (C) and its block is really gone while the coverage remains');
 
 call pgpm.maintain('public.cr129c');
 

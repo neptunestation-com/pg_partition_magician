@@ -35,34 +35,34 @@ select child_name as mon from pgpm.part
  where parent_table = 'public.sro'::regclass and attached order by lo::numeric limit 1 \gset
 
 select is((select regrain_to from pgpm.config where parent_table = 'public.sro'::regclass), '100',
-  'LIVENESS (A): auto-regrain is on');
+  'LIVENESS: (A) auto-regrain is on');
 select ok(pgpm._regrain_capture_active('public.sro', :'mon'),
-  'LIVENESS (A): capture is installed on the source');
+  'LIVENESS: (A) capture is installed on the source');
 select is(
   (select array_agg(tgname::text order by tgname) from pg_trigger
     where tgrelid = format('public.%I', :'mon')::regclass and not tgisinternal),
   array['pgpm_regrain_capture', 'pgpm_regrain_truncate_guard'],
-  'LIVENESS (A): the capture trigger and the TRUNCATE guard both sit on the source');
+  'LIVENESS: (A) the capture trigger and the TRUNCATE guard both sit on the source');
 select is((select regrain_cursor from pgpm.config where parent_table = 'public.sro'::regclass), '100',
-  'LIVENESS (A): the cursor sits at the end of the first copied sub-range: the run is in flight');
+  'LIVENESS: (A) the cursor sits at the end of the first copied sub-range: the run is in flight');
 select is(
   (select array_agg(action order by id) from pgpm.log
     where parent_table = 'public.sro'::regclass and action in ('regrain_prepare', 'regrain_copy')),
   array['regrain_prepare', 'regrain_copy'],
-  'LIVENESS (A): one prepare tick and one copy tick ran');
+  'LIVENESS: (A) one prepare tick and one copy tick ran');
 select is(
   (select array_agg(lo || '-' || hi order by lo::numeric) from pgpm.part
     where parent_table = 'public.sro'::regclass and not attached),
   array['0-100'],
-  'LIVENESS (A): exactly one not-yet-attached fine copy is recorded, for the first sub-range');
+  'LIVENESS: (A) exactly one not-yet-attached fine copy is recorded, for the first sub-range');
 select child_name as copy_a from pgpm.part where parent_table = 'public.sro'::regclass and not attached \gset
 select isnt(to_regclass(format('public.%I', :'copy_a')), null,
-  'LIVENESS (A): and it is a real relation on disk');
+  'LIVENESS: (A) and it is a real relation on disk');
 update public.sro set payload = 'y' where id = 10;                             -- a change the trigger sees
 select is(pgpm._regrain_delta_count('public.sro'), 2::bigint,
-  'LIVENESS (A): the capture trigger is live: the update landed old + new in the delta');
+  'LIVENESS: (A) the capture trigger is live: the update landed old + new in the delta');
 select throws_like($$ truncate public.sro $$, '%a regrain is in flight%',
-  'LIVENESS (A): while the run is in flight, TRUNCATE of the parent is refused');
+  'LIVENESS: (A) while the run is in flight, TRUNCATE of the parent is refused');
 
 select lives_ok($$ select pgpm.set_regrain('public.sro', null) $$,
   '(A) set_regrain(null) mid-flight goes through');
@@ -131,14 +131,14 @@ call pgpm.transmute('public.sro2', 'id', 1000);
 select pgpm.set_regrain('public.sro2', '100');
 
 select is((select regrain_to from pgpm.config where parent_table = 'public.sro2'::regclass), '100',
-  'LIVENESS (B): auto-regrain is on');
+  'LIVENESS: (B) auto-regrain is on');
 select is((select regrain_cursor from pgpm.config where parent_table = 'public.sro2'::regclass), null,
-  'LIVENESS (B): but no run is in flight (no tick has run)');
+  'LIVENESS: (B) but no run is in flight (no tick has run)');
 select is(
   (select coalesce(array_agg(p.child_name::text order by p.child_name), '{}') from pgpm.part p
     where p.parent_table = 'public.sro2'::regclass and pgpm._regrain_capture_active('public.sro2', p.child_name)),
   '{}'::text[],
-  'LIVENESS (B): and no child carries capture');
+  'LIVENESS: (B) and no child carries capture');
 
 select lives_ok($$ select pgpm.set_regrain('public.sro2', null) $$,
   '(B) set_regrain(null) with nothing in flight goes through');
@@ -161,18 +161,18 @@ select child_name as mon3 from pgpm.part
  where parent_table = 'public.sro3'::regclass and attached order by lo::numeric limit 1 \gset
 
 select is((select regrain_to from pgpm.config where parent_table = 'public.sro3'::regclass), null,
-  'LIVENESS (C): auto-regrain is off');
+  'LIVENESS: (C) auto-regrain is off');
 select is(pgpm.regrain_step('public.sro3', :'mon3', '100', 50), 'prepared',
-  'LIVENESS (C): an operator-driven regrain installs capture');
+  'LIVENESS: (C) an operator-driven regrain installs capture');
 -- #266 may have renamed the source to its transitional name; re-read it
 select child_name as mon3 from pgpm.part
  where parent_table = 'public.sro3'::regclass and attached order by lo::numeric limit 1 \gset
 select is(pgpm.regrain_step('public.sro3', :'mon3', '100', 50), 'copied:9',
-  'LIVENESS (C): and copies its first sub-range: the run is in flight');
+  'LIVENESS: (C) and copies its first sub-range: the run is in flight');
 select ok(pgpm._regrain_capture_active('public.sro3', :'mon3'),
-  'LIVENESS (C): capture is on the source');
+  'LIVENESS: (C) capture is on the source');
 select is((select regrain_cursor from pgpm.config where parent_table = 'public.sro3'::regclass), '100',
-  'LIVENESS (C): the cursor marks the run in flight');
+  'LIVENESS: (C) the cursor marks the run in flight');
 
 select lives_ok($$ select pgpm.set_regrain('public.sro3', null) $$,
   '(C) set_regrain(null) with auto-regrain already off goes through');

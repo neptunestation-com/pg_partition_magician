@@ -120,13 +120,13 @@ select set_config('c195.bpid', :'bpid', false);
 select dblink_exec('c195_a', 'begin');
 select is((select x from dblink('c195_a',
             $q$select pgpm.extend_to('public.tz195_a', pgpm._ts_to_uuid('2030-11-15 00:00+00')::text)::text$q$) as t(x text)),
-  '5', 'LIVENESS (A): session A extended the grid by five cells and holds its transaction open');
+  '5', 'LIVENESS: (A) session A extended the grid by five cells and holds its transaction open');
 select dblink_send_query('c195_b', $q$select pgpm.set_partition_tz('public.tz195_a', 'Europe/London')::text$q$);
 select pg_temp.await_b195();
 select ok(exists (select 1 from pg_stat_activity where pid = :bpid and wait_event_type = 'Lock'),
-  'LIVENESS (A): the zone change is waiting on a lock...');
+  'LIVENESS: (A) the zone change is waiting on a lock...');
 select ok(exists (select 1 from pg_stat_activity where pid = :apid and state = 'idle in transaction'),
-  'LIVENESS (A): ...while session A''s extension is still uncommitted');
+  'LIVENESS: (A) ...while session A''s extension is still uncommitted');
 select dblink_exec('c195_a', 'commit');
 select pg_temp.collect_b195('A');
 
@@ -156,14 +156,14 @@ select is((select tableoid::regclass::text from public.tz195_a where v = 9), 'tz
 select dblink_exec('c195_a', 'begin');
 select is((select x from dblink('c195_a',
             $q$select pgpm.set_partition_tz('public.tz195_b', 'Europe/London')::text$q$) as t(x text)),
-  '', 'LIVENESS (B): session A changed the zone to London and holds its transaction open');
+  '', 'LIVENESS: (B) session A changed the zone to London and holds its transaction open');
 select dblink_send_query('c195_b',
   $q$select pgpm.extend_to('public.tz195_b', pgpm._ts_to_uuid('2030-11-15 00:00+00')::text)::text$q$);
 select pg_temp.await_b195();
 select ok(exists (select 1 from pg_stat_activity where pid = :bpid and wait_event_type = 'Lock'),
-  'LIVENESS (B): the extension is waiting on a lock...');
+  'LIVENESS: (B) the extension is waiting on a lock...');
 select ok(exists (select 1 from pg_stat_activity where pid = :apid and state = 'idle in transaction'),
-  'LIVENESS (B): ...while session A''s zone change is still uncommitted');
+  'LIVENESS: (B) ...while session A''s zone change is still uncommitted');
 select dblink_exec('c195_a', 'commit');
 select pg_temp.collect_b195('B');
 
@@ -187,13 +187,13 @@ select is((select tableoid::regclass::text from public.tz195_b where v = 9), 'tz
 -- ======================================================================================================
 select dblink_exec('c195_a', 'begin');
 select is((select x from dblink('c195_a', $q$select pgpm.obtain('public.tz195_c')::text$q$) as t(x text)),
-  '5', 'LIVENESS (C): session A obtained five cells and holds its transaction open');
+  '5', 'LIVENESS: (C) session A obtained five cells and holds its transaction open');
 select dblink_send_query('c195_b', $q$select pgpm.set_partition_tz('public.tz195_c', 'Europe/London')::text$q$);
 select pg_temp.await_b195();
 select ok(exists (select 1 from pg_stat_activity where pid = :bpid and wait_event_type = 'Lock'),
-  'LIVENESS (C): the zone change is waiting on a lock...');
+  'LIVENESS: (C) the zone change is waiting on a lock...');
 select ok(exists (select 1 from pg_stat_activity where pid = :apid and state = 'idle in transaction'),
-  'LIVENESS (C): ...while session A''s obtain is still uncommitted');
+  'LIVENESS: (C) ...while session A''s obtain is still uncommitted');
 select dblink_exec('c195_a', 'commit');
 select pg_temp.collect_b195('C');
 
@@ -221,13 +221,13 @@ select is((select tableoid::regclass::text from public.tz195_c where v = 9), 'tz
 select dblink_exec('c195_a', 'begin');
 select is((select x from dblink('c195_a',
             $q$select pgpm.set_partition_tz('public.tz195_d', 'Europe/London')::text$q$) as t(x text)),
-  '', 'LIVENESS (D): session A changed the zone to London and holds its transaction open');
+  '', 'LIVENESS: (D) session A changed the zone to London and holds its transaction open');
 select dblink_send_query('c195_b', $q$select pgpm.obtain('public.tz195_d')::text$q$);
 select pg_temp.await_b195();
 select ok(exists (select 1 from pg_stat_activity where pid = :bpid and wait_event_type = 'Lock'),
-  'LIVENESS (D): the obtain is waiting on a lock...');
+  'LIVENESS: (D) the obtain is waiting on a lock...');
 select ok(exists (select 1 from pg_stat_activity where pid = :apid and state = 'idle in transaction'),
-  'LIVENESS (D): ...while session A''s zone change is still uncommitted');
+  'LIVENESS: (D) ...while session A''s zone change is still uncommitted');
 select dblink_exec('c195_a', 'commit');
 select pg_temp.collect_b195('D');
 select dblink_disconnect('c195_a');

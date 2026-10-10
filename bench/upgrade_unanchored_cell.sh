@@ -57,12 +57,12 @@ mkdir -p "$OUT"
 if ! git -C "$ROOT" rev-parse -q --verify "refs/tags/$ORIGIN_TAG^{commit}" >/dev/null 2>&1; then
   echo "      tag $ORIGIN_TAG is not in this checkout (CI checks out shallow and without tags); fetching it"
   if ! out=$(git -C "$ROOT" fetch --no-tags --depth=1 origin tag "$ORIGIN_TAG" 2>&1); then
-    echo "FAIL  could not fetch tag $ORIGIN_TAG; without the origin artifact this guard verifies nothing"
+    echo "FAIL  fixture: could not fetch tag $ORIGIN_TAG; without the origin artifact this guard verifies nothing"
     printf '%s\n' "$out" | sed 's/^/      /'; exit 1
   fi
 fi
 if ! git -C "$ROOT" show "$ORIGIN_TAG:$ORIGIN_PATH" > "$ORIGIN_SQL" 2>/dev/null || [ ! -s "$ORIGIN_SQL" ]; then
-  echo "FAIL  git show $ORIGIN_TAG:$ORIGIN_PATH produced nothing; without the origin artifact this guard verifies nothing"
+  echo "FAIL  fixture: git show $ORIGIN_TAG:$ORIGIN_PATH produced nothing; without the origin artifact this guard verifies nothing"
   exit 1
 fi
 
@@ -70,9 +70,9 @@ cleanup
 docker exec "$C" psql -U postgres -q -c "create database $DB" >/dev/null 2>&1
 if ! docker exec -i -e PGOPTIONS='-c client_min_messages=warning' "$C" \
        psql -U postgres -q -d "$DB" -v ON_ERROR_STOP=1 -f - < "$ORIGIN_SQL" >/dev/null 2>&1; then
-  echo "FAIL  the $ORIGIN_TAG origin did not install"; cleanup; exit 1
+  echo "FAIL  fixture: the $ORIGIN_TAG origin did not install"; cleanup; exit 1
 fi
-check "precondition: the origin has no pgpm.part.child_oid" \
+check "LIVENESS: the origin has no pgpm.part.child_oid" \
   "$(q "select count(*) from information_schema.columns where table_schema = 'pgpm' and table_name = 'part' and column_name = 'child_oid'")" "0"
 
 # ---------------------------------------------------------------------------- on the origin

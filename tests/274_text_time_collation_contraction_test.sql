@@ -31,16 +31,16 @@ select plan(28);
 select ok(
   ('69aa0000' collate "da-x-icu") > ('69cc6000' collate "da-x-icu")
   and ('69aa0000' collate "C") < ('69cc6000' collate "C"),
-  'witness: under da-x-icu the hex string 69aa0000 sorts after 69cc6000, against place value'
+  'LIVENESS: under da-x-icu the hex string 69aa0000 sorts after 69cc6000, against place value'
 );
 select ok(
   ('01CH0000' collate "cs-x-icu") > ('01CJ0000' collate "cs-x-icu")
   and ('01CH0000' collate "C") < ('01CJ0000' collate "C"),
-  'witness: under cs-x-icu the Crockford string 01CH0000 sorts after 01CJ0000, against place value'
+  'LIVENESS: under cs-x-icu the Crockford string 01CH0000 sorts after 01CJ0000, against place value'
 );
 select ok(
   ('cha' collate "cs-x-icu") > ('cia' collate "cs-x-icu") and ('xha' collate "cs-x-icu") < ('xia' collate "cs-x-icu"),
-  'witness: under cs-x-icu a prefix c and a digit h contract, and a prefix x and the same digit do not'
+  'LIVENESS: under cs-x-icu a prefix c and a digit h contract, and a prefix x and the same digit do not'
 );
 
 -- ObjectId-shaped hex: 8 digits of epoch seconds, then a payload. One row a day for 13 months, plus
@@ -70,12 +70,12 @@ select v, 'contracted'
  limit 1;
 select is(
   (select count(*) from public.tt274_rows where body = 'contracted'), 1::bigint,
-  'witness: the fixture holds the row built with aa in its timestamp field'
+  'LIVENESS: the fixture holds the row built with aa in its timestamp field'
 );
 select ok(
   (select (r.id collate "da-x-icu") >= (public.hex_id(date_trunc('month', public.hex_ts(r.id)) + interval '1 month', 0) collate "da-x-icu")
      from public.tt274_rows r where r.body = 'contracted'),
-  'witness: under da-x-icu that row sorts at or above the next month''s bound, outside its own month'
+  'LIVENESS: under da-x-icu that row sorts at or above the next month''s bound, outside its own month'
 );
 
 -- ------------------------------------------------------------- refusal: hex on da-x-icu (the reproduction)
@@ -169,7 +169,7 @@ select cmp_ok(
 -- ------------------------------------------- a digit the collation ignores: '-' under glibc's en_US
 select ok(
   ('-9' collate "en_US.utf8") > ('0' collate "en_US.utf8") and ('-9' collate "C") < ('0' collate "C"),
-  'witness: en_US.utf8 ignores - at the primary level, so -9 sorts after 0 against place value'
+  'LIVENESS: en_US.utf8 ignores - at the primary level, so -9 sorts after 0 against place value'
 );
 select throws_like(
   $$ select * from pgpm.check_text_time('public.tt274_dflt', 'id', '', 8, 11, 's', 1000, '-0123456789') $$,
@@ -201,7 +201,7 @@ with p as materialized (
   select child_oid, child_name, lo, hi from pgpm.part
    where parent_table = 'public.tt274_rows'::regclass and attached)
 select child_oid, child_name, lo::timestamptz as lo, hi::timestamptz as hi from p where lo::timestamptz > now();
-select cmp_ok((select count(*) from _fine), '>=', 2::bigint, 'witness: at least two fine month partitions exist ahead');
+select cmp_ok((select count(*) from _fine), '>=', 2::bigint, 'LIVENESS: at least two fine month partitions exist ahead');
 insert into public.tt274_rows
 select distinct on (f.child_name) rpad(substr(b, 1, k - 1) || 'aa', 8, '0') || '00000000000000fe', 'fresh_' || f.child_name
   from _fine f
@@ -216,7 +216,7 @@ select r.body, r.tableoid as actual, (select f.child_oid from _fine f where f.lo
 select ok(
   exists (select 1 from _fresh f join public.tt274_rows r on r.body = f.body
            where (r.id collate "da-x-icu") >= (public.hex_id((select hi from _fine where child_oid = f.expected), 0) collate "da-x-icu")),
-  'witness: a fresh row sorts above its own month''s upper bound under da-x-icu'
+  'LIVENESS: a fresh row sorts above its own month''s upper bound under da-x-icu'
 );
 select is(
   (select array_agg(body order by body) from _fresh where actual is distinct from expected),

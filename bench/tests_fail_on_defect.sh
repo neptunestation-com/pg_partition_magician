@@ -145,7 +145,7 @@ g19_only() {
 
 if [ -n "$ONLY" ]; then
   ONLY="${ONLY/#\/repo\//$ROOT/}"
-  if [ ! -f "$ONLY" ]; then say FAIL "the test file to judge exists" "$ONLY"; exit 1; fi
+  if [ ! -f "$ONLY" ]; then say FAIL "GUARD: the test file to judge exists" "$ONLY"; exit 1; fi
   base=$(basename "$ONLY")
   src=$(python3 - "$ROOT/bench/mutations" "${base%.*}" <<'PY'
 import sys
@@ -179,7 +179,7 @@ PY
     141_transmute_step_obtain_preflight_test.sql:*|*:tests/141_transmute_step_obtain_preflight_test.sql)
       SEL=" 141 "; F141="$ONLY" ;;
     *) g19_only "$base" "$src" ||
-         { say FAIL "the file to judge is one of the files this guard knows" "$ONLY -> '${src}'"; exit 1; } ;;
+         { say FAIL "GUARD: the file to judge is one of the files this guard knows" "$ONLY -> '${src}'"; exit 1; } ;;
   esac
 fi
 sel() { [[ "$SEL" == *" $1 "* ]]; }
@@ -261,7 +261,7 @@ if sel 18; then
     fi
     judge "CONTROL: $T18 passes against the clean install" pass "$F18"
   else
-    say FAIL "the clean install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
+    say FAIL "fixture: the clean install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
   fi
   # The guard lives in pgpm._transmute_refuse_child_holders (#1167), which the preflight and the cutover
   # both call, so the plant makes the helper's two relation raises unreachable at every asking.
@@ -284,10 +284,10 @@ if sel 18; then
       fi
       judge "DEFECT: $T18 fails with the orphan guard gone" fail "$F18"
     else
-      say FAIL "the install with no orphan guard loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
+      say FAIL "fixture: the install with no orphan guard loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
     fi
   else
-    say FAIL "planted the defect: the orphan guard's two raises" "install.sql moved; fix the pattern"; fail=1
+    say FAIL "fixture: planted the defect: the orphan guard's two raises" "install.sql moved; fix the pattern"; fail=1
   fi
 fi
 
@@ -303,7 +303,7 @@ if sel 90; then
     fi
     judge "CONTROL: $T90 passes against the clean install" pass "$F90"
   else
-    say FAIL "the clean install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
+    say FAIL "fixture: the clean install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
   fi
   if plant no_length_check \
        "declare v_alphabet text; v_c text; v_d int; v_acc numeric := 0;
@@ -324,10 +324,10 @@ begin
       fi
       judge "DEFECT: $T90 fails with the length check gone" fail "$F90"
     else
-      say FAIL "the install with no length check loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
+      say FAIL "fixture: the install with no length check loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
     fi
   else
-    say FAIL "planted the defect: _radix_decode's length check" "install.sql moved; fix the pattern"; fail=1
+    say FAIL "fixture: planted the defect: _radix_decode's length check" "install.sql moved; fix the pattern"; fail=1
   fi
 fi
 
@@ -355,7 +355,7 @@ if sel 11 || sel 12; then
     sel 11 && judge "DEFECT: $T11 fails with two seeded rows replaced" fail "$F11"
     sel 12 && judge "DEFECT: $T12 fails with two seeded rows replaced" fail "$F12"
   else
-    say FAIL "the clean install and fixtures/demo.sql loaded" "$(cat "$work/install.log" "$work/fixtures.log" 2>/dev/null | grep -m1 ERROR)"; fail=1
+    say FAIL "fixture: the clean install and fixtures/demo.sql loaded" "$(cat "$work/install.log" "$work/fixtures.log" 2>/dev/null | grep -m1 ERROR)"; fail=1
   fi
 fi
 
@@ -367,7 +367,7 @@ if sel 92; then
   if fresh && install "$ROOT/pgpm_core/install.sql"; then
     judge "CONTROL: $T92 passes against the clean install" pass "$F92"
   else
-    say FAIL "the clean install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
+    say FAIL "fixture: the clean install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
   fi
   if plant swap_rewrites_key "  $SWAP_LOG" \
        "  execute format('update %s set %I = %I - 1 where %I = (select max(%I) from %s where %I < %L)',
@@ -387,10 +387,10 @@ if sel 92; then
         say FAIL "LIVENESS: the swap ran once, lost 2500, invented 2499" "swaps:has2500:has2499:rows $got"; fail=1
       fi
     else
-      say FAIL "the install whose swap rewrites a key loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
+      say FAIL "fixture: the install whose swap rewrites a key loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
     fi
   else
-    say FAIL "planted the defect: a key rewrite after regrain's swap" "install.sql moved; fix the pattern"; fail=1
+    say FAIL "fixture: planted the defect: a key rewrite after regrain's swap" "install.sql moved; fix the pattern"; fail=1
   fi
 fi
 
@@ -416,7 +416,7 @@ tt_probe() { q -d "$DB" -tAq -f - <<<"$TT_PROBE" 2>&1 | grep -o 'PROBE .*' | hea
 # judge_on <install.sql> <label> <expect> <test file>: judge the file in a fresh <db> holding that install.
 judge_on() {
   if fresh && install "$1"; then judge "$2" "$3" "$4"
-  else say FAIL "$2: the install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1; fi
+  else say FAIL "fixture: $2: the install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1; fi
 }
 if sel 88 || sel 91; then
   if fresh && install "$ROOT/pgpm_core/install.sql"; then
@@ -429,7 +429,7 @@ if sel 88 || sel 91; then
     sel 88 && judge_on "$ROOT/pgpm_core/install.sql" "CONTROL: $T88 passes against the clean install" pass "$F88"
     sel 91 && judge_on "$ROOT/pgpm_core/install.sql" "CONTROL: $T91 passes against the clean install" pass "$F91"
   else
-    say FAIL "the clean install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
+    say FAIL "fixture: the clean install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
   fi
   if plant text_time_frontier_data_only \
        "  if cfg.control_kind in ('uuidv7', 'text_time') then
@@ -447,10 +447,10 @@ if sel 88 || sel 91; then
       sel 88 && judge_on "$work/text_time_frontier_data_only.sql" "DEFECT: $T88 fails with text_time's clock blend gone" fail "$F88"
       sel 91 && judge_on "$work/text_time_frontier_data_only.sql" "DEFECT: $T91 fails with text_time's clock blend gone" fail "$F91"
     else
-      say FAIL "the install with text_time's clock blend gone loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
+      say FAIL "fixture: the install with text_time's clock blend gone loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
     fi
   else
-    say FAIL "planted the defect: _frontier_native's text_time blend" "install.sql moved; fix the pattern"; fail=1
+    say FAIL "fixture: planted the defect: _frontier_native's text_time blend" "install.sql moved; fix the pattern"; fail=1
   fi
 fi
 
@@ -516,7 +516,7 @@ if sel 247 || sel 178; then
       expect_v "four converted, all four transmutes logged as nb" "fd,ff,nb,nc | nb,nb,nb,nb" "$TLOG"
     fi
   else
-    say FAIL "planted the defect: transmute's log row names the first parent" "install.sql moved; fix the pattern"; fail=1
+    say FAIL "fixture: planted the defect: transmute's log row names the first parent" "install.sql moved; fix the pattern"; fail=1
   fi
 fi
 
@@ -535,7 +535,7 @@ if sel 140; then
               || ':' || (select count(*) from public.rn_old) || ':' || (select count(*) from pg_constraint
                 where conrelid = 'public.rn_old'::regclass and conname = 'pgpm_monolith_bound')"
   else
-    say FAIL "planted the defect: the reap rewrites the lowest id" "install.sql moved; fix the pattern"; fail=1
+    say FAIL "fixture: planted the defect: the reap rewrites the lowest id" "install.sql moved; fix the pattern"; fail=1
   fi
 fi
 
@@ -590,7 +590,7 @@ if sel 77; then
       "true/fail_retain_detach/{}/0"
     judge_on "$work/retire_empties_at_dispatch.sql" "DEFECT: $T77 fails when retire() empties at dispatch" fail "$F77"
   else
-    say FAIL "planted the defect: retire() empties the partition at dispatch" "install.sql moved; fix the pattern"; fail=1
+    say FAIL "fixture: planted the defect: retire() empties the partition at dispatch" "install.sql moved; fix the pattern"; fail=1
   fi
   if plant retire_empties_refused_crossing \
        "        exception when others then
@@ -608,7 +608,7 @@ if sel 77; then
       "true/fail_retain_crossing/{42}/1"
     judge_on "$work/retire_empties_refused_crossing.sql" "DEFECT: $T77 fails when a refused crossing half-retires" fail "$F77"
   else
-    say FAIL "planted the defect: a refused crossing deletes the unreferenced rows" "install.sql moved; fix the pattern"; fail=1
+    say FAIL "fixture: planted the defect: a refused crossing deletes the unreferenced rows" "install.sql moved; fix the pattern"; fail=1
   fi
 fi
 
@@ -664,7 +664,7 @@ if sel 267; then
     fi
     judge_on "$ROOT/pgpm_core/install.sql" "CONTROL: $T267 passes against the clean install" pass "$F267"
   else
-    say FAIL "the clean install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
+    say FAIL "fixture: the clean install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
   fi
   # OWNER
   if plant delta_minted_tick_owner "$MINT_DELTA" "  perform pgpm._acl_reset(v_delta_reg, true);
@@ -678,10 +678,10 @@ if sel 267; then
       fi
       judge_on "$work/delta_minted_tick_owner.sql" "DEFECT: $T267 fails with the delta minted the tick's" fail "$F267"
     else
-      say FAIL "the install minting the delta the tick's loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
+      say FAIL "fixture: the install minting the delta the tick's loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
     fi
   else
-    say FAIL "planted the defect: the delta's mint" "install.sql moved; fix the pattern"; fail=1
+    say FAIL "fixture: planted the defect: the delta's mint" "install.sql moved; fix the pattern"; fail=1
   fi
   # ROWS
   if plant_file "$F267" "$work/t267_rows_swapped.sql" "$UNTR_I2" "${UNTR_I2}update public.s267i set id = 450, payload = 'frontier' where id = 17;
@@ -695,7 +695,7 @@ if sel 267; then
       say FAIL "LIVENESS: s267i came back plain, 299 rows, 450 for 17" "rows/has450/has17/kind $got"; fail=1
     fi
   else
-    say FAIL "planted the defect: a swap after s267i's untransmute" "$T267 moved; fix the pattern"; fail=1
+    say FAIL "fixture: planted the defect: a swap after s267i's untransmute" "$T267 moved; fix the pattern"; fail=1
   fi
   # STRAY
   if plant delta_stray_sequence "$MINT_DELTA" "${MINT_DELTA}  execute format('create sequence if not exists %I.%I', v_nsp, v_delta || '_stray');
@@ -709,7 +709,7 @@ if sel 267; then
       say FAIL "LIVENESS: the prepare left s267's stray sequence behind" "relkind $got"; fail=1
     fi
   else
-    say FAIL "planted the defect: a sequence beside the delta" "install.sql moved; fix the pattern"; fail=1
+    say FAIL "fixture: planted the defect: a sequence beside the delta" "install.sql moved; fix the pattern"; fail=1
   fi
   q -d postgres -q -c "drop database if exists $DB" </dev/null >/dev/null 2>&1
   q -d postgres -q -c "drop role if exists tfd267_owner" </dev/null >/dev/null 2>&1
@@ -755,17 +755,17 @@ g19_case() {
     if [ "$got" = "$clean" ]; then say PASS "LIVENESS: clean install, $what: probe intact" "$got"
     else say FAIL "LIVENESS: clean install, $what: probe intact" "${got:-no PROBE line}"; fail=1; fi
   else
-    say FAIL "the clean install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
+    say FAIL "fixture: the clean install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
   fi
   if ! plant "$name" "$find" "$repl"; then
-    say FAIL "planted the defect: $what" "install.sql moved; fix the pattern"; fail=1; return
+    say FAIL "fixture: planted the defect: $what" "install.sql moved; fix the pattern"; fail=1; return
   fi
   if fresh && install "$work/$name.sql"; then
     got=$(g19_probe "$probe")
     if [[ "$got" =~ $defect ]]; then say PASS "LIVENESS: under the defect, $what" "$got"
     else say FAIL "LIVENESS: under the defect, $what" "${got:-no PROBE line}"; fail=1; fi
   else
-    say FAIL "the install with the defect ($what) loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1; return
+    say FAIL "fixture: the install with the defect ($what) loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1; return
   fi
   g19_judge "$set" "$work/$name.sql" "$what"
 }
@@ -876,7 +876,7 @@ if sel 07; then
     judge_on "$work/swap_shifts_max_key.sql" "DEFECT: $T07 fails when the swap loses 50000 for 50001" fail "$F07"
     expect_v "the swap ran once, lost 50000, holds 50001 in its place" "1:false:p50000:20002" "$RT7"
   else
-    say FAIL "planted the defect: regrain's swap shifts its highest key" "install.sql moved; fix the pattern"; fail=1
+    say FAIL "fixture: planted the defect: regrain's swap shifts its highest key" "install.sql moved; fix the pattern"; fail=1
   fi
 fi
 
@@ -893,7 +893,7 @@ ts_judge_on() {
      q -d "$DB" -v ON_ERROR_STOP=1 -q -f - <"$ROOT/tests/timescale/fixtures.sql" >>"$work/install.log" 2>&1; then
     judge "$2" "$3" "$FTS33"
   else
-    say FAIL "$2: TimescaleDB, the core, the module and the fixtures loaded" "$(grep -m1 -E 'ERROR|FATAL' "$work/install.log")"; fail=1
+    say FAIL "fixture: $2: TimescaleDB, the core, the module and the fixtures loaded" "$(grep -m1 -E 'ERROR|FATAL' "$work/install.log")"; fail=1
   fi
 }
 HG33="select (select relkind::text from pg_class where oid = to_regclass('public.hg33'))
@@ -909,7 +909,7 @@ if sel ts33; then
     ts_judge_on "$work/cutover_keeps_capture_fn.sql" "DEFECT: $TS33 fails when the cutover keeps the capture fn" fail
     expect_v "defect, hg33 migrated, delta gone, capture function kept" "p|true|true" "$HG33"
   else
-    say FAIL "planted the defect: the cutover keeps the capture function" "pgpm_hypertable/install.sql moved; fix the pattern"; fail=1
+    say FAIL "fixture: planted the defect: the cutover keeps the capture function" "pgpm_hypertable/install.sql moved; fix the pattern"; fail=1
   fi
 fi
 

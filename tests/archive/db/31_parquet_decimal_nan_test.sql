@@ -26,7 +26,7 @@ begin execute p_sql into b; return b;
 exception when others then return null; end $$;
 
 select throws_like($$ select archive._pq_plain_decimal('NaN'::numeric, 2, 3) $$, 'cannot convert NaN to integer',
-  'witness: the DECIMAL primitive itself cannot take a NaN, so the encoder must keep NaN away from it');
+  'LIVENESS: the DECIMAL primitive itself cannot take a NaN, so the encoder must keep NaN away from it');
 
 -- ---------------------------------------------------------------------------
 -- The tick: the Parquet strategy archives the chunk instead of deferring it

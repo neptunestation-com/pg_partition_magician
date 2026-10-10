@@ -42,7 +42,7 @@ select format('public.%I', :'wb_doomed')::regclass::oid as wb_real \gset
 select is(
   (select count(*)::int from pgpm.part
     where parent_table = 'public.wb104'::regclass and attached and hi::numeric <= 2000),
-  2, 'setup: exactly two partitions are past the retention horizon, so both are due a write block');
+  2, 'fixture: exactly two partitions are past the retention horizon, so both are due a write block');
 select is(
   (select child_oid from pgpm.part
     where parent_table = 'public.wb104'::regclass and child_name = :'wb_doomed'),

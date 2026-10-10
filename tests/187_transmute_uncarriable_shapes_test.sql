@@ -42,7 +42,7 @@ alter table public.nvc add constraint nvc_qty_pos check (qty > 0);
 select is((select string_agg(conname || '=' || convalidated, ' ' order by conname) from pg_constraint
             where conrelid = 'public.nvc'::regclass and contype = 'c'),
   'nvc_amt_pos=false nvc_qty_pos=true',
-  'A LIVENESS: nvc carries one NOT VALID CHECK (nvc_amt_pos) beside a valid one');
+  'LIVENESS: (A) nvc carries one NOT VALID CHECK (nvc_amt_pos) beside a valid one');
 select throws_like($$ call pgpm.transmute('public.nvc', 'id', 100::bigint, p_obtain => 2) $$,
   'pg_partition_magician: cannot transmute nvc -- its constraint(s) (nvc_amt_pos) are NOT VALID,%',
   'A: the NOT VALID CHECK is refused, naming it and only it');
@@ -55,10 +55,10 @@ delete from public.nvc where id = 5000;
 alter table public.nvc validate constraint nvc_amt_pos;
 call pgpm.transmute('public.nvc', 'id', 100::bigint, p_obtain => 2);
 select is((select relkind::text from pg_class where oid = 'public.nvc'::regclass), 'p',
-  'A LIVENESS: with the constraint validated the same call converts nvc');
-select lives_ok($$ insert into public.nvc values (310, 7, 7) $$, 'A LIVENESS: a valid row is accepted past the monolith');
+  'LIVENESS: (A) with the constraint validated the same call converts nvc');
+select lives_ok($$ insert into public.nvc values (310, 7, 7) $$, 'LIVENESS: (A) a valid row is accepted past the monolith');
 select isnt((select tableoid from public.nvc where id = 310), (select monolith_oid from pgpm.config where parent_table = 'public.nvc'::regclass),
-  'A LIVENESS: and it landed in a forward partition, not the monolith');
+  'LIVENESS: (A) and it landed in a forward partition, not the monolith');
 select throws_like($$ insert into public.nvc values (320, -1, 7) $$,
   '%violates check constraint "nvc_amt_pos"%',
   'A: nvc_amt_pos binds that forward partition too');
@@ -71,7 +71,7 @@ alter table public.nic add constraint nic_qty_pos check (qty > 0);
 select is((select string_agg(conname || '=' || connoinherit, ' ' order by conname) from pg_constraint
             where conrelid = 'public.nic'::regclass and contype = 'c'),
   'nic_amt_pos=true nic_qty_pos=false',
-  'B LIVENESS: nic carries one NO INHERIT CHECK (nic_amt_pos) beside an inheritable one');
+  'LIVENESS: (B) nic carries one NO INHERIT CHECK (nic_amt_pos) beside an inheritable one');
 select throws_like($$ call pgpm.transmute('public.nic', 'id', 100::bigint, p_obtain => 2) $$,
   'pg_partition_magician: cannot transmute nic -- its CHECK constraint(s) (nic_amt_pos) are NO INHERIT,%',
   'B: the NO INHERIT CHECK is refused, naming it and only it');
@@ -85,10 +85,10 @@ alter table public.nic drop constraint nic_amt_pos;
 alter table public.nic add constraint nic_amt_pos check (amt > 0);
 call pgpm.transmute('public.nic', 'id', 100::bigint, p_obtain => 2);
 select is((select relkind::text from pg_class where oid = 'public.nic'::regclass), 'p',
-  'B LIVENESS: with the constraint inheritable the same call converts nic');
-select lives_ok($$ insert into public.nic values (210, 7, 7) $$, 'B LIVENESS: a valid row is accepted past the monolith');
+  'LIVENESS: (B) with the constraint inheritable the same call converts nic');
+select lives_ok($$ insert into public.nic values (210, 7, 7) $$, 'LIVENESS: (B) a valid row is accepted past the monolith');
 select isnt((select tableoid from public.nic where id = 210), (select monolith_oid from pgpm.config where parent_table = 'public.nic'::regclass),
-  'B LIVENESS: and it landed in a forward partition, not the monolith');
+  'LIVENESS: (B) and it landed in a forward partition, not the monolith');
 select throws_like($$ insert into public.nic values (220, -1, 7) $$,
   '%violates check constraint "nic_amt_pos"%',
   'B: nic_amt_pos binds that forward partition too');
@@ -100,7 +100,7 @@ create table public.gcc (id bigint not null, created_at timestamptz not null,
 insert into public.gcc (id, created_at) select g, now() - (g || ' days')::interval from generate_series(1, 40) g;
 select is((select string_agg(attname || '=' || attgenerated::text, ' ' order by attnum) from pg_attribute
             where attrelid = 'public.gcc'::regclass and attnum > 0 and attgenerated <> ''),
-  'd=s', 'C LIVENESS: gcc.d is a stored generated column, and the only one');
+  'd=s', 'LIVENESS: (C) gcc.d is a stored generated column, and the only one');
 select throws_like($$ call pgpm.transmute('public.gcc', 'd', interval '1 month', p_obtain => 2) $$,
   'pg_partition_magician: cannot partition gcc on d -- it is a generated column,%',
   'C: the generated control column is refused, naming it');
@@ -113,7 +113,7 @@ select lives_ok($$ insert into public.gcc (id, created_at) values (5000, now() +
 delete from public.gcc where id = 5000;
 call pgpm.transmute('public.gcc', 'created_at', interval '1 month', p_obtain => 2);
 select is((select relkind::text from pg_class where oid = 'public.gcc'::regclass), 'p',
-  'C LIVENESS: the same table converts on the plain column d is computed from');
+  'LIVENESS: (C) the same table converts on the plain column d is computed from');
 select is((select attgenerated::text from pg_attribute where attrelid = 'public.gcc'::regclass and attname = 'd'), 's',
   'C: and its generated column is carried onto the parent, still generated');
 insert into public.gcc (id, created_at) values (41, now() + interval '20 days');
@@ -129,12 +129,12 @@ insert into pgpm.transmute_inflight (parent_table, nsp, rel, control_kind, lo, h
 values ('public.rsm'::regclass, 'public', 'rsm', 'id', '0', '200', 'UTC',
         (select attnum from pg_attribute where attrelid = 'public.rsm'::regclass and attname = 'id'), null, null);
 select is((select convalidated::text from pg_constraint where conrelid = 'public.rsm'::regclass and conname = 'pgpm_monolith_bound'),
-  'false', 'D LIVENESS: rsm carries pgpm''s own bound NOT VALID, with a claim whose session is gone');
+  'false', 'LIVENESS: (D) rsm carries pgpm''s own bound NOT VALID, with a claim whose session is gone');
 call pgpm.transmute('public.rsm', 'id', 100::bigint, p_obtain => 2);
 select is((select relkind::text from pg_class where oid = 'public.rsm'::regclass), 'p',
   'D: the re-run is not refused for pgpm''s own NOT VALID bound, and converts rsm');
 select is((select count(*)::int from pgpm.log where parent_table = 'public.rsm'::regclass and action = 'transmute_resume'), 1,
-  'D LIVENESS: it RESUMED on the recorded bound');
+  'LIVENESS: (D) it RESUMED on the recorded bound');
 select is((select lo || ' ' || hi from pgpm.part where parent_table = 'public.rsm'::regclass
             and child_oid = (select monolith_oid from pgpm.config where parent_table = 'public.rsm'::regclass)),
   '0 200', 'D: the monolith is attached on the recorded bound [0, 200)');

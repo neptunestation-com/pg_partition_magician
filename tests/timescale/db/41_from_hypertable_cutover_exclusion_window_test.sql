@@ -36,14 +36,14 @@ select is(
   (select string_agg(id::text, ',' order by id) from public.x41_pgpm_dest) || ' '
     || (select count(*) from public.x41 where ts > (select max(ts) from public.x41_pgpm_dest)),
   (select string_agg(g::text, ',' order by g) from generate_series(1, 20) g) || ' 4',
-  'WITNESS: the copy holds ids 1 to 20 and four rows are past its watermark, more than a one-row batch');
+  'LIVENESS: the copy holds ids 1 to 20 and four rows are past its watermark, more than a one-row batch');
 select is(
   (select string_agg(conname || ':' || contype::text, ',') from pg_constraint
     where conrelid = 'public.x41'::regclass and contype = 'x'),
-  'x41_dev_excl:x', 'WITNESS: the hypertable carries the exclusion constraint added after the copy');
+  'x41_dev_excl:x', 'LIVENESS: the hypertable carries the exclusion constraint added after the copy');
 select throws_ok(
   $$ insert into public.x41 values (500, timestamptz '2026-09-01 15:00+00', 5) $$,
-  '23P01', NULL, 'WITNESS: and it rejects a second row with dev 5 at id 5''s instant');
+  '23P01', NULL, 'LIVENESS: and it rejects a second row with dev 5 at id 5''s instant');
 
 -- ================= THE CONTRACT =================
 select throws_like(

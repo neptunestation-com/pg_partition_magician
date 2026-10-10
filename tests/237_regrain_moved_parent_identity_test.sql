@@ -82,7 +82,7 @@ select ok((select regrain_delta_oid from pgpm.config where parent_table = 'mvh.r
           and pg_temp.triggers_on('public.ra_p0000000000000000000_to_0000000000000000300')
             = array['pgpm_regrain_capture', 'pgpm_regrain_truncate_guard']
           and (select regrain_cursor from pgpm.config where parent_table = 'mvh.ra'::regclass) = '0',
-          'A LIVENESS: prepared before the move, the parent is in mvh and its source and delta stayed in public');
+          'LIVENESS: (A) prepared before the move, the parent is in mvh and its source and delta stayed in public');
 call pgpm.maintain('mvh.ra');      -- copies [0, 50)
 select ok(exists (select 1 from pgpm.log where parent_table = 'mvh.ra'::regclass
                    and action = 'regrain_copy' and lo = '0' and hi = '50' and rows = 49),
@@ -93,7 +93,7 @@ insert into mvh.ra values (250, 'ins-250');
 update mvh.ra set id = 350, payload = 'moved-199' where id = 199;   -- leaves [0, 300): captured as a DELETE
 select is(pg_temp.keys_in('public.ra_pgpm_regrain_delta'),
           array[10, 10, 20, 30, 250, 199]::bigint[],
-          'A LIVENESS: the writes through the moved parent were captured in the real delta');
+          'LIVENESS: (A) the writes through the moved parent were captured in the real delta');
 do $$ declare v_st text; begin
   for i in 1..20 loop
     call pgpm.maintain('mvh.ra', v_st);
@@ -126,7 +126,7 @@ alter table public.rb set schema mvh;
 select ok(exists (select 1 from pgpm.part where parent_table = 'mvh.rb'::regclass and attached
                    and child_name = 'rb_p0000000000000000000_to_0000000000000000300'
                    and child_oid = 'public.rb_p0000000000000000000_to_0000000000000000300'::regclass::oid),
-          'B LIVENESS: the parent moved to mvh and its monolith stayed in public, recorded by oid');
+          'LIVENESS: (B) the parent moved to mvh and its monolith stayed in public, recorded by oid');
 select pgpm.set_regrain('mvh.rb', '50');
 call pgpm.maintain('mvh.rb');   -- prepare
 update mvh.rb set payload = 'upd-60' where id = 60;
@@ -165,7 +165,7 @@ update mvh.rc set payload = 'x' where id = 10;
 select ok((select regrain_delta_oid from pgpm.config where parent_table = 'mvh.rc'::regclass)
             = to_regclass('public.rc_pgpm_regrain_delta')::oid
           and pg_temp.keys_in('public.rc_pgpm_regrain_delta') = array[10, 10]::bigint[],
-          'C LIVENESS: the real delta, recorded by oid and left in public, holds the captured change');
+          'LIVENESS: (C) the real delta, recorded by oid and left in public, holds the captured change');
 select is(pgpm.regrain_cancel('mvh.rc'), 0, 'C: regrain_cancel runs (no copy had been made)');
 select is(pg_temp.stranger_rows('rc'), array['1000:keep-1', '2000:keep-2'],
           'C: regrain_cancel leaves the unrelated mvh.rc_pgpm_regrain_delta and its rows alone');
@@ -185,7 +185,7 @@ alter table public.rd set schema mvh;
 update pgpm.config set regrain_cursor = null where parent_table = 'mvh.rd'::regclass;   -- the hand edit
 select ok(pg_temp.triggers_on('public.rd_p0000000000000000000_to_0000000000000000300')
             = array['pgpm_regrain_capture', 'pgpm_regrain_truncate_guard'],
-          'D LIVENESS: the moved table''s source in public still carries the capture its cleared cursor orphaned');
+          'LIVENESS: (D) the moved table''s source in public still carries the capture its cleared cursor orphaned');
 select ok(pgpm._regrain_capture_active('mvh.rd', 'rd_p0000000000000000000_to_0000000000000000300'),
           'D: _regrain_capture_active reads that source as captured');
 select pgpm._enforce_regrain_capture('mvh.rd');
@@ -209,7 +209,7 @@ update mvh.re set payload = 'x' where id = 10;
 select ok(pg_temp.keys_in('public.re_pgpm_regrain_delta') = array[10, 10]::bigint[]
           and pg_temp.triggers_on('public.re_p0000000000000000000_to_0000000000000000300')
             = array['pgpm_regrain_capture', 'pgpm_regrain_truncate_guard'],
-          'E LIVENESS: an in-flight regrain''s source and delta stayed in public, the delta holding a captured change');
+          'LIVENESS: (E) an in-flight regrain''s source and delta stayed in public, the delta holding a captured change');
 select ok(pgpm.retire('mvh.re', 're_p0000000000000000000_to_0000000000000000300'),
           'E: retire drops the in-flight source of the moved table');
 select is((select method from pgpm.log where parent_table = 'mvh.re'::regclass and action = 'regrain_cancel'),

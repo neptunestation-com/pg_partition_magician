@@ -46,7 +46,7 @@ insert into public.rn168 (id, payload) values (3500, 'frontier');
 create table pg_temp.before168 as
   select lo, child_name from pgpm.part where parent_table = 'public.rn168'::regclass and attached;
 select is((select array_agg(lo order by lo::numeric) from pg_temp.before168), array['0', '1000', '2000', '3000'],
-  'setup: four attached partitions, two of them below the legitimate horizon');
+  'fixture: four attached partitions, two of them below the legitimate horizon');
 select child_name as w_live from pgpm.part
   where parent_table = 'public.rn168'::regclass and attached and lo = '3000' \gset
 
@@ -132,7 +132,7 @@ select child_name as r_mono from pgpm.part where parent_table = 'public.rn168r':
 update pgpm.config set retain = 'NaN' where parent_table = 'public.rn168r'::regclass;   -- THE HAND EDIT
 
 select is(pgpm.regrain_step('public.rn168r', :'r_mono'), 'prepared',
-  'setup: the first regrain_step call installs change capture, before the horizon is computed');
+  'fixture: the first regrain_step call installs change capture, before the horizon is computed');
 select throws_like(
   format($$ select pgpm.regrain_step('public.rn168r', %L) $$, :'r_mono'),
   '%config.retain NaN on %rn168r is negative%', 'regrain_step refuses to compute a horizon from NaN');

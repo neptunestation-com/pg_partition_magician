@@ -67,15 +67,15 @@ select format('public.%I', :'ri_doomed')::regclass::oid as ri_real \gset
 -- open, or "it returned false" below proves nothing about the third.
 select is((select archive_fn from pgpm.config where parent_table = 'public.ri103'::regclass),
   null::regprocedure,
-  'setup: no archive strategy, so the coverage gate is wide open and cannot be what refuses');
+  'fixture: no archive strategy, so the coverage gate is wide open and cannot be what refuses');
 select is(
   (select count(*)::int from pg_constraint
     where confrelid = 'public.ri103'::regclass and contype = 'f' and conparentid = 0),
-  0, 'setup: nothing references this parent, so retirement takes the one-step bare-DROP path');
+  0, 'fixture: nothing references this parent, so retirement takes the one-step bare-DROP path');
 select is((select count(*)::int from public.ri103 where id < 1000), 7,
-  'setup: the monolith holds 7 rows');
+  'fixture: the monolith holds 7 rows');
 select is((select count(*)::int from public.ri103 where id >= 1000 and id < 2000), 3,
-  'setup: the sibling holds 3 -- a different count, so neither can stand in for the other');
+  'fixture: the sibling holds 3 -- a different count, so neither can stand in for the other');
 
 -- LIVENESS, and the one that says this file is not a duplicate of tests/77: the anchor #407 added is
 -- absent here, which is exactly the gap. A run in which retiring_oid happened to be set would be

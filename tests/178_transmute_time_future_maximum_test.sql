@@ -31,7 +31,7 @@ set timezone = 'UTC';
 create table public.fa (id bigint, ts timestamptz not null, primary key (id, ts));
 insert into public.fa values (1, now() - interval '3 days'), (2, now() - interval '1 day'), (3, now() + interval '400 days');
 select ok((select max(ts) from public.fa) > date_trunc('month', now()) + interval '2 months',
-  'A LIVENESS: fa holds a row past the monthly boundary the clock alone gives');
+  'LIVENESS: (A) fa holds a row past the monthly boundary the clock alone gives');
 select throws_like($$ call pgpm.transmute('public.fa', 'ts', interval '1 month', p_obtain => 2) $$,
   '%fa cannot be partitioned on a time grid using ts: its newest value is % ahead of now()%p_force_frontier => true%',
   'A: a maximum 400 days out on a monthly grid is refused before anything is committed');
@@ -50,7 +50,7 @@ insert into public.nb values (1, now() - interval '2 days'), (2, now() - interva
                              (3, date_trunc('day', now()) + interval '1 day 30 minutes');
 select oid as nb_oid from pg_class where oid = 'public.nb'::regclass \gset
 select ok((select max(ts) from public.nb) >= date_trunc('day', now()) + interval '1 day',
-  'B LIVENESS: nb holds a row past the daily boundary the clock alone gives');
+  'LIVENESS: (B) nb holds a row past the daily boundary the clock alone gives');
 call pgpm.transmute('public.nb', 'ts', interval '1 day', p_obtain => 2);
 select is((select relkind::text from pg_class where oid = 'public.nb'::regclass), 'p', 'B: nb converted');
 select is((select hi::timestamptz from pgpm.part where parent_table = 'public.nb'::regclass and child_oid = :nb_oid),

@@ -32,7 +32,7 @@ select is(
   array['10000000000000000000' ~ '^[0-9]{19}$', '0000000000000000001_5' ~ '^[0-9]{19}$',
         '0000000000000000-10' ~ '^[0-9]{19}$'],
   array[false, false, false],
-  'witness: none of the three labels has the pre-#582 shape, so each is a name the old guard let through');
+  'LIVENESS: none of the three labels has the pre-#582 shape, so each is a name the old guard let through');
 
 -- ============================ transmute's orphan guard ============================
 create table public.t196a (id numeric primary key, v text);
@@ -71,7 +71,7 @@ insert into public.t196a values (10500000000000000000, 'past 10^19');
 select is(
   (select tableoid::regclass::text from public.t196a where id = 10500000000000000000),
   't196a_p10000000000000000000',
-  'liveness: with the orphan gone, obtain builds the cell [10^19, 1.1*10^19) under that name and a write lands in it');
+  'LIVENESS: with the orphan gone, obtain builds the cell [10^19, 1.1*10^19) under that name and a write lands in it');
 
 -- no false positive: a sibling whose suffix is digits but NOT a label _id_label can produce (a trailing
 -- zero in the fraction, a 21-character zero-padded integer) can never collide with a cell, so it is left alone
@@ -99,7 +99,7 @@ select is(
   (select array_agg(referencing_table::text) from pgpm.dropped_fk
     where parent_table = 'public.t196g'::regclass and restored_at is null),
   array['r196g'],
-  'precondition: r196g''s FK is suspended and not yet restored');
+  'LIVENESS: r196g''s FK is suspended and not yet restored');
 
 -- an orphan at 5*10^19 (past obtain's lookahead, so the name is free) is a child still out of the parent
 do $$ begin
@@ -120,7 +120,7 @@ select is(pgpm.restore_incoming_fks('public.t196g'), 0,
   'the gate holds the FK off while a fraction-labelled orphan (t196g_p9500000000000000000_5) is out of the parent');
 drop table public.t196g_p9500000000000000000_5;
 select is(pgpm.restore_incoming_fks('public.t196g'), 1,
-  'liveness: with no orphan the same call re-adds the FK');
+  'LIVENESS: with no orphan the same call re-adds the FK');
 select is(
   (select array_agg(confrelid::regclass::text) from pg_constraint
     where conrelid = 'public.r196g'::regclass and contype = 'f' and conparentid = 0),

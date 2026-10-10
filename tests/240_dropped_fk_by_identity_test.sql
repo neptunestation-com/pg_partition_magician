@@ -69,9 +69,9 @@ insert into fa_old.ev values (999);
 
 select ok((select restored_at is null and definition like '%REFERENCES fa_old.ev(id)%'
              from pgpm.dropped_fk where parent_table = :a_parent::oid::regclass),
-  'A LIVENESS: the key is suspended, and its recorded text names fa_old.ev');
+  'LIVENESS: (A) the key is suspended, and its recorded text names fa_old.ev');
 select is((select relkind::text from pg_class where oid = 'fa_old.ev'::regclass), 'r',
-  'A LIVENESS: fa_old.ev now names an unrelated plain table, not the managed one');
+  'LIVENESS: (A) fa_old.ev now names an unrelated plain table, not the managed one');
 select is(pgpm.restore_incoming_fks('fa_new.ev'), 1, 'A: restore_incoming_fks re-adds the key');
 select is(pg_temp.key_on('fa_old.items'), 'items_ev_fk->fa_new.ev',
   'A: the key references the managed table where it is now, not the namesake at the recorded name');
@@ -94,7 +94,7 @@ insert into fb.ev values (999);
 
 select ok((select restored_at is null and definition like '%REFERENCES fb.ev(id)%'
              from pgpm.dropped_fk where parent_table = 'fb.ev_renamed'::regclass),
-  'B LIVENESS: the key is suspended, its text names fb.ev, and fb.ev is now another table');
+  'LIVENESS: (B) the key is suspended, its text names fb.ev, and fb.ev is now another table');
 select is(pgpm.restore_incoming_fks('fb.ev_renamed'), 1, 'B: restore_incoming_fks re-adds the key');
 select is(pg_temp.key_on('fb.items'), 'items_ev_fk->fb.ev_renamed',
   'B: against the renamed managed table, not the namesake under its old name');
@@ -117,11 +117,11 @@ alter table fc_old.ev set schema fc_new;
 select coalesce(max(id), 0) as c_mark from pgpm.log \gset
 
 select is(pg_temp.key_on('fc_old.items'), 'items_ev_fk->fc_new.ev',
-  'C LIVENESS: the key is live against the moved table before the regrain');
+  'LIVENESS: (C) the key is live against the moved table before the regrain');
 select ok(to_regclass('fc_old.ev') is null
           and (select definition like '%REFERENCES fc_old.ev(id)%' from pgpm.dropped_fk
                 where parent_table = 'fc_new.ev'::regclass),
-  'C LIVENESS: its recorded text names fc_old.ev, where nothing is now');
+  'LIVENESS: (C) its recorded text names fc_old.ev, where nothing is now');
 select is(pgpm.regrain('fc_new.ev', 'ev_p0000000000000000000_to_0000000000000000200', '50'), 4,
   'C: the moved table''s monolith regrains into four children');
 select is((select array_agg(action order by id) from pgpm.log where parent_table = 'fc_new.ev'::regclass
@@ -153,10 +153,10 @@ select ok((select definition like '%REFERENCES fd_old.ev(id)%' from pgpm.dropped
             where parent_table = 'fd_new.ev2'::regclass)
           and (select relkind::text from pg_class where oid = 'fd_old.ev'::regclass) = 'r'
           and (select relnamespace::regnamespace::text from pg_class where oid = :d_mono) = 'fd_old',
-  'D LIVENESS: the recorded text names fd_old.ev, a namesake holds it, and the monolith is in fd_old');
+  'LIVENESS: (D) the recorded text names fd_old.ev, a namesake holds it, and the monolith is in fd_old');
 select is(pgpm.untransmute('fd_new.ev2')::oid, :d_mono::oid, 'D: untransmute hands back the monolith');
 select is((select n.nspname || '.' || c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace
-            where c.oid = :d_mono), 'fd_new.ev2', 'D LIVENESS: as fd_new.ev2, where the managed table was');
+            where c.oid = :d_mono), 'fd_new.ev2', 'LIVENESS: (D) as fd_new.ev2, where the managed table was');
 select is(pg_temp.key_on('fd_old.items'), 'items_ev_fk->fd_new.ev2',
   'D: the key is re-added against the restored table, not the namesake at the recorded name');
 select is(pg_temp.refused($$ insert into fd_old.items values (12, 999) $$) || '/'
@@ -179,9 +179,9 @@ alter table fe.lines add constraint lines_order_id_fkey foreign key (order_id) r
 select is((select array_agg(parent_table::text || ':' || constraint_name || ':' || (restored_at is null)::text order by id)
              from pgpm.dropped_fk where restored_at is null),
   array['fe.orders:lines_order_id_fkey:true'],
-  'E LIVENESS: the key against orders is the one suspended record, so it alone can make uninstall refuse');
+  'LIVENESS: (E) the key against orders is the one suspended record, so it alone can make uninstall refuse');
 select is(pg_temp.key_on('fe.lines'), 'lines_order_id_fkey->fe.customers',
-  'E LIVENESS: lines holds a key of that name, against customers, and none against orders');
+  'LIVENESS: (E) lines holds a key of that name, against customers, and none against orders');
 
 \set ON_ERROR_STOP 0
 begin;

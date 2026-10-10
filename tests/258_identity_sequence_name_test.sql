@@ -26,12 +26,12 @@ create table public.sq258 (id bigint generated always as identity, n bigint gene
 alter sequence public.sq258_n_seq rename to sq258_n_custom;
 insert into public.sq258 (v) values ('a'), ('b'), ('c');
 select is(pg_get_serial_sequence('public.sq258', 'id') || ' ' || pg_get_serial_sequence('public.sq258', 'n'),
-  'public.sq258_id_seq public.sq258_n_custom', 'A LIVENESS: the table''s identity sequences are sq258_id_seq and sq258_n_custom');
+  'public.sq258_id_seq public.sq258_n_custom', 'LIVENESS: (A) the table''s identity sequences are sq258_id_seq and sq258_n_custom');
 call pgpm.transmute('public.sq258', 'id', 100::bigint, p_obtain => 2);
-select is((select relkind::text from pg_class where oid = 'public.sq258'::regclass), 'p', 'A LIVENESS: sq258 is converted');
+select is((select relkind::text from pg_class where oid = 'public.sq258'::regclass), 'p', 'LIVENESS: (A) sq258 is converted');
 select is((select array_agg(attname::text || ':' || attidentity::text order by attnum) from pg_attribute
             where attrelid = 'public.sq258'::regclass and attidentity <> ''),
-  array['id:a', 'n:d'], 'A LIVENESS: the parent carries both identity columns, in their kinds');
+  array['id:a', 'n:d'], 'LIVENESS: (A) the parent carries both identity columns, in their kinds');
 select is(pg_get_serial_sequence('public.sq258', 'id') || ' ' || pg_get_serial_sequence('public.sq258', 'n'),
   'public.sq258_id_seq public.sq258_n_custom',
   'A: the converted table''s identity sequences keep the original''s names, sq258_id_seq and sq258_n_custom');
@@ -44,8 +44,8 @@ select is((select id::text || ':' || n::text from public.sq258 where v = 'd'), '
   'A: and they are the parent''s, resuming where the originals stopped (id 4, n 7 on its INCREMENT BY 2)');
 -- the operator renames one of them while the table is managed
 alter sequence public.sq258_n_custom rename to sq258_n_live;
-select is(pgpm.untransmute('public.sq258')::text, 'sq258', 'A LIVENESS: sq258 is restored');
-select is((select relkind::text from pg_class where oid = 'public.sq258'::regclass), 'r', 'A LIVENESS: an ordinary table again');
+select is(pgpm.untransmute('public.sq258')::text, 'sq258', 'LIVENESS: (A) sq258 is restored');
+select is((select relkind::text from pg_class where oid = 'public.sq258'::regclass), 'r', 'LIVENESS: (A) an ordinary table again');
 select is(pg_get_serial_sequence('public.sq258', 'id') || ' ' || pg_get_serial_sequence('public.sq258', 'n'),
   'public.sq258_id_seq public.sq258_n_live',
   'A: the restored table''s identity sequences carry the managed table''s names, sq258_id_seq and sq258_n_live');
@@ -67,11 +67,11 @@ select is(pg_get_serial_sequence('public.mv258', 'id'), 'public.mv258_id_seq',
 alter table public.mv258 set schema s258;
 create sequence public.mv258_id_seq;   -- not the table's: a squatter on the name in the schema it left
 select is(pg_get_serial_sequence('s258.mv258', 'id'), 's258.mv258_id_seq',
-  'B LIVENESS: the parent''s sequence moved with it, and public.mv258_id_seq is another sequence');
+  'LIVENESS: (B) the parent''s sequence moved with it, and public.mv258_id_seq is another sequence');
 select lives_ok($$ select pgpm.untransmute('s258.mv258') $$,
   'B: untransmute runs, the name in the schema the table left in nobody''s way');
 select is((select relkind::text from pg_class where oid = to_regclass('s258.mv258')), 'r',
-  'B LIVENESS: mv258 is restored in s258, an ordinary table again');
+  'LIVENESS: (B) mv258 is restored in s258, an ordinary table again');
 select is(pg_get_serial_sequence('s258.mv258', 'id'), 's258.mv258_id_seq',
   'B: its identity sequence is s258.mv258_id_seq, named in the schema it ended up in');
 select is((select count(*)::int from pg_depend d where d.refobjid = 's258.mv258'::regclass

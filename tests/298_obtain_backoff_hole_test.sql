@@ -115,11 +115,11 @@ select ok((select obtain_retry_after > clock_timestamp() from pgpm.config where 
 -- the witness: the same tick with the back-off cleared does rebuild it, so B's tick was kept from real work
 update pgpm.config set obtain_retry_after = null where parent_table = 'public.bh298b'::regclass;
 call pgpm.maintain_obtain('public.bh298b') \gset b_wit_
-select is(:'b_wit_p_status'::text, 'obtained=1'::text, 'B witness: without the back-off the tick builds one cell');
+select is(:'b_wit_p_status'::text, 'obtained=1'::text, 'LIVENESS: (B) without the back-off the tick builds one cell');
 select ok(exists (select 1 from pgpm.part p join pg_inherits i on i.inhrelid = p.child_oid
                    where p.parent_table = 'public.bh298b'::regclass and i.inhparent = 'public.bh298b'::regclass
                      and p.lo = '3000' and p.hi = '4000' and p.child_oid <> :'b_hole_oid'::oid),
-  'B witness: and that cell is [3000, 4000)');
+  'LIVENESS: (B) and that cell is [3000, 4000)');
 
 -- ==================== (C) the second forward cell detached by hand ====================
 create table public.bh298c (id bigint primary key, payload text);
@@ -200,7 +200,7 @@ select is(:'e_tick_p_status'::text, 'obtained=0 obtain_backoff'::text,
   'E: with no hole and two built steps past the frontier''s cell, the back-off is honoured');
 update pgpm.config set obtain_retry_after = null where parent_table = 'public.bh298e'::regclass;
 call pgpm.maintain_obtain('public.bh298e') \gset e_wit_
-select is(:'e_wit_p_status'::text, 'obtained=2'::text, 'E witness: without the back-off the same tick builds two cells');
+select is(:'e_wit_p_status'::text, 'obtained=2'::text, 'LIVENESS: (E) without the back-off the same tick builds two cells');
 
 -- ==================== (F) a hole obtain cannot build: the back-off holds ====================
 create table public.bh298f (id bigint primary key, payload text);
@@ -251,12 +251,12 @@ select ok(exists (select 1 from pg_class where oid = :'f_stranger_oid'::oid and 
 update pgpm.config set obtain_retry_after = null where parent_table = 'public.bh298f'::regclass;
 create temporary table mark298f2 as select coalesce(max(id), 0) as id from pgpm.log;
 call pgpm.maintain_obtain('public.bh298f') \gset f_wit_
-select is(:'f_wit_p_status'::text, 'obtained=1'::text, 'F witness: without the back-off the tick builds one cell');
+select is(:'f_wit_p_status'::text, 'obtained=1'::text, 'LIVENESS: (F) without the back-off the tick builds one cell');
 select is((select array_agg(action || ':' || lo order by id) from pgpm.log
             where parent_table = 'public.bh298f'::regclass and id > (select id from mark298f2)
               and (action in ('fail_obtain_name', 'skip_obtain') or (action = 'forget_dropped_partition' and lo = '4000'))),
   array['fail_obtain_name:2000', 'forget_dropped_partition:4000'],
-  'F witness: it cannot build [2000, 3000) (fail_obtain_name) and rebuilds [4000, 5000)');
+  'LIVENESS: (F) it cannot build [2000, 3000) (fail_obtain_name) and rebuilds [4000, 5000)');
 
 -- ==================== (G) the walk's forget is not committed without obtain's build ====================
 create table public.bh298g (id bigint primary key, payload text);
@@ -289,11 +289,11 @@ select ok(exists (select 1 from pgpm.part where parent_table = 'public.bh298g'::
 create temporary table mark298g2 as select coalesce(max(id), 0) as id from pgpm.log;
 call pgpm.maintain_obtain('public.bh298g') \gset g_wit_
 select is(:'g_wit_p_status'::text, 'obtained=1 obtain_backoff_bypassed'::text,
-  'G witness: the tick that wins the lock builds the one cell');
+  'LIVENESS: (G) the tick that wins the lock builds the one cell');
 select is((select array_agg(action || ':' || lo order by id) from pgpm.log
             where parent_table = 'public.bh298g'::regclass and id > (select id from mark298g2)
               and action in ('forget_dropped_partition', 'obtain')),
   array['forget_dropped_partition:2000', 'obtain:2000'],
-  'G witness: it logs the forget and then the obtain of [2000, 3000)');
+  'LIVENESS: (G) it logs the forget and then the obtain of [2000, 3000)');
 
 select * from finish();

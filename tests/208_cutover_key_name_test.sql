@@ -29,9 +29,9 @@ insert into public.kn select g, 'r' || g from generate_series(1, 20) g;
 select conindid as kn_idx from pg_constraint where conrelid = 'public.kn'::regclass and contype = 'p' \gset
 insert into public.kn values (5, 'dup') on conflict on constraint kn_pkey do nothing;
 select is((select v from public.kn where k = 5), 'r5',
-  'A LIVENESS: before the conversion the upsert names kn_pkey and keeps the existing row');
+  'LIVENESS: (A) before the conversion the upsert names kn_pkey and keeps the existing row');
 call pgpm.transmute('public.kn', 'k', 100::bigint, p_obtain => 2);
-select is((select relkind::text from pg_class where oid = 'public.kn'::regclass), 'p', 'A LIVENESS: kn is converted');
+select is((select relkind::text from pg_class where oid = 'public.kn'::regclass), 'p', 'LIVENESS: (A) kn is converted');
 select is((select array_agg(conname::text) from pg_constraint where conrelid = 'public.kn'::regclass and contype = 'p'),
   array['kn_pkey'], 'A: the parent''s primary key is named kn_pkey, as the table''s was');
 select is(
@@ -55,7 +55,7 @@ select is((select tableoid::regclass::text || ':' || v from public.kn where k = 
 create table public.kc (k int8 not null, v text, constraint kc_pk primary key (k));
 insert into public.kc select g, 'c' || g from generate_series(1, 13) g;
 call pgpm.transmute('public.kc', 'k', 100::bigint, p_obtain => 2);
-select is((select relkind::text from pg_class where oid = 'public.kc'::regclass), 'p', 'B LIVENESS: kc is converted');
+select is((select relkind::text from pg_class where oid = 'public.kc'::regclass), 'p', 'LIVENESS: (B) kc is converted');
 select is((select array_agg(conname::text) from pg_constraint where conrelid = 'public.kc'::regclass and contype = 'p'),
   array['kc_pk'], 'B: the parent''s primary key is named kc_pk, not an auto-name');
 select is((select relname::text from pg_class
@@ -74,7 +74,7 @@ create table public.ku (k int8 not null, v text, constraint ku_uq unique (k));
 insert into public.ku select g, 'u' || g from generate_series(1, 7) g;
 select conindid as ku_idx from pg_constraint where conrelid = 'public.ku'::regclass and contype = 'u' \gset
 call pgpm.transmute('public.ku', 'k', 100::bigint, p_obtain => 2);
-select is((select relkind::text from pg_class where oid = 'public.ku'::regclass), 'p', 'C LIVENESS: ku is converted');
+select is((select relkind::text from pg_class where oid = 'public.ku'::regclass), 'p', 'LIVENESS: (C) ku is converted');
 select is(
   (select array_agg(conname::text || ' ' || condeferrable::text || ' ' || condeferred::text)
      from pg_constraint where conrelid = 'public.ku'::regclass and contype = 'u'),
@@ -84,9 +84,9 @@ select is(
     where c.conrelid = (select monolith_oid from pgpm.config where parent_table = 'public.ku'::regclass)
       and c.contype = 'u' and c.conindid = :ku_idx and c.conparentid <> 0),
   'pgpm_key_' || :ku_idx, 'C: the monolith''s copy is the original index under pgpm_key_<index oid>, adopted by the parent');
-select lives_ok($$ insert into public.ku values (170, 'fwd') $$, 'C fixture: a row past the monolith');
+select lives_ok($$ insert into public.ku values (170, 'fwd') $$, 'fixture: (C) a row past the monolith');
 select is((select tableoid::regclass::text || ':' || v from public.ku where k = 170), 'ku_p0000000000000000100:fwd',
-  'C LIVENESS: 170 lives in the forward partition');
+  'LIVENESS: (C) 170 lives in the forward partition');
 select lives_ok($$ insert into public.ku values (170, 'dup') on conflict on constraint ku_uq do update set v = 'upd' $$,
   'C: the upsert naming ku_uq runs on the converted table');
 select is((select array_agg(v) from public.ku where k = 170), array['upd'],
@@ -96,7 +96,7 @@ select is((select array_agg(v) from public.ku where k = 170), array['upd'],
 select rpad('kl_key_', 63, 'k') as kl63 \gset
 create table public.kl (k int8 not null, v text, constraint :"kl63" primary key (k) deferrable initially deferred);
 insert into public.kl select g, 'l' || g from generate_series(1, 4) g;
-select is(octet_length(:'kl63'), 63, 'D LIVENESS: the key name is 63 bytes, so no suffix fits beside it');
+select is(octet_length(:'kl63'), 63, 'LIVENESS: (D) the key name is 63 bytes, so no suffix fits beside it');
 call pgpm.transmute('public.kl', 'k', 100::bigint, p_obtain => 2);
 select is(
   (select array_agg(conname::text || ' ' || condeferrable::text || ' ' || condeferred::text)
@@ -106,8 +106,8 @@ select is(
 
 -- ==================== (E) untransmute hands the original name back ====================
 delete from public.kn where k >= 100;   -- every row back inside the monolith, so the door is open
-select is(pgpm.untransmute('public.kn')::text, 'kn', 'E LIVENESS: kn is restored');
-select is((select relkind::text from pg_class where oid = 'public.kn'::regclass), 'r', 'E LIVENESS: kn is a plain table again');
+select is(pgpm.untransmute('public.kn')::text, 'kn', 'LIVENESS: (E) kn is restored');
+select is((select relkind::text from pg_class where oid = 'public.kn'::regclass), 'r', 'LIVENESS: (E) kn is a plain table again');
 select is(
   (select conname::text || ' ' || (conindid = :kn_idx)::text from pg_constraint
     where conrelid = 'public.kn'::regclass and contype = 'p'),
