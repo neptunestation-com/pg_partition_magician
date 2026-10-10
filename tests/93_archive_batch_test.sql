@@ -45,9 +45,16 @@ select is(
 -- archive_batch bounds how many partitions get a turn, not how many chunks any one gets.
 call pgpm.maintain('public.ab93');
 
+-- Identity, not cardinality (#1170): the chunks themselves, by partition and range. A count of distinct
+-- partitions in the ledger is also 1 after a second tick that archived nothing, so it could not see an
+-- archive that stalls after its first chunk. At archive_byte_budget = 2000 a chunk of this table is 58 rows:
+-- [0, 59) on the first tick, then [59, 117), resuming exactly where it ended.
 select is(
-  (select count(distinct child_name)::int from pgpm.archive_ledger where parent_table = 'public.ab93'::regclass),
-  1, 'a second tick still works the same (oldest, not-yet-covered) partition, not a new one');
+  (select string_agg(format('%s [%s,%s)', child_name, lo, hi), ' ' order by lo::bigint)
+     from pgpm.archive_ledger where parent_table = 'public.ab93'::regclass),
+  (select format('%1$s [0,59) %1$s [59,117)', child_name) from pgpm.part
+    where parent_table = 'public.ab93'::regclass and lo = '0'),
+  'a second tick continues the same (oldest, not-yet-covered) partition where its first chunk ended, not a new one');
 
 delete from pgpm.archive_ledger where parent_table = 'public.ab93'::regclass;
 
@@ -65,9 +72,16 @@ delete from pgpm.archive_ledger where parent_table = 'public.ab93'::regclass;
 update pgpm.config set archive_batch = 2 where parent_table = 'public.ab93'::regclass;
 call pgpm.maintain('public.ab93');
 
+-- Identity, not cardinality (#1170): which partitions, by name. Two ledger rows would also be two chunks of
+-- the monolith, a cap spent on chunks rather than on DIFFERENT partitions. The two oldest each get one chunk:
+-- the monolith's first, [0, 59), and all of [6000, 7000), whose five rows fit the budget.
 select is(
-  (select count(*)::int from pgpm.archive_ledger where parent_table = 'public.ab93'::regclass),
-  2, 'archive_batch = 2 archives exactly two of the three eligible partitions in one tick');
+  (select string_agg(format('%s [%s,%s)', child_name, lo, hi), ' ' order by lo::bigint)
+     from pgpm.archive_ledger where parent_table = 'public.ab93'::regclass),
+  (select format('%s [0,59) %s [6000,7000)',
+                 (select child_name from pgpm.part where parent_table = 'public.ab93'::regclass and lo = '0'),
+                 (select child_name from pgpm.part where parent_table = 'public.ab93'::regclass and lo = '6000'))),
+  'archive_batch = 2 archives exactly two of the three eligible partitions in one tick, the two oldest');
 
 -- retain_batch is untouched by any of this (issue #351 only adds the archiving-side knob).
 select is(
