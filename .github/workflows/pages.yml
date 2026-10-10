@@ -27,8 +27,12 @@ concurrency:
 
 jobs:
   deploy:
-    # Skip cascade deploys when the upstream Release failed.
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    # Deploys after every completed Release run, whatever its conclusion (#1169). A Release run can
+    # publish the GitHub Release and still conclude failure: publish-dbdev runs after the publish and
+    # refuses a package over database.dev's cap by design (#1077), and a run cancelled after the publish
+    # ends the same way. Gating on success left the install page on the previous release's bundle. The
+    # site is assembled from the latest published release, so after a run that published nothing this
+    # redeploys the page it already serves. bench/pages_deploy_after_release.sh keeps it so.
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

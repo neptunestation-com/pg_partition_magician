@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **The install page is redeployed after a Release run that published its GitHub Release and then failed
+  at database.dev** (#1169). `pages.yml` redeployed after a Release run only when the whole run concluded
+  success, and since #1077 a tag cut from a tree whose dbdev package is over database.dev's cap publishes the
+  GitHub Release and then fails the run by design in `publish-dbdev.yml`, so the install page kept serving the
+  previous release's bundle and version. The deploy now runs after every completed Release run, whatever its
+  conclusion, and assembles the site from the latest published release, so a run that published nothing
+  redeploys the page it already serves; `RELEASING.md` says what a release over the cap leaves red. Guard
+  `bench/pages_deploy_after_release.sh` (evaluates the deploy's conditions for that run), mutation
+  `pages_deploy_gated_on_release_success`.
 - **The reaper re-reads a claim under the table's lock and leaves one a live session took over** (#1166).
   `_transmute_reap` judged each claim by the row its loop read when the sweep began, so while it waited
   (up to its 5 s lock timeout) on one abandoned table, an operator's re-run of `transmute` on another, the
