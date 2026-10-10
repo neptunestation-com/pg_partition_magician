@@ -12,6 +12,15 @@
   orphan written while it was suspended no longer keeps it dropped. PostgreSQL 15 to 17 refuse `NOT VALID` there, and their only scan-free route (a validated key
   per partition, adopted by the parent) costs a constraint per pair of partitions and exhausts the lock table at a
   few dozen of them, so on those versions the one-step validation stays, and `docs/reference.md` and
+  `docs/guide.md` now say so. Two consequences are handled with it. On 18 a managed table that references
+  another managed one can now hold that key `NOT VALID` (an orphan keeps it from validating), so its own
+  regrain's swap adds the key to each copy `NOT VALID` just before the `ATTACH`, which adopts it without a scan,
+  and its drift check no longer reads a copy's validated key under a `NOT VALID` parent key as drift; before,
+  the `ATTACH` validated it on every copy under `ACCESS EXCLUSIVE` and failed on the orphan every tick. And on
+  15 to 17 a one-step re-add that fails on an orphan is parked for five minutes (`dropped_fk.validate_retry_after`,
+  noted in its `fail_restore_incoming_fk` row) instead of rescanning the managed table under `SHARE ROW
+  EXCLUSIVE` on every tick; a call naming the key in `p_ids` (regrain's swap, `uninstall.sql`, or you) retries it
+  at once. Test `tests/322`; guard `bench/restore_one_step_backoff.sh`, mutation `restore_one_step_no_backoff`.
   `docs/guide.md` now say so. Test `tests/322`.
 - **A regrain no longer wedges on a captured `text_time` key that lacks the declared shape** (#709, the
   reconcile's decode). `_regrain_reconcile` placed every captured key by `_grid_floor(_decode(key))`, and

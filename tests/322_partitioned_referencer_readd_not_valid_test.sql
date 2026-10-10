@@ -26,7 +26,7 @@
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(14);
+select plan(40);
 
 select current_setting('server_version_num')::int >= 180000 as pg18 \gset
 
@@ -139,8 +139,8 @@ select is(
   (select array_agg(constraint_name || ':' || (validated_at is not null)::text || ':' || (validate_retry_after is not null)::text
                     order by constraint_name)
      from pgpm.dropped_fk where parent_table = 'public.t322'::regclass),
-  array['pl322_t_fk:true:false', 'rp322_t_fk:false:false', 't322_parent_fk:true:false'],
-  'PG 15-17: rp322_t_fk was never re-added, so there was nothing to validate or back off');
+  array['pl322_t_fk:true:false', 'rp322_t_fk:false:true', 't322_parent_fk:true:false'],
+  'PG 15-17: rp322_t_fk was never re-added, and its failed one-step re-add backs off');
 \endif
 
 -- ======================================================================================================
@@ -176,5 +176,166 @@ select is(
 \endif
 select throws_ok($$ insert into public.rpu322 values (3, 999, 16) $$, '23503', NULL,
   'and it enforces: an rpu322 row for a missing u322 id is refused');
+
+
+-- ======================================================================================================
+-- E (PR verification P1-01): a pgpm-managed partitioned referencer regrains with the key left NOT VALID
+-- ======================================================================================================
+-- a322 is referenced by b322, which pgpm converts too; an orphan written into b322 while the key is
+-- suspended keeps the key from validating. On 18 restore leaves it NOT VALID on b322, and b322's own regrain
+-- must still swap: its copies carry the key NOT VALID, which the swap's ATTACH adopts without validating
+-- (a copy without it is validated by the ATTACH, which the orphan fails, on every tick). Before 18 the
+-- one-step re-add fails on the orphan and the key stays dropped, so the regrain swaps without it.
+create table public.a322 (id bigint primary key, body text);
+insert into public.a322 select g, 'a' || g from generate_series(1, 15) g;
+create table public.b322 (id bigint primary key, a_id bigint constraint b322_a_fk references public.a322 (id), v text);
+insert into public.b322 select g, (g % 15) + 1, 'b' || g from generate_series(1, 45) g;
+call pgpm.transmute('public.a322', 'id', 10::bigint, p_incoming_fks => 'preserve', p_obtain => 2);
+update public.b322 set a_id = 999 where id = 5;                -- the orphan, written while b322_a_fk is down
+call pgpm.transmute('public.b322', 'id', 10::bigint, p_obtain => 2);
+insert into public.b322 values (55, 1, 'f'), (65, 2, 'g');     -- frontier past b322's monolith: frozen
+select pgpm.restore_incoming_fks('public.a322');
+select pgpm.validate_incoming_fks('public.a322');
+
+select is(
+  (select referencing_table::text || ':' || (select relkind::text from pg_class where oid = referencing_table)
+     from pgpm.dropped_fk where parent_table = 'public.a322'::regclass and constraint_name = 'b322_a_fk'),
+  'b322:p', 'LIVENESS (E): a322''s preserved key is recorded against b322, a partitioned pgpm-managed table');
+select is(
+  (select coalesce(string_agg(conrelid::regclass::text || ':' || convalidated::text, ','), 'none')
+     from pg_constraint where contype = 'f' and conparentid = 0 and conname = 'b322_a_fk'),
+  case when :'pg18'::boolean then 'b322:false' else 'none' end,
+  'LIVENESS (E): the orphan keeps the key NOT VALID on b322 (18) or dropped (15-17) as the regrain starts');
+select child_name as mon322 from pgpm.part
+ where parent_table = 'public.b322'::regclass
+   and child_oid = (select monolith_oid from pgpm.config where parent_table = 'public.b322'::regclass) \gset
+select lives_ok(format($$ select pgpm.regrain('public.b322', %L, '10') $$, :'mon322'),
+  '(E) b322''s regrain swaps its monolith for fine partitions, the orphan and the NOT VALID key notwithstanding');
+select ok(not exists (select 1 from pgpm.part where parent_table = 'public.b322'::regclass and child_name = :'mon322'),
+  '(E) the monolith was replaced by the swap');
+select is(
+  (select count(*)::int from pg_inherits i where i.inhparent = 'public.b322'::regclass
+      and exists (select 1 from pg_constraint k where k.conrelid = i.inhrelid and k.contype = 'f'
+                     and k.conname = 'b322_a_fk' and k.conparentid <> 0 and not k.convalidated)),
+  case when :'pg18'::boolean then (select count(*)::int from pg_inherits where inhparent = 'public.b322'::regclass) else 0 end,
+  '(E) every partition of b322 carries the key as b322 holds it: a NOT VALID clone of b322''s on 18, none before');
+select is((select array_agg(id order by id) from public.b322),
+  (select array_agg(g::bigint order by g) from generate_series(1, 45) g) || array[55, 65]::bigint[],
+  'LIVENESS (E): b322 holds exactly its 47 rows');
+update public.b322 set a_id = 1 where id = 5;                  -- the orphan cleared
+\if :pg18
+select is(pgpm.validate_incoming_fks('public.a322'), 1, '(E) 18: the key validates once the orphan is gone');
+\else
+select is(pgpm.restore_incoming_fks('public.a322',
+            (select array_agg(id) from pgpm.dropped_fk where parent_table = 'public.a322'::regclass)),
+  1, '(E) 15-17: the key re-adds once the orphan is gone (named in p_ids, so its back-off does not hold it)');
+\endif
+select is(
+  (select string_agg(distinct convalidated::text, ',') from pg_constraint where contype = 'f' and conname = 'b322_a_fk'),
+  'true', '(E) and it is validated on b322 and on every fine partition the swap attached');
+
+-- ======================================================================================================
+-- F (PR verification P1-01, mid-run): the key is re-added NOT VALID while the referencer's copies wait
+-- ======================================================================================================
+-- b2's regrain makes its copies while its key (a2's preserved one) is validated, so each copy carries it
+-- validated. a2's own regrain swap then suspends the key and re-adds it, which on 18 is NOT VALID. That is not
+-- drift: the next tick goes on with the same copies rather than discarding them, and the swap's ATTACH adopts
+-- each copy's validated key under b2's NOT VALID one. Before 18 the re-add is validated, so nothing changes
+-- state, and the run swaps the same way.
+create table public.a2 (id bigint primary key);
+insert into public.a2 select generate_series(1, 15);
+create table public.b2 (id bigint primary key, a_id bigint constraint b2_a_fk references public.a2 (id));
+insert into public.b2 select g, (g % 15) + 1 from generate_series(1, 45) g;
+call pgpm.transmute('public.a2', 'id', 10::bigint, p_incoming_fks => 'preserve', p_obtain => 2);
+call pgpm.transmute('public.b2', 'id', 10::bigint, p_obtain => 2);
+insert into public.b2 values (55, 1), (65, 2);
+select pgpm.restore_incoming_fks('public.a2');
+select pgpm.validate_incoming_fks('public.a2');
+create function pg_temp.b2_tick() returns text language plpgsql as $f$
+declare v name;
+begin
+  select child_name into v from pgpm.part
+   where parent_table = 'public.b2'::regclass
+     and child_oid = (select monolith_oid from pgpm.config where parent_table = 'public.b2'::regclass);
+  if v is null then return 'no monolith'; end if;            -- swapped already
+  return pgpm.regrain_step('public.b2', v, '10', 12);
+end $f$;
+select is(array[pg_temp.b2_tick(), (pg_temp.b2_tick() like 'copied:%')::text], array['prepared', 'true'],
+  'LIVENESS (F): b2''s regrain prepared and copied a first batch');
+select is(
+  (select coalesce(string_agg(distinct k.convalidated::text, ','), 'none')
+     from pgpm.part p join pg_constraint k on k.conrelid = p.child_oid and k.contype = 'f' and k.conname = 'b2_a_fk'
+    where p.parent_table = 'public.b2'::regclass and not p.attached),
+  'true', 'LIVENESS (F): the copies made so far carry b2_a_fk validated, as b2 held it');
+select (select array_agg(child_oid order by child_oid) from pgpm.part
+         where parent_table = 'public.b2'::regclass and not attached)::text as f_copies \gset
+-- what a2's regrain swap does to the keys referencing it, inside its own transaction
+select is(array[pgpm.suspend_incoming_fks('public.a2', true),
+                pgpm.restore_incoming_fks('public.a2', (select array_agg(id) from pgpm.dropped_fk where parent_table = 'public.a2'::regclass))],
+  array[1, 1], 'LIVENESS (F): a2''s swap suspends b2_a_fk and re-adds it');
+select is((select convalidated from pg_constraint where conrelid = 'public.b2'::regclass and conname = 'b2_a_fk'),
+  not :'pg18'::boolean, 'LIVENESS (F): b2 holds it NOT VALID now on 18, validated before 18');
+select unalike(pg_temp.b2_tick(), 'restarted:%', '(F) the next tick goes on with the run rather than restarting it');
+select ok((select array_agg(child_oid order by child_oid) from pgpm.part
+            where parent_table = 'public.b2'::regclass and not attached and child_oid = any(:'f_copies'::oid[]))::text
+          = :'f_copies', '(F) the copies made before the re-add are the ones kept');
+select ok((select bool_or(s like 'swapped:%') from (select pg_temp.b2_tick() as s from generate_series(1, 20)) t),
+  '(F) and the swap attaches them');
+select is(
+  (select array_agg(k.convalidated order by k.convalidated)::text from pg_inherits i
+     join pg_constraint k on k.conrelid = i.inhrelid and k.contype = 'f' and k.conname = 'b2_a_fk'
+    where i.inhparent = 'public.b2'::regclass and i.inhrelid = any(:'f_copies'::oid[])),
+  (select array_agg(true)::text from unnest(:'f_copies'::oid[])),
+  '(F) each attached copy kept its validated key, adopted under b2''s');
+select is(pgpm.validate_incoming_fks('public.a2'), case when :'pg18'::boolean then 1 else 0 end,
+  '(F) and b2''s key validates afterwards (on 18; before 18 it never stopped being valid)');
+select is((select string_agg(distinct convalidated::text, ',') from pg_constraint where contype = 'f' and conname = 'b2_a_fk'),
+  'true', '(F) valid on b2 and every partition');
+
+-- ======================================================================================================
+-- G (PR verification P1-02): a failed one-step re-add backs off instead of rescanning every tick
+-- ======================================================================================================
+-- Before 18 the self-referential key of g322 is re-added validating in one step, and an orphan fails it.
+-- That re-add scans all of g322 under SHARE ROW EXCLUSIVE, and maintain calls restore on every tick, so
+-- every tick scanned again to fail again. Now the failure parks the key for five minutes, as
+-- validate_incoming_fks parks a failing VALIDATE; a call naming the key in p_ids retries it at once. On 18
+-- the key comes back NOT VALID and nothing is parked.
+create table public.g322 (id bigint primary key, pid bigint constraint g322_parent_fk references public.g322 (id));
+insert into public.g322 select g, nullif(g - 1, 0) from generate_series(1, 30) g;
+call pgpm.transmute('public.g322', 'id', 100::bigint, p_incoming_fks => 'preserve', p_obtain => 2);
+update public.g322 set pid = 999 where id = 10;                -- the orphan
+select id as g_fk from pgpm.dropped_fk where parent_table = 'public.g322'::regclass \gset
+\if :pg18
+select is(pgpm.restore_incoming_fks('public.g322'), 1, 'G 18: the key comes back NOT VALID, the orphan notwithstanding');
+select is((select restored_at is not null and validate_retry_after is null from pgpm.dropped_fk where id = :g_fk), true,
+  'G 18: restored, and nothing is parked');
+select is(pgpm.restore_incoming_fks('public.g322'), 0, 'G 18: a second call has nothing left to re-add');
+select is((select count(*)::int from pgpm.log where parent_table = 'public.g322'::regclass and action = 'fail_restore_incoming_fk'),
+  0, 'G 18: and no re-add failed');
+select is(pgpm.restore_incoming_fks('public.g322', array[:g_fk]::bigint[]), 0, 'G 18: naming it in p_ids finds it restored too');
+\else
+select is(pgpm.restore_incoming_fks('public.g322'), 0, 'G 15-17: the one-step re-add fails on the orphan');
+select ok((select restored_at is null and validate_retry_after > clock_timestamp() + interval '4 minutes'
+             from pgpm.dropped_fk where id = :g_fk),
+  'G 15-17: the key stays dropped and is parked for five minutes');
+select is(pgpm.restore_incoming_fks('public.g322'), 0, 'G 15-17: the next call (the next tick) re-adds nothing');
+select is(
+  (select array_agg(method like 'g322_parent_fk: retried in 5 minutes (at once if named in p_ids): %violates foreign key constraint%')
+     from pgpm.log where parent_table = 'public.g322'::regclass and action = 'fail_restore_incoming_fk'),
+  array[true], 'G 15-17: and does not even try: one failure logged, saying when it is retried, not a second');
+select is(pgpm.restore_incoming_fks('public.g322', array[:g_fk]::bigint[]), 0,
+  'G 15-17: a call naming the key in p_ids retries it at once (and fails again on the orphan)');
+\endif
+select is((select count(*)::int from pgpm.log where parent_table = 'public.g322'::regclass and action = 'fail_restore_incoming_fk'),
+  case when :'pg18'::boolean then 0 else 2 end, '(G) the named retry was a real attempt: a second failure is logged before 18');
+update public.g322 set pid = 9 where id = 10;
+\if :pg18
+select is(pgpm.validate_incoming_fks('public.g322'), 1, 'G 18: with the orphan gone the key validates');
+\else
+select is(pgpm.restore_incoming_fks('public.g322', array[:g_fk]::bigint[]), 1, 'G 15-17: with the orphan gone, the named retry re-adds it');
+\endif
+select is((select restored_at is not null and validated_at is not null and validate_retry_after is null
+             from pgpm.dropped_fk where id = :g_fk), true,
+  '(G) the key ends restored, validated and not parked');
 
 select * from finish();

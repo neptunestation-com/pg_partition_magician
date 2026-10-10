@@ -783,7 +783,10 @@ monolith child: left alone, the constraint would keep enforcing over the monolit
 written into a forward partition would escape it. Carrying it is metadata-only, since PostgreSQL adopts the
 monolith's already-validated copy rather than rescanning. A `NOT VALID` outgoing key is refused up front:
 adding it at the parent would rescan the whole table under a lock that blocks writes on it and on the
-referenced table, so validate or drop it first.
+referenced table, so validate or drop it first. (A table pgpm already manages can come to hold one: on
+PostgreSQL 18, a key it preserved for a table this one references is re-added `NOT VALID` while an orphan
+keeps it from validating. Regrain carries such a key onto the fine partitions `NOT VALID`, without a scan; it
+is converting the table again, after `untransmute`, that asks for it validated first.)
 
 The rest of this section is about the **incoming** direction, where other tables reference the one you are
 transmuting (e.g. `reactions(message_id) -> messages(id)`). Because `transmute` never rewrites the primary
@@ -854,9 +857,12 @@ For the full step-by-step recovery, see the runbook entry
 One exception on PostgreSQL 15 to 17: a key whose referencing table is **partitioned**, which includes a
 self-referential key of the table you converted, cannot be re-added `NOT VALID` there, so it comes back
 validated in one step. That re-add scans the whole referencing table while it blocks writes to the managed
-table, and an orphan fails it and leaves the key dropped until you remove the orphan. PostgreSQL 18 takes
-`NOT VALID` on a partitioned table, and there such a key gets the same split as any other. See
-[`restore_incoming_fks`](reference.md#restore_incoming_fks) for why pgpm does not work around it.
+table, and an orphan fails it and leaves the key dropped until you remove the orphan. Because the attempt
+is the scan, a failed one waits five minutes before maintenance tries it again, rather than rescanning on
+every tick; once the orphan is gone, `pgpm.restore_incoming_fks(parent, array[<its pgpm.dropped_fk id>])`
+retries it at once. PostgreSQL 18 takes `NOT VALID` on a partitioned table, and there such a key gets the same
+split as any other. See [`restore_incoming_fks`](reference.md#restore_incoming_fks) for why pgpm does not work
+around it.
 
 **Once restored, it stays restored.** Nothing in a maintenance tick suspends a managed FK again;
 `pgpm.suspend_incoming_fks` has exactly one caller left, described next. Referential actions,

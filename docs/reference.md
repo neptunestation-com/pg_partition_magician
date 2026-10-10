@@ -1714,7 +1714,11 @@ complete, K children attached), or a soft no-progress status: `active` (not froz
 (the step does not subdivide). This is the unit `maintain` paces across ticks; because it copies, the
 cross-tick path opens **no** read gap. Its incoming-FK touch is the swap's `DETACH`, which transiently
 drops and re-adds any incoming FK within that single transaction. Outgoing FKs are carried onto each fine
-child while it is still empty, so the swap never validates one under its lock.
+child while it is still empty, so the swap never validates one under its lock. A `NOT VALID` outgoing key
+on the parent (on PostgreSQL 18, `restore_incoming_fks` leaves one on a managed table that references another
+managed one while an orphan keeps it from validating) cannot go on a copy then, since it would refuse that
+orphan as it is copied in; the swap adds it to each copy `NOT VALID` just before the `ATTACH`, which checks no
+row and adopts it as it is, so the parent keeps it `NOT VALID` and `validate_incoming_fks` validates it later.
 
 Committed DML against the source while a regrain is in flight is honoured. A trigger on the source records
 changed keys into a per-parent delta table, and a reconcile pass treats the **source** as the authority for
@@ -1852,7 +1856,8 @@ added or dropped, or an outgoing foreign key added, dropped or redefined, reache
 while the copy, the reconcile and the swap's `ATTACH` all need the parent's current columns and
 constraints. Every tick that resumes a run compares each copy's columns (name, type, collation, `NOT
 NULL`, generated), `CHECK` constraints (name and expression) and outgoing foreign keys (definition; a
-`NOT VALID` key on the parent is not carried, so not compared) with the parent's first. A copy made
+`NOT VALID` key on the parent is carried by the swap rather than onto the copy, so it is not compared, nor is a
+copy's key with the same definition) with the parent's first. A copy made
 before a key was added would otherwise reach the swap without it, and `ATTACH` would validate the key by
 scanning the copy under the swap's lock; restarted, every copy is made again carrying the key, validated
 while it is empty. It also compares the source with what the run recorded when it began copying
@@ -3246,6 +3251,11 @@ scans the whole referencing table (for a self-referential key, the whole managed
 writes to it and to the managed table: at the re-add after the conversion, and again at every regrain
 swap, inside the swap's `ACCESS EXCLUSIVE`. An orphan written while the key was suspended fails that
 validation and leaves the key dropped, logged `fail_restore_incoming_fk`, until you delete the orphan.
+Because the attempt is the scan, a failed one is parked for five minutes (`dropped_fk.validate_retry_after`,
+the back-off `validate_incoming_fks` keeps), and the log row says so: `maintain` retries the key at most
+every five minutes while the orphan stands, not on every tick. A call that names the key's
+`pgpm.dropped_fk.id` in `p_ids` retries it at once, which is how to get it back as soon as you have deleted
+the orphan; regrain's swap and `uninstall.sql` name theirs that way too.
 The only scan-free route those versions offer, a `NOT VALID` key on every partition, validated and then
 adopted by the parent's `ADD`, creates a constraint with its triggers for every pair of referencing and
 referenced partitions, and the adopting `ADD` locks every one of them: measured on PostgreSQL 15, 40
@@ -3451,6 +3461,7 @@ Preserve-managed incoming FKs and their lifecycle.
 | `definition` | `text` | the captured FK definition, naming the referenced table schema-qualified as it was named at the capture. It is a record, not the statement replayed: every re-add points it at the table the record names by OID, under its name and schema as they are then (`parent_table` for `restore_incoming_fks` and regrain's swap, the restored table for `untransmute`), so a table moved with `SET SCHEMA` or renamed since gets its key back, and a table that took its old name does not |
 | `restored_at` | `timestamptz` | null = dropped (RI off); set = re-added |
 | `validated_at` | `timestamptz` | set = fully validated; null with `restored_at` set = re-added `NOT VALID` (orphans pending) |
+| `validate_retry_after` | `timestamptz` | the back-off after a failed attempt that scans: a `VALIDATE` (`validate_incoming_fks` on a tick), or before PostgreSQL 18 a one-step re-add of a partitioned referencer's key (`restore_incoming_fks` without `p_ids`); not retried before then |
 | `dropped_at` | `timestamptz` | when the FK was captured and dropped |
 
 A record names its referencing table by OID, and nothing ties the two together after the capture, so

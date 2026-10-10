@@ -6170,6 +6170,14 @@ begin
 end;
 $$;
 
+-- A foreign key's definition without the NOT VALID pg_get_constraintdef appends to an unvalidated one (#633),
+-- so that a key is matched by what it enforces and not by whether it has been validated yet: regrain's swap
+-- carries the parent's NOT VALID keys onto a copy by it, and its drift check leaves a copy's key out by it.
+create or replace function pgpm._fk_def_unvalidated(p_con oid)
+returns text language sql stable as $$
+  select regexp_replace(pg_get_constraintdef(p_con), ' NOT VALID$', '');
+$$;
+
 -- How the first of a regrain's copies whose columns differ from its parent's differs (#785), or null when
 -- every copy matches. Each side's columns are compared as name, type, collation (when not the type's
 -- own), NOT NULL and generated: the properties regrain_step's copy and reconcile statements and the
@@ -6186,8 +6194,12 @@ $$;
 -- the parent after a copy was made reached the swap missing from it, where ATTACH validated it by scanning
 -- the copy under the swap's ACCESS EXCLUSIVE on the parent; one the parent dropped or changed stayed on
 -- the fine child. A NOT VALID key and a self-reference are left out on the parent's side because regrain
--- never carries them, and a key's clones onto the partitions of a partitioned referenced table
--- (conparentid set) on both sides. The name is not compared: ATTACH matches a key by its definition, so a
+-- never makes a copy with them, and a key's clones onto the partitions of a partitioned referenced table
+-- (conparentid set) on both sides. A copy's key with the definition of one the parent holds NOT VALID is
+-- left out on the copy's side (#633): on PostgreSQL 18 restore_incoming_fks re-adds a key NOT VALID on a
+-- partitioned referencing table, regrain's swap of the table it references re-adds it so mid-run, and a
+-- copy made while it was validated still carries it validated; that is not drift, since the swap's ATTACH
+-- adopts the copy's key as it is, and a restart would discard every copy for nothing. The name is not compared: ATTACH matches a key by its definition, so a
 -- renamed key is still adopted. A copy is made LIKE its parent,
 -- so the two differ only when the parent has been altered since; regrain_step restarts the run when they
 -- do. One statement over every copy, comparing each relation's column list as one string, and the
@@ -6219,7 +6231,11 @@ returns text language sql stable as $$
       from pg_constraint k
      where k.contype = 'f' and k.conparentid = 0
        and ((k.conrelid = p_parent and k.confrelid <> p_parent and k.convalidated)
-            or k.conrelid = any(p_copies))
+            or (k.conrelid = any(p_copies)
+                and not exists (select 1 from pg_constraint nv     -- #633: the swap's to settle, not drift
+                                 where nv.conrelid = p_parent and nv.contype = 'f' and nv.conparentid = 0
+                                   and not nv.convalidated
+                                   and pgpm._fk_def_unvalidated(nv.oid) = pgpm._fk_def_unvalidated(k.oid))))
   ),
   sig as (select attrelid, string_agg(col, ', ' order by col) as s from cols group by attrelid),
   drifted as (
@@ -6949,7 +6965,7 @@ declare
   v_lo_lit text; v_hi_lit text; v_moved bigint := 0; v_aged boolean; v_made int := 0; v_fk int := 0; r record;
   v_fk_ids bigint[];
   v_child_name name; v_src_name name; v_rec int; v_delta_n bigint; v_delta_name name; v_busy name;
-  v_delta_reg regclass; v_sub_known boolean; v_sub_oid oid; v_sub_now regclass; v_copy regclass;
+  v_delta_reg regclass; v_sub_known boolean; v_sub_oid oid; v_sub_now regclass; v_copy regclass; v_nv record;
   v_held_lo text; v_held_hi text; v_drift text; v_copies oid[]; v_capture_drift text;
   v_unarmed text; v_restart_why text;   -- #892
   v_dnsp name;   -- the delta's own schema, by its recorded oid (#555)
@@ -7444,10 +7460,11 @@ begin
       -- ordinary FK machinery regardless, so this one-time, zero-row validation is the only one this
       -- constraint will ever need; by the swap's ATTACH (below), Postgres adopts it instead of
       -- re-scanning, the same adoption transmute already relies on for the monolith
-      -- (install.sql:2841-2851). A NOT VALID outgoing FK on the parent is left alone (the
-      -- convalidated filter skips it): that matches today's behavior for it exactly, and transmute
-      -- already refuses a NOT VALID outgoing FK at conversion time, so this only matters if one was
-      -- added directly to the parent afterward.
+      -- (install.sql:2841-2851). A NOT VALID outgoing FK on the parent is left off here (the
+      -- convalidated filter skips it): on the copy it would enforce every row copied in, and refuse
+      -- the orphan the parent's key tolerates. On PostgreSQL 18 pgpm's own restore_incoming_fks leaves
+      -- one on a managed referencer (#633), and the swap carries it onto the copy, NOT VALID, just
+      -- before the ATTACH, where it checks no row and is adopted as it is.
       for r in
         select conname, pg_get_constraintdef(oid) as def
           from pg_constraint
@@ -7614,6 +7631,28 @@ begin
     p_parent::text, v_ncast, v_lo, v_ncast, v_ncast, v_hi, v_ncast, v_ncast)
   loop
     v_copy := pgpm._regrain_copy_rel(p_parent, r.child_name, 'attach');   -- #707: by recorded oid
+    -- #633: the parent's NOT VALID outgoing keys, NOT VALID on the copy, so the ATTACH adopts each as it is.
+    -- On PostgreSQL 18 restore_incoming_fks leaves one on a managed table that references another managed
+    -- one while an orphan keeps it from validating. The copy is made with the parent's VALIDATED keys only
+    -- (validated while it is empty, above); a NOT VALID one cannot go on it then, because it enforces every
+    -- row copied in and the copy would refuse that orphan. Left off, the ATTACH validated it on the copy under
+    -- the swap's ACCESS EXCLUSIVE, scanning it, and failed on the orphan on every tick. Added here, after the
+    -- residual reconcile wrote the copy's last rows and with nothing writing to it, NOT VALID checks no row,
+    -- and ATTACH adopts a NOT VALID key under a NOT VALID parent key without a scan (verified on 18.6). A copy
+    -- that already holds the key, validated, keeps it: ATTACH adopts that too. A parent before 18 cannot hold
+    -- such a key, so this finds nothing there.
+    for v_nv in
+      select k.conname, pgpm._fk_def_unvalidated(k.oid) as def
+        from pg_constraint k
+       where k.conrelid = p_parent and k.contype = 'f' and k.conparentid = 0 and k.confrelid <> p_parent
+         and not k.convalidated
+         and not exists (select 1 from pg_constraint c
+                          where c.conrelid = v_copy and c.contype = 'f' and c.conparentid = 0
+                            and pgpm._fk_def_unvalidated(c.oid) = pgpm._fk_def_unvalidated(k.oid))
+       order by k.conname
+    loop
+      execute format('alter table %s add constraint %I %s not valid', v_copy::text, v_nv.conname, v_nv.def);
+    end loop;
     execute format('alter table %s attach partition %s for values from (%L) to (%L)',
                    p_parent::text, v_copy::text,
                    pgpm._encode(cfg.control_kind, r.lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz), pgpm._encode(cfg.control_kind, r.hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));
@@ -13756,6 +13795,15 @@ begin
     -- swap calls this: every write to the managed table waited out an O(rows) scan.
     v_is_part := (select relkind from pg_class where oid = r.referencing_table) = 'p'
                  and current_setting('server_version_num')::int < 180000;
+    -- #633: and a one-step re-add that failed is parked for five minutes (validate_retry_after, the back-off
+    -- validate_incoming_fks keeps for a failed VALIDATE, #265), because the attempt is the scan: retried on
+    -- every call, it scanned the whole referencing table under SHARE ROW EXCLUSIVE on the managed one on every
+    -- maintain tick, only to fail on the same orphan. A call that names the key in p_ids retries it at once:
+    -- regrain's swap re-adding what it just suspended, uninstall.sql, or an operator who has cleared the orphan.
+    if v_is_part and p_ids is null
+       and coalesce(r.validate_retry_after, '-infinity'::timestamptz) > clock_timestamp() then
+      continue;
+    end if;
     v_readded := false;
     begin
       if v_is_part then
@@ -13771,7 +13819,7 @@ begin
         execute format('alter table %s add constraint %I %s',
                        r.referencing_table::text, r.constraint_name,
                        pgpm._fk_readd_definition(r.definition, p_parent));   -- #872: the parent by oid
-        update pgpm.dropped_fk set restored_at = now(), validated_at = now() where id = r.id;
+        update pgpm.dropped_fk set restored_at = now(), validated_at = now(), validate_retry_after = null where id = r.id;
       else
         execute format('alter table %s add constraint %I %s not valid',
                        r.referencing_table::text, r.constraint_name,
@@ -13782,8 +13830,14 @@ begin
       v_n := v_n + 1;
       insert into pgpm.log (parent_table, action, method) values (p_parent, 'restore_incoming_fk', r.constraint_name);
     exception when others then
+      if v_is_part then   -- #633: parked, so the next tick does not scan again to fail again (above)
+        update pgpm.dropped_fk set validate_retry_after = clock_timestamp() + interval '5 minutes' where id = r.id;
+      end if;
       insert into pgpm.log (parent_table, action, method)
-        values (p_parent, 'fail_restore_incoming_fk', left(r.constraint_name || ': ' || sqlerrm, 200));
+        values (p_parent, 'fail_restore_incoming_fk',
+                left(r.constraint_name || ': '
+                     || case when v_is_part then 'retried in 5 minutes (at once if named in p_ids): ' else '' end
+                     || sqlerrm, 200));
     end;
     -- The VALIDATE deliberately does NOT happen here (#265). It used to, in its own subtransaction, which
     -- isolated its errors but not its locks: the ADD above takes SHARE ROW EXCLUSIVE on BOTH the
