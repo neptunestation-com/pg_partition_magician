@@ -16,7 +16,8 @@
 #   write_block_trusts_part_attached     -- _enforce_write_blocks walks every attached row again, the
 #                                           pre-fix shape. Part A.
 #   archive_trusts_part_attached         -- _archive_step's candidate query trusts attached again, the
-#                                           pre-fix shape. Part B.
+#                                           pre-fix shape: the detached table takes archive_batch's one
+#                                           turn (#1159's hold then refuses it). Part B.
 #   detached_by_hand_ignores_retiring_at -- the over-correction: any child outside pg_inherits reads as
 #                                           detached by hand, so a partition pgpm's own retirement detached
 #                                           (retiring_at set) is no longer blocked. Part C.

@@ -24,7 +24,7 @@
 -- horizon beside the one detached, so a block missing from one and present on another cannot cancel.
 set client_min_messages = warning;
 create extension if not exists pgtap;
-select plan(47);
+select plan(50);
 
 create schema pgpm_test307;
 
@@ -144,6 +144,30 @@ select is((select array_agg(child_name order by lo::bigint) from pgpm.archive_le
             where parent_table = 'public.ar307'::regclass and child_name in (:'ar_kept', :'ar_sib')),
   array[:'ar_sib']::name[],
   'coverage is recorded for the attached sibling and none for the detached table');
+
+-- part B, at archive_batch's default of 1 (#1159): the detached table is left out in the candidate query
+-- itself, before `limit`, so the call's one turn goes to the next partition. _archive_hold_partition would
+-- refuse the table too once it was picked, but a call that picked it would archive nothing, and since it is
+-- the oldest every later call would pick it again: the parent's archiving would stop behind it for good.
+create table public.ab307 (id bigint primary key, payload text);
+insert into public.ab307 select g, 'base' from generate_series(1, 50) g;
+call pgpm.transmute('public.ab307', 'id', 10000, p_retain => 30000, p_paused => false);
+select pgpm.obtain('public.ab307');
+insert into public.ab307 values (15000, 'next-a'), (17000, 'next-b'), (85000, 'frontier');
+select pgpm.set_archive_fn('public.ab307', 'pgpm_test307.recorder(regclass,name,text,text)');
+select child_name as ab_old, child_oid as ab_old_oid from pgpm.part where parent_table = 'public.ab307'::regclass and lo = '0' \gset
+select child_name as ab_next from pgpm.part where parent_table = 'public.ab307'::regclass and lo = '10000' \gset
+select pgpm._enforce_write_blocks('public.ab307');
+select format('alter table public.ab307 detach partition public.%I', :'ab_old') \gexec
+
+select ok((select archive_batch = 1 from pgpm.config where parent_table = 'public.ab307'::regclass)
+          and exists (select 1 from pg_trigger where tgrelid = :'ab_old_oid'::oid and tgname = 'pgpm_write_block')
+          and not exists (select 1 from pg_inherits where inhrelid = :'ab_old_oid'::oid),
+  'LIVENESS: at archive_batch 1, the oldest write-blocked partition [0, 10000) of ab307 is detached by hand, block and all');
+select is(pgpm._archive_step('public.ab307'), 1, 'one archive step call records one chunk');
+select is((select array_agg(child || ':' || id order by id) from pgpm_test307.handed where child in (:'ab_old', :'ab_next')),
+  array[:'ab_next' || ':15000', :'ab_next' || ':17000'],
+  'and its one turn went to the next partition, [10000, 20000), ids 15000 and 17000, not to the detached table');
 
 -- ============== part C: pgpm's own retirement is still pgpm's (the rule is one-directional) ==============
 -- retire() detaches a referenced partition concurrently and marks it retiring_at first; between the detach

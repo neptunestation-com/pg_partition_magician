@@ -7877,8 +7877,10 @@ select ok(
     "archive_trusts_part_attached": (
         "bench/write_block_skips_hand_detached.sh",
         "Pre-#705 _archive_step: the candidate query trusts pgpm.part.attached, so a table the operator detached "
-        "after pgpm blocked it is handed to the strategy and coverage is recorded for it. One site, the "
-        "candidate query. tests/307 part B catches it.",
+        "after pgpm blocked it is picked as a candidate. Since #1159 _archive_hold_partition refuses it once picked, "
+        "so nothing is archived from it, but at archive_batch 1 the oldest such table takes the call's one turn on "
+        "every call and the parent's archiving stops behind it. One site, the candidate query. tests/307 part B "
+        "catches it (at archive_batch 1 the call archives nothing, not the next partition).",
         [("        and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)\n", "", 1)],
     ),
     "detached_by_hand_ignores_retiring_at": (
@@ -10072,6 +10074,87 @@ MUTATIONS["archive_whole_parent_schema"] = (
       1)],
 )
 MUTATION_SRC["archive_whole_parent_schema"] = "scripts/archive_partition_whole.sql"
+
+# Issue #1159: scripts/archive_partition_whole.sql leaves a table the operator detached by hand out of its
+# candidates, as _archive_step does (#705). One site, the candidate query's clause, caught by tests/313 through
+# bench/archive_whole_skips_hand_detached.sh. The source is the script, which nothing installs.
+MUTATIONS["archive_whole_trusts_part_attached"] = (
+    "bench/archive_whole_skips_hand_detached.sh",
+    "Pre-#1159 scripts/archive_partition_whole.sql: the candidate query trusts pgpm.part.attached, which an "
+    "operator's own DETACH PARTITION never touches, so a table detached by hand that still carries pgpm's write "
+    "block is handed to the strategy; one reading through the parent finds none of its rows, and [lo, hi) is "
+    "recorded as covered with 0 rows, so retain() drops the table once it is attached back. One site, the "
+    "candidate query's `not pgpm._part_detached_by_hand(...)` clause. tests/313 part A catches it (the strategy "
+    "handed [0, 100) and reading nothing, a ledger row for it) and part B (its 0-row coverage kept).",
+    [("        and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)\n", "", 1)],
+)
+MUTATION_SRC["archive_whole_trusts_part_attached"] = "scripts/archive_partition_whole.sql"
+
+# Issue #1159, the per-PR verification's V-01: both archive paths hold the parent and ask again under that hold
+# (pgpm._archive_hold_partition) before reading a candidate, so a DETACH in flight when they chose it is waited
+# out and the table it detached is left alone. One mutation per clause of the helper and one per call site, each
+# caught by tests/325 through bench/archive_hold_detach_in_flight.sh.
+MUTATIONS["archive_hold_unlocked"] = (
+    "bench/archive_hold_detach_in_flight.sh",
+    "Pre-V-01 hold: pgpm._archive_hold_partition asks again WITHOUT taking ACCESS SHARE on the parent, so it asks "
+    "while an operator's DETACH is still uncommitted, finds the table attached, and the first read waits the detach "
+    "out instead: a strategy reading through the parent finds none of the table's rows and [lo, hi) is recorded as "
+    "covered. One site, the helper's LOCK. tests/325 parts A, B and D catch it (a strategy call and a 0-row ledger "
+    "row for the detached table; retain() drops ids 7, 42 and 88 once it is attached back).",
+    [("  execute format('lock table only %s in access share mode', p_parent);\n", "", 1)],
+)
+MUTATIONS["archive_hold_recheck_by_snapshot"] = (
+    "bench/archive_hold_detach_in_flight.sh",
+    "Pre-V-01 hold: pgpm._archive_hold_partition asks pgpm._part_detached_by_hand again under the lock, which reads "
+    "pg_inherits under the statement's snapshot; under REPEATABLE READ that is the transaction's first, taken before "
+    "the detach committed, so the table still reads as attached and is handed to the strategy. One site, the "
+    "helper's question. tests/325 part D catches it (the script under REPEATABLE READ records the 0-row range).",
+    [("      or exists (select 1 from pg_partition_ancestors(p_child_oid::regclass) a where a.relid = p_parent::oid);\n",
+      "      or not pgpm._part_detached_by_hand(p_parent, p_child_oid, p_retiring_at);\n", 1)],
+)
+MUTATIONS["archive_step_hold_skipped"] = (
+    "bench/archive_hold_detach_in_flight.sh",
+    "Pre-V-01 pgpm._archive_step: the candidate is read with no hold on the parent and no second question, so the "
+    "chunk sizing waits out a DETACH in flight, the strategy reads through the parent after it committed and finds "
+    "none of the table's rows, and the range is recorded as covered. One site, the step's call of "
+    "pgpm._archive_hold_partition. tests/325 part B catches it.",
+    [("      if not pgpm._archive_hold_partition(p_parent, r.child_oid, r.retiring_at) then\n        continue;\n      end if;\n",
+      "", 1)],
+)
+MUTATIONS["archive_whole_hold_skipped"] = (
+    "bench/archive_hold_detach_in_flight.sh",
+    "Pre-V-01 scripts/archive_partition_whole.sql: the candidate is handed to the strategy with no hold on the "
+    "parent and no second question, so the strategy's read through the parent waits out a DETACH in flight and "
+    "finds none of the table's rows, and the script records the range as covered. One site, the script's call of "
+    "pgpm._archive_hold_partition. tests/325 parts A and D catch it.",
+    [("""  if not pgpm._archive_hold_partition(p_parent, r.child_oid, r.retiring_at) then
+    return format('%I.%I is no longer a partition of %s (detached or dropped by hand), so it was not '
+                  'archived and nothing was recorded for it. Call again for the next partition.',
+                  v_nsp, r.child_name, p_parent);
+  end if;
+""", "", 1)],
+)
+MUTATION_SRC["archive_whole_hold_skipped"] = "scripts/archive_partition_whole.sql"
+# #1159's own defect, whole. Since V-01 the script has two independent defences against a table detached by
+# hand before the call (the candidate-query predicate and the hold), so each single-clause mutation above leaves
+# the issue's reproductions passing; this one removes both, the script as it was before this fix, so the
+# acceptance reproductions (F9-04, F6-03) fail against a mutation of the PR.
+MUTATIONS["archive_whole_unfiltered_and_unheld"] = (
+    "bench/archive_whole_skips_hand_detached.sh",
+    "Pre-#1159 scripts/archive_partition_whole.sql: neither the candidate query's "
+    "`not pgpm._part_detached_by_hand(...)` clause nor the pgpm._archive_hold_partition call, so a table detached "
+    "by hand is handed to the strategy, which reading through the parent finds none of its rows, and [lo, hi) is "
+    "recorded as covered with 0 rows; retain() drops the table once it is attached back. Both of the script's "
+    "defences, the issue's defect whole. tests/313 parts A and B catch it.",
+    [("        and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)\n", "", 1),
+     ("""  if not pgpm._archive_hold_partition(p_parent, r.child_oid, r.retiring_at) then
+    return format('%I.%I is no longer a partition of %s (detached or dropped by hand), so it was not '
+                  'archived and nothing was recorded for it. Call again for the next partition.',
+                  v_nsp, r.child_name, p_parent);
+  end if;
+""", "", 1)],
+)
+MUTATION_SRC["archive_whole_unfiltered_and_unheld"] = "scripts/archive_partition_whole.sql"
 
 # pass 9 G18: #994, #995, #1002. Four test files that counted where their own comments promised to name, each
 # judged by bench/tests_fail_on_defect.sh against a defect it plants in install.sql. One mutation per site, each
