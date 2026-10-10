@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **`from_hypertable_cutover` reads the copy only under a lock that keeps the drains out of it until the swap**
+  (#1158). The cutover read the copy's catch-up watermark and its conservation baseline before it locked
+  anything, assuming nothing wrote the copy from there to the swap, but the drains (documented as drivable
+  directly during the two-phase window) took no lock it took. A `from_hypertable_drain_appends(_step)` batch
+  that committed in between was caught up a second time on a keyless hypertable, the baseline plus the
+  catch-up still agreed with the source, and the migrated table held those rows twice; on a tracking copy a
+  `from_hypertable_drain_delta(_step)` batch left the baseline stale and the swap was refused. The cutover now
+  takes `SHARE` on the copy before it reads it and holds it through the swap, so a drain batch in flight is
+  waited for (bounded by `p_lock_timeout`) and read, and a drain called later waits for the swap and then
+  fails, the copy gone. Every drain and drain step takes the copy (`ROW EXCLUSIVE`) before it reads the source
+  or the delta in a transaction, so a drain waiting for the cutover holds nothing the swap needs and the two
+  cannot deadlock. Test `tests/timescale/db/64`; guard `bench/hypertable_cutover_reads_copy_under_lock.sh`,
+  mutations `hypertable_cutover_reads_copy_unlocked`, `hypertable_drain_appends_reads_before_copy_lock` and
+  `hypertable_drain_delta_step_takes_delta_first`.
 - **`untransmute` refuses while a partition of the table is pending a concurrent detach** (#1157). A partition
   left pending by an interrupted `DETACH PARTITION ... CONCURRENTLY` (the state `_detach_reap` exists to finish)
   has its rows already invisible through the parent, so `untransmute`'s one-way-door check, which reads through
