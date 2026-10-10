@@ -13,7 +13,9 @@
 # run checks that those assertions fail when the cursor leaves the heap out again. The same holds for a
 # relation whose control column holds NULL (parts C and D): such a row is paged in a run of its own after
 # every other row, and the file bounds every export with a statement_timeout, so the mutant whose export
-# never ends fails an assertion by name instead of hanging the run.
+# never ends fails an assertion by name instead of hanging the run. And the relation's column of the
+# control column's name may have another type than the parent's (parts E and F): the cursor is cast back as
+# the relation's own type, and a relation with no such column is refused by name (part G).
 #
 # The mutations it is required to fail against (bench/mutations/mutate.py):
 #   to_s3_cursor_heap_unkeyed    -- the next-page predicate compares (control, ctid) with the cursor,
@@ -24,6 +26,10 @@
 #                                   the read forever (part D, cancelled)
 #   to_s3_cursor_null_restart    -- the first run admits a NULL control value, so part D never ends
 #   to_s3_cursor_null_run_unread -- no NULL run follows the first, so parts C and D are refused
+#   to_s3_cursor_parent_type     -- the cursor is cast back as the PARENT's control column type, so a
+#                                   timestamptz relation under a date or timestamp parent re-reads the
+#                                   row each page ended on and never ends (parts E and F, cancelled),
+#                                   and a relation with no such column is not refused by name (part G)
 #
 # Usage: archive_to_s3_multi_heap.sh <container> <db> [archive install.sql]
 # Needs the archive image (pgsql-http + pgtap + pg_prove) AND MinIO on the same network: the file PUTs

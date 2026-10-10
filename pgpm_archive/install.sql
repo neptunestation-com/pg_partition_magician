@@ -3448,8 +3448,21 @@ begin
   v_child := archive._resolve_child(p_parent, p_child, 'archive.to_s3');
   perform pgpm._refuse_filtered_reads(v_child, 'export', 'the object would hold only those rows');
   select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_child;
+  -- The keyset cursor's control value is cast back as the type of the column it pages: the EXPORTED relation's
+  -- column of the control column's name, never the parent's. The two can differ, since any relation in the
+  -- parent's schema is accepted, and the parent's type did not round-trip: under a date parent a timestamptz
+  -- cursor of noon read back as midnight and each page re-admitted the row it ended on, so the export never
+  -- ended; under a timestamp parent a timestamptz cursor lost its offset and, east of UTC, did the same. The type
+  -- is used for that cast and nowhere else (the object key, the conservation check and the lines do not read it),
+  -- so nothing else here assumes the parent's type. A relation with no such column cannot be paged at all, and is
+  -- refused by name before anything is read or sent.
   select a.atttypid::regtype::text into v_ctltype
-    from pg_attribute a where a.attrelid = p_parent and a.attname = pcfg.control_column;
+    from pg_attribute a
+   where a.attrelid = v_child and a.attname = pcfg.control_column and a.attnum > 0 and not a.attisdropped;
+  if v_ctltype is null then
+    raise exception 'pg_partition_magician: % has no column %, the control column of % that archive.to_s3 pages it by; refusing to export it',
+      v_child, quote_ident(pcfg.control_column), p_parent;
+  end if;
   -- The object's form follows archive.config.compress, as it does on every other path this module
   -- ships (#520): plain NDJSON at <prefix><schema>.<child>.ndjson or, with the flag on, a GZIP stream
   -- at <prefix><schema>.<child>.ndjson.gz, the suffix the automatic NDJSON strategy already uses for a
