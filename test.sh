@@ -1228,6 +1228,7 @@ run_perf() {
     "bench/regrain_swap_lock_budget.sh pgpm_perf331"
     "bench/forget_missing_logs_object_keys.sh pgpm_perf334"
     "bench/over_retired_chunks_range_first.sh pgpm_perf333"
+    "bench/transmute_reap_reread.sh pgpm_perf336"
   )
   local selected=()
   local n=${#guards[@]} idx
