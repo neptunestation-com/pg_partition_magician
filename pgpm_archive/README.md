@@ -81,9 +81,11 @@ partitioned table or an inheritance parent in the parent's schema, which `child`
 the control value, then the heap, then the row's position in it, so no row of one heap is skipped for a row
 of another that shares its control value and position. A row whose control value is NULL (which such a
 relation can hold, though a pgpm partition cannot) is exported too, after every other row, and the relation's
-column of the control column's name is paged by its own type, which need not be the parent's. A relation with
-no column of that name is refused with a `pg_partition_magician:` error naming the column, before anything is
-read or sent. The check reads the partition once more after the
+column of the control column's name is paged by its own type, which need not be the parent's. That column must be
+a scalar type with a btree ordering (a base or enum type that is not an array, or a domain over one, paged as its
+base type); an array, a composite, a range or a type with no ordering such as `json` is refused with a
+`pg_partition_magician:` error naming the column and its type, before anything is read or sent, and so is a
+relation with no column of that name. The check reads the partition once more after the
 last page, which costs about one more pass over it. The multipart abort runs whatever ends an export, an error or
 a cancel (`statement_timeout`, `pg_cancel_backend`), and the error or cancel still reaches the caller.
 One that lands inside the request that starts the upload, before the store's answer arrives, leaves no

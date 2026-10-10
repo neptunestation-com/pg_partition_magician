@@ -38,12 +38,13 @@
 -- bit(3) column, whose bare `bit` is bit(1): an explicit cast that way cut the cursor to its first bit, and the
 -- export never ended the same way.
 --
--- The two runs partition the rows for every type: the first reads `not (control is null)`, the second
--- `control is null`. For a scalar `not (x is null)` is `x is not null`, but for a composite they differ: ROW(1,
--- NULL) is neither IS NULL nor IS NOT NULL, so runs split on IS NOT NULL / IS NULL read such a row in neither, and
--- the quiescent export was refused (part K, V-01 of the fourth round). ROW(NULL, NULL) IS NULL, and is read in the
--- second run with the scalar NULLs.
-select plan(59);
+-- THE TYPES IT CAN PAGE. The page query needs a scalar with a btree ordering: a composite such as ROW(1, NULL) is
+-- neither IS NULL nor IS NOT NULL, so no run read it and the export was refused as a write (part K, V-01 of the
+-- fourth round); an array's cursor, taken by array_agg, is a two-dimensional array whose [1] is NULL, so the read
+-- restarted forever (part L, P1-02); a type with no ordering cannot be compared at all (part M). Each is now refused
+-- by name before anything is read. A domain pages as its base type: cast as the domain, the cursor ran a NOT VALID
+-- CHECK and every retry raised on the rows it does not admit (part N, P1-03). An enum pages (part O).
+select plan(75);
 
 create schema t51;
 create table t51.evt (id bigint primary key, payload text not null);
@@ -105,6 +106,20 @@ insert into t51.bits values (B'101', 'f'), (B'011', 'e'), (B'110', 'g');
 create type t51.pair as (a int, b int);
 create table t51.cmp (id t51.pair, payload text);
 insert into t51.cmp values (row(2, 2), 'two'), (row(1, null), 'half'), (row(null, null), 'none'), (row(1, 1), 'one');
+-- L: an array; M: a type with no btree ordering
+create table t51.arr (id bigint[], payload text);
+insert into t51.arr values ('{2}', 'b'), ('{1}', 'a'), ('{3}', 'c');
+create table t51.jsn (id json, payload text);
+insert into t51.jsn values ('1', 'a'), ('2', 'b');
+-- N: a domain over bigint whose CHECK, added NOT VALID, does not admit two of its rows
+create domain t51.pos as bigint;
+create table t51.dom (id t51.pos, payload text);
+insert into t51.dom values (-1, 'a'), (2, 'b'), (-3, 'c');
+alter domain t51.pos add constraint t51_pos_positive check (value > 0) not valid;
+-- O: an enum
+create type t51.lvl as enum ('low', 'mid', 'high');
+create table t51.enm (id t51.lvl, payload text);
+insert into t51.enm values ('high', 'h'), ('low', 'l'), ('mid', 'm');
 -- G: a relation with no column named id, the control column of t51.evt
 create table t51.nocol (x int, payload text);
 insert into t51.nocol values (1, 'q');
@@ -136,6 +151,11 @@ exception
   when query_canceled then return 'cancelled by statement_timeout: the export did not end';
   when others then return sqlerrm;
 end $$;
+-- the refusal archive.to_s3 raises for a relation whose id has a type it cannot page
+create function t51.unpageable(p_rel text, p_type text) returns text language sql as $$
+  select 'pg_partition_magician: archive.to_s3 pages ' || p_rel || ' by its column id, of type ' || p_type
+      || ', which it cannot page by: the column must be a scalar type with a btree ordering (a base or enum type, '
+      || 'or a domain over one), not an array, composite, range or multirange; refusing to export it' $$;
 -- the payloads an NDJSON object holds, one per line, sorted; null when there is no object at the key
 create function t51.payloads(p_key text) returns text[] language plpgsql as $$
 declare v http_response := t51.req('GET', p_key); r text[];
@@ -286,7 +306,7 @@ select is(t51.try_export('bits'), 'ok', 'archive.to_s3 of a bit(3) relation, one
 select is(t51.payloads(:'kj'), array['e', 'f', 'g'], 'its object holds rows e, f and g, each once');
 select is(t51.clear(:'kj'), 404, 'LIVENESS: the bit(3) relation''s object is cleared after the check');
 
--- 53-59. K: a composite control column holding ROW(1, NULL), which is neither IS NULL nor IS NOT NULL.
+-- 53-58. K: a composite control column holding ROW(1, NULL), which is neither IS NULL nor IS NOT NULL.
 select is((select string_agg(payload, ',' order by payload) from t51.cmp where not (id is null) and not (id is not null)),
   'half', 'LIVENESS: the row half''s control value ROW(1, NULL) is neither IS NULL nor IS NOT NULL');
 select is((select string_agg(payload, ',' order by payload) from t51.cmp where id is null),
@@ -295,9 +315,43 @@ select is((select string_agg(payload, ',' order by payload) from t51.cmp where i
   'one,two', 'LIVENESS: only the rows one and two have a control value that IS NOT NULL');
 select :'p' || 't51.cmp.ndjson' as kk \gset
 select is(t51.clear(:'kk'), 404, 'LIVENESS: no object at the composite relation''s key before its export');
-select is(t51.try_export('cmp'), 'ok', 'archive.to_s3 of a composite-control relation, one row per page, ends, and completes');
-select is(t51.payloads(:'kk'), array['half', 'none', 'one', 'two'], 'its object holds rows half, none, one and two, each once');
-select is(t51.clear(:'kk'), 404, 'LIVENESS: the composite relation''s object is cleared after the check');
+select is(t51.try_export('cmp'), t51.unpageable('t51.cmp', 't51.pair'),
+  'archive.to_s3 refuses a composite control column by name, before anything is read');
+select is((t51.req('GET', :'kk')).status, 404, 'and no object lands at the composite relation''s key');
+
+-- 59-61. L: an array control column, whose cursor array_agg would build as a two-dimensional array.
+select ok((select (array_agg(id order by id desc))[1] from t51.arr where payload = 'a') is null,
+  'LIVENESS: (array_agg(k))[1] over a one-row page of an array k is NULL, so the cursor would read as none');
+select is(t51.try_export('arr'), t51.unpageable('t51.arr', 'bigint[]'),
+  'archive.to_s3 refuses an array control column by name, before anything is read');
+select is((t51.req('GET', :'p' || 't51.arr.ndjson')).status, 404, 'and no object lands at the array relation''s key');
+
+-- 62-64. M: a json control column, a type with no btree ordering.
+select is((select count(*)::int from pg_operator where oprname = '>' and oprleft = 'json'::regtype and oprright = 'json'::regtype),
+  0, 'LIVENESS: json has no > operator, so the page query''s row comparison cannot be made for it');
+select is(t51.try_export('jsn'), t51.unpageable('t51.jsn', 'json'),
+  'archive.to_s3 refuses a control column of a type with no ordering by name, before anything is read');
+select is((t51.req('GET', :'p' || 't51.jsn.ndjson')).status, 404, 'and no object lands at the json relation''s key');
+
+-- 65-70. N: a domain over bigint with a NOT VALID CHECK that two of its rows do not satisfy.
+select is((select convalidated from pg_constraint where conname = 't51_pos_positive'), false,
+  'LIVENESS: the domain''s CHECK was added NOT VALID');
+select is((select array_agg(id::bigint order by id) from t51.dom where not (id > 0)), array[-3, -1]::bigint[],
+  'LIVENESS: the relation holds rows -3 and -1, which the NOT VALID CHECK does not admit, so a cast to the domain raises on them');
+select :'p' || 't51.dom.ndjson' as kn \gset
+select is(t51.clear(:'kn'), 404, 'LIVENESS: no object at the domain relation''s key before its export');
+select is(t51.try_export('dom'), 'ok', 'archive.to_s3 of a domain-controlled relation, one row per page, completes');
+select is(t51.payloads(:'kn'), array['a', 'b', 'c'], 'its object holds rows a, b and c, each once');
+select is(t51.clear(:'kn'), 404, 'LIVENESS: the domain relation''s object is cleared after the check');
+
+-- 71-75. O: an enum control column, ordered by its declaration (low, mid, high), not its text.
+select is((select array_agg(payload order by id) from t51.enm), array['l', 'm', 'h'],
+  'LIVENESS: the enum orders its rows low, mid, high, an order its text does not have');
+select :'p' || 't51.enm.ndjson' as ko \gset
+select is(t51.clear(:'ko'), 404, 'LIVENESS: no object at the enum relation''s key before its export');
+select is(t51.try_export('enm'), 'ok', 'archive.to_s3 of an enum-controlled relation, one row per page, completes');
+select is(t51.payloads(:'ko'), array['h', 'l', 'm'], 'its object holds rows h, l and m, each once');
+select is(t51.clear(:'ko'), 404, 'LIVENESS: the enum relation''s object is cleared after the check');
 reset statement_timeout;
 
 select * from finish();

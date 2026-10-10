@@ -3393,6 +3393,8 @@ create or replace function archive.to_s3(p_parent regclass, p_child name, p_lo t
 returns void language plpgsql set extra_float_digits = 1 as $$
 declare
   cfg archive.config; pcfg pgpm.config; v_ctltype text;
+  v_ctl_col text; v_ctl_typ oid; v_ctl_mod int; v_ctl_kind "char"; v_ctl_cat "char"; v_ctl_base oid; v_ctl_base_mod int;
+  v_ctl_ordered boolean := false;   -- the control-named column's type can be paged by keyset (see below)
   v_gzip boolean; v_ctype text; v_body bytea := '';
   v_key_id text; v_secret text; v_nsp name; v_key text;
   v_child regclass;   -- the relation resolved, held and claimed; every read below goes by it, never by name (#1030)
@@ -3459,12 +3461,44 @@ begin
   -- name loses it, and for char(n) the bare `character` is char(1), so a cursor of 'abc' was cast back as 'a' and
   -- every later page re-read 'abc' (bit(n) the same: the bare `bit` is bit(1)). With the typmod the cast reads back
   -- the value it was rendered from (a bpchar is padded back to its width, a numeric keeps its scale).
-  select format_type(a.atttypid, a.atttypmod) into v_ctltype
+  --
+  -- THE TYPES IT CAN PAGE. The page query compares (control, tableoid, ctid) as a row, takes the cursor as the
+  -- last row's control value, splits the rows into `not (control is null)` and `control is null`, and casts the
+  -- cursor's text back. All four hold for a SCALAR with a btree ordering and nothing else: an array's cursor is
+  -- built by array_agg as a two-dimensional array whose [1] is NULL, so the read restarted forever; a composite
+  -- such as ROW(1, NULL) is neither IS NULL nor IS NOT NULL; and a type with no btree `>` cannot be compared at all.
+  -- So the column's type must be a base or enum type that is not an array (typtype 'b' or 'e', typcategory not
+  -- 'A'), or a domain over one, and the row comparison the page query makes must resolve for it; anything else
+  -- (an array, a composite, a range or multirange, a type with no ordering) is refused by name before anything is
+  -- read or sent. A domain pages as its BASE type, with the domain's typmod: cast as the domain, the cursor ran
+  -- the domain's CHECK constraints, and a row a NOT VALID constraint does not admit made every retry raise.
+  select a.atttypid, a.atttypmod, format_type(a.atttypid, a.atttypmod) into v_ctl_typ, v_ctl_mod, v_ctl_col
     from pg_attribute a
    where a.attrelid = v_child and a.attname = pcfg.control_column and a.attnum > 0 and not a.attisdropped;
-  if v_ctltype is null then
+  if v_ctl_typ is null then
     raise exception 'pg_partition_magician: % has no column %, the control column of % that archive.to_s3 pages it by; refusing to export it',
       v_child, quote_ident(pcfg.control_column), p_parent;
+  end if;
+  loop
+    select t.typtype, t.typcategory, t.typbasetype, t.typtypmod into v_ctl_kind, v_ctl_cat, v_ctl_base, v_ctl_base_mod
+      from pg_type t where t.oid = v_ctl_typ;
+    exit when v_ctl_kind <> 'd';
+    v_ctl_typ := v_ctl_base;
+    if v_ctl_base_mod <> -1 then v_ctl_mod := v_ctl_base_mod; end if;
+  end loop;
+  v_ctltype := format_type(v_ctl_typ, v_ctl_mod);
+  if v_ctl_kind in ('b', 'e') and v_ctl_cat <> 'A' then
+    begin
+      -- the page query's own comparison, parsed for this type: it resolves only for a btree-ordered type
+      execute format('select row(null::%1$s, null::oid, null::tid) > row(null::%1$s, null::oid, null::tid)', v_ctltype);
+      v_ctl_ordered := true;
+    exception when others then
+      v_ctl_ordered := false;
+    end;
+  end if;
+  if not v_ctl_ordered then
+    raise exception 'pg_partition_magician: archive.to_s3 pages % by its column %, of type %, which it cannot page by: the column must be a scalar type with a btree ordering (a base or enum type, or a domain over one), not an array, composite, range or multirange; refusing to export it',
+      v_child, quote_ident(pcfg.control_column), v_ctl_col;
   end if;
   -- The object's form follows archive.config.compress, as it does on every other path this module
   -- ships (#520): plain NDJSON at <prefix><schema>.<child>.ndjson or, with the flag on, a GZIP stream
@@ -3527,11 +3561,8 @@ begin
       -- starts, keyed by (tableoid, ctid) alone, which is total over those rows. Each run is one simple
       -- predicate once $5 is known (EXECUTE binds the parameters as constants), so the index on the
       -- control column still drives the first, and the second is an IS NULL condition. The two runs are
-      -- `not (control is null)` and `control is null`, a partition of the rows for EVERY type: for a scalar the
-      -- first is IS NOT NULL (the planner folds it so), but a composite such as ROW(1, NULL) is neither IS NULL
-      -- nor IS NOT NULL, and runs split on those two read it in neither, so the quiescent export was refused.
-      -- It is paged in the first run, where record comparison orders it (a NULL field sorts last), and
-      -- ROW(NULL, NULL), which IS NULL, in the second.
+      -- `not (control is null)` and `control is null`, complementary for every type; the column is a scalar here
+      -- (composites are refused above), for which the first is IS NOT NULL (the planner folds it so).
       execute format(
         'select coalesce(string_agg(j, e''\n'' order by k, r, c), ''''),
                 archive._cursor_text((array_agg(k order by k desc, r desc, c desc))[1]),
