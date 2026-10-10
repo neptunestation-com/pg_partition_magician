@@ -17,13 +17,17 @@
   page re-admitted the row it ended on and a quiescent export never ended. The cast now takes the relation's own
   type with its typmod (a bare `character` or `bit` is one wide and would cut a char(n) or bit(n) cursor the same
   way), and a relation with no column of that name is refused by name before anything is read. That column must be
-  a scalar with a btree ordering (a base or enum type that is not an array, or a domain over one, paged as its base
-  type so a `NOT VALID` domain CHECK does not raise on the cursor); an array (whose cursor was NULL, so the read
-  restarted forever), a composite (whose ROW(1, NULL) no run read) or a type with no ordering is refused by name
-  before anything is read. `tests/archive/db/51`
+  a scalar with a btree ordering (a base or enum type that is not an array, or a domain over a base type, paged as
+  its base type so a `NOT VALID` domain CHECK does not raise on the cursor); an array (whose cursor was NULL, so the
+  read restarted forever), a composite (whose ROW(1, NULL) no run read), a type with no ordering or a domain over an
+  enum (which cannot be compared with its base) is refused by name before anything is read. And the relation must be
+  a table, or a partitioned table or inheritance tree of tables: a `postgres_fdw` leaf returns the remote row
+  position, which over a remote partitioned table repeats, so a quiescent export was refused as a write; a view or a
+  tree holding a foreign table is now refused by name before anything is read. `tests/archive/db/51`
   under `bench/archive_to_s3_multi_heap.sh`, with the mutations `to_s3_cursor_heap_unkeyed`, `to_s3_cursor_null_blind`,
   `to_s3_cursor_null_restart`, `to_s3_cursor_null_run_unread`, `to_s3_cursor_parent_type`,
-  `to_s3_cursor_type_typmod_dropped`, `to_s3_cursor_type_unrefused` and `to_s3_cursor_domain_checked`.
+  `to_s3_cursor_type_typmod_dropped`, `to_s3_cursor_type_unrefused`, `to_s3_cursor_domain_checked`,
+  `to_s3_relkind_unrefused` and `to_s3_cursor_probe_base_only`.
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's

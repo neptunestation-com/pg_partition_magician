@@ -11496,6 +11496,31 @@ MUTATIONS["to_s3_cursor_domain_checked"] = (
 )
 MUTATION_SRC["to_s3_cursor_domain_checked"] = "pgpm_archive/install.sql"
 
+# PR #1213's sixth verification round (V-01): archive.to_s3 exports a table, or a partitioned table or inheritance
+# tree whose every member is a table, and refuses anything else by name. Caught by tests/archive/db/51 parts P and Q.
+MUTATIONS["to_s3_relkind_unrefused"] = (
+    "bench/archive_to_s3_multi_heap.sh",
+    "archive.to_s3 pages a relation whose tree holds something other than tables. A postgres_fdw leaf returns the "
+    "REMOTE ctid, so over a remote partitioned table two of its rows share one tableoid and one ctid, the next page "
+    "skips the second, and the conservation check refuses the quiescent export as a write on every retry; a view "
+    "has no row position, and fails on an unnamed error. One clause, the refusal. tests/archive/db/51 parts P and "
+    "Q catch it (neither is refused by name).",
+    [("  if v_unpageable is not null then\n", "  if false then\n", 1)],
+)
+MUTATION_SRC["to_s3_relkind_unrefused"] = "pgpm_archive/install.sql"
+MUTATIONS["to_s3_cursor_probe_base_only"] = (
+    "bench/archive_to_s3_multi_heap.sh",
+    "archive.to_s3's type probe compares the cast type with itself instead of making the page query's own "
+    "comparison, the column against a cursor of the cast type. A domain over an enum passes it (the base enum "
+    "compares with itself) while its column has no `>` against the base enum, so the page query fails on an unnamed "
+    "'operator does not exist' instead of the refusal. One clause, the probe. tests/archive/db/51 part S catches it.",
+    [("      execute format('select 1 from %2$s t where (t.%1$I, t.tableoid, t.ctid) > ($1::%3$s, $2, $3) limit 0',\n"
+      "                     pcfg.control_column, v_child::text, v_ctltype)\n"
+      "        using null::text, null::oid, null::tid;\n",
+      "      execute format('select row(null::%1$s, null::oid, null::tid) > row(null::%1$s, null::oid, null::tid)', v_ctltype);\n", 1)],
+)
+MUTATION_SRC["to_s3_cursor_probe_base_only"] = "pgpm_archive/install.sql"
+
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

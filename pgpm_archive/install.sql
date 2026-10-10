@@ -3395,6 +3395,7 @@ declare
   cfg archive.config; pcfg pgpm.config; v_ctltype text;
   v_ctl_col text; v_ctl_typ oid; v_ctl_mod int; v_ctl_kind "char"; v_ctl_cat "char"; v_ctl_base oid; v_ctl_base_mod int;
   v_ctl_ordered boolean := false;   -- the control-named column's type can be paged by keyset (see below)
+  v_unpageable text;                -- the relations of the export's tree that are not local heaps (see below)
   v_gzip boolean; v_ctype text; v_body bytea := '';
   v_key_id text; v_secret text; v_nsp name; v_key text;
   v_child regclass;   -- the relation resolved, held and claimed; every read below goes by it, never by name (#1030)
@@ -3450,6 +3451,32 @@ begin
   v_child := archive._resolve_child(p_parent, p_child, 'archive.to_s3');
   perform pgpm._refuse_filtered_reads(v_child, 'export', 'the object would hold only those rows');
   select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_child;
+  -- THE RELATIONS IT CAN PAGE. The keyset key (control, tableoid, ctid) is unique only over rows that live in local
+  -- heaps, where (tableoid, ctid) names one tuple. A view and a materialized view are not such a tree's leaves, and
+  -- a foreign table returns whatever ctid its server sends: postgres_fdw sends the REMOTE ctid, so a foreign leaf
+  -- over a remote partitioned table holds two rows with one tableoid and one ctid, the next page skipped the
+  -- second, and the quiescent export was refused as a write on every retry. So the relation exported, and every
+  -- relation under it by partitioning or inheritance, must be a table (relkind r) or a partitioned table (p, which
+  -- holds no rows of its own); anything else is refused by name before anything is read or sent. The relation is
+  -- held from archive._resolve_child on, but a leaf attached or a child inheriting after this check is not
+  -- blocked by that hold; such a change during the export is a write as far as this function is concerned, and the
+  -- conservation check below refuses it like any other.
+  with recursive tree(oid) as (
+    select v_child::oid
+    union
+    select i.inhrelid from pg_inherits i join tree on i.inhparent = tree.oid
+  )
+  select string_agg(format('%s (%s)', c.oid::regclass,
+                           case c.relkind when 'f' then 'a foreign table' when 'v' then 'a view'
+                                          when 'm' then 'a materialized view'
+                                          else format('relkind %s', c.relkind) end), ', ' order by c.oid::regclass::text)
+    into v_unpageable
+    from tree join pg_class c on c.oid = tree.oid
+   where c.relkind not in ('r', 'p');
+  if v_unpageable is not null then
+    raise exception 'pg_partition_magician: archive.to_s3 exports a table, or a partitioned table or inheritance tree whose every member is a table, and % reaches %, which it cannot page by row position; refusing to export it',
+      v_child, v_unpageable;
+  end if;
   -- The keyset cursor's control value is cast back as the type of the column it pages: the EXPORTED relation's
   -- column of the control column's name, never the parent's. The two can differ, since any relation in the
   -- parent's schema is accepted, and the parent's type did not round-trip: under a date parent a timestamptz
@@ -3468,10 +3495,15 @@ begin
   -- built by array_agg as a two-dimensional array whose [1] is NULL, so the read restarted forever; a composite
   -- such as ROW(1, NULL) is neither IS NULL nor IS NOT NULL; and a type with no btree `>` cannot be compared at all.
   -- So the column's type must be a base or enum type that is not an array (typtype 'b' or 'e', typcategory not
-  -- 'A'), or a domain over one, and the row comparison the page query makes must resolve for it; anything else
-  -- (an array, a composite, a range or multirange, a type with no ordering) is refused by name before anything is
-  -- read or sent. A domain pages as its BASE type, with the domain's typmod: cast as the domain, the cursor ran
-  -- the domain's CHECK constraints, and a row a NOT VALID constraint does not admit made every retry raise.
+  -- 'A'), or a domain over one, AND the row comparison the page query makes must resolve for it; anything else
+  -- (an array, a composite, a range or multirange, a type with no ordering, a domain over an enum) is refused by
+  -- name before anything is read or sent. A domain pages as its BASE type, with the domain's typmod: cast as the
+  -- domain, the cursor ran the domain's CHECK constraints, and a row a NOT VALID constraint does not admit made
+  -- every retry raise. The comparison is probed exactly as the page query makes it, the column against a cursor of
+  -- the cast type, under LIMIT 0 so nothing is read, and with no value cast to the column's type (a NULL cast to a
+  -- NOT NULL domain would raise). That is what refuses a domain over an enum: its column has no `>` against the
+  -- base enum (the enum operators are polymorphic, and a domain does not match them), which a probe of the base
+  -- type alone admitted, so the page query failed on an unnamed error.
   select a.atttypid, a.atttypmod, format_type(a.atttypid, a.atttypmod) into v_ctl_typ, v_ctl_mod, v_ctl_col
     from pg_attribute a
    where a.attrelid = v_child and a.attname = pcfg.control_column and a.attnum > 0 and not a.attisdropped;
@@ -3490,14 +3522,16 @@ begin
   if v_ctl_kind in ('b', 'e') and v_ctl_cat <> 'A' then
     begin
       -- the page query's own comparison, parsed for this type: it resolves only for a btree-ordered type
-      execute format('select row(null::%1$s, null::oid, null::tid) > row(null::%1$s, null::oid, null::tid)', v_ctltype);
+      execute format('select 1 from %2$s t where (t.%1$I, t.tableoid, t.ctid) > ($1::%3$s, $2, $3) limit 0',
+                     pcfg.control_column, v_child::text, v_ctltype)
+        using null::text, null::oid, null::tid;
       v_ctl_ordered := true;
     exception when others then
       v_ctl_ordered := false;
     end;
   end if;
   if not v_ctl_ordered then
-    raise exception 'pg_partition_magician: archive.to_s3 pages % by its column %, of type %, which it cannot page by: the column must be a scalar type with a btree ordering (a base or enum type, or a domain over one), not an array, composite, range or multirange; refusing to export it',
+    raise exception 'pg_partition_magician: archive.to_s3 pages % by its column %, of type %, which it cannot page by: the column must be a scalar type with a btree ordering (a base or enum type, or a domain over a base type), not an array, composite, range, multirange or a domain over an enum; refusing to export it',
       v_child, quote_ident(pcfg.control_column), v_ctl_col;
   end if;
   -- The object's form follows archive.config.compress, as it does on every other path this module

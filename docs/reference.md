@@ -2518,7 +2518,8 @@ An export written before this release left no record of whose it was, so its nam
 parent exports under it next.
 
 A name claim alone cannot tell the two kinds of key apart: the export of a relation named
-`<table>_<stem>` (the synchronous functions accept any relation in the parent's schema, tracked or not)
+`<table>_<stem>` (the synchronous functions accept any relation in the parent's schema, tracked or not, within
+the limits `archive.to_s3` sets on what it can page, below)
 is `<prefix><schema>.<table>_<stem>.ndjson`, which is also the key of `<table>`'s chunk at that stem. So
 every key is also claimed whole, in `archive.object_key_claim`, by its parent and its kind (`chunk` or
 `export`), and a call whose key is already another writer's takes the oid shape instead: the export to
@@ -2554,13 +2555,20 @@ transaction keeps the hold until that transaction ends.
 `archive.to_s3` pages the relation it exports by that relation's own column of the control column's name, which
 need not have the parent's type, and with nothing writing to the relation it reads every row once: a relation of
 several heaps (a partitioned table, an inheritance parent) and rows whose control value is NULL (read after every
-other row) included. The rule for that column: it must be a scalar type with a btree ordering, that is a base or
-enum type that is not an array, or a domain over one. A domain is paged as its base type, so a domain constraint
-added `NOT VALID` does not stop the export of rows it does not admit. Anything else (an array, a composite, a range
-or multirange, or a type with no ordering such as `json`) is refused before anything is read or sent:
-`archive.to_s3 pages <relation> by its column <column>, of type <type>, which it cannot page by: ...`. A relation
-with no column of that name is refused the same way: `<relation> has no column <column>, the control column of
-<parent> that archive.to_s3 pages it by`.
+other row) included. It pages by row position within each heap, so the rule for the relation: it must be a table,
+or a partitioned table or inheritance parent every member of whose tree is a table (or a partitioned table). A
+view, or a tree with a foreign table in it, is refused before anything is read or sent: `archive.to_s3 exports a
+table, or a partitioned table or inheritance tree whose every member is a table, and <relation> reaches <member>
+(a foreign table), which it cannot page by row position`. (A foreign table returns whatever row position its
+server sends; `postgres_fdw` sends the remote one, which is not unique when the remote table is itself partitioned.)
+A materialized view is refused earlier, when the call locks it. The rule for the column: it must be a scalar type
+with a btree ordering that the page query can compare, that is a base or enum type that is not an array, or a
+domain over a base type. A domain is paged as its base type, so a domain constraint added `NOT VALID` does not stop
+the export of rows it does not admit. Anything else (an array, a composite, a range or multirange, a type with no
+ordering such as `json`, or a domain over an enum, whose column PostgreSQL cannot compare with its base enum) is
+refused before anything is read or sent: `archive.to_s3 pages <relation> by its column <column>, of type <type>,
+which it cannot page by: ...`. A relation with no column of that name is refused the same way: `<relation> has no
+column <column>, the control column of <parent> that archive.to_s3 pages it by`.
 
 A schema rename is the one change that hold does not stop: `ALTER SCHEMA ... RENAME` takes no lock that
 conflicts with it, and it moves every name in the schema at once, so a second session that swaps the child's
