@@ -4760,8 +4760,8 @@ $$;''',
         "Pre-#821 archive.to_s3: its pages render row_to_json(t) and its conservation fingerprint hashes the "
         "same text, so on a table with a composite column t both sides agree on that column alone and the "
         "object lands without the rows' other columns; a timestamptz column t raises. Both sites.",
-        [("           from (select row_to_json(t.*)::text as j, t.%I as k, t.ctid as c from %s t\n",
-          "           from (select row_to_json(t)::text as j, t.%I as k, t.ctid as c from %s t   -- MUTANT: pre-#821\n", 1),
+        [("           from (select row_to_json(t.*)::text as j, t.%I as k, t.tableoid as r, t.ctid as c from %s t\n",
+          "           from (select row_to_json(t)::text as j, t.%I as k, t.tableoid as r, t.ctid as c from %s t   -- MUTANT: pre-#821\n", 1),
          ("coalesce(sum(hashtextextended(row_to_json(t.*)::text, 0)), 0) from %s t',\n",
           "coalesce(sum(hashtextextended(row_to_json(t)::text, 0)), 0) from %s t',   -- MUTANT: pre-#821\n", 1)],
     ),
@@ -4781,8 +4781,8 @@ $$;''',
         "by abbreviation, and Asia/Shanghai's CST reads back as US Central (-06): the cursor lands 14 "
         "hours past the last paged row, the next page skips every row in between, and the conservation "
         "check refuses every multi-page export of an unwritten partition. One site, the render.",
-        [("archive._cursor_text((array_agg(k order by k desc, c desc))[1]),",
-          "(array_agg(k order by k desc, c desc))[1]::text,", 1)],
+        [("archive._cursor_text((array_agg(k order by k desc, r desc, c desc))[1]),",
+          "(array_agg(k order by k desc, r desc, c desc))[1]::text,", 1)],
     ),
     "parquet_snapshot_per_encode_table": (
         "bench/archive_parquet_snapshot_locks.sh",
@@ -9636,8 +9636,8 @@ _RESOLVE_HOLD = (
     "                           and l.database = (select d.oid from pg_database d where d.datname = current_database()));\n",
     "    v_locked := true;\n", 1)
 _TO_S3_READS_BY_NAME = [
-    ("order by t.%I, t.ctid limit $3) s',\n        pcfg.control_column, v_child::text, pcfg.control_column, v_ctltype, pcfg.control_column)",
-     "order by t.%I, t.ctid limit $3) s',\n        pcfg.control_column, v_nsp, p_child, pcfg.control_column, v_ctltype, pcfg.control_column)", 1),
+    ("order by t.%I, t.tableoid, t.ctid limit $4) s',\n        pcfg.control_column, v_child::text, pcfg.control_column, v_ctltype, pcfg.control_column)",
+     "order by t.%I, t.tableoid, t.ctid limit $4) s',\n        pcfg.control_column, v_nsp, p_child, pcfg.control_column, v_ctltype, pcfg.control_column)", 1),
     ("t.ctid as c from %s t\n", "t.ctid as c from %I.%I t\n", 1),
     ("0)), 0) from %s t',\n                     v_child::text) into v_expected", "0)), 0) from %I.%I t',\n                     v_nsp, p_child) into v_expected", 1),
 ]
@@ -11395,6 +11395,22 @@ MUTATIONS["retain_horizon_wall_round_trip"] = (
       "  return (((now() at time zone p_tz) - v_cal) at time zone p_tz) - (p_retain - v_cal);\n",
       "  return ((now() at time zone p_tz) - p_retain) at time zone p_tz;\n", 1)],
 )
+
+
+# Issue #1168: archive.to_s3's keyset cursor is unique across the heaps of the relation it exports.
+# bench/archive_to_s3_multi_heap.sh runs tests/archive/db/51 against the mutant.
+MUTATIONS["to_s3_cursor_heap_unkeyed"] = (
+    "bench/archive_to_s3_multi_heap.sh",
+    "Pre-#1168 archive.to_s3: the next page's keyset predicate compares (control, ctid) with the cursor, leaving out "
+    "the heap the cursor's row came from, and ctid is unique only within one heap. A partitioned relation or an "
+    "inheritance parent in the parent's schema (which the synchronous export accepts) holds a row of the same "
+    "control value at the same ctid in two heaps; with a page boundary between those twins the next page skips the "
+    "second, and the conservation check refuses the quiescent export as a write, on every retry. One clause, the "
+    "predicate. tests/archive/db/51 parts A and B catch it (the export is refused, and no object lands).",
+    [("                  where $1 is null or (t.%I, t.tableoid, t.ctid) > ($1::%s, $2, $3)\n",
+      "                  where $1 is null or (t.%I, t.ctid) > ($1::%s, $3)\n", 1)],
+)
+MUTATION_SRC["to_s3_cursor_heap_unkeyed"] = "pgpm_archive/install.sql"
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

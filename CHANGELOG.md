@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **`archive.to_s3` pages every row of a relation with more than one heap** (#1168). The synchronous export
+  accepts any relation in the parent's schema, a partitioned table or an inheritance parent included, and its
+  keyset cursor was (control, ctid), a total order within one heap only: two heaps holding a row of the same
+  control value at the same ctid, with a page boundary between them, had the next page skip the second, and the
+  conservation check refused the export as "a write changed the partition" with nothing writing, on every retry.
+  The cursor is now (control, tableoid, ctid), unique across the heaps a read reaches and, on a relation of one
+  heap, the same order as before. `tests/archive/db/51` under `bench/archive_to_s3_multi_heap.sh`, with the
+  mutation `to_s3_cursor_heap_unkeyed`.
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's

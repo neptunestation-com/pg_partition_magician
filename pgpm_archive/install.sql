@@ -3396,7 +3396,7 @@ declare
   v_gzip boolean; v_ctype text; v_body bytea := '';
   v_key_id text; v_secret text; v_nsp name; v_key text;
   v_child regclass;   -- the relation resolved, held and claimed; every read below goes by it, never by name (#1030)
-  v_part_payload text; v_chunk text; v_cursor text; v_cursor_tid tid; v_done boolean := false;
+  v_part_payload text; v_chunk text; v_cursor text; v_cursor_rel oid; v_cursor_tid tid; v_done boolean := false;
   v_page_rows bigint; v_written bigint := 0; v_expected bigint;
   v_page_h numeric; v_written_h numeric := 0; v_expected_h numeric;   -- the rows' identity, not only their count (#673)
   v_upload_id text; v_part int := 0; v_etag text; v_parts_xml text := '';
@@ -3475,15 +3475,22 @@ begin
   -- archive._encode_upload_ndjson_single).
 
   v_part_payload := '';
-  v_cursor := null; v_cursor_tid := null;
+  v_cursor := null; v_cursor_rel := null; v_cursor_tid := null;
   <<parts>>
   loop
     while not v_done and octet_length(v_part_payload) < cfg.part_bytes loop
-      -- Page by the TOTAL order (control, ctid), never by the control column alone. The control column
-      -- need not be unique, and a cursor set to a page's max(control) lands ON a run of equal values
+      -- Page by the TOTAL order (control, tableoid, ctid), never by the control column alone. The control
+      -- column need not be unique, and a cursor set to a page's max(control) lands ON a run of equal values
       -- when the page boundary falls inside one; the next page's `> cursor` then skips the rest of the
-      -- run (issue #463). ctid breaks the tie and is stable for the whole export because nothing here
-      -- moves tuples: the automatic path exports a write-blocked child, and this synchronous path
+      -- run (issue #463). (tableoid, ctid) breaks the tie: ctid alone is unique only within ONE heap, and
+      -- the relation exported may have several (archive._resolve_child accepts any relation in the
+      -- parent's schema, a partitioned table or an inheritance parent included), whose heaps can each hold
+      -- a row of the same control value at the same ctid; with the boundary between those twins the next
+      -- page skipped the second, and the conservation check below refused a quiescent export as a write,
+      -- on every retry (issue #1168). The heap's oid makes the order total across them, and on a relation
+      -- of one heap it is constant, so the order is (control, ctid) as before. ctid is stable for the
+      -- whole export because nothing here moves tuples: the automatic path exports a write-blocked
+      -- child, and this synchronous path
       -- leaves quiescence to the caller (a concurrent UPDATE or VACUUM FULL cannot lose rows silently
       -- either, it trips the conservation check below). The planner derives the `control >= cursor`
       -- index condition from the row comparison itself, so an index on the control column still
@@ -3493,15 +3500,17 @@ begin
       -- as the name that reaches that oid in this session at the moment of rendering, so a schema renamed
       -- away and a namesake created in its place cannot stand in for it.
       execute format(
-        'select coalesce(string_agg(j, e''\n'' order by k, c), ''''),
-                archive._cursor_text((array_agg(k order by k desc, c desc))[1]),
-                (array_agg(c order by k desc, c desc))[1],
+        'select coalesce(string_agg(j, e''\n'' order by k, r, c), ''''),
+                archive._cursor_text((array_agg(k order by k desc, r desc, c desc))[1]),
+                (array_agg(r order by k desc, r desc, c desc))[1],
+                (array_agg(c order by k desc, r desc, c desc))[1],
                 count(*), coalesce(sum(hashtextextended(j, 0)), 0)
-           from (select row_to_json(t.*)::text as j, t.%I as k, t.ctid as c from %s t
-                  where $1 is null or (t.%I, t.ctid) > ($1::%s, $2)
-                  order by t.%I, t.ctid limit $3) s',
+           from (select row_to_json(t.*)::text as j, t.%I as k, t.tableoid as r, t.ctid as c from %s t
+                  where $1 is null or (t.%I, t.tableoid, t.ctid) > ($1::%s, $2, $3)
+                  order by t.%I, t.tableoid, t.ctid limit $4) s',
         pcfg.control_column, v_child::text, pcfg.control_column, v_ctltype, pcfg.control_column)
-        into v_chunk, v_cursor, v_cursor_tid, v_page_rows, v_page_h using v_cursor, v_cursor_tid, cfg.fetch_rows;
+        into v_chunk, v_cursor, v_cursor_rel, v_cursor_tid, v_page_rows, v_page_h
+        using v_cursor, v_cursor_rel, v_cursor_tid, cfg.fetch_rows;
       if v_page_rows = 0 then v_done := true;
       else
         v_written := v_written + v_page_rows; v_written_h := v_written_h + v_page_h;
