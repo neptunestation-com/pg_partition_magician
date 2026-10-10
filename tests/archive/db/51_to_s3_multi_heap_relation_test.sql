@@ -44,7 +44,18 @@
 -- restarted forever (part L, P1-02); a type with no ordering cannot be compared at all (part M). Each is now refused
 -- by name before anything is read. A domain pages as its base type: cast as the domain, the cursor ran a NOT VALID
 -- CHECK and every retry raised on the rows it does not admit (part N, P1-03). An enum pages (part O).
-select plan(75);
+--
+-- THE RELATIONS IT CAN PAGE. (tableoid, ctid) names one tuple only in a local heap. A foreign table returns whatever
+-- ctid its server sends (postgres_fdw sends the remote one, so a foreign leaf over a remote partitioned table held
+-- two rows with one tableoid and one ctid, and the quiescent export was refused as a write: V-01 of the sixth
+-- round), and a view has no row position at all. So the relation, and every relation under it, must be a table or a
+-- partitioned table; a view (part P) and a partitioned table with a foreign leaf (part Q) are refused by name before
+-- anything is read. Part Q's foreign leaf is postgres_fdw over a remote (loopback) partitioned table, the
+-- issue's own shape: its two rows with id 1 share one tableoid and one ctid. A materialized view never reaches that rule: archive._resolve_child's LOCK TABLE refuses it
+-- first, naming it (part R pins that it is refused, and that nothing lands). A domain over an enum is refused by
+-- name too (part S): its column has no `>` against the base enum, so the page query cannot compare it, and the type
+-- rule is probed as that very comparison rather than on the base type alone (V-01's sibling P1-03 of the sixth round).
+select plan(91);
 
 create schema t51;
 create table t51.evt (id bigint primary key, payload text not null);
@@ -120,6 +131,28 @@ alter domain t51.pos add constraint t51_pos_positive check (value > 0) not valid
 create type t51.lvl as enum ('low', 'mid', 'high');
 create table t51.enm (id t51.lvl, payload text);
 insert into t51.enm values ('high', 'h'), ('low', 'l'), ('mid', 'm');
+-- P: a view; Q: a partitioned table with one local leaf and one foreign leaf; R: a materialized view
+create view t51.vw as select 1::bigint as id, 'v'::text as payload;
+create extension if not exists postgres_fdw;
+do $$ begin
+  execute format('create server t51_loop foreign data wrapper postgres_fdw options (dbname %L)', current_database());
+end $$;
+create user mapping for current_user server t51_loop;
+create schema t51r;
+create table t51r.tw (id bigint, k int, payload text) partition by list (k);
+create table t51r.tw_a partition of t51r.tw for values in (1);
+create table t51r.tw_b partition of t51r.tw for values in (2);
+insert into t51r.tw values (1, 1, 'a'), (1, 2, 'b'), (2, 1, 'c');
+create table t51.mix (id bigint, k int, payload text) partition by list (k);
+create table t51.mix_a partition of t51.mix for values in (3);
+create foreign table t51.mix_f partition of t51.mix for values in (1, 2) server t51_loop
+  options (schema_name 't51r', table_name 'tw');
+insert into t51.mix_a values (5, 3, 'd');
+create materialized view t51.mv as select 1::bigint as id, 'w'::text as payload;
+-- S: a domain over the enum t51.lvl
+create domain t51.dlvl as t51.lvl;
+create table t51.denm (id t51.dlvl, payload text);
+insert into t51.denm values ('high', 'h'), ('low', 'l');
 -- G: a relation with no column named id, the control column of t51.evt
 create table t51.nocol (x int, payload text);
 insert into t51.nocol values (1, 'q');
@@ -155,7 +188,8 @@ end $$;
 create function t51.unpageable(p_rel text, p_type text) returns text language sql as $$
   select 'pg_partition_magician: archive.to_s3 pages ' || p_rel || ' by its column id, of type ' || p_type
       || ', which it cannot page by: the column must be a scalar type with a btree ordering (a base or enum type, '
-      || 'or a domain over one), not an array, composite, range or multirange; refusing to export it' $$;
+      || 'or a domain over a base type), not an array, composite, range, multirange or a domain over an enum; '
+      || 'refusing to export it' $$;
 -- the payloads an NDJSON object holds, one per line, sorted; null when there is no object at the key
 create function t51.payloads(p_key text) returns text[] language plpgsql as $$
 declare v http_response := t51.req('GET', p_key); r text[];
@@ -352,6 +386,46 @@ select is(t51.clear(:'ko'), 404, 'LIVENESS: no object at the enum relation''s ke
 select is(t51.try_export('enm'), 'ok', 'archive.to_s3 of an enum-controlled relation, one row per page, completes');
 select is(t51.payloads(:'ko'), array['h', 'l', 'm'], 'its object holds rows h, l and m, each once');
 select is(t51.clear(:'ko'), 404, 'LIVENESS: the enum relation''s object is cleared after the check');
+
+-- 76-79. P: a view.
+select is((select relkind::text from pg_class where oid = 't51.vw'::regclass), 'v', 'LIVENESS: t51.vw is a view');
+select :'p' || 't51.vw.ndjson' as kp \gset
+select is(t51.clear(:'kp'), 404, 'LIVENESS: no object at the view''s key before its export');
+select is(t51.try_export('vw'),
+  'pg_partition_magician: archive.to_s3 exports a table, or a partitioned table or inheritance tree whose every member is a table, and t51.vw reaches t51.vw (a view), which it cannot page by row position; refusing to export it',
+  'archive.to_s3 refuses a view by name, before anything is read');
+select is((t51.req('GET', :'kp')).status, 404, 'and no object lands at the view''s key');
+
+-- 80-83. Q: a partitioned table with a foreign leaf.
+select is((select string_agg(c.relname || ':' || c.relkind::text, ',' order by c.relname)
+             from pg_inherits i join pg_class c on c.oid = i.inhrelid where i.inhparent = 't51.mix'::regclass)
+          || ' ' ||
+          (select string_agg(tableoid::regclass::text || ':' || ctid::text, ',' order by payload) from t51.mix where id = 1),
+  'mix_a:r,mix_f:f t51.mix_f:(0,1),t51.mix_f:(0,1)',
+  'LIVENESS: t51.mix has a table leaf and a foreign leaf, whose two rows with id 1 share one tableoid and one ctid');
+select :'p' || 't51.mix.ndjson' as kq \gset
+select is(t51.clear(:'kq'), 404, 'LIVENESS: no object at the mixed relation''s key before its export');
+select is(t51.try_export('mix'),
+  'pg_partition_magician: archive.to_s3 exports a table, or a partitioned table or inheritance tree whose every member is a table, and t51.mix reaches t51.mix_f (a foreign table), which it cannot page by row position; refusing to export it',
+  'archive.to_s3 refuses a partitioned table with a foreign leaf by name, naming the leaf, before anything is read');
+select is((t51.req('GET', :'kq')).status, 404, 'and no object lands at the mixed relation''s key');
+
+-- 84-87. R: a materialized view.
+select is((select relkind::text from pg_class where oid = 't51.mv'::regclass), 'm', 'LIVENESS: t51.mv is a materialized view');
+select :'p' || 't51.mv.ndjson' as kr \gset
+select is(t51.clear(:'kr'), 404, 'LIVENESS: no object at the materialized view''s key before its export');
+select is(t51.try_export('mv'), 'cannot lock relation "mv"',
+  'archive.to_s3 refuses a materialized view, naming it, when it resolves and locks it, before anything is read');
+select is((t51.req('GET', :'kr')).status, 404, 'and no object lands at the materialized view''s key');
+
+-- 88-91. S: a domain over an enum, whose column cannot be compared with its base enum.
+select is((select d.typtype::text || '/' || b.typtype::text from pg_type d join pg_type b on b.oid = d.typbasetype
+            where d.oid = 't51.dlvl'::regtype), 'd/e', 'LIVENESS: t51.dlvl is a domain over an enum');
+select is((select count(*)::int from t51.denm where id::t51.lvl > 'low'::t51.lvl), 1,
+  'LIVENESS: cast to the base enum its column compares (one row past low), so the relation itself is readable and ordered');
+select is(t51.try_export('denm'), t51.unpageable('t51.denm', 't51.dlvl'),
+  'archive.to_s3 refuses a domain over an enum by name, before anything is read');
+select is((t51.req('GET', :'p' || 't51.denm.ndjson')).status, 404, 'and no object lands at its key');
 reset statement_timeout;
 
 select * from finish();

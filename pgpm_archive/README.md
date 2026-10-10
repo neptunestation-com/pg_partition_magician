@@ -82,10 +82,12 @@ the control value, then the heap, then the row's position in it, so no row of on
 of another that shares its control value and position. A row whose control value is NULL (which such a
 relation can hold, though a pgpm partition cannot) is exported too, after every other row, and the relation's
 column of the control column's name is paged by its own type, which need not be the parent's. That column must be
-a scalar type with a btree ordering (a base or enum type that is not an array, or a domain over one, paged as its
-base type); an array, a composite, a range or a type with no ordering such as `json` is refused with a
-`pg_partition_magician:` error naming the column and its type, before anything is read or sent, and so is a
-relation with no column of that name. The check reads the partition once more after the
+a scalar type with a btree ordering (a base or enum type that is not an array, or a domain over a base type, paged
+as its base type); an array, a composite, a range, a type with no ordering such as `json` or a domain over an enum
+is refused with a `pg_partition_magician:` error naming the column and its type, before anything is read or sent,
+and so is a relation with no column of that name. The relation itself must be a table, or a partitioned table or
+inheritance tree of tables: a view, or a tree holding a foreign table, is refused by name the same way, since the
+pages follow each heap's row positions and a foreign table's are whatever its server sends. The check reads the partition once more after the
 last page, which costs about one more pass over it. The multipart abort runs whatever ends an export, an error or
 a cancel (`statement_timeout`, `pg_cancel_backend`), and the error or cancel still reaches the caller.
 One that lands inside the request that starts the upload, before the store's answer arrives, leaves no

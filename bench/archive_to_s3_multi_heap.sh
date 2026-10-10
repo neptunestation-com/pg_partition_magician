@@ -17,7 +17,9 @@
 # control column's name may have another type than the parent's (parts E and F): the cursor is cast back as
 # the relation's own type, with its typmod (parts H to J), and a relation with no such column is refused by
 # name (part G). The column must be a scalar with a btree ordering: a composite, an array and a type with no
-# ordering are refused by name (parts K to M), a domain pages as its base type (part N), an enum pages (part O).
+# ordering are refused by name (parts K to M), a domain pages as its base type (part N), an enum pages (part O),
+# and a domain over an enum is refused (part S). The relation must be a table or a tree of tables: a view and a
+# tree with a foreign leaf are refused by name (parts P and Q), a materialized view when it is locked (part R).
 #
 # The mutations it is required to fail against (bench/mutations/mutate.py):
 #   to_s3_cursor_heap_unkeyed    -- the next-page predicate compares (control, ctid) with the cursor,
@@ -39,6 +41,10 @@
 #                                   (part M) fails on an unnamed operator error
 #   to_s3_cursor_domain_checked  -- the cursor is cast as the domain, not its base type, so a NOT VALID
 #                                   CHECK raises on the rows it does not admit (part N)
+#   to_s3_relkind_unrefused      -- a view, or a tree holding a postgres_fdw leaf whose remote row positions
+#                                   repeat, is not refused by name (parts P and Q)
+#   to_s3_cursor_probe_base_only -- the type probe compares the base type with itself, so a domain over an
+#                                   enum passes it and dies on an unnamed operator error (part S)
 #
 # Usage: archive_to_s3_multi_heap.sh <container> <db> [archive install.sql]
 # Needs the archive image (pgsql-http + pgtap + pg_prove) AND MinIO on the same network: the file PUTs
