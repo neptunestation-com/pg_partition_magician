@@ -6170,6 +6170,79 @@ begin
 end;
 $$;
 
+-- A foreign key's definition without the NOT VALID pg_get_constraintdef appends to an unvalidated one (#633),
+-- so that a key is matched by what it enforces and not by whether it has been validated yet: regrain's swap
+-- carries the parent's NOT VALID keys onto a copy by it, and its drift check leaves a copy's key out by it.
+create or replace function pgpm._fk_def_unvalidated(p_con oid)
+returns text language sql stable as $$
+  select regexp_replace(pg_get_constraintdef(p_con), ' NOT VALID$', '');
+$$;
+
+-- A regrain copy's shape (#633): the standalone table regrain_step makes for a fine sub-range, LIKE the parent,
+-- with the parent's validated outgoing foreign keys. Made here, by one routine, for two callers: regrain_step,
+-- which then gives the copy its owner and ACL, its bound CHECK and its rows; and _regrain_fresh_copy_drift,
+-- which makes one only to ask whether a copy made now would match the parent, and drops it. The two must make
+-- the same shape for that question to mean anything, so neither makes its own. p_spc_q is the tablespace
+-- clause, already quoted.
+create or replace function pgpm._regrain_copy_make(p_parent regclass, p_nsp name, p_name name, p_spc_q text)
+returns void language plpgsql as $$
+declare r record; v_nsp name; v_rel name;
+begin
+  select n.nspname, c.relname into v_nsp, v_rel
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+  execute format('create table %I.%I (like %I.%I including defaults including generated including storage including indexes including constraints excluding identity)%s',
+                 p_nsp, p_name, v_nsp, v_rel, p_spc_q);
+  -- #348: give the fine child its own already-validated copy of every outgoing FK the parent
+  -- has, the same trick regrain_step's bound CHECK uses. The child is still empty here (this runs
+  -- before the first row is copied in), so VALIDATE costs nothing -- exactly how an empty
+  -- CHECK validates for free. Every row copied in afterward is checked at INSERT time by the
+  -- ordinary FK machinery regardless, so this one-time, zero-row validation is the only one this
+  -- constraint will ever need; by the swap's ATTACH (below), Postgres adopts it instead of
+  -- re-scanning, the same adoption transmute already relies on for the monolith
+  -- (install.sql:2841-2851). A NOT VALID outgoing FK on the parent is left off here (the
+  -- convalidated filter skips it): on the copy it would enforce every row copied in, and refuse
+  -- the orphan the parent's key tolerates. On PostgreSQL 18 pgpm's own restore_incoming_fks leaves
+  -- one on a managed referencer (#633), and the swap carries it onto the copy, NOT VALID, just
+  -- before the ATTACH, where it checks no row and is adopted as it is.
+  for r in
+    select conname, pg_get_constraintdef(oid) as def
+      from pg_constraint
+     where conrelid = p_parent and contype = 'f' and confrelid <> p_parent and conparentid = 0
+       and convalidated
+  loop
+    execute format('alter table %I.%I add constraint %I %s not valid', p_nsp, p_name, r.conname, r.def);
+    execute format('alter table %I.%I validate constraint %I', p_nsp, p_name, r.conname);
+  end loop;
+end;
+$$;
+
+-- Whether a regrain copy made from the parent NOW would itself differ from it (#633): the drift a restart could
+-- not cure, since a restart only makes the copies again. Asked by regrain_step before it restarts a run for its
+-- copies' shape: it makes a probe copy with _regrain_copy_make (in the parent's schema, under a name nothing of
+-- pgpm's takes), compares it with _regrain_shape_drift exactly as the copies are compared, and drops it, all in
+-- the tick's own transaction, so no other session ever sees it. Null when the probe matches, which is every
+-- case PostgreSQL's LIKE and the key carry reproduce (a CHECK or a key added, dropped or re-added since the
+-- copies were made, and a key PostgreSQL 18 has made NOT VALID and validated again in between): the restart
+-- cures those, and goes ahead. Not null only when something makes every new copy differ from its parent (an
+-- event trigger that alters each table created, say), where restarting would discard and recopy the range on
+-- every other tick for good. Also null, so the restart goes ahead, when the probe's name is taken.
+create or replace function pgpm._regrain_fresh_copy_drift(p_parent regclass)
+returns text language plpgsql as $$
+declare v_nsp name; v_name name; v_probe regclass; v_d text;
+begin
+  select n.nspname, left(c.relname, 40) || '_pgpm_shape_probe' into v_nsp, v_name
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+  if to_regclass(format('%I.%I', v_nsp, v_name)) is not null then
+    return null;
+  end if;
+  perform pgpm._regrain_copy_make(p_parent, v_nsp, v_name, '');
+  v_probe := format('%I.%I', v_nsp, v_name)::regclass;
+  v_d := pgpm._regrain_shape_drift(p_parent, array[v_probe::oid]);
+  execute format('drop table %s', v_probe::text);
+  return v_d;
+end;
+$$;
+
 -- How the first of a regrain's copies whose columns differ from its parent's differs (#785), or null when
 -- every copy matches. Each side's columns are compared as name, type, collation (when not the type's
 -- own), NOT NULL and generated: the properties regrain_step's copy and reconcile statements and the
@@ -6186,9 +6259,20 @@ $$;
 -- the parent after a copy was made reached the swap missing from it, where ATTACH validated it by scanning
 -- the copy under the swap's ACCESS EXCLUSIVE on the parent; one the parent dropped or changed stayed on
 -- the fine child. A NOT VALID key and a self-reference are left out on the parent's side because regrain
--- never carries them, and a key's clones onto the partitions of a partitioned referenced table
--- (conparentid set) on both sides. The name is not compared: ATTACH matches a key by its definition, so a
--- renamed key is still adopted. A copy is made LIKE its parent,
+-- never makes a copy with them, and a key's clones onto the partitions of a partitioned referenced table
+-- (conparentid set) on both sides. A copy's key that is the one the parent now holds NOT VALID, under the
+-- same name and definition, is left out on the copy's side (#633): on PostgreSQL 18 restore_incoming_fks
+-- re-adds a key NOT VALID on a partitioned referencing table, regrain's swap of the table it references
+-- re-adds it so mid-run (under its recorded name), and a copy made while it was validated still carries it
+-- validated; that is not drift, since the swap's ATTACH adopts the copy's key as it is, and a restart would
+-- discard every copy for nothing. By name as well as definition, so that only the key it was carried from
+-- excuses it: a parent can hold a validated key and a NOT VALID twin of the same definition (PostgreSQL 18
+-- accepts one), the copy carries the validated one under ITS name, and matching on the definition alone
+-- left that key out, read the parent's validated key as missing from every copy, and restarted the run on
+-- every other tick for good. A copy made from the parent as it is never holds a key under the name of a
+-- NOT VALID parent key (it is given the validated ones only), so a restart always clears this case. Apart
+-- from that the name is not compared: ATTACH matches a key by its definition, so a renamed key is still
+-- adopted. A copy is made LIKE its parent,
 -- so the two differ only when the parent has been altered since; regrain_step restarts the run when they
 -- do. One statement over every copy, comparing each relation's column list as one string, and the
 -- difference spelt out for the first that differs only: asked on every resumed tick, and a run toward a
@@ -6219,7 +6303,11 @@ returns text language sql stable as $$
       from pg_constraint k
      where k.contype = 'f' and k.conparentid = 0
        and ((k.conrelid = p_parent and k.confrelid <> p_parent and k.convalidated)
-            or k.conrelid = any(p_copies))
+            or (k.conrelid = any(p_copies)
+                and not exists (select 1 from pg_constraint nv     -- #633: the swap's to settle, not drift
+                                 where nv.conrelid = p_parent and nv.contype = 'f' and nv.conparentid = 0
+                                   and not nv.convalidated and nv.conname = k.conname
+                                   and pgpm._fk_def_unvalidated(nv.oid) = pgpm._fk_def_unvalidated(k.oid))))
   ),
   sig as (select attrelid, string_agg(col, ', ' order by col) as s from cols group by attrelid),
   drifted as (
@@ -6949,8 +7037,8 @@ declare
   v_lo_lit text; v_hi_lit text; v_moved bigint := 0; v_aged boolean; v_made int := 0; v_fk int := 0; r record;
   v_fk_ids bigint[];
   v_child_name name; v_src_name name; v_rec int; v_delta_n bigint; v_delta_name name; v_busy name;
-  v_delta_reg regclass; v_sub_known boolean; v_sub_oid oid; v_sub_now regclass; v_copy regclass;
-  v_held_lo text; v_held_hi text; v_drift text; v_copies oid[]; v_capture_drift text;
+  v_delta_reg regclass; v_sub_known boolean; v_sub_oid oid; v_sub_now regclass; v_copy regclass; v_nv record;
+  v_held_lo text; v_held_hi text; v_drift text; v_copies oid[]; v_capture_drift text; v_shape text; v_fresh text;
   v_unarmed text; v_restart_why text;   -- #892
   v_dnsp name;   -- the delta's own schema, by its recorded oid (#555)
   v_src_nsp name; v_sub_nsp name;   -- the source's own schema, and a copy's (#872): never the parent's
@@ -7213,7 +7301,8 @@ begin
   -- is copied again from the source, which holds every change committed before this tick. Between the
   -- ALTER and this tick such a write is refused (it raises), never lost; pgpm has no hook into ALTER TABLE
   -- that would let it re-mint any sooner.
-  v_drift := concat_ws('; ', pgpm._regrain_shape_drift(p_parent, v_copies),
+  v_shape := pgpm._regrain_shape_drift(p_parent, v_copies);
+  v_drift := concat_ws('; ', v_shape,
                        case when cardinality(v_copies) > 0
                             then pgpm._regrain_source_drift(v_child, cfg.regrain_source_mark) end);
   v_capture_drift := pgpm._regrain_capture_drift(p_parent, v_keyidx);
@@ -7228,6 +7317,19 @@ begin
     v_unarmed || ', so change capture is re-minted ENABLE ALWAYS');
   v_capture_drift := coalesce(v_capture_drift, v_unarmed);
   if v_drift <> '' or v_capture_drift is not null then
+    -- #633: a restart is bounded. It cures drift only by making the copies again, from the parent as it is,
+    -- so one whose copies would differ from the parent all the same (_regrain_fresh_copy_drift, which makes a
+    -- probe copy the way this function makes its copies and compares it) cannot be cured by restarting: the
+    -- run would discard and recopy its range on every other tick for good. Refused instead, with what differs,
+    -- before anything is dropped (this tick rolls back whole), until the parent changes or the run is
+    -- cancelled. Asked only for the copies' shape: a source rewrite and a capture re-mint are always cured.
+    if v_shape is not null then
+      v_fresh := pgpm._regrain_fresh_copy_drift(p_parent);
+      if v_fresh is not null then
+        raise exception 'pg_partition_magician: refusing to restart the regrain of % -- %; a copy made from the parent now would differ from it too (%), so restarting cannot cure it and would only repeat. Nothing was dropped. Remove what makes every new copy differ from its parent (an event trigger that alters each table created, say), or abandon the run with pgpm.regrain_cancel(%).',
+          v_child_name, v_restart_why, v_fresh, p_parent;
+      end if;
+    end if;
     for r in execute format(
       'select child_name from pgpm.part where parent_table = %L::regclass and not attached'
       || ' and lo::%s >= %L::%s and hi::%s <= %L::%s',
@@ -7429,34 +7531,13 @@ begin
       v_spc_q := coalesce((select format(' tablespace %I', t.spcname)
                              from pg_class c join pg_tablespace t on t.oid = c.reltablespace
                             where c.oid = p_parent), '');
-      execute format('create table %I.%I (like %I.%I including defaults including generated including storage including indexes including constraints excluding identity)%s',
-                     v_sub_nsp, v_sub_name, v_nsp, v_rel, v_spc_q);
+      perform pgpm._regrain_copy_make(p_parent, v_sub_nsp, v_sub_name, v_spc_q);   -- #633: its shape
       -- #949: the parent's owner and an owner-only ACL from the tick that creates it, before a row is copied in.
       -- The reset used to wait for the sub-range's last short batch (below), and between ticks a role the
       -- creating role's default privileges name read every row copied so far, past the parent's row security.
       perform pgpm._scratch_mint(p_parent, format('%I.%I', v_sub_nsp, v_sub_name)::regclass);
       execute format('alter table %I.%I add constraint %I check (%I >= %L and %I < %L)',
                      v_sub_nsp, v_sub_name, (v_sub_name || '_ck'), cfg.control_column, v_lo_lit, cfg.control_column, v_hi_lit);
-      -- #348: give the fine child its own already-validated copy of every outgoing FK the parent
-      -- has, the same trick the bound CHECK above uses. The child is still empty here (this runs
-      -- before the first row is copied in below), so VALIDATE costs nothing -- exactly how an empty
-      -- CHECK validates for free. Every row copied in afterward is checked at INSERT time by the
-      -- ordinary FK machinery regardless, so this one-time, zero-row validation is the only one this
-      -- constraint will ever need; by the swap's ATTACH (below), Postgres adopts it instead of
-      -- re-scanning, the same adoption transmute already relies on for the monolith
-      -- (install.sql:2841-2851). A NOT VALID outgoing FK on the parent is left alone (the
-      -- convalidated filter skips it): that matches today's behavior for it exactly, and transmute
-      -- already refuses a NOT VALID outgoing FK at conversion time, so this only matters if one was
-      -- added directly to the parent afterward.
-      for r in
-        select conname, pg_get_constraintdef(oid) as def
-          from pg_constraint
-         where conrelid = p_parent and contype = 'f' and confrelid <> p_parent and conparentid = 0
-           and convalidated
-      loop
-        execute format('alter table %I.%I add constraint %I %s not valid', v_sub_nsp, v_sub_name, r.conname, r.def);
-        execute format('alter table %I.%I validate constraint %I', v_sub_nsp, v_sub_name, r.conname);
-      end loop;
       -- child_oid (#421): the fine child is standalone here and joins pg_inherits only at the swap,
       -- so this is the only point at which its identity can be recorded from the CREATE that made it.
       insert into pgpm.part (parent_table, child_name, lo, hi, attached, child_oid)
@@ -7614,6 +7695,34 @@ begin
     p_parent::text, v_ncast, v_lo, v_ncast, v_ncast, v_hi, v_ncast, v_ncast)
   loop
     v_copy := pgpm._regrain_copy_rel(p_parent, r.child_name, 'attach');   -- #707: by recorded oid
+    -- #633: the parent's NOT VALID outgoing keys, NOT VALID on the copy, so the ATTACH adopts each as it is.
+    -- On PostgreSQL 18 restore_incoming_fks leaves one on a managed table that references another managed
+    -- one while an orphan keeps it from validating. The copy is made with the parent's VALIDATED keys only
+    -- (validated while it is empty, above); a NOT VALID one cannot go on it then, because it enforces every
+    -- row copied in and the copy would refuse that orphan. Left off, the ATTACH validated it on the copy under
+    -- the swap's ACCESS EXCLUSIVE, scanning it, and failed on the orphan on every tick. Added here, after the
+    -- residual reconcile wrote the copy's last rows and with nothing writing to it, NOT VALID checks no row,
+    -- and ATTACH adopts a NOT VALID key under a NOT VALID parent key without a scan (verified on 18.6). A copy
+    -- that already holds the key under its name, validated (made before the parent's went NOT VALID), keeps
+    -- it: ATTACH adopts that too, and the drift check excuses exactly that key. Matched by NAME, as the drift
+    -- check matches it, not by definition: a parent can hold a validated key and a NOT VALID twin of the same
+    -- definition (PostgreSQL 18 accepts one), the copy carries the validated one under its own name, and a
+    -- definition match skipped the twin, which ATTACH then cloned onto the copy and validated, scanning it
+    -- under the swap's lock (and failing on an orphan, every tick). Each parent key adopts one copy key, so
+    -- the copy holds both, each under the parent's name. A parent before 18 cannot hold such a key, so this
+    -- finds nothing there.
+    for v_nv in
+      select k.conname, pgpm._fk_def_unvalidated(k.oid) as def
+        from pg_constraint k
+       where k.conrelid = p_parent and k.contype = 'f' and k.conparentid = 0 and k.confrelid <> p_parent
+         and not k.convalidated
+         and not exists (select 1 from pg_constraint c
+                          where c.conrelid = v_copy and c.contype = 'f' and c.conparentid = 0
+                            and c.conname = k.conname)
+       order by k.conname
+    loop
+      execute format('alter table %s add constraint %I %s not valid', v_copy::text, v_nv.conname, v_nv.def);
+    end loop;
     execute format('alter table %s attach partition %s for values from (%L) to (%L)',
                    p_parent::text, v_copy::text,
                    pgpm._encode(cfg.control_kind, r.lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz), pgpm._encode(cfg.control_kind, r.hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));
@@ -11517,8 +11626,9 @@ begin
   -- table's name only while the parent was neither renamed nor moved since: replayed verbatim it named a
   -- table that is not there (42P01, the reverse rolled back) or whatever had taken that name. Mirror
   -- restore_incoming_fks:
-  -- a partitioned referencer validates in one step (Postgres forbids NOT VALID there), anything else
-  -- comes back NOT VALID, which enforces every new write from this statement on.
+  -- before PostgreSQL 18 a partitioned referencer validates in one step (PostgreSQL forbids NOT VALID
+  -- there until 18, #633), anything else comes back NOT VALID, which enforces every new write from this
+  -- statement on.
   --
   -- And stays NOT VALID (#577). The VALIDATE used to follow here, and it scans the whole REFERENCING
   -- table: this is a function, one transaction, holding ACCESS EXCLUSIVE on the restored table since the
@@ -11529,7 +11639,10 @@ begin
   -- the operator's, run in its own transaction after this one, where it takes only SHARE UPDATE EXCLUSIVE
   -- on the referencing table and ROW SHARE on this one and blocks neither. The notice names it.
   for r in select * from pgpm.dropped_fk where parent_table = p_parent order by id loop
-    if (select relkind from pg_class where oid = r.referencing_table) = 'p' then
+    -- #633: before PostgreSQL 18 only (as in restore_incoming_fks, which says why): 18 takes NOT VALID on a
+    -- partitioned referencing table too, so there it comes back NOT VALID with the notice, like any other.
+    if (select relkind from pg_class where oid = r.referencing_table) = 'p'
+       and current_setting('server_version_num')::int < 180000 then
       execute format('alter table %s add constraint %I %s',
                      r.referencing_table::text, r.constraint_name,
                      pgpm._fk_readd_definition(r.definition, v_restored));   -- #872: the restored table by oid
@@ -13743,17 +13856,40 @@ begin
             where parent_table = p_parent and restored_at is null
               and (p_ids is null or id = any(p_ids))
             order by id loop
-    v_is_part := (select relkind from pg_class where oid = r.referencing_table) = 'p';
+    -- #633: a self-referential key (its referencing table IS the managed parent) or one declared on another
+    -- partitioned table. PostgreSQL 18 takes NOT VALID there like anywhere else, so it gets the same split
+    -- as a plain referencer: the ADD below scans nothing, and validate_incoming_fks validates it on a later
+    -- tick under locks that block no writes. It used to be added validating on every version, which scanned
+    -- the whole referencing table (for a self-referential key, the whole MANAGED table) inside this
+    -- statement's SHARE ROW EXCLUSIVE on the parent, and inside the DETACH's ACCESS EXCLUSIVE when regrain's
+    -- swap calls this: every write to the managed table waited out an O(rows) scan.
+    v_is_part := (select relkind from pg_class where oid = r.referencing_table) = 'p'
+                 and current_setting('server_version_num')::int < 180000;
+    -- #633: and a one-step re-add that failed is parked for five minutes (validate_retry_after, the back-off
+    -- validate_incoming_fks keeps for a failed VALIDATE, #265), because the attempt is the scan: retried on
+    -- every call, it scanned the whole referencing table under SHARE ROW EXCLUSIVE on the managed one on every
+    -- maintain tick, only to fail on the same orphan. A call that names the key in p_ids retries it at once:
+    -- regrain's swap re-adding what it just suspended, uninstall.sql, or an operator who has cleared the orphan.
+    if v_is_part and p_ids is null
+       and coalesce(r.validate_retry_after, '-infinity'::timestamptz) > clock_timestamp() then
+      continue;
+    end if;
     v_readded := false;
     begin
       if v_is_part then
-        -- self-referential / partitioned referencer: Postgres forbids NOT VALID FKs here, so add it
-        -- validating in one step (all-or-nothing). A pre-existing orphan leaves it DROPPED and logged,
-        -- without bricking the other FKs; self-ref / partitioned-referencer FKs are typically small.
+        -- Before 18 PostgreSQL refuses NOT VALID on a partitioned referencing table ("cannot add NOT VALID
+        -- foreign key on partitioned table"), so the key is added validating in one step (all-or-nothing),
+        -- and that scan does run under the lock above. The one route around it there, a NOT VALID key per
+        -- partition, validated, then adopted by the parent's ADD, creates one constraint and trigger pair per
+        -- (referencing partition x referenced partition), and the adopting ADD locks each: measured on 15,
+        -- 40 partitions of a self-referential table made 1640 constraint rows and the ADD took 5056 locks,
+        -- and the default lock table (64 per connection, 100 connections) runs out a few partitions later.
+        -- docs/reference.md names the exception. A pre-existing orphan leaves the key DROPPED and logged,
+        -- without bricking the other FKs.
         execute format('alter table %s add constraint %I %s',
                        r.referencing_table::text, r.constraint_name,
                        pgpm._fk_readd_definition(r.definition, p_parent));   -- #872: the parent by oid
-        update pgpm.dropped_fk set restored_at = now(), validated_at = now() where id = r.id;
+        update pgpm.dropped_fk set restored_at = now(), validated_at = now(), validate_retry_after = null where id = r.id;
       else
         execute format('alter table %s add constraint %I %s not valid',
                        r.referencing_table::text, r.constraint_name,
@@ -13764,8 +13900,14 @@ begin
       v_n := v_n + 1;
       insert into pgpm.log (parent_table, action, method) values (p_parent, 'restore_incoming_fk', r.constraint_name);
     exception when others then
+      if v_is_part then   -- #633: parked, so the next tick does not scan again to fail again (above)
+        update pgpm.dropped_fk set validate_retry_after = clock_timestamp() + interval '5 minutes' where id = r.id;
+      end if;
       insert into pgpm.log (parent_table, action, method)
-        values (p_parent, 'fail_restore_incoming_fk', left(r.constraint_name || ': ' || sqlerrm, 200));
+        values (p_parent, 'fail_restore_incoming_fk',
+                left(r.constraint_name || ': '
+                     || case when v_is_part then 'retried in 5 minutes (at once if named in p_ids): ' else '' end
+                     || sqlerrm, 200));
     end;
     -- The VALIDATE deliberately does NOT happen here (#265). It used to, in its own subtransaction, which
     -- isolated its errors but not its locks: the ADD above takes SHARE ROW EXCLUSIVE on BOTH the

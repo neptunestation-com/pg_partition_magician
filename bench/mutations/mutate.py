@@ -2416,26 +2416,27 @@ begin
         "#898 added to _regrain_shape_drift, because with that arm in place a copy without the parent's key "
         "is drift, the run restarts on every tick, and the ATTACH scan the guard measures is never reached; "
         "pre-#348 code had neither.",
-        [("""      -- #348: give the fine child its own already-validated copy of every outgoing FK the parent
-      -- has, the same trick the bound CHECK above uses. The child is still empty here (this runs
-      -- before the first row is copied in below), so VALIDATE costs nothing -- exactly how an empty
-      -- CHECK validates for free. Every row copied in afterward is checked at INSERT time by the
-      -- ordinary FK machinery regardless, so this one-time, zero-row validation is the only one this
-      -- constraint will ever need; by the swap's ATTACH (below), Postgres adopts it instead of
-      -- re-scanning, the same adoption transmute already relies on for the monolith
-      -- (install.sql:2841-2851). A NOT VALID outgoing FK on the parent is left alone (the
-      -- convalidated filter skips it): that matches today's behavior for it exactly, and transmute
-      -- already refuses a NOT VALID outgoing FK at conversion time, so this only matters if one was
-      -- added directly to the parent afterward.
-      for r in
-        select conname, pg_get_constraintdef(oid) as def
-          from pg_constraint
-         where conrelid = p_parent and contype = 'f' and confrelid <> p_parent and conparentid = 0
-           and convalidated
-      loop
-        execute format('alter table %I.%I add constraint %I %s not valid', v_sub_nsp, v_sub_name, r.conname, r.def);
-        execute format('alter table %I.%I validate constraint %I', v_sub_nsp, v_sub_name, r.conname);
-      end loop;
+        [("""  -- #348: give the fine child its own already-validated copy of every outgoing FK the parent
+  -- has, the same trick regrain_step's bound CHECK uses. The child is still empty here (this runs
+  -- before the first row is copied in), so VALIDATE costs nothing -- exactly how an empty
+  -- CHECK validates for free. Every row copied in afterward is checked at INSERT time by the
+  -- ordinary FK machinery regardless, so this one-time, zero-row validation is the only one this
+  -- constraint will ever need; by the swap's ATTACH (below), Postgres adopts it instead of
+  -- re-scanning, the same adoption transmute already relies on for the monolith
+  -- (install.sql:2841-2851). A NOT VALID outgoing FK on the parent is left off here (the
+  -- convalidated filter skips it): on the copy it would enforce every row copied in, and refuse
+  -- the orphan the parent's key tolerates. On PostgreSQL 18 pgpm's own restore_incoming_fks leaves
+  -- one on a managed referencer (#633), and the swap carries it onto the copy, NOT VALID, just
+  -- before the ATTACH, where it checks no row and is adopted as it is.
+  for r in
+    select conname, pg_get_constraintdef(oid) as def
+      from pg_constraint
+     where conrelid = p_parent and contype = 'f' and confrelid <> p_parent and conparentid = 0
+       and convalidated
+  loop
+    execute format('alter table %I.%I add constraint %I %s not valid', p_nsp, p_name, r.conname, r.def);
+    execute format('alter table %I.%I validate constraint %I', p_nsp, p_name, r.conname);
+  end loop;
 """, "", 1),
          ("     where k.contype = 'f' and k.conparentid = 0\n",
           "     where k.contype = 'f' and k.conparentid = 0 and false\n", 1)],
@@ -6911,9 +6912,9 @@ select ok(
         "exist'), a DROP COLUMN or a TYPE change fails the swap's ATTACH, and the run never moves again. One "
         "site, the restart branch, switched off. tests/211 parts A and B catch it.",
         [("  if v_drift <> '' or v_capture_drift is not null then\n"
-          "    for r in execute format(\n",
+          "    -- #633: a restart is bounded.",
           "  if false then\n"
-          "    for r in execute format(\n", 1)],
+          "    -- #633: a restart is bounded.", 1)],
     ),
     "regrain_shape_restart_keeps_cursor": (
         "bench/regrain_survives_parent_ddl.sh",
@@ -7101,11 +7102,11 @@ select ok(
         "Issue #1075 put back: regrain_step's standalone CREATE TABLE (LIKE ...) for a fine child splices no "
         "tablespace clause, so the fine children, and the rows a regrain moves into them, land in the database "
         "default whatever tablespace the parent mints its partitions in. One clause, the splice dropped from "
-        "the create; tests/296's parts A and B catch it, while part C's database-default table still passes.",
+        "the create (in _regrain_copy_make, #633); tests/296's parts A and B catch it, while part C's database-default table still passes.",
         [("including indexes including constraints excluding identity)%s',\n"
-          "                     v_sub_nsp, v_sub_name, v_nsp, v_rel, v_spc_q);\n",
+          "                 p_nsp, p_name, v_nsp, v_rel, p_spc_q);\n",
           "including indexes including constraints excluding identity)',\n"
-          "                     v_sub_nsp, v_sub_name, v_nsp, v_rel, v_spc_q);\n", 1)],
+          "                 p_nsp, p_name, v_nsp, v_rel, p_spc_q);\n", 1)],
     ),
     "unbuilt_cell_type_holder_unnamed": (
         "bench/unbuilt_cell_type_holder.sh",
@@ -11622,6 +11623,19 @@ MUTATIONS["hypertable_drain_delta_step_takes_delta_first"] = (
 )
 MUTATION_SRC["hypertable_drain_delta_step_takes_delta_first"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_drain_delta_step_takes_delta_first"] = "timescale"
+MUTATIONS["restore_one_step_no_backoff"] = (
+    "bench/restore_one_step_backoff.sh",
+    "Pre-fix restore_incoming_fks (#633, PR verification P1-02): a key whose one-step validating re-add "
+    "failed on an orphan (a partitioned or self-referential referencer, before PostgreSQL 18) is not parked, "
+    "so every call without p_ids, which is maintain's every tick, scans the whole managed table again under "
+    "SHARE ROW EXCLUSIVE on it to fail on the same orphan. Removes only the skip; the failure still sets "
+    "validate_retry_after, so the mutant differs from the fix in the one clause that reads it.",
+    [("    if v_is_part and p_ids is null\n"
+      "       and coalesce(r.validate_retry_after, '-infinity'::timestamptz) > clock_timestamp() then\n"
+      "      continue;\n"
+      "    end if;\n",
+      "", 1)],
+)
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

@@ -17,8 +17,10 @@
 --       work is lost.
 --
 -- The fixture is asymmetric on purpose: two keys, one restorable (a plain referencer) and one not (the
--- table's own self-referencing key, with an orphan written while RI was off: a partitioned referencer
--- can only get its key back validating, which the orphan fails), so "the uninstall restored what it could and refused on the rest" cannot be satisfied by
+-- table's own self-referencing key, with an orphan written while RI was off: before PostgreSQL 18 a
+-- partitioned referencer can only get its key back validating, which the orphan fails; 18 re-adds it NOT
+-- VALID, which the orphan does not stop (#633), so there a CHECK constraint holding the key's name is what
+-- stops it), so "the uninstall restored what it could and refused on the rest" cannot be satisfied by
 -- restoring both or neither. Every negative ("no copy survives", "the schema is gone") is paired with a
 -- witness that the thing was there to lose.
 --
@@ -67,6 +69,13 @@ insert into u589.orders values (4, 'd', 99);                                -- a
 select is((select array_agg(id || ':' || coalesce(parent_id::text, '-') order by id) from u589.orders),
   array['1:-', '2:1', '3:1', '4:99'],
   'LIVENESS (A): the orphan went in, so the self-referencing key cannot come back validating');
+select current_setting('server_version_num')::int >= 180000 as pg18 \gset
+\if :pg18
+alter table u589.orders add constraint orders_parent_fkey check (true);    -- 18: the name, not the orphan, stops it
+\set why 'already exists'
+\else
+\set why 'violat'
+\endif
 
 -- ======================================================================================================
 -- fixture (B): a regrain in flight, with one standalone copy holding rows the source still holds
@@ -99,7 +108,7 @@ select is(:'LAST_ERROR_SQLSTATE'::text, 'P0001', '(A) the uninstall refused with
 select matches(:'LAST_ERROR_MESSAGE'::text,
   'refusing to uninstall.*alter table u589\.orders add constraint orders_parent_fkey FOREIGN KEY \(parent_id\) REFERENCES u589\.orders\(id\)',
   '(A) the refusal names the key it could not restore, with the DDL to re-add it by hand');
-select matches(:'LAST_ERROR_MESSAGE'::text, 'orders_parent_fkey: .*violat',
+select matches(:'LAST_ERROR_MESSAGE'::text, 'orders_parent_fkey: .*' || :'why',
   '(A) and says why it could not, since the rollback takes pgpm.log with it');
 select doesnt_match(:'LAST_ERROR_MESSAGE'::text, 'lines_order_id_fkey',
   '(A) and does not name the key it did restore');
@@ -112,6 +121,9 @@ select is(
 
 -- One of the ways out the refusal offers: clear the orphan and re-add the key by hand, then re-run. The
 -- record stays unrestored (nothing told pgpm), so the second run must see the key live and not refuse.
+\if :pg18
+alter table u589.orders drop constraint orders_parent_fkey;                 -- the CHECK holding the name
+\endif
 update u589.orders set parent_id = null where id = 4;
 alter table u589.orders add constraint orders_parent_fkey foreign key (parent_id) references u589.orders (id);
 

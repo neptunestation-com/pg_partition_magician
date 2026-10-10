@@ -73,8 +73,10 @@ select is(
   (select array_agg(conrelid::regclass::text || ':' || (conparentid = 0)::text || ':' || convalidated::text
                     order by conrelid::regclass::text)
      from pg_constraint where confrelid = 'public.ev142'::regclass and contype = 'f' and conname = 'refp142_ev_id_fkey'),
-  array['refp142:true:true', 'refp142_a:false:true', 'refp142_b:false:true'],
-  'the partitioned referencer''s key is back at refp142, validated, with a clone on each partition');
+  case when current_setting('server_version_num')::int >= 180000
+       then array['refp142:true:false', 'refp142_a:false:false', 'refp142_b:false:false']
+       else array['refp142:true:true', 'refp142_a:false:true', 'refp142_b:false:true'] end,
+  'the partitioned referencer''s key is back at refp142, with a clone on each partition: validated in one step before PostgreSQL 18, NOT VALID from 18 (#633)');
 
 -- The monolith covers [1, 20); 25 lives in a forward partition, which is where a key left on the monolith
 -- would stop enforcing. An orphan into refp142_b is refused, a real forward row is accepted.

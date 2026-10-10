@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+- **On PostgreSQL 18 a preserved key on a partitioned referencing table, or a self-referential one, comes back
+  `NOT VALID`, so its re-add no longer scans the table under a write-blocking lock** (#633). `restore_incoming_fks`
+  (maintain's tick, and every regrain swap) and `untransmute` re-added such a key in one validating step on every
+  version, which scanned the whole referencing table (for a self-referential key, the whole managed table) while
+  holding `SHARE ROW EXCLUSIVE` on the managed table, or the swap's and `untransmute`'s `ACCESS EXCLUSIVE`. On
+  18, which accepts `NOT VALID` on a partitioned table, both sites now re-add it `NOT VALID` like any other key,
+  validated on a later tick by `validate_incoming_fks` (after `untransmute`, by you, as its `NOTICE` says), and an
+  orphan written while it was suspended no longer keeps it dropped. PostgreSQL 15 to 17 refuse `NOT VALID` there, and their only scan-free route (a validated key
+  per partition, adopted by the parent) costs a constraint per pair of partitions and exhausts the lock table at a
+  few dozen of them, so on those versions the one-step validation stays, and `docs/reference.md` and
+  `docs/guide.md` now say so. Two consequences are handled with it. On 18 a managed table that references
+  another managed one can now hold that key `NOT VALID` (an orphan keeps it from validating), so its own
+  regrain's swap adds the key to each copy `NOT VALID`, under its own name (a validated twin of the same
+  definition does not stand in for it), just before the `ATTACH`, which adopts it without a scan,
+  and its drift check no longer reads a copy's validated key, carried under the name of the key the parent now
+  holds `NOT VALID`, as drift (by name and definition, so a validated key with a `NOT VALID` twin still matches),
+  and a restart that could not cure the drift (a probe copy made from the parent as it is differs from it too)
+  is refused rather than repeated; before,
+  the `ATTACH` validated it on every copy under `ACCESS EXCLUSIVE` and failed on the orphan every tick. And on
+  15 to 17 a one-step re-add that fails on an orphan is parked for five minutes (`dropped_fk.validate_retry_after`,
+  noted in its `fail_restore_incoming_fk` row) instead of rescanning the managed table under `SHARE ROW
+  EXCLUSIVE` on every tick; a call naming the key in `p_ids` (regrain's swap, `uninstall.sql`, or you) retries it
+  at once. Test `tests/322`; guard `bench/restore_one_step_backoff.sh`, mutation `restore_one_step_no_backoff`.
+  `docs/guide.md` now say so. Test `tests/322`.
 - **A regrain no longer wedges on a captured `text_time` key that lacks the declared shape** (#709, the
   reconcile's decode). `_regrain_reconcile` placed every captured key by `_grid_floor(_decode(key))`, and
   `_decode` raises `22P02` on a value the table accepts but that is too short or holds a character outside
