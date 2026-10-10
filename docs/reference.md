@@ -2765,12 +2765,15 @@ ObjectId key, finer or coarser than the unit: each fine bound is encoded by floo
 run would copy a row into one cell and apply a change made to it during the run to another, and a row
 deleted mid-regrain would come back at the swap; and for the same reason any target at all on such a key
 whose registered `partition_anchor` or `partition_step` is itself off the unit, which an older install could
-register: convert that table back with [`untransmute`](#untransmute) and transmute it again on whole units;
-likewise any target at all on a `time` key whose registered `partition_anchor` or `partition_step` is off the
-column's unit (a `date` grid anchored other than 00:00 UTC, a `timestamptz(0)` grid anchored off the second),
-which an install from before `transmute` held a time grid to its column's unit could register: the run would
-copy every sub-range and every swap would then fail, so it is refused with the same remedy, and the upgrade
-logs such a grid as `warn_grid_off_unit`; a domain is judged by its
+register (see the remedy below); likewise any target at all on a `time` key whose registered
+`partition_anchor` or `partition_step` is off the column's unit (a `date` grid anchored other than 00:00 UTC,
+a `timestamptz(0)` grid anchored off the second), which an install from before `transmute` held a time grid
+to its column's unit could register, and any fixed target (days, hours) on a `date` or `timestamp` key whose
+grid is recorded in a zone other than UTC (an install from before such a grid was recorded in UTC took the
+converting session's zone, so every bound sits at that zone's midnight rather than the column's; a zone whose
+offset is always zero, such as `Etc/UTC`, is UTC here, and a whole number of months round-trips and is not
+refused): the run would copy every sub-range and every swap would then fail, so each is refused with the same
+remedy, and the upgrade logs such a grid as `warn_grid_off_unit`; a domain is judged by its
 base type and typmod; a fractional step on an unconstrained `numeric` column is allowed), one coarser than
 `partition_step` (auto-regrain would reselect the same unsplittable child forever), and one whose fine
 names `<rel>_p<label>` would exceed PostgreSQL's 63-byte identifier limit.
@@ -2779,6 +2782,14 @@ message names the offending name and says how many bytes to shorten the table na
 The names asked about are the ones auto-regrain would render for every child it would split, at both ends
 of each, not only the anchor's: on a `numeric` key a cell's label grows with a fractional target's digits,
 so the cell after the anchor can need a longer name than the anchor itself.
+
+**The remedy for a grid registered off its column's unit or clock** is a reconversion, and it has a door.
+While every row is still in the original monolith, [`untransmute`](#untransmute) hands the table back and it
+can be transmuted again on whole units (a `date` or `timestamp` key's grid is now recorded in UTC whatever the
+session's zone). Once a row lives past the monolith (a forward partition holds one, or a regrain has split
+it), `untransmute` refuses it as a one-way door and pgpm has no in-place repair: create a new table like it,
+copy its rows in, swap the two tables' names and transmute the new one. Every refusal names this remedy,
+with the anchor and step (or the zone) the new conversion needs.
 
 Turning it **off while the run it started is in flight** abandons that run, exactly as
 [`regrain_cancel`](#regrain_cancel) would: the capture trigger and the `TRUNCATE` refusal come off, the
@@ -3369,7 +3380,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `archive_coverage_reset` | `pgpm.archive_ledger` rows were discarded because the coverage they record cannot be vouched for; `rows` carries how many chunks and `method` says why. Four causes: the partition they were recorded for has no write block in force on it (absent, disabled, or origin-only: coverage nothing has been guarding, see [`maintain`](#maintain) and [`retire`](#retire)); they were recorded under a `child_name` that is no longer a tracked partition of the parent, over a range a tracked partition now holds (a partition renamed without carrying the ledger, see [the archive step](#byte-budget-chunked-archiving)); a `regrain` swap dropped a partly archived source, whose chunks go with it (see [`regrain`](#regrain)); or `adopt_partition()` recorded a new relation under the name they were recorded for (see [`adopt_partition`](#adopt_partition)). In every case the partition holding the range archives again from its own `lo`. A chunk `retire()` marked retired (`pgpm.archive_ledger.retired_at`) is never discarded, by any of the four |
 | `archive_chunk_retired` | a step about to discard chunks by name, or as an orphan, found `pgpm.archive_ledger` rows whose relation (`child_oid`) no longer exists: their partition was dropped outside `retire()`, so their objects are the only copy of its rows. They were marked retired (`retired_at`) instead of discarded; `rows` carries how many chunks, `method` names the relation and its oid, and no partition over their range is archived (see [the ledger](#pgpmarchive_ledger)) |
 | `warn_replica_identity_nothing` | a partition was minted (by `obtain`, `extend_to` or a regrain's swap) for a parent whose `REPLICA IDENTITY USING INDEX` index was dropped, a state PostgreSQL treats as `NOTHING`, so the partition took `NOTHING` (see the replica identity paragraph under `transmute`). Logged at most once per transaction for the parent; `method` names the first such partition. Each one keeps `NOTHING` after the parent is given an identity again, so give it the identity by hand |
-| `warn_grid_off_unit` | re-running `install.sql` (the upgrade) found a `time` grid whose registered `partition_anchor` or `partition_step` is not a whole multiple of what its control column keeps (a `date` grid anchored other than 00:00 UTC, a `timestamptz(0)` grid anchored off the second), which an install from before `transmute` held a time grid to its column's unit could register. Every partition `obtain` mints on it is attached at other bounds than `pgpm.part` records, and every regrain of it is refused (see [`set_regrain`](#set_regrain)). `method` names the anchor, the step, the unit and the remedy: convert the table back with [`untransmute`](#untransmute) and transmute it again on whole units. Logged once per grid; every run of `install.sql` that finds it also raises it as a `WARNING` |
+| `warn_grid_off_unit` | re-running `install.sql` (the upgrade) found a `time` grid an install from before `transmute` held a time grid to its control column could register: one whose registered `partition_anchor` or `partition_step` is not a whole multiple of what the column keeps (a `date` grid anchored other than 00:00 UTC, a `timestamptz(0)` grid anchored off the second), on which every partition `obtain` mints is attached at other bounds than `pgpm.part` records and every regrain is refused, or a `date` or `timestamp` grid recorded in a zone other than UTC, whose bounds sit at that zone's midnight and on which every regrain toward a fixed step is refused (see [`set_regrain`](#set_regrain)). `method` names what is off and the remedy, a reconversion that `untransmute` can make only while every row is in the monolith (see the remedy under `set_regrain`). Logged once per grid; every run of `install.sql` that finds it also raises it as a `WARNING` |
 | `warn_obtain_unscheduled` | logged at most once per `maintain_all` sweep, with a null `parent_table`, when the `pgpm` cron job exists but `pgpm_obtain` doesn't -- obtain is silently not running |
 | `skip_obtain` / `skip_retain` / `skip_regrain` / `skip_regrain_capture` / `skip_archive` / `skip_write_block` / `skip_restore_fk` / `skip_validate_fk` | a step deferred (lock race or transient error; `method` carries the reason) |
 | `skip_transmute_reap` | `maintain_all`'s sweep found an abandoned conversion but could not take the table's lock within 5 s (a long transaction holds it), so it left the bound and the claim in place for the next tick rather than queue every read and write of the table behind it; `method` carries the lock timeout |
