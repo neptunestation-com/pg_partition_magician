@@ -161,7 +161,10 @@ begin
               where d.restored_at is null
                 and exists (select 1 from pg_class c where c.oid = d.parent_table)
                 and exists (select 1 from pgpm.config c where c.parent_table = d.parent_table) loop
-      perform pgpm.restore_incoming_fks(r.parent_table);
+      -- by id: a key whose one-step re-add failed recently is parked (#633), and only a call naming it in
+      -- p_ids retries it at once, which is what a re-run after clearing its orphan expects
+      perform pgpm.restore_incoming_fks(r.parent_table,
+                (select array_agg(d.id) from pgpm.dropped_fk d where d.parent_table = r.parent_table and d.restored_at is null));
     end loop;
 
     select string_agg(format('alter table %s add constraint %I %s (%s)',

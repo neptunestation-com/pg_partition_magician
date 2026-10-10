@@ -62,7 +62,14 @@ when `archive_fn` is unset; the reconciliation below applies unchanged.
    `fks_unvalidated > 0` for a parent means an incoming FK was re-added but is blocked from validation. (If
    instead `fks_suspended > 0`, the cutover's drop has not been restored yet and the FK is currently fully
    dropped: on a paused table no tick will restore it, so call `pgpm.restore_incoming_fks` before
-   reconciling -- see **Prevent**.)
+   reconciling -- see **Prevent**. One exception, before PostgreSQL 18: a key on a **partitioned**
+   referencing table, a self-referential one included, is re-added validated in one step, so an orphan
+   fails the re-add itself and the key stays dropped, logged `fail_restore_incoming_fk`. That failure parks
+   the key for five minutes, during which a plain `restore_incoming_fks('public.events')` returns 0 without
+   trying. Clear its orphans with steps 2 to 4 first (they are counted against the dropped key only once it
+   is back, so query the referencing table directly), then name the key to retry it at once:
+   `select pgpm.restore_incoming_fks('public.events', array[<id>])`, with `<id>` from
+   `select id, constraint_name from pgpm.dropped_fk where parent_table = 'public.events'::regclass and restored_at is null`.)
 
 2. List the blocked foreign keys and how many orphan rows each has:
 

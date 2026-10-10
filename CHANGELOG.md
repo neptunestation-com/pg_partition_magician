@@ -2,6 +2,58 @@
 
 ## [Unreleased]
 
+- **On PostgreSQL 18 a preserved key on a partitioned referencing table, or a self-referential one, comes back
+  `NOT VALID`, so its re-add no longer scans the table under a write-blocking lock** (#633). `restore_incoming_fks`
+  (maintain's tick, and every regrain swap) and `untransmute` re-added such a key in one validating step on every
+  version, which scanned the whole referencing table (for a self-referential key, the whole managed table) while
+  holding `SHARE ROW EXCLUSIVE` on the managed table, or the swap's and `untransmute`'s `ACCESS EXCLUSIVE`. On
+  18, which accepts `NOT VALID` on a partitioned table, both sites now re-add it `NOT VALID` like any other key,
+  validated on a later tick by `validate_incoming_fks` (after `untransmute`, by you, as its `NOTICE` says), and an
+  orphan written while it was suspended no longer keeps it dropped. PostgreSQL 15 to 17 refuse `NOT VALID` there, and their only scan-free route (a validated key
+  per partition, adopted by the parent) costs a constraint per pair of partitions and exhausts the lock table at a
+  few dozen of them, so on those versions the one-step validation stays, and `docs/reference.md` and
+  `docs/guide.md` now say so. Two consequences are handled with it. On 18 a managed table that references
+  another managed one can now hold that key `NOT VALID` (an orphan keeps it from validating), so its own
+  regrain's swap adds the key to each copy `NOT VALID`, under its own name (a validated twin of the same
+  definition does not stand in for it), just before the `ATTACH`, which adopts it without a scan,
+  and its drift check no longer reads a copy's validated key, carried under the name of the key the parent now
+  holds `NOT VALID`, as drift (by name and definition, so a validated key with a `NOT VALID` twin still matches),
+  and a restart that could not cure the drift (a probe copy made from the parent as it is differs from it too)
+  is refused rather than repeated; before,
+  the `ATTACH` validated it on every copy under `ACCESS EXCLUSIVE` and failed on the orphan every tick. And on
+  15 to 17 a one-step re-add that fails on an orphan is parked for five minutes (`dropped_fk.validate_retry_after`,
+  noted in its `fail_restore_incoming_fk` row) instead of rescanning the managed table under `SHARE ROW
+  EXCLUSIVE` on every tick; a call naming the key in `p_ids` (regrain's swap, `uninstall.sql`, or you) retries it
+  at once. Test `tests/322`; guard `bench/restore_one_step_backoff.sh`, mutation `restore_one_step_no_backoff`.
+  `docs/guide.md` now say so. Test `tests/322`.
+- **A regrain no longer wedges on a captured `text_time` key that lacks the declared shape** (#709, the
+  reconcile's decode). `_regrain_reconcile` placed every captured key by `_grid_floor(_decode(key))`, and
+  `_decode` raises `22P02` on a value the table accepts but that is too short or holds a character outside
+  the alphabet; one such key in the delta (an ordinary `DELETE` of a row the copy had already moved, or a row
+  any role with `INSERT` on the table writes into the delta) raised on every tick and at the swap until
+  `regrain_cancel`. The reconcile now decodes a key only when `_text_time_shaped` accepts it, and reconciles an
+  off-shape key into the fine child whose encoded bounds hold it, where the copy put its row; one no fine
+  child holds is discarded as `regrain_reconcile_aged` below the retention horizon and refused above it, as a
+  decoded key is. Test `tests/323`; guard `bench/regrain_reconcile_unshaped_key.sh`, mutations
+  `regrain_reconcile_decodes_unshaped_key` and `regrain_reconcile_drops_unshaped_key`.
+- **An upgrade from v0.6.0 no longer holds its archived partitions for good** (#1160). The upgrade that adds
+  `pgpm.archive_ledger.child_oid` attributed a pre-existing chunk only to a partition whose write block was enabled
+  `ALWAYS`, but every release through v0.6.0 created the block origin-only (only the first `maintain` tick after
+  the upgrade repairs it) and v0.6.0 removed it from a partition retention stopped reaching, so the upgrade marked
+  every live archived partition's chunks retired and the partition was held (`skip_archive_retired_range`), never
+  archived again or dropped. The backfill now attributes on identity: the oid pgpm recorded when it created the
+  partition, still held by its name, with the block `ALWAYS`, origin-only or absent; the first tick then discards
+  that coverage (`archive_coverage_reset`), archives the partition again from its `lo`, and retention drops it as
+  before. An oid the same upgrade adopted from whatever held the name (an upgrade straight from v0.5.0 or older,
+  recorded in a table that lives only until the backfill has run) vouches for nothing, whatever the block, so its
+  chunk is still marked retired and a partition re-created by hand under a dropped one's name is held rather than
+  archived over the only copy; so is one under a block disabled or set replica-only by hand. Test `tests/314`
+  (and `tests/309` part S now records the adoption it simulates); guard
+  `bench/ledger_backfill_origin_only_block.sh`, mutations `archive_ledger_backfill_origin_only_retired`,
+  `archive_ledger_backfill_lifted_retired`, `archive_ledger_backfill_hand_state_attributed`,
+  `archive_ledger_backfill_adopted_blocked_attributed`, `archive_ledger_upgrade_adoption_unrecorded`, and
+  `archive_ledger_backfill_unblocked_attributed` re-pointed at the adoption clause.
+
 - **`from_hypertable_cutover` reads the copy only under a lock that keeps the drains out of it until the swap**
   (#1158). The cutover read the copy's catch-up watermark and its conservation baseline before it locked
   anything, assuming nothing wrote the copy from there to the swap, but the drains (documented as drivable

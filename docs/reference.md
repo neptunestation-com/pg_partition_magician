@@ -643,8 +643,10 @@ select format('alter table %s validate constraint %I', conrelid::regclass, conna
 Validate them before converting the table again with `p_incoming_fks => 'preserve'`, too: `transmute`
 refuses an incoming key that is `NOT VALID` (see `p_incoming_fks` under [`transmute`](#transmute-time--uuidv7--text_time-grid)).
 
-A partitioned referencing table cannot hold a `NOT VALID` key, so its key is re-added validated in one step,
-as `restore_incoming_fks` does.
+On PostgreSQL 18 a key on a partitioned referencing table comes back `NOT VALID` too, with the same
+`NOTICE`. Before 18 a partitioned referencing table cannot hold a `NOT VALID` key, so its key is re-added
+validated in one step, as `restore_incoming_fks` does there: the scan of the referencing table runs under the
+`ACCESS EXCLUSIVE` this call holds on the restored table, and an orphan in it fails the reverse.
 
 It is a **one-way door** once any row lives outside the monolith's range -- a forward partition after the
 frontier crosses `B`, or the finer children a regrain's swap has put in the monolith's place -- because a
@@ -1413,7 +1415,11 @@ silence triggers, is refused exactly as an ordinary session is. A block an older
 origin-only state is brought up to `ALWAYS` by the first `maintain` tick after `install.sql` is re-run.
 Only a block enabled `ALWAYS` counts as a write block: one in any other state (origin-only, or disabled
 by hand) is treated as no block at all, so the coverage recorded under it is discarded as described
-below, and the archive step does not archive the partition until the block is `ALWAYS`.
+below, and the archive step does not archive the partition until the block is `ALWAYS`. The one reader
+that looks at the block's state for another purpose is the upgrade that adds
+`pgpm.archive_ledger.child_oid`, which uses it only to tell a state pgpm leaves (`ALWAYS`, origin-only,
+absent) from one only an operator leaves (disabled, replica-only); what it attributes a chunk on is the
+partition's recorded oid (see [the ledger](#pgpmarchive_ledger)).
 
 `retire` never widens what retention may drop -- a caller only picks **which** eligible partition and
 **when**. It refuses (raises) an unmanaged table, a table with no retention policy (`config.retain` is
@@ -1708,7 +1714,14 @@ complete, K children attached), or a soft no-progress status: `active` (not froz
 (the step does not subdivide). This is the unit `maintain` paces across ticks; because it copies, the
 cross-tick path opens **no** read gap. Its incoming-FK touch is the swap's `DETACH`, which transiently
 drops and re-adds any incoming FK within that single transaction. Outgoing FKs are carried onto each fine
-child while it is still empty, so the swap never validates one under its lock.
+child while it is still empty, so the swap never validates one under its lock. A `NOT VALID` outgoing key
+on the parent (on PostgreSQL 18, `restore_incoming_fks` leaves one on a managed table that references another
+managed one while an orphan keeps it from validating) cannot go on a copy then, since it would refuse that
+orphan as it is copied in; the swap adds it to each copy `NOT VALID`, under its own name, just before the
+`ATTACH`, which checks no row and adopts it as it is, so the parent keeps it `NOT VALID` and
+`validate_incoming_fks` validates it later. A copy that already holds a key under that name (made while the
+parent's was still validated) keeps it instead; one that holds only a validated twin of the same definition
+under another name gets the `NOT VALID` one as well, so each parent key has its own copy key to adopt.
 
 Committed DML against the source while a regrain is in flight is honoured. A trigger on the source records
 changed keys into a per-parent delta table, and a reconcile pass treats the **source** as the authority for
@@ -1846,7 +1859,8 @@ added or dropped, or an outgoing foreign key added, dropped or redefined, reache
 while the copy, the reconcile and the swap's `ATTACH` all need the parent's current columns and
 constraints. Every tick that resumes a run compares each copy's columns (name, type, collation, `NOT
 NULL`, generated), `CHECK` constraints (name and expression) and outgoing foreign keys (definition; a
-`NOT VALID` key on the parent is not carried, so not compared) with the parent's first. A copy made
+`NOT VALID` key on the parent is carried by the swap rather than onto the copy, so it is not compared, nor is a
+copy's key under that key's own name and definition, made while it was still validated) with the parent's first. A copy made
 before a key was added would otherwise reach the swap without it, and `ATTACH` would validate the key by
 scanning the copy under the swap's lock; restarted, every copy is made again carrying the key, validated
 while it is empty. It also compares the source with what the run recorded when it began copying
@@ -1862,7 +1876,12 @@ took for a new column: a volatile default (`nextval`, `clock_timestamp()`) gave 
 `now()` the instant of the `ALTER`, which re-evaluating the default in a copy would not reproduce. A
 restart costs the copying done so far, so schedule such migrations between regrains of a large partition
 when you can. A rewrite that changes no value (`VACUUM FULL`, `CLUSTER`, `SET TABLESPACE` on the source)
-cannot be told from one that does, so it restarts the run too. Defaults, statistics targets, storage and
+cannot be told from one that does, so it restarts the run too. Before restarting for its copies' shape, the
+tick makes one probe copy from the parent as it is, the way it makes its copies, compares it the same way and
+drops it. If even that copy differs from the parent (something alters every table created, such as an event
+trigger), a restart could not cure the drift, so the tick refuses instead, dropping nothing and raising with
+what differs; remove the cause, or abandon the run with `regrain_cancel`. Any drift a fresh copy does not
+show, however often it recurs, restarts the run. Defaults, statistics targets, storage and
 indexes are not compared: the copy inserts explicit values, and `ATTACH` builds an index the parent gained.
 A run that has copies but no recorded mark restarts the same way, since nothing says what its copies were
 made from. That is a regrain already in flight when you upgrade from a release that did not record the
@@ -1889,6 +1908,13 @@ whose sub-range has **no** fine child is discarded, and logged `regrain_reconcil
 sub-range lies below the retention horizon, which is the one case in which no child was ever made. In any
 other case the tick fails rather than discarding the change, and the key stays in the delta; under
 `maintain` that surfaces as a `skip_regrain` row carrying the error.
+
+On a `text_time` key, a captured value the table accepted but that lacks the declared shape (shorter than
+the prefix and digit width, or holding a character outside the alphabet) is never decoded: it is reconciled
+into the fine child whose encoded bounds hold it, which is where the copy put its row, and counted in the
+same `regrain_reconcile` row as every other key. When no fine child holds it, the same horizon rule decides,
+over the run of sub-ranges with no child that it falls in: discarded and logged `regrain_reconcile_aged`
+when that run lies below the horizon, a failed tick otherwise.
 
 The first tick installs the capture and copies nothing, so budget one tick more than the microbatch count.
 
@@ -3226,6 +3252,26 @@ managed parent; validating in the same statement would hold that block across a 
 referencing table, so writes to your managed table would stall for a time set by a table pgpm does not
 own. Split, the blocking part is instant and the scan runs later under a lock that blocks no writes.
 
+The split covers a **partitioned** referencing table, and a self-referential key (whose referencing table
+is the managed table itself), on PostgreSQL 18 only. PostgreSQL 15 to 17 refuse `NOT VALID` on a
+partitioned referencing table, so there pgpm re-adds such a key **validated in one step**: the statement
+scans the whole referencing table (for a self-referential key, the whole managed table) while it blocks
+writes to it and to the managed table: at the re-add after the conversion, and again at every regrain
+swap, inside the swap's `ACCESS EXCLUSIVE`. An orphan written while the key was suspended fails that
+validation and leaves the key dropped, logged `fail_restore_incoming_fk`, until you delete the orphan.
+Because the attempt is the scan, a failed one is parked for five minutes (`dropped_fk.validate_retry_after`,
+the back-off `validate_incoming_fks` keeps), and the log row says so: `maintain` retries the key at most
+every five minutes while the orphan stands, not on every tick. A call that names the key's
+`pgpm.dropped_fk.id` in `p_ids` retries it at once, which is how to get it back as soon as you have deleted
+the orphan; regrain's swap and `uninstall.sql` name theirs that way too.
+The only scan-free route those versions offer, a `NOT VALID` key on every partition, validated and then
+adopted by the parent's `ADD`, creates a constraint with its triggers for every pair of referencing and
+referenced partitions, and the adopting `ADD` locks every one of them: measured on PostgreSQL 15, 40
+partitions of a self-referential table made 1,640 such constraints and the `ADD` took 5,056 locks, which a
+default `max_locks_per_transaction` stops allowing a few partitions later. So pgpm does not take it. If the
+scan is a write pause you cannot afford, upgrade to PostgreSQL 18: the version is read at each re-add, so
+from then on these keys come back `NOT VALID` as well.
+
 ### `validate_incoming_fks`
 
 ```sql
@@ -3423,6 +3469,7 @@ Preserve-managed incoming FKs and their lifecycle.
 | `definition` | `text` | the captured FK definition, naming the referenced table schema-qualified as it was named at the capture. It is a record, not the statement replayed: every re-add points it at the table the record names by OID, under its name and schema as they are then (`parent_table` for `restore_incoming_fks` and regrain's swap, the restored table for `untransmute`), so a table moved with `SET SCHEMA` or renamed since gets its key back, and a table that took its old name does not |
 | `restored_at` | `timestamptz` | null = dropped (RI off); set = re-added |
 | `validated_at` | `timestamptz` | set = fully validated; null with `restored_at` set = re-added `NOT VALID` (orphans pending) |
+| `validate_retry_after` | `timestamptz` | the back-off after a failed attempt that scans: a `VALIDATE` (`validate_incoming_fks` on a tick), or before PostgreSQL 18 a one-step re-add of a partitioned referencer's key (`restore_incoming_fks` without `p_ids`); not retried before then |
 | `dropped_at` | `timestamptz` | when the FK was captured and dropped |
 
 A record names its referencing table by OID, and nothing ties the two together after the capture, so
@@ -3497,13 +3544,25 @@ adopted, is held like any partition over a retired chunk (its rows are already i
 
 Re-running `install.sql` over an install that predates the columns adds them. `retired_at` is set on the
 chunks already retired where `pgpm.log` shows it: a row archived no later than a `retain_drop` logged over a
-range holding it. `child_oid` is set from the oid `pgpm.part` records for the row's name, but only when the
-relation holding that name is that oid and carries pgpm's write block (enabled `ALWAYS`): a chunk describes a
-relation's contents only because the block has been on that relation since its first chunk, and a name alone
-cannot tell the partition pgpm archived from one re-created under its name after a hand drop, which the upgrade's
-anchoring of `pgpm.part` attaches to whatever holds the name. A row under an unblocked relation is marked retired
-instead (a partition whose block was lifted by hand would have had that coverage discarded by the next tick
-anyway; marking it is the safe side of the same judgement). A row whose name no
+range holding it. `child_oid` is set from the oid `pgpm.part` records for the row's name when that oid is the
+partition's identity: an oid pgpm recorded when it created the partition (every release from v0.6.0 records
+one), still held by the name. An oid this same upgrade adopted for a row that had none (an install from before
+v0.6.0, whose `pgpm.part` rows are anchored to whatever holds each name as `install.sql` runs) is not identity,
+because a name alone cannot tell the partition pgpm archived from one re-created under its name after a hand drop,
+and a pgpm before v0.6.0 write-blocked such a successor just as it did the original: a chunk under an adopted oid
+is marked retired, whatever the block, and the partition over its range is held rather than archived over the
+only copy. So an upgrade straight from v0.5.0 or older holds every partition it had archived, recoverable by the
+logged remedy; one from v0.6.0 does not. What this cannot see: an install upgraded to v0.6.0 from an older
+release had its oids adopted by that upgrade, which recorded nothing about it, so they count as recorded here, and
+a partition re-created by hand under a dropped one's name before that upgrade (and not dropped by it since) is
+attributed the dropped one's chunks. Under an identity oid, the block decides only whether pgpm kept the
+coverage: a block enabled `ALWAYS`, origin-only (how every release through v0.6.0 created it; the first
+`maintain` tick after the upgrade brings it up to `ALWAYS`) or absent (v0.6.0 removed the block from a partition
+retention no longer reached, and kept its chunks) attributes the chunk. The first tick then discards the coverage
+it finds under a block that is not `ALWAYS` (`archive_coverage_reset`, see [`maintain`](#maintain)) and the
+partition is archived again from its `lo` and retired as usual. A block present but disabled or set replica-only
+is a state only an operator leaves, so its chunk is marked retired instead (the next tick would discard that
+coverage anyway; marking it is the safe side of the same judgement). A row whose name no
 `pgpm.part` row records is marked retired, whether or not a relation has that name now: nothing vouches that the
 relation is the one the chunk was read from (a partition dropped by hand and re-created under its own name has
 the name and none of the rows), so a partition adopted over its range is held, recoverable by the logged remedy,
@@ -3512,8 +3571,8 @@ anchor, because its partition no longer exists), and a row whose recorded oid no
 renamed before the upgrade, its coverage left under the old name, looks the same as one dropped by hand, so the
 renamed partition is held too; its `skip_archive_retired_range` row then also names the remedy that is safe for a
 rename only: delete the retired rows recorded under the old name, once you have confirmed the partition holds the
-range, and it archives afresh. Afterwards every row recorded before the columns is attributed to a write-blocked
-relation `pgpm.part` records for its name, or is marked retired, and every row pgpm writes since carries an oid, so a
+range, and it archives afresh. Afterwards every row recorded before the columns is attributed to the relation
+pgpm created under its name, or is marked retired, and every row pgpm writes since carries an oid, so a
 null `child_oid` comes only from a row written by hand; such a row counts as its partition's by name, and is
 marked retired by the first step that finds its name resolving to no relation.
 
