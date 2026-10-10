@@ -5162,6 +5162,53 @@ $$;''',
         [('  check "LIVENESS: $2: the lock race really happened: skip_obtain with a lock timeout" \\\n',
           '  check "$2: LIVENESS: the lock race really happened: skip_obtain with a lock timeout" \\\n', 1)],
     ),
+    "witness_label_backoff_unprefixed": (
+        "bench/liveness_witness_labels.sh",
+        "Pre-#1175 bench/obtain_backoff_headroom.sh: the premise that the back-off is still in the future before "
+        "the low-headroom tick (header item 4, there so assertion 5 cannot pass merely because 30 s elapsed) "
+        "prints without its LIVENESS: prefix, so a run whose back-off lapsed, the bypass under test never "
+        "exercised, and which failed only that premise is certified by bench/discriminate.sh as a catch. One "
+        "site: the label's prefix.",
+        [('check "LIVENESS: ob_race: the back-off is still in the future before the low-headroom tick" \\\n',
+          'check "ob_race: the back-off is still in the future before the low-headroom tick" \\\n', 1)],
+    ),
+    "witness_label_scan_witness_unprefixed": (
+        "bench/liveness_witness_labels.sh",
+        "Pre-#1146 bench/transmute_lock.sh: the witness that the probe caught the validation scan in progress "
+        "(the header's positive evidence that the lock question was asked inside the window) prints without its "
+        "LIVENESS: prefix, so a probe that sampled outside the scan and failed only that witness is certified by "
+        "bench/discriminate.sh as catching transmute_no_commits. One site: the label's prefix.",
+        [('check "LIVENESS: the probe caught the validation scan in progress" "$CAUGHT" "true"\n',
+          'check "the probe caught the validation scan in progress" "$CAUGHT" "true"\n', 1)],
+    ),
+    "witness_label_on_defect_check": (
+        "bench/liveness_witness_labels.sh",
+        "The plausible wrong fix of #1146 (F8-09 proposes it): bench/upgrade_in_place.sh's check that "
+        "DEGRADE_COLS names every backfilled column reads like a precondition and is given a GUARD: prefix, but "
+        "it is the one check mutation upgrade_degrade_list_drift exists to fail, so bench/discriminate.sh now "
+        "refuses that mutant's catch as a starved fixture and the guard reads unverified. One site: the prefix.",
+        [('check "DEGRADE_COLS names every backfilled column" "${unlisted:-none}" "none"\n',
+          'check "GUARD: DEGRADE_COLS names every backfilled column" "${unlisted:-none}" "none"\n', 1)],
+    ),
+    "witness_label_precondition_word": (
+        "bench/liveness_witness_labels.sh",
+        "Pre-#1033 bench/upgrade_unanchored_cell.sh: the premise that the origin release has no "
+        "pgpm.part.child_oid is labelled `precondition:`, a word bench/discriminate.sh's starved() does not "
+        "read, so a run whose origin already had the column, the unanchored state never built, and which "
+        "failed only that premise is certified as a catch. One site: the label's word.",
+        [('check "LIVENESS: the origin has no pgpm.part.child_oid" \\\n',
+          'check "precondition: the origin has no pgpm.part.child_oid" \\\n', 1)],
+    ),
+    "witness_label_test_tag_before_prefix": (
+        "bench/liveness_witness_labels.sh",
+        "Pre-#1033 tests/296_regrain_children_tablespace_test.sql (F15r2-02): the file's first witness carries "
+        "its part tag before the LIVENESS marker, `A LIVENESS: ...`. bench/regrain_children_tablespace.sh "
+        "echoes the file's `not ok` lines and bench/discriminate.sh's starved() reads a premise only at the head "
+        "of a description, so a mutant that starved the conversion and failed only that witness is certified "
+        "as a catch. One site: the label's tag.",
+        [("  'LIVENESS: (A) the parent and the monolith holding ids 1..150 are both in pgpm_t296_<database>');\n",
+          "  'A LIVENESS: the parent and the monolith holding ids 1..150 are both in pgpm_t296_<database>');\n", 1)],
+    ),
     "discriminate_counts_uninstallable": (
         "bench/discriminate_installs.sh",
         "Pre-#601 bench/discriminate.sh: a mutant is never installed before its guard runs, so a mutation "
@@ -9308,6 +9355,12 @@ MUTATION_SRC = {
     # #1095: a guard's liveness witness printed where discriminate.sh's starved() cannot read it.
     "witness_label_unprefixed": "bench/maintain_lock.sh",
     "witness_label_prefix_behind_tag": "bench/obtain_backoff_headroom.sh",
+    # #1175, #1146 b1, #1033 b3: premises unprefixed, misspelled, or a defect check prefixed.
+    "witness_label_backoff_unprefixed": "bench/obtain_backoff_headroom.sh",
+    "witness_label_scan_witness_unprefixed": "bench/transmute_lock.sh",
+    "witness_label_on_defect_check": "bench/upgrade_in_place.sh",
+    "witness_label_precondition_word": "bench/upgrade_unanchored_cell.sh",
+    "witness_label_test_tag_before_prefix": "tests/296_regrain_children_tablespace_test.sql",
     "discriminate_counts_uninstallable": "bench/discriminate.sh",
     "discriminate_list_on_stdin": "bench/discriminate.sh",
     "discriminate_counts_liveness_only": "bench/discriminate.sh",

@@ -33,7 +33,7 @@ select is(
   array['10000000000000000000' ~ '^[0-9]{19}$', '0000000000000000001_5' ~ '^[0-9]{19}$',
         '0000000000000000-10' ~ '^[0-9]{19}$', '0000000000001030000' ~ '^[0-9]{19}$'],
   array[false, false, false, true],
-  'witness: the first three labels lack the pre-#582 shape, so each is a name the old check let through; the control has it');
+  'LIVENESS: the first three labels lack the pre-#582 shape, so each is a name the old check let through; the control has it');
 
 create table public.t215a (id numeric primary key, v text);
 insert into public.t215a values (9500000000000000000, 'x'), (9600000000000000000, 'y');
@@ -81,7 +81,7 @@ insert into public.t215a values (10500000000000000000, 'past 10^19');
 select is(
   (select tableoid::regclass::text from public.t215a where id = 10500000000000000000),
   't215a_p10000000000000000000',
-  'liveness: with the domain gone, obtain builds the cell [10^19, 1.1*10^19) under that name and a write lands in it');
+  'LIVENESS: with the domain gone, obtain builds the cell [10^19, 1.1*10^19) under that name and a write lands in it');
 select is(
   (select count(*)::int from pgpm.log where parent_table = 'public.t215a'::regclass and action = 'fail_obtain_name'),
   0,

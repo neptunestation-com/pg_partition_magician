@@ -48,13 +48,13 @@ select child_name as ai_sib from pgpm.part
 select format('public.%I', :'ai_doomed')::regclass::oid as ai_real \gset
 
 select is((select count(*)::int from public.ai102 where id < 1000), 7,
-  'setup: the monolith holds 7 rows');
+  'fixture: the monolith holds 7 rows');
 select is((select count(*)::int from public.ai102 where id >= 1000 and id < 2000), 3,
-  'setup: the sibling holds 3 -- a different count, so neither can stand in for the other');
+  'fixture: the sibling holds 3 -- a different count, so neither can stand in for the other');
 select is(
   (select count(*)::int from pgpm.part
     where parent_table = 'public.ai102'::regclass and attached and hi::numeric <= 2000),
-  2, 'setup: exactly two partitions are past the retention horizon');
+  2, 'fixture: exactly two partitions are past the retention horizon');
 
 -- the write blocks a maintain() tick installs, before anything is disturbed
 select pgpm._enforce_write_blocks('public.ai102');

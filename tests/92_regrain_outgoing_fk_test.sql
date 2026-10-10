@@ -36,7 +36,7 @@ create table public.ofk92 (id bigint primary key, ref_id int not null references
 -- enforces after regrain" below cannot be satisfied by a fixture that never enforced anything.
 select throws_ok(
   $$ insert into public.ofk92 values (1, 999, 'orphan') $$,
-  '23503', null, 'setup: the plain table rejects a ref_id that does not exist in ofk92_ref');
+  '23503', null, 'fixture: the plain table rejects a ref_id that does not exist in ofk92_ref');
 
 -- every row carries its own payload, so a swap that rewrites a key, or hands one row's values to
 -- another, cannot hide behind identical 'x' rows in the identity check at the end

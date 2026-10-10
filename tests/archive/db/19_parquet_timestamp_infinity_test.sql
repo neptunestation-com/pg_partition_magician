@@ -36,11 +36,11 @@ insert into public.inf19 values
 -- ---------------------------------------------------------------------------
 
 select throws_ok($$ select round(extract(epoch from 'infinity'::timestamptz) * 1000000)::int8 $$, '0A000', 'cannot convert infinity to bigint',
-  'witness: the cast the encoder used raises for an infinite timestamptz');
+  'LIVENESS: the cast the encoder used raises for an infinite timestamptz');
 
 select is((select array_agg(isfinite(ts) order by id) || array_agg(isfinite(tstz) order by id) from public.inf19),
   array[false, true, false, false, true, false],
-  'witness: rows 1 and 3 hold an infinity in both columns, row 2 is finite');
+  'LIVENESS: rows 1 and 3 hold an infinity in both columns, row 2 is finite');
 
 -- ---------------------------------------------------------------------------
 -- The encoder writes them, as the sentinels
@@ -88,12 +88,12 @@ update pgpm.config set retain_batch = 0 where parent_table = 'public.infm19'::re
 select pgpm.set_archive_fn('public.infm19', 'pgpm.archive_to_s3_parquet(regclass,name,text,text)'::regprocedure);
 
 select is((select archive_batch from pgpm.config where parent_table = 'public.infm19'::regclass), 1,
-  'witness: archive_batch is at its default of 1, so a wedged oldest partition holds up the next');
+  'LIVENESS: archive_batch is at its default of 1, so a wedged oldest partition holds up the next');
 select is((select array_agg(lo::bigint order by lo::bigint) from pgpm.part
             where parent_table = 'public.infm19'::regclass and lo::bigint in (0, 10000)),
-  array[0, 10000]::bigint[], 'witness: partitions [0, 10000) and [10000, 20000) exist below the 40000 horizon');
+  array[0, 10000]::bigint[], 'LIVENESS: partitions [0, 10000) and [10000, 20000) exist below the 40000 horizon');
 select is((select expires_at from public.infm19 where id = 7), 'infinity'::timestamptz,
-  'witness: row 7, in the older partition, expires at infinity');
+  'LIVENESS: row 7, in the older partition, expires at infinity');
 
 call pgpm.maintain('public.infm19');
 call pgpm.maintain('public.infm19');

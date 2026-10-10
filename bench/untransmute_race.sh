@@ -155,7 +155,7 @@ for _ in $(seq 1 100); do
   [ "${w_holds:-0}" = "1" ] && break
   sleep 0.1
 done
-check "the writer holds ROW EXCLUSIVE on the parent (its insert is in flight)" "${w_holds:-0}" "1"
+check "LIVENESS: the writer holds ROW EXCLUSIVE on the parent (its insert is in flight)" "${w_holds:-0}" "1"
 
 # ---- untransmute, in a session of its own, against a table whose late row it cannot yet see ----
 docker exec "$C" psql -U postgres -d "$DB" -qtA -v ON_ERROR_STOP=1 \

@@ -41,15 +41,15 @@ create temporary table nx_clone as
      and (select indrelid from pg_index where indexrelid = h.inhrelid) = :nx_mon;
 select is((select array_agg(parent_name order by parent_name) from nx_clone),
   array['nx221_code_uq', 'nx221_v_idx', 'nx221_vk_uidx', 'nx221_w_idx_pgpm'],
-  'A LIVENESS: each of the parent''s indexes has its copy on the monolith');
+  'LIVENESS: (A) each of the parent''s indexes has its copy on the monolith');
 select ok((select bool_and(clone_name <> parent_name) from nx_clone where parent_name <> 'nx221_w_idx_pgpm'),
-  'A LIVENESS: the three made since the conversion sit on the monolith under names that are not the parent''s');
+  'LIVENESS: (A) the three made since the conversion sit on the monolith under names that are not the parent''s');
 select is((select clone_oid from nx_clone where parent_name = 'nx221_w_idx_pgpm'), :w_idx::oid,
-  'A LIVENESS: the carried index''s copy is the table''s original nx221_w_idx');
+  'LIVENESS: (A) the carried index''s copy is the table''s original nx221_w_idx');
 select lives_ok($$ insert into public.nx221 values (3, 30, 'dup', null) on conflict on constraint nx221_code_uq do nothing $$,
-  'A LIVENESS: ON CONFLICT ON CONSTRAINT nx221_code_uq works on the managed table');
+  'LIVENESS: (A) ON CONFLICT ON CONSTRAINT nx221_code_uq works on the managed table');
 
-select is(pgpm.untransmute('public.nx221')::text, 'nx221', 'A LIVENESS: nx221 is restored');
+select is(pgpm.untransmute('public.nx221')::text, 'nx221', 'LIVENESS: (A) nx221 is restored');
 select is((select array_agg(c.relname::text order by c.relname) from pg_index i join pg_class c on c.oid = i.indexrelid
             where i.indrelid = 'public.nx221'::regclass),
   array['nx221_code_uq', 'nx221_pkey', 'nx221_v_idx', 'nx221_vk_uidx', 'nx221_w_idx'],
@@ -89,8 +89,8 @@ select is((select array_agg(c.relname::text order by c.relname) from pg_index i 
               and i.indisprimary)
            || (select array_agg(conname::text) from pg_constraint where conrelid = 'public.lg221'::regclass and contype = 'p'),
   array['lg221_pkey', 'lg221_pkey1'],
-  'B LIVENESS: the monolith''s key is the original lg221_pkey and the parent''s is the auto-named lg221_pkey1');
-select is(pgpm.untransmute('public.lg221')::text, 'lg221', 'B LIVENESS: lg221 is restored');
+  'LIVENESS: (B) the monolith''s key is the original lg221_pkey and the parent''s is the auto-named lg221_pkey1');
+select is(pgpm.untransmute('public.lg221')::text, 'lg221', 'LIVENESS: (B) lg221 is restored');
 select is((select array_agg(c.relname::text || ' ' || (c.oid = :lg_key)::text order by c.relname)
              from pg_index i join pg_class c on c.oid = i.indexrelid where i.indrelid = 'public.lg221'::regclass),
   array['lg221_pkey true', 'lg221_v_idx false'],

@@ -28,9 +28,9 @@ insert into public.nk21 values (1, 'z', 9), (5, 'a', 1), (5, 'b', 2), (6, 'c', 3
 -- ---------------------------------------------------------------------------
 
 select is(archive._key_columns('public.nk21'), null::name[],
-  'witness: public.nk21 has no primary key or unique constraint');
+  'LIVENESS: public.nk21 has no primary key or unique constraint');
 select is((select count(*) - count(distinct id) from public.nk21), 1::bigint,
-  'witness: two of its rows tie on the control column id');
+  'LIVENESS: two of its rows tie on the control column id');
 
 -- ---------------------------------------------------------------------------
 -- The encoder archives it, one row per row
@@ -58,7 +58,7 @@ select ok(
   'the tied rows keep their own values: tag and n are paired (a, 1) and (b, 2) in whichever order the tie took');
 
 select ok((select length(bytes) > :n_off + 16 from t21.enc where label = 'range'),
-  'witness: the n page read above lies inside the file, with the footer after it');
+  'LIVENESS: the n page read above lies inside the file, with the footer after it');
 
 -- ---------------------------------------------------------------------------
 -- The issue's tick: a keyless partitioned table is archived, not skipped
@@ -73,9 +73,9 @@ select mk_archive_config('nkm21', false);
 update pgpm.config set retain_batch = 0 where parent_table = 'public.nkm21'::regclass;
 
 select is(archive._key_columns('public.nkm21'), null::name[],
-  'witness: the transmuted parent is keyless too');
+  'LIVENESS: the transmuted parent is keyless too');
 select is((select count(*) from pgpm.part where parent_table = 'public.nkm21'::regclass and lo::bigint = 0), 1::bigint,
-  'witness: the partition [0, 10000) exists below the 40000 horizon');
+  'LIVENESS: the partition [0, 10000) exists below the 40000 horizon');
 
 select lives_ok($$ select pgpm.set_archive_fn('public.nkm21', 'pgpm.archive_to_s3_parquet(regclass,name,text,text)'::regprocedure) $$,
   'pgpm.set_archive_fn accepts the Parquet strategy for the keyless table');

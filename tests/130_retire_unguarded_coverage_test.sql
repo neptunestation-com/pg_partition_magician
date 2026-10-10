@@ -64,29 +64,29 @@ select pgpm._enforce_write_blocks('public.rs130a');
 do $$ begin for i in 1..6 loop perform pgpm._archive_step('public.rs130a'); end loop; end $$;
 
 select ok(pgpm._archive_fully_covered('public.rs130a', :'a_mono') and pgpm._archive_fully_covered('public.rs130a', :'a_sib'),
-  'LIVENESS A: the monolith and the sibling are both fully archive-covered');
+  'LIVENESS: (A) the monolith and the sibling are both fully archive-covered');
 select results_eq(
   $$ select child_name, lo, hi from pgpm.archive_ledger where parent_table = 'public.rs130a'::regclass order by child_name, lo::numeric $$,
   format($$ values (%1$L::name, '0'::text, '600'::text), (%1$L::name, '600', '1000'), (%2$L::name, '1000', '1600'), (%2$L::name, '1600', '2000') $$,
          :'a_mono', :'a_sib'),
-  'LIVENESS A: the monolith is covered by two chunks and the sibling by two, under their own names');
+  'LIVENESS: (A) the monolith is covered by two chunks and the sibling by two, under their own names');
 select results_eq(
   $$ select id from pgpm_test130.handed where parent = 'public.rs130a'::regclass order by id $$,
   $$ values (1::bigint), (2::bigint), (3::bigint), (1500::bigint) $$,
-  'LIVENESS A: ids 1, 2, 3 and 1500 were each handed to the strategy exactly once');
+  'LIVENESS: (A) ids 1, 2, 3 and 1500 were each handed to the strategy exactly once');
 
 -- the block leaves by a path pgpm did not guard (the hand edit #452 names), and a row lands
 select format('drop trigger pgpm_write_block on public.%I', :'a_mono') as a_dropsql \gset
 :a_dropsql;
 insert into public.rs130a (id, payload) values (500, 'written while unblocked');
 
-select ok(not pgpm._is_write_blocked('public.rs130a', :'a_mono'), 'LIVENESS A: the monolith''s write block is gone');
-select ok(pgpm._is_write_blocked('public.rs130a', :'a_sib'), 'LIVENESS A: the sibling''s write block is still on');
+select ok(not pgpm._is_write_blocked('public.rs130a', :'a_mono'), 'LIVENESS: (A) the monolith''s write block is gone');
+select ok(pgpm._is_write_blocked('public.rs130a', :'a_sib'), 'LIVENESS: (A) the sibling''s write block is still on');
 select results_eq(format($$ select id from public.%I order by id $$, :'a_mono'),
   $$ values (1::bigint), (2::bigint), (3::bigint), (500::bigint) $$,
-  'LIVENESS A: row 500 landed in the monolith, beside 1, 2, 3');
+  'LIVENESS: (A) row 500 landed in the monolith, beside 1, 2, 3');
 select ok(pgpm._archive_fully_covered('public.rs130a', :'a_mono'),
-  'LIVENESS A: the stale watermark still reads as full coverage of the monolith, so the old retire() would drop it');
+  'LIVENESS: (A) the stale watermark still reads as full coverage of the monolith, so the old retire() would drop it');
 
 -- an external retirement actor calls the sanctioned single-partition drop directly
 select is(pgpm.retire('public.rs130a', :'a_mono'), false,
@@ -143,9 +143,9 @@ select pgpm.set_archive_fn('public.rs130c', 'pgpm_test130.recorder(regclass,name
 insert into public.rs130c (id, payload) values (20000, 'frontier');
 select child_name as c_mono from pgpm.part where parent_table = 'public.rs130c'::regclass and lo = '0' \gset
 
-select ok(not pgpm._is_write_blocked('public.rs130c', :'c_mono'), 'LIVENESS C: the child has never been write-blocked');
+select ok(not pgpm._is_write_blocked('public.rs130c', :'c_mono'), 'LIVENESS: (C) the child has never been write-blocked');
 select ok(not exists (select 1 from pgpm.archive_ledger where parent_table = 'public.rs130c'::regclass),
-  'LIVENESS C: and no coverage is recorded for it');
+  'LIVENESS: (C) and no coverage is recorded for it');
 select is(pgpm.retire('public.rs130c', :'c_mono'), false, 'retire() does not drop the uncovered child');
 select ok(pgpm._is_write_blocked('public.rs130c', :'c_mono'), 'retire() write-blocked it, as it always has');
 select ok(not exists (select 1 from pgpm.log where parent_table = 'public.rs130c'::regclass and action = 'archive_coverage_reset'),

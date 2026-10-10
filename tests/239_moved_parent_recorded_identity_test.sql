@@ -95,7 +95,7 @@ insert into m0.ev values (999);
 select ok((select restored_at is null and definition like '%REFERENCES m0.ev(id)%'
              from pgpm.dropped_fk where parent_table = :parent::oid::regclass)
           and 'm0.ev'::regclass::oid <> :parent::oid,
-  'S1 LIVENESS: the key is suspended, its recorded text names m0.ev, and m0.ev is now a namesake');
+  'LIVENESS: (S1) the key is suspended, its recorded text names m0.ev, and m0.ev is now a namesake');
 select is(pgpm.restore_incoming_fks(:parent::oid::regclass), 1, 'S1: restore_incoming_fks re-adds the key');
 select is(pg_temp.key_on('m0.refs'), 'refs_ev_fk->m1.ev', 'S1: against the managed parent, not the namesake');
 
@@ -116,10 +116,10 @@ insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, rows_archived
 
 select is((select regrain_cursor from pgpm.config where parent_table = :parent::oid::regclass)
           || ' ' || pg_temp.rows_in(:copy0),
-  '0 20', 'S2 LIVENESS: the copy of [0, 50) is part-filled: 20 rows, and the cursor still at 0');
+  '0 20', 'LIVENESS: (S2) the copy of [0, 50) is part-filled: 20 rows, and the cursor still at 0');
 select ok(pg_temp.at(:copy0) in ('m0.ev_p0000000000000000000', 'm1.ev_p0000000000000000000')
           and 'm2.ev_p0000000000000000000'::regclass::oid <> :copy0::oid,
-  'S2 LIVENESS: the copy stayed where it was made, and its name in the parent''s new schema m2 is a namesake''s');
+  'LIVENESS: (S2) the copy stayed where it was made, and its name in the parent''s new schema m2 is a namesake''s');
 select is(pg_temp.drive(:parent::oid::regclass, 'ev_p0000000000000000000_to_0000000000000000200'), 'swapped:4',
   'S2: the moved table''s regrain runs on to the swap');
 select is((select child_oid from pgpm.part where parent_table = :parent::oid::regclass and attached and lo = '0'),
@@ -155,13 +155,13 @@ select pgpm.set_archive_fn(:parent::oid::regclass, 'pgpm._archive_noop(regclass,
 update pgpm.config set retain = '100' where parent_table = :parent::oid::regclass;   -- set_retain refuses arming a drop
 select pgpm.suspend_incoming_fks(:parent::oid::regclass, true);
 select ok(not exists (select 1 from pg_constraint where confrelid = :parent::oid and contype = 'f'),
-  'S3 LIVENESS: no live key references the managed table, so its partitions retire without pg_cron');
+  'LIVENESS: (S3) no live key references the managed table, so its partitions retire without pg_cron');
 select child_oid as aged50 from pgpm.part where parent_table = :parent::oid::regclass and lo = '50' \gset
 select is((select pgpm._retain_boundary(c) from pgpm.config c where parent_table = :parent::oid::regclass), '100',
-  'S3 LIVENESS: the horizon is 100, so [0, 50) and [50, 100) are wholly past it');
+  'LIVENESS: (S3) the horizon is 100, so [0, 50) and [50, 100) are wholly past it');
 select ok(pg_temp.at(:copy0) = 'm0.ev_p0000000000000000000' and pg_temp.at(:aged50) = 'm0.ev_p0000000000000000050'
           and 'm3.ev_p0000000000000000000'::regclass::oid <> :copy0::oid,
-  'S3 LIVENESS: both aged partitions are in m0, and their names in the parent''s new schema m3 are namesakes''');
+  'LIVENESS: (S3) both aged partitions are in m0, and their names in the parent''s new schema m3 are namesakes''');
 select pgpm._enforce_write_blocks(:parent::oid::regclass);
 select pgpm._archive_step(:parent::oid::regclass);
 select pgpm._archive_step(:parent::oid::regclass);
@@ -196,7 +196,7 @@ create table m0.uv (id bigint constraint uv_s4_pkey primary key);
 insert into m0.uv values (999);
 select ok((select definition like '%REFERENCES m0.uv(id)%' from pgpm.dropped_fk where parent_table = 'm1.uv2'::regclass)
           and pg_temp.at(:umono) like 'm0.%',
-  'S4 LIVENESS: the recorded text names m0.uv, a namesake holds it, and the monolith is in m0');
+  'LIVENESS: (S4) the recorded text names m0.uv, a namesake holds it, and the monolith is in m0');
 select is(pg_temp.at(pgpm.untransmute('m1.uv2')::oid), 'm1.uv2', 'S4: untransmute hands back the monolith as m1.uv2');
 select is(pg_temp.key_on('m0.urefs'), 'urefs_uv_fk->m1.uv2', 'S4: the key is back against the restored table');
 
@@ -205,7 +205,7 @@ select is(pg_temp.key_on('m0.urefs'), 'urefs_uv_fk->m1.uv2', 'S4: the key is bac
 -- ======================================================================================================
 select ok((select restored_at is null and definition like '%REFERENCES m0.ev(id)%' from pgpm.dropped_fk
              where parent_table = :parent::oid::regclass),
-  'S5 LIVENESS: the key is still suspended, its recorded text naming m0.ev');
+  'LIVENESS: (S5) the key is still suspended, its recorded text naming m0.ev');
 alter table m3.ev set schema m4;
 create table m3.ev (id bigint constraint ev_s5_pkey primary key);
 insert into m3.ev values (999);
@@ -216,7 +216,7 @@ begin;
 commit;
 \set ON_ERROR_STOP 1
 
-select is(to_regnamespace('pgpm'), null, 'S5 LIVENESS: uninstall went through');
+select is(to_regnamespace('pgpm'), null, 'LIVENESS: (S5) uninstall went through');
 select is(pg_temp.key_on('m0.refs'), 'refs_ev_fk->m4.ev', 'S5: uninstall put the key back against the managed table');
 select is(pg_temp.refused($$ insert into m0.refs values (12, 999) $$) || '/'
           || pg_temp.refused($$ insert into m0.refs values (13, 101) $$),

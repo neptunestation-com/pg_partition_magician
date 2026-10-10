@@ -125,9 +125,9 @@ select dblink_disconnect('writer');
 
 -- ================================ the witnesses ================================
 select is((select count(*)::int from public.rs_witness), 1,
-  'WITNESS: the writer recorded exactly one observation');
+  'LIVENESS: the writer recorded exactly one observation');
 select cmp_ok((select waiters from public.rs_witness), '>=', 1,
-  'WITNESS: the writer saw the swap''s ungranted ACCESS EXCLUSIVE before it wrote, so its 120,002 captured changes landed while the swap waited on the DETACH');
+  'LIVENESS: the writer saw the swap''s ungranted ACCESS EXCLUSIVE before it wrote, so its 120,002 captured changes landed while the swap waited on the DETACH');
 select cmp_ok((select count(*) from pgpm.log
                 where parent_table = 'public.rs'::regclass and action = 'regrain_reconcile'), '>', 100::bigint,
   'LIVENESS: the residual reconcile needed more than 100 passes, so a 100-pass bound would have bitten here');

@@ -102,7 +102,7 @@ while IFS=$'\t' read -r j status concl steps name; do
   other_fails=$(grep -E "^FAIL " <<<"$log" | grep -vc "writes to the MANAGED PARENT are not blocked")
   if grep -qE "^FAIL +writes to the MANAGED PARENT are not blocked +got [0-9]+, want 0" <<<"$log" \
      && [ "$other_fails" = "0" ] \
-     && grep -qE "^PASS +the probe overlapped a running swap" <<<"$log"; then
+     && grep -qE "^PASS +LIVENESS: the probe overlapped a running swap" <<<"$log"; then
     echo "job $j: known flake lock_guard_probe (regrain_outgoing_fk_lock's probe timed out under load; liveness passed; #556)"
   elif grep -qE "^FAIL +writes to the MANAGED PARENT are not blocked +got [0-9]+, want 0" <<<"$log" \
      && [ "$other_fails" = "0" ] \

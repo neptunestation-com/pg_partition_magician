@@ -180,7 +180,7 @@ select is(
     where n in (select routine || '.' || arg from t41_swept))::text
   || ' / ' || ((select count(*) from t41_swept) >= 48 and (select count(distinct routine) from t41_swept) >= 9)::text,
   '{archive.configure.p_bucket,archive.s3_signed_request.p_key,archive.s3_signed_request_bytea.p_payload,archive.s3_url_encode.p_raw,archive.to_s3.p_child,archive.to_s3_parquet.p_parent,archive.unconfigure.p_parent,archive_to_s3_ndjson.p_hi,archive_to_s3_ndjson.p_lo,archive_to_s3_parquet.p_hi} / true',
-  'A LIVENESS: the sweep enumerated both schemas'' routines from the catalog (at least 9, 48 argument positions), the issue''s included');
+  'LIVENESS: (A) the sweep enumerated both schemas'' routines from the catalog (at least 9, 48 argument positions), the issue''s included');
 select is(
   (select string_agg(p.proname, ',' order by p.proname) from pg_proc p
     where p.pronamespace = 'pgpm'::regnamespace and p.oid in (select pg_temp.t41_module())
@@ -188,7 +188,7 @@ select is(
   || ' / ' || (select count(*) > 30 from pg_proc p where p.pronamespace = 'pgpm'::regnamespace and p.proname !~ '^_'
                  and p.oid < 'archive'::regnamespace::oid)::text,
   'archive_to_s3_ndjson,archive_to_s3_parquet / true',
-  'A LIVENESS: the oid boundary takes the module''s routines in schema pgpm and none of the core''s, which are there below it');
+  'LIVENESS: (A) the oid boundary takes the module''s routines in schema pgpm and none of the core''s, which are there below it');
 select is(
   (select array_agg(d.routine || '.' || d.arg order by d.routine, d.arg) from t41_documented d
     where not exists (select 1 from t41_swept s where s.routine = d.routine and s.arg = d.arg)),
@@ -209,7 +209,7 @@ select is(
   null,
   'A: no argument whose null is documented is refused for its null');
 select ok((select n >= 9 and endpoint_null_msg like 'Failed to connect to 127.0.0.1 port 9%' from t41_fence),
-  'A LIVENESS: the fence held: a documented-null call that went on to send its request reached the refusing proxy, not S3');
+  'LIVENESS: (A) the fence held: a documented-null call that went on to send its request reached the refusing proxy, not S3');
 
 -- ======================================================================================================
 -- B. The reproduction (A969-9), as identity: nothing overwrites an archived chunk's object
@@ -256,13 +256,13 @@ create temp table good_pq_bytes as select t41.bytes((select s3_key from good_pq)
 
 select is((select rows_archived from good_nd) || ' / ' || t41.rows((select s3_key from good_nd)),
   '9 / 1:r1,2:r2,3:r3,4:r4,5:r5,6:r6,7:r7,8:r8,9:r9',
-  'B LIVENESS: the NDJSON strategy archived [1, 10), and its object holds rows 1 to 9');
+  'LIVENESS: (B) the NDJSON strategy archived [1, 10), and its object holds rows 1 to 9');
 select ok((select rows_archived = 9 from good_pq)
           and (select octet_length(b) > 0 and md5(b) = btrim((select etag from good_pq), '"') from good_pq_bytes),
-  'B LIVENESS: the Parquet strategy archived [1, 10), and the bytes read back are the ones its PUT wrote (their md5 is its ETag)');
+  'LIVENESS: (B) the Parquet strategy archived [1, 10), and the bytes read back are the ones its PUT wrote (their md5 is its ETag)');
 select is(archive._object_key('t41.ev'::regclass, :'p', 'id', '1', '.ndjson') || ' ' || archive._object_key('t41.ev'::regclass, :'p', 'id', '1', '.parquet'),
   (select s3_key from good_nd) || ' ' || (select s3_key from good_pq),
-  'B LIVENESS: a call with lo 1 addresses those very objects, whatever its hi (the key is derived from lo alone)');
+  'LIVENESS: (B) a call with lo 1 addresses those very objects, whatever its hi (the key is derived from lo alone)');
 
 select throws_like($$ select * from pgpm.archive_to_s3_ndjson('t41.ev', 'unused', '1', null) $$,
   'pg_partition_magician: archive_to_s3_ndjson does not accept null for p_hi:%', 'B: archive_to_s3_ndjson refuses a null p_hi, naming it');

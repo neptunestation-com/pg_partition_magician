@@ -49,15 +49,15 @@ comment on column public.ow190.b is null;
 comment on column public.ow190.c is 'managed c';
 
 select is((select pg_get_userbyid(relowner)::text from pg_class where oid = (select oid from orig190)), 't190_old',
-  'A LIVENESS: the monolith still has the conversion-time owner at the reverse');
+  'LIVENESS: (A) the monolith still has the conversion-time owner at the reverse');
 select is(obj_description((select oid from orig190), 'pg_class'), 'conversion-time table comment',
-  'A LIVENESS: and the conversion-time table comment');
+  'LIVENESS: (A) and the conversion-time table comment');
 select is(array[col_description((select oid from orig190), 2), col_description((select oid from orig190), 3),
                 col_description((select oid from orig190), 4)],
   array['conversion-time a', 'conversion-time b', null],
-  'A LIVENESS: and the conversion-time column comments');
+  'LIVENESS: (A) and the conversion-time column comments');
 select ok(not has_table_privilege('t190_new', (select oid from orig190), 'SELECT'),
-  'A LIVENESS: t190_new, the managed table''s owner, has no privilege on the monolith');
+  'LIVENESS: (A) t190_new, the managed table''s owner, has no privilege on the monolith');
 
 select is(pgpm.untransmute('public.ow190')::text, 'ow190', 'A: untransmute returns the restored table');
 select is((select oid from pg_class where oid = 'public.ow190'::regclass), (select oid from orig190),
@@ -86,9 +86,9 @@ select child_name as wb_child, lo as wb_lo, hi as wb_hi from pgpm.part
 select pgpm._install_write_block('public.wb190', :'wb_child');
 select is((select tgenabled::text from pg_trigger
             where tgrelid = format('public.%I', :'wb_child')::regclass and tgname = 'pgpm_write_block'), 'A',
-  'B WITNESS: the block is installed ENABLE ALWAYS');
+  'LIVENESS: (B) the block is installed ENABLE ALWAYS');
 select is((select count(*) from pgpm.log where parent_table = 'public.wb190'::regclass and action = 'write_block_reenable'),
-  0::bigint, 'B WITNESS: installing a block logs no re-enable');
+  0::bigint, 'LIVENESS: (B) installing a block logs no re-enable');
 
 select pgpm._install_write_block('public.wb190', :'wb_child');
 select is((select count(*) from pgpm.log where parent_table = 'public.wb190'::regclass and action = 'write_block_reenable'),
@@ -97,11 +97,11 @@ select is((select count(*) from pgpm.log where parent_table = 'public.wb190'::re
 select format('alter table public.%I disable trigger pgpm_write_block', :'wb_child') \gexec
 select is((select tgenabled::text from pg_trigger
             where tgrelid = format('public.%I', :'wb_child')::regclass and tgname = 'pgpm_write_block'), 'D',
-  'B LIVENESS: an operator disabled the block');
+  'LIVENESS: (B) an operator disabled the block');
 select pgpm._install_write_block('public.wb190', :'wb_child');
 select is((select tgenabled::text from pg_trigger
             where tgrelid = format('public.%I', :'wb_child')::regclass and tgname = 'pgpm_write_block'), 'A',
-  'B LIVENESS: the next revisit re-enabled it');
+  'LIVENESS: (B) the next revisit re-enabled it');
 select is((select array_agg(lo || '|' || hi) from pgpm.log
             where parent_table = 'public.wb190'::regclass and action = 'write_block_reenable'),
   array[:'wb_lo' || '|' || :'wb_hi'],
@@ -119,13 +119,13 @@ create view public.ob190_p0000000000000000400 as select 1 as squatter;
 insert into public.ob190 values (350, 'c');   -- frontier 350: obtain asks for [300, 400) .. [600, 700)
 
 select is((select count(*) from pgpm.log where parent_table = 'public.ob190'::regclass and action = 'fail_obtain_name'),
-  0::bigint, 'C WITNESS: nothing logged before obtain meets the held name');
-select is(pgpm.obtain('public.ob190'), 2, 'C LIVENESS: obtain built two cells past the held one');
+  0::bigint, 'LIVENESS: (C) nothing logged before obtain meets the held name');
+select is(pgpm.obtain('public.ob190'), 2, 'LIVENESS: (C) obtain built two cells past the held one');
 select is((select array_agg(lo order by lo::numeric) from pgpm.part where parent_table = 'public.ob190'::regclass and attached),
   array['0', '100', '200', '300', '500', '600'],
-  'C LIVENESS: [500, 600) and [600, 700) were built, [400, 500) was not');
+  'LIVENESS: (C) [500, 600) and [600, 700) were built, [400, 500) was not');
 select throws_ok($$ insert into public.ob190 values (450, 'hole') $$, '23514', NULL,
-  'C LIVENESS: a write into [400, 500) is refused: the hole is real');
+  'LIVENESS: (C) a write into [400, 500) is refused: the hole is real');
 select is((select array_agg(lo || '|' || hi) from pgpm.log
             where parent_table = 'public.ob190'::regclass and action = 'fail_obtain_name'),
   array['400|500'],
@@ -133,7 +133,7 @@ select is((select array_agg(lo || '|' || hi) from pgpm.log
 select ok((select method from pgpm.log where parent_table = 'public.ob190'::regclass and action = 'fail_obtain_name')
             like '%its name public.ob190_p0000000000000000400 is held by view ob190_p0000000000000000400, which is not a partition of this table%',
   'C: naming the relation that holds the name and what it is');
-select is(pgpm.extend_to('public.ob190', '450'), 0, 'C LIVENESS: extend_to over the same cell builds nothing');
+select is(pgpm.extend_to('public.ob190', '450'), 0, 'LIVENESS: (C) extend_to over the same cell builds nothing');
 select is((select array_agg(lo || '|' || hi order by id) from pgpm.log
             where parent_table = 'public.ob190'::regclass and action = 'fail_obtain_name'),
   array['400|500', '400|500'],
@@ -142,7 +142,7 @@ select is((select array_agg(lo || '|' || hi order by id) from pgpm.log
 -- ===================================== D. a BC year's label =====================================
 select is(to_char('0001-06-01 00:00:00+00 BC'::timestamptz at time zone 'UTC', 'YYYY_MM_DD'),
           to_char('0001-06-01 00:00:00+00'::timestamptz at time zone 'UTC', 'YYYY_MM_DD'),
-  'D LIVENESS: to_char renders 1 BC and 1 AD alike');
+  'LIVENESS: (D) to_char renders 1 BC and 1 AD alike');
 select is(array[pgpm._part_name('d190', 'time', '1 day', '0001-06-01 00:00:00+00 BC', null, 'UTC')::text,
                 pgpm._part_name('d190', 'time', '1 day', '0001-06-01 00:00:00+00', null, 'UTC')::text],
   array['d190_p0001_06_01_bc', 'd190_p0001_06_01'],
@@ -175,13 +175,13 @@ begin
                    and l.mode = 'ShareUpdateExclusiveLock' and l.granted);
 end $$;
 select is(array[public.t190_step_analyzes(), public.t190_step_analyzes()], array[false, true],
-  'E LIVENESS: the step after the prepare analyzes the never-analyzed delta (the probe sees that lock)');
+  'LIVENESS: (E) the step after the prepare analyzes the never-analyzed delta (the probe sees that lock)');
 select is((select reltuples from pg_class where oid = 'public.rc190_pgpm_regrain_delta'::regclass), 0::real,
-  'E WITNESS: the delta is analyzed and empty (reltuples = 0, which the old test read as unanalyzed)');
+  'LIVENESS: (E) the delta is analyzed and empty (reltuples = 0, which the old test read as unanalyzed)');
 select is(array[public.t190_step_analyzes(), public.t190_step_analyzes()], array[false, false],
   'E: later steps over the empty delta do not ANALYZE it again');
 select is((select count(*) from pgpm.part where parent_table = 'public.rc190'::regclass and not attached), 1::bigint,
-  'E WITNESS: those steps were copying (the regrain is in flight, one copy started)');
+  'LIVENESS: (E) those steps were copying (the regrain is in flight, one copy started)');
 
 -- ================================= F. a fixed step's offset, exactly =================================
 -- '1.000001 seconds' from a year-1 anchor: about 6.4e10 steps, so k * step has 17 significant digits in
@@ -189,7 +189,7 @@ select is((select count(*) from pgpm.part where parent_table = 'public.rc190'::r
 select ok((select (k * 1.000001)::float8::numeric <> k * 1.000001
              from (select floor(extract(epoch from ('2026-09-30 12:34:56.789012+00'::timestamptz
                                                     - '0001-01-01 00:00:00+00'::timestamptz)) / 1.000001) as k) s),
-  'F LIVENESS: the offset k * step is not exact in double precision');
+  'LIVENESS: (F) the offset k * step is not exact in double precision');
 select is((select extract(epoch from (pgpm._grid_floor('time', '1.000001 seconds', '0001-01-01 00:00:00+00',
                                                       '2026-09-30 12:34:56.789012+00', 'UTC')::timestamptz
                                       - '0001-01-01 00:00:00+00'::timestamptz)) % 1.000001),

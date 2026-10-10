@@ -57,11 +57,11 @@ reset role;
 
 -- ================= WITNESSES =================
 select is((select (not rolsuper and not rolbypassrls)::text from pg_roles where rolname = 't38_owner'), 'true',
-  'WITNESS: t38_owner is neither a superuser nor BYPASSRLS');
+  'LIVENESS: t38_owner is neither a superuser nor BYPASSRLS');
 select is(:'owner_parent_rows'::text || '/' || (select count(*) from public.ar38)::text, '37/40',
-  'WITNESS: the owner sees 37 of ar38''s 40 rows');
+  'LIVENESS: the owner sees 37 of ar38''s 40 rows');
 select is(:'owner_parent_rls'::text || '/' || :'owner_mono_rls'::text, 'true/true',
-  'WITNESS: row-level security filters the owner on the parent and on the monolith alike');
+  'LIVENESS: row-level security filters the owner on the parent and on the monolith alike');
 
 -- ================= the synchronous exports: the partition they are handed =================
 select throws_like(format($$ select public.t38_as_owner('select archive.to_s3(''public.ar38'', ''%s'', ''%s'', ''%s'')') $$,

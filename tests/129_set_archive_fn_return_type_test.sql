@@ -72,7 +72,7 @@ select child_name as af_child from pgpm.part
   where parent_table = 'public.af129'::regclass and lo = '0' \gset
 
 select is((select archive_fn from pgpm.config where parent_table = 'public.af129'::regclass),
-  null::regprocedure, 'setup: archive_fn is null (strategy none) on the freshly transmuted table');
+  null::regprocedure, 'fixture: archive_fn is null (strategy none) on the freshly transmuted table');
 
 -- ============================ the witnesses ============================
 -- Both mis-typed candidates get past the regprocedure cast on their own: the cast is not the check.
@@ -136,7 +136,7 @@ call pgpm.maintain('public.af129');
 select results_eq(
   $$ select strategy, p_child, p_lo, p_hi from pgpm_test129.calls $$,
   format($$ values ('well_typed'::text, %L::name, '0'::text, '1000'::text) $$, :'af_child'),
-  'WITNESS: the tick called exactly one strategy, the well-typed one, for the monolith''s chunk [0, 1000)');
+  'LIVENESS: the tick called exactly one strategy, the well-typed one, for the monolith''s chunk [0, 1000)');
 select is((select count(*)::int from pgpm_test129.calls where strategy in ('echo_hi', 'as_setof')), 0,
   'neither mis-typed strategy was ever invoked');
 select results_eq(
@@ -152,7 +152,7 @@ select is(
 select results_eq(
   $$ select lo, hi from pgpm.log where parent_table = 'public.af129'::regclass and action = 'retain_drop' $$,
   $$ values ('0'::text, '1000'::text) $$,
-  'WITNESS: the monolith was dropped this tick, after the real archive, so the tick reached retention');
+  'LIVENESS: the monolith was dropped this tick, after the real archive, so the tick reached retention');
 select results_eq(
   $$ select id from public.af129 order by id $$,
   $$ values (20000::bigint) $$,

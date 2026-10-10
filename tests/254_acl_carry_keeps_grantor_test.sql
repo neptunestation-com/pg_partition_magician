@@ -100,7 +100,7 @@ select is(current_user::text, 't254_owner',
   'A: transmute puts the caller''s role back as it was, after replaying grants as other roles');
 reset role;
 select is((select relkind::text from pg_class where oid = 'public.gr254'::regclass), 'p',
-  'A LIVENESS: gr254 was converted into a partitioned parent');
+  'LIVENESS: (A) gr254 was converted into a partitioned parent');
 select is(pg_temp.acl254('public.gr254'), (select acl from before254),
   'A: the parent holds exactly the table''s grants, each under the grantor that made it');
 set role t254_bob;
@@ -119,16 +119,16 @@ select ok(has_column_privilege('t254_erin', 'public.gr254', 'v', 'select')
   'A: erin keeps the SELECT on v bob granted her, and nothing on id');
 select ok(has_table_privilege('t254_dave', 'public.gr254', 'select with grant option')
           and has_table_privilege('t254_plain', 'public.gr254', 'insert'),
-  'A LIVENESS: the grants nobody revoked are still held');
+  'LIVENESS: (A) the grants nobody revoked are still held');
 
 -- ================= (B) untransmute hands the grants back under their grantors =================
 call pgpm.transmute('public.gr254u', 'id', 100::bigint, p_obtain => 2);
 create temp table parent254u as select pg_temp.acl254('public.gr254u') as acl;
 select ok((select acl from parent254u) @> array['t254_carol:SELECT/t254_bob', 't254_erin:SELECT/t254_dave'],
-  'B LIVENESS: the managed gr254u holds carol''s grant from bob and erin''s from dave');
-select is(pgpm.untransmute('public.gr254u')::text, 'gr254u', 'B LIVENESS: untransmute restored gr254u');
+  'LIVENESS: (B) the managed gr254u holds carol''s grant from bob and erin''s from dave');
+select is(pgpm.untransmute('public.gr254u')::text, 'gr254u', 'LIVENESS: (B) untransmute restored gr254u');
 select is((select relkind::text from pg_class where oid = 'public.gr254u'::regclass), 'r',
-  'B LIVENESS: gr254u is an ordinary table again');
+  'LIVENESS: (B) gr254u is an ordinary table again');
 select is(pg_temp.acl254('public.gr254u'), (select acl from parent254u),
   'B: the restored table holds exactly the parent''s grants, each under the grantor that made it');
 set role t254_bob;
@@ -141,7 +141,7 @@ select ok(not has_table_privilege('t254_carol', 'public.gr254u', 'select')
 -- ================= (C) a session that cannot become bob =================
 create temp table before254r as select pg_temp.acl254('public.gr254r') as acl;
 select ok(not pg_has_role('t254_owner', 't254_bob', 'member'),
-  'C LIVENESS: t254_owner is no member of t254_bob, so a session it authenticates cannot SET ROLE to him');
+  'LIVENESS: (C) t254_owner is no member of t254_bob, so a session it authenticates cannot SET ROLE to him');
 set session authorization t254_owner;
 select throws_like(
   $$ call pgpm.transmute('public.gr254r', 'id', 100::bigint, p_obtain => 2) $$,
@@ -161,7 +161,7 @@ call pgpm.transmute('public.gr254r', 'id', 100::bigint, p_obtain => 2);
 select is(current_user::text, 't254_owner', 'C: the role is put back after the replay');
 reset session authorization;
 select is((select relkind::text from pg_class where oid = 'public.gr254r'::regclass), 'p',
-  'C LIVENESS: as a member of bob and dave the same session converts gr254r');
+  'LIVENESS: (C) as a member of bob and dave the same session converts gr254r');
 select is(pg_temp.acl254('public.gr254r'), (select acl from before254r),
   'C: and the parent holds exactly the table''s grants, each under its grantor');
 revoke t254_bob, t254_dave from t254_owner;
@@ -171,7 +171,7 @@ call pgpm.transmute('public.gr254d', 'id', 100::bigint, p_obtain => 2);
 create temp table parent254d as select pg_temp.acl254('public.gr254d') as acl;
 select ok((select acl from parent254d) @> array['t254_carol:SELECT/t254_bob', 't254_erin:SELECT/t254_dave']
           and not pg_has_role('t254_owner2', 't254_bob', 'member'),
-  'D LIVENESS: the managed gr254d holds grants by bob and dave, and its owner t254_owner2 is no member of bob');
+  'LIVENESS: (D) the managed gr254d holds grants by bob and dave, and its owner t254_owner2 is no member of bob');
 set session authorization t254_owner2;
 select throws_like(
   $$ select pgpm.untransmute('public.gr254d') $$,

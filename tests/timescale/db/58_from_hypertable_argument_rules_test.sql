@@ -40,19 +40,19 @@ insert into public.p58 values (now() - interval '1 hour', 1);
 select throws_like(
   $$ call pgpm.transmute('public.p58', 'ts', interval '1 day', p_retain => interval '-1 day') $$,
   'pg_partition_magician: p_retain cannot be negative (got -1 days)%',
-  'WITNESS: transmute refuses a negative p_retain on a plain table');
+  'LIVENESS: transmute refuses a negative p_retain on a plain table');
 select throws_like(
   $$ call pgpm.transmute('public.p58', 'ts', interval '1 day', p_obtain => -1) $$,
   'pg_partition_magician: p_obtain must be a non-negative integer (got -1)',
-  'WITNESS: transmute refuses a negative p_obtain on a plain table');
+  'LIVENESS: transmute refuses a negative p_obtain on a plain table');
 select throws_like(
   $$ call pgpm.transmute('public.p58', 'ts', interval '0') $$,
   'pg_partition_magician: the partition step must be positive (got 00:00:00)%',
-  'WITNESS: transmute refuses a zero step on a plain table');
+  'LIVENESS: transmute refuses a zero step on a plain table');
 select throws_like(
   $$ select pgpm._from_hypertable_check_frontier('public.a58', 'ts', interval '-1 day', false) $$,
   'pg_partition_magician: cannot migrate hypertable a58 with p_interval -1 days -- %Delete or correct the rows whose ts is after %',
-  'WITNESS: asked of a negative step, the frontier check would refuse a58 telling the operator to delete rows');
+  'LIVENESS: asked of a negative step, the frontier check would refuse a58 telling the operator to delete rows');
 
 -- ================================ A: the one-shot driver, before its copy ================================
 select throws_like(

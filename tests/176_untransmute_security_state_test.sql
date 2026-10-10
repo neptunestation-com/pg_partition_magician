@@ -70,21 +70,21 @@ create policy sec176_alice on public.sec176 for select to t176_new using (owner_
 create policy sec176_ins on public.sec176 as restrictive for insert to t176_new with check (owner_name = 'alice');
 
 select is(public.t176_ids('t176_new', 'public.sec176'), array[1]::bigint[],
-  'LIVENESS (A): before the reverse, the new policy lets t176_new see exactly the alice row');
+  'LIVENESS: (A) before the reverse, the new policy lets t176_new see exactly the alice row');
 select is(public.t176_ids('t176_gone', 'public.sec176'), array[-1]::bigint[],
-  'LIVENESS (A): before the reverse, the revoked role cannot read the table');
+  'LIVENESS: (A) before the reverse, the revoked role cannot read the table');
 select ok(has_table_privilege('t176_gone', format('public.%I', :'mon176'), 'select'),
-  'LIVENESS (A): the monolith still grants the revoked role SELECT, the stale state the reverse must not keep');
+  'LIVENESS: (A) the monolith still grants the revoked role SELECT, the stale state the reverse must not keep');
 select ok(not (select relrowsecurity from pg_class where oid = (select oid from orig176)),
-  'LIVENESS (A): the monolith still has row security off');
+  'LIVENESS: (A) the monolith still has row security off');
 select is((select array_agg(polname::text order by polname) from pg_policy where polrelid = (select oid from orig176)),
   array['sec176_old'],
-  'LIVENESS (A): the monolith still carries the dropped conversion-time policy and none of the new ones');
+  'LIVENESS: (A) the monolith still carries the dropped conversion-time policy and none of the new ones');
 
 select is(pgpm.untransmute('public.sec176')::oid, (select oid from orig176),
-  'LIVENESS (A): untransmute goes through and hands back the original relation');
+  'LIVENESS: (A) untransmute goes through and hands back the original relation');
 select is((select relkind::text from pg_class where oid = 'public.sec176'::regclass), 'r',
-  'LIVENESS (A): the table is an ordinary table again');
+  'LIVENESS: (A) the table is an ordinary table again');
 
 select is(
   (select array_agg(pg_get_userbyid(a.grantee) || ':' || a.privilege_type order by 1)
@@ -138,14 +138,14 @@ drop policy sec176b_none on public.sec176b;
 grant select on table :"mon176b" to t176_gone;   -- on the partition, which is not the table
 
 select ok((select relrowsecurity and relforcerowsecurity from pg_class where oid = (select oid from orig176b)),
-  'LIVENESS (B): the monolith still has row security ENABLEd and FORCEd');
+  'LIVENESS: (B) the monolith still has row security ENABLEd and FORCEd');
 select ok(has_table_privilege('t176_gone', (select oid from orig176b), 'select'),
-  'LIVENESS (B): the monolith grants t176_gone SELECT');
+  'LIVENESS: (B) the monolith grants t176_gone SELECT');
 select ok((select relacl is null from pg_class where oid = 'public.sec176b'::regclass),
-  'LIVENESS (B): the parent''s ACL is the owner''s default, never granted or revoked');
+  'LIVENESS: (B) the parent''s ACL is the owner''s default, never granted or revoked');
 
 select is(pgpm.untransmute('public.sec176b')::oid, (select oid from orig176b),
-  'LIVENESS (B): untransmute goes through and hands back the original relation');
+  'LIVENESS: (B) untransmute goes through and hands back the original relation');
 
 select ok((select not relrowsecurity and not relforcerowsecurity from pg_class where oid = 'public.sec176b'::regclass),
   '(B) row security is off on the restored table, as it was on the parent');
@@ -162,6 +162,6 @@ select ok(has_table_privilege('t176_owner', 'public.sec176b', 'select, insert, u
 select is(public.t176_ids('t176_owner', 'public.sec176b'), array[1, 2]::bigint[],
   '(B) behaviourally: the owner reads every row, with no row security in the way');
 select is((select pg_get_userbyid(relowner)::text from pg_class where oid = 'public.sec176b'::regclass), 't176_owner',
-  'LIVENESS (B): the owner is still t176_owner, so the privilege checks above are not a superuser''s');
+  'LIVENESS: (B) the owner is still t176_owner, so the privilege checks above are not a superuser''s');
 
 select * from finish();

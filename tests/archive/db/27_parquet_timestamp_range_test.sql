@@ -46,9 +46,9 @@ insert into public.far27 values
 
 select throws_ok($$ select round(extract(epoch from '294250-01-01 00:00:00+00'::timestamptz) * 1000000)::int8 $$,
   '22003', 'bigint out of range',
-  'witness: the cast the encoder used raises for a finite timestamptz past the int64 microsecond range');
+  'LIVENESS: the cast the encoder used raises for a finite timestamptz past the int64 microsecond range');
 select ok((select bool_and(isfinite(ts) and isfinite(tstz)) from public.far27 where id in (1, 2)),
-  'witness: the far-future values in rows 1 and 2 are finite, not the infinities #586 already handles');
+  'LIVENESS: the far-future values in rows 1 and 2 are finite, not the infinities #586 already handles');
 
 -- ---------------------------------------------------------------------------
 -- The helper: exact up to the last instant, saturated past it, the infinities untouched
@@ -127,7 +127,7 @@ select ok((select archive_batch = 1 from pgpm.config where parent_table = 'publi
           and (select array_agg(lo::bigint order by lo::bigint) from pgpm.part
                 where parent_table = 'public.far27m'::regclass and lo::bigint in (0, 10000)) = array[0, 10000]::bigint[]
           and (select expires_at from public.far27m where id = 7) = '294250-01-01 00:00:00+00'::timestamptz,
-  'witness: archive_batch is 1, [0, 10000) and [10000, 20000) sit below the 40000 horizon, and row 7 of the older expires in 294250 AD');
+  'LIVENESS: archive_batch is 1, [0, 10000) and [10000, 20000) sit below the 40000 horizon, and row 7 of the older expires in 294250 AD');
 
 call pgpm.maintain('public.far27m');
 call pgpm.maintain('public.far27m');

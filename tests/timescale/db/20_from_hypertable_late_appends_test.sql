@@ -72,15 +72,15 @@ insert into la_a (ts, device_id, temp) select w, 9002, 2 from t20_w where tbl = 
 insert into la_a (ts, device_id, temp) select w + interval '1 microsecond', 9003, 3 from t20_w where tbl = 'la_a';
 
 select is((select ts from la_a where device_id = 9002), (select w from t20_w where tbl = 'la_a'),
-  'A witness: the equal row sits EXACTLY at the copy watermark (max control in the destination)');
+  'LIVENESS: (A) the equal row sits EXACTLY at the copy watermark (max control in the destination)');
 select is((select ts from la_a where device_id = 9003), (select w + interval '1 microsecond' from t20_w where tbl = 'la_a'),
-  'A witness: the past row sits 1 us past the watermark');
+  'LIVENESS: (A) the past row sits 1 us past the watermark');
 select is((select count(*)::int from la_a_pgpm_dest where device_id in (9002, 9003)), 0,
-  'A witness: neither late row is in the destination -- both arrived after the copy');
+  'LIVENESS: (A) neither late row is in the destination -- both arrived after the copy');
 select is((select array_agg(device_id) from la_a_pgpm_dest where ts = (select w from t20_w where tbl = 'la_a')),
   array[240]::bigint[],
-  'A witness: the destination already holds the copied row at the watermark (device 240), so a bare >= would duplicate it');
-select is((select count(*)::int from la_a), 242, 'A witness: the source holds 240 copied + 2 late rows');
+  'LIVENESS: (A) the destination already holds the copied row at the watermark (device 240), so a bare >= would duplicate it');
+select is((select count(*)::int from la_a), 242, 'LIVENESS: (A) the source holds 240 copied + 2 late rows');
 
 call pgpm.from_hypertable_cutover('la_a', 'ts', interval '1 month', p_paused => false);
 
@@ -112,13 +112,13 @@ insert into la_b (ts, device_id, temp) select w, 9002, 2 from t20_w where tbl = 
 insert into la_b (ts, device_id, temp) select w + interval '1 microsecond', 9003, 3 from t20_w where tbl = 'la_b';
 
 select cmp_ok((select ts from la_b where device_id = 9001), '<', (select w from t20_w where tbl = 'la_b'),
-  'B witness: the behind row sits below the copy watermark');
+  'LIVENESS: (B) the behind row sits below the copy watermark');
 select is((select ts from la_b where device_id = 9002), (select w from t20_w where tbl = 'la_b'),
-  'B witness: the equal row sits exactly at it');
+  'LIVENESS: (B) the equal row sits exactly at it');
 select is((select count(*)::int from la_b_pgpm_dest where device_id >= 9001), 0,
-  'B witness: none of the three late rows is in the destination');
-select is((select count(*)::int from la_b), 243, 'B witness: the source holds 243 = 240 copied + 3 late');
-select is((select count(*)::int from la_b_pgpm_dest), 240, 'B witness: the destination holds the 240 copied');
+  'LIVENESS: (B) none of the three late rows is in the destination');
+select is((select count(*)::int from la_b), 243, 'LIVENESS: (B) the source holds 243 = 240 copied + 3 late');
+select is((select count(*)::int from la_b_pgpm_dest), 240, 'LIVENESS: (B) the destination holds the 240 copied');
 
 select throws_like(
   $$ call pgpm.from_hypertable_cutover('la_b', 'ts', interval '1 month', p_predrain => false) $$,
@@ -150,17 +150,17 @@ insert into la_c (ts, device_id, temp) select w, 9002, 2 from t20_w where tbl = 
 insert into la_c (ts, device_id, temp) select w + interval '1 microsecond', 9003, 3 from t20_w where tbl = 'la_c';
 
 select is((select count(*)::int from pg_constraint where conrelid = 'la_c'::regclass and contype in ('p', 'u')), 0,
-  'C witness: the table is keyless');
+  'LIVENESS: (C) the table is keyless');
 select cmp_ok((select ts from la_c where device_id = 9001), '<', (select w from t20_w where tbl = 'la_c'),
-  'C witness: the behind row sits below the copy watermark');
+  'LIVENESS: (C) the behind row sits below the copy watermark');
 select is((select ts from la_c where device_id = 9002), (select w from t20_w where tbl = 'la_c'),
-  'C witness: the equal row sits exactly at it');
+  'LIVENESS: (C) the equal row sits exactly at it');
 select is((select array_agg(device_id) from la_c_pgpm_dest where ts = (select w from t20_w where tbl = 'la_c')),
   array[240]::bigint[],
-  'C witness: the destination already holds the copied row at the watermark');
+  'LIVENESS: (C) the destination already holds the copied row at the watermark');
 select is((select count(*)::int from la_c_pgpm_dest where device_id >= 9001), 0,
-  'C witness: none of the three late rows is in the destination');
-select is((select count(*)::int from la_c), 243, 'C witness: the source holds 243 = 240 copied + 3 late');
+  'LIVENESS: (C) none of the three late rows is in the destination');
+select is((select count(*)::int from la_c), 243, 'LIVENESS: (C) the source holds 243 = 240 copied + 3 late');
 
 select throws_like(
   $$ call pgpm.from_hypertable_cutover('la_c', 'ts', interval '1 month', p_predrain => false) $$,

@@ -65,20 +65,20 @@ insert into public.rc values (pg_temp.tt(date_trunc('month', now()) + interval '
                               date_trunc('month', now()) + interval '3 months 1 day', 'frontier');   -- the monolith freezes
 select is((select partition_tz || ' ' || partition_step::interval::text from pgpm.config
             where parent_table = 'public.rc'::regclass),
-  'America/New_York 1 mon', 'A LIVENESS: a monthly grid in America/New_York');
+  'America/New_York 1 mon', 'LIVENESS: (A) a monthly grid in America/New_York');
 select pgpm.regrain_history('public.rc', '1 month');
 select ok(exists (select 1 from pgpm.part where parent_table = 'public.rc'::regclass and attached
                     and child_name = 'rc_p2024_02' and lo::timestamptz = '2024-02-01 05:00+00'),
-  'A LIVENESS: February is an attached monthly child starting at New York midnight, 05:00Z');
+  'LIVENESS: (A) February is an attached monthly child starting at New York midnight, 05:00Z');
 select isnt(pgpm._grid_floor('text_time', '1 day', (select partition_anchor from pgpm.config where parent_table = 'public.rc'::regclass),
                              '2024-02-01 05:00+00', 'America/New_York')::timestamptz,
   '2024-02-01 05:00+00'::timestamptz,
-  'A LIVENESS: 05:00Z is off the day lattice, so February''s first daily sub-range is clamped');
-select is(pgpm.regrain('public.rc', 'rc_p2024_01', '1 day'), 32, 'A LIVENESS: January splits into 32 daily cells');
+  'LIVENESS: (A) 05:00Z is off the day lattice, so February''s first daily sub-range is clamped');
+select is(pgpm.regrain('public.rc', 'rc_p2024_01', '1 day'), 32, 'LIVENESS: (A) January splits into 32 daily cells');
 select is((select child_name from pgpm.part where parent_table = 'public.rc'::regclass and attached
             and lo::timestamptz = '2024-02-01 00:00+00' and hi::timestamptz = '2024-02-01 05:00+00'),
   'rc_p2024_02_01'::name,
-  'A LIVENESS: January''s last cell [02-01 00:00Z, 05:00Z) holds the name its UTC date renders');
+  'LIVENESS: (A) January''s last cell [02-01 00:00Z, 05:00Z) holds the name its UTC date renders');
 select lives_ok($$ select pgpm.regrain('public.rc', 'rc_p2024_02', '1 day') $$,
   'A: February regrains to a day after January did');
 select is((select child_name from pgpm.part where parent_table = 'public.rc'::regclass and attached
@@ -102,7 +102,7 @@ select is((select count(*)::int from public.rc r
                                 and p.child_oid = r.tableoid and p.hi::timestamptz - p.lo::timestamptz <= interval '1 day')),
   0, 'A: none of February''s rows is left outside an attached cell at most a day wide');
 select is((select count(*)::int from public.rc where ts >= '2024-02-01 05:00+00' and ts < '2024-03-01 05:00+00'),
-  31, 'A LIVENESS: and February holds its 29 daily rows and two edge rows, so the check above was over something');
+  31, 'LIVENESS: (A) and February holds its 29 daily rows and two edge rows, so the check above was over something');
 
 -- ==================== (B) Los Angeles: the monolith's clamped first cell, auto-regrained ====================
 set timezone = 'America/Los_Angeles';
@@ -123,11 +123,11 @@ insert into public.la values (pg_temp.tt(date_trunc('month', now()) + interval '
                               date_trunc('month', now()) + interval '3 months 1 day', 'frontier');   -- the monolith freezes
 select ok(exists (select 1 from pgpm.part where parent_table = 'public.la'::regclass and attached
                     and lo::timestamptz = '2024-07-01 07:00+00'),
-  'B LIVENESS: a monthly Los Angeles grid whose monolith starts at the PDT month edge, 07:00Z');
+  'LIVENESS: (B) a monthly Los Angeles grid whose monolith starts at the PDT month edge, 07:00Z');
 select pgpm.set_regrain('public.la', '1 day');
 do $$ declare v text; begin for i in 1..6 loop call pgpm.maintain('public.la', v); end loop; end $$;
 select ok(exists (select 1 from pgpm.log where parent_table = 'public.la'::regclass and action = 'regrain_prepare'),
-  'B LIVENESS: auto-regrain prepared the monolith');
+  'LIVENESS: (B) auto-regrain prepared the monolith');
 select is((select array_agg(action order by id) from pgpm.log
             where parent_table = 'public.la'::regclass and action = 'skip_regrain'),
   null::text[], 'B: no auto-regrain tick is refused (skip_regrain)');

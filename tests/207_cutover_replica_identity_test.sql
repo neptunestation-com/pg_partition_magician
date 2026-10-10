@@ -47,9 +47,9 @@ create table public.rc (k int8 not null, v text);
 insert into public.rc values (1, 'c');
 create publication rf_pub for table public.rf, public.rc;
 select throws_ok($$ update public.rc set v = 'x' where k = 1 $$, '55000', NULL,
-  'A LIVENESS: the publication check is live: UPDATE on a published keyless table with no identity fails with 55000');
+  'LIVENESS: (A) the publication check is live: UPDATE on a published keyless table with no identity fails with 55000');
 select lives_ok($$ update public.rf set v = 'pre' where k = 3 $$,
-  'A LIVENESS: before the conversion UPDATE on the published FULL table succeeds');
+  'LIVENESS: (A) before the conversion UPDATE on the published FULL table succeeds');
 call pgpm.transmute('public.rf', 'k', 100::bigint, p_obtain => 2);
 select is((select relkind::text || ':' || relreplident::text from pg_class where oid = 'public.rf'::regclass), 'p:f',
   'A: the converted parent is REPLICA IDENTITY FULL');
@@ -58,7 +58,7 @@ select is(pg_temp.idents('public.rf'),
   'A: the monolith and both forward partitions transmute minted are FULL');
 insert into public.rf values (150, 'fwd'), (160, 'fwd'), (170, 'keep');
 select is((select tableoid::regclass::text from public.rf where k = 150), 'rf_p0000000000000000100',
-  'A LIVENESS: 150 lives in the forward partition [100, 200), past the monolith');
+  'LIVENESS: (A) 150 lives in the forward partition [100, 200), past the monolith');
 select lives_ok($$ update public.rf set v = 'upd' where k = 150 $$, 'A: UPDATE of a forward partition''s row succeeds');
 select lives_ok($$ delete from public.rf where k = 160 $$, 'A: DELETE of a forward partition''s row succeeds');
 select is((select array_agg(k || ':' || v order by k) from public.rf where k >= 100), array['150:upd', '170:keep'],
@@ -80,7 +80,7 @@ call pgpm.transmute('public.ri', 'k', 100::bigint, p_obtain => 2);
 select is((select relreplident::text from pg_class where oid = 'public.ri'::regclass) || ':' || pg_temp.ident_index('public.ri'),
   'i:ri_uk_pgpm', 'B: the parent''s identity is USING INDEX ri_uk_pgpm, the partitioned copy of ri_uk');
 select is((select inhparent::regclass::text from pg_inherits where inhrelid = :ri_uk_oid), 'ri_uk_pgpm',
-  'B LIVENESS: ri_uk_pgpm is the index the original ri_uk is attached under');
+  'LIVENESS: (B) ri_uk_pgpm is the index the original ri_uk is attached under');
 select is(pg_temp.ident_index((select monolith_oid from pgpm.config where parent_table = 'public.ri'::regclass)::regclass),
   'ri_uk', 'B: the monolith keeps the original ri_uk as its identity');
 select is(
@@ -138,9 +138,9 @@ insert into public.rg values (3500000, 'frontier');
 select child_name as rg_src from pgpm.part
  where parent_table = 'public.rg'::regclass and attached order by lo::numeric limit 1 \gset
 select is(pgpm.regrain('public.rg', :'rg_src', '500000'), 4,
-  'F LIVENESS: the regrain swaps, four fine children attached over the source''s [0, 2000000)');
+  'LIVENESS: (F) the regrain swaps, four fine children attached over the source''s [0, 2000000)');
 select is((select array_agg(k || ':' || v order by k) from public.rg where k < 2000000),
-  array['10:a', '20:b', '150000:c', '1999999:widen'], 'F LIVENESS: the fine children hold exactly the source''s rows');
+  array['10:a', '20:b', '150000:c', '1999999:widen'], 'LIVENESS: (F) the fine children hold exactly the source''s rows');
 select is(
   (select array_agg(c.relname::text || ':' || c.relreplident::text order by c.relname)
      from pgpm.part p join pg_class c on c.oid = p.child_oid

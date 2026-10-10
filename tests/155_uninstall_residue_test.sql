@@ -48,7 +48,7 @@ select is(
   (select array_agg(conrelid::regclass::text || ':' || conname order by conname) from pg_constraint
     where confrelid = 'u589.orders'::regclass and contype = 'f' and conparentid = 0),
   array['u589.lines:lines_order_id_fkey', 'u589.orders:orders_parent_fkey'],
-  'LIVENESS (A): both incoming keys are live before the conversion');
+  'LIVENESS: (A) both incoming keys are live before the conversion');
 
 call pgpm.transmute('u589.orders', 'id', 1000::bigint, p_incoming_fks => 'preserve');
 
@@ -56,17 +56,17 @@ select is(
   (select array_agg(constraint_name || ':' || (restored_at is null)::text order by constraint_name) from pgpm.dropped_fk
     where parent_table = 'u589.orders'::regclass),
   array['lines_order_id_fkey:true', 'orders_parent_fkey:true'],
-  'LIVENESS (A): the conversion dropped both keys and recorded each for restore');
+  'LIVENESS: (A) the conversion dropped both keys and recorded each for restore');
 select is(
   (select count(*)::int from pg_constraint where contype = 'f' and conrelid in ('u589.lines'::regclass, 'u589.orders'::regclass)),
-  0, 'LIVENESS (A): neither key is live on its referencing table');
+  0, 'LIVENESS: (A) neither key is live on its referencing table');
 select ok((select paused from pgpm.config where parent_table = 'u589.orders'::regclass),
-  'LIVENESS (A): the table is paused, so no tick will restore the keys');
+  'LIVENESS: (A) the table is paused, so no tick will restore the keys');
 
 insert into u589.orders values (4, 'd', 99);                                -- an orphan, written while RI is off
 select is((select array_agg(id || ':' || coalesce(parent_id::text, '-') order by id) from u589.orders),
   array['1:-', '2:1', '3:1', '4:99'],
-  'LIVENESS (A): the orphan went in, so the self-referencing key cannot come back validating');
+  'LIVENESS: (A) the orphan went in, so the self-referencing key cannot come back validating');
 
 -- ======================================================================================================
 -- fixture (B): a regrain in flight, with one standalone copy holding rows the source still holds
@@ -76,15 +76,15 @@ insert into u589.ev select g, 'x' || g from generate_series(1, 45) g;
 call pgpm.transmute('u589.ev', 'id', 10::bigint);
 insert into u589.ev values (55, 'y'), (65, 'z');                            -- frontier past the monolith: frozen
 select child_name as mon from pgpm.part where parent_table = 'u589.ev'::regclass and lo = '0' and attached \gset
-select is(pgpm.regrain_step('u589.ev', :'mon', '10', 3), 'prepared', 'LIVENESS (B): the regrain prepared');
+select is(pgpm.regrain_step('u589.ev', :'mon', '10', 3), 'prepared', 'LIVENESS: (B) the regrain prepared');
 select child_name as mon from pgpm.part where parent_table = 'u589.ev'::regclass and lo = '0' and attached \gset
-select is(pgpm.regrain_step('u589.ev', :'mon', '10', 3), 'copied:3', 'LIVENESS (B): one batch of three rows copied');
+select is(pgpm.regrain_step('u589.ev', :'mon', '10', 3), 'copied:3', 'LIVENESS: (B) one batch of three rows copied');
 select is(
   (select array_agg(child_name || ':' || lo || '-' || hi) from pgpm.part where parent_table = 'u589.ev'::regclass and not attached),
   array['ev_p0000000000000000000:0-10'],
-  'LIVENESS (B): exactly one not-yet-attached fine copy is recorded');
+  'LIVENESS: (B) exactly one not-yet-attached fine copy is recorded');
 select is((select array_agg(id order by id) from u589.ev_p0000000000000000000), array[1,2,3]::bigint[],
-  'LIVENESS (B): and it is a real standalone table holding copies of ids 1..3');
+  'LIVENESS: (B) and it is a real standalone table holding copies of ids 1..3');
 
 -- ======================================================================================================
 -- first uninstall: refused, in one transaction, as the script says to run it
@@ -133,7 +133,7 @@ select throws_ok($$ insert into u589.lines values (12, 42) $$, '23503', NULL,
 select is((select array_agg(id || ':' || order_id order by id) from u589.lines), array['10:1', '11:2'],
   '(A) the referencing rows are exactly the two there were');
 select is((select array_agg(id || v order by id) from u589.orders), array['1a', '2b', '3c', '4d'],
-  'LIVENESS (A): the orders are intact under the original name, row 4 (the orphan until cleared) among them');
+  'LIVENESS: (A) the orders are intact under the original name, row 4 (the orphan until cleared) among them');
 
 select is(to_regclass('u589.ev_p0000000000000000000'), null,
   '(B) the regrain''s standalone copy did not survive the uninstall');
@@ -143,9 +143,9 @@ select is(
   array['ev', 'lines', 'orders'],
   '(B) no relation pgpm made survives in the schema beyond the tables and their partitions');
 select is((select relkind::text from pg_class where oid = 'u589.ev'::regclass), 'p',
-  'LIVENESS (B): the regrained table is still partitioned');
+  'LIVENESS: (B) the regrained table is still partitioned');
 select is((select array_agg(id order by id) from u589.ev),
   (select array_agg(g::bigint order by g) from generate_series(1, 45) g) || array[55, 65]::bigint[],
-  'LIVENESS (B): and holds exactly its 47 rows, 1..3 once each');
+  'LIVENESS: (B) and holds exactly its 47 rows, 1..3 once each');
 
 select * from finish();

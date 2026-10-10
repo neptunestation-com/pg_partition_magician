@@ -31,7 +31,7 @@ create collation if not exists public.tt_icu (provider = icu, locale = 'und');
 select ok(
   ('ck9abcde' collate public.tt_num) < ('ck10000' collate public.tt_num)
   and not (('ck9abcde' collate "C") < ('ck10000' collate "C")),
-  'witness: the numeric collation orders cuid fragments against bytewise order (digit runs by value)'
+  'LIVENESS: the numeric collation orders cuid fragments against bytewise order (digit runs by value)'
 );
 
 -- cuid (prefix 'c', 8 base-36 digits of epoch ms) with an asymmetric, distinct suffix per row. 1700 rows
@@ -50,7 +50,7 @@ create function public.cuid_misordered(p_id text) returns boolean language sql s
 $$;
 select cmp_ok(
   (select count(*) from public.tt_cuid_num where public.cuid_misordered(id)), '>', 0::bigint,
-  'witness: the cuid fixture contains rows that sort outside their own month under the numeric collation'
+  'LIVENESS: the cuid fixture contains rows that sort outside their own month under the numeric collation'
 );
 
 -- ------------------------------------------------------------------ refusal of a cuid column under it
@@ -95,7 +95,7 @@ select cmp_ok(
        >= (pgpm._ts_to_text_time(date_trunc('month', pgpm._text_time_to_ts(t.id, '', 13, 10, 'ms')) + interval '1 month',
                                  '', 13, 10, 'ms') collate public.tt_num)),
   '>', 0::bigint,
-  'witness: decimal rows with a digit suffix sort at or after the NEXT month''s bound under the numeric collation'
+  'LIVENESS: decimal rows with a digit suffix sort at or after the NEXT month''s bound under the numeric collation'
 );
 select throws_like(
   $$ select * from pgpm.check_text_time('public.tt_dec_num', 'id', '', 13, 10, 'ms', 1000) $$,
@@ -136,7 +136,7 @@ select is(
   (select count(*) from public.tt_cuid_icu c
     where not ((c.id collate public.tt_icu) >= (pgpm._ts_to_text_time(date_trunc('month', pgpm._text_time_to_ts(c.id, 'c', 8, 36, 'ms')), 'c', 8, 36, 'ms') collate public.tt_icu)
            and (c.id collate public.tt_icu) <  (pgpm._ts_to_text_time(date_trunc('month', pgpm._text_time_to_ts(c.id, 'c', 8, 36, 'ms')) + interval '1 month', 'c', 8, 36, 'ms') collate public.tt_icu))),
-  0::bigint, 'witness: under ICU und (no numeric ordering) every fixture row sorts inside its own month'
+  0::bigint, 'LIVENESS: under ICU und (no numeric ordering) every fixture row sorts inside its own month'
 );
 select cmp_ok(
   (select fraction from pgpm.check_text_time('public.tt_cuid_en', 'id', 'c', 8, 36, 'ms', 1000)),

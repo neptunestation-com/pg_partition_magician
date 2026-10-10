@@ -50,14 +50,14 @@ select child_name as mon_a from pgpm.part
  where parent_table = 'public.rt'::regclass and attached order by lo::numeric limit 1 \gset
 
 select is(:'mon_a'::text, 'rt_p0000000000000000000_to_0000000000000003000',
-  'fixture (A): the monolith is the frozen coarse child [0, 3000)');
+  'fixture: (A) the monolith is the frozen coarse child [0, 3000)');
 select is((select regrain_cursor from pgpm.config where parent_table = 'public.rt'::regclass), '200',
-  'LIVENESS (A): the run toward 100 is in flight, cursor at 200');
+  'LIVENESS: (A) the run toward 100 is in flight, cursor at 200');
 select is((select array_agg(lo || '-' || hi order by lo::numeric) from pgpm.part
             where parent_table = 'public.rt'::regclass and not attached),
   array['0-100', '100-200'],
-  'LIVENESS (A): two copies on the 100 grid are recorded, not yet attached');
-select ok(pgpm._regrain_capture_active('public.rt', :'mon_a'), 'LIVENESS (A): capture sits on the source');
+  'LIVENESS: (A) two copies on the 100 grid are recorded, not yet attached');
+select ok(pgpm._regrain_capture_active('public.rt', :'mon_a'), 'LIVENESS: (A) capture sits on the source');
 
 select max(id) as mark_a from pgpm.log \gset
 select throws_like($$ select pgpm.set_regrain('public.rt', '500') $$,
@@ -113,20 +113,20 @@ insert into public.rd values (123456, 'frontier');
 select child_name as mon_c from pgpm.part
  where parent_table = 'public.rd'::regclass and attached order by lo::numeric limit 1 \gset
 select is(:'mon_c'::text, 'rd_p0000000000000000000_to_0000000000000020000',
-  'fixture (C): the monolith is the frozen coarse child [0, 20000)');
-select is(pgpm.regrain_step('public.rd', :'mon_c', '5000', 1000), 'prepared', 'fixture (C): the run is prepared');
+  'fixture: (C) the monolith is the frozen coarse child [0, 20000)');
+select is(pgpm.regrain_step('public.rd', :'mon_c', '5000', 1000), 'prepared', 'fixture: (C) the run is prepared');
 -- A write far up the source ([10000, 15000), which the copy has not reached, so no reconcile takes the
 -- steps below) gives the delta rows. That matters to the probe: a step ANALYZEs the delta while it has no
 -- row estimate, and ANALYZE's SHARE UPDATE EXCLUSIVE would serialise the two steps below by accident,
 -- which is exactly what hid the missing lock from a first draft of this section.
 update public.rd set payload = 'u' where id = 10100;
 select is(pgpm.regrain_step('public.rd', :'mon_c', '5000', 1000), 'copied:1000',
-  'fixture (C): the first batch of [0, 5000) is copied');
+  'fixture: (C) the first batch of [0, 5000) is copied');
 select is(pgpm._regrain_delta_count('public.rd'), 2::bigint,
-  'fixture (C): the write far up the source is captured (old + new) and not yet reconciled');
+  'fixture: (C) the write far up the source is captured (old + new) and not yet reconciled');
 select ok((select c.reltuples > 0 from pgpm._regrain_capture_names('public.rd') n
              join pg_class c on c.oid = format('public.%I', n.delta)::regclass),
-  'LIVENESS (C): the delta has a row estimate, so neither step below ANALYZEs it (no accidental serialisation)');
+  'LIVENESS: (C) the delta has a row estimate, so neither step below ANALYZEs it (no accidental serialisation)');
 
 select dblink_connect('c162_a', 'dbname=' || current_database());
 select dblink_connect('c162_b', 'dbname=' || current_database());
@@ -139,7 +139,7 @@ create table public.c162_outcome (who text primary key, state text, result text)
 select dblink_exec('c162_a', 'begin');
 select is((select x from dblink('c162_a',
             format('select pgpm.regrain_step(%L, %L, %L, 700)', 'public.rd', :'mon_c', '5000')) as t(x text)),
-  'copied:700', 'LIVENESS (C): session A copied its batch of 700 and holds its transaction open');
+  'copied:700', 'LIVENESS: (C) session A copied its batch of 700 and holds its transaction open');
 -- B: a second driver on the same parent, one step of 500
 select dblink_send_query('c162_b',
   format('select pgpm.regrain_step(%L, %L, %L, 500)', 'public.rd', :'mon_c', '5000'));
@@ -156,9 +156,9 @@ do $$ begin
   end loop;
 end $$;
 select ok(exists (select 1 from pg_stat_activity where pid = :bpid and wait_event_type = 'Lock'),
-  'LIVENESS (C): session B is waiting on a lock...');
+  'LIVENESS: (C) session B is waiting on a lock...');
 select ok(exists (select 1 from pg_stat_activity where pid = :apid and state = 'idle in transaction'),
-  'LIVENESS (C): ...while session A''s step is still uncommitted');
+  'LIVENESS: (C) ...while session A''s step is still uncommitted');
 select dblink_exec('c162_a', 'commit');
 do $$ declare v text; begin
   select x into v from dblink_get_result('c162_b') as t(x text);
@@ -187,12 +187,12 @@ insert into public.rp values (123456, 'frontier');
 select child_name as mon_d from pgpm.part
  where parent_table = 'public.rp'::regclass and attached order by lo::numeric limit 1 \gset
 select is((select regrain_to from pgpm.config where parent_table = 'public.rp'::regclass), null,
-  'fixture (D): auto-regrain is off; the run below is operator-driven');
+  'fixture: (D) auto-regrain is off; the run below is operator-driven');
 
 select dblink_exec('c162_a', 'begin');
 select is((select x from dblink('c162_a',
             format('select pgpm.regrain_step(%L, %L, %L)', 'public.rp', :'mon_d', '5000')) as t(x text)),
-  'prepared', 'LIVENESS (D): session A prepared a run at 5000 and holds its transaction open');
+  'prepared', 'LIVENESS: (D) session A prepared a run at 5000 and holds its transaction open');
 select dblink_send_query('c162_b', $q$select pgpm.set_regrain('public.rp', '2500')::text$q$);
 do $$ begin
   for i in 1 .. 6000 loop
@@ -203,9 +203,9 @@ do $$ begin
   end loop;
 end $$;
 select ok(exists (select 1 from pg_stat_activity where pid = :bpid and wait_event_type = 'Lock'),
-  'LIVENESS (D): set_regrain is waiting on a lock...');
+  'LIVENESS: (D) set_regrain is waiting on a lock...');
 select ok(exists (select 1 from pg_stat_activity where pid = :apid and state = 'idle in transaction'),
-  'LIVENESS (D): ...while the prepare is still uncommitted');
+  'LIVENESS: (D) ...while the prepare is still uncommitted');
 select dblink_exec('c162_a', 'commit');
 do $$ declare v text; begin
   select x into v from dblink_get_result('c162_b') as t(x text);
@@ -243,16 +243,16 @@ call pgpm.transmute('public.rc', 'id', 10000, p_regrain_batch => 1000);
 insert into public.rc values (123456, 'frontier');
 select child_name as mon_e from pgpm.part
  where parent_table = 'public.rc'::regclass and attached order by lo::numeric limit 1 \gset
-select is(pgpm.regrain_step('public.rc', :'mon_e', '5000', 1000), 'prepared', 'fixture (E): the run is prepared');
+select is(pgpm.regrain_step('public.rc', :'mon_e', '5000', 1000), 'prepared', 'fixture: (E) the run is prepared');
 select is(pgpm.regrain_step('public.rc', :'mon_e', '5000', 5000), 'copied:2000',
-  'fixture (E): [0, 5000) is copied whole');
+  'fixture: (E) [0, 5000) is copied whole');
 select is((select regrain_cursor from pgpm.config where parent_table = 'public.rc'::regclass), '5000',
-  'LIVENESS (E): the run is in flight with the cursor past its first sub-range');
+  'LIVENESS: (E) the run is in flight with the cursor past its first sub-range');
 select max(id) as mark_e from pgpm.log \gset
 
 select dblink_exec('c162_a', 'begin');
 select is((select x::int from dblink('c162_a', $q$select pgpm.regrain_cancel('public.rc')::text$q$) as t(x text)), 1,
-  'LIVENESS (E): session A cancelled the run (one copy dropped) and holds its transaction open');
+  'LIVENESS: (E) session A cancelled the run (one copy dropped) and holds its transaction open');
 select dblink_send_query('c162_b',
   format('select pgpm.regrain_step(%L, %L, %L, 1000)', 'public.rc', :'mon_e', '5000'));
 do $$ begin
@@ -264,9 +264,9 @@ do $$ begin
   end loop;
 end $$;
 select ok(exists (select 1 from pg_stat_activity where pid = :bpid and wait_event_type = 'Lock'),
-  'LIVENESS (E): the second step is waiting on a lock...');
+  'LIVENESS: (E) the second step is waiting on a lock...');
 select ok(exists (select 1 from pg_stat_activity where pid = :apid and state = 'idle in transaction'),
-  'LIVENESS (E): ...while the cancel is still uncommitted');
+  'LIVENESS: (E) ...while the cancel is still uncommitted');
 select dblink_exec('c162_a', 'commit');
 do $$ declare v text; begin
   select x into v from dblink_get_result('c162_b') as t(x text);

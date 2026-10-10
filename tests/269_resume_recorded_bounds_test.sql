@@ -88,12 +88,12 @@ $$;
 create table public.t269a (id numeric primary key, v text);
 insert into public.t269a select g, 'x' from generate_series(1, 50) g;
 select pg_temp.t269_claim('public.t269a', 'id', '0', 'NaN');
-select ok(pg_temp.t269_owner_gone('public.t269a'), 'A LIVENESS: the session that recorded the claim is gone');
+select ok(pg_temp.t269_owner_gone('public.t269a'), 'LIVENESS: (A) the session that recorded the claim is gone');
 select is(pg_temp.t269_state('public.t269a'),
   'r | config:false | claim:[0, NaN) | bound:CHECK (((id >= ''0''::numeric) AND (id < ''NaN''::numeric))) NOT VALID | partitions:none',
-  'A LIVENESS: the pre-#922 state: a claim [0, NaN) and its NOT VALID CHECK, the NaN row already deleted');
+  'LIVENESS: (A) the pre-#922 state: a claim [0, NaN) and its NOT VALID CHECK, the NaN row already deleted');
 select is((select count(*)::int from public.t269a where id >= 0 and id < 'NaN'), 50,
-  'A LIVENESS: every row satisfies that CHECK, so a resume would validate it and go on to the cutover');
+  'LIVENESS: (A) every row satisfies that CHECK, so a resume would validate it and go on to the cutover');
 select throws_like(
   $$ select dblink_exec('t269', $c$ call pgpm.transmute('public.t269a', 'id', 100::bigint) $c$) $$,
   'pg_partition_magician: cannot resume the transmute of t269a on id: the bound [0, NaN) an earlier attempt recorded%NaN is not finite%pgpm.transmute_abort(t269a)%',
@@ -104,7 +104,7 @@ select is(pg_temp.t269_state('public.t269a'),
 select ok(pgpm.transmute_abort('public.t269a'), 'A: the remedy the refusal names, transmute_abort, clears the claim');
 select lives_ok(
   $$ select dblink_exec('t269', $c$ call pgpm.transmute('public.t269a', 'id', 100::bigint) $c$) $$,
-  'A LIVENESS: and the re-run converts the same table on a fresh bound');
+  'LIVENESS: (A) and the re-run converts the same table on a fresh bound');
 select is((select string_agg(pg_get_expr(c.relpartbound, c.oid), ', ') from pg_inherits i join pg_class c on c.oid = i.inhrelid
             where i.inhparent = 'public.t269a'::regclass
               and c.oid = (select monolith_oid from pgpm.config where parent_table = 'public.t269a'::regclass)),
@@ -116,9 +116,9 @@ select is((select string_agg(pg_get_expr(c.relpartbound, c.oid), ', ') from pg_i
 create table public.t269b (id numeric(4,0) primary key, v text);
 insert into public.t269b select g * 5, 'x' from generate_series(1, 1999) g;   -- max 9995
 select pg_temp.t269_claim('public.t269b', 'id', '0', '10000');
-select ok(pg_temp.t269_owner_gone('public.t269b'), 'B LIVENESS: the session that recorded the claim is gone');
+select ok(pg_temp.t269_owner_gone('public.t269b'), 'LIVENESS: (B) the session that recorded the claim is gone');
 select throws_ok($$ select 10000::numeric(4,0) $$, '22003', NULL,
-  'B LIVENESS: the recorded hi, 10000, cannot be stored in numeric(4,0)');
+  'LIVENESS: (B) the recorded hi, 10000, cannot be stored in numeric(4,0)');
 select throws_like(
   $$ select dblink_exec('t269', $c$ call pgpm.transmute('public.t269b', 'id', 10::bigint) $c$) $$,
   'pg_partition_magician: cannot resume the transmute of t269b on id: the bound [0, 10000) an earlier attempt recorded%numeric(4,0)%10000 cannot be stored in it at all%',
@@ -133,7 +133,7 @@ select is(pg_temp.t269_state('public.t269b'),
 create table public.t269c (id bigint primary key, v text);
 insert into public.t269c select g, 'x' from generate_series(1, 30) g;
 select pg_temp.t269_claim('public.t269c', 'id', '0', '200');   -- wider than a fresh bound [0, 40) would be
-select ok(pg_temp.t269_owner_gone('public.t269c'), 'C LIVENESS: the session that recorded the claim is gone');
+select ok(pg_temp.t269_owner_gone('public.t269c'), 'LIVENESS: (C) the session that recorded the claim is gone');
 select lives_ok(
   $$ select dblink_exec('t269', $c$ call pgpm.transmute('public.t269c', 'id', 10::bigint) $c$) $$,
   'C: a resume of a finite claim the column can hold goes ahead');

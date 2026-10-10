@@ -29,7 +29,7 @@ create table public.tya (id bigint primary key, body text);
 insert into public.tya select g, 'b' || g from generate_series(1, 5) g;
 create type public.tya_pgpm_new as enum ('x');
 select ok(to_regclass('public.tya_pgpm_new') is null and to_regtype('public.tya_pgpm_new') is not null,
-  'A LIVENESS: tya''s staging name is free as a relation and taken as a type');
+  'LIVENESS: (A) tya''s staging name is free as a relation and taken as a type');
 select throws_like($$ call pgpm.transmute('public.tya', 'id', 100::bigint, p_obtain => 2) $$,
   'pg_partition_magician: public.tya_pgpm_new already exists as an enum type, and transmute needs that name as a staging name%',
   'A: the enum on the staging name is refused, and named as an enum');
@@ -41,7 +41,7 @@ select lives_ok($$ insert into public.tya values (500, 'past any bound') $$, 'A:
 drop type public.tya_pgpm_new;
 call pgpm.transmute('public.tya', 'id', 100::bigint, p_obtain => 2);
 select is((select relkind::text from pg_class where oid = 'public.tya'::regclass), 'p',
-  'A LIVENESS: with the enum gone the same call converts tya');
+  'LIVENESS: (A) with the enum gone the same call converts tya');
 
 -- (B) the monolith name
 create table public.tyb (id bigint primary key, body text);
@@ -50,7 +50,7 @@ select pgpm._part_name('tyb', 'id', '100', '0', '300', 'UTC') as tyb_mon \gset
 select oid as tyb_oid from pg_class where oid = 'public.tyb'::regclass \gset
 create domain public.:"tyb_mon" as int;
 select ok(to_regclass(format('public.%I', :'tyb_mon')) is null and to_regtype(format('public.%I', :'tyb_mon')) is not null,
-  'B LIVENESS: tyb''s monolith name is free as a relation and taken as a type');
+  'LIVENESS: (B) tyb''s monolith name is free as a relation and taken as a type');
 select throws_like($$ call pgpm.transmute('public.tyb', 'id', 100::bigint, p_obtain => 2) $$,
   'pg_partition_magician: public.' || :'tyb_mon' || ' already exists as a domain, and transmute needs that name for the monolith%',
   'B: the domain on the monolith name is refused, and named as a domain');
@@ -63,9 +63,9 @@ select is((select array_agg(id order by id) from public.tyb where id in (1, 250)
 alter domain public.:"tyb_mon" rename to tyb_elsewhere;
 call pgpm.transmute('public.tyb', 'id', 100::bigint, p_obtain => 2);
 select is((select relkind::text from pg_class where oid = 'public.tyb'::regclass), 'p',
-  'B LIVENESS: with the domain renamed away the same call converts tyb');
+  'LIVENESS: (B) with the domain renamed away the same call converts tyb');
 select is((select relname::text from pg_class where oid = :tyb_oid), :'tyb_mon',
-  'B LIVENESS: and the original table took exactly the name the domain had held');
+  'LIVENESS: (B) and the original table took exactly the name the domain had held');
 
 -- (C) an implicit array type on the staging name is not in the way
 create table public._cf (id bigint primary key, body text);
@@ -74,9 +74,9 @@ create type public.cf_pgpm_new as enum ('y');
 select is((select t.typcategory::text from pg_type t where t.typname = '_cf_pgpm_new'
              and t.typnamespace = 'public'::regnamespace
              and t.typelem = 'public.cf_pgpm_new'::regtype), 'A',
-  'C LIVENESS: _cf_pgpm_new, _cf''s staging name, is taken by the implicit array type of the enum cf_pgpm_new');
+  'LIVENESS: (C) _cf_pgpm_new, _cf''s staging name, is taken by the implicit array type of the enum cf_pgpm_new');
 select is(pgpm._type_squatter('public', '_cf_pgpm_new'), null, 'C: _type_squatter does not count an implicit array type');
-select is(pgpm._type_squatter('public', 'cf_pgpm_new'), 'an enum type', 'C LIVENESS: but it does see the enum itself');
+select is(pgpm._type_squatter('public', 'cf_pgpm_new'), 'an enum type', 'LIVENESS: (C) but it does see the enum itself');
 call pgpm.transmute('public._cf', 'id', 100::bigint, p_obtain => 2);
 select is((select relkind::text from pg_class where oid = 'public._cf'::regclass), 'p', 'C: _cf converts');
 select is((select enum_range(null::public.cf_pgpm_new)::text), '{y}', 'C: the enum is untouched');

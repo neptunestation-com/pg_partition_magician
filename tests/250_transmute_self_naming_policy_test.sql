@@ -43,14 +43,14 @@ grant select, insert on public.pa250 to r250_app;
 grant select on public.m250 to r250_app;
 
 select alike(pg_get_expr(polqual, polrelid), '%pa250.org%',
-  'A LIVENESS: the SELECT policy''s expression qualifies the outer row with the table''s own name')
+  'LIVENESS: (A) the SELECT policy''s expression qualifies the outer row with the table''s own name')
   from pg_policy where polrelid = 'public.pa250'::regclass and polname = 'pa250_sel';
 select alike(pg_get_expr(polwithcheck, polrelid), '%pa250.org%',
-  'A LIVENESS: the INSERT policy''s unqualified outer column renders qualified by the table''s own name too')
+  'LIVENESS: (A) the INSERT policy''s unqualified outer column renders qualified by the table''s own name too')
   from pg_policy where polrelid = 'public.pa250'::regclass and polname = 'pa250_ins';
 set role r250_app;
 select is((select array_agg(id order by id) from public.pa250), array[1, 3, 5, 7, 9, 11, 13, 15]::bigint[],
-  'A LIVENESS: before the conversion the role reads exactly its tenant''s eight rows');
+  'LIVENESS: (A) before the conversion the role reads exactly its tenant''s eight rows');
 reset role;
 
 select dblink_connect('c250', 'dbname=' || current_database());
@@ -79,7 +79,7 @@ select alike((select pg_get_expr(p.polqual, p.polrelid) from pg_policy p join pg
 insert into public.pa250 values (25, 'acme', 'fwd'), (26, 'other', 'fwd');
 select isnt((select tableoid from public.pa250 where id = 25),
             (select monolith_oid from pgpm.config where parent_table = 'public.pa250'::regclass),
-  'A LIVENESS: id 25 landed in a forward partition, not the monolith');
+  'LIVENESS: (A) id 25 landed in a forward partition, not the monolith');
 set role r250_app;
 select is((select array_agg(id order by id) from public.pa250), array[1, 3, 5, 7, 9, 11, 13, 15, 25]::bigint[],
   'A: through the parent the role reads its tenant''s rows in the monolith and in the forward partition, and no other');
@@ -98,11 +98,11 @@ create policy pb250_self on public.pb250 for delete using (exists (select 1 from
 select ok(exists (select 1 from pg_depend d join pg_policy p on p.oid = d.objid
                    where d.classid = 'pg_policy'::regclass and p.polname = 'pb250_self'
                      and d.refobjid = 'public.pb250'::regclass and d.deptype = 'n'),
-  'B LIVENESS: the original policy depends on the table''s own oid through its subquery');
+  'LIVENESS: (B) the original policy depends on the table''s own oid through its subquery');
 call pgpm.transmute('public.pb250', 'id', 10::bigint, p_obtain => 2);
 select isnt((select monolith_oid from pgpm.config where parent_table = 'public.pb250'::regclass),
             'public.pb250'::regclass::oid,
-  'B LIVENESS: the conversion handed the original oid to the monolith');
+  'LIVENESS: (B) the conversion handed the original oid to the monolith');
 select is((select array_agg(distinct d.refobjid::regclass::text order by d.refobjid::regclass::text)
              from pg_depend d join pg_policy p on p.oid = d.objid
             where d.classid = 'pg_policy'::regclass and d.refclassid = 'pg_class'::regclass
