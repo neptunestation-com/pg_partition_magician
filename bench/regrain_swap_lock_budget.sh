@@ -11,8 +11,10 @@
 # are live), and this wrapper re-checks, every CI run, that the refusals they guard would fail if removed.
 #
 # The mutations it is required to fail against (bench/mutations/mutate.py):
-#   regrain_swap_no_prepare_budget      -- the prepare tick and set_regrain never refuse a run past the line, so
-#                                          the cap + 1 run is prepared and its target stored (part A)
+#   regrain_swap_no_prepare_budget      -- the prepare tick never refuses a run past the line, so the cap + 1
+#                                          run is prepared (part A)
+#   regrain_set_regrain_no_budget_warning -- set_regrain stores that run's target in silence: no WARNING and no
+#                                          warn_regrain_lock_budget row (part A)
 #   regrain_swap_no_measured_budget     -- the swap never refuses on what its ATTACHes cost, so the two
 #                                          measured runs swap holding more than half the table (parts D and E)
 #   regrain_swap_incoming_fk_uncharged  -- the swap projects the ATTACHes alone, so the run referenced by twenty

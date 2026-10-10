@@ -1713,14 +1713,16 @@ the lock table every session shares: at least two slots a child (the child itsel
 swap drops), two more for each outgoing foreign key, and about one more for each incoming key the swap
 re-adds. So a run is bounded by that table, at the half of
 `max_locks_per_transaction x (max_connections + max_prepared_transactions)` that `obtain` and `extend_to`
-keep for every other session. The prepare tick refuses, before anything is copied and before the source is
-renamed, a run whose fine children at two slots each would take more than half: on stock settings (64 x 100)
-more than 1600 children, a little over four years of a monolith regrained to `'1 day'`. With `archive_fn`
+keep for every other session: on stock settings (64 x 100) a budget of 3200 slots, which is 1600 children at
+two slots each, a little over four years of a monolith regrained to `'1 day'`. It is asked at three points,
+two of which refuse. [`set_regrain`](#set_regrain) only **warns** (see there). The prepare tick **refuses**,
+before anything is copied and before the source is renamed, a run whose fine children at two slots each
+would take more than half. With `archive_fn`
 unset it counts only the sub-ranges above the retention horizon, since the aged ones are discarded with the
-source rather than attached. The swap then measures what its second `ATTACH` cost, charges each incoming
-foreign key two slots a child plus two more, and refuses when the run's children at that cost would take more
-than half; it rolls back whole, so the source stays attached with every row and the copies are kept. Both
-messages give the knob and about how many children fit in one swap: raise `max_locks_per_transaction` (a
+source rather than attached. The swap tick **refuses** too, as the last guard: it measures what its second
+`ATTACH` cost, charges each incoming foreign key two slots a child plus two more, and refuses when the run's
+children at that cost would take more than half; it rolls back whole, so the source stays attached with every row and the copies are kept. Both
+refusals give the knob and about how many children fit in one swap: raise `max_locks_per_transaction` (a
 restart), or [`regrain_cancel`](#regrain_cancel) and regrain in two passes, first to a coarser step and then
 each of its children to the target. Through `maintain` each refusal appears as a `skip_regrain` row carrying
 the message. What the swap holds whatever its size (the locks taken before its first `ATTACH`, that
@@ -2857,11 +2859,16 @@ The names asked about are the ones auto-regrain would render for every child it 
 of each, not only the anchor's: on a `numeric` key a cell's label grows with a fractional target's digits,
 so the cell after the anchor can need a longer name than the anchor itself.
 
-A target is refused too when a child auto-regrain would split could never swap: when its fine children at two
-lock-table slots each would take more than half the shared lock table, the count `regrain_step`'s prepare tick
-makes (see [`regrain_step`](#regrain_step)). It reads no row of the table: on an `id` grid with `retain` set
-it places the retention horizon by the newest partition's upper bound rather than by the largest value, so it
-can only count fewer children than the prepare tick, never more, and never refuses a target the prepare tick
+A target is **not** refused for the size of the run it would start, but it is **warned** about: when a child
+auto-regrain would split has more fine children above the retention horizon than half the shared lock table
+holds at two slots each (on stock settings, more than 1600; see [`regrain_step`](#regrain_step)),
+`set_regrain` raises a `WARNING` naming the count, the slots and the budget, and saying that `regrain_step`'s
+prepare tick will refuse that run before copying anything, logs one `warn_regrain_lock_budget` row for the
+child (`lo`/`hi` its bounds, `rows` the count it reached), and stores the target. It warns rather than
+refuses because the count is sure only at the prepare tick: the retention horizon, and with it the children
+the run will attach, can move between the two. It reads no row of the table: on an `id` grid with `retain`
+set it places the horizon by the newest partition's upper bound rather than by the largest value, so it can
+only count fewer children than the prepare tick, never more, and never warns about a run the prepare tick
 would accept.
 
 Turning it **off while the run it started is in flight** abandons that run, exactly as
@@ -3472,6 +3479,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `adopt_partition` | `adopt_partition()` recorded an attached partition by its oid: a stale row of the same name re-anchored, or a partition with no row recorded afresh over its catalog bounds (see [`adopt_partition`](#adopt_partition)). `method` names the relation, its oid and, for a re-anchored row, the oid it replaced |
 | `archive_coverage_reset` | `pgpm.archive_ledger` rows were discarded because the coverage they record cannot be vouched for; `rows` carries how many chunks and `method` says why. Four causes: the partition they were recorded for has no write block in force on it (absent, disabled, or origin-only: coverage nothing has been guarding, see [`maintain`](#maintain) and [`retire`](#retire)); they were recorded under a `child_name` that is no longer a tracked partition of the parent, over a range a tracked partition now holds (a partition renamed without carrying the ledger, see [the archive step](#byte-budget-chunked-archiving)); a `regrain` swap dropped a partly archived source, whose chunks go with it (see [`regrain`](#regrain)); or `adopt_partition()` recorded a new relation under the name they were recorded for (see [`adopt_partition`](#adopt_partition)). In every case the partition holding the range archives again from its own `lo`. A chunk `retire()` marked retired (`pgpm.archive_ledger.retired_at`) is never discarded, by any of the four |
 | `archive_chunk_retired` | a step about to discard chunks by name, or as an orphan, found `pgpm.archive_ledger` rows whose relation (`child_oid`) no longer exists: their partition was dropped outside `retire()`, so their objects are the only copy of its rows. They were marked retired (`retired_at`) instead of discarded; `rows` carries how many chunks, `method` names the relation and its oid, and no partition over their range is archived (see [the ledger](#pgpmarchive_ledger)) |
+| `warn_regrain_lock_budget` | `set_regrain` stored a target whose run on a child would attach more fine children than half the shared lock table holds at two slots each, so `regrain_step`'s prepare tick will refuse it (see [`set_regrain`](#set_regrain)); `lo`/`hi` are the child's bounds, `rows` the count reached (counting stops just past the budget), `method` the estimate. One row per such child per call |
 | `warn_replica_identity_nothing` | a partition was minted (by `obtain`, `extend_to` or a regrain's swap) for a parent whose `REPLICA IDENTITY USING INDEX` index was dropped, a state PostgreSQL treats as `NOTHING`, so the partition took `NOTHING` (see the replica identity paragraph under `transmute`). Logged at most once per transaction for the parent; `method` names the first such partition. Each one keeps `NOTHING` after the parent is given an identity again, so give it the identity by hand |
 | `warn_obtain_unscheduled` | logged at most once per `maintain_all` sweep, with a null `parent_table`, when the `pgpm` cron job exists but `pgpm_obtain` doesn't -- obtain is silently not running |
 | `skip_obtain` / `skip_retain` / `skip_regrain` / `skip_regrain_capture` / `skip_archive` / `skip_write_block` / `skip_restore_fk` / `skip_validate_fk` | a step deferred (lock race or transient error; `method` carries the reason) |

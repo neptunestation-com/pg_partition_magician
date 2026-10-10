@@ -8,7 +8,8 @@
 --
 -- The contract: a run whose swap would attach more children than half the table holds at two slots a child
 -- (each child's own lock and the lock on the bound CHECK the swap drops, the least any child costs) is refused
--- at its prepare tick and by set_regrain, before anything is copied; a run at that line is not. The aged prefix
+-- at its prepare tick, before anything is copied, and set_regrain warns about it (a WARNING and a
+-- warn_regrain_lock_budget log row) but stores the target; a run at that line is neither refused nor warned of. The aged prefix
 -- a retention policy discards is not counted, since the copy skips it and the swap attaches nothing there. And
 -- the swap itself measures what its second ATTACH cost and refuses, rolling back whole, when the run's children
 -- at that cost (plus a charge for re-adding each incoming foreign key against every child) would hold more than
@@ -21,7 +22,7 @@
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
-select plan(22);
+select plan(24);
 
 create temporary table rs_budget as
   select slots, slots / 4 as cap
@@ -74,11 +75,23 @@ select is(pg_temp.rs_run_state('rs315_over'), 'cursor=null copies=0 prepares=0',
 select is((select child_oid from pgpm.part where parent_table = 'public.rs315_over'::regclass and attached and lo = '0'),
           (select child_oid from rs_over_src),
   'A: the source is still the attached partition at lo 0, the same relation');
-select throws_like($$ select pgpm.set_regrain('public.rs315_over', '100') $$,
-  format('%%its swap would attach at least %s fine partitions%%', :cap + 1),
-  'A: set_regrain refuses the same target for auto-regrain, by the same count');
-select is((select regrain_to from pgpm.config where parent_table = 'public.rs315_over'::regclass), null,
-  'A: and stores nothing');
+-- set_regrain WARNS about the same run rather than refusing it (the count is sure only at the prepare tick). A
+-- WARNING cannot be caught in SQL, so the call runs in a second psql session on this database, inside this same
+-- container, its output written to a file the server then reads back.
+\setenv PGDATABASE :DBNAME
+\! psql -X -q -U postgres -c "select pgpm.set_regrain('public.rs315_over', '100')" > /tmp/pgpm315_warn_$PGDATABASE.txt 2>&1
+select alike(pg_read_file('/tmp/pgpm315_warn_' || current_database() || '.txt'),
+  format('%%WARNING:  pg_partition_magician: set_regrain(rs315_over, 100) stores the target, but the run that would split %s -- its swap would attach at least %s fine partitions in one transaction%%more than half the shared lock table''s %s (max_locks_per_transaction%%regrain_step''s prepare tick will refuse that run before copying anything%%',
+         pg_temp.rs_source('rs315_over'), :cap + 1, :slots),
+  'A: set_regrain warns that the same run would need more than half the table, and that the prepare tick will refuse it');
+\! rm -f /tmp/pgpm315_warn_$PGDATABASE.txt
+select is(
+  (select string_agg(format('%s rows=%s [%s, %s)', action, rows, lo, hi), '; ') from pgpm.log
+    where parent_table = 'public.rs315_over'::regclass and action = 'warn_regrain_lock_budget'),
+  format('warn_regrain_lock_budget rows=%s [0, %s)', :cap + 1, (:cap + 1) * 100),
+  'A: and logs it once, as warn_regrain_lock_budget over the monolith''s bounds, with the count it reached');
+select is((select regrain_to from pgpm.config where parent_table = 'public.rs315_over'::regclass), '100',
+  'A: and stores the target, as a valid step is stored whatever the table''s size');
 
 -- ==================== (B) exactly at the line: set and prepared ==============================================
 \o /dev/null
@@ -89,6 +102,8 @@ insert into public.rs315_at (id, a) values (:cap * 100 + 1, 'frontier');
 
 select lives_ok($$ select pgpm.set_regrain('public.rs315_at', '100') $$,
   'B LIVENESS: set_regrain accepts a target whose cap fine children fit in half the table at two slots each');
+select is((select count(*)::int from pgpm.log where parent_table = 'public.rs315_at'::regclass and action = 'warn_regrain_lock_budget'),
+  0, 'B: and does not warn about it: A''s warning is the line, not a warning about every target');
 select is(pgpm.regrain_step('public.rs315_at', pg_temp.rs_source('rs315_at'), '100'), 'prepared',
   'B LIVENESS: and the prepare tick prepares it, so A''s refusal is the line and not a refusal of everything');
 

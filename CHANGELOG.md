@@ -7,6 +7,17 @@
   dropped bound `CHECK`, more for foreign keys) to that transaction's end; nothing bounded that, as `obtain`
   (#786) and `extend_to` (#591) are bounded, so a monolith of a few years regrained to `'1 day'` copied every
   sub-range and then died 53200 `out of shared memory` at an `ATTACH` on every swap tick, the cursor at `hi`
+  and every copy kept. `regrain_step`'s prepare tick (before the source is renamed or anything copied) now
+  refuses a run whose fine children above the retention horizon would take more than half of
+  `max_locks_per_transaction x (max_connections + max_prepared_transactions)` at two slots each (1600 children
+  on stock settings); `set_regrain` warns about such a run (a `WARNING` and a `warn_regrain_lock_budget` log
+  row) and stores the target; and the swap measures what its second `ATTACH` cost, charges each incoming
+  foreign key it re-adds, and refuses, rolled back whole with the copies kept, when the run's children would
+  take more than half. Each refusal names the knob and how many children fit. `regrain()` still makes every
+  copy in its one transaction, which this does not bound. `tests/233` regrains its BC monolith to `'2 years'`
+  so it stays under the budget. Test `tests/315`; guard `bench/regrain_swap_lock_budget.sh`, mutations
+  `regrain_swap_no_prepare_budget`, `regrain_set_regrain_no_budget_warning`, `regrain_swap_no_measured_budget`,
+  `regrain_swap_incoming_fk_uncharged`.
   and every copy kept. `regrain_step`'s prepare tick (before the source is renamed or anything copied) and
   `set_regrain` now refuse a run whose fine children above the retention horizon would take more than half of
   `max_locks_per_transaction x (max_connections + max_prepared_transactions)` at two slots each, and the swap

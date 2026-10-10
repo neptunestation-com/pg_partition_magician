@@ -7033,7 +7033,7 @@ $$;
 -- Batching the swap across commits is not on offer, because between two commits the source's range would be
 -- served twice or not at all. So such a run is REFUSED, at the half of the table obtain and extend_to leave to
 -- every other session: before anything is copied, when its fine-child count at two slots a child already needs
--- more than half (here, asked by the prepare tick and by set_regrain); and at the swap tick itself, after the
+-- more than half (refused by the prepare tick; set_regrain only warns); and at the swap tick itself, after the
 -- first two ATTACHes, by what they measurably cost (in regrain_step), which is what bounds a table whose children
 -- cost more than the floor, and a run prepared before this budget existed.
 --
@@ -7046,7 +7046,7 @@ $$;
 -- this call. A negative retain counts every sub-range: regrain_step refuses that config on its own (#451).
 -- p_catalog_only (set_regrain's) reads no user rows (tests/241 classifies set_regrain so): on an id grid the
 -- newest attached partition's hi stands in for the frontier, which is never above it, so the horizon it gives
--- is never earlier than the real one and set_regrain never refuses a target the prepare tick would accept.
+-- is never earlier than the real one and set_regrain never warns about a run the prepare tick would accept.
 create or replace function pgpm._regrain_fine_count(p_parent regclass, cfg pgpm.config, p_step text,
                                                     p_lo text, p_hi text, p_cap bigint, p_catalog_only boolean default false)
 returns bigint language plpgsql as $$
@@ -7076,24 +7076,39 @@ begin
 end;
 $$;
 
--- _regrain_swap_budget: refuse a run of p_child ([p_lo, p_hi) toward p_step) whose swap would attach more fine
--- children than half the shared lock table holds at two slots each, counted as _regrain_fine_count counts them
--- (p_catalog_only: set_regrain's). Asked by the prepare tick, before a copy is dropped, capture is installed or a
--- row is copied, and by set_regrain before the target is stored, so the refusal changes nothing in either.
+-- _regrain_swap_budget: a run of p_child ([p_lo, p_hi) toward p_step) whose swap would attach more fine children
+-- than half the shared lock table holds at two slots each, counted as _regrain_fine_count counts them. The prepare
+-- tick REFUSES it, before a copy is dropped, capture is installed or a row is copied, so the refusal changes
+-- nothing. set_regrain (p_warn, which also counts p_catalog_only) only WARNS, with a WARNING and a
+-- warn_regrain_lock_budget log row, and stores the target: the count is sure only at the prepare tick (the
+-- retention horizon and the children the target will split can move between the two), and the step's own
+-- validity is set_regrain's to judge whatever the table's size.
 create or replace function pgpm._regrain_swap_budget(p_parent regclass, cfg pgpm.config, p_child name, p_step text,
-                                                     p_lo text, p_hi text, p_catalog_only boolean default false)
+                                                     p_lo text, p_hi text, p_catalog_only boolean default false,
+                                                     p_warn boolean default false)
 returns void language plpgsql as $$
 declare
   v_slots bigint := current_setting('max_locks_per_transaction')::bigint
                     * (current_setting('max_connections')::bigint + current_setting('max_prepared_transactions')::bigint);
-  v_n bigint;
+  v_n bigint; v_what text; v_split text;
 begin
   v_n := pgpm._regrain_fine_count(p_parent, cfg, p_step, p_lo, p_hi, v_slots / 4, p_catalog_only);
   if 2 * v_n > v_slots / 2 then
-    raise exception 'pg_partition_magician: cannot regrain % of % at target step % -- its swap would attach at least % fine partitions in one transaction, each holding at least two lock-table slots (its own and its bound CHECK''s, more with foreign keys) to that transaction''s end: at least % slots, more than half the shared lock table''s % (max_locks_per_transaction % x (max_connections % + max_prepared_transactions %)). Refusing before anything is copied, rather than copying every row and then exhausting the table for every other session at the swap. Regrain in two passes, each child split into at most about % partitions (first to a coarser step, then each of its children to %), or raise max_locks_per_transaction (a restart).',
-      p_child, p_parent, p_step, v_n, 2 * v_n, v_slots,
-      current_setting('max_locks_per_transaction'), current_setting('max_connections'),
-      current_setting('max_prepared_transactions'), v_slots / 4, p_step;
+    v_what := format('its swap would attach at least %s fine partitions in one transaction, each holding at least two lock-table slots (its own and its bound CHECK''s, more with foreign keys) to that transaction''s end: at least %s slots, more than half the shared lock table''s %s (max_locks_per_transaction %s x (max_connections %s + max_prepared_transactions %s))',
+                     v_n, 2 * v_n, v_slots, current_setting('max_locks_per_transaction'),
+                     current_setting('max_connections'), current_setting('max_prepared_transactions'));
+    v_split := format('Regrain in two passes, each child split into at most about %s partitions (first to a coarser step, then each of its children to %s), or raise max_locks_per_transaction (a restart).',
+                      v_slots / 4, p_step);
+    if p_warn then
+      raise warning 'pg_partition_magician: set_regrain(%, %) stores the target, but the run that would split % -- %. regrain_step''s prepare tick will refuse that run before copying anything. %',
+        p_parent, p_step, p_child, v_what, v_split;
+      insert into pgpm.log (parent_table, action, lo, hi, rows, method)
+        values (p_parent, 'warn_regrain_lock_budget', p_lo, p_hi, v_n,
+                format('target %s for %s: %s; the prepare tick will refuse it', p_step, p_child, v_what));
+    else
+      raise exception 'pg_partition_magician: cannot regrain % of % at target step % -- %. Refusing before anything is copied, rather than copying every row and then exhausting the table for every other session at the swap. %',
+        p_child, p_parent, p_step, v_what, v_split;
+    end if;
   end if;
 end;
 $$;
@@ -12046,15 +12061,15 @@ begin
   if p_target_step is not null then
     perform pgpm._regrain_names_fit(p_parent, cfg, v_rel, p_target_step);
   end if;
-  -- #1161: ...and every child auto-regrain will split (the ones _regrain_names_fit walks) must be able to swap
-  -- inside half the shared lock table, or its run would copy every row and then never swap; refused here, by
-  -- the prepare tick's own count, rather than on every tick as skip_regrain (see _regrain_swap_budget)
+  -- #1161: ...and a child auto-regrain will split (the ones _regrain_names_fit walks) whose swap could not fit in
+  -- half the shared lock table is WARNED about here (a WARNING and a warn_regrain_lock_budget row), by the prepare
+  -- tick's own count, and the target is still stored: the prepare tick is what refuses (see _regrain_swap_budget)
   if p_target_step is not null then
     for r in select p.child_name, p.lo, p.hi from pgpm.part p where p.parent_table = p_parent and p.attached
                 and pgpm._native_gt(cfg.control_kind, p.hi, pgpm._grid_next(cfg.control_kind, cfg.partition_step, p.lo, cfg.partition_tz))
                 and pgpm._native_gt(cfg.control_kind, p.hi, pgpm._grid_next(cfg.control_kind, p_target_step, p.lo, cfg.partition_tz))
     loop
-      perform pgpm._regrain_swap_budget(p_parent, cfg, r.child_name, p_target_step, r.lo, r.hi, true);
+      perform pgpm._regrain_swap_budget(p_parent, cfg, r.child_name, p_target_step, r.lo, r.hi, true, true);
     end loop;
   end if;
 

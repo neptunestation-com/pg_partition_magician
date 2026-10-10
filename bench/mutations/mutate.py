@@ -11639,17 +11639,31 @@ MUTATIONS["restore_one_step_no_backoff"] = (
 
 
 # #1161: regrain_step's swap attaches every fine child in one transaction, so it gets the lock budget obtain (#786)
-# and extend_to (#591) have. One mutation per clause of it, each caught by tests/315 through
+# and extend_to (#591) have: refused at the prepare tick and at the swap, warned of by set_regrain. One mutation per
+# clause of it, each caught by tests/315 through
 # bench/regrain_swap_lock_budget.sh.
 _G1161 = "bench/regrain_swap_lock_budget.sh"
 MUTATIONS["regrain_swap_no_prepare_budget"] = (
     _G1161,
-    "Pre-#1161 prepare tick and set_regrain: nothing asks whether the run's swap can attach its fine children inside "
-    "half the shared lock table, so a run of more children than that is prepared, copied sub-range by sub-range, and "
-    "only then meets the swap (which dies 53200 `out of shared memory` at an ATTACH on every tick once the children "
-    "outnumber the whole table). One site, the floor's refusal made unreachable, which both callers share. tests/315 "
-    "part A catches it (the cap + 1 run is prepared, and set_regrain stores the target).",
-    [("  if 2 * v_n > v_slots / 2 then\n", "  if false then\n", 1)],
+    "Pre-#1161 prepare tick: nothing refuses a run whose swap cannot attach its fine children inside half the shared "
+    "lock table, so a run of more children than that is prepared, copied sub-range by sub-range, and only then meets "
+    "the swap (which dies 53200 `out of shared memory` at an ATTACH on every tick once the children outnumber the "
+    "whole table). One clause, the refusal's branch made unreachable; set_regrain's warning still fires. tests/315 "
+    "part A catches it (the cap + 1 run is prepared).",
+    [("    else\n      raise exception 'pg_partition_magician: cannot regrain % of % at target step % -- %.",
+      "    elsif false then\n      raise exception 'pg_partition_magician: cannot regrain % of % at target step % -- %.", 1)],
+)
+MUTATIONS["regrain_set_regrain_no_budget_warning"] = (
+    _G1161,
+    "set_regrain stores a target whose run the prepare tick will refuse and says nothing: no WARNING and no "
+    "warn_regrain_lock_budget row, so an operator learns of it only from skip_regrain on every tick. One site, the "
+    "warning branch emptied. tests/315 part A catches it (the WARNING text and the log row are both missing).",
+    [("    if p_warn then\n      raise warning 'pg_partition_magician: set_regrain(%, %) stores the target, but the run that would split % -- %. regrain_step''s prepare tick will refuse that run before copying anything. %',\n"
+      "        p_parent, p_step, p_child, v_what, v_split;\n"
+      "      insert into pgpm.log (parent_table, action, lo, hi, rows, method)\n"
+      "        values (p_parent, 'warn_regrain_lock_budget', p_lo, p_hi, v_n,\n"
+      "                format('target %s for %s: %s; the prepare tick will refuse it', p_step, p_child, v_what));\n",
+      "    if p_warn then\n      null;\n", 1)],
 )
 MUTATIONS["regrain_swap_no_measured_budget"] = (
     _G1161,
