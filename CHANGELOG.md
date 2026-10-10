@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **The documented-install guard judges a command that feeds install.sql on stdin** (#1178). The parser of
+  `bench/doc_install_stops_on_error.sh` kept a psql command only when it named install.sql through `-f`, so a
+  documented `psql "$DATABASE_URL" < pgpm_core/install.sql` (which runs past the first error and exits 0) was
+  dropped without a word and a doc carrying it beside a correct `-f` command passed. A command that reads the
+  file on stdin (`< file`, `<file`, `-f - < file`, a redirect before `psql`, or a pipe into `psql` from a
+  command naming the file) is now run on stdin, as written, and judged like a `-f` one (so is `-ffile`), and a
+  command that names install.sql and runs it neither way (`-c '\i install.sql'`) fails the guard as unparsed
+  instead of being skipped. Guard `bench/doc_install_guard_judges_stdin.sh`, mutations
+  `doc_install_stdin_dropped` and `doc_install_unplaced_dropped`.
+
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's

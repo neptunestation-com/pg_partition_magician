@@ -11397,6 +11397,39 @@ MUTATIONS["retain_horizon_wall_round_trip"] = (
 )
 
 
+# Issue #1178 (pass 11 F7-10): bench/doc_install_stops_on_error.sh judges a documented install command however it
+# hands psql the file, and refuses one it cannot place. bench/doc_install_guard_judges_stdin.sh runs the guard
+# (or its mutant) over a planted doc and reads the verdict for each line.
+_DOC_INSTALL_UNPLACED = (
+    "                if not installs:\n"
+    "                    out.append((start, None, \"names install.sql but runs it neither through -f nor on stdin: \"\n"
+    "                                f\"psql {m.group(1).strip()[:60]}\", None))\n"
+    "                    continue\n")
+MUTATIONS["doc_install_stdin_dropped"] = (
+    "bench/doc_install_guard_judges_stdin.sh",
+    "Pre-#1178 doc_install_stops_on_error.sh: a psql command that does not name install.sql through -f is "
+    "skipped, so `psql \"$DATABASE_URL\" < pgpm_core/install.sql` (which runs past the first error and exits 0) "
+    "is never run or judged and a doc carrying it beside a correct -f command passes. The one branch that decides "
+    "what such a command is, back to `continue`.",
+    [("                # #1178: not named through -f. psql reads stdin when it is given no -f, or -f -, so a file\n"
+      "                # fed there is what the command installs, judged as run: on stdin.\n"
+      "                installs = fed_on_stdin(toks, prefix) if all(f == \"-\" for f in files) else []\n"
+      "                how = \"-f\" if files else \"<\"\n" + _DOC_INSTALL_UNPLACED,
+      "                continue\n", 1)],
+)
+MUTATIONS["doc_install_unplaced_dropped"] = (
+    "bench/doc_install_guard_judges_stdin.sh",
+    "doc_install_stops_on_error.sh judging stdin-fed commands but skipping, not refusing, one that names "
+    "install.sql and runs it neither through -f nor on stdin (`psql -c '\\i pgpm_core/install.sql'`), so a "
+    "command it cannot place passes unjudged. One clause: the refusal.",
+    [(_DOC_INSTALL_UNPLACED,
+      "                if not installs:\n"
+      "                    continue\n", 1)],
+)
+MUTATION_SRC["doc_install_stdin_dropped"] = "bench/doc_install_stops_on_error.sh"
+MUTATION_SRC["doc_install_unplaced_dropped"] = "bench/doc_install_stops_on_error.sh"
+
+
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
 # cost), and discriminate.sh's --shard=I/N interleaves that list, so the heavy ones spread over the

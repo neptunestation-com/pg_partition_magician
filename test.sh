@@ -1053,6 +1053,7 @@ run_perf() {
     "bench/release_assets_over_cap.sh pgpm_perf307"
     "bench/doc_maintain_does_not_obtain.sh pgpm_perf118"
     "bench/doc_install_stops_on_error.sh pgpm_perf119"
+    "bench/doc_install_guard_judges_stdin.sh pgpm_perf346"
     "bench/classify_claims_tap.sh pgpm_perf79"
     "bench/lint_value_not_spelling.sh pgpm_perf125"
     "bench/tap_verdict.sh pgpm_perf80"
