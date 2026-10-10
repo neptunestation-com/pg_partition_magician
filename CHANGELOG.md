@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **`untransmute` refuses while a partition of the table is pending a concurrent detach** (#1157). A partition
+  left pending by an interrupted `DETACH PARTITION ... CONCURRENTLY` (the state `_detach_reap` exists to finish)
+  has its rows already invisible through the parent, so `untransmute`'s one-way-door check, which reads through
+  the parent, passed, and the drop of the parent destroyed the partition and its rows while `pgpm.log` recorded a
+  plain `untransmute`. It now refuses, before that check and again under the `ACCESS EXCLUSIVE` it takes on the
+  parent, naming every pending partition and the remedy (let the detach finish, or `ALTER TABLE ... DETACH
+  PARTITION ... FINALIZE` it, after which the reverse leaves that partition standing). Test `tests/312`; guard
+  `bench/untransmute_pending_detach.sh`, mutations `untransmute_detach_pending_unchecked` and
+  `untransmute_detach_pending_unlocked_only`.
+
 - **`scripts/archive_partition_whole.sql` leaves a table detached by hand out of its candidates** (#1159). Its
   candidate query chose on `pgpm.part.attached`, which an operator's own `DETACH PARTITION` never touches, so a
   table detached by hand that still carried pgpm's write block was handed to the strategy; one reading the

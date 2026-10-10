@@ -666,6 +666,15 @@ joined or left, or an id taken, while `untransmute` waits for it comes through t
 level cannot give the under-lock check a snapshot taken after the lock, so it refuses up front rather than
 proceed on a stale one.
 
+It refuses, the same two ways, while a partition of the managed table is pending a concurrent detach
+(`pg_inherits.inhdetachpending`, set by `ALTER TABLE ... DETACH PARTITION ... CONCURRENTLY` from its first
+transaction until it finishes, and left set when the detaching session dies in its wait). That partition's rows
+are already invisible through the parent, where the door is checked, and the drop of the parent would take them
+with it. The refusal names every such partition: let a running detach finish, or finish an interrupted one with
+`ALTER TABLE <table> DETACH PARTITION <partition> FINALIZE` (or let the next maintenance tick's
+[`_detach_reap`](#_detach_reap) do it), then re-run `untransmute`, which leaves the detached partition standing
+as a table of yours.
+
 It refuses, the same two ways, while an object names the managed table by its oid: a view, materialized
 view, rule, `BEGIN ATOMIC` function or another table's policy created over the parent since the conversion,
 or a function, column or domain typed by the parent's row type. The reverse drops the parent, which would

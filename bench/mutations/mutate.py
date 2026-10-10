@@ -11480,6 +11480,33 @@ MUTATIONS["retain_horizon_wall_round_trip"] = (
 )
 
 
+
+# Issue #1157: untransmute refuses while a partition of the parent is pending a concurrent detach, before its
+# gate and again under its ACCESS EXCLUSIVE. bench/untransmute_pending_detach.sh runs tests/312 against the mutant.
+MUTATIONS["untransmute_detach_pending_unchecked"] = (
+    "bench/untransmute_pending_detach.sh",
+    "Pre-#1157 untransmute: neither of its two calls asks pg_inherits.inhdetachpending, so a partition left pending "
+    "by an interrupted DETACH ... CONCURRENTLY, its rows already invisible through the parent, passes the gate that "
+    "reads through the parent, and the DROP of the parent takes it with its rows while pgpm.log records the "
+    "reverse. The issue's reproduction and tests/312 part A catch it.",
+    [("  perform pgpm._refuse_detach_pending(p_parent);\n"
+      "  execute v_gate_q into v_outside;\n"
+      "  -- #873: the gate reads through the parent",
+      "  execute v_gate_q into v_outside;\n"
+      "  -- #873: the gate reads through the parent", 1),
+     ("  perform pgpm._refuse_detach_pending(p_parent);   -- #1157, final: a detach that set its flag while this waited\n",
+      "", 1)],
+)
+MUTATIONS["untransmute_detach_pending_unlocked_only"] = (
+    "bench/untransmute_pending_detach.sh",
+    "#1157's plausible half-fix: the pending-detach refusal is asked only unlocked, before the gate, so a detach that "
+    "sets its flag while untransmute waits for its ACCESS EXCLUSIVE is not seen, and the DROP of the parent takes the "
+    "partition the operator is detaching and fails their detach. One site, the call under the lock. tests/312 part B "
+    "catches it.",
+    [("  perform pgpm._refuse_detach_pending(p_parent);   -- #1157, final: a detach that set its flag while this waited\n",
+      "", 1)],
+)
+
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
 # cost), and discriminate.sh's --shard=I/N interleaves that list, so the heavy ones spread over the

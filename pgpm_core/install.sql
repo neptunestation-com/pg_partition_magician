@@ -10908,6 +10908,34 @@ begin
 end;
 $$;
 
+-- A partition of p_parent pending a concurrent detach (pg_inherits.inhdetachpending), refused (#1157). DETACH
+-- PARTITION ... CONCURRENTLY sets the flag in a first transaction that commits before it waits out the parent's
+-- older lockers, and from then on the partition's rows are invisible through the parent; a detacher whose
+-- session dies in that wait leaves it so, the state _detach_reap exists to finish. untransmute decides its one-way
+-- door by reading through the parent, so such a partition's rows were outside its view, the door passed, and the
+-- DROP of the parent took the partition with them while pgpm.log recorded the reverse. Every pending partition is
+-- named at once, with the remedy: let a live detach finish, or FINALIZE an abandoned one, after which the
+-- partition is a standalone table of the operator's and the reverse leaves it standing. A detach's first
+-- transaction and its FINALIZE both take SHARE UPDATE EXCLUSIVE on the parent, so under the ACCESS EXCLUSIVE
+-- untransmute asks this again the flag can neither appear nor clear: that answer is final.
+create or replace function pgpm._refuse_detach_pending(p_parent regclass)
+returns void language plpgsql as $$
+declare
+  v_pending_q text;   -- the pending partitions, schema-qualified and quoted, for the message
+begin
+  select string_agg(format('%I.%I', n.nspname, c.relname), ', ' order by n.nspname, c.relname)
+    into v_pending_q
+    from pg_inherits i
+    join pg_class c on c.oid = i.inhrelid
+    join pg_namespace n on n.oid = c.relnamespace
+   where i.inhparent = p_parent and i.inhdetachpending;
+  if v_pending_q is not null then
+    raise exception 'pg_partition_magician: cannot untransmute % -- its partition(s) % are pending a concurrent detach (pg_inherits.inhdetachpending), so their rows are already invisible through the parent, where the check that every row still lives in the monolith reads, and the reverse''s DROP of the parent would take them with it. If the detach is still running, let it finish; if its session died, finish it with ALTER TABLE % DETACH PARTITION <partition> FINALIZE. The partition is then a standalone table of yours, which untransmute leaves standing; re-run it then. Nothing was changed.',
+      p_parent, v_pending_q, p_parent;
+  end if;
+end;
+$$;
+
 -- Reverse a transmute, exactly while it is still reversible. transmute's cutover moves no data: the
 -- original table is attached intact as the monolith, merely renamed. As long as every row still lives
 -- inside the monolith's [lo, hi), untransmute exploits that: detach the monolith (it is a complete
@@ -11048,6 +11076,9 @@ begin
                  cfg.control_column, pgpm._encode(cfg.control_kind, v_mon_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));
   v_door := format('pg_partition_magician: cannot untransmute %s -- rows now live outside the original monolith (a forward partition past B, a backdated stray, or a regraining has split it), so a metadata-only reverse would lose data. This is a one-way door once the frontier crosses B or a regrain has split the monolith.',
                    p_parent::text);
+  -- #1157: a partition pending a concurrent detach is outside what the gate reads, and inside what the DROP takes.
+  -- Asked before the gate, unlocked, and again under the lock below.
+  perform pgpm._refuse_detach_pending(p_parent);
   execute v_gate_q into v_outside;
   -- #873: the gate reads through the parent, under the caller's row-level security, and a row it cannot see
   -- outside the monolith is one the DROP below takes with the parent. Asked AFTER the gate's first read, under
@@ -11110,6 +11141,7 @@ begin
   -- below, all catalog reads or index descents. Named through p_parent, whose ACCESS SHARE from the first
   -- check is held to the end of this transaction and so pins the name against a concurrent rename.
   execute format('lock table %s in access exclusive mode', p_parent::text);
+  perform pgpm._refuse_detach_pending(p_parent);   -- #1157, final: a detach that set its flag while this waited
   execute v_gate_q into v_outside;
   if v_outside then
     raise exception '%', v_door;
