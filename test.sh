@@ -1230,6 +1230,7 @@ run_perf() {
     "bench/forget_missing_logs_object_keys.sh pgpm_perf334"
     "bench/over_retired_chunks_range_first.sh pgpm_perf333"
     "bench/transmute_reap_reread.sh pgpm_perf336"
+    "bench/set_regrain_restated_target.sh pgpm_perf335"
   )
   local selected=()
   local n=${#guards[@]} idx
