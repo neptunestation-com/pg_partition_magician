@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **An upgrade from v0.6.0 or older no longer holds every archived partition for good** (#1160). The upgrade
+  that adds `pgpm.archive_ledger.child_oid` attributed a pre-existing chunk only to a partition whose write block
+  was enabled `ALWAYS`, but every release through v0.6.0 created the block origin-only and only the first
+  `maintain` tick after the upgrade repairs it, so every live archived partition's chunks were marked retired and
+  the partition was held (`skip_archive_retired_range`), never archived again or dropped. The block now counts in
+  either state pgpm installs it, so the chunk is attributed to its own partition, the first tick discards that
+  coverage (`archive_coverage_reset`) and archives the partition again from its `lo`, and retention drops it as
+  before. A block disabled by hand still counts as none. Test `tests/314`; guard
+  `bench/ledger_backfill_origin_only_block.sh`, mutation `archive_ledger_backfill_origin_only_retired`.
+
 - **`from_hypertable_cutover` reads the copy only under a lock that keeps the drains out of it until the swap**
   (#1158). The cutover read the copy's catch-up watermark and its conservation baseline before it locked
   anything, assuming nothing wrote the copy from there to the swap, but the drains (documented as drivable

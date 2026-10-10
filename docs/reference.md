@@ -3498,10 +3498,15 @@ adopted, is held like any partition over a retired chunk (its rows are already i
 Re-running `install.sql` over an install that predates the columns adds them. `retired_at` is set on the
 chunks already retired where `pgpm.log` shows it: a row archived no later than a `retain_drop` logged over a
 range holding it. `child_oid` is set from the oid `pgpm.part` records for the row's name, but only when the
-relation holding that name is that oid and carries pgpm's write block (enabled `ALWAYS`): a chunk describes a
+relation holding that name is that oid and carries pgpm's write block: a chunk describes a
 relation's contents only because the block has been on that relation since its first chunk, and a name alone
 cannot tell the partition pgpm archived from one re-created under its name after a hand drop, which the upgrade's
-anchoring of `pgpm.part` attaches to whatever holds the name. A row under an unblocked relation is marked retired
+anchoring of `pgpm.part` attaches to whatever holds the name. The block counts here enabled `ALWAYS` or
+origin-only, the two states pgpm installs it in: every release through v0.6.0 created it origin-only, and the
+first `maintain` tick after the upgrade is what brings it up to `ALWAYS`. That tick then discards the coverage it
+finds under the origin-only block (`archive_coverage_reset`, see [`maintain`](#maintain)) and the partition is archived
+again from its `lo` and retired as usual. A row under an unblocked relation (no block, or one disabled or set
+replica-only by hand) is marked retired
 instead (a partition whose block was lifted by hand would have had that coverage discarded by the next tick
 anyway; marking it is the safe side of the same judgement). A row whose name no
 `pgpm.part` row records is marked retired, whether or not a relation has that name now: nothing vouches that the

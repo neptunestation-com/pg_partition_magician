@@ -4428,12 +4428,19 @@ $$;
 
 -- The upgrade's half of the above, run once, when the column is added. A row recorded before it gets the oid
 -- pgpm.part records for its name ONLY when that relation is the one the name resolves to and carries pgpm's write
--- block (enabled ALWAYS): the #452 rule, a watermark describes a relation's contents only because the block has
--- been on THAT relation since the first chunk. A name alone cannot tell the partition pgpm archived from a
--- successor created under it after a hand drop (the #421 backfill anchors pgpm.part to whatever holds the name),
--- and only the archived one carries the block. Every other row is marked retired: one under an unblocked
--- relation (a successor, or a partition whose block an operator lifted, whose coverage #452's reset would discard
--- anyway: marking it is the safe side of the same judgement), one whose name no pgpm.part row records, whether or
+-- block: the #452 rule, a watermark describes a relation's contents only because the block has been on THAT
+-- relation since the first chunk. A name alone cannot tell the partition pgpm archived from a successor created
+-- under it after a hand drop (the #421 backfill anchors pgpm.part to whatever holds the name), and only the
+-- archived one carries the block. The block counts here in either state pgpm installs it (#1160): enabled ALWAYS,
+-- or origin-only, which is how every pgpm before #450 created it (v0.6.0 included) and which nothing repairs
+-- until the first tick AFTER this upgrade (_install_write_block). Asking _is_write_blocked (ALWAYS only) here
+-- marked every live archived partition of such an install retired, and _over_retired_chunks then held it for
+-- good. Attributed, its coverage meets the first tick's #452/#651 discard (the block is not yet ALWAYS when the
+-- ledger is read) and is archived again from lo under the repaired block, as before #1141. A block an operator
+-- DISABLED or set to replica-only is not one pgpm installed and counts as none. Every other row is marked
+-- retired: one under an unblocked relation (a successor, or a partition whose block an operator lifted, whose
+-- coverage #452's reset would discard anyway: marking it is the safe side of the same judgement), one whose name
+-- no pgpm.part row records, whether or
 -- not a relation has the name now, one with no name, and one whose pgpm.part row is UNANCHORED (no child_oid). That second case reads the #421 backfill of pgpm.part.child_oid,
 -- which runs earlier in this file on every install (it comes first in the text, so a fresh run and a re-run
 -- alike have anchored every row it can before this runs): a row it could not anchor is one whose partition no
@@ -4451,7 +4458,8 @@ begin
    where p.parent_table = l.parent_table and p.child_name = l.child_name
      and l.child_oid is null and l.retired_at is null and p.child_oid is not null
      and to_regclass(format('%I.%I', pgpm._child_nsp(l.parent_table, l.child_name), l.child_name))::oid = p.child_oid
-     and pgpm._is_write_blocked(l.parent_table, l.child_name);
+     and exists (select 1 from pg_trigger t
+                  where t.tgrelid = p.child_oid and t.tgname = 'pgpm_write_block' and t.tgenabled in ('A', 'O'));
   with gone as (
     update pgpm.archive_ledger l set retired_at = now()
       from pgpm.config c

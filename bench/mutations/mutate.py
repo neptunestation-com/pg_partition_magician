@@ -11441,7 +11441,9 @@ MUTATIONS["archive_ledger_backfill_unblocked_attributed"] = (
     "pgpm.part row kept, anchored by #421 to the successor) inherits the dropped relation's chunk: #452's reset "
     "discards it on the next tick and the archive step writes over the only copy (PR #1152 round 4). One clause. "
     "tests/309 part S catches it.",
-    [("     and pgpm._is_write_blocked(l.parent_table, l.child_name);\n", "     and true;\n", 1)],
+    [("     and exists (select 1 from pg_trigger t\n"
+      "                  where t.tgrelid = p.child_oid and t.tgname = 'pgpm_write_block' and t.tgenabled in ('A', 'O'));\n",
+      "     and true;\n", 1)],
 )
 MUTATIONS["archive_retired_orphan_delete_unfiltered"] = (
     _G1141,
@@ -11463,6 +11465,19 @@ MUTATIONS["archive_retired_backfill_untimed"] = (
     [(" and d.at >= l.archived_at", "", 1)],
 )
 
+
+# Issue #1160: the upgrade backfill counts pgpm's write block in either state pgpm installs it. Every release through
+# v0.6.0 created it origin-only, and the repair to ALWAYS waits for the first tick after the upgrade.
+MUTATIONS["archive_ledger_backfill_origin_only_retired"] = (
+    "bench/ledger_backfill_origin_only_block.sh",
+    "The upgrade attributes a pre-existing chunk only to a relation whose pgpm_write_block is enabled ALWAYS, so on an "
+    "upgrade from v0.6.0 or older (blocks origin-only until the first tick repairs them) every live archived "
+    "partition's chunk is marked retired and _over_retired_chunks holds the partition for good "
+    "(skip_archive_retired_range, never archived again or dropped). One clause, the origin-only state. tests/314 "
+    "catches it.",
+    [("t.tgname = 'pgpm_write_block' and t.tgenabled in ('A', 'O'));\n",
+      "t.tgname = 'pgpm_write_block' and t.tgenabled in ('A'));\n", 1)],
+)
 
 # Issue #627: the retain horizon's time part is instant arithmetic, and a retain with no calendar part takes no
 # wall-clock round trip at all. bench/retain_horizon_ambiguous_wall_time.sh runs tests/311 against the mutant.
