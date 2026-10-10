@@ -15,7 +15,8 @@
 # every other row, and the file bounds every export with a statement_timeout, so the mutant whose export
 # never ends fails an assertion by name instead of hanging the run. And the relation's column of the
 # control column's name may have another type than the parent's (parts E and F): the cursor is cast back as
-# the relation's own type, and a relation with no such column is refused by name (part G).
+# the relation's own type, with its typmod (parts H to J), and a relation with no such column is refused by
+# name (part G).
 #
 # The mutations it is required to fail against (bench/mutations/mutate.py):
 #   to_s3_cursor_heap_unkeyed    -- the next-page predicate compares (control, ctid) with the cursor,
@@ -30,6 +31,8 @@
 #                                   timestamptz relation under a date or timestamp parent re-reads the
 #                                   row each page ended on and never ends (parts E and F, cancelled),
 #                                   and a relation with no such column is not refused by name (part G)
+#   to_s3_cursor_type_typmod_dropped -- the cast type is spelled without its typmod, so char(3) and bit(3)
+#                                   cast as char(1) and bit(1) cut the cursor and never end (parts H, J)
 #
 # Usage: archive_to_s3_multi_heap.sh <container> <db> [archive install.sql]
 # Needs the archive image (pgsql-http + pgtap + pg_prove) AND MinIO on the same network: the file PUTs

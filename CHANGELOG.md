@@ -15,8 +15,11 @@
   control column type, while the column it pages is the relation's: a timestamptz relation under a date parent
   read its cursor of noon back as midnight (under a timestamp parent, east of UTC, it lost its offset), so every
   page re-admitted the row it ended on and a quiescent export never ended. The cast now takes the relation's own
-  type, and a relation with no column of that name is refused by name before anything is read. `tests/archive/db/51`
+  type with its typmod (a bare `character` or `bit` is one wide and would cut a char(n) or bit(n) cursor the same
+  way), and a relation with no column of that name is refused by name before anything is read. `tests/archive/db/51`
   under `bench/archive_to_s3_multi_heap.sh`, with the mutations `to_s3_cursor_heap_unkeyed`, `to_s3_cursor_null_blind`,
+  `to_s3_cursor_null_restart`, `to_s3_cursor_null_run_unread`, `to_s3_cursor_parent_type` and
+  `to_s3_cursor_type_typmod_dropped`.
   `to_s3_cursor_null_restart`, `to_s3_cursor_null_run_unread` and `to_s3_cursor_parent_type`.
   in a run of their own after every other row, by (tableoid, ctid). `tests/archive/db/51` under
   `bench/archive_to_s3_multi_heap.sh`, with the mutations `to_s3_cursor_heap_unkeyed`, `to_s3_cursor_null_blind`,

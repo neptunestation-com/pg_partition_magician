@@ -31,8 +31,13 @@
 -- back as midnight, so each page re-admitted the row it ended on and the export never ended (part E, V-01 of
 -- the second verification round); under a timestamp parent a timestamptz cursor lost its offset, so a session
 -- east of UTC re-read rows forever (part F, P1-02). The cast now takes the exported relation's own type. A
--- relation with no column of that name is refused by name before anything is read (part G).
-select plan(37);
+-- relation with no column of that name is refused by name before anything is read (part G). The relation's
+-- type is read WITH its typmod: spelled as the bare type name, char(3) was `character`, which is char(1), so a
+-- cursor of 'abc' was cast back as 'a' and every later page re-read 'abc' forever (part H, V-01 of the third
+-- round). Part I pages a numeric(10,2) column, a typmod the cast must also carry and keep exact. Part J pages a
+-- bit(3) column, whose bare `bit` is bit(1): an explicit cast that way cut the cursor to its first bit, and the
+-- export never ended the same way.
+select plan(52);
 
 create schema t51;
 create table t51.evt (id bigint primary key, payload text not null);
@@ -81,6 +86,15 @@ select archive.configure('t51.evt4', 'archive-test-bucket', p_endpoint => 'http:
                          p_fetch_rows => 1);
 create table t51.tsz (ts timestamptz, payload text);
 insert into t51.tsz values ('2024-01-01 10:00+00', 'x'), ('2024-01-01 11:00+00', 'y'), ('2024-01-01 12:00+00', 'z');
+-- H: a relation whose id is char(3), under t51.evt (one row per page)
+create table t51.chr (id char(3), payload text);
+insert into t51.chr values ('abd', 'k'), ('abc', 'j'), ('abe', 'l');
+-- I: a relation whose id is numeric(10,2), under t51.evt
+create table t51.num (id numeric(10,2), payload text);
+insert into t51.num values (1.50, 'u'), (1.25, 't'), (2.00, 'v');
+-- J: a relation whose id is bit(3), under t51.evt
+create table t51.bits (id bit(3), payload text);
+insert into t51.bits values (B'101', 'f'), (B'011', 'e'), (B'110', 'g');
 -- G: a relation with no column named id, the control column of t51.evt
 create table t51.nocol (x int, payload text);
 insert into t51.nocol values (1, 'q');
@@ -232,6 +246,35 @@ select is(t51.try_export('nocol'),
   'pg_partition_magician: t51.nocol has no column id, the control column of t51.evt that archive.to_s3 pages it by; refusing to export it',
   'archive.to_s3 refuses a relation with no column of the control column''s name, naming the column');
 select is((t51.req('GET', :'kg')).status, 404, 'and no object lands at its key');
+
+-- 38-42. H: the relation's id is char(3), whose bare type name `character` means char(1).
+select is((select format_type(atttypid, atttypmod) from pg_attribute where attrelid = 't51.chr'::regclass and attname = 'id')
+          || '/' || ('abc'::character)::text,
+  'character(3)/a',
+  'LIVENESS: the relation''s id is character(3), and a cursor of abc cast as the bare type name is cut to a');
+select :'p' || 't51.chr.ndjson' as kh \gset
+select is(t51.clear(:'kh'), 404, 'LIVENESS: no object at the char(3) relation''s key before its export');
+select is(t51.try_export('chr'), 'ok', 'archive.to_s3 of a char(3) relation, one row per page, ends, and completes');
+select is(t51.payloads(:'kh'), array['j', 'k', 'l'], 'its object holds rows j, k and l, each once');
+select is(t51.clear(:'kh'), 404, 'LIVENESS: the char(3) relation''s object is cleared after the check');
+
+-- 43-47. I: the relation's id is numeric(10,2).
+select is((select format_type(atttypid, atttypmod) from pg_attribute where attrelid = 't51.num'::regclass and attname = 'id'),
+  'numeric(10,2)', 'LIVENESS: the relation''s id is numeric(10,2), a type whose typmod the cursor cast carries');
+select :'p' || 't51.num.ndjson' as ki \gset
+select is(t51.clear(:'ki'), 404, 'LIVENESS: no object at the numeric(10,2) relation''s key before its export');
+select is(t51.try_export('num'), 'ok', 'archive.to_s3 of a numeric(10,2) relation, one row per page, ends, and completes');
+select is(t51.payloads(:'ki'), array['t', 'u', 'v'], 'its object holds rows t, u and v, each once');
+select is(t51.clear(:'ki'), 404, 'LIVENESS: the numeric(10,2) relation''s object is cleared after the check');
+
+-- 48-52. J: the relation's id is bit(3), whose bare type name `bit` means bit(1).
+select is((select format_type(atttypid, atttypmod) from pg_attribute where attrelid = 't51.bits'::regclass and attname = 'id'),
+  'bit(3)', 'LIVENESS: the relation''s id is bit(3), whose bare type name bit is bit(1), so a cursor of 101 cast that way is cut to 1');
+select :'p' || 't51.bits.ndjson' as kj \gset
+select is(t51.clear(:'kj'), 404, 'LIVENESS: no object at the bit(3) relation''s key before its export');
+select is(t51.try_export('bits'), 'ok', 'archive.to_s3 of a bit(3) relation, one row per page, ends, and completes');
+select is(t51.payloads(:'kj'), array['e', 'f', 'g'], 'its object holds rows e, f and g, each once');
+select is(t51.clear(:'kj'), 404, 'LIVENESS: the bit(3) relation''s object is cleared after the check');
 reset statement_timeout;
 
 select * from finish();
