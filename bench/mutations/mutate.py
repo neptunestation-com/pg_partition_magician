@@ -10073,6 +10073,21 @@ MUTATIONS["archive_whole_parent_schema"] = (
 )
 MUTATION_SRC["archive_whole_parent_schema"] = "scripts/archive_partition_whole.sql"
 
+# Issue #1159: scripts/archive_partition_whole.sql leaves a table the operator detached by hand out of its
+# candidates, as _archive_step does (#705). One site, the candidate query's clause, caught by tests/313 through
+# bench/archive_whole_skips_hand_detached.sh. The source is the script, which nothing installs.
+MUTATIONS["archive_whole_trusts_part_attached"] = (
+    "bench/archive_whole_skips_hand_detached.sh",
+    "Pre-#1159 scripts/archive_partition_whole.sql: the candidate query trusts pgpm.part.attached, which an "
+    "operator's own DETACH PARTITION never touches, so a table detached by hand that still carries pgpm's write "
+    "block is handed to the strategy; one reading through the parent finds none of its rows, and [lo, hi) is "
+    "recorded as covered with 0 rows, so retain() drops the table once it is attached back. One site, the "
+    "candidate query's `not pgpm._part_detached_by_hand(...)` clause. tests/313 part A catches it (the strategy "
+    "handed [0, 100) and reading nothing, a ledger row for it) and part B (its 0-row coverage kept).",
+    [("        and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)\n", "", 1)],
+)
+MUTATION_SRC["archive_whole_trusts_part_attached"] = "scripts/archive_partition_whole.sql"
+
 # pass 9 G18: #994, #995, #1002. Four test files that counted where their own comments promised to name, each
 # judged by bench/tests_fail_on_defect.sh against a defect it plants in install.sql. One mutation per site, each
 # the site's exact pre-fix text, so the file under it passes against that defect.

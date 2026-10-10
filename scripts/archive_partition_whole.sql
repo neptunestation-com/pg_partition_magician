@@ -67,7 +67,7 @@
 -- #977) and pgpm._refuse_filtered_reads (issue #873) for the contract check, the ledger's canonical
 -- hi and the row-level security refusal, pgpm._max_hi_native (issue #500) for the canonical resume
 -- watermark, pgpm._child_nsp (issue #727) for the partition's own schema, pgpm.archive_ledger.retired_at and
--- pgpm._over_retired_chunks and pgpm.archive_ledger.child_oid (issue #1141) to leave retired chunks and the partitions over them alone, plus pgpm.part.child_oid for the identity check below (issue #421; added after this
+-- pgpm._over_retired_chunks and pgpm.archive_ledger.child_oid (issue #1141) to leave retired chunks and the partitions over them alone, pgpm._part_detached_by_hand (issue #705) to leave a table the operator detached by hand alone (issue #1159), plus pgpm.part.child_oid for the identity check below (issue #421; added after this
 -- script, so an older core needs that check removed along with the column reference). Not part of pgpm_core/install.sql and never will be without a real feature proposal
 -- and its own issue/PR -- this is scratch space for an operator to paste into a session and run,
 -- not a shipped, versioned function.
@@ -107,10 +107,16 @@ begin
   -- partition ahead of an older one (issue #1054). EXECUTE does not set FOUND, so the row count says whether
   -- anything was eligible. A partition over the range of a chunk retire() marked retired is not one, as it is
   -- not one of _archive_step's (#1141): archived, it would go to the retired chunk's object key, over the only
-  -- copy of the rows that drop removed; the tick logs skip_archive_retired_range for it, with the remedy.
+  -- copy of the rows that drop removed; the tick logs skip_archive_retired_range for it, with the remedy. Nor is a
+  -- table the operator DETACHed by hand (#705, #1159, pgpm._part_detached_by_hand), which keeps its attached
+  -- pgpm.part row and pgpm's write block: a strategy reading the range through the parent finds none of its rows,
+  -- and the coverage recorded for it would let retire() drop it, rows and all, once it is attached back. As in
+  -- _archive_step it is never handed to the strategy and no coverage is recorded for it; left out here, before
+  -- `limit 1`, the call goes to the next eligible partition.
   execute format(
     'select p.child_name, p.lo, p.hi, p.child_oid from pgpm.part p
       where p.parent_table = %L::regclass and p.attached
+        and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)
         and pgpm._is_write_blocked(%L::regclass, p.child_name)
         and not pgpm._archive_fully_covered(%L::regclass, p.child_name)
         and p.child_name not in (select o.child_name from pgpm._over_retired_chunks(%L::regclass) o)

@@ -2334,6 +2334,9 @@ It also picks and finds the partition as the archive step does: the oldest candi
 native order (not `pgpm.part.lo`'s text order), resumed from the ledger's watermark in the same canonical
 text the step records (whatever the caller's `DateStyle`), and resolved in the partition's own schema, so it
 still archives a moved parent's partitions and refuses only a relation that took the partition's name there.
+A table the operator detached by hand is not one of its candidates either, as it is not the step's: it is
+never handed to the strategy and no coverage is recorded for it, and the call goes to the next eligible
+partition.
 
 Unlike the identity refusals, this one is retryable by construction. Nothing advanced, so the next
 tick hands the strategy the very same chunk; correct the strategy (or point `pgpm.set_archive_fn` at

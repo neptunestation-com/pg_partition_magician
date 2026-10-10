@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **`scripts/archive_partition_whole.sql` leaves a table detached by hand out of its candidates** (#1159). Its
+  candidate query chose on `pgpm.part.attached`, which an operator's own `DETACH PARTITION` never touches, so a
+  table detached by hand that still carried pgpm's write block was handed to the strategy; one reading the
+  range through the parent, as `pgpm_archive`'s transports do, found none of its rows, and the script recorded
+  `[lo, hi)` as covered with 0 rows, so once the operator attached the table back `retain()` dropped rows
+  nothing had archived. The query now asks `pgpm._part_detached_by_hand` first, as the archive step has since
+  #705: such a table is never handed to the strategy, no coverage is recorded for it, and the call archives the
+  parent's next eligible partition instead. Test `tests/313`; guard `bench/archive_whole_skips_hand_detached.sh`,
+  mutation `archive_whole_trusts_part_attached`.
+
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's
