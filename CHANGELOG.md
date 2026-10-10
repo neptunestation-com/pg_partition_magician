@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **`forget_missing()` logs where every chunk of the table it forgets was archived** (#1164). It deleted every
+  `pgpm.archive_ledger` row of a parent whose relation is gone, retired rows included, and its `forget_missing`
+  log row named no object key, so after the runbook's path for a table past its monolith (drop it, run
+  `pgpm.forget_missing()`) nothing in pgpm said where the only copy of the rows `retire()` had dropped was. The
+  `forget_missing` row's `method` now names every ledger row of the parent, before they go: its range, its
+  object key (or `no object key`), and `retired` for a chunk whose partition `retire()` dropped. The rows
+  themselves are still cleared, since the dead oid can be reused by a later table. Test `tests/318`; guard
+  `bench/forget_missing_logs_object_keys.sh`, mutation `forget_missing_retired_keys_unlogged`.
 - **A regrain whose swap cannot fit in half the shared lock table is refused, not left to die at the swap**
   (#1161). The swap attaches every fine child in one transaction, and each holds its locks (the child, its
   dropped bound `CHECK`, more for foreign keys) to that transaction's end; nothing bounded that, as `obtain`

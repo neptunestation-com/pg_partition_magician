@@ -1226,6 +1226,7 @@ run_perf() {
     "bench/regrain_reconcile_unshaped_key.sh pgpm_perf353"
     "bench/restore_one_step_backoff.sh pgpm_perf352"
     "bench/regrain_swap_lock_budget.sh pgpm_perf331"
+    "bench/forget_missing_logs_object_keys.sh pgpm_perf334"
   )
   local selected=()
   local n=${#guards[@]} idx
