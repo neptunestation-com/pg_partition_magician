@@ -11021,6 +11021,52 @@ MUTATIONS["quoted_splices_initialiser_unread"] = (
 """, "", 1)],
 )
 MUTATION_SRC["quoted_splices_initialiser_unread"] = "scripts/check_quoted_splices.py"
+# Issue #1179 (F8-04): check_quoted_splices.py reads each piece by value, not by its lower-case spelling. One
+# mutation per piece, each putting one spelling back, judged by the same guard's #1179 rows.
+MUTATIONS["quoted_splices_assign_colon_eq_only"] = (
+    "bench/lint_value_not_spelling.sh",
+    "Pre-#1179 scripts/check_quoted_splices.py: a body assignment is read only as `:=`, so `v_cols = "
+    "quote_ident(c);` (PL/pgSQL takes `=` too) is never judged and an unmarked quoted list assigned that way "
+    "passes. One site, the assignment pattern's operator.",
+    [('    r"(?<![\\w$])(?P<target>" + IDENT + r")\\s*(?::=|=)\\s*(?P<expr>[^;]+);")\n',
+      '    r"(?<![\\w$])(?P<target>" + IDENT + r")\\s*:=\\s*(?P<expr>[^;]+);")\n', 1)],
+)
+MUTATION_SRC["quoted_splices_assign_colon_eq_only"] = "scripts/check_quoted_splices.py"
+MUTATIONS["quoted_splices_call_spelled"] = (
+    "bench/lint_value_not_spelling.sh",
+    "Pre-#1179 scripts/check_quoted_splices.py: a quoting call is recognised only as its exact lower-case "
+    "`name(`, so `quote_ident (c)`, `QUOTE_IDENT(c)` and `format ('%I', c)` quote nothing as far as the lint "
+    "knows and an unmarked list built by them passes. One site, the call pattern.",
+    [('    return re.compile(r\'(?<![\\w$"])\' + r"\\s*\\.\\s*".join(parts) + r"\\s*\\(")\n',
+      '    return re.compile(re.escape(name) + r"\\(")\n', 1)],
+)
+MUTATION_SRC["quoted_splices_call_spelled"] = "scripts/check_quoted_splices.py"
+MUTATIONS["quoted_splices_type_spelled"] = (
+    "bench/lint_value_not_spelling.sh",
+    "Pre-#1179 scripts/check_quoted_splices.py: a local's type is its declaration's text as written, so "
+    "`pg_catalog.text`, `\"text\"` and `character varying(500)` are not a text type and an unmarked quoted list "
+    "declared with one passes. One site, the type a declaration yields.",
+    [('                yield (canonical(d.group("name")), type_key(d.group("type")), expr or None,\n',
+      '                yield (canonical(d.group("name")), d.group("type").lower(), expr or None,\n', 1)],
+)
+MUTATION_SRC["quoted_splices_type_spelled"] = "scripts/check_quoted_splices.py"
+MUTATIONS["quoted_splices_type_word_text"] = (
+    "bench/lint_value_not_spelling.sh",
+    "Pre-#1179 scripts/check_quoted_splices.py: only `text` is a type a quoted list is held in, so a `varchar` "
+    "local holding quote_ident's output passes. One site, the type family.",
+    [('TEXT_TYPES = {"text", "varchar", "character varying", "char", "character", "bpchar"}\n',
+      'TEXT_TYPES = {"text"}\n', 1)],
+)
+MUTATION_SRC["quoted_splices_type_word_text"] = "scripts/check_quoted_splices.py"
+MUTATIONS["quoted_splices_into_list_first_only"] = (
+    "bench/lint_value_not_spelling.sh",
+    "Pre-#1179 scripts/check_quoted_splices.py: a SELECT's list is read only from the text BEFORE its INTO, so "
+    "`select into v_cols quote_ident(c)` assigns nothing the lint can see and the unmarked list passes. One "
+    "site, the statement the select list is read from.",
+    [('            rest = stmt[:m.start()] + " " * (m.end() - m.start()) + stmt[m.end():]\n',
+      '            rest = stmt[:m.start()]\n', 1)],
+)
+MUTATION_SRC["quoted_splices_into_list_first_only"] = "scripts/check_quoted_splices.py"
 # pass 10 G20 (#1091, #1092, #1093): three test files that passed against the defect they name, each back to
 # the shape that passed. Judged by bench/tests_fail_on_defect.sh (tests/07, tests/timescale/db/33) and
 # bench/archive_fn_s3_readback.sh (tests/archive/db/08), each against an injection of that defect.
