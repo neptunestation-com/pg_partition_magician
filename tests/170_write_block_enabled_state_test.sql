@@ -69,22 +69,22 @@ select results_eq(
   $$ select child_name, lo, hi from pgpm.archive_ledger where parent_table = 'public.ew170a'::regclass order by child_name, lo::numeric $$,
   format($$ values (%1$L::name, '0'::text, '600'::text), (%1$L::name, '600', '1000'), (%2$L::name, '1000', '1600'), (%2$L::name, '1600', '2000') $$,
          :'a_mono', :'a_sib'),
-  'LIVENESS A: the monolith and the sibling are each covered by two chunks');
+  'LIVENESS: (A) the monolith and the sibling are each covered by two chunks');
 
 -- the monolith's block goes back to the origin-only state a pre-#450 pgpm installed it in
 select format('alter table public.%I enable trigger pgpm_write_block', :'a_mono') as a_origin_sql \gset
 :a_origin_sql;
-select is(pgpm_test170.state(:'a_mono'), 'O', 'LIVENESS A: the monolith''s block is origin-only');
-select is(pgpm_test170.state(:'a_sib'), 'A', 'LIVENESS A: the sibling''s block is still ALWAYS');
+select is(pgpm_test170.state(:'a_mono'), 'O', 'LIVENESS: (A) the monolith''s block is origin-only');
+select is(pgpm_test170.state(:'a_sib'), 'A', 'LIVENESS: (A) the sibling''s block is still ALWAYS');
 
 set session_replication_role = replica;
 insert into public.ew170a (id, payload) values (500, 'replicated');
 reset session_replication_role;
 select results_eq(format($$ select id from public.%I order by id $$, :'a_mono'),
   $$ values (1::bigint), (2::bigint), (3::bigint), (500::bigint) $$,
-  'LIVENESS A: a replica-role row 500 landed in the monolith past its origin-only block');
+  'LIVENESS: (A) a replica-role row 500 landed in the monolith past its origin-only block');
 select ok(pgpm._archive_fully_covered('public.ew170a', :'a_mono'),
-  'LIVENESS A: the stale watermark still reads as full coverage of the monolith');
+  'LIVENESS: (A) the stale watermark still reads as full coverage of the monolith');
 
 select ok(not pgpm._is_write_blocked('public.ew170a', :'a_mono'), 'an origin-only block does not count as write-blocked');
 select ok(pgpm._is_write_blocked('public.ew170a', :'a_sib'), 'an ALWAYS block does');
@@ -130,15 +130,15 @@ select child_name as b_mono from pgpm.part where parent_table = 'public.ew170b':
 
 select pgpm._enforce_write_blocks('public.ew170b');
 do $$ begin for i in 1..4 loop perform pgpm._archive_step('public.ew170b'); end loop; end $$;
-select ok(pgpm._archive_fully_covered('public.ew170b', :'b_mono'), 'LIVENESS B: the monolith is fully archive-covered');
+select ok(pgpm._archive_fully_covered('public.ew170b', :'b_mono'), 'LIVENESS: (B) the monolith is fully archive-covered');
 
 select format('alter table public.%I disable trigger pgpm_write_block', :'b_mono') as b_disable_sql \gset
 :b_disable_sql;
 insert into public.ew170b (id, payload) values (700, 'written while disabled');
-select is(pgpm_test170.state(:'b_mono'), 'D', 'LIVENESS B: the block is present and disabled');
+select is(pgpm_test170.state(:'b_mono'), 'D', 'LIVENESS: (B) the block is present and disabled');
 select results_eq(format($$ select id from public.%I order by id $$, :'b_mono'),
   $$ values (1::bigint), (2::bigint), (3::bigint), (700::bigint) $$,
-  'LIVENESS B: an ordinary row 700 landed in the monolith past the disabled block');
+  'LIVENESS: (B) an ordinary row 700 landed in the monolith past the disabled block');
 
 select is(pgpm.retire('public.ew170b', :'b_mono'), false,
   'retire() does not drop a partition whose coverage was recorded before its block was disabled');
@@ -169,7 +169,7 @@ select child_name as c_mono from pgpm.part where parent_table = 'public.ew170c':
 select pgpm._enforce_write_blocks('public.ew170c');
 select format('alter table public.%I enable trigger pgpm_write_block', :'c_mono') as c_origin_sql \gset
 :c_origin_sql;
-select is(pgpm_test170.state(:'c_mono'), 'O', 'LIVENESS C: the uncovered child''s block is origin-only');
+select is(pgpm_test170.state(:'c_mono'), 'O', 'LIVENESS: (C) the uncovered child''s block is origin-only');
 
 do $$ begin for i in 1..3 loop perform pgpm._archive_step('public.ew170c'); end loop; end $$;
 select ok(not exists (select 1 from pgpm.archive_ledger where parent_table = 'public.ew170c'::regclass)

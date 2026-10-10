@@ -54,7 +54,7 @@ create view public.x205_v as select id from public.ot205;
 select is((select count(distinct d.classid::text || ':' || d.objid)::int from pg_depend d
             where d.refclassid = 'pg_class'::regclass and d.refobjid = 'public.dv205'::regclass
               and d.classid in ('pg_rewrite'::regclass, 'pg_proc'::regclass, 'pg_policy'::regclass)),
-  8, 'A LIVENESS: eight objects depend on dv205 (the seven to refuse, and its own policy)');
+  8, 'LIVENESS: (A) eight objects depend on dv205 (the seven to refuse, and its own policy)');
 select throws_like($$ call pgpm.transmute('public.dv205', 'k', 100::bigint, p_obtain => 2) $$,
   'pg_partition_magician: cannot transmute dv205 -- the object(s) (function dv205_n(), materialized view dv205_mv, policy ot205_p on ot205, rule dv205_r on dv205, rule src205_r on src205, view dv205_v, view dv205_v2) name it by its oid,%',
   'A: the refusal names exactly the seven objects bound to the oid, and not dv205''s own policy or x205_v');
@@ -76,7 +76,7 @@ drop rule src205_r on public.src205;
 drop rule dv205_r on public.dv205;
 call pgpm.transmute('public.dv205', 'k', 100::bigint, p_obtain => 2);
 select is((select relkind::text from pg_class where oid = 'public.dv205'::regclass), 'p',
-  'A LIVENESS: with the seven dropped, the same call converts dv205 (its own policy and x205_v did not stop it)');
+  'LIVENESS: (A) with the seven dropped, the same call converts dv205 (its own policy and x205_v did not stop it)');
 -- The carried copy is created after the renames (#897), so its subquery binds to the parent. It used to be
 -- created on the staging parent before them, bound to the original oid, and the cutover's re-check had to
 -- exempt it; the monolith partition's copy is its own, and still names the monolith.
@@ -87,9 +87,9 @@ select is((select array_agg(distinct d.refobjid) from pg_depend d join pg_policy
   'A: the parent''s carried copy of dv205_self reads the parent, not the original oid the monolith took (#897)');
 insert into public.dv205 values (150, 'forward'), (11, 'mono');
 select isnt((select tableoid from public.dv205 where k = 150), (select monolith_oid from pgpm.config where parent_table = 'public.dv205'::regclass),
-  'A LIVENESS: k = 150 landed in a forward partition, not the monolith');
+  'LIVENESS: (A) k = 150 landed in a forward partition, not the monolith');
 select is((select tableoid from public.dv205 where k = 11), (select monolith_oid from pgpm.config where parent_table = 'public.dv205'::regclass),
-  'A LIVENESS: k = 11 landed in the monolith');
+  'LIVENESS: (A) k = 11 landed in the monolith');
 create view public.dv205_v as select k, v from public.dv205;
 select is((select array_agg(k order by k) from public.dv205_v),
   array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 150]::int8[],
@@ -117,14 +117,14 @@ create event trigger t205_inject on ddl_command_end when tag in ('CREATE TABLE')
 select is((select relkind::text from pg_class where oid = 'public.dw205'::regclass)
           || ':' || (select count(*)::int from pg_depend where refobjid = 'public.dw205'::regclass
                       and classid = 'pg_rewrite'::regclass)::text,
-  'r:0', 'B LIVENESS: dw205 is a plain table with no view over it when transmute starts, so the preflight passes');
+  'r:0', 'LIVENESS: (B) dw205 is a plain table with no view over it when transmute starts, so the preflight passes');
 select dblink_connect('t205', 'dbname=' || current_database());
 select throws_like(
   $$ select dblink_exec('t205', 'call pgpm.transmute(''public.dw205'', ''k'', 100::bigint, p_obtain => 2)') $$,
   '%pg_partition_magician: cannot transmute dw205 -- the object(s) (view dw205_late) name it by its oid,%',
   'B: the cutover refuses the view created after the preflight');
 select is((select last_value::int || ':' || is_called::text from public.w205_seq), '1:true',
-  'B LIVENESS: the window''s view went on once, inside the cutover');
+  'LIVENESS: (B) the window''s view went on once, inside the cutover');
 select is((select relkind::text from pg_class where oid = 'public.dw205'::regclass), 'r', 'B: dw205 is still the plain table');
 select is(to_regclass('public.dw205_late'), null, 'B: and the view went with the cutover''s rollback');
 select is(
@@ -132,12 +132,12 @@ select is(
   true, 'B: phases 1 and 2 committed and stand: the refusal came from the cutover, leaving the resumable state');
 select lives_ok(
   $$ select dblink_exec('t205', 'call pgpm.transmute(''public.dw205'', ''k'', 100::bigint, p_obtain => 2)') $$,
-  'B LIVENESS: the re-run, with no view created this time, converts dw205');
+  'LIVENESS: (B) the re-run, with no view created this time, converts dw205');
 select dblink_disconnect('t205');
 drop event trigger t205_inject;
-select is((select relkind::text from pg_class where oid = 'public.dw205'::regclass), 'p', 'B LIVENESS: dw205 is partitioned');
+select is((select relkind::text from pg_class where oid = 'public.dw205'::regclass), 'p', 'LIVENESS: (B) dw205 is partitioned');
 select is((select count(*)::int from pgpm.log where parent_table = 'public.dw205'::regclass and action = 'transmute_resume'), 1,
-  'B LIVENESS: the re-run RESUMED on the bound the refused run committed');
+  'LIVENESS: (B) the re-run RESUMED on the bound the refused run committed');
 select is((select array_agg(k order by k) from public.dw205), array[1, 2, 3, 4, 5]::int8[], 'B: the rows are intact');
 
 -- ====================================================================================================
@@ -152,7 +152,7 @@ create rule du205_r as on insert to public.du205 do also insert into public.audi
 create view public.du205_mono_v as select k from :du_mono;   -- over the monolith partition: not refused
 insert into public.du205 values (7, 'u7');
 select is((select array_agg(k order by k) from public.audit205), array[7]::int8[],
-  'C LIVENESS: the rule on the parent fires for a write through it');
+  'LIVENESS: (C) the rule on the parent fires for a write through it');
 select throws_like($$ select pgpm.untransmute('public.du205') $$,
   'pg_partition_magician: cannot untransmute du205 -- the object(s) (rule du205_r on du205, view du205_v) name the partitioned table by its oid,%',
   'C: untransmute refuses the view and the rule over the parent, naming both and not the monolith''s view');
@@ -165,8 +165,8 @@ select throws_like($$ select pgpm.untransmute('public.du205') $$,
 select ok(exists (select 1 from pg_rewrite where rulename = 'du205_r' and ev_class = 'public.du205'::regclass),
   'C: the rule is still on the parent');
 drop rule du205_r on public.du205;
-select lives_ok($$ select pgpm.untransmute('public.du205') $$, 'C LIVENESS: with both gone, untransmute reverses du205');
-select is((select relkind::text from pg_class where oid = 'public.du205'::regclass), 'r', 'C LIVENESS: du205 is the plain table again');
+select lives_ok($$ select pgpm.untransmute('public.du205') $$, 'LIVENESS: (C) with both gone, untransmute reverses du205');
+select is((select relkind::text from pg_class where oid = 'public.du205'::regclass), 'r', 'LIVENESS: (C) du205 is the plain table again');
 select is((select array_agg(k order by k) from public.du205_mono_v), array[1, 2, 3, 4, 5, 6, 7]::int8[],
   'C: the view over the monolith now reads the restored table, every row');
 select is((select array_agg(k order by k) from public.du205), array[1, 2, 3, 4, 5, 6, 7]::int8[], 'C: the rows are intact');

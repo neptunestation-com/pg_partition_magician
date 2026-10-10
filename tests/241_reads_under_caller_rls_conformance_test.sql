@@ -191,29 +191,29 @@ select count(*) as tc_mono_all from public.tc241 where id < 100 \gset
 -- ================= WITNESSES: the owner's reads really are filtered, where and only where intended =====
 select is((select (not rolsuper and not rolbypassrls)::text from pg_roles where rolname = 't241_owner')
           || '/' || (select (rolsuper or rolbypassrls)::text from pg_roles where rolname = current_user), 'true/true',
-  'WITNESS: t241_owner is neither a superuser nor BYPASSRLS, and the harness''s role bypasses row-level security');
+  'LIVENESS: t241_owner is neither a superuser nor BYPASSRLS, and the harness''s role bypasses row-level security');
 select is(:'owner_ida_max'::text || '/' || (select max(id) from public.ida241)::text, '20/37',
-  'WITNESS F1: the owner''s largest id of ida241 is 20; the true one is 37');
+  'LIVENESS: (F1) the owner''s largest id of ida241 is 20; the true one is 37');
 select is(:'owner_ida_rls'::text || '/' || :'owner_ida_mono_rls'::text, 'true/true',
-  'WITNESS F1: row-level security filters the owner on ida241''s parent and on its monolith');
+  'LIVENESS: (F1) row-level security filters the owner on ida241''s parent and on its monolith');
 select is(:'owner_ck'::text || '/' || (select count(*) from public.ck241)::text, '3/4',
-  'WITNESS F2: the owner sees 3 of ck241''s 4 rows, the future-dated one hidden');
+  'LIVENESS: (F2) the owner sees 3 of ck241''s 4 rows, the future-dated one hidden');
 select is(:'owner_tc_rls'::text || '/' || :'owner_tc_mono_rls'::text || '/' || :'owner_tc_parent'::text, 'false/true/30',
-  'WITNESS F3: tc241''s parent no longer filters the owner (all 30 rows through it), its monolith still does');
+  'LIVENESS: (F3) tc241''s parent no longer filters the owner (all 30 rows through it), its monolith still does');
 select is(:'owner_tc_mono'::text || '/' || :'tc_mono_all'::text, '30/30',
-  'WITNESS F3: through the unfiltered parent the owner sees all 30 monolith rows');
+  'LIVENESS: (F3) through the unfiltered parent the owner sees all 30 monolith rows');
 select is(:'owner_tp_rls'::text || '/' || :'owner_tp_mono_rls'::text || '/' || :'owner_tp_parent'::text, 'true/false/6',
-  'WITNESS F4: tp241''s parent filters the owner (6 of 8 rows), its monolith does not');
+  'LIVENESS: (F4) tp241''s parent filters the owner (6 of 8 rows), its monolith does not');
 select is(:'owner_ref'::text || '/' || (select string_agg(id || '->' || p_id, ',' order by id) from public.ref241), '1/1->5,2->7',
-  'WITNESS F5: the owner sees ref241''s row 1 (-> 5) and not row 2 (-> 7), both into cr241''s monolith');
-select is(:'owner_cr_rls'::text, 'false', 'WITNESS F5: cr241 itself does not filter the owner');
+  'LIVENESS: (F5) the owner sees ref241''s row 1 (-> 5) and not row 2 (-> 7), both into cr241''s monolith');
+select is(:'owner_cr_rls'::text, 'false', 'LIVENESS: (F5) cr241 itself does not filter the owner');
 select is(:'owner_ra'::text || '/' || (select string_agg(id || '->' || p_id, ',' order by id) from public.ra241),
-  '1,2/1->5,2->9999,3->8888', 'WITNESS F6: ra241 holds two orphans (9999, 8888) and the owner sees one');
+  '1,2/1->5,2->9999,3->8888', 'LIVENESS: (F6) ra241 holds two orphans (9999, 8888) and the owner sees one');
 select is((select string_agg(referencing_table::text || '=' || orphan_rows, ',' order by referencing_table::text)
              from (select * from pgpm.incoming_fk_orphans('public.oa241')
                    union all select * from pgpm.incoming_fk_orphans('public.ob241')) o),
-  'ra241=2,rb241=1', 'WITNESS F6: read by a role row-level security does not filter, ra241 has 2 orphans and rb241 has 1');
-select is(:'owner_ob'::text, '5', 'WITNESS F6: the owner cannot see ob241''s row 7, which rb241''s row 2 points at');
+  'ra241=2,rb241=1', 'LIVENESS: (F6) read by a role row-level security does not filter, ra241 has 2 orphans and rb241 has 1');
+select is(:'owner_ob'::text, '5', 'LIVENESS: (F6) the owner cannot see ob241''s row 7, which rb241''s row 2 points at');
 
 -- ================= C1. the write frontier: read through the parent, refused =================
 select throws_like($$ select public.t241_as_owner('select pgpm.obtain(''public.ida241'')') $$,
@@ -277,7 +277,7 @@ select is((select count(*)::int from pgpm.log where parent_table = 'public.tp241
               and method like 'pg_partition_magician: cannot archive a partition of tp241 as t241_owner -- row-level security is active on it for that role%'),
   1, 'C4: and logged the monolith''s turn skip_archive, refused because the parent filters the owner');
 select ok(pgpm._is_write_blocked('public.tp241', :'tp_mono'),
-  'C4 LIVENESS: the monolith was a candidate (write-blocked, not covered) when the owner''s step ran');
+  'LIVENESS: (C4) the monolith was a candidate (write-blocked, not covered) when the owner''s step ran');
 
 -- ================= C5. the archive step, a strategy reading the partition itself =================
 set role t241_owner;
@@ -285,7 +285,7 @@ call pgpm.maintain('public.tc241');
 reset role;
 select ok((select count(*) from pgpm.log where parent_table = 'public.tc241'::regclass and action = 'skip_archive' and lo = '0')
           + (select count(*) from pgpm.archive_ledger where parent_table = 'public.tc241'::regclass and child_name = :'tc_mono') >= 1,
-  'C5 LIVENESS: the owner''s tick reached tc241''s monolith in its archive step (its frontier read through the unfiltered parent wrote the block)');
+  'LIVENESS: (C5) the owner''s tick reached tc241''s monolith in its archive step (its frontier read through the unfiltered parent wrote the block)');
 select is((select string_agg(id::text, ',' order by id) from public.tc241 where tenant = 'hid')
           || '/' || pgpm._is_write_blocked('public.tc241', :'tc_mono')::text, '7,14,21,28/true',
   'C5: the monolith is still there, write-blocked, with its hidden rows by identity');
@@ -311,7 +311,7 @@ select throws_like($$ select public.t241_as_owner('select * from pgpm.check_time
 select ok((select newest_in_future from pgpm.check_uuidv7('public.ck241', 'id'))
           and (select newest_in_future from pgpm.check_text_time('public.ck241', 'tt', 'c', 8, 36, 'ms'))
           and (select fraction < 1 from pgpm.check_time_monotonic('public.ck241', 'n', 'ts')),
-  'C6-C8 LIVENESS: read whole, the column''s maximum is future-dated and n and ts do not co-increase');
+  'LIVENESS: (C6-C8) read whole, the column''s maximum is future-dated and n and ts do not co-increase');
 
 -- ================= C9. retention's crossing keys, read from the referencing table =================
 select throws_like(format($$ select public.t241_as_owner('select pgpm.retire(''public.cr241'', ''%s'')') $$, :'cr_mono'),
@@ -323,7 +323,7 @@ select is((select string_agg(id::text, ',' order by id) from public.cr241 where 
 select is((select count(*)::int from pgpm.log where parent_table = 'public.cr241'::regclass and action in ('retain_crossing', 'fail_retain_crossing')), 0,
   'C9: and no crossing delete was attempted');
 select ok((select retain_backlog from pgpm.status() where parent = 'public.cr241'::regclass) >= 1,
-  'C9 LIVENESS: cr241''s monolith is past the retention horizon, so retire reached the crossing');
+  'LIVENESS: (C9) cr241''s monolith is past the retention horizon, so retire reached the crossing');
 
 -- ================= C10. the orphan count =================
 select throws_like($$ select public.t241_as_owner('select * from pgpm.incoming_fk_orphans(''public.oa241'')') $$,
@@ -400,6 +400,6 @@ select set_eq(
   $$ select sig from t241_entry $$,
   'Z: every public routine of the pgpm schema is classified here (a new one fails this until it is)');
 select is((select count(*)::int from t241_entry where verdict = 'refuses'), 20,
-  'Z LIVENESS: the classification is not vacuous: 20 entry points read user rows and are refused above or in tests/218 and 242');
+  'LIVENESS: (Z) the classification is not vacuous: 20 entry points read user rows and are refused above or in tests/218 and 242');
 
 select * from finish();

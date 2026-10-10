@@ -114,12 +114,12 @@ mkdir -p "$OUT"
 if ! git -C "$ROOT" rev-parse -q --verify "refs/tags/$ORIGIN_TAG^{commit}" >/dev/null 2>&1; then
   echo "      tag $ORIGIN_TAG is not in this checkout (CI checks out shallow and without tags); fetching it"
   if ! out=$(git -C "$ROOT" fetch --no-tags --depth=1 origin tag "$ORIGIN_TAG" 2>&1); then
-    echo "FAIL  could not fetch tag $ORIGIN_TAG; without the origin artifact this guard verifies nothing"
+    echo "FAIL  fixture: could not fetch tag $ORIGIN_TAG; without the origin artifact this guard verifies nothing"
     printf '%s\n' "$out" | sed 's/^/      /'; exit 1
   fi
 fi
 if ! git -C "$ROOT" show "$ORIGIN_TAG:$ORIGIN_PATH" > "$ORIGIN_SQL" 2>/tmp/ufr_show.err || [ ! -s "$ORIGIN_SQL" ]; then
-  echo "FAIL  git show $ORIGIN_TAG:$ORIGIN_PATH produced nothing; without the origin artifact this guard verifies nothing"
+  echo "FAIL  fixture: git show $ORIGIN_TAG:$ORIGIN_PATH produced nothing; without the origin artifact this guard verifies nothing"
   sed 's/^/      /' /tmp/ufr_show.err; exit 1
 fi
 printf 'PASS  %-58s %s\n' "origin artifact obtained" "$ORIGIN_TAG:$ORIGIN_PATH ($(wc -c < "$ORIGIN_SQL" | tr -d ' ') bytes)"
@@ -128,16 +128,16 @@ printf 'PASS  %-58s %s\n' "origin artifact obtained" "$ORIGIN_TAG:$ORIGIN_PATH (
 docker exec "$C" psql -U postgres -q -c "drop database if exists $FRESH" >/dev/null 2>&1
 docker exec "$C" psql -U postgres -q -c "create database $FRESH" >/dev/null 2>&1
 if ! install_into "$FRESH" >/tmp/ufr_fresh.log 2>&1; then
-  echo "FAIL  the fresh oracle install did not complete"; sed 's/^/      /' /tmp/ufr_fresh.log; exit 1
+  echo "FAIL  fixture: the fresh oracle install did not complete"; sed 's/^/      /' /tmp/ufr_fresh.log; exit 1
 fi
 routines "$FRESH" > /tmp/ufr_fresh_routines.txt
 N_ORACLE=$(grep -c . /tmp/ufr_fresh_routines.txt)
 if [ "$N_ORACLE" -lt 1 ]; then
-  echo "FAIL  the fresh oracle lists no routines at all: the identity comparison would compare nothing"; exit 1
+  echo "FAIL  GUARD: the fresh oracle lists no routines at all: the identity comparison would compare nothing"; exit 1
 fi
 # The oracle must be able to tell the stale shapes apart from the current ones, or assertion 3 could
 # not fail on them: none of the four may be in a fresh install.
-check "precondition: a fresh install has none of the $N_STALE stale signatures" "$(count_present /tmp/ufr_fresh_routines.txt)" "0"
+check "GUARD: a fresh install has none of the $N_STALE stale signatures" "$(count_present /tmp/ufr_fresh_routines.txt)" "0"
 if [ "$fail" != 0 ]; then
   echo "      the STALE list names a signature the current code still ships; fix the list before trusting anything below"; exit 1
 fi
@@ -146,14 +146,14 @@ fi
 docker exec "$C" psql -U postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
 docker exec "$C" psql -U postgres -q -c "create database $DB" >/dev/null 2>&1
 if ! install_origin_into "$DB" >/tmp/ufr_origin.log 2>&1; then
-  echo "FAIL  the origin install ($ORIGIN_TAG) did not complete"; sed 's/^/      /' /tmp/ufr_origin.log; exit 1
+  echo "FAIL  fixture: the origin install ($ORIGIN_TAG) did not complete"; sed 's/^/      /' /tmp/ufr_origin.log; exit 1
 fi
 
 # ASSERTION 1, the liveness witness. Everything below asserts the upgrade removed something; all of it
 # passes against an origin that never had it.
-check "the origin really is $ORIGIN_VERSION" "$(q "$DB" "select pgpm.version()")" "$ORIGIN_VERSION"
+check "LIVENESS: the origin really is $ORIGIN_VERSION" "$(q "$DB" "select pgpm.version()")" "$ORIGIN_VERSION"
 routines "$DB" > /tmp/ufr_origin_routines.txt
-check "the origin carries all $N_STALE stale signatures" "$(count_present /tmp/ufr_origin_routines.txt)" "$N_STALE"
+check "LIVENESS: the origin carries all $N_STALE stale signatures" "$(count_present /tmp/ufr_origin_routines.txt)" "$N_STALE"
 if [ "$fail" != 0 ]; then
   echo "      the origin is not what this guard thinks it is; nothing below would be evidence of anything"; exit 1
 fi
@@ -168,15 +168,15 @@ run "$DB" "insert into public.ev (id, body) values (10, 'keep-a'), (20, 'doomed'
 run "$DB" "delete from public.ev where body = 'doomed'" >/dev/null
 run "$DB" "insert into public.ev_child (id, ev_id) values (1, 10), (3, 30)" >/dev/null
 if ! run "$DB" "call pgpm.transmute('public.ev', 'id', 1000::bigint, p_obtain => 2, p_paused => false, p_incoming_fks => 'preserve')" >/tmp/ufr_transmute.log 2>&1; then
-  echo "FAIL  the origin's transmute did not complete"; sed 's/^/      /' /tmp/ufr_transmute.log; exit 1
+  echo "FAIL  fixture: the origin's transmute did not complete"; sed 's/^/      /' /tmp/ufr_transmute.log; exit 1
 fi
 BODIES_BEFORE=$(q "$DB" "select string_agg(body, ',' order by body) from public.ev")
 
 # ASSERTION 2, the FK-half liveness witness: the FK is really suspended going into the upgrade.
-check "the origin recorded the FK as dropped and unrestored" \
+check "LIVENESS: the origin recorded the FK as dropped and unrestored" \
       "$(q "$DB" "select string_agg(constraint_name || ':' || coalesce(restored_at::text, 'unrestored'), ',') from pgpm.dropped_fk where parent_table = 'public.ev'::regclass")" \
       "ev_child_ev_id_fkey:unrestored"
-check "no FK is live on the referencing table before the upgrade" \
+check "LIVENESS: no FK is live on the referencing table before the upgrade" \
       "$(q "$DB" "select count(*) from pg_constraint where conrelid = 'public.ev_child'::regclass and contype = 'f' and conparentid = 0")" "0"
 
 # ---------------------------------------------------------------------------- the upgrade

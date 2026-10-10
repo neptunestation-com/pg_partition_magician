@@ -130,10 +130,10 @@ SCANS_AFTER=$(q "select seq_scan from pg_stat_all_tables where relid = 'public.r
 # LIVENESS WITNESSES. "Nothing was blocked" is satisfied by a run where the retirement never happened,
 # or where the probe never overlapped it, so pin all three: the probe saw the work, it got observations
 # in while the work ran, and the work really did the O(referencing table) scan that carries the lock.
-check "the probe overlapped a running retirement"      "$(q "select saw::text from public.probe")"              "true"
-check "reads landed inside it"                         "$(q "select (reads > 0)::text from public.probe")"      "true"
-check "writes landed inside it"                        "$(q "select (writes > 0)::text from public.probe")"     "true"
-check "the detach really scanned the referencing table" "$([ "$SCANS_AFTER" -gt "$SCANS_BEFORE" ] && echo true || echo false)" "true"
+check "LIVENESS: the probe overlapped a running retirement"      "$(q "select saw::text from public.probe")"              "true"
+check "LIVENESS: reads landed inside it"                         "$(q "select (reads > 0)::text from public.probe")"      "true"
+check "LIVENESS: writes landed inside it"                        "$(q "select (writes > 0)::text from public.probe")"     "true"
+check "LIVENESS: the detach really scanned the referencing table" "$([ "$SCANS_AFTER" -gt "$SCANS_BEFORE" ] && echo true || echo false)" "true"
 
 # THE CONTRACT.
 check "the MANAGED PARENT is never blocked"            "$(q "select timeouts::text from public.probe")"         "0"

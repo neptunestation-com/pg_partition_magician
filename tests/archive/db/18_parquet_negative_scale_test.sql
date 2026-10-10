@@ -36,13 +36,13 @@ insert into public.twin18 values (1, 12300), (2, -45600), (3, 9999900);
 -- ---------------------------------------------------------------------------
 
 select is((select format_type(atttypid, atttypmod) from pg_attribute where attrelid = 'public.neg18'::regclass and attname = 'v'),
-  'numeric(5,-2)', 'witness: PostgreSQL itself renders the column as numeric(5,-2)');
+  'numeric(5,-2)', 'LIVENESS: PostgreSQL itself renders the column as numeric(5,-2)');
 
 select is((select (atttypmod - 4) & 65535 from pg_attribute where attrelid = 'public.neg18'::regclass and attname = 'v'),
-  2046, 'witness: the unsigned read of that typmod, the one the encoders used, is scale 2046');
+  2046, 'LIVENESS: the unsigned read of that typmod, the one the encoders used, is scale 2046');
 
 select is((select array_agg(v order by id) from public.neg18), array[12300, -45600, 9999900]::numeric[],
-  'witness: the column holds 12300, -45600 and 9999900, the last its largest value');
+  'LIVENESS: the column holds 12300, -45600 and 9999900, the last its largest value');
 
 -- ---------------------------------------------------------------------------
 -- The shape the leaf declares
@@ -74,7 +74,7 @@ select ok(position(archive._pq_build_schema_leaf('v', 7, 5, false, 4, 0, 7) in b
 
 -- the witness for the two negatives below: the same byte match finds the twin's leaf, which is fine
 select ok(position(archive._pq_build_schema_leaf('v', 7, 5, false, 4, 0, 7) in bytes) > 0,
-  'witness: the byte match finds the numeric(7,0) twin''s DECIMAL(7,0) leaf')
+  'LIVENESS: the byte match finds the numeric(7,0) twin''s DECIMAL(7,0) leaf')
   from t18.enc where label = 'twin_whole';
 
 select is(position(archive._pq_build_schema_leaf('v', 7, 5, false, 3, 2046, 5) in bytes), 0,
@@ -101,7 +101,7 @@ select is((select substring(bytes from :v_off + 1 for 12) from t18.enc where lab
 
 select is((select length(bytes) from t18.enc where label = 'whole'),
           (select length(bytes) from t18.enc where label = 'twin_whole'),
-  'witness: the file is exactly as long as the twin''s, so the page read above is the whole v page');
+  'LIVENESS: the file is exactly as long as the twin''s, so the page read above is the whole v page');
 
 -- A numeric(5,-2) column and a numeric(7,0) column holding the same values are the same Parquet file:
 -- the two columns' names and types agree, so the whole file is the identity to hold, footer included.

@@ -82,7 +82,7 @@ begin
     if n > 500 then raise exception 'regrain setup did not converge'; end if;
   end loop;
 end \$setup\$;" >/dev/null; then
-  printf 'FAIL  %-52s %s\n' "the regrain was pre-copied up to its swap" "setup raised (see above)"
+  printf 'FAIL  %-52s %s\n' "fixture: the regrain was pre-copied up to its swap" "setup raised (see above)"
   exit 1
 fi
 
@@ -136,8 +136,8 @@ begin
 end \$p\$;" >/dev/null 2>&1
 wait $BG
 
-check "the probe overlapped a running swap"          "$(q "select saw::text from public.probe")"          "true"
-check "at least one write landed inside it"          "$(q "select (attempts > 0)::text from public.probe")" "true"
+check "LIVENESS: the probe overlapped a running swap"          "$(q "select saw::text from public.probe")"          "true"
+check "LIVENESS: at least one write landed inside it"          "$(q "select (attempts > 0)::text from public.probe")" "true"
 check "writes to the MANAGED PARENT are not blocked" "$(q "select timeouts::text from public.probe")"      "0"
 # conparentid = 0 picks the top-level constraint. An FK referencing a PARTITIONED table also gets one
 # pg_constraint row per partition of the referencING side, so an unfiltered count would report one

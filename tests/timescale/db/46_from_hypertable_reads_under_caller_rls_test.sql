@@ -95,14 +95,14 @@ select count(*) as delta_n from public.hd46_pgpm_delta \gset
 -- ================= WITNESSES =================
 select is((select (not rolsuper and not rolbypassrls)::text from pg_roles where rolname = 't46_owner')
           || '/' || (select rolbypassrls::text from pg_roles where rolname = current_user), 'true/true',
-  'WITNESS: t46_owner is neither a superuser nor BYPASSRLS, and the harness''s role is BYPASSRLS');
+  'LIVENESS: t46_owner is neither a superuser nor BYPASSRLS, and the harness''s role is BYPASSRLS');
 select is(:'owner_sees_ha'::text || '/' || (select string_agg(id || ':' || tenant, ',' order by id) from public.ha46),
   '1,2,3,4,5,6/1:a,2:a,3:a,4:a,5:a,6:a,7:b,8:b',
-  'WITNESS: ha46 holds rows 7 and 8 past the copy, and the owner sees neither');
+  'LIVENESS: ha46 holds rows 7 and 8 past the copy, and the owner sees neither');
 select is((select string_agg(id::text, ',' order by id) from public.ha46_pgpm_dest), '1,2,3,4,5,6',
-  'WITNESS: ha46''s copy holds the six rows it was made from');
+  'LIVENESS: ha46''s copy holds the six rows it was made from');
 select is(:'owner_sees_hd'::text || '/' || :'delta_n'::text, '1,3,4,5,6/4',
-  'WITNESS: the owner cannot see hd46''s row 2, and the delta holds the two updates'' four entries');
+  'LIVENESS: the owner cannot see hd46''s row 2, and the delta holds the two updates'' four entries');
 
 -- ================= the append drain =================
 select throws_like(format($$ select public.t46_as_owner('select pgpm.from_hypertable_drain_appends_step(''public.ha46'', ''ts'', 100, ''%s'')') $$,

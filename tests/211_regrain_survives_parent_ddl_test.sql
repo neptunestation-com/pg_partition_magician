@@ -49,7 +49,7 @@ select ok(exists (select 1 from pgpm.log where parent_table = 'public.rg211a'::r
                    and action = 'regrain_copy' and lo = '0' and hi = '50' and rows = 49)
           and (select regrain_cursor from pgpm.config where parent_table = 'public.rg211a'::regclass) = '50'
           and (select count(*) from s211.copy_a c join pg_class k on k.oid = c.child_oid) = 1,
-          'LIVENESS A: auto-regrain is mid-flight: the copy of [0, 50) holds 49 rows and the cursor is at 50');
+          'LIVENESS: (A) auto-regrain is mid-flight: the copy of [0, 50) holds 49 rows and the cursor is at 50');
 
 alter table public.rg211a add column note text default 'n';
 alter table public.rg211a add column tag bigint default nextval('s211.tag_seq');   -- volatile: a rewrite
@@ -61,7 +61,7 @@ create table s211.want_a as select id, payload, note, tag from public.rg211a whe
 select ok((select count(distinct tag) from s211.want_a) = 199
           and not exists (select 1 from pg_attribute a join s211.copy_a c on a.attrelid = c.child_oid
                            where a.attname in ('note', 'tag')),
-          'LIVENESS A: the source holds a distinct tag per row, and the copy made before the ALTER has neither new column');
+          'LIVENESS: (A) the source holds a distinct tag per row, and the copy made before the ALTER has neither new column');
 
 do $$ declare v text; begin for i in 1..30 loop call pgpm.maintain('public.rg211a', v); end loop; end $$;
 
@@ -97,7 +97,7 @@ call pgpm.maintain('public.rg211b');   -- copies [50, 100)
 
 select ok((select count(*) from pgpm.log where parent_table = 'public.rg211b'::regclass and action = 'regrain_copy') = 2
           and (select regrain_cursor from pgpm.config where parent_table = 'public.rg211b'::regclass) = '100',
-          'LIVENESS B: two sub-ranges are copied and the cursor is at 100');
+          'LIVENESS: (B) two sub-ranges are copied and the cursor is at 100');
 
 alter table public.rg211b drop column extra;
 alter table public.rg211b alter column payload type varchar(40);

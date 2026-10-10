@@ -39,15 +39,15 @@ select is(
   (select string_agg(conname || ':' || contype::text, ',' order by conname) from pg_constraint
     where conrelid = 'public.ex26'::regclass and contype in ('x', 'u')),
   'ex26_a_one_desk_per_instant:x,ex26_b_no_double_booking:x,ex26_tag_key:u',
-  'WITNESS: the hypertable carries two exclusion constraints and one unique constraint');
+  'LIVENESS: the hypertable carries two exclusion constraints and one unique constraint');
 select throws_like(
   $$ insert into public.ex26 values ('2026-09-01 00:00+00', 0, 4, tstzrange('2026-09-01 00:00+00', '2026-09-01 00:30+00'), 'fresh') $$,
   '%violates exclusion constraint "%ex26_b_no_double_booking"%',
-  'WITNESS: before migration the hypertable rejects a double booking of room 0 at 00:00');
+  'LIVENESS: before migration the hypertable rejects a double booking of room 0 at 00:00');
 select throws_like(
   $$ insert into public.ex26 values ('2026-09-01 00:00+00', 2, 0, tstzrange('2026-09-02 00:00+00', '2026-09-02 00:30+00'), 'fresh') $$,
   '%violates exclusion constraint "%ex26_a_one_desk_per_instant"%',
-  'WITNESS: and a second use of desk 0 at 00:00');
+  'LIVENESS: and a second use of desk 0 at 00:00');
 
 -- ================= the refusals, one per entry point =================
 select throws_like(

@@ -189,7 +189,7 @@ select results_eq(
        from pgpm.config where parent_table = 'public.a8t'::regclass $$,
   $$ values ('t'::text, 8, 16, 's'::text, '0123456789ABCDEF'::text, 4,
              timestamptz '2026-01-01 00:00:00+00') $$,
-  'setup: the managed table stores every non-default text_time codec field');
+  'fixture: the managed table stores every non-default text_time codec field');
 
 create temporary table a8t_expected as
 select array[
@@ -206,7 +206,7 @@ select is(
                                       '0123456789ABCDEF', 4, '2026-01-01 00:00:00+00')
       and id < pgpm._ts_to_text_time('2026-03-01 00:00:00+00', 't', 8, 16, 's',
                                      '0123456789ABCDEF', 4, '2026-01-01 00:00:00+00')),
-  'setup: the archive range contains the two identified rows');
+  'fixture: the archive range contains the two identified rows');
 
 create temporary table a8t_ndjson_result as
 select (r).* from (select pgpm.archive_to_s3_ndjson(
@@ -259,7 +259,7 @@ select (r).* from (select pgpm.archive_to_s3_ndjson('public."A8Pascal"'::regclas
 -- character, so "the upload succeeded" below cannot be satisfied by an accidentally-safe key.
 select ok(
   (select s3_key like '%"%' from a8pascal_ndjson_result),
-  'setup: the archived key genuinely carries the quote character that used to break signing');
+  'fixture: the archived key genuinely carries the quote character that used to break signing');
 
 select ok(
   (select rows_archived = 50 and s3_key like '%.ndjson' and etag is not null from a8pascal_ndjson_result),

@@ -88,14 +88,14 @@ select child_name as a_doomed, hi as a_hi, child_oid as a_oid from pgpm.part
  where parent_table = 'pgpm_t204_old.rra'::regclass and lo = '0' \gset
 
 alter table pgpm_t204_old.rra set schema pgpm_t204_new;
-select is(pgpm_t204_old.nsp_of(:'a_oid'::oid), 'pgpm_t204_old', 'A LIVENESS: the parent moved and its partition stayed in the old schema');
+select is(pgpm_t204_old.nsp_of(:'a_oid'::oid), 'pgpm_t204_old', 'LIVENESS: (A) the parent moved and its partition stayed in the old schema');
 
-select ok(not pgpm.retire('pgpm_t204_new.rra', :'a_doomed'), 'A fixture: retire() dispatches the detach and returns false');
+select ok(not pgpm.retire('pgpm_t204_new.rra', :'a_doomed'), 'fixture: (A) retire() dispatches the detach and returns false');
 select is(pgpm_t204_old.armed(), format('alter table pgpm_t204_new.rra detach partition pgpm_t204_old.%I concurrently', :'a_doomed'),
-  'A LIVENESS: the standing job is armed with the partition''s detach, named in its own schema');
+  'LIVENESS: (A) the standing job is armed with the partition''s detach, named in its own schema');
 
 select pgpm.set_retain('pgpm_t204_new.rra', '45000');   -- horizon 20000 -> 0
-select ok(not pgpm_t204_old.reached('pgpm_t204_new.rra', :'a_hi'), 'A LIVENESS: after loosening, retention no longer reaches the partition');
+select ok(not pgpm_t204_old.reached('pgpm_t204_new.rra', :'a_hi'), 'LIVENESS: (A) after loosening, retention no longer reaches the partition');
 select is(pgpm_t204_old.armed(), 'select 1', 'A: set_retain returns the standing job to idle before cron can run the detach');
 select is(pgpm_t204_old.actions('pgpm_t204_new.rra', '0'), array['retain_detach', 'retain_recall'],
   'A: logged as exactly retain_detach, retain_recall, with no identity failure');
@@ -128,18 +128,18 @@ select child_name as b_doomed, hi as b_hi, child_oid as b_oid from pgpm.part
 select array_agg(conname::text order by conname) as b_cons from pg_constraint where conrelid = :'b_oid'::oid \gset
 
 alter table pgpm_t204_old.rrb set schema pgpm_t204_new;
-select ok(not pgpm.retire('pgpm_t204_new.rrb', :'b_doomed'), 'B fixture: retire() dispatches the detach');
+select ok(not pgpm.retire('pgpm_t204_new.rrb', :'b_doomed'), 'fixture: (B) retire() dispatches the detach');
 -- pg_cron has already read the command: this is the text its worker is about to run
 select pgpm_t204_old.armed() as b_cmd \gset
 select is(:'b_cmd', format('alter table pgpm_t204_new.rrb detach partition pgpm_t204_old.%I concurrently', :'b_doomed'),
-  'B LIVENESS: the command cron picked up is this partition''s detach, in its own schema');
+  'LIVENESS: (B) the command cron picked up is this partition''s detach, in its own schema');
 select pgpm.set_retain('pgpm_t204_new.rrb', '45000');
-select ok(not pgpm_t204_old.reached('pgpm_t204_new.rrb', :'b_hi'), 'B LIVENESS: retention no longer reaches the partition');
+select ok(not pgpm_t204_old.reached('pgpm_t204_new.rrb', :'b_hi'), 'LIVENESS: (B) retention no longer reaches the partition');
 
 -- the worker that started before the recall runs the detach anyway
 select :'b_cmd' \gexec
-select ok(not pgpm_t204_old.attached('pgpm_t204_new.rrb', :'b_oid'::oid), 'B LIVENESS: the late detach landed: the partition left the parent');
-select is(pgpm_t204_old.ids('pgpm_t204_new.rrb', 20000), null::bigint[], 'B LIVENESS: its rows are invisible through the parent');
+select ok(not pgpm_t204_old.attached('pgpm_t204_new.rrb', :'b_oid'::oid), 'LIVENESS: (B) the late detach landed: the partition left the parent');
+select is(pgpm_t204_old.ids('pgpm_t204_new.rrb', 20000), null::bigint[], 'LIVENESS: (B) its rows are invisible through the parent');
 
 call pgpm.maintain('pgpm_t204_new.rrb');
 
@@ -156,7 +156,7 @@ select is((select retiring_at from pgpm.part where parent_table = 'pgpm_t204_new
   null, 'B: the retiring marker is cleared with the re-attach');
 select is(pgpm_t204_old.armed(), 'select 1', 'B: the standing job stays idle, so it does not detach the partition again');
 select lives_ok($$ insert into pgpm_t204_new.rrb values (9, 'i') $$, 'B: a write into the range lands');
-select lives_ok($$ insert into public.rr204b_ref values (2, 6) $$, 'B LIVENESS: a referencing row can point into the re-attached range');
+select lives_ok($$ insert into public.rr204b_ref values (2, 6) $$, 'LIVENESS: (B) a referencing row can point into the re-attached range');
 select throws_ok($$ delete from pgpm_t204_new.rrb where id = 6 $$, '23503', null,
   'B: and the incoming foreign key is enforced on the re-attached partition');
 select results_eq($$ select retain_drop_failures, retain_detaching from pgpm.status() where parent = 'pgpm_t204_new.rrb'::regclass $$,
@@ -174,18 +174,18 @@ select child_name as c_doomed, hi as c_hi, child_oid as c_oid from pgpm.part
  where parent_table = 'pgpm_t204_old.rrc'::regclass and lo = '0' \gset
 
 alter table pgpm_t204_old.rrc set schema pgpm_t204_new;
-select ok(not pgpm.retire('pgpm_t204_new.rrc', :'c_doomed'), 'C fixture: retire() dispatches the detach');
+select ok(not pgpm.retire('pgpm_t204_new.rrc', :'c_doomed'), 'fixture: (C) retire() dispatches the detach');
 -- the partition is renamed aside and something else takes its name, in the partition's own schema
 select format('alter table pgpm_t204_old.%I rename to rr204c_aside', :'c_doomed') \gexec
 select format('create table pgpm_t204_old.%I (id bigint, payload text)', :'c_doomed') \gexec
 select format('insert into pgpm_t204_old.%I values (99, ''squat'')', :'c_doomed') \gexec
 select format('pgpm_t204_old.%I', :'c_doomed') as c_squat \gset
-select isnt(to_regclass(:'c_squat')::oid, :'c_oid'::oid, 'C LIVENESS: the name now resolves to a different relation in the partition''s schema');
+select isnt(to_regclass(:'c_squat')::oid, :'c_oid'::oid, 'LIVENESS: (C) the name now resolves to a different relation in the partition''s schema');
 select is(pgpm_t204_old.armed(), format('alter table pgpm_t204_new.rrc detach partition pgpm_t204_old.%I concurrently', :'c_doomed'),
-  'C LIVENESS: the standing job is armed with the detach of that name');
+  'LIVENESS: (C) the standing job is armed with the detach of that name');
 
 select pgpm.set_retain('pgpm_t204_new.rrc', '45000');
-select ok(not pgpm_t204_old.reached('pgpm_t204_new.rrc', :'c_hi'), 'C LIVENESS: retention no longer reaches the partition');
+select ok(not pgpm_t204_old.reached('pgpm_t204_new.rrc', :'c_hi'), 'LIVENESS: (C) retention no longer reaches the partition');
 select is(pgpm_t204_old.actions('pgpm_t204_new.rrc', '0'), array['retain_detach', 'fail_retain_identity'],
   'C: the substituted name is refused as exactly fail_retain_identity');
 select is(pgpm_t204_old.armed(), 'select 1', 'C: and the command naming the squatter is disarmed');

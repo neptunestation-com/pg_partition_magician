@@ -40,23 +40,23 @@ select md5(string_agg(id::text || ':' || payload, ',' order by id)) as rows_befo
 select child_name as mono, lo as mono_lo, hi as mono_hi from pgpm.part
  where parent_table = 'public.tz163'::regclass and attached order by lo::timestamptz limit 1 \gset
 
-select is(pgpm.regrain_step('public.tz163', :'mono', '1 month'), 'prepared', 'fixture (A): the run is prepared');
-select is(pgpm.regrain_step('public.tz163', :'mono', '1 month'), 'copied:9', 'fixture (A): December 2017 is copied');
-select is(pgpm.regrain_step('public.tz163', :'mono', '1 month'), 'copied:11', 'fixture (A): January 2018 is copied');
-select is(pgpm.regrain_step('public.tz163', :'mono', '1 month'), 'copied:9', 'fixture (A): February 2018 is copied');
+select is(pgpm.regrain_step('public.tz163', :'mono', '1 month'), 'prepared', 'fixture: (A) the run is prepared');
+select is(pgpm.regrain_step('public.tz163', :'mono', '1 month'), 'copied:9', 'fixture: (A) December 2017 is copied');
+select is(pgpm.regrain_step('public.tz163', :'mono', '1 month'), 'copied:11', 'fixture: (A) January 2018 is copied');
+select is(pgpm.regrain_step('public.tz163', :'mono', '1 month'), 'copied:9', 'fixture: (A) February 2018 is copied');
 select is((select regrain_cursor::timestamptz from pgpm.config where parent_table = 'public.tz163'::regclass),
-  timestamptz '2018-03-01 00:00:00+00', 'LIVENESS (A): the run is in flight, its cursor at 2018-03-01 00:00Z');
+  timestamptz '2018-03-01 00:00:00+00', 'LIVENESS: (A) the run is in flight, its cursor at 2018-03-01 00:00Z');
 select is((select array_agg(child_name::text order by lo::timestamptz) from pgpm.part
             where parent_table = 'public.tz163'::regclass and not attached),
   array['tz163_p2017_12', 'tz163_p2018_01', 'tz163_p2018_02'],
-  'LIVENESS (A): three copies on the UTC month lattice, not yet attached');
+  'LIVENESS: (A) three copies on the UTC month lattice, not yet attached');
 select ok(pgpm._grid_floor('time', '1 month', '2000-01-01 00:00:00+00', :'mono_lo', 'Africa/Sao_Tome')::timestamptz = :'mono_lo'::timestamptz
       and pgpm._grid_floor('time', '1 month', '2000-01-01 00:00:00+00', :'mono_hi', 'Africa/Sao_Tome')::timestamptz = :'mono_hi'::timestamptz
       and pgpm._grid_floor('time', '1 month', '2000-01-01 00:00:00+00', :'top', 'Africa/Sao_Tome')::timestamptz = :'top'::timestamptz,
-  'LIVENESS (A): Sao_Tome agrees with UTC at the monolith''s bounds and at the grid top (the attached checks pass it)');
+  'LIVENESS: (A) Sao_Tome agrees with UTC at the monolith''s bounds and at the grid top (the attached checks pass it)');
 select isnt(pgpm._grid_floor('time', '1 month', '2000-01-01 00:00:00+00', '2018-03-01 00:00:00+00', 'Africa/Sao_Tome')::timestamptz,
   timestamptz '2018-03-01 00:00:00+00',
-  'LIVENESS (A): and disagrees at the cursor: 2018-03-01 00:00Z is not a Sao_Tome month boundary');
+  'LIVENESS: (A) and disagrees at the cursor: 2018-03-01 00:00Z is not a Sao_Tome month boundary');
 
 select max(id) as mark_a from pgpm.log \gset
 select throws_like($$ select pgpm.set_partition_tz('public.tz163', 'Africa/Sao_Tome') $$,
@@ -113,7 +113,7 @@ select dblink_exec('t163_a', 'set timezone = ''UTC''');
 select dblink_exec('t163_a', 'begin');
 select is((select x from dblink('t163_a',
             format('select pgpm.regrain_step(%L, %L, %L)', 'public.tz163b', :'monob', '1 month')) as t(x text)),
-  'prepared', 'LIVENESS (B): session A prepared a month run and holds its transaction open');
+  'prepared', 'LIVENESS: (B) session A prepared a month run and holds its transaction open');
 select dblink_send_query('t163_b', $q$select pgpm.set_partition_tz('public.tz163b', 'Africa/Sao_Tome')::text$q$);
 -- pg_stat_activity is read once per transaction and then frozen (the documented snapshot; a DO block is
 -- one transaction), so without clearing it each turn this loop saw its first read 6000 times and could
@@ -128,9 +128,9 @@ do $$ begin
   end loop;
 end $$;
 select ok(exists (select 1 from pg_stat_activity where pid = :bpid and wait_event_type = 'Lock'),
-  'LIVENESS (B): set_partition_tz is waiting on a lock...');
+  'LIVENESS: (B) set_partition_tz is waiting on a lock...');
 select ok(exists (select 1 from pg_stat_activity where pid = :apid and state = 'idle in transaction'),
-  'LIVENESS (B): ...while the prepare is still uncommitted');
+  'LIVENESS: (B) ...while the prepare is still uncommitted');
 select dblink_exec('t163_a', 'commit');
 do $$ declare v text; begin
   select x into v from dblink_get_result('t163_b') as t(x text);

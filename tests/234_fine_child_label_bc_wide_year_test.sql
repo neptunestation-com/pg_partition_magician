@@ -43,7 +43,7 @@ select is(
   (select array_agg('t234_p' || label order by label) from l234),
   'fixture: each label is the one _part_name gives that cell (seven BC granularities, four years past 9999)');
 select is((select array_agg(label order by label) from l234 where label ~ '^[0-9]{4}(_[0-9]+)*$'), null,
-  'witness: none of the eleven labels has the pre-fix shape, so each is a name the old guard let through');
+  'LIVENESS: none of the eleven labels has the pre-fix shape, so each is a name the old guard let through');
 select is((select array_agg(label order by label) from l234 where not pgpm._is_fine_child_label('time', label)), null,
   'the helper recognises every one of them as a fine child''s label');
 select ok(pgpm._is_fine_child_label('uuidv7', '10889_12') and pgpm._is_fine_child_label('text_time', '0100_06_bc'),
@@ -112,7 +112,7 @@ select is(
   (select array_agg(referencing_table::text) from pgpm.dropped_fk
     where parent_table = 'public.g234'::regclass and restored_at is null),
   array['r234'],
-  'precondition: r234''s FK is suspended and not yet restored');
+  'LIVENESS: r234''s FK is suspended and not yet restored');
 create table public.g234_p0100_06_bc (like public.g234);
 select is(pgpm.restore_incoming_fks('public.g234'), 0,
   'the gate holds the FK off while a BC-labelled orphan (g234_p0100_06_bc) is out of the parent');
@@ -123,7 +123,7 @@ select is(
   (select array_agg(referencing_table::text) from pgpm.dropped_fk
     where parent_table = 'public.g234'::regclass and restored_at is null),
   array['r234'],
-  'precondition: r234''s FK is still suspended after the BC orphan''s call');
+  'LIVENESS: r234''s FK is still suspended after the BC orphan''s call');
 create table public.g234_p10001_03 (like public.g234);
 select is(pgpm.restore_incoming_fks('public.g234'), 0,
   'the gate holds the FK off while a five-digit-year orphan (g234_p10001_03) is out of the parent');

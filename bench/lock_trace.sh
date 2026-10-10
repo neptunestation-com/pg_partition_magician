@@ -234,24 +234,24 @@ PY
 )"
 
 # --- the witnesses that the ordering assertion is about a non-empty interval --------------------
-check "the probe captured events"                 "$([ "${EVENT_COUNT:-0}" -gt 0 ] && echo true || echo false)" "true"
-check "mg_ret requested ACCESS EXCLUSIVE in the tick" "$([ "${MG_REQUESTS:-0}" -gt 0 ] && echo true || echo false)" "true"
+check "LIVENESS: the probe captured events"                 "$([ "${EVENT_COUNT:-0}" -gt 0 ] && echo true || echo false)" "true"
+check "LIVENESS: mg_ret requested ACCESS EXCLUSIVE in the tick" "$([ "${MG_REQUESTS:-0}" -gt 0 ] && echo true || echo false)" "true"
 # The anchor identifies the backend under test, so a second backend requesting mg_ret's strong lock in
 # the same window would let the interval splice two sessions together -- and that is the direction
 # that PASSES, since the other session would supply the commit. Asserted, not assumed.
-check "exactly one backend requested mg_ret's strong lock" "${MG_BACKENDS:-0}" "1"
-check "ml's turn is visible in the same tick"     "${ML_ANCHOR:-false}" "true"
+check "LIVENESS: exactly one backend requested mg_ret's strong lock" "${MG_BACKENDS:-0}" "1"
+check "LIVENESS: ml's turn is visible in the same tick"     "${ML_ANCHOR:-false}" "true"
 # Counted in the kernel, at the instant of the event, by the probe itself. Every assertion here is a
 # claim about which events are present, so a stream with holes is not evidence of anything -- and
 # unlike the tool this replaced, a hole cannot go unreported.
-check "no events were dropped"                    "${DROPPED:--1}" "0"
+check "LIVENESS: no events were dropped"                    "${DROPPED:--1}" "0"
 # A tick starved of its locks logs skip_retain, takes no strong lock, and would leave the interval
 # above empty. Exact action values, never a prefix: non-success events are prefixed (skip_drain,
 # fail_retain_drop), precisely so `retain%` cannot match a deferral.
-check "the tick did the work that takes the lock (retain)" \
+check "LIVENESS: the tick did the work that takes the lock (retain)" \
       "$(q "select (count(*) > 0)::text from pgpm.log
              where parent_table='public.mg_ret'::regclass and action = 'retain_drop'")" "true"
-check "and regrained ml in the same tick" \
+check "LIVENESS: and regrained ml in the same tick" \
       "$(q "select (count(*) > 0)::text from pgpm.log
              where parent_table='public.ml'::regclass and action = 'regrain_copy'")" "true"
 

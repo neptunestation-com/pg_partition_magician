@@ -35,9 +35,9 @@ create table public.ts226 (k int8 primary key, v text) tablespace :"ts";
 insert into public.ts226 select g, 'v' || g from generate_series(1, 10) g;
 select 'public.ts226'::regclass::oid as ts_rel \gset
 select is((select reltablespace from pg_class where oid = 'public.ts226'::regclass), :'ts_oid'::oid,
-  'A LIVENESS: ts226 lives in pgpm_t226_<database> before the conversion');
+  'LIVENESS: (A) ts226 lives in pgpm_t226_<database> before the conversion');
 call pgpm.transmute('public.ts226', 'k', 100::bigint, p_obtain => 2);
-select is((select relkind::text from pg_class where oid = 'public.ts226'::regclass), 'p', 'A LIVENESS: ts226 is converted');
+select is((select relkind::text from pg_class where oid = 'public.ts226'::regclass), 'p', 'LIVENESS: (A) ts226 is converted');
 select is((select reltablespace from pg_class where oid = 'public.ts226'::regclass), :'ts_oid'::oid,
   'A: the partitioned parent is in pgpm_t226_<database>, as the table was');
 select is((select monolith_oid::oid || ' ' || (select reltablespace from pg_class where oid = monolith_oid)::text
@@ -52,7 +52,7 @@ select is((select array_agg(c.relname::text || ' ' || (c.reltablespace = :'ts_oi
   'A: both forward partitions obtain minted are in pgpm_t226_<database>');
 insert into public.ts226 values (150, 'fwd');
 select is((select tableoid::regclass::text from public.ts226 where k = 150), 'ts226_p0000000000000000100',
-  'A LIVENESS: row 150 landed in the first forward partition, not the monolith');
+  'LIVENESS: (A) row 150 landed in the first forward partition, not the monolith');
 select is((select reltablespace from pg_class where oid = (select tableoid from public.ts226 where k = 150)), :'ts_oid'::oid,
   'A: so the row written past the monolith is stored in pgpm_t226_<database>');
 select pgpm.extend_to('public.ts226', '450');
@@ -64,9 +64,9 @@ select is((select c.reltablespace from pgpm.part p join pg_class c on c.oid = p.
 create table public.df226 (k int8 primary key, v text);
 insert into public.df226 select g, 'd' || g from generate_series(1, 7) g;
 select is((select reltablespace from pg_class where oid = 'public.df226'::regclass), 0::oid,
-  'B LIVENESS: df226 lives in the database default before the conversion');
+  'LIVENESS: (B) df226 lives in the database default before the conversion');
 call pgpm.transmute('public.df226', 'k', 100::bigint, p_obtain => 2);
-select is((select relkind::text from pg_class where oid = 'public.df226'::regclass), 'p', 'B LIVENESS: df226 is converted');
+select is((select relkind::text from pg_class where oid = 'public.df226'::regclass), 'p', 'LIVENESS: (B) df226 is converted');
 select is((select array_agg(c.relname::text || ' ' || c.reltablespace::text order by c.relname)
              from pg_class c
             where c.oid = 'public.df226'::regclass
@@ -92,7 +92,7 @@ revoke create on tablespace :"ts" from t226_converter;
 select ok(not has_tablespace_privilege('t226_converter', :'ts', 'CREATE')
           and (select pg_get_userbyid(relowner) = 't226_converter' and reltablespace = :'ts_oid'::oid
                  from pg_class where oid = 'public.np226'::regclass),
-  'C WITNESS: t226_converter owns np226, which is in pgpm_t226_<database>, and can no longer create there');
+  'LIVENESS: (C) t226_converter owns np226, which is in pgpm_t226_<database>, and can no longer create there');
 set role t226_converter;
 select throws_like(
   $$ call pgpm.transmute('public.np226', 'k', 100::bigint, p_obtain => 2) $$,
@@ -110,6 +110,6 @@ set role t226_converter;
 call pgpm.transmute('public.np226', 'k', 100::bigint, p_obtain => 2);
 reset role;
 select is((select relkind::text || ' ' || reltablespace::text from pg_class where oid = 'public.np226'::regclass),
-  'p ' || :'ts_oid', 'C LIVENESS: with CREATE granted back the same transmute converts np226, into pgpm_t226_<database>');
+  'p ' || :'ts_oid', 'LIVENESS: (C) with CREATE granted back the same transmute converts np226, into pgpm_t226_<database>');
 
 select * from finish();

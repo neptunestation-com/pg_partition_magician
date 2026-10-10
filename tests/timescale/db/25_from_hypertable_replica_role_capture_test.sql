@@ -52,13 +52,13 @@ update rr_a set v = 'replica-update' where dev = 8;
 reset session_replication_role;
 
 select is((select v from rr_a_pgpm_dest where dev = 8), 'r8',
-  'A witness: the copy holds dev 8 at its copied value');
+  'LIVENESS: (A) the copy holds dev 8 at its copied value');
 select is((select v from rr_a where dev = 8), 'replica-update',
-  'A witness: the source holds the replica-role update of dev 8');
+  'LIVENESS: (A) the source holds the replica-role update of dev 8');
 select is((select array_agg(distinct dev) from rr_a_pgpm_delta), array[7],
-  'A witness: the delta logged the origin update (dev 7) and never saw the replica-role one (dev 8)');
+  'LIVENESS: (A) the delta logged the origin update (dev 7) and never saw the replica-role one (dev 8)');
 select is((select count(*) from rr_a), (select count(*) from rr_a_pgpm_dest),
-  'A witness: both sides hold the same number of rows, so the count check alone cannot see the update');
+  'LIVENESS: (A) both sides hold the same number of rows, so the count check alone cannot see the update');
 
 select throws_like(
   $$ call pgpm.from_hypertable_cutover('rr_a', 'ts', interval '1 day', p_predrain => false) $$,
@@ -82,17 +82,17 @@ select ok(to_regclass('public.rr_a_pgpm_delta') is not null and to_regclass('pub
 select mk_rr('rr_b');
 call pgpm.from_hypertable_copy('rr_b', 'ts', true);
 select ok(obj_description('public.rr_b_pgpm_delta'::regclass, 'pg_class') like 'pgpm from_hypertable horizon %',
-  'B witness: the copy recorded its horizon on the delta');
+  'LIVENESS: (B) the copy recorded its horizon on the delta');
 comment on table rr_b_pgpm_delta is null;
 select is(obj_description('public.rr_b_pgpm_delta'::regclass, 'pg_class'), null,
-  'B witness: the horizon is gone, as on a delta an older release built');
+  'LIVENESS: (B) the horizon is gone, as on a delta an older release built');
 
 set session_replication_role = replica;
 update rr_b set v = 'replica-update' where dev = 50;
 reset session_replication_role;
 
-select is((select v from rr_b_pgpm_dest where dev = 50), 'r50', 'B witness: the copy holds dev 50 at its copied value');
-select is((select count(*)::int from rr_b_pgpm_delta), 0, 'B witness: the delta never saw the replica-role update');
+select is((select v from rr_b_pgpm_dest where dev = 50), 'r50', 'LIVENESS: (B) the copy holds dev 50 at its copied value');
+select is((select count(*)::int from rr_b_pgpm_delta), 0, 'LIVENESS: (B) the delta never saw the replica-role update');
 
 select throws_like(
   $$ call pgpm.from_hypertable_cutover('rr_b', 'ts', interval '1 day', p_predrain => false) $$,
@@ -116,9 +116,9 @@ update rr_c set v = 'drained-update' where dev = 3;
 insert into rr_c values (timestamptz '2026-09-03 23:30+00', 1001, 'drained-insert');
 call pgpm.from_hypertable_drain_delta('rr_c', 'ts');
 select is((select count(*)::int from rr_c_pgpm_delta), 0,
-  'C witness: the online drain reconciled the first wave and emptied the delta');
+  'LIVENESS: (C) the online drain reconciled the first wave and emptied the delta');
 select is((select v from rr_c_pgpm_dest where dev = 3), 'drained-update',
-  'C witness: the drain carried dev 3''s update into the copy');
+  'LIVENESS: (C) the drain carried dev 3''s update into the copy');
 
 -- second wave, left for the lock
 update rr_c set v = 'origin-update' where dev = 20;
@@ -128,7 +128,7 @@ set session_replication_role = replica;
 update rr_c set v = 'replica-after-origin' where dev = 20;
 reset session_replication_role;
 select is((select array_agg(distinct dev order by dev) from rr_c_pgpm_delta), array[20, 40, 1002],
-  'C witness: the delta holds the second wave''s origin keys (20, 40, 1002) for the lock to reconcile');
+  'LIVENESS: (C) the delta holds the second wave''s origin keys (20, 40, 1002) for the lock to reconcile');
 
 call pgpm.from_hypertable_cutover('rr_c', 'ts', interval '1 day', p_paused => false);
 
@@ -151,7 +151,7 @@ select ok(to_regclass('public.rr_c_pgpm_delta') is null, 'C: the tracking appara
 -- Without tracking there is no horizon and no delta; the cutover is exactly the #460 one.
 select mk_rr('rr_d');
 call pgpm.from_hypertable_copy('rr_d', 'ts');
-select is(to_regclass('public.rr_d_pgpm_delta'), null, 'D witness: no tracking apparatus');
+select is(to_regclass('public.rr_d_pgpm_delta'), null, 'LIVENESS: (D) no tracking apparatus');
 call pgpm.from_hypertable_cutover('rr_d', 'ts', interval '1 day', p_paused => false);
 select is((select count(*)::int from rr_d), 72, 'D: the append-only cutover conserved all 72 rows');
 

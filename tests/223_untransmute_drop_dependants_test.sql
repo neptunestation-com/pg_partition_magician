@@ -44,13 +44,13 @@ create function public.mono223(r :ut_mono) returns bigint language sql as 'selec
 create view public.ut223_mono_v as select id from :ut_mono;
 
 select is((select array_agg(public.row223(x) order by 1) from public.ut223 x), array[1, 2]::bigint[],
-  'A LIVENESS: row223 takes the managed table''s rows (ids 1 and 2)');
+  'LIVENESS: (A) row223 takes the managed table''s rows (ids 1 and 2)');
 select ok(exists (select 1 from pg_depend d join pg_type ty on ty.oid = d.refobjid
                    where d.refclassid = 'pg_type'::regclass and ty.typrelid = 'public.ut223'::regclass
                      and d.classid = 'pg_proc'::regclass and d.objid = 'public.row223(public.ut223)'::regprocedure)
           and not exists (select 1 from pg_depend d where d.refclassid = 'pg_class'::regclass
                      and d.refobjid = 'public.ut223'::regclass and d.classid = 'pg_proc'::regclass),
-  'A LIVENESS: row223 depends on the parent''s row type, and nothing in pg_proc on its pg_class row');
+  'LIVENESS: (A) row223 depends on the parent''s row type, and nothing in pg_proc on its pg_class row');
 select throws_like($$ select pgpm.untransmute('public.ut223') $$,
   'pg_partition_magician: cannot untransmute ut223 -- the object(s) (column audit223.r, function arr223(ut223[]), function row223(ut223)) name the partitioned table by its oid,%',
   'A: untransmute refuses the two functions and the column typed by the parent''s row type, naming exactly those');
@@ -62,8 +62,8 @@ drop function public.row223(public.ut223);
 drop function public.arr223(public.ut223[]);
 drop table public.audit223;
 select lives_ok($$ select pgpm.untransmute('public.ut223') $$,
-  'A LIVENESS: with the three gone, untransmute reverses ut223 (the monolith''s function and view did not stop it)');
-select is((select relkind::text from pg_class where oid = 'public.ut223'::regclass), 'r', 'A LIVENESS: ut223 is the plain table again');
+  'LIVENESS: (A) with the three gone, untransmute reverses ut223 (the monolith''s function and view did not stop it)');
+select is((select relkind::text from pg_class where oid = 'public.ut223'::regclass), 'r', 'LIVENESS: (A) ut223 is the plain table again');
 select is((select array_agg(public.mono223(x) order by 1) from public.ut223 x), array[10, 20]::bigint[],
   'A: the monolith''s function takes the restored table''s rows');
 select is((select array_agg(id order by id) from public.ut223_mono_v), array[1, 2]::bigint[],
@@ -90,13 +90,13 @@ select is((select string_agg(c.relname || ':' || (select count(*) from pg_inheri
              from pg_class c where c.relname in ('fv223_p0000000000000000100', 'fv223_p0000000000000000200', 'fv223_def')
               and c.relnamespace = 'public'::regnamespace),
   'fv223_def:1 fv223_p0000000000000000100:1 fv223_p0000000000000000200:1',
-  'B LIVENESS: two forward partitions and the DEFAULT are attached to fv223, so the DROP would cascade to them');
+  'LIVENESS: (B) two forward partitions and the DEFAULT are attached to fv223, so the DROP would cascade to them');
 select is((select count(*)::int from public.fv223 where tableoid <> (select monolith_oid from pgpm.config
                                                                    where parent_table = 'public.fv223'::regclass)),
-  0, 'B LIVENESS: every row is in the monolith, so the reverse''s gate is open');
+  0, 'LIVENESS: (B) every row is in the monolith, so the reverse''s gate is open');
 select ok(exists (select 1 from pg_rewrite where rulename = 'fv223_fwd_r'
                    and ev_class = 'public.fv223_p0000000000000000100'::regclass),
-  'B LIVENESS: the rule sits on the first forward partition itself');
+  'LIVENESS: (B) the rule sits on the first forward partition itself');
 select throws_like($$ select pgpm.untransmute('public.fv223') $$,
   'pg_partition_magician: cannot untransmute fv223 -- the object(s) (function fwdrow223(fv223_p0000000000000000200), view fv223_def_v, view fv223_fwd_v) name the partitioned table by its oid,%',
   'B: untransmute refuses the objects over the partitions its DROP takes, naming exactly those three');
@@ -107,8 +107,8 @@ drop view public.fv223_fwd_v;
 drop function public.fwdrow223(public.fv223_p0000000000000000200);
 drop view public.fv223_def_v;
 select lives_ok($$ select pgpm.untransmute('public.fv223') $$,
-  'B LIVENESS: with the three gone, untransmute reverses fv223 (the partition''s own rule and the monolith''s view did not stop it)');
-select is((select relkind::text from pg_class where oid = 'public.fv223'::regclass), 'r', 'B LIVENESS: fv223 is the plain table again');
+  'LIVENESS: (B) with the three gone, untransmute reverses fv223 (the partition''s own rule and the monolith''s view did not stop it)');
+select is((select relkind::text from pg_class where oid = 'public.fv223'::regclass), 'r', 'LIVENESS: (B) fv223 is the plain table again');
 select is(to_regclass('public.fv223_p0000000000000000100'), null, 'B: the forward partition went with the DROP, its rule with it');
 select is((select array_agg(id order by id) from public.fv223_mono_v), array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]::bigint[],
   'B: the view over the monolith reads the restored table, every row');

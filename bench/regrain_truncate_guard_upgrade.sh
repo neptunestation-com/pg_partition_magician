@@ -81,10 +81,10 @@ SEED=$(q "select md5(string_agg((g*10)::text, ',' order by g)) from generate_ser
 check "LIVENESS: the prepare tick ran" "$(tick)" "prepared"
 check "LIVENESS: a copy batch moved rows (ids 10..90)" "$(tick)" "copied:9"
 run "drop trigger pgpm_regrain_truncate_guard on public.$SRC" >/dev/null
-check "WITNESS: the source carries capture and no guard (0.6.0's state)" \
+check "LIVENESS: the source carries capture and no guard (0.6.0's state)" \
   "$(q "select string_agg(tgname::text, ',' order by tgname) from pg_trigger where tgrelid = 'public.$SRC'::regclass and tgname like 'pgpm_regrain%'")" \
   "pgpm_regrain_capture"
-check "WITNESS: no guard anywhere before the upgrade" "$(guards)" "none"
+check "LIVENESS: no guard anywhere before the upgrade" "$(guards)" "none"
 
 # ---------------------------------------------------------------- 2. the upgrade itself installs it
 if ! install; then echo "FAIL  install.sql re-ran over the in-flight regrain"; fail=1; fi
@@ -100,9 +100,9 @@ check "a second upgrade leaves the present guard alone (same oid)" \
 
 # ---------------------------------------------------------------- 4. the resuming tick installs it too
 run "drop trigger pgpm_regrain_truncate_guard on public.$SRC" >/dev/null
-check "WITNESS: the guard is gone again before the resume tick" "$(guards)" "none"
+check "LIVENESS: the guard is gone again before the resume tick" "$(guards)" "none"
 check "the next tick RESUMES (copies ids 100..190)" "$(tick)" "copied:10"
-check "WITNESS: the resume restarted nothing" \
+check "LIVENESS: the resume restarted nothing" \
   "$(q "select count(*) from pgpm.log where parent_table = 'public.gu'::regclass and action = 'regrain_restart'")" "0"
 check "the resume tick put the guard back on the source, and only there" "$(guards)" "$SRC:A"
 check "a TRUNCATE after the resume is refused" "$(truncate_refused)" "yes"

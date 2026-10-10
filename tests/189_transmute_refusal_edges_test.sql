@@ -42,7 +42,7 @@ insert into public.ex189 values (1, 1, '[2020-01-01,2020-01-02)', 'a'), (2, 1, '
 select ok(exists (select 1 from pg_constraint c join pg_index i on i.indexrelid = c.conindid
                    where c.conrelid = 'public.ex189'::regclass and c.contype = 'x'
                      and c.conname = 'ex189_no_overlap' and not i.indisunique),
-  'A WITNESS: ex189 carries the EXCLUDE constraint ex189_no_overlap, whose index is not unique (the shape the carried-index filter let through)');
+  'LIVENESS: (A) ex189 carries the EXCLUDE constraint ex189_no_overlap, whose index is not unique (the shape the carried-index filter let through)');
 
 select throws_like(
   $$ select dblink_exec('dbname=' || current_database(),
@@ -65,9 +65,9 @@ select is((select relkind::text from pg_class where oid = 'public.ex189'::regcla
 alter table public.ex189 drop constraint ex189_no_overlap;
 call pgpm.transmute('public.ex189', 'id', 1000, p_obtain => 1);
 select is((select relkind::text from pg_class where oid = 'public.ex189'::regclass), 'p',
-  'A LIVENESS: with the constraint dropped, the same transmute converts ex189');
+  'LIVENESS: (A) with the constraint dropped, the same transmute converts ex189');
 select ok(exists (select 1 from pg_class where relname = 'ex189_note_idx_pgpm' and relkind = 'I'),
-  'A LIVENESS: and carries its plain secondary index (ex189_note_idx_pgpm)');
+  'LIVENESS: (A) and carries its plain secondary index (ex189_note_idx_pgpm)');
 
 -- ============================== B. a publication the caller does not own ==============================
 create table public.pb189 (id bigint primary key, v text);
@@ -82,14 +82,14 @@ grant all on all tables in schema pgpm to t189_converter;
 grant all on all sequences in schema pgpm to t189_converter;
 
 select is((select pg_get_userbyid(relowner)::text from pg_class where oid = 'public.pb189'::regclass), 't189_converter',
-  'B WITNESS: t189_converter owns pb189');
+  'LIVENESS: (B) t189_converter owns pb189');
 select is((select array_agg(p.pubname::text order by p.pubname) from pg_publication_rel r
              join pg_publication p on p.oid = r.prpubid where r.prrelid = 'public.pb189'::regclass),
   array['pub189', 'pub189_mine'],
-  'B WITNESS: two publications name pb189');
+  'LIVENESS: (B) two publications name pb189');
 select ok(not pg_has_role('t189_converter', (select pubowner from pg_publication where pubname = 'pub189'), 'USAGE')
           and pg_has_role('t189_converter', (select pubowner from pg_publication where pubname = 'pub189_mine'), 'USAGE'),
-  'B WITNESS: t189_converter owns pub189_mine and not pub189');
+  'LIVENESS: (B) t189_converter owns pub189_mine and not pub189');
 
 select dblink_connect('t189b', 'dbname=' || current_database());
 select dblink_exec('t189b', 'set role t189_converter');
@@ -110,11 +110,11 @@ alter publication pub189 owner to t189_converter;
 select dblink_exec('t189b', $c$ call pgpm.transmute('public.pb189', 'id', 1000, p_obtain => 1) $c$);
 select dblink_disconnect('t189b');
 select is((select relkind::text from pg_class where oid = 'public.pb189'::regclass), 'p',
-  'B LIVENESS: owning both publications, t189_converter converts pb189');
+  'LIVENESS: (B) owning both publications, t189_converter converts pb189');
 select is((select array_agg(p.pubname::text order by p.pubname) from pg_publication_rel r
              join pg_publication p on p.oid = r.prpubid where r.prrelid = 'public.pb189'::regclass),
   array['pub189', 'pub189_mine'],
-  'B LIVENESS: and the new parent is in both publications');
+  'LIVENESS: (B) and the new parent is in both publications');
 
 -- ============================ C. set_regrain probes the names it will need ============================
 -- 19 bytes, so the monolith's name `..._p<19 digits>_to_<19 digits>` is exactly 63: a name that fits at
@@ -128,13 +128,13 @@ select is((select child_name::text from pgpm.part
             where parent_table = 'public.rg189_numeric_names'::regclass and child_oid = (select monolith_oid from pgpm.config
                    where parent_table = 'public.rg189_numeric_names'::regclass)),
   'rg189_numeric_names_p0000000000000000000_to_0000000000000002000',
-  'C WITNESS: the monolith is the coarse child [0, 2000), and its 63-byte name fits');
+  'LIVENESS: (C) the monolith is the coarse child [0, 2000), and its 63-byte name fits');
 select lives_ok($$ select pgpm._part_name('rg189_numeric_names', 'id', '0.00000000000000000000001', '0', null, 'UTC') $$,
-  'C WITNESS: at the target 1e-23 the anchor cell''s name fits (all the old check asked about)');
+  'LIVENESS: (C) at the target 1e-23 the anchor cell''s name fits (all the old check asked about)');
 select throws_like($$ select pgpm._part_name('rg189_numeric_names', 'id', '0.00000000000000000000001',
                                              '0.00000000000000000000001', null, 'UTC') $$,
   'pg_partition_magician: cannot name a partition of rg189_numeric_names -- % is 64 bytes%',
-  'C WITNESS: and the second cell''s name is 64 bytes, which regrain_step would refuse on every tick');
+  'LIVENESS: (C) and the second cell''s name is 64 bytes, which regrain_step would refuse on every tick');
 
 select throws_like($$ select pgpm.set_regrain('public.rg189_numeric_names', '0.00000000000000000000001') $$,
   'pg_partition_magician: cannot name a partition of rg189_numeric_names -- % is 64 bytes%',
@@ -143,8 +143,8 @@ select is((select regrain_to from pgpm.config where parent_table = 'public.rg189
   'C: and records no target');
 
 select lives_ok($$ select pgpm.set_regrain('public.rg189_numeric_names', '0.5') $$,
-  'C LIVENESS: a fractional target whose names fit (one fraction digit) is accepted');
+  'LIVENESS: (C) a fractional target whose names fit (one fraction digit) is accepted');
 select is((select regrain_to from pgpm.config where parent_table = 'public.rg189_numeric_names'::regclass), '0.5',
-  'C LIVENESS: and recorded');
+  'LIVENESS: (C) and recorded');
 
 select * from finish();

@@ -165,7 +165,7 @@ select is(
   array['from_hypertable', 'from_hypertable_copy', 'from_hypertable_cutover', 'from_hypertable_disk_estimate',
         'from_hypertable_drain_appends', 'from_hypertable_drain_appends_step', 'from_hypertable_drain_delta',
         'from_hypertable_drain_delta_step', 'from_hypertable_preflight', 'from_hypertable_time_estimate'],
-  'A LIVENESS: the sweep enumerated the module''s routines from the catalog, the procedures and the drains among them');
+  'LIVENESS: (A) the sweep enumerated the module''s routines from the catalog, the procedures and the drains among them');
 select is(
   (select array_agg(d.routine || '.' || d.arg order by d.routine, d.arg) from t50_documented d
     where not exists (select 1 from t50_swept s where s.routine = d.routine and s.arg = d.arg)),
@@ -210,12 +210,12 @@ select is(pg_temp.t50_state('public.t50_a') || ' | ' || pg_temp.t50_keys('public
 call pgpm.from_hypertable('public.t50_a', 'ts', interval '1 day', p_paused => true);
 select is((select relkind::text from pg_class where oid = 'public.t50_a'::regclass)
           || ' | config:' || exists (select 1 from pgpm.config where parent_table = 'public.t50_a'::regclass)::text,
-  'p | config:true', 'A1 LIVENESS: the same call with p_paused => true migrates the same hypertable');
+  'p | config:true', 'LIVENESS: (A1) the same call with p_paused => true migrates the same hypertable');
 select is((select string_agg(id::text || ':' || v::text, ',' order by id) from public.t50_a),
   (select string_agg(g::text || ':' || g::text, ',' order by g) from generate_series(1, 60) g),
-  'A1 LIVENESS: every row is there, by identity');
+  'LIVENESS: (A1) every row is there, by identity');
 select is(pg_temp.t50_keys('public.t50_a'), 't50_a_ref_fk:true:t50_a_ref->t50_a',
-  'A1 LIVENESS: and its incoming key is back, validated, against the new parent');
+  'LIVENESS: (A1) and its incoming key is back, validated, against the new parent');
 
 -- ======================================================================================================
 -- B. A NOT VALID incoming key is refused before the copy (#959 bullet 1, A959-1's fixture)
@@ -233,7 +233,7 @@ select is(pg_temp.t50_keys('public.t50_nv') || ' | orphans:'
           || (select count(*) from public.t50_nv_dirty d where not exists
                (select 1 from public.t50_nv h where h.id = d.pid and h.ts = d.pts))::text,
   't50_nv_clean_fk:false:t50_nv_clean->t50_nv, t50_nv_dirty_fk:false:t50_nv_dirty->t50_nv | orphans:1',
-  'B LIVENESS: both incoming keys are NOT VALID, one over a tolerated orphan');
+  'LIVENESS: (B) both incoming keys are NOT VALID, one over a tolerated orphan');
 select throws_like(
   $$ call pgpm.from_hypertable('public.t50_nv', 'ts', interval '1 day', p_paused => false) $$,
   'pg_partition_magician: cannot migrate hypertable t50_nv -- its incoming foreign key(s) (t50_nv_clean_fk on t50_nv_clean, t50_nv_dirty_fk on t50_nv_dirty) are NOT VALID.%',
@@ -256,7 +256,7 @@ insert into public.t50_w select g, timestamptz '2026-09-10 00:00+00' + g * inter
 create table public.t50_w_ref (rid int primary key, id bigint, ts timestamptz);
 insert into public.t50_w_ref select 1, id, ts from public.t50_w where id = 5;
 call pgpm.from_hypertable_copy('public.t50_w', 'ts');
-select is((select count(*)::int from public.t50_w_pgpm_dest), 40, 'C LIVENESS: the online copy ran and holds all 40 rows');
+select is((select count(*)::int from public.t50_w_pgpm_dest), 40, 'LIVENESS: (C) the online copy ran and holds all 40 rows');
 alter table public.t50_w_ref add constraint t50_w_fk foreign key (id, ts) references public.t50_w (id, ts) not valid;
 -- p_predrain => false keeps the cutover in one transaction up to the swap, so a cutover that does NOT refuse
 -- reaches the swap's COMMIT and dies there with 2D000 instead of the pinned message
@@ -273,7 +273,7 @@ select is((select relkind::text from pg_class where oid = 'public.t50_w'::regcla
           || pg_temp.t50_keys('public.t50_w') || ' | '
           || (select string_agg(id::text, ',' order by id) from public.t50_w where id in (1, 5, 40)),
   'p | t50_w_fk:true:t50_w_ref->t50_w | 1,5,40',
-  'C LIVENESS: validated, the same key migrates: the cutover swaps, and the key comes back validated');
+  'LIVENESS: (C) validated, the same key migrates: the cutover swaps, and the key comes back validated');
 
 -- ======================================================================================================
 -- D. A NOT VALID outgoing key is refused before the copy (#264), the same case as tests/268 part B5

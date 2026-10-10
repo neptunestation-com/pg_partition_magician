@@ -30,9 +30,9 @@ insert into public.tyw select g, 'w' || g from generate_series(1, 5) g;
 create type public.tyw_pgpm_new as enum ('w');
 select throws_like($$ call pgpm.transmute('public.tyw', 'id', 100::bigint, p_obtain => 2) $$,
   'pg_partition_magician: public.tyw_pgpm_new already exists as an enum type, and transmute needs that name as a staging name%',
-  'W LIVENESS: an enum on tyw''s staging name in tyw''s own schema is refused, and named as an enum');
+  'LIVENESS: (W) an enum on tyw''s staging name in tyw''s own schema is refused, and named as an enum');
 select is((select relkind::text from pg_class where oid = 'public.tyw'::regclass), 'r',
-  'W LIVENESS: and tyw is still a plain table');
+  'LIVENESS: (W) and tyw is still a plain table');
 
 -- (O) squatters in ANOTHER schema are not in the way
 create table public.tyo (id bigint primary key, body text);
@@ -43,9 +43,9 @@ create type s201.tyo_pgpm_new as enum ('o');
 create domain s201.:"tyo_mon" as int;
 select ok(to_regtype('s201.tyo_pgpm_new') is not null and to_regtype(format('s201.%I', :'tyo_mon')) is not null
           and to_regtype('public.tyo_pgpm_new') is null and to_regtype(format('public.%I', :'tyo_mon')) is null,
-  'O LIVENESS: tyo''s staging and monolith names are taken as types in s201 and free in public');
+  'LIVENESS: (O) tyo''s staging and monolith names are taken as types in s201 and free in public');
 select is(pgpm._type_squatter('s201', 'tyo_pgpm_new'), 'an enum type',
-  'O LIVENESS: _type_squatter sees the enum in its own schema');
+  'LIVENESS: (O) _type_squatter sees the enum in its own schema');
 select is(pgpm._type_squatter('public', 'tyo_pgpm_new'), null,
   'O: _type_squatter does not count the s201 enum against public');
 select is(pgpm._type_squatter('public', :'tyo_mon'), null,
