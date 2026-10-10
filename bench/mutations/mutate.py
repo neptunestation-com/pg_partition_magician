@@ -11507,6 +11507,45 @@ MUTATIONS["untransmute_detach_pending_unlocked_only"] = (
       "", 1)],
 )
 
+# Issue #1158: from_hypertable_cutover takes SHARE on the copy before it reads the copy's watermark and
+# conservation baseline, and every drain takes the copy (ROW EXCLUSIVE) before it reads the source or the
+# delta in a transaction. bench/hypertable_cutover_reads_copy_under_lock.sh runs tests/timescale/db/64 against
+# each mutant.
+MUTATIONS["hypertable_cutover_reads_copy_unlocked"] = (
+    "bench/hypertable_cutover_reads_copy_under_lock.sh",
+    "Pre-#1158 cutover: the copy's watermark and conservation baseline are read before any lock on the copy, so "
+    "a drain batch that commits between that read and the swap lock is caught up a second time on a keyless "
+    "hypertable (tests/timescale/db/64 (K): 1,2,3,4,100,100,101,101,102) and leaves a tracking copy's baseline "
+    "stale ((T): the swap refused). One clause: the cutover's SHARE on the copy.",
+    [("  execute format('lock table %s in share mode', v_dest_oid::text);\n", "", 1)],
+)
+MUTATION_SRC["hypertable_cutover_reads_copy_unlocked"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_cutover_reads_copy_unlocked"] = "timescale"
+MUTATIONS["hypertable_drain_appends_reads_before_copy_lock"] = (
+    "bench/hypertable_cutover_reads_copy_under_lock.sh",
+    "from_hypertable_drain_appends reads the copy's watermark and the source's residual before it takes the "
+    "copy, so called while a cutover holds SHARE on the copy and waits for the source it holds a read of both, "
+    "and the two deadlock (tests/timescale/db/64 (D): the drain waits on the source, one of them dies 40P01). "
+    "One clause: the procedure's first lock on the copy.",
+    [("  execute format('lock table %I.%I in row exclusive mode', v_nsp, v_dest);\n"
+      "  -- the initial frontier: the copy watermark (max control in the dest). Read once; each step advances it.\n",
+      "  -- the initial frontier: the copy watermark (max control in the dest). Read once; each step advances it.\n", 1)],
+)
+MUTATION_SRC["hypertable_drain_appends_reads_before_copy_lock"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_drain_appends_reads_before_copy_lock"] = "timescale"
+MUTATIONS["hypertable_drain_delta_step_takes_delta_first"] = (
+    "bench/hypertable_cutover_reads_copy_under_lock.sh",
+    "from_hypertable_drain_delta_step consumes its batch from the delta before it takes the copy, so called while "
+    "a cutover holds SHARE on the copy it holds the delta the swap locks next, and the two deadlock "
+    "(tests/timescale/db/64 (E): one of them dies 40P01). One clause: the step's lock on the copy.",
+    [("  -- which holds SHARE on the copy from its read of it to the swap and then wants the delta and the source).\n"
+      "  execute format('lock table %I.%I in row exclusive mode', v_nsp, v_dest);\n",
+      "  -- which holds SHARE on the copy from its read of it to the swap and then wants the delta and the source).\n", 1)],
+)
+MUTATION_SRC["hypertable_drain_delta_step_takes_delta_first"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_drain_delta_step_takes_delta_first"] = "timescale"
+
+
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
 # cost), and discriminate.sh's --shard=I/N interleaves that list, so the heavy ones spread over the

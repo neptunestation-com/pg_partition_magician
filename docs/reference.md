@@ -879,6 +879,13 @@ only a tiny residual instead of the whole online-copy backlog. The cutover runs 
 automatically (`p_predrain`), but you can also drive it directly during a long two-phase window: after
 `from_hypertable_copy`, call it repeatedly while the application keeps writing, then `from_hypertable_cutover`.
 
+A drain and the cutover take turns on the copy. Every drain batch takes the copy (`ROW EXCLUSIVE`) before
+it reads the source or the delta, and the cutover holds `SHARE` on the copy from the moment it reads it
+until the swap commits. So a batch in flight when the cutover starts is waited for (within the cutover's
+`p_lock_timeout`) and is part of what the cutover reads, and a drain called while the cutover runs waits
+for it and then fails, `relation ... does not exist`: the copy has become the migrated table, and there is
+nothing left to drain. Neither can deadlock the other.
+
 The reconcile is idempotent and order-independent per key (delete the key's copied row from the destination,
 re-insert its current source row), which is what makes incremental draining safe. Each batch
 **delete-RETURNS** its rows from the delta as the authority and reconciles exactly those keys against the live
@@ -908,7 +915,8 @@ pgpm.from_hypertable_drain_appends_step(p_hypertable regclass, p_control name, p
 The **append-only** counterpart of `from_hypertable_drain_delta`, for the default
 (non-`p_track_changes`) path: copy the rows appended past the copy watermark **online, while the source stays
 live**, so the cutover's lock applies only the final tail. The cutover runs it automatically (`p_predrain`)
-for the non-tracking path; you can also drive it directly during a long two-phase window.
+for the non-tracking path; you can also drive it directly during a long two-phase window, and it takes
+turns with the cutover on the copy exactly as `from_hypertable_drain_delta` does.
 
 It is purely additive (append-only means already-copied rows never change), so unlike the delta drain it
 needs no delta, no reconcile, no key, and no destination index, and works on a **keyless** hypertable. Each
@@ -950,9 +958,13 @@ O(rows) work, deliberately kept out of the blocking window). Each is built from 
 definition under `<index>_pgpm_new`, or `pgpm_new_<index oid>` when that name would exceed 63 bytes (pgpm
 never cuts it) or, for a key, is held by something not on this destination (an abandoned tracking copy taken
 under the table's old name), so index and table names holding spaces or other quoted characters migrate as they are. A key
-index the tracking copy already built on the destination, under either name, is adopted rather than rebuilt. For the append-only path the catch-up watermark
-(`max(control)` on the destination) is also read here, before the lock, so an `O(rows)` `max()` seqscan on a
-keyless destination is not in the blocking window.
+index the tracking copy already built on the destination, under either name, is adopted rather than rebuilt.
+Before any of that it takes `SHARE` on the copy, which no reader of the copy waits for and every writer
+does, and holds it through the swap: a drain batch in flight is waited for (within `p_lock_timeout`) and a
+later one waits for the swap, so nothing changes the copy between what the cutover reads of it and the
+swap. Under that lock, but before the source's lock, it reads the copy's row count and content fingerprint
+(the conservation baseline, below) and, for the append-only path, the catch-up watermark
+(`max(control)` on the destination), so an `O(rows)` scan of the destination is not in the blocking window.
 Then it takes the **`ACCESS EXCLUSIVE` window**: catch up the writes that arrived during
 the copy (append-only, or a full delta replay when `from_hypertable_copy` ran with `p_track_changes => true`
 -- auto-detected via the delta table, so the two phases cannot disagree), **verify that the source and the

@@ -1323,6 +1323,9 @@ begin
   if v_dest is null then
     raise exception 'pg_partition_magician: from_hypertable_drain_delta_step(%) found no copy to drain into -- run from_hypertable_copy first', p_hypertable;
   end if;
+  -- #1158: the copy first, before this batch touches the delta or the source (see from_hypertable_cutover,
+  -- which holds SHARE on the copy from its read of it to the swap and then wants the delta and the source).
+  execute format('lock table %I.%I in row exclusive mode', v_nsp, v_dest);
   -- #873: the batch's keys leave the delta below and their rows are re-read from the source as this caller,
   -- so under row-level security that filters it a hidden row's change would be consumed and never applied.
   perform pgpm._refuse_filtered_reads(p_hypertable, 'drain changes from hypertable',
@@ -1414,6 +1417,11 @@ begin
   end if;
 
   loop
+    -- #1158: the copy first in every batch's transaction, before the residual check reads the delta (see
+    -- from_hypertable_drain_delta_step). With no copy recorded the step below refuses, naming it.
+    if v_dest is not null then
+      execute format('lock table %I.%I in row exclusive mode', v_nsp, v_dest);
+    end if;
     -- residual <= threshold? EXISTS at offset stops at the first row past the threshold (count > threshold)
     execute format('select exists(select 1 from %I.%I order by %I offset %s limit 1)',
                    v_nsp, v_delta, pgpm._delta_seq(format('%I.%I', v_nsp, v_delta)::regclass), p_threshold) into v_more;
@@ -1484,6 +1492,9 @@ begin
   if v_dest is null then
     raise exception 'pg_partition_magician: from_hypertable_drain_appends_step(%) found no copy to drain -- run from_hypertable_copy first', p_hypertable;
   end if;
+  -- #1158: the copy first, before this batch reads the source (see from_hypertable_cutover, which holds SHARE
+  -- on the copy from its read of it to the swap and then wants the source).
+  execute format('lock table %I.%I in row exclusive mode', v_nsp, v_dest);
   select format_type(atttypid, atttypmod) into v_ctl_type
     from pg_attribute where attrelid = p_hypertable and attname = p_control and not attisdropped;
   select string_agg(quote_ident(attname), ', ' order by attnum) into v_cols_q
@@ -1540,6 +1551,11 @@ begin
     'the copy would be brought up to date with those rows alone');
   select format_type(atttypid, atttypmod) into v_ctl_type
     from pg_attribute where attrelid = p_hypertable and attname = p_control and not attisdropped;
+  -- #1158: the copy first, in every batch's transaction (again after each COMMIT below), before this reads the
+  -- copy's watermark or the source's residual: a cutover holds SHARE on the copy from its read of it to the
+  -- swap, and a drain that waited for the copy while holding a read of the source or the copy would deadlock
+  -- with it. Waiting here holds nothing the cutover wants, and once it swaps the copy is gone (42P01).
+  execute format('lock table %I.%I in row exclusive mode', v_nsp, v_dest);
   -- the initial frontier: the copy watermark (max control in the dest). Read once; each step advances it.
   -- NULL when nothing was copied, which puts every source row past it (#736, _from_hypertable_past).
   execute format('select pgpm._from_hypertable_ctl_text(max(%I)) from %I.%I', p_control, v_nsp, v_dest) into v_watermark;
@@ -1551,6 +1567,7 @@ begin
     exit when not v_more;
     v_watermark := pgpm.from_hypertable_drain_appends_step(p_hypertable, p_control, p_batch, v_watermark);
     commit;
+    execute format('lock table %I.%I in row exclusive mode', v_nsp, v_dest);   -- #1158: the next transaction's
     v_iter := v_iter + 1;
     if v_iter > p_max_iter then
       if p_best_effort then return; end if;
@@ -1663,8 +1680,8 @@ begin
   -- Keep the OID this check resolved, not just the fact that something answered (#422). The swap
   -- below renames this relation INTO the source's name, so it is the half of the swap that ends with
   -- a relation BECOMING the production table -- and between here and there the destination is
-  -- unlocked (nothing takes a lock on it until the first index pre-build, and the pre-drain's
-  -- per-batch commits release even that). Verified under lock at the swap.
+  -- unlocked until the SHARE taken before it is read (#1158), and the pre-drain's per-batch commits
+  -- come before that. Verified under lock at the swap.
   -- #955: and that relation is the copy from_hypertable_copy RECORDED for this hypertable, by its oid, never
   -- whatever answers to <rel>_pgpm_dest: an operator's table under that name, of the hypertable's shape and
   -- holding its rows, passed every check below and was renamed into the hypertable's place, the operator's
@@ -1730,11 +1747,24 @@ begin
   -- aborts the swap whole, before anything irreversible: the hypertable, the copy and every drained batch
   -- are as they were, and re-running the cutover costs only the index pre-builds.
   perform set_config('lock_timeout', p_lock_timeout, true);
-  -- Read the destination BEFORE the lock. It is private and stable from here to the lock (only CREATE INDEX
-  -- runs, which does not change rows), so what is read here is what the under-lock work would read -- but
-  -- reading it here keeps an O(rows) seqscan of the dest OUT of the locked window (#174). Two things, one
-  -- scan: the append-only catch-up watermark (max control; new appends after this read have a higher
-  -- control value and are still caught under the lock), and the CONSERVATION BASELINE (#460, #653):
+  -- THE COPY, LOCKED BEFORE IT IS READ (#1158). SHARE on the copy, held from here through the swap: it
+  -- excludes every writer of the copy (any INSERT, UPDATE or DELETE needs ROW EXCLUSIVE, TRUNCATE and DDL
+  -- more) and no reader, and the index pre-builds below take the same mode. So the copy is stable from this
+  -- read to the swap because nothing else can write it, not because nothing is expected to: the drains are
+  -- documented as drivable directly during the two-phase window, and they took no lock this took. A drain
+  -- batch that committed between an unlocked read here and the swap lock was in the copy and also past the
+  -- stale watermark, so on a keyless table the catch-up inserted it a second time and the conservation
+  -- check, whose baseline was that same read, agreed; on a tracking copy the baseline went stale and the
+  -- check refused a swap with nothing wrong in it. Now a drain batch in flight is waited for (bounded by
+  -- p_lock_timeout, set just above) and read; a drain called later waits for the swap and then finds the
+  -- copy gone. Every drain takes the copy (ROW EXCLUSIVE) before anything else in a transaction, so it never
+  -- waits here holding the source or the delta, which the swap lock below wants. By oid, as the swap lock is.
+  execute format('lock table %s in share mode', v_dest_oid::text);
+  -- Read the destination here, under that lock but BEFORE the swap lock: what is read here is what the
+  -- under-lock work would read, and reading it here keeps an O(rows) seqscan of the dest OUT of the locked
+  -- window (#174). Two things, one scan: the append-only catch-up watermark (max control; new appends after
+  -- this read have a higher control value and are still caught under the lock), and the CONSERVATION
+  -- BASELINE (#460, #653):
   -- count(*) and the content fingerprint of the dest as it stands, which the catch-up below adjusts by
   -- exactly the rows it adds or removes (their RETURNING) so the check under the lock can compare the two
   -- sides without scanning the dest again.
@@ -1983,11 +2013,12 @@ begin
   -- the private destination has been touched and the raise rolls the catch-up and the index pre-builds back
   -- with it: the source is left whole and still a hypertable. Both sides are exact. The source is frozen
   -- under the ACCESS EXCLUSIVE just taken, and the destination's is the pre-lock baseline plus exactly what
-  -- the catch-up changed, on a table nothing else writes (the private-destination invariant the watermark
-  -- read already rests on). Reading the source is O(rows) under the lock, and there is no bounded read
-  -- that could replace it: the rows this exists to find are the ones that landed BELOW the watermark,
-  -- anywhere in the table, between the copy and this lock. Reading the destination here too would double
-  -- that cost for nothing, which is why its side is carried in rather than taken again.
+  -- the catch-up changed, on a table nothing else can write: the SHARE taken before the baseline was read
+  -- (#1158) has excluded every other writer of it from that read to here. Reading the source is O(rows)
+  -- under the lock, and there is no bounded read that could replace it: the rows this exists to find are
+  -- the ones that landed BELOW the watermark, anywhere in the table, between the copy and this lock.
+  -- Reading the destination here too would double that cost for nothing, which is why its side is carried
+  -- in rather than taken again.
   --
   -- IDENTITY, not cardinality (#653): the two sides are compared by count AND by the content fingerprint
   -- (v_fp_q above), so the check asks whether the destination holds the SAME rows, not merely as many. A
