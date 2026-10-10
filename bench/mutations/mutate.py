@@ -11395,6 +11395,29 @@ MUTATIONS["over_retired_chunks_reads_all"] = (
       "                                       or pgpm._native_order_key(l.hi) is null)),\n",
       "                                where l.parent_table = %2$L::regclass and l.retired_at is not null),\n", 1)],
 )
+MUTATIONS["native_order_key_parallel_safe"] = (
+    "bench/over_retired_chunks_range_first.sh",
+    "PR #1189's first head (V-01): pgpm._native_order_key, whose EXCEPTION block starts a subtransaction, is marked "
+    "parallel safe, so PostgreSQL builds archive_ledger_retired_hi_key_idx in parallel over a ledger past "
+    "min_parallel_table_scan_size and the build fails with 'cannot start subtransactions during a parallel "
+    "operation': the upgrade's CREATE INDEX over a long history rolls back, and every REINDEX fails. One clause. "
+    "tests/317 part D and the guard's own rebuild catch it.",
+    [("returns numeric language plpgsql immutable strict parallel unsafe as $$\n",
+      "returns numeric language plpgsql immutable strict parallel safe as $$\n", 1)],
+)
+MUTATIONS["retired_hi_key_idx_before_column"] = (
+    "bench/over_retired_chunks_range_first.sh",
+    "PR #1189's first head (P1-02): archive_ledger_retired_hi_key_idx is created right after pgpm._native_order_key, "
+    "above the block that adds retired_at to an existing ledger, so re-running install.sql over an install from "
+    "before #1141 (v0.6.0) stops at 42703 on the index's predicate and the single-transaction upgrade rolls back. "
+    "One statement, moved. The guard's upgrade from v0.6.0 catches it.",
+    [("create index if not exists archive_ledger_retired_hi_key_idx\n"
+      "  on pgpm.archive_ledger (parent_table, (pgpm._native_order_key(hi))) where retired_at is not null;\n", "", 1),
+     ("\n-- A RETIRED CHUNK'S ROW IS THE RECORD OF THE ONLY COPY (issue #1141).",
+      "\ncreate index if not exists archive_ledger_retired_hi_key_idx\n"
+      "  on pgpm.archive_ledger (parent_table, (pgpm._native_order_key(hi))) where retired_at is not null;\n"
+      "\n-- A RETIRED CHUNK'S ROW IS THE RECORD OF THE ONLY COPY (issue #1141).", 1)],
+)
 
 
 # Issue #627: the retain horizon's time part is instant arithmetic, and a retain with no calendar part takes no

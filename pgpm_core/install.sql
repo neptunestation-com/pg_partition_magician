@@ -4324,10 +4324,19 @@ create index if not exists archive_ledger_parent_child_hi_idx on pgpm.archive_le
 -- numeric digits, and an ISO 8601 timestamp, year first, that carries its own offset (_ts_text's output, which
 -- is every time bound pgpm writes since #500); year-first ISO parses the same under every DateStyle and an
 -- explicit offset under every TimeZone. Anything else, a pre-#500 DateStyle-shaped bound or an operator's
--- offset-less one, gets null, and a reader of the index below takes every null-keyed row as a candidate, so the
--- key narrows what is read and never decides an overlap: the native cast still does that.
+-- offset-less one, gets null, and a reader of archive_ledger_retired_hi_key_idx (built after the upgrade blocks
+-- below) takes every null-keyed row as a candidate, so the key narrows what is read and never decides an overlap:
+-- the native cast still does that.
+--
+-- PARALLEL UNSAFE, deliberately: the EXCEPTION block below starts a subtransaction on every call, and on
+-- PostgreSQL 15 and 16 parallel mode refuses one ('cannot start subtransactions during a parallel operation'), in a
+-- worker and in the leader alike (so PARALLEL RESTRICTED is not enough either). PostgreSQL builds a btree in
+-- parallel once the table passes min_parallel_table_scan_size, unless an index expression is not parallel safe, so
+-- marked safe this made the CREATE INDEX below fail over a ledger past 8 MB (the upgrade, rolled back whole), and
+-- every REINDEX of it with it. Unsafe, the build runs serially, and so does a query calling it, which
+-- _over_retired_chunks's bounded read does not need to be parallel.
 create or replace function pgpm._native_order_key(p_text text)
-returns numeric language plpgsql immutable strict parallel safe as $$
+returns numeric language plpgsql immutable strict parallel unsafe as $$
 begin
   if p_text ~ '^-?[0-9]+(\.[0-9]+)?$' then
     return p_text::numeric;
@@ -4340,11 +4349,6 @@ exception when data_exception then
   return null;   -- the shape of a timestamp but not one (month 13): no key, so always a candidate
 end;
 $$;
-
--- The retired chunks of a parent by where they end (#1163), for _over_retired_chunks: a retired row is never
--- discarded, so a reader that wants the few that reach into an attached partition must not have to read them all.
-create index if not exists archive_ledger_retired_hi_key_idx
-  on pgpm.archive_ledger (parent_table, (pgpm._native_order_key(hi))) where retired_at is not null;
 
 -- A RETIRED CHUNK'S ROW IS THE RECORD OF THE ONLY COPY (issue #1141). Once retire() drops a partition, the
 -- objects its chunks were archived to hold the only copy of its rows, and the ledger rows are what says where
@@ -4502,6 +4506,14 @@ begin
     perform pgpm._backfill_chunk_oids();
   end if;
 end $$;
+
+-- The retired chunks of a parent by where they end (#1163), for _over_retired_chunks: a retired row is never
+-- discarded, so a reader that wants the few that reach into an attached partition must not have to read them all.
+-- HERE, after the two blocks above: its predicate names retired_at, which an install from before #1141 does not
+-- have until the first of them adds it, and an upgrade that reached this line first stopped at 42703 and rolled
+-- back whole.
+create index if not exists archive_ledger_retired_hi_key_idx
+  on pgpm.archive_ledger (parent_table, (pgpm._native_order_key(hi))) where retired_at is not null;
 
 -- picks the next chunk to archive within ONE child: resumes from wherever pgpm.archive_ledger's
 -- coverage of THIS child left off (or the child's own lo, on the first call), estimates how many
