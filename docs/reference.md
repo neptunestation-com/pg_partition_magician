@@ -1708,6 +1708,29 @@ or [`regrain_cancel`](#regrain_cancel) the run. It refuses the same way, before 
 `pgpm.part` already records the name a new fine child would take for a different range. Through `maintain`
 each refusal appears as a `skip_regrain` row carrying the message.
 
+The swap is one transaction, and every fine child it attaches holds its locks to that transaction's end in
+the lock table every session shares: at least two slots a child (the child itself and the bound `CHECK` the
+swap drops), two more for each outgoing foreign key, and about one more for each incoming key the swap
+re-adds. So a run is bounded by that table, at the half of
+`max_locks_per_transaction x (max_connections + max_prepared_transactions)` that `obtain` and `extend_to`
+keep for every other session. The prepare tick refuses, before anything is copied and before the source is
+renamed, a run whose fine children at two slots each would take more than half: on stock settings (64 x 100)
+more than 1600 children, a little over four years of a monolith regrained to `'1 day'`. With `archive_fn`
+unset it counts only the sub-ranges above the retention horizon, since the aged ones are discarded with the
+source rather than attached. The swap then measures what its second `ATTACH` cost, charges each incoming
+foreign key two slots a child plus two more, and refuses when the run's children at that cost would take more
+than half; it rolls back whole, so the source stays attached with every row and the copies are kept. Both
+messages give the knob and about how many children fit in one swap: raise `max_locks_per_transaction` (a
+restart), or [`regrain_cancel`](#regrain_cancel) and regrain in two passes, first to a coarser step and then
+each of its children to the target. Through `maintain` each refusal appears as a `skip_regrain` row carrying
+the message. What the swap holds whatever its size (the locks taken before its first `ATTACH`, that
+`ATTACH`'s one-time ones, and those taken after its last, a few dozen) is not charged, as `extend_to` does
+not charge its frontier read. [`regrain`](#regrain) and [`regrain_history`](#regrain_history) go through the
+same prepare tick and the same swap, but they also make every copy in their one transaction, and each copy
+holds its own locks to that transaction's end (measured, about a dozen slots a child for a plain table),
+which this bound does not count; for a large split use `maintain` (auto-regrain) or `regrain_step`, one
+tick per transaction.
+
 Returns `prepared` (the first tick, which installs change capture and copies nothing), `reconciled:N`,
 `copied:N`, `reconciling:N` (the swap is waiting for the captured backlog to clear), `swapped:K` (regrain
 complete, K children attached), or a soft no-progress status: `active` (not frozen yet) or `nosubdiv`
@@ -2833,6 +2856,13 @@ message names the offending name and says how many bytes to shorten the table na
 The names asked about are the ones auto-regrain would render for every child it would split, at both ends
 of each, not only the anchor's: on a `numeric` key a cell's label grows with a fractional target's digits,
 so the cell after the anchor can need a longer name than the anchor itself.
+
+A target is refused too when a child auto-regrain would split could never swap: when its fine children at two
+lock-table slots each would take more than half the shared lock table, the count `regrain_step`'s prepare tick
+makes (see [`regrain_step`](#regrain_step)). It reads no row of the table: on an `id` grid with `retain` set
+it places the retention horizon by the newest partition's upper bound rather than by the largest value, so it
+can only count fewer children than the prepare tick, never more, and never refuses a target the prepare tick
+would accept.
 
 Turning it **off while the run it started is in flight** abandons that run, exactly as
 [`regrain_cancel`](#regrain_cancel) would: the capture trigger and the `TRUNCATE` refusal come off, the

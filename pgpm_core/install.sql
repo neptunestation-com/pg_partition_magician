@@ -7022,6 +7022,82 @@ begin
 end;
 $$;
 
+-- The regrain swap's lock budget (#1161): obtain's (#786) and extend_to's (#591) applied to the swap. The swap
+-- is ONE transaction by contract (detach the source, attach every fine child, drop the source, so the range is
+-- never served twice and never not at all), and each ATTACH holds its locks to that transaction's end in the
+-- lock table every backend shares: the fine child's own and the one on the bound CHECK the swap drops, two
+-- non-fast-path slots a child at the least, and more for each foreign key the child carries or is referenced
+-- by (their triggers are replaced). Nothing bounded that: a monolith of a few years regrained to '1 day'
+-- copied every sub-range and then died 53200 `out of shared memory` at an ATTACH on every swap tick, the
+-- cursor at hi and every copy kept, so the run could never finish and filled the shared table on each attempt.
+-- Batching the swap across commits is not on offer, because between two commits the source's range would be
+-- served twice or not at all. So such a run is REFUSED, at the half of the table obtain and extend_to leave to
+-- every other session: before anything is copied, when its fine-child count at two slots a child already needs
+-- more than half (here, asked by the prepare tick and by set_regrain); and at the swap tick itself, after the
+-- first two ATTACHes, by what they measurably cost (in regrain_step), which is what bounds a table whose children
+-- cost more than the floor, and a run prepared before this budget existed.
+--
+-- _regrain_fine_count: how many fine children a run of [p_lo, p_hi) toward p_step will attach at its swap,
+-- counted no further than p_cap + 1, since past the cap the answer is already "too many" and a sub-second
+-- step over a decade is millions of cells. The aged prefix is not counted: with retain set and no archive_fn
+-- the copy skips every sub-range wholly at or below the retention horizon and the swap discards it with the
+-- source, so a long monolith whose live tail is short is refused only for the tail it will really attach. The
+-- horizon only advances (a loosened retain is refused at the swap, #448), so the count only ever falls after
+-- this call. A negative retain counts every sub-range: regrain_step refuses that config on its own (#451).
+-- p_catalog_only (set_regrain's) reads no user rows (tests/241 classifies set_regrain so): on an id grid the
+-- newest attached partition's hi stands in for the frontier, which is never above it, so the horizon it gives
+-- is never earlier than the real one and set_regrain never refuses a target the prepare tick would accept.
+create or replace function pgpm._regrain_fine_count(p_parent regclass, cfg pgpm.config, p_step text,
+                                                    p_lo text, p_hi text, p_cap bigint, p_catalog_only boolean default false)
+returns bigint language plpgsql as $$
+declare k text := cfg.control_kind; z text := cfg.partition_tz; v_at text := p_lo; v_b text; v_g text; v_n bigint := 0;
+        v_top numeric;
+begin
+  if cfg.retain is not null and cfg.archive_fn is null and pgpm._retain_nonnegative(k, cfg.retain) then
+    if p_catalog_only and k = 'id' then
+      select max(p.hi::numeric) into v_top from pgpm.part p where p.parent_table = p_parent and p.attached;
+      if v_top is not null then
+        v_b := pgpm._grid_floor(k, cfg.partition_step, cfg.partition_anchor, (v_top - cfg.retain::numeric)::text, z);
+      end if;
+    else
+      v_b := pgpm._retain_boundary(cfg);   -- the horizon regrain_step's skip reads (#627)
+    end if;
+    if v_b is not null then
+      v_g := pgpm._grid_floor(k, p_step, cfg.partition_anchor, v_b, z);   -- the first sub-range not wholly below it
+      if pgpm._native_gt(k, v_g, v_at) then v_at := v_g; end if;
+    end if;
+  end if;
+  v_g := pgpm._grid_floor(k, p_step, cfg.partition_anchor, v_at, z);
+  while pgpm._native_gt(k, p_hi, v_g) and v_n <= p_cap loop
+    v_n := v_n + 1;
+    v_g := pgpm._grid_next(k, p_step, v_g, z);
+  end loop;
+  return v_n;
+end;
+$$;
+
+-- _regrain_swap_budget: refuse a run of p_child ([p_lo, p_hi) toward p_step) whose swap would attach more fine
+-- children than half the shared lock table holds at two slots each, counted as _regrain_fine_count counts them
+-- (p_catalog_only: set_regrain's). Asked by the prepare tick, before a copy is dropped, capture is installed or a
+-- row is copied, and by set_regrain before the target is stored, so the refusal changes nothing in either.
+create or replace function pgpm._regrain_swap_budget(p_parent regclass, cfg pgpm.config, p_child name, p_step text,
+                                                     p_lo text, p_hi text, p_catalog_only boolean default false)
+returns void language plpgsql as $$
+declare
+  v_slots bigint := current_setting('max_locks_per_transaction')::bigint
+                    * (current_setting('max_connections')::bigint + current_setting('max_prepared_transactions')::bigint);
+  v_n bigint;
+begin
+  v_n := pgpm._regrain_fine_count(p_parent, cfg, p_step, p_lo, p_hi, v_slots / 4, p_catalog_only);
+  if 2 * v_n > v_slots / 2 then
+    raise exception 'pg_partition_magician: cannot regrain % of % at target step % -- its swap would attach at least % fine partitions in one transaction, each holding at least two lock-table slots (its own and its bound CHECK''s, more with foreign keys) to that transaction''s end: at least % slots, more than half the shared lock table''s % (max_locks_per_transaction % x (max_connections % + max_prepared_transactions %)). Refusing before anything is copied, rather than copying every row and then exhausting the table for every other session at the swap. Regrain in two passes, each child split into at most about % partitions (first to a coarser step, then each of its children to %), or raise max_locks_per_transaction (a restart).',
+      p_child, p_parent, p_step, v_n, 2 * v_n, v_slots,
+      current_setting('max_locks_per_transaction'), current_setting('max_connections'),
+      current_setting('max_prepared_transactions'), v_slots / 4, p_step;
+  end if;
+end;
+$$;
+
 -- one resumable microbatch of regrain work on coarse child p_child toward target step p_target_step.
 -- Returns: 'copied:N' (copied N rows into the current fine child), 'swapped:K' (cursor reached hi -> detached
 -- the source, attached K fine children, dropped it: regrain done), or a soft no-progress status ('active' =
@@ -7044,6 +7120,9 @@ declare
   v_src_nsp name; v_sub_nsp name;   -- the source's own schema, and a copy's (#872): never the parent's
   v_spc_q text;   -- #1075: ' tablespace <the parent's>', or empty for the database default
   v_off text;   -- what of the run in flight is off the requested grid (#905)
+  v_ncopies bigint := 0; v_locks1 bigint; v_locks2 bigint; v_projected bigint; v_per bigint;   -- #1161
+  v_slots bigint := current_setting('max_locks_per_transaction')::bigint
+                    * (current_setting('max_connections')::bigint + current_setting('max_prepared_transactions')::bigint);
 begin
   -- #951: refused before anything is read or committed; p_target_step (null: the partition step) and p_batch
   -- (null: config.regrain_batch) are not
@@ -7144,6 +7223,13 @@ begin
       raise exception 'pg_partition_magician: cannot regrain % at target step % -- the regrain in flight on it was not cut on that step''s grid: %, and a run''s copies belong to the step it was started at. Driven on another grid it would mint copies overlapping them, and every swap would fail. Drive it at its own target (config.regrain_to: %), or abandon it with pgpm.regrain_cancel(%) (the source still holds every row) and re-run at the new one.',
         v_child_name, v_step, v_off, coalesce(cfg.regrain_to, 'null, a run started by hand'), p_parent;
     end if;
+  end if;
+  -- #1161: ...and a run about to be prepared (no capture yet) whose swap could not attach its children inside half
+  -- the shared lock table is refused, before a copy is dropped, capture is installed or a row is copied, and before
+  -- the #266 rename, so the refusal mutates nothing and names the child as the caller did (see
+  -- _regrain_swap_budget). A run already in flight is the swap's own measured budget's to judge.
+  if not pgpm._regrain_capture_active(p_parent, v_child_name) then
+    perform pgpm._regrain_swap_budget(p_parent, cfg, v_child_name, v_step, v_lo, v_hi);
   end if;
 
   -- ...and the source must not be named as its own first fine sub-range (issue #266). _part_name gives a
@@ -7633,6 +7719,7 @@ begin
     p_parent::text, v_ncast, v_lo, v_ncast, v_ncast, v_hi, v_ncast)
   loop
     perform pgpm._regrain_copy_rel(p_parent, r.child_name, 'attach');
+    v_ncopies := v_ncopies + 1;   -- #1161: what the attach loop's lock budget projects over
   end loop;
 
   -- cursor reached hi: every sub-range is copied (or aged and skipped). Swap atomically -- detach the source,
@@ -7733,6 +7820,31 @@ begin
     update pgpm.part set attached = true where parent_table = p_parent and child_name = r.child_name;
     insert into pgpm.log (parent_table, action, lo, hi, method) values (p_parent, 'regrain_attach', r.lo, r.hi, 'check_skip');
     v_made := v_made + 1;
+    -- #1161: the measured budget. Once two children are attached, what the second cost (never taken as less
+    -- than the floor of two slots: a fast-path slot still free absorbs a weak lock) is what each child of the
+    -- run holds, and a swap whose children would hold more than half the shared lock table is refused. The
+    -- incoming foreign keys this swap suspended are re-added after the loop, against every partition, so what
+    -- that costs a child cannot be measured here; it is charged at two slots a child for each key plus two
+    -- (measured on PostgreSQL 15 and 18: about 2 + 1.2 a key, the child's SHARE ROW EXCLUSIVE, its referenced
+    -- index and each key's constraint), an over- rather than an under-estimate. What the swap holds whatever
+    -- its size is not charged, as extend_to does not charge the frontier read: the locks taken before the
+    -- first ATTACH, the first ATTACH's one-time ones and those after the last (about ten to twenty, measured).
+    -- So the projection is the prepare tick's floor (_regrain_swap_budget) whenever a child costs two slots,
+    -- and the two cannot disagree about a plain table. The raise rolls the swap back whole, as every refusal
+    -- past the DETACH does: the source stays attached with every row, the copies are kept, nothing is dropped.
+    if v_made = 1 then
+      select count(*) into v_locks1 from pg_locks where pid = pg_backend_pid() and not fastpath;
+    elsif v_made = 2 then
+      select count(*) into v_locks2 from pg_locks where pid = pg_backend_pid() and not fastpath;
+      v_per := greatest(v_locks2 - v_locks1, 2) + case when v_fk > 0 then 2 + 2 * v_fk else 0 end;
+      v_projected := v_per * v_ncopies;
+      if v_projected > v_slots / 2 then
+        raise exception 'pg_partition_magician: cannot swap the regrain of % of % at target step % -- attaching its % fine partitions in one transaction would hold about % lock-table slots (about % a partition: what the second ATTACH took, with what re-adding the incoming foreign keys costs), more than half the shared lock table''s % (max_locks_per_transaction % x (max_connections % + max_prepared_transactions %)); refusing rather than exhausting it for every other session. The swap rolls back whole: the source stays attached and holds every row, and the copies are kept. Raise max_locks_per_transaction (a restart) and the next tick swaps, or abandon the run with pgpm.regrain_cancel(%) and regrain in two passes, each child split into at most about % partitions (first to a coarser step, then each of its children to %).',
+          v_child_name, p_parent, v_step, v_ncopies, v_projected, v_per, v_slots,
+          current_setting('max_locks_per_transaction'), current_setting('max_connections'),
+          current_setting('max_prepared_transactions'), p_parent, greatest(v_slots / 2 / v_per, 1), v_step;
+      end if;
+    end if;
   end loop;
   -- #1141: chunks under the source's name whose relation was dropped (not the source's: it still exists) are marked
   -- retired before the discard below; while the source's pgpm.part row stands, so its name is resolved where it is
@@ -11869,7 +11981,7 @@ $$;
 create or replace function pgpm.set_regrain(p_parent regclass, p_target_step text default null)
 returns void language plpgsql as $$
 declare
-  cfg pgpm.config; v_rel name;
+  cfg pgpm.config; v_rel name; r record;
 begin
   -- #951: refused before anything is read or committed; p_target_step (null turns auto-regrain off) is not
   perform pgpm._refuse_null_arguments('set_regrain', json_build_object('p_parent', p_parent));
@@ -11933,6 +12045,17 @@ begin
   -- ...and every name the children auto-regrain will split can need, not only the anchor's (#710)
   if p_target_step is not null then
     perform pgpm._regrain_names_fit(p_parent, cfg, v_rel, p_target_step);
+  end if;
+  -- #1161: ...and every child auto-regrain will split (the ones _regrain_names_fit walks) must be able to swap
+  -- inside half the shared lock table, or its run would copy every row and then never swap; refused here, by
+  -- the prepare tick's own count, rather than on every tick as skip_regrain (see _regrain_swap_budget)
+  if p_target_step is not null then
+    for r in select p.child_name, p.lo, p.hi from pgpm.part p where p.parent_table = p_parent and p.attached
+                and pgpm._native_gt(cfg.control_kind, p.hi, pgpm._grid_next(cfg.control_kind, cfg.partition_step, p.lo, cfg.partition_tz))
+                and pgpm._native_gt(cfg.control_kind, p.hi, pgpm._grid_next(cfg.control_kind, p_target_step, p.lo, cfg.partition_tz))
+    loop
+      perform pgpm._regrain_swap_budget(p_parent, cfg, r.child_name, p_target_step, r.lo, r.hi, true);
+    end loop;
   end if;
 
   -- #554: a CHANGE of target while a run is in flight is refused. Nothing records the step a run was started

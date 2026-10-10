@@ -11638,6 +11638,39 @@ MUTATIONS["restore_one_step_no_backoff"] = (
 )
 
 
+# #1161: regrain_step's swap attaches every fine child in one transaction, so it gets the lock budget obtain (#786)
+# and extend_to (#591) have. One mutation per clause of it, each caught by tests/315 through
+# bench/regrain_swap_lock_budget.sh.
+_G1161 = "bench/regrain_swap_lock_budget.sh"
+MUTATIONS["regrain_swap_no_prepare_budget"] = (
+    _G1161,
+    "Pre-#1161 prepare tick and set_regrain: nothing asks whether the run's swap can attach its fine children inside "
+    "half the shared lock table, so a run of more children than that is prepared, copied sub-range by sub-range, and "
+    "only then meets the swap (which dies 53200 `out of shared memory` at an ATTACH on every tick once the children "
+    "outnumber the whole table). One site, the floor's refusal made unreachable, which both callers share. tests/315 "
+    "part A catches it (the cap + 1 run is prepared, and set_regrain stores the target).",
+    [("  if 2 * v_n > v_slots / 2 then\n", "  if false then\n", 1)],
+)
+MUTATIONS["regrain_swap_no_measured_budget"] = (
+    _G1161,
+    "Pre-#1161 swap: nothing measures what the swap's ATTACHes cost, so a run the floor admits but whose children cost "
+    "more than two slots each (thirty outgoing foreign keys: 62 a child) attaches every child in one transaction, "
+    "holding more than half the shared lock table (4308 of 6400 measured on PostgreSQL 15). One site, the measured "
+    "refusal made unreachable, so the measurement still runs. tests/315 parts D and E catch it (both swaps swap).",
+    [("      if v_projected > v_slots / 2 then\n        raise exception 'pg_partition_magician: cannot swap the regrain",
+      "      if false then\n        raise exception 'pg_partition_magician: cannot swap the regrain", 1)],
+)
+MUTATIONS["regrain_swap_incoming_fk_uncharged"] = (
+    _G1161,
+    "The swap's measured budget without its charge for the incoming foreign keys it suspends and re-adds against "
+    "every partition after the last ATTACH: the second ATTACH's two slots are all it projects, so a plain table "
+    "referenced by twenty keys swaps holding more than half the shared lock table (4071 of 6400 measured on "
+    "PostgreSQL 15). One clause, the charge. tests/315 part E catches it; part D still refuses.",
+    [("      v_per := greatest(v_locks2 - v_locks1, 2) + case when v_fk > 0 then 2 + 2 * v_fk else 0 end;\n",
+      "      v_per := greatest(v_locks2 - v_locks1, 2);\n", 1)],
+)
+
+
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
 # cost), and discriminate.sh's --shard=I/N interleaves that list, so the heavy ones spread over the

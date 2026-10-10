@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **A regrain whose swap cannot fit in half the shared lock table is refused, not left to die at the swap**
+  (#1161). The swap attaches every fine child in one transaction, and each holds its locks (the child, its
+  dropped bound `CHECK`, more for foreign keys) to that transaction's end; nothing bounded that, as `obtain`
+  (#786) and `extend_to` (#591) are bounded, so a monolith of a few years regrained to `'1 day'` copied every
+  sub-range and then died 53200 `out of shared memory` at an `ATTACH` on every swap tick, the cursor at `hi`
+  and every copy kept. `regrain_step`'s prepare tick (before the source is renamed or anything copied) and
+  `set_regrain` now refuse a run whose fine children above the retention horizon would take more than half of
+  `max_locks_per_transaction x (max_connections + max_prepared_transactions)` at two slots each, and the swap
+  measures what its second `ATTACH` cost, charges each incoming foreign key it re-adds, and refuses, rolled
+  back whole with the copies kept, when the run's children would take more than half. Each message names the
+  knob and how many children fit. Test `tests/315`; guard `bench/regrain_swap_lock_budget.sh`, mutations
+  `regrain_swap_no_prepare_budget`, `regrain_swap_no_measured_budget`, `regrain_swap_incoming_fk_uncharged`.
 - **On PostgreSQL 18 a preserved key on a partitioned referencing table, or a self-referential one, comes back
   `NOT VALID`, so its re-add no longer scans the table under a write-blocking lock** (#633). `restore_incoming_fks`
   (maintain's tick, and every regrain swap) and `untransmute` re-added such a key in one validating step on every
