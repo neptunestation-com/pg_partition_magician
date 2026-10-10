@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prove that every throws_* assertion around `call pgpm.<procedure>` in the test tree PINS what it
+# Prove that every throws_* assertion around a CALL of a pgpm procedure in the test tree PINS what it
 # catches (a SQLSTATE or a message), by asking pgTAP itself whether the assertion would also accept the
 # one error a NON-refusing committing procedure raises inside it.
 #
@@ -14,7 +14,9 @@
 # tests/timescale/db/08, 10 and 14); this keeps a fifth from landing.
 #
 # HOW. For every throws_* pgTAP installs (read from its catalog, see below: ok, like, ilike, matching and
-# imatching in pgTAP 1.3) whose statement under test contains `call pgpm.`,
+# imatching in pgTAP 1.3) whose statement under test CALLs a pgpm procedure, however the procedure is
+# named (schema quoted or not, any case, whitespace or comments around the dot, unqualified, or through a
+# format() placeholder; #1182, see calls_pgpm below and its self-check, a third CONTROL),
 # however that statement is written (dollar-quoted, single-quoted, built by format()) and however many
 # arguments follow it (none included), the SAME assertion is re-issued with that statement swapped for one that raises exactly that 2D000
 # (`do $d$ begin commit; end $d$`), and it has to say `not ok`. Nothing here depends on pgpm's code
@@ -24,10 +26,11 @@
 # creates cannot be evaluated here and is reported as INFO, neither pass nor failure: it is an
 # expression, and an expression is not the bare NULL this guard exists to catch.
 #
-# Two CONTROLS run first, so a broken instrument cannot read as a clean tree: a synthetic unpinned
+# Three CONTROLS run first, so a broken instrument cannot read as a clean tree: a synthetic unpinned
 # assertion must say `ok` (the substituted statement really raises 2D000 inside the wrapper, and NULL
-# really accepts it) and a P0001-pinned one must say `not ok`. Either control failing FAILS the guard
-# before any site is judged.
+# really accepts it), a P0001-pinned one must say `not ok`, and the site recogniser must read every
+# spelling in its self-check as a call of a pgpm procedure, and the calls of other procedures there as
+# none. Any control failing FAILS the guard.
 #
 # The mutations it is required to fail against (bench/mutations/mutate.py):
 #   throws_ok_null_pattern -- tests/72's refusal assertion put back to throws_ok(..., NULL, desc)
@@ -45,6 +48,10 @@
 #                             assertion: the bare-NULL shape with its DESCRIPTION in a psql variable. The
 #                             psql-variable skip used to search every argument after the statement, so it read
 #                             the description as an unevaluable pattern and reported the site INFO (#1000)
+#   throws_ok_quoted_schema -- a throws_ok($$ call "pgpm".transmute(...) $$, NULL, desc) beside tests/72's pinned
+#                             assertion. The site pattern used to be the text `call\s+pgpm\.`, so a quoted schema was no
+#                             site at all and the file passed on the pinned neighbour alone (#1182)
+# and bench/throws_pinned_sites.sh holds THIS script to its recogniser (mutation throws_pinned_site_by_spelling).
 #
 # Usage: throws_pinned.sh <container> <db> [test file]
 # With no third argument it probes every tests/**/*.sql in the repository. With one it probes THAT
@@ -75,12 +82,16 @@ work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 q -d postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
 q -d postgres -q -c "create database $DB" >/dev/null 2>&1
 q -d "$DB" -q -c "create extension if not exists pgtap;" >/dev/null 2>&1
-# The core is installed so a pattern built from a pgpm helper evaluates; nothing under test is in it.
-if ! q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f /repo/pgpm_core/install.sql >/dev/null 2>&1; then
-  printf 'FAIL  %-58s %s\n' "pgpm_core installed" "/repo/pgpm_core/install.sql"
-  q -d postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
-  exit 1
-fi
+# The core is installed so a pattern built from a pgpm helper evaluates; nothing under test is in it. The
+# from_hypertable module goes in beside it (it installs without TimescaleDB, whose checks run at call time)
+# so that its procedures are in the catalog the site recogniser reads below.
+for mod in pgpm_core pgpm_hypertable; do
+  if ! q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f "/repo/$mod/install.sql" >/dev/null 2>&1; then
+    printf 'FAIL  %-58s %s\n' "$mod installed" "/repo/$mod/install.sql"
+    q -d postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
+    exit 1
+  fi
+done
 
 # WHICH throws_* A SITE CAN BE (#915). The site pattern used to be a hand-written list,
 # throws_(ok|like|matching|imatching), and it left out pgTAP's throws_ilike: a throws_ilike($$ call pgpm... $$,
@@ -101,13 +112,30 @@ else
   exit 1
 fi
 
-THROWS_FORMS="$forms" python3 - "$ROOT" "${FILES[@]}" > "$work/probe.sql" <<'PY' || { echo "FAIL  the probe could not be built"; q -d postgres -q -c "drop database if exists $DB" >/dev/null 2>&1; exit 1; }
+# WHICH STATEMENTS A SITE CAN BE (#1182). A site used to be any statement whose text matched `call\s+pgpm\.`,
+# so `call "pgpm".transmute(...)`, the same committing procedure with its schema quoted, was never probed and
+# an unpinned throws_ok around it passed on its pinned neighbour. The statement is now read for the procedure
+# it CALLs, as PostgreSQL reads a name (below), and judged against the procedures pgpm installs, read from
+# the catalog the way the forms are. The two procedures the self-check below names have to be among them, or
+# the catalog read is broken and the recogniser would match nothing but a schema spelled pgpm.
+procs=$(q -d "$DB" -tAq -c "select string_agg(distinct proname, ' ')
+                              from pg_proc
+                             where pronamespace = 'pgpm'::regnamespace and prokind = 'p'" 2>&1 </dev/null)
+if [[ " $procs " == *" transmute "* && " $procs " == *" from_hypertable_copy "* ]]; then
+  printf 'PASS  %-58s %s\n' "a site is a call of any procedure pgpm installs" "$procs"
+else
+  printf 'FAIL  %-58s %s\n' "a site is a call of any procedure pgpm installs" "read: ${procs:-nothing}"
+  q -d postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
+  exit 1
+fi
+
+THROWS_FORMS="$forms" PGPM_PROCS="$procs" python3 - "$ROOT" "${FILES[@]}" > "$work/probe.sql" <<'PY' || { echo "FAIL  the probe could not be built"; q -d postgres -q -c "drop database if exists $DB" >/dev/null 2>&1; exit 1; }
 import os, re, sys
 root, files = sys.argv[1], sys.argv[2:]
 forms = os.environ["THROWS_FORMS"].split()
 # A site is a throws_* call whose FIRST argument (the statement under test, as written: dollar-quoted,
-# single-quoted or built by format()) contains `call pgpm.`; everything after that argument is the
-# assertion's own arguments, possibly none. The argument list is SPLIT, not pattern-matched (#601): a
+# single-quoted or built by format()) calls a pgpm procedure (calls_pgpm below); everything after that
+# argument is the assertion's own arguments, possibly none. The argument list is SPLIT, not pattern-matched (#601): a
 # pattern that demanded a comma after a dollar-quoted statement never saw the one-argument form, which
 # pins nothing at all, nor a single-quoted statement.
 CALL = re.compile(r"\bthrows_(" + "|".join(re.escape(f) for f in forms) + r")\s*\(", re.I)
@@ -153,6 +181,102 @@ def split_args(text, i):
             start = i + 1
         i += 1
     return None
+
+
+PROCS = set(os.environ["PGPM_PROCS"].split())
+KEYWORD = re.compile(r"\bcall\b", re.I)
+QUOTED_NAME = re.compile(r'(?:([Uu])&)?"((?:[^"]|"")*)"')   # "pgpm", and U&"\0070gpm" with its escapes
+UNICODE_ESCAPE = re.compile(r"\\(\\|[0-9A-Fa-f]{4}|\+[0-9A-Fa-f]{6})")
+PLAIN_NAME = re.compile(r"[A-Za-z_\u0080-\U0010ffff][A-Za-z0-9_$\u0080-\U0010ffff]*")
+PLACEHOLDER = re.compile(r"%(?:\d+\$)?-?\d*[IsL]")      # format()'s %I, %s, %L, %1$I, %-10s
+FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def skip_blank(text, i):
+    """The index of the first character at or after i that is neither whitespace nor inside a comment."""
+    n = len(text)
+    while i < n:
+        if text[i].isspace():
+            i += 1
+        elif text.startswith("--", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j + 1
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+        else:
+            break
+    return i
+
+
+def called_names(text):
+    """The name every CALL in text names, as PostgreSQL reads it: dot-separated parts with whitespace and
+    comments allowed around each dot, a double-quoted part taken verbatim ("" for ", and a U&"..." part with
+    its default \\XXXX and \\+XXXXXX escapes decoded; a UESCAPE clause is not read), an unquoted one folded
+    to lower case (ASCII only, as the server folds it), and a format() placeholder kept as None, because the
+    value it stands for is only known at run time. A CALL followed by nothing that reads as a name (a word
+    in prose, `call :=`) yields nothing."""
+    for m in KEYWORD.finditer(text):
+        parts, i = [], m.end()
+        while True:
+            i = skip_blank(text, i)
+            q = QUOTED_NAME.match(text, i)
+            p = None if q else PLACEHOLDER.match(text, i)
+            u = None if q or p else PLAIN_NAME.match(text, i)
+            if q:
+                name = q.group(2).replace('""', '"')
+                if q.group(1):
+                    name = UNICODE_ESCAPE.sub(lambda e: "\\" if e.group(1) == "\\" else chr(int(e.group(1).lstrip("+"), 16)), name)
+                parts.append(name); i = q.end()
+            elif p:
+                parts.append(None); i = p.end()
+            elif u:
+                parts.append(u.group(0).translate(FOLD)); i = u.end()
+            else:
+                break
+            j = skip_blank(text, i)
+            if not text.startswith(".", j):
+                break
+            i = j + 1
+        if parts:
+            yield parts
+
+
+def calls_pgpm(text):
+    """True when a CALL in text can reach a pgpm procedure: its schema is pgpm however spelled, or its
+    procedure is one pgpm installs (with any schema or none, so an unqualified call under a search_path
+    counts), or a part of its name is a format() placeholder this reading cannot resolve. Probing a site
+    that turns out not to be pgpm's costs nothing a pinned assertion does not already pay; skipping one
+    that is pgpm's is the defect this guard exists for (#1182)."""
+    for parts in called_names(text):
+        if None in parts or parts[-1] in PROCS or (len(parts) >= 2 and parts[-2] == "pgpm"):
+            return True
+    return False
+
+
+# The recogniser's own self-check, run on every invocation before any file is read: each spelling the issue
+# and the server accept must be a site, and a call of another schema's procedure, a word after `call` in
+# prose and a function select must not, so neither a recogniser that sees nothing nor one that sees
+# everything gets past it. Printed as a CONTROL row the shell below asserts by name.
+SPELLINGS = [
+    ("call pgpm.transmute('public.t', 'id', 10)", True),
+    ('call "pgpm".transmute(\'public.t\', \'id\', 10)', True),
+    ('CALL PGPM . "transmute"(\'public.t\', \'id\', 10)', True),
+    ("call\n  pgpm\n  .maintain_all()", True),
+    ("call /* c */ pgpm./* c */maintain('public.t')", True),
+    ('call"pgpm"."from_hypertable_copy"(\'public.h\')', True),
+    ("call transmute('public.t', 'id', 10)", True),
+    ("format('call %I.%I(%L, %L, 10)', 'pgpm', 'transmute', 'public.t', 'id')", True),
+    ("do $d$ begin call pgpm.maintain_obtain('public.t'); end $d$", True),
+    ('call U&"\\0070gpm".U&"m\\0061intain"(\'public.t\')', True),
+    ('call U&"\\0050GPM".mk(\'public.t\')', False),
+    ("call pg_temp.mk('public.t')", False),
+    ('call "PGPM".mk(\'public.t\')', False),
+    ("select pgpm.transmute_abort('public.t') -- the call that follows", False),
+]
+wrong = [t for t, want in SPELLINGS if calls_pgpm(t) != want]
+print("select 'CONTROL spellings => " + ("ok" if not wrong else "misread " + str(len(wrong)) + ": "
+      + " | ".join(" ".join(t.split()) for t in wrong).replace("'", "''")) + "';")
 
 
 PSQL_VAR = r""":(?:'\w+'|"\w+")"""
@@ -227,7 +351,7 @@ for path in files:
         if split is None:
             sys.exit(f"probe: {shown}:{line}: cannot find where this throws_{m.group(1)}( call ends")
         args, _end = split
-        if not re.search(r"\bcall\s+pgpm\.", args[0], re.I):
+        if not calls_pgpm(args[0]):
             continue
         kind = m.group(1).lower()
         after = args[1:]
@@ -275,6 +399,12 @@ if grep -q '^CONTROL unpinned => ok ' <<<"$out"; then
   printf 'PASS  %-58s %s\n' "control: 2D000 is raised inside the wrapper and NULL accepts it" "ok"
 else
   printf 'FAIL  %-58s %s\n' "control: 2D000 is raised inside the wrapper and NULL accepts it" "$(echo "$out" | grep '^CONTROL unpinned' | head -1)"
+  fail=1
+fi
+if grep -qx 'CONTROL spellings => ok' <<<"$out"; then
+  printf 'PASS  %-58s %s\n' "control: every spelling of a pgpm call is a site, no other" "ok"
+else
+  printf 'FAIL  %-58s %s\n' "control: every spelling of a pgpm call is a site, no other" "$(grep '^CONTROL spellings' <<<"$out" | head -1)"
   fail=1
 fi
 if grep -q '^CONTROL pinned => not ok ' <<<"$out"; then

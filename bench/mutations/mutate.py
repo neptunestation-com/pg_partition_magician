@@ -11397,6 +11397,36 @@ MUTATIONS["retain_horizon_wall_round_trip"] = (
 )
 
 
+# Issue #1182: bench/throws_pinned.sh recognises a site by the procedure its statement CALLs, not by the text
+# `call pgpm.`. Two mutations, one per guard: the first is a test-file mutation like its siblings (the real guard
+# on a real file), the second puts the pre-#1182 recognition back into the guard itself, for
+# bench/throws_pinned_sites.sh, which runs the script it is handed over planted files.
+MUTATIONS["throws_ok_quoted_schema"] = (
+    "bench/throws_pinned.sh",
+    "A throws_ok($$ call \"pgpm\".transmute(...) $$, NULL, desc) added to tests/72 beside its pinned throws_like. "
+    "The quoted schema names the same committing procedure, and the NULL accepts the 2D000 of a transmute that did "
+    "not refuse. Pre-#1182 bench/throws_pinned.sh called a statement a site only when its text matched "
+    "`call\\s+pgpm\\.`, so this was no site at all and the file passed on the pinned neighbour alone ('1 pinned of "
+    "1'); the neighbour is there for the reason throws_ok_one_argument gives.",
+    [("select throws_like($$ call pgpm.transmute('public.ev72t', 'id', 1000) $$,\n",
+      "select throws_ok($$ call \"pgpm\".transmute('public.ev72t', 'id', 1000) $$, NULL,\n"
+      "  'an unpinned refusal: the schema quoted');\n"
+      "select throws_like($$ call pgpm.transmute('public.ev72t', 'id', 1000) $$,\n", 1)],
+)
+MUTATION_SRC["throws_ok_quoted_schema"] = "tests/72_transmute_attributes_test.sql"
+MUTATIONS["throws_pinned_site_by_spelling"] = (
+    "bench/throws_pinned_sites.sh",
+    "Pre-#1182 bench/throws_pinned.sh: a statement is a site only when its text matches `call\\s+pgpm\\.`, so an "
+    "unpinned throws_ok around call \"pgpm\".transmute, CALL PGPM . \"transmute\", a commented or unqualified call, "
+    "or a format() with the schema as %I is never probed and the file passes on a pinned neighbour. One site, the "
+    "exact pre-#1182 decision; calls_pgpm and its self-check are left in place (the self-check still passes), so "
+    "only a run over files can tell.",
+    [("        if not calls_pgpm(args[0]):\n",
+      "        if not re.search(r\"\\bcall\\s+pgpm\\.\", args[0], re.I):\n", 1)],
+)
+MUTATION_SRC["throws_pinned_site_by_spelling"] = "bench/throws_pinned.sh"
+
+
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
 # cost), and discriminate.sh's --shard=I/N interleaves that list, so the heavy ones spread over the
