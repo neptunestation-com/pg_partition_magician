@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **The install page is redeployed after a Release run that published its GitHub Release and then failed
+  at database.dev** (#1169). `pages.yml` redeployed after a Release run only when the whole run concluded
+  success, and since #1077 a tag cut from a tree whose dbdev package is over database.dev's cap publishes the
+  GitHub Release and then fails the run by design in `publish-dbdev.yml`, so the install page kept serving the
+  previous release's bundle and version. The deploy now runs after every completed Release run, whatever its
+  conclusion, and assembles the site from the latest published release, so a run that published nothing
+  redeploys the page it already serves; `RELEASING.md` says what a release over the cap leaves red. Guard
+  `bench/pages_deploy_after_release.sh` (evaluates the deploy's conditions for that run), mutation
+  `pages_deploy_gated_on_release_success`.
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's
