@@ -12,7 +12,7 @@
 -- and the existing pipeline (write-block, then archive, then retire) takes it from there, already gated.
 -- With no archive_fn the cheap skip is unchanged, because retire's gate is a no-op with nothing to cover.
 create extension if not exists pgtap;
-select plan(11);
+select plan(13);
 
 -- ============================ archive_fn SET: aged rows must survive the regrain ============================
 create table public.ag74 (id bigint primary key, payload text);
@@ -63,6 +63,9 @@ select cmp_ok((select count(*) from pgpm.part
 -- The point is not that the rows survive forever, it is that they are archived BEFORE they are dropped.
 update pgpm.config set archive_byte_budget = 8 * 1024 * 1024
  where parent_table = 'public.ag74'::regclass;
+-- the aged children the pipeline has to take, by range, before maintenance touches any of them (#1171)
+create temporary table ag74_aged as
+  select lo, hi from pgpm.part where parent_table = 'public.ag74'::regclass and hi::bigint <= 3000;
 -- v_status only exists to receive maintain()'s INOUT: PL/pgSQL requires a writable argument for an output
 -- parameter, so the parameter's default cannot be relied on from inside a block.
 do $$ declare i int := 0; v_status text; begin
@@ -73,16 +76,37 @@ do $$ declare i int := 0; v_status text; begin
   end loop;
 end $$;
 
+-- Identity, not cardinality (#1171). The three counts this used to be (some ledger row, some retain_drop, no
+-- aged partition left) also hold when one child was archived and the rest dropped without ever being archived.
+-- So each dropped range is tied to the archive: the chunks the ledger recorded at or before its drop cover
+-- all of it. The first three are the liveness half: there was archiving, and there were drops to judge.
 select cmp_ok((select count(*) from pgpm.archive_ledger where parent_table = 'public.ag74'::regclass),
   '>', 0::bigint, 'maintenance archived the materialized aged children');
 
 select cmp_ok((select count(*) from pgpm.log
                 where parent_table = 'public.ag74'::regclass and action = 'retain_drop'),
-  '>', 0::bigint, 'and only then did retire drop them, through the gated path');
+  '>', 0::bigint, 'and retire dropped them, through the gated path');
 
 select is((select count(*)::int from pgpm.part
             where parent_table = 'public.ag74'::regclass and hi::bigint <= 3000),
-  0, 'so the aged rows are gone in the end, but archived first rather than discarded');
+  0, 'so the aged rows are gone in the end');
+
+select is(
+  (select array_agg(numrange(l.lo::numeric, l.hi::numeric) order by l.lo::numeric) from pgpm.log l
+    where l.parent_table = 'public.ag74'::regclass and l.action = 'retain_drop'
+      and (select range_agg(numrange(a.lo::numeric, a.hi::numeric)) from pgpm.archive_ledger a
+            where a.parent_table = l.parent_table and a.archived_at <= l.at)
+          @> numrange(l.lo::numeric, l.hi::numeric)),
+  (select array_agg(numrange(l.lo::numeric, l.hi::numeric) order by l.lo::numeric) from pgpm.log l
+    where l.parent_table = 'public.ag74'::regclass and l.action = 'retain_drop'),
+  'every dropped range is covered by chunks archived before its drop: archived first rather than discarded');
+
+-- and what was dropped is exactly what was aged: [0, 100) to [2900, 3000), each by range
+select is(
+  (select array_agg(numrange(lo::numeric, hi::numeric) order by lo::numeric) from pgpm.log
+    where parent_table = 'public.ag74'::regclass and action = 'retain_drop'),
+  (select array_agg(numrange(lo::numeric, hi::numeric) order by lo::numeric) from ag74_aged),
+  'the ranges retire dropped are exactly the aged children that existed before maintenance ran');
 
 -- ============================ a PARTIALLY aged child keeps its aged remainder ============================
 -- The insidious case from the issue: the live sub-ranges copy normally and the aged ones vanish, so the

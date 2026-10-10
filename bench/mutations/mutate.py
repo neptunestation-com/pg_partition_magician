@@ -11396,6 +11396,109 @@ MUTATIONS["retain_horizon_wall_round_trip"] = (
       "  return ((now() at time zone p_tz) - p_retain) at time zone p_tz;\n", 1)],
 )
 
+# pass 11 G14 (#1170, #1171, #1172): three test files back to the counts that passed against the defect each
+# names. Judged by bench/tests_fail_on_defect.sh against a defect it plants in install.sql per site.
+MUTATIONS["archive_resume_by_distinct_child"] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#1170 tests/93: the archive step's second tick asserted as count(distinct child_name) = 1 over the "
+    "ledger, which a second tick that archives nothing satisfies, so an archive that stalls after its first "
+    "chunk passes. The exact pre-#1170 assertion; the guard's defect never resumes a partially archived "
+    "partition.",
+    [("""-- Identity, not cardinality (#1170): the chunks themselves, by partition and range. A count of distinct
+-- partitions in the ledger is also 1 after a second tick that archived nothing, so it could not see an
+-- archive that stalls after its first chunk. At archive_byte_budget = 2000 a chunk of this table is 58 rows:
+-- [0, 59) on the first tick, then [59, 117), resuming exactly where it ended.
+select is(
+  (select string_agg(format('%s [%s,%s)', child_name, lo, hi), ' ' order by lo::bigint)
+     from pgpm.archive_ledger where parent_table = 'public.ab93'::regclass),
+  (select format('%1$s [0,59) %1$s [59,117)', child_name) from pgpm.part
+    where parent_table = 'public.ab93'::regclass and lo = '0'),
+  'a second tick continues the same (oldest, not-yet-covered) partition where its first chunk ended, not a new one');
+""", """select is(
+  (select count(distinct child_name)::int from pgpm.archive_ledger where parent_table = 'public.ab93'::regclass),
+  1, 'a second tick still works the same (oldest, not-yet-covered) partition, not a new one');
+""", 1)],
+)
+MUTATION_SRC["archive_resume_by_distinct_child"] = "tests/93_archive_batch_test.sql"
+MUTATIONS["archive_batch_by_ledger_rows"] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#1170 tests/93: archive_batch = 2 asserted as count(*) = 2 ledger rows, which two chunks of the "
+    "monolith satisfy, so a step that spends the cap on chunks rather than on DIFFERENT partitions passes. "
+    "The exact pre-#1170 assertion.",
+    [("""-- Identity, not cardinality (#1170): which partitions, by name. Two ledger rows would also be two chunks of
+-- the monolith, a cap spent on chunks rather than on DIFFERENT partitions. The two oldest each get one chunk:
+-- the monolith's first, [0, 59), and all of [6000, 7000), whose five rows fit the budget.
+select is(
+  (select string_agg(format('%s [%s,%s)', child_name, lo, hi), ' ' order by lo::bigint)
+     from pgpm.archive_ledger where parent_table = 'public.ab93'::regclass),
+  (select format('%s [0,59) %s [6000,7000)',
+                 (select child_name from pgpm.part where parent_table = 'public.ab93'::regclass and lo = '0'),
+                 (select child_name from pgpm.part where parent_table = 'public.ab93'::regclass and lo = '6000'))),
+  'archive_batch = 2 archives exactly two of the three eligible partitions in one tick, the two oldest');
+""", """select is(
+  (select count(*)::int from pgpm.archive_ledger where parent_table = 'public.ab93'::regclass),
+  2, 'archive_batch = 2 archives exactly two of the three eligible partitions in one tick');
+""", 1)],
+)
+MUTATION_SRC["archive_batch_by_ledger_rows"] = "tests/93_archive_batch_test.sql"
+MUTATIONS["archive_before_drop_uncovered"] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#1171 tests/74: archive-before-drop asserted as some ledger row, some retain_drop and no aged "
+    "partition left, which one child archived and every other dropped unarchived satisfies. The exact "
+    "pre-#1171 text of the site: nothing ties a dropped range to a chunk archived before the drop, nor the "
+    "dropped ranges to the aged children.",
+    [("select plan(13);\n", "select plan(11);\n", 1),
+     ("""-- the aged children the pipeline has to take, by range, before maintenance touches any of them (#1171)
+create temporary table ag74_aged as
+  select lo, hi from pgpm.part where parent_table = 'public.ag74'::regclass and hi::bigint <= 3000;
+""", "", 1),
+     ("""-- Identity, not cardinality (#1171). The three counts this used to be (some ledger row, some retain_drop, no
+-- aged partition left) also hold when one child was archived and the rest dropped without ever being archived.
+-- So each dropped range is tied to the archive: the chunks the ledger recorded at or before its drop cover
+-- all of it. The first three are the liveness half: there was archiving, and there were drops to judge.
+""", "", 1),
+     ("""  '>', 0::bigint, 'and retire dropped them, through the gated path');
+""", """  '>', 0::bigint, 'and only then did retire drop them, through the gated path');
+""", 1),
+     ("""  0, 'so the aged rows are gone in the end');
+
+select is(
+  (select array_agg(numrange(l.lo::numeric, l.hi::numeric) order by l.lo::numeric) from pgpm.log l
+    where l.parent_table = 'public.ag74'::regclass and l.action = 'retain_drop'
+      and (select range_agg(numrange(a.lo::numeric, a.hi::numeric)) from pgpm.archive_ledger a
+            where a.parent_table = l.parent_table and a.archived_at <= l.at)
+          @> numrange(l.lo::numeric, l.hi::numeric)),
+  (select array_agg(numrange(l.lo::numeric, l.hi::numeric) order by l.lo::numeric) from pgpm.log l
+    where l.parent_table = 'public.ag74'::regclass and l.action = 'retain_drop'),
+  'every dropped range is covered by chunks archived before its drop: archived first rather than discarded');
+
+-- and what was dropped is exactly what was aged: [0, 100) to [2900, 3000), each by range
+select is(
+  (select array_agg(numrange(lo::numeric, hi::numeric) order by lo::numeric) from pgpm.log
+    where parent_table = 'public.ag74'::regclass and action = 'retain_drop'),
+  (select array_agg(numrange(lo::numeric, hi::numeric) order by lo::numeric) from ag74_aged),
+  'the ranges retire dropped are exactly the aged children that existed before maintenance ran');
+""", """  0, 'so the aged rows are gone in the end, but archived first rather than discarded');
+""", 1)],
+)
+MUTATION_SRC["archive_before_drop_uncovered"] = "tests/74_regrain_archive_gate_test.sql"
+MUTATIONS["transmute_day_out_write_by_count"] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#1172 tests/141: 'ts_ev takes a write a day out, past its monolith' asserted as count(*) = 4, which a "
+    "day-out write that lands inside the monolith satisfies, where its id_ev and dt_ev siblings name the "
+    "partition. The exact pre-#1172 assertion; the guard's defect reads a timestamptz maximum a day late.",
+    [("""-- Identity, not cardinality (#1172): the partition the day-out row landed in, by name, as id_ev's and dt_ev's
+-- checks above name theirs. A count of four also holds when the write stays inside the monolith. The monolith
+-- ends at the first midnight past the clock, so the row a day out lands in its own day's partition (UTC).
+select is((select c.relname::text from public.ts_ev e join pg_class c on c.oid = e.tableoid
+            where e.ts = (select max(ts) from public.ts_ev)),
+  (select 'ts_ev_p' || to_char(max(ts), 'YYYY_MM_DD') from public.ts_ev),
+  'ts_ev takes a write a day out in that day''s partition, past its monolith');
+""", """select is((select count(*)::int from public.ts_ev), 4, 'ts_ev takes a write a day out, past its monolith');
+""", 1)],
+)
+MUTATION_SRC["transmute_day_out_write_by_count"] = "tests/141_transmute_step_obtain_preflight_test.sql"
+
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
