@@ -9,8 +9,16 @@
   `[lo, hi)` as covered with 0 rows, so once the operator attached the table back `retain()` dropped rows
   nothing had archived. The query now asks `pgpm._part_detached_by_hand` first, as the archive step has since
   #705: such a table is never handed to the strategy, no coverage is recorded for it, and the call archives the
-  parent's next eligible partition instead. Test `tests/313`; guard `bench/archive_whole_skips_hand_detached.sh`,
-  mutation `archive_whole_trusts_part_attached`.
+  parent's next eligible partition instead. Both the script and `pgpm._archive_step` also missed a detach that
+  landed mid-call: they asked only in the candidate query and locked nothing, so the first read waited out a
+  `DETACH PARTITION` in flight and a strategy reading through the parent then found none of the table's rows and
+  the range was recorded as covered. Both now call `pgpm._archive_hold_partition` before the first read, which
+  takes `ACCESS SHARE` on the parent (under `maintain`'s 200 ms `lock_timeout` a longer wait is `skip_archive`)
+  and asks the catalog again as of that lock, under any isolation level; a table that left meanwhile is not
+  archived and nothing is recorded. Tests `tests/313` and `tests/325` (and `tests/307` part B at `archive_batch`
+  1); guards `bench/archive_whole_skips_hand_detached.sh` and `bench/archive_hold_detach_in_flight.sh`,
+  mutations `archive_whole_trusts_part_attached`, `archive_hold_unlocked`, `archive_hold_recheck_by_snapshot`,
+  `archive_step_hold_skipped` and `archive_whole_hold_skipped`.
 
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL

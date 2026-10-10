@@ -4787,6 +4787,43 @@ $$;
 -- published extension point that pgpm.set_archive_fn type-checks, so widening it to carry an OID is
 -- not available). The check below is therefore made ONCE here, at the top of each candidate's turn,
 -- which is the only place that covers all of them.
+-- _archive_hold_partition: hold p_parent against a DETACH (or DROP) of its partitions for the rest of the
+-- transaction, and say whether the archive candidate the caller picked is still one of them (#1159). Both
+-- archive paths (_archive_step and scripts/archive_partition_whole.sql) call it after choosing a candidate and
+-- before anything reads it, so the two cannot drift.
+--
+-- Why: the candidate query asks _part_detached_by_hand under its own snapshot, and nothing it does locks the
+-- parent. An operator's DETACH PARTITION holding the parent's ACCESS EXCLUSIVE, uncommitted, when that query ran
+-- is invisible to it, so the table was still a candidate; the first read (the chunk sizing, or a strategy
+-- reading through the parent) then waited on the detach's lock, and once it committed the parent no longer held
+-- the table: a strategy reading through the parent found none of its rows, the range was recorded as covered,
+-- and once the operator attached the table back retire() dropped rows nothing had archived. Taking ACCESS SHARE
+-- on the parent here waits out a detach in flight and keeps a later one from starting until the caller's
+-- transaction ends (ONLY: the partitions themselves are the reads' to lock). Under maintain()'s 200 ms
+-- lock_timeout a longer wait raises here, and _archive_step's per-candidate handler defers the partition
+-- (skip_archive), as the read it stands in front of would have.
+--
+-- The question is then asked again, and of the catalog as of the lock rather than of a snapshot: the
+-- candidate is still the parent's partition by pg_partition_ancestors, which reads relispartition and
+-- pg_inherits the way the planner will (the catalog snapshot, refreshed when the lock is granted). A
+-- statement snapshot would do under READ COMMITTED; under REPEATABLE READ it is the transaction's first, taken
+-- before the detach committed, and would still see the table attached. False means the table left the parent
+-- while the caller waited (detached or dropped by hand): the caller hands it to nothing and records nothing,
+-- as it would have had the candidate query seen it (a dropped one stays on the paths that report it, as
+-- _part_detached_by_hand's note says). A row pgpm's own retirement is detaching (retiring_at) and an unanchored row (no child_oid) are
+-- left to behave as they did before, as _part_detached_by_hand leaves them. A DETACH ... CONCURRENTLY whose
+-- first transaction has committed leaves the table in pg_inherits with inhdetachpending set, which this
+-- (like _part_built) still counts as attached: #705's open note.
+create or replace function pgpm._archive_hold_partition(p_parent regclass, p_child_oid oid, p_retiring_at timestamptz)
+returns boolean language plpgsql as $$
+begin
+  execute format('lock table only %s in access share mode', p_parent);
+  return p_child_oid is null
+      or p_retiring_at is not null
+      or exists (select 1 from pg_partition_ancestors(p_child_oid::regclass) a where a.relid = p_parent::oid);
+end;
+$$;
+
 create or replace function pgpm._archive_step(p_parent regclass)
 returns int language plpgsql as $$
 declare
@@ -4885,7 +4922,7 @@ begin
   -- not one (#705, _part_detached_by_hand), even when it carries the block pgpm put on it before the
   -- detach: it is never handed to the strategy and no coverage is recorded for it.
   for r in execute format(
-    'select p.child_name, p.child_oid, p.lo, p.hi from pgpm.part p
+    'select p.child_name, p.child_oid, p.retiring_at, p.lo, p.hi from pgpm.part p
       where p.parent_table = %L::regclass and p.attached
         and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)
         and pgpm._is_write_blocked(%L::regclass, p.child_name)
@@ -4933,6 +4970,13 @@ begin
           values (p_parent, 'fail_archive_identity', r.lo, r.hi,
                   format('%I.%I is oid %s now, not the oid %s recorded for this partition; refusing to archive it',
                          v_nsp, r.child_name, coalesce(v_now::oid::text, 'nothing'), r.child_oid));
+        continue;
+      end if;
+
+      -- #1159: the parent held against a DETACH, and the candidate asked again under that hold, before the
+      -- first read of it (see _archive_hold_partition). A table detached by hand while this waited is left as
+      -- the candidate query leaves one: not handed to the strategy, no coverage recorded, nothing logged.
+      if not pgpm._archive_hold_partition(p_parent, r.child_oid, r.retiring_at) then
         continue;
       end if;
 

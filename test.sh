@@ -1196,6 +1196,7 @@ run_perf() {
     "bench/regrain_capture_delta_by_record.sh pgpm_perf289"
     "bench/archive_partition_whole_follows_step.sh pgpm_perf290"
     "bench/archive_whole_skips_hand_detached.sh pgpm_perf329"
+    "bench/archive_hold_detach_in_flight.sh pgpm_perf358"
     "bench/regrain_capture_delta_held.sh pgpm_perf294"
     "bench/regrain_children_tablespace.sh pgpm_perf106"
     "bench/regrain_target_encoded_unit.sh pgpm_perf298"

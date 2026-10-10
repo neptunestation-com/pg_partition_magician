@@ -1990,7 +1990,13 @@ Chunked archiving: `archived=N` counts how many chunks this tick recorded via
 mechanism. It only ever considers a child the write-block step above has already protected, so it
 always runs after write-blocking within the same tick. A partition detached by hand is not a candidate
 even when it carries the block pgpm put on it before the detach: it is never handed to the strategy and
-no coverage is recorded for it. Archive coverage is `retire()`'s other drop precondition.
+no coverage is recorded for it. That holds for a detach that lands while the step runs, too: before it
+reads a candidate the step takes `ACCESS SHARE` on the parent, which waits out a `DETACH PARTITION` in
+flight (under `maintain`'s 200 ms `lock_timeout` a longer wait defers the partition, logged
+`skip_archive`), and asks again of the catalog as of that lock, so a table that left the parent meanwhile
+is skipped the same way. The lock is held to the end of the step's transaction, so no plain detach starts
+under it. A `DETACH PARTITION ... CONCURRENTLY` whose first transaction has committed still counts as
+attached. Archive coverage is `retire()`'s other drop precondition.
 
 ### `maintain_all`
 
@@ -2336,7 +2342,9 @@ text the step records (whatever the caller's `DateStyle`), and resolved in the p
 still archives a moved parent's partitions and refuses only a relation that took the partition's name there.
 A table the operator detached by hand is not one of its candidates either, as it is not the step's: it is
 never handed to the strategy and no coverage is recorded for it, and the call goes to the next eligible
-partition.
+partition. It holds the parent and asks again before the strategy reads, as the step does, so a detach that
+lands while the call waits leaves the table alone too, and the call says so; it sets no `lock_timeout` of
+its own, so it waits a detach in flight out (bounded by your `statement_timeout`).
 
 Unlike the identity refusals, this one is retryable by construction. Nothing advanced, so the next
 tick hands the strategy the very same chunk; correct the strategy (or point `pgpm.set_archive_fn` at
