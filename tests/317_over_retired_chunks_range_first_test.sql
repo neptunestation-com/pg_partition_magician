@@ -15,6 +15,7 @@
 --   * What it returns is unchanged: exactly the attached partitions over a retired chunk's range, each with
 --     exactly those chunks described, compared in the native type (a time bound's offset counts, its text order
 --     does not), from any session's TimeZone and DateStyle.
+--   * The index that read goes through rebuilds where PostgreSQL builds it in parallel (part D).
 --
 -- THE INSTRUMENT. pg_stat_get_xact_tuples_returned/_fetched over pgpm.archive_ledger and its indexes, read before
 -- and after the call inside one function, so in the same transaction (the cumulative counters flush only at
@@ -28,7 +29,7 @@
 create extension if not exists pgtap;
 set client_min_messages = warning;
 set timezone = 'UTC';
-select plan(11);
+select plan(13);
 
 create schema t317;
 
@@ -141,6 +142,22 @@ select is(t317.held('t317.b'),
             || '[2026-01-10 00:00:00, 2026-01-11 00:00:00) recorded for gone_z, whose relation no longer exists, at obj/z / gone_y, gone_z',
           'with an offset-less lo on the partition, the call holds it over the same two chunks');
 
-select * from finish();
+-- D. Every build of archive_ledger_retired_hi_key_idx evaluates pgpm._native_order_key, and PostgreSQL builds a btree
+-- in parallel once the ledger passes min_parallel_table_scan_size (8 MB by default, about 55,000 rows). The function's
+-- EXCEPTION block starts a subtransaction, which parallel mode refuses on PostgreSQL 15 and 16 ('cannot start
+-- subtransactions during a parallel operation'), so a function marked parallel safe made the upgrade's CREATE INDEX
+-- over a long history and a REINDEX fail there (PR #1189's V-01). 17 and later admit the subtransaction, so there the
+-- rebuild passes either way and the declaration is what holds the contract. The threshold is lowered here so this
+-- file's 32,000 rows qualify; bench/over_retired_chunks_range_first.sh witnesses that a build over them goes parallel.
+select is((select proparallel::text from pg_proc where oid = 'pgpm._native_order_key(text)'::regprocedure), 'u',
+          'pgpm._native_order_key is parallel unsafe (its EXCEPTION block starts a subtransaction)');
+set min_parallel_table_scan_size = 0;
+set max_parallel_maintenance_workers = 2;
+set maintenance_work_mem = '256MB';
+select lives_ok('reindex index pgpm.archive_ledger_retired_hi_key_idx',
+                'archive_ledger_retired_hi_key_idx rebuilds over 32,000 ledger rows with parallel maintenance workers allowed');
+reset maintenance_work_mem;
+reset max_parallel_maintenance_workers;
+reset min_parallel_table_scan_size;
 
-delete from pgpm.archive_ledger where parent_table in ('t317.a'::regclass, 't317.b'::regclass);
+select * from finish();

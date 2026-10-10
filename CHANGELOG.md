@@ -10,6 +10,12 @@
   It now reads, through a new partial index `archive_ledger_retired_hi_key_idx` over each retired row's `hi` as
   a number (`pgpm._native_order_key`: the value of an `id` bound, the epoch of a time bound that carries its
   offset), only the retired rows ending above the lowest attached partition's `lo`, plus any whose bound has no
+  such number, and describes only the rows it returns; what it returns is unchanged. The index is built after the
+  upgrade adds `retired_at`, so re-running `install.sql` over an older install builds it, and the function is
+  parallel unsafe (it starts a subtransaction), so the build stays serial over a ledger large enough for a
+  parallel one. Test `tests/317`; guard `bench/over_retired_chunks_range_first.sh` (which also upgrades a v0.6.0
+  install and rebuilds the index where builds go parallel), mutations `over_retired_chunks_reads_all`,
+  `native_order_key_parallel_safe` and `retired_hi_key_idx_before_column`.
   such number, and describes only the rows it returns; what it returns is unchanged. Test `tests/317`; guard
   `bench/over_retired_chunks_range_first.sh`, mutation `over_retired_chunks_reads_all`.
 - **`forget_missing()` logs where every chunk of the table it forgets was archived** (#1164). It deleted every
