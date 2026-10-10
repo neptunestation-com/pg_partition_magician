@@ -1051,6 +1051,7 @@ run_perf() {
     "bench/doc_remedy_and_symptom.sh pgpm_perf243"
     "bench/doc_transmute_no_default.sh pgpm_perf278"
     "bench/release_assets_over_cap.sh pgpm_perf307"
+    "bench/pages_deploy_after_release.sh pgpm_perf339"
     "bench/doc_maintain_does_not_obtain.sh pgpm_perf118"
     "bench/doc_install_stops_on_error.sh pgpm_perf119"
     "bench/classify_claims_tap.sh pgpm_perf79"

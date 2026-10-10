@@ -4847,6 +4847,18 @@ $$;''',
         [('PGPM_DBDEV_CAP=warn scripts/build_dbdev_package.sh pgpm_core/install.sql "release-assets/',
           'scripts/build_dbdev_package.sh pgpm_core/install.sql "release-assets/', 1)],
     ),
+    "pages_deploy_gated_on_release_success": (
+        "bench/pages_deploy_after_release.sh",
+        "Pre-#1169 .github/workflows/pages.yml: the deploy job runs after a Release run only when that run "
+        "concluded success, so a tag cut from a tree whose dbdev package is over database.dev's cap, which "
+        "publishes the GitHub Release and then fails the run at publish-dbdev by design (#1077), leaves the "
+        "install page serving the previous release's bundle and version. One clause, the pre-#1169 gate, put back.",
+        [("    # redeploys the page it already serves. bench/pages_deploy_after_release.sh keeps it so.\n"
+          "    environment:\n",
+          "    # redeploys the page it already serves. bench/pages_deploy_after_release.sh keeps it so.\n"
+          "    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}\n"
+          "    environment:\n", 1)],
+    ),
     "runbook_retain_count_of_intervals": (
         "bench/doc_retain_unit.sh",
         "Pre-#676 docs/runbook.md: 'Storage is not dropping despite a retention policy' calls an id grid's "
@@ -9278,6 +9290,7 @@ MUTATION_SRC = {
     "onboarding_ts_versions": "ONBOARDING.md",
     "onboarding_unread_knob_first": "ONBOARDING.md",
     "release_dbdev_build_strict": ".github/workflows/release.yml",
+    "pages_deploy_gated_on_release_success": ".github/workflows/pages.yml",
     "runbook_retain_count_of_intervals": "docs/runbook.md",
     "reference_archive_identity_forget_missing": "docs/reference.md",
     "reference_fks_suspended_dead_swap": "docs/reference.md",

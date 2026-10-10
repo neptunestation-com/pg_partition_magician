@@ -60,7 +60,15 @@ git push origin v0.2.0
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`, which validates the tag shape, runs the
 PG 15-18 matrix and the TimescaleDB track, builds the three assets (dashboard bundle, dbdev package,
-source tarball), publishes the GitHub Release, and then publishes to database.dev.
+source tarball), publishes the GitHub Release, and then publishes to database.dev. When the run
+completes, whatever its conclusion, `.github/workflows/pages.yml` redeploys the install page with the
+latest published release's bundle and version.
+
+While the dbdev package is over database.dev's cap (see Channels below), the Release run ends red by
+design: the GitHub Release is published, the install page is redeployed with it, and only the
+`Publish to database.dev` job fails, with the package size in its log. Nothing else is left to do by
+hand: that version is simply not on database.dev, and the next release cut under the cap publishes
+there again (`bench/pages_deploy_after_release.sh` keeps the redeploy independent of that job, #1169).
 
 Two traps in that pipeline:
 
