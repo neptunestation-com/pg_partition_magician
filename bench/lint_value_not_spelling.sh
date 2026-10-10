@@ -14,6 +14,11 @@
 #   * check_quoted_splices.py read an assignment only when it began its own line, so `if p then v_cols :=
 #     quote_ident(c); end if;` and a DECLARE initialiser `v_cols text := quote_ident(c)` were never read
 #     (#1031, A1031-3 and F8-01).
+# Review pass 11 (#1179, F8-04) found check_quoted_splices.py still recognising each piece by its exact
+# lower-case spelling: a body assignment only as `:=` (PL/pgSQL takes `=`), a quoting call only as
+# `quote_ident(` or `format(` (not `quote_ident (`, `QUOTE_IDENT(`, `format (`), a local only when its type
+# contained the word `text` (not `varchar`, `character varying(n)`, `pg_catalog.text`), and a SELECT INTO only
+# with the list before INTO (not `select into v list`).
 # Each script's --selftest carries these shapes too, but a selftest lives in the file it tests and goes
 # wherever that file goes; these fixtures are the guard's own, so a mutant of either script is judged by
 # something it did not write.
@@ -28,6 +33,11 @@
 #   quoted_splices_type_rest_of_decl     -- only `:=` ends a declaration's type again (#1096)
 #   quoted_splices_assign_line_anchored  -- a body assignment is read only at the start of a line (F8-01)
 #   quoted_splices_initialiser_unread    -- a DECLARE initialiser is not an assignment (A1031-3)
+#   quoted_splices_assign_colon_eq_only  -- a body assignment is only `:=`, never `=` (#1179)
+#   quoted_splices_call_spelled          -- a quoting call is only its exact `name(` spelling (#1179)
+#   quoted_splices_type_spelled          -- a declared type is its text as written, not the type (#1179)
+#   quoted_splices_type_word_text        -- only `text` holds a quoted list, not varchar (#1179)
+#   quoted_splices_into_list_first_only  -- a SELECT's INTO is read only after its list (#1179)
 #
 # Usage: lint_value_not_spelling.sh <container> <db> [checker.py]
 # The container and database are accepted for the shape bench/discriminate.sh calls every guard with and
@@ -209,7 +219,31 @@ for decl, stmt, var, why, what in [
         ("v_cols text", "for v_n in 1..2 loop v_cols := quote_ident('c'); end loop;", "v_cols", C1,
          "check 1, after loop on one line"),
         ("v_cols text", "null; v_cols := quote_ident('c');", "v_cols", C1,
-         "check 1, second statement on a line")]:
+         "check 1, second statement on a line"),
+        # #1179 (F8-04): the same value in each other spelling PL/pgSQL accepts
+        ("v_cols text", "v_cols = quote_ident('c');", "v_cols", C1, "check 1, a body `=` assignment"),
+        ("v_cols_q text", "v_cols_q = 'nothing quoted here';", "v_cols_q", C2, "check 2, a body `=` assignment"),
+        ("v_cols text", "v_cols := quote_ident ('c');", "v_cols", C1, "check 1, `quote_ident (` with a space"),
+        ("v_cols text", "v_cols := Quote_Ident('c');", "v_cols", C1, "check 1, `Quote_Ident(` mixed case"),
+        ("v_cols text", "v_cols := pg_catalog . quote_ident('c');", "v_cols", C1,
+         "check 1, `pg_catalog . quote_ident(`"),
+        ("v_cols text", "v_cols := format ('%1$I', 'c');", "v_cols", C1, "check 1, `format (` with %1$I"),
+        ("v_cols text", "v_cols := FORMAT('%I', 'c');", "v_cols", C1, "check 1, `FORMAT(` upper case"),
+        ("v_cols varchar", QUOTE, "v_cols", C1, "check 1, declared `varchar`"),
+        ("v_cols character varying(500)", QUOTE, "v_cols", C1, "check 1, declared `character varying(500)`"),
+        ("v_cols pg_catalog.text", QUOTE, "v_cols", C1, "check 1, declared `pg_catalog.text`"),
+        ('v_cols "text"', QUOTE, "v_cols", C1, 'check 1, declared `"text"`'),
+        ("v_cols_q pg_catalog.text", LIE, "v_cols_q", C2, "check 2, declared `pg_catalog.text`"),
+        ("V_Cols text", QUOTE, "v_cols", C1, "check 1, declared `V_Cols`, assigned as `v_cols`"),
+        ("v_cols text", "select into v_cols quote_ident('c');", "v_cols", C1, "check 1, `select into v list`"),
+        ("v_cols text", "select into strict v_cols quote_ident(relname) from pg_class limit 1;", "v_cols", C1,
+         "check 1, `select into strict v list from`"),
+        ("v_cols_q text", "select into v_cols_q 'nothing quoted here';", "v_cols_q", C2,
+         "check 2, `select into v list`"),
+        ("v_cols text", "select quote_ident(relname) from pg_class limit 1 into v_cols;", "v_cols", C1,
+         "check 1, `select list from t into v`"),
+        ("v_cols text", "for v_n in select 1 loop select into v_cols quote_ident('c'); end loop;", "v_cols", C1,
+         "check 1, `select into v list` after a FOR's own query")]:
     hit, v, q = flags(decl, stmt, var, why)
     report(hit, f"_q: {what}", "flagged" if hit else f"not flagged (violations {v}, quoting {q})")
 # A named-notation argument is not an assignment: the unmarked local named as the argument is not judged,
@@ -218,6 +252,20 @@ v, q = cqs.check_text("named.sql", BODY.format(
     decl="v_cols_q text; v_arg text", var="v_cols_q",
     stmt="if p_on then perform g(v_arg := quote_ident('c')); end if; v_cols_q := quote_ident('d');"))
 report(not v and q == 1, "_q: a named-notation argument is not read as an assignment",
+       f"violations {v}, quoting {q}")
+# Reading INTO wherever it stands must still pair each target with its own item: an INTO-first SELECT
+# assigning a marked list and an unmarked raw value judges each on its own (no violation, one quoting)
+v, q = cqs.check_text("into_pair.sql", BODY.format(
+    decl="v_cols_q text; v_raw text", var="v_cols_q",
+    stmt="select into v_cols_q, v_raw quote_ident('c'), 'raw' from pg_class;"))
+report(not v and q == 1, "_q: an INTO-first SELECT pairs each target with its own item",
+       f"violations {v}, quoting {q}")
+# A `name` local is the raw identifier's type and is not judged, so a quoting expression on the way to an
+# OID (the shape pgpm._delta_seq is called in) is not read as a quoted value
+v, q = cqs.check_text("name.sql", BODY.format(
+    decl="v_seq name; v_cols_q text", var="v_cols_q",
+    stmt="v_seq := pgpm._delta_seq(format('%I.%I', v_nsp, 'd')::regclass); v_cols_q := quote_ident(v_seq);"))
+report(not v and q == 1, "_q: a `name` local holding a raw name is not judged",
        f"violations {v}, quoting {q}")
 
 sys.exit(fail)

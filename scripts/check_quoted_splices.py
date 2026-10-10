@@ -33,14 +33,21 @@ predicate, not an identifier list, and its provenance is already legible in the 
 built from. Widening this to "any pre-built SQL fragment" would put the suffix on nearly every local
 in the file, at which point it marks nothing.
 
-Only `text` locals are considered, which is why the declare blocks are parsed at all: `v_child :=
-format('%I.%I', v_nsp, p_child)::regclass` quotes identifiers on its way to an OID, and an OID is not
-a fragment anyone can splice wrong. Every DECLARE section of a body is read, a nested block's as well
-as the top level's (#1004: a quoted list declared in a nested block was never typed, so never checked).
+Only string locals (`text`, `varchar`, `bpchar`: TEXT_TYPES) are considered, which is why the declare
+blocks are parsed at all: `v_child := format('%I.%I', v_nsp, p_child)::regclass` quotes identifiers on
+its way to an OID, and an OID is not a fragment anyone can splice wrong. Every DECLARE section of a body
+is read, a nested block's as well as the top level's (#1004: a quoted list declared in a nested block was
+never typed, so never checked).
 A local's type is its declared type with CONSTANT, COLLATE, NOT NULL and the initialiser set aside (#1096:
 `text default ''` was typed as that whole text, so never judged), and an initialiser (`:=`, `=` or DEFAULT)
 is an assignment like any other, for both checks. A body assignment is read wherever a statement starts,
 not only at the start of a line (#1031: `if p then v := quote_ident(x); end if;` was never read).
+
+Every one of these is read by VALUE, not by spelling (#1179): a body assignment is `:=` or `=`, a SELECT's
+INTO is read wherever PL/pgSQL takes it (before the select list, after it, at the end, after RETURNING),
+a call is a call however it is cased, spaced, quoted or schema-qualified (`QUOTE_IDENT (`, `pg_catalog.
+format(`), a name is the name PL/pgSQL resolves (`V_COLS` is `v_cols`), and a type is the type it names
+(`pg_catalog.text`, `"text"`, `varchar(200)`, `character varying`).
 
   ./scripts/check_quoted_splices.py            # check the module
   ./scripts/check_quoted_splices.py --selftest # prove the checks fail when their defect is present
@@ -72,8 +79,57 @@ MIN_QUOTED_ASSIGNMENTS = 12
 
 # `%I`, and the positional form `%3$I` that this module uses wherever an identifier is repeated.
 # Both are identifier quoting; missing the positional one would be a silent blind spot rather than
-# a loud failure, which is the kind of gap this script exists to close.
-SPEC_I = re.compile(r"%(?:\d+\$)?I")
+# a loud failure, which is the kind of gap this script exists to close. format() also takes a `-` flag
+# and a width (`%-10I`, `%*I`, `%1$*2$I`) before the type, and the conversion is still `I` (#1179).
+SPEC_I = re.compile(r"%(?:\d+\$)?-?(?:\d+|\*(?:\d+\$)?)?I")
+
+# A PL/pgSQL identifier as it can be written: unquoted (any case, folded to lower case) or double-quoted
+# (kept exactly, `""` an escaped quote). canonical() turns either spelling into the name PL/pgSQL resolves,
+# so `V_COLS`, `v_cols` and `"v_cols"` are one local (#1179: the checks matched names, calls and types by
+# their exact lower-case spelling).
+IDENT = r'(?:[a-z_][a-z0-9_$]*|"(?:[^"]|"")+")'
+
+
+def canonical(tok: str) -> str:
+    tok = tok.strip()
+    if tok.startswith('"') and tok.endswith('"') and len(tok) >= 2:
+        return tok[1:-1].replace('""', '"')
+    return tok.lower()
+
+
+def call_pattern(name: str):
+    """A call of the (possibly schema-qualified) function `name`, however it is spelled: any case
+    unquoted, double-quoted exactly, with whitespace before the `(` or around a qualifying `.`, and
+    qualified by `pg_catalog.` or not (the qualifier is simply not part of what is matched)."""
+    parts = [r'(?:(?i:%s)|"%s")' % (re.escape(p), re.escape(p)) for p in name.split(".")]
+    return re.compile(r'(?<![\w$"])' + r"\s*\.\s*".join(parts) + r"\s*\(")
+
+
+QUOTE_IDENT_CALL = call_pattern("quote_ident")
+FORMAT_CALL = call_pattern("format")
+HELPER_CALLS = [call_pattern(h) for h in QUOTING_HELPERS]
+
+# The types a quoted list can be held in and spliced from with `%s`, however they are spelled: `text`,
+# `pg_catalog.text`, `"text"`, `varchar(200)`, `character varying`, `bpchar` (#1179: only the word `text`
+# was typed). Two boundaries, both deliberate. An OID type (`regclass`) is not one: its value is not a
+# fragment anyone can splice wrong. Nor is `name`: it is the RAW identifier's type throughout this module
+# (`v_nsp name` beside every `%I`), its 63 bytes cannot hold a column list, and the expressions that fill
+# one quote on the way to an OID (`pgpm._delta_seq(format('%I.%I', ...)::regclass)` returns a raw name),
+# which judging the expression's text would misread as a quoted value.
+TEXT_TYPES = {"text", "varchar", "character varying", "char", "character", "bpchar"}
+
+
+def type_key(typ: str) -> str:
+    """A declared type reduced to the type it names: typmods dropped, a `pg_catalog.` qualifier dropped,
+    each part canonical() (so `"text"` and `TEXT` are text) and whitespace collapsed."""
+    t = re.sub(r"\([^)]*\)", " ", typ)
+    parts = [canonical(p) if p.strip().startswith('"') else " ".join(p.lower().split())
+             for p in re.split(r"\s*\.\s*", t.strip())]
+    if len(parts) == 2 and parts[0] == "pg_catalog":
+        parts = parts[1:]
+    if re.fullmatch(r'\s*(?:pg_catalog\s*\.\s*)?"char"\s*', t):
+        return '"char"'          # the one-byte "char" is a different type from the unquoted char
+    return ".".join(parts)
 
 
 def strip_noise(body: str) -> str:
@@ -85,13 +141,26 @@ def strip_noise(body: str) -> str:
     the signal: `format('d.%I = s.%I', ...)` quotes identifiers exactly as `quote_ident` does.
 
     Character-for-character length-preserving, so an offset into the result is an offset into the
-    original and reported line numbers are real.
+    original and reported line numbers are real. `%%` inside a literal is format()'s escaped percent, so
+    `'%%I'` is the text `%I`, not a conversion, and is blanked (#1179). A double-quoted identifier is
+    copied as it stands, so a `'` inside one does not open a literal.
     """
     out = []
     i, n = 0, len(body)
     while i < n:
         c = body[i]
-        if c == "'":
+        if c == '"':
+            j = i + 1
+            while j < n:
+                if body[j] == '"':
+                    if j + 1 < n and body[j + 1] == '"':
+                        j += 2
+                        continue
+                    break
+                j += 1
+            out.append(body[i:j + 1])
+            i = j + 1
+        elif c == "'":
             out.append("'")
             i += 1
             while i < n:
@@ -103,6 +172,10 @@ def strip_noise(body: str) -> str:
                     out.append("'")
                     i += 1
                     break
+                if body.startswith("%%", i):
+                    out.append("  ")
+                    i += 2
+                    continue
                 spec = SPEC_I.match(body, i)
                 if spec:
                     out.append(spec.group(0))
@@ -157,6 +230,8 @@ def bodies(text: str):
 
 # Where a declaration's initialiser starts: PL/pgSQL takes `:=`, `=` and DEFAULT alike (#1096).
 DECL_INIT = re.compile(r"(?is):=|=|\bdefault\b")
+# A declaration's name and its type, CONSTANT set aside: `name [constant] type`.
+DECL_HEAD = re.compile(r"(?is)\s*(?P<name>" + IDENT + r")\s+(?:constant\s+)?(?P<type>\S.*?)\s*\Z")
 
 
 def declarations(body: str):
@@ -180,13 +255,11 @@ def declarations(body: str):
             start, pos = pos, pos + len(decl) + 1
             init = DECL_INIT.search(decl)
             head = decl[:init.start()] if init else decl
-            head = re.sub(r"(?is)\bcollate\s+\S+|\bnot\s+null\b", " ", head)
-            parts = head.split()
-            if len(parts) >= 2 and parts[1].lower() == "constant":
-                del parts[1]
-            if len(parts) >= 2 and re.fullmatch(r"[a-z_][a-z0-9_]*", parts[0]):
+            head = re.sub(r"(?is)\bcollate\s+(?:\"[^\"]*\"|\S)+|\bnot\s+null\b", " ", head)
+            d = DECL_HEAD.match(head)
+            if d:
                 expr = decl[init.end():].strip() if init else None
-                yield (parts[0], " ".join(parts[1:]).lower(), expr or None,
+                yield (canonical(d.group("name")), type_key(d.group("type")), expr or None,
                        start + (init.end() if init else 0))
 
 
@@ -202,36 +275,96 @@ def declared_types(body: str) -> dict:
 
 
 def quotes_identifiers(expr: str) -> bool:
-    """The expression itself applies identifier quoting (CHECK 1's trigger)."""
-    if "quote_ident(" in expr:
+    """The expression itself applies identifier quoting (CHECK 1's trigger): it calls quote_ident, or
+    formats with a `%I`, or calls a QUOTING_HELPERS function, in any spelling of the call (#1179)."""
+    if QUOTE_IDENT_CALL.search(expr):
         return True
-    if "format(" in expr and SPEC_I.search(expr):
+    if FORMAT_CALL.search(expr) and SPEC_I.search(expr):
         return True
-    return any(h + "(" in expr for h in QUOTING_HELPERS)
+    return any(h.search(expr) for h in HELPER_CALLS)
+
+
+# A `_q` local named in an expression, in any spelling of its name.
+Q_NAME = re.compile(r'(?i)(?<![\w$"])[a-z_][a-z0-9_$]*_q(?![\w$])|"(?:[^"]|"")*_q"')
 
 
 def carries_quoting(expr: str) -> bool:
     """The expression's value is quoted, whether it did the quoting or inherited it (CHECK 2)."""
-    return quotes_identifiers(expr) or re.search(r"\b[a-z_][a-z0-9_]*_q\b", expr) is not None
+    return quotes_identifiers(expr) or Q_NAME.search(expr) is not None
 
 
-# A plpgsql SELECT ... INTO, anywhere in a body, not crossing a statement boundary. Matched by
-# regex rather than by splitting the body into statements first, because a chunk split on `;`
-# carries whatever block keyword preceded it (`begin`, `then`, `loop`), and requiring a chunk to
-# START with `select` silently dropped the first statement of every function.
-SELECT_INTO = re.compile(
-    r"(?is)\bselect\b(?P<list>[^;]*?)\binto\b\s+(?:strict\s+)?"
-    r"(?P<targets>[a-z_][a-z0-9_]*(?:\s*,\s*[a-z_][a-z0-9_]*)*)")
+# The INTO clause of a plpgsql statement: `into [strict] target [, target ...]`. PL/pgSQL takes it
+# almost anywhere in a SELECT (`select list into v from`, `select into v list from`, `select list from t
+# into v`) and after RETURNING (#1179: only the list-first form was read).
+INTO = re.compile(r"(?is)(?<![\w$])into\s+(?:strict\s+)?"
+                  r"(?P<targets>" + IDENT + r"(?:\s*,\s*" + IDENT + r")*)")
+# Where a top-level select list ends.
+LIST_END = re.compile(r"(?is)(?<![\w$])(?:from|where|group|having|window|order|limit|offset|union|"
+                      r"intersect|except|fetch|for)(?![\w$])")
 
-# A plain assignment: `name :=` where a STATEMENT starts, which is the start of the body, after a `;`,
-# or after the block keyword a statement can follow (`begin`, `then`, `else`, `loop`). Anchored there
-# rather than at the start of a line (#1031, A1031-3 and F8-01): `if p then v := quote_ident(x); end
-# if;` is a statement that does not begin its own line, and the line anchor never read it. `:=` also
-# appears in named-notation arguments (`f(p_x := ...)`), after a `(` or a `,`, which is no statement
-# start, and in DECLARE initialisers, which declarations() reads with the type between.
+
+def depth0(text: str):
+    """The set of offsets of `text` that are outside every parenthesis."""
+    out, depth = set(), 0
+    for i, c in enumerate(text):
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+        if depth == 0:
+            out.add(i)
+    return out
+
+
+def select_into(clean: str):
+    """Yield (target, expression, offset) for the INTO clause of every statement, in any of the places
+    PL/pgSQL takes it: the value assigned is the list of the last top-level RETURNING or SELECT before the
+    INTO (the INTO's own: the text before it can carry a block head with a query of its own, `for r in
+    select ... loop select ... into v`), read with the INTO clause cut out. Statements are split on `;`,
+    which strip_noise has left only between statements; a statement with neither a top-level SELECT nor
+    a RETURNING before its INTO (EXECUTE, FETCH, INSERT INTO's own INTO) assigns nothing this check reads.
+    """
+    for st in re.finditer(r"[^;]+", clean):
+        stmt = st.group(0)
+        top = depth0(stmt)
+        for m in INTO.finditer(stmt):
+            if m.start() not in top:
+                continue
+            before = re.search(r"(?is)([a-z_]+)\s*\Z", stmt[:m.start()])
+            if before and before.group(1).lower() in ("insert", "merge"):
+                continue
+            rest = stmt[:m.start()] + " " * (m.end() - m.start()) + stmt[m.end():]
+            rtop = depth0(rest)
+            heads = [k for k in re.finditer(
+                r"(?is)(?<![\w$])(?:(?P<ret>returning)|select)(?![\w$])\s*(?:(?:distinct|all)(?![\w$]))?", rest)
+                if k.start() in rtop and k.start() < m.start()]
+            if not heads:
+                break
+            head = heads[-1]
+            lst = rest[head.end():]
+            if not head.group("ret"):
+                ends = [k.start() for k in LIST_END.finditer(lst) if head.end() + k.start() in rtop]
+                if ends:
+                    lst = lst[:ends[0]]
+            targets = [canonical(t) for t in split_top_level(m.group("targets"), ",") if t.strip()]
+            exprs = [e.strip() for e in split_top_level(lst, ",")]
+            if len(exprs) != len(targets):
+                exprs = [lst] * len(targets)   # cannot pair them; judge each on the whole list
+            for target, expr in zip(targets, exprs):
+                yield target, expr, st.start() + m.start()
+            break
+
+
+# A plain assignment: `name :=` or `name =` (PL/pgSQL takes both, #1179) where a STATEMENT starts, which
+# is the start of the body, after a `;`, or after the block keyword a statement can follow (`begin`,
+# `then`, `else`, `loop`). Anchored there rather than at the start of a line (#1031, A1031-3 and F8-01):
+# `if p then v := quote_ident(x); end if;` is a statement that does not begin its own line, and the line
+# anchor never read it. `:=` also appears in named-notation arguments (`f(p_x := ...)`), after a `(` or a
+# `,`, which is no statement start, and in DECLARE initialisers, which declarations() reads with the type
+# between.
 ASSIGN = re.compile(
     r"(?is)(?:\A|(?<=;)|(?<=\bbegin)|(?<=\bthen)|(?<=\belse)|(?<=\bloop))\s*"
-    r"\b(?P<target>[a-z_][a-z0-9_]*)\s*:=\s*(?P<expr>[^;]+);")
+    r"(?<![\w$])(?P<target>" + IDENT + r")\s*(?::=|=)\s*(?P<expr>[^;]+);")
 
 
 def assignments(clean: str):
@@ -242,16 +375,10 @@ def assignments(clean: str):
     nothing. That is the right answer -- a %I inside a dynamic statement quotes an identifier in
     THAT statement, never in the value coming back through INTO.
     """
-    for m in SELECT_INTO.finditer(clean):
-        targets = [t.strip() for t in m.group("targets").split(",") if t.strip()]
-        exprs = [e.strip() for e in split_top_level(m.group("list"), ",")]
-        if len(exprs) != len(targets):
-            exprs = [m.group("list")] * len(targets)   # cannot pair them; judge each on the whole list
-        for target, expr in zip(targets, exprs):
-            yield target, expr, m.start()
+    yield from select_into(clean)
 
     for m in ASSIGN.finditer(clean):
-        yield m.group("target"), m.group("expr"), m.start("target")
+        yield canonical(m.group("target")), m.group("expr"), m.start("target")
 
     for name, _, expr, pos in declarations(clean):
         if expr is not None:
@@ -269,7 +396,7 @@ def check_text(path_label: str, text: str):
         clean = strip_noise(body)
         types = declared_types(clean)
         for target, expr, pos in assignments(clean):
-            if "text" not in types.get(target, ()):
+            if not types.get(target, set()) & TEXT_TYPES:
                 continue
             line = line_of(text, offset + pos)
             marked = target.endswith("_q")
@@ -345,13 +472,32 @@ SHAPES = {
     "quoted in a DEFAULT initialiser": ("v_cols text default format('%I', 'c')", "null;"),
     # #1031 (F8-01): a statement that does not begin its own line
     "assigned in a one-line if": ("v_cols text", "if p_on then v_cols := quote_ident('c'); end if;"),
+    # #1179 (F8-04): the same value in every other spelling PL/pgSQL accepts
+    "assigned with `=`": ("v_cols text", "v_cols = quote_ident('c');"),
+    "quoted by `quote_ident (`": ("v_cols text", "v_cols := quote_ident ('c');"),
+    "quoted by `format (` with %I": ("v_cols text", "v_cols := format ('%I', 'c');"),
+    "quoted by `QUOTE_IDENT(`": ("v_cols text", "v_cols := QUOTE_IDENT('c');"),
+    "quoted by `pg_catalog.quote_ident(`": ("v_cols text", "v_cols := pg_catalog.quote_ident('c');"),
+    "quoted by `FORMAT(` with a width `%-20I`": ("v_cols text", "v_cols := FORMAT('%-20I', 'c');"),
+    "declared `varchar`": ("v_cols varchar", "v_cols := quote_ident('c');"),
+    "declared `character varying(200)`": ("v_cols character varying(200)", "v_cols := quote_ident('c');"),
+    "declared `pg_catalog.text`": ("v_cols pg_catalog.text", "v_cols := quote_ident('c');"),
+    "declared `TEXT`": ("v_cols TEXT", "v_cols := quote_ident('c');"),
+    "declared and assigned as `V_COLS`": ("V_COLS text", "V_COLS := quote_ident('c');"),
+    "assigned by `select into v list`": ("v_cols text", "select into v_cols quote_ident('c');"),
+    "assigned by `select list from t into v`": (
+        "v_cols text", "select string_agg(quote_ident(attname), ', ') from pg_attribute into v_cols;"),
+    "assigned by `returning list into v`": (
+        "v_cols text", "update pg_temp.t set k = k returning quote_ident('c') into v_cols;"),
+    "assigned by a SELECT INTO after a FOR loop's own query": (
+        "v_cols text", "for v_n in select 1 loop select quote_ident('c') into v_cols; end loop;"),
 }
 
 
 def shape_fixture(name: str, marked: bool) -> str:
     decl, stmt = SHAPES[name]
     src = SHAPE_BODY.format(decl=decl, stmt=stmt)
-    return src.replace("v_cols", "v_cols_q") if marked else src
+    return re.sub(r"(?i)\bv_cols\b", lambda m: m.group(0) + "_q", src) if marked else src
 
 
 def selftest() -> int:
@@ -461,6 +607,20 @@ def selftest() -> int:
         failures += 1
     else:
         print("SELFTEST PASS  a named-notation argument is not read as an assignment")
+
+    # #1179: `%%I` is format()'s escaped percent before an `I`, the text `%I`, not a conversion; and a SELECT
+    # whose INTO comes first is read with the list it assigns, not the whole statement: the marked list beside
+    # an unmarked local holding an unquoted value must leave the unmarked one alone
+    v, q = check_text("pct.sql", SHAPE_BODY.format(decl="v_cols text", stmt="v_cols := format('%%I', 'c');"))
+    v2, q2 = check_text("into_pair.sql", SHAPE_BODY.format(
+        decl="v_cols_q text; v_plain text",
+        stmt="select into v_cols_q, v_plain quote_ident('c'), 'raw' from pg_class;").replace("v_cols,", "v_cols_q,"))
+    if v or q != 0 or v2 or q2 != 1:
+        print(f"SELFTEST FAIL  `%%I` should quote nothing (saw {q}, {v}), and an INTO-first SELECT should pair each "
+              f"target with its own item (saw {q2} quoting assignment(s) and {v2})")
+        failures += 1
+    else:
+        print("SELFTEST PASS  `%%I` quotes nothing, and an INTO-first SELECT pairs each target with its own item")
 
     print()
     if failures:

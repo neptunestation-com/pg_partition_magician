@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **The `_q` lint reads a quoted value by value, not by its spelling** (#1179). `scripts/check_quoted_splices.py`
+  matched each piece by its exact lower-case spelling, so the #409 shape passed with zero violations when the
+  list was assigned with PL/pgSQL's `=`, quoted by `quote_ident (`, `QUOTE_IDENT(` or `format (`, held in a
+  `varchar` or `pg_catalog.text` local, or assigned by `select into v quote_ident(...)`. A body assignment is
+  now `:=` or `=`; a call is matched in any case, with whitespace before its `(` and with or without a schema;
+  `%I` is read with a width or `-` flag and `%%I` is not a conversion; a name is the one PL/pgSQL resolves
+  (`V_COLS` is `v_cols`, `"v_cols"` too); a type is the one it names (`text`, `pg_catalog.text`, `varchar(n)`,
+  `character varying`, `bpchar`; `name` stays out, the raw identifier's type here); and a SELECT's INTO is read
+  wherever PL/pgSQL takes it, paired with the list of its own SELECT or RETURNING. The three install files
+  judge the same 80 quoting assignments, none of them a violation. Guard `bench/lint_value_not_spelling.sh`,
+  mutations `quoted_splices_assign_colon_eq_only`, `quoted_splices_call_spelled`,
+  `quoted_splices_type_spelled`, `quoted_splices_type_word_text` and `quoted_splices_into_list_first_only`.
+
 - **`obtain_backoff_headroom.sh`'s back-off premise prints as a premise** (#1175). The check that the back-off
   is still in the future before the low-headroom tick (header item 4, there so assertion 5 cannot pass because
   30 s elapsed) printed without `LIVENESS:`, so a run whose back-off lapsed and which failed only that premise
