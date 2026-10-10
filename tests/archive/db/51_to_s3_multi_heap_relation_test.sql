@@ -55,7 +55,11 @@
 -- first, naming it (part R pins that it is refused, and that nothing lands). A domain over an enum is refused by
 -- name too (part S): its column has no `>` against the base enum, so the page query cannot compare it, and the type
 -- rule is probed as that very comparison rather than on the base type alone (V-01's sibling P1-03 of the sixth round).
-select plan(91);
+-- And an ordering is not enough: the cursor's text must read back as the value it came from. A regproc of an
+-- overloaded function renders as its bare name, which reads back as "more than one function named", so an export
+-- of it failed on every retry, unnamed (V-01 of the seventh round). The types are now an allowlist of those the page
+-- query round-trips; a regproc is refused by name (part T), and so is every type outside the list.
+select plan(95);
 
 create schema t51;
 create table t51.evt (id bigint primary key, payload text not null);
@@ -153,6 +157,11 @@ create materialized view t51.mv as select 1::bigint as id, 'w'::text as payload;
 create domain t51.dlvl as t51.lvl;
 create table t51.denm (id t51.dlvl, payload text);
 insert into t51.denm values ('high', 'h'), ('low', 'l');
+-- T: a regproc column whose values are three overloads of abs, all of which render as pg_catalog.abs
+create table t51.rp (id regproc, payload text);
+insert into t51.rp values ('pg_catalog.abs(int4)'::regprocedure::regproc, 'a'),
+                          ('pg_catalog.abs(int8)'::regprocedure::regproc, 'b'),
+                          ('pg_catalog.abs(float8)'::regprocedure::regproc, 'c');
 -- G: a relation with no column named id, the control column of t51.evt
 create table t51.nocol (x int, payload text);
 insert into t51.nocol values (1, 'q');
@@ -187,9 +196,9 @@ end $$;
 -- the refusal archive.to_s3 raises for a relation whose id has a type it cannot page
 create function t51.unpageable(p_rel text, p_type text) returns text language sql as $$
   select 'pg_partition_magician: archive.to_s3 pages ' || p_rel || ' by its column id, of type ' || p_type
-      || ', which it cannot page by: the column must be a scalar type with a btree ordering (a base or enum type, '
-      || 'or a domain over a base type), not an array, composite, range, multirange or a domain over an enum; '
-      || 'refusing to export it' $$;
+      || ', which it cannot page by: the column must be smallint, integer, bigint, numeric, real, double precision, '
+      || 'text, varchar, char, bit, bit varying, date, timestamp, timestamptz, time, timetz, interval, uuid, bytea, '
+      || 'boolean, an enum, or a domain over one of those (not over an enum); refusing to export it' $$;
 -- the payloads an NDJSON object holds, one per line, sorted; null when there is no object at the key
 create function t51.payloads(p_key text) returns text[] language plpgsql as $$
 declare v http_response := t51.req('GET', p_key); r text[];
@@ -426,6 +435,15 @@ select is((select count(*)::int from t51.denm where id::t51.lvl > 'low'::t51.lvl
 select is(t51.try_export('denm'), t51.unpageable('t51.denm', 't51.dlvl'),
   'archive.to_s3 refuses a domain over an enum by name, before anything is read');
 select is((t51.req('GET', :'p' || 't51.denm.ndjson')).status, 404, 'and no object lands at its key');
+
+-- 92-95. T: a regproc, ordered (by oid) but not round-tripping through its text.
+select is((select count(distinct id::oid)::text || '/' || string_agg(distinct id::text, ',') from t51.rp),
+  '3/pg_catalog.abs', 'LIVENESS: three distinct regproc values, every one of which renders as the same text pg_catalog.abs');
+select throws_like($$select 'pg_catalog.abs'::regproc$$, '%more than one function named%',
+  'LIVENESS: that text does not read back as a regproc, so a cursor of it could not cross to the next page');
+select is(t51.try_export('rp'), t51.unpageable('t51.rp', 'regproc'),
+  'archive.to_s3 refuses a regproc control column by name, before anything is read');
+select is((t51.req('GET', :'p' || 't51.rp.ndjson')).status, 404, 'and no object lands at its key');
 reset statement_timeout;
 
 select * from finish();

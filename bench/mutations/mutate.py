@@ -12112,6 +12112,21 @@ MUTATIONS["to_s3_cursor_probe_base_only"] = (
 )
 MUTATION_SRC["to_s3_cursor_probe_base_only"] = "pgpm_archive/install.sql"
 
+# PR #1213's seventh verification round (V-01): archive.to_s3 pages only an allowlist of types whose text it
+# round-trips. Caught by tests/archive/db/51 part T.
+MUTATIONS["to_s3_cursor_type_allowlist_widened"] = (
+    "bench/archive_to_s3_multi_heap.sh",
+    "archive.to_s3 admits any base or enum type whose comparison resolves, not an allowlist of the types whose text "
+    "reads back. A regproc of an overloaded function renders as its bare name and reads back as 'more than one "
+    "function named', so the second page's cursor cast raises and the export fails on every retry, unnamed. One "
+    "clause, the allowlist. tests/archive/db/51 part T catches it (not refused by name).",
+    [("     or v_ctl_typ = any (array['int2', 'int4', 'int8', 'numeric', 'float4', 'float8', 'text', 'varchar', 'bpchar',\n"
+      "                               'bit', 'varbit', 'date', 'timestamp', 'timestamptz', 'time', 'timetz', 'interval',\n"
+      "                               'uuid', 'bytea', 'bool']::regtype[]::oid[]) then\n",
+      "     or v_ctl_kind = 'b' then\n", 1)],
+)
+MUTATION_SRC["to_s3_cursor_type_allowlist_widened"] = "pgpm_archive/install.sql"
+
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

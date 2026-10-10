@@ -18,7 +18,8 @@
 # the relation's own type, with its typmod (parts H to J), and a relation with no such column is refused by
 # name (part G). The column must be a scalar with a btree ordering: a composite, an array and a type with no
 # ordering are refused by name (parts K to M), a domain pages as its base type (part N), an enum pages (part O),
-# and a domain over an enum is refused (part S). The relation must be a table or a tree of tables: a view and a
+# a domain over an enum is refused (part S), and the types are an allowlist of those whose cursor text reads
+# back, so a regproc is refused (part T). The relation must be a table or a tree of tables: a view and a
 # tree with a foreign leaf are refused by name (parts P and Q), a materialized view when it is locked (part R).
 #
 # The mutations it is required to fail against (bench/mutations/mutate.py):
@@ -45,6 +46,8 @@
 #                                   repeat, is not refused by name (parts P and Q)
 #   to_s3_cursor_probe_base_only -- the type probe compares the base type with itself, so a domain over an
 #                                   enum passes it and dies on an unnamed operator error (part S)
+#   to_s3_cursor_type_allowlist_widened -- any base type whose comparison resolves is admitted, so a regproc,
+#                                   whose cursor text does not read back, fails unnamed (part T)
 #
 # Usage: archive_to_s3_multi_heap.sh <container> <db> [archive install.sql]
 # Needs the archive image (pgsql-http + pgtap + pg_prove) AND MinIO on the same network: the file PUTs

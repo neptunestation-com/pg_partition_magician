@@ -2664,12 +2664,15 @@ view, or a tree with a foreign table in it, is refused before anything is read o
 table, or a partitioned table or inheritance tree whose every member is a table, and <relation> reaches <member>
 (a foreign table), which it cannot page by row position`. (A foreign table returns whatever row position its
 server sends; `postgres_fdw` sends the remote one, which is not unique when the remote table is itself partitioned.)
-A materialized view is refused earlier, when the call locks it. The rule for the column: it must be a scalar type
-with a btree ordering that the page query can compare, that is a base or enum type that is not an array, or a
-domain over a base type. A domain is paged as its base type, so a domain constraint added `NOT VALID` does not stop
-the export of rows it does not admit. Anything else (an array, a composite, a range or multirange, a type with no
-ordering such as `json`, or a domain over an enum, whose column PostgreSQL cannot compare with its base enum) is
-refused before anything is read or sent: `archive.to_s3 pages <relation> by its column <column>, of type <type>,
+A materialized view is refused earlier, when the call locks it. The rule for the column: its type must be one the
+page query is known to carry from one page to the next as text and read back as the same value, that is one of
+`smallint`, `integer`, `bigint`, `numeric`, `real`, `double precision`, `text`, `varchar`, `char(n)`, `bit(n)`,
+`bit varying`, `date`, `timestamp`, `timestamptz`, `time`, `timetz`, `interval`, `uuid`, `bytea`, `boolean`, any
+enum, or a domain over one of those (not over an enum, whose column PostgreSQL cannot compare with its base enum). A
+domain is paged as its base type, so a domain constraint added `NOT VALID` does not stop the export of rows it does
+not admit. Every other type is refused before anything is read or sent, including some that have an ordering but
+whose text does not read back as the same value (`regproc` renders an overloaded function as its bare name), as
+well as arrays, composites, ranges and types with no ordering such as `json`: `archive.to_s3 pages <relation> by its column <column>, of type <type>,
 which it cannot page by: ...`. A relation with no column of that name is refused the same way: `<relation> has no
 column <column>, the control column of <parent> that archive.to_s3 pages it by`.
 

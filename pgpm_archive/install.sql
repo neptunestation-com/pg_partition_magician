@@ -3393,7 +3393,7 @@ create or replace function archive.to_s3(p_parent regclass, p_child name, p_lo t
 returns void language plpgsql set extra_float_digits = 1 as $$
 declare
   cfg archive.config; pcfg pgpm.config; v_ctltype text;
-  v_ctl_col text; v_ctl_typ oid; v_ctl_mod int; v_ctl_kind "char"; v_ctl_cat "char"; v_ctl_base oid; v_ctl_base_mod int;
+  v_ctl_col text; v_ctl_typ oid; v_ctl_mod int; v_ctl_kind "char"; v_ctl_base oid; v_ctl_base_mod int;
   v_ctl_ordered boolean := false;   -- the control-named column's type can be paged by keyset (see below)
   v_unpageable text;                -- the relations of the export's tree that are not local heaps (see below)
   v_gzip boolean; v_ctype text; v_body bytea := '';
@@ -3494,10 +3494,15 @@ begin
   -- cursor's text back. All four hold for a SCALAR with a btree ordering and nothing else: an array's cursor is
   -- built by array_agg as a two-dimensional array whose [1] is NULL, so the read restarted forever; a composite
   -- such as ROW(1, NULL) is neither IS NULL nor IS NOT NULL; and a type with no btree `>` cannot be compared at all.
-  -- So the column's type must be a base or enum type that is not an array (typtype 'b' or 'e', typcategory not
-  -- 'A'), or a domain over one, AND the row comparison the page query makes must resolve for it; anything else
-  -- (an array, a composite, a range or multirange, a type with no ordering, a domain over an enum) is refused by
-  -- name before anything is read or sent. A domain pages as its BASE type, with the domain's typmod: cast as the
+  -- Nor is a btree ordering enough: the cursor's text must read back as the same value, and for some types it does
+  -- not (a regproc of an overloaded function renders as its bare name, `pg_catalog.abs`, which then reads back as
+  -- "more than one function named"). So the type is checked against an ALLOWLIST of the types the page query is
+  -- known to round-trip, not a predicate over typtype and category: smallint, integer, bigint, numeric, real,
+  -- double precision (rendered shortest-exact, extra_float_digits being pinned for this function), text, varchar,
+  -- char(n), bit(n), bit varying, date, timestamp, timestamptz, time, timetz, interval, uuid, bytea, boolean and
+  -- every enum, or a domain over one of those. AND the row comparison the page query makes must resolve for it.
+  -- Anything else (an array, a composite, a range or multirange, a type with no ordering, a reg* type, a domain
+  -- over an enum) is refused by name before anything is read or sent. A domain pages as its BASE type, with the domain's typmod: cast as the
   -- domain, the cursor ran the domain's CHECK constraints, and a row a NOT VALID constraint does not admit made
   -- every retry raise. The comparison is probed exactly as the page query makes it, the column against a cursor of
   -- the cast type, under LIMIT 0 so nothing is read, and with no value cast to the column's type (a NULL cast to a
@@ -3512,14 +3517,17 @@ begin
       v_child, quote_ident(pcfg.control_column), p_parent;
   end if;
   loop
-    select t.typtype, t.typcategory, t.typbasetype, t.typtypmod into v_ctl_kind, v_ctl_cat, v_ctl_base, v_ctl_base_mod
+    select t.typtype, t.typbasetype, t.typtypmod into v_ctl_kind, v_ctl_base, v_ctl_base_mod
       from pg_type t where t.oid = v_ctl_typ;
     exit when v_ctl_kind <> 'd';
     v_ctl_typ := v_ctl_base;
     if v_ctl_base_mod <> -1 then v_ctl_mod := v_ctl_base_mod; end if;
   end loop;
   v_ctltype := format_type(v_ctl_typ, v_ctl_mod);
-  if v_ctl_kind in ('b', 'e') and v_ctl_cat <> 'A' then
+  if v_ctl_kind = 'e'
+     or v_ctl_typ = any (array['int2', 'int4', 'int8', 'numeric', 'float4', 'float8', 'text', 'varchar', 'bpchar',
+                               'bit', 'varbit', 'date', 'timestamp', 'timestamptz', 'time', 'timetz', 'interval',
+                               'uuid', 'bytea', 'bool']::regtype[]::oid[]) then
     begin
       -- the page query's own comparison, parsed for this type: it resolves only for a btree-ordered type
       execute format('select 1 from %2$s t where (t.%1$I, t.tableoid, t.ctid) > ($1::%3$s, $2, $3) limit 0',
@@ -3531,7 +3539,7 @@ begin
     end;
   end if;
   if not v_ctl_ordered then
-    raise exception 'pg_partition_magician: archive.to_s3 pages % by its column %, of type %, which it cannot page by: the column must be a scalar type with a btree ordering (a base or enum type, or a domain over a base type), not an array, composite, range, multirange or a domain over an enum; refusing to export it',
+    raise exception 'pg_partition_magician: archive.to_s3 pages % by its column %, of type %, which it cannot page by: the column must be smallint, integer, bigint, numeric, real, double precision, text, varchar, char, bit, bit varying, date, timestamp, timestamptz, time, timetz, interval, uuid, bytea, boolean, an enum, or a domain over one of those (not over an enum); refusing to export it',
       v_child, quote_ident(pcfg.control_column), v_ctl_col;
   end if;
   -- The object's form follows archive.config.compress, as it does on every other path this module

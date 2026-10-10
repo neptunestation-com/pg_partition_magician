@@ -16,17 +16,20 @@
   read its cursor of noon back as midnight (under a timestamp parent, east of UTC, it lost its offset), so every
   page re-admitted the row it ended on and a quiescent export never ended. The cast now takes the relation's own
   type with its typmod (a bare `character` or `bit` is one wide and would cut a char(n) or bit(n) cursor the same
-  way), and a relation with no column of that name is refused by name before anything is read. That column must be
-  a scalar with a btree ordering (a base or enum type that is not an array, or a domain over a base type, paged as
-  its base type so a `NOT VALID` domain CHECK does not raise on the cursor); an array (whose cursor was NULL, so the
-  read restarted forever), a composite (whose ROW(1, NULL) no run read), a type with no ordering or a domain over an
-  enum (which cannot be compared with its base) is refused by name before anything is read. And the relation must be
+  way), and a relation with no column of that name is refused by name before anything is read. That column's type
+  must be on an allowlist of the types whose text the cursor round-trips (the integer, numeric, floating-point,
+  character, bit, date and time, interval, uuid, bytea and boolean types, any enum, or a domain over one of those,
+  paged as its base type so a `NOT VALID` domain CHECK does not raise on the cursor); any other type is refused by
+  name before anything is read, among them an array (whose cursor was NULL, so the read restarted forever), a
+  composite (whose ROW(1, NULL) no run read), `regproc` (an overloaded function's text does not read back), a type
+  with no ordering and a domain over an enum (which cannot be compared with its base). And the relation must be
   a table, or a partitioned table or inheritance tree of tables: a `postgres_fdw` leaf returns the remote row
   position, which over a remote partitioned table repeats, so a quiescent export was refused as a write; a view or a
   tree holding a foreign table is now refused by name before anything is read. `tests/archive/db/51`
   under `bench/archive_to_s3_multi_heap.sh`, with the mutations `to_s3_cursor_heap_unkeyed`, `to_s3_cursor_null_blind`,
   `to_s3_cursor_null_restart`, `to_s3_cursor_null_run_unread`, `to_s3_cursor_parent_type`,
   `to_s3_cursor_type_typmod_dropped`, `to_s3_cursor_type_unrefused`, `to_s3_cursor_domain_checked`,
+  `to_s3_relkind_unrefused`, `to_s3_cursor_probe_base_only` and `to_s3_cursor_type_allowlist_widened`.
   `to_s3_relkind_unrefused` and `to_s3_cursor_probe_base_only`.
   `to_s3_cursor_type_typmod_dropped`, `to_s3_cursor_type_unrefused` and `to_s3_cursor_domain_checked`.
   `to_s3_cursor_type_typmod_dropped` and `to_s3_cursor_first_run_row_gap`.
