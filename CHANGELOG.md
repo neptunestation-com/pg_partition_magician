@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+- **`tests/93` names the chunks the archive step takes, and the partitions `archive_batch` lets it take**
+  (#1170). Its second tick was asserted as one distinct `child_name` in the ledger, which a second tick that
+  archives nothing satisfies, and `archive_batch = 2` as two ledger rows, which two chunks of the monolith
+  satisfy. It now names the monolith's `[0, 59)` then `[59, 117)` after two ticks, and one chunk each of the
+  two oldest partitions (lo 0 and 6000) under `archive_batch = 2`. `bench/tests_fail_on_defect.sh` judges it
+  against a `_next_archive_chunk` that never resumes a partially archived partition and an `_archive_step`
+  that spends the cap on chunks; mutations `archive_resume_by_distinct_child`, `archive_batch_by_ledger_rows`.
+
+- **`tests/74` ties every dropped range to the chunks archived before its drop** (#1171). Archive-before-drop
+  was asserted as some ledger row, some `retain_drop` and no aged partition left, which one child archived and
+  the rest dropped unarchived satisfies. Each `retain_drop` range must now be covered by ledger chunks recorded
+  at or before the drop, and the dropped ranges must be exactly the aged children that existed before
+  maintenance ran. `bench/tests_fail_on_defect.sh` judges it against a `retire()` whose gate opens once the
+  parent has any ledger row; mutation `archive_before_drop_uncovered`.
+
+- **`tests/141` names the partition a `timestamptz` write a day out lands in** (#1172). "ts_ev takes a write
+  a day out, past its monolith" was `count(*) = 4`, which a write that stays in the monolith satisfies; it now
+  asserts that day's partition by name, as its `id_ev` and `dt_ev` siblings do. `bench/tests_fail_on_defect.sh`
+  judges it against a transmute that reads a `timestamptz` maximum a day late; mutation
+  `transmute_day_out_write_by_count`.
+
+- **`tests/archive/db/50` reaches the digest check it names** (#1173). Its "refused by the digest check"
+  assertion re-created the retired range with 40 rows against a 90-row chunk, so the refusal's count arm
+  refused first and the file passed with the digest comparison removed. The re-created partition now holds 90
+  other rows over the same ids, and the assertion pins the digest arm's message. Guard
+  `bench/archive_retired_chunk_digest_layer.sh`; mutation `archive_recorded_chunk_digest_compare_dropped`.
+
+- **`tests/295` tells a reconcile keyed on the whole key from one keyed on `id` alone** (#1174). Its twin row
+  `(20, 1000)` was said to make the two leave different rows, but a reconcile deletes and rereads every source
+  row matching a captured key, so one keyed on `id` alone rereads the twin unchanged and ends in the same
+  table. The file now reads each row of id 20 in the fine child by its `xmin` after the copy and after the
+  swap: the reconcile rewrote `(20, 2)` and left the twin as the copy wrote it. Guard
+  `bench/regrain_delta_seq_name.sh`; mutation `regrain_reconcile_keyed_on_id_alone`.
+
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's
