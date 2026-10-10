@@ -11416,7 +11416,7 @@ MUTATION_SRC["to_s3_cursor_heap_unkeyed"] = "pgpm_archive/install.sql"
 # every other row. Two sites, the first run's NOT NULL clause and the switch to the NULL run, one mutation each and
 # one that puts both back (the cursor as it was, NULL-blind). All are caught by tests/archive/db/51 parts C and D
 # through bench/archive_to_s3_multi_heap.sh; the file's statement_timeout bounds the export that never ends.
-_TO_S3_NULL_FIRST_RUN = ("else t.%1$I is not null and ($1 is null or", "else ($1 is null or", 1)
+_TO_S3_NULL_FIRST_RUN = ("else not (t.%1$I is null) and ($1 is null or", "else ($1 is null or", 1)
 _TO_S3_NULL_RUN_SWITCH = (
     "        v_null_run := true; v_cursor := null; v_cursor_rel := null; v_cursor_tid := null;\n",
     "        v_done := true;\n", 1)
@@ -11473,6 +11473,18 @@ MUTATIONS["to_s3_cursor_type_typmod_dropped"] = (
       "  select a.atttypid::regtype::text into v_ctltype\n", 1)],
 )
 MUTATION_SRC["to_s3_cursor_type_typmod_dropped"] = "pgpm_archive/install.sql"
+
+# PR #1213's fourth verification round (V-01): archive.to_s3's two runs are `not (control is null)` and
+# `control is null`, a partition of the rows for every type. Caught by tests/archive/db/51 part K.
+MUTATIONS["to_s3_cursor_first_run_row_gap"] = (
+    "bench/archive_to_s3_multi_heap.sh",
+    "archive.to_s3's first run reads `control is not null` instead of `not (control is null)`. For a scalar the two "
+    "agree, but a composite control value such as ROW(1, NULL) is neither IS NULL nor IS NOT NULL, so neither run "
+    "reads that row and the conservation check refuses the quiescent export on every retry. One clause. "
+    "tests/archive/db/51 part K catches it (refused, and no object lands).",
+    [("else not (t.%1$I is null) and ($1 is null or", "else t.%1$I is not null and ($1 is null or", 1)],
+)
+MUTATION_SRC["to_s3_cursor_first_run_row_gap"] = "pgpm_archive/install.sql"
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
