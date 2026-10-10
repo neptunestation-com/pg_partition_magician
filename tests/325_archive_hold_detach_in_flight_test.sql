@@ -165,7 +165,7 @@ select is_empty($$ select 1 from t325.calls where parent = 'public.t325_wh'::reg
   'A: the strategy was handed nothing: not the table that left while the call waited');
 select is_empty($$ select 1 from pgpm.archive_ledger where parent_table = 'public.t325_wh'::regclass $$,
   'A: and no coverage was recorded');
-select matches(:'a_result'::text, format('^%s\.%s left ', 'public', :'wh0'),
+select matches(:'a_result'::text, format('^%s\.%s is no longer a partition of ', 'public', :'wh0'),
   'A: the call says which table left while it waited');
 select pgpm_archive_next_partition_whole('public.t325_wh'::regclass) as a_next \gset
 select results_eq($$ select p_child, p_lo, p_hi, seen from t325.calls where parent = 'public.t325_wh'::regclass order by n $$,
@@ -236,7 +236,7 @@ select is_empty($$ select 1 from t325.calls where parent = 'public.t325_rr'::reg
   'D: the strategy was handed nothing, though the call''s snapshot predates the detach''s commit');
 select is_empty($$ select 1 from pgpm.archive_ledger where parent_table = 'public.t325_rr'::regclass $$,
   'D: and no coverage was recorded');
-select matches(:'d_result'::text, format('^%s\.%s left ', 'public', :'rr0'),
+select matches(:'d_result'::text, format('^%s\.%s is no longer a partition of ', 'public', :'rr0'),
   'D: the call says which table left while it waited');
 select format('alter table public.t325_rr attach partition public.%I for values from (0) to (100)', :'rr0') as attach_rr \gset
 :attach_rr;

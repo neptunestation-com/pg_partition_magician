@@ -156,7 +156,7 @@ begin
   -- caller can see and cancel, it waited just as long before (the strategy's read queued behind the same lock),
   -- and the header leaves statement_timeout, the bound on the whole call, to the caller.
   if not pgpm._archive_hold_partition(p_parent, r.child_oid, r.retiring_at) then
-    return format('%I.%I left %s while this call waited for its lock (detached or dropped by hand), so it was not '
+    return format('%I.%I is no longer a partition of %s (detached or dropped by hand), so it was not '
                   'archived and nothing was recorded for it. Call again for the next partition.',
                   v_nsp, r.child_name, p_parent);
   end if;

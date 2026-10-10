@@ -10128,7 +10128,7 @@ MUTATIONS["archive_whole_hold_skipped"] = (
     "finds none of the table's rows, and the script records the range as covered. One site, the script's call of "
     "pgpm._archive_hold_partition. tests/325 parts A and D catch it.",
     [("""  if not pgpm._archive_hold_partition(p_parent, r.child_oid, r.retiring_at) then
-    return format('%I.%I left %s while this call waited for its lock (detached or dropped by hand), so it was not '
+    return format('%I.%I is no longer a partition of %s (detached or dropped by hand), so it was not '
                   'archived and nothing was recorded for it. Call again for the next partition.',
                   v_nsp, r.child_name, p_parent);
   end if;
