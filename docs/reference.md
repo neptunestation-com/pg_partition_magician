@@ -3451,6 +3451,14 @@ steps, `retire`, a `regrain` swap or `adopt_partition`), no coverage reader coun
 and the archive step does not archive a partition over its range (`skip_archive_retired_range`, see
 [the archive step](#byte-budget-chunked-archiving)).
 
+Retired rows therefore accumulate for the parent's whole history, and the check for a partition over a retired
+chunk's range runs twice on every tick while an archive strategy is set (the archive step and `retain`). It reads
+only the retired rows that end above the parent's lowest attached partition, through the partial index
+`archive_ledger_retired_hi_key_idx`: in the ordinary run of things, where `retain` drops oldest first, that is
+none of them, however long the history. A bound that does not name one value in every session (a time bound
+without its UTC offset, or not in ISO 8601 form) has no place in that index and is always read; and when an
+attached partition's own `lo` is such a bound, every retired row of the parent is read, as before.
+
 A chunk belongs to the relation its `child_oid` names, not to whatever holds its `child_name` now. The
 coverage readers (`pgpm._next_archive_chunk`, `pgpm._archive_fully_covered`, the operator script
 `scripts/archive_partition_whole.sql`) count a chunk for a partition only when its `child_oid` is that

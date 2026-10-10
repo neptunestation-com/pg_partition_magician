@@ -4316,6 +4316,40 @@ create table if not exists pgpm.archive_ledger (
 );
 create index if not exists archive_ledger_parent_child_hi_idx on pgpm.archive_ledger (parent_table, child_name, hi desc);
 
+-- A native bound's position as a number (#1163): the value itself for an id kind's text, the epoch for a time
+-- kind's, and null for text whose instant depends on the reading session. A native bound is text, and its text
+-- order is not its order ('91' > '1000'; '2026-01-01 04:00:00+05:30' is earlier than '2026-01-01 00:00:00+00'),
+-- while the native cast is not immutable for time (an offset-less text names a different instant in every zone),
+-- so no index can be built over either. This keys only the text that reads as ONE value in every session: plain
+-- numeric digits, and an ISO 8601 timestamp, year first, that carries its own offset (_ts_text's output, which
+-- is every time bound pgpm writes since #500); year-first ISO parses the same under every DateStyle and an
+-- explicit offset under every TimeZone. Anything else, a pre-#500 DateStyle-shaped bound or an operator's
+-- offset-less one, gets null, and a reader of archive_ledger_retired_hi_key_idx (built after the upgrade blocks
+-- below) takes every null-keyed row as a candidate, so the key narrows what is read and never decides an overlap:
+-- the native cast still does that.
+--
+-- PARALLEL UNSAFE, deliberately: the EXCEPTION block below starts a subtransaction on every call, and on
+-- PostgreSQL 15 and 16 parallel mode refuses one ('cannot start subtransactions during a parallel operation'), in a
+-- worker and in the leader alike (so PARALLEL RESTRICTED is not enough either). PostgreSQL builds a btree in
+-- parallel once the table passes min_parallel_table_scan_size, unless an index expression is not parallel safe, so
+-- marked safe this made the CREATE INDEX below fail over a ledger past 8 MB (the upgrade, rolled back whole), and
+-- every REINDEX of it with it. Unsafe, the build runs serially, and so does a query calling it, which
+-- _over_retired_chunks's bounded read does not need to be parallel.
+create or replace function pgpm._native_order_key(p_text text)
+returns numeric language plpgsql immutable strict parallel unsafe as $$
+begin
+  if p_text ~ '^-?[0-9]+(\.[0-9]+)?$' then
+    return p_text::numeric;
+  end if;
+  if p_text ~ '^[0-9]{4,}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?[+-][0-9]{2}(:[0-9]{2}){0,2}$' then
+    return extract(epoch from p_text::timestamptz);
+  end if;
+  return null;
+exception when data_exception then
+  return null;   -- the shape of a timestamp but not one (month 13): no key, so always a candidate
+end;
+$$;
+
 -- A RETIRED CHUNK'S ROW IS THE RECORD OF THE ONLY COPY (issue #1141). Once retire() drops a partition, the
 -- objects its chunks were archived to hold the only copy of its rows, and the ledger rows are what says where
 -- they are. A strategy keys a chunk's object by parent and lo (pgpm_archive's archive._object_key), so a
@@ -4472,6 +4506,14 @@ begin
     perform pgpm._backfill_chunk_oids();
   end if;
 end $$;
+
+-- The retired chunks of a parent by where they end (#1163), for _over_retired_chunks: a retired row is never
+-- discarded, so a reader that wants the few that reach into an attached partition must not have to read them all.
+-- HERE, after the two blocks above: its predicate names retired_at, which an install from before #1141 does not
+-- have until the first of them adds it, and an upgrade that reached this line first stopped at 42703 and rolled
+-- back whole.
+create index if not exists archive_ledger_retired_hi_key_idx
+  on pgpm.archive_ledger (parent_table, (pgpm._native_order_key(hi))) where retired_at is not null;
 
 -- picks the next chunk to archive within ONE child: resumes from wherever pgpm.archive_ledger's
 -- coverage of THIS child left off (or the child's own lo, on the first call), estimates how many
@@ -4726,8 +4768,16 @@ $$;
 -- and lo (pgpm_archive's do) would PUT it over the retired chunk's object, the only copy of the dropped rows,
 -- and the ledger, keyed (parent_table, lo), could not record both. Which rows belong in which object is the
 -- operator's call, so the archive step does not archive such a partition at all. Filtered by parent first, in
--- materialized CTEs, so the casts never meet another parent's bounds (#973); the join runs only for
--- partitions starting below the newest retired hi, which is none in the ordinary run of things.
+-- materialized CTEs, so the casts never meet another parent's bounds (#973).
+--
+-- RANGE FIRST (#1163). A retired row is never discarded, so the parent's retired history only grows, and every
+-- tick with an archive_fn calls this twice (_archive_step and retain()). It read every retired row of the parent,
+-- with a catalog probe per row for the description, before filtering by range: 300,000 rows read to hold nothing.
+-- Now it reads, through archive_ledger_retired_hi_key_idx, only the retired rows ending above the lowest attached
+-- lo (by _native_order_key), plus every row whose hi has no key, and describes only the rows the native overlap
+-- test keeps. retain() drops oldest first, so in the ordinary run of things every retired chunk ends at or below
+-- every attached partition and that is no row at all. When an attached lo has no key, there is no floor and every
+-- retired row is read, as before.
 --
 -- other_names lists the names those chunks were recorded under when they are not the partition's own (null when
 -- every one is). That is the shape a partition renamed before an upgrade leaves, its ledger rows left under the
@@ -4738,28 +4788,36 @@ $$;
 drop function if exists pgpm._over_retired_chunks(regclass);
 create or replace function pgpm._over_retired_chunks(p_parent regclass)
 returns table(child_name name, lo text, hi text, chunks text, other_names text) language plpgsql stable as $$
-declare v_ncast text;
+declare v_ncast text; v_floor numeric; v_unkeyed boolean;
 begin
   select pgpm._native_type(c.control_kind) into v_ncast from pgpm.config c where c.parent_table = p_parent;
   if not found then return; end if;
+  -- the floor: no retired chunk ending at or below the lowest attached lo can overlap an attached partition
+  select min(pgpm._native_order_key(p.lo)), bool_or(pgpm._native_order_key(p.lo) is null)
+    into v_floor, v_unkeyed
+    from pgpm.part p where p.parent_table = p_parent and p.attached;
+  if v_unkeyed is null then return; end if;   -- no attached partition, nothing to hold
+  if v_unkeyed then v_floor := null; end if;  -- a lo with no key gives no floor: every retired row is read
   return query execute format(
-    'with led as materialized (select l.lo, l.hi, l.child_name, l.s3_key,
-                                     case when l.child_oid is not null
-                                          then case when not exists (select 1 from pg_class c where c.oid = l.child_oid)
-                                                    then '', whose relation no longer exists,'' else '''' end
-                                          when l.child_name is null
-                                            or to_regclass(format(''%%I.%%I'', pgpm._child_nsp(%2$L::regclass, l.child_name),
-                                                                  l.child_name)) is null
-                                          then '', whose relation no longer exists,''
-                                          else '', which pgpm cannot tie to the relation holding that name now,'' end as fate
+    'with led as materialized (select l.lo, l.hi, l.child_name, l.s3_key, l.child_oid
                                 from pgpm.archive_ledger l
-                                where l.parent_table = %2$L::regclass and l.retired_at is not null),
+                                where l.parent_table = %2$L::regclass and l.retired_at is not null
+                                  and (%3$L::numeric is null
+                                       or pgpm._native_order_key(l.hi) > %3$L::numeric
+                                       or pgpm._native_order_key(l.hi) is null)),
           mine as materialized (select p.child_name, p.lo, p.hi from pgpm.part p
                                  where p.parent_table = %2$L::regclass and p.attached)
      select m.child_name, m.lo, m.hi,
             string_agg(format(''[%%s, %%s) recorded for %%s%%s at %%s'', l.lo, l.hi,
                               coalesce(quote_ident(l.child_name), ''an unnamed partition''),
-                              l.fate,
+                              case when l.child_oid is not null
+                                   then case when not exists (select 1 from pg_class c where c.oid = l.child_oid)
+                                             then '', whose relation no longer exists,'' else '''' end
+                                   when l.child_name is null
+                                     or to_regclass(format(''%%I.%%I'', pgpm._child_nsp(%2$L::regclass, l.child_name),
+                                                           l.child_name)) is null
+                                   then '', whose relation no longer exists,''
+                                   else '', which pgpm cannot tie to the relation holding that name now,'' end,
                               coalesce(l.s3_key, ''no object key'')),
                        ''; '' order by l.lo::%1$s),
             string_agg(distinct quote_ident(l.child_name), '', '')
@@ -4767,7 +4825,7 @@ begin
        from mine m join led l on l.lo::%1$s < m.hi::%1$s and l.hi::%1$s > m.lo::%1$s
       where m.lo::%1$s < (select max(x.hi::%1$s) from led x)
       group by m.child_name, m.lo, m.hi',
-    v_ncast, p_parent::text);
+    v_ncast, p_parent::text, v_floor);
 end;
 $$;
 

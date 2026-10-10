@@ -1215,6 +1215,7 @@ run_perf() {
     "bench/transmute_claim_owner_under_set_role.sh pgpm_perf325"
     "bench/retain_horizon_ambiguous_wall_time.sh pgpm_perf326"
     "bench/archive_retired_chunk_kept.sh pgpm_perf324"
+    "bench/over_retired_chunks_range_first.sh pgpm_perf333"
   )
   local selected=()
   local n=${#guards[@]} idx
