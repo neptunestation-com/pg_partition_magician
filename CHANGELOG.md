@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **The check for a partition over a retired chunk reads only the chunks that can overlap one** (#1163).
+  `pgpm._over_retired_chunks`, which the archive step and `retain()` call on every tick while an `archive_fn` is
+  set, read every retired `pgpm.archive_ledger` row of the parent, with a catalog probe per row for its
+  description, before filtering by range; a retired row is never discarded, so a call that held nothing read the
+  parent's whole archive history (300,000 rows, about 0.4 s, at two years of 8 MB chunks on a 1 TB/year table).
+  It now reads, through a new partial index `archive_ledger_retired_hi_key_idx` over each retired row's `hi` as
+  a number (`pgpm._native_order_key`: the value of an `id` bound, the epoch of a time bound that carries its
+  offset), only the retired rows ending above the lowest attached partition's `lo`, plus any whose bound has no
+  such number, and describes only the rows it returns; what it returns is unchanged. Test `tests/317`; guard
+  `bench/over_retired_chunks_range_first.sh`, mutation `over_retired_chunks_reads_all`.
 - **A retired chunk's ledger row is the record of the only copy, and nothing discards it or archives over it**
   (#1141). After `retire()` dropped an archived partition, a partition re-created over its range by plain DDL
   and recorded with `pgpm.adopt_partition` made the next tick's orphan discard delete the retired chunk's

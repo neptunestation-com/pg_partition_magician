@@ -11381,6 +11381,22 @@ MUTATIONS["archive_retired_backfill_untimed"] = (
 )
 
 
+# Issue #1163: _over_retired_chunks reads only the retired chunks that end above the lowest attached partition's
+# lo (or have no order key), through archive_ledger_retired_hi_key_idx. bench/over_retired_chunks_range_first.sh
+# runs tests/317 against the mutant.
+MUTATIONS["over_retired_chunks_reads_all"] = (
+    "bench/over_retired_chunks_range_first.sh",
+    "Pre-#1163 ledger read: _over_retired_chunks reads every retired archive_ledger row of the parent, with no floor, "
+    "so a call that holds nothing reads the parent's whole archive history, twice per tick with an archive_fn. What "
+    "it returns is unchanged. One clause. tests/317's bounded-read assertions catch it.",
+    [("                                where l.parent_table = %2$L::regclass and l.retired_at is not null\n"
+      "                                  and (%3$L::numeric is null\n"
+      "                                       or pgpm._native_order_key(l.hi) > %3$L::numeric\n"
+      "                                       or pgpm._native_order_key(l.hi) is null)),\n",
+      "                                where l.parent_table = %2$L::regclass and l.retired_at is not null),\n", 1)],
+)
+
+
 # Issue #627: the retain horizon's time part is instant arithmetic, and a retain with no calendar part takes no
 # wall-clock round trip at all. bench/retain_horizon_ambiguous_wall_time.sh runs tests/311 against the mutant.
 MUTATIONS["retain_horizon_wall_round_trip"] = (
