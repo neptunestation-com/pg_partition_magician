@@ -545,9 +545,10 @@ select is((select array_agg(method) from pgpm.log where parent_table = 't309.f':
 -- ============================ PART S: a same-name successor the #421 backfill anchored, on upgrade ======
 -- A pre-#421 install: [0, 100) archived, dropped by hand and re-created under its own name, its pgpm.part row
 -- kept. The #421 backfill anchors that row to whatever holds the name, the successor, which carries no write
--- block. The chunk's backfill attributes a chunk only to a write-blocked relation, so the dropped relation's
--- chunk is marked retired and the successor is held. CONTROL: [100, 200), live, write-blocked and archived, is
--- attributed and retired as usual.
+-- block, and the upgrade records that anchor as adopted before it does (pgpm.upgrade_adopted_anchor, #1160). The
+-- chunk's backfill attributes a chunk only under an anchor it did not adopt, so the dropped relation's chunk is
+-- marked retired and the successor is held. CONTROL: [100, 200), live, write-blocked and archived, its anchor
+-- recorded at creation, is attributed and retired as usual.
 call t309.mk('s', 100);
 insert into t309.s select g, 'mid' || g from generate_series(101, 107) g;
 update pgpm.config set archive_batch = null where parent_table = 't309.s'::regclass;
@@ -559,9 +560,13 @@ select format('drop table t309.%I', :'s0') as drop_s \gset
 select format('create table t309.%I partition of t309.s for values from (0) to (100)', :'s0') as mk_s \gset
 :mk_s;
 insert into t309.s select g, 'late' || g from generate_series(1, 40) g;
--- what the older install leaves once the columns are added, and the #421 backfill has run
+-- what the older install leaves once the columns are added, and the #421 backfill has run: the row it adopted,
+-- recorded as adopted first, as install.sql does
 update pgpm.part set child_oid = to_regclass('t309.' || quote_ident(:'s0'))::oid
  where parent_table = 't309.s'::regclass and child_name = :'s0';
+create table pgpm.upgrade_adopted_anchor (parent_table regclass not null, child_name name not null,
+                                          primary key (parent_table, child_name));
+insert into pgpm.upgrade_adopted_anchor values ('t309.s', :'s0');
 update pgpm.archive_ledger set child_oid = null, retired_at = null
  where parent_table = 't309.s'::regclass and lo in ('0', '100');
 select ok(not pgpm._is_write_blocked('t309.s', :'s0') and pgpm._is_write_blocked('t309.s', :'s1')
@@ -569,6 +574,7 @@ select ok(not pgpm._is_write_blocked('t309.s', :'s0') and pgpm._is_write_blocked
                 and lo in ('0', '100') and child_oid is null and retired_at is null) = 2,
   'LIVENESS: S: the successor of [0, 100) is unblocked, [100, 200) is blocked, and both chunks are unattributed');
 select pgpm._backfill_chunk_oids();
+drop table pgpm.upgrade_adopted_anchor;
 select is((select string_agg(format('%s|%s|%s', lo, child_oid is null, retired_at is not null), '; ' order by lo::numeric)
              from pgpm.archive_ledger where parent_table = 't309.s'::regclass and lo in ('0', '100')),
   '0|t|t; 100|f|f',
