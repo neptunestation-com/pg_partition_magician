@@ -952,6 +952,10 @@ run_archive() {
   # completes with archive._owned_key looking the export's relation up by name again.
   echo "--- a synchronous export keys and claims the relation it resolved, by oid guard (issue #1064) ---"
   bash "$(dirname "$0")/bench/archive_key_by_resolved_oid.sh" pgpm_test-archive pgpm_perf323 || fail=1
+  # The multi-heap guard (#1168) re-runs tests/archive/db/51 for the same reason: the clean-code half of the pair
+  # bench/discriminate.sh completes with archive.to_s3's cursor leaving the heap, or a NULL control value, out again.
+  echo "--- archive.to_s3 pages every row of a multi-heap or NULL-control relation guard (issue #1168) ---"
+  bash "$(dirname "$0")/bench/archive_to_s3_multi_heap.sh" pgpm_test-archive pgpm_perf338 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi

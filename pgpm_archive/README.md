@@ -76,7 +76,11 @@ raises `pg_partition_magician: archive.to_s3 of ... paged N rows but the partiti
 `... paged N rows and the partition holds N, but not the same rows ...`) and writes nothing (an
 in-flight multipart upload is aborted), so an object that does land holds exactly the partition's
 rows. The only thing that trips it is a write to the partition during the export: run it against a
-partition nothing is still writing to, then drop. The check reads the partition once more after the
+partition nothing is still writing to, then drop. That holds for a relation with more than one heap too (a
+partitioned table or an inheritance parent in the parent's schema, which `child` may name): the pages follow
+the control value, then the heap, then the row's position in it, so no row of one heap is skipped for a row
+of another that shares its control value and position. A row whose control value is NULL (which such a
+relation can hold, though a pgpm partition cannot) is exported too, after every other row. The check reads the partition once more after the
 last page, which costs about one more pass over it. The multipart abort runs whatever ends an export, an error or
 a cancel (`statement_timeout`, `pg_cancel_backend`), and the error or cancel still reaches the caller.
 One that lands inside the request that starts the upload, before the store's answer arrives, leaves no
