@@ -12895,6 +12895,39 @@ MUTATIONS["test303_adopted_rows_by_count"] = (
 )
 MUTATION_SRC["test303_adopted_rows_by_count"] = "tests/303_adopt_partition_test.sql"
 
+# Issue #1241: regrain_step's swap waits for every snapshot that cannot see its copies (_regrain_snapshot_wait), so
+# a REPEATABLE READ reader whose snapshot predates the copies never reads the regrained range empty. One mutation for
+# the wait, one for the record of the run's last write that judges which snapshots, one for the mutual-wait
+# refusal, each caught by tests/328 through bench/regrain_swap_waits_for_older_snapshots.sh.
+_G1241 = "bench/regrain_swap_waits_for_older_snapshots.sh"
+MUTATIONS["regrain_swap_no_snapshot_wait"] = (
+    _G1241,
+    "Pre-#1241 swap: nothing waits for the snapshots older than the copies, so the tick that reaches the swap with a "
+    "REPEATABLE READ reader open (its snapshot older than every copy, no lock held) detaches and drops the source "
+    "under it, and the reader then reads the regrained range empty. One site, the call. tests/328 parts A, B and C "
+    "catch it (the swap is made, the reader's rows are gone, regrain() does not refuse).",
+    [("  perform pgpm._regrain_snapshot_wait(p_parent, v_child_name);\n", "", 1)],
+)
+MUTATIONS["regrain_written_xid_first_copy"] = (
+    _G1241,
+    "The run records the transaction of its FIRST copy batch, not its last, as the brief for #1241 first proposed: "
+    "the swap then waits only for snapshots older than the first copy, so a reader opened between the first copy and "
+    "the last (it sees some copies and not the others) is swapped under and reads the later sub-ranges empty. One "
+    "site, the copy's record kept once set. tests/328 part D catches it.",
+    [("      update pgpm.config set regrain_written_xid = pg_current_xact_id() where parent_table = p_parent;\n",
+      "      update pgpm.config set regrain_written_xid = coalesce(regrain_written_xid, pg_current_xact_id()) where parent_table = p_parent;\n", 1)],
+)
+MUTATIONS["regrain_snapshot_wait_no_mutual_check"] = (
+    _G1241,
+    "The swap's wait without its mutual-wait refusal: a reader whose snapshot is open and which is itself queued on "
+    "a lock the regrain holds (a write behind regrain()'s SHARE lock) is waited for until the budget runs out, and "
+    "under lock_timeout 0 (a hand regrain()'s session default) for good, though it can never finish first. One "
+    "site, the refusal made unreachable. tests/328 part C catches it (the deferral is raised at 3 s, not the "
+    "refusal at once).",
+    [("    if v_stuck is not null then\n      raise exception 'pg_partition_magician: regrain swap refused:",
+      "    if false then\n      raise exception 'pg_partition_magician: regrain swap refused:", 1)],
+)
+
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a

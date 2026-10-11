@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+- **The regrain swap waits for snapshots older than its copies** (#1241). A `REPEATABLE READ` reader whose
+  snapshot predated a regrain's copies, and which first read the table after the swap (so it held no lock the
+  `DETACH` waited on), read the fine children, whose rows its snapshot cannot see, and found the regrained range
+  empty with no error, against `docs/guide.md`'s promise that a regrain never undercounts. Before it takes any
+  lock, the swap now waits, as `CREATE INDEX CONCURRENTLY` does, for every snapshot in the database that may not
+  see the copies: those at or before the run's last copy or reconcile batch, recorded in the new
+  `config.regrain_written_xid`, or, when the swap's own transaction made the copies (`regrain()`) or the run
+  predates the column, those of transactions older than its own. The budget is the caller's `lock_timeout`:
+  under `maintain` a reader still open after 200 ms defers the swap to the next tick, logged as `skip_regrain`
+  naming how many snapshots remain and the oldest one's pid, and `regrain()` raises the same once its budget is
+  spent, or at once when that reader is itself queued on a lock the regrain holds. A snapshot the wait does not
+  cover (opened after it began, or during a `regrain()` call) still misses what the swap's own transaction
+  writes, which under `regrain()` is the whole range; `docs/reference.md` says so. Test `tests/328`, guard
+  `bench/regrain_swap_waits_for_older_snapshots.sh`, mutations `regrain_swap_no_snapshot_wait`,
+  `regrain_written_xid_first_copy` and `regrain_snapshot_wait_no_mutual_check`.
+
 - **The stopping check reads coverage and capture-recapture, and the dead-man switch waits for the user**
   (#1226). `scripts/review/pass_metrics.py --coverage <coverage.json>` writes the record's
   `coverage: <min> (<n> of <m> finders at or above 0.90)` line, which `stop_check.py` reads for the full lens

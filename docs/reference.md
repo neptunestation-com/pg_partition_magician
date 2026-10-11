@@ -1928,6 +1928,41 @@ gate. Under `maintain` the `DETACH` gives up after 200 ms (a `skip_regrain` row,
 keeps the residual small; a hand-driven `regrain_step` waits without a timeout, so a large purge committing
 during that wait is reconciled under the lock in full.
 
+**The swap waits for snapshots older than the copies.** The fine children's rows were written by the copy
+and reconcile transactions, which no snapshot taken before them can see, so a reader whose snapshot predates
+them and which first touches the table after the swap (holding no lock, it gave the `DETACH` nothing to wait
+for) would read the regrained range empty: a `REPEATABLE READ` or `SERIALIZABLE` transaction opened before
+the copies, for one. So after every other refusal, and before it takes any lock of its own, the swap lists the
+other sessions of this database (autovacuum's excepted) whose `pg_stat_activity.backend_xmin` is set and whose
+snapshot may not see the copies, and waits until each has released it: the transaction ended, or, for a
+`READ COMMITTED` one, the running statement finished. Which snapshots those are depends on who made the copies.
+When earlier transactions did (the run's ticks under `maintain`, or `regrain_step` calls each in its own
+transaction), the run records the transaction id of its last copy or reconcile batch in
+`config.regrain_written_xid`, and the swap waits for every snapshot whose `backend_xmin` is at or before it: a
+snapshot opened after the run's last write sees every copy and is not waited for. When the swap's own
+transaction made them (`regrain`, which copies and swaps in one transaction), or the run's last write is not
+recorded (a run in flight across the upgrade that added the column), it waits for every snapshot of a
+transaction that began before its own. Sessions that open a snapshot after the list was taken are not waited
+for, so the wait ends on a busy database; other databases and hot standbys are not consulted.
+
+The budget is the caller's `lock_timeout`: under `maintain`, 200 ms, after which the step raises and the tick
+logs `skip_regrain` with `method` beginning `pg_partition_magician: regrain swap deferred: N snapshot(s) older
+than the copies still open (oldest: pid P, open T)`, and the next tick tries again; nothing was swapped or
+lost. A long reporting transaction opened before the last copy therefore delays the swap for as long as it
+stays open. Under `lock_timeout` 0 (the session default, under which a hand `regrain` runs) the wait lasts as
+long as the snapshots do, except that a session it waits for which is itself waiting, directly or down a
+chain, on a lock the regrain holds (a write queued behind `regrain`'s `SHARE` lock, say) makes it raise at once
+(`regrain swap refused: pid P holds a snapshot older than the copies and waits on a lock this session holds`),
+since that session cannot finish first and swapping under it would let it read the range empty. A raise rolls
+`regrain` back whole, copies included.
+
+What no wait before the swap can protect is a snapshot it does not wait for (opened after the list was taken,
+or, for `regrain`, in a transaction that began after the call's) that first reads the table after the swap
+commits: it misses what the swap's own transaction wrote. Under `maintain` that is only the residual reconcile
+above; under `regrain`, which copies in the same transaction as its swap, it is every row of the range. For a
+table read by long `REPEATABLE READ` transactions, regrain through `maintain` (or `regrain_step` calls each in
+its own transaction) rather than with `regrain`.
+
 `TRUNCATE` is the exception, and it is **refused** rather than honoured. It fires no row trigger, so the
 rows it removes cannot be captured, and a `TRUNCATE` of the parent never reaches the copies (they are not
 partitions until the swap), so the swap would put every truncated row back. While a regrain is in flight, a
