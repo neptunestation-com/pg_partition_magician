@@ -66,17 +66,17 @@ create temporary table a_base as
 
 alter table pgpm_t219.tg rename column at to created_at;
 select is(pg_get_partkeydef('pgpm_t219.tg'::regclass), 'RANGE (created_at)',
-  'A LIVENESS: the partition key column is now created_at');
+  'LIVENESS: (A) the partition key column is now created_at');
 select is((select count(*)::int from pg_attribute where attrelid = 'pgpm_t219.tg'::regclass and attname = 'at'), 0,
-  'A LIVENESS: no column of the table answers to the registered name any more');
+  'LIVENESS: (A) no column of the table answers to the registered name any more');
 select throws_like(format($$ insert into pgpm_t219.tg values (3, %L, 'past the grid') $$, (select top from a_base) + interval '12 hours'),
   '%no partition of relation%',
-  'A LIVENESS: a write one cell past the grid has nowhere to go before the tick');
+  'LIVENESS: (A) a write one cell past the grid has nowhere to go before the tick');
 
 select pgpm.set_obtain('pgpm_t219.tg', 5);
 create temporary table a_tick (s text);
 do $$ declare s text; begin call pgpm.maintain_obtain('pgpm_t219.tg', s); insert into a_tick values (s); end $$;
-select ok((select s from a_tick) ~ '^obtained=', 'A LIVENESS: the obtain tick ran (not paused)');
+select ok((select s from a_tick) ~ '^obtained=', 'LIVENESS: (A) the obtain tick ran (not paused)');
 
 select is((select array_agg(lo::timestamptz order by lo::timestamptz) from pgpm.part
             where parent_table = 'pgpm_t219.tg'::regclass and attached and lo::timestamptz >= (select top from a_base)),
@@ -97,12 +97,12 @@ insert into pgpm_t219.ig values (5, 'five'), (17, 'seventeen');
 call pgpm.transmute('pgpm_t219.ig', 'id', 100::bigint, p_obtain => 2);
 select pgpm.obtain('pgpm_t219.ig');
 select is(pgpm_t219.cells_from('pgpm_t219.ig', 0), array[0, 100, 200]::numeric[],
-  'B LIVENESS: before the rename the grid is the monolith and two forward cells');
+  'LIVENESS: (B) before the rename the grid is the monolith and two forward cells');
 
 alter table pgpm_t219.ig rename column id to ident;
 insert into pgpm_t219.ig values (250, 'two fifty');   -- the frontier moves into the last cell
 select is(pg_get_partkeydef('pgpm_t219.ig'::regclass), 'RANGE (ident)',
-  'B LIVENESS: the partition key column is now ident');
+  'LIVENESS: (B) the partition key column is now ident');
 
 select is(pgpm_t219.run($$ select pgpm.obtain('pgpm_t219.ig') $$), '2', 'B: obtain reads the frontier from the renamed column and builds two cells');
 select is(pgpm_t219.cells_from('pgpm_t219.ig', 0), array[0, 100, 200, 300, 400]::numeric[],
@@ -125,7 +125,7 @@ select is((select regrain_to from pgpm.config where parent_table = 'pgpm_t219.ig
 create temporary table c_mon as
   select child_name from pgpm.part where parent_table = 'pgpm_t219.ig'::regclass and attached and lo = '0';
 select matches(pgpm_t219.run(format($$ select pgpm.regrain('pgpm_t219.ig', %L, '50') $$, (select child_name from c_mon))), '^[1-9][0-9]*$',
-  'C LIVENESS: the monolith''s regrain ran');
+  'LIVENESS: (C) the monolith''s regrain ran');
 select is(pgpm_t219.cells_from('pgpm_t219.ig', 0), array[0, 50, 100, 200, 300, 400, 500, 600, 700]::numeric[],
   'C: the monolith [0, 100) became the two fine cells [0, 50) and [50, 100)');
 select is((select array_agg(ident || '@' || pgpm_t219.home('pgpm_t219.ig', tableoid) order by ident)
@@ -141,7 +141,7 @@ insert into pgpm_t219.nv values (7, now()::timestamp, 'seven');
 call pgpm.transmute('pgpm_t219.nv', 'at', '1 day'::interval, p_obtain => 2);
 select throws_like($$ select pgpm.set_partition_tz('pgpm_t219.nv', 'America/New_York') $$,
   '%refused -- column at of pgpm_t219.nv is a timestamp or date column%',
-  'D LIVENESS: before the rename, set_partition_tz refuses to move a naive grid''s zone');
+  'LIVENESS: (D) before the rename, set_partition_tz refuses to move a naive grid''s zone');
 alter table pgpm_t219.nv rename column at to logged_at;
 select throws_like($$ select pgpm.set_partition_tz('pgpm_t219.nv', 'America/New_York') $$,
   '%refused -- column logged_at of pgpm_t219.nv is a timestamp or date column%',
@@ -156,7 +156,7 @@ insert into pgpm_t219.ut values (11, now() - interval '3 days', 'eleven'), (12, 
 call pgpm.transmute('pgpm_t219.ut', 'at', '1 day'::interval, p_obtain => 2);
 alter table pgpm_t219.ut rename column at to occurred_at;
 select is(pg_get_partkeydef('pgpm_t219.ut'::regclass), 'RANGE (occurred_at)',
-  'E LIVENESS: the partition key column is now occurred_at');
+  'LIVENESS: (E) the partition key column is now occurred_at');
 select lives_ok($$ select pgpm.untransmute('pgpm_t219.ut') $$, 'E: untransmute runs on the renamed table');
 select is((select relkind::text from pg_class where oid = 'pgpm_t219.ut'::regclass), 'r',
   'E: the table is a plain table again');
@@ -209,19 +209,19 @@ create temporary table f_loads as
         from regexp_matches(p.prosrc, '\m(\w+)\s*:=\s*\(\s*select\s+(\w+)\s+from\s+pgpm\.config\s+(?:as\s+)?\2\M[^;]*;\s*([^;]*;)', 'gi') x
     ) m;
 select cmp_ok((select count(*)::int from f_loads where origin = 'pgpm' and shape = 'into'), '>=', 30,
-  'F LIVENESS: the probe finds pgpm''s whole-row config loads (obtain, extend_to, retain, regrain, untransmute, ...)');
+  'LIVENESS: (F) the probe finds pgpm''s whole-row config loads (obtain, extend_to, retain, regrain, untransmute, ...)');
 select is((select array_agg(fn order by fn) from f_loads
             where origin = 'pgpm' and next_stmt <> format('%1$s := pgpm._control_followed(%1$s);', var)),
   null::text[], 'F: every one of them is followed by pgpm._control_followed');
 select ok((select array_agg(fn) from f_loads where origin = 'pgpm' and shape = 'for')
           @> array['pgpm.status()', 'pgpm.progress(regclass)'],
-  'F LIVENESS: the probe finds the FOR-loop loads too, status()''s and progress()''s');
+  'LIVENESS: (F) the probe finds the FOR-loop loads too, status()''s and progress()''s');
 select is((select array_agg(fn || ':' || shape || ':'
                             || (next_stmt = format('%1$s := pgpm._control_followed(%1$s);', var))::text
                             order by fn)
              from f_loads where origin = 'probe'),
   array['assign:assign:false', 'followed:for:true', 'for:for:false', 'into:into:false',
         'into_after:into:false', 'into_alias:into:false'],
-  'F LIVENESS: the probe sees each load shape, unfollowed where it is, and no load where there is none');
+  'LIVENESS: (F) the probe sees each load shape, unfollowed where it is, and no load where there is none');
 
 select * from finish();

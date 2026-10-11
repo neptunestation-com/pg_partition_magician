@@ -73,7 +73,7 @@ for _ in $(seq 1 100); do
   if [ "${n:-0}" -ge 1 ]; then HELD=true; break; fi
   sleep 0.2
 done
-check "the blocker is holding a conflicting lock" "$HELD" "true"
+check "LIVENESS: the blocker is holding a conflicting lock" "$HELD" "true"
 
 # Attempt the conversion under the hang ceiling, so a build that waits forever reports FAIL instead of
 # wedging CI. Done with a background process and a polling deadline rather than coreutils `timeout`,
@@ -117,6 +117,6 @@ wait "$BLOCKER" 2>/dev/null
 docker exec "$C" psql -U postgres -d "$DB" -qtA -v ON_ERROR_STOP=1 \
   -c "call pgpm.transmute('public.lt', 'created_at', interval '1 day', p_lock_timeout => '$LOCK_TIMEOUT')" \
   >/tmp/lt_ok.log 2>&1
-check "the same call succeeds once unblocked" "$(q "select relkind from pg_class where oid = 'public.lt'::regclass")" "p"
+check "LIVENESS: the same call succeeds once unblocked" "$(q "select relkind from pg_class where oid = 'public.lt'::regclass")" "p"
 
 exit "$fail"

@@ -43,9 +43,9 @@ insert into public.sw7 values (3500000, 'frontier');
 select child_name as sw7_src, child_oid as sw7_src_oid from pgpm.part
  where parent_table = 'public.sw7'::regclass and attached order by lo::numeric limit 1 \gset
 
-select is(pgpm.regrain_step('public.sw7', :'sw7_src', '100000', 1000), 'prepared', 'A fixture: the prepare tick');
+select is(pgpm.regrain_step('public.sw7', :'sw7_src', '100000', 1000), 'prepared', 'fixture: (A) the prepare tick');
 select is(pgpm.regrain_step('public.sw7', :'sw7_src', '100000', 1000), 'copied:3',
-  'A fixture: sub-range [0, 100000) is copied whole in one short batch');
+  'fixture: (A) sub-range [0, 100000) is copied whole in one short batch');
 select child_oid as sw7_copy_oid from pgpm.part
  where parent_table = 'public.sw7'::regclass and not attached and child_name = 'sw7_p0000000000000000000' \gset
 
@@ -54,12 +54,12 @@ create table public.sw7_p0000000000000000000 (like public.sw7_copy_aside includi
 
 select ok(:sw7_copy_oid = 'public.sw7_copy_aside'::regclass::oid
           and (select array_agg(id order by id) from public.sw7_copy_aside) = array[10, 20, 30]::bigint[],
-  'A LIVENESS: the recorded copy of [0, 100000), by oid, is the renamed table holding 10, 20, 30');
+  'LIVENESS: (A) the recorded copy of [0, 100000), by oid, is the renamed table holding 10, 20, 30');
 select ok('public.sw7_p0000000000000000000'::regclass::oid <> :sw7_copy_oid
           and not exists (select 1 from public.sw7_p0000000000000000000)
           and exists (select 1 from pg_constraint where conrelid = 'public.sw7_p0000000000000000000'::regclass
                          and conname = 'sw7_p0000000000000000000_ck'),
-  'A LIVENESS: an empty, unrelated table bears the copy''s name and carries its _ck, so an ATTACH would go through');
+  'LIVENESS: (A) an empty, unrelated table bears the copy''s name and carries its _ck, so an ATTACH would go through');
 
 select throws_like(
   format($$select pgpm.regrain('public.sw7', %L, '100000')$$, :'sw7_src'),
@@ -75,7 +75,7 @@ select is((select inhparent::regclass::text from pg_inherits where inhrelid = :s
 drop table public.sw7_p0000000000000000000;
 alter table public.sw7_copy_aside rename to sw7_p0000000000000000000;
 select is(pgpm.regrain('public.sw7', :'sw7_src', '100000'), 20,
-  'A LIVENESS: with the copy back under its name the same run swaps, twenty fine children attached over the source''s [0, 2000000)');
+  'LIVENESS: (A) with the copy back under its name the same run swaps, twenty fine children attached over the source''s [0, 2000000)');
 select is((select inhrelid from pg_inherits where inhrelid = 'public.sw7_p0000000000000000000'::regclass), :sw7_copy_oid::oid,
   'A: the partition attached for [0, 100000) is the copy pgpm.part recorded');
 select is((select array_agg(id || ':' || payload order by id) from public.sw7 where id < 200000),
@@ -91,7 +91,7 @@ select pgpm.obtain('public.cn7');
 insert into public.cn7 values (3500000, 'frontier');
 select child_name as cn7_src, child_oid as cn7_src_oid from pgpm.part
  where parent_table = 'public.cn7'::regclass and attached order by lo::numeric limit 1 \gset
-select is(pgpm.regrain_step('public.cn7', :'cn7_src', '100000', 1000), 'prepared', 'B fixture: the prepare tick');
+select is(pgpm.regrain_step('public.cn7', :'cn7_src', '100000', 1000), 'prepared', 'fixture: (B) the prepare tick');
 
 alter table public.:"cn7_src" rename to cn7_src_aside;
 create table public.:"cn7_src" (id bigint);
@@ -101,11 +101,11 @@ create trigger pgpm_regrain_truncate_guard before truncate on public.:"cn7_src" 
 
 select is((select array_agg(tgname::text order by tgname) from pg_trigger where tgrelid = :cn7_src_oid and not tgisinternal),
   array['pgpm_regrain_capture', 'pgpm_regrain_truncate_guard'],
-  'B LIVENESS: the recorded source, renamed aside, carries the regrain''s capture and TRUNCATE guard');
+  'LIVENESS: (B) the recorded source, renamed aside, carries the regrain''s capture and TRUNCATE guard');
 select is((select array_agg(tgname::text order by tgname) from pg_trigger
             where tgrelid = format('public.%I', :'cn7_src')::regclass and not tgisinternal),
   array['pgpm_regrain_capture', 'pgpm_regrain_truncate_guard'],
-  'B LIVENESS: an unrelated table under the source''s old name carries its own triggers of those two names');
+  'LIVENESS: (B) an unrelated table under the source''s old name carries its own triggers of those two names');
 
 select is(pgpm.regrain_cancel('public.cn7'), 0, 'B: regrain_cancel runs (no copy existed yet)');
 select is((select count(*)::int from pg_trigger where tgrelid = :cn7_src_oid and not tgisinternal), 0,
@@ -127,16 +127,16 @@ select pgpm.obtain('public.cr7');
 insert into public.cr7 values (3500000, 'frontier');
 select child_name as cr7_src from pgpm.part
  where parent_table = 'public.cr7'::regclass and attached order by lo::numeric limit 1 \gset
-select is(pgpm.regrain_step('public.cr7', :'cr7_src', '100000', 1000), 'prepared', 'C fixture: the prepare tick');
+select is(pgpm.regrain_step('public.cr7', :'cr7_src', '100000', 1000), 'prepared', 'fixture: (C) the prepare tick');
 select is(pgpm.regrain_step('public.cr7', :'cr7_src', '100000', 1000), 'copied:1',
-  'C fixture: sub-range [0, 100000) is copied whole');
+  'fixture: (C) sub-range [0, 100000) is copied whole');
 insert into pgpm.part (parent_table, child_name, lo, hi, attached)
   values ('public.cr7', 'cr7_p0000000000000100000', '700000', '800000', false);
 
 select ok((select regrain_cursor from pgpm.config where parent_table = 'public.cr7'::regclass) = '100000'
           and pgpm._part_name('cr7', 'id', '100000', '100000', '200000', 'UTC') = 'cr7_p0000000000000100000'
           and to_regclass('public.cr7_p0000000000000100000') is null,
-  'C LIVENESS: the next sub-range [100000, 200000) renders cr7_p0000000000000100000, which no relation holds');
+  'LIVENESS: (C) the next sub-range [100000, 200000) renders cr7_p0000000000000100000, which no relation holds');
 select throws_like(
   format($$select pgpm.regrain_step('public.cr7', %L, '100000', 1000)$$, :'cr7_src'),
   'pg_partition_magician: cannot regrain % -- the fine child for sub-range [100000, 200000) would be public.cr7_p0000000000000100000, but pgpm.part already records that name for public.cr7 over [700000, 800000)%',
@@ -146,7 +146,7 @@ select is((select lo || '..' || hi from pgpm.part where parent_table = 'public.c
             and child_name = 'cr7_p0000000000000100000'), '700000..800000', 'C: the existing row is unchanged');
 delete from pgpm.part where parent_table = 'public.cr7'::regclass and child_name = 'cr7_p0000000000000100000';
 select is(pgpm.regrain_step('public.cr7', :'cr7_src', '100000', 1000), 'copied:1',
-  'C LIVENESS: without that row the same tick creates the copy and copies row 150000 into it');
+  'LIVENESS: (C) without that row the same tick creates the copy and copies row 150000 into it');
 
 -- ======================================================================================================
 -- (D) obtain leaves a cell whose name a TYPE holds unbuilt, and builds the rest
@@ -160,9 +160,9 @@ select pgpm.set_obtain('public.ob7', 4);
 select ok(pgpm._part_name('ob7', 'id', '100000', '400000', '500000', 'UTC') = 'ob7_p0000000000000400000'
           and to_regclass('public.ob7_p0000000000000400000') is null
           and pgpm._type_squatter('public', 'ob7_p0000000000000400000') = 'an enum type',
-  'D LIVENESS: forward cell [400000, 500000) renders a name an enum holds and no relation does');
+  'LIVENESS: (D) forward cell [400000, 500000) renders a name an enum holds and no relation does');
 select is((select array_agg(lo order by lo::numeric) from pgpm.part where parent_table = 'public.ob7'::regclass),
-  array['0'], 'D LIVENESS: before obtain the monolith is the only partition');
+  array['0'], 'LIVENESS: (D) before obtain the monolith is the only partition');
 select is(pgpm.obtain('public.ob7'), 3, 'D: obtain builds three cells instead of failing on the squatted one');
 select is((select array_agg(lo || '..' || hi order by lo::numeric) from pgpm.part where parent_table = 'public.ob7'::regclass),
   array['0..300000', '300000..400000', '500000..600000', '600000..700000'],
@@ -177,7 +177,7 @@ insert into public.or7 values (10, 'a'), (250000, 'b');
 create domain public.or7_p0000000000000500000 as int;
 select ok(to_regclass('public.or7_p0000000000000500000') is null
           and to_regtype('public.or7_p0000000000000500000') is not null,
-  'E LIVENESS: a child-shaped name of or7 is free as a relation and taken as a domain');
+  'LIVENESS: (E) a child-shaped name of or7 is free as a relation and taken as a domain');
 select throws_like($$ call pgpm.transmute('public.or7', 'id', 100000::bigint) $$,
   'pg_partition_magician: public.or7_p0000000000000500000 already exists as a domain matching this parent''s partition naming%',
   'E: transmute refuses up front, naming the domain');
@@ -185,6 +185,6 @@ select is((select relkind::text from pg_class where oid = 'public.or7'::regclass
 alter domain public.or7_p0000000000000500000 rename to or7_elsewhere;
 call pgpm.transmute('public.or7', 'id', 100000::bigint);
 select is((select relkind::text from pg_class where oid = 'public.or7'::regclass), 'p',
-  'E LIVENESS: with the domain renamed away the same call converts or7');
+  'LIVENESS: (E) with the domain renamed away the same call converts or7');
 
 select * from finish();

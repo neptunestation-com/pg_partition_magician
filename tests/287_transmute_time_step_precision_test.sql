@@ -78,7 +78,7 @@ create table public.t287_s0 (id bigint, ts timestamp(0) not null, v text, primar
 insert into public.t287_s0 select g, localtimestamp(0) - g * interval '1 second', 's0-' || g from generate_series(1, 5) g;
 insert into t287_oid values ('t287_s0', 'public.t287_s0'::regclass);
 select is((select format_type(atttypid, atttypmod) from pg_attribute where attrelid = 'public.t287_s0'::regclass and attname = 'ts'),
-  'timestamp(0) without time zone', 'A LIVENESS: the key is timestamp(0), which keeps whole seconds');
+  'timestamp(0) without time zone', 'LIVENESS: (A) the key is timestamp(0), which keeps whole seconds');
 select throws_like(
   $$ select dblink_exec('t287', $c$ call pgpm.transmute('public.t287_s0', 'ts', interval '500 milliseconds', p_obtain => 3) $c$) $$,
   'pg_partition_magician: cannot partition t287_s0 on ts with step 00:00:00.5 and anchor % -- the column is timestamp(0) without time zone, which keeps whole seconds only,%whole multiples of 1 second%',
@@ -95,7 +95,7 @@ select lives_ok($$ insert into public.t287_s0 values (100, localtimestamp(0) + i
 select lives_ok(
   $$ select dblink_exec('t287', $c$ call pgpm.transmute('public.t287_s0', 'ts', interval '2 seconds', p_obtain => 40) $c$) $$,
   'A: a 2 second step (a whole multiple of the unit) converts the same table');
-select ok(pg_temp.t287_converted('public.t287_s0'), 'A LIVENESS: t287_s0 is partitioned, with cells to compare');
+select ok(pg_temp.t287_converted('public.t287_s0'), 'LIVENESS: (A) t287_s0 is partitioned, with cells to compare');
 select is(pg_temp.t287_mismatch('public.t287_s0'), 'none', 'A: every t287_s0 cell records the bounds it is attached on');
 select is((select string_agg(v, ',' order by id) from public.t287_s0 where id in (1, 5, 100)), 's0-1,s0-5,s0-current',
   'A: with the rows, the current write included, in place');
@@ -105,7 +105,7 @@ insert into public.t287_s0u select g, localtimestamp(0) - g * interval '1 second
 select lives_ok(
   $$ select dblink_exec('t287', $c$ call pgpm.transmute('public.t287_s0u', 'ts', interval '1 second', p_obtain => 3) $c$) $$,
   'A: a 1 second step (exactly the unit) converts a timestamp(0) table');
-select ok(pg_temp.t287_converted('public.t287_s0u'), 'A LIVENESS: t287_s0u is partitioned, with cells to compare');
+select ok(pg_temp.t287_converted('public.t287_s0u'), 'LIVENESS: (A) t287_s0u is partitioned, with cells to compare');
 select is(pg_temp.t287_mismatch('public.t287_s0u'), 'none', 'A: every t287_s0u cell records the bounds it is attached on');
 
 create table public.t287_s0m (id bigint, ts timestamp(0) not null, primary key (id, ts));
@@ -133,7 +133,7 @@ select is(pg_temp.t287_state('public.t287_s3'), 'r | same oid | config:false | b
 select lives_ok(
   $$ select dblink_exec('t287', $c$ call pgpm.transmute('public.t287_s3', 'ts', interval '250 milliseconds', p_obtain => 3) $c$) $$,
   'B: a 250 ms step (a whole multiple of the unit) converts the same table');
-select ok(pg_temp.t287_converted('public.t287_s3'), 'B LIVENESS: t287_s3 is partitioned, with cells to compare');
+select ok(pg_temp.t287_converted('public.t287_s3'), 'LIVENESS: (B) t287_s3 is partitioned, with cells to compare');
 select is(pg_temp.t287_mismatch('public.t287_s3'), 'none', 'B: every t287_s3 cell records the bounds it is attached on');
 select is((select string_agg(v, ',' order by id) from public.t287_s3), 's3-1,s3-2,s3-3,s3-4', 'B: with its four rows in place');
 
@@ -142,26 +142,26 @@ insert into public.t287_s3u select g, localtimestamp(3) - g * interval '0.125 se
 select lives_ok(
   $$ select dblink_exec('t287', $c$ call pgpm.transmute('public.t287_s3u', 'ts', interval '1 millisecond', p_obtain => 3) $c$) $$,
   'B: a 1 ms step (exactly the unit) converts a timestamp(3) table');
-select ok(pg_temp.t287_converted('public.t287_s3u'), 'B LIVENESS: t287_s3u is partitioned, with cells to compare');
+select ok(pg_temp.t287_converted('public.t287_s3u'), 'LIVENESS: (B) t287_s3u is partitioned, with cells to compare');
 select is(pg_temp.t287_mismatch('public.t287_s3u'), 'none', 'B: every t287_s3u cell records the bounds it is attached on');
 
 -- ======================================================================================================
 -- C. timestamptz(6): a microsecond, below which no interval goes, so no step is refused
 -- ======================================================================================================
-select is(interval '0.4 microseconds', interval '0', 'C LIVENESS: no interval is finer than a microsecond (0.4 us reads as 0)');
+select is(interval '0.4 microseconds', interval '0', 'LIVENESS: (C) no interval is finer than a microsecond (0.4 us reads as 0)');
 create table public.t287_z6 (id bigint, ts timestamptz(6) not null, primary key (id, ts));
 insert into public.t287_z6 select g, now() - g * interval '1.000001 seconds' from generate_series(1, 6) g;
 select lives_ok(
   $$ select dblink_exec('t287', $c$ call pgpm.transmute('public.t287_z6', 'ts', interval '1500 microseconds', p_obtain => 3) $c$) $$,
   'C: the 1500 us step refused on timestamp(3) converts a timestamptz(6) table (a whole number of its unit)');
-select ok(pg_temp.t287_converted('public.t287_z6'), 'C LIVENESS: t287_z6 is partitioned, with cells to compare');
+select ok(pg_temp.t287_converted('public.t287_z6'), 'LIVENESS: (C) t287_z6 is partitioned, with cells to compare');
 select is(pg_temp.t287_mismatch('public.t287_z6'), 'none', 'C: every t287_z6 cell records the bounds it is attached on');
 create table public.t287_z6u (id bigint, ts timestamptz(6) not null, primary key (id, ts));
 insert into public.t287_z6u select g, now() - g * interval '3 microseconds' from generate_series(1, 3) g;
 select lives_ok(
   $$ select dblink_exec('t287', $c$ call pgpm.transmute('public.t287_z6u', 'ts', interval '1 microsecond', p_obtain => 3) $c$) $$,
   'C: a 1 us step (exactly the unit) converts a timestamptz(6) table');
-select ok(pg_temp.t287_converted('public.t287_z6u'), 'C LIVENESS: t287_z6u is partitioned, with cells to compare');
+select ok(pg_temp.t287_converted('public.t287_z6u'), 'LIVENESS: (C) t287_z6u is partitioned, with cells to compare');
 
 -- ======================================================================================================
 -- D. the anchor: every bound is the anchor plus whole steps, so it must be whole units too
@@ -185,7 +185,7 @@ select lives_ok(
 select ok(pg_temp.t287_converted('public.t287_a3')
           and (select bool_and(extract(microseconds from lo::timestamptz)::bigint % 1000000 = 500000)
                  from pgpm.part where parent_table = 'public.t287_a3'::regclass and attached),
-  'D LIVENESS: t287_a3 is partitioned and every recorded lower bound carries the anchor''s half second');
+  'LIVENESS: (D) t287_a3 is partitioned and every recorded lower bound carries the anchor''s half second');
 select is(pg_temp.t287_mismatch('public.t287_a3'), 'none', 'D: every t287_a3 cell records the bounds it is attached on');
 
 -- ======================================================================================================
@@ -228,9 +228,9 @@ end $$;
 select set_config('t287.lo', pgpm._ts_text(date_trunc('second', now()) - interval '9.5 seconds'), false),
        set_config('t287.hi', pgpm._ts_text(date_trunc('second', now()) + interval '30.5 seconds'), false);
 select pg_temp.t287_claim('public.t287_r0', current_setting('t287.lo'), current_setting('t287.hi'));
-select ok(pg_temp.t287_owner_gone('public.t287_r0'), 'E LIVENESS: the session that recorded the claim is gone');
+select ok(pg_temp.t287_owner_gone('public.t287_r0'), 'LIVENESS: (E) the session that recorded the claim is gone');
 select is(pg_temp.t287_state('public.t287_r0'), 'r | same oid | config:false | bound:true | claim:true | part:false',
-  'E LIVENESS: the older install''s state: a claim on half-second bounds and its CHECK');
+  'LIVENESS: (E) the older install''s state: a claim on half-second bounds and its CHECK');
 select throws_like(
   $$ select dblink_exec('t287', $c$ call pgpm.transmute('public.t287_r0', 'ts', interval '500 milliseconds', p_obtain => 3) $c$) $$,
   'pg_partition_magician: cannot partition t287_r0 on ts with step 00:00:00.5 and anchor %pgpm.transmute_abort(t287_r0)%',

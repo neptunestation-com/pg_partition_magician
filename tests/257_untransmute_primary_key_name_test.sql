@@ -37,16 +37,16 @@ select c.conindid as ka_clone, ic.relname as ka_clone_name
   from pg_constraint c join pg_class ic on ic.oid = c.conindid
  where c.conrelid = :ka_mon and c.contype = 'p' \gset
 select is((select conname::text from pg_constraint where conrelid = 'public.ka257'::regclass and contype = 'p'),
-  'ka257_pk', 'A LIVENESS: the managed table''s primary key is ka257_pk');
+  'ka257_pk', 'LIVENESS: (A) the managed table''s primary key is ka257_pk');
 select is(:'ka_clone_name'::text, (select relname::text from pg_class where oid = :ka_mon) || '_pkey',
-  'A LIVENESS: the monolith''s copy of it carries the clone''s auto-name, <monolith>_pkey');
+  'LIVENESS: (A) the monolith''s copy of it carries the clone''s auto-name, <monolith>_pkey');
 select lives_ok($$ insert into public.ka257 values (2, 20, 'dup') on conflict on constraint ka257_pk do nothing $$,
-  'A LIVENESS: ON CONFLICT ON CONSTRAINT ka257_pk works on the managed table');
+  'LIVENESS: (A) ON CONFLICT ON CONSTRAINT ka257_pk works on the managed table');
 
-select is(pgpm.untransmute('public.ka257')::text, 'ka257', 'A LIVENESS: ka257 is restored');
+select is(pgpm.untransmute('public.ka257')::text, 'ka257', 'LIVENESS: (A) ka257 is restored');
 select is((select c.relname::text from pg_index i join pg_class c on c.oid = i.indexrelid
             where i.indrelid = 'public.ka257'::regclass and not i.indisprimary),
-  'ka257_w_idx', 'A LIVENESS: the secondary index made since came back as ka257_w_idx (the hand-back ran)');
+  'ka257_w_idx', 'LIVENESS: (A) the secondary index made since came back as ka257_w_idx (the hand-back ran)');
 select is((select conname::text || ' ' || (conindid = :ka_clone)::text from pg_constraint
             where conrelid = 'public.ka257'::regclass and contype = 'p'),
   'ka257_pk true', 'A: the primary key made since comes back as ka257_pk, the monolith''s own copy renamed in place');
@@ -64,12 +64,12 @@ select monolith_oid as kb_mon from pgpm.config where parent_table = 'public.kb25
 alter table public.kb257 drop constraint kb257_pkey;
 alter table public.kb257 add primary key (v, id);
 select is((select conname::text from pg_constraint where conrelid = 'public.kb257'::regclass and contype = 'p'),
-  'kb257_pkey', 'B LIVENESS: the managed table''s new key took PostgreSQL''s name for it, kb257_pkey');
+  'kb257_pkey', 'LIVENESS: (B) the managed table''s new key took PostgreSQL''s name for it, kb257_pkey');
 select is((select ic.relname::text from pg_constraint c join pg_class ic on ic.oid = c.conindid
             where c.conrelid = :kb_mon and c.contype = 'p'),
   (select relname::text from pg_class where oid = :kb_mon) || '_pkey',
-  'B LIVENESS: and the monolith''s copy the clone''s auto-name');
-select is(pgpm.untransmute('public.kb257')::text, 'kb257', 'B LIVENESS: kb257 is restored');
+  'LIVENESS: (B) and the monolith''s copy the clone''s auto-name');
+select is(pgpm.untransmute('public.kb257')::text, 'kb257', 'LIVENESS: (B) kb257 is restored');
 select is((select conname::text || ' ' || pg_get_constraintdef(oid) from pg_constraint
             where conrelid = 'public.kb257'::regclass and contype = 'p'),
   'kb257_pkey PRIMARY KEY (v, id)', 'B: the replacement key comes back as kb257_pkey, on (v, id)');
@@ -81,15 +81,15 @@ call pgpm.transmute('public.kc257_forty_bytes_of_table_name_abcdefgh', 'id', 100
 select monolith_oid as kc_mon from pgpm.config
  where parent_table = 'public.kc257_forty_bytes_of_table_name_abcdefgh'::regclass \gset
 alter table public.kc257_forty_bytes_of_table_name_abcdefgh add constraint kc257_pk primary key (id);
-select is(octet_length('kc257_forty_bytes_of_table_name_abcdefgh'), 40, 'C LIVENESS: the table''s name is 40 bytes');
+select is(octet_length('kc257_forty_bytes_of_table_name_abcdefgh'), 40, 'LIVENESS: (C) the table''s name is 40 bytes');
 select ok(octet_length((select relname from pg_class where oid = :kc_mon)) > 58,
-  'C LIVENESS: the monolith''s name is too long for <monolith>_pkey to fit 63 bytes');
+  'LIVENESS: (C) the monolith''s name is too long for <monolith>_pkey to fit 63 bytes');
 select is((select ic.relname::text from pg_constraint c join pg_class ic on ic.oid = c.conindid
             where c.conrelid = :kc_mon and c.contype = 'p'),
   left((select relname::text from pg_class where oid = :kc_mon), 58) || '_pkey',
-  'C LIVENESS: so the monolith''s copy is the monolith''s name clipped to 58 bytes, plus _pkey');
+  'LIVENESS: (C) so the monolith''s copy is the monolith''s name clipped to 58 bytes, plus _pkey');
 select is(pgpm.untransmute('public.kc257_forty_bytes_of_table_name_abcdefgh')::text,
-  'kc257_forty_bytes_of_table_name_abcdefgh', 'C LIVENESS: the long-named table is restored');
+  'kc257_forty_bytes_of_table_name_abcdefgh', 'LIVENESS: (C) the long-named table is restored');
 select is((select conname::text from pg_constraint
             where conrelid = 'public.kc257_forty_bytes_of_table_name_abcdefgh'::regclass and contype = 'p'),
   'kc257_pk', 'C: the key made since comes back as kc257_pk');

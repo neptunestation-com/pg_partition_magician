@@ -63,7 +63,7 @@ FILES=()
 if [ -n "$ONLY" ]; then
   ONLY="${ONLY/#\/repo\//$ROOT/}"
   if [ ! -f "$ONLY" ]; then
-    printf 'FAIL  %-58s %s\n' "the file to probe exists" "$ONLY"; exit 1
+    printf 'FAIL  %-58s %s\n' "GUARD: the file to probe exists" "$ONLY"; exit 1
   fi
   FILES=("$ONLY")
 else
@@ -77,7 +77,7 @@ q -d postgres -q -c "create database $DB" >/dev/null 2>&1
 q -d "$DB" -q -c "create extension if not exists pgtap;" >/dev/null 2>&1
 # The core is installed so a pattern built from a pgpm helper evaluates; nothing under test is in it.
 if ! q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f /repo/pgpm_core/install.sql >/dev/null 2>&1; then
-  printf 'FAIL  %-58s %s\n' "pgpm_core installed" "/repo/pgpm_core/install.sql"
+  printf 'FAIL  %-58s %s\n' "fixture: pgpm_core installed" "/repo/pgpm_core/install.sql"
   q -d postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
   exit 1
 fi
@@ -94,9 +94,9 @@ forms=$(q -d "$DB" -tAq -c "select string_agg(distinct substr(p.proname, 8), ' '
                               join pg_extension x on x.oid = d.refobjid and x.extname = 'pgtap'
                              where p.proname ~ '^throws_[a-z]+$'" 2>&1 </dev/null)
 if [[ " $forms " == *" ok "* ]]; then
-  printf 'PASS  %-58s %s\n' "the site pattern is every throws_* pgTAP installs" "$forms"
+  printf 'PASS  %-58s %s\n' "GUARD: the site pattern is every throws_* pgTAP installs" "$forms"
 else
-  printf 'FAIL  %-58s %s\n' "the site pattern is every throws_* pgTAP installs" "read: ${forms:-nothing}"
+  printf 'FAIL  %-58s %s\n' "GUARD: the site pattern is every throws_* pgTAP installs" "read: ${forms:-nothing}"
   q -d postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
   exit 1
 fi
@@ -260,7 +260,7 @@ out=$(q -d "$DB" -tAq -v ON_ERROR_STOP=1 -f - < "$work/probe.sql" 2>&1)
 rc=$?
 q -d postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
 if [ "$rc" != 0 ]; then
-  printf 'FAIL  %-58s %s\n' "the probe ran to completion" "psql exit $rc"
+  printf 'FAIL  %-58s %s\n' "LIVENESS: the probe ran to completion" "psql exit $rc"
   echo "$out" | tail -15 | sed 's/^/      /'
   exit 1
 fi
@@ -272,15 +272,15 @@ fi
 # reads as the control FAILING although the line it printed was the expected one (#688's head, 92 sites,
 # `line 196: echo: write error: Broken pipe`). A here-string is written whole before grep reads it.
 if grep -q '^CONTROL unpinned => ok ' <<<"$out"; then
-  printf 'PASS  %-58s %s\n' "control: 2D000 is raised inside the wrapper and NULL accepts it" "ok"
+  printf 'PASS  %-58s %s\n' "LIVENESS: control: 2D000 is raised inside the wrapper and NULL accepts it" "ok"
 else
-  printf 'FAIL  %-58s %s\n' "control: 2D000 is raised inside the wrapper and NULL accepts it" "$(echo "$out" | grep '^CONTROL unpinned' | head -1)"
+  printf 'FAIL  %-58s %s\n' "LIVENESS: control: 2D000 is raised inside the wrapper and NULL accepts it" "$(echo "$out" | grep '^CONTROL unpinned' | head -1)"
   fail=1
 fi
 if grep -q '^CONTROL pinned => not ok ' <<<"$out"; then
-  printf 'PASS  %-58s %s\n' "control: a P0001 pin rejects that 2D000" "not ok"
+  printf 'PASS  %-58s %s\n' "LIVENESS: control: a P0001 pin rejects that 2D000" "not ok"
 else
-  printf 'FAIL  %-58s %s\n' "control: a P0001 pin rejects that 2D000" "$(echo "$out" | grep '^CONTROL pinned' | head -1)"
+  printf 'FAIL  %-58s %s\n' "LIVENESS: control: a P0001 pin rejects that 2D000" "$(echo "$out" | grep '^CONTROL pinned' | head -1)"
   fail=1
 fi
 
@@ -306,7 +306,7 @@ judged=$((pinned + accepts + unevaluable + malformed))
 if [ -z "$sites" ] || [ "$sites" -eq 0 ]; then
   # A file with nothing to probe is a vacuous pass, and in mutant mode it would mean the mutation
   # rewrote the assertion into something this guard no longer recognises: either way, not evidence.
-  printf 'FAIL  %-58s %s\n' "the probe found at least one throws_* around call pgpm." "${sites:-none} found"
+  printf 'FAIL  %-58s %s\n' "LIVENESS: the probe found at least one throws_* around call pgpm." "${sites:-none} found"
   fail=1
 elif [ "$judged" -ne "$sites" ]; then
   printf 'FAIL  %-58s %s\n' "every site the probe found was judged" "$sites found, $judged judged"

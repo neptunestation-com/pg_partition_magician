@@ -116,7 +116,7 @@ select 't49as.evt'::regclass::oid as a_par, 't49as.loose'::regclass::oid as a_mi
        't49ad.loose'::regclass::oid as a_other \gset
 select :'p' || 't49as.loose.ndjson' as a_key, :'p' || 't49ad.loose.ndjson' as a_other_key \gset
 select ok(t49.clear(:'a_key') = 404 and t49.clear(:'a_other_key') = 404,
-  'A fixture: nothing at either schema''s key for loose before the work');
+  'fixture: (A) nothing at either schema''s key for loose before the work');
 
 -- the statement is spelled before the shim is on the search_path, so only the export's own calls can fire it
 select format('select archive.to_s3(%s::oid::regclass, %L, null, null)', :'a_par', 'loose') as a_sql \gset
@@ -127,9 +127,9 @@ reset search_path;
 -- disarmed here too: a failed export rolls the shim's own disarm back
 select set_config('t49.part', '', false) as disarmed \gset discard_
 select is((select outcome from t49.seen where part = 'A'), 'done',
-  'A LIVENESS: a second session moved the parent to t49ad inside the export, after archive._resolve_child returned');
+  'LIVENESS: (A) a second session moved the parent to t49ad inside the export, after archive._resolve_child returned');
 select is((select relnamespace::regnamespace::text from pg_class where oid = :'a_par'), 't49ad',
-  'A LIVENESS: the parent now lives in t49ad, where a namesake loose already stood');
+  'LIVENESS: (A) the parent now lives in t49ad, where a namesake loose already stood');
 select is(t49.rows(:'a_key'), '1:mine,2:mine',
   'A: the object keyed by the resolved relation''s own schema and name holds exactly its rows 1 and 2');
 select is((select relation_oid from archive.object_key_claim where object_key = :'a_key'), :'a_mine'::oid,
@@ -143,7 +143,7 @@ select is((select array_agg(object_key order by object_key) from archive.object_
 
 -- the consequence the issue names: the namesake, now loose in the parent's schema, exported through it
 select lives_ok(format('select archive.to_s3(%s::oid::regclass, %L, null, null)', :'a_par', 'loose'),
-  'A fixture: archive.to_s3(evt, loose) of the namesake now standing in the parent''s schema');
+  'fixture: (A) archive.to_s3(evt, loose) of the namesake now standing in the parent''s schema');
 select is(t49.rows(:'a_other_key'), '10:namesake',
   'A: the namesake''s export holds its own row 10, at its own key');
 select is(t49.rows(:'a_key'), '1:mine,2:mine',
@@ -164,7 +164,7 @@ select 't49bs.evt'::regclass::oid as b_par, 't49bs.loose'::regclass::oid as b_mi
        't49bd.loose'::regclass::oid as b_other \gset
 select :'p' || 't49bs.loose.parquet' as b_key, :'p' || 't49bd.loose.parquet' as b_other_key \gset
 select ok(t49.clear(:'b_key') = 404 and t49.clear(:'b_other_key') = 404,
-  'B fixture: nothing at either schema''s key for loose before the work');
+  'fixture: (B) nothing at either schema''s key for loose before the work');
 
 select format('select archive.to_s3_parquet(%s::oid::regclass, %L, null, null)', :'b_par', 'loose') as b_sql \gset
 select t49.arm('B', :'b_mine', 'alter table t49bs.evt set schema t49bd') as armed \gset discard_
@@ -173,9 +173,9 @@ select lives_ok(:'b_sql', 'B: archive.to_s3_parquet(evt, loose) completed, the p
 reset search_path;
 select set_config('t49.part', '', false) as disarmed \gset discard_
 select is((select outcome from t49.seen where part = 'B'), 'done',
-  'B LIVENESS: a second session moved the parent to t49bd inside the export, after archive._resolve_child returned');
+  'LIVENESS: (B) a second session moved the parent to t49bd inside the export, after archive._resolve_child returned');
 select is((select relnamespace::regnamespace::text from pg_class where oid = :'b_par'), 't49bd',
-  'B LIVENESS: the parent now lives in t49bd, where a namesake loose already stood');
+  'LIVENESS: (B) the parent now lives in t49bd, where a namesake loose already stood');
 insert into t49.got values ('B', t49.bytes(:'b_key'));
 select ok((select t49.has(file, 'mine_b') and not t49.has(file, 'namesake_b') from t49.got where part = 'B'),
   'B: the object keyed by the resolved relation''s own schema and name holds its rows, not the namesake''s');
@@ -184,7 +184,7 @@ select is((select relation_oid from archive.object_key_claim where object_key = 
 select is((t49.req('GET', :'b_other_key')).status, 404,
   'B: nothing was written at the namesake''s key t49bd.loose');
 select lives_ok(format('select archive.to_s3_parquet(%s::oid::regclass, %L, null, null)', :'b_par', 'loose'),
-  'B fixture: archive.to_s3_parquet(evt, loose) of the namesake now standing in the parent''s schema');
+  'fixture: (B) archive.to_s3_parquet(evt, loose) of the namesake now standing in the parent''s schema');
 select ok(t49.has(t49.bytes(:'b_other_key'), 'namesake_b'),
   'B: the namesake''s export holds its own row, at its own key');
 -- ok over `=`, not is(): two missing objects are both null, and is() would call them the same file
@@ -214,9 +214,9 @@ select 't49cs.evt'::regclass::oid as c_par, 't49cs.loose'::regclass::oid as c_mi
 select :'p' || 't49cn.loose.ndjson' as c_other_key, :'p' || 't49cs.loose.ndjson' as c_old_key,
        :'p' || 't49cn.loose.' || :'c_par' || '.ndjson' as c_key \gset
 select ok(t49.clear(:'c_other_key') = 404 and t49.clear(:'c_old_key') = 404 and t49.clear(:'c_key') = 404,
-  'C fixture: nothing at any of the three keys before the work');
+  'fixture: (C) nothing at any of the three keys before the work');
 select lives_ok($$select archive.to_s3('t49cn.evt', 'loose', null, null)$$,
-  'C fixture: the other parent exported its loose, row 30, to <prefix>t49cn.loose.ndjson');
+  'fixture: (C) the other parent exported its loose, row 30, to <prefix>t49cn.loose.ndjson');
 
 select format('select archive.to_s3(%s::oid::regclass, %L, null, null)', :'c_par', 'loose') as c_sql \gset
 select t49.arm('C', :'c_mine', 'alter schema t49cn rename to t49cn_was; alter schema t49cs rename to t49cn')
@@ -226,7 +226,7 @@ select lives_ok(:'c_sql', 'C: archive.to_s3(evt, loose) completed, its schema re
 reset search_path;
 select set_config('t49.part', '', false) as disarmed \gset discard_
 select is((select outcome from t49.seen where part = 'C'), 'done',
-  'C LIVENESS: a second session gave this parent''s schema the other schema''s name inside the export');
+  'LIVENESS: (C) a second session gave this parent''s schema the other schema''s name inside the export');
 select is(t49.rows(:'c_other_key'), '30:other',
   'C: the other relation''s object at <prefix>t49cn.loose.ndjson still holds exactly its row 30');
 select is((select relation_oid from archive.object_key_claim where object_key = :'c_key'), :'c_mine'::oid,

@@ -48,7 +48,7 @@ docker exec "$C" psql -U postgres -d "$DB" -qv ON_ERROR_STOP=1 -f "$INSTALL" >/d
 # install (a missing database, as this guard itself shipped with once, or a mutant that will not load)
 # leaves every assertion below querying a database with no pgpm in it, and the guard reports a wall of
 # confusing failures instead of naming the cause.
-check "pgpm installed into $DB, with the claim's owner columns" \
+check "fixture: pgpm installed into $DB, with the claim's owner columns" \
   "$(q "select count(*)::int from information_schema.columns
          where table_schema = 'pgpm' and table_name = 'transmute_inflight'
            and column_name in ('owner_pid','owner_backend_start')")" "2"
@@ -73,7 +73,7 @@ DEAD_PID=$(q "select pg_backend_pid()")
 # "already gone" rather than "abort works under a squat". It is registered after the reap instead.
 q "insert into pgpm.transmute_inflight (parent_table,nsp,rel,control_kind,lo,hi,owner_pid,owner_backend_start)
    values ('public.sq_reap'::regclass,'public','sq_reap','id','0','100',$DEAD_PID, now());" >/dev/null
-check "the dead owner's session really is gone" \
+check "LIVENESS: the dead owner's session really is gone" \
   "$(q "select pgpm._session_alive($DEAD_PID, now())")" "f"
 
 # THE SQUAT. A second session takes the pre-#405 key for sq_reap and holds it. Backgrounded, so it stays
@@ -97,17 +97,17 @@ for _ in $(seq 1 40); do
 done
 
 # ---- the liveness witness: the squat is real, on the right key, and still connected ----
-check "a squatter holds the pre-#405 advisory key" \
+check "LIVENESS: a squatter holds the pre-#405 advisory key" \
   "$(q "select count(*)::int from pg_locks
          where locktype = 'advisory'
            and ((classid::bigint << 32) | objid::bigint) = $KEY and granted")" "1"
-check "the squatting session is still connected" \
+check "LIVENESS: the squatting session is still connected" \
   "$(q "select count(*)::int from pg_stat_activity a join pg_locks l on l.pid = a.pid
          where l.locktype = 'advisory'
            and ((l.classid::bigint << 32) | l.objid::bigint) = $KEY")" "1"
 # ...and it is a squat, not this conversion's own claim: the claim's recorded owner is a different,
 # dead session. Without this, a guard could "prove" the squat while accidentally squatting as the owner.
-check "the squatter is not the claim's recorded owner" \
+check "LIVENESS: the squatter is not the claim's recorded owner" \
   "$(q "select count(*)::int from pg_locks l
          where l.locktype = 'advisory'
            and ((l.classid::bigint << 32) | l.objid::bigint) = $KEY
@@ -130,7 +130,7 @@ check "it logged the reap" \
 # transmute_abort, the manual escape hatch, on a table whose key is squatted too.
 q "insert into pgpm.transmute_inflight (parent_table,nsp,rel,control_kind,lo,hi,owner_pid,owner_backend_start)
    values ('public.sq_abort'::regclass,'public','sq_abort','id','0','100',$DEAD_PID, now());" >/dev/null
-check "sq_abort's abandoned claim is registered" \
+check "fixture: sq_abort's abandoned claim is registered" \
   "$(q "select count(*)::int from pgpm.transmute_inflight where parent_table = 'public.sq_abort'::regclass")" "1"
 KEY2=$(q "select hashtextextended('pgpm_transmute:' || 'public.sq_abort'::regclass::oid::text, 0)")
 docker exec "$C" psql -U postgres -d "$DB" -qtA \
@@ -144,7 +144,7 @@ for _ in $(seq 1 40); do
   [ "${held2:-0}" -ge 1 ] && break
   sleep 0.25
 done
-check "a squatter holds sq_abort's key too" "${held2:-0}" "1"
+check "LIVENESS: a squatter holds sq_abort's key too" "${held2:-0}" "1"
 check "transmute_abort still undoes it" \
   "$(q "select pgpm.transmute_abort('public.sq_abort')")" "t"
 check "sq_abort's bound is gone" \
@@ -172,9 +172,9 @@ for _ in $(seq 1 40); do
   [ "$(q "select count(*)::int from pgpm.transmute_inflight where parent_table='public.sq_live'::regclass")" = "1" ] && break
   sleep 0.25
 done
-check "the live owner's claim is registered" \
+check "fixture: the live owner's claim is registered" \
   "$(q "select count(*)::int from pgpm.transmute_inflight where parent_table = 'public.sq_live'::regclass")" "1"
-check "its recorded session reads as alive" \
+check "LIVENESS: its recorded session reads as alive" \
   "$(q "select pgpm._session_alive(owner_pid, owner_backend_start) from pgpm.transmute_inflight
          where parent_table = 'public.sq_live'::regclass")" "t"
 q "select pgpm._transmute_reap()" >/dev/null

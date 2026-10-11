@@ -55,7 +55,7 @@ create temp table orig259a as select 'public.t259a'::regclass::oid as oid;
 
 select is(pg_temp.keys_on(array['public.ref259a_dirty', 'public.ref259a_clean', 'public.ref259a_valid']::regclass[]),
   'ref259a_clean_fk:false:t259a, ref259a_dirty_fk:false:t259a, ref259a_valid_fk:true:t259a',
-  'A LIVENESS: two incoming keys are NOT VALID and one is validated, all against t259a');
+  'LIVENESS: (A) two incoming keys are NOT VALID and one is validated, all against t259a');
 
 select throws_like(
   $$ select dblink_exec('t259', 'call pgpm.transmute(''public.t259a'', ''id'', 10::bigint, p_obtain => 2, p_incoming_fks => ''preserve'')') $$,
@@ -85,7 +85,7 @@ select is(pg_temp.keys_on(array['public.ref259a_dirty', 'public.ref259a_clean', 
   'ref259a_clean_fk:false:t259a, ref259a_dirty_fk:false:t259a, ref259a_valid_fk:true:t259a',
   'A: every key is where it was, and the two NOT VALID keys are still NOT VALID');
 select is((select array_agg(cid || '->' || a_id order by cid) from public.ref259a_dirty), array['10->1', '11->99'],
-  'A LIVENESS: the tolerated orphan is still in the referencing table');
+  'LIVENESS: (A) the tolerated orphan is still in the referencing table');
 select ok(not exists (select 1 from pgpm.dropped_fk where constraint_name in ('ref259a_dirty_fk', 'ref259a_clean_fk', 'ref259a_valid_fk')),
   'A: no key was recorded as dropped');
 select ok(not exists (select 1 from pgpm.log where action = 'fail_validate_incoming_fk'
@@ -94,14 +94,14 @@ select ok(not exists (select 1 from pgpm.log where action = 'fail_validate_incom
 
 -- the operator's remedy: validate the clean key, drop the one whose orphan they tolerate, re-run
 select lives_ok($$ alter table public.ref259a_clean validate constraint ref259a_clean_fk $$,
-  'A LIVENESS: the operator validates the clean key');
+  'LIVENESS: (A) the operator validates the clean key');
 select lives_ok($$ alter table public.ref259a_dirty drop constraint ref259a_dirty_fk $$,
-  'A LIVENESS: and drops the key over the orphan');
+  'LIVENESS: (A) and drops the key over the orphan');
 select lives_ok(
   $$ select dblink_exec('t259', 'call pgpm.transmute(''public.t259a'', ''id'', 10::bigint, p_obtain => 2, p_incoming_fks => ''preserve'')') $$,
   'A: with every incoming key validated, transmute converts t259a');
 select is((select relkind::text from pg_class where oid = 'public.t259a'::regclass), 'p',
-  'A LIVENESS: t259a is now the partitioned parent');
+  'LIVENESS: (A) t259a is now the partitioned parent');
 select is((select array_agg(constraint_name::text order by constraint_name) from pgpm.dropped_fk
             where parent_table = 'public.t259a'::regclass),
   array['ref259a_clean_fk', 'ref259a_valid_fk'], 'A: the cutover recorded exactly the two validated keys');
@@ -165,10 +165,10 @@ select throws_like(
   'C: the cutover refuses the NOT VALID key added after the preflight, naming it alone');
 drop event trigger t259c_inject;
 select is((select last_value::int || ':' || is_called::text from public.w259c_seq), '1:true',
-  'C LIVENESS: the window''s key went on once, inside the cutover');
+  'LIVENESS: (C) the window''s key went on once, inside the cutover');
 select is(
   (select convalidated from pg_constraint where conrelid = 'public.t259c'::regclass and conname = 'pgpm_monolith_bound'),
-  true, 'C LIVENESS: phases 1 and 2 committed: the refusal came from the cutover, leaving the resumable state');
+  true, 'LIVENESS: (C) phases 1 and 2 committed: the refusal came from the cutover, leaving the resumable state');
 select is((select relkind::text from pg_class where oid = 'public.t259c'::regclass) || ' / '
           || pg_temp.keys_on(array['public.ref259c_old', 'public.ref259c_late']::regclass[]),
   'r / ref259c_old_fk:true:t259c',

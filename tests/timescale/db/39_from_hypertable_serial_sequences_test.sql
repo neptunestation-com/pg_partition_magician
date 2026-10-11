@@ -56,22 +56,22 @@ select a.attname::text as col, d.objid as seq
 select is(
   (select string_agg(col || ':' || seq::regclass::text, ',' order by col) from public.s39_before),
   'id:s39_id_seq,n:s39_n_seq,v:s39_aux',
-  'WITNESS: the hypertable owns three sequences, through id, n and v');
+  'LIVENESS: the hypertable owns three sequences, through id, n and v');
 select is(
   (select string_agg(c.relname || ':' || pg_get_userbyid(c.relowner), ',' order by c.relname) from pg_class c
     where c.oid in ('public.s39'::regclass, 'public.s39_id_seq'::regclass)),
   's39:t39_owner,s39_id_seq:t39_owner',
-  'WITNESS: the table and its sequences belong to t39_owner, not to the migrating role');
+  'LIVENESS: the table and its sequences belong to t39_owner, not to the migrating role');
 select is(
   (select string_agg(sequencename || ':' || coalesce(last_value::text, 'unused'), ',' order by sequencename)
      from pg_sequences where schemaname = 'public' and sequencename like 's39%'),
   's39_aux:unused,s39_id_seq:23,s39_n_seq:1000',
-  'WITNESS: id issued 23 with 20 kept, n stands at 1000, s39_aux was never used');
+  'LIVENESS: id issued 23 with 20 kept, n stands at 1000, s39_aux was never used');
 
 call pgpm.from_hypertable_copy('public.s39', 'ts');
 alter table public.s39_pgpm_dest owner to postgres;   -- the copy's owner drifts from the source's (see the header)
 select is((select pg_get_userbyid(relowner)::text from pg_class where oid = 'public.s39_pgpm_dest'::regclass), 'postgres',
-  'WITNESS: at the cutover the copy belongs to another role than the source and its sequences');
+  'LIVENESS: at the cutover the copy belongs to another role than the source and its sequences');
 call pgpm.from_hypertable_cutover('public.s39', 'ts', interval '1 day', p_paused => true);
 
 -- ================= THE CONTRACT =================

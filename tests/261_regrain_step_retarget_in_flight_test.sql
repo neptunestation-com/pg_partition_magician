@@ -46,10 +46,10 @@ select ok((select regrain_to = '50' and regrain_cursor = '50' from pgpm.config w
           and pgpm._regrain_capture_active('public.rt261', :'mon_a')
           and exists (select 1 from pgpm.log where parent_table = 'public.rt261'::regclass
                        and action = 'regrain_copy' and lo = '0' and hi = '50' and rows = 49),
-          'LIVENESS (A): an auto-regrain to 50 is in flight on the monolith: capture on, [0, 50) copied, cursor at 50');
+          'LIVENESS: (A) an auto-regrain to 50 is in flight on the monolith: capture on, [0, 50) copied, cursor at 50');
 select is((select array_agg(lo || '-' || hi order by lo::numeric) from pgpm.part
             where parent_table = 'public.rt261'::regclass and not attached),
-          array['0-50'], 'LIVENESS (A): the run''s one copy is [0, 50)');
+          array['0-50'], 'LIVENESS: (A) the run''s one copy is [0, 50)');
 
 select throws_like(format($$ select pgpm.regrain_step('public.rt261', %L, '20') $$, :'mon_a'),
                    '%cannot regrain % at target step 20 -- the regrain in flight on it was not cut on that step''s grid: its copy [0, 50)%',
@@ -70,7 +70,7 @@ select is(pgpm.regrain_step('public.rt261', :'mon_a', '50'), 'copied:50',
           'the run''s own target by hand is accepted: it copies the run''s next sub-range [50, 100)');
 select is((select array_agg(lo || '-' || hi order by lo::numeric) from pgpm.part
             where parent_table = 'public.rt261'::regclass and not attached),
-          array['0-50', '50-100'], 'LIVENESS (A): the accepted hand step cut its copy on the run''s grid');
+          array['0-50', '50-100'], 'LIVENESS: (A) the accepted hand step cut its copy on the run''s grid');
 
 do $$ declare v_st text; begin
   for i in 1..20 loop
@@ -101,9 +101,9 @@ select pgpm.set_regrain('public.rh261', '50');   -- nothing in flight yet, so th
 select child_name as mon_b from pgpm.part
  where parent_table = 'public.rh261'::regclass and attached and lo = '0' \gset
 select is(pgpm.regrain_step('public.rh261', :'mon_b', '20'), 'prepared',
-          'LIVENESS (B): a hand regrain_step at 20 starts a run while regrain_to is 50');
+          'LIVENESS: (B) a hand regrain_step at 20 starts a run while regrain_to is 50');
 select is(pgpm.regrain_step('public.rh261', :'mon_b', '20'), 'copied:19',
-          'LIVENESS (B): and a second one copies [0, 20)');
+          'LIVENESS: (B) and a second one copies [0, 20)');
 
 call pgpm.maintain('public.rh261');
 select is((select array_agg(lo || '-' || hi order by lo::numeric) from pgpm.part
@@ -120,7 +120,7 @@ select is(pgpm.regrain('public.rh261', :'mon_b', '20'), 15,
           'regrain() at the run''s own step finishes it: 15 children of 20');
 select is((select array_agg(lo || '-' || hi order by lo::numeric) from pgpm.part
             where parent_table = 'public.rh261'::regclass and attached and hi::numeric <= 60),
-          array['0-20', '20-40', '40-60'], 'LIVENESS (B): the swap attached the run''s 20-grid children');
+          array['0-20', '20-40', '40-60'], 'LIVENESS: (B) the swap attached the run''s 20-grid children');
 select is((select array_agg(id || ':' || note order by id) from public.rh261 where id in (1, 19, 20, 21, 150, 200)),
           array['1:old1', '19:old19', '20:old20', '21:old21', '150:old150', '200:old200'],
           'every row reads as inserted after it');

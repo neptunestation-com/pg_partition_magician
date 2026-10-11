@@ -70,11 +70,11 @@ insert into t43.xtr values (1, 'first'), (2, 'first'), (3, 'first');
 select 't43.xtr'::regclass::oid as first_oid \gset
 
 select is(t43.clear(:'p' || 't43.xtr.ndjson') || '/' || t43.clear(:'p' || 't43.xtr.' || :'evt_oid' || '.ndjson'), '404/404',
-  'A fixture: nothing at the export''s key nor at its oid shape before the work');
+  'fixture: (A) nothing at the export''s key nor at its oid shape before the work');
 select lives_ok($$ select archive.to_s3('t43.evt', 'xtr', null, null) $$,
-  'A LIVENESS: archive.to_s3 of t43.xtr completed');
+  'LIVENESS: (A) archive.to_s3 of t43.xtr completed');
 select is(t43.rows(:'p' || 't43.xtr.ndjson'), '1:first,2:first,3:first',
-  'A LIVENESS: the export landed at <p>t43.xtr.ndjson holding rows 1, 2 and 3');
+  'LIVENESS: (A) the export landed at <p>t43.xtr.ndjson holding rows 1, 2 and 3');
 select is(t43.claimed_relation(:'p' || 't43.xtr.ndjson'), :'first_oid'::oid,
   'A: the claim on <p>t43.xtr.ndjson records the relation it exported, by oid');
 
@@ -91,7 +91,7 @@ create table t43.xtr (id bigint primary key, payload text not null);
 insert into t43.xtr values (10, 'second'), (11, 'second');
 select 't43.xtr'::regclass::oid as second_oid \gset
 select isnt(:'second_oid'::oid, :'first_oid'::oid,
-  'A LIVENESS: the new t43.xtr is another relation, with an oid of its own');
+  'LIVENESS: (A) the new t43.xtr is another relation, with an oid of its own');
 
 select throws_like($$ select archive.to_s3('t43.evt', 'xtr', null, null) $$,
   'pg_partition_magician: the object key %t43.xtr.ndjson is already claimed by the export of relation '
@@ -113,12 +113,12 @@ select 't43.ext2'::regclass::oid as b_first_oid \gset
 insert into archive.object_key_claim (object_key, parent_oid, kind, relation_oid) values
   (:'p' || 't43.ext2.ndjson', 1, 'chunk', 1);
 select is(t43.clear(:'p' || 't43.ext2.ndjson') || '/' || t43.clear(:'p' || 't43.ext2.' || :'evt_oid' || '.ndjson'), '404/404',
-  'B fixture: nothing at the plain key nor at the oid shape before the work');
+  'fixture: (B) nothing at the plain key nor at the oid shape before the work');
 select lives_ok($$ select archive.to_s3('t43.evt', 'ext2', null, null) $$,
-  'B LIVENESS: archive.to_s3 of t43.ext2 completed');
+  'LIVENESS: (B) archive.to_s3 of t43.ext2 completed');
 select is(t43.rows(:'p' || 't43.ext2.' || :'evt_oid' || '.ndjson') || '/' || (t43.req('GET', :'p' || 't43.ext2.ndjson')).status,
   '5:first,6:first/404',
-  'B LIVENESS: the export took the oid shape <p>t43.ext2.<oid>.ndjson, the plain key being another writer''s');
+  'LIVENESS: (B) the export took the oid shape <p>t43.ext2.<oid>.ndjson, the plain key being another writer''s');
 select is(t43.claimed_relation(:'p' || 't43.ext2.' || :'evt_oid' || '.ndjson'), :'b_first_oid'::oid,
   'B: the claim on the oid shape records the relation it exported');
 
@@ -145,7 +145,7 @@ select ok((select count(*) from archive.object_key_claim
              where object_key in (:'p' || 't43.evt_90000.ndjson', :'p' || 't43.ext3.ndjson')) = 2
           and t43.claimed_relation(:'p' || 't43.evt_90000.ndjson') is null
           and t43.claimed_relation(:'p' || 't43.ext3.ndjson') is null,
-  'C fixture: a chunk claim and an export claim with no relation recorded, as before an upgrade');
+  'fixture: (C) a chunk claim and an export claim with no relation recorded, as before an upgrade');
 select is(archive._record_claim_relations(), 1, 'C: install recorded the relation of exactly one claim');
 select is(t43.claimed_relation(:'p' || 't43.evt_90000.ndjson'), :'evt_oid'::oid,
   'C: the chunk claim''s relation is its parent');
@@ -154,7 +154,7 @@ select is(t43.claimed_relation(:'p' || 't43.ext3.ndjson'), null,
 
 create table t43.ext3 (id bigint primary key, payload text not null);
 insert into t43.ext3 values (30, 'third');
-select is(t43.clear(:'p' || 't43.ext3.ndjson'), 404, 'C fixture: nothing at <p>t43.ext3.ndjson before the export');
+select is(t43.clear(:'p' || 't43.ext3.ndjson'), 404, 'fixture: (C) nothing at <p>t43.ext3.ndjson before the export');
 select throws_like($$ select archive.to_s3('t43.evt', 'ext3', null, null) $$,
   'pg_partition_magician: the object key %t43.ext3.ndjson is already claimed by the export of relation (unrecorded) through t43.evt; refusing to write the export of t43.ext3 (relation '
     || ('t43.ext3'::regclass::oid)::text || ') over it%',

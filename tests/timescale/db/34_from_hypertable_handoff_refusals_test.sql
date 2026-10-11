@@ -41,11 +41,11 @@ select is(
                      || exists (select 1 from pg_constraint k where k.conindid = i.indexrelid)::text, ',' order by c.relname)
      from pg_index i join pg_class c on c.oid = i.indexrelid where i.indrelid = 'public.hbu34'::regclass),
   'hbu34_dev:false:false,hbu34_dev_ts:true:false,hbu34_ts_idx:false:false',
-  'WITNESS: hbu34 is keyed only by a bare unique index (no primary key, no unique constraint)');
+  'LIVENESS: hbu34 is keyed only by a bare unique index (no primary key, no unique constraint)');
 select throws_like(
   $$ call pgpm.transmute('public.pbu34', 'ts', interval '1 day') $$,
   '%the unique index pbu34_dev_ts includes the control column but is a bare index, not a constraint%',
-  'WITNESS: transmute refuses the same shape on a plain table');
+  'LIVENESS: transmute refuses the same shape on a plain table');
 
 select throws_like(
   $$ select pgpm.from_hypertable_preflight('public.hbu34', 'ts') $$,
@@ -107,11 +107,11 @@ insert into public.pfu34 values (now() - interval '1 hour', 20), (now() + interv
 select is(
   (select string_agg(v::text, ',' order by v) from public.hfu34)
   || '/' || (select max(ts) > now() + interval '29 days' from public.hfu34)::text,
-  '10,20,30/true', 'WITNESS: hfu34 holds 10,20,30, the newest 30 days ahead of now()');
+  '10,20,30/true', 'LIVENESS: hfu34 holds 10,20,30, the newest 30 days ahead of now()');
 select throws_like(
   $$ call pgpm.transmute('public.pfu34', 'ts', interval '1 day') $$,
   '%its newest value is %, which is % ahead of now()%p_force_frontier => true%',
-  'WITNESS: transmute refuses the same frontier on a plain table');
+  'LIVENESS: transmute refuses the same frontier on a plain table');
 
 select throws_like(
   $$ call pgpm.from_hypertable('public.hfu34', 'ts', interval '1 day') $$,
@@ -155,7 +155,7 @@ insert into public.hff34 values (now() - interval '3 hours', 7), (now() + interv
 select throws_like(
   $$ call pgpm.from_hypertable('public.hff34', 'ts', interval '1 day') $$,
   '%cannot migrate hypertable hff34 with p_interval 1 day -- refused before anything is changed%ahead of now()%',
-  'WITNESS: without the override from_hypertable refuses hff34 too');
+  'LIVENESS: without the override from_hypertable refuses hff34 too');
 call pgpm.from_hypertable('public.hff34', 'ts', interval '1 day', p_paused => false, p_force_frontier => true);
 select is(
   (select relkind::text from pg_class where oid = 'public.hff34'::regclass)

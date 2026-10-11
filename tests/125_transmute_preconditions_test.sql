@@ -51,17 +51,17 @@ insert into public.dt select i, i from generate_series(1, 2500) i;
 call pgpm.transmute('public.dt', 'id', 1000, p_obtain => 1);
 
 select is((select relkind::text from pg_class where oid = 'public.dt'::regclass), 'p',
-  'A WITNESS: dt is converted (a partitioned parent)');
+  'LIVENESS: (A) dt is converted (a partitioned parent)');
 select ok(exists (select 1 from pgpm.part where parent_table = 'public.dt'::regclass
                     and child_name = 'dt_p0000000000000003000'),
-  'A WITNESS: the forward partition [3000, 4000) exists');
+  'LIVENESS: (A) the forward partition [3000, 4000) exists');
 -- A write past the monolith lands in the forward partition. Removed again so max(id) stays inside the
 -- monolith: the re-run then recomputes the SAME bound and collides with the real monolith's name, which
 -- is the path that leaves the bound on the live parent (with a higher frontier it instead succeeds and
 -- nests the whole table under a second parent; either is the defect, this one is the one that hurts).
 insert into public.dt values (3500, 1);
 select is((select tableoid::regclass::text from public.dt where id = 3500), 'dt_p0000000000000003000',
-  'A WITNESS: a write past the monolith lands in the forward partition before the re-run');
+  'LIVENESS: (A) a write past the monolith lands in the forward partition before the re-run');
 delete from public.dt where id = 3500;
 
 select throws_like(
@@ -141,7 +141,7 @@ create table public.ev (id bigint primary key, payload text);
 insert into public.ev select i, 'x' from generate_series(1, 2500) i;
 select is(pgpm._part_name('ev', 'id', '1000', '0', '3000', 'UTC')::text,
   'ev_p0000000000000000000_to_0000000000000003000',
-  'B WITNESS: the monolith name this conversion will need');
+  'LIVENESS: (B) the monolith name this conversion will need');
 -- a standalone table already answers to it (an operator leftover; a partition of nothing)
 create table public.ev_p0000000000000000000_to_0000000000000003000 (id bigint);
 
@@ -165,7 +165,7 @@ call pgpm.transmute('public.ev', 'id', 1000, p_obtain => 1);
 select is((select child_name::text from pgpm.part where parent_table = 'public.ev'::regclass
             and child_name = 'ev_p0000000000000000000_to_0000000000000003000'),
   'ev_p0000000000000000000_to_0000000000000003000',
-  'B LIVENESS: without the squatter the same call converts ev, and the monolith takes exactly that name');
+  'LIVENESS: (B) without the squatter the same call converts ev, and the monolith takes exactly that name');
 
 -- B2. A NON-TABLE relation holding a child's name: here the first forward partition's, [3000, 4000). The
 -- orphan guard's relkind filter skipped it, and so did obtain in the cutover (it skips any candidate
@@ -193,7 +193,7 @@ call pgpm.transmute('public.ev2', 'id', 1000, p_obtain => 1);
 select is((select child_name::text from pgpm.part where parent_table = 'public.ev2'::regclass
             and child_name = 'ev2_p0000000000000003000'),
   'ev2_p0000000000000003000',
-  'B2 LIVENESS: without the sequence the same call converts ev2 and creates that very partition');
+  'LIVENESS: (B2) without the sequence the same call converts ev2 and creates that very partition');
 
 -- ====================================== C. the claim and its own session ======================================
 -- One backend for the operator across the failure, the retry and the abort.
@@ -217,7 +217,7 @@ select * from dblink('holder', 'select count(*) from public.rt_child') as t(c bi
 select is((select count(*)::int from pg_locks
             where relation = 'public.rt_child'::regclass and mode = 'AccessShareLock' and granted
               and pid <> pg_backend_pid()),
-  1, 'C WITNESS: the holder holds ACCESS SHARE on the referencing table');
+  1, 'LIVENESS: (C) the holder holds ACCESS SHARE on the referencing table');
 
 select throws_ok(
   $$ select dblink_exec('op', $c$ call pgpm.transmute('public.rt', 'id', 1000, p_obtain => 1,
@@ -228,11 +228,11 @@ select throws_ok(
 -- The recorded, resumable state, and WHOSE it is: this is the condition the defect trips on.
 select ok((select convalidated from pg_constraint
             where conrelid = 'public.rt'::regclass and conname = 'pgpm_monolith_bound'),
-  'C WITNESS: phases 1 and 2 committed (the validated bound is on rt): the failure was in the cutover');
+  'LIVENESS: (C) phases 1 and 2 committed (the validated bound is on rt): the failure was in the cutover');
 select is((select owner_pid from pgpm.transmute_inflight where rel = 'rt'), (select pid from op_id),
-  'C WITNESS: the claim is owned by the op backend');
+  'LIVENESS: (C) the claim is owned by the op backend');
 select ok((select pgpm._session_alive(owner_pid, owner_backend_start) from pgpm.transmute_inflight where rel = 'rt'),
-  'C WITNESS: and that owner reads as alive, because it is');
+  'LIVENESS: (C) and that owner reads as alive, because it is');
 
 -- Scope: a DIFFERENT live session (this one) is still refused. The fix must not have made the claim free
 -- for all; the owner alone may resume.
@@ -247,7 +247,7 @@ select dblink_disconnect('holder');
 select is((select count(*)::int from pg_locks
             where relation = 'public.rt_child'::regclass and mode = 'AccessShareLock' and granted
               and pid <> pg_backend_pid()),
-  0, 'C WITNESS: the holder has released the referencing table');
+  0, 'LIVENESS: (C) the holder has released the referencing table');
 
 -- THE DEFECT (retry). The documented remedy, from the session that owns the claim.
 select lives_ok(
@@ -258,7 +258,7 @@ select is((select relkind::text from pg_class where oid = 'public.rt'::regclass)
   'C: the re-run converted rt');
 select is((select count(*)::int from pgpm.log
             where parent_table = 'public.rt'::regclass and action = 'transmute_resume'),
-  1, 'C WITNESS: it RESUMED on the recorded bound rather than starting over');
+  1, 'LIVENESS: (C) it RESUMED on the recorded bound rather than starting over');
 select is((select child_name::text from pgpm.part where parent_table = 'public.rt'::regclass
             and child_name = 'rt_p0000000000000000000_to_0000000000000003000'),
   'rt_p0000000000000000000_to_0000000000000003000',
@@ -286,14 +286,14 @@ select throws_ok(
 select dblink_exec('holder', 'commit');
 select dblink_disconnect('holder');
 select is((select owner_pid from pgpm.transmute_inflight where rel = 'ab'), (select pid from op_id),
-  'C2 WITNESS: the claim is owned by the op backend');
+  'LIVENESS: (C2) the claim is owned by the op backend');
 select ok((select convalidated from pg_constraint
             where conrelid = 'public.ab'::regclass and conname = 'pgpm_monolith_bound'),
-  'C2 WITNESS: the validated bound is on ab');
+  'LIVENESS: (C2) the validated bound is on ab');
 select throws_ok(
   $$ insert into public.ab values (9000, 'past the bound') $$,
   '23514', 'new row for relation "ab" violates check constraint "pgpm_monolith_bound"',
-  'C2 WITNESS: the bound is rejecting a write past hi, which is what the abort exists to end');
+  'LIVENESS: (C2) the bound is rejecting a write past hi, which is what the abort exists to end');
 
 -- Scope again: from a different live session the abort is still refused.
 select throws_ok(
@@ -314,7 +314,7 @@ select is((select count(*)::int from pgpm.log
   1, 'C2: logged as transmute_abort');
 insert into public.ab values (9000, 'past the bound');
 select is((select payload from public.ab where id = 9000), 'past the bound',
-  'C2 LIVENESS: the write the bound was rejecting lands on the restored table');
+  'LIVENESS: (C2) the write the bound was rejecting lands on the restored table');
 
 select dblink_disconnect('op');
 

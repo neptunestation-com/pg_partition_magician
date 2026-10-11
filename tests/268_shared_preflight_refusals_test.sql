@@ -179,7 +179,7 @@ select is(
 
 select ok((select count(*) from t268_swept) >= 80
           and (select count(distinct routine) from t268_swept) >= 30,
-  'A LIVENESS: the sweep enumerated every public routine from the catalog (at least 30, 80 argument positions)');
+  'LIVENESS: (A) the sweep enumerated every public routine from the catalog (at least 30, 80 argument positions)');
 select is(
   (select array_agg(n order by n) from unnest(array['suspend_incoming_fks.p_force', 'restore_incoming_fks.p_parent',
              'validate_incoming_fks.p_respect_backoff', 'set_obtain.p_obtain', 'set_partition_tz.p_tz',
@@ -189,7 +189,7 @@ select is(
   array['extend_to.p_max', 'maintain.p_parent', 'observe_window.p_since', 'restore_incoming_fks.p_parent',
         'set_obtain.p_obtain', 'set_partition_tz.p_tz', 'suspend_incoming_fks.p_force',
         'transmute.p_lock_timeout', 'transmute.p_paused', 'validate_incoming_fks.p_respect_backoff'],
-  'A LIVENESS: the swept positions include the ones the issues name (the FK helpers, the setters, transmute)');
+  'LIVENESS: (A) the swept positions include the ones the issues name (the FK helpers, the setters, transmute)');
 select is(
   (select array_agg(d.routine || '.' || d.arg order by d.routine, d.arg) from t268_documented d
     where not exists (select 1 from t268_swept s where s.routine = d.routine and s.arg = d.arg)),
@@ -220,7 +220,7 @@ create table public.t268_spc (rid bigint primary key,
 insert into public.t268_spc values (1, 10), (2, 2500);
 select dblink_exec('t268', $c$ call pgpm.transmute('public.t268_sp', 'id', 1000::bigint, p_obtain => 30,
                                                     p_incoming_fks => 'preserve') $c$);
-select is(pgpm.restore_incoming_fks('public.t268_sp'), 1, 'A1 LIVENESS: the preserved key is re-added on the parent');
+select is(pgpm.restore_incoming_fks('public.t268_sp'), 1, 'LIVENESS: (A1) the preserved key is re-added on the parent');
 select is(pgpm.suspend_incoming_fks('public.t268_sp', false), 0, 'A1 GUARD: p_force => false does nothing');
 select throws_like($$ select pgpm.suspend_incoming_fks('public.t268_sp', null) $$,
   'pg_partition_magician: suspend_incoming_fks does not accept null for p_force: %',
@@ -265,7 +265,7 @@ select is(pg_temp.t268_state('public.t268_np', (select oid from t268_oid where r
   'r | same oid | config:false | bound:false | claim:false | 30', 'B1: refused before anything committed');
 select lives_ok(
   $$ select dblink_exec('t268', $c$ call pgpm.transmute('public.t268_np', 'id', 10::bigint, p_paused => true) $c$) $$,
-  'B1 LIVENESS: the same call with p_paused => true converts the same table');
+  'LIVENESS: (B1) the same call with p_paused => true converts the same table');
 
 -- B2. a negative-scale numeric key whose step its bounds cannot represent (#952 bullet 1, A952-1's fixture)
 create table public.t268_ns (id numeric(6,-2) primary key, v text);
@@ -274,7 +274,7 @@ insert into t268_oid values ('public.t268_ns', 'public.t268_ns'::regclass);
 select is((select format_type(atttypid, atttypmod) from pg_attribute
             where attrelid = 'public.t268_ns'::regclass and attname = 'id') || ' / ' || (select max(id) from public.t268_ns)::text
           || ' / ' || 2010::numeric(6,-2)::text,
-  'numeric(6,-2) / 2000 / 2000', 'B2 LIVENESS: the key is numeric(6,-2), and the step-10 bound 2010 would round to 2000');
+  'numeric(6,-2) / 2000 / 2000', 'LIVENESS: (B2) the key is numeric(6,-2), and the step-10 bound 2010 would round to 2000');
 select throws_like(
   $$ select dblink_exec('t268', $c$ call pgpm.transmute('public.t268_ns', 'id', 10::bigint) $c$) $$,
   'pg_partition_magician: cannot partition t268_ns on id with step 10 and anchor 0 -- the column is numeric(6,-2), which holds only multiples of 100,%',
@@ -285,7 +285,7 @@ select is(pg_temp.t268_state('public.t268_ns', (select oid from t268_oid where r
 select lives_ok($$ insert into public.t268_ns values (2100, 'past hi') $$, 'B2: a write past the old frontier is accepted');
 select lives_ok(
   $$ select dblink_exec('t268', $c$ call pgpm.transmute('public.t268_ns', 'id', 100::bigint) $c$) $$,
-  'B2 LIVENESS: a step of 100, which the column can represent, converts the same table');
+  'LIVENESS: (B2) a step of 100, which the column can represent, converts the same table');
 select is((select string_agg(pg_get_expr(c.relpartbound, c.oid), ', ') from pg_inherits i join pg_class c on c.oid = i.inhrelid
             where i.inhparent = 'public.t268_ns'::regclass and c.oid = (select monolith_oid from pgpm.config where parent_table = 'public.t268_ns'::regclass)),
   'FOR VALUES FROM (''100'') TO (''2200'')', 'B2: and the monolith is attached on bounds the column holds exactly');
@@ -295,7 +295,7 @@ create table public.t268_ov (id numeric(4,0) primary key, v text);
 insert into public.t268_ov select g * 5, 'x' from generate_series(1, 1999) g;
 insert into t268_oid values ('public.t268_ov', 'public.t268_ov'::regclass);
 select throws_ok($$ select 10000::numeric(4,0) $$, '22003', NULL,
-  'B3 LIVENESS: the boundary above the newest key, 10000, cannot be stored in numeric(4,0)');
+  'LIVENESS: (B3) the boundary above the newest key, 10000, cannot be stored in numeric(4,0)');
 select throws_like(
   $$ select dblink_exec('t268', $c$ call pgpm.transmute('public.t268_ov', 'id', 10::bigint) $c$) $$,
   'pg_partition_magician: cannot partition t268_ov on id: the monolith''s bound [0, 10000) cannot be stored in the column, which is numeric(4,0)%',
@@ -379,7 +379,7 @@ select case when :'pg18'::boolean
   then is((select string_agg(conname || ':' || (to_jsonb(c) ->> 'conenforced') || ':' || convalidated::text, ', ' order by conname)
              from pg_constraint c where conname in ('t268_nei_fk', 't268_neo_fk')),
           't268_nei_fk:false:false, t268_neo_fk:false:false',
-          'B7 LIVENESS: both keys are NOT ENFORCED, and read convalidated = false')
+          'LIVENESS: (B7) both keys are NOT ENFORCED, and read convalidated = false')
   else skip('NOT ENFORCED foreign keys exist from PostgreSQL 18', 1) end;
 select case when :'pg18'::boolean
   then ok((select v like 'pg_partition_magician: cannot transmute t268_nei -- its foreign key(s) (t268_nei_fk on t268_nei_ref) are NOT ENFORCED.%'

@@ -107,7 +107,7 @@ select format('create table t46a_x.%I (id bigint primary key, payload text not n
 :mk;
 -- the parent's schema is named t46a_x once the swap has run, and the export's key names it as it is then
 select is(t46h.clear(:'p' || 't46a_x.' || :'a_child' || '.parquet'), 404,
-  'A fixture: nothing at the key the export writes before the work');
+  'fixture: (A) nothing at the key the export writes before the work');
 
 select set_config('t46.sql', t46h.swap_sql('t46a', 't46a_x'), false) as armed \gset discard_
 select set_config('t46.part', 'A', false) as armed \gset discard_
@@ -116,10 +116,10 @@ select lives_ok(format('select archive.to_s3_parquet(%L, %L, null, null)', 't46a
 -- disarmed here too: a failed export rolls the trigger's own disarm back
 select set_config('t46.part', '', false) as disarmed \gset discard_
 select is((select outcome from t46h.seen where part = 'A'), 'done',
-  'A LIVENESS: the second session swapped t46a and t46a_x inside the export, after the encoder began');
+  'LIVENESS: (A) the second session swapped t46a and t46a_x inside the export, after the encoder began');
 select ok(to_regclass(format('t46a.%I', :'a_child'))::oid is distinct from :'a_oid'::oid
           and to_regclass(format('t46a_x.%I', :'a_child'))::oid = :'a_oid'::oid,
-  'A LIVENESS: the child''s old spelling now names the namesake, and the child moved with its schema');
+  'LIVENESS: (A) the child''s old spelling now names the namesake, and the child moved with its schema');
 -- coalesced, so a run whose export failed still reaches every assertion below rather than stopping here
 select coalesce((select object_key from archive.object_key_claim
                   where relation_oid = :'a_oid'::oid and object_key like '%.parquet'), '(no claim)') as a_key \gset
@@ -150,9 +150,9 @@ select lives_ok(format('insert into t46h.got select %L, archive._pq_to_parquet_r
   'B: the range encoder completed, a second session''s swap of the parent''s schema committed inside it');
 select set_config('t46.part', '', false) as disarmed \gset discard_
 select is((select outcome from t46h.seen where part = 'B'), 'done',
-  'B LIVENESS: the second session swapped t46b and t46b_x inside the encode');
+  'LIVENESS: (B) the second session swapped t46b and t46b_x inside the encode');
 select ok(to_regclass('t46b.evt')::oid is distinct from :'b_oid'::oid and to_regclass('t46b_x.evt')::oid = :'b_oid'::oid,
-  'B LIVENESS: the parent''s old spelling now names the namesake, and the parent moved with its schema');
+  'LIVENESS: (B) the parent''s old spelling now names the namesake, and the parent moved with its schema');
 select ok(length((select file from t46h.got where part = 'B')) > 0,
   'B: the encoder returned a file');
 select is((select file from t46h.got where part = 'B'),
@@ -179,12 +179,12 @@ select archive._held_relations() as c_before \gset
 select string_agg(payload, ',' order by id) as c_read from t46c.mine \gset
 select ok(t46h.held('t46c.mine'::regclass) and t46h.held('t46c.mine_pkey'::regclass)
           and not ('t46c.mine_pkey'::regclass::oid = any (:'c_before'::oid[])),
-  'C LIVENESS: the read of t46c.mine newly holds it and its index, which the planner opened');
+  'LIVENESS: (C) the read of t46c.mine newly holds it and its index, which the planner opened');
 select lives_ok(format('select archive._refuse_foreign_read(%L, %L, %L::oid[])', 't46', 't46c.mine', :'c_before'),
   'C: a read of the relation itself, its index included, is not refused');
 select count(*) as c_other from t46c.other \gset
 select ok(t46h.held('t46c.other'::regclass) and not ('t46c.other'::regclass::oid = any (:'c_before'::oid[])),
-  'C LIVENESS: then another relation was read, so this transaction newly holds a lock on it');
+  'LIVENESS: (C) then another relation was read, so this transaction newly holds a lock on it');
 select throws_like(format('select archive._refuse_foreign_read(%L, %L, %L::oid[])', 't46', 't46c.mine', :'c_before'),
   '%t46 reached t46c.other%while reading t46c.mine%',
   'C: once a read has reached another relation, it is refused, naming the relation reached');
@@ -216,7 +216,7 @@ end $$;
 begin;
 -- the snapshot table is ON COMMIT DROP, so the encodes and the trigger on it share this one transaction
 select is((select c.p_num_rows from archive._pq_to_parquet_range_counted(:'d_oid'::oid::regclass, 'id', '0', '100', false) c),
-          5::bigint, 'D LIVENESS: before the swap the range encoder reads the parent''s 5 rows of [0, 100)');
+          5::bigint, 'LIVENESS: (D) before the swap the range encoder reads the parent''s 5 rows of [0, 100)');
 create trigger t46_d_swap before truncate on pg_temp.archive_pq_snapshot
   for each statement execute function t46h.swap_on_truncate();
 select set_config('t46.d_armed', 'yes', true) as armed \gset discard_
@@ -226,7 +226,7 @@ select throws_like(format('select archive._pq_to_parquet_range_counted(%s::oid::
   'D: the range encoder refuses once its rendered name reached the partition named like the parent');
 select ok(to_regclass('t46d_x.evt')::oid = :'d_oid'::oid
           and exists (select 1 from pg_inherits where inhrelid = to_regclass('t46d.evt') and inhparent = :'d_oid'::oid),
-  'D LIVENESS: the swap committed inside the encode, and the parent''s old spelling names one of its own partitions');
+  'LIVENESS: (D) the swap committed inside the encode, and the parent''s old spelling names one of its own partitions');
 commit;
 
 -- ======================= PART E: the check fires inside both readers =======================
@@ -239,14 +239,14 @@ create table t46e_x.evt partition of t46e.evt for values from (900000000) to (90
 insert into t46e.evt values (900000001, 'partition-e');
 select ok(exists (select 1 from pg_inherits where inhrelid = 't46e_x.evt'::regclass and inhparent = 't46e.evt'::regclass)
           and (select count(*) from t46e_x.evt) = 1,
-  'E LIVENESS: t46e_x.evt is a partition of t46e.evt, carries its name, and holds row 900000001');
+  'LIVENESS: (E) t46e_x.evt is a partition of t46e.evt, carries its name, and holds row 900000001');
 select lives_ok($$ select archive._pq_to_parquet_range('t46e.evt', 'id', '0', '10000', false) $$,
-  'E LIVENESS: the range encoder reads [0, 10000), which does not reach that partition');
+  'LIVENESS: (E) the range encoder reads [0, 10000), which does not reach that partition');
 select throws_like($$ select archive._pq_to_parquet_range('t46e.evt', 'id', '900000000', '900010000', false) $$,
   '%archive._pq_snapshot reached t46e_x.evt%while reading t46e.evt%',
   'E: the range encoder refuses a read that newly locked a relation carrying the parent''s name');
 select lives_ok($$ select * from archive._encode_upload_ndjson_single('t46e.evt', '0', '10000', false) $$,
-  'E LIVENESS: the NDJSON strategy''s read of [0, 10000) completes');
+  'LIVENESS: (E) the NDJSON strategy''s read of [0, 10000) completes');
 select throws_like($$ select * from archive._encode_upload_ndjson_single('t46e.evt', '900000000', '900010000', false) $$,
   '%archive._encode_upload_ndjson_single reached t46e_x.evt%while reading t46e.evt%',
   'E: the NDJSON strategy refuses the same read, from inside its own call of the check');

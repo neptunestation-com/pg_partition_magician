@@ -16,7 +16,7 @@ insert into public.og (payload) select 'x' from generate_series(1, 300);
 create table public.og_p0000000000000000000 (like public.og);
 
 select has_table('public', 'og_p0000000000000000000',
-  'precondition: an orphaned child-partition-named table exists standalone');
+  'LIVENESS: an orphaned child-partition-named table exists standalone');
 
 -- Pinned by MESSAGE, not by SQLSTATE alone. In this fixture (300 ids, step 100000) the monolith is the
 -- one-step cell [0, 100000), whose name is og_p0000000000000000000, the orphan's own name, so with the

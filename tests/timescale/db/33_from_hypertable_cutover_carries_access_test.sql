@@ -97,12 +97,12 @@ create temp table before33 as
 -- ================= WITNESSES: on the hypertable, before the migration =================
 select is((select access from before33 where t = 'hg33'),
   'owner t33_owner | acl t33_app:INSERT:false,t33_app:SELECT:false,t33_owner:DELETE:false,t33_owner:INSERT:false,t33_owner:REFERENCES:false,t33_owner:SELECT:false,t33_owner:TRIGGER:false,t33_owner:TRUNCATE:false,t33_owner:UPDATE:false,t33_ro:SELECT:true | cols note:t33_app:UPDATE | rls true/true | policies hg33_app_sees:r:true:t33_app:(v >= 20):-,hg33_app_writes:a:true:t33_app:-:(v < 100),hg33_ro_sees:r:true:t33_ro:(v <= 20):- | comment grants, policies and a trigger ride the swap | triggers hg33_stamp:O',
-  'WITNESS: the hypertable has its owner, grants, column grant, RLS, three policies, comment and trigger');
+  'LIVENESS: the hypertable has its owner, grants, column grant, RLS, three policies, comment and trigger');
 select is(has_table_privilege('t33_app', 'public.hg33', 'select, insert')::text
           || '/' || has_table_privilege('t33_app', 'public.hg33', 'delete')::text
           || '/' || has_column_privilege('t33_app', 'public.hg33', 'note', 'update')::text
           || '/' || has_column_privilege('t33_app', 'public.hg33', 'v', 'update')::text,
-  'true/false/true/false', 'WITNESS: t33_app may select and insert, not delete, and update note but not v');
+  'true/false/true/false', 'LIVENESS: t33_app may select and insert, not delete, and update note but not v');
 \set before_app_sees '(refused)'
 \set before_ro_sees '(refused)'
 \set before_owner_sees '(refused)'
@@ -116,14 +116,14 @@ set role t33_owner;
 select count(*) as owner_sees from public.hg33 \gset before_
 reset role;
 select is(:'before_owner_sees'::text || ' of ' || (select count(*) from public.hg33), '0 of 3',
-  'WITNESS: FORCE holds the owner to the policies, and none names it, so t33_owner sees none of the 3 rows');
+  'LIVENESS: FORCE holds the owner to the policies, and none names it, so t33_owner sees none of the 3 rows');
 select is(:'before_app_sees'::text || ' / ' || :'before_ro_sees', '20,30 / 10,20',
-  'WITNESS: the policies admit different rows to the two roles (t33_app 20,30; t33_ro 10,20)');
+  'LIVENESS: the policies admit different rows to the two roles (t33_app 20,30; t33_ro 10,20)');
 select is((select access from before33 where t = 'hk33'),
   'owner postgres | acl postgres:DELETE:false,postgres:INSERT:false,postgres:REFERENCES:false,postgres:SELECT:false,postgres:TRIGGER:false,postgres:TRUNCATE:false,postgres:UPDATE:false,t33_ro:SELECT:false | rls false/false | comment -',
-  'WITNESS: the keyless hypertable has its one grant');
+  'LIVENESS: the keyless hypertable has its one grant');
 select is((select string_agg(tgname, ',' order by tgname) from pg_trigger where tgrelid = 'public.hg33'::regclass),
-  'hg33_stamp,ts_insert_blocker', 'WITNESS: the user trigger sits beside TimescaleDB''s insert blocker');
+  'hg33_stamp,ts_insert_blocker', 'LIVENESS: the user trigger sits beside TimescaleDB''s insert blocker');
 
 -- ================= the migrations =================
 -- What the tracked copy mints for its change capture, by identity, as it creates it.

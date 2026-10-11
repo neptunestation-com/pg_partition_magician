@@ -96,12 +96,12 @@ drop sequence public.probe297;
 -- ================= (A) transmute =================
 call pgpm.transmute('public.sq297', 'id', 100::bigint, p_obtain => 2);
 select is((select relkind::text from pg_class where oid = 'public.sq297'::regclass), 'p',
-  'A LIVENESS: sq297 was converted into a partitioned parent');
+  'LIVENESS: (A) sq297 was converted into a partitioned parent');
 select ok(pg_temp.seq297('public.sq297', 'id')::text = 'sq297_id_seq'
           and pg_temp.seq297('public.sq297', 'n')::text = 'sq297_n_seq'
           and pg_temp.seq297('public.sq297', 'id')::oid <> (select id_oid from before297)
           and pg_temp.seq297('public.sq297', 'n')::oid <> (select n_oid from before297),
-  'A LIVENESS: both of the parent''s identity sequences are new sequences under the original names');
+  'LIVENESS: (A) both of the parent''s identity sequences are new sequences under the original names');
 select is(pg_temp.acl297('public.sq297_id_seq'), (select id_acl from before297),
   'A: the parent''s sq297_id_seq holds exactly the original''s grants, each under its grantor');
 select is(pg_temp.acl297('public.sq297_n_seq'), (select n_acl from before297),
@@ -113,7 +113,7 @@ select ok(not has_sequence_privilege('t297_stranger', 'public.sq297_id_seq', 'UP
           and not has_sequence_privilege('t297_stranger', 'public.sq297_id_seq', 'USAGE'),
   'A: the stranger the operator revoked gets neither UPDATE (setval) nor USAGE on sq297_id_seq back');
 select ok(has_sequence_privilege('t297_stranger', 'public.sq297_n_seq', 'UPDATE'),
-  'A LIVENESS: the stranger keeps UPDATE on sq297_n_seq, which the operator never revoked');
+  'LIVENESS: (A) the stranger keeps UPDATE on sq297_n_seq, which the operator never revoked');
 set role t297_bob;
 revoke usage on sequence public.sq297_id_seq from t297_carol;
 reset role;
@@ -122,7 +122,7 @@ select ok(not has_sequence_privilege('t297_carol', 'public.sq297_id_seq', 'USAGE
   'A: bob''s REVOKE takes carol''s USAGE away on the parent''s sequence, so it is still his grant');
 insert into public.sq297 (v) values ('d');
 select is((select id::text || ':' || n::text from public.sq297 where v = 'd'), '4:7',
-  'A LIVENESS: the parent''s sequences resume where the originals stopped');
+  'LIVENESS: (A) the parent''s sequences resume where the originals stopped');
 
 -- ================= (B) untransmute =================
 -- the operator changes both sequences' grants while the table is managed
@@ -137,15 +137,15 @@ select ok((select id_acl from parent297) @> array['t297_carol:USAGE/postgres', '
           and not (select id_acl from parent297) @> array['t297_app:SELECT/postgres']
           and (select n_acl from parent297) @> array['t297_app:UPDATE/postgres']
           and not has_sequence_privilege('t297_stranger', 'public.sq297_n_seq', 'UPDATE'),
-  'B LIVENESS: the managed sequences carry the operator''s changes, and the stranger holds nothing on sq297_n_seq');
-select is(pgpm.untransmute('public.sq297')::text, 'sq297', 'B LIVENESS: untransmute restored sq297');
+  'LIVENESS: (B) the managed sequences carry the operator''s changes, and the stranger holds nothing on sq297_n_seq');
+select is(pgpm.untransmute('public.sq297')::text, 'sq297', 'LIVENESS: (B) untransmute restored sq297');
 select is((select relkind::text from pg_class where oid = 'public.sq297'::regclass), 'r',
-  'B LIVENESS: sq297 is an ordinary table again');
+  'LIVENESS: (B) sq297 is an ordinary table again');
 select ok(pg_temp.seq297('public.sq297', 'id')::text = 'sq297_id_seq'
           and pg_temp.seq297('public.sq297', 'n')::text = 'sq297_n_seq'
           and pg_temp.seq297('public.sq297', 'id')::oid <> (select id_oid from parent297)
           and pg_temp.seq297('public.sq297', 'n')::oid <> (select n_oid from parent297),
-  'B LIVENESS: both restored identity sequences are new sequences under the managed table''s names');
+  'LIVENESS: (B) both restored identity sequences are new sequences under the managed table''s names');
 select is(pg_temp.acl297('public.sq297_id_seq'), (select id_acl from parent297),
   'B: the restored sq297_id_seq holds exactly the managed sequence''s grants');
 select is(pg_temp.acl297('public.sq297_n_seq'), (select n_acl from parent297),
@@ -156,14 +156,14 @@ select ok(not has_sequence_privilege('t297_stranger', 'public.sq297_n_seq', 'UPD
 
 -- ================= (C) a sequence at the owner's implicit default =================
 select ok((select relacl is null from pg_class where oid = 'public.nl297_id_seq'::regclass),
-  'C LIVENESS: nl297_id_seq, created before the default privileges, has the NULL ACL');
+  'LIVENESS: (C) nl297_id_seq, created before the default privileges, has the NULL ACL');
 call pgpm.transmute('public.nl297', 'id', 100::bigint, p_obtain => 2);
 select ok((select relkind::text from pg_class where oid = 'public.nl297'::regclass) = 'p'
           and pg_temp.seq297('public.nl297', 'id')::text = 'nl297_id_seq',
-  'C LIVENESS: nl297 was converted, its sequence under the original''s name');
+  'LIVENESS: (C) nl297 was converted, its sequence under the original''s name');
 select is(pg_temp.acl297('public.nl297_id_seq'), array['postgres:SELECT/postgres', 'postgres:UPDATE/postgres', 'postgres:USAGE/postgres'],
   'C: the parent''s nl297_id_seq holds the owner''s privileges and nothing the default privileges gave the stranger');
-select is(pgpm.untransmute('public.nl297')::text, 'nl297', 'C LIVENESS: untransmute restored nl297');
+select is(pgpm.untransmute('public.nl297')::text, 'nl297', 'LIVENESS: (C) untransmute restored nl297');
 select is(pg_temp.acl297('public.nl297_id_seq'), array['postgres:SELECT/postgres', 'postgres:UPDATE/postgres', 'postgres:USAGE/postgres'],
   'C: and so does the restored one');
 
@@ -182,7 +182,7 @@ create temp table before297d as select pg_temp.acl297('public.gd297_id_seq') as 
 select ok((select acl from before297d) @> array['t297_carol:USAGE/t297_bob']
           and not pg_has_role('t297_owner', 't297_bob', 'member')
           and (select relacl is null from pg_class where oid = 'public.gd297'::regclass),
-  'D LIVENESS: gd297''s table carries no grant, its sequence carries carol''s from bob, and t297_owner is no member of bob');
+  'LIVENESS: (D) gd297''s table carries no grant, its sequence carries carol''s from bob, and t297_owner is no member of bob');
 set session authorization t297_owner;
 select throws_like(
   $$ call pgpm.transmute('public.gd297', 'id', 100::bigint, p_obtain => 2) $$,
@@ -200,7 +200,7 @@ set session authorization t297_owner;
 call pgpm.transmute('public.gd297', 'id', 100::bigint, p_obtain => 2);
 reset session authorization;
 select is((select relkind::text from pg_class where oid = 'public.gd297'::regclass), 'p',
-  'D LIVENESS: as a member of bob the same session converts gd297');
+  'LIVENESS: (D) as a member of bob the same session converts gd297');
 select is(pg_temp.acl297('public.gd297_id_seq'), (select acl from before297d),
   'D: and the parent''s gd297_id_seq holds exactly the original''s grants, carol''s under bob');
 revoke t297_bob from t297_owner;

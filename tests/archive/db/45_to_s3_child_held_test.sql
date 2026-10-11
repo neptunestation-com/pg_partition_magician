@@ -93,11 +93,11 @@ select child_name as a_child, child_oid as a_oid from pgpm.part
  where parent_table = 't45.evt'::regclass and lo = '0' \gset
 select :'p' || 't45.' || :'a_child' || '.ndjson' as a_key \gset
 
-select is(t45.clear(:'a_key'), 404, 'A fixture: nothing at the export''s key before the work');
+select is(t45.clear(:'a_key'), 404, 'fixture: (A) nothing at the export''s key before the work');
 select lives_ok(format('select archive.to_s3(%L, %L, null, null)', 't45.evt', :'a_child'),
-  'A LIVENESS: the first archive.to_s3 of the [0, 10000) child completed');
+  'LIVENESS: (A) the first archive.to_s3 of the [0, 10000) child completed');
 select is(t45.rows(:'a_key'), '1:first,2:first,3:first',
-  'A LIVENESS: its object holds rows 1, 2 and 3, now the export the next run must not replace');
+  'LIVENESS: (A) its object holds rows 1, 2 and 3, now the export the next run must not replace');
 
 -- the re-run, with a second session dropping the child and creating another relation by its name inside it
 select set_config('t45.sql', format(
@@ -109,7 +109,7 @@ select lives_ok(format('select archive.to_s3(%L, %L, null, null)', 't45.evt', :'
 -- disarmed here too: a failed export rolls the trigger's own disarm back
 select set_config('t45.part', '', false) as disarmed \gset discard_
 select is((select count(*)::int from t45.seen where part = 'A'), 1,
-  'A LIVENESS: the second session made its attempt inside the re-run, after the export resolved its child');
+  'LIVENESS: (A) the second session made its attempt inside the re-run, after the export resolved its child');
 select is((select outcome from t45.seen where part = 'A'), 'lock_not_available',
   'A: the DROP waited for the export, which holds the child it resolved, and gave up at its lock_timeout');
 select is(to_regclass(format('t45.%I', :'a_child'))::oid, :'a_oid'::oid,
@@ -120,9 +120,9 @@ select is((select relation_oid from archive.object_key_claim where object_key = 
   'A: the claim names the relation the object holds');
 -- the hold lasts as long as the export's transaction, and no longer
 select lives_ok(format('select dblink_exec(%L, %L)', 'h', current_setting('t45.sql')),
-  'A LIVENESS: the same DROP and namesake succeed once the export has committed');
+  'LIVENESS: (A) the same DROP and namesake succeed once the export has committed');
 select isnt(to_regclass(format('t45.%I', :'a_child'))::oid, :'a_oid'::oid,
-  'A LIVENESS: and the name is now another relation''s');
+  'LIVENESS: (A) and the name is now another relation''s');
 
 -- ======================= PART B: the child's schema renamed away =======================
 create schema t45b;
@@ -134,10 +134,10 @@ select child_name as b_child, child_oid as b_oid from pgpm.part
  where parent_table = 't45b.evt'::regclass and lo = '0' \gset
 select :'p' || 't45b.' || :'b_child' || '.ndjson' as b_key \gset
 
-select is(t45.clear(:'b_key'), 404, 'B fixture: nothing at the export''s key before the work');
+select is(t45.clear(:'b_key'), 404, 'fixture: (B) nothing at the export''s key before the work');
 select lives_ok(format('select archive.to_s3(%L, %L, null, null)', 't45b.evt', :'b_child'),
-  'B LIVENESS: the first archive.to_s3 of the [0, 10000) child of t45b.evt completed');
-select is(t45.rows(:'b_key'), '5:first,6:first', 'B LIVENESS: its object holds rows 5 and 6');
+  'LIVENESS: (B) the first archive.to_s3 of the [0, 10000) child of t45b.evt completed');
+select is(t45.rows(:'b_key'), '5:first,6:first', 'LIVENESS: (B) its object holds rows 5 and 6');
 
 select set_config('t45.sql', format(
   'alter schema t45b rename to t45b_old; create schema t45b; '
@@ -149,10 +149,10 @@ select lives_ok(format('select archive.to_s3(%L, %L, null, null)', 't45b.evt', :
 -- disarmed here too: a failed export rolls the trigger's own disarm back
 select set_config('t45.part', '', false) as disarmed \gset discard_
 select is((select outcome from t45.seen where part = 'B'), 'done',
-  'B LIVENESS: the second session renamed t45b away and created a namesake inside the re-run');
+  'LIVENESS: (B) the second session renamed t45b away and created a namesake inside the re-run');
 select ok(to_regclass(format('t45b.%I', :'b_child'))::oid is distinct from :'b_oid'::oid
           and to_regclass(format('t45b_old.%I', :'b_child'))::oid = :'b_oid'::oid,
-  'B LIVENESS: the old spelling of the child now names another relation, and the claimed one moved with its schema');
+  'LIVENESS: (B) the old spelling of the child now names another relation, and the claimed one moved with its schema');
 select is(t45.rows(:'b_key'), '5:first,6:first',
   'B: the object holds exactly the claimed relation''s rows 5 and 6, not the namesake''s row 20');
 
@@ -170,14 +170,14 @@ select child_name as c_child, child_oid as c_oid from pgpm.part
 
 begin;
 select is(archive._resolve_child('t45c.evt', :'c_child', 'tests/archive/db/45')::oid, :'c_oid'::oid,
-  'C LIVENESS: archive._resolve_child resolved the child to the relation pgpm.part records');
+  'LIVENESS: (C) archive._resolve_child resolved the child to the relation pgpm.part records');
 select is(t45.attempt('C', format('drop table t45c.%I', :'c_child')), 'lock_not_available',
   'C: a second session''s DROP of the child waits for the transaction that resolved it, and gave up at its lock_timeout');
 commit;
 -- the attempt in a statement of its own: one statement would look the child up in the catalog it began with
 select t45.attempt('C after', format('drop table if exists t45c.%I', :'c_child')) as c_after \gset
 select ok(:'c_after' = 'done' and to_regclass(format('t45c.%I', :'c_child')) is null,
-  'C LIVENESS: the same DROP succeeds once that transaction has ended, and the child is gone');
+  'LIVENESS: (C) the same DROP succeeds once that transaction has ended, and the child is gone');
 
 select dblink_disconnect('h') as disconnected \gset discard_
 select count(t45.clear(k)) from unnest(array[:'a_key', :'b_key']) k \gset discard_

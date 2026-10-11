@@ -117,7 +117,7 @@ alter publication pub43_r add table public.pl43 where (v > 3);
 select throws_like(
   $$ call pgpm.transmute('public.pl43', 'ts', interval '1 day') $$,
   '%the publication(s) (pub43_r) name it with a row filter or a column list and publish_via_partition_root = false%',
-  'WITNESS: transmute refuses the same membership on a plain table');
+  'LIVENESS: transmute refuses the same membership on a plain table');
 select throws_like(
   $$ call pgpm.from_hypertable('public.hr43', 'ts', interval '1 day') $$,
   'pg_partition_magician: cannot migrate hypertable hr43 -- refused before anything is changed%the publication(s) (pub43_r) name it with a row filter or a column list and publish_via_partition_root = false%',

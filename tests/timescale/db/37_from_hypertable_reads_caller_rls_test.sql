@@ -60,19 +60,19 @@ reset role;
 -- ================= WITNESSES =================
 select is((select (not rolsuper and not rolbypassrls)::text from pg_roles where rolname = 't37_owner')
           || '/' || (select rolbypassrls::text from pg_roles where rolname = current_user), 'true/true',
-  'WITNESS: t37_owner is neither a superuser nor BYPASSRLS, and the harness''s role is BYPASSRLS');
+  'LIVENESS: t37_owner is neither a superuser nor BYPASSRLS, and the harness''s role is BYPASSRLS');
 select is((select string_agg(relname || ':' || pg_get_userbyid(relowner) || ':' || relrowsecurity || '/' || relforcerowsecurity,
                              ',' order by relname)
              from pg_class where oid in ('public.hf37'::regclass, 'public.hn37'::regclass)),
   'hf37:t37_owner:true/true,hn37:t37_owner:true/false',
-  'WITNESS: both are t37_owner''s; hf37 FORCEs row-level security, hn37 only ENABLEs it');
+  'LIVENESS: both are t37_owner''s; hf37 FORCEs row-level security, hn37 only ENABLEs it');
 select is(:'owner_sees_hf'::text, '1,2,4,5,7,8',
-  'WITNESS: under FORCE the owner sees tenant a''s six rows of hf37 and none of tenant b''s three');
-select is(:'owner_sees_hn'::text, '1,2,3,4,5,6,7,8,9', 'WITNESS: without FORCE the owner sees every row of hn37');
+  'LIVENESS: under FORCE the owner sees tenant a''s six rows of hf37 and none of tenant b''s three');
+select is(:'owner_sees_hn'::text, '1,2,3,4,5,6,7,8,9', 'LIVENESS: without FORCE the owner sees every row of hn37');
 select is((select string_agg(id || ':' || tenant, ',' order by id) from public.hf37),
-  '1:a,2:a,3:b,4:a,5:a,6:b,7:a,8:a,9:b', 'WITNESS: hf37 holds all nine rows (read by the BYPASSRLS harness role)');
+  '1:a,2:a,3:b,4:a,5:a,6:b,7:a,8:a,9:b', 'LIVENESS: hf37 holds all nine rows (read by the BYPASSRLS harness role)');
 select ok((select count(*) from timescaledb_information.chunks where hypertable_name = 'hf37') >= 3,
-  'WITNESS: hf37''s rows span several chunks, so the copy is chunk by chunk');
+  'LIVENESS: hf37''s rows span several chunks, so the copy is chunk by chunk');
 
 -- ================= A. the owner migrating: refused before the copy =================
 select throws_like(
@@ -94,7 +94,7 @@ select is((select count(*)::int from timescaledb_information.hypertables where h
 -- ================= B. the owner cutting over a copy a BYPASSRLS role made: refused =================
 call pgpm.from_hypertable_copy('public.hf37', 'ts');
 select is((select string_agg(id || ':' || tenant, ',' order by id) from public.hf37_pgpm_dest),
-  '1:a,2:a,3:b,4:a,5:a,6:b,7:a,8:a,9:b', 'B WITNESS: the harness role''s copy holds all nine rows, tenant b''s included');
+  '1:a,2:a,3:b,4:a,5:a,6:b,7:a,8:a,9:b', 'LIVENESS: (B) the harness role''s copy holds all nine rows, tenant b''s included');
 select throws_like(
   $$ select public.t37_as_owner($c$ call pgpm.from_hypertable_cutover('public.hf37', 'ts', interval '1 day', p_paused => true) $c$) $$,
   'pg_partition_magician: cannot cut over hypertable hf37 as t37_owner -- row-level security is active on it for that role (FORCE ROW LEVEL SECURITY holds even the table''s owner to the policies, and the role has no BYPASSRLS)%the conservation check would read only those rows%',
@@ -108,7 +108,7 @@ call pgpm.from_hypertable_cutover('public.hf37', 'ts', interval '1 day', p_pause
 select is((select relkind::text from pg_class where oid = 'public.hf37'::regclass)
           || '/' || (select count(*) from pgpm.config where parent_table = 'public.hf37'::regclass)
           || '/' || (select count(*) from timescaledb_information.hypertables where hypertable_name = 'hf37'), 'p/1/0',
-  'C LIVENESS: the harness role''s cutover converted hf37 into a pgpm-managed partitioned table');
+  'LIVENESS: (C) the harness role''s cutover converted hf37 into a pgpm-managed partitioned table');
 select is((select string_agg(id || ':' || tenant, ',' order by id) from public.hf37),
   '1:a,2:a,3:b,4:a,5:a,6:b,7:a,8:a,9:b', 'C: hf37 holds every row by identity, tenant b''s three included');
 select is((select pg_get_userbyid(relowner) || ':' || relrowsecurity || '/' || relforcerowsecurity
@@ -125,7 +125,7 @@ call pgpm.from_hypertable('public.hn37', 'ts', interval '1 day', p_paused => tru
 reset role;
 select is((select relkind::text from pg_class where oid = 'public.hn37'::regclass)
           || '/' || (select count(*) from pgpm.config where parent_table = 'public.hn37'::regclass), 'p/1',
-  'D LIVENESS: the owner migrated hn37, whose policy does not apply to it');
+  'LIVENESS: (D) the owner migrated hn37, whose policy does not apply to it');
 select is((select string_agg(id || ':' || tenant, ',' order by id) from public.hn37),
   '1:a,2:a,3:b,4:a,5:a,6:b,7:a,8:a,9:b', 'D: hn37 holds every row by identity, tenant b''s included');
 select is((select relrowsecurity::text || '/' || relforcerowsecurity from pg_class where oid = 'public.hn37'::regclass),

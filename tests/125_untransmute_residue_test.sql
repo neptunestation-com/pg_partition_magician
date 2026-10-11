@@ -51,22 +51,22 @@ select is(
   (select array_agg(action order by id) from pgpm.log
     where parent_table = 'public.ur508a'::regclass and action in ('skip_archive', 'retain_detach', 'retain_drop')),
   array['skip_archive'],
-  'LIVENESS (A): archiving was deferred exactly once and nothing was dropped');
+  'LIVENESS: (A) archiving was deferred exactly once and nothing was dropped');
 select ok(pgpm._is_write_blocked('public.ur508a', :'mon_a'),
-  'LIVENESS (A): the monolith carries pgpm_write_block');
+  'LIVENESS: (A) the monolith carries pgpm_write_block');
 select is(
   (select tgenabled::text from pg_trigger where tgrelid = format('public.%I', :'mon_a')::regclass and tgname = 'pgpm_write_block'),
-  'A', 'LIVENESS (A): and it is ENABLE ALWAYS, the state that survives DETACH untouched');
+  'A', 'LIVENESS: (A) and it is ENABLE ALWAYS, the state that survives DETACH untouched');
 select throws_like($$ insert into public.ur508a (id, payload) values (8, 'blocked') $$, '%past its retention boundary%',
-  'LIVENESS (A): before the reverse the block really rejects a write into the monolith');
+  'LIVENESS: (A) before the reverse the block really rejects a write into the monolith');
 
 delete from public.ur508a where id = 20000;                                -- nothing outside the monolith now
 select is((select array_agg(id order by id) from public.ur508a), array[1,2,3,4,5,6,7]::bigint[],
-  'LIVENESS (A): exactly ids 1..7 remain, all inside the monolith, so the door is open');
+  'LIVENESS: (A) exactly ids 1..7 remain, all inside the monolith, so the door is open');
 
 select lives_ok($$ select pgpm.untransmute('public.ur508a') $$, '(A) untransmute goes through');
 select is((select relkind::text from pg_class where oid = 'public.ur508a'::regclass), 'r',
-  'LIVENESS (A): the reverse really happened: the table is plain again');
+  'LIVENESS: (A) the reverse really happened: the table is plain again');
 select is(
   (select coalesce(array_agg(tgname::text order by tgname), '{}') from pg_trigger
     where tgrelid = 'public.ur508a'::regclass and not tgisinternal),
@@ -111,26 +111,26 @@ select is(
   (select array_agg(child_name || ':' || lo || '-' || hi order by hi) from pgpm.archive_ledger
     where parent_table = 'public.ur508b'::regclass),
   array[:'mon_b' || ':0-1'],
-  'LIVENESS (B): exactly one chunk of coverage is recorded for the monolith, and it is not complete');
+  'LIVENESS: (B) exactly one chunk of coverage is recorded for the monolith, and it is not complete');
 delete from public.ur508b where id = 20000;                                -- the frontier regresses to 7
 call pgpm.maintain('public.ur508b');
 select is(
   (select array_agg(action order by id) from pgpm.log
     where parent_table = 'public.ur508b'::regclass and action = 'skip_write_block_lift'),
   array['skip_write_block_lift'],
-  'LIVENESS (B): retention no longer reaches the monolith and pgpm kept the block on purpose, logged once');
+  'LIVENESS: (B) retention no longer reaches the monolith and pgpm kept the block on purpose, logged once');
 select ok(pgpm._is_write_blocked('public.ur508b', :'mon_b'),
-  'LIVENESS (B): the block is still on the monolith');
+  'LIVENESS: (B) the block is still on the monolith');
 select is((select count(*)::int from pgpm.part where parent_table = 'public.ur508b'::regclass and child_name = :'mon_b'), 1,
-  'LIVENESS (B): and the monolith was not dropped (coverage incomplete)');
+  'LIVENESS: (B) and the monolith was not dropped (coverage incomplete)');
 select throws_like($$ insert into public.ur508b (id, payload) values (8, 'blocked') $$, '%past its retention boundary%',
-  'LIVENESS (B): before the reverse the kept block really rejects a write');
+  'LIVENESS: (B) before the reverse the kept block really rejects a write');
 select is((select array_agg(id order by id) from public.ur508b), array[1,2,3,4,5,6,7]::bigint[],
-  'LIVENESS (B): exactly ids 1..7 remain, so the door is open');
+  'LIVENESS: (B) exactly ids 1..7 remain, so the door is open');
 
 select lives_ok($$ select pgpm.untransmute('public.ur508b') $$, '(B) untransmute goes through');
 select is((select relkind::text from pg_class where oid = 'public.ur508b'::regclass), 'r',
-  'LIVENESS (B): the table is plain again');
+  'LIVENESS: (B) the table is plain again');
 select is(
   (select coalesce(array_agg(tgname::text order by tgname), '{}') from pg_trigger
     where tgrelid = 'public.ur508b'::regclass and not tgisinternal),
@@ -151,37 +151,37 @@ insert into public.ur508c (id, payload) values (20000, 'frontier');       -- fre
 select 'public.ur508c'::regclass::oid as parent_c \gset
 select child_name as mon_c from pgpm.part where parent_table = 'public.ur508c'::regclass and lo = '0' and attached \gset
 select is(pgpm.regrain_step('public.ur508c', :'mon_c', '100', 3), 'prepared',
-  'LIVENESS (C): regrain capture is installed on the monolith');
+  'LIVENESS: (C) regrain capture is installed on the monolith');
 -- #266 may have renamed the source to its transitional name; re-read it
 select child_name as mon_c from pgpm.part where parent_table = 'public.ur508c'::regclass and lo = '0' and attached \gset
 select is(pgpm.regrain_step('public.ur508c', :'mon_c', '100', 3), 'copied:3',
-  'LIVENESS (C): one microbatch of three rows copied into a fine child: the regrain is in flight, mid-sub-range');
+  'LIVENESS: (C) one microbatch of three rows copied into a fine child: the regrain is in flight, mid-sub-range');
 select is(
   (select array_agg(tgname::text order by tgname) from pg_trigger
     where tgrelid = format('public.%I', :'mon_c')::regclass and not tgisinternal),
   array['pgpm_regrain_capture', 'pgpm_regrain_truncate_guard'],
-  'LIVENESS (C): the capture trigger and the TRUNCATE guard sit on the monolith child');
+  'LIVENESS: (C) the capture trigger and the TRUNCATE guard sit on the monolith child');
 select is((select count(*)::int from pg_proc where proname = 'ur508c_pgpm_regrain_capture'), 1,
-  'LIVENESS (C): the per-parent capture function exists, and the trigger depends on it');
+  'LIVENESS: (C) the per-parent capture function exists, and the trigger depends on it');
 select is((select count(*)::int from pgpm.part where parent_table = 'public.ur508c'::regclass and not attached), 1,
-  'LIVENESS (C): one not-yet-attached fine copy is recorded');
+  'LIVENESS: (C) one not-yet-attached fine copy is recorded');
 select child_name as copy_c from pgpm.part where parent_table = 'public.ur508c'::regclass and not attached \gset
 select isnt(to_regclass(format('public.%I', :'copy_c')), null,
-  'LIVENESS (C): and it is a real standalone relation, which the parent''s DROP would not reach');
+  'LIVENESS: (C) and it is a real standalone relation, which the parent''s DROP would not reach');
 select is((select count(*)::int from pgpm.config where parent_table = 'public.ur508c'::regclass and regrain_cursor is not null), 1,
-  'LIVENESS (C): config.regrain_cursor marks the regrain as in flight');
+  'LIVENESS: (C) config.regrain_cursor marks the regrain as in flight');
 
 delete from public.ur508c where id = 20000;                                -- nothing outside the monolith
 update public.ur508c set payload = 'c7x' where id = 7;                     -- a change the capture trigger sees
 select is(pgpm._regrain_delta_count('public.ur508c'), 2::bigint,
-  'LIVENESS (C): the capture trigger is live: the update landed old + new in the delta');
+  'LIVENESS: (C) the capture trigger is live: the update landed old + new in the delta');
 select is((select array_agg(id order by id) from public.ur508c), array[1,2,3,4,5,6,7]::bigint[],
-  'LIVENESS (C): exactly ids 1..7 remain, so the door is open');
+  'LIVENESS: (C) exactly ids 1..7 remain, so the door is open');
 
 select lives_ok($$ select pgpm.untransmute('public.ur508c') $$,
   '(C) untransmute mid-regrain goes through: it does not die on its own capture apparatus');
 select is((select relkind::text from pg_class where oid = 'public.ur508c'::regclass), 'r',
-  'LIVENESS (C): the table is plain again');
+  'LIVENESS: (C) the table is plain again');
 select is(
   (select coalesce(array_agg(tgname::text order by tgname), '{}') from pg_trigger
     where tgrelid = 'public.ur508c'::regclass and not tgisinternal),

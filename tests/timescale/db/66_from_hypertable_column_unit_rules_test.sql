@@ -43,15 +43,15 @@ insert into public.p66t values (now() - interval '1 hour', 1);
 select throws_like(
   $$ call pgpm.transmute('public.p66d', 'd', interval '36 hours') $$,
   'pg_partition_magician: the date column d holds whole days, so its partition step must be a whole number of days or months (got 36:00:00)%',
-  'WITNESS: transmute refuses a sub-day step on a plain table''s date key');
+  'LIVENESS: transmute refuses a sub-day step on a plain table''s date key');
 select throws_like(
   $$ call pgpm.transmute('public.p66d', 'd', interval '1 day', p_anchor => '2000-01-01 12:00:00+00') $$,
   'pg_partition_magician: cannot partition p66d on d with step 1 day and anchor % -- the column is a date, %this anchor falls at 12:00:00 UTC%',
-  'WITNESS: transmute refuses an anchor off 00:00 UTC on a plain table''s date key');
+  'LIVENESS: transmute refuses an anchor off 00:00 UTC on a plain table''s date key');
 select throws_like(
   $$ call pgpm.transmute('public.p66t', 'ts', interval '1500 milliseconds') $$,
   'pg_partition_magician: cannot partition p66t on ts with step 00:00:01.5 and anchor % -- the column is timestamp(0) with time zone, which keeps whole seconds only%',
-  'WITNESS: transmute refuses a step finer than a timestamptz(0) key keeps on a plain table');
+  'LIVENESS: transmute refuses a step finer than a timestamptz(0) key keeps on a plain table');
 
 -- ================================ A: the one-shot driver, before its copy ================================
 select throws_like(

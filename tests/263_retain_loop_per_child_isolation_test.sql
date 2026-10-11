@@ -50,11 +50,11 @@ insert into public.rl263 values (65, 'frontier');
 select is((select string_agg(lo || '-' || hi, ',' order by lo::bigint) from pgpm.part
             where parent_table = 'public.rl263'::regclass and hi::bigint <= 30 and attached),
   '0-10,10-20,20-30',
-  'SETUP: three partitions are wholly past the horizon, oldest first: [0, 10), [10, 20), [20, 30)');
+  'fixture: three partitions are wholly past the horizon, oldest first: [0, 10), [10, 20), [20, 30)');
 select is((select string_agg(tableoid::regclass::text || ':' || id, ',' order by id) from public.rl263),
   format('%s:1,%s:2,%s:3,%s:15,%s:21,%s:22,%s:65', :'p0', :'p0', :'p0', :'p10', :'p20', :'p20',
          (select child_name from pgpm.part where parent_table = 'public.rl263'::regclass and lo = '60')),
-  'SETUP: rows 1-3 sit in [0, 10), row 15 in [10, 20), rows 21-22 in [20, 30), the frontier row in [60, 70)');
+  'fixture: rows 1-3 sit in [0, 10), row 15 in [10, 20), rows 21-22 in [20, 30), the frontier row in [60, 70)');
 
 -- =============================== the second session's lock ===============================
 -- SHARE UPDATE EXCLUSIVE on [10, 20) alone: what a VACUUM or ANALYZE of that partition holds.

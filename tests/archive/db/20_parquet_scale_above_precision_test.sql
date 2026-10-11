@@ -33,13 +33,13 @@ insert into public.twin20 values (1, 0.0012), (2, -0.0099), (3, 0.0050);
 -- ---------------------------------------------------------------------------
 
 select is((select format_type(atttypid, atttypmod) from pg_attribute where attrelid = 'public.sp20'::regclass and attname = 'w'),
-  'numeric(2,4)', 'witness: PostgreSQL itself renders the column as numeric(2,4), scale above precision');
+  'numeric(2,4)', 'LIVENESS: PostgreSQL itself renders the column as numeric(2,4), scale above precision');
 
 select throws_ok($$ insert into public.sp20 values (9, 0.01) $$, '22003', NULL,
-  'witness: 0.01 does not fit numeric(2,4), so every value it holds has at most four digits after the point and none before');
+  'LIVENESS: 0.01 does not fit numeric(2,4), so every value it holds has at most four digits after the point and none before');
 
 select is((select array_agg(w order by id) from public.sp20), array[0.0012, -0.0099, 0.0050]::numeric[],
-  'witness: the column holds 0.0012, -0.0099 and 0.0050');
+  'LIVENESS: the column holds 0.0012, -0.0099 and 0.0050');
 
 -- ---------------------------------------------------------------------------
 -- The shape the leaf declares
@@ -68,7 +68,7 @@ select ok(position(archive._pq_build_schema_leaf('w', 7, 5, false, 2, 4, 4) in b
 
 -- the witness for the two negatives below: this byte match finds a DECIMAL(4,4) leaf where one is
 select ok(position(archive._pq_build_schema_leaf('w', 7, 5, false, 2, 4, 4) in bytes) > 0,
-  'witness: the byte match finds the numeric(4,4) twin''s DECIMAL(4,4) leaf')
+  'LIVENESS: the byte match finds the numeric(4,4) twin''s DECIMAL(4,4) leaf')
   from t20.enc where label = 'twin_whole';
 
 select is(position(archive._pq_build_schema_leaf('w', 7, 5, false, 1, 4, 2) in bytes), 0,

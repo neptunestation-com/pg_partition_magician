@@ -59,13 +59,13 @@ $$;
 -- ======================================================================================================
 create table public.t305_top (id numeric(4,0) primary key);
 insert into public.t305_top select g from generate_series(9000, 9999) g;
-select is((select max(id)::text from public.t305_top), '9999', 'A LIVENESS: the newest key is 9999, the top of numeric(4,0)');
+select is((select max(id)::text from public.t305_top), '9999', 'LIVENESS: (A) the newest key is 9999, the top of numeric(4,0)');
 select is(pg_temp.t305_err($$ call pgpm.transmute('public.t305_top', 'id', 10::bigint) $$),
   'pg_partition_magician: cannot partition t305_top on id: the monolith''s bound [9000, 10000) cannot be stored in the column, which is numeric(4,0): 10000 cannot be stored in it at all (numeric field overflow). The cutover''s ATTACH would fail on it after the bound had been committed, leaving the table rejecting every write past it. No smaller step avoids it: the finest step the column admits, 1, gives [9000, 10000), which the column cannot store either. Give the column a type that holds the bound (ALTER TABLE t305_top ALTER COLUMN id TYPE ...), then re-run transmute.',
   'A: step 10 is refused, and the refusal names the wider type alone, not a smaller step');
 select alike(pg_temp.t305_err($$ call pgpm.transmute('public.t305_top', 'id', 1::bigint) $$),
   'pg_partition_magician: cannot partition t305_top on id: the monolith''s bound [9000, 10000) cannot be stored in the column%',
-  'A LIVENESS: the withheld remedy really fails: step 1 is refused on the same bound');
+  'LIVENESS: (A) the withheld remedy really fails: step 1 is refused on the same bound');
 select is(pg_temp.t305_state('public.t305_top'), 'r | config:false | bound:false | claim:false',
   'A: both refusals left the table as it was');
 alter table public.t305_top alter column id type numeric(5,0);
@@ -97,7 +97,7 @@ select is(pg_temp.t305_err($$ call pgpm.transmute('public.t305_ctop', 'id', 1000
   'C: newest 999900, the top of numeric(4,-2): refused with the wider type alone, the finest step being 100');
 select alike(pg_temp.t305_err($$ call pgpm.transmute('public.t305_ctop', 'id', 100::bigint) $$),
   'pg_partition_magician: cannot partition t305_ctop on id: the monolith''s bound [990000, 1000000) cannot be stored in the column%',
-  'C LIVENESS: the withheld remedy really fails: step 100 is refused on the same bound');
+  'LIVENESS: (C) the withheld remedy really fails: step 100 is refused on the same bound');
 create table public.t305_cnear (id numeric(4,-2) primary key);
 insert into public.t305_cnear select g * 100 from generate_series(9900, 9990) g;
 select is(pg_temp.t305_err($$ call pgpm.transmute('public.t305_cnear', 'id', 1000::bigint) $$),
@@ -133,7 +133,7 @@ select is(pg_temp.t305_err($$ call pgpm.transmute('public.t305_head', 'id', 5::b
   'E: step 5 with headroom 9 is refused with the wider type alone, the finest bound counting the headroom');
 select alike(pg_temp.t305_err($$ call pgpm.transmute('public.t305_head', 'id', 1::bigint, p_bound_headroom => 9) $$),
   'pg_partition_magician: cannot partition t305_head on id: the monolith''s bound [9900, 10000) cannot be stored in the column%',
-  'E LIVENESS: the withheld remedy really fails: step 1 with the same headroom is refused on the bound named');
+  'LIVENESS: (E) the withheld remedy really fails: step 1 with the same headroom is refused on the bound named');
 
 -- ======================================================================================================
 -- F. An integer type's range: smallint's newest key 32767, its maximum.

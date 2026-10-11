@@ -96,9 +96,9 @@ create table public.t306_noon (id bigint, dt date not null, v text, primary key 
 insert into public.t306_noon select g, current_date - g, 'noon-' || g from generate_series(1, 3) g;
 insert into t306_oid values ('t306_noon', 'public.t306_noon'::regclass);
 select is((select format_type(atttypid, atttypmod) from pg_attribute where attrelid = 'public.t306_noon'::regclass and attname = 'dt'),
-  'date', 'A LIVENESS: the key is a date, which holds whole days');
+  'date', 'LIVENESS: (A) the key is a date, which holds whole days');
 select isnt(timestamptz '2000-01-01 12:00:00+00', date_trunc('day', timestamptz '2000-01-01 12:00:00+00'),
-  'A LIVENESS: the anchor 2000-01-01 12:00+00 is not a midnight UTC');
+  'LIVENESS: (A) the anchor 2000-01-01 12:00+00 is not a midnight UTC');
 select throws_like(
   $$ select dblink_exec('t306', $c$ call pgpm.transmute('public.t306_noon', 'dt', interval '1 day', p_obtain => 3,
        p_anchor => '2000-01-01 12:00:00+00') $c$) $$,
@@ -116,7 +116,7 @@ select lives_ok($$ insert into public.t306_noon values (100, current_date + 1, '
 select lives_ok(
   $$ select dblink_exec('t306', $c$ call pgpm.transmute('public.t306_noon', 'dt', interval '1 day', p_obtain => 3) $c$) $$,
   'A: the default anchor (2000-01-01 00:00+00) converts the same table');
-select ok(pg_temp.t306_converted('public.t306_noon'), 'A LIVENESS: t306_noon is partitioned, with cells to compare');
+select ok(pg_temp.t306_converted('public.t306_noon'), 'LIVENESS: (A) t306_noon is partitioned, with cells to compare');
 select is(pg_temp.t306_mismatch('public.t306_noon'), 'none', 'A: every t306_noon cell records the bounds it is attached on');
 select is(pg_temp.t306_outside('public.t306_noon'), 'none', 'A: no t306_noon row sits in a cell whose recorded range does not hold its date');
 select is((select string_agg(v, ',' order by id) from public.t306_noon), 'noon-1,noon-2,noon-3,noon-tomorrow',
@@ -129,10 +129,10 @@ create table public.t306_ny (id bigint not null, dt date not null, v text, prima
 insert into public.t306_ny values (1, current_date - 3, 'ny-old'), (2, current_date + 1, 'ny-tomorrow');
 insert into t306_oid values ('t306_ny', 'public.t306_ny'::regclass);
 select is((timestamp '2024-01-01 00:00' at time zone 'America/New_York') at time zone 'UTC', timestamp '2024-01-01 05:00',
-  'B LIVENESS: midnight 2024-01-01 in New York is 05:00 UTC, off the date grid''s midnight');
+  'LIVENESS: (B) midnight 2024-01-01 in New York is 05:00 UTC, off the date grid''s midnight');
 select dblink_exec('t306', 'set timezone = ''America/New_York''');
 select is((select s from dblink('t306', 'select current_setting(''TimeZone'')') as t(s text)), 'America/New_York',
-  'B LIVENESS: the transmuting session is in New York');
+  'LIVENESS: (B) the transmuting session is in New York');
 select throws_like(
   $$ select dblink_exec('t306', $c$ call pgpm.transmute('public.t306_ny', 'dt', interval '1 day', p_anchor => '2024-01-01') $c$) $$,
   'pg_partition_magician: cannot partition t306_ny on dt with step 1 day and anchor 2024-01-01 00:00:00-05 -- the column is a date,%this anchor falls at 05:00:00 UTC%read in the session''s time zone, America/New_York%',
@@ -145,9 +145,9 @@ select lives_ok(
   $$ select dblink_exec('t306', $c$ call pgpm.transmute('public.t306_ny', 'dt', interval '1 day', p_anchor => '2024-01-01 00:00:00+00') $c$) $$,
   'B: the same date written at 00:00 UTC converts the table from the same New York session');
 select dblink_exec('t306', 'set timezone = ''UTC''');
-select ok(pg_temp.t306_converted('public.t306_ny'), 'B LIVENESS: t306_ny is partitioned, with cells to compare');
+select ok(pg_temp.t306_converted('public.t306_ny'), 'LIVENESS: (B) t306_ny is partitioned, with cells to compare');
 select is((select partition_tz from pgpm.config where parent_table = 'public.t306_ny'::regclass), 'UTC',
-  'B LIVENESS: the date grid is recorded in UTC whatever the session''s zone (#504)');
+  'LIVENESS: (B) the date grid is recorded in UTC whatever the session''s zone (#504)');
 select is(pg_temp.t306_mismatch('public.t306_ny'), 'none', 'B: every t306_ny cell records the bounds it is attached on');
 select is(pg_temp.t306_outside('public.t306_ny'), 'none', 'B: no t306_ny row sits in a cell whose recorded range does not hold its date');
 select is((select string_agg(v, ',' order by id) from public.t306_ny), 'ny-old,ny-tomorrow,ny-next',
@@ -158,12 +158,12 @@ select is((select string_agg(v, ',' order by id) from public.t306_ny), 'ny-old,n
 -- ======================================================================================================
 create table public.t306_wk (id bigint, dt date not null, v text, primary key (id, dt));
 insert into public.t306_wk select g, current_date - 5 * g, 'wk-' || g from generate_series(1, 4) g;
-select is(extract(isodow from date '2000-01-03')::int, 1, 'C LIVENESS: 2000-01-03 is a Monday');
+select is(extract(isodow from date '2000-01-03')::int, 1, 'LIVENESS: (C) 2000-01-03 is a Monday');
 select lives_ok(
   $$ select dblink_exec('t306', $c$ call pgpm.transmute('public.t306_wk', 'dt', interval '7 days', p_obtain => 3,
        p_anchor => '2000-01-03 00:00:00+00') $c$) $$,
   'C: a midnight-UTC anchor on a Monday converts a date key with a 7 day step');
-select ok(pg_temp.t306_converted('public.t306_wk'), 'C LIVENESS: t306_wk is partitioned, with cells to compare');
+select ok(pg_temp.t306_converted('public.t306_wk'), 'LIVENESS: (C) t306_wk is partitioned, with cells to compare');
 select is((select string_agg(distinct to_char(lo::timestamptz at time zone 'UTC', 'Dy HH24:MI:SS'), ',')
              from pgpm.part where parent_table = 'public.t306_wk'::regclass and attached
               and hi::timestamptz - lo::timestamptz = interval '7 days'),
@@ -210,9 +210,9 @@ end $$;
 select set_config('t306.lo', pgpm._ts_text((current_date - 6)::timestamp at time zone 'UTC' + interval '12 hours'), false),
        set_config('t306.hi', pgpm._ts_text((current_date + 3)::timestamp at time zone 'UTC' + interval '12 hours'), false);
 select pg_temp.t306_claim('public.t306_r', current_setting('t306.lo'), current_setting('t306.hi'));
-select ok(pg_temp.t306_owner_gone('public.t306_r'), 'D LIVENESS: the session that recorded the claim is gone');
+select ok(pg_temp.t306_owner_gone('public.t306_r'), 'LIVENESS: (D) the session that recorded the claim is gone');
 select is(pg_temp.t306_state('public.t306_r'), 'r | same oid | config:false | bound:true | claim:true | part:false',
-  'D LIVENESS: the older install''s state: a claim on noon bounds and its CHECK');
+  'LIVENESS: (D) the older install''s state: a claim on noon bounds and its CHECK');
 select throws_like(
   $$ select dblink_exec('t306', $c$ call pgpm.transmute('public.t306_r', 'dt', interval '1 day', p_obtain => 3,
        p_anchor => '2000-01-01 12:00:00+00') $c$) $$,

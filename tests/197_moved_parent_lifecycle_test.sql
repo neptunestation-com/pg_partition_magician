@@ -65,14 +65,14 @@ alter table pgpm_t197_old.ra set schema pgpm_t197_new;
 
 -- SETUP WITNESSES: the parent moved, its aged partitions did not, and they are still its partitions by oid.
 select is((select pgpm._retain_boundary(c) from pgpm.config c where parent_table = 'pgpm_t197_new.ra'::regclass),
-  '30', 'LIVENESS A: the moved table''s horizon is 30, so [0, 20) and [20, 30) are wholly past it');
+  '30', 'LIVENESS: (A) the moved table''s horizon is 30, so [0, 20) and [20, 30) are wholly past it');
 select is((select count(*)::int from pg_inherits i join pg_class c on c.oid = i.inhrelid
             where i.inhparent = 'pgpm_t197_new.ra'::regclass
               and i.inhrelid in (:a_mono_oid, :a_20_oid)
               and c.relnamespace = 'pgpm_t197_old'::regnamespace),
-  2, 'LIVENESS A: both aged partitions are attached to the moved parent, under the recorded oids, in the OLD schema');
+  2, 'LIVENESS: (A) both aged partitions are attached to the moved parent, under the recorded oids, in the OLD schema');
 select ok(to_regclass(format('pgpm_t197_new.%I', :'a_20')) is null,
-  'LIVENESS A: no relation of that name exists in the parent''s new schema (the state the bug misread)');
+  'LIVENESS: (A) no relation of that name exists in the parent''s new schema (the state the bug misread)');
 
 call pgpm.maintain('pgpm_t197_new.ra');
 
@@ -92,7 +92,7 @@ select is(pgpm_t197_old.wedges('pgpm_t197_new.ra'), 0,
 -- retention stops reaching [20, 30): with no archive coverage on it the next tick lifts its block
 select pgpm.set_retain('pgpm_t197_new.ra', '40');
 select is((select pgpm._retain_boundary(c) from pgpm.config c where parent_table = 'pgpm_t197_new.ra'::regclass),
-  '10', 'LIVENESS A: the loosened horizon is 10, so [20, 30) is no longer eligible');
+  '10', 'LIVENESS: (A) the loosened horizon is 10, so [20, 30) is no longer eligible');
 call pgpm.maintain('pgpm_t197_new.ra');
 select ok(pgpm_t197_old.alive(:a_20_oid) and not pgpm_t197_old.blocked(:a_20_oid),
   'A tick 2: the block came off [20, 30), which is still there');
@@ -129,10 +129,10 @@ select child_name as b_20 from pgpm.part where parent_table = 'pgpm_t197_old.rb'
 alter table pgpm_t197_old.rb set schema pgpm_t197_new;
 
 select is((select archive_batch from pgpm.config where parent_table = 'pgpm_t197_new.rb'::regclass), 1,
-  'LIVENESS B: archive_batch is 1, so each tick archives one partition, oldest first');
+  'LIVENESS: (B) archive_batch is 1, so each tick archives one partition, oldest first');
 select ok(to_regclass(format('pgpm_t197_new.%I', :'b_mono')) is null
           and to_regclass(format('pgpm_t197_old.%I', :'b_mono'))::oid = :b_mono_oid,
-  'LIVENESS B: the monolith lives in the old schema only');
+  'LIVENESS: (B) the monolith lives in the old schema only');
 
 call pgpm.maintain('pgpm_t197_new.rb');
 
@@ -175,7 +175,7 @@ alter table pgpm_t197_old.rc set schema pgpm_t197_new;
 
 select ok((select child_oid is null from pgpm.part where parent_table = 'pgpm_t197_new.rc'::regclass and lo = '0')
           and pgpm_t197_old.alive(:c_mono_oid),
-  'LIVENESS C: the monolith''s row is unanchored, and the monolith is there');
+  'LIVENESS: (C) the monolith''s row is unanchored, and the monolith is there');
 
 call pgpm.maintain('pgpm_t197_new.rc');
 
@@ -206,7 +206,7 @@ select format('insert into pgpm_t197_old.%I values (999, %L)', :'d_mono', 'squat
 select format('pgpm_t197_old.%I', :'d_mono')::regclass::oid as d_squat_oid \gset
 
 select ok(:d_squat_oid <> :d_mono_oid and pgpm_t197_old.alive(:d_mono_oid),
-  'LIVENESS D: the name now means a different relation, and the real monolith still exists');
+  'LIVENESS: (D) the name now means a different relation, and the real monolith still exists');
 
 call pgpm.maintain('pgpm_t197_new.rd');
 
@@ -223,7 +223,7 @@ select is((select array_agg(id order by id) from pgpm_t197_old.rd_mono_aside), a
   'D: the real monolith, renamed aside, keeps exactly its 3 rows');
 select is((select count(*)::int from pgpm.log where parent_table = 'pgpm_t197_new.rd'::regclass
             and action = 'retain_drop' and lo = '20' and hi = '30'),
-  1, 'LIVENESS D: the same tick retired the unsubstituted [20, 30), so retire() did reach this table');
+  1, 'LIVENESS: (D) the same tick retired the unsubstituted [20, 30), so retire() did reach this table');
 select ok(not pgpm_t197_old.alive(:d_20_oid), 'D: [20, 30) is gone, by oid');
 select is((select array_agg(id order by id) from pgpm_t197_old.:"d_mono"), array[999]::bigint[],
   'D: the squatter holds exactly its own row');

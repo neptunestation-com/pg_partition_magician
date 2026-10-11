@@ -49,10 +49,10 @@ call pgpm.transmute('public.nc', 'id', 100000, p_obtain => 0);
 alter table public.nc rename to nc_old;
 
 select is((select array_agg(id || ':' || payload) from public.nc_old), array['150000:old-row'],
-  'LIVENESS (A): the old table holds exactly its one row');
+  'LIVENESS: (A) the old table holds exactly its one row');
 select is((select inhparent::regclass::text from pg_inherits
             where inhrelid = 'public.nc_p0000000000000100000'::regclass),
-  'nc_old', 'LIVENESS (A): nc_p0000000000000100000 is an attached partition of the old table');
+  'nc_old', 'LIVENESS: (A) nc_p0000000000000100000 is an attached partition of the old table');
 
 create table public.nc (id bigint primary key, payload text);
 insert into public.nc select g, 'new' from generate_series(1000, 199000, 1000) g;
@@ -63,13 +63,13 @@ select child_name as nc_src from pgpm.part
  where parent_table = 'public.nc'::regclass and attached order by lo::numeric limit 1 \gset
 
 select is(pgpm.regrain_step('public.nc', :'nc_src', '100000', 1000), 'prepared',
-  'fixture (A): the prepare tick');
+  'fixture: (A) the prepare tick');
 select is(pgpm.regrain_step('public.nc', :'nc_src', '100000', 1000), 'copied:99',
-  'LIVENESS (A): the first sub-range [0, 100000) is copied whole (99 rows), so the copy branch runs');
+  'LIVENESS: (A) the first sub-range [0, 100000) is copied whole (99 rows), so the copy branch runs');
 select is((select regrain_cursor from pgpm.config where parent_table = 'public.nc'::regclass), '100000',
-  'LIVENESS (A): the cursor sits at the sub-range [100000, 200000) whose name the old table holds');
+  'LIVENESS: (A) the cursor sits at the sub-range [100000, 200000) whose name the old table holds');
 select is(pgpm._part_name('nc', 'id', '100000', '100000', '200000', 'UTC'), 'nc_p0000000000000100000',
-  'LIVENESS (A): that sub-range renders exactly the old table''s partition name');
+  'LIVENESS: (A) that sub-range renders exactly the old table''s partition name');
 
 select throws_like(
   format($$select pgpm.regrain_step('public.nc', %L, '100000', 1000)$$, :'nc_src'),
@@ -117,9 +117,9 @@ insert into public.cx values (3500000, 'frontier');
 select child_name as cx_src from pgpm.part
  where parent_table = 'public.cx'::regclass and attached order by lo::numeric limit 1 \gset
 
-select is(pgpm.regrain_step('public.cx', :'cx_src', '100000', 2), 'prepared', 'fixture (B): the prepare tick');
+select is(pgpm.regrain_step('public.cx', :'cx_src', '100000', 2), 'prepared', 'fixture: (B) the prepare tick');
 select is(pgpm.regrain_step('public.cx', :'cx_src', '100000', 2), 'copied:2',
-  'fixture (B): one partial batch of [0, 100000): 2 of its 3 rows');
+  'fixture: (B) one partial batch of [0, 100000): 2 of its 3 rows');
 create temp table cx_copy as
   select child_oid from pgpm.part
    where parent_table = 'public.cx'::regclass and not attached and child_name = 'cx_p0000000000000000000';
@@ -131,9 +131,9 @@ insert into public.cx_p0000000000000000000 values (5, 'squatter');
 select ok((select child_oid from cx_copy) = 'public.cx_copy_aside'::regclass::oid
           and (select array_agg(id order by id) from public.cx_copy_aside) = array[10, 20]::bigint[]
           and (select regrain_cursor from pgpm.config where parent_table = 'public.cx'::regclass) = '0',
-  'LIVENESS (B): the recorded copy (oid) is the renamed table holding exactly 10 and 20, cursor still at 0');
+  'LIVENESS: (B) the recorded copy (oid) is the renamed table holding exactly 10 and 20, cursor still at 0');
 select isnt('public.cx_p0000000000000000000'::regclass::oid, (select child_oid from cx_copy),
-  'LIVENESS (B): the copy''s recorded name now resolves to a different relation');
+  'LIVENESS: (B) the copy''s recorded name now resolves to a different relation');
 
 select throws_like(
   format($$select pgpm.regrain_step('public.cx', %L, '100000', 2)$$, :'cx_src'),
@@ -159,16 +159,16 @@ insert into public.rc values (3500000, 'frontier');
 select child_name as rc_src from pgpm.part
  where parent_table = 'public.rc'::regclass and attached order by lo::numeric limit 1 \gset
 
-select is(pgpm.regrain_step('public.rc', :'rc_src', '100000', 2), 'prepared', 'fixture (C): the prepare tick');
+select is(pgpm.regrain_step('public.rc', :'rc_src', '100000', 2), 'prepared', 'fixture: (C) the prepare tick');
 select is(pgpm.regrain_step('public.rc', :'rc_src', '100000', 2), 'copied:2',
-  'fixture (C): one partial batch of [0, 100000)');
+  'fixture: (C) one partial batch of [0, 100000)');
 create temp table rc_first as select 'public.rc_p0000000000000000000'::regclass::oid as first_oid;
 drop table public.rc_p0000000000000000000;
 
 select is(pgpm.regrain_step('public.rc', :'rc_src', '100000', 2), 'copied:2',
-  'LIVENESS (C): the next tick recreates the dropped copy under its row and copies into it');
+  'LIVENESS: (C) the next tick recreates the dropped copy under its row and copies into it');
 select ok(to_regclass('public.rc_p0000000000000000000')::oid <> (select first_oid from rc_first),
-  'LIVENESS (C): the relation under the copy''s name is a new one, not the copy first recorded');
+  'LIVENESS: (C) the relation under the copy''s name is a new one, not the copy first recorded');
 select is(pgpm.regrain_cancel('public.rc'), 1, '(C) regrain_cancel reclaims the one in-flight copy');
 select is(to_regclass('public.rc_p0000000000000000000'), null,
   '(C) and the recreated copy is the relation it dropped: none is left behind under the name');

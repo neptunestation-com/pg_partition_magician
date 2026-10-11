@@ -99,15 +99,15 @@ select pg_sleep(greatest(0, extract(epoch from (:'rp_hi'::timestamptz + interval
 select is((select (not rolsuper and not rolbypassrls)::text from pg_roles where rolname = 't266_owner')
           || '/' || :'owner_rp_sees' || '/' || (select string_agg(id::text, ',' order by id) from public.rp266),
   'true/1,2/1,2,3,4',
-  'WITNESS: t266_owner is neither a superuser nor BYPASSRLS, and sees ids 1 and 2 of rp266''s 1 to 4');
+  'LIVENESS: t266_owner is neither a superuser nor BYPASSRLS, and sees ids 1 and 2 of rp266''s 1 to 4');
 select is(:'owner_rp_rls' || '/' || :'owner_rpr_rls', 'true/false',
-  'WITNESS: row-level security filters the owner on the parent and not on the referencing table, so the refusal below can only be the parent''s');
+  'LIVENESS: row-level security filters the owner on the parent and not on the referencing table, so the refusal below can only be the parent''s');
 select is((select string_agg(p_id || '<-' || id, ',' order by id) from public.rpr266)
           || '/' || (select string_agg(id::text, ',' order by id) from public.rp266 where tableoid = format('public.%I', :'rp_mono')::regclass),
   '1<-100,3<-300,3<-301/1,2,3,4',
-  'WITNESS: ids 1 to 4 sit in rp266''s monolith, id 1 referenced once and id 3 twice');
+  'LIVENESS: ids 1 to 4 sit in rp266''s monolith, id 1 referenced once and id 3 twice');
 select ok(not pgpm._native_gt('time', :'rp_hi', pgpm._retain_boundary((select c from pgpm.config c where parent_table = 'public.rp266'::regclass))),
-  'WITNESS: the monolith is past the retention horizon, so retire() reaches the crossing');
+  'LIVENESS: the monolith is past the retention horizon, so retire() reaches the crossing');
 
 -- ================= THE REFUSAL =================
 select throws_like(format($$ select public.t266_as_owner('select pgpm.retire(''public.rp266'', ''%s'')') $$, :'rp_mono'),

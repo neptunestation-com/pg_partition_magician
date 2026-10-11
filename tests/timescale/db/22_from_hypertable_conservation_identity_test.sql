@@ -48,14 +48,14 @@ insert into t22_w select 'ci_a', max(ts) from ci_a_pgpm_dest;
 delete from ci_a where dev = 5;
 insert into ci_a select w - interval '30 hours' + interval '30 minutes', 999, 'late' from t22_w where tbl = 'ci_a';
 
-select is((select count(*)::int from ci_a), 72, 'A witness: the source holds 72 rows');
-select is((select count(*)::int from ci_a_pgpm_dest), 72, 'A witness: the destination holds 72 rows, the same count');
+select is((select count(*)::int from ci_a), 72, 'LIVENESS: (A) the source holds 72 rows');
+select is((select count(*)::int from ci_a_pgpm_dest), 72, 'LIVENESS: (A) the destination holds 72 rows, the same count');
 select cmp_ok((select ts from ci_a where dev = 999), '<', (select w from t22_w where tbl = 'ci_a'),
-  'A witness: the late row 999 sits behind the copy watermark, where the catch-up cannot see it');
+  'LIVENESS: (A) the late row 999 sits behind the copy watermark, where the catch-up cannot see it');
 select is((select array_agg(dev order by dev) from ci_a_pgpm_dest where dev in (5, 999)), array[5],
-  'A witness: the destination holds the deleted row 5 and not the late row 999');
+  'LIVENESS: (A) the destination holds the deleted row 5 and not the late row 999');
 select is((select array_agg(dev order by dev) from ci_a where dev in (5, 999)), array[999],
-  'A witness: the source holds the late row 999 and not the deleted row 5');
+  'LIVENESS: (A) the source holds the late row 999 and not the deleted row 5');
 
 select throws_like(
   $$ call pgpm.from_hypertable_cutover('ci_a', 'ts', interval '1 month', p_predrain => false) $$,
@@ -82,15 +82,15 @@ update ci_b set temp = -1 where device_id = 7;
 insert into ci_b select w + interval '1 minute', 9001, 2 from t22_w where tbl = 'ci_b';
 
 select cmp_ok((select ts from ci_b where device_id = 7), '<', (select w from t22_w where tbl = 'ci_b'),
-  'B witness: the updated row sits behind the copy watermark');
+  'LIVENESS: (B) the updated row sits behind the copy watermark');
 select is((select temp from ci_b_pgpm_dest where device_id = 7), 10.5::double precision,
-  'B witness: the destination holds the copied version of row 7 (temp 10.5), not the update');
+  'LIVENESS: (B) the destination holds the copied version of row 7 (temp 10.5), not the update');
 select is((select temp from ci_b where device_id = 7), -1::double precision,
-  'B witness: the source holds the updated version (temp -1)');
+  'LIVENESS: (B) the source holds the updated version (temp -1)');
 select cmp_ok((select ts from ci_b where device_id = 9001), '>', (select w from t22_w where tbl = 'ci_b'),
-  'B witness: the appended row 9001 sits past the watermark, where the keyed catch-up takes it');
-select is((select count(*)::int from ci_b), 61, 'B witness: the source holds 60 copied + 1 appended');
-select is((select count(*)::int from ci_b_pgpm_dest), 60, 'B witness: the destination holds the 60 copied');
+  'LIVENESS: (B) the appended row 9001 sits past the watermark, where the keyed catch-up takes it');
+select is((select count(*)::int from ci_b), 61, 'LIVENESS: (B) the source holds 60 copied + 1 appended');
+select is((select count(*)::int from ci_b_pgpm_dest), 60, 'LIVENESS: (B) the destination holds the 60 copied');
 
 select throws_like(
   $$ call pgpm.from_hypertable_cutover('ci_b', 'ts', interval '1 month', p_predrain => false) $$,
@@ -117,13 +117,13 @@ update ci_c set temp = -9 where device_id = 9;          -- NOT captured: no trig
 reset session_replication_role;
 
 select is((select array_agg(distinct device_id order by device_id) from ci_c_pgpm_delta), array[3]::bigint[],
-  'C witness: the delta saw the captured update (3) and not the bypassed one (9)');
+  'LIVENESS: (C) the delta saw the captured update (3) and not the bypassed one (9)');
 select is((select temp from ci_c_pgpm_dest where device_id = 9), 9::double precision,
-  'C witness: the destination holds the copied version of row 9');
+  'LIVENESS: (C) the destination holds the copied version of row 9');
 select is((select temp from ci_c where device_id = 9), -9::double precision,
-  'C witness: the source holds the bypassed update of row 9');
+  'LIVENESS: (C) the source holds the bypassed update of row 9');
 select is((select count(*)::int from ci_c), (select count(*)::int from ci_c_pgpm_dest),
-  'C witness: the two sides hold the same count (50), so a count check could not refuse');
+  'LIVENESS: (C) the two sides hold the same count (50), so a count check could not refuse');
 
 select throws_like(
   $$ call pgpm.from_hypertable_cutover('ci_c', 'ts', interval '1 month', p_predrain => false) $$,
@@ -154,11 +154,11 @@ insert into ci_d select w + interval '10 minutes', 777, null, '{"late": true}', 
 insert into ci_d select w + interval '10 minutes', 777, null, '{"late": true}', 1.50 from t22_w where tbl = 'ci_d';
 create table ci_d_snap as select * from ci_d;
 
-select is((select count(*)::int from ci_d where dev = 12), 2, 'D witness: the source holds two identical copies of row 12');
-select is((select count(*)::int from ci_d_pgpm_dest where dev = 12), 2, 'D witness: and the copy took both');
+select is((select count(*)::int from ci_d where dev = 12), 2, 'LIVENESS: (D) the source holds two identical copies of row 12');
+select is((select count(*)::int from ci_d_pgpm_dest where dev = 12), 2, 'LIVENESS: (D) and the copy took both');
 select is((select count(*)::int from ci_d where dev = 777), 2,
-  'D witness: two identical late rows 777 sit past the watermark');
-select is((select count(*)::int from ci_d_pgpm_dest where dev = 777), 0, 'D witness: neither late row is in the destination yet');
+  'LIVENESS: (D) two identical late rows 777 sit past the watermark');
+select is((select count(*)::int from ci_d_pgpm_dest where dev = 777), 0, 'LIVENESS: (D) neither late row is in the destination yet');
 
 call pgpm.from_hypertable_cutover('ci_d', 'ts', interval '1 month', p_paused => false);
 

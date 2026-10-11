@@ -296,9 +296,9 @@ select substring(msg from 'upload (\S+) listed') as a_id from outcome where labe
 select is((select sqlstate from outcome where label = 'A'), '57014',
   'A: the cancel propagates out of archive.to_s3 as itself');
 select alike((select msg from outcome where label = 'A'), 't28: cancel inside the initiate; upload % listed: yes',
-  'A LIVENESS: the store had created the upload and listed it in flight when the cancel landed');
+  'LIVENESS: (A) the store had created the upload and listed it in flight when the cancel landed');
 select is(array[t28.n('t28.initiated'), t28.n('t28.parts')], array[1, 0]::bigint[],
-  'A LIVENESS: one initiate and no part: the cancel landed before archive.to_s3 knew the upload''s id');
+  'LIVENESS: (A) one initiate and no part: the cancel landed before archive.to_s3 knew the upload''s id');
 select ok(not (:'a_id' = any(t28.inflight('public.la28', :'ka'))),
   'A: the upload the cancelled initiate created is no longer in flight');
 -- the bystander's half pairs the negative with its witness: the listing the sweep read OFFERED it the
@@ -320,10 +320,10 @@ select substring(msg from 'upload (\S+) listed') as b_id from outcome where labe
 select is((select sqlstate from outcome where label = 'B'), 'P0001',
   'B: the transport error propagates out of archive.to_s3 as itself');
 select alike((select msg from outcome where label = 'B'), 't28: transport error inside the initiate; upload % listed: yes',
-  'B LIVENESS: the store had created the upload and listed it in flight when the error was raised');
+  'LIVENESS: (B) the store had created the upload and listed it in flight when the error was raised');
 select is(array[t28.n('t28.initiated'), t28.n('t28.parts')], array[1, 0]::bigint[],
-  'B LIVENESS: one initiate and no part');
-select ok(:'b_id' <> :'a_id', 'B LIVENESS: a different upload from A''s');
+  'LIVENESS: (B) one initiate and no part');
+select ok(:'b_id' <> :'a_id', 'LIVENESS: (B) a different upload from A''s');
 select is(t28.inflight('public.lb28', :'kb'), '{}'::text[],
   'B: no multipart upload is left in flight at the key after the failed export');
 
