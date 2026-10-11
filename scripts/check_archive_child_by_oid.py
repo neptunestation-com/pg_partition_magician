@@ -24,7 +24,10 @@ names to refuse (rule 1's last paragraph):
      (`x::regclass`, CAST(x AS regclass), regclass(x)) rendered as text: cast on to a text type
      (`c.oid::regclass::text`, after any grouping or by CAST ... AS text), handed to a call that takes it as text
      (format(), concat(), to_json() ...), concatenated with ||, or regclassout() of anything (#1180: `where
-     c.oid::regclass::text = v_rel` finds a relation by its rendered name with no name column in sight). The
+     c.oid::regclass::text = v_rel` finds a relation by its rendered name with no name column in sight). A
+     regtype counts the same way (`c.reltype::regtype::text`, regtypeout()): a relation's row type renders as
+     the relation's own name, resolved by search_path alike, and a lexer cannot tell a row type from another
+     type. Cast on to anything but text first (`'int8'::regtype::oid`), either is a number again. The
      rule is the INVERSE of a list of forbidden places, because each list gained a spelling per round (#1154: a
      simple CASE in an ORDER BY, `order by case c.relname when k.relname then 0 else 1 end limit 1`, has no
      operator token and was in no clause the list named). A name may stand in exactly two places, read off a
@@ -114,6 +117,11 @@ SELECT_END = {"from", "into", "where", "group", "order", "having", "limit", "off
 MESSAGE_FNS = {"quote_ident", "format", "json_build_object", "jsonb_build_object"}
 # The types a regclass renders to as its name, and the calls that take a regclass as text without a cast.
 TEXT_TYPES = {"text", "varchar", "name", "bpchar", "char", "character", "citext"}
+# The types whose value renders as a relation's name: regclass, and regtype, which renders a relation's row type
+# (pg_class.reltype) under the relation's own name, resolved by search_path the same way (#1205's V-01). A lexer
+# cannot tell a row type from another type, so every regtype a cast makes counts. And their output functions.
+NAME_TYPES = {"regclass", "regtype"}
+NAME_OUTS = {"regclassout", "regtypeout"}
 RENDER_FNS = {"text", "varchar", "name", "bpchar", "format", "concat", "concat_ws", "quote_literal", "quote_nullable",
               "to_json", "to_jsonb", "json_build_object", "jsonb_build_object", "json_build_array",
               "jsonb_build_array"}
@@ -258,19 +266,21 @@ def operand_start(toks, j):
 
 
 def rendered_regclass(toks):
-    """[(s, e)]: every span that renders, as its name, a regclass a cast made (`x::regclass`, CAST(x AS
-    regclass), regclass(x)): cast on to a text type (`x::regclass::text`, after any grouping, or by CAST ... AS
+    """[(s, e)]: every span that renders, as its name, a regclass or a regtype a cast made (`x::regclass`,
+    CAST(x AS regclass), regclass(x), and the same for regtype, whose name is the relation's own for a row type,
+    `c.reltype::regtype`): cast on to a text type (`x::regclass::text`, after any grouping, or by CAST ... AS
     text), handed to a call that takes it as text (format(), concat(), to_json() ...), concatenated with ||, and
-    regclassout() of anything. A regclass-typed parameter or local cast to text is not seen (the docstring)."""
+    regclassout() or regtypeout() of anything. Cast on to anything else first (`x::regclass::oid`), it is no
+    longer a name. A regclass-typed parameter or local cast to text is not seen (the docstring)."""
     out = []
     for k, (kind, text, _) in enumerate(toks):
         if kind != "ID":
             continue
         part = last_part(text)
-        if part == "regclassout" and tok(toks, k + 1)[1] == "(":
+        if part in NAME_OUTS and tok(toks, k + 1)[1] == "(":
             out.append((k, match_close(toks, k + 1)))
             continue
-        if part != "regclass":
+        if part not in NAME_TYPES:
             continue
         if tok(toks, k - 1)[1] == "::":
             s, e = operand_start(toks, k - 2), k
@@ -284,13 +294,19 @@ def rendered_regclass(toks):
         rendered = False
         while True:
             if tok(toks, e + 1)[1] == "::" and tok(toks, e + 2)[0] == "ID":
-                rendered = rendered or last_part(tok(toks, e + 2)[1]) in TEXT_TYPES
+                to = last_part(tok(toks, e + 2)[1])
+                if not rendered and to not in TEXT_TYPES | NAME_TYPES:
+                    break                             # an oid or a number now, no longer a name
+                rendered = rendered or to in TEXT_TYPES
                 e += 2
                 while tok(toks, e + 1)[1] in TYPE_TAILS:
                     e += 1
                 continue
             if tok(toks, s - 1)[1] == "(" and last_part(tok(toks, s - 2)[1]) == "cast" and tok(toks, e + 1)[1] == "as":
-                rendered = rendered or last_part(tok(toks, e + 2)[1]) in TEXT_TYPES
+                to = last_part(tok(toks, e + 2)[1])
+                if not rendered and to not in TEXT_TYPES | NAME_TYPES:
+                    break
+                rendered = rendered or to in TEXT_TYPES
                 s, e = s - 2, match_close(toks, s - 1)
                 continue
             if tok(toks, s - 1)[1] == "(" and tok(toks, e + 1)[1] == ")" and not is_call(toks, s - 1):
@@ -441,7 +457,8 @@ def name_lookups(toks):
                 found.append((k, why, False))
     spans = rendered_regclass(toks)
     for s, e in spans:
-        what = "a regclass rendered as text (" + " ".join(t[1] for t in toks[s:e + 1])[:60] + ")"
+        typ = "regtype" if any(last_part(t[1]) in ("regtype", "regtypeout") for t in toks[s:e + 1]) else "regclass"
+        what = f"a {typ} rendered as text (" + " ".join(t[1] for t in toks[s:e + 1])[:60] + ")"
         why = name_read(toks, s, e, ctx, what)
         if why:
             found.append((s, why, True))
@@ -936,6 +953,16 @@ RENDERED = {
                         ("c.oid::regclass || '' = v_rel", "c.oid::regclass || '' = v_rel"),
                         ("regclassout(c.oid) = v_rel", "regclassout(c.oid) = v_rel"),
                         ("cast(c.oid as regclass)::text = v_rel", "cast(c.oid as regclass)::text = v_rel"))}
+# #1205's verification, V-01: the same lookup through the relation's ROW TYPE, whose regtype renders as the
+# relation's own name and resolves by search_path the same way; and a regclass or regtype cast on to oid, which
+# is a number again, not a name (the control: the module formats 'int8'::regtype::oid into a cache key).
+RENDERED_ROW_TYPE = {
+    label: plant(f"  select c.oid into v_oid from pg_class c where {pred};", params="p_parent regclass")
+    for label, pred in (("c.reltype::regtype::text = v_rel", "c.reltype::regtype::text = v_rel"),
+                        ("format('%s', c.reltype::regtype) = v_rel", "format('%s', c.reltype::regtype) = v_rel"),
+                        ("regtypeout(c.reltype) = v_rel", "regtypeout(c.reltype) = v_rel"))}
+CAST_ON_TO_OID = plant("  v_rel := format('%s %s', 'int8'::regtype::oid, p_parent::oid::regclass::oid);",
+                       params="p_parent regclass")
 RENDERED_ORDER_CASE = plant("  select c.oid into v_oid from pg_class c\n"
                             "   order by case c.oid::regclass::text when v_rel then 0 else 1 end limit 1;",
                             params="p_parent regclass")
@@ -1038,6 +1065,9 @@ def selftest():
            MUTANT_ORDER_CASE_PARSED, False, "r.relname stands in the ORDER clause of a query")
     for label, src in RENDERED.items():
         expect(f"#1180: a lookup by {label}", src, False, "a regclass rendered as text")
+    for label, src in RENDERED_ROW_TYPE.items():
+        expect(f"#1205 V-01: a lookup by the row type's name, {label}", src, False, "a regtype rendered as text")
+    expect("a regclass or regtype cast on to oid is a number, not a name, wherever it goes", CAST_ON_TO_OID, True)
     expect("#1180 and #1154 together: ORDER BY case c.oid::regclass::text when v_rel ... limit 1", RENDERED_ORDER_CASE,
            False, "a regclass rendered as text (c.oid :: regclass :: text) stands in the ORDER clause")
     expect("a rendered regclass selected INTO a local, the local spliced by format() into a LOCK",

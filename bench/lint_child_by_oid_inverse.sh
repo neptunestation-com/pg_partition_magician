@@ -10,7 +10,8 @@
 #   * #1154: archive._owned_key finding its relation by `order by case c.relname when k.relname then 0 else 1
 #     end limit 1` passed: a simple CASE has no operator token and ORDER BY was not a clause it inspected;
 #   * #1180: `where c.oid::regclass::text = v_rel` passed: no name column appears at all, the relation is
-#     found by its rendered name.
+#     found by its rendered name; and, in #1205's verification (V-01), the same through the relation's row
+#     type, `where c.reltype::regtype::text = v_rel`.
 # Both, installed, reproduce #1064 (tests/archive/db/49 catches the module), so the lint passed for the wrong
 # reason. The checker's --selftest carries these shapes too, but a selftest lives in the file it tests; these
 # fixtures are the guard's own, and they are built from the REAL module of this checkout (its archive._owned_key
@@ -26,6 +27,8 @@
 #   archive_child_by_oid_clause_list     -- rule 1 refuses only the places it lists again (#1154)
 #   archive_child_by_oid_rendered_exempt -- a regclass rendered as text is exempt everywhere, not only in the
 #                                           one function that compares rendered names to refuse (#1180)
+#   archive_child_by_oid_regtype_unread  -- a regtype rendered as text is no name, so a relation is found by
+#                                           its row type's name (#1180, V-01 of #1205's verification)
 #
 # Usage: lint_child_by_oid_inverse.sh <container> <db> [checker.py]
 # The container and database are accepted for the shape bench/discriminate.sh calls every guard with and are
@@ -168,6 +171,10 @@ for label, pred in (("c.oid::regclass::text = v_rel", "c.oid::regclass::text = v
                     ("format('%s', c.oid::regclass) = v_rel", "format('%s', c.oid::regclass) = v_rel"),
                     ("c.oid::regclass || '' = v_rel", "c.oid::regclass || '' = v_rel"),
                     ("regclassout(c.oid) = v_rel", "regclassout(c.oid) = v_rel")):
+    report(refused_in(*by(pred)), f"a lookup by {label} is refused", "#1180")
+# the relation's ROW TYPE renders as the relation's own name, resolved the same way (#1205's verification, V-01)
+for label, pred in (("c.reltype::regtype::text = v_rel", "c.reltype::regtype::text = v_rel"),
+                    ("format('%s', c.reltype::regtype) = v_rel", "format('%s', c.reltype::regtype) = v_rel")):
     report(refused_in(*by(pred)), f"a lookup by {label} is refused", "#1180")
 ORDER_RENDERED = ("  select c.oid into v_oid from pg_class c\n"
                   "   order by case c.oid::regclass::text when v_rel then 0 else 1 end limit 1;")

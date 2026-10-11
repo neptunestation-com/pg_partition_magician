@@ -11351,6 +11351,15 @@ MUTATIONS["archive_child_by_oid_rendered_exempt"] = (
     [("        if rendered and scope_of(defs, k) == RENDERED_NAME_SITE:\n", "        if rendered:\n", 1)],
 )
 MUTATION_SRC["archive_child_by_oid_rendered_exempt"] = "scripts/check_archive_child_by_oid.py"
+MUTATIONS["archive_child_by_oid_regtype_unread"] = (
+    "bench/lint_child_by_oid_inverse.sh",
+    "Pre-V-01 (#1205's verification, #1180) scripts/check_archive_child_by_oid.py: only a regclass renders as a "
+    "relation's name, so a lookup by the relation's row type, `where c.reltype::regtype::text = v_rel`, passes "
+    "while `c.relname = v_rel` is refused, and on two namesakes it returns the one the search_path picks. One "
+    "site, the regtype in the types whose rendering is a name.",
+    [('NAME_TYPES = {"regclass", "regtype"}\n', 'NAME_TYPES = {"regclass"}\n', 1)],
+)
+MUTATION_SRC["archive_child_by_oid_regtype_unread"] = "scripts/check_archive_child_by_oid.py"
 # pass 10 G20 (#1091, #1092, #1093): three test files that passed against the defect they name, each back to
 # the shape that passed. Judged by bench/tests_fail_on_defect.sh (tests/07, tests/timescale/db/33) and
 # bench/archive_fn_s3_readback.sh (tests/archive/db/08), each against an injection of that defect.

@@ -21,9 +21,11 @@
   `c.relname = v_rel` was refused. A regclass a cast made and then rendered as text (cast on to a text type,
   through CAST, `format()`, `concat()`, `to_json()` and the like, `||`, or `regclassout()`) is now a name to
   rule 1, everywhere but `archive._refuse_foreign_read`, which compares rendered names to refuse a read that
-  reached a namesake (#1055) and is the floor that proves the check reads them. A regclass-typed parameter or
-  column cast to text is still not seen (the checker's docstring says why). Guard
-  `bench/lint_child_by_oid_inverse.sh`, mutation `archive_child_by_oid_rendered_exempt`.
+  reached a namesake (#1055) and is the floor that proves the check reads them. A regtype counts alike, so a
+  relation found by its row type's name, `where c.reltype::regtype::text = v_rel`, is refused too. A
+  regclass-typed parameter or column cast to text is still not seen (the checker's docstring says why). Guard
+  `bench/lint_child_by_oid_inverse.sh`, mutations `archive_child_by_oid_rendered_exempt` and
+  `archive_child_by_oid_regtype_unread`.
 
 - **The archive object-key lint follows the prefix read out of the config row by name** (#1181).
   `scripts/check_archive_object_keys.py` knew the prefix only as an identifier or a subquery selecting one, so a
