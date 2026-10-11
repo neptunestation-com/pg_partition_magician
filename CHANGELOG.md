@@ -27,7 +27,7 @@
   `regrain_written_xid_first_copy`, `regrain_snapshot_wait_masked_type_dropped`,
   `regrain_snapshot_wait_older_transactions_only`, `snapshot_wait_masked_state_dropped`,
   `snapshot_wait_running_statement_exempt`, `snapshot_wait_settles_running`, `snapshot_wait_no_blocked_exemption`,
-  `snapshot_wait_list_captured_once`,
+  `snapshot_wait_list_captured_once`, `snapshot_wait_import_strictly_older`,
   `hypertable_cutover_no_snapshot_wait` and `hypertable_drain_delete_unrecorded`.
 
 - **The stopping check reads coverage and capture-recapture, and the dead-man switch waits for the user**

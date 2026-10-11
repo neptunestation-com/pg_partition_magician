@@ -30,6 +30,9 @@
 #                                            regrain() refuses instead of completing (part C)
 #   snapshot_wait_list_captured_once      -- the sessions are listed once, so a snapshot imported after the wait
 #                                            began is never waited for (part I)
+#   snapshot_wait_import_strictly_older   -- against the caller's own xid, a late importer is waited for only when
+#                                            older than every running xid, so one equal to an idle writer's is not
+#                                            (part J)
 #
 # Usage: regrain_swap_waits_for_older_snapshots.sh <container> <db> [install.sql]
 # Runs on the plain core image (it needs pgtap, dblink and pg_prove, all of which it has). TAP_GUARD_TEST_FILE

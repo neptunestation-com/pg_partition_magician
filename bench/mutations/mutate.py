@@ -12905,8 +12905,8 @@ MUTATION_SRC["test303_adopted_rows_by_count"] = "tests/303_adopt_partition_test.
 # REPEATABLE READ reader whose snapshot predates the copies never reads the range empty. One mutation for each
 # clause: the wait, the record of the run's last write, each way the list lost a reader in an earlier round (a
 # masked backend_type, a transaction opened during regrain(), a masked state, a running statement, a settle at the
-# budget, a list of sessions taken once), the one exemption (a session blocked on this one), caught by tests/328 through
-# bench/regrain_swap_waits_for_older_snapshots.sh; and the cutover's call and the drains' record, caught by
+# budget, a list of sessions taken once, an importer only strictly older than every running xid), the one exemption
+# (a session blocked on this one), caught by tests/328 through bench/regrain_swap_waits_for_older_snapshots.sh; and the cutover's call and the drains' record, caught by
 # tests/timescale/db/67 through bench/hypertable_cutover_waits_for_older_snapshots.sh.
 _G1241 = "bench/regrain_swap_waits_for_older_snapshots.sh"
 MUTATIONS["regrain_swap_no_snapshot_wait"] = (
@@ -12991,12 +12991,22 @@ MUTATIONS["snapshot_wait_list_captured_once"] = (
     "Round 3's wait: the sessions are those whose transaction was open when the wait began, a list taken once, so a "
     "REPEATABLE READ transaction that imports (SET TRANSACTION SNAPSHOT) a snapshot older than the copies after the "
     "wait began is never waited for; the exporter commits, the swap goes ahead, and the importer reads the range "
-    "empty (round 3's finding V-01 on PR #1253). Two sites: the fresh reading against an earlier transaction's "
-    "reference and the older-than-any-running-xid clause. tests/328 part I catches it.",
+    "empty (round 3's finding V-01 on PR #1253). One site, two clauses: the fresh reading against an earlier "
+    "transaction's reference and the newest-captured-xmin clause. tests/328 part I catches it.",
     [("       and (v_by_xid                                                                -- every such snapshot, read fresh\n"
-      "            or age(a.backend_xmin) > v_floor                                        -- older than any xid running\n"
+      "            or age(a.backend_xmin) >= v_newest                                      -- an import from before the wait\n"
       "            or exists",
       "       and (exists", 1)],
+)
+MUTATIONS["snapshot_wait_import_strictly_older"] = (
+    _G1241,
+    "Round 4's own-xid rule for a snapshot that arrives after the wait began: waited for only when STRICTLY older "
+    "than every xid still running. An imported snapshot whose xmin equals the oldest running xid (a writer idle in "
+    "its transaction since before it was exported) is not, so under regrain(), or a run with no recorded last write "
+    "(across the upgrade), the importer is swapped under and reads the range empty (round 4's finding V-01 on PR "
+    "#1253). One site, the clause. tests/328 part J catches it.",
+    [("            or age(a.backend_xmin) >= v_newest                                      -- an import from before the wait\n",
+      "            or age(a.backend_xmin) > greatest(age(v_self::xid), (select max(age(x.backend_xid)) from pg_stat_activity x where x.backend_xid is not null), (select max(age(t.transaction)) from pg_prepared_xacts t))\n", 1)],
 )
 _G1241_HT = "bench/hypertable_cutover_waits_for_older_snapshots.sh"
 MUTATIONS["hypertable_cutover_no_snapshot_wait"] = (
