@@ -21,8 +21,8 @@
 #                                       in, every sweep
 #
 # Usage: maintain_all_sweep_turns.sh <container> <db> [install.sql]
-# Runs on the plain core image (it needs pgtap and pg_prove, both of which it has). About 8 s: five
-# sweeps, each bounded by the file's 1.5 s statement_timeout.
+# Runs on the plain core image (it needs pgtap and pg_prove, both of which it has). About 17 s: five
+# sweeps, four of them cut short by the file's 4 s statement_timeout (the file says why it is 4 s).
 # SWEEP_TURNS_TEST_FILE overrides the test file's path inside the container, for running from a
 # worktree that is mounted somewhere other than /repo.
 set -uo pipefail

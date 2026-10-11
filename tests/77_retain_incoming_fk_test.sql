@@ -35,7 +35,7 @@
 create extension if not exists pgtap;
 create extension if not exists dblink;
 
-select plan(50);
+select plan(51);
 
 -- ============================ fixture 1: an incoming FK, no crossing ============================
 -- 50000 rows -> monolith [0,60000); the frontier write at 110000 puts the horizon at 80000, so the
@@ -269,6 +269,8 @@ select * from dblink('holder', 'select count(*) from public.rp77') as t(c bigint
 
 select dblink_connect('det', 'dbname=' || current_database());
 select * from dblink('det', 'select pg_backend_pid()') as t(pid int) \gset
+-- Its backend_start, so the wait below is anchored to THIS backend and not to a pid the server reuses.
+select backend_start as det_start from pg_stat_activity where pid = :pid \gset
 select dblink_send_query('det',
   format('alter table public.rp77 detach partition public.%I concurrently', :'rp_doomed'));
 
@@ -284,6 +286,30 @@ begin
 end $$;
 
 select pg_terminate_backend(:pid);
+
+-- pg_terminate_backend only SIGNALS: it returns before the backend has gone, and until it has, its locks
+-- are still in pg_locks and its statement still in pg_stat_activity, every one of which _detach_reap's
+-- skip rules read as a LIVE detach (its contract). Reaping at once then returns 0 whenever the backend is
+-- slow to exit, which a loaded runner made it (#1065, #1224). So wait, in this session, until the
+-- backend (pid AND backend_start) has left pg_stat_activity and the pid holds or awaits nothing in
+-- pg_locks. pg_stat_activity is snapshotted once per transaction and a function is one transaction, so
+-- the snapshot is cleared every turn, or the loop reads its first sample until it runs out (#713, #1045).
+create function pg_temp.det77_gone(p_pid int, p_start timestamptz)
+returns boolean language plpgsql as $$
+begin
+  for i in 1 .. 600 loop
+    perform pg_stat_clear_snapshot();
+    if not exists (select 1 from pg_stat_activity where pid = p_pid and backend_start = p_start)
+       and not exists (select 1 from pg_locks where pid = p_pid) then
+      return true;
+    end if;
+    perform pg_sleep(0.05);
+  end loop;
+  return false;
+end $$;
+-- LIVENESS WITNESS for the reap below: what it is handed is an ABANDONED detach, not a live one whose
+-- backend happened to exit in time. A run that timed out here is a starved fixture, not a reaper verdict.
+select ok(pg_temp.det77_gone(:pid, :'det_start'), 'LIVENESS: the terminated detach backend is gone');
 
 -- LIVENESS WITNESS for the reaper: the hazard must actually be present, or "the reaper cleared it"
 -- would pass against a run where there was never anything to clear.
