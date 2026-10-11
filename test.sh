@@ -970,6 +970,10 @@ run_archive() {
   # bench/discriminate.sh completes with archive.to_s3's cursor leaving the heap, or a NULL control value, out again.
   echo "--- archive.to_s3 pages every row of a multi-heap or NULL-control relation guard (issue #1168) ---"
   bash "$(dirname "$0")/bench/archive_to_s3_multi_heap.sh" pgpm_test-archive pgpm_perf338 || fail=1
+  # The retired-chunk digest-layer guard (#1173) re-runs tests/archive/db/50 for the same reason: the clean-code
+  # half of the pair bench/discriminate.sh completes with the refusal's digest comparison dropped.
+  echo "--- tests/archive/db/50 reaches the digest check it names guard (issue #1173) ---"
+  bash "$(dirname "$0")/bench/archive_retired_chunk_digest_layer.sh" pgpm_test-archive pgpm_perf341 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi
