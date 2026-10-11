@@ -91,8 +91,11 @@ nothing; none of the three is filed.
 2. **Set the budget.** Agent-hours or tokens per finder, number of finders, and a wall-clock limit. The
    budget is fixed before the pass so cost per finding is comparable across passes.
 3. **Declare lenses.** Choose from the [catalog](#lenses), at least half of them different from the
-   previous pass. The freshly merged surface since the last pass is always one lens: hand-resolved
-   merge regions and interactions between recent fixes are where new defects concentrate.
+   previous pass, and so that the two most recent passes together use every rotating lens of the
+   catalogue (the five least recently used, since pass 12: the [stopping criteria](#stopping-criteria)
+   count Tier 1 over a full lens cycle). The freshly merged surface since the last pass is always one
+   lens: hand-resolved merge regions and interactions between recent fixes are where new defects
+   concentrate.
 4. **Seed.** Plant `K` seeds (see [Seeding](#seeding)); record which, where and their tiers in a sealed
    file the finders cannot read. Build the review tree as one history-less commit.
 5. **Hunt.** Finders work their slices in parallel, in isolated worktrees on the review tree. Each
@@ -106,7 +109,10 @@ nothing; none of the three is filed.
    - fails on both and matches an issue still open from an earlier pass: **known and open**, recorded
      against that issue and not counted as a new finding. The verifier alone holds the open-issue list
      (see [Between passes](#between-passes)).
-7. **Triage.** Tier every finding by the rubric. Group findings that share a root cause and a fix.
+7. **Triage.** Tier every finding by the rubric. Group findings that share a root cause and a fix. Tag
+   every Tier 1 and Tier 2 finding with its **age** and the **lens** that found it (see
+   [Between passes](#between-passes)): old when the defect survived earlier passes with its unit marked
+   read in their coverage ledgers, young when the code it sits in is newer than the previous pin.
 8. **Measure.** Fill in the [metrics](#metrics). Compute precision and seed recall before anyone looks at
    the count of findings, so the count is read in light of them.
 9. **File and fix.** One issue per finding or group; one PR per issue, each with a guard and a mutation,
@@ -133,6 +139,15 @@ look the same.
   measures that a finder ran the tests, not that a lens saw the defect: in pass 4 every seed had a
   test-file guard, and one finder found all nine by running the suite before reading a line. Plant most
   seeds where no test catches them, and read recall by its read-caught half.
+- **The late-survivor set.** Catalogue seeds of known shapes are found at 0.9 to 1.0; the defects that
+  matter were missed ten times. The catalogue names a LATE-SURVIVOR set (`mutate.py --late-survivors`):
+  the mutations that put back a Tier 1 or Tier 2 defect which survived five or more passes while its
+  unit was read (pass 11's untransmute gate versus a pending detach and the keyless cutover's pre-lock
+  read, the in-flight concurrent DDL class, lock-then-reread, a sibling copy of a fixed mechanism, an
+  older-install state, a derived name assumed free), each with its issue and the passes it survived.
+  From pass 12 at least three of `K` come from that set, planted beside the ordinary seeds and sealed
+  with their membership; recall on the set is reported as its own figure (the stopping criteria read
+  it), and the hypothesis round of the pass is aimed at those shapes by name.
 - **Blindness.** Finders never see the seed list, `bench/mutations/`, or any diff. The review tree has one
   commit and no remote. Novel seeds are kept in a sealed file the coordinator alone reads until the pass
   closes.
@@ -147,6 +162,8 @@ Recorded per pass, in this order, so the count of findings is never read alone.
 |---|---|
 | budget | finders, agent-hours or tokens per finder, wall-clock |
 | seeds `K`, recall | seeds planted; fraction reported by at least one finder; from pass 5 also split into suite-caught (the pgTAP suite run on the seeded tree fails, so a finder that ran the tests found it) and read-caught (it does not, so only reading finds it), each as hits over count |
+| late-survivor recall | seeds planted from the late-survivor set reported by at least one finder, over seeds planted from it; from pass 12, beside the catalogue recall and never averaged into it |
+| age of the Tier 1 and 2 findings | each Tier 1 and Tier 2 finding marked old or young (see [Between passes](#between-passes)), with the lens that found it; the convergence report's old-versus-young split is the number that tells a long tail being drained from a steady state |
 | claims | total claims across finders |
 | findings | claims that survived verification |
 | per finder | claims, precision and coverage for each finder, with the model it ran on when the pass split model tiers |
@@ -172,11 +189,20 @@ reproduction, while 2 claims fell), and its remedy is the "backlog verified befo
 
 The deep-hunt mode ends when ALL of the following hold, judged on the two most recent passes:
 
-1. **Zero Tier 1 findings** in each of two consecutive passes, and
+1. **Zero Tier 1 findings over a full lens cycle**: every one of the ten rotating lenses of the
+   [catalogue](#lenses) (fresh surface is always on and does not count toward the cycle) was used in one
+   of the two most recent passes, and each of those two passes found zero Tier 1 with every slice at
+   coverage 0.9 or above before classification. Until pass 11 the criterion read "zero Tier 1 in each of
+   two consecutive passes"; two quiet passes under one six-lens set say nothing about the four lenses
+   they left out, and two of pass 11's three Tier 1 had survived ten passes with their units marked
+   read, so the rule was widened to the cycle (decided 2026-10-11). The record of every pass states
+   which lenses the cycle still owes; `scripts/review/stop_check.py` computes it.
 2. **seed recall of at least 0.8** in each of those passes (so the zero was earned); from pass 5, the
    read-caught recall when the suite check measured the split; from pass 8, with every slice's coverage
    at 0.9 or above before classification (passes 6 and 7 read 0.56 twice with the missed seeds in
-   units no finder had opened, which is a budget fault, not a reading result), and
+   units no finder had opened, which is a budget fault, not a reading result); from pass 12, on the
+   catalogue seeds AND on the late-survivor set, each at 0.8 (a pass that planted none from the set
+   reads as not met), and
 3. **precision of at least 0.7** in each, counting verified known-and-open re-finds as true reports, and
    **a fell rate of at most 0.3** (so the passes were not reaching), and
 4. **the capture-recapture estimate for Tier 1 rounds to zero**, when two independent hunts were run, or
@@ -190,6 +216,12 @@ Stopping does not mean no scrutiny. It means the standing mode changes to:
   [Per-PR verification](#per-pr-verification) and was started before convergence, as a test;
 - **a full pass after any release, and after any merge batch of more than five PRs**, since a batch of
   fixes is new surface with new interactions.
+
+The campaign has a **ceiling** and a **fallback mode** as well, set on 2026-10-11 (see
+[Between passes](#between-passes)): the deep-hunt mode runs through pass 13, the earliest stop under
+criterion 1 if passes 12 and 13 complete the cycle with zero Tier 1, unless the user extends it; after the
+ceiling, or earlier if a loop's old-code Tier 1 yield reaches zero, the standing mode above applies with one
+addition, a single-lens sweep each month over the least-read units.
 
 A pass is also **abandoned early**, and the method revised, if the fell rate exceeds 0.5 mid-pass.
 
@@ -230,6 +262,28 @@ meant to draw says nothing. The rules that keep the loop honest:
 - **Judge the fix phase on classes.** Pass 1's 25 issues came from about seven root causes. A fix that
   removes the cause removes a class; one that patches the symptom leaves siblings for the next pass to
   find. Record root causes closed alongside findings fixed.
+- **Every Tier 1 and Tier 2 carries its age and its lens.** In the record's findings table and in the
+  filed issue (`file_issues.py` renders both): the AGE is old when the defect survived earlier passes
+  with its unit marked read in their coverage ledgers (from pass 8, when the ledger began; before that,
+  when the unit was in a slice a finder reported on), and young when the code it sits in is newer than
+  the previous pin (a fix phase's or a lever phase's surface); the LENS is the one under which the
+  finder reported it. Age is judged on the DEFECT, not on the blame of a line: a line older than the previous
+  pin whose defect a newer fix made reachable (pass 10's forged `pgpm_seq`, reachable since #974) or left
+  asymmetric (pass 11's operator script, after its sibling got the #705 filter) is young; `git blame` of the
+  claim's line against the previous pin is the first input, the coverage ledgers the second, and the
+  coordinator writes the age with its reason. The loop's convergence report splits each pass's Tier 1 into old versus young and
+  names the lens of each: Tier 1 found only in old code under a rotated lens is a long tail being
+  drained one rotation per pass, Tier 1 on the previous fix phase's surface is the injection channel the
+  per-PR mode exists to close, and the two call for different levers. Back-filled for passes 10 (both
+  Tier 1 young, on the pass-9 fix phase's surface) and 11 (#1157 and #1158 old, #1159 young).
+- **The ceiling and the fallback.** Each loop (a pass and its fix phase) is budgeted at about 27M agent
+  tokens (10M for the pass, 17M for the fix phase) and two days of wall clock, with CI saturation watched;
+  the campaign runs through pass 13 unless the user extends it, since pass 13 is the earliest stop under
+  the full-lens-cycle criterion if passes 12 and 13 complete the cycle with zero Tier 1. After the
+  ceiling, or earlier if a loop finds zero Tier 1 in old code, the FALLBACK MODE replaces full passes:
+  per-PR verification on every install-touching change (the mode built before pass 10) plus one
+  single-lens sweep per month over the least-read units of the coverage ledgers. Any extension past the
+  ceiling is the user's decision, never the loop's.
 - **Fixes are new surface.** A batch of fix PRs, and the hand-resolved merge regions between them, is
   where the next pass's defects concentrate. The floor rises as a ratchet with a small backlash, not
   monotonically, which is why the fresh-surface lens is mandatory and why a full pass follows any large
@@ -387,7 +441,7 @@ One file per pass, committed under `docs/reviews/` as `YYYY-MM-DD.md`, in this s
 
 pinned: <sha> (<release>) | budget: <finders> x <hours or tokens>, <wall-clock>
 lenses: <list> | previous pass lenses: <list>
-seeds K=<n>, recall <r> (suite-caught <a>/<b>, read-caught <c>/<d>); claims <c>; findings <f>; precision <p> (strict <s>, fell rate <e>)
+seeds K=<n>, recall <r> (suite-caught <a>/<b>, read-caught <c>/<d>; late-survivor <e>/<f>); claims <c>; findings <f>; precision <p> (strict <s>, fell rate <e>)
 findings by tier: T1 <n> T2 <n> T3 <n> T4 <n> T5 <n>
 cost per finding: <x>; per Tier 1 finding: <y>
 root causes: <n> behind the findings, <m> closed as a class by the fix phase
@@ -396,13 +450,14 @@ capture-recapture (T1): <estimate or "not attempted">
 blind spots (seeds missed, by lens): <list>
 
 ## Findings
-| tier | finding | issue | fix PR |
+| tier | age | lens | finding | issue | fix PR |
 
 ## Null results (by lens)
 
 ## Hypotheses (not counted)
 
 ## Stopping criteria status
+(each criterion met or NOT met, and the lenses the full cycle still owes)
 ```
 
 ## Pass history
