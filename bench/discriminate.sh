@@ -43,7 +43,9 @@
 # the setup it depends on held") and the one scripts/review/classify_claims.py applies to a reproduction,
 # so it is applied here with the classifier's prefixes: a run whose every failure is `LIVENESS:`, `GUARD:`
 # or `fixture:` FAILS this check as a starved fixture, while one witness failing beside a failed defect
-# check still counts. See starved() for how failures are read; bench/discriminate_installs.sh proves it.
+# check still counts. A wrapper whose pgTAP file reached no assertion at all failed only premises too: its
+# wrapper prints them so (#1177). See starved() for how failures are read; bench/discriminate_installs.sh
+# proves it, and bench/wrapper_premise_rule.sh proves the wrappers print and apply it.
 #
 # DISCRIMINATE_DB_PREFIX (default pgpm_mut) names the scratch databases, <prefix><n> and
 # <prefix><n>_install; bench/discriminate_installs.sh sets it so its nested runs share nothing with this one.
@@ -118,16 +120,24 @@ installs() {
 # (#713, see the header). The failures are its pgTAP `not ok` lines when it printed any (indented or not,
 # numbered or not, as classify_claims.py reads them): a wrapper's own `FAIL  <what>  N ran` line restates
 # the file's verdict and is not a check of its own, so the assertions behind it decide. Otherwise they are
-# its `FAIL  <label>` lines. An undescribed `not ok` names no premise, so it counts as a defect check, and a
-# guard that failed without printing any failure line is not read as starved (the classifier's rule too).
+# its `FAIL  <label>` lines, with that restated verdict (a value of `N ran` or `N ran, M failed`) still set
+# aside unless it carries a premise prefix itself (#1177): a wrapper whose file raised before its first
+# assertion printed no `not ok`, so its restatement must not stand in for the checks that never ran, and
+# what it printed beside it is a premise (the reached-at-all witness, a setup line spelled `fixture:`). An
+# undescribed `not ok` names no premise, so it counts as a defect check, and a guard that failed without
+# printing any failure line, or only a restated verdict, is not read as starved (the classifier's rule
+# too). The inverted wrappers (hypertable_catchup_identity.sh and its kin) read this function out of this
+# file and apply it to the test file they judge (#1176), so the rule is stated once.
 starved() {
-  local tap='^[[:space:]]*not ok([^[:alnum:]_]|$)' descs
+  local tap='^[[:space:]]*not ok([^[:alnum:]_]|$)' premise='^(LIVENESS|GUARD|fixture):' fails descs
+  local restated='(^|[^,])[[:space:]]+[0-9]+ ran(, [0-9]+ failed)?[[:space:]]*$'
   if grep -qE "$tap" "$1"; then
     descs=$(grep -E "$tap" "$1" | sed -E 's/^[[:space:]]*not ok[[:space:]]*[0-9]*[[:space:]]*(-[[:space:]]*)?//')
   else
-    descs=$(grep -E '^FAIL[[:space:]]' "$1" | sed -E 's/^FAIL[[:space:]]+//')
+    fails=$(grep -E '^FAIL[[:space:]]' "$1" | sed -E 's/^FAIL[[:space:]]+//')
+    descs=$(grep -E "$premise" <<<"$fails"; grep -vE "$premise" <<<"$fails" | grep -vE "$restated")
   fi
-  [ -n "$descs" ] && ! grep -qvE '^(LIVENESS|GUARD|fixture):' <<<"$descs"
+  [ -n "$descs" ] && ! grep -qvE "$premise" <<<"$descs"
 }
 
 # Materialise the listing BEFORE the loop rather than piping it straight in. `done < <(cmd)` discards
