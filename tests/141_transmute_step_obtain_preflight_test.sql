@@ -90,7 +90,13 @@ select is((select string_agg(dt::text, ',' order by dt) from public.dt_ev),
   (select string_agg(d::text, ',' order by d) from unnest(array[current_date - 3, current_date - 1, current_date, current_date + 1]) d),
   'dt_ev holds exactly its four rows');
 insert into public.ts_ev (ts) values (now() + interval '1 day');
-select is((select count(*)::int from public.ts_ev), 4, 'ts_ev takes a write a day out, past its monolith');
+-- Identity, not cardinality (#1172): the partition the day-out row landed in, by name, as id_ev's and dt_ev's
+-- checks above name theirs. A count of four also holds when the write stays inside the monolith. The monolith
+-- ends at the first midnight past the clock, so the row a day out lands in its own day's partition (UTC).
+select is((select c.relname::text from public.ts_ev e join pg_class c on c.oid = e.tableoid
+            where e.ts = (select max(ts) from public.ts_ev)),
+  (select 'ts_ev_p' || to_char(max(ts), 'YYYY_MM_DD') from public.ts_ev),
+  'ts_ev takes a write a day out in that day''s partition, past its monolith');
 select is((select count(*)::int from pgpm.transmute_inflight where parent_table in ('public.ts_ev'::regclass, 'public.dt_ev'::regclass, 'public.id_ev'::regclass)), 0, 'LIVENESS: every conversion completed and released its claim');
 
 select * from finish();
