@@ -11,7 +11,9 @@
   every session of the database whose `backend_xmin` is at or before the copies' last write: recorded in the new
   `config.regrain_written_xid` for a regrain run and the new `pgpm.scratch.written_xid` for a hypertable copy (a
   drain's pure delete included), and this transaction itself under `regrain()`, which copies and swaps in one
-  transaction. No exemption by state, transaction start or role: every session is judged by its pid,
+  transaction. The sessions are read afresh on every poll, never listed once, so a snapshot older than the copies
+  imported (`SET TRANSACTION SNAPSHOT`) after the wait began is waited for too. No exemption by state,
+  transaction start or role: every session is judged by its pid,
   `backend_xmin` and virtual xid, which any caller sees, so the table's non-superuser owner without
   `pg_read_all_stats` waits for another role's reader alike. The one exemption, which would otherwise deadlock,
   is a session queued on a lock the caller holds (a write behind `regrain()`'s `SHARE` lock), passed with a
@@ -25,6 +27,7 @@
   `regrain_written_xid_first_copy`, `regrain_snapshot_wait_masked_type_dropped`,
   `regrain_snapshot_wait_older_transactions_only`, `snapshot_wait_masked_state_dropped`,
   `snapshot_wait_running_statement_exempt`, `snapshot_wait_settles_running`, `snapshot_wait_no_blocked_exemption`,
+  `snapshot_wait_list_captured_once`,
   `hypertable_cutover_no_snapshot_wait` and `hypertable_drain_delete_unrecorded`.
 
 - **The stopping check reads coverage and capture-recapture, and the dead-man switch waits for the user**

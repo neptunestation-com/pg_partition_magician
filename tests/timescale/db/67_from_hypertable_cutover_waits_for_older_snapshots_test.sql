@@ -22,12 +22,15 @@
 --         waited for, and never reads the deleted row back.
 -- PART D  no settling: a reader in the middle of a statement when p_lock_timeout runs out makes the cutover refuse
 --         exactly as an idle one does (it would read the table empty after the swap).
--- ASYMMETRIC: A has 240 rows, B 120, C 60 keyed devices with device 17 deleted, D 90; the rows are judged by identity
+-- PART E  the wait reads the sessions afresh on every poll: a REPEATABLE READ transaction that imports a snapshot
+--         older than the copy (exported by another) after the cutover's wait began is waited for once the exporter
+--         has gone, and the cutover refuses rather than swap under it.
+-- ASYMMETRIC: A has 240 rows, B 120, C 60 keyed devices with device 17 deleted, D 90, E 75; the rows are judged by identity
 -- against the source as it stood (a bag), never by count.
 create extension if not exists dblink;
 \set pgpm_host `hostname -i | tr ' ' '\n' | grep -m1 '^[0-9][0-9.]*$'`
 select set_config('t67.connstr', format('host=%s dbname=%s user=postgres password=postgres', :'pgpm_host', current_database()), false) \g /dev/null
-select plan(26);
+select plan(31);
 
 -- runs the cutover in dblink connection p_conn, waits for it from short statements of this session, and returns
 -- its error message ('' when it went through): a refusal raised here would be a raw error
@@ -212,6 +215,64 @@ select bag_eq($$ select * from dblink('r67d', 'select ts, device_id from h67d') 
 select dblink_exec('r67d', 'commit') \g /dev/null
 select dblink_disconnect('r67d') \g /dev/null
 select dblink_disconnect('d67d') \g /dev/null
+
+-- ============================================ PART E ============================================
+select mk_plain_hypertable('h67e', 75, '1 day', '10 days') \g /dev/null
+create temp table h67e_before as select ts, device_id from h67e;
+create temp table h67e_state (k text primary key, v text);
+-- A: REPEATABLE READ, its snapshot taken before the copy and exported, no lock on the table
+select dblink_connect('a67e', current_setting('t67.connstr')) \g /dev/null
+select dblink_exec('a67e', 'begin isolation level repeatable read') \g /dev/null
+insert into h67e_state select 'snap', s from dblink('a67e', 'select pg_export_snapshot()') as t(s text);
+insert into h67e_state select 'apid', p::text from dblink('a67e', 'select pg_backend_pid()') as t(p int);
+call pgpm.from_hypertable_copy('h67e', 'ts');
+-- the cutover, its budget 3 s; it waits for A
+select dblink_connect('d67e', current_setting('t67.connstr')) \g /dev/null
+insert into h67e_state select 'dpid', p::text from dblink('d67e', 'select pg_backend_pid()') as t(p int);
+select dblink_send_query('d67e', $q$call pgpm.from_hypertable_cutover('h67e', 'ts', interval '1 month', p_paused => false, p_predrain => false, p_lock_timeout => '3s')$q$) \g /dev/null
+do $$
+begin
+  for i in 1..400 loop
+    perform pg_stat_clear_snapshot();
+    exit when exists (select 1 from pg_stat_activity where pid = (select v::int from h67e_state where k = 'dpid')
+                        and wait_event = 'PgSleep');
+    perform pg_sleep(0.01);
+  end loop;
+end $$;
+insert into h67e_state select 'd_waiting_at', clock_timestamp()::text
+  where exists (select 1 from pg_stat_activity where pid = (select v::int from h67e_state where k = 'dpid') and wait_event = 'PgSleep');
+select ok(exists (select 1 from h67e_state where k = 'd_waiting_at'), 'LIVENESS: (E) the cutover is in its snapshot wait (waiting for A)');
+-- B: opened NOW, after the wait began, importing A's snapshot
+select dblink_connect('b67e', current_setting('t67.connstr')) \g /dev/null
+select dblink_exec('b67e', 'begin isolation level repeatable read') \g /dev/null
+select dblink_exec('b67e', format('set transaction snapshot %L', (select v from h67e_state where k = 'snap'))) \g /dev/null
+insert into h67e_state select 'bpid', p::text from dblink('b67e', 'select pg_backend_pid()') as t(p int);
+select ok((select b.backend_xmin = a.backend_xmin and b.xact_start > (select v::timestamptz from h67e_state where k = 'd_waiting_at')
+             from pg_stat_activity a, pg_stat_activity b
+            where a.pid = (select v::int from h67e_state where k = 'apid') and b.pid = (select v::int from h67e_state where k = 'bpid')),
+  'LIVENESS: (E) B began after the cutover''s wait did, and holds A''s snapshot (the same backend_xmin)');
+select dblink_exec('a67e', 'commit') \g /dev/null
+do $$
+begin
+  for i in 1..600 loop
+    exit when dblink_is_busy('d67e') = 0;
+    perform pg_sleep(0.05);
+  end loop;
+end $$;
+create temp table h67e_outcome as
+  select (select r from dblink_get_result('d67e', false) as t(r text) limit 1) as status, dblink_error_message('d67e') as msg;
+select count(*) from dblink_get_result('d67e', false) as t(r text) \g /dev/null
+select alike((select msg from h67e_outcome),
+  'ERROR:  pg_partition_magician: hypertable cutover deferred: 1 snapshot(s) older than the copies still open (oldest: pid '
+    || (select v from h67e_state where k = 'bpid') || ',%',
+  '(E) once A committed, the cutover waited for B, the importer, and refused');
+select is((select relkind::text from pg_class where oid = 'h67e'::regclass), 'r', '(E) the hypertable was not swapped');
+select bag_eq($$ select * from dblink('b67e', 'select ts, device_id from h67e') as t(ts timestamptz, device_id bigint) $$,
+  'select * from h67e_before', '(E) B reads every row of the hypertable, by identity');
+select dblink_exec('b67e', 'commit') \g /dev/null
+select dblink_disconnect('a67e') \g /dev/null
+select dblink_disconnect('b67e') \g /dev/null
+select dblink_disconnect('d67e') \g /dev/null
 
 select * from finish();
 -- no teardown: the harness runs each db/ test in a throwaway database (disposable-db).

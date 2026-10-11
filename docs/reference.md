@@ -1957,15 +1957,23 @@ and reconcile transactions, which no snapshot taken before them can see, so a re
 them and which first touches the table after the swap (holding no lock, it gave the `DETACH` nothing to wait
 for) would read the regrained range empty: a `REPEATABLE READ` or `SERIALIZABLE` transaction opened before
 the copies, for one. So after every other refusal, and before it takes any lock of its own, the swap does what
-`CREATE INDEX CONCURRENTLY` does: it lists every other session of this database whose
-`pg_stat_activity.backend_xmin` is at or before a reference transaction, and waits until each has released that
-snapshot (its transaction ended, or, for a `READ COMMITTED` one, its statement finished). The reference is the
-run's last copy or reconcile batch, recorded in `config.regrain_written_xid`, when an earlier transaction made
-the copies (the run's ticks under `maintain`, or `regrain_step` calls each in its own transaction): a snapshot
-opened after the run's last write sees every copy and is not waited for. When the swap's own transaction made
+`CREATE INDEX CONCURRENTLY` does: it waits until no other session of this database holds a snapshot whose
+`pg_stat_activity.backend_xmin` is at or before a reference transaction (each releases it when its transaction
+ends or, for a `READ COMMITTED` one, when its statement finishes). It reads the sessions afresh on every poll,
+never from a list taken once, so a snapshot older than the copies that arrives after the wait began, imported
+with `SET TRANSACTION SNAPSHOT` from one another transaction exported, is waited for too.
+
+The reference is the run's last copy or reconcile batch, recorded in `config.regrain_written_xid`, when an
+earlier transaction made the copies (the run's ticks under `maintain`, or `regrain_step` calls each in its own
+transaction): a snapshot taken now has an `xmin` past it unless a transaction at or before it is still running,
+so the wait ends once no session holds a snapshot that could miss a copy. When the swap's own transaction made
 them (`regrain`, which copies and swaps in one transaction), or the run's last write is not recorded (a run in
 flight across the upgrade that added the column), the reference is the swap's own transaction, which no snapshot
-open now can see, so every snapshot open is waited for, one opened during the call included.
+taken while it runs can see. There the wait is for every session whose transaction was open when the wait began
+(one opened during the call before the copies included), and for any snapshot older than every transaction still
+running in the cluster, which no snapshot taken after the wait began can be but an imported one is. A snapshot
+taken during the call and not older than that is the residual below, whatever the wait does: it misses this
+transaction's copies.
 
 There is no exemption by what the session is doing, when its transaction began or which role it is. Every
 session is judged by what any caller can see of it, so the wait is the same for the table's non-superuser owner
@@ -1990,9 +1998,10 @@ across the call (a client waiting for it through `dblink`, a wrapper that holds 
 wait for, and would wait for the call while the call waited for it.
 
 What no wait before the swap can protect, `CREATE INDEX CONCURRENTLY`'s own residual, is a snapshot it does not
-wait for that first reads the table after the swap commits: one opened after the list was taken, or one held by
-a session it passed. It misses what the swap's own transaction wrote: under `maintain` only the residual
-reconcile above; under `regrain`, which copies in the same transaction as its swap, every row of the range.
+wait for that first reads the table after the swap commits: one taken after the wait ended, one held by a session
+it passed, or, under `regrain`, one taken during the call that is not older than every running transaction. It
+misses what the swap's own transaction wrote: under `maintain` only the residual reconcile above; under `regrain`,
+which copies in the same transaction as its swap, every row of the range.
 `from_hypertable_cutover` waits the same way before its swap.
 
 `TRUNCATE` is the exception, and it is **refused** rather than honoured. It fires no row trigger, so the

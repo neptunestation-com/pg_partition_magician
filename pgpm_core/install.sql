@@ -7609,25 +7609,36 @@ drop function if exists pgpm._snapshot_wait(xid8, text, text, text);
 -- found the range empty, with no error: a REPEATABLE READ or SERIALIZABLE transaction opened before the copies, say.
 -- _regrain_snapshot_wait, below, is regrain_step's call.
 --
--- WHICH SNAPSHOTS. Every other session of this database whose pg_stat_activity.backend_xmin is set when the wait
--- begins and is at or before a reference xid, with no exemption by state, transaction start, role or anything else
--- the activity view shows. The reference is p_written, the transaction of the copies' last write (regrain:
--- config.regrain_written_xid; the hypertable cutover: pgpm.scratch.written_xid of its copy), when that is an
--- earlier transaction than this one; a snapshot whose xmin is past it sees every write of the copies. Otherwise
--- (this transaction made the copies: regrain(), or regrain_step calls in one transaction; or the last write is not
--- recorded: a run in flight across the upgrade that added the record) it is this transaction's own xid: every
--- snapshot open now, since none can see a transaction still running.
+-- WHICH SNAPSHOTS. Every other session of this database whose pg_stat_activity.backend_xmin is at or before a
+-- reference xid, with no exemption by state, transaction start, role or anything else the activity view shows. The
+-- reference is p_written, the transaction of the copies' last write (regrain: config.regrain_written_xid; the
+-- hypertable cutover: pgpm.scratch.written_xid of its copy), when that is an earlier transaction than this one; a
+-- snapshot whose xmin is past it sees every write of the copies. Otherwise (this transaction made the copies:
+-- regrain(), or regrain_step calls in one transaction; or the last write is not recorded: a run in flight across
+-- the upgrade that added the record) it is this transaction's own xid: every snapshot open, since none can see a
+-- transaction still running.
+--
+-- RE-READ ON EVERY POLL, never a list captured once (#1241, round 4): SET TRANSACTION SNAPSHOT can open a snapshot
+-- older than the copies AFTER the wait began, importing one another transaction exported, and a list taken once
+-- never sees it. Against an earlier transaction's reference the predicate is simply re-evaluated on a fresh read:
+-- a snapshot taken now has an xmin past the reference unless an xid at or before it still runs, so the wait ends
+-- once no session holds such a snapshot. Against this transaction's own xid that cannot end (every snapshot taken
+-- while this transaction runs has an xmin at or before it, and a client waiting on this very call, as tests/149's
+-- does, holds one), so there a fresh read waits for every session whose transaction was open when the wait began
+-- (followed by its virtual xid in pg_locks) and for any whose snapshot is older than every xid still running (its
+-- backend_xmin before the oldest backend_xid of the cluster, a prepared transaction's or this one's), which no
+-- snapshot taken after the wait began can be but an imported one is. Other snapshots taken during the call are
+-- the residual below, whatever the wait does.
 --
 -- WHAT IT CAN SEE. pgpm needs no superuser, and every function runs as its caller, so a session is judged only by
 -- what any caller sees of it: its pid, its database and its backend_xmin in pg_stat_activity, and its
 -- transaction's virtual xid in pg_locks, which is never masked (a session of another role reads NULL for
 -- backend_type, state and xact_start without pg_read_all_stats, and nothing here reads those as a reason not to
 -- wait). Left out are the sessions with no role (usesysid null: autovacuum and auxiliary processes, which serve no
--- reader) and an autovacuum worker the caller can see is one. Each listed session is followed by IDENTITY, its pid
--- and its transaction's virtual xid, until its snapshot is released (its backend_xmin cleared, as a READ COMMITTED
--- one is between statements) or that transaction ended; never by a fresh read of who holds a snapshot now, which on
--- a busy database would never come up empty. Other databases' sessions, which cannot read this table, and a hot
--- standby's, which pg_stat_activity does not show, are not consulted.
+-- reader) and an autovacuum worker the caller can see is one. A session drops out once its snapshot is released (its
+-- backend_xmin cleared, as a READ COMMITTED one is between statements) or its transaction ends. Other databases'
+-- sessions, which cannot read this table, and a hot standby's, which pg_stat_activity does not show, are not
+-- consulted.
 --
 -- THE ONE EXEMPTION, because waiting would deadlock: a listed session waiting, directly or down a chain, on a lock
 -- THIS session holds (a write queued behind regrain()'s SHARE lock on the parent, #580). It cannot release its
@@ -7643,9 +7654,9 @@ drop function if exists pgpm._snapshot_wait(xid8, text, text, text);
 -- a lock. So a client that holds a snapshot across its call (a dblink caller waiting for the call, a wrapper that
 -- holds one) is a reader the swap must wait for: call these from a direct session.
 --
--- What it cannot cover, CREATE INDEX CONCURRENTLY's own residual: a snapshot taken after the wait listed the
--- sessions, or held by a session it passed, that first reads the table after the swap commits misses what this
--- transaction wrote: the residual reconcile's rows under maintain, every row of the range under regrain(), the
+-- What it cannot cover, CREATE INDEX CONCURRENTLY's own residual: a snapshot taken after the wait ended, or held by
+-- a session it passed, or, against this transaction's own xid, taken during the call and not older than every xid
+-- still running, that first reads the table after the swap commits misses what this transaction wrote: the residual reconcile's rows under maintain, every row of the range under regrain(), the
 -- under-lock catch-up's rows in the cutover. DETACH, ATTACH and a DROP and rename are not MVCC-safe in that sense,
 -- and no wait before them can be.
 --
@@ -7662,35 +7673,42 @@ declare
   v_by_xid boolean;
   v_limit xid;
   v_pids int[]; v_vxids text[]; v_still int[]; v_blocked int[]; v_passed int[] := '{}'; v_n int; v_pid int;
-  v_open text; v_new int;
+  v_open text; v_new int; v_floor int;
   v_sleep float8 := 0.005;
 begin
   -- the copies' own transaction: an earlier one (wait for snapshots at or before it) or this one (wait for every
   -- snapshot open now); unrecorded counts as this one
   v_by_xid := v_written is not null and v_written <> v_self;
   v_limit := case when v_by_xid then v_written::xid else v_self::xid end;
-  -- the activity view is snapshotted once per transaction: cleared before every read, or the wait reads the
-  -- view as it was when this transaction first looked and never sees a session leave (CLAUDE.md, #1045)
-  perform pg_stat_clear_snapshot();
-  select coalesce(array_agg(a.pid order by a.pid), '{}'), coalesce(array_agg(l.virtualtransaction order by a.pid), '{}')
+  -- the transactions open when the wait begins, by virtual xid (consulted only against this transaction's own xid)
+  select coalesce(array_agg(l.pid order by l.pid), '{}'), coalesce(array_agg(l.virtualtransaction order by l.pid), '{}')
     into v_pids, v_vxids
-    from pg_stat_activity a
-    join pg_locks l on l.pid = a.pid and l.locktype = 'virtualxid' and l.granted
-                   and l.virtualxid = l.virtualtransaction
-   where a.datid = v_db
-     and a.pid <> pg_backend_pid()
-     and a.backend_xmin is not null
-     and a.usesysid is not null                                                   -- autovacuum, auxiliaries
-     and a.backend_type is distinct from 'autovacuum worker'                      -- NULL when masked: kept
-     and age(a.backend_xmin) >= age(v_limit);
+    from pg_locks l
+   where l.locktype = 'virtualxid' and l.granted and l.virtualxid = l.virtualtransaction and l.pid is not null;
   loop
+    -- the activity view is snapshotted once per transaction: cleared before every read, or the wait reads the
+    -- view as it was when this transaction first looked and never sees a session leave or arrive (CLAUDE.md, #1045)
+    perform pg_stat_clear_snapshot();
+    -- the oldest xid still running anywhere in the cluster, as an age: no snapshot taken now is older than it
+    select greatest(age(v_self::xid),
+                    (select max(age(x.backend_xid)) from pg_stat_activity x where x.backend_xid is not null),
+                    (select max(age(t.transaction)) from pg_prepared_xacts t))
+      into v_floor;
     select coalesce(array_agg(a.pid order by age(a.backend_xmin) desc, a.pid), '{}')
       into v_still
-      from unnest(v_pids, v_vxids) as w(pid, vxid)
-      join pg_stat_activity a on a.pid = w.pid
-     where a.backend_xmin is not null
-       and exists (select 1 from pg_locks l
-                    where l.pid = w.pid and l.locktype = 'virtualxid' and l.granted and l.virtualtransaction = w.vxid);
+      from pg_stat_activity a
+     where a.datid = v_db
+       and a.pid <> pg_backend_pid()
+       and a.backend_xmin is not null
+       and a.usesysid is not null                                                   -- autovacuum, auxiliaries
+       and a.backend_type is distinct from 'autovacuum worker'                      -- NULL when masked: kept
+       and age(a.backend_xmin) >= age(v_limit)
+       and (v_by_xid                                                                -- every such snapshot, read fresh
+            or age(a.backend_xmin) > v_floor                                        -- older than any xid running
+            or exists (select 1 from unnest(v_pids, v_vxids) as w(pid, vxid)        -- open when the wait began
+                         join pg_locks l on l.pid = w.pid and l.locktype = 'virtualxid' and l.granted
+                                        and l.virtualtransaction = w.vxid
+                        where w.pid = a.pid));
     -- the exemption: those waiting on a lock this session holds, directly or down a chain
     with recursive chain(origin, pid, depth) as (
       select s.pid, b.pid, 1 from unnest(v_still) as s(pid) cross join lateral unnest(pg_blocking_pids(s.pid)) as b(pid)
@@ -7718,7 +7736,6 @@ begin
     end if;
     perform pg_sleep(v_sleep);
     v_sleep := least(v_sleep * 2, 0.1);
-    perform pg_stat_clear_snapshot();
   end loop;
   return v_passed;
 end;
