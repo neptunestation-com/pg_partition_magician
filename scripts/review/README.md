@@ -15,7 +15,8 @@ the two model roles.
 | `file_issues.py --groups --claims --verdicts --pinned --pass --out [--post]` | 10 | one issue body per root-cause group with its age, lens and reproductions inline; `--post` files them, Tier 1 first, and writes `filed.json` |
 
 Each Python script has a `--selftest` that CI runs (`.github/workflows/lint.yml`, "Review tooling self-test").
-The per-PR mode's scripts are listed under [Per-PR verification tooling](#per-pr-verification-tooling).
+The per-PR mode's scripts are listed under [Per-PR verification tooling](#per-pr-verification-tooling), the
+autonomous loop's under [Loop tooling](#loop-tooling).
 
 ## Claim format
 
@@ -280,6 +281,43 @@ Why the mutant. `./test.sh discriminate` proves the guard FAILS against the muta
 the mutation put back the defect the issue describes or a cousin that happens to live on the same lines. The
 issue's own reproduction can: run against the mutant it must fail, and when it does not, the guard the
 mutation certifies is not a guard for this fix. That check costs one more install per acceptance claim.
+
+## Loop tooling
+
+A loop is one review pass, its fix phase, the record PR, the loop summary and the convergence report, then the
+stopping check (`docs/adversarial-review.md`, "Running a loop without a human"). `/review-loop`
+(`.claude/skills/review-loop/`) is the driver's checklist; it runs `/review-pass` and `/fix-phase` in turn and
+these three scripts around them:
+
+| script | does | proof |
+|---|---|---|
+| `stop_check.py --history docs/adversarial-review.md --records docs/reviews [--pass N] [--budget-used T] [--decisions Q] [--extended-through P] [--json OUT]` | reads the pass history table and each pass's record (the header lines `pass_metrics.py` writes, an optional `coverage:` line, the stopping-status rows) and judges the two most recent passes: (a) the full lens cycle, the ten catalogue lenses besides fresh surface used across the two, each pass with zero Tier 1 and coverage at 0.9 (printing the lenses the cycle still owes and the next pass's five least recently used); (b) precision, fell rate, seed recall (read-caught when split) and the late-survivor recall (absent from pass 12 on is NOT met); (c) the ceiling (pass 13 unless extended) and the 27M-token budget; (d) an unresolved `BLOCKING` decision. One line per criterion, then `continue` (exit 0) or `stop` with the reason (exit 1); a record it cannot read, a lens outside the catalogue or a Tier 1 count the table and the record disagree on is exit 2, never a default | `--selftest`: every branch on synthetic records, and the repository's passes 2 to 11 must parse and read `continue` on their Tier 1 and the owed lenses |
+| `loop_state.py <state.json> init\|set\|progress\|show\|check` | the loop's state file: where the driver is after a compaction, and the dead-man switch every wakeup runs first: `check` exits 0 ok, 3 when the last progress is over `--stale-hours` (2) old with a phase open (notify, keep the wakeup), 4 over `--dead-hours` (6) (stop and report); `set --phase done` closes the loop | `--selftest`: transitions, PRs recorded once, both thresholds, the bounded history, corrupt files refused |
+| `decisions_queue.py <queue.md> init\|add\|resolve\|render\|pending` | the queue of decisions the loop took on the user's behalf (`default`, `limit`, `carried`, `scope`) and the ones only the user may take (`blocking`, written `BLOCKING`); `render --since <loop>` is the section the loop summary carries (that loop's entries and every open one); `pending` exits 1 while a `BLOCKING` entry is unresolved | `--selftest`: loop headings, resolve once, refused fields, both exits of `pending` |
+
+`loop_state.json`:
+
+```json
+{"loop": 12, "pin": "60f4ad89", "phase": "fix", "step": "3: landing wave 1", "prs": [1230, 1231],
+ "started": "2026-10-11T09:00:00Z", "last_progress": "2026-10-11T13:42:10Z",
+ "history": [{"time": "2026-10-11T09:00:00Z", "phase": "init", "step": "initialised"}]}
+```
+
+`phase` is one of `init`, `review`, `fix`, `record`, `report`, `stop_check` and `done`; `history` keeps the
+last 50 transitions; times are UTC. `set` stamps `last_progress`, and so does `progress`, which the driver
+calls only when a step actually advanced.
+
+`decisions_queue.md`, one line per entry under a heading per loop:
+
+```text
+## Loop 12
+
+- D01 | 2026-10-11 | default | refuse over warn on the archive bound | issue #1230 | PR - | open
+- D02 | 2026-10-11 | BLOCKING | cut release v0.7.0 | issue - | PR - | resolved by david (after pass 13)
+```
+
+An absent issue or PR is `-`; an entry is `open` until `resolve` writes who resolved it. The text may not
+hold `|` or a line break, and the scripts refuse a line that does not have this shape.
 
 ## coverage.py
 

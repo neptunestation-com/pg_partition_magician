@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **The review loop can run without a human** (#1226). `scripts/review/stop_check.py` reads the pass history
+  table and every pass record and says whether another loop starts: the full lens cycle (the ten catalogue
+  lenses besides fresh surface across the two most recent passes, each with zero Tier 1 and coverage at 0.9,
+  printing the lenses still owed), precision, fell rate and both recalls, the pass-13 ceiling and the 27M-token
+  budget, and any unresolved blocking decision; exit 0 continue, 1 stop with the reason, 2 a record it cannot
+  read. `scripts/review/loop_state.py` keeps the loop's state and is the dead-man switch every wakeup runs
+  (exit 3 stale after two hours without progress, 4 dead after six), and `scripts/review/decisions_queue.py`
+  queues the defaults the loop applied and the decisions only the user may take. The `/review-loop` skill is
+  the driver's checklist. All three self-tests run in the lint workflow, `stop_check.py`'s on the
+  repository's own passes 2 to 11 as well.
+
 - **The review tooling plants a late-survivor seed set and tags every finding with its age and lens** (part of
   #1226). The catalogue's seeds are found at 0.9 to 1.0, while two of pass 11's three Tier 1 findings had
   survived ten passes with their units read, so recall measured the shapes finders already know.

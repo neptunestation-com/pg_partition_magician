@@ -1554,6 +1554,9 @@ lint_job_review_tooling_selftest() {
   python3 scripts/review/pr_surface.py --selftest
   python3 scripts/review/pr_classify.py --selftest
   python3 scripts/review/pr_comment.py --selftest
+  python3 scripts/review/stop_check.py --selftest
+  python3 scripts/review/loop_state.py --selftest
+  python3 scripts/review/decisions_queue.py --selftest
 }
 lint_job_shellcheck() {
   # ludeeus/action-shellcheck@master with scandir '.' and severity warning: every shell script of the
