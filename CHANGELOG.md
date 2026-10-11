@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **`bench/throws_pinned.sh` recognises a site by the procedure its statement calls** (#1182). A statement was
+  a site only when its text matched `call\s+pgpm\.`, so an unpinned `throws_ok($$ call "pgpm".transmute(...) $$,
+  NULL, desc)` (the same committing procedure, its 2D000 accepted the same way) was never probed and the file
+  passed on its pinned neighbour. The guard now reads the name every `CALL` in the statement names as the server
+  does (quoted, `U&"..."` or unquoted parts, any case, whitespace or comments around the dot) and calls it a site when the
+  schema is `pgpm`, when the procedure is one pgpm installs (read from the catalog, the `from_hypertable` module
+  installed beside the core for it; an unqualified call included), or when a part is a `format()` placeholder;
+  a third control holds that reading to a list of spellings. `bench/throws_pinned_sites.sh` (new) runs the guard
+  over planted files, one unpinned spelling each. Mutations `throws_ok_quoted_schema` and
+  `throws_pinned_site_by_spelling`.
+
 - **The child-by-oid lint refuses a name wherever it does not allow one** (#1154). Rule 1 of
   `scripts/check_archive_child_by_oid.py` listed the places a relname may not stand (beside a comparison
   operator, in a WHERE, ON, HAVING or USING clause, projected out of a subquery, under an alias), so
