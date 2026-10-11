@@ -12703,6 +12703,46 @@ MUTATIONS["throws_pinned_site_by_spelling"] = (
 )
 MUTATION_SRC["throws_pinned_site_by_spelling"] = "bench/throws_pinned.sh"
 
+# Pass 11's three novel seeds (#1226), catalogued after the pass with a guard that fails against each: no test
+# caught them while they were planted, and every finder had to find them by reading.
+MUTATIONS["adopt_partition_regrain_unlocked"] = (
+    "bench/adopt_partition_regrain_lock.sh",
+    "Pass 11 seed S1: pgpm.adopt_partition without its pgpm._regrain_lock(p_parent), so it judges and records a "
+    "partition while another transaction holds the parent's regrain lock, and a regrain step can swap partitions "
+    "under the judgement. tests/303 runs every call in a session nothing else touches, where taking the lock and "
+    "not taking it look the same. One site, the call. The guard holds the lock from a second session: the call "
+    "returns at once instead of timing out at 500 ms, and records the row while the lock is held.",
+    [("  perform pgpm._refuse_null_arguments('adopt_partition', json_build_object('p_parent', p_parent, 'p_child', p_child));\n"
+      "  perform pgpm._regrain_lock(p_parent);\n"
+      "  select * into cfg from pgpm.config where parent_table = p_parent for key share;\n",
+      "  perform pgpm._refuse_null_arguments('adopt_partition', json_build_object('p_parent', p_parent, 'p_child', p_child));\n"
+      "  select * into cfg from pgpm.config where parent_table = p_parent for key share;\n", 1)],
+)
+MUTATIONS["adopt_partition_pending_detach_admitted"] = (
+    "bench/adopt_partition.sh",
+    "Pass 11 seed S9: both of adopt_partition's `not i.inhdetachpending` clauses gone, so a partition that a "
+    "DETACH ... CONCURRENTLY has marked pending (its session gave up waiting, or is still waiting for a reader) is "
+    "admitted and recorded though it is leaving the table. Two sites, the first check and the re-read under the "
+    "partition's lock. tests/303 part F (a detach left pending before the call) and part G (one that marks it "
+    "pending while the call waits for the partition) catch it.",
+    [("                  where i.inhparent = p_parent and i.inhrelid = p_child and not i.inhdetachpending) then\n",
+      "                  where i.inhparent = p_parent and i.inhrelid = p_child) then\n", 1),
+     ("   where c.oid = p_child and i.inhparent = p_parent and not i.inhdetachpending;\n",
+      "   where c.oid = p_child and i.inhparent = p_parent;\n", 1)],
+)
+MUTATIONS["test303_adopted_rows_by_count"] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pass 11 seed S7: tests/303 part A's verdict on the adopted partition's retention, the rows left by identity "
+    "('55'), weakened to count(*) = 1, which a table holding any one row satisfies (the count-for-identity class "
+    "of #997 and #998). The guard's defect leaves 58 in place of 55 after retention, every premise intact, and "
+    "the counted file passes it.",
+    [("select is((select string_agg(id::text, ',' order by id) from public.t303a), '55',\n"
+      "  'A: rows 1, 2 and 15 of the adopted partition are retired with 25; 55 stays');\n",
+      "select is((select count(*)::int from public.t303a), 1,\n"
+      "  'A: rows 1, 2 and 15 of the adopted partition are retired with 25; 55 stays');\n", 1)],
+)
+MUTATION_SRC["test303_adopted_rows_by_count"] = "tests/303_adopt_partition_test.sql"
+
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a

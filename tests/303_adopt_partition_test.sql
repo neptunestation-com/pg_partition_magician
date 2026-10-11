@@ -26,14 +26,20 @@
 --           express. A refusal writes no row.
 --   PART E  the partition cannot be detached between the judgement and the commit: a second session's
 --           DETACH waits on adopt_partition's transaction, and goes through once it commits.
+--   PART F  a partition left pending a DETACH ... CONCURRENTLY (its session gave up waiting for a reader) is
+--           leaving the table: refused at the first check, and nothing recorded.
+--   PART G  a concurrent detach that marks the partition pending while adopt_partition waits for the
+--           partition's lock, after its first check: refused by the re-read under that lock, nothing recorded.
+--           The order is set by the lock queue and witnessed in pg_locks, not by sleeps.
 --
 -- adopt_partition is a function, not a committing procedure, so its refusals are pinned by message.
--- ASYMMETRIC FIXTURES. A's rows are 1, 2, 15, 25 and 55, B's 4, 6, 18, 22 and 57, so an assertion aimed at
--- the wrong table cannot pass; every check names the rows or the oid, never a count alone.
+-- ASYMMETRIC FIXTURES. A's rows are 1, 2, 15, 25 and 55, B's 4, 6, 18, 22 and 57, F's partition holds 31 and 36
+-- and G's 33, 38 and 39, so an assertion aimed at the wrong table cannot pass; every check names the rows or
+-- the oid, never a count alone.
 create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
-select plan(32);
+select plan(44);
 
 -- a partition restored from a dump under its own name: same rows, same write-block trigger, a new oid
 create function pg_temp.t303_restore(p_parent regclass, p_child name, p_as name, p_lo text, p_hi text,
@@ -231,5 +237,113 @@ select lives_ok(format('select dblink_exec(%L, %L)', 'dbname=' || current_databa
 select is((select count(*)::int from pg_inherits where inhparent = 'public.t303e'::regclass
             and inhrelid = to_regclass('public.' || :'e_old')), 0,
   'LIVENESS: E: and the partition did leave the table');
+
+-- ============================================ PART F ============================================
+-- a partition left pending a DETACH ... CONCURRENTLY is leaving the table, so adopt_partition refuses it at its
+-- first check: session fa holds the parent's ACCESS SHARE, session fb's concurrent detach marks the partition
+-- pending, commits that first transaction, and gives up at its lock_timeout waiting for fa
+create table public.t303f (id bigint primary key, payload text);
+insert into public.t303f values (8, 'a');
+call pgpm.transmute('public.t303f', 'id', 10::bigint);
+select pgpm.extend_to('public.t303f', '60');
+insert into public.t303f values (31, 'b'), (36, 'c'), (47, 'frontier');
+select child_name as f_part from pgpm.part where parent_table = 'public.t303f'::regclass and lo = '30' \gset
+delete from pgpm.part where parent_table = 'public.t303f'::regclass and child_name = :'f_part';
+select is((select string_agg(id::text, ',' order by id) from public.:"f_part")
+            || '|' || (select count(*) from pgpm.part where parent_table = 'public.t303f'::regclass
+                         and (child_name = :'f_part' or child_oid = to_regclass('public.' || :'f_part')::oid)),
+          '31,36|0', 'LIVENESS: F: [30,40) holds rows 31 and 36, and no pgpm.part row records it');
+select dblink_connect('fa', 'dbname=' || current_database()) as fa \gset
+select dblink_connect('fb', 'dbname=' || current_database()) as fb \gset
+select dblink_exec('fa', 'begin') as fa_begin \gset
+select n as fa_read from dblink('fa', 'select count(*) from public.t303f') as t(n bigint) \gset
+select dblink_exec('fb', $$set lock_timeout = '700ms'$$) as fb_timeout \gset
+select throws_like(format('select dblink_exec(%L, %L)', 'fb',
+                          format('alter table public.t303f detach partition public.%I concurrently', :'f_part')),
+  '%lock timeout%', 'LIVENESS: F: the concurrent detach gave up waiting for session fa');
+select ok((select i.inhdetachpending from pg_inherits i
+            where i.inhparent = 'public.t303f'::regclass and i.inhrelid = to_regclass('public.' || :'f_part')),
+  'LIVENESS: F: and left the partition pending detach');
+select throws_like(format('select pgpm.adopt_partition(%L, %L)', 'public.t303f', 'public.' || :'f_part'),
+  '%' || :'f_part' || ' is not a partition of t303f: %a partition being detached is leaving it',
+  'F: a partition pending detach is refused: it is leaving the table');
+select is((select string_agg(child_name, ',') from pgpm.part where parent_table = 'public.t303f'::regclass
+            and child_oid = to_regclass('public.' || :'f_part')::oid), null,
+  'F: the refusal recorded nothing');
+select dblink_exec('fa', 'rollback') as fa_rollback \gset
+alter table public.t303f detach partition public.:"f_part" finalize;
+select is((select count(*)::int from pg_inherits where inhparent = 'public.t303f'::regclass
+            and inhrelid = to_regclass('public.' || :'f_part')), 0,
+  'LIVENESS: F: once fa let go, the detach finalized and the partition left the table');
+select dblink_disconnect('fa') as fa_gone \gset
+select dblink_disconnect('fb') as fb_gone \gset
+
+-- ============================================ PART G ============================================
+-- the same detach beginning while adopt_partition waits for the partition's lock, after its first check: the
+-- re-read under that lock refuses it. The order is set by the lock queue, each step witnessed in pg_locks, and
+-- nothing waits on a timeout: session gc holds the partition in SHARE UPDATE EXCLUSIVE; session gb's concurrent
+-- detach queues behind gc; session gd's adopt_partition passes its first check (nothing is pending yet) and
+-- queues behind gb. gc commits: gb takes the partition, marks it pending and commits that first transaction,
+-- which hands the partition to gd, and waits for session ga's transaction to finish the detach.
+create table public.t303g (id bigint primary key, payload text);
+insert into public.t303g values (9, 'a');
+call pgpm.transmute('public.t303g', 'id', 10::bigint);
+select pgpm.extend_to('public.t303g', '60');
+insert into public.t303g values (33, 'b'), (38, 'c'), (39, 'd'), (44, 'frontier');
+select child_name as g_part from pgpm.part where parent_table = 'public.t303g'::regclass and lo = '30' \gset
+delete from pgpm.part where parent_table = 'public.t303g'::regclass and child_name = :'g_part';
+-- <pid> waits, not granted, on a lock of <locktype> (for a relation lock: SHARE UPDATE EXCLUSIVE on <rel>).
+-- pg_locks is not snapshotted, so one call polls it until the wait shows, for at most five seconds
+create function pg_temp.t303_waits(p_pid int, p_locktype text, p_rel regclass) returns boolean
+language plpgsql as $$
+begin
+  for i in 1..500 loop
+    if exists (select 1 from pg_locks l where l.pid = p_pid and not l.granted and l.locktype = p_locktype
+                 and (p_rel is null or (l.relation = p_rel and l.mode = 'ShareUpdateExclusiveLock'))) then
+      return true;
+    end if;
+    perform pg_sleep(0.01);
+  end loop;
+  return false;
+end;
+$$;
+select dblink_connect('ga', 'dbname=' || current_database()) as ga \gset
+select dblink_connect('gb', 'dbname=' || current_database()) as gb \gset
+select dblink_connect('gc', 'dbname=' || current_database()) as gc \gset
+select dblink_connect('gd', 'dbname=' || current_database()) as gd \gset
+select pid as gb_pid from dblink('gb', 'select pg_backend_pid()') as t(pid int) \gset
+select pid as gd_pid from dblink('gd', 'select pg_backend_pid()') as t(pid int) \gset
+select dblink_exec('gc', 'begin') as gc_begin \gset
+select dblink_exec('gc', format('lock table public.%I in share update exclusive mode', :'g_part')) as gc_lock \gset
+select dblink_exec('ga', 'begin') as ga_begin \gset
+select n as ga_read from dblink('ga', 'select count(*) from public.t303g') as t(n bigint) \gset
+select dblink_send_query('gb', format('alter table public.t303g detach partition public.%I concurrently', :'g_part')) as gb_sent \gset
+select ok(pg_temp.t303_waits(:gb_pid, 'relation', to_regclass('public.' || :'g_part')),
+  'LIVENESS: G: the concurrent detach waits behind gc for the partition');
+select dblink_send_query('gd', format('select pgpm.adopt_partition(%L, %L)', 'public.t303g', 'public.' || :'g_part')) as gd_sent \gset
+select ok(pg_temp.t303_waits(:gd_pid, 'relation', to_regclass('public.' || :'g_part')),
+  'LIVENESS: G: adopt_partition passed its first check and waits behind the detach for the partition');
+select dblink_exec('gc', 'commit') as gc_commit \gset
+select count(*) as gd_rows from dblink_get_result('gd', false) as t(x text) \gset
+select ok(dblink_error_message('gd') like '%' || :'g_part' || ' is not a partition of t303g any more (detached while this call waited for it)%',
+  'G: a partition whose detach began while adopt_partition waited for it is refused under the lock');
+select is((select string_agg(child_name, ',') from pgpm.part where parent_table = 'public.t303g'::regclass
+            and child_oid = to_regclass('public.' || :'g_part')::oid), null,
+  'G: the refusal recorded nothing');
+select pg_temp.t303_waits(:gb_pid, 'virtualxid', null) as gb_parked \gset
+select ok(:'gb_parked'::boolean
+          and (select i.inhdetachpending from pg_inherits i
+                where i.inhparent = 'public.t303g'::regclass and i.inhrelid = to_regclass('public.' || :'g_part')),
+  'LIVENESS: G: the detach had marked the partition pending, and waits for ga');
+select dblink_exec('ga', 'rollback') as ga_rollback \gset
+select count(*) as gb_rows from dblink_get_result('gb', false) as t(x text) \gset
+select is(dblink_error_message('gb') || '|' || (select string_agg(id::text, ',' order by id) from public.:"g_part")
+            || '|' || (select count(*) from pg_inherits where inhparent = 'public.t303g'::regclass
+                         and inhrelid = to_regclass('public.' || :'g_part')),
+          'OK|33,38,39|0', 'LIVENESS: G: once ga let go, the detach completed: rows 33, 38 and 39 left the table with it');
+select dblink_disconnect('ga') as ga_gone \gset
+select dblink_disconnect('gb') as gb_gone \gset
+select dblink_disconnect('gc') as gc_gone \gset
+select dblink_disconnect('gd') as gd_gone \gset
 
 select * from finish();

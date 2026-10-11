@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **Pass 11's three novel seeds are catalogued, each with a guard that fails against it** (#1226). No test
+  caught them while they were planted. `bench/adopt_partition_regrain_lock.sh` (new) holds the parent's regrain
+  lock from a second session and requires `pgpm.adopt_partition` to time out and record nothing until it is
+  released, then to record the partition by oid (mutation `adopt_partition_regrain_unlocked`).
+  `tests/303_adopt_partition_test.sql` gains part F, a partition left pending a `DETACH ... CONCURRENTLY`, and
+  part G, a detach that marks it pending while the call waits for the partition's lock, ordered by the lock
+  queue rather than by sleeps; both are refused and record nothing (mutation
+  `adopt_partition_pending_detach_admitted`, guard `bench/adopt_partition.sh`). `bench/tests_fail_on_defect.sh`
+  judges tests/303 against row 55 replaced by a stranger after part A's retention, which part A's identity
+  check sees and a count of one does not (mutation `test303_adopted_rows_by_count`).
+
 - **The review loop can run without a human** (#1226). `scripts/review/stop_check.py` reads the pass history
   table and every pass record and says whether another loop starts: the full lens cycle (the ten catalogue
   lenses besides fresh surface across the two most recent passes, each with zero Tier 1 and coverage at 0.9,

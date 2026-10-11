@@ -182,6 +182,8 @@ PY
     74_regrain_archive_gate_test.sql:*|*:tests/74_regrain_archive_gate_test.sql) SEL=" 74 "; F74="$ONLY" ;;
     141_transmute_step_obtain_preflight_test.sql:*|*:tests/141_transmute_step_obtain_preflight_test.sql)
       SEL=" 141 "; F141="$ONLY" ;;
+    # pass 11's novel seed S7 (#1226): tests/303, defined with its defect at the end of this file
+    303_adopt_partition_test.sql:*|*:tests/303_adopt_partition_test.sql) SEL=" 303 "; F303="$ONLY" ;;
     *) g19_only "$base" "$src" ||
          { say FAIL "GUARD: the file to judge is one of the files this guard knows" "$ONLY -> '${src}'"; exit 1; } ;;
   esac
@@ -1068,6 +1070,40 @@ if sel 141; then
     expect_v "defect, the day-out write is in the monolith" "true" "$TS141"
   else
     say FAIL "fixture: planted the defect: transmute reads the time maximum a day late" "install.sql moved; fix the pattern"; fail=1
+  fi
+fi
+
+# pass 11's novel seed S7 (#1226) ------------------------------------------------------------------------------
+# tests/303 part A states the adopted partition's retention as the rows left, by identity: rows 1, 2 and 15 of
+# the restored partition retired with 25, and 55 stays, string_agg = '55'. Pass 11 planted the count in its
+# place (count(*) = 1), the "count where identity was the claim" class of pass 9's G19, and no test noticed.
+# A count of one also holds when the one row left is not 55.
+# The defect, spliced into the file right after part A's retention premise (the 'dropped [20,30)' LIVENESS
+# line), like tests/267's ROWS site: row 55 lost and a stranger, 58, in its place, after retention ran and
+# before part A's verdicts. Every premise of the file still holds (the wedge, the new oid, the drop of
+# [20,30)), and so does every other part A verdict (the drop of [0,20), the ledger, status()), so only the
+# identity check can see it.
+# LIVENESS, read from the database the file leaves: under the defect t303a holds 58 and nothing else, one row;
+# under the clean file, 55 alone.
+# The mutation (bench/mutations/mutate.py):
+#   test303_adopted_rows_by_count -- tests/303 part A's identity check back to count(*) = 1, the seed's text
+T303="tests/303_adopt_partition_test.sql"; F303="${F303:-$ROOT/$T303}"
+[ -z "$ONLY" ] && SEL="${SEL}303 "
+
+# ---- tests/303: the rows part A's retention leaves, by identity ----------------------------------------------
+A303_PREMISE="  'LIVENESS: A: retention ran past [0,20) and dropped [20,30)');
+"
+T303A="select coalesce(string_agg(id::text, ',' order by id), 'none') || '|' || count(*) from public.t303a"
+if sel 303; then
+  judge_on "$ROOT/pgpm_core/install.sql" "CONTROL: $T303 passes against the clean install" pass "$F303"
+  expect_v "clean, part A leaves row 55 alone" "55|1" "$T303A"
+  if plant_file "$F303" "$work/t303_frontier_swapped.sql" "$A303_PREMISE" "${A303_PREMISE}delete from public.t303a where id = 55;
+insert into public.t303a values (58, 'not seeded');
+"; then
+    judge_on "$ROOT/pgpm_core/install.sql" "DEFECT: $T303 fails when part A keeps 58 in place of 55" fail "$work/t303_frontier_swapped.sql"
+    expect_v "defect, part A leaves one row, 58, not 55" "58|1" "$T303A"
+  else
+    say FAIL "fixture: planted the defect: 58 for 55 after part A's retention" "$T303 moved; fix the pattern"; fail=1
   fi
 fi
 
