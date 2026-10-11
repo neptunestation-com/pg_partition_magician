@@ -13,6 +13,12 @@ Inputs:
   --budget-units, --budget  a number (agent-hours or tokens) for cost per finding, and its text form
   --ages        optional: a JSON object mapping a claim id to its AGE, printed in the findings table:
                 {"F3-07": "old", "F5-02": "young", "F1-04": "young (on #1152's surface)"}
+  --coverage    optional: coverage.py --out's file ({"threshold": t, "rows": [{"finder", "coverage", "ledger",
+                ...}]}, the final run after any re-runs); writes the header line
+                `coverage: <min over finders> (<n> of <m> finders at or above 0.90)` right after the lenses
+                line, which stop_check.py reads for the full-lens-cycle criterion. A finder with no ledger
+                counts at 0.00. Without it the record has no coverage line and stop_check.py reads coverage as
+                unknown.
 
 Definitions used here:
   recall     = seeds attributed to at least one claim / K; when plant_seeds.py --suite measured every seed,
@@ -55,7 +61,7 @@ Usage:
   pass_metrics.py --pass N --date YYYY-MM-DD --pinned <sha> --release <tag> --sealed s.json
                   --classified c.json --verdicts v.json --budget "8 finders x 2h, 6h wall" --budget-units 16
                   --lenses "fresh surface, concurrency" --previous-lenses "..." --out docs/reviews/YYYY-MM-DD.md
-                  [--ages ages.json]
+                  [--ages ages.json] [--coverage coverage.json]
   pass_metrics.py --selftest
 """
 import argparse
@@ -202,12 +208,29 @@ def split_text(m):
     return f" ({'; '.join(parts)})" if parts else ""
 
 
+COVERAGE_GATE = 0.90
+
+
+def coverage_line(cov):
+    """The record's coverage header line from coverage.py --out's JSON: the minimum over finders (a missing
+    ledger scores 0.00, as coverage.py scores it) and how many finders reached the 0.90 gate the stopping
+    criteria read, whatever threshold the coverage run itself used."""
+    rows = cov.get("rows") if isinstance(cov, dict) else None
+    if not rows or not all(isinstance(r, dict) and "finder" in r and "coverage" in r for r in rows):
+        raise ValueError("--coverage must be coverage.py --out's JSON: {\"threshold\": t, \"rows\": [{\"finder\": ..., "
+                         "\"coverage\": ...}, ...]} with at least one row")
+    vals = [0.0 if r.get("ledger") == "missing" else float(r["coverage"]) for r in rows]
+    at = sum(1 for v in vals if round(v, 3) >= COVERAGE_GATE)
+    return f"coverage: {min(vals):.2f} ({at} of {len(vals)} finders at or above {COVERAGE_GATE:.2f})"
+
+
 def record(m, a):
     t = m["by_tier"]
     lines = [
         f"# Review pass {a.pass_n}: {a.date}", "",
         f"pinned: `{a.pinned}` ({a.release}) | budget: {a.budget}",
         f"lenses: {a.lenses} | previous pass lenses: {a.previous_lenses}",
+    ] + ([getattr(a, "coverage_line")] if getattr(a, "coverage_line", None) else []) + [
         f"seeds K={m['K']}, recall {fmt(m['recall'])}{split_text(m)}; claims {m['claims']}; findings {m['findings']}; "
         f"precision {fmt(m['precision'])} (strict {fmt(m['precision_strict'])}, fell rate {fmt(m['fell_rate'])})",
         f"findings by tier: T1 {t[1]} T2 {t[2]} T3 {t[3]} T4 {t[4]} T5 {t[5]}",
@@ -417,6 +440,38 @@ def selftest_late_survivor_and_age():
     assert dict(stopping_status(m4))[row] is False
 
 
+def selftest_coverage_line(m, A):
+    """--coverage: the line is the minimum over finders and the count at the 0.90 gate, sits right after the
+    lenses line, is absent without the file, and is the spelling stop_check.py reads."""
+    cov = {"threshold": 0.9, "rows": [
+        {"finder": "F1", "kind": "sql", "units": 40, "read": 40, "coverage": 1.0, "ledger": "ok"},
+        {"finder": "F2", "kind": "files", "units": 50, "read": 43, "coverage": 0.86, "ledger": "ok"},
+        {"finder": "F3", "kind": "sql", "units": 10, "read": 9, "coverage": 0.9, "ledger": "ok"}]}
+    line = coverage_line(cov)
+    assert line == "coverage: 0.86 (2 of 3 finders at or above 0.90)", line
+    cov["rows"].append({"finder": "F4", "kind": "sql", "units": 5, "read": 0, "coverage": 0.0, "ledger": "missing"})
+    assert coverage_line(cov) == "coverage: 0.00 (2 of 4 finders at or above 0.90)", coverage_line(cov)
+    for bad in ({}, {"rows": []}, {"rows": [{"finder": "F1"}]}, []):
+        try:
+            coverage_line(bad)
+            raise AssertionError(f"accepted a coverage file without rows: {bad!r}")
+        except ValueError:
+            pass
+
+    class B(A):
+        coverage_line = "coverage: 0.93 (13 of 13 finders at or above 0.90)"
+    lines = record(m, B).split("\n")
+    assert lines[3].startswith("lenses: ") and lines[4] == B.coverage_line and lines[5].startswith("seeds K="), lines[:7]
+    assert not any(ln.startswith("coverage: ") for ln in record(m, A).split("\n")), "no --coverage, no line"
+    # the other side of the contract: stop_check.py reads this exact line as the minimum, figure first
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import re as _re
+    import stop_check
+    mm = _re.match(r"^coverage: " + stop_check.NUM + r"\b", line)
+    assert mm and stop_check.num(mm.group(1)) == 0.86, line
+
+
 def selftest():
     sealed = {"seeds": [{"id": "S1", "lens": "time", "tier": 1, "mutation": "grid_session_timezone"},
                         {"id": "S2", "lens": "concurrency", "tier": 1, "mutation": "untransmute_no_recheck_under_lock"}]}
@@ -466,6 +521,7 @@ def selftest():
     selftest_seed_interactions()
     selftest_suite_split()
     selftest_late_survivor_and_age()
+    selftest_coverage_line(m, A)
     print("pass_metrics selftest: PASS")
     return 0
 
@@ -481,6 +537,7 @@ def main():
     ap.add_argument("--root-cause-groups", type=int, help="number of classes in that grouping, for the summary line")
     ap.add_argument("--notes", dest="notes_file", help="markdown file appended as 'Coordinator notes'")
     ap.add_argument("--ages", help="JSON file mapping a claim id to its age ('old', 'young' or a phrase) for the findings table")
+    ap.add_argument("--coverage", help="coverage.py --out's JSON; writes the record's coverage header line")
     ap.add_argument("--out"); ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
@@ -500,6 +557,17 @@ def main():
             ages = json.load(fh)
         if not isinstance(ages, dict) or not all(isinstance(v, str) for v in ages.values()):
             ap.error("--ages must hold one JSON object mapping a claim id to its age text")
+    a.coverage_line = None
+    if a.coverage:
+        with open(a.coverage) as fh:
+            try:
+                a.coverage_line = coverage_line(json.load(fh))
+            except ValueError as exc:
+                ap.error(str(exc))
+        print(a.coverage_line)
+    else:
+        print("WARNING: no --coverage, so the record has no coverage line and stop_check.py reads coverage as "
+              "unknown (NOT met)", file=sys.stderr)
     m = compute(sealed, classified, verdicts, a.budget_units, ages=ages)
     print(f"seeds K={m['K']}  recall {fmt(m['recall'])}{split_text(m)}  precision {fmt(m['precision'])} "
           f"(strict {fmt(m['precision_strict'])}, fell rate {fmt(m['fell_rate'])})   (read these first)")

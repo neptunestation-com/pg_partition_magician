@@ -17,9 +17,12 @@ recent passes (N and the pass before it; N defaults to the last row of the table
       reads as NOT met; absent before pass 12 is not judged);
   (c) the ceiling: the next pass would exceed 13 (or --extended-through) is a stop, "ceiling";
       --budget-used above 27M agent tokens for the current loop is a stop, "budget";
-  (d) a BLOCKING entry of the decisions queue (decisions_queue.py) not resolved is a stop with its text.
+  (d) a BLOCKING entry of the decisions queue (decisions_queue.py) not resolved is a stop with its text;
+  (e) the method's criterion 4: the Tier 1 capture-recapture estimate rounds to zero in both passes, or,
+      when either pass reads "not attempted" or not computable ("not computable", "undefined"), (a) and (b)
+      hold over the THREE most recent passes instead of two.
 
-Verdict: `stop` when (c) or (d) applies, or with "converged" when (a) and (b) are both met; `continue`
+Verdict: `stop` when (c) or (d) applies, or with "converged" when (a), (b) and (e) are all met; `continue`
 otherwise. Exit 0 continue, 1 stop, 2 a parse error (a record that does not have the shape, a lens not in
 the catalogue, the table's Tier 1 count disagreeing with the record's, a missing file): never a silent
 default. A figure a record does not state (a fell rate before pass 7, coverage before pass 12) reads as
@@ -29,7 +32,8 @@ Record header lines read (pass_metrics.py writes them; anything in parentheses a
   lenses: <list> | previous pass lenses: <list>
   seeds K=<n>, recall <r> (suite-caught a/b, read-caught c/d; late-survivor e/f); ... precision <p> (strict <s>, fell rate <e>)
   findings by tier: T1 <n> T2 <n> ...
-  coverage: <min over slices>                      (optional; from pass 12)
+  coverage: <min over finders> (<n> of <m> finders at or above 0.90)   (optional; pass_metrics.py --coverage)
+  capture-recapture (T1): <prose with `estimate <x>[, found <y>]`, or `not attempted`, or `not computable`>
 and the `## Stopping criteria status` rows `- <criterion>: met|NOT met`, where a row naming coverage stands
 in for the coverage line when the header has none.
 """
@@ -132,6 +136,26 @@ def lens_list(text, lenses):
     return out
 
 
+def capture(text, where):
+    """Criterion 4's reading of a record's `capture-recapture (T1):` line, which is prose the coordinator
+    writes. `not attempted` (leading) reads as not attempted; any `not computable` or `undefined` (for one
+    slice or for the tree) reads as not computable; otherwise every `estimate <x>` is an estimate, of the
+    Tier 1 still to find when it stands alone (`estimate 0 on both`) and of the population when a
+    `, found <y>` follows (`estimate 2, found 2`: x - y remain), and the pass's figure is the largest. Prose
+    that is none of these is a parse error, never a default."""
+    t = text.strip().lower()
+    if t.startswith("not attempted"):
+        return {"kind": "not attempted", "remaining": None}
+    if "not computable" in t or "undefined" in t:
+        return {"kind": "not computable", "remaining": None}
+    found = re.findall(r"\bestimate (\d+(?:\.\d+)?)(?:, found (\d+(?:\.\d+)?))?", t)
+    if not found:
+        raise ParseError(f"{where}: the capture-recapture line states no estimate and does not say it was not "
+                         f"attempted or not computable: {text[:80]!r}")
+    left = [float(x) - (float(y) if y else 0.0) for x, y in found]
+    return {"kind": "estimate", "remaining": max(left)}
+
+
 def record(path, lenses):
     with open(path) as f:
         text = f.read()
@@ -184,6 +208,11 @@ def record(path, lenses):
     if not m:
         raise ParseError(f"{where}: no `findings by tier: T1 <n>` header line")
     r["t1"] = int(m.group(1))
+
+    ln = line("capture-recapture (T1): ")
+    if ln is None:
+        raise ParseError(f"{where}: no `capture-recapture (T1):` header line")
+    r["capture"] = capture(ln[len("capture-recapture (T1): "):], where)
 
     ln = line("coverage: ")
     status = []
@@ -258,22 +287,13 @@ def fmt(x):
     return "unknown" if x is None else f"{x:.2f}"
 
 
-def decide(lenses, rows, recs, current=None, budget_used=None, decisions=None, extended_through=None):
-    """The criteria and the verdict, as a dict; `lines` is what main prints."""
-    n = max(rows) if current is None else current
-    if n not in rows:
-        raise ParseError(f"--pass {n} is not in the history table (last is {max(rows)})")
-    earlier = [p for p in rows if p < n]
-    prev = max(earlier) if earlier else None
-    pair = [p for p in (prev, n) if p is not None]
-    cycle = [x for x in lenses if x != FRESH]
-    lines, crit = [], {}
-    lines.append(f"pass {n} (previous {prev if prev is not None else 'none'}); judged on passes "
-                 f"{' and '.join(str(p) for p in pair)}")
-
-    # (a) the full lens cycle
+def window(win, recs, cycle):
+    """Criteria (a) and (b) over the passes in `win` (two, or three in criterion 4's fallback): the per-pass
+    readings, whether each holds, and the lines that print them."""
+    k = len(win)
+    lines = []
     per, paid, used = {}, set(), set()
-    for p in pair:
+    for p in win:
         r = recs.get(p)
         if r is None:
             per[p] = {"record": False, "t1": None, "coverage": "no record", "qualifies": False, "lenses": []}
@@ -284,29 +304,23 @@ def decide(lenses, rows, recs, current=None, budget_used=None, decisions=None, e
         if q:
             paid |= set(r["lenses"])
     owed = [x for x in cycle if x not in paid]
-    a_met = len(pair) == 2 and all(per[p]["qualifies"] for p in pair) and not owed
-    t1_text = ", ".join(f"pass {p} {per[p]['t1'] if per[p]['t1'] is not None else 'no record'}" for p in pair)
-    cov_text = ", ".join(f"pass {p} {per[p]['coverage']}" for p in pair)
+    full = k >= 2
+    a_met = full and all(per[p]["qualifies"] for p in win) and not owed
+    t1_text = ", ".join(f"pass {p} {per[p]['t1'] if per[p]['t1'] is not None else 'no record'}" for p in win)
+    cov_text = ", ".join(f"pass {p} {per[p]['coverage']}" for p in win)
     lines.append(f"(a) lens cycle: {len([x for x in cycle if x in used])}/{len(cycle)} cycle lenses used across "
-                 f"the two passes; Tier 1: {t1_text}; coverage: {cov_text}: {'met' if a_met else 'NOT met'}")
-    lines.append(f"    the cycle owes (lenses no Tier-1-free pass at coverage 0.9 of the two used): "
+                 f"the {k} passes; Tier 1: {t1_text}; coverage: {cov_text}: {'met' if a_met else 'NOT met'}")
+    lines.append(f"    the cycle owes (lenses no Tier-1-free pass at coverage 0.9 of the {k} used): "
                  f"{', '.join(owed) if owed else 'nothing'}")
-    last_use = {x: max([p for p, r in recs.items() if p <= n and x in r["lenses"]] or [0]) for x in cycle}
-    nxt = sorted(cycle, key=lambda x: (last_use[x], cycle.index(x)))[:CYCLE_SIZE]
-    lines.append(f"    next pass lenses by the cycle rule (fresh surface plus the {CYCLE_SIZE} least recently used): "
-                 + ", ".join([FRESH] + [f"{x} (last {last_use[x] or 'never'})" for x in nxt]))
-    crit["a"] = {"met": a_met, "passes": {str(p): v for p, v in per.items()}, "owed": owed,
-                 "next_lenses": [FRESH] + nxt}
 
-    # (b) precision, fell rate, recall, late-survivor recall
     b = {}
 
     def judge(name, values, ok):
         verdicts = {p: (v is not None and ok(v)) for p, v in values.items()}
-        b[name] = {"values": {str(p): v for p, v in values.items()}, "met": all(verdicts.values()) and len(pair) == 2}
+        b[name] = {"values": {str(p): v for p, v in values.items()}, "met": all(verdicts.values()) and full}
         return b[name]["met"]
 
-    rec_or_none = {p: recs.get(p) for p in pair}
+    rec_or_none = {p: recs.get(p) for p in win}
     prec = {p: (r["precision"] if r else None) for p, r in rec_or_none.items()}
     fell = {p: (r["fell"] if r else None) for p, r in rec_or_none.items()}
     recall, recall_src = {}, {}
@@ -324,7 +338,7 @@ def decide(lenses, rows, recs, current=None, budget_used=None, decisions=None, e
     lines.append("    fell rate <= 0.3: " + ", ".join(f"pass {p} {fmt(v)}" for p, v in fell.items())
                  + f": {'met' if fm else 'NOT met'}")
     rm = judge("seed recall >= 0.8", recall, lambda v: v >= 0.8)
-    lines.append("    seed recall >= 0.8: " + ", ".join(f"pass {p} {fmt(recall[p])} ({recall_src[p]})" for p in pair)
+    lines.append("    seed recall >= 0.8: " + ", ".join(f"pass {p} {fmt(recall[p])} ({recall_src[p]})" for p in win)
                  + f": {'met' if rm else 'NOT met'}")
     late, late_txt, late_met = {}, [], True
     for p, r in rec_or_none.items():
@@ -340,11 +354,57 @@ def decide(lenses, rows, recs, current=None, budget_used=None, decisions=None, e
         else:
             late[str(p)] = "not judged"
             late_txt.append(f"pass {p} not judged (before pass {LATE_SURVIVOR_FROM})")
-    late_met = late_met and len(pair) == 2
+    late_met = late_met and full
     b["late-survivor recall >= 0.8"] = {"values": late, "met": late_met}
     lines.append("    late-survivor recall >= 0.8: " + ", ".join(late_txt) + f": {'met' if late_met else 'NOT met'}")
     b_met = all(v["met"] for v in b.values())
+    return {"a_met": a_met, "b_met": b_met, "per": per, "owed": owed, "b": b, "lines": lines}
+
+
+def decide(lenses, rows, recs, current=None, budget_used=None, decisions=None, extended_through=None):
+    """The criteria and the verdict, as a dict; `lines` is what main prints."""
+    n = max(rows) if current is None else current
+    if n not in rows:
+        raise ParseError(f"--pass {n} is not in the history table (last is {max(rows)})")
+    before = sorted(p for p in rows if p < n)
+    prev = before[-1] if before else None
+    pair = [p for p in (prev, n) if p is not None]
+    triple = before[-2:] + [n]
+    cycle = [x for x in lenses if x != FRESH]
+    lines, crit = [], {}
+    lines.append(f"pass {n} (previous {prev if prev is not None else 'none'}); judged on passes "
+                 f"{' and '.join(str(p) for p in pair)}")
+
+    two = window(pair, recs, cycle)
+    a_met, b_met, per, owed, b = two["a_met"], two["b_met"], two["per"], two["owed"], two["b"]
+    lines += two["lines"][:2]
+    last_use = {x: max([p for p, r in recs.items() if p <= n and x in r["lenses"]] or [0]) for x in cycle}
+    nxt = sorted(cycle, key=lambda x: (last_use[x], cycle.index(x)))[:CYCLE_SIZE]
+    lines.append(f"    next pass lenses by the cycle rule (fresh surface plus the {CYCLE_SIZE} least recently used): "
+                 + ", ".join([FRESH] + [f"{x} (last {last_use[x] or 'never'})" for x in nxt]))
+    lines += two["lines"][2:]
+    crit["a"] = {"met": a_met, "passes": {str(p): v for p, v in per.items()}, "owed": owed,
+                 "next_lenses": [FRESH] + nxt}
     crit["b"] = {"met": b_met, "checks": b}
+
+    # criterion 4: the Tier 1 capture-recapture estimate rounds to zero in both passes; where either pass did
+    # not attempt it or could not compute it, (a) and (b) must hold over the three most recent passes instead
+    cr = {p: (recs[p]["capture"] if p in recs else {"kind": "no record", "remaining": None}) for p in pair}
+    cr_text = ", ".join(f"pass {p} " + (f"estimate, {cr[p]['remaining']:g} remaining" if cr[p]["kind"] == "estimate"
+                                        else cr[p]["kind"]) for p in pair)
+    if len(pair) == 2 and all(cr[p]["kind"] == "estimate" for p in pair):
+        c4_met = all(round(cr[p]["remaining"]) == 0 for p in pair)
+        c4 = {"branch": "estimate", "met": c4_met, "remaining": {str(p): cr[p]["remaining"] for p in pair}}
+        lines.append(f"(e) capture-recapture, criterion 4: {cr_text}: rounds to zero in both: {'met' if c4_met else 'NOT met'}")
+    else:
+        three = window(triple, recs, cycle) if len(triple) == 3 else {"a_met": False, "b_met": False, "owed": None}
+        c4_met = three["a_met"] and three["b_met"]
+        c4 = {"branch": "three passes", "met": c4_met, "passes": triple, "a_met": three["a_met"],
+              "b_met": three["b_met"], "owed": three["owed"]}
+        lines.append(f"(e) capture-recapture, criterion 4: {cr_text}: so (a) and (b) over the three passes "
+                     f"{', '.join(str(p) for p in triple)}: (a) {'met' if three['a_met'] else 'NOT met'}, "
+                     f"(b) {'met' if three['b_met'] else 'NOT met'}: {'met' if c4_met else 'NOT met'}")
+    crit["e"] = c4
 
     # (c) the ceiling and the budget
     ceiling = CEILING if extended_through is None else extended_through
@@ -374,10 +434,12 @@ def decide(lenses, rows, recs, current=None, budget_used=None, decisions=None, e
         stops.append(f"blocking decision {e['id']}: {e['text']}")
     crit["d"] = {"queue": decisions is not None, "pending": [{"id": e["id"], "text": e["text"]} for e in pending]}
 
-    if a_met and b_met:
+    if a_met and b_met and c4_met:
+        how = ("the Tier 1 capture-recapture estimate rounding to zero in both" if c4["branch"] == "estimate" else
+               f"(a) and (b) holding over passes {', '.join(str(p) for p in triple)} in place of an estimate")
         verdict, reason = "stop", "; ".join(
             [f"converged: the full lens cycle with zero Tier 1 and coverage >= 0.9 in passes {prev} and {n}, "
-             f"and precision, fell rate and both recalls met in each"] + stops)
+             f"precision, fell rate and both recalls met in each, and {how}"] + stops)
     elif stops:
         verdict, reason = "stop", "; ".join(stops)
     else:
@@ -395,6 +457,10 @@ def decide(lenses, rows, recs, current=None, budget_used=None, decisions=None, e
             why.append("(a) not met: " + "; ".join(parts))
         if not b_met:
             why.append("(b) not met: " + ", ".join(k for k, v in b.items() if not v["met"]))
+        if not c4_met:
+            why.append("(e) not met: " + ("a capture-recapture estimate does not round to zero"
+                                          if c4["branch"] == "estimate" else
+                                          f"(a) and (b) do not hold over passes {', '.join(str(p) for p in triple)}"))
         verdict, reason = "continue", "not converged: " + "; ".join(why)
     lines.append(f"verdict: {verdict}: {reason}")
     return {"pass": n, "previous": prev, "criteria": crit, "verdict": verdict, "reason": reason, "lines": lines}
@@ -420,20 +486,27 @@ A5 = "concurrency and locks, time and zones, boundary arithmetic and types, upgr
 B5 = "operator error, failure injection, contracts versus documentation, tests that pass for the wrong reason, resource cliffs"
 
 
-def synth(d, passes, history_t1=None):
+CR_ZERO = "attempted on the two duplicated slices: S8 opus 0 Tier 1, fable 0, estimate 0 on both"
+
+
+def synth(d, passes, history_t1=None, capture_text=None):
     """Write a method document and records for `passes`: [(n, t1, lenses, seeds_paren, precision_tail, coverage,
-    status_rows)]."""
+    status_rows)]; `capture_text` maps a pass to its capture-recapture line (default: an estimate of zero), and
+    a pass mapped to None has no such line."""
     rows = ["| 1 | 2026-09-24 | `aaaaaaa` | 76 (25 filed as T1) | ~106 | not measured | none | baseline |"]
     os.makedirs(os.path.join(d, "reviews"), exist_ok=True)
     for (n, t1, lenses, paren, prec, cov, status) in passes:
         t1_table = (history_t1 or {}).get(n, t1)
         rows.append(f"| {n} | 2026-10-{n:02d} | `bbbbbbb` | 30 ({t1_table} T1; groups) | 70 | 0.9 | 9 / 1.00 | notes |")
         head = [f"# Review pass {n}: 2026-10-{n:02d}", "", "pinned: `bbbbbbb` | budget: x",
-                f"lenses: fresh surface, {lenses} | previous pass lenses: fresh surface, x (the same, by decision)",
-                f"seeds K=9, recall 1.00{paren}; claims 70; findings 30; {prec}",
-                f"findings by tier: T1 {t1} T2 1 T3 2 T4 0 T5 3"]
-        if cov is not None:
-            head.append(f"coverage: {cov}")
+                f"lenses: fresh surface, {lenses} | previous pass lenses: fresh surface, x (the same, by decision)"]
+        if cov is not None:  # pass_metrics.py --coverage's exact spelling, right after the lenses line
+            head.append(f"coverage: {cov} (12 of 13 finders at or above 0.90)")
+        head += [f"seeds K=9, recall 1.00{paren}; claims 70; findings 30; {prec}",
+                 f"findings by tier: T1 {t1} T2 1 T3 2 T4 0 T5 3"]
+        cr = (capture_text or {}).get(n, CR_ZERO)
+        if cr is not None:
+            head.append(f"capture-recapture (T1): {cr}")
         body = head + ["", "## Findings", "", "## Stopping criteria status", "",
                        "This pass's half; the criteria need the previous pass as well.", ""]
         body += status or ["- zero Tier 1 findings: " + ("met" if t1 == 0 else "NOT met")]
@@ -557,7 +630,45 @@ def selftest():
         decisions_queue.cmd_resolve(q, "D02", "david", "later")
         assert run(h, r, current=12, decisions=decisions_queue.parse(decisions_queue.load(q)))["verdict"] == "continue"
 
+        # (e) criterion 4, the estimate branch: both passes state an estimate, which must round to zero in each
+        ok12, ok13 = (12, 0, A5, split, good_prec, "0.93", None), (13, 0, B5, split, good_prec, "0.93", None)
+        h, r = case("cr_left", [ok12, ok13], capture_text={13: "S8: n1 = 3, n2 = 2, overlap 1, estimate 6, found 4"})
+        v = run(h, r, extended_through=14)
+        assert v["verdict"] == "continue" and v["criteria"]["a"]["met"] and v["criteria"]["b"]["met"], v["lines"]
+        assert v["criteria"]["e"] == {"branch": "estimate", "met": False, "remaining": {"12": 0.0, "13": 2.0}}, v["criteria"]["e"]
+        assert "(e) not met: a capture-recapture estimate does not round to zero" in v["reason"], v["reason"]
+        h, r = case("cr_round", [ok12, ok13], capture_text={13: "S8: estimate 0.4 (a fraction left)"})
+        v = run(h, r, extended_through=14)
+        assert v["reason"].startswith("converged") and "rounding to zero" in v["reason"], v["lines"]
+        # the fallback branch: an estimate not attempted or not computable in either pass asks for (a) and (b)
+        # over THREE passes; two qualifying passes alone are then not enough
+        for name, text in (("cr_na", "not attempted"), ("cr_nc", "S8 opus 1, fable 0, no overlap, so not computable"),
+                           ("cr_undef", "S3: overlap 0, estimate undefined")):
+            h, r = case(name, [ok12, ok13], capture_text={12: text})
+            v = run(h, r, extended_through=14)
+            assert v["verdict"] == "continue" and v["criteria"]["e"]["branch"] == "three passes", (name, v["lines"])
+            assert v["criteria"]["e"]["passes"] == [1, 12, 13] and "(e) not met" in v["reason"], (name, v["reason"])
+            ok11 = (11, 0, B5, " (suite-caught 3/3, read-caught 6/6)", good_prec, "0.95", None)
+            h, r = case(name + "3", [ok11, ok12, ok13], capture_text={12: text})
+            v = run(h, r, extended_through=14)
+            assert v["reason"].startswith("converged") and "over passes 11, 12, 13" in v["reason"], (name, v["lines"])
+            # the third pass must hold (a) and (b) too: a Tier 1 or a low precision in pass 11 keeps the loop going
+            for bad11, needle in (((11, 1, B5, " (read-caught 6/6)", good_prec, "0.95", None), "(a) NOT met, (b) met"),
+                                  ((11, 0, B5, " (read-caught 6/6)", "precision 0.5 (strict 0.5, fell rate 0.1)", "0.95", None),
+                                   "(a) met, (b) NOT met")):
+                h, r = case(name + "3bad" + needle[4], [bad11, ok12, ok13], capture_text={12: text})
+                v = run(h, r, extended_through=14)
+                assert v["verdict"] == "continue" and needle in "\n".join(v["lines"]), (name, needle, v["lines"])
+                assert "(e) not met: (a) and (b) do not hold over passes 11, 12, 13" in v["reason"], v["reason"]
+        # the coverage line pass_metrics.py --coverage writes, figure first: read as the minimum
+        h, r = case("covline", [ok12, ok13])
+        assert load(h, r)[2][13]["coverage"] == 0.93 and load(h, r)[2][13]["coverage_from"] == "header"
+
         # parse errors: never a silent default
+        h, r = case("cr_prose", [ok12, ok13], capture_text={13: "both finders agreed, nothing left"})
+        expect_parse_error(lambda: run(h, r), "a capture-recapture line that is none of the three readings")
+        h, r = case("cr_missing", [ok12, ok13], capture_text={13: None})
+        expect_parse_error(lambda: run(h, r), "a record without a capture-recapture line")
         h, r = case("mismatch", [(12, 0, A5, split, good_prec, "0.93", None), (13, 0, B5, split, good_prec, "0.93", None)],
                     history_t1={13: 1})
         expect_parse_error(lambda: run(h, r), "the table's Tier 1 count disagreeing with the record's")
@@ -609,13 +720,18 @@ def selftest():
     assert real["verdict"] == "continue", real["lines"]
     assert "Tier 1 findings: pass 10 has 2 Tier 1, pass 11 has 3 Tier 1" in real["reason"], real["reason"]
     assert "the cycle owes 10 lenses" in real["reason"], real["reason"]
+    # criterion 4 on the real prose: pass 2 not attempted, pass 3's "estimate 2, found 2" none left, pass 7's
+    # "undefined for the tree" not computable, pass 10's "estimate 0 on both" zero, pass 11 not computable
+    assert recs[2]["capture"]["kind"] == "not attempted" and recs[3]["capture"] == {"kind": "estimate", "remaining": 0.0}
+    assert recs[7]["capture"]["kind"] == "not computable" and recs[10]["capture"]["remaining"] == 0.0
+    assert recs[11]["capture"]["kind"] == "not computable" and real["criteria"]["e"]["passes"] == [9, 10, 11]
     # the latest pass must parse and be judged; its verdict is not pinned, since a later record may rightly
     # read stop (converged, or the ceiling) and this self-test must not turn main red on it
     latest = decide(lenses, rows, recs)
     assert latest["verdict"] in ("continue", "stop") and latest["pass"] == max(rows), latest
     print("stop_check selftest: PASS (converged, Tier 1, repeated lenses, coverage header/status rows/unknown, "
           "each (b) check alone, read-caught over overall, late-survivor before and from pass 12, ceiling and "
-          "--extended-through, budget, blocking decision, parse errors, CLI exits and JSON; the repository's "
+          "--extended-through, budget, blocking decision, criterion 4 on an estimate and over three passes, parse errors, CLI exits and JSON; the repository's "
           "passes 2 to 11)")
     print("  real history: " + real["lines"][-1])
 

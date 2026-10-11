@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **The stopping check reads coverage and capture-recapture, and the dead-man switch waits for the user**
+  (#1226). `scripts/review/pass_metrics.py --coverage <coverage.json>` writes the record's
+  `coverage: <min> (<n> of <m> finders at or above 0.90)` line, which `stop_check.py` reads for the full lens
+  cycle; without it coverage stays unknown. `stop_check.py` now judges the method's criterion 4 from the
+  record's `capture-recapture (T1):` line: an estimate must round to zero in both passes, and a pass that did
+  not attempt one or could not compute one asks for criteria (a) and (b) over the three most recent passes
+  instead of two. `loop_state.py` gains a `waiting` phase that `check` reads as ok with the time waited, so
+  loop 12's wait for the user's record merge never reads stale or dead; `/review-loop` sets it before the
+  wait.
+
 - **`retire()` leaves a partition pending a concurrent detach alone** (#705, the pending-detach site at
   `retire()` and its unlocked read). Its #652 refusal asked `pg_inherits` whether the child was still a partition without asking
   `inhdetachpending`, so a partition an operator's interrupted `DETACH PARTITION ... CONCURRENTLY` left pending
