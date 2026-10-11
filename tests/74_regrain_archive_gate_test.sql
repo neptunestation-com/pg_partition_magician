@@ -28,11 +28,11 @@ update pgpm.config set archive_byte_budget = 2000,
 -- Liveness witness for the setup, not a test of the fix: if retire were willing to drop this child, the
 -- rows would not be under the gate's protection and everything below would prove nothing.
 select is(pgpm.retain('public.ag74'), 0,
-  'setup: retire refuses to drop the child because archive coverage is incomplete');
+  'fixture: retire refuses to drop the child because archive coverage is incomplete');
 select ok(not (select pgpm._archive_fully_covered('public.ag74', child_name)
                  from pgpm.part where parent_table = 'public.ag74'::regclass
                   and (hi::numeric - lo::numeric) > 1000),
-  'setup: and the child is genuinely not fully covered');
+  'fixture: and the child is genuinely not fully covered');
 
 do $$
 declare v_child name; v_status text; i int := 0;

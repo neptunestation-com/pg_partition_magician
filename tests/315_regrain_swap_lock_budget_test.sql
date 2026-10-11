@@ -63,7 +63,7 @@ create temporary table rs_over_src as
   select child_name, child_oid from pgpm.part where parent_table = 'public.rs315_over'::regclass and attached and lo = '0';
 select is((select hi from pgpm.part where parent_table = 'public.rs315_over'::regclass and attached and lo = '0'),
           ((:cap + 1) * 100)::text,
-  'A LIVENESS: the monolith is [0, (cap + 1) x 100): cap + 1 sub-ranges of 100, and two partition steps wide');
+  'LIVENESS: (A) the monolith is [0, (cap + 1) x 100): cap + 1 sub-ranges of 100, and two partition steps wide');
 
 select throws_like(
   format($$ select pgpm.regrain_step('public.rs315_over', %L, '100') $$, pg_temp.rs_source('rs315_over')),
@@ -101,11 +101,11 @@ call pgpm.transmute('public.rs315_at', 'id', (:cap * 50)::bigint, p_obtain => 2)
 insert into public.rs315_at (id, a) values (:cap * 100 + 1, 'frontier');
 
 select lives_ok($$ select pgpm.set_regrain('public.rs315_at', '100') $$,
-  'B LIVENESS: set_regrain accepts a target whose cap fine children fit in half the table at two slots each');
+  'LIVENESS: (B) set_regrain accepts a target whose cap fine children fit in half the table at two slots each');
 select is((select count(*)::int from pgpm.log where parent_table = 'public.rs315_at'::regclass and action = 'warn_regrain_lock_budget'),
   0, 'B: and does not warn about it: A''s warning is the line, not a warning about every target');
 select is(pgpm.regrain_step('public.rs315_at', pg_temp.rs_source('rs315_at'), '100'), 'prepared',
-  'B LIVENESS: and the prepare tick prepares it, so A''s refusal is the line and not a refusal of everything');
+  'LIVENESS: (B) and the prepare tick prepares it, so A''s refusal is the line and not a refusal of everything');
 
 -- ==================== (C) the aged prefix retention discards is not counted ===================================
 -- partition_step P, a monolith [0, 4P) and retain P: the frontier at 4P + 1 puts the horizon at 3P, so the copy
@@ -120,9 +120,9 @@ insert into public.rs315_aged (id, a) values (4 * :p_step + 1, 'frontier');
 
 select is((select hi from pgpm.part where parent_table = 'public.rs315_aged'::regclass and attached and lo = '0'),
           (4 * :p_step)::text,
-  'C LIVENESS: the monolith is [0, 4P), so the whole of it is 2 cap + 4 sub-ranges of 100');
+  'LIVENESS: (C) the monolith is [0, 4P), so the whole of it is 2 cap + 4 sub-ranges of 100');
 select cmp_ok((4 * :p_step / 100)::bigint, '>', :cap::bigint,
-  'C LIVENESS: which is more than the line, so counting the aged prefix would refuse this run');
+  'LIVENESS: (C) which is more than the line, so counting the aged prefix would refuse this run');
 select is(pgpm.regrain_step('public.rs315_aged', pg_temp.rs_source('rs315_aged'), '100'), 'prepared',
   'C: the prepare tick counts only the sub-ranges above the retention horizon, and prepares it');
 
@@ -151,10 +151,10 @@ select is(
   (select array_agg(p.lo::numeric order by p.lo::numeric) from pgpm.part p join rs_ofk_copies c using (child_name)
     where p.parent_table = 'public.rs315_ofk'::regclass),
   (select array_agg(g::numeric order by g) from generate_series(0, (:slots / 100 - 1) * 100, 100) g),
-  'D LIVENESS: the prepare tick let the run through, and every sub-range has its copy');
+  'LIVENESS: (D) the prepare tick let the run through, and every sub-range has its copy');
 select is((select regrain_cursor from pgpm.config where parent_table = 'public.rs315_ofk'::regclass),
           ((:slots / 100) * 100)::text,
-  'D LIVENESS: the cursor is at hi, so the next tick is the swap');
+  'LIVENESS: (D) the cursor is at hi, so the next tick is the swap');
 select throws_like(
   format($$ select pgpm.regrain_step('public.rs315_ofk', %L, '100') $$, pg_temp.rs_source('rs315_ofk')),
   format('%%cannot swap the regrain of %s of rs315_ofk at target step 100 -- attaching its %s fine partitions in one transaction would hold about %%more than half the shared lock table''s %s%%',
@@ -192,10 +192,10 @@ select format('select pgpm.regrain_step(%L, pg_temp.rs_source(%L), %L)', 'public
 
 select is(
   (select count(*)::int from pgpm.dropped_fk where parent_table = 'public.rs315_ifk'::regclass and restored_at is not null),
-  20, 'E LIVENESS: all twenty incoming keys are live, so the swap suspends and re-adds them');
+  20, 'LIVENESS: (E) all twenty incoming keys are live, so the swap suspends and re-adds them');
 select is((select regrain_cursor from pgpm.config where parent_table = 'public.rs315_ifk'::regclass),
           ((:slots * 3 / 128) * 100)::text,
-  'E LIVENESS: every copy is made and the cursor is at hi, so the next tick is the swap');
+  'LIVENESS: (E) every copy is made and the cursor is at hi, so the next tick is the swap');
 select throws_like(
   format($$ select pgpm.regrain_step('public.rs315_ifk', %L, '100') $$, pg_temp.rs_source('rs315_ifk')),
   format('%%cannot swap the regrain of %s of rs315_ifk%%with what re-adding the incoming foreign keys costs%%', pg_temp.rs_source('rs315_ifk')),

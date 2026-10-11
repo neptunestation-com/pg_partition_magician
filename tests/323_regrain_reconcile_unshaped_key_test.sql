@@ -115,7 +115,7 @@ select lives_ok($$ select pgpm.regrain_step('public.ru', (select child_name from
   'tick 5 reconciles the batch: no tick raises on an off-shape key');
 select is(pg_temp.delta_ids('public.ru'), null, 'and it consumed every captured key: the delta is empty');
 select is((select rows from pgpm.log where parent_table = 'public.ru'::regclass and action = 'regrain_reconcile'),
-  7::bigint, 'WITNESS: the regrain_reconcile row counts all seven');
+  7::bigint, 'LIVENESS: the regrain_reconcile row counts all seven');
 select is((select count(*)::int from pgpm.log where parent_table = 'public.ru'::regclass and action = 'regrain_reconcile_aged'),
   0, 'and none was taken for aged: there is no retention policy');
 select is((select regrain_cursor::timestamptz from pgpm.config where parent_table = 'public.ru'::regclass),
@@ -141,7 +141,7 @@ select is((select id from public.ru where payload = 'oc-inserted'), (select oc f
 select ok(to_regclass('public.' || (select child_name from cell)) is null
           and (select count(distinct r.tableoid) from public.ru r
                 where r.id >= pg_temp.tt((select t from cell)) and r.id < pg_temp.tt((select t + interval '1 day' from cell))) = 4,
-  'WITNESS: those rows are served by the four fine children: the source is gone, the swap really happened');
+  'LIVENESS: those rows are served by the four fine children: the source is gone, the swap really happened');
 
 -- ============ (B) an off-shape key in an aged sub-range is discarded and counted ============
 -- retain 3 days on a day grid: the monolith's sub-ranges below the horizon are skipped as aged (no fine child),
@@ -176,7 +176,7 @@ select is((select hi::timestamptz from pgpm.log where parent_table = 'public.rv'
   'and says so: one regrain_reconcile_aged row whose range ends at the first fine child, the aged run the key fell in');
 select ok((select hi from pgpm.log where parent_table = 'public.rv'::regclass and action = 'regrain_reconcile_aged')::timestamptz
           <= (select pgpm._retain_boundary(c)::timestamptz from pgpm.config c where parent_table = 'public.rv'::regclass),
-  'WITNESS: that range lies below the retention horizon');
+  'LIVENESS: that range lies below the retention horizon');
 select is(pg_temp.delta_ids('public.rv'), null, 'the delta is clear');
 
 -- ============ (C) an off-shape key whose fine child is missing in a range that is not aged refuses ============

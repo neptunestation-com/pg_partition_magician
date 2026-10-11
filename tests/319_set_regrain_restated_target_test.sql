@@ -51,7 +51,7 @@ select ok((select regrain_to = '50' and regrain_cursor = '50' from pgpm.config w
           and pgpm._regrain_in_flight('public.ra319')
           and exists (select 1 from pgpm.log where parent_table = 'public.ra319'::regclass
                        and action = 'regrain_copy' and lo = '0' and hi = '50' and rows = 49),
-          'LIVENESS (A): an auto-regrain to 50 is in flight: [0, 50) copied with its 49 rows, cursor at 50');
+          'LIVENESS: (A) an auto-regrain to 50 is in flight: [0, 50) copied with its 49 rows, cursor at 50');
 
 select throws_like($$ select pgpm.set_regrain('public.ra319', '25') $$,
                    '%set_regrain(ra319, 25) refused -- a regrain of ra319 is in flight%',
@@ -95,9 +95,9 @@ insert into public.rb319 select pg_temp.u7(max(hi::timestamptz) - interval '1 da
 select child_name as mon_b from pgpm.part
  where parent_table = 'public.rb319'::regclass and attached and lo::timestamptz = '2024-01-01' \gset
 select pgpm.set_regrain('public.rb319', '1 month');
-select is(pgpm.regrain_step('public.rb319', :'mon_b', '1 month'), 'prepared', 'LIVENESS (B): a run at 1 month is prepared');
-select is(pgpm.regrain_step('public.rb319', :'mon_b', '1 month'), 'copied:31', 'LIVENESS (B): and copies January 2024');
-select ok(pgpm._regrain_in_flight('public.rb319'), 'LIVENESS (B): the run at 1 month is in flight');
+select is(pgpm.regrain_step('public.rb319', :'mon_b', '1 month'), 'prepared', 'LIVENESS: (B) a run at 1 month is prepared');
+select is(pgpm.regrain_step('public.rb319', :'mon_b', '1 month'), 'copied:31', 'LIVENESS: (B) and copies January 2024');
+select ok(pgpm._regrain_in_flight('public.rb319'), 'LIVENESS: (B) the run at 1 month is in flight');
 
 select throws_like($$ select pgpm.set_regrain('public.rb319', '30 days') $$,
                    '%set_regrain(rb319, 30 days) refused -- a regrain of rb319 is in flight%',
@@ -126,9 +126,9 @@ insert into public.rc319 select pg_temp.u7(max(hi::timestamptz) - interval '1 da
 select child_name as mon_c from pgpm.part
  where parent_table = 'public.rc319'::regclass and attached and lo::timestamptz = '2023-12-30' \gset
 select pgpm.set_regrain('public.rc319', '1 day');
-select is(pgpm.regrain_step('public.rc319', :'mon_c', '1 day'), 'prepared', 'LIVENESS (C): a run at 1 day is prepared');
-select is(pgpm.regrain_step('public.rc319', :'mon_c', '1 day'), 'copied:0', 'LIVENESS (C): and copies 30 December 2023');
-select ok(pgpm._regrain_in_flight('public.rc319'), 'LIVENESS (C): the run at 1 day is in flight');
+select is(pgpm.regrain_step('public.rc319', :'mon_c', '1 day'), 'prepared', 'LIVENESS: (C) a run at 1 day is prepared');
+select is(pgpm.regrain_step('public.rc319', :'mon_c', '1 day'), 'copied:0', 'LIVENESS: (C) and copies 30 December 2023');
+select ok(pgpm._regrain_in_flight('public.rc319'), 'LIVENESS: (C) the run at 1 day is in flight');
 
 select throws_like($$ select pgpm.set_regrain('public.rc319', '12 hours') $$,
                    '%set_regrain(rc319, 12 hours) refused -- a regrain of rc319 is in flight%',
@@ -157,7 +157,7 @@ insert into public.rd319 values (450, 'frontier');
 select child_name as mon_d from pgpm.part
  where parent_table = 'public.rd319'::regclass and attached and lo = '0' \gset
 select is(pgpm.regrain_step('public.rd319', :'mon_d', '20'), 'prepared',
-          'LIVENESS (D): a hand regrain_step at 20 starts a run while auto-regrain is off');
+          'LIVENESS: (D) a hand regrain_step at 20 starts a run while auto-regrain is off');
 select throws_like($$ select pgpm.set_regrain('public.rd319', '20') $$,
                    '%set_regrain(rd319, 20) refused -- a regrain of rd319 is in flight%a step it was started at by hand (regrain_to is null)%',
                    '(D) set_regrain(t, ''20'') is refused: with regrain_to null the run''s step is unknown');

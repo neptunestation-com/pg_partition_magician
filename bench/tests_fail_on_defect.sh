@@ -991,7 +991,7 @@ if sel 93; then
     ab_probe_on "$work/archive_never_resumes.sql" 1 2 "the stalled archive's second tick takes nothing" "0:0-59"
     judge_on "$work/archive_never_resumes.sql" "DEFECT: $T93 fails when the archive stalls after a chunk" fail "$F93"
   else
-    say FAIL "planted the defect: _next_archive_chunk never resumes" "install.sql moved; fix the pattern"; fail=1
+    say FAIL "fixture: planted the defect: _next_archive_chunk never resumes" "install.sql moved; fix the pattern"; fail=1
   fi
   if plant archive_batch_spent_on_chunks \
        "    'select p.child_name, p.child_oid, p.retiring_at, p.lo, p.hi from pgpm.part p
@@ -1003,7 +1003,7 @@ if sel 93; then
     ab_probe_on "$work/archive_batch_spent_on_chunks.sql" 2 1 "archive_batch = 2 spent on two chunks of one" "0:0-59,0:59-117"
     judge_on "$work/archive_batch_spent_on_chunks.sql" "DEFECT: $T93 fails when the cap is spent on chunks" fail "$F93"
   else
-    say FAIL "planted the defect: _archive_step's cap spent on chunks" "install.sql moved; fix the pattern"; fail=1
+    say FAIL "fixture: planted the defect: _archive_step's cap spent on chunks" "install.sql moved; fix the pattern"; fail=1
   fi
 fi
 
@@ -1030,7 +1030,7 @@ if sel 74; then
     # in that tick: the 30 aged ones and the 16 empty forward ones below 19000, none of them but [0, 100) archived
     expect_v "defect, 46 dropped in one tick, 45 of them never archived" "46/45/0" "$AG74"
   else
-    say FAIL "planted the defect: retire()'s gate opens on any chunk" "install.sql moved; fix the pattern"; fail=1
+    say FAIL "fixture: planted the defect: retire()'s gate opens on any chunk" "install.sql moved; fix the pattern"; fail=1
   fi
 fi
 
@@ -1048,7 +1048,7 @@ if sel 141; then
     judge_on "$work/transmute_time_max_day_ahead.sql" "DEFECT: $T141 fails when the write stays in the monolith" fail "$F141"
     expect_v "defect, the day-out write is in the monolith" "true" "$TS141"
   else
-    say FAIL "planted the defect: transmute reads the time maximum a day late" "install.sql moved; fix the pattern"; fail=1
+    say FAIL "fixture: planted the defect: transmute reads the time maximum a day late" "install.sql moved; fix the pattern"; fail=1
   fi
 fi
 
