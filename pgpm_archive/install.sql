@@ -3396,6 +3396,7 @@ declare
   v_ctl_col text; v_ctl_typ oid; v_ctl_mod int; v_ctl_kind "char"; v_ctl_base oid; v_ctl_base_mod int;
   v_ctl_ordered boolean := false;   -- the control-named column's type can be paged by keyset (see below)
   v_unpageable text;                -- the relations of the export's tree that are not local heaps (see below)
+  v_member oid; v_member_kind "char"; v_member_said text;   -- one of them, by oid, and what the refusal says of it
   v_gzip boolean; v_ctype text; v_body bytea := '';
   v_key_id text; v_secret text; v_nsp name; v_key text;
   v_child regclass;   -- the relation resolved, held and claimed; every read below goes by it, never by name (#1030)
@@ -3460,19 +3461,26 @@ begin
   -- holds no rows of its own); anything else is refused by name before anything is read or sent. The relation is
   -- held from archive._resolve_child on, but a leaf attached or a child inheriting after this check is not
   -- blocked by that hold; such a change during the export is a write as far as this function is concerned, and the
-  -- conservation check below refuses it like any other.
-  with recursive tree(oid) as (
-    select v_child::oid
-    union
-    select i.inhrelid from pg_inherits i join tree on i.inhparent = tree.oid
-  )
-  select string_agg(format('%s (%s)', c.oid::regclass,
-                           case c.relkind when 'f' then 'a foreign table' when 'v' then 'a view'
-                                          when 'm' then 'a materialized view'
-                                          else format('relkind %s', c.relkind) end), ', ' order by c.oid::regclass::text)
-    into v_unpageable
-    from tree join pg_class c on c.oid = tree.oid
-   where c.relkind not in ('r', 'p');
+  -- conservation check below refuses it like any other. The members are found and ordered by oid, and each is
+  -- rendered only for the message, alone, as scripts/check_archive_child_by_oid.py lets a name be read (#1154).
+  for v_member, v_member_kind in
+    with recursive tree(oid) as (
+      select v_child::oid
+      union
+      select i.inhrelid from pg_inherits i join tree on i.inhparent = tree.oid
+    )
+    select c.oid, c.relkind
+      from tree join pg_class c on c.oid = tree.oid
+     where c.relkind not in ('r', 'p')
+     order by c.oid
+  loop
+    select format('%s (%s)', v_member::regclass,
+                  case v_member_kind when 'f' then 'a foreign table' when 'v' then 'a view'
+                                     when 'm' then 'a materialized view'
+                                     else format('relkind %s', v_member_kind) end)
+      into v_member_said;
+    v_unpageable := concat_ws(', ', v_unpageable, v_member_said);
+  end loop;
   if v_unpageable is not null then
     raise exception 'pg_partition_magician: archive.to_s3 exports a table, or a partitioned table or inheritance tree whose every member is a table, and % reaches %, which it cannot page by row position; refusing to export it',
       v_child, v_unpageable;

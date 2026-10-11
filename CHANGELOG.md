@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+- **The child-by-oid lint refuses a name wherever it does not allow one** (#1154). Rule 1 of
+  `scripts/check_archive_child_by_oid.py` listed the places a relname may not stand (beside a comparison
+  operator, in a WHERE, ON, HAVING or USING clause, projected out of a subquery, under an alias), so
+  `archive._owned_key` finding its relation by `order by case c.relname when k.relname then 0 else 1 end limit 1`
+  passed it: a simple CASE has no operator token and ORDER BY was not on the list. Installed, that module is
+  #1064 again. The rule is now the inverse: outside `archive._resolve_child` a name may stand only alone as an
+  item of a statement's own select list or of a RAISE, or as a bare argument of `quote_ident()`, `format()` or
+  `json_build_object()` that is the whole item, and is refused anywhere else (an ORDER BY or GROUP BY, a CASE,
+  an operator or a call in a select item, a plpgsql expression). One site of the module is reshaped to it:
+  `archive.to_s3`'s refusal of a tree with a member it cannot page finds the members by oid and renders each
+  one alone for the message, so a refusal naming several members now lists them in oid order rather than by
+  name (the message is otherwise unchanged). Guard
+  `bench/lint_child_by_oid_inverse.sh`, mutation `archive_child_by_oid_clause_list`.
+
+- **The child-by-oid lint reads a rendered regclass as a name** (#1180). The same rule followed name columns
+  only, so `where c.oid::regclass::text = v_rel` found a relation by its rendered name and passed while
+  `c.relname = v_rel` was refused. A regclass a cast made and then rendered as text (cast on to a text type,
+  through CAST, `format()`, `concat()`, `to_json()` and the like, `||`, or `regclassout()`) is now a name to
+  rule 1, everywhere but `archive._refuse_foreign_read`, which compares rendered names to refuse a read that
+  reached a namesake (#1055) and is the floor that proves the check reads them. A regtype counts alike, so a
+  relation found by its row type's name, `where c.reltype::regtype::text = v_rel`, is refused too. A
+  regclass-typed parameter or column cast to text is still not seen, nor a rendering reached through a wrapper
+  such as `coalesce(c.oid::regclass)::text` (the checker's docstring says why; `tests/archive/db/49` is the net).
+  Guard
+  `bench/lint_child_by_oid_inverse.sh`, mutations `archive_child_by_oid_rendered_exempt` and
+  `archive_child_by_oid_regtype_unread`.
+
 - **The archive object-key lint follows the prefix read out of the config row by name** (#1181).
   `scripts/check_archive_object_keys.py` knew the prefix only as an identifier or a subquery selecting one, so a
   second, unclaimed object key assembled from the same configured prefix read as JSON
