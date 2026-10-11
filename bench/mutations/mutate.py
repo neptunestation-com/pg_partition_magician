@@ -10411,7 +10411,7 @@ select is((select array_agg(id order by id) from public.rn_old),
         "actually happens' asserted as one pg_inherits row under the partition's NAME, reading none of its rows, "
         "which a retire() that empties the partition when it dispatches the detach satisfies. The exact pre-#1002 "
         "text of that site, plan and oid capture included.",
-        [("select plan(50);\n", "select plan(48);\n", 1),
+        [("select plan(51);\n", "select plan(49);\n", 1),
          ("""-- and its oid, before anything touches it: "still attached" below is judged on THIS relation, not on
 -- whatever holds the name by then
 select format('public.%I', :'doomed')::regclass::oid as doomed_oid \\gset
@@ -10445,7 +10445,7 @@ select is(
         "ACTION crossing) asserted as one pg_inherits row under the partition's NAME, reading none of its rows, "
         "which a refused retire() that has already deleted the rows nothing references satisfies. The exact "
         "pre-#1002 text of that site, plan and oid capture included.",
-        [("select plan(50);\n", "select plan(48);\n", 1),
+        [("select plan(51);\n", "select plan(49);\n", 1),
          ("select format('public.%I', :'nx_doomed')::regclass::oid as nx_doomed_oid \\gset\n", "", 1),
          ("""-- INTACT is about its rows, not only its attachment (#1002): a refused retire() that had already deleted
 -- the rows nothing references would leave it attached and half-retired. Ids 1, 42 (the referenced one),

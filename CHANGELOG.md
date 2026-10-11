@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **`tests/77` waits for the terminated detach backend to leave before it reaps; `tests/147` cuts by order,
+  not by speed** (#1224, #1065). `tests/77` called `pgpm._detach_reap()` right after `pg_terminate_backend`,
+  which only signals; a backend still exiting holds its locks, the reaper rightly read the detach as live, and
+  assertions 31 and 32 failed on loaded runners. It now polls, clearing the `pg_stat_activity` snapshot each
+  turn, until the backend (pid and `backend_start`) has left `pg_stat_activity` and holds nothing in
+  `pg_locks`, and asserts `LIVENESS: the terminated detach backend is gone` before the reap. `tests/147` (#579)
+  timed its cuts with one-second chunks against a 1.9 s `statement_timeout`, so a loaded runner cut the first
+  parent short before the second was entered; its archive function now returns at once for the first parent of
+  a tick and outlasts a 4 s timeout for every later one, so which parent is cut follows the sweep's order
+  alone. Its call counters read `is_called`, as a sequence never called reports `last_value` 1 and
+  "tick 1 entered B's archive function" had passed with B never entered.
+
 - **Pass 11's three novel seeds are catalogued, each with a guard that fails against it** (#1226). No test
   caught them while they were planted. `bench/adopt_partition_regrain_lock.sh` (new) holds the parent's regrain
   lock from a second session and requires `pgpm.adopt_partition` to time out and record nothing until it is

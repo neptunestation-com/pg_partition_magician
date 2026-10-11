@@ -17,15 +17,25 @@
 --
 -- Two scenarios, one per half of the rule, each asserted tick by tick so the order is shown by WHICH
 -- parent did its work in which tick rather than by a total:
---   1. A backlog ahead of a tail. A (lower oid) has a backlog of one-second archive chunks; B (higher
---      oid) needs one one-second chunk, then retires its aged partition. 1.9 s fits one chunk, not two,
---      and leaves the sweep's own work 0.9 s before the second parent must have been ENTERED (a
---      0.5 s margin was cut short by a loaded CI runner once; two chunks never fit whatever the load).
---   2. A parent that overruns on its own. P (lower oid) has a three-second archive chunk, so its tick
---      never fits; Q (higher oid) needs nothing but a drop.
+--   1. A backlog ahead of a tail. A (lower oid) has a backlog of three archive chunks; B (higher oid)
+--      needs one chunk, then retires its aged partition.
+--   2. A parent that overruns on its own. P (lower oid) has an archive chunk that never fits the
+--      timeout; Q (higher oid) needs nothing but a drop.
+--
+-- WHERE THE CLOCK CUTS IS SET BY ORDER, NOT BY SPEED. The archive function returns at once for the
+-- first parent to enter it in a tick and sleeps far past the statement_timeout for every later one (and
+-- for P always), so the timeout lands inside the second parent to enter it, whatever the runner's load.
+-- Which parent that is depends only on the sweep's order, the thing under test. This used to be
+-- one-second chunks against a 1.9 s timeout, so that one chunk fitted and two did not, which left the
+-- sweep's own work a margin (0.5 s, then 0.9 s) to reach the second parent before the clock ran out; a
+-- loaded runner spent both, the clock cut A short in tick 1 before B was entered, and tick 2 then led
+-- with A and failed assertions that are about B (PR #1225's PG18/dbdev job). The clock now only has to
+-- cover one ordinary maintain() and the paused parents ahead of it, a tenth of a second here, against 4 s.
 -- Each archive function counts its calls in a SEQUENCE, which a cancellation does not roll back, so
 -- "cut short" is proven (the function was entered, no chunk was recorded) rather than inferred from
--- nothing having happened.
+-- nothing having happened. A count is read with is_called: a sequence never called reports last_value 1,
+-- the same as one called once, which let "tick 1 entered B's archive function" pass in the run above
+-- although B was never entered.
 create extension if not exists pgtap;
 set client_min_messages = warning;
 select plan(20);
@@ -34,16 +44,34 @@ create schema s147;
 create sequence s147.calls_a;
 create sequence s147.calls_b;
 create sequence s147.calls_p;
+-- The oid of the first parent to enter the archive function in the current tick, reset before each tick.
+-- A sequence, like the counters, so that neither a commit nor a cancellation moves it.
+create sequence s147.first_in_tick minvalue 0;
+-- How many times a counter's archive function was entered: 0 for a sequence never called.
+create function s147.calls(p_seq regclass) returns int language plpgsql as $$
+declare v int;
+begin
+  execute format('select case when is_called then last_value::int else 0 end from %s', p_seq) into v;
+  return v;
+end $$;
 create function s147.chunk(p_parent regclass, p_child name, p_lo text, p_hi text)
 returns pgpm.archive_result language plpgsql as $$
-declare v pgpm.archive_result;
+declare v pgpm.archive_result; v_first bigint;
 begin
-  -- one second per chunk (a compressing S3 upload, say); three for P, which never fits the timeout
   case p_parent
-    when 'public.sw_a'::regclass then perform nextval('s147.calls_a'); perform pg_sleep(1.0);
-    when 'public.sw_b'::regclass then perform nextval('s147.calls_b'); perform pg_sleep(1.0);
-    when 'public.sw_p'::regclass then perform nextval('s147.calls_p'); perform pg_sleep(3.0);
+    when 'public.sw_a'::regclass then perform nextval('s147.calls_a');
+    when 'public.sw_b'::regclass then perform nextval('s147.calls_b');
+    when 'public.sw_p'::regclass then perform nextval('s147.calls_p');
   end case;
+  select case when is_called then last_value end into v_first from s147.first_in_tick;
+  if v_first is null then
+    v_first := p_parent::oid::bigint;
+    perform setval('s147.first_in_tick', v_first, true);
+  end if;
+  -- the tick's first parent in returns at once; a later one, and P always, is still here when the clock runs out
+  if p_parent = 'public.sw_p'::regclass or v_first <> p_parent::oid::bigint then
+    perform pg_sleep(60);
+  end if;
   v.covered_hi := p_hi; v.rows_archived := 0;
   return v;
 end $$;
@@ -62,7 +90,7 @@ insert into public.sw_a (payload) select 'a' from generate_series(1, 3);
 call pgpm.transmute('public.sw_a', 'id', 1000, p_retain => 19000, p_paused => false);
 insert into public.sw_a (id, payload) values (20000, 'frontier');
 select pgpm.set_archive_fn('public.sw_a', 's147.chunk(regclass,name,text,text)'::regprocedure);
--- one row per chunk, so A's three rows are a backlog of three one-second chunks
+-- one row per chunk, so A's three rows are a backlog of three chunks, one per tick
 update pgpm.config set archive_byte_budget = 1 where parent_table = 'public.sw_a'::regclass;
 
 insert into public.sw_b (payload) select 'b' from generate_series(1, 2);
@@ -76,7 +104,8 @@ select child_name as blive from pgpm.part
 select ok('public.sw_a'::regclass::oid < 'public.sw_b'::regclass::oid,
   'LIVENESS: A precedes B in the fixed order the sweep used to follow');
 
-set statement_timeout = '1900ms';
+select setval('s147.first_in_tick', 0, false);
+set statement_timeout = '4s';
 \set ON_ERROR_STOP 0
 call pgpm.maintain_all();
 \set ON_ERROR_STOP 1
@@ -84,12 +113,13 @@ reset statement_timeout;
 
 select is((select count(*)::int from pgpm.archive_ledger where parent_table = 'public.sw_a'::regclass), 1,
   'tick 1: A archived one chunk');
-select is((select last_value::int from s147.calls_b), 1,
+select is(s147.calls('s147.calls_b'), 1,
   'LIVENESS: tick 1 entered B''s archive function');
 select ok(not exists (select 1 from pgpm.archive_ledger where parent_table = 'public.sw_b'::regclass),
   'LIVENESS: and the shared clock cut B short there (the starving the fix is about happened)');
 
-set statement_timeout = '1900ms';
+select setval('s147.first_in_tick', 0, false);
+set statement_timeout = '4s';
 \set ON_ERROR_STOP 0
 call pgpm.maintain_all();
 \set ON_ERROR_STOP 1
@@ -106,12 +136,13 @@ select is((select string_agg(t.id || '->' || c.relname, ' ' order by t.id)
              from public.sw_b t join pg_class c on c.oid = t.tableoid),
   '20000->' || :'blive',
   'and only it: B''s live partition keeps its frontier row');
-select is((select last_value::int from s147.calls_a), 2,
+select is(s147.calls('s147.calls_a'), 2,
   'LIVENESS: tick 2 still reached A');
 select is((select count(*)::int from pgpm.archive_ledger where parent_table = 'public.sw_a'::regclass), 1,
   'and it was A that the clock cut short this time');
 
-set statement_timeout = '1900ms';
+select setval('s147.first_in_tick', 0, false);
+set statement_timeout = '4s';
 \set ON_ERROR_STOP 0
 call pgpm.maintain_all();
 \set ON_ERROR_STOP 1
@@ -119,7 +150,7 @@ reset statement_timeout;
 
 select is((select count(*)::int from pgpm.archive_ledger where parent_table = 'public.sw_a'::regclass), 2,
   'tick 3: A, cut short last tick, went first and archived its next chunk');
-select is((select last_value::int from s147.calls_a), 3,
+select is(s147.calls('s147.calls_a'), 3,
   'LIVENESS: A''s archive function was entered once more, for that chunk');
 
 -- ---------------------------------------------------------------------------------------------------
@@ -148,20 +179,22 @@ select is((select string_agg(parent_table::text, ',' order by parent_table) from
   'sw_p,sw_q',
   'LIVENESS: P and Q are new to the sweep, so neither has had a turn');
 
-set statement_timeout = '1900ms';
+select setval('s147.first_in_tick', 0, false);
+set statement_timeout = '4s';
 \set ON_ERROR_STOP 0
 call pgpm.maintain_all();
 \set ON_ERROR_STOP 1
 reset statement_timeout;
 
-select is((select last_value::int from s147.calls_p), 1,
+select is(s147.calls('s147.calls_p'), 1,
   'LIVENESS: tick 1 entered P''s archive function');
 select ok(not exists (select 1 from pgpm.archive_ledger where parent_table = 'public.sw_p'::regclass),
   'LIVENESS: and P''s own tick overran the timeout');
 select ok(to_regclass('public.' || quote_ident(:'qold')) is not null,
   'LIVENESS: tick 1 never reached Q, so its aged partition is still there');
 
-set statement_timeout = '1900ms';
+select setval('s147.first_in_tick', 0, false);
+set statement_timeout = '4s';
 \set ON_ERROR_STOP 0
 call pgpm.maintain_all();
 \set ON_ERROR_STOP 1
@@ -176,7 +209,7 @@ select is((select string_agg(t.id || '->' || c.relname, ' ' order by t.id)
              from public.sw_q t join pg_class c on c.oid = t.tableoid),
   '20000->' || :'qlive',
   'and only it: Q''s live partition keeps its frontier row');
-select is((select last_value::int from s147.calls_p), 2,
+select is(s147.calls('s147.calls_p'), 2,
   'LIVENESS: P was not dropped from the sweep; tick 2 still gave it a turn');
 
 select * from finish();
