@@ -576,6 +576,10 @@ run_timescale() {
     # of the pair discriminate.sh completes with the hypertable_copy_rerun_*_by_name mutations.
     echo "--- a re-run copy replaces the recorded copy, wherever it lives (issue #1083) ---"
     bash "$(dirname "$0")/bench/hypertable_copy_rerun_by_record.sh" pgpm_test-timescale pgpm_perf116 || fail=1
+    # #1057 bullet 1's guard, the same way: it re-runs tests/timescale/db/65 against the real install, the clean-code
+    # half of the pairs discriminate.sh completes with its four mutants.
+    echo "--- the drains and the cutover follow the recorded delta wherever it lives (issue #1057) ---"
+    bash "$(dirname "$0")/bench/hypertable_cutover_delta_by_record.sh" pgpm_test-timescale pgpm_perf354 || fail=1
     # #1105's hypertable guard, the same way: it re-runs tests/timescale/db/63 against the real install, the
     # clean-code half of the pair discriminate.sh completes with its two isolation mutants.
     echo "--- from_hypertable refuses a stricter isolation level before the copy and the swap (issue #1105) ---"
