@@ -10,7 +10,7 @@
 # exists so the mutations have a guard the discriminate track can run against the mutant, in the shape of
 # bench/forget_missing_disarms_detach.sh.
 #
-# FOUR mutations are required to fail against it (bench/mutations/mutate.py):
+# FIVE mutations are required to fail against it (bench/mutations/mutate.py):
 #   adopt_partition_keeps_stale_oid      -- the stale row is not re-anchored: the wedge stands and the rows
 #                                           stay. Part A.
 #   adopt_partition_records_nothing      -- a partition with no row is not recorded afresh, the state the old
@@ -19,6 +19,17 @@
 #                                           the adopted one. Part A's ledger identity.
 #   adopt_partition_unlocked             -- the partition is not locked while it is judged, so a second
 #                                           session's DETACH lands before the row commits. Part E.
+#   adopt_partition_pending_detach_admitted -- both `not i.inhdetachpending` clauses gone (pass 11's novel
+#                                           seed, catalogued by #1226): a partition a DETACH ... CONCURRENTLY
+#                                           has marked pending is admitted and recorded though it is leaving
+#                                           the table. Part F catches the first clause (a detach left pending
+#                                           before the call), part G the re-read under the partition's lock (a
+#                                           detach that marks it pending while the call waits for that lock,
+#                                           ordered by the lock queue, so no timing race). Checked by hand
+#                                           when catalogued: either clause removed alone fails its own part.
+#
+# pgpm._regrain_lock, the other lock adopt_partition takes, needs a holder in a second session that this file's
+# parts do not stage; bench/adopt_partition_regrain_lock.sh guards it.
 #
 # Runs on the plain core image (pgtap, dblink and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path
 # inside the container, for a worktree mounted somewhere other than /repo.

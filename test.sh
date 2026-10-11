@@ -1237,6 +1237,7 @@ run_perf() {
     "bench/transmute_cutover_names_held.sh pgpm_perf313"
     "bench/transmute_publication_change_refused.sh pgpm_perf314"
     "bench/adopt_partition.sh pgpm_perf315"
+    "bench/adopt_partition_regrain_lock.sh pgpm_perf359"
     "bench/write_block_skips_hand_detached.sh pgpm_perf316"
     "bench/bound_contract_remedy.sh pgpm_perf318"
     "bench/liveness_witness_labels.sh pgpm_perf322"
