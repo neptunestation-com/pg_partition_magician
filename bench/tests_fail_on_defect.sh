@@ -994,8 +994,8 @@ if sel 93; then
     say FAIL "planted the defect: _next_archive_chunk never resumes" "install.sql moved; fix the pattern"; fail=1
   fi
   if plant archive_batch_spent_on_chunks \
-       "    'select p.child_name, p.child_oid, p.lo, p.hi from pgpm.part p
-" "    'select p.child_name, p.child_oid, p.lo, p.hi from pgpm.part p cross join generate_series(1, coalesce((select c0.archive_batch from pgpm.config c0 where c0.parent_table = p.parent_table), 1)) rep
+       "    'select p.child_name, p.child_oid, p.retiring_at, p.lo, p.hi from pgpm.part p
+" "    'select p.child_name, p.child_oid, p.retiring_at, p.lo, p.hi from pgpm.part p cross join generate_series(1, coalesce((select c0.archive_batch from pgpm.config c0 where c0.parent_table = p.parent_table), 1)) rep
 " \
        "      order by p.lo::%s
 " "      order by p.lo::%s, rep
