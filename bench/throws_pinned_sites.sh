@@ -70,7 +70,7 @@ f="$work/other_schema.sql"
   echo "select throws_ok(\$\$ call pg_temp.mk('public.t1182') \$\$, NULL, 'unpinned, but no pgpm procedure');"
   echo "select * from finish();"; } > "$f"
 run "$f"
-if grep -q '^PASS  control: 2D000 is raised inside the wrapper and NULL accepts it' <<<"$out"; then
+if grep -q '^PASS  LIVENESS: control: 2D000 is raised inside the wrapper and NULL accepts it' <<<"$out"; then
   ok "LIVENESS: the guard under test ran its controls" "2D000 raised, NULL accepts it"
 else
   bad "LIVENESS: the guard under test ran its controls" "$(grep -m1 -E '^FAIL' <<<"$out")"
