@@ -1461,7 +1461,48 @@ drops the table; `maintain`'s write-block and archive steps leave it alone too (
 Its `pgpm.part` row stays, so every later `retain` refuses and logs it again and
 `status().retain_drop_failures` counts it. To end that, attach the table back to the parent or delete its
 `pgpm.part` row. A partition pgpm's own retirement detached carries `retiring_at` and is dropped as usual
-(see below).
+(see below), but only with the record of pgpm's own dispatch: `pgpm.part.detach_dispatched_oid`, which `retire`
+writes, as the partition's oid, in the transaction in which the dispatch armed the `pgpm_detach` job. Nothing
+else vouches for a mark, not a `retain_detach` row, not the job's command and not `pg_cron`'s run history. A
+`retiring_at` mark without the record (its dispatch failed, with no `pg_cron` or no `pgpm_detach` job, and the
+operator's own detach then completed) vouches for nothing: `retire` clears it, logged `retain_disown`, disarms
+the job if it still holds that detach, and refuses the table as one detached by hand. `_retain_recall` does the
+same rather than attach such a table back when retention stops reaching it. A partition whose detach pgpm
+dispatched, and which an operator then detached by hand, is pgpm's retirement still: it is dropped when the
+retirement completes, as any partition pgpm detached.
+
+A partition pending a concurrent detach that pgpm did not issue (an operator's `DETACH PARTITION ...
+CONCURRENTLY` still waiting, or interrupted in its wait, leaving `pg_inherits.inhdetachpending` set) is left
+alone the same way, on either path: `retire` returns `false`, logs `skip_retain` for the partition's range with
+`method` naming the pending detach and its remedy, and neither write-blocks nor drops the table, nor marks it
+`retiring_at`. The state passes: [`_detach_reap`](#_detach_reap) finishes an abandoned detach (`maintain_all`
+runs it ahead of every tick; a per-table `maintain` does not), or the operator runs `ALTER TABLE ... DETACH
+PARTITION ... FINALIZE`, and the table is then detached by hand, refused and logged `fail_retain_drop` as above.
+Until then it takes a `retain_batch` slot on every call, as any deferral does.
+
+A `retiring_at` mark vouches for a pending detach by the same record. A mark without it is cleared, by
+`retire` or by `_detach_reap` before it finishes the detach, and logged `retain_disown` once; the table is then
+the operator's as above. Every run of `install.sql` applies the rule to every row at once: a mark on a pending or
+detached partition without the record is cleared and logged `retain_disown`, and the job disarmed where it
+still holds that detach. A row an upgrade from before 0.6.0 could not anchor (no `child_oid`) is found by its name.
+
+**The upgrade to this release disowns every mark on a pending or detached partition, once.** The record is a
+column the upgrade adds, empty on every row. A pgpm older than it stamped `retiring_at` on an operator's detach
+(adopting it as its own retirement, where the detach was pending when retention reached the partition) exactly as
+on its own, and armed the job and logged `retain_detach` alike, so nothing it left can tell the two apart; the
+upgrade takes the side that drops nothing. So a retirement of pgpm's own that was pending or detached at the
+moment of the upgrade is left standing too, logged `retain_disown` with the remedy: once its detach is finished,
+drop the table by hand, or attach it back to the parent on its bounds so retention retires it (its
+`pgpm.part` row is kept). A retirement still attached at the upgrade, whose dispatched detach is still armed on the
+job, is given its record instead (an adopted operator's detach is never attached), and every retirement dispatched
+after the upgrade carries its record from the start.
+
+`retire` takes `SHARE UPDATE EXCLUSIVE` on the partition before it asks whether it is attached, detached or
+pending, and asks the catalog as of that lock, so a detach that starts while `retire` is in flight cannot set
+its flag under it and one already set is seen (a caller in `REPEATABLE READ` included). A concurrent detach
+that queues meanwhile and `retire`'s `DROP` then wait on each other; PostgreSQL cancels one of the two, and
+neither outcome drops a partition pending a detach (inside `maintain`, the 200 ms `lock_timeout` gives up
+first and logs `skip_retain`).
 
 Coverage `retire` finds on a partition with **no** write block in force on it (a trigger removed or
 disabled by hand, lifted by a pgpm older than the rule [`maintain`](#maintain) applies, or left
@@ -1600,7 +1641,9 @@ Nothing is logged for a skipped partition: a detach in progress is the expected 
 tick, never finalizing a detach that is still running.
 
 It drops nothing: `retire` completes pgpm's own retirements on the normal path, and an operator's hand-run
-detach that was interrupted is finished and then left alone.
+detach that was interrupted is finished and then left alone. A pending partition is pgpm's own only while the
+record of pgpm's own dispatch (`pgpm.part.detach_dispatched_oid`); a `retiring_at` mark on one without it is cleared
+before the detach is finished, logged `retain_disown` (see [`retire`](#retire)).
 
 The wait for the partition's lock is bounded at 5 s, `transmute`'s default. `FINALIZE` takes `ACCESS
 EXCLUSIVE` on the partition, so behind one long reader of it (a report, a `pg_dump`) an unbounded request
@@ -2087,8 +2130,9 @@ reads a candidate the step takes `ACCESS SHARE` on the parent, which waits out a
 flight (under `maintain`'s 200 ms `lock_timeout` a longer wait defers the partition, logged
 `skip_archive`), and asks again of the catalog as of that lock, so a table that left the parent meanwhile
 is skipped the same way. The lock is held to the end of the step's transaction, so no plain detach starts
-under it. A `DETACH PARTITION ... CONCURRENTLY` whose first transaction has committed still counts as
-attached. Archive coverage is `retire()`'s other drop precondition.
+under it. A partition pending a `DETACH PARTITION ... CONCURRENTLY` (its first transaction committed, the
+detach still waiting or interrupted) is skipped the same way: the parent no longer holds it. Archive coverage
+is `retire()`'s other drop precondition.
 
 ### `maintain_all`
 
@@ -3478,6 +3522,7 @@ session; for `id`, the number.
 | `attached` | `boolean` | false while a regrain is still filling it standalone; true once attached |
 | `retiring_at` | `timestamptz` | set when `retire` dispatches a concurrent detach for this partition, so recovery can tell whose detach a pending one was; null for every partition on the ordinary one-step drop path |
 | `retiring_oid` | `oid` | which relation that dispatch meant. The detach travels to pg_cron as text naming the partition, and is re-resolved there; this is what lets `retire` refuse to act when the name has stopped resolving to it (see [identity](#what-retire-checks-a-partitions-identity-against)). Null alongside a null `retiring_at`, and for a retirement already in flight when the column was added |
+| `detach_dispatched_oid` | `oid` | the record that `retire`'s own dispatch of this retirement's detach succeeded: the partition's oid, written in the transaction in which the dispatch armed the `pgpm_detach` job, cleared with `retiring_at`. A mark on a pending or detached partition without it is the operator's, not pgpm's (see [`retire`](#retire)). Null on every row an upgrade finds |
 | `child_oid` | `oid` | which relation this row is about, recorded where the partition enters this table (`obtain`, regrain's standalone child, `transmute`'s monolith) rather than at retirement. The write-block step checks `child_name` against it before issuing any DDL, the archive step checks it before reading the child (see [the archive step's identity check](#the-archive-steps-identity-check)), and `retire` checks it before any side effect -- which is what anchors the ordinary one-step `DROP` that `retiring_oid` leaves uncovered (see [identity](#what-retire-checks-a-partitions-identity-against)). A rename does not change an OID, so regrain's own transitional rename leaves it correct. Null reads as unanchored; an upgrade backfills it for every row whose name still resolves |
 
 Primary key `(parent_table, child_name)`. The non-overlap invariant holds over `attached = true` rows
@@ -3540,6 +3585,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `obtain` | a forward partition created (`method` = `plain`) |
 | `retain_drop` | a partition dropped by retention (via `retain()` or `retire()`) |
 | `retain_detach` / `retain_crossing` / `detach_reap` | a concurrent detach dispatched for a referenced partition / rows deleted to honour a crossing FK's declared `ON DELETE` / an abandoned concurrent detach finalized |
+| `retain_disown` | a `retiring_at` mark on a pending or detached partition without the record of pgpm's own dispatch (`pgpm.part.detach_dispatched_oid`) was cleared, so the detach is the operator's and the table is never dropped by retention: by `retire`, `_detach_reap`, `_retain_recall` or a run of `install.sql`, the upgrade that adds the record among them (see [`retire`](#retire)). `method` says which, why and the remedy. Logged once per mark |
 | `retain_recall` / `retain_reattach` | retention stopped reaching a partition whose retirement was under way: its dispatched detach was recalled and the `pgpm_detach` job returned to idle / the detach had already landed, and the partition was re-attached on its own bounds (see [`retire`](#retire)) |
 | `regrain_copy` / `regrain_aged` / `regrain_attach` / `regrain` | a regrain microbatch copied rows into a fine child / skipped a below-horizon sub-range that has no fine child yet (only when `archive_fn` is unset; discarded with the source, never copied, once the swap has re-checked that it is still below the horizon) / attached a fine child (`method` = `check_skip`) / completed (`method` = `copy_swap_drop`) |
 | `regrain_prepare` / `regrain_capture_orphan` / `regrain_reconcile` / `regrain_reconcile_aged` / `regrain_delta_purge` / `regrain_rename` / `regrain_restart` / `regrain_cancel` | the cross-tick regrain's own steps: change capture installed / a leftover capture table cleared / the source-is-authority reconcile before the swap (and its below-horizon counterpart) / captured keys the swap gate discarded because no reconcile could consume them (out of the source's range, or a `NULL` control value; `rows` counts them) / the source renamed onto the target grid / a stale run restarted (copies that predate capture, or copies a parent altered mid-regrain made stale: their columns or `CHECK` constraints no longer match, the source was rewritten or had a column replaced, or change capture no longer fits the key, or copies no recorded source mark vouches for, as a run in flight across an upgrade has, or change capture's trigger found disabled, origin-only or replica-only rather than enabled `ALWAYS`) / a run cancelled by `regrain_cancel()`, or by `retire` dropping the run's source whole (`method` names `retire`, `rows` counts the copies discarded) |

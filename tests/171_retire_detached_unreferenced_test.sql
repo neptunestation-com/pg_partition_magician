@@ -19,7 +19,7 @@
 -- the horizon at 3000, so a wrong drop, a wrong refusal and a wrong count cannot stand in for each other.
 create extension if not exists pgtap;
 
-select plan(34);
+select plan(35);
 
 -- The ids a table holds, by name, or null when no such table exists. A results_eq over a dropped table
 -- raises and takes the rest of the file with it; a null is a clean failed assertion instead, which
@@ -156,10 +156,20 @@ select is((select retiring_at from pgpm.part
   null::timestamptz, 'and it was not marked as a retirement pgpm started');
 
 -- ONE-DIRECTIONAL. The aged [2000, 3000) goes through pgpm's own retirement: retire() write-blocks it,
--- marks it retiring_at and dispatches the detach (no pg_cron in this database, so the dispatch itself
--- is logged fail_retain_detach; the marker is what matters here), then the detach is run by hand at top
--- level exactly as the cron job would, and retire() completes the DROP of a table that is detached but
--- carries retiring_at.
+-- marks it retiring_at and dispatches the detach, then the armed command is run by hand at top level
+-- exactly as the cron job would, and retire() completes the DROP of a table that is detached but carries
+-- retiring_at. The dispatch has to be real (a stand-in for pg_cron's job table, as tests/194 has): since
+-- #705 a mark on a detached partition vouches only with a record of pgpm's dispatch (retain_detach), so a
+-- mark whose dispatch failed, followed by a detach someone else ran, is the operator's table and is refused
+-- (tests/327 part G), where this file used to stand that in for pgpm's own landing.
+create schema cron;
+create table cron.job (jobid bigint primary key, jobname text, database text, command text);
+create function cron.alter_job(job_id bigint, schedule text default null, command text default null,
+                               database text default null, username text default null, active boolean default null)
+returns void language sql as $$
+  update cron.job set command = coalesce(alter_job.command, job.command) where jobid = job_id
+$$;
+insert into cron.job values (1, 'pgpm_detach', current_database(), 'select 1');
 select is(pgpm.retire('public.rd171b', :'b_aged'), false,
   'LIVENESS: retire() starts pgpm''s own retirement of [2000, 3000) and returns false');
 select ok((select retiring_at is not null and retiring_oid = :'b_aged_oid'::oid from pgpm.part
@@ -170,7 +180,10 @@ select ok(exists (select 1 from pg_trigger where tgrelid = :'b_aged_oid'::oid an
 select is(pgpm_test171.ids(:'b_aged'), array[2500]::bigint[],
   'LIVENESS: it holds exactly id 2500 before the detach');
 
-select format('alter table public.rd171b detach partition public.%I concurrently', :'b_aged') \gexec
+select is((select command from cron.job where jobname = 'pgpm_detach'),
+          format('alter table public.rd171b detach partition public.%I concurrently', :'b_aged'),
+  'LIVENESS: the dispatch armed the pgpm_detach job with its detach');
+select command from cron.job where jobname = 'pgpm_detach' \gexec
 
 select ok(not exists (select 1 from pg_inherits
                        where inhparent = 'public.rd171b'::regclass and inhrelid = :'b_aged_oid'::oid),

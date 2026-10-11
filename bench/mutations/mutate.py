@@ -5414,12 +5414,8 @@ $$;''',
         "so a table an operator DETACHed to keep is write-blocked and dropped with its rows by the next "
         "retain(). One site, the refusal right after the identity check, switched off. tests/171 part A "
         "catches the drop, part B the write block the referenced path used to put on it.",
-        [("  if r.retiring_at is null and not exists (\n"
-          "       select 1 from pg_inherits i\n"
-          "        where i.inhparent = p_parent\n",
-          "  if false and not exists (\n"
-          "       select 1 from pg_inherits i\n"
-          "        where i.inhparent = p_parent\n", 1)],
+        [("  if r.retiring_at is null and not v_attached and not v_pending then\n",
+          "  if false and not v_attached and not v_pending then\n", 1)],
     ),
     "retire_refuses_own_detach": (
         "bench/retire_detached_unreferenced.sh",
@@ -5428,10 +5424,8 @@ $$;''',
         "then never completes: the detach pgpm dispatched lands and retire() refuses the DROP it was waiting "
         "for, forever. One site, the retiring_at clause of the same refusal. tests/171 part B's completion "
         "of pgpm's own detach catches it.",
-        [("  if r.retiring_at is null and not exists (\n"
-          "       select 1 from pg_inherits i\n",
-          "  if not exists (\n"
-          "       select 1 from pg_inherits i\n", 1)],
+        [("  if r.retiring_at is null and not v_attached and not v_pending then\n",
+          "  if not v_attached and not v_pending then\n", 1)],
     ),
     "retain_recall_never": (
         "bench/retain_recall_armed_detach.sh",
@@ -10411,7 +10405,7 @@ select is((select array_agg(id order by id) from public.rn_old),
         "actually happens' asserted as one pg_inherits row under the partition's NAME, reading none of its rows, "
         "which a retire() that empties the partition when it dispatches the detach satisfies. The exact pre-#1002 "
         "text of that site, plan and oid capture included.",
-        [("select plan(51);\n", "select plan(49);\n", 1),
+        [("select plan(53);\n", "select plan(51);\n", 1),
          ("""-- and its oid, before anything touches it: "still attached" below is judged on THIS relation, not on
 -- whatever holds the name by then
 select format('public.%I', :'doomed')::regclass::oid as doomed_oid \\gset
@@ -10445,7 +10439,7 @@ select is(
         "ACTION crossing) asserted as one pg_inherits row under the partition's NAME, reading none of its rows, "
         "which a refused retire() that has already deleted the rows nothing references satisfies. The exact "
         "pre-#1002 text of that site, plan and oid capture included.",
-        [("select plan(51);\n", "select plan(49);\n", 1),
+        [("select plan(53);\n", "select plan(51);\n", 1),
          ("select format('public.%I', :'nx_doomed')::regclass::oid as nx_doomed_oid \\gset\n", "", 1),
          ("""-- INTACT is about its rows, not only its attachment (#1002): a refused retire() that had already deleted
 -- the rows nothing references would leave it attached and half-retired. Ids 1, 42 (the referenced one),
@@ -12063,6 +12057,164 @@ MUTATIONS["untransmute_detach_pending_unlocked_only"] = (
     "catches it.",
     [("  perform pgpm._refuse_detach_pending(p_parent);   -- #1157, final: a detach that set its flag while this waited\n",
       "", 1)],
+)
+
+# Issue #705 (the pending-detach site at retire(), and bullet 3): retire() leaves a partition pending or detached by a
+# detach pgpm did not issue alone, and asks the catalog under a lock on the partition. bench/retire_pending_detach.sh
+# runs tests/327 against each mutant, and re-runs the mutant's install over a degraded copy of itself.
+_R705_RETIRE_PENDING = ("  if v_pending and not (r.retiring_at is not null and pgpm._detach_dispatched(p_parent, p_child, v_rel::oid)) then\n",
+                        "  if v_pending and r.retiring_at is null then\n", 1)
+_R705_REAP = ("       and not pgpm._detach_dispatched(r.parent, r.crel, r.child_oid) then\n",
+              "       and false then\n", 1)
+_R705_RETIRE_DETACHED = ("     and not pgpm._detach_dispatched(p_parent, p_child, v_rel::oid) then\n",
+                         "     and false then\n", 1)
+_R705_PASS = ("    continue when pgpm._detach_dispatched(r.parent_table, r.child_name, r.rel);\n",
+              "    continue;\n", 1)
+_R705_WITNESS = "                    and p.retiring_at is not null and p.detach_dispatched_oid = p_rel);\n"
+MUTATIONS["retire_pending_detach_counts_attached"] = (
+    "bench/retire_pending_detach.sh",
+    "Pre-fix retire(): the #652 refusal asks pg_inherits for the child, which lists a partition pending a "
+    "concurrent detach, so one an operator's interrupted DETACH ... CONCURRENTLY left pending (no retiring_at) "
+    "counts as attached: write-blocked already, the next pgpm.maintain(parent) tick drops it with its rows, and with "
+    "an incoming FK the operator's detach is stamped retiring_at and the table dropped once the detach is finished. "
+    "One site, the attached read. The acceptance reproduction (B01-03) and tests/327 parts A and B catch it.",
+    [("    and exists (select 1 from pg_partition_ancestors(v_rel) a where a.relid = p_parent::oid);\n",
+      "    and exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = v_rel::oid);\n", 1)],
+)
+MUTATIONS["retire_pending_detach_trusts_stamp"] = (
+    "bench/retire_pending_detach.sh",
+    "#705's plausible half-fix in retire(): a partition pending a concurrent detach is refused only when it carries "
+    "no retiring_at, so a mark with no record of pgpm's own dispatch (one a pgpm older than the record stamped on an "
+    "operator's pending detach, or one whose dispatch failed) is taken for pgpm's own retirement, and the table is "
+    "dropped once the detach is finished. One site, the record clause of the refusal. tests/327 part D catches it.",
+    [_R705_RETIRE_PENDING],
+)
+MUTATIONS["detach_reap_trusts_stamp"] = (
+    "bench/retire_pending_detach.sh",
+    "#705 in _detach_reap: the reap finishes an operator's pending detach under a retirement mark with no record of "
+    "pgpm's dispatch, without clearing it, so the table then reads as pgpm's detached retirement. One site, the "
+    "reap's disown. tests/327 part E catches it.",
+    [_R705_REAP],
+)
+MUTATIONS["retire_trusts_detached_mark"] = (
+    "bench/retire_pending_detach.sh",
+    "#705 (round 2's V-02): retire() takes a partition detached under a retirement mark for pgpm's dispatched detach "
+    "having landed without asking for the record of that dispatch, so a mark whose dispatch failed (no pg_cron) is "
+    "honoured once the operator's own detach completes, and the table is dropped. One site, retire()'s record check "
+    "on a detached partition. That acceptance reproduction and tests/327 part G catch it.",
+    [_R705_RETIRE_DETACHED],
+)
+MUTATIONS["retain_recall_trusts_detached_mark"] = (
+    "bench/retire_pending_detach.sh",
+    "#705 in _retain_recall: a partition detached under a retirement mark with no record of pgpm's dispatch is read as "
+    "the dispatched detach having landed, so when retention stops reaching it the recall attaches the operator's "
+    "table back into the parent. One site, the recall's record check. tests/327 part J catches it.",
+    [("    if not pgpm._detach_dispatched(p_parent, r.child_name, v_now::oid) then\n",
+      "    if false then\n", 1)],
+)
+MUTATIONS["upgrade_pass_skips_pending"] = (
+    "bench/retire_pending_detach.sh",
+    "#705 in the install's pass: a mark on a PENDING partition is never disowned, so the upgrade from an install older "
+    "than the dispatch record keeps a mark that install stamped on an operator's pending detach (with pg_cron, its "
+    "job armed for it as for its own), and the table is dropped once the detach is finished. One site, the pass's "
+    "disown clause. tests/327 part C and the guard's UPGRADE phase catch it.",
+    [("    continue when pgpm._detach_dispatched(r.parent_table, r.child_name, r.rel);\n",
+      "    continue when r.pending or pgpm._detach_dispatched(r.parent_table, r.child_name, r.rel);\n", 1)],
+)
+MUTATIONS["upgrade_pass_trusts_detached_mark"] = (
+    "bench/retire_pending_detach.sh",
+    "#705 in the install's pass: a mark on a DETACHED partition is never disowned, so the marks an older pgpm left on "
+    "an operator's detach that was finished before the upgrade are kept. One site, the pass's disown clause. tests/327 "
+    "parts H and K to M catch it.",
+    [("    continue when pgpm._detach_dispatched(r.parent_table, r.child_name, r.rel);\n",
+      "    continue when r.pending is not true or pgpm._detach_dispatched(r.parent_table, r.child_name, r.rel);\n", 1)],
+)
+MUTATIONS["upgrade_pass_drops_inflight_dispatch"] = (
+    "bench/retire_pending_detach.sh",
+    "#705 in the install's pass: a mark on a partition still ATTACHED at the upgrade, whose detach the older install "
+    "dispatched and pg_cron has yet to run, is not given its dispatch record, so when that detach lands the mark has "
+    "none and pgpm's own retirement is disowned rather than completed. One site, the record the pass writes. "
+    "tests/327 part N catches it.",
+    [("        update pgpm.part set detach_dispatched_oid = r.rel\n"
+      "         where parent_table = r.parent_table and child_name = r.child_name;\n",
+      "        null;\n", 1)],
+)
+MUTATIONS["upgrade_pass_skips_unanchored"] = (
+    "bench/retire_pending_detach.sh",
+    "#705 in the install's pass: a row with no recorded oid (one the #421 backfill could not anchor) is found by its "
+    "child_oid only, so the pass never reaches it and its unvouched mark is kept. One site, the pass's relation join. "
+    "tests/327 part H catches it.",
+    [("             join pg_class c on c.oid = coalesce(p.child_oid, to_regclass(format('%I.%I',\n"
+      "                                  pgpm._child_nsp(p.parent_table, p.child_name), p.child_name))::oid)\n",
+      "             join pg_class c on c.oid = p.child_oid\n", 1)],
+)
+MUTATIONS["dispatch_witness_reads_log"] = (
+    "bench/retire_pending_detach.sh",
+    "#705, round 3's first witness: a retain_detach row for the range vouches for a mark, but an install older than "
+    "the dispatch record wrote that row for an operator's detach it adopted exactly as for its own, so the upgrade "
+    "keeps the adopted mark and the table is dropped. One site, the witness's predicate. tests/327 parts K to M "
+    "(round 3's V-01, history off) and the guard's UPGRADE phase catch it.",
+    [(_R705_WITNESS,
+      "                    and p.retiring_at is not null\n"
+      "                    and exists (select 1 from pgpm.log l where l.parent_table = p.parent_table and l.lo = p.lo\n"
+      "                                   and l.hi = p.hi and l.action = 'retain_detach'));\n", 1)],
+)
+_R705_WITNESS_FN = """create or replace function pgpm._detach_dispatched(p_parent regclass, p_child name, p_rel oid)
+returns boolean language plpgsql stable as $$
+begin
+  return p_rel is not null
+     and exists (select 1 from pgpm.part p
+                  where p.parent_table = p_parent and p.child_name = p_child
+                    and p.retiring_at is not null and p.detach_dispatched_oid = p_rel);
+end;
+$$;
+"""
+MUTATIONS["dispatch_witness_reads_cron_history"] = (
+    "bench/retire_pending_detach.sh",
+    "#705, round 3's witness whole: the retain_detach row vouches unless pg_cron's run history, matched on the "
+    "command as the parent's CURRENT name spells it, shows every run of the detach failed. With no history (log_run "
+    "off, purged), an unreadable one, or the parent renamed since, it decides nothing, and an adopted mark is kept. "
+    "One site, the witness function. tests/327 parts K (no history), L (unreadable) and M (renamed) catch it.",
+    [(_R705_WITNESS_FN,
+      """create or replace function pgpm._detach_dispatched(p_parent regclass, p_child name, p_rel oid)
+returns boolean language plpgsql stable as $$
+declare v_runs bigint := 0; v_ok bigint := 0;
+begin
+  if p_rel is null or not exists (select 1 from pgpm.part p join pgpm.log l
+                                    on l.parent_table = p.parent_table and l.lo = p.lo and l.hi = p.hi
+                                   where p.parent_table = p_parent and p.child_name = p_child
+                                     and p.retiring_at is not null and l.action = 'retain_detach') then
+    return false;
+  end if;
+  begin
+    execute 'select count(*), count(*) filter (where d.status = ''succeeded'') from cron.job_run_details d'
+         || ' join cron.job j on j.jobid = d.jobid where j.jobname = ''pgpm_detach'' and d.command = $1'
+      into v_runs, v_ok using pgpm._detach_cmd(p_parent, pgpm._child_nsp(p_parent, p_child), p_child);
+  exception when others then
+    v_runs := 0;
+  end;
+  return not (v_runs > 0 and v_ok = 0);
+end;
+$$;
+""", 1)],
+)
+MUTATIONS["retire_pending_detach_adopted_mark_trusted"] = (
+    "bench/retire_pending_detach.sh",
+    "#705, every V-01 whole: a retirement mark with no record of pgpm's own dispatch is trusted everywhere. retire() "
+    "refuses a pending partition only when it carries no mark and asks a detached one for nothing, _detach_reap "
+    "finishes the detach without clearing it, and the install's pass disowns no mark, so after an upgrade from an "
+    "install older than the record, whether the operator's adopted detach was finished before it or after, the table "
+    "reads as pgpm's retirement and the next tick drops it with its rows. Four sites, one each. Every V-01 "
+    "acceptance reproduction, tests/327 parts C, D, E, G, H and K to M, and the guard's UPGRADE phase catch it.",
+    [_R705_RETIRE_PENDING, _R705_REAP, _R705_RETIRE_DETACHED, _R705_PASS],
+)
+MUTATIONS["retire_checks_before_lock"] = (
+    "bench/retire_pending_detach.sh",
+    "#705 bullet 3, the pre-fix order: retire() asks the catalog with no lock on the partition, so a DETACH ... "
+    "CONCURRENTLY whose first transaction commits while retire() waits later on (behind the regrain lock, here) is "
+    "never seen, and the DROP takes the table pending the operator's detach. One site, the lock before the checks. "
+    "The acceptance reproduction (P1-02) and tests/327 part R catch it.",
+    [("    execute format('lock table only %s in share update exclusive mode', v_rel::text);\n", "    null;\n", 1)],
 )
 
 # Issue #1158: from_hypertable_cutover takes SHARE on the copy before it reads the copy's watermark and

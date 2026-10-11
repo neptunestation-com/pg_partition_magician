@@ -404,6 +404,17 @@ create table if not exists pgpm.part (
   -- can only adopt what is true AT THAT MOMENT. An install upgraded after a substitution has already
   -- happened records the substitute; there is nothing in the catalog that could tell it otherwise.
   child_oid    oid,
+  -- THAT PGPM'S OWN DISPATCH OF THIS RETIREMENT'S DETACH SUCCEEDED, as the oid of the partition it was dispatched
+  -- for (#705): set by retire() in the transaction in which _dispatch_detach armed the pgpm_detach job with the
+  -- detach, and cleared with retiring_at. The only record that a mark stands for a detach pgpm issued, which is
+  -- what makes the mark worth a DROP once the partition is pending or detached: retiring_at is stamped before the
+  -- dispatch, so a dispatch that failed leaves it on a partition pgpm never asked anything to detach, and a pgpm
+  -- older than this column stamped it on an operator's pending detach as readily as on its own. Nothing an older
+  -- pgpm wrote (its retain_detach rows, the job's command, pg_cron's run history) tells those apart, so this is
+  -- written only by code that has the column, keyed by the partition's oid (never a rendered name, which a rename
+  -- of the parent changes). Null on every row an upgrade finds: such a mark is disowned once the partition is
+  -- pending or detached (see _disown_unvouched_retirements).
+  detach_dispatched_oid oid,
   primary key (parent_table, child_name)
 );
 -- upgrade path for installs that predate these columns
@@ -411,6 +422,7 @@ alter table pgpm.part add column if not exists attached boolean not null default
 alter table pgpm.part add column if not exists retiring_at timestamptz;
 alter table pgpm.part add column if not exists retiring_oid oid;
 alter table pgpm.part add column if not exists child_oid oid;
+alter table pgpm.part add column if not exists detach_dispatched_oid oid;
 
 -- WHICH ANCHORS THIS UPGRADE ADOPTS (#1160). An oid adopted here is "whatever holds the name now", not the relation
 -- pgpm created, and the archive ledger's own upgrade far below (pgpm._backfill_chunk_oids) must not read it as
@@ -3447,6 +3459,115 @@ returns name language sql stable as $$
     (select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent));
 $$;
 
+-- _disown_retirement: clear a retirement mark (retiring_at, retiring_oid, detach_dispatched_oid) that does not vouch
+-- for a retirement of pgpm's, because the partition is pending or detached by a detach pgpm did not issue (#705), and
+-- log it once,
+-- retain_disown over the partition's range with p_why and the consequence. Without the mark the operator's detach
+-- is theirs: once it is finished the table is detached by hand, which retire() refuses (#652, fail_retain_drop),
+-- where with it retire() would have dropped the table as its own retirement's. Returns whether a mark was cleared.
+create or replace function pgpm._disown_retirement(p_parent regclass, p_child name, p_why text)
+returns boolean language plpgsql as $$
+declare v_lo text; v_hi text;
+begin
+  update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
+   where parent_table = p_parent and child_name = p_child and retiring_at is not null
+  returning lo, hi into v_lo, v_hi;
+  if not found then return false; end if;
+  insert into pgpm.log (parent_table, action, lo, hi, method)
+    values (p_parent, 'retain_disown', v_lo, v_hi,
+            p_why || '; its retirement mark (retiring_at) is cleared, so the detach is the operator''s: once it is finished the table is left standing as one detached by hand, and retention never drops it');
+  return true;
+end;
+$$;
+
+-- _detach_dispatched: whether pgpm recorded its own dispatch of the detach of p_child, the relation p_rel (#705). The
+-- record is pgpm.part.detach_dispatched_oid (see its comment), written only by retire() in the transaction in which
+-- the dispatch armed the pgpm_detach job and cleared with the mark; it has to name the relation that is there now.
+-- Nothing else vouches: not the job's command, not a retain_detach row, not pg_cron's run history, all of which a pgpm
+-- older than the record wrote alike for a detach it issued and for an operator's it adopted, and the first two of
+-- which spell the parent's name, which a rename changes.
+create or replace function pgpm._detach_dispatched(p_parent regclass, p_child name, p_rel oid)
+returns boolean language plpgsql stable as $$
+begin
+  return p_rel is not null
+     and exists (select 1 from pgpm.part p
+                  where p.parent_table = p_parent and p.child_name = p_child
+                    and p.retiring_at is not null and p.detach_dispatched_oid = p_rel);
+end;
+$$;
+
+-- _detach_job_holds: whether the standing pgpm_detach job of this database is armed with this partition's detach
+-- (_detach_cmd). False without pg_cron, the job, or the privilege to read cron.job. Read only for a partition still
+-- attached (see _disown_unvouched_retirements), never to vouch for a mark on a pending or detached one.
+create or replace function pgpm._detach_job_holds(p_parent regclass, p_nsp name, p_child name)
+returns boolean language plpgsql stable as $$
+declare v boolean;
+begin
+  execute 'select exists (select 1 from cron.job where jobname = ''pgpm_detach'''
+       || ' and database = current_database() and command = $1)'
+    into v using pgpm._detach_cmd(p_parent, p_nsp, p_child);
+  return coalesce(v, false);
+exception when others then
+  return false;
+end;
+$$;
+
+-- _disown_unvouched_retirements: disown every retirement mark that vouches for no detach of pgpm's (#705), by the rule
+-- retire(), _detach_reap and _retain_recall apply one partition at a time, over every row at once: a mark on a
+-- relation that is pending a concurrent detach under its parent, or no longer a partition of it at all, without the
+-- record of pgpm's own dispatch (_detach_dispatched). Each is cleared, logged retain_disown once, and the pgpm_detach
+-- job disarmed where it still holds that detach (or it would run it again every tick). A mark on a partition still
+-- attached is a retirement under way, retire()'s to finish; one on a relation that no longer exists is left to the
+-- paths that report it. The relation is the row's child_oid, or for a row the #421 backfill could not anchor the one
+-- its name resolves to. Returns how many marks it cleared.
+--
+-- RUN BY EVERY INSTALL, AND THAT IS THE UPGRADE'S HALF. The record is a column an upgrade adds, so on an install
+-- older than it every mark is without one, and every mark on a pending or detached partition is disowned on the
+-- upgrade itself: an older pgpm stamped the mark on an operator's detach (pending, or finished since) exactly as on
+-- its own, and nothing it left tells the two apart. The safe side of not knowing: a disowned retirement of pgpm's
+-- own leaves a table for the operator to drop (the method says how), where a kept adopted mark drops the
+-- operator's rows. A mark on a partition still ATTACHED at the upgrade, whose detach that install dispatched and
+-- pg_cron has yet to run, is given its record instead (see the loop), so the detach that lands is pgpm's own. On an
+-- install that has the record the pass changes nothing retire() would not.
+create or replace function pgpm._disown_unvouched_retirements()
+returns int language plpgsql as $$
+declare r record; v_n int := 0; v_why_q text;
+begin
+  for r in select p.parent_table, p.child_name, n.nspname, c.oid as rel,
+                  (select i.inhdetachpending from pg_inherits i
+                    where i.inhparent = p.parent_table and i.inhrelid = c.oid) as pending
+             from pgpm.part p
+             join pg_class c on c.oid = coalesce(p.child_oid, to_regclass(format('%I.%I',
+                                  pgpm._child_nsp(p.parent_table, p.child_name), p.child_name))::oid)
+             join pg_namespace n on n.oid = c.relnamespace
+            where p.retiring_at is not null and c.relname = p.child_name
+  loop
+    if r.pending is false then
+      -- attached: a retirement under way, retire()'s to finish. One an older install dispatched (the job armed with
+      -- its detach, which pg_cron has yet to run) gets its record here, or the detach would land on a mark with none
+      -- and be disowned. Unambiguous while it is attached: an older pgpm adopted an operator's detach only once the
+      -- detach had left the partition pending, and a mark whose dispatch failed has no job armed with it.
+      if not pgpm._detach_dispatched(r.parent_table, r.child_name, r.rel) and pgpm._detach_job_holds(r.parent_table, r.nspname, r.child_name) then
+        update pgpm.part set detach_dispatched_oid = r.rel
+         where parent_table = r.parent_table and child_name = r.child_name;
+      end if;
+      continue;
+    end if;
+    continue when pgpm._detach_dispatched(r.parent_table, r.child_name, r.rel);
+    perform pgpm._idle_detach_job(pgpm._detach_cmd(r.parent_table, r.nspname, r.child_name));
+    v_why_q := format('%I.%I is %s under a retirement mark for which pgpm recorded no dispatch of its own (a dispatch that failed, or a pgpm older than that record, which stamped the mark on an operator''s detach as on its own); if it was pgpm''s own aged retirement, once its detach is finished drop the table by hand, or attach it back to the parent on its bounds so retention retires it',
+                      r.nspname, r.child_name,
+                      case when r.pending then 'pending a concurrent detach' else 'detached from the parent' end);
+    if pgpm._disown_retirement(r.parent_table, r.child_name, v_why_q) then
+      v_n := v_n + 1;
+    end if;
+  end loop;
+  return v_n;
+end;
+$$;
+
+select pgpm._disown_unvouched_retirements();
+
 -- retire(): the sanctioned single-partition drop (issue #195) -- retain()'s per-partition body,
 -- public and claim-guarded, so an external assistant (e.g. an archive-then-drop scanner) or several
 -- cooperating ones can drive retirement themselves through the same protocol retain() uses: claim,
@@ -3488,7 +3609,7 @@ declare
   cfg pgpm.config; v_nsp name; v_boundary text; r record;
   v_referenced boolean; v_child regclass; v_now regclass; v_why text;
   v_cross text[]; v_coltype text; v_lo_lit text; v_hi_lit text; v_deleted int; v_reason text;
-  v_chunks bigint;
+  v_chunks bigint; v_rel regclass; v_attached boolean; v_pending boolean;
 begin
   -- #951: refused before anything is read or committed; no argument here has a null meaning
   perform pgpm._refuse_null_arguments('retire', json_build_object('p_parent', p_parent, 'p_child', p_child));
@@ -3574,6 +3695,32 @@ begin
     end if;
   end if;
 
+  -- THE LOCK FIRST, THEN THE QUESTION (#705 bullet 3). Both refusals below read the catalog, and they are only
+  -- worth the lock they are asked under: read before any lock on the child, a DETACH PARTITION ...
+  -- CONCURRENTLY whose first transaction committed while this call waited later on (behind the regrain lock in
+  -- _regrain_reclaim, or any lock its one-step path takes before the DROP) was never seen, and the DROP took the
+  -- table the operator was detaching, rows and all. SHARE UPDATE EXCLUSIVE on the child is the least mode that
+  -- conflicts with the SHARE UPDATE EXCLUSIVE that detach's first transaction takes on the partition, so from
+  -- here the flag cannot be set under this call, and one already set is seen; a plain DETACH and a DROP by hand
+  -- (ACCESS EXCLUSIVE) wait for it too. Taken on the relation the identity check just vouched for. A detach
+  -- already queued holds SHARE UPDATE EXCLUSIVE on the parent, which this call's DROP then waits on while the
+  -- detach waits here: PostgreSQL ends that deadlock by cancelling one of the two, and neither outcome loses a
+  -- row (the detach cancelled in its first transaction set no flag; this call cancelled dropped nothing, and under
+  -- maintain()'s 200 ms lock_timeout it gives up first, skip_retain).
+  --
+  -- Asked of the catalog AS OF THE LOCK: pg_partition_ancestors reads pg_inherits through the catalog snapshot,
+  -- which the lock refreshes, so a caller in REPEATABLE READ, whose own snapshot predates the detach, still sees
+  -- it; and it stops at a link pending detach, so "attached" here means attached and not pending. pg_inherits
+  -- through the statement's snapshot then only tells a pending partition (still listed) from a detached one.
+  v_rel := to_regclass(format('%I.%I', v_nsp, p_child));
+  if v_rel is not null then
+    execute format('lock table only %s in share update exclusive mode', v_rel::text);
+  end if;
+  v_attached := v_rel is not null
+    and exists (select 1 from pg_partition_ancestors(v_rel) a where a.relid = p_parent::oid);
+  v_pending := not v_attached and v_rel is not null
+    and exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = v_rel::oid);
+
   -- DETACHED BY SOMETHING OTHER THAN RETIREMENT, ON EITHER PATH (issue #652), before any side effect.
   -- pgpm.part.attached says what pgpm did, not what the catalog holds: an operator's own `DETACH
   -- PARTITION` (to keep a table, or to archive it by hand) never touches it. Only a child that pgpm's
@@ -3584,13 +3731,53 @@ begin
   -- operator-detached table with its rows. One rule for both paths, and it is one-directional: a child
   -- detached WITH retiring_at is this retirement's own and goes on to the DROP. By oid, through the
   -- same name resolution the identity check above just vouched for.
-  if r.retiring_at is null and not exists (
-       select 1 from pg_inherits i
-        where i.inhparent = p_parent
-          and i.inhrelid = to_regclass(format('%I.%I', v_nsp, p_child))::oid) then
+  --
+  -- A MARK VOUCHES FOR A DETACHED PARTITION ONLY WITH THE RECORD OF PGPM'S DISPATCH (#705). retiring_at is stamped
+  -- before the dispatch, so a failed dispatch leaves it on a partition pgpm never asked anything to detach, and a
+  -- pgpm older than the pending-detach refusal stamped it on an operator's pending detach. When the operator's
+  -- detach then lands, the partition is detached under the mark; on either path below that used to read as the
+  -- dispatched detach having landed, and the table was dropped. So the mark is first asked for its record
+  -- (pgpm.part.detach_dispatched_oid, _detach_dispatched); without one it is disowned (retain_disown) and the
+  -- partition is the operator's, refused as one detached by hand.
+  if r.retiring_at is not null and v_rel is not null and not v_attached and not v_pending
+     and not pgpm._detach_dispatched(p_parent, p_child, v_rel::oid) then
+    perform pgpm._idle_detach_job(pgpm._detach_cmd(p_parent, v_nsp, p_child));   -- only if it still holds this detach
+    perform pgpm._disown_retirement(p_parent, p_child,
+      format('retire() found %I.%I detached under a retirement mark for which pgpm recorded no dispatch of its own', v_nsp, p_child));
+    r.retiring_at := null;
+  end if;
+  if r.retiring_at is null and not v_attached and not v_pending then
     insert into pgpm.log (parent_table, action, lo, hi, method)
       values (p_parent, 'fail_retain_drop', r.lo, r.hi,
               'detached from the parent by something other than retirement; not dropping it');
+    return false;
+  end if;
+
+  -- PENDING A CONCURRENT DETACH THAT NO RETIREMENT OF PGPM'S ISSUED (#705), before any side effect too. An
+  -- operator's DETACH PARTITION ... CONCURRENTLY sets pg_inherits.inhdetachpending in a first transaction that
+  -- commits before its wait for the parent's older lockers, and a session that dies in that wait leaves the row
+  -- there. It is a detach the operator started, to keep the table, and it is left alone the same way: no write
+  -- block (an incomplete detach refuses the ALTER anyway), no DROP on either path, and no retiring_at, which the
+  -- referenced path below would stamp, adopting the operator's detach as this retirement's own and dropping the
+  -- table once the detach was finished. Logged skip_retain, not fail_retain_drop, because the state passes:
+  -- _detach_reap finishes an abandoned one (maintain_all runs it ahead of every tick) and leaves the table
+  -- standing, and from then on the refusal above takes over.
+  --
+  -- A pending child WITH retiring_at is this retirement's own detach only if pgpm issued it, and the one record
+  -- of that is pgpm.part.detach_dispatched_oid (_detach_dispatched), written in the transaction in which the
+  -- dispatch armed the job. A mark without it (one whose dispatch failed, or one a pgpm older than the record
+  -- stamped on an operator's pending detach) vouches for nothing: the mark is cleared (_disown_retirement, logged
+  -- retain_disown) and the partition refused as above.
+  if v_pending and not (r.retiring_at is not null and pgpm._detach_dispatched(p_parent, p_child, v_rel::oid)) then
+    if r.retiring_at is not null then
+      perform pgpm._idle_detach_job(pgpm._detach_cmd(p_parent, v_nsp, p_child));   -- only if it still holds this detach
+      perform pgpm._disown_retirement(p_parent, p_child,
+        format('retire() found %I.%I pending a concurrent detach under a retirement mark for which pgpm recorded no dispatch of its own', v_nsp, p_child));
+    end if;
+    insert into pgpm.log (parent_table, action, lo, hi, method)
+      values (p_parent, 'skip_retain', r.lo, r.hi,
+              format('%I.%I is pending a concurrent detach that no retirement of pgpm''s issued (pg_inherits.inhdetachpending); not write-blocking or dropping it. If the detach is still running, let it finish; if its session died, _detach_reap (run by maintain_all) finishes it, as does ALTER TABLE %s DETACH PARTITION %I.%I FINALIZE, and the table is then yours, left standing',
+                     v_nsp, p_child, p_parent, v_nsp, p_child));
     return false;
   end if;
 
@@ -3735,6 +3922,9 @@ begin
 
       v_reason := pgpm._dispatch_detach(p_parent, v_child);
       if v_reason is null then
+        -- #705: the record that this mark stands for a detach pgpm issued, in the transaction that armed the job
+        update pgpm.part set detach_dispatched_oid = v_child::oid
+         where parent_table = p_parent and child_name = p_child;
         insert into pgpm.log (parent_table, action, lo, hi, method)
           values (p_parent, 'retain_detach', r.lo, r.hi,
                   'concurrent detach dispatched; the drop completes on a later tick');
@@ -3911,13 +4101,20 @@ begin
                     where a.datname = current_database() and a.pid <> pg_backend_pid() and a.state = 'active'
                       and a.query ~* 'detach[[:space:]]+partition' and a.query ~* 'concurrently'
                       and position(lower(r.child_name) in lower(a.query)) > 0);
-      update pgpm.part set retiring_at = null, retiring_oid = null
+      update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
        where parent_table = p_parent and child_name = r.child_name;
       continue;
     end if;
 
-    -- the dispatched detach landed
+    -- the dispatched detach landed, if pgpm dispatched one (#705): a detached partition under a mark with no record of
+    -- pgpm's dispatch is the operator's table (see _detach_dispatched), disowned rather than re-attached
     continue when p_reattach is not true or v_now is null;
+    if not pgpm._detach_dispatched(p_parent, r.child_name, v_now::oid) then
+      perform pgpm._idle_detach_job(v_cmd_q);
+      perform pgpm._disown_retirement(p_parent, r.child_name,
+        format('retention no longer reaches %I.%I, which is detached under a retirement mark for which pgpm recorded no dispatch of its own', v_nsp, r.child_name));
+      continue;
+    end if;
     perform pgpm._idle_detach_job(v_cmd_q);
     begin
       execute format('alter table %s attach partition %I.%I for values from (%L) to (%L)',
@@ -3931,7 +4128,7 @@ begin
       loop
         execute format('alter table %I.%I drop constraint %I', v_nsp, r.child_name, v_check);
       end loop;
-      update pgpm.part set retiring_at = null, retiring_oid = null
+      update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
        where parent_table = p_parent and child_name = r.child_name;
       insert into pgpm.log (parent_table, action, lo, hi, method)
         values (p_parent, 'retain_reattach', r.lo, r.hi,
@@ -5013,8 +5210,9 @@ $$;
 -- as it would have had the candidate query seen it (a dropped one stays on the paths that report it, as
 -- _part_detached_by_hand's note says). A row pgpm's own retirement is detaching (retiring_at) and an unanchored row (no child_oid) are
 -- left to behave as they did before, as _part_detached_by_hand leaves them. A DETACH ... CONCURRENTLY whose
--- first transaction has committed leaves the table in pg_inherits with inhdetachpending set, which this
--- (like _part_built) still counts as attached: #705's open note.
+-- first transaction has committed leaves the table in pg_inherits with inhdetachpending set: _part_built still
+-- counts it attached, so it can be the candidate, but pg_partition_ancestors stops at a link pending detach, so
+-- this answers false for it and the caller hands it to nothing (retire() leaves the same table alone, #705).
 create or replace function pgpm._archive_hold_partition(p_parent regclass, p_child_oid oid, p_retiring_at timestamptz)
 returns boolean language plpgsql as $$
 begin
@@ -11549,6 +11747,18 @@ begin
                    join pg_locks p on p.pid = h.pid and p.locktype = 'relation' and p.granted
                                   and p.database = v_db and p.relation = r.parent_oid
                   where w.locktype = 'virtualxid' and not w.granted and w.pid <> pg_backend_pid());
+    -- #705: a retirement mark on it vouches for pgpm's own detach only with the record of pgpm's dispatch (see
+    -- retire()). Otherwise the detach is the operator's, and the mark is cleared BEFORE it is finished: after
+    -- that the table reads as pgpm's detached retirement, which retire() drops. Out here, ahead of the finalize
+    -- and outside its handler, so a finalize that times out still leaves the mark cleared.
+    if exists (select 1 from pgpm.part p
+                where p.parent_table = r.parent and p.retiring_at is not null
+                  and (p.child_oid = r.child_oid or (p.child_oid is null and p.child_name = r.crel)))
+       and not pgpm._detach_dispatched(r.parent, r.crel, r.child_oid) then
+      perform pgpm._idle_detach_job(pgpm._detach_cmd(r.parent, r.cnsp, r.crel));
+      perform pgpm._disown_retirement(r.parent, r.crel,
+        format('_detach_reap found %I.%I pending a concurrent detach under a retirement mark for which pgpm recorded no dispatch of its own', r.cnsp, r.crel));
+    end if;
     begin
       execute format('alter table %I.%I detach partition %I.%I finalize',
                      r.pnsp, r.prel, r.cnsp, r.crel);

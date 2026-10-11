@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+- **`retire()` leaves a partition pending a concurrent detach alone** (#705, the pending-detach site at
+  `retire()` and its unlocked read). Its #652 refusal asked `pg_inherits` whether the child was still a partition without asking
+  `inhdetachpending`, so a partition an operator's interrupted `DETACH PARTITION ... CONCURRENTLY` left pending
+  (no `retiring_at`) counted as attached: already write-blocked, it was dropped with its rows by the next
+  `pgpm.maintain(parent)` tick, and with an incoming FK the operator's detach was stamped as pgpm's own
+  retirement and the table dropped once the detach was finished. `retire()` now returns `false` for it on
+  either path and logs `skip_retain` over its range, naming the pending detach and the remedy; `_detach_reap`
+  finishes an abandoned one and leaves the table standing, after which the #652 refusal (`fail_retain_drop`)
+  takes over. A `retiring_at` mark on a pending or detached partition vouches for pgpm's own detach only with
+  the record of pgpm's own dispatch, a new column `pgpm.part.detach_dispatched_oid` that `retire` writes in the
+  transaction in which its dispatch succeeds: `retire`, `_detach_reap`, `_retain_recall` and every run of
+  `install.sql` clear a mark without it (`retain_disown`, new), so neither a failed dispatch followed by the
+  operator's own detach nor a mark an older pgpm stamped on the operator's detach drops the table. The upgrade
+  to this release therefore disowns every mark on a pending or detached partition once, pgpm's own included,
+  which it leaves for the operator to drop (logged, with the remedy). And `retire` now takes `SHARE UPDATE
+  EXCLUSIVE` on the partition before it asks the catalog, as of that lock, so a detach that starts while it is
+  in flight cannot set its flag under it (#705 bullet 3). Test `tests/327`, guard
+  `bench/retire_pending_detach.sh`, mutations `retire_pending_detach_counts_attached`,
+  `retire_pending_detach_trusts_stamp`, `detach_reap_trusts_stamp`, `retire_trusts_detached_mark`,
+  `retain_recall_trusts_detached_mark`, `upgrade_pass_skips_pending`, `upgrade_pass_trusts_detached_mark`,
+  `upgrade_pass_skips_unanchored`, `dispatch_witness_reads_log`, `dispatch_witness_reads_cron_history`,
+  `retire_pending_detach_adopted_mark_trusted` and `retire_checks_before_lock`.
+
 - **`tests/77` waits for the terminated detach backend to leave before it reaps; `tests/147` cuts by order,
   not by speed** (#1224, #1065). `tests/77` called `pgpm._detach_reap()` right after `pg_terminate_backend`,
   which only signals; a backend still exiting holds its locks, the reaper rightly read the detach as live, and
