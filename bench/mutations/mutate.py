@@ -4763,8 +4763,8 @@ $$;''',
         "Pre-#821 archive.to_s3: its pages render row_to_json(t) and its conservation fingerprint hashes the "
         "same text, so on a table with a composite column t both sides agree on that column alone and the "
         "object lands without the rows' other columns; a timestamptz column t raises. Both sites.",
-        [("           from (select row_to_json(t.*)::text as j, t.%I as k, t.ctid as c from %s t\n",
-          "           from (select row_to_json(t)::text as j, t.%I as k, t.ctid as c from %s t   -- MUTANT: pre-#821\n", 1),
+        [("           from (select row_to_json(t.*)::text as j, t.%1$I as k, t.tableoid as r, t.ctid as c from %2$s t\n",
+          "           from (select row_to_json(t)::text as j, t.%1$I as k, t.tableoid as r, t.ctid as c from %2$s t   -- MUTANT: pre-#821\n", 1),
          ("coalesce(sum(hashtextextended(row_to_json(t.*)::text, 0)), 0) from %s t',\n",
           "coalesce(sum(hashtextextended(row_to_json(t)::text, 0)), 0) from %s t',   -- MUTANT: pre-#821\n", 1)],
     ),
@@ -4784,8 +4784,8 @@ $$;''',
         "by abbreviation, and Asia/Shanghai's CST reads back as US Central (-06): the cursor lands 14 "
         "hours past the last paged row, the next page skips every row in between, and the conservation "
         "check refuses every multi-page export of an unwritten partition. One site, the render.",
-        [("archive._cursor_text((array_agg(k order by k desc, c desc))[1]),",
-          "(array_agg(k order by k desc, c desc))[1]::text,", 1)],
+        [("archive._cursor_text((array_agg(k order by k desc, r desc, c desc))[1]),",
+          "(array_agg(k order by k desc, r desc, c desc))[1]::text,", 1)],
     ),
     "parquet_snapshot_per_encode_table": (
         "bench/archive_parquet_snapshot_locks.sh",
@@ -9731,9 +9731,9 @@ _RESOLVE_HOLD = (
     "                           and l.database = (select d.oid from pg_database d where d.datname = current_database()));\n",
     "    v_locked := true;\n", 1)
 _TO_S3_READS_BY_NAME = [
-    ("order by t.%I, t.ctid limit $3) s',\n        pcfg.control_column, v_child::text, pcfg.control_column, v_ctltype, pcfg.control_column)",
-     "order by t.%I, t.ctid limit $3) s',\n        pcfg.control_column, v_nsp, p_child, pcfg.control_column, v_ctltype, pcfg.control_column)", 1),
-    ("t.ctid as c from %s t\n", "t.ctid as c from %I.%I t\n", 1),
+    ("        pcfg.control_column, v_child::text, v_ctltype)\n        into v_chunk",
+     "        pcfg.control_column, v_child::text, v_ctltype, v_nsp, p_child)\n        into v_chunk", 1),
+    ("t.ctid as c from %2$s t\n", "t.ctid as c from %4$I.%5$I t\n", 1),
     ("0)), 0) from %s t',\n                     v_child::text) into v_expected", "0)), 0) from %I.%I t',\n                     v_nsp, p_child) into v_expected", 1),
 ]
 MUTATIONS["archive_to_s3_child_unheld"] = (
@@ -11986,6 +11986,147 @@ MUTATIONS["hypertable_cutover_capture_fn_drop_tracking_only"] = (
 )
 MUTATION_SRC["hypertable_cutover_capture_fn_drop_tracking_only"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_cutover_capture_fn_drop_tracking_only"] = "timescale"
+
+
+# Issue #1168: archive.to_s3's keyset cursor is unique across the heaps of the relation it exports.
+# bench/archive_to_s3_multi_heap.sh runs tests/archive/db/51 against the mutant.
+MUTATIONS["to_s3_cursor_heap_unkeyed"] = (
+    "bench/archive_to_s3_multi_heap.sh",
+    "Pre-#1168 archive.to_s3: the next page's keyset predicate compares (control, ctid) with the cursor, leaving out "
+    "the heap the cursor's row came from, and ctid is unique only within one heap. A partitioned relation or an "
+    "inheritance parent in the parent's schema (which the synchronous export accepts) holds a row of the same "
+    "control value at the same ctid in two heaps; with a page boundary between those twins the next page skips the "
+    "second, and the conservation check refuses the quiescent export as a write, on every retry. One clause, the "
+    "predicate. tests/archive/db/51 parts A and B catch it (the export is refused, and no object lands).",
+    [("($1 is null or (t.%1$I, t.tableoid, t.ctid) > ($1::%3$s, $2, $3))\n",
+      "($1 is null or (t.%1$I, t.ctid) > ($1::%3$s, $3))\n", 1)],
+)
+MUTATION_SRC["to_s3_cursor_heap_unkeyed"] = "pgpm_archive/install.sql"
+
+# PR #1213's verification (V-01, V-02): archive.to_s3 pages a NULL control value too, in a run of its own after
+# every other row. Two sites, the first run's NOT NULL clause and the switch to the NULL run, one mutation each and
+# one that puts both back (the cursor as it was, NULL-blind). All are caught by tests/archive/db/51 parts C and D
+# through bench/archive_to_s3_multi_heap.sh; the file's statement_timeout bounds the export that never ends.
+_TO_S3_NULL_FIRST_RUN = ("else not (t.%1$I is null) and ($1 is null or", "else ($1 is null or", 1)
+_TO_S3_NULL_RUN_SWITCH = (
+    "        v_null_run := true; v_cursor := null; v_cursor_rel := null; v_cursor_tid := null;\n",
+    "        v_done := true;\n", 1)
+MUTATIONS["to_s3_cursor_null_blind"] = (
+    "bench/archive_to_s3_multi_heap.sh",
+    "archive.to_s3's keyset cursor as it was before the NULL run: the first run admits a NULL control value and no "
+    "run follows it. A page ending on a NULL control value sets the cursor to NULL, which reads as no cursor, so the "
+    "next page starts over and an export whose first page holds the whole relation never ends; with smaller pages "
+    "the row comparison is NULL for such a row, it is never paged, and the conservation check refuses the quiescent "
+    "export. Both sites. tests/archive/db/51 part C (refused) and part D (cancelled by the statement_timeout) catch it.",
+    [_TO_S3_NULL_FIRST_RUN, _TO_S3_NULL_RUN_SWITCH],
+)
+MUTATION_SRC["to_s3_cursor_null_blind"] = "pgpm_archive/install.sql"
+MUTATIONS["to_s3_cursor_null_restart"] = (
+    "bench/archive_to_s3_multi_heap.sh",
+    "archive.to_s3's first run admits a NULL control value, so a page ending on one sets the cursor to NULL and the "
+    "next page reads the relation from the top again, forever. One clause, the first run's NOT NULL. "
+    "tests/archive/db/51 part D catches it (the export is cancelled by the statement_timeout).",
+    [_TO_S3_NULL_FIRST_RUN],
+)
+MUTATION_SRC["to_s3_cursor_null_restart"] = "pgpm_archive/install.sql"
+MUTATIONS["to_s3_cursor_null_run_unread"] = (
+    "bench/archive_to_s3_multi_heap.sh",
+    "archive.to_s3 ends the read when the first run runs dry instead of starting the NULL run, so no row whose "
+    "control value is NULL is paged and the conservation check refuses the quiescent export. One site, the switch. "
+    "tests/archive/db/51 parts C and D catch it (refused, and no object lands).",
+    [_TO_S3_NULL_RUN_SWITCH],
+)
+MUTATION_SRC["to_s3_cursor_null_run_unread"] = "pgpm_archive/install.sql"
+
+# PR #1213's second verification round (V-01, P1-02): archive.to_s3 casts its cursor back as the type of the column
+# it pages, the exported relation's, not the parent's. Caught by tests/archive/db/51 parts E, F and G through
+# bench/archive_to_s3_multi_heap.sh; the file's statement_timeout bounds the export that never ends.
+MUTATIONS["to_s3_cursor_parent_type"] = (
+    "bench/archive_to_s3_multi_heap.sh",
+    "archive.to_s3 reads the cursor's type off the PARENT's control column, not the exported relation's column of "
+    "that name. Under a date parent a timestamptz relation's cursor of noon reads back as midnight, and under a "
+    "timestamp parent a timestamptz cursor loses its offset, so each page re-admits the row it ended on and a "
+    "quiescent export never ends (east of UTC for the second); a relation with no such column fails on an unnamed "
+    "error instead of the refusal. One clause, the relation the type is read from. tests/archive/db/51 parts E and F "
+    "(cancelled by the statement_timeout) and G (not the refusal) catch it.",
+    [("   where a.attrelid = v_child and a.attname = pcfg.control_column and a.attnum > 0 and not a.attisdropped;\n",
+      "   where a.attrelid = p_parent and a.attname = pcfg.control_column and a.attnum > 0 and not a.attisdropped;\n", 1)],
+)
+MUTATION_SRC["to_s3_cursor_parent_type"] = "pgpm_archive/install.sql"
+MUTATIONS["to_s3_cursor_type_typmod_dropped"] = (
+    "bench/archive_to_s3_multi_heap.sh",
+    "archive.to_s3 spells the cursor's type as the bare type name (atttypid::regtype), dropping the typmod. For a "
+    "char(3) column the bare `character` is char(1), so a cursor of 'abc' is cast back as 'a' and every later page "
+    "re-reads 'abc': a quiescent export never ends; for bit(3) the bare `bit` is bit(1), which cuts the cursor to its "
+    "first bit the same way. One clause, the spelling. tests/archive/db/51 parts H and J catch it (both cancelled by "
+    "the statement_timeout).",
+    [("  v_ctltype := format_type(v_ctl_typ, v_ctl_mod);\n",
+      "  v_ctltype := v_ctl_typ::regtype::text;\n", 1)],
+)
+MUTATION_SRC["to_s3_cursor_type_typmod_dropped"] = "pgpm_archive/install.sql"
+
+# PR #1213's fourth and fifth verification rounds (V-01; P1-02, P1-03): archive.to_s3 pages only a scalar with a
+# btree ordering, refusing anything else by name, and pages a domain as its base type. Caught by tests/archive/db/51
+# parts K to N through bench/archive_to_s3_multi_heap.sh.
+MUTATIONS["to_s3_cursor_type_unrefused"] = (
+    "bench/archive_to_s3_multi_heap.sh",
+    "archive.to_s3 pages a control-named column of any type instead of refusing one it cannot page. An array's "
+    "cursor is built by array_agg as a two-dimensional array whose [1] is NULL, so the read restarts forever; a "
+    "composite such as ROW(1, NULL) is neither IS NULL nor IS NOT NULL; a type with no ordering fails on an unnamed "
+    "operator error. One clause, the refusal. tests/archive/db/51 parts K, L and M catch it (none is refused by name; "
+    "L is cancelled by the statement_timeout).",
+    [("  if not v_ctl_ordered then\n", "  if false then\n", 1)],
+)
+MUTATION_SRC["to_s3_cursor_type_unrefused"] = "pgpm_archive/install.sql"
+MUTATIONS["to_s3_cursor_domain_checked"] = (
+    "bench/archive_to_s3_multi_heap.sh",
+    "archive.to_s3 casts the cursor as the column's declared type, a domain included, instead of the domain's base "
+    "type, so the cast runs the domain's CHECK constraints and a row a NOT VALID constraint does not admit makes the "
+    "next page raise, on every retry. One clause, the cast type. tests/archive/db/51 part N catches it.",
+    [("  v_ctltype := format_type(v_ctl_typ, v_ctl_mod);\n", "  v_ctltype := v_ctl_col;\n", 1)],
+)
+MUTATION_SRC["to_s3_cursor_domain_checked"] = "pgpm_archive/install.sql"
+
+# PR #1213's sixth verification round (V-01): archive.to_s3 exports a table, or a partitioned table or inheritance
+# tree whose every member is a table, and refuses anything else by name. Caught by tests/archive/db/51 parts P and Q.
+MUTATIONS["to_s3_relkind_unrefused"] = (
+    "bench/archive_to_s3_multi_heap.sh",
+    "archive.to_s3 pages a relation whose tree holds something other than tables. A postgres_fdw leaf returns the "
+    "REMOTE ctid, so over a remote partitioned table two of its rows share one tableoid and one ctid, the next page "
+    "skips the second, and the conservation check refuses the quiescent export as a write on every retry; a view "
+    "has no row position, and fails on an unnamed error. One clause, the refusal. tests/archive/db/51 parts P and "
+    "Q catch it (neither is refused by name).",
+    [("  if v_unpageable is not null then\n", "  if false then\n", 1)],
+)
+MUTATION_SRC["to_s3_relkind_unrefused"] = "pgpm_archive/install.sql"
+MUTATIONS["to_s3_cursor_probe_base_only"] = (
+    "bench/archive_to_s3_multi_heap.sh",
+    "archive.to_s3's type probe compares the cast type with itself instead of making the page query's own "
+    "comparison, the column against a cursor of the cast type. A domain over an enum passes it (the base enum "
+    "compares with itself) while its column has no `>` against the base enum, so the page query fails on an unnamed "
+    "'operator does not exist' instead of the refusal. One clause, the probe. tests/archive/db/51 part S catches it.",
+    [("      execute format('select 1 from %2$s t where (t.%1$I, t.tableoid, t.ctid) > ($1::%3$s, $2, $3) limit 0',\n"
+      "                     pcfg.control_column, v_child::text, v_ctltype)\n"
+      "        using null::text, null::oid, null::tid;\n",
+      "      execute format('select row(null::%1$s, null::oid, null::tid) > row(null::%1$s, null::oid, null::tid)', v_ctltype);\n", 1)],
+)
+MUTATION_SRC["to_s3_cursor_probe_base_only"] = "pgpm_archive/install.sql"
+
+# PR #1213's seventh verification round (V-01): archive.to_s3 pages only an allowlist of types whose text it
+# round-trips. Caught by tests/archive/db/51 part T.
+MUTATIONS["to_s3_cursor_type_allowlist_widened"] = (
+    "bench/archive_to_s3_multi_heap.sh",
+    "archive.to_s3 admits any base or enum type whose comparison resolves, not an allowlist of the types whose text "
+    "reads back. A regproc of an overloaded function renders as its bare name and reads back as 'more than one "
+    "function named', so the second page's cursor cast raises and the export fails on every retry, unnamed. One "
+    "clause, the allowlist. tests/archive/db/51 part T catches it (not refused by name).",
+    [("     or v_ctl_typ = any (array['int2', 'int4', 'int8', 'numeric', 'float4', 'float8', 'text', 'varchar', 'bpchar',\n"
+      "                               'bit', 'varbit', 'date', 'timestamp', 'timestamptz', 'time', 'timetz', 'interval',\n"
+      "                               'uuid', 'bytea', 'bool']::regtype[]::oid[]) then\n",
+      "     or v_ctl_kind = 'b' then\n", 1)],
+)
+MUTATION_SRC["to_s3_cursor_type_allowlist_widened"] = "pgpm_archive/install.sql"
+
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

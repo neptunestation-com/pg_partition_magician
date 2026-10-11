@@ -3393,10 +3393,14 @@ create or replace function archive.to_s3(p_parent regclass, p_child name, p_lo t
 returns void language plpgsql set extra_float_digits = 1 as $$
 declare
   cfg archive.config; pcfg pgpm.config; v_ctltype text;
+  v_ctl_col text; v_ctl_typ oid; v_ctl_mod int; v_ctl_kind "char"; v_ctl_base oid; v_ctl_base_mod int;
+  v_ctl_ordered boolean := false;   -- the control-named column's type can be paged by keyset (see below)
+  v_unpageable text;                -- the relations of the export's tree that are not local heaps (see below)
   v_gzip boolean; v_ctype text; v_body bytea := '';
   v_key_id text; v_secret text; v_nsp name; v_key text;
   v_child regclass;   -- the relation resolved, held and claimed; every read below goes by it, never by name (#1030)
-  v_part_payload text; v_chunk text; v_cursor text; v_cursor_tid tid; v_done boolean := false;
+  v_part_payload text; v_chunk text; v_cursor text; v_cursor_rel oid; v_cursor_tid tid; v_done boolean := false;
+  v_null_run boolean := false;   -- paging the rows whose control value is NULL, after every other row
   v_page_rows bigint; v_written bigint := 0; v_expected bigint;
   v_page_h numeric; v_written_h numeric := 0; v_expected_h numeric;   -- the rows' identity, not only their count (#673)
   v_upload_id text; v_part int := 0; v_etag text; v_parts_xml text := '';
@@ -3447,8 +3451,97 @@ begin
   v_child := archive._resolve_child(p_parent, p_child, 'archive.to_s3');
   perform pgpm._refuse_filtered_reads(v_child, 'export', 'the object would hold only those rows');
   select n.nspname into v_nsp from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_child;
-  select a.atttypid::regtype::text into v_ctltype
-    from pg_attribute a where a.attrelid = p_parent and a.attname = pcfg.control_column;
+  -- THE RELATIONS IT CAN PAGE. The keyset key (control, tableoid, ctid) is unique only over rows that live in local
+  -- heaps, where (tableoid, ctid) names one tuple. A view and a materialized view are not such a tree's leaves, and
+  -- a foreign table returns whatever ctid its server sends: postgres_fdw sends the REMOTE ctid, so a foreign leaf
+  -- over a remote partitioned table holds two rows with one tableoid and one ctid, the next page skipped the
+  -- second, and the quiescent export was refused as a write on every retry. So the relation exported, and every
+  -- relation under it by partitioning or inheritance, must be a table (relkind r) or a partitioned table (p, which
+  -- holds no rows of its own); anything else is refused by name before anything is read or sent. The relation is
+  -- held from archive._resolve_child on, but a leaf attached or a child inheriting after this check is not
+  -- blocked by that hold; such a change during the export is a write as far as this function is concerned, and the
+  -- conservation check below refuses it like any other.
+  with recursive tree(oid) as (
+    select v_child::oid
+    union
+    select i.inhrelid from pg_inherits i join tree on i.inhparent = tree.oid
+  )
+  select string_agg(format('%s (%s)', c.oid::regclass,
+                           case c.relkind when 'f' then 'a foreign table' when 'v' then 'a view'
+                                          when 'm' then 'a materialized view'
+                                          else format('relkind %s', c.relkind) end), ', ' order by c.oid::regclass::text)
+    into v_unpageable
+    from tree join pg_class c on c.oid = tree.oid
+   where c.relkind not in ('r', 'p');
+  if v_unpageable is not null then
+    raise exception 'pg_partition_magician: archive.to_s3 exports a table, or a partitioned table or inheritance tree whose every member is a table, and % reaches %, which it cannot page by row position; refusing to export it',
+      v_child, v_unpageable;
+  end if;
+  -- The keyset cursor's control value is cast back as the type of the column it pages: the EXPORTED relation's
+  -- column of the control column's name, never the parent's. The two can differ, since any relation in the
+  -- parent's schema is accepted, and the parent's type did not round-trip: under a date parent a timestamptz
+  -- cursor of noon read back as midnight and each page re-admitted the row it ended on, so the export never
+  -- ended; under a timestamp parent a timestamptz cursor lost its offset and, east of UTC, did the same. The type
+  -- is used for that cast and nowhere else (the object key, the conservation check and the lines do not read it),
+  -- so nothing else here assumes the parent's type. A relation with no such column cannot be paged at all, and is
+  -- refused by name before anything is read or sent. The type is spelled WITH its typmod (format_type): the bare
+  -- name loses it, and for char(n) the bare `character` is char(1), so a cursor of 'abc' was cast back as 'a' and
+  -- every later page re-read 'abc' (bit(n) the same: the bare `bit` is bit(1)). With the typmod the cast reads back
+  -- the value it was rendered from (a bpchar is padded back to its width, a numeric keeps its scale).
+  --
+  -- THE TYPES IT CAN PAGE. The page query compares (control, tableoid, ctid) as a row, takes the cursor as the
+  -- last row's control value, splits the rows into `not (control is null)` and `control is null`, and casts the
+  -- cursor's text back. All four hold for a SCALAR with a btree ordering and nothing else: an array's cursor is
+  -- built by array_agg as a two-dimensional array whose [1] is NULL, so the read restarted forever; a composite
+  -- such as ROW(1, NULL) is neither IS NULL nor IS NOT NULL; and a type with no btree `>` cannot be compared at all.
+  -- Nor is a btree ordering enough: the cursor's text must read back as the same value, and for some types it does
+  -- not (a regproc of an overloaded function renders as its bare name, `pg_catalog.abs`, which then reads back as
+  -- "more than one function named"). So the type is checked against an ALLOWLIST of the types the page query is
+  -- known to round-trip, not a predicate over typtype and category: smallint, integer, bigint, numeric, real,
+  -- double precision (rendered shortest-exact, extra_float_digits being pinned for this function), text, varchar,
+  -- char(n), bit(n), bit varying, date, timestamp, timestamptz, time, timetz, interval, uuid, bytea, boolean and
+  -- every enum, or a domain over one of those. AND the row comparison the page query makes must resolve for it.
+  -- Anything else (an array, a composite, a range or multirange, a type with no ordering, a reg* type, a domain
+  -- over an enum) is refused by name before anything is read or sent. A domain pages as its BASE type, with the domain's typmod: cast as the
+  -- domain, the cursor ran the domain's CHECK constraints, and a row a NOT VALID constraint does not admit made
+  -- every retry raise. The comparison is probed exactly as the page query makes it, the column against a cursor of
+  -- the cast type, under LIMIT 0 so nothing is read, and with no value cast to the column's type (a NULL cast to a
+  -- NOT NULL domain would raise). That is what refuses a domain over an enum: its column has no `>` against the
+  -- base enum (the enum operators are polymorphic, and a domain does not match them), which a probe of the base
+  -- type alone admitted, so the page query failed on an unnamed error.
+  select a.atttypid, a.atttypmod, format_type(a.atttypid, a.atttypmod) into v_ctl_typ, v_ctl_mod, v_ctl_col
+    from pg_attribute a
+   where a.attrelid = v_child and a.attname = pcfg.control_column and a.attnum > 0 and not a.attisdropped;
+  if v_ctl_typ is null then
+    raise exception 'pg_partition_magician: % has no column %, the control column of % that archive.to_s3 pages it by; refusing to export it',
+      v_child, quote_ident(pcfg.control_column), p_parent;
+  end if;
+  loop
+    select t.typtype, t.typbasetype, t.typtypmod into v_ctl_kind, v_ctl_base, v_ctl_base_mod
+      from pg_type t where t.oid = v_ctl_typ;
+    exit when v_ctl_kind <> 'd';
+    v_ctl_typ := v_ctl_base;
+    if v_ctl_base_mod <> -1 then v_ctl_mod := v_ctl_base_mod; end if;
+  end loop;
+  v_ctltype := format_type(v_ctl_typ, v_ctl_mod);
+  if v_ctl_kind = 'e'
+     or v_ctl_typ = any (array['int2', 'int4', 'int8', 'numeric', 'float4', 'float8', 'text', 'varchar', 'bpchar',
+                               'bit', 'varbit', 'date', 'timestamp', 'timestamptz', 'time', 'timetz', 'interval',
+                               'uuid', 'bytea', 'bool']::regtype[]::oid[]) then
+    begin
+      -- the page query's own comparison, parsed for this type: it resolves only for a btree-ordered type
+      execute format('select 1 from %2$s t where (t.%1$I, t.tableoid, t.ctid) > ($1::%3$s, $2, $3) limit 0',
+                     pcfg.control_column, v_child::text, v_ctltype)
+        using null::text, null::oid, null::tid;
+      v_ctl_ordered := true;
+    exception when others then
+      v_ctl_ordered := false;
+    end;
+  end if;
+  if not v_ctl_ordered then
+    raise exception 'pg_partition_magician: archive.to_s3 pages % by its column %, of type %, which it cannot page by: the column must be smallint, integer, bigint, numeric, real, double precision, text, varchar, char, bit, bit varying, date, timestamp, timestamptz, time, timetz, interval, uuid, bytea, boolean, an enum, or a domain over one of those (not over an enum); refusing to export it',
+      v_child, quote_ident(pcfg.control_column), v_ctl_col;
+  end if;
   -- The object's form follows archive.config.compress, as it does on every other path this module
   -- ships (#520): plain NDJSON at <prefix><schema>.<child>.ndjson or, with the flag on, a GZIP stream
   -- at <prefix><schema>.<child>.ndjson.gz, the suffix the automatic NDJSON strategy already uses for a
@@ -3475,15 +3568,22 @@ begin
   -- archive._encode_upload_ndjson_single).
 
   v_part_payload := '';
-  v_cursor := null; v_cursor_tid := null;
+  v_cursor := null; v_cursor_rel := null; v_cursor_tid := null;
   <<parts>>
   loop
     while not v_done and octet_length(v_part_payload) < cfg.part_bytes loop
-      -- Page by the TOTAL order (control, ctid), never by the control column alone. The control column
-      -- need not be unique, and a cursor set to a page's max(control) lands ON a run of equal values
+      -- Page by the TOTAL order (control, tableoid, ctid), never by the control column alone. The control
+      -- column need not be unique, and a cursor set to a page's max(control) lands ON a run of equal values
       -- when the page boundary falls inside one; the next page's `> cursor` then skips the rest of the
-      -- run (issue #463). ctid breaks the tie and is stable for the whole export because nothing here
-      -- moves tuples: the automatic path exports a write-blocked child, and this synchronous path
+      -- run (issue #463). (tableoid, ctid) breaks the tie: ctid alone is unique only within ONE heap, and
+      -- the relation exported may have several (archive._resolve_child accepts any relation in the
+      -- parent's schema, a partitioned table or an inheritance parent included), whose heaps can each hold
+      -- a row of the same control value at the same ctid; with the boundary between those twins the next
+      -- page skipped the second, and the conservation check below refused a quiescent export as a write,
+      -- on every retry (issue #1168). The heap's oid makes the order total across them, and on a relation
+      -- of one heap it is constant, so the order is (control, ctid) as before. ctid is stable for the
+      -- whole export because nothing here moves tuples: the automatic path exports a write-blocked
+      -- child, and this synchronous path
       -- leaves quiescence to the caller (a concurrent UPDATE or VACUUM FULL cannot lose rows silently
       -- either, it trips the conservation check below). The planner derives the `control >= cursor`
       -- index condition from the row comparison itself, so an index on the control column still
@@ -3492,17 +3592,36 @@ begin
       -- v_child, the relation resolved and claimed, never as its schema and name (#1030): a regclass renders
       -- as the name that reaches that oid in this session at the moment of rendering, so a schema renamed
       -- away and a namesake created in its place cannot stand in for it.
+      --
+      -- A control value of NULL is paged too, in a run of its own after every other row. pgpm's partitions
+      -- cannot hold one (the column is NOT NULL), but a relation this function accepts can, and NULL took
+      -- the order apart twice: the row comparison is NULL for such a row, so once a cursor was set it was
+      -- never paged and the conservation check refused the export, and a page ending on one set the cursor
+      -- to NULL, which is "no cursor", so the next page read from the top again and the export never ended
+      -- (it re-read the relation and uploaded a part every part_bytes until cancelled). Now the first run
+      -- reads only non-NULL control values, so its cursor is never NULL; when it runs dry the NULL run
+      -- starts, keyed by (tableoid, ctid) alone, which is total over those rows. Each run is one simple
+      -- predicate once $5 is known (EXECUTE binds the parameters as constants), so the index on the
+      -- control column still drives the first, and the second is an IS NULL condition. The two runs are
+      -- `not (control is null)` and `control is null`, complementary for every type; the column is a scalar here
+      -- (composites are refused above), for which the first is IS NOT NULL (the planner folds it so).
       execute format(
-        'select coalesce(string_agg(j, e''\n'' order by k, c), ''''),
-                archive._cursor_text((array_agg(k order by k desc, c desc))[1]),
-                (array_agg(c order by k desc, c desc))[1],
+        'select coalesce(string_agg(j, e''\n'' order by k, r, c), ''''),
+                archive._cursor_text((array_agg(k order by k desc, r desc, c desc))[1]),
+                (array_agg(r order by k desc, r desc, c desc))[1],
+                (array_agg(c order by k desc, r desc, c desc))[1],
                 count(*), coalesce(sum(hashtextextended(j, 0)), 0)
-           from (select row_to_json(t.*)::text as j, t.%I as k, t.ctid as c from %s t
-                  where $1 is null or (t.%I, t.ctid) > ($1::%s, $2)
-                  order by t.%I, t.ctid limit $3) s',
-        pcfg.control_column, v_child::text, pcfg.control_column, v_ctltype, pcfg.control_column)
-        into v_chunk, v_cursor, v_cursor_tid, v_page_rows, v_page_h using v_cursor, v_cursor_tid, cfg.fetch_rows;
-      if v_page_rows = 0 then v_done := true;
+           from (select row_to_json(t.*)::text as j, t.%1$I as k, t.tableoid as r, t.ctid as c from %2$s t
+                  where case when $5 then t.%1$I is null and ($3 is null or (t.tableoid, t.ctid) > ($2, $3))
+                             else not (t.%1$I is null) and ($1 is null or (t.%1$I, t.tableoid, t.ctid) > ($1::%3$s, $2, $3))
+                        end
+                  order by t.%1$I, t.tableoid, t.ctid limit $4) s',
+        pcfg.control_column, v_child::text, v_ctltype)
+        into v_chunk, v_cursor, v_cursor_rel, v_cursor_tid, v_page_rows, v_page_h
+        using v_cursor, v_cursor_rel, v_cursor_tid, cfg.fetch_rows, v_null_run;
+      if v_page_rows = 0 and not v_null_run then
+        v_null_run := true; v_cursor := null; v_cursor_rel := null; v_cursor_tid := null;
+      elsif v_page_rows = 0 then v_done := true;
       else
         v_written := v_written + v_page_rows; v_written_h := v_written_h + v_page_h;
         v_part_payload := v_part_payload || v_chunk || e'\n';

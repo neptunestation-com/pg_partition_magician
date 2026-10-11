@@ -2,6 +2,45 @@
 
 ## [Unreleased]
 
+- **`archive.to_s3` pages every row of a relation with more than one heap** (#1168). The synchronous export
+  accepts any relation in the parent's schema, a partitioned table or an inheritance parent included, and its
+  keyset cursor was (control, ctid), a total order within one heap only: two heaps holding a row of the same
+  control value at the same ctid, with a page boundary between them, had the next page skip the second, and the
+  conservation check refused the export as "a write changed the partition" with nothing writing, on every retry.
+  The cursor is now (control, tableoid, ctid), unique across the heaps a read reaches and, on a relation of one
+  heap, the same order as before. Such a relation can also hold a NULL control value, which the row comparison
+  never paged (refused the same way) and which, ending a page, set the cursor to NULL and restarted the read, so
+  an export whose first page held the whole relation never ended. Rows with a NULL control value are now paged
+  in a run of their own after every other row, by (tableoid, ctid). And the cursor was cast back as the PARENT's
+  control column type, while the column it pages is the relation's: a timestamptz relation under a date parent
+  read its cursor of noon back as midnight (under a timestamp parent, east of UTC, it lost its offset), so every
+  page re-admitted the row it ended on and a quiescent export never ended. The cast now takes the relation's own
+  type with its typmod (a bare `character` or `bit` is one wide and would cut a char(n) or bit(n) cursor the same
+  way), and a relation with no column of that name is refused by name before anything is read. That column's type
+  must be on an allowlist of the types whose text the cursor round-trips (the integer, numeric, floating-point,
+  character, bit, date and time, interval, uuid, bytea and boolean types, any enum, or a domain over one of those,
+  paged as its base type so a `NOT VALID` domain CHECK does not raise on the cursor); any other type is refused by
+  name before anything is read, among them an array (whose cursor was NULL, so the read restarted forever), a
+  composite (whose ROW(1, NULL) no run read), `regproc` (an overloaded function's text does not read back), a type
+  with no ordering and a domain over an enum (which cannot be compared with its base). And the relation must be
+  a table, or a partitioned table or inheritance tree of tables: a `postgres_fdw` leaf returns the remote row
+  position, which over a remote partitioned table repeats, so a quiescent export was refused as a write; a view or a
+  tree holding a foreign table is now refused by name before anything is read. `tests/archive/db/51`
+  under `bench/archive_to_s3_multi_heap.sh`, with the mutations `to_s3_cursor_heap_unkeyed`, `to_s3_cursor_null_blind`,
+  `to_s3_cursor_null_restart`, `to_s3_cursor_null_run_unread`, `to_s3_cursor_parent_type`,
+  `to_s3_cursor_type_typmod_dropped`, `to_s3_cursor_type_unrefused`, `to_s3_cursor_domain_checked`,
+  `to_s3_relkind_unrefused`, `to_s3_cursor_probe_base_only` and `to_s3_cursor_type_allowlist_widened`.
+  `to_s3_relkind_unrefused` and `to_s3_cursor_probe_base_only`.
+  `to_s3_cursor_type_typmod_dropped`, `to_s3_cursor_type_unrefused` and `to_s3_cursor_domain_checked`.
+  `to_s3_cursor_type_typmod_dropped` and `to_s3_cursor_first_run_row_gap`.
+  `to_s3_cursor_null_restart`, `to_s3_cursor_null_run_unread`, `to_s3_cursor_parent_type` and
+  `to_s3_cursor_type_typmod_dropped`.
+  `to_s3_cursor_null_restart`, `to_s3_cursor_null_run_unread` and `to_s3_cursor_parent_type`.
+  in a run of their own after every other row, by (tableoid, ctid). `tests/archive/db/51` under
+  `bench/archive_to_s3_multi_heap.sh`, with the mutations `to_s3_cursor_heap_unkeyed`, `to_s3_cursor_null_blind`,
+  `to_s3_cursor_null_restart` and `to_s3_cursor_null_run_unread`.
+  heap, the same order as before. `tests/archive/db/51` under `bench/archive_to_s3_multi_heap.sh`, with the
+  mutation `to_s3_cursor_heap_unkeyed`.
 - **`from_hypertable` refuses a step its time dimension's type cannot hold before the copy, not after the
   swap** (#1118). `pgpm._from_hypertable_check_arguments` (#1085) asked only the rules a value alone breaks,
   so a sub-day `p_interval` on a `date` dimension (#581), or one finer than a `timestamp(p)` dimension keeps
