@@ -75,7 +75,12 @@ spliced into dynamic SQL text other than through format() (`'lock table ' || quo
 a lexer cannot tell their types apart. For the same reason, a regclass the text did not make by a cast: a
 regclass-typed parameter, local or column rendered by a cast of its own (`p_parent::text`,
 `cfg.parent_table::text`), and a regclass rendered inside an array or a row
-(`array_agg(c.oid::regclass)::text`). A by-name read in dynamic SQL from parameters (`format('%I.%I', p_schema,
+(`array_agg(c.oid::regclass)::text`). A cast-made regclass or regtype that reaches its rendering through any
+expression other than the forms rule 1 follows (further casts, CAST ... AS, grouping parentheses, || and a
+rendering call around it): `coalesce(c.oid::regclass)::text = v_rel`, the same under greatest(), a CASE or a
+scalar subquery, or format() of coalesce(). A lexical rule gains a spelling per round; the dynamic guard
+(tests/archive/db/49, run by bench/archive_key_by_resolved_oid.sh) is the net for these, whatever their spelling.
+A by-name read in dynamic SQL from parameters (`format('%I.%I', p_schema,
 p_table)`): the module does that for its own pg_temp snapshot table, so the rule could not be exception-free
 there. tests/archive/db/49 proves the contract itself on both exports, with a second session moving the parent
 between the hold and the key.

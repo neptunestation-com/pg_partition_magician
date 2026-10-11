@@ -23,7 +23,9 @@
   rule 1, everywhere but `archive._refuse_foreign_read`, which compares rendered names to refuse a read that
   reached a namesake (#1055) and is the floor that proves the check reads them. A regtype counts alike, so a
   relation found by its row type's name, `where c.reltype::regtype::text = v_rel`, is refused too. A
-  regclass-typed parameter or column cast to text is still not seen (the checker's docstring says why). Guard
+  regclass-typed parameter or column cast to text is still not seen, nor a rendering reached through a wrapper
+  such as `coalesce(c.oid::regclass)::text` (the checker's docstring says why; `tests/archive/db/49` is the net).
+  Guard
   `bench/lint_child_by_oid_inverse.sh`, mutations `archive_child_by_oid_rendered_exempt` and
   `archive_child_by_oid_regtype_unread`.
 
