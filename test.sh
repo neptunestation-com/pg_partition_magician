@@ -1079,6 +1079,7 @@ run_perf() {
     "bench/doc_install_guard_judges_stdin.sh pgpm_perf346"
     "bench/classify_claims_tap.sh pgpm_perf79"
     "bench/lint_value_not_spelling.sh pgpm_perf125"
+    "bench/archive_keys_row_read.sh pgpm_perf349"
     "bench/tap_verdict.sh pgpm_perf80"
     "bench/retire_straddle.sh pgpm_perf81"
     "bench/archive_overclaim.sh pgpm_perf82"
