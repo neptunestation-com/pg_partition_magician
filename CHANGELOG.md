@@ -10,7 +10,10 @@
   #1064 again. The rule is now the inverse: outside `archive._resolve_child` a name may stand only alone as an
   item of a statement's own select list or of a RAISE, or as a bare argument of `quote_ident()`, `format()` or
   `json_build_object()` that is the whole item, and is refused anywhere else (an ORDER BY or GROUP BY, a CASE,
-  an operator or a call in a select item, a plpgsql expression). The module reads as before. Guard
+  an operator or a call in a select item, a plpgsql expression). One site of the module is reshaped to it:
+  `archive.to_s3`'s refusal of a tree with a member it cannot page finds the members by oid and renders each
+  one alone for the message, so a refusal naming several members now lists them in oid order rather than by
+  name (the message is otherwise unchanged). Guard
   `bench/lint_child_by_oid_inverse.sh`, mutation `archive_child_by_oid_clause_list`.
 
 - **The child-by-oid lint reads a rendered regclass as a name** (#1180). The same rule followed name columns
