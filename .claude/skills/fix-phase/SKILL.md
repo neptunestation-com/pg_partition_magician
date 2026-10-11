@@ -47,8 +47,11 @@ SigV4 bucket PUT `test.sh`'s run_archive does. Four more lines every brief carri
 run each gated track ONCE, at the end, in the FOREGROUND, and do not report until its verdict is in (nine
 of 23 fixers' "gated run in progress" notices read as reports); a partial fix of a multi-bullet issue says
 `Addresses #N (bullet k)`, never `Fixes`/`Closes`, which close the whole issue whatever follows the
-number; a rule-tightening PR (a stricter discriminate or lint) is spawned with the wave but landed LAST,
-and its fixer re-runs the track on the rebased head before it is enqueued; when several fixers must extend
+number; a PR that adds or tightens a repo-wide rule (a lint, a checker, a wrapper or premise rule, a grep in
+a guard) is spawned with the wave and landed FIRST in its batch, marked `rule` in `landq.txt` (`<tier> <pr>
+rule`), so every later PR of the batch is rebased onto it and checked with its rule in force (pass 11, L13:
+four of the five tier-9 PRs, each a rule landed late, met code that arrived after they branched and paid a
+re-anchor round), and its fixer still re-runs the track on the rebased head before the report; when several fixers must extend
 one guard script's dispatch, one fixer owns the dispatch and the others append under it. Record
 each PR the fixers report in `$WORK/prs.tsv` with its test, guard and mutation names.
 
@@ -61,9 +64,13 @@ each PR the fixers report in `$WORK/prs.tsv` with its test, guard and mutation n
   run, so it costs no landing time. Every PR must also have passed `./test.sh 15 --channel=psql` on its own
   head (the fixer's report says so; spot-check one), run through `scripts/review/gate.sh $WORK/gate.lock -- ./test.sh 15
   --channel=psql` so parallel fixers do not fail each other at `compose up`. The merge queue runs every
-  track on the exact tree it merges.
+  track on the exact tree it merges. A per-PR verification never reads the PR's own CI checks (pass 11, L11:
+  #1196 reached the queue with a red perf shard that had been red since its first push), so the fixer's
+  report must say its head checks are green (at least the perf and discriminate tracks) before the PR is
+  handed to landing, and the coordinator spot-checks `gh pr checks <pr>`.
 - Land them with `scripts/review/landq.sh $WORK --batch 5` reading `$WORK/landq.txt` (`<tier> <pr>` lines,
-  appended as the fixers report), or by hand with `scripts/review/land.sh [--batch] <pr> ...`, Tier 1
+  `<tier> <pr> rule` for a repo-wide rule's PR, appended as the fixers report; `landq.sh $WORK --batch 5
+  --next` prints the batch it would land next without landing it), or by hand with `scripts/review/land.sh [--batch] <pr> ...`, Tier 1
   first. `land.sh` rebases each PR onto the
   current main under the diff3 conflict style, resolves every same-spot add/add conflict (any file;
   a hunk both sides edited stops for a hand), verifies what CI would fail on, waits for the head
@@ -76,8 +83,11 @@ each PR the fixers report in `$WORK/prs.tsv` with its test, guard and mutation n
   nothing. `gh workflow run timescale.yml --ref main` once seeds it, and `gh workflow run test.yml --ref main` seeds the matrix images, which `test.yml` caches under `scripts/image_build_key.sh`'s key (the Dockerfile, the compose file and the ISO week). The fixers' pushes are a CI storm
   (pass 3: 21 heads, about 90 queued runs, the first landing's checks still queued when `land.sh`'s
   60-minute wait expired); a wait timeout is a restart, not a failure.
-- When it stops: read why. A conflict `keep_both.py` refused (both sides edited the same lines) is
-  resolved by hand in the worktree it names, then pushed; a CI failure that is not a known flake is a real failure, so read the job log before doing
+- When it stops: read why. `keep_both.py` resolves same-spot add/add hunks and REFUSES a hunk both sides
+  edited on the same lines (tests/155 and tests/295 in pass 11, four hand rebases: #1195, #1211, #1207,
+  #1214); that conflict is the fixer's to resolve, in the worktree `land.sh` names, then pushed. A stacked
+  PR still carries its base's pre-rebase commit after the base has been rebased, and its rebase stops on
+  that commit; `git rebase --skip` drops it (pass 11: #1214 carried #1211's). A CI failure that is not a known flake is a real failure, so read the job log before doing
   anything. Never rebase-and-rerun a batch by hand; that is the queue's job.
 - When two fixes interact (one changes what a configuration can be, another's guard depends on that
   configuration), the guard is not retired until someone shows the state is unreachable on upgraded

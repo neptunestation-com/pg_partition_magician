@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **`scripts/review/landq.sh` lands a repo-wide rule's PR first in its batch** (#1226). A `landq.txt` line
+  may carry a third word, `<tier> <pr> rule`, and each turn orders the lowest unfinished tier's `rule` PRs
+  ahead of the rest, so a batch that holds one puts it at the base of the stack `land.sh --batch` builds and
+  every later PR is checked with the rule in force; in pass 11 four of the five tier-9 PRs, each a rule landed
+  late, met code that arrived after they branched and paid a re-anchor round. `landq.sh <workdir> --next`
+  prints the batch the next turn would land, without landing it. The fix-phase skill now says rule-first
+  (it said landed LAST), names the two hand-rebase cases (`keep_both.py` refusing a hunk both sides edited,
+  a stacked PR's carried pre-rebase commit) and asks for a PR's own checks to be green before landing; the
+  pr-verify skill sets aside a regression witness and a PostgreSQL 18-only fix for the record, and reads
+  `gh pr checks` before posting `clear`.
+
 - **`bench/throws_pinned.sh` recognises a site by the procedure its statement calls** (#1182). A statement was
   a site only when its text matched `call\s+pgpm\.`, so an unpinned `throws_ok($$ call "pgpm".transmute(...) $$,
   NULL, desc)` (the same committing procedure, its 2D000 accepted the same way) was never probed and the file

@@ -77,7 +77,12 @@ line per issue reproduction (fails on base, passes on head, mutant restores it) 
 finder's ledger. Read it before anything else:
 
 - an acceptance reproduction that does not fail on the base, or does not pass on the head, or that the
-  PR's mutation does not make fail: the PR is blocked already; send the finding to its fixer.
+  PR's mutation does not make fail: the PR is blocked already; send the finding to its fixer. Two shapes
+  trip that rule as written without the PR being wrong (pass 11, L3 and L6), and both are classified for
+  the record and set aside, the comment saying so and why: a regression witness (a reproduction that
+  passes on the base by design, because it pins behaviour the PR must keep), and a PostgreSQL 18-only fix
+  (no `mutate.py` mutation discriminates on 17, and `pr_classify` holds one core container, so its 18
+  claims run in a private `pgpm_prv-18` through a second classify merged by hand).
 - `invalid_repro`: back to its finder.
 - coverage below 0.9: the finder re-runs on its unread units before step 4.
 - the seed not hit: recorded; the comment will say so.
@@ -108,7 +113,10 @@ merges the verdicts and renders the comment; `--post` posts it on the PR. Exit 1
 acceptance that did not hold, a verified regression of any tier, a verified Tier 1 or 2 pre-existing defect
 in the PR's surface, an unverified candidate, or a `partial` closing claim. The fixer fixes in place and the
 verification re-runs on the new head (a fresh `--work`; the acceptance claims and the plan are reusable).
-Exit 0 is **clear**: enqueue it (`scripts/review/land.sh` or `landq.sh`). Verified pre-existing Tier 3 to 5
+Exit 0 is **clear**, but read `gh pr checks <pr>` before posting it: this verification never runs the PR's
+own CI, and #1196 reached the queue with a perf shard red since its first push (pass 11, L11); a red check
+goes back to the fixer with the job log, whatever the comment says. Then enqueue it (`scripts/review/land.sh`
+or `landq.sh`). Verified pre-existing Tier 3 to 5
 claims are filed as issues with their reproductions (`file_issues.py`, pass "pr-<n>") and do not hold the PR.
 
 Then `scripts/review/pr_verify.sh cleanup --work $W/pr` (the worktrees), and `harness down` when the

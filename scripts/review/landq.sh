@@ -1,31 +1,42 @@
 #!/usr/bin/env bash
-# landq.sh <workdir> [--batch N]
+# landq.sh <workdir> [--batch N] [--next]
 #
 # The fix phase's landing loop: a queue file of PRs landed in tier order by land.sh, restarted on its
 # own after a wait timeout, stopped for a human on anything else. <workdir> holds:
 #
-#   landq.txt   one line per PR: `<tier> <pr>`; append while the loop runs, it re-reads the file each turn
+#   landq.txt   one line per PR: `<tier> <pr>`, or `<tier> <pr> rule` for a PR that adds or tightens a
+#               repo-wide rule (a lint, a checker, a wrapper rule, a grep in a guard); append while the
+#               loop runs, it re-reads the file each turn
 #   landq.done  written by the loop: `<pr> merged <time>` or `<pr> FAILED rc=<n> <time>`; when a batch stops,
 #               a PR of it that had already merged gets its merged line, not a FAILED one (#713)
 #   landq.log   land.sh's output, prefixed by the loop's own lines (`===== landing ...`, `keeper: ...`)
 #
-# Each turn takes the lowest tier's lowest-numbered PRs not yet in landq.done: one at a time by default,
-# or with --batch N up to N of the SAME tier at once through `land.sh --batch` (a merge-commit queue;
-# the batch is a stack, see land.sh). A land.sh exit of 6 (a wait timed out) is retried, at most eight
-# times per PR, with the PR's FAILED line removed; any other non-zero exit leaves the line in place,
-# prints why, and exits, because a conflict outside the list files or a CI failure that is not a known
-# flake needs a person: fix it, delete the FAILED line, and rerun this script. When landq.txt has
-# nothing left to land the loop idles (one poll a minute) so PRs can still be appended.
+# Each turn takes the lowest tier's PRs not yet in landq.done, its `rule` PRs first and then the rest,
+# lowest numbers first within each: one at a time by default, or with --batch N up to N of the SAME tier
+# at once through `land.sh --batch` (a merge-commit queue; the batch is a stack, see land.sh). Rule first
+# because a repo-wide rule judges every file in the tree, and landed late in a batch it judges code that
+# arrived after it branched: in pass 11 four of the five tier-9 PRs, each a rule, paid a re-anchor round
+# for that (L13). At the base of the stack, every later PR of the batch is rebased onto it and checked
+# with the rule in force. The ordering is within a tier only; a `rule` PR never jumps a lower tier.
+# --next prints the PRs the next turn would land, one per line in landing order, and exits 0 without
+# landing anything (nothing printed: nothing left to land).
+#
+# A land.sh exit of 6 (a wait timed out) is retried, at most eight times per PR, with the PR's FAILED
+# line removed; any other non-zero exit leaves the line in place, prints why, and exits, because a
+# conflict outside the list files or a CI failure that is not a known flake needs a person: fix it,
+# delete the FAILED line, and rerun this script. When landq.txt has nothing left to land the loop idles
+# (one poll a minute) so PRs can still be appended.
 #
 # Pass 3's loop was this script in scratch form: 24 PRs in 17.8 hours at one at a time, six restarts,
 # nine stops for a hand. Run it detached (`nohup ... >> landq.log 2>&1 &`) and tail landq.log.
 set -uo pipefail
 W="${1:?workdir}"; shift
-BATCH=1
+BATCH=1; NEXT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --batch) BATCH=$2; shift 2;;
-    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    --next) NEXT=1; shift;;
+    -h|--help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "unknown option $1"; exit 2;;
   esac
 done
@@ -36,15 +47,17 @@ S="${LAND_TOOLING:-$ROOT/scripts/review}"
 touch "$W/landq.txt" "$W/landq.done" "$W/landq.tries"
 say() { echo "$(date -u +%H:%M:%SZ) $*"; }
 
-next_batch() { # prints up to $BATCH PRs of the lowest unfinished tier, lowest numbers first
-  local t p tier=""
-  sort -k1,1n -k2,2n "$W/landq.txt" | while read -r t p; do
+next_batch() { # up to $BATCH PRs of the lowest unfinished tier, `rule` PRs first, lowest numbers first, each once
+  # (a PR listed twice, say re-appended with `rule`, is landed once and as a rule)
+  local t p k tier=""
+  sort -k1,1n -k2,2n "$W/landq.txt" | while read -r t p k; do
     [ -n "$p" ] || continue
     grep -q "^$p " "$W/landq.done" && continue
     if [ -z "$tier" ]; then tier=$t; elif [ "$t" != "$tier" ]; then break; fi
-    echo "$p"
-  done | head -n "$BATCH"
+    if [ "$k" = rule ]; then echo "0 $p"; else echo "1 $p"; fi
+  done | sort -k1,1n -k2,2n | awk '!seen[$2]++ {print $2}' | head -n "$BATCH"
 }
+[ -z "$NEXT" ] || { next_batch; exit 0; }
 
 while :; do
   prs=$(next_batch | tr '\n' ' '); prs=${prs% }
