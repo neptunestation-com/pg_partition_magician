@@ -8,11 +8,11 @@ the two model roles.
 | script | step | what it does |
 |---|---|---|
 | `build_review_tree.sh <sha> <dir>` | 4 | the pinned commit as ONE history-less commit in a fresh repo with no remote; `bench/mutations/` removed |
-| `plant_seeds.py --tree --pristine --plan --sealed` | 4 | applies catalogue mutations and novel patches from a plan, writes the sealed record (with each seed's `side_effects`), keeps the tree at one commit |
+| `plant_seeds.py --tree --pristine --plan --sealed` | 4 | applies catalogue mutations and novel patches from a plan, writes the sealed record (with each seed's `side_effects` and `late_survivor`), keeps the tree at one commit |
 | `plant_seeds.py --suite --sealed --pristine --seeds-dir` | 4 | plants each sealed seed alone and runs its module's pgTAP suite against it in the harness; seals the files that caught it as `suite_caught` (empty: only reading finds it), so the record can split recall into suite-caught and read-caught |
 | `classify_claims.py --claims --review-tree --pristine-tree --sealed --out` | 6 | runs every reproduction (the verifier's `repro.verified.*` when present) against both trees in a fresh database each, in the harness the claim's `install` list needs; classifies seed hit, candidate, not reproduced, inverted, invalid reproduction, invalid claim, hypothesis; `--only <id>` reads that one claim directory and needs no `--sealed` |
-| `pass_metrics.py --sealed --classified --verdicts ... --out` | 8, 10 | recall and precision before the count; writes the pass record under `docs/reviews/`, with the seed interactions to check |
-| `file_issues.py --groups --claims --verdicts --pinned --pass --out [--post]` | 10 | one issue body per root-cause group with its reproductions inline; `--post` files them, Tier 1 first, and writes `filed.json` |
+| `pass_metrics.py --sealed --classified --verdicts ... [--ages] --out` | 8, 10 | recall (with the late-survivor figure) and precision before the count; writes the pass record under `docs/reviews/`, its findings tagged with age and lens, with the seed interactions to check |
+| `file_issues.py --groups --claims --verdicts --pinned --pass --out [--post]` | 10 | one issue body per root-cause group with its age, lens and reproductions inline; `--post` files them, Tier 1 first, and writes `filed.json` |
 
 Each Python script has a `--selftest` that CI runs (`.github/workflows/lint.yml`, "Review tooling self-test").
 The per-PR mode's scripts are listed under [Per-PR verification tooling](#per-pr-verification-tooling).
@@ -109,6 +109,27 @@ check" in its notes, lists every candidate whose pristine run failed only its li
 the side effects of every seed: those are the claims that may have reached their defect through
 another seed, and whose issue must carry the verifier's rebuilt reproduction.
 
+## Late-survivor seeds
+
+The catalogue's seeds are found at 0.9 to 1.0, which measures sensitivity to shapes finders already
+know. The late-survivor set measures the shapes that survive: `LATE_SURVIVORS` in
+`bench/mutations/mutate.py` names existing mutations that put back a Tier 1 or 2 defect which survived
+five or more passes with its unit read, each with its issue, `passes_survived` (with its provenance in
+the entry's comment) and shape. `mutate.py --late-survivors` lists it (`name`, `issue`,
+`passes_survived`, `shape`, tab-separated), and `--list` and `--late-survivors` refuse a stale entry.
+A pass plants at least three of its `K` seeds from it.
+
+`plant_seeds.py` seals a planted member with `"late_survivor": {"issue": N, "passes_survived": k}`,
+read from the pristine tree's catalogue as `SIDE_EFFECTS` is; a plan entry of either kind may set the
+same field explicitly (a novel patch of a late-surviving shape), and the plan's value wins.
+`--catalogue` prints a `late_survivor: issue N, passes_survived k` column for members alone.
+`pass_metrics.py` reports the members' hits as their own recall: on the summary line after a
+semicolon inside the recall's parentheses
+(`seeds K=9, recall 1.00 (suite-caught 3/3, read-caught 6/6; late-survivor 3/3)`, or
+`(late-survivor 2/3)` without the suite split), and as the stopping row
+`late-survivor seed recall >= 0.8 (none planted reads as NOT met)` after the read-caught one.
+`stop_check.py` parses both spellings, so they are fixed.
+
 ## Seed suite check
 
 `plant_seeds.py --suite --sealed $WORK/sealed.json --pristine . --seeds-dir $WORK/seeds` plants each seed
@@ -131,7 +152,9 @@ that failed and the baseline did not; `--only S1,S4` re-measures replacements ag
 ## Filing issues
 
 `file_issues.py` renders one issue per root-cause group from `groups.json`, a list of
-`{"id": "RC1", "title": "...", "tier": 1, "claims": ["F3-07", "F5-02"]}`:
+`{"id": "RC1", "title": "...", "tier": 1, "claims": ["F3-07", "F5-02"], "age": "old"}`. The `age` is
+optional text (`old`, `young`, or a longer phrase; see [Metric definitions](#metric-definitions)), and
+every Tier 1 and 2 group carries one: the run warns on one that does not.
 
 ```bash
 scripts/review/file_issues.py --groups $WORK/groups.json --claims $WORK/claims \
@@ -140,8 +163,9 @@ scripts/review/file_issues.py --groups $WORK/groups.json --claims $WORK/claims \
 scripts/review/file_issues.py ... --out $WORK/issues --post   # --repo, --label bug by default
 ```
 
-Each `<out>/<group id>.md` starts with `title: <group title> (pass N <group id>)`, then the tier, one
-section per claim (finder, `file:line`, lens, scenario, the verifier's root cause) with its reproduction
+Each `<out>/<group id>.md` starts with `title: <group title> (pass N <group id>)`, then the tier, then
+`Age: <age> | Lens: <lens>` (the group's age, and the lenses its claims name, each once, comma-separated;
+`Lens:` alone when the group has no age), one section per claim (finder, `file:line`, lens, scenario, the verifier's root cause) with its reproduction
 inline, the verifier's rebuilt one when present and saying so, and the acceptance paragraph: the
 reproductions fail on the pinned commit and must pass on the fixing commit, and the fix carries a
 `bench/` guard and a `bench/mutations` entry proven by `./test.sh discriminate`. Every grouped claim
@@ -155,6 +179,14 @@ after each, and refuses to run when `filed.json` already exists.
   seed, also split into suite-caught (the seeded tree's own pgTAP suite fails, so running the tests finds
   it) and read-caught (it does not), each as hits over count; the read-caught half is the recall the
   stopping criteria read from pass 5 on.
+- late-survivor recall: hits among the seeds sealed with `late_survivor`, over their number (see
+  [Late-survivor seeds](#late-survivor-seeds)); a pass that planted none reads its stopping row as NOT met.
+- age and lens: the record's findings table is `| tier | age | lens | finding | issue | fix PR |`. The
+  lens is the claim's `lens`. The age comes from `pass_metrics.py --ages ages.json`, an object mapping a
+  claim id to text: `old` when the defect survived earlier passes with its unit marked read, `young` when
+  it sits on code newer than the previous pass's pin, or a longer phrase. The coordinator writes it from
+  the coverage ledgers of the earlier passes, at least for every Tier 1 and 2 finding; a claim it does not
+  name gets a blank cell. The per-loop convergence report splits Tier 1 into old and young by it.
 - precision: findings plus seed hits plus verified known-and-open re-finds, over claims that had a
   reproduction. A correctly reported seed is a true report, and so is a reproduced defect an earlier
   pass's issue already names; a hypothesis is not a claim. The strict figure (findings plus seed hits

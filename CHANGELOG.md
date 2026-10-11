@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **The review tooling plants a late-survivor seed set and tags every finding with its age and lens** (part of
+  #1226). The catalogue's seeds are found at 0.9 to 1.0, while two of pass 11's three Tier 1 findings had
+  survived ten passes with their units read, so recall measured the shapes finders already know.
+  `bench/mutations/mutate.py` now names `LATE_SURVIVORS`, ten existing mutations that put back such a
+  long-surviving shape (#1157, #1158, #1082's in-flight DDL, #706's lock-then-reread, #1159's sibling copy,
+  #1160's older-install state, #550's squatted cell), each with its issue and passes survived, listed by
+  `--late-survivors` and refused loudly when stale. `plant_seeds.py` seals a planted member (or a plan entry
+  marked `late_survivor`) as one, and `pass_metrics.py` reports its recall on the summary line
+  (`...; late-survivor h/n)`) and as its own stopping row, which reads NOT met when none was planted. The
+  record's findings table gains `age` (from `--ages`: old or young) and `lens` columns, and `file_issues.py`
+  puts `Age: ... | Lens: ...` under each issue's tier.
+
 - **`scripts/review/landq.sh` lands a repo-wide rule's PR first in its batch** (#1226). A `landq.txt` line
   may carry a third word, `<tier> <pr> rule`, and each turn orders the lowest unfinished tier's `rule` PRs
   ahead of the rest, so a batch that holds one puts it at the base of the stack `land.sh --batch` builds and

@@ -14,6 +14,7 @@ on a stale pattern is the same liveness-witness discipline the guards themselves
 
 Usage: mutate.py <name> <src install.sql> <dst path>
        mutate.py --list [--track=NAME]     (heaviest first: MUTATION_COST, so --shard=I/N balances)
+       mutate.py --late-survivors          (the late-survivor seed set: name, issue, passes survived, shape)
 """
 import re
 import sys
@@ -12745,9 +12746,98 @@ MUTATION_COST = {
     "scratch_upgrade_fill_dropped": 20,
 }
 
+# The late-survivor seed set (docs/adversarial-review.md, "Seeding"): catalogue mutations that put back a Tier 1
+# or Tier 2 defect which survived five or more review passes while its unit was read. The catalogue's other seeds
+# are found at 0.9 to 1.0, which measures sensitivity to shapes the finders already know; two of pass 11's three
+# Tier 1 findings (#1157, #1158) had survived ten passes with their units marked read. A pass plants at least three
+# of its K seeds from this set and reports recall on it separately (plant_seeds.py seals a member as one, and
+# pass_metrics.py prints "late-survivor h/n" on the record's summary line). `--late-survivors` lists the set.
+#
+# passes_survived counts the review passes the defect's SHAPE went through unfound: from the first pass that could
+# have read it (its code present, or its class first named) to the pass before the one that found this instance.
+# Read from the pass history in docs/adversarial-review.md, the records under docs/reviews/ and the issues' dates.
+# Where the instance itself is young (on code newer than the previous pin) the number is its class's, and the
+# comment says so. Every entry is an existing mutation with its own guard; a name not in MUTATIONS, or an entry
+# outside the set's rule, fails `--list` and `--late-survivors` loudly.
+LATE_SURVIVORS = {
+    # #1157 (T1), found in pass 11: untransmute's gate and the pending-detach state both predate pass 1, and the
+    # unit was read in every pass the coverage ledger gated (8 to 10): passes 1 to 10.
+    "untransmute_detach_pending_unchecked": {
+        "issue": 1157, "passes_survived": 10,
+        "shape": "untransmute's gate versus a partition pending a concurrent detach"},
+    # #1158 (T1), found in pass 11: the keyless hypertable cutover's pre-lock read of the copy, present since pass 1
+    # and read in passes 8 to 10 under the ledger: passes 1 to 10. Its track is timescale.
+    "hypertable_cutover_reads_copy_unlocked": {
+        "issue": 1158, "passes_survived": 10,
+        "shape": "the keyless hypertable cutover reads the copy's watermark and baseline before its lock"},
+    # The #1082 class, in-flight concurrent DDL: #1082 found in pass 10, the runbook repair it replaced documented
+    # since pass 3: passes 3 to 9. The instance (adopt_partition, written in pass 10's fix phase) is young, and
+    # #1082 itself was graded Tier 3 (pass 10's RC14); the class is in the set by the pass-12 plan.
+    "adopt_partition_unlocked": {
+        "issue": 1082, "passes_survived": 7,
+        "shape": "in-flight concurrent DDL: adopt_partition judges a partition attached without locking it"},
+    # The same class as #1157's plausible half-fix: the refusal asked only unlocked, so a detach that sets its flag
+    # while untransmute waits for its lock is not seen. #1157's count: passes 1 to 10.
+    "untransmute_detach_pending_unlocked_only": {
+        "issue": 1157, "passes_survived": 10,
+        "shape": "in-flight concurrent DDL: the pending-detach refusal asked only before the lock"},
+    # Lock-then-reread, the #706 class: named in pass 4 (#706, filed from pass 4's fix phase), siblings found in
+    # later passes through pass 11 (#732 in pass 5, #1166 in pass 11): passes 4 to 10. These two sites themselves
+    # were present from pass 1 and fixed in pass 5's fix phase (e1e7e8e5, PR #754).
+    "transmute_incoming_gate_preflight_only": {
+        "issue": 706, "passes_survived": 7,
+        "shape": "lock-then-reread: transmute's incoming-key gate read in the preflight and trusted after the lock"},
+    "transmute_key_shape_unchecked": {
+        "issue": 706, "passes_survived": 7,
+        "shape": "lock-then-reread: transmute's key and identity shape read in the preflight and trusted after the lock"},
+    # A sibling copy of a fixed mechanism: #1159 (T1), found in pass 11, is the operator script's copy of #705's
+    # gap, which #705 (named in pass 4) did not list and #1131 fixed in _archive_step alone in pass 10's fix phase.
+    # The script predates pass 1 (bbebbb30, 2026-09-08); the instance is young as a sibling, the shape open from
+    # pass 4: passes 4 to 10. The mutation is the issue's defect whole (the filter and the V-01 hold both gone).
+    "archive_whole_unfiltered_and_unheld": {
+        "issue": 1159, "passes_survived": 7,
+        "shape": "a sibling copy of a fixed mechanism: the operator script's candidate query lacks #705's filter"},
+    # An older-install state: #1160 (T2), found in pass 11 on #1152's surface (the lever phase before pass 11, so
+    # the instance is young); its class, the origin-only write blocks every release through v0.6.0 left (#450,
+    # fixed before pass 2), was an upgrade-source state every pass from 2 could read: passes 2 to 10. The second
+    # entry is the #1188 verification's regression in the same backfill (a pre-#429 adoption taken as identity).
+    "archive_ledger_backfill_origin_only_retired": {
+        "issue": 1160, "passes_survived": 9,
+        "shape": "an older-install state: the ledger backfill under pre-#450 origin-only write blocks"},
+    "archive_ledger_backfill_adopted_blocked_attributed": {
+        "issue": 1160, "passes_survived": 9,
+        "shape": "an older-install state: the ledger backfill lets a write block vouch for a pre-#429 adopted anchor"},
+    # #550's squatted cell, a derived name assumed free: filed in pass 2, fixed in pass 5's fix phase by #710's
+    # fail_obtain_name log, the shape re-found as #1105 (pass 10), #1167 (pass 11) and #1216 (after pass 11):
+    # passes 2 to 10.
+    "obtain_unbuilt_cell_unlogged": {
+        "issue": 550, "passes_survived": 9,
+        "shape": "a derived name assumed free: obtain skips a squatted cell with nothing logged"},
+}
+
+
+def late_survivors():
+    """LATE_SURVIVORS, refused loudly when an entry names no catalogue mutation or falls outside the set's rule."""
+    stale = sorted(set(LATE_SURVIVORS) - set(MUTATIONS))
+    if stale:
+        raise SystemExit(
+            f"mutate.py: LATE_SURVIVORS names mutations the catalogue does not have: {', '.join(stale)}.\n"
+            f"  A renamed or retired mutation must be renamed or removed there too, or a pass plans a seed\n"
+            f"  plant_seeds.py cannot find and reads late-survivor recall over a set that is not there."
+        )
+    for name, e in LATE_SURVIVORS.items():
+        if (sorted(e) != ["issue", "passes_survived", "shape"] or not isinstance(e["issue"], int)
+                or not isinstance(e["passes_survived"], int) or e["passes_survived"] < 5 or not e["shape"]):
+            raise SystemExit(
+                f"mutate.py: LATE_SURVIVORS[{name!r}] must be {{issue: int, passes_survived: int >= 5, shape: text}};\n"
+                f"  the set is the Tier 1 and 2 defects that survived five or more passes, and a pass reads it as such."
+            )
+    return LATE_SURVIVORS
+
 
 def listing_order():
     """The catalogue heaviest first, catalogue order within a cost (see MUTATION_COST)."""
+    late_survivors()
     stale = sorted(set(MUTATION_COST) - set(MUTATIONS))
     if stale:
         raise SystemExit(
@@ -12759,6 +12849,10 @@ def listing_order():
 
 
 def main() -> int:
+    if sys.argv[1:] == ["--late-survivors"]:
+        for name, e in late_survivors().items():
+            print(f"{name}\t{e['issue']}\t{e['passes_survived']}\t{e['shape']}")
+        return 0
     if len(sys.argv) in (2, 3) and sys.argv[1] == "--list":
         track = "perf"
         if len(sys.argv) == 3:
