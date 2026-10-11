@@ -9,12 +9,12 @@
 # reader's snapshot predates the copy, the reader holds no lock on the hypertable, its chunks or the copy) and shows
 # the same cutover swapping once the reader has committed. The cutover dropped the hypertable and renamed the copy
 # into its place under a REPEATABLE READ reader whose snapshot predated the copy, and the reader then read the table
-# empty; now it waits for that snapshot under p_lock_timeout first (pgpm._snapshot_wait), and gives up whole.
+# empty; now it waits for that snapshot under p_lock_timeout first (pgpm._snapshot_wait), and refuses whole.
 #
-# The mutation it is required to fail against (bench/mutations/mutate.py):
-#   hypertable_cutover_no_snapshot_wait -- the cutover waits for no snapshot before it swaps
-# (the helper's settle-on-active clause, which only the cutover asks for, is proven in core: tests/328 part G,
-# mutation snapshot_wait_settles_idle_reader)
+# The mutations it is required to fail against (bench/mutations/mutate.py):
+#   hypertable_cutover_no_snapshot_wait -- the cutover waits for no snapshot before it swaps (parts A to D)
+#   hypertable_drain_delete_unrecorded  -- a drain's pure delete is not recorded as the copy's last write, so a
+#                                          reader between it and the swap reads the deleted row back (part C)
 #
 # Usage: hypertable_cutover_waits_for_older_snapshots.sh <container> <db> [pgpm_hypertable/install.sql]
 # Runs on the TIMESCALE track's container (supabase/postgres + TimescaleDB), which is why its mutation sits in

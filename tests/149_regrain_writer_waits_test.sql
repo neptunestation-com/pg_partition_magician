@@ -88,6 +88,13 @@ select ok(exists (select 1 from pg_stat_activity where pid = :rpid and state = '
                    and query like '%pgpm.regrain(%'),
   'LIVENESS: ...while regrain() is still running, so the write arrived before the swap committed');
 
+-- Wait for R to finish from short top-level statements, each its own transaction, before collecting. The swap
+-- waits for every snapshot older than its copies (#1241), and a statement that held this session's snapshot across
+-- the whole call (the DO below, blocked in dblink_get_result) is one: R would wait for it while it waited for R.
+-- W is not such a reader to R: it waits on R's SHARE lock, which is the wait's one exemption.
+\o /dev/null
+select format('select pg_sleep(0.05) where dblink_is_busy(%L) = 1', 'rww_r') from generate_series(1, 2400) \gexec
+\o
 -- Collect both sides, recording each one's SQLSTATE rather than dying on it.
 do $$
 declare v text;

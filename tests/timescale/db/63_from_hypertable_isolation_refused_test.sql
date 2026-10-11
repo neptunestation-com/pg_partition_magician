@@ -57,8 +57,12 @@ select ok(pgpm._from_hypertable_scratch('a63'::regclass, 'hypertable_dest') is n
   '(A) nothing was copied: no copy recorded for a63');
 select is((select array_agg(device_id order by device_id) from a63), (select array_agg(g::bigint order by g) from generate_series(1, 60) g),
   '(A) a63 holds its 60 devices, by identity');
-select lives_ok($$ select dblink_exec('c63', 'call pgpm.from_hypertable(''a63''::regclass, ''ts'', interval ''1 month'')') $$,
-  'LIVENESS: (A) the same call from a READ COMMITTED session converts a63');
+-- From this session, directly (READ COMMITTED, autocommit). Sent through c63, this session's statement would hold
+-- its snapshot across the whole call, copy included, and the cutover waits for every snapshot older than its copy
+-- (#1241): it would wait for this session while this session waited for it, and refuse at p_lock_timeout.
+call pgpm.from_hypertable('a63'::regclass, 'ts', interval '1 month');
+select is((select relkind::text from pg_class where oid = 'public.a63'::regclass), 'p',
+  'LIVENESS: (A) the same call from a READ COMMITTED session (this one, direct) converts a63');
 select ok((select relkind::text from pg_class where oid = 'public.a63'::regclass) = 'p'
           and exists (select 1 from pgpm.config where parent_table = 'public.a63'::regclass),
   'LIVENESS: (A) a63 is a registered partitioned parent now');

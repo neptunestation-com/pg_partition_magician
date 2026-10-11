@@ -789,6 +789,11 @@ create table if not exists pgpm.scratch (
   obj        oid  not null,
   primary key (parent_oid, kind)
 );
+-- the hypertable copy's last write (#1241): the transaction id of the latest copy batch or drain step that wrote it
+-- (any DML, a drain's pure delete included), set on its hypertable_dest row by that batch (_scratch_written). The
+-- cutover waits for every snapshot that cannot see it (_snapshot_wait). Null for a copy made before this column
+-- existed, and the cutover then waits for every snapshot older than itself.
+alter table pgpm.scratch add column if not exists written_xid xid8;
 -- Upgrade path: a copy made before the record existed is recorded from the module's earlier record, the
 -- comment the copy put on it (`pgpm from_hypertable copy of <oid>`, #773, and for a tracking copy's delta
 -- `pgpm from_hypertable horizon <xid>`, #654), written in the transaction that created it, so it names
@@ -2565,6 +2570,12 @@ begin
 end;
 $$;
 
+-- Record that this transaction wrote p_parent's hypertable copy (#1241): see pgpm.scratch.written_xid.
+create or replace function pgpm._scratch_written(p_parent regclass)
+returns void language sql as $$
+  update pgpm.scratch set written_xid = pg_current_xact_id() where parent_oid = p_parent::oid and kind = 'hypertable_dest';
+$$;
+
 -- The relation pgpm.scratch records for p_parent and p_kind, or null when there is none or it is gone.
 create or replace function pgpm._scratch_rel(p_parent regclass, p_kind text)
 returns regclass language sql stable as $$
@@ -2577,7 +2588,7 @@ $$;
 create or replace function pgpm._scratch_record(p_parent regclass, p_kind text, p_obj oid)
 returns void language sql as $$
   insert into pgpm.scratch (parent_oid, kind, obj) values (p_parent::oid, p_kind, p_obj)
-  on conflict (parent_oid, kind) do update set obj = excluded.obj;
+  on conflict (parent_oid, kind) do update set obj = excluded.obj, written_xid = null;   -- #1241: a new object, no write yet
 $$;
 
 -- Every scratch object pgpm has recorded for p_parent: the regrain delta and every not-yet-attached copy
@@ -7585,76 +7596,63 @@ begin
   end loop;
 end $$;
 
+-- earlier shapes of this helper (#1241's first rounds, never released), so this one replaces them whole
+drop function if exists pgpm._snapshot_wait(xid8, text, text, text, boolean);
+drop function if exists pgpm._snapshot_wait(xid8, text, text, text);
 -- _snapshot_wait (#1241): before a swap that puts COPIES of a table's rows in place of the originals (regrain_step's
 -- swap of fine children for the coarse source; from_hypertable_cutover's of the copy for the hypertable), wait for
--- every snapshot that cannot see the copies to be released, the way CREATE INDEX CONCURRENTLY waits for older
--- snapshots. The copies hold rows written by the copy (and reconcile, and drain) transactions, and a snapshot taken
--- before one of those committed cannot see what it wrote: no snapshot can. Until the swap such a reader reads the
--- originals, which hold every row. After it, a reader whose snapshot predates the copies and whose FIRST touch of
--- the table comes after the swap (so it held no lock the swap's DETACH or DROP would have waited on) read the
--- copies and found the range empty, with no error: a REPEATABLE READ or SERIALIZABLE transaction opened before the
--- copies, say. _regrain_snapshot_wait, below, is regrain_step's call.
+-- every snapshot that cannot see the copies to be released: CREATE INDEX CONCURRENTLY's WaitForOlderSnapshots. The
+-- copies hold rows written by the copy (and reconcile, and drain) transactions, and a snapshot taken before one of
+-- those committed cannot see what it wrote: no snapshot can. Until the swap such a reader reads the originals,
+-- which hold every row. After it, a reader whose snapshot predates the copies and whose FIRST touch of the table
+-- comes after the swap (so it held no lock the swap's DETACH or DROP would have waited on) read the copies and
+-- found the range empty, with no error: a REPEATABLE READ or SERIALIZABLE transaction opened before the copies, say.
+-- _regrain_snapshot_wait, below, is regrain_step's call.
 --
--- WHAT IT CAN SEE. pgpm needs no superuser, and every function runs as its caller, so a session of another role is
--- judged by what any caller sees of it: its pid, its database and its backend_xmin in pg_stat_activity (backend_type,
--- state and xact_start read NULL there without pg_read_all_stats or that role's privileges), and its transaction's
--- virtual xid in pg_locks, which is never masked. Autovacuum is left out by what that leaves: a session with no role
--- (usesysid null) is autovacuum or an auxiliary process, which serve no reader.
+-- WHICH SNAPSHOTS. Every other session of this database whose pg_stat_activity.backend_xmin is set when the wait
+-- begins and is at or before a reference xid, with no exemption by state, transaction start, role or anything else
+-- the activity view shows. The reference is p_written, the transaction of the copies' last write (regrain:
+-- config.regrain_written_xid; the hypertable cutover: pgpm.scratch.written_xid of its copy), when that is an
+-- earlier transaction than this one; a snapshot whose xmin is past it sees every write of the copies. Otherwise
+-- (this transaction made the copies: regrain(), or regrain_step calls in one transaction; or the last write is not
+-- recorded: a run in flight across the upgrade that added the record) it is this transaction's own xid: every
+-- snapshot open now, since none can see a transaction still running.
 --
--- WHICH SNAPSHOTS. Other sessions of this database whose backend_xmin is set when the wait begins and is at or before
--- a limit xid:
---   * p_written, the transaction of the copies' last write, when that is an earlier transaction than this one
---     (regrain: config.regrain_written_xid; the hypertable cutover: its copy's youngest row). A snapshot whose xmin
---     is past it sees every write of the copies, so a session that opened one after the last copy is not waited
---     for;
---   * otherwise (this transaction made the copies: regrain(), or regrain_step calls in one transaction; or the
---     last write is not recorded: a regrain in flight across the upgrade that added the column), this
---     transaction's own xid: every snapshot open now, since none can see a transaction still running. Of the
---     sessions whose
---     transaction began AFTER this one (visible only where its xact_start is), one running a statement is not
---     waited for while it runs: a READ COMMITTED statement takes a fresh snapshot for its next one, and a client
---     waiting on this very transaction (a dblink caller, a write queued behind regrain()'s SHARE lock, #580) would
---     otherwise wait for it while it waited for them. Once such a session sits idle in its transaction with its
---     snapshot still held (REPEATABLE READ or SERIALIZABLE), it is waited for like the rest.
--- Each is waited for by IDENTITY, its pid and its transaction's virtual xid, until its snapshot is released (its
--- backend_xmin cleared, as a READ COMMITTED one is between statements) or that transaction ended. Never by a fresh
--- read of who holds a snapshot now, which on a busy database would never come up empty. Other databases' sessions,
--- which cannot read this table, and a hot standby's, which pg_stat_activity does not show, are not consulted.
+-- WHAT IT CAN SEE. pgpm needs no superuser, and every function runs as its caller, so a session is judged only by
+-- what any caller sees of it: its pid, its database and its backend_xmin in pg_stat_activity, and its
+-- transaction's virtual xid in pg_locks, which is never masked (a session of another role reads NULL for
+-- backend_type, state and xact_start without pg_read_all_stats, and nothing here reads those as a reason not to
+-- wait). Left out are the sessions with no role (usesysid null: autovacuum and auxiliary processes, which serve no
+-- reader) and an autovacuum worker the caller can see is one. Each listed session is followed by IDENTITY, its pid
+-- and its transaction's virtual xid, until its snapshot is released (its backend_xmin cleared, as a READ COMMITTED
+-- one is between statements) or that transaction ended; never by a fresh read of who holds a snapshot now, which on
+-- a busy database would never come up empty. Other databases' sessions, which cannot read this table, and a hot
+-- standby's, which pg_stat_activity does not show, are not consulted.
 --
--- A session waited for that is itself waiting, directly or down a chain, on a lock this session holds can neither
--- be waited for (it cannot finish before the swap commits) nor swapped under, so the swap is REFUSED at once, naming
--- it.
+-- THE ONE EXEMPTION, because waiting would deadlock: a listed session waiting, directly or down a chain, on a lock
+-- THIS session holds (a write queued behind regrain()'s SHARE lock on the parent, #580). It cannot release its
+-- snapshot before this transaction commits, so it is passed with a WARNING naming its pid, for as long as it waits,
+-- and returned. That is the documented residual: a READ COMMITTED statement takes a fresh snapshot once it has its
+-- lock, and is safe; a REPEATABLE READ transaction queued there cannot be protected without a deadlock.
 --
--- THE BUDGET is the caller's lock_timeout, as for every lock the swap takes: maintain's 200 ms, after which the
--- step raises, maintain logs skip_regrain naming how many snapshots remain, the oldest's pid and how long its
--- transaction has been open, and the next tick tries again; the cutover's p_lock_timeout, after which it gives up
--- as it does on its lock. The raise rolls back what the caller did before the wait in this transaction. lock_timeout
--- 0 (the session default, under which a hand regrain() runs) waits for as long as they take, as the DETACH would
--- wait for a reader holding a lock.
+-- THE BUDGET is the caller's lock_timeout, as for every lock the swap takes. When it runs out with a session still
+-- listed the step raises 'pg_partition_magician: <p_what> deferred: N snapshot(s) older than the copies still open
+-- (oldest: pid P, open T; pids ...)': maintain logs that as skip_regrain and the next tick tries again, regrain()
+-- and the cutover refuse with it, rolled back whole. It never goes ahead. lock_timeout 0 (the session default,
+-- under which a hand regrain() runs) waits for as long as they take, as the DETACH would wait for a reader holding
+-- a lock. So a client that holds a snapshot across its call (a dblink caller waiting for the call, a wrapper that
+-- holds one) is a reader the swap must wait for: call these from a direct session.
 --
--- What it cannot cover, CREATE INDEX CONCURRENTLY's own residual: a snapshot that is not waited for (taken after the
--- wait listed the sessions; or, when this transaction made the copies, one held by a statement of a transaction
--- that began after this one and ran through the wait without going idle) and that first reads the table after the
--- swap commits misses what this transaction wrote: the residual reconcile's rows under maintain, every row of the
--- range under regrain(), the under-lock catch-up's rows in the cutover. DETACH, ATTACH and a DROP and rename are
--- not MVCC-safe in that sense, and no wait before them can be.
---
--- p_settle_active (the hypertable cutover): when the budget runs out and every session still waited for is RUNNING
--- A STATEMENT (state 'active', visible), the swap goes ahead with a WARNING naming them instead of giving up. A READ
--- COMMITTED statement takes a fresh snapshot for its next one, and a statement that reads the table already holds
--- a lock on it the swap waits for; the one such session it cannot tell from those, a REPEATABLE READ transaction
--- in the middle of a statement that reads the table only in a later one, is what the WARNING names. Without it a
--- client that runs the whole migration and waits for it (from_hypertable called through dblink, tests/timescale/db
--- 63) is a statement older than the copy that the cutover would wait for while it waited for the cutover, and
--- every such migration gave up. A session idle in its transaction with its snapshot held (REPEATABLE READ, a held
--- cursor), or one whose state the caller cannot see, still makes it give up. regrain_step leaves it false: under
--- maintain a deferral costs one tick.
+-- What it cannot cover, CREATE INDEX CONCURRENTLY's own residual: a snapshot taken after the wait listed the
+-- sessions, or held by a session it passed, that first reads the table after the swap commits misses what this
+-- transaction wrote: the residual reconcile's rows under maintain, every row of the range under regrain(), the
+-- under-lock catch-up's rows in the cutover. DETACH, ATTACH and a DROP and rename are not MVCC-safe in that sense,
+-- and no wait before them can be.
 --
 -- p_what names the swap ('regrain swap', 'hypertable cutover'), p_range what a reader would find empty, p_where the
--- relations it concerns; the messages read 'pg_partition_magician: <p_what> deferred: ...' and '... refused: ...'.
-create or replace function pgpm._snapshot_wait(p_written xid8, p_what text, p_range text, p_where text,
-                                               p_settle_active boolean default false)
-returns void language plpgsql as $$
+-- relations it concerns. Returns the pids it passed.
+create or replace function pgpm._snapshot_wait(p_written xid8, p_what text, p_range text, p_where text)
+returns int[] language plpgsql as $$
 declare
   v_budget_ms bigint := (select s.setting::bigint from pg_settings s where s.name = 'lock_timeout');
   v_start timestamptz := clock_timestamp();
@@ -7663,7 +7661,8 @@ declare
   v_self xid8 := pg_current_xact_id();
   v_by_xid boolean;
   v_limit xid;
-  v_pids int[]; v_vxids text[]; v_still int[]; v_n int; v_pid int; v_open text; v_stuck int;
+  v_pids int[]; v_vxids text[]; v_still int[]; v_blocked int[]; v_passed int[] := '{}'; v_n int; v_pid int;
+  v_open text; v_new int;
   v_sleep float8 := 0.005;
 begin
   -- the copies' own transaction: an earlier one (wait for snapshots at or before it) or this one (wait for every
@@ -7691,38 +7690,37 @@ begin
       join pg_stat_activity a on a.pid = w.pid
      where a.backend_xmin is not null
        and exists (select 1 from pg_locks l
-                    where l.pid = w.pid and l.locktype = 'virtualxid' and l.granted and l.virtualtransaction = w.vxid)
-       and (v_by_xid or not (a.state = 'active' and a.xact_start > now()));
-    v_n := cardinality(v_still);
-    exit when v_n = 0;
+                    where l.pid = w.pid and l.locktype = 'virtualxid' and l.granted and l.virtualtransaction = w.vxid);
+    -- the exemption: those waiting on a lock this session holds, directly or down a chain
     with recursive chain(origin, pid, depth) as (
       select s.pid, b.pid, 1 from unnest(v_still) as s(pid) cross join lateral unnest(pg_blocking_pids(s.pid)) as b(pid)
       union
       select c.origin, b.pid, c.depth + 1 from chain c cross join lateral unnest(pg_blocking_pids(c.pid)) as b(pid)
        where c.depth < 8
     )
-    select c.origin into v_stuck from chain c where c.pid = pg_backend_pid() limit 1;
-    if v_stuck is not null then
-      raise exception 'pg_partition_magician: % refused: pid % holds a snapshot older than the copies and waits on a lock this session holds, so it cannot finish before the swap and would read % empty after it. %. Nothing was swapped; run it again once that transaction has finished.',
-        p_what, v_stuck, p_range, p_where;
-    end if;
-    if v_budget_ms > 0 and clock_timestamp() - v_start >= v_budget_ms * interval '1 millisecond' then
-      if p_settle_active and not exists (select 1 from pg_stat_activity a
-                                          where a.pid = any(v_still) and a.state is distinct from 'active') then
-        raise warning 'pg_partition_magician: % going ahead with % session(s) still running a statement that began before the copies (pids %): a READ COMMITTED statement takes a fresh snapshot for its next one, but a REPEATABLE READ transaction among them that first reads % after the swap would find it empty. %.',
-          p_what, v_n, array_to_string(v_still, ', '), p_range, p_where;
-        return;
+    select coalesce(array_agg(distinct c.origin), '{}') into v_blocked from chain c where c.pid = pg_backend_pid();
+    foreach v_new in array v_blocked loop
+      if not v_new = any(v_passed) then
+        v_passed := v_passed || v_new;
+        raise warning 'pg_partition_magician: % passes pid %, which holds a snapshot older than the copies but waits on a lock this session holds, so it cannot release it before the swap commits. A READ COMMITTED statement there takes a fresh snapshot once it has its lock; a REPEATABLE READ transaction would find % empty after the swap. %.',
+          p_what, v_new, p_range, p_where;
       end if;
+    end loop;
+    v_still := array(select s from unnest(v_still) with ordinality as u(s, o) where not s = any(v_blocked) order by o);
+    v_n := cardinality(v_still);
+    exit when v_n = 0;
+    if v_budget_ms > 0 and clock_timestamp() - v_start >= v_budget_ms * interval '1 millisecond' then
       v_pid := v_still[1];
       select coalesce(date_trunc('second', clock_timestamp() - a.xact_start)::text, 'not visible to this role')
         into v_open from pg_stat_activity a where a.pid = v_pid;
-      raise exception 'pg_partition_magician: % deferred: % snapshot(s) older than the copies still open (oldest: pid %, open %); a reader in one would find % empty after the swap. %. Nothing was swapped: maintain retries a regrain on its next tick, and a call by hand can be run again once that transaction has ended.',
-        p_what, v_n, v_pid, v_open, p_range, p_where;
+      raise exception 'pg_partition_magician: % deferred: % snapshot(s) older than the copies still open (oldest: pid %, open %; pids %); a reader in one would find % empty after the swap. %. Nothing was swapped: maintain retries a regrain on its next tick, and a call by hand is refused and can be run again once those transactions have ended (from a direct session: a caller that holds a snapshot across the call is one of them).',
+        p_what, v_n, v_pid, v_open, array_to_string(v_still, ', '), p_range, p_where;
     end if;
     perform pg_sleep(v_sleep);
     v_sleep := least(v_sleep * 2, 0.1);
     perform pg_stat_clear_snapshot();
   end loop;
+  return v_passed;
 end;
 $$;
 

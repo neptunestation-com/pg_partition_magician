@@ -13,18 +13,21 @@
 #
 # The mutations it is required to fail against (bench/mutations/mutate.py):
 #   regrain_swap_no_snapshot_wait         -- the swap waits for nothing: the tick swaps under the open reader, which
-#                                            then reads the range empty (parts A and D), and regrain() does not
-#                                            refuse (parts B and C)
+#                                            then reads the range empty (part A), and regrain() does not refuse
+#                                            (part B)
 #   regrain_written_xid_first_copy        -- the run records its first copy's transaction, not its last, so a
 #                                            reader opened between the two is swapped under (part D)
 #   regrain_snapshot_wait_masked_type_dropped -- a reader in a role the maintaining owner cannot see the
-#                                            backend_type of is dropped from the list (part E)
-#   regrain_snapshot_wait_older_transactions_only -- under regrain(), a reader opened during the call is not
-#                                            waited for (part F)
-#   snapshot_wait_settles_idle_reader     -- the helper's settle-on-active clause (the hypertable cutover's) goes
-#                                            ahead with an idle REPEATABLE READ reader left (part G)
-#   regrain_snapshot_wait_no_mutual_check -- a reader queued on a lock the regrain holds is waited for until the
-#                                            budget runs out instead of refused at once (part C)
+#                                            backend_type of is dropped from the list (parts E and H)
+#   regrain_snapshot_wait_older_transactions_only -- under regrain(), only transactions older than the call are
+#                                            listed (parts F and H)
+#   snapshot_wait_masked_state_dropped    -- a predicate over state and xact_start, NULL to an owner without
+#                                            pg_read_all_stats, drops the other role's reader (parts F and H)
+#   snapshot_wait_running_statement_exempt -- a reader running a statement is not waited for (part F)
+#   snapshot_wait_settles_running         -- at the budget, a swap with only running statements left goes ahead
+#                                            (part G)
+#   snapshot_wait_no_blocked_exemption    -- a session waiting on a lock the regrain holds is waited for, so
+#                                            regrain() refuses instead of completing (part C)
 #
 # Usage: regrain_swap_waits_for_older_snapshots.sh <container> <db> [install.sql]
 # Runs on the plain core image (it needs pgtap, dblink and pg_prove, all of which it has). TAP_GUARD_TEST_FILE
