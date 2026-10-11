@@ -2,21 +2,29 @@
 
 ## [Unreleased]
 
-- **The regrain swap waits for snapshots older than its copies** (#1241). A `REPEATABLE READ` reader whose
-  snapshot predated a regrain's copies, and which first read the table after the swap (so it held no lock the
-  `DETACH` waited on), read the fine children, whose rows its snapshot cannot see, and found the regrained range
-  empty with no error, against `docs/guide.md`'s promise that a regrain never undercounts. Before it takes any
-  lock, the swap now waits, as `CREATE INDEX CONCURRENTLY` does, for every snapshot in the database that may not
-  see the copies: those at or before the run's last copy or reconcile batch, recorded in the new
-  `config.regrain_written_xid`, or, when the swap's own transaction made the copies (`regrain()`) or the run
-  predates the column, those of transactions older than its own. The budget is the caller's `lock_timeout`:
-  under `maintain` a reader still open after 200 ms defers the swap to the next tick, logged as `skip_regrain`
-  naming how many snapshots remain and the oldest one's pid, and `regrain()` raises the same once its budget is
-  spent, or at once when that reader is itself queued on a lock the regrain holds. A snapshot the wait does not
-  cover (opened after it began, or during a `regrain()` call) still misses what the swap's own transaction
-  writes, which under `regrain()` is the whole range; `docs/reference.md` says so. Test `tests/328`, guard
-  `bench/regrain_swap_waits_for_older_snapshots.sh`, mutations `regrain_swap_no_snapshot_wait`,
-  `regrain_written_xid_first_copy` and `regrain_snapshot_wait_no_mutual_check`.
+- **The regrain swap and the hypertable cutover wait for snapshots older than their copies** (#1241). A
+  `REPEATABLE READ` reader whose snapshot predated a regrain's copies, and which first read the table after the
+  swap (so it held no lock the `DETACH` waited on), read the fine children, whose rows its snapshot cannot see,
+  and found the regrained range empty with no error, against `docs/guide.md`'s promise that a regrain never
+  undercounts; `from_hypertable_cutover` did the same to a reader opened before its copy (0 rows of 240). Before
+  either takes a lock of its own it now waits, as `CREATE INDEX CONCURRENTLY` does, for every snapshot in the
+  database that may not see the copies (`pgpm._snapshot_wait`), judging each session by what any caller can see
+  (pid and `backend_xmin`, the transaction's virtual xid in `pg_locks`), so it works the same for a
+  non-superuser owner without `pg_read_all_stats`. Under `maintain` the limit is the run's last copy or
+  reconcile batch, recorded in the new `config.regrain_written_xid`, and in the cutover the copy's youngest row;
+  under `regrain()` (copies and swap in one transaction) and an upgraded run, every snapshot open now, including
+  one opened during a `regrain()` call. The budget is the caller's `lock_timeout`: `maintain` defers the swap
+  after 200 ms with a `skip_regrain` row naming the count and the oldest pid, `regrain()` and the cutover give up
+  whole (the cutover goes ahead with a `WARNING` when only running statements are left, a `READ COMMITTED`
+  statement taking a fresh snapshot for its next one), and a waited-for session that is itself queued on a lock
+  the caller holds refuses the swap at once. A snapshot opened
+  after the wait began still misses what the swap's own transaction writes; `docs/reference.md` states the
+  window. Tests `tests/328` and `tests/timescale/db/67`, guards
+  `bench/regrain_swap_waits_for_older_snapshots.sh` and `bench/hypertable_cutover_waits_for_older_snapshots.sh`,
+  mutations `regrain_swap_no_snapshot_wait`, `regrain_written_xid_first_copy`,
+  `regrain_snapshot_wait_masked_type_dropped`, `regrain_snapshot_wait_older_transactions_only`,
+  `regrain_snapshot_wait_no_mutual_check`, `snapshot_wait_settles_idle_reader` and
+  `hypertable_cutover_no_snapshot_wait`.
 
 - **The stopping check reads coverage and capture-recapture, and the dead-man switch waits for the user**
   (#1226). `scripts/review/pass_metrics.py --coverage <coverage.json>` writes the record's

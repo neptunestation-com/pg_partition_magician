@@ -594,6 +594,10 @@ run_timescale() {
     # of the pairs discriminate.sh completes with its three mutants.
     echo "--- the cutover reads the copy only under its lock, and a drain takes the copy first (issue #1158) ---"
     bash "$(dirname "$0")/bench/hypertable_cutover_reads_copy_under_lock.sh" pgpm_test-timescale pgpm_perf328 || fail=1
+    # #1241's hypertable guard, the same way: it re-runs tests/timescale/db/67 against the real install, the clean-code
+    # half of the pair discriminate.sh completes with its mutant.
+    echo "--- the cutover waits for snapshots older than its copy before it swaps (issue #1241) ---"
+    bash "$(dirname "$0")/bench/hypertable_cutover_waits_for_older_snapshots.sh" pgpm_test-timescale pgpm_perf364 || fail=1
     # #1091's guard, the same way: tests_fail_on_defect.sh judges tests/timescale/db/33 only when named, so the
     # clean-code half of the pair discriminate.sh completes with hypertable_cutover_capture_fn_drop_concatenated
     # runs here, on this container.

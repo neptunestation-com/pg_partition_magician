@@ -545,9 +545,10 @@ Atomicity alone does not cover one reader: a `REPEATABLE READ` or `SERIALIZABLE`
 was taken before the copies and which first reads the table after the swap. The fine children's rows were
 written after its snapshot, so it would find the regrained range empty. The swap therefore first waits for
 every snapshot older than the copies to be released, as `CREATE INDEX CONCURRENTLY` waits for older
-snapshots: such a reader delays the swap rather than undercounting. Under `maintain` the wait is bounded by
-the tick's 200 ms `lock_timeout`, after which the swap is deferred to the next tick with a `skip_regrain` row
-naming how many snapshots it waits for and the oldest one's pid. See
+snapshots, whichever role holds it and whatever role runs the regrain: such a reader delays the swap rather
+than undercounting. Under `maintain` the wait is bounded by the tick's 200 ms `lock_timeout`, after which the
+swap is deferred to the next tick with a `skip_regrain` row naming how many snapshots it waits for and the
+oldest one's pid. `from_hypertable_cutover` waits the same way before it swaps in its copy. See
 [`regrain_step`](reference.md#regrain_step) for exactly which snapshots, and for the narrow window no wait
 can close (wider under the one-transaction `regrain()`, so prefer auto-regrain for a table read by long
 `REPEATABLE READ` transactions).

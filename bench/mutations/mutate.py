@@ -12897,7 +12897,8 @@ MUTATION_SRC["test303_adopted_rows_by_count"] = "tests/303_adopt_partition_test.
 
 # Issue #1241: regrain_step's swap waits for every snapshot that cannot see its copies (_regrain_snapshot_wait), so
 # a REPEATABLE READ reader whose snapshot predates the copies never reads the regrained range empty. One mutation for
-# the wait, one for the record of the run's last write that judges which snapshots, one for the mutual-wait
+# the wait, one for the record of the run's last write that judges which snapshots, one each for the two ways the
+# list lost a reader (a masked backend_type, a transaction opened during regrain()), one for the mutual-wait
 # refusal, each caught by tests/328 through bench/regrain_swap_waits_for_older_snapshots.sh.
 _G1241 = "bench/regrain_swap_waits_for_older_snapshots.sh"
 MUTATIONS["regrain_swap_no_snapshot_wait"] = (
@@ -12917,6 +12918,48 @@ MUTATIONS["regrain_written_xid_first_copy"] = (
     [("      update pgpm.config set regrain_written_xid = pg_current_xact_id() where parent_table = p_parent;\n",
       "      update pgpm.config set regrain_written_xid = coalesce(regrain_written_xid, pg_current_xact_id()) where parent_table = p_parent;\n", 1)],
 )
+MUTATIONS["regrain_snapshot_wait_masked_type_dropped"] = (
+    _G1241,
+    "The wait leaves autovacuum out by backend_type NOT IN (...), which PostgreSQL masks to NULL for a session of a "
+    "role the caller lacks the privileges of (no pg_read_all_stats), and NULL NOT IN drops the row: when the "
+    "table's non-superuser owner runs maintain, a REPEATABLE READ reader in a reporting role is never waited for and "
+    "reads the regrained range empty (the round-2 finding V-01 on PR #1253). One site, the filter. tests/328 part E "
+    "catches it.",
+    [("     and a.backend_type is distinct from 'autovacuum worker'                      -- NULL when masked: kept\n",
+      "     and a.backend_type not in ('autovacuum worker', 'autovacuum launcher')\n", 1)],
+)
+MUTATIONS["regrain_snapshot_wait_older_transactions_only"] = (
+    _G1241,
+    "When the swap's own transaction made the copies (regrain()), the wait lists only transactions that began "
+    "before it, as the first version of #1241's fix did: a REPEATABLE READ transaction opened during the call's "
+    "copy phase holds a snapshot the wait can see and wait for, is not waited for, and reads the regrained range "
+    "empty after the call (the round-2 finding V-02 on PR #1253). One site, the regrain() clause. tests/328 part F "
+    "catches it.",
+    [("       and (v_by_xid or not (a.state = 'active' and a.xact_start > now()));\n",
+      "       and (v_by_xid or a.xact_start < now());\n", 1)],
+)
+MUTATIONS["hypertable_cutover_no_snapshot_wait"] = (
+    "bench/hypertable_cutover_waits_for_older_snapshots.sh",
+    "Pre-#1241 from_hypertable_cutover: nothing waits for the snapshots older than the copy, so the cutover drops "
+    "the hypertable and renames the copy into its place under a REPEATABLE READ reader opened before the copy and "
+    "holding no lock, which then reads the table empty (0 rows of 240). One site, the call. tests/timescale/db/67 "
+    "catches it (the cutover does not give up, the hypertable is swapped, the reader's rows are gone).",
+    [("    perform pgpm._snapshot_wait((v_self::text::bigint - v_young)::text::xid8,\n"
+      "                                'hypertable cutover', 'the table', format('Hypertable: %s', p_hypertable), true);\n",
+      "    null;\n", 1)],
+)
+MUTATION_SRC["hypertable_cutover_no_snapshot_wait"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_cutover_no_snapshot_wait"] = "timescale"
+MUTATIONS["snapshot_wait_settles_idle_reader"] = (
+    _G1241,
+    "The cutover's settle-on-active exception (p_settle_active) without its condition: when the budget runs out "
+    "the cutover goes ahead with a WARNING whatever the sessions still waited for are doing, so a REPEATABLE READ "
+    "reader idle in its transaction with its snapshot held, the one it exists to protect, is swapped under and reads "
+    "the table empty. One clause, the state check. tests/328 part G catches it.",
+    [("      if p_settle_active and not exists (select 1 from pg_stat_activity a\n"
+      "                                          where a.pid = any(v_still) and a.state is distinct from 'active') then\n",
+      "      if p_settle_active then\n", 1)],
+)
 MUTATIONS["regrain_snapshot_wait_no_mutual_check"] = (
     _G1241,
     "The swap's wait without its mutual-wait refusal: a reader whose snapshot is open and which is itself queued on "
@@ -12924,8 +12967,8 @@ MUTATIONS["regrain_snapshot_wait_no_mutual_check"] = (
     "under lock_timeout 0 (a hand regrain()'s session default) for good, though it can never finish first. One "
     "site, the refusal made unreachable. tests/328 part C catches it (the deferral is raised at 3 s, not the "
     "refusal at once).",
-    [("    if v_stuck is not null then\n      raise exception 'pg_partition_magician: regrain swap refused:",
-      "    if false then\n      raise exception 'pg_partition_magician: regrain swap refused:", 1)],
+    [("    if v_stuck is not null then\n      raise exception 'pg_partition_magician: % refused:",
+      "    if false then\n      raise exception 'pg_partition_magician: % refused:", 1)],
 )
 
 

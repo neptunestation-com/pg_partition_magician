@@ -1643,6 +1643,7 @@ declare
   v_prev_lock_timeout text;   -- #665: so validating p_lock_timeout leaves the setting untouched
   v_carried_ddl text[];       -- #787: what LIKE left behind (owner, grants, RLS, policies, comment, triggers)
   v_stmt text;
+  v_self xid8; v_young int;   -- #1241: this transaction, and the age of the copy's youngest row
 begin
   -- #951: refused before anything is read or committed; p_retain (null: the source's drop_chunks interval, if
   -- any) is not
@@ -1791,11 +1792,30 @@ begin
   -- count(*) and the content fingerprint of the dest as it stands, which the catch-up below adjusts by
   -- exactly the rows it adds or removes (their RETURNING) so the check under the lock can compare the two
   -- sides without scanning the dest again.
+  -- #1241: and, in the same scan, the age of the copy's youngest row (min(age(xmin))), its last write's
+  -- transaction, read against this transaction's own xid, assigned first so every age() below counts from it
+  v_self := pg_current_xact_id();
   if not v_track then
-    execute format('select count(*), coalesce(sum(%s), 0), pgpm._from_hypertable_ctl_text(max(%I)) from %I.%I', v_fp_q, p_control, v_nsp, v_dest)
-      into v_dest_n, v_dest_h, v_watermark;
+    execute format('select count(*), min(age(xmin)), coalesce(sum(%s), 0), pgpm._from_hypertable_ctl_text(max(%I)) from %I.%I', v_fp_q, p_control, v_nsp, v_dest)
+      into v_dest_n, v_young, v_dest_h, v_watermark;
   else
-    execute format('select count(*), coalesce(sum(%s), 0) from %I.%I', v_fp_q, v_nsp, v_dest) into v_dest_n, v_dest_h;
+    execute format('select count(*), min(age(xmin)), coalesce(sum(%s), 0) from %I.%I', v_fp_q, v_nsp, v_dest) into v_dest_n, v_young, v_dest_h;
+  end if;
+  -- #1241: every snapshot that cannot see the copy must be released before the swap. The swap drops the
+  -- hypertable and renames the copy into its place, and the copy's rows were written by the copy and drain
+  -- transactions, which a snapshot older than them cannot see: a REPEATABLE READ reader opened before the copy
+  -- and first reading the table after the swap (holding no lock on the hypertable, it gave the ACCESS EXCLUSIVE
+  -- below nothing to wait for) found it EMPTY. The limit is the copy's youngest row, read just above: a snapshot
+  -- whose xmin is past it sees every row of the copy. After the copy's lock, so a drain batch in flight is part
+  -- of what was read, and before the source's, so the wait holds nothing a reader of the hypertable needs. Bounded
+  -- by p_lock_timeout: a reader that outlasts it aborts the cutover whole, as a lock timeout does, and it is
+  -- re-run. An empty copy has nothing to miss. A session still RUNNING a statement when the budget is spent does
+  -- not make it give up (p_settle_active: the caller of from_hypertable through dblink is one, waiting for this
+  -- very call); it goes ahead with a WARNING naming them. See pgpm._snapshot_wait for which sessions it follows,
+  -- and the window no wait can close (the catch-up's rows, written below by this transaction).
+  if v_young is not null then
+    perform pgpm._snapshot_wait((v_self::text::bigint - v_young)::text::xid8,
+                                'hypertable cutover', 'the table', format('Hypertable: %s', p_hypertable), true);
   end if;
   -- The key the append-only catch-up anti-joins by (#460): the PRIMARY KEY, else a UNIQUE constraint, and
   -- every one of its columns NOT NULL -- a row-constructor `=` never matches a NULL component, so a

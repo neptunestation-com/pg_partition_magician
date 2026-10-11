@@ -17,6 +17,12 @@
 #                                            refuse (parts B and C)
 #   regrain_written_xid_first_copy        -- the run records its first copy's transaction, not its last, so a
 #                                            reader opened between the two is swapped under (part D)
+#   regrain_snapshot_wait_masked_type_dropped -- a reader in a role the maintaining owner cannot see the
+#                                            backend_type of is dropped from the list (part E)
+#   regrain_snapshot_wait_older_transactions_only -- under regrain(), a reader opened during the call is not
+#                                            waited for (part F)
+#   snapshot_wait_settles_idle_reader     -- the helper's settle-on-active clause (the hypertable cutover's) goes
+#                                            ahead with an idle REPEATABLE READ reader left (part G)
 #   regrain_snapshot_wait_no_mutual_check -- a reader queued on a lock the regrain holds is waited for until the
 #                                            budget runs out instead of refused at once (part C)
 #
