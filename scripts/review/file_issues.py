@@ -5,14 +5,18 @@
 Inputs:
   --groups    groups.json, the coordinator's root-cause grouping:
               [{"id": "RC1", "title": "grid arithmetic reads the session TimeZone", "tier": 1,
-                "claims": ["F3-07", "F5-02"]}, ...]
+                "claims": ["F3-07", "F5-02"], "age": "old"}, ...]
+              "age" is optional text ("old": the defect survived earlier passes with its unit marked read;
+              "young": it sits on code newer than the previous pin; or a longer phrase). Every Tier 1 and 2
+              group should carry one, and the run warns when one does not.
   --claims    the claims tree, <dir>/<finder>/<claim-id>/claim.json plus its reproduction
   --verdicts  the merged verdicts (every grouped claim must be a "finding")
   --pinned    the pinned commit the reproductions fail on
   --pass      the pass number, for the title suffix "(pass N RCk)"
 
 For each group it writes <out>/<group id>.md: a first line `title: <title> (pass N <id>)`, then the body:
-the tier, one section per claim (finder, file:line, lens, scenario, the verifier's root cause) with the
+the tier, then `Age: <age> | Lens: <lens>` (the group's age when it has one; the lenses of its claims, each
+once, comma-separated in claim order), one section per claim (finder, file:line, lens, scenario, the verifier's root cause) with the
 claim's reproduction inline, and the acceptance paragraph. The reproduction is the verifier's rebuilt one
 (repro.verified.sql or .sh) when the claim directory holds it, chosen by the same rule classify_claims.py
 uses, and the section says so: in pass 2 five issues were filed with the finders' reproductions, which only
@@ -97,8 +101,17 @@ def claim_section(c, verdict):
 def render_group(group, claims, verdicts, pinned, pass_n):
     """(title, text) for one group; text's first line is the title line."""
     title = f"{group['title']} (pass {pass_n} {group['id']})"
+    lenses = []
+    for cid in group["claims"]:
+        lens = claims[cid].get("lens") or ""
+        if lens and lens not in lenses:
+            lenses.append(lens)
+    tag = f"Lens: {', '.join(lenses)}"
+    if group.get("age"):
+        tag = f"Age: {group['age']} | {tag}"
     lines = [f"title: {title}", "",
              f"Tier: {group['tier']}", "",
+             tag, "",
              f"Found in adversarial review pass {pass_n} at `{pinned}`, root-cause group {group['id']}: "
              + ", ".join(group["claims"]) + ".", ""]
     for cid in group["claims"]:
@@ -106,6 +119,12 @@ def render_group(group, claims, verdicts, pinned, pass_n):
     lines += [f"Acceptance: the reproduction(s) above fail on {pinned} and must pass on the fixing commit; the "
               "fix carries a bench/ guard and a bench/mutations entry proven by ./test.sh discriminate."]
     return title, "\n".join(lines) + "\n"
+
+
+def untagged(groups):
+    """Tier 1 and 2 groups without an age: every such issue is to carry one (the per-loop convergence report
+    splits Tier 1 into old and young by it)."""
+    return [g["id"] for g in groups if int(g["tier"]) <= 2 and not g.get("age")]
 
 
 def render_all(groups, claims, verdicts, pinned, pass_n, out):
@@ -167,7 +186,7 @@ def selftest():
                     fh.write(text)
         claims = {c["id"]: c for c in load_claims(claims_dir)}
         groups = [{"id": "RC1", "title": "drain races the late row", "tier": 2, "claims": ["F1-01"]},
-                  {"id": "RC2", "title": "grid reads the session zone", "tier": 1, "claims": ["F2-01"]}]
+                  {"id": "RC2", "title": "grid reads the session zone", "tier": 1, "claims": ["F2-01"], "age": "old"}]
         verdicts = {"F1-01": {"verdict": "finding", "tier": 2, "root_cause": "no re-check under the lock"},
                     "F2-01": {"verdict": "finding", "tier": 1, "root_cause": "session TimeZone grid"}}
         rendered = render_all(groups, claims, verdicts, "abc1234", 3, out)
@@ -185,6 +204,14 @@ def selftest():
         assert ("Acceptance: the reproduction(s) above fail on abc1234 and must pass on the fixing commit; the fix "
                 "carries a bench/ guard and a bench/mutations entry proven by ./test.sh discriminate.") in rc1
         assert "# ORIGINAL F2-01" in rc2 and "rebuilt" not in rc2, rc2
+        # the age and the lens, in the header right after the tier line; a group without an age still names its lens
+        assert "\n\nTier: 1\n\nAge: old | Lens: time\n\nFound in adversarial review pass 3" in rc2, rc2
+        assert "\n\nTier: 2\n\nLens: concurrency\n\nFound in" in rc1 and "Age:" not in rc1, rc1
+        # claims naming different lenses are listed comma-separated, each once, in claim order
+        _t, mixed = render_group({"id": "RC3", "title": "t", "tier": 2, "claims": ["F1-01", "F2-01", "F1-01"],
+                                  "age": "young (on #1152's surface)"}, claims, verdicts, "abc1234", 3)
+        assert "\n\nTier: 2\n\nAge: young (on #1152's surface) | Lens: concurrency, time\n\n" in mixed, mixed
+        assert untagged(groups) == ["RC1"], untagged(groups)
         assert "````bash\n# ORIGINAL F2-01" in rc2, rc2                  # fence outgrows the ``` inside
         # a group naming a claim that is missing, or one that is not a finding, is refused before writing
         for bad_groups, bad_verdicts, word in (
@@ -246,6 +273,9 @@ def main():
         verdicts = json.load(fh)
     claims = {c["id"]: c for c in load_claims(a.claims)}
     rendered = render_all(groups, claims, verdicts, a.pinned, a.pass_n, a.out)
+    if untagged(groups):
+        print("WARNING: Tier 1 or 2 group(s) without an age: " + ", ".join(untagged(groups))
+              + "; every Tier 1 and 2 issue carries one (add \"age\" to groups.json)", file=sys.stderr)
     for r in rendered:
         print(f"T{r['tier']} {r['id']}: {r['title']}  ({r['path']}, {r['verified']} of {len(r['claims'])} "
               "reproductions verified)")

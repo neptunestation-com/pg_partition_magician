@@ -11,6 +11,8 @@ Inputs:
                  "F2-01": {"verdict": "fell", "reason": "documented; reference.md#retain"},
                  "F1-04": {"verdict": "known_open", "issue": 439}}
   --budget-units, --budget  a number (agent-hours or tokens) for cost per finding, and its text form
+  --ages        optional: a JSON object mapping a claim id to its AGE, printed in the findings table:
+                {"F3-07": "old", "F5-02": "young", "F1-04": "young (on #1152's surface)"}
 
 Definitions used here:
   recall     = seeds attributed to at least one claim / K; when plant_seeds.py --suite measured every seed,
@@ -27,7 +29,21 @@ Definitions used here:
   fell rate  = claims that fell in verification / claims that had a reproduction: the reaching alarm the
                stopping criteria read (at most 0.3), since a fallen claim is the one shape a reviewer
                pushed for defects produces when there are none.
+  late-survivor recall = the hits among the seeds sealed with "late_survivor" (plant_seeds.py: the catalogue's
+               LATE_SURVIVORS, Tier 1 and 2 defects that survived five or more passes with their units read)
+               over their number; printed on the summary line after a semicolon inside the recall's
+               parentheses, e.g. "seeds K=9, recall 1.00 (suite-caught 3/3, read-caught 6/6; late-survivor 3/3)"
+               or "(late-survivor 2/3)" without the suite split, and read by its own stopping row, which a pass
+               that planted none reads as NOT met. The catalogue's seeds are found at 0.9 to 1.0; this figure
+               measures the shapes that survive.
   cost       = budget-units / findings, and / Tier 1 findings
+
+Age and lens. The findings table is `| tier | age | lens | finding | issue | fix PR |`, so the per-loop
+convergence report can split Tier 1 into old and young. The lens is the claim's own "lens" field. The age comes
+from --ages: OLD means the defect survived earlier passes with its unit marked read in their coverage ledgers;
+YOUNG means it sits on code newer than the previous pass's pin. The coordinator writes the ages file from the
+coverage ledgers of the earlier passes (and the pins' diff), at least for every Tier 1 and 2 finding; a finding
+it does not name gets a blank cell.
 
 Seed interactions. A seed that changes global state (its sealed record's optional "side_effects") can make
 another claim reproducible for the wrong reason: in pass 2 five candidates reached their defect only
@@ -39,6 +55,7 @@ Usage:
   pass_metrics.py --pass N --date YYYY-MM-DD --pinned <sha> --release <tag> --sealed s.json
                   --classified c.json --verdicts v.json --budget "8 finders x 2h, 6h wall" --budget-units 16
                   --lenses "fresh surface, concurrency" --previous-lenses "..." --out docs/reviews/YYYY-MM-DD.md
+                  [--ages ages.json]
   pass_metrics.py --selftest
 """
 import argparse
@@ -48,7 +65,8 @@ import sys
 TIERS = (1, 2, 3, 4, 5)
 
 
-def compute(sealed, classified, verdicts, budget_units=None):
+def compute(sealed, classified, verdicts, budget_units=None, ages=None):
+    ages = ages or {}
     seeds = sealed["seeds"]
     claims = [c for c in classified["claims"] if c.get("class") != "hypothesis"]
     hypotheses = [c for c in classified["claims"] if c.get("class") == "hypothesis"]
@@ -65,6 +83,11 @@ def compute(sealed, classified, verdicts, budget_units=None):
         split = {"suite_K": len(suite_ids), "suite_hit": len(suite_ids & hit_ids),
                  "read_K": len(read_ids), "read_hit": len(read_ids & hit_ids)}
         split["read_recall"] = (split["read_hit"] / split["read_K"]) if split["read_K"] else None
+    late_ids = {s["id"] for s in seeds if s.get("late_survivor")}
+    late_split = None
+    if late_ids:
+        late_split = {"K": len(late_ids), "hit": len(late_ids & hit_ids)}
+        late_split["recall"] = late_split["hit"] / late_split["K"]
 
     findings, fell, known = [], [], []
     for c in candidates:
@@ -106,7 +129,7 @@ def compute(sealed, classified, verdicts, budget_units=None):
     seed_rows = [{"id": s["id"], "lens": s["lens"], "tier": s["tier"], "what": s.get("mutation") or s.get("patch"),
                   "hit_by": hit_by.get(s["id"], []), "side_effects": s.get("side_effects"),
                   "suite": s.get("suite_caught") if "suite_caught" in s else None,
-                  "suite_skipped": s.get("suite_skipped")} for s in seeds]
+                  "suite_skipped": s.get("suite_skipped"), "late_survivor": s.get("late_survivor")} for s in seeds]
     interaction_candidates = [{"id": c["id"], "finder": c["finder"], "tier": c.get("tier"),
                                "scenario": c.get("scenario", "")}
                               for c in candidates if (c.get("pristine") or {}).get("liveness_failed")]
@@ -125,12 +148,13 @@ def compute(sealed, classified, verdicts, budget_units=None):
         "blind_spots": [{"id": s["id"], "lens": s["lens"], "tier": s["tier"],
                          "what": s.get("mutation") or s.get("patch")} for s in blind],
         "finding_rows": [{"id": f["id"], "tier": int(f["verdict"].get("tier") or f.get("tier") or 0),
-                          "scenario": f.get("scenario", ""), "issue": f["verdict"].get("issue")} for f in findings],
+                          "scenario": f.get("scenario", ""), "issue": f["verdict"].get("issue"),
+                          "age": ages.get(f["id"], ""), "lens": f.get("lens") or ""} for f in findings],
         "fell_rows": [{"id": f["id"], "reason": f["verdict"].get("reason", "")} for f in fell],
         "known_rows": [{"id": f["id"], "issue": f["verdict"].get("issue")} for f in known],
         "hypothesis_rows": [{"id": h["id"], "finder": h["finder"], "scenario": h.get("scenario", "")} for h in hypotheses],
         "seed_rows": seed_rows, "interaction_candidates": interaction_candidates,
-        "suite_split": split, "suite_unmeasured": K - len(measured),
+        "suite_split": split, "suite_unmeasured": K - len(measured), "late_survivor_split": late_split,
     }
 
 
@@ -147,6 +171,11 @@ def stopping_status(m):
         rr = m["suite_split"]["read_recall"]
         rows.insert(2, ("read-caught seed recall >= 0.8 (the seeds the suite does not catch; none planted reads as NOT met)",
                         rr is not None and rr >= 0.8))
+    # always present, right after the read-caught row (or the seed recall row without the suite split): a pass
+    # that planted none of the late-survivor set has not measured what survives, so that reads as NOT met
+    ls = m.get("late_survivor_split")
+    rows.insert(3 if m.get("suite_split") else 2, ("late-survivor seed recall >= 0.8 (none planted reads as NOT met)",
+                                                   ls is not None and ls["recall"] >= 0.8))
     return rows
 
 
@@ -161,11 +190,16 @@ def fmt(x, nd=2):
 
 
 def split_text(m):
-    """The recall split for the record's summary line, or nothing when --suite did not measure every seed."""
-    s = m.get("suite_split")
-    if not s:
-        return ""
-    return f" (suite-caught {s['suite_hit']}/{s['suite_K']}, read-caught {s['read_hit']}/{s['read_K']})"
+    """The recall split for the record's summary line: suite-caught / read-caught when --suite measured every
+    seed, then the late-survivor hits over its members after a semicolon when any seed is one; nothing when
+    neither applies. stop_check.py parses this spelling, so it is fixed."""
+    s, ls = m.get("suite_split"), m.get("late_survivor_split")
+    parts = []
+    if s:
+        parts.append(f"suite-caught {s['suite_hit']}/{s['suite_K']}, read-caught {s['read_hit']}/{s['read_K']}")
+    if ls:
+        parts.append(f"late-survivor {ls['hit']}/{ls['K']}")
+    return f" ({'; '.join(parts)})" if parts else ""
 
 
 def record(m, a):
@@ -187,11 +221,11 @@ def record(m, a):
         "",
         f"Per finder (claims, precision, strict): " + ", ".join(f"{k} ({v['claims']}, {fmt(v['precision'])}, {fmt(v['precision_strict'])})" for k, v in sorted(m["per_finder"].items())),
         f"Seed hits {m['seed_hits']}, candidates {m['candidates']}, fell {m['fell']}, unverified {m['unverified']}, hypotheses {m['hypotheses']}.",
-        "", "## Findings", "", "| tier | finding | issue | fix PR |", "|---|---|---|---|",
+        "", "## Findings", "", "| tier | age | lens | finding | issue | fix PR |", "|---|---|---|---|---|---|",
     ]
     for f in sorted(m["finding_rows"], key=lambda r: (r["tier"], r["id"])):
         issue = f"#{f['issue']}" if f["issue"] else ""
-        lines.append(f"| {f['tier']} | {f['id']}: {md_cell(f['scenario'])} | {issue} | |")
+        lines.append(f"| {f['tier']} | {md_cell(f['age'])} | {md_cell(f['lens'])} | {f['id']}: {md_cell(f['scenario'])} | {issue} | |")
     lines += ["", "## Seeds", ""]
     for r in m["seed_rows"]:
         state = f"hit by {', '.join(r['hit_by'])}" if r["hit_by"] else "missed"
@@ -201,7 +235,9 @@ def record(m, a):
             suite = ("; suite: caught by " + ", ".join(md_cell(f) for f in r["suite"])) if r["suite"] else "; suite: not caught (read-caught seed)"
             if r.get("suite_skipped"):
                 suite += " (not run: " + ", ".join(md_cell(f) for f in r["suite_skipped"]) + ")"
-        lines.append(f"- {r['id']} {md_cell(r['what'])} ({r['lens']}, T{r['tier']}): {state}{effects}{suite}")
+        ls = r.get("late_survivor")
+        late = f"; late survivor: #{ls['issue']}, {ls['passes_survived']} passes" if ls else ""
+        lines.append(f"- {r['id']} {md_cell(r['what'])} ({r['lens']}, T{r['tier']}): {state}{effects}{suite}{late}")
     if not m["seed_rows"]:
         lines.append("none")
     lines += ["", "## Null results (by lens)", "", "(from the finders' null-results files)", "",
@@ -309,7 +345,76 @@ def selftest_suite_split():
     # still say what caught them, and the unmeasured one says nothing
     assert "seeds K=4, recall 0.75; claims 3;" in rec3 and "(suite-caught" not in rec3, rec3
     assert "- S2 n.patch (names, T2): hit by F2-01\n" in rec3 and "S1 a (time, T1): hit by F1-01; suite: caught by" in rec3, rec3
-    assert len(stopping_status(m3)) == 4 and not any(n.startswith("read-caught") for n, _ in stopping_status(m3))
+    assert len(stopping_status(m3)) == 5 and not any(n.startswith("read-caught") for n, _ in stopping_status(m3))
+
+
+def selftest_late_survivor_and_age():
+    """Seeds sealed with late_survivor get their own recall: on the summary line inside the parentheses after a
+    semicolon (with and without the suite split), under compute()'s late_survivor_split, and as a stopping row
+    right after the read-caught one that reads NOT met when none was planted. The findings table carries the
+    age (--ages, by claim id) and the claim's lens."""
+    late = {"issue": 1157, "passes_survived": 10}
+    sealed = {"seeds": [{"id": "S1", "lens": "locks", "tier": 1, "mutation": "a", "suite_caught": [], "late_survivor": late},
+                        {"id": "S2", "lens": "locks", "tier": 1, "mutation": "b", "suite_caught": ["tests/1_test.sql"],
+                         "late_survivor": {"issue": 1158, "passes_survived": 10}},
+                        {"id": "S3", "lens": "names", "tier": 2, "patch": "c.patch", "suite_caught": [],
+                         "late_survivor": {"issue": 550, "passes_survived": 9}},
+                        {"id": "S4", "lens": "time", "tier": 2, "patch": "d.patch", "suite_caught": []},
+                        {"id": "S5", "lens": "time", "tier": 3, "patch": "e.patch", "suite_caught": ["tests/2_test.sql"]}]}
+    classified = {"claims": [
+        {"id": "F1-01", "finder": "F1", "class": "seed_hit", "seed": "S1", "tier": 1},
+        {"id": "F1-02", "finder": "F1", "class": "seed_hit", "seed": "S3", "tier": 2},
+        {"id": "F2-01", "finder": "F2", "class": "seed_hit", "seed": "S4", "tier": 2},
+        {"id": "F2-02", "finder": "F2", "class": "seed_hit", "seed": "S5", "tier": 3},
+        {"id": "F3-01", "finder": "F3", "class": "candidate", "tier": 1, "lens": "concurrency and locks",
+         "scenario": "pending detach dropped"},
+        {"id": "F3-02", "finder": "F3", "class": "candidate", "tier": 2, "lens": "fresh surface", "scenario": "new script"},
+        {"id": "F4-01", "finder": "F4", "class": "candidate", "tier": 3, "scenario": "no lens, no age"},
+    ]}
+    verdicts = {"F3-01": {"verdict": "finding", "tier": 1, "issue": 1157},
+                "F3-02": {"verdict": "finding", "tier": 2, "issue": 1159},
+                "F4-01": {"verdict": "finding", "tier": 3}}
+    ages = {"F3-01": "old", "F3-02": "young (on #1152's surface)"}
+    m = compute(sealed, classified, verdicts, ages=ages)
+    # a liveness witness for the split: the members are the three sealed as such, two of them hit, and the
+    # suite split (which the late-survivor figure sits beside, not inside) is the usual one
+    assert m["late_survivor_split"] == {"K": 3, "hit": 2, "recall": 2 / 3}, m["late_survivor_split"]
+    assert m["suite_split"]["read_K"] == 3 and m["suite_split"]["read_hit"] == 3, m["suite_split"]
+
+    class A:
+        pass_n, date, pinned, release = 12, "2026-10-12", "abc", "0.7.0"
+        budget, lenses, previous_lenses, capture_recapture = "", "locks", "none", "not attempted"
+        root_cause_groups, root_causes_file, notes_file = None, None, None
+    rec = record(m, A)
+    assert "seeds K=5, recall 0.80 (suite-caught 1/2, read-caught 3/3; late-survivor 2/3); claims 7;" in rec, rec
+    assert "| tier | age | lens | finding | issue | fix PR |\n|---|---|---|---|---|---|\n" in rec, rec
+    assert "| 1 | old | concurrency and locks | F3-01: pending detach dropped | #1157 | |\n" in rec, rec
+    assert "| 2 | young (on #1152's surface) | fresh surface | F3-02: new script | #1159 | |\n" in rec, rec
+    assert "|  |  | F4-01: no lens, no age |  | |\n" in rec, rec
+    assert "- S1 a (locks, T1): hit by F1-01; suite: not caught (read-caught seed); late survivor: #1157, 10 passes\n" in rec, rec
+    assert "- S4 d.patch (time, T2): hit by F2-01; suite: not caught (read-caught seed)\n" in rec, rec
+    names = [n for n, _ in stopping_status(m)]
+    row = "late-survivor seed recall >= 0.8 (none planted reads as NOT met)"
+    assert names[names.index(row) - 1].startswith("read-caught seed recall"), names
+    assert dict(stopping_status(m))[row] is False                       # 2/3 < 0.8
+    # without the suite split the figure stands alone in the parentheses, and the row follows the seed recall
+    for s in sealed["seeds"]:
+        s.pop("suite_caught")
+    m2 = compute(sealed, classified, verdicts)
+    assert "seeds K=5, recall 0.80 (late-survivor 2/3); claims 7;" in record(m2, A), record(m2, A)
+    names2 = [n for n, _ in stopping_status(m2)]
+    assert names2[names2.index(row) - 1] == "seed recall >= 0.8", names2
+    # every member hit: met; no ages file: the age column is blank, the lens still there
+    hit_all = {"claims": classified["claims"] + [{"id": "F5-01", "finder": "F5", "class": "seed_hit", "seed": "S2", "tier": 1}]}
+    m3 = compute(sealed, hit_all, verdicts)
+    assert m3["late_survivor_split"]["recall"] == 1.0 and dict(stopping_status(m3))[row] is True
+    assert "| 1 |  | concurrency and locks | F3-01: pending detach dropped | #1157 | |\n" in record(m3, A)
+    # none planted: no split, no mention on the summary line, and the row reads NOT met
+    for s in sealed["seeds"]:
+        s.pop("late_survivor", None)
+    m4 = compute(sealed, classified, verdicts)
+    assert m4["late_survivor_split"] is None and "late-survivor" not in record(m4, A).split("\n")[4], record(m4, A)
+    assert dict(stopping_status(m4))[row] is False
 
 
 def selftest():
@@ -350,7 +455,7 @@ def selftest():
     rec = record(m, A)
     assert "recall 0.50; claims 5; findings 1; precision 0.60 (strict 0.40, fell rate 0.20)" in rec, rec
     assert "Per finder (claims, precision, strict): F1 (3, 0.67, 0.67), F2 (2, 0.50, 0.00)" in rec, rec
-    assert "| 1 | F1-02: rows lost | #500 | |" in rec
+    assert "| 1 |  |  | F1-02: rows lost | #500 | |" in rec
     assert md_cell("a _grid_next | b") == "a \\_grid\\_next \\| b"
     assert "S2 untransmute_no_recheck_under_lock (concurrency, T1)" in rec
     assert "root causes: 1 distinct verifier root-cause statements behind the findings; grouped into 1 classes below" in rec
@@ -360,6 +465,7 @@ def selftest():
     assert "## Seeds" in rec and "- S2 untransmute\\_no\\_recheck\\_under\\_lock (concurrency, T1): missed" in rec, rec
     selftest_seed_interactions()
     selftest_suite_split()
+    selftest_late_survivor_and_age()
     print("pass_metrics selftest: PASS")
     return 0
 
@@ -374,6 +480,7 @@ def main():
     ap.add_argument("--root-causes", dest="root_causes_file", help="markdown file with the coordinator's root-cause grouping, appended as a section")
     ap.add_argument("--root-cause-groups", type=int, help="number of classes in that grouping, for the summary line")
     ap.add_argument("--notes", dest="notes_file", help="markdown file appended as 'Coordinator notes'")
+    ap.add_argument("--ages", help="JSON file mapping a claim id to its age ('old', 'young' or a phrase) for the findings table")
     ap.add_argument("--out"); ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
@@ -387,9 +494,18 @@ def main():
         classified = json.load(fh)
     with open(a.verdicts) as fh:
         verdicts = json.load(fh)
-    m = compute(sealed, classified, verdicts, a.budget_units)
+    ages = {}
+    if a.ages:
+        with open(a.ages) as fh:
+            ages = json.load(fh)
+        if not isinstance(ages, dict) or not all(isinstance(v, str) for v in ages.values()):
+            ap.error("--ages must hold one JSON object mapping a claim id to its age text")
+    m = compute(sealed, classified, verdicts, a.budget_units, ages=ages)
     print(f"seeds K={m['K']}  recall {fmt(m['recall'])}{split_text(m)}  precision {fmt(m['precision'])} "
           f"(strict {fmt(m['precision_strict'])}, fell rate {fmt(m['fell_rate'])})   (read these first)")
+    if not m["late_survivor_split"]:
+        print("WARNING: no seed is sealed as a late survivor, so the late-survivor recall row reads NOT met; plant at "
+              "least three from mutate.py --late-survivors next time", file=sys.stderr)
     if m["suite_unmeasured"]:
         print(f"WARNING: {m['suite_unmeasured']} seed(s) carry no suite_caught, so recall is not split into suite-caught / "
               "read-caught; run plant_seeds.py --suite before the hunt next time", file=sys.stderr)

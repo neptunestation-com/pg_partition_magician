@@ -19,6 +19,12 @@ lists it beside every candidate whose pristine run failed only its liveness chec
 (bench/mutations/mutate.py) may define an optional SIDE_EFFECTS dict keyed by mutation name; --catalogue
 prints it where present. The plan's field is what reaches the sealed record.
 
+"late_survivor" marks a seed from the late-survivor set (docs/adversarial-review.md, "Seeding"): a Tier 1 or 2
+defect that survived five or more passes with its unit read, reported as its own recall by pass_metrics.py. A
+mutation seed named in the pristine catalogue's LATE_SURVIVORS (mutate.py --late-survivors) is sealed with
+"late_survivor": {"issue": N, "passes_survived": k} without the plan saying so; a plan entry of either kind
+may set the same field explicitly, and the plan's value wins. --catalogue prints it as a column for members.
+
 A "mutation" entry is applied with the PRISTINE checkout's bench/mutations/mutate.py (the review tree
 has no catalogue), which refuses to write anything if its pattern has drifted. A "patch" entry is a
 unified diff the coordinator wrote for this pass (a novel seed), applied with `git apply` inside the
@@ -54,7 +60,7 @@ Usage:
   plant_seeds.py --tree <review-tree> --pristine <checkout> --plan <plan.json> --sealed <out.json>
   plant_seeds.py --suite --sealed <sealed.json> --pristine <checkout> [--seeds-dir <dir>] [--only S1,S4]
                  [--container pgpm_test-15] [--archive-container ...] [--timescale-container ...] [--work <dir>]
-  plant_seeds.py --catalogue [--pristine <checkout>]      # every mutation, its file and track
+  plant_seeds.py --catalogue [--pristine <checkout>]      # every mutation, its file, track and guard (+ late_survivor)
   plant_seeds.py --selftest
 """
 import argparse
@@ -72,8 +78,14 @@ def load_mutate(pristine):
     return mutate
 
 
+def late_record(entry):
+    """What the sealed record and --catalogue carry of a LATE_SURVIVORS entry: its issue and passes_survived."""
+    return {"issue": entry["issue"], "passes_survived": entry["passes_survived"]}
+
+
 def catalogue(mutate):
     side = getattr(mutate, "SIDE_EFFECTS", {})
+    late = getattr(mutate, "LATE_SURVIVORS", {})
     rows = []
     for name, (guard, why, _edits) in mutate.MUTATIONS.items():
         row = {
@@ -85,13 +97,17 @@ def catalogue(mutate):
         }
         if side.get(name):
             row["side_effects"] = side[name]
+        if name in late:
+            row["late_survivor"] = late_record(late[name])
         rows.append(row)
     return rows
 
 
 def catalogue_line(r):
     line = f"{r['mutation']}\t{r['file']}\t{r['track']}\t{r['guard']}"
-    return line + (f"\tside effects: {r['side_effects']}" if r.get("side_effects") else "")
+    line += f"\tside effects: {r['side_effects']}" if r.get("side_effects") else ""
+    ls = r.get("late_survivor")
+    return line + (f"\tlate_survivor: issue {ls['issue']}, passes_survived {ls['passes_survived']}" if ls else "")
 
 
 def touched_lines(text, edits):
@@ -136,6 +152,12 @@ def validate(plan):
                 raise SystemExit(f"plant_seeds: entry {i} lacks {k!r}; the sealed record needs it")
         if "side_effects" in entry and not isinstance(entry["side_effects"], str):
             raise SystemExit(f"plant_seeds: entry {i}'s side_effects must be one string describing the effect")
+        if "late_survivor" in entry:
+            ls = entry["late_survivor"]
+            if (not isinstance(ls, dict) or sorted(ls) != ["issue", "passes_survived"]
+                    or not all(isinstance(v, int) and not isinstance(v, bool) for v in ls.values())):
+                raise SystemExit(f"plant_seeds: entry {i}'s late_survivor must be "
+                                 '{"issue": N, "passes_survived": k}, both integers')
     if not plan.get("seeds"):
         raise SystemExit("plant_seeds: the plan has no seeds; a pass without seeds cannot measure its recall")
 
@@ -181,6 +203,12 @@ def plant(tree, pristine, plan, sealed_path, run=subprocess.run):
             })
         if entry.get("side_effects"):
             sealed["seeds"][-1]["side_effects"] = entry["side_effects"]
+        # a member of the pristine catalogue's late-survivor set is sealed as one; the plan's own field wins
+        late = entry.get("late_survivor")
+        if late is None and "mutation" in entry and entry["mutation"] in getattr(mutate, "LATE_SURVIVORS", {}):
+            late = late_record(mutate.LATE_SURVIVORS[entry["mutation"]])
+        if late is not None:
+            sealed["seeds"][-1]["late_survivor"] = dict(late)
 
     # keep the tree history-less: one commit, amended
     run(["git", "-C", tree, "-c", "user.name=review", "-c", "user.email=review@localhost", "add", "-A"], check=True)
@@ -561,6 +589,92 @@ def selftest_side_effects():
     assert "side effects" not in catalogue_line(rows["b"])
 
 
+LATE_SELFTEST_MUTATE = '''import sys
+MUTATIONS = {"m_late": ("g.sh", "why late", [("line 2\\n", "LINE 2\\n", 1)]),
+             "m_plain": ("g.sh", "why plain", [("line 3\\n", "LINE 3\\n", 1)]),
+             "m_over": ("g.sh", "why over", [("line 1\\n", "LINE 1\\n", 1)])}
+MUTATION_SRC = {"m_late": "x.sql", "m_plain": "y.sql", "m_over": "z.sql"}
+MUTATION_TRACK = {}
+LATE_SURVIVORS = {"m_late": {"issue": 1157, "passes_survived": 10, "shape": "a gate versus a pending detach"},
+                  "m_over": {"issue": 706, "passes_survived": 7, "shape": "lock-then-reread"}}
+if __name__ == "__main__":
+    name, src, dst = sys.argv[1:4]
+    find, rep, _n = MUTATIONS[name][2][0]
+    with open(src) as fh:
+        text = fh.read()
+    with open(dst, "w") as fh:
+        fh.write(text.replace(find, rep))
+'''
+
+
+def selftest_late_survivor():
+    """A mutation seed that is a member of the catalogue's LATE_SURVIVORS is sealed with its issue and
+    passes_survived (read from the PRISTINE tree's catalogue, end to end through a real plant), a plan entry's
+    explicit late_survivor wins over the catalogue's and marks a patch seed too, a non-member carries no key,
+    and --catalogue prints the column for members alone."""
+    import tempfile
+    import types
+    with tempfile.TemporaryDirectory() as tmp:
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@localhost"]
+        pristine, tree = os.path.join(tmp, "pristine"), os.path.join(tmp, "tree")
+        for d in (pristine, tree):
+            os.makedirs(os.path.join(d, "bench", "mutations"))
+            for f in ("x.sql", "y.sql", "z.sql", "w.sql"):
+                with open(os.path.join(d, f), "w") as fh:
+                    fh.write("line 1\nline 2\nline 3\n")
+            subprocess.run(["git", "init", "-q", d], check=True)
+        with open(os.path.join(pristine, "bench", "mutations", "mutate.py"), "w") as fh:
+            fh.write(LATE_SELFTEST_MUTATE)
+        for d in (pristine, tree):
+            subprocess.run(git + ["-C", d, "add", "-A"], check=True)
+            subprocess.run(git + ["-C", d, "commit", "-q", "-m", "one"], check=True)
+        pp = os.path.join(tmp, "w.patch")
+        with open(pp, "w") as fh:
+            fh.write("--- a/w.sql\n+++ b/w.sql\n@@ -1,3 +1,3 @@\n line 1\n-line 2\n+LINE 2\n line 3\n")
+        plan = {"seeds": [{"mutation": "m_late", "lens": "concurrency", "tier": 1},
+                          {"mutation": "m_plain", "lens": "names", "tier": 2},
+                          {"mutation": "m_over", "lens": "locks", "tier": 2,
+                           "late_survivor": {"issue": 1166, "passes_survived": 10}},
+                          {"patch": pp, "lens": "upgrade", "tier": 2, "file": "w.sql",
+                           "late_survivor": {"issue": 1160, "passes_survived": 9}}]}
+        sealed_path = os.path.join(tmp, "sealed.json")
+        saved_path, saved_mod = list(sys.path), sys.modules.pop("mutate", None)
+        try:
+            plant(tree, pristine, plan, sealed_path,
+                  run=lambda cmd, **kw: subprocess.run(cmd, **{"capture_output": True, **kw}))
+        finally:
+            sys.path[:] = saved_path
+            sys.modules.pop("mutate", None)
+            if saved_mod is not None:
+                sys.modules["mutate"] = saved_mod
+        with open(sealed_path) as fh:
+            s1, s2, s3, s4 = json.load(fh)["seeds"]
+        # liveness: the plant really applied each seed, so the record describes a seeded tree
+        for f, want in (("x.sql", "LINE 2"), ("y.sql", "LINE 3"), ("z.sql", "LINE 1"), ("w.sql", "LINE 2")):
+            with open(os.path.join(tree, f)) as fh:
+                assert want in fh.read(), (f, want)
+        assert s1["late_survivor"] == {"issue": 1157, "passes_survived": 10}, s1
+        assert "late_survivor" not in s2, s2
+        assert s3["late_survivor"] == {"issue": 1166, "passes_survived": 10}, s3
+        assert s4["kind"] == "patch" and s4["late_survivor"] == {"issue": 1160, "passes_survived": 9}, s4
+    for bad in ({"issue": "1157", "passes_survived": 10}, {"issue": 1157}, [1157, 10]):
+        try:
+            validate({"seeds": [{"mutation": "m", "lens": "x", "tier": 1, "late_survivor": bad}]})
+        except SystemExit as e:
+            assert "late_survivor" in str(e), str(e)
+        else:
+            raise AssertionError(f"accepted a malformed late_survivor: {bad!r}")
+    fake = types.SimpleNamespace(
+        MUTATIONS={"a": ("g.sh", "why a", []), "b": ("h.sh", "why b", [])}, MUTATION_SRC={}, MUTATION_TRACK={},
+        LATE_SURVIVORS={"a": {"issue": 1158, "passes_survived": 10, "shape": "pre-lock read"}})
+    rows = {r["mutation"]: r for r in catalogue(fake)}
+    assert rows["a"]["late_survivor"] == {"issue": 1158, "passes_survived": 10} and "late_survivor" not in rows["b"], rows
+    assert catalogue_line(rows["a"]).endswith("\tlate_survivor: issue 1158, passes_survived 10"), catalogue_line(rows["a"])
+    assert "late_survivor" not in catalogue_line(rows["b"])
+    del fake.LATE_SURVIVORS
+    assert all("late_survivor" not in r for r in catalogue(fake))
+
+
 def selftest():
     # touched_lines: a literal pattern and a regex pattern, each at a known line
     text = "a\nb\nfoo(1)\nc\nfoo(2)\n"
@@ -587,6 +701,7 @@ def selftest():
     else:
         raise AssertionError("accepted a non-string side_effects")
     selftest_side_effects()
+    selftest_late_survivor()
     selftest_suite()
     print("plant_seeds selftest: PASS")
     return 0

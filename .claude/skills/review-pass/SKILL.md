@@ -28,6 +28,11 @@ Work in a scratch directory outside the repository (the session scratchpad). Ref
   **novel patches** you write for this pass in the catalogue's style (a quiet defect: a dropped
   re-check, an off-by-one at a boundary, a `%I` over a `_q` fragment). Save novel patches under
   `$WORK/seeds/`.
+- Plant at least three of K from the **late-survivor set** (`python3 bench/mutations/mutate.py
+  --late-survivors`: Tier 1 and 2 defects that survived five or more passes with their units read),
+  reported as a separate recall figure. A member is sealed as one without the plan saying so; a novel
+  patch of a late-surviving shape takes `"late_survivor": {"issue": N, "passes_survived": k}` in its plan
+  entry. `--catalogue` marks the members.
 - Give every seed that changes global state other claims depend on (freezes the monolith, disables a
   tick, alters a default) a `"side_effects"` string in its plan entry. It is sealed with the seed and
   `pass_metrics.py` sets it beside the candidates that may have leaned on it. Prefer planting such a
@@ -124,11 +129,17 @@ failed" came back either rebuilt or `fell`. Then
 scripts/review/pass_metrics.py --pass N --date $(date +%F) --pinned $pinned --release <tag> \
   --sealed $WORK/sealed.json --classified $WORK/classified.json --verdicts $WORK/verdicts.json \
   --budget "<text>" --budget-units <n> --lenses "<list>" --previous-lenses "<list>" \
-  --out docs/reviews/$(date +%F).md
+  --ages $WORK/ages.json --out docs/reviews/$(date +%F).md
 ```
 
+Write `$WORK/ages.json` first (`{"F3-07": "old", "F5-02": "young"}`), at least for every Tier 1 and 2
+finding: `old` when the defect survived earlier passes with its unit marked read in their coverage
+ledgers, `young` when it sits on code newer than the previous pass's pin (or a longer phrase). The record's
+findings table is `| tier | age | lens | finding | issue | fix PR |`, the lens read from each claim.
+
 **Report recall and precision before the count of findings, always**, recall with its suite-caught /
-read-caught split (the stopping criteria read the read-caught half), precision with its strict figure
+read-caught split (the stopping criteria read the read-caught half) and its late-survivor figure
+(`late-survivor h/n`, its own stopping row; none planted reads as NOT met), precision with its strict figure
 and the fell rate beside it (verified re-finds of open issues count as true reports; the fell rate is
 the reaching alarm). Then the findings by tier, the
 blind spots (seeds missed, by lens, each marked read-and-missed or unread from the ledger), and the
@@ -140,8 +151,10 @@ the record, with which claim depended on which seed's side effect.
 ## 8. File, fix, close
 
 - Write `$WORK/groups.json`, one entry per root-cause group
-  (`{"id": "RC1", "title": "...", "tier": 1, "claims": [...]}`), render the issues and read every one
-  before filing:
+  (`{"id": "RC1", "title": "...", "tier": 1, "claims": [...], "age": "old"}`), render the issues and
+  read every one before filing. Every Tier 1 and 2 issue carries its age and lens, as the line
+  `Age: old | Lens: concurrency` under the tier: give each such group the `age` of its findings from
+  `$WORK/ages.json` (`file_issues.py` warns on one without), and the lens comes from its claims.
 
   ```bash
   scripts/review/file_issues.py --groups $WORK/groups.json --claims $WORK/claims \
