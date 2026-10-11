@@ -143,6 +143,9 @@ jobs:
           python3 scripts/review/pr_surface.py --selftest
           python3 scripts/review/pr_classify.py --selftest
           python3 scripts/review/pr_comment.py --selftest
+          python3 scripts/review/stop_check.py --selftest
+          python3 scripts/review/loop_state.py --selftest
+          python3 scripts/review/decisions_queue.py --selftest
 
   shellcheck:
     name: Shell scripts
