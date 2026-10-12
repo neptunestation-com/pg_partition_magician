@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+- **The `_q` lint reads every body and every assignment PL/pgSQL makes** (#1278).
+  `scripts/check_quoted_splices.py` found bodies by splitting each install file on the bare `$$`, so a function
+  whose body was dollar-quoted with any other tag (`$fn$`) was never read, and it never read a FOR loop's target
+  as an assignment, so an unmarked text local given `quote_ident` output by `for v_cols in select ... loop` passed
+  while its SELECT INTO twin was refused. Bodies are now found by lexing the file (comments, literals and quoted
+  identifiers stepped over), every dollar-quoted string whatever its tag; a FOR or FOREACH loop's target is
+  paired with the loop's values (a query's list, a `for ... in execute` statement's, a FOREACH's array), and an
+  EXECUTE's INTO target with the list of the dynamic statement it spells out, so `execute 'select
+  quote_ident(...)' into v` is read while a template's own `%I`, which quotes a name in that statement and not
+  the value coming back, is not. The three install files read the same bodies and judge the same 82 quoting
+  assignments, none of them a violation. Guard `bench/quoted_splices_every_body.sh`, mutations
+  `quoted_splices_loop_target_unread`, `quoted_splices_execute_into_unread` and
+  `quoted_splices_bare_dollar_bodies`.
+- **The `_q` lint lexes block comments and escape strings** (#1236, bullets B08-01 and B08-02).
+  `strip_noise()` blanked `--` comments but not `/* */` ones, so a block comment before an assignment kept it
+  from starting a statement and a `;` inside one ended it early; and it read `E'it\'s'` as a plain literal that
+  closed at the escaped quote, so the next quote opened one that blanked the assignment after it. Both passed an
+  unmarked quoted list. A block comment, nested ones included, is now blanked like a line comment, and an escape
+  string's backslash escapes the character after it (only an escape string's: `'C:\'` still ends at its second
+  quote). Guard `bench/quoted_splices_every_body.sh`, mutations `quoted_splices_block_comment_kept` and
+  `quoted_splices_e_string_unescaped`.
+
 - **transmute's orphan-child guard asks this grid's labels** (#1274). It refused any relation whose name carried a
   time label of the control column's kind, so a monthly grid was refused by the operator's own standalone
   `sales_p2023`, a year label neither its cells nor its auto-regrain can give (`set_regrain` refuses a coarser

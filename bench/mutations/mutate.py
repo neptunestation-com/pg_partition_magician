@@ -11463,6 +11463,60 @@ MUTATIONS["quoted_splices_into_list_first_only"] = (
       '            rest = stmt[:m.start()]\n', 1)],
 )
 MUTATION_SRC["quoted_splices_into_list_first_only"] = "scripts/check_quoted_splices.py"
+# Issues #1278 (F8-01, F12-06, F8-08) and #1236 (bullets B08-01, B08-02): check_quoted_splices.py reads every
+# dollar-quoted body whatever its tag, a loop's target and an EXECUTE's INTO as assignments, and lexes block
+# comments and escape strings. One mutation per mechanism, each removing one clause, judged by the same guard.
+MUTATIONS["quoted_splices_loop_target_unread"] = (
+    "bench/quoted_splices_every_body.sh",
+    "Pre-#1278 scripts/check_quoted_splices.py: a FOR or FOREACH loop's target is not an assignment, so `for "
+    "v_cols in select string_agg(quote_ident(attname), ', ') ... loop` gives an unmarked text local a quoted list "
+    "the lint never reads, while the SELECT INTO twin is refused. One site, the loop targets assignments() yields.",
+    [("\n    yield from loop_targets(clean, raw)\n", "\n", 1)],
+)
+MUTATION_SRC["quoted_splices_loop_target_unread"] = "scripts/check_quoted_splices.py"
+MUTATIONS["quoted_splices_execute_into_unread"] = (
+    "bench/quoted_splices_every_body.sh",
+    "Pre-#1278 scripts/check_quoted_splices.py: an EXECUTE's INTO is not an assignment, so `execute 'select "
+    "quote_ident(relname) from pg_class' into v_cols` gives an unmarked text local a quoted name the lint never "
+    "reads. One site, the EXECUTE targets assignments() yields.",
+    [("\n    yield from execute_into(clean, raw)\n", "\n", 1)],
+)
+MUTATION_SRC["quoted_splices_execute_into_unread"] = "scripts/check_quoted_splices.py"
+MUTATIONS["quoted_splices_bare_dollar_bodies"] = (
+    "bench/quoted_splices_every_body.sh",
+    "Pre-#1278 (F8-08) scripts/check_quoted_splices.py: only a body dollar-quoted with the bare `$$` is read, so "
+    "an unmarked quoted list in a function whose body is tagged `$fn$` passes. One site, the dollar-quote "
+    "delimiter's tag.",
+    [('DOLLAR_QUOTE = re.compile(r"(?<![\\w$])\\$(?:[^\\W\\d][\\w]*)?\\$")\n',
+      'DOLLAR_QUOTE = re.compile(r"(?<![\\w$])\\$\\$")\n', 1)],
+)
+MUTATION_SRC["quoted_splices_bare_dollar_bodies"] = "scripts/check_quoted_splices.py"
+MUTATIONS["quoted_splices_block_comment_kept"] = (
+    "bench/quoted_splices_every_body.sh",
+    "Pre-#1236 (B08-01) scripts/check_quoted_splices.py: a body's block comment is not blanked, so one before an "
+    "assignment keeps it from starting a statement and a `;` inside one ends it early, and an unmarked quoted list "
+    "assigned there passes. One site, strip_noise's block-comment branch.",
+    [("""        if c == "/" and body.startswith("/*", i):
+            end = block_comment_end(body, i)
+            out.append(re.sub(r"[^\\n]", " ", body[i:end]))
+            i = end
+        elif c == '"':
+""", """        if c == '"':
+""", 1)],
+)
+MUTATION_SRC["quoted_splices_block_comment_kept"] = "scripts/check_quoted_splices.py"
+MUTATIONS["quoted_splices_e_string_unescaped"] = (
+    "bench/quoted_splices_every_body.sh",
+    "Pre-#1236 (B08-02) scripts/check_quoted_splices.py: an escape string's backslash escapes nothing, so "
+    "E'it\\'s' closes at its escaped quote, the next quote opens a literal that blanks the code after it, and an "
+    "unmarked quoted list assigned there passes. One site, strip_noise's backslash clause.",
+    [("""                if escapes and body[i] == "\\\\" and i + 1 < n:   # E'...': a backslash escapes what follows
+                    out.append(" " + ("\\n" if body[i + 1] == "\\n" else " "))
+                    i += 2
+                    continue
+""", "", 1)],
+)
+MUTATION_SRC["quoted_splices_e_string_unescaped"] = "scripts/check_quoted_splices.py"
 # Issue #1181 (review pass 11, F8-06): scripts/check_archive_object_keys.py follows the prefix read out of the
 # config row by the column's name. The mutation drops the one clause that makes a field operator's read the
 # reference, so `'prefix'` after `->>` or `#>>` is judged as the literal alone, and the parentheses around
