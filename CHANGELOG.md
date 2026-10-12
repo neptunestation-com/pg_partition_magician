@@ -19,8 +19,11 @@
   holds directly blocks (a write behind `regrain()`'s `SHARE` lock), passed with a `WARNING` naming it. Any other
   session waiting on the caller, directly or behind another queued request (a reader behind a DDL behind the
   swap's lock), can never let go before the swap and is not waited for: the swap gives up at once, naming the
-  pids and the queued requests (`maintain` logs `skip_regrain`, a hand call refuses), so no wait is unbounded
-  under `lock_timeout` 0. At the caller's `lock_timeout` `maintain` defers
+  pids and the queued requests (`maintain` logs `skip_regrain`, a hand call refuses). Two such waits that list
+  each other with no lock between them (two hand `regrain()` calls on two tables, or a hand `regrain_step` or a
+  tick against one) are a cycle too: each advertises itself with a transaction-level advisory lock, and the
+  younger of two yields at once to an older one, which keeps waiting and completes; no snapshot is ever skipped.
+  So no wait is unbounded under `lock_timeout` 0. At the caller's `lock_timeout` `maintain` defers
   the swap (`skip_regrain` naming the snapshots) and `regrain()` and the cutover refuse; none ever goes ahead.
   `regrain()`, which copies in the swap's own transaction, waits for every snapshot open while it runs and, on a
   database never quiet for long enough, refuses at its budget; auto-regrain through `maintain` is the paced path.
@@ -34,7 +37,7 @@
   `snapshot_wait_masked_state_dropped`, `snapshot_wait_running_statement_exempt`, `snapshot_wait_settles_running`,
   `snapshot_wait_no_blocked_exemption`, `snapshot_wait_list_captured_once`, `snapshot_wait_import_strictly_older`,
   `snapshot_wait_captured_xmin_bound`, `snapshot_wait_own_xid_strict`, `snapshot_wait_blocked_chain`,
-  `snapshot_wait_chain_waited`,
+  `snapshot_wait_chain_waited`, `snapshot_wait_peer_ignored`, `snapshot_wait_peer_older_yields`,
   `hypertable_cutover_no_snapshot_wait` and
   `hypertable_drain_delete_unrecorded`.
 

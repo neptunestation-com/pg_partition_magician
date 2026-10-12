@@ -7657,6 +7657,26 @@ drop function if exists pgpm._snapshot_wait(xid8, text, text, text);
 --     little; passing it lets a REPEATABLE READ reader behind a DDL behind this lock read the range empty (round
 --     6), and waiting for it never ends under lock_timeout 0 (round 7).
 --
+-- ANOTHER SNAPSHOT WAIT (round 9). Two of these waits can list each other with no lock between them: two hand
+-- regrain() calls on two parents (each one's reference is its own xid, and each one's snapshot was taken while the
+-- other ran), or a hand regrain_step or a maintain tick against a regrain(). Neither is blocked on the other, so
+-- neither rule above applies, and each would poll for the other for ever under lock_timeout 0. CREATE INDEX
+-- CONCURRENTLY has the same cycle between two index builds and breaks it by skipping a peer's snapshot
+-- (PROC_IN_SAFE_IC); that is sound for it because an index build reads nothing else afterwards, and it is not
+-- sound here (a REPEATABLE READ caller of regrain() reads on through its old snapshot after the call). So the
+-- cycle is broken by refusal instead:
+--   * A wait advertises itself, once it finds a session to wait for, with a transaction-level advisory lock keyed
+--     (1885826423, its own pid) ('pgmw'), which every role sees in pg_locks and which goes with the transaction,
+--     so a refusal, an abort or a commit clears it with no handler.
+--   * A wait that lists a session so marked whose transaction is OLDER than its own (a smaller backend_xid, or
+--     one this role cannot read: NULL counts as older) yields AT ONCE, naming those pids: maintain logs
+--     skip_regrain, a hand driver refuses. The older never yields to a younger one: it keeps waiting, and its
+--     wait ends when the younger's refusal releases that snapshot. In any cycle of waits the youngest lists an
+--     older one, so every cycle loses a member and none waits for ever; no snapshot is ever skipped.
+--   * The marker can be forged (an advisory key carries no ACL) and a wait past its last poll still holds it until
+--     its transaction ends. Either only ever makes a younger wait refuse, never pass a snapshot: a refusal, not an
+--     empty read.
+--
 -- THE BUDGET is the caller's lock_timeout, as for every lock the swap takes. When it runs out with a session still
 -- listed the step raises 'pg_partition_magician: <p_what> deferred: N snapshot(s) older than the copies still open
 -- (oldest: pid P, open T; pids ...)': maintain logs that as skip_regrain and the next tick tries again, regrain()
@@ -7689,7 +7709,7 @@ declare
   v_by_xid boolean;
   v_limit xid;
   v_still int[]; v_blocked int[]; v_chained int[]; v_queue text; v_passed int[] := '{}'; v_n int; v_pid int;
-  v_open text; v_new int;
+  v_open text; v_new int; v_older int[]; v_marked boolean := false;
   v_sleep float8 := 0.005;
 begin
   -- the copies' own transaction: an earlier one (wait for snapshots at or before it) or this one (wait for every
@@ -7750,6 +7770,18 @@ begin
       raise exception 'pg_partition_magician: % deferred at once: pids % hold a snapshot older than the copies and wait on a lock this session holds, directly or behind another queued request (queued on %), so none can release its snapshot before the swap commits: refused rather than waited for or swapped under. %. Nothing was swapped: maintain retries on its next tick, and a call by hand can be run again once the queued request (a DDL, say) has completed.',
         p_what, array_to_string(v_chained, ', '), coalesce(v_queue, 'a lock of this session'), p_where;
     end if;
+    -- another snapshot wait, older than this one, among the sessions listed: this one yields at once (round 9)
+    select coalesce(array_agg(a.pid order by a.pid), '{}') into v_older
+      from pg_stat_activity a
+     where a.pid = any(v_still)
+       and (a.backend_xid is null or age(a.backend_xid) > age(v_self::xid))          -- older, or not visible: older
+       and exists (select 1 from pg_locks m
+                    where m.pid = a.pid and m.locktype = 'advisory' and m.granted
+                      and m.classid = 1885826423::oid and m.objid = a.pid::oid and m.objsubid = 2);
+    if cardinality(v_older) > 0 then
+      raise exception 'pg_partition_magician: % deferred at once: pids % are snapshot waits of other pgpm swaps, older than this one, whose snapshots this one waits for while theirs may wait for this one''s, so the younger yields rather than the two waiting on each other for ever. %. Nothing was swapped: maintain retries on its next tick, and a call by hand can be run again once those have finished.',
+        p_what, array_to_string(v_older, ', '), p_where;
+    end if;
     v_n := cardinality(v_still);
     exit when v_n = 0;
     if v_budget_ms > 0 and clock_timestamp() - v_start >= v_budget_ms * interval '1 millisecond' then
@@ -7758,6 +7790,10 @@ begin
         into v_open from pg_stat_activity a where a.pid = v_pid;
       raise exception 'pg_partition_magician: % deferred: % snapshot(s) older than the copies still open (oldest: pid %, open %; pids %); a reader in one would find % empty after the swap. %. Nothing was swapped: maintain retries a regrain on its next tick, and a call by hand is refused and can be run again once those transactions have ended (from a direct session: a caller that holds a snapshot across the call is one of them).',
         p_what, v_n, v_pid, v_open, array_to_string(v_still, ', '), p_range, p_where;
+    end if;
+    if not v_marked then   -- advertised once there is a session to wait for; released with the transaction
+      perform pg_advisory_xact_lock_shared(1885826423, pg_backend_pid());
+      v_marked := true;
     end if;
     perform pg_sleep(v_sleep);
     v_sleep := least(v_sleep * 2, 0.1);

@@ -2005,14 +2005,36 @@ never see the cycle and under `lock_timeout` 0 it would never end. Two cases, tr
   refusing costs little, while passing it would let a `REPEATABLE READ` reader there read the range empty and
   waiting for it would never end.
 
+Two of these waits can also list each other with no lock between them: two hand `regrain` calls on two tables
+(each waits for every snapshot open while it runs, the other's included), or a hand `regrain_step` or a
+`maintain` tick against a `regrain`. Neither is blocked on the other, so neither rule above applies, and under
+`lock_timeout` 0 each would wait for the other for ever. `CREATE INDEX CONCURRENTLY` has the same cycle between
+two index builds and breaks it by ignoring the other build's snapshot; that is not sound here, since a
+`REPEATABLE READ` caller of `regrain` goes on reading through its old snapshot after the call. So the cycle is
+broken by refusal:
+
+- A wait that finds a session to wait for advertises itself with a transaction-level advisory lock, keys
+  (1885826423, its own pid), which every role sees in `pg_locks` and which goes with its transaction.
+- A wait that lists a session so advertised whose transaction is **older** than its own (a smaller
+  `backend_xid`, or one the caller cannot read, which counts as older) gives up **at once**:
+  `pg_partition_magician: regrain swap deferred at once: pids ... are snapshot waits of other pgpm swaps, older
+  than this one, ...`. `maintain` logs it as `skip_regrain`; a hand `regrain`, `regrain_step` or
+  `from_hypertable_cutover` refuses, swapping nothing, and can be run again once the other has finished.
+- The **older** wait never yields to a younger one: it keeps waiting, and its wait ends when the younger's
+  refusal releases that snapshot. In any cycle of waits the youngest lists an older one, so every cycle loses a
+  member, no pair waits for ever, and no snapshot is ever skipped.
+- The advisory key carries no ACL, so any role can take it, and a wait holds it until its transaction ends, past
+  its last poll. Either only ever makes a younger wait refuse sooner than it needed to; neither makes a wait pass a
+  snapshot.
+
 The budget is the caller's `lock_timeout`. Under `maintain` that is 200 ms, after which the step raises and the
 tick logs `skip_regrain` with `method` beginning `pg_partition_magician: regrain swap deferred: N snapshot(s)
 older than the copies still open (oldest: pid P, open T; pids ...)` (`T` reads `not visible to this role` when
 the caller cannot see that session's `xact_start`), and the next tick tries again; nothing was swapped or lost.
 `regrain` refuses with the same message and rolls back whole, copies included. Neither ever goes ahead under a
 snapshot it waits for. Under `lock_timeout` 0, the session default under which a hand `regrain` runs, the wait
-lasts as long as the snapshots do, which ends: a snapshot held by a session waiting on the swap is refused at
-once, above, rather than waited for. A long reporting transaction opened before the last copy therefore delays the
+lasts as long as the snapshots do, which ends: a snapshot held by a session waiting on the swap, or by an
+older snapshot wait of another swap, is refused at once, above, rather than waited for. A long reporting transaction opened before the last copy therefore delays the
 swap for as long as it stays open. **Call `regrain` from a direct session**: a caller that holds a snapshot
 across the call (a client waiting for it through `dblink`, a wrapper that holds one) is a reader the swap must
 wait for, and would wait for the call while the call waited for it.

@@ -43,6 +43,9 @@
 #                                            reader behind a DDL behind the step's lock reads empty (parts O, P, Q)
 #   snapshot_wait_chain_waited            -- such a session is waited for (round 7): under lock_timeout 0 it never
 #                                            ends, under a budget it is refused only at the budget (parts O, P, Q)
+#   snapshot_wait_peer_ignored            -- another snapshot wait is waited for like any session: two regrain()
+#                                            calls wait on each other for ever (parts R, S, T)
+#   snapshot_wait_peer_older_yields       -- the older of two waits yields too: both refuse, neither swaps (R, S)
 #
 # Usage: regrain_swap_waits_for_older_snapshots.sh <container> <db> [install.sql]
 # Runs on the plain core image (it needs pgtap, dblink and pg_prove, all of which it has). TAP_GUARD_TEST_FILE

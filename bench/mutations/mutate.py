@@ -12906,7 +12906,8 @@ MUTATION_SRC["test303_adopted_rows_by_count"] = "tests/303_adopt_partition_test.
 # clause: the wait, the record of the run's last write, each way the list lost a reader in an earlier round (a
 # masked backend_type, a transaction opened during regrain(), a masked state, a running statement, a settle at the
 # budget, a list of sessions taken once, an importer only strictly older than every running xid, only at or before a
-# captured xmin, or only strictly older than the caller's xid; a chained waiter passed, or waited for), the one
+# captured xmin, or only strictly older than the caller's xid; a chained waiter passed, or waited for; a peer
+# wait ignored, or yielded to when younger), the one
 # exemption (a session blocked on this one), caught by tests/328 through bench/regrain_swap_waits_for_older_snapshots.sh; and the cutover's call and the drains' record, caught by
 # tests/timescale/db/67 through bench/hypertable_cutover_waits_for_older_snapshots.sh.
 _G1241 = "bench/regrain_swap_waits_for_older_snapshots.sh"
@@ -13065,6 +13066,22 @@ MUTATIONS["snapshot_wait_chain_waited"] = (
     "returns and the queued DDL blocks every read and write of the table (round 7's finding V-01 on PR #1253); under "
     "a budget it is refused only when the budget runs out. One site, the refusal. tests/328 parts O, P and Q catch it.",
     [("    if cardinality(v_chained) > 0 then\n", "    if false then\n", 1)],
+)
+MUTATIONS["snapshot_wait_peer_ignored"] = (
+    _G1241,
+    "Round 8's wait, blind to another snapshot wait: two hand regrain() calls on two parents (or a hand regrain_step "
+    "or a maintain tick against a regrain()) each list the other's snapshot, neither blocked on a lock of the other, "
+    "and each polls for the other for ever under lock_timeout 0, both parents' SHARE locks held (round 8's finding "
+    "V-01 on PR #1253). One site, the yield. tests/328 parts R and S catch it by their statement_timeout.",
+    [("    if cardinality(v_older) > 0 then\n", "    if false then\n", 1)],
+)
+MUTATIONS["snapshot_wait_peer_older_yields"] = (
+    _G1241,
+    "The peer rule without its order: a wait yields to ANY other snapshot wait it lists, older or younger, so two "
+    "regrain() calls racing each other both refuse and neither ever swaps while they race. One site, the age "
+    "predicate. tests/328 parts R and S catch it (the older must complete and swap).",
+    [("       and (a.backend_xid is null or age(a.backend_xid) > age(v_self::xid))          -- older, or not visible: older\n",
+      "       and true\n", 1)],
 )
 _G1241_HT = "bench/hypertable_cutover_waits_for_older_snapshots.sh"
 MUTATIONS["hypertable_cutover_no_snapshot_wait"] = (
