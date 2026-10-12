@@ -1963,6 +1963,48 @@ begin
 end;
 $$;
 
+-- Can a grid of this kind, step, anchor and zone give a label as coarse as p_suffix (#1274)? _is_fine_child_label
+-- answers for the KIND: a time suffix passes it whatever its granularity, a year's or a microsecond's. A grid
+-- labels a cell at its step's granularity (_part_name: YYYY for whole years, YYYY_MM for months, YYYY_MM_DD for
+-- days, then the hour, the minute, the second and the microsecond), a regrain at its target step's or finer
+-- (_regrain_sub_name only ever falls toward finer), and set_regrain refuses a target coarser than the step
+-- (#341), measured as it measures it: the two steps' first cells from the anchor, in the grid's zone. So the
+-- coarsest label a grid can give is that of the coarsest step set_regrain would accept: a year's when '1 year'
+-- is accepted (an '18 months' grid, whose '1 year' cells are named <rel>_pYYYY), a month's when '1 month' is,
+-- else the step's own, a fixed one (a calendar step always takes '1 month'), read by _part_name's thresholds
+-- (a fixed target no wider than a fixed step is no coarser); and every finer one. Those two are the narrowest
+-- steps with a year's and a month's label, so no other target reaches further. A label coarser than that is out of the grid's reach: obtain never names a cell
+-- by it and auto-regrain never does, so transmute's orphan guard does not refuse a table of the operator's own
+-- under it (a monthly grid and <rel>_p2023, a hand-made archive of 2023). A one-off regrain() to a coarser
+-- target can (a monthly monolith split into years), and regrain_step refuses a relation it did not create at
+-- the name it is about to copy into (#631), loudly and before a row moves. restore_incoming_fks's in-flight gate
+-- does NOT ask this: a coarser one-off regrain's un-attached children are exactly what it has to see. An id
+-- label is a value, and a finer step reaches any value, so every id label _is_fine_child_label accepts is in
+-- reach.
+create or replace function pgpm._grid_can_label(p_kind text, p_step text, p_anchor text, p_tz text, p_suffix text)
+returns boolean language plpgsql stable as $$
+declare v_secs numeric; v_step_hi text; v_coarsest int; v_g text[]; v_rank int;
+begin
+  if p_kind = 'id' then
+    return true;
+  end if;
+  v_secs := extract(epoch from p_step::interval);
+  v_step_hi := pgpm._grid_next(p_kind, p_step, p_anchor, p_tz);
+  v_coarsest := case
+    when not pgpm._native_gt(p_kind, pgpm._grid_next(p_kind, '1 year', p_anchor, p_tz), v_step_hi) then 1
+    when not pgpm._native_gt(p_kind, pgpm._grid_next(p_kind, '1 month', p_anchor, p_tz), v_step_hi) then 2
+    when v_secs >= 86400 then 3 when v_secs >= 3600 then 4 when v_secs >= 60 then 5
+    when v_secs >= 1 then 6 else 7 end;
+  -- the label's own granularity, read off its shape: a year, a month, a day, then the fourth group's width
+  -- (HH24, HH24MI, HH24MISS), then a fifth group (the microseconds); a BC mark is no group
+  v_g := string_to_array(regexp_replace(p_suffix, '_bc$', ''), '_');
+  v_rank := case when cardinality(v_g) <= 3 then cardinality(v_g)
+                 when cardinality(v_g) = 4 then case when length(v_g[4]) <= 2 then 4 when length(v_g[4]) <= 4 then 5 else 6 end
+                 else 7 end;
+  return v_rank >= v_coarsest;
+end;
+$$;
+
 -- _part_name maps a partition's NATIVE [lo, hi) to its child table name. A one-step range (hi is the
 -- next grid value after lo, the common fine partition) keeps the historical name _p<lo>; a wider range
 -- (a coarse / monolith child, REDESIGN.md section 6) is named _p<lo>_to_<hi> so it can never collide
@@ -10309,23 +10351,49 @@ $$;
 -- a relation's own row type and an implicit array type alone. The suffix is recognised by
 -- _is_fine_child_label, as in pg_class above (#794).
 --
--- In the cutover a partition attached to the new parent is not a holder (it is in pg_inherits), nor is its
--- row type (_type_squatter), so the guard asks the same question there and refuses only what the preflight
--- would have. It reads pg_class and pg_type under the statement's snapshot, not through to_regclass, for the
--- reason _transmute_refuse_names_held gives.
-create or replace function pgpm._transmute_refuse_child_holders(p_nsp name, p_rel name, p_control_kind text)
+-- In the cutover a partition attached to the new parent is not a holder, nor is its row type (_type_squatter),
+-- so the guard asks the same question there and refuses only what the preflight would have. It reads pg_class
+-- and pg_type under the statement's snapshot, not through to_regclass, for the reason
+-- _transmute_refuse_names_held gives.
+--
+-- #1216: a partition of THIS parent (p_parent: the table in the preflight, which has none, and the new parent
+-- in the cutover) is the one relation in pg_inherits that is not a holder. The exemption was any pg_inherits
+-- row, so a partition or inheritance child of ANOTHER table at a forward cell's name passed the preflight and
+-- both of the cutover's askings, obtain stepped over the held name, and the conversion completed with that
+-- cell unbuilt (fail_obtain_name) and every write into its range refused. It is refused up front now, named
+-- with the table it belongs to, and the remedy is a rename, which leaves it where it belongs.
+--
+-- #1274: and only a label THIS grid can give (_grid_can_label: the step's granularity, or a finer one, or the
+-- coarser one a regrain target set_regrain accepts on this step and anchor reaches). The test was the kind's alone, so a monthly grid was refused by the
+-- operator's own <rel>_p2023, a name neither its cells nor its auto-regrain can take, and told to drop it.
+-- A standalone table that IS in reach is still refused, but the remedy leads with the rename: the guard
+-- cannot tell an orphan from a table of the operator's own, and a rename loses nothing either way.
+drop function if exists pgpm._transmute_refuse_child_holders(name, name, text);
+create or replace function pgpm._transmute_refuse_child_holders(p_nsp name, p_rel name, p_control_kind text,
+                                                                p_step text, p_anchor text, p_tz text,
+                                                                p_parent regclass)
 returns void language plpgsql stable as $$
-declare v_orphan name; v_orphan_kind "char";
+declare v_orphan name; v_orphan_kind "char"; v_holder_q text; v_is_partition boolean;
 begin
-  select c.relname, c.relkind into v_orphan, v_orphan_kind
+  select c.relname, c.relkind, c.relispartition,
+         (select format('%I.%I', pn.nspname, pc.relname)
+            from pg_inherits i join pg_class pc on pc.oid = i.inhparent join pg_namespace pn on pn.oid = pc.relnamespace
+           where i.inhrelid = c.oid order by i.inhseqno limit 1)
+    into v_orphan, v_orphan_kind, v_is_partition, v_holder_q
     from pg_class c
    where c.relnamespace = (select n.oid from pg_namespace n where n.nspname = p_nsp)
      and starts_with(c.relname, p_rel || '_p')
      and pgpm._is_fine_child_label(p_control_kind, substr(c.relname, length(p_rel) + 3))
-     and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid)
+     and pgpm._grid_can_label(p_control_kind, p_step, p_anchor, p_tz, substr(c.relname, length(p_rel) + 3))
+     and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid and i.inhparent = p_parent)
    limit 1;
-  if v_orphan is not null and v_orphan_kind = 'r' then
-    raise exception 'pg_partition_magician: %.% already exists as a standalone table matching this parent''s partition naming -- most likely an orphan left by an interrupted regrain. Drop it (drop table %.%) and retry transmute.',
+  if v_orphan is not null and v_holder_q is not null then
+    raise exception 'pg_partition_magician: %.% already exists as % of % matching this parent''s partition naming, and the conversion would collide with it when it creates that partition. It is %''s, so transmute does not touch it: rename it out of the way (alter % %.% rename to <a new name>; it stays where it is) and retry transmute.',
+      p_nsp, v_orphan, case when v_is_partition then 'a partition' else 'an inheritance child' end, v_holder_q,
+      v_holder_q, case when v_orphan_kind in ('i', 'I') then 'index' when v_orphan_kind = 'f' then 'foreign table' else 'table' end,
+      quote_ident(p_nsp), quote_ident(v_orphan);
+  elsif v_orphan is not null and v_orphan_kind = 'r' then
+    raise exception 'pg_partition_magician: %.% already exists as a standalone table matching this parent''s partition naming, a name the conversion or a later regrain could give one of its partitions: an orphan left by an interrupted regrain of an earlier table by this name, or a table of your own. Rename it out of the way (alter table %.% rename to <a new name>) and retry transmute; drop it instead only if it is such an orphan and holds nothing you need.',
       p_nsp, v_orphan, quote_ident(p_nsp), quote_ident(v_orphan);
   elsif v_orphan is not null then
     raise exception 'pg_partition_magician: %.% already exists as a % matching this parent''s partition naming, and the conversion would collide with it when it creates that partition. Drop or rename it and retry transmute.',
@@ -10336,6 +10404,7 @@ begin
    where t.typnamespace = (select n.oid from pg_namespace n where n.nspname = p_nsp)
      and starts_with(t.typname, p_rel || '_p')
      and pgpm._is_fine_child_label(p_control_kind, substr(t.typname, length(p_rel) + 3))
+     and pgpm._grid_can_label(p_control_kind, p_step, p_anchor, p_tz, substr(t.typname, length(p_rel) + 3))
      and pgpm._type_squatter(p_nsp, t.typname) is not null
    limit 1;
   if v_orphan is not null then
@@ -11013,7 +11082,7 @@ begin
 
   -- Orphaned-child guard (REDESIGN.md, #509, #707): nothing may hold a name pgpm could give one of this
   -- table's fine children. See the helper, which the cutover asks again (#1135, #1167).
-  perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind);
+  perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, p_parent);
 
   -- Staging-name collision guard (#344): phase 3 builds the new parent under a temporary name BEFORE
   -- either rename (so that none of its setup work adds to the outage), which means that name must be
@@ -12426,12 +12495,12 @@ begin
     perform pgpm.obtain(v_parent);
   exception
     when duplicate_table or duplicate_object or unique_violation then
-      perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind);
+      perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, v_parent);
       perform pgpm._transmute_refuse_names_held(v_nsp, v_fwd_names, 'CREATE of a forward partition',
                                                 p_skip => v_pre_names);
       raise;
   end;
-  perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind);
+  perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, v_parent);
 
   -- the conversion is complete: deleting the claim row IS releasing the claim, and nothing is left for the
   -- reaper to undo.

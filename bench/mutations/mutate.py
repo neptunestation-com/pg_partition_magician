@@ -12542,7 +12542,7 @@ MUTATIONS["transmute_child_names_preflight_only"] = (
     "in the preflight only. A table (tests/321 (A)) or an enum (B) committed at a forward cell's name after it "
     "is stepped over by the cutover's obtain, and the conversion completes with that cell unbuilt "
     "(fail_obtain_name): every write into it is refused. One site: the cutover's asking after its obtain.",
-    [("      raise;\n  end;\n  perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind);\n",
+    [("      raise;\n  end;\n  perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, v_parent);\n",
       "      raise;\n  end;\n", 1)],
 )
 MUTATIONS["transmute_forward_create_unhandled"] = (
@@ -12552,16 +12552,16 @@ MUTATIONS["transmute_forward_create_unhandled"] = (
     "or its array type name (D), makes the cutover die raw once it commits, after phases 1 and 2 committed the "
     "bound and the claim. One site: the unique_violation arm of the handler around the cutover's obtain.",
     [("    when duplicate_table or duplicate_object or unique_violation then\n"
-      "      perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind);\n",
+      "      perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, v_parent);\n",
       "    when duplicate_table or duplicate_object then\n"
-      "      perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind);\n", 1)],
+      "      perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, v_parent);\n", 1)],
 )
 MUTATIONS["transmute_forward_orphan_unasked"] = (
     "bench/transmute_child_names_under_lock.sh",
     "#1135 with the forward CREATE's handler asking the general names helper only, not the orphan-child "
     "guard: a table an open transaction was creating at a forward cell's name (tests/321 (C)) is refused in "
     "the general helper's words, not the up-front ones the file pins. One site: that handler's guard call.",
-    [("unique_violation then\n      perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind);\n"
+    [("unique_violation then\n      perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, v_parent);\n"
       "      perform pgpm._transmute_refuse_names_held(v_nsp, v_fwd_names,",
       "unique_violation then\n      perform pgpm._transmute_refuse_names_held(v_nsp, v_fwd_names,", 1)],
 )
@@ -14022,6 +14022,34 @@ MUTATIONS["uninstall_capture_fn_nsp_read_bare"] = (
       "      select x.nsp, x.delta, x.fn, x.fn_nsp\n", 1)],
 )
 MUTATION_SRC["uninstall_capture_fn_nsp_read_bare"] = "pgpm_core/uninstall.sql"
+
+# Issues #1274 and #1216: transmute's orphan-child guard refuses a holder of a name THIS grid can give one of
+# THIS table's partitions, and only that. bench/transmute_child_holders_by_grid.sh runs tests/341 against each.
+_G17 = "bench/transmute_child_holders_by_grid.sh"
+MUTATIONS["child_holders_any_kind_label"] = (
+    _G17,
+    "Pre-#1274 transmute: the pg_class half of the orphan-child guard asks only whether a name's suffix is a label "
+    "of the control KIND, so a monthly grid is refused by the operator's own standalone t341a_p2023, a year label "
+    "neither its cells nor its auto-regrain can give, and told to drop it. One site, the pg_class query's grid "
+    "label test. tests/341 parts A and G catch it (the monthly and the '30 days' conversions are refused).",
+    [("     and pgpm._grid_can_label(p_control_kind, p_step, p_anchor, p_tz, substr(c.relname, length(p_rel) + 3))\n", "", 1)],
+)
+MUTATIONS["child_holder_types_any_kind_label"] = (
+    _G17,
+    "#1274 with the pg_type half of the orphan-child guard still asking the KIND's label test alone: a domain "
+    "t341a_p2022 refuses a monthly grid that can never give a year label. One site, the pg_type query's grid "
+    "label test. tests/341 part A catches it.",
+    [("     and pgpm._grid_can_label(p_control_kind, p_step, p_anchor, p_tz, substr(t.typname, length(p_rel) + 3))\n", "", 1)],
+)
+MUTATIONS["child_holders_any_parent_exempt"] = (
+    _G17,
+    "Pre-#1216 transmute: a relation with ANY pg_inherits parent is not a holder, so a partition of another table "
+    "(tests/341 part E) or an inheritance child of one (F) at a forward cell's name passes the preflight and the "
+    "cutover's askings, obtain steps over the name, and the conversion completes with that cell unbuilt. One "
+    "clause, the exemption's parent.",
+    [("     and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid and i.inhparent = p_parent)\n",
+      "     and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid)\n", 1)],
+)
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- **transmute's orphan-child guard asks this grid's labels** (#1274). It refused any relation whose name carried a
+  time label of the control column's kind, so a monthly grid was refused by the operator's own standalone
+  `sales_p2023`, a year label neither its cells nor its auto-regrain can give (`set_regrain` refuses a coarser
+  target, #341), and the message called it a regrain orphan and told the operator to `drop table` it, rows and
+  all. The label must now be one the grid can give (`pgpm._grid_can_label`): the step's granularity or a finer
+  one, or the coarser one a regrain target no wider than the step gives (a year label on an `'18 months'` grid);
+  both the table and the type halves of the guard ask it. A one-off `regrain()` to a coarser target is left to
+  `regrain_step`'s own refusal of a relation it did not create (#631). A standalone table that is in reach is
+  still refused, and the remedy now renames it (`alter table ... rename to ...`) rather than dropping it.
+- **A partition of another table at a forward cell's name is refused up front** (#1216). The orphan-child guard
+  excused any relation with a `pg_inherits` parent, so a partition or inheritance child of an unrelated table
+  holding `<table>_p<label>` passed the preflight and the cutover's askings, obtain stepped over the name, and
+  the conversion completed with that cell unbuilt (`fail_obtain_name`) and every write into its range refused.
+  Only a partition of the table's own new parent is excused now; the refusal names the table the holder
+  belongs to and renames it out of the way.
 - **`untransmute` and `uninstall.sql` drop a moved regrain capture function** (#1271).
   `pgpm._regrain_capture_names` looked the recorded capture function up by its oid only inside the delta's
   current schema, so once the delta (`ALTER TABLE ... SET SCHEMA`) or the function (`ALTER FUNCTION ... SET

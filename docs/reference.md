@@ -439,9 +439,12 @@ row: `transmute` converts a table once, and a retry whose earlier cutover did co
 is not a plain table (partitioned, a view, a foreign table), or is a partition, an inheritance child or an
 inheritance parent; a relation of any kind already holds the name the monolith will take
 (`<table>_p<lo>_to_<hi>`, typically a monolith detached from an earlier conversion of a table by that name)
-or a child-partition name (`<table>_p<label>`, any name pgpm could give a fine child, an id label past 19
-digits or with a fraction included: an orphan from an interrupted regrain, or a sequence or
-view that happens to be named that way) or the staging name `<table>_pgpm_new` the new parent is built under
+or a child-partition name (`<table>_p<label>`, any name pgpm could give a partition on this grid: a label
+at the step's granularity or a finer one, or the coarser one a regrain target no wider than the step gives,
+such as a year label on an `'18 months'` grid but not on a monthly one; an id label past 19 digits or with
+a fraction included: an orphan from an interrupted regrain, a table of your own, a sequence or view that
+happens to be named that way, or a partition or inheritance child of another table; the remedy renames it,
+which keeps its rows and its place) or the staging name `<table>_pgpm_new` the new parent is built under
 (usually a leftover from an interrupted run; the message names the kind of relation it found and the `DROP`
 for that kind, or, for one that cannot be dropped on its own, such as a constraint's index or an identity
 column's sequence, the object it is part of, or, for one something else depends on, such as a serial
@@ -492,8 +495,8 @@ would filter the caller's reads of the table (`row_security_active()` is true: a
 bound is read from the rows the caller can see (run it as a role with `BYPASSRLS`; an owner on a table
 that only `ENABLE`s row-level security is not filtered and converts as before); a non-PK `UNIQUE` secondary index does not include the
 partition key (global uniqueness could not be enforced); an incoming FK exists and `p_incoming_fks` is
-`'error'`; a standalone table matching the child-partition naming already exists (an orphan from an
-interrupted run); a name the conversion derives from the table's (the monolith's `<rel>_p<lo>_to_<hi>`, a
+`'error'`; a standalone table matching this grid's child-partition naming already exists (an orphan from
+an interrupted run, or a table of your own: rename it); a name the conversion derives from the table's (the monolith's `<rel>_p<lo>_to_<hi>`, a
 fine cell's `<rel>_p<lo>`, the staging `<rel>_pgpm_new`) would exceed PostgreSQL's 63-byte identifier
 limit, which pgpm never truncates (the message names the offending name and says how many bytes to shorten
 the table name by; the budget is under [Partition naming](#partition-naming)); a secondary index's name is

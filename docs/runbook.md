@@ -549,25 +549,34 @@ maintenance actually runs.
 **Symptom.** `transmute` refuses up front with an error like:
 
 > pg_partition_magician: public.events_p2026_03 already exists as a standalone table matching this
-> parent's partition naming -- most likely an orphan left by an interrupted regrain. Drop it
-> (drop table public.events_p2026_03) and retry transmute.
+> parent's partition naming, a name the conversion or a later regrain could give one of its partitions: an
+> orphan left by an interrupted regrain of an earlier table by this name, or a table of your own. Rename it
+> out of the way (alter table public.events_p2026_03 rename to &lt;a new name&gt;) and retry transmute; drop
+> it instead only if it is such an orphan and holds nothing you need.
 
 **What it means.** A regrain builds each fine child as a **standalone** table and only `ATTACH`es it at
 the swap. A standalone child has no dependency on the parent, so a `DROP TABLE <parent> CASCADE` does
 **not** remove an un-attached child -- it survives the cascade. If the parent is then recreated and
 re-transmuted, the new conversion would collide with that orphan by name. So `transmute` refuses when it
-finds a standalone table matching the parent's child-partition naming (`<rel>_p<label>`, any label pgpm
-could give a fine child, such as `events_p2026_03`, `n_p0000000000000000100`, a 20-digit id label past
-10^19 or one with a `_<fraction>` tail), rather than silently adopting stale data. An in-flight child is
-also tracked in `pgpm.part` with `attached = false`.
+finds a standalone table matching the parent's child-partition naming (`<rel>_p<label>`, any label THIS
+grid could give a partition: its step's granularity or a finer one, such as `events_p2026_03` on a monthly
+grid, `n_p0000000000000000100`, a 20-digit id label past 10^19 or one with a `_<fraction>` tail), rather
+than silently adopting stale data. A coarser label is no obstacle: a monthly grid is not refused by
+`events_p2023`, a year label it never gives (a year label is in reach only of a grid whose step is at least
+a year long, such as `'18 months'`, whose `'1 year'` regrain target gives it). pgpm cannot tell an orphan
+from a table of your own, so the remedy renames it. An in-flight child is also tracked in `pgpm.part` with
+`attached = false`.
 
-Two sibling refusals share this shape. `... already exists as a sequence matching this parent's partition
+Three sibling refusals share this shape. `... already exists as a sequence matching this parent's partition
 naming ...` means a relation that is not a table holds a child-partition name; the message says what kind it
-is, so `drop table` is not the command. `... already exists, and transmute needs that name for the monolith
-...` means a relation holds the coarse name the converted table itself will take (`<rel>_p<lo>_to_<hi>`),
-typically a monolith detached from an earlier conversion of a table by that name. In every case the refusal
-happens before anything is committed: no bound, no claim, the table untouched. Drop or rename the relation
-the message names and retry.
+is, so `drop table` is not the command. `... already exists as a partition of public.other matching this
+parent's partition naming ...` (or `an inheritance child of`) means a partition of ANOTHER table holds the
+name; it is that table's, so rename it (`alter table ... rename to ...`, which keeps it attached where it
+is) rather than drop it. `... already exists, and transmute needs that name for the monolith ...` means a
+relation holds the coarse name the converted table itself will take (`<rel>_p<lo>_to_<hi>`), typically a
+monolith detached from an earlier conversion of a table by that name. In every case the refusal happens
+before anything is committed: no bound, no claim, the table untouched. Rename (or, for an orphan you do not
+need, drop) the relation the message names and retry.
 
 **Steps.**
 
@@ -580,10 +589,11 @@ the message names and retry.
    select * from pgpm.partitions where child_name = 'events_p2026_03';  -- attached = false, if still tracked
    ```
 
-2. Drop the orphan and retry:
+2. Rename it out of the way and retry. Renaming keeps its rows; drop it instead only if step 1 showed it
+   is an orphan and it holds nothing you need:
 
    ```sql
-   drop table public.events_p2026_03;   -- the table the error named
+   alter table public.events_p2026_03 rename to events_p2026_03_old;   -- the table the error named
    -- then re-run your transmute(...) call
    ```
 
