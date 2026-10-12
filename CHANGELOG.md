@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **A retired chunk's bound with no offset is read on the grid's clock, not the caller's** (#1264).
+  `pgpm._over_retired_chunks`, which decides the partitions the archive step and `retain()` hold over a retired
+  chunk's range, compared the bounds with `::timestamptz` in the caller's session, and a retired ledger row an
+  older install wrote can carry a bound with no offset (before #977 a strategy's `covered_hi` was stored verbatim,
+  and no upgrade rewrites a retired row). The same call then held a partition from pg_cron's UTC session and not
+  from an operator's Asia/Kolkata one, which archived it over the retired range. Every bound it compares, the
+  ledger's and the partitions', now goes through `pgpm._native_bound_key`: a bound with an offset is the instant
+  it names, one without is wall time in `config.partition_tz`, and a DateStyle-shaped one reads as `ISO, MDY`, so
+  every session gets the same answer; the caller's settings are left as they were. The rows are read, not
+  rewritten: a retired row is the record of the only copy. Test `tests/334`; guard
+  `bench/over_retired_chunks_grid_zone.sh`; mutations `over_retired_chunks_session_zone`, `native_bound_key_utc`,
+  `native_bound_key_session_datestyle`.
 - **`from_hypertable` and its cutover ask the grid's mixed-step rule before the swap** (#1268). A `p_interval`
   that mixes a month count with a duration (`'1 mon 1 day'`) is one `transmute` refuses only in
   `pgpm._grid_floor`, when it first places a bound, and `pgpm._from_hypertable_check_arguments` did not ask it,
