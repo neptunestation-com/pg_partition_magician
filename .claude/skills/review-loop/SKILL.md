@@ -52,7 +52,10 @@ first thing you read.
 Run `/review-pass <pin> 9 <lenses>` with the budget below. At each of its numbered steps,
 `loop_state.py ... set --phase review --step "<n>: <what>"` when the step starts, and `loop_state.py ...
 progress` whenever a step advances inside it (a finder returns, a verifier's verdict lands). The record it
-writes must carry the coverage line and the late-survivor figure; `stop_check.py` reads both.
+writes must carry the coverage line (`pass_metrics.py --coverage $WORK/coverage.json`, the final
+`coverage.py --out` after any re-runs), the late-survivor figure and the `capture-recapture (T1):` line
+(`--capture-recapture`, saying `estimate <x>[, found <y>]`, `not attempted` or `not computable`);
+`stop_check.py` reads all three.
 
 ## 3. The fix phase
 
@@ -72,9 +75,11 @@ blocking decision.
   stopping status with the lenses the cycle owes (`stop_check.py`'s lines); cost against the ceiling; a
   one-paragraph reading. Add `scripts/review/decisions_queue.py $LOOP/decisions_queue.md render --since N`.
   Post both on the record PR (`gh pr comment`) AND in the chat.
-- The record's merge: in loop 12 the user merges it; wait, with the dead-man switch running (a long wait
-  for the user is reported, not a failure). From loop 13, merge it when its checks are green and the
-  closure gate holds. Its merge commit is the next loop's pin.
+- The record's merge: in loop 12 the user merges it. Before the wait, `loop_state.py ... set --phase waiting
+  --step "record PR #N awaits the user's merge"`: `check` reads a waiting loop as ok and reports how long it
+  has waited, so a wait for the user never reads stale or dead. Once it has merged, `set --phase stop_check
+  --step "record PR #N merged"`, which re-arms the switch. From loop 13, merge it when its checks are green
+  and the closure gate holds. Its merge commit is the next loop's pin.
 
 ## 5. Stop or continue
 

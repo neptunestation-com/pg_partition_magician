@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """loop_state.py <state.json> init --loop N --pin <sha> [--force]
-   loop_state.py <state.json> set --phase review|fix|record|report|stop_check|done --step "<text>" [--pr N ...] [--pin <sha>]
+   loop_state.py <state.json> set --phase review|fix|record|report|waiting|stop_check|done --step "<text>" [--pr N ...] [--pin <sha>]
    loop_state.py <state.json> progress
    loop_state.py <state.json> show
    loop_state.py <state.json> check [--stale-hours 2] [--dead-hours 6]
@@ -19,9 +19,12 @@ stamps `last_progress`; `progress` only stamps it. A transition is progress; a w
 do is not, so the driver calls `progress` only when a step actually advanced.
 
 `check` prints the age of the last progress and the verdict while a phase is open (every phase but
-`done`): exit 0 ok, 3 STALE when it is older than --stale-hours (push a notification and keep the wakeup),
-4 DEAD when it is older than --dead-hours (stop and report). After `set --phase done` it exits 0 and says no
-phase is open. Exit 2 is a missing or malformed state file, or an argument refused: never a silent default.
+`waiting` and `done`): exit 0 ok, 3 STALE when it is older than --stale-hours (push a notification and keep
+the wakeup), 4 DEAD when it is older than --dead-hours (stop and report). `waiting` is the loop parked on the
+user (loop 12's record PR awaiting the user's merge: `set --phase waiting --step "record PR #N awaits the
+user's merge"`, then `set --phase stop_check` once it merged): `check` exits 0 and notes how long it has
+waited, since a wait for the user is not a stall. After `set --phase done` it exits 0 and says no phase is
+open. Exit 2 is a missing or malformed state file, or an argument refused: never a silent default.
 Times are UTC, ISO 8601 with a `Z`.
 """
 import argparse
@@ -34,7 +37,7 @@ import re
 import sys
 import tempfile
 
-PHASES = ("init", "review", "fix", "record", "report", "stop_check", "done")
+PHASES = ("init", "review", "fix", "record", "report", "waiting", "stop_check", "done")
 SETTABLE = PHASES[1:]
 HISTORY_MAX = 50
 FIELDS = ("loop", "pin", "phase", "step", "prs", "started", "last_progress", "history")
@@ -149,6 +152,8 @@ def verdict(st, stale_hours=2.0, dead_hours=6.0, t=None):
     head = f"last progress {st['last_progress']}, {age:.2f} h ago ({where})"
     if st["phase"] == "done":
         return OK, f"{head}: ok (no phase open)"
+    if st["phase"] == "waiting":
+        return OK, f"{head}: ok (waiting on the user for {age:.2f} h; the dead-man switch does not run while waiting)"
     if age < -0.05:
         return OK, f"{head}: ok (last progress is in the future: check the clock)"
     if age > dead_hours:
@@ -203,6 +208,13 @@ def selftest():
         assert verdict(st, stale_hours=1, dead_hours=3, t=hours(8.5))[0] == STALE
         cmd_progress(p, t=hours(12))
         assert verdict(load(p), t=hours(12.5))[0] == OK, "progress resets the switch"
+        # a loop waiting on the user is never stale or dead, and says how long it has waited; leaving the
+        # wait re-arms the switch from that transition
+        cmd_set(p, "waiting", "record PR #1240 awaits the user's merge", t=hours(12.25))
+        code, line = verdict(load(p), t=hours(30))
+        assert code == OK and "waiting on the user for 17.75 h" in line, line
+        cmd_set(p, "stop_check", "record PR #1240 merged", t=hours(31))
+        assert verdict(load(p), t=hours(33.5))[0] == STALE and verdict(load(p), t=hours(37.5))[0] == DEAD
         # a closed loop is never stale
         cmd_set(p, "done", "stop_check: continue", t=hours(13))
         code, line = verdict(load(p), t=hours(40))
@@ -246,7 +258,7 @@ def selftest():
             assert main([q, "check"]) == OK
         assert load(q)["prs"] == [7, 8] and "phase review: 1: pinned" in sink.getvalue(), sink.getvalue()
     print("loop_state selftest: PASS (init refuses an existing loop, set records transitions and PRs once, "
-          "check ok/STALE 3/DEAD 4 from the last progress, progress resets it, done is never stale, "
+          "check ok/STALE 3/DEAD 4 from the last progress, progress resets it, waiting and done are never stale, "
           "history bounded at 50, corrupt and incomplete files refused)")
 
 
