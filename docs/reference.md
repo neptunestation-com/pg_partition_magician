@@ -2781,6 +2781,20 @@ archived before this release keeps its keys and its objects are protected the sa
 the database: two databases writing one bucket under one prefix are not told apart, so give each its own
 prefix.
 
+Every key is written, and claimed, in one spelling, whatever the spelling of the prefix: without a leading
+`/` and with every run of `/` written as one. MinIO reads `/events/x`, `//events/x` and `events/x` as one
+object, so a prefix configured `/events/` is the same place as `events/`, and a table configured with
+either spelling after another archived under the other takes the oid shape like any later namesake. On a
+store that keeps those spellings apart (AWS S3 does), a prefix configured with a leading `/` or a doubled
+`/` now writes its objects at the single-slash key, not at the spelling configured; objects already
+written stay where `pgpm.archive_ledger` records them, and a re-run over a recorded chunk finds that row
+whichever way it is spelled. A prefix with a `.` or `..` segment (`events/../x/`) cannot address any
+store, because the HTTP client resolves the segment before sending and the request's signature no longer
+matches: `archive.configure` refuses it, naming it, and a key whose stored prefix has one is refused
+before anything is written, naming the prefix; configure the prefix again without the segment. Install
+claims again, in the single-slash spelling, every name and key an earlier install claimed under another
+spelling, so its objects are protected the same way.
+
 The synchronous functions write one object per call, named after the partition with its own schema (the
 parent's, where the call resolves it): `archive.to_s3` to `<prefix><schema>.<child>.ndjson` (`.ndjson.gz` when compressed) and
 `archive.to_s3_parquet` to `<prefix><schema>.<child>.parquet`, quoted the same way, so two parents with

@@ -978,6 +978,10 @@ run_archive() {
   # half of the pair bench/discriminate.sh completes with the refusal's digest comparison dropped.
   echo "--- tests/archive/db/50 reaches the digest check it names guard (issue #1173) ---"
   bash "$(dirname "$0")/bench/archive_retired_chunk_digest_layer.sh" pgpm_test-archive pgpm_perf341 || fail=1
+  # The key-spelling guard (#1260) re-runs tests/archive/db/52 for the same reason: the clean-code half of the pair
+  # bench/discriminate.sh completes with archive._owned_key claiming the key base as the prefix was stored.
+  echo "--- one object, one claim, whatever the prefix's spelling guard (issue #1260) ---"
+  bash "$(dirname "$0")/bench/archive_key_base_canonical.sh" pgpm_test-archive pgpm_perf368 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi

@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+- **An archive key is claimed and written in one spelling, whatever the prefix's** (#1260). The claims
+  (`archive.object_key_owner`, `archive.object_key_claim`) compared keys as text, and `archive._owned_key` took
+  the prefix as `archive.configure` stored it, while MinIO reads `/P/x` and `P/x` as one object: a table that
+  took a dropped table's name, configured with the same prefix spelled with a leading `/`, claimed a base of its
+  own, kept the plain key shape and PUT over the dropped table's object, the only copy of the rows `retire()`
+  dropped. `archive._owned_key` now assembles every key, chunk and export alike, in the spelling
+  `archive._canonical_key` gives (no leading `/`, every run of `/` one `/`), claims it and writes it there, so a
+  namesake takes the oid shape whatever its prefix's spelling; a prefix with a `.` or `..` segment, which no
+  store can be addressed with, is refused by `archive.configure` and, already stored, by the key, naming it.
+  On AWS S3, which keeps the spellings apart, a prefix configured with a leading or doubled `/` now writes at
+  the single-slash key. For an install upgraded from one that recorded other spellings, install claims every
+  such base and key again in the canonical spelling (`archive._claim_canonical_spellings`), and
+  `archive._refuse_recorded_chunk_overwrite` finds a recorded chunk's ledger row whichever way its key is
+  spelled. Guard `bench/archive_key_base_canonical.sh` (tests/archive/db/52); mutations
+  `archive_key_base_spelled_as_stored`, `archive_recorded_chunk_ledger_spelled`.
+
 - **The regrain swap and the hypertable cutover wait for snapshots older than their copies** (#1241). A
   `REPEATABLE READ` reader whose snapshot predated a regrain's copies, and which first read the table after the
   swap (so it held no lock the `DETACH` waited on), read the fine children, whose rows its snapshot cannot see,

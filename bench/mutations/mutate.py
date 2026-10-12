@@ -12018,6 +12018,32 @@ MUTATIONS["archive_recorded_chunk_digest_compare_dropped"] = (
       "    elsif l.rows_digest is null then\n", 1)],
 )
 MUTATION_SRC["archive_recorded_chunk_digest_compare_dropped"] = "pgpm_archive/install.sql"
+
+# #1260 (pass 12 F5-02): every object key is assembled, claimed and written in one canonical spelling
+# (archive._canonical_key), since MinIO reads '/P/x' and 'P/x' as one object and the claims compare text. Both are
+# caught by tests/archive/db/52 (bench/archive_key_base_canonical.sh, against the archive image and MinIO).
+MUTATIONS["archive_key_base_spelled_as_stored"] = (
+    "bench/archive_key_base_canonical.sh",
+    "Pre-#1260 archive._owned_key: the key base is claimed and written as the prefix was stored, so a table that "
+    "took a dropped table's name, configured with the same prefix spelled with a leading '/', claims the unclaimed "
+    "base '/P/<schema>.<table>', keeps the plain key shape, and its chunk PUT replaces the dropped table's object "
+    "(MinIO reads both spellings as one), the only copy of the rows retire() dropped. One clause, the "
+    "canonicalisation of the base. tests/archive/db/52 part A catches it (the namesake writes at '/<p>t52.f_0.ndjson' "
+    "and the dropped table's object holds the namesake's four rows), as does the issue's reproduction.",
+    [("  v_base_q := archive._canonical_key(v_base_q);\n", "", 1)],
+)
+MUTATION_SRC["archive_key_base_spelled_as_stored"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_recorded_chunk_ledger_spelled"] = (
+    "bench/archive_key_base_canonical.sh",
+    "archive._refuse_recorded_chunk_overwrite finds the ledger row of a chunk by the key's spelling, so on an install "
+    "upgraded from one that recorded a chunk under a prefix configured '/P/', the canonical key a direct call now "
+    "writes finds no row, and the call PUTs a subset (or, after retire(), nothing) over the chunk's object, which "
+    "the store reads both spellings as (#975 undone for that install). One clause, the ledger lookup. "
+    "tests/archive/db/52 part B catches it (the direct call over [0, 5) is not refused and the object loses its rows).",
+    [("            where a.parent_table = p_parent and archive._canonical_key(a.s3_key) = p_key loop\n",
+      "            where a.parent_table = p_parent and a.s3_key = p_key loop\n", 1)],
+)
+MUTATION_SRC["archive_recorded_chunk_ledger_spelled"] = "pgpm_archive/install.sql"
 MUTATIONS["regrain_reconcile_keyed_on_id_alone"] = (
     "bench/regrain_delta_seq_name.sh",
     "pgpm._regrain_reconcile reads the delta's key columns as every column but its ordering column AND any "
