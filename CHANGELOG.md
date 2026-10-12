@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **A direct archive_fn strategy call keys the chunk it read** (#814, the archive bullet). Within one direct call of
+  `pgpm.archive_to_s3_ndjson` or `pgpm.archive_to_s3_parquet`, the range read and the recorded-chunk check parsed
+  `p_lo` in the caller's session while `archive._object_stem` parsed it under its own pinned `TimeZone` and
+  `DateStyle`, so from a `SQL, DMY` session `02/01/2024` archived the 2 January rows at the 1 February chunk's key,
+  and an offset-less bound from a New York session was read from 05:00Z and keyed from 00:00Z. Each encoder now
+  reads its bounds once, as `pgpm._native_text` renders what the session reads (an `id` bound at its least scale,
+  so `'0100'` is keyed `100`), and the read, the check and the key take that text. `tests/archive/db/54`, run by
+  `bench/archive_direct_call_bounds.sh` against the mutations `archive_ndjson_bounds_caller_spelling` and
+  `archive_parquet_bounds_caller_spelling`.
 - **A whole-month grid anchored off its column's unit is no longer said to be attached at other bounds, nor
   refused a whole-month regrain** (#1276). A calendar step's bounds are midnight on the 1st of a month whatever
   the anchor's time, so a `date` grid an older install anchored at noon on a month step (or a `timestamptz(0)`

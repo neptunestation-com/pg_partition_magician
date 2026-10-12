@@ -2831,6 +2831,12 @@ $$;
 -- other kind. Two chunks of one table must never share a key, because the store overwrites whatever
 -- object already sits at one while the ledger records both rows as archived (#502).
 --
+-- That text is canonical (pgpm._native_text: ISO with its offset, or a number at its least scale), the one
+-- form this function's pinned parse reads as the same instant every other reader in the call read. The two
+-- encoders read their bounds once and hand it that text, never the caller's own spelling (#814): from a
+-- 'SQL, DMY' session '02/01/2024' is 2 January to the read and was 1 February here, so the 2 January rows
+-- went to the 1 February chunk's key.
+--
 -- The id kind's text is kept whole. It is already `-?[0-9]+(\.[0-9]+)?`, which S3 accepts as is, and
 -- the sign and the point are exactly what the digits-only projection this replaces threw away: lo
 -- -10000 and lo 10000 collapsed onto one key, and on a numeric control so would 10.5 and 105. A
@@ -3190,6 +3196,18 @@ begin
   pcfg := pgpm._control_followed(pcfg);
   if not found then raise exception 'archive._encode_upload_ndjson_single: % is not managed', p_parent; end if;
 
+  -- The bounds are read ONCE, here, as the canonical text of what the calling session reads them as
+  -- (pgpm._native_text, the reading _archive_step gives a strategy's covered_hi, #977), and p_lo and p_hi
+  -- hold that text from here on: the read, the recorded-chunk check and the object key all take it (#814).
+  -- A tick hands over canonical text already, which every reading agrees on. A direct call need not: the
+  -- read and the recorded-chunk check parse in the caller's session while archive._object_stem parses under
+  -- its own pinned TimeZone and DateStyle, so from a 'SQL, DMY' session '02/01/2024 00:00:00+00' read the
+  -- 2 January rows and PUT them at the 1 February chunk's key, and an offset-less bound from a New York
+  -- session was read from 05:00Z and keyed from 00:00Z. An id bound is read at its least scale the same
+  -- way, so '0100' is keyed _100, as a tick keys the chunk.
+  p_lo := pgpm._native_text(pcfg.control_kind, p_lo);
+  p_hi := pgpm._native_text(pcfg.control_kind, p_hi);
+
   -- [p_lo, p_hi) as literals of the column's type, rendered in config.partition_tz like every other
   -- reader of a chunk in pgpm_core (#501). On a timestamptz column any zone's rendering names the same
   -- instant. On a naive timestamp or date column the literal's offset is dropped and its WALL CLOCK is
@@ -3278,6 +3296,9 @@ begin
   pcfg := pgpm._control_followed(pcfg);
   if not found then raise exception 'archive._encode_upload_parquet: % is not managed', p_parent; end if;
 
+  -- read once, as canonical text, for the reason given in _encode_upload_ndjson_single (#814)
+  p_lo := pgpm._native_text(pcfg.control_kind, p_lo);
+  p_hi := pgpm._native_text(pcfg.control_kind, p_hi);
   -- in config.partition_tz, for the reason given in _encode_upload_ndjson_single (#501)
   v_lo_lit := pgpm._encode(pcfg.control_kind, p_lo, pcfg.text_time_prefix, pcfg.text_time_width,
                            pcfg.text_time_radix, pcfg.text_time_unit, pcfg.text_time_alphabet,

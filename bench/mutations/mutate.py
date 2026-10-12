@@ -13865,6 +13865,34 @@ MUTATIONS["retain_disown_remedy_drops_unreached"] = (
     [("    v_reached := v_boundary is not null and not pgpm._native_gt(cfg.control_kind, v_hi, v_boundary);\n",
       "    v_reached := true;\n", 1)],
 )
+# #814 (the archive bullet, F19-03 of pass 12): each archive_fn encoder reads its bounds once, as canonical text,
+# before the read, the recorded-chunk check and the object key take them. One mutation per encoder, each taking out
+# the lo's reading alone, so the key is the stem's own parse of the caller's spelling again. Both are caught by
+# tests/archive/db/54 through bench/archive_direct_call_bounds.sh (against the archive image and MinIO).
+MUTATIONS["archive_ndjson_bounds_caller_spelling"] = (
+    "bench/archive_direct_call_bounds.sh",
+    "Pre-#814 archive._encode_upload_ndjson_single: a direct pgpm.archive_to_s3_ndjson call's lo reaches the "
+    "object key as the caller spelled it, so archive._object_stem parses it under its own pinned TimeZone and "
+    "DateStyle while the read parsed it in the caller's session: from a 'SQL, DMY' session '02/01/2024' reads the "
+    "2 January rows and PUTs them at the 1 February chunk's key, and an offset-less lo from a New York session is "
+    "read from 05:00Z and keyed from 00:00Z. One clause, the lo's reading. tests/archive/db/54 parts A, C and D "
+    "catch it (the object is keyed by the other instant, and its rows sit at the other chunk's key).",
+    [("  -- way, so '0100' is keyed _100, as a tick keys the chunk.\n"
+      "  p_lo := pgpm._native_text(pcfg.control_kind, p_lo);\n",
+      "  -- way, so '0100' is keyed _100, as a tick keys the chunk.\n", 1)],
+)
+MUTATION_SRC["archive_ndjson_bounds_caller_spelling"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_parquet_bounds_caller_spelling"] = (
+    "bench/archive_direct_call_bounds.sh",
+    "Pre-#814 archive._encode_upload_parquet: as archive_ndjson_bounds_caller_spelling, for the Parquet "
+    "strategy: from a 'SQL, DMY' session pgpm.archive_to_s3_parquet with lo '02/01/2024' writes the 2 January "
+    "rows to the 1 February chunk's key. One clause, the lo's reading. tests/archive/db/54 part B catches it.",
+    [("  -- read once, as canonical text, for the reason given in _encode_upload_ndjson_single (#814)\n"
+      "  p_lo := pgpm._native_text(pcfg.control_kind, p_lo);\n",
+      "  -- read once, as canonical text, for the reason given in _encode_upload_ndjson_single (#814)\n", 1)],
+)
+MUTATION_SRC["archive_parquet_bounds_caller_spelling"] = "pgpm_archive/install.sql"
+
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a

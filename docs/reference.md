@@ -2931,7 +2931,12 @@ included), and for every time kind the digits of `lo` rendered in UTC (`2024-01-
 `2024010100000000`), whatever the session's `TimeZone`, keeping the decimal point of a fractional second
 (`2024-01-01 00:00:00.1+00` becomes `20240101000000.100`) and ending `BC` for a BC instant
 (`2024-01-01 00:00:00+00 BC` becomes `2024010100000000BC`), so a BC chunk and an AD chunk of one calendar
-day, or a fraction of a second and a five-digit year, never share a key. Objects uploaded before this key
+day, or a fraction of a second and a five-digit year, never share a key. A direct call of either strategy
+reads its `p_lo` and `p_hi` once, as the calling session reads them (its `DateStyle` and `TimeZone`, the way
+it reads any timestamp literal; an `id` bound as a number, at its least scale), and the range it reads, the
+recorded-chunk check and the key all take that one reading: from a `SQL, DMY` session a `p_lo` of
+`02/01/2024 00:00:00+00` reads the rows of 2 January and is keyed `2024010200000000`, and `'0100'` on an
+`id` grid is keyed `100`, as a tick keys that chunk. Objects uploaded before this key
 shape stay where they are: each `pgpm.archive_ledger` row records the key its object was written to, and
 nothing derives a key from a chunk's bounds after the upload. A table whose ticks ran with its schema on the `search_path`
 (a `public` table under pg_cron, typically) had its earlier chunks keyed `<prefix><table>_<stem>`, so its
