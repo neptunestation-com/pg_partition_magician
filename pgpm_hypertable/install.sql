@@ -1234,6 +1234,7 @@ begin
     execute format('insert into %I.%I (%s) select %s from %I.%I where %I >= %s and %I < %s order by %I',
                    v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel,
                    p_control, v_lo, p_control, v_hi, p_control);
+    perform pgpm._scratch_written(p_hypertable);   -- #1241: the copy's last write, for the cutover's wait
     commit;
   end loop;
   -- The destination was just CREATE TABLE LIKE'd and bulk-loaded, so it has no planner stats (reltuples=0).
@@ -1398,6 +1399,8 @@ begin
     execute format('insert into %I.%I (%s) select %s from %I.%I s where %s in (select %s from pg_temp.pgpm_dbatch)',
                    v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel, v_skey_q, v_keycols_q);
   end if;
+  -- #1241: the copy's last write, its delete included (a key deleted from the source leaves no row to date it)
+  perform pgpm._scratch_written(p_hypertable);
   return v_keys;
 end $$;
 
@@ -1534,6 +1537,7 @@ begin
   execute format('insert into %I.%I (%s) select %s from %I.%I where %s and %I <= %L::%s order by %I',
                  v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel,
                  v_past, p_control, v_hi, v_ctl_type, p_control);
+  perform pgpm._scratch_written(p_hypertable);   -- #1241: the copy's last write, for the cutover's wait
   return v_hi;
 end $$;
 
@@ -1797,6 +1801,21 @@ begin
   else
     execute format('select count(*), coalesce(sum(%s), 0) from %I.%I', v_fp_q, v_nsp, v_dest) into v_dest_n, v_dest_h;
   end if;
+  -- #1241: every snapshot that cannot see the copy must be released before the swap. The swap drops the
+  -- hypertable and renames the copy into its place, and the copy's rows were written by the copy and drain
+  -- transactions, which a snapshot older than them cannot see: a REPEATABLE READ reader opened before the copy
+  -- and first reading the table after the swap (holding no lock on the hypertable, it gave the ACCESS EXCLUSIVE
+  -- below nothing to wait for) found it EMPTY. The reference is the copy's last write, recorded by every copy
+  -- batch and drain step (pgpm.scratch.written_xid, a drain's pure delete included); a copy made before the record
+  -- existed has none, and every snapshot older than this transaction is waited for. After the copy's lock, so a
+  -- drain batch in flight has committed and recorded, and before the source's, so the wait holds nothing a
+  -- reader of the hypertable needs. Bounded by p_lock_timeout: a reader that outlasts it makes the cutover refuse
+  -- whole, as a lock timeout does, naming its pid, and it is re-run. A caller that holds a snapshot across its
+  -- call (from_hypertable through dblink) is such a reader: call it from a direct session. See pgpm._snapshot_wait
+  -- for which sessions it follows, and the window no wait can close (the catch-up's rows, written below).
+  perform pgpm._snapshot_wait((select s.written_xid from pgpm.scratch s
+                                where s.parent_oid = p_hypertable::oid and s.kind = 'hypertable_dest'),
+                              'hypertable cutover', 'the table', format('Hypertable: %s', p_hypertable));
   -- The key the append-only catch-up anti-joins by (#460): the PRIMARY KEY, else a UNIQUE constraint, and
   -- every one of its columns NOT NULL -- a row-constructor `=` never matches a NULL component, so a
   -- nullable key could re-copy a watermark row it cannot recognise (the control column itself is NOT NULL

@@ -83,7 +83,11 @@ q "create schema app;
    create table app.hclt_pgpm_dest (like app.hclt including defaults including constraints including generated including comments);
    insert into app.hclt_pgpm_dest select * from app.hclt order by ts;
    -- recorded as from_hypertable_copy records the copy it builds (#955): the cutover swaps in nothing else
-   select pgpm._scratch_record('app.hclt', 'hypertable_dest', 'app.hclt_pgpm_dest'::regclass::oid);" >/dev/null
+   select pgpm._scratch_record('app.hclt', 'hypertable_dest', 'app.hclt_pgpm_dest'::regclass::oid);
+   -- and its last write, as every copy batch records it (#1241): the cutover's snapshot wait then waits only for
+   -- snapshots older than the copy, which the session opened below is not. Unrecorded, the copy reads as one made
+   -- before the record existed and the wait holds out for every open snapshot, this guard's own included.
+   select pgpm._scratch_written('app.hclt');" >/dev/null
 SRC_OID=$(q "select 'app.hclt'::regclass::oid")
 check "LIVENESS: the destination copy holds the 72 source rows" "$(q "select count(*) from app.hclt_pgpm_dest")" "72"
 
@@ -99,6 +103,9 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 check "LIVENESS: the reader holds ACCESS SHARE on the source" "$held" "yes"
+check "LIVENESS: the copy's last write is recorded and the reader's snapshot is newer (the snapshot wait passes it)" \
+  "$(q "select coalesce(age(a.backend_xmin) < age(s.written_xid::xid), false) from pgpm.scratch s, pg_stat_activity a
+         where s.parent_oid = 'app.hclt'::regclass and s.kind = 'hypertable_dest' and a.application_name = 'pgpm_hclt_reader'")" "t"
 
 # The operator's cutover: a bare CALL, no p_lock_timeout, the session's default lock_timeout (0).
 docker exec "$C" psql -U postgres -d "$DB" -qtA -c "set application_name = 'pgpm_hclt_cutover'" \

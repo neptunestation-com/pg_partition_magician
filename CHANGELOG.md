@@ -2,6 +2,46 @@
 
 ## [Unreleased]
 
+- **The regrain swap and the hypertable cutover wait for snapshots older than their copies** (#1241). A
+  `REPEATABLE READ` reader whose snapshot predated a regrain's copies, and which first read the table after the
+  swap (so it held no lock the `DETACH` waited on), read the fine children, whose rows its snapshot cannot see,
+  and found the regrained range empty with no error, against `docs/guide.md`'s promise that a regrain never
+  undercounts; `from_hypertable_cutover` did the same to a reader opened before its copy (0 rows of 240). Before
+  either takes a lock of its own it now waits, by `CREATE INDEX CONCURRENTLY`'s rule (`pgpm._snapshot_wait`), for
+  every session of the database whose `backend_xmin` is at or before the copies' last write: recorded in the new
+  `config.regrain_written_xid` for a regrain run and the new `pgpm.scratch.written_xid` for a hypertable copy (a
+  drain's pure delete included), and this transaction itself under `regrain()`, which copies and swaps in one
+  transaction. The sessions are read afresh on every poll, never listed once, so a snapshot older than the copies
+  imported (`SET TRANSACTION SNAPSHOT`) after the wait began is waited for too. No exemption by state, transaction
+  start or role: every session is judged by its pid, `backend_xmin` and virtual xid, which any caller sees, so the
+  table's non-superuser owner without `pg_read_all_stats` waits for another role's reader alike. The one
+  exemption, under `regrain()` only and which would otherwise deadlock, is a session whose request a lock the caller
+  holds directly blocks (a write behind `regrain()`'s `SHARE` lock), passed with a `WARNING` naming it. Any other
+  session waiting on the caller, directly or behind another queued request (a reader behind a DDL behind the
+  swap's lock), can never let go before the swap and is not waited for: the swap gives up at once, naming the
+  pids and the queued requests (`maintain` logs `skip_regrain`, a hand call refuses). Two such waits that list
+  each other with no lock between them (two hand `regrain()` calls on two tables, or a hand `regrain_step` or a
+  tick against one) are a cycle too: each advertises itself with a transaction-level advisory lock, and the
+  younger of two yields at once to an older one, which keeps waiting and completes; no snapshot is ever skipped.
+  Known limit (#1256): two hand drivers under `lock_timeout` 0 can still wait on each other through a session
+  one of them passes, until a `statement_timeout`. At the caller's `lock_timeout` `maintain` defers
+  the swap (`skip_regrain` naming the snapshots) and `regrain()` and the cutover refuse; none ever goes ahead.
+  `regrain()`, which copies in the swap's own transaction, waits for every snapshot open while it runs and, on a
+  database never quiet for long enough, refuses at its budget; auto-regrain through `maintain` is the paced path.
+  Call `regrain()` and `from_hypertable` from a direct session: a caller that holds a snapshot across the call is
+  a reader the swap waits for (`tests/149` and `tests/timescale/db/63` now wait for or make their calls that way).
+  A snapshot opened after the wait's last poll still misses what the swap's own transaction writes;
+  `docs/reference.md` states the window. Tests `tests/328` and `tests/timescale/db/67`, guards
+  `bench/regrain_swap_waits_for_older_snapshots.sh` and `bench/hypertable_cutover_waits_for_older_snapshots.sh`,
+  mutations `regrain_swap_no_snapshot_wait`, `regrain_written_xid_first_copy`,
+  `regrain_snapshot_wait_masked_type_dropped`, `regrain_snapshot_wait_older_transactions_only`,
+  `snapshot_wait_masked_state_dropped`, `snapshot_wait_running_statement_exempt`, `snapshot_wait_settles_running`,
+  `snapshot_wait_no_blocked_exemption`, `snapshot_wait_list_captured_once`, `snapshot_wait_import_strictly_older`,
+  `snapshot_wait_captured_xmin_bound`, `snapshot_wait_own_xid_strict`, `snapshot_wait_blocked_chain`,
+  `snapshot_wait_chain_waited`, `snapshot_wait_peer_ignored`, `snapshot_wait_peer_older_yields`,
+  `hypertable_cutover_no_snapshot_wait` and
+  `hypertable_drain_delete_unrecorded`.
+
 - **The stopping check reads coverage and capture-recapture, and the dead-man switch waits for the user**
   (#1226). `scripts/review/pass_metrics.py --coverage <coverage.json>` writes the record's
   `coverage: <min> (<n> of <m> finders at or above 0.90)` line, which `stop_check.py` reads for the full lens

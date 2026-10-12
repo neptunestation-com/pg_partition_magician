@@ -135,6 +135,7 @@ pgpm.config:regrain_cursor
 pgpm.config:regrain_delta_oid
 pgpm.config:regrain_capture_fn_oid
 pgpm.config:regrain_source_mark
+pgpm.config:regrain_written_xid
 pgpm.config:retain_batch
 pgpm.config:archive_fn
 pgpm.config:archive_byte_budget
@@ -154,6 +155,7 @@ pgpm.transmute_inflight:control_attnum
 pgpm.dropped_fk:restored_at
 pgpm.dropped_fk:validated_at
 pgpm.dropped_fk:validate_retry_after
+pgpm.scratch:written_xid
 pgpm.archive_ledger:retired_at
 pgpm.archive_ledger:child_oid
 "

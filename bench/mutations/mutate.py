@@ -12895,6 +12895,220 @@ MUTATIONS["test303_adopted_rows_by_count"] = (
 )
 MUTATION_SRC["test303_adopted_rows_by_count"] = "tests/303_adopt_partition_test.sql"
 
+# Issue #1241: regrain_step's swap waits for every snapshot that cannot see its copies (_regrain_snapshot_wait), so
+# a REPEATABLE READ reader whose snapshot predates the copies never reads the regrained range empty. One mutation for
+# the wait, one for the record of the run's last write that judges which snapshots, one each for the two ways the
+# list lost a reader (a masked backend_type, a transaction opened during regrain()), one for the mutual-wait
+# refusal, each caught by tests/328 through bench/regrain_swap_waits_for_older_snapshots.sh.
+# Issue #1241: a swap that puts copies in place of a table's rows (regrain_step's, from_hypertable_cutover's) waits
+# for every snapshot that cannot see the copies (pgpm._snapshot_wait), CREATE INDEX CONCURRENTLY's rule, so a
+# REPEATABLE READ reader whose snapshot predates the copies never reads the range empty. One mutation for each
+# clause: the wait, the record of the run's last write, each way the list lost a reader in an earlier round (a
+# masked backend_type, a transaction opened during regrain(), a masked state, a running statement, a settle at the
+# budget, a list of sessions taken once, an importer only strictly older than every running xid, only at or before a
+# captured xmin, or only strictly older than the caller's xid; a chained waiter passed, or waited for; a peer
+# wait ignored, or yielded to when younger), the one
+# exemption (a session blocked on this one), caught by tests/328 through bench/regrain_swap_waits_for_older_snapshots.sh; and the cutover's call and the drains' record, caught by
+# tests/timescale/db/67 through bench/hypertable_cutover_waits_for_older_snapshots.sh.
+_G1241 = "bench/regrain_swap_waits_for_older_snapshots.sh"
+MUTATIONS["regrain_swap_no_snapshot_wait"] = (
+    _G1241,
+    "Pre-#1241 swap: nothing waits for the snapshots older than the copies, so the tick that reaches the swap with a "
+    "REPEATABLE READ reader open (its snapshot older than every copy, no lock held) detaches and drops the source "
+    "under it, and the reader then reads the regrained range empty. One site, the call. tests/328 parts A and B "
+    "catch it (the swap is made, the reader's rows are gone, regrain() does not refuse).",
+    [("  perform pgpm._regrain_snapshot_wait(p_parent, v_child_name);\n", "", 1)],
+)
+MUTATIONS["regrain_written_xid_first_copy"] = (
+    _G1241,
+    "The run records the transaction of its FIRST copy batch, not its last, as the brief for #1241 first proposed: "
+    "the swap then waits only for snapshots older than the first copy, so a reader opened between the first copy and "
+    "the last (it sees some copies and not the others) is swapped under and reads the later sub-ranges empty. One "
+    "site, the copy's record kept once set. tests/328 part D catches it.",
+    [("      update pgpm.config set regrain_written_xid = pg_current_xact_id() where parent_table = p_parent;\n",
+      "      update pgpm.config set regrain_written_xid = coalesce(regrain_written_xid, pg_current_xact_id()) where parent_table = p_parent;\n", 1)],
+)
+MUTATIONS["regrain_snapshot_wait_masked_type_dropped"] = (
+    _G1241,
+    "The wait leaves autovacuum out by backend_type NOT IN (...), which PostgreSQL masks to NULL for a session of a "
+    "role the caller lacks the privileges of (no pg_read_all_stats), and NULL NOT IN drops the row: when the "
+    "table's non-superuser owner runs maintain, a REPEATABLE READ reader in a reporting role is never waited for and "
+    "reads the regrained range empty (round 2's V-01 on PR #1253). One site, the filter. tests/328 part E catches it.",
+    [("       and a.backend_type is distinct from 'autovacuum worker'                      -- NULL when masked: kept\n",
+      "       and a.backend_type not in ('autovacuum worker', 'autovacuum launcher')\n", 1)],
+)
+MUTATIONS["regrain_snapshot_wait_older_transactions_only"] = (
+    _G1241,
+    "When the swap's own transaction made the copies (regrain()), the wait lists only transactions that began "
+    "before it, as the first version of #1241's fix did: a REPEATABLE READ transaction opened during the call's "
+    "copy phase holds a snapshot the wait can see and wait for, is not waited for, and reads the regrained range "
+    "empty after the call (round 2's V-02); and to an owner without pg_read_all_stats every other role's "
+    "xact_start is NULL, so nothing of theirs is listed. One site, the listing. tests/328 parts F and H catch it.",
+    [("       and age(a.backend_xmin) >= age(v_limit);                                    -- at or before the reference\n",
+      "       and age(a.backend_xmin) >= age(v_limit)\n       and (v_by_xid or a.xact_start < now());\n", 1)],
+)
+MUTATIONS["snapshot_wait_masked_state_dropped"] = (
+    _G1241,
+    "Round 2's running-statement exemption as it stood, a predicate over the activity view's state and xact_start: "
+    "to regrain() run by the table's non-superuser owner without pg_read_all_stats, another role's state and "
+    "xact_start read NULL, the predicate is NULL, and a REPEATABLE READ reader opened before the call is dropped from "
+    "the wait on its first poll and reads the range empty (round 3's V-01). One site, the poll. tests/328 part H "
+    "catches it.",
+    [("       and age(a.backend_xmin) >= age(v_limit);                                    -- at or before the reference\n",
+      "       and age(a.backend_xmin) >= age(v_limit)\n       and (v_by_xid or not (a.state = 'active' and a.xact_start > now()));\n", 1)],
+)
+MUTATIONS["snapshot_wait_running_statement_exempt"] = (
+    _G1241,
+    "Round 2's running-statement exemption with the NULLs read as 'wait': under regrain(), a REPEATABLE READ reader "
+    "opened during the call is waited for while it sits idle, and dropped the moment it starts its next statement, "
+    "its snapshot unchanged, so the swap goes ahead and it reads the range empty (round 3's V-02). One site, the "
+    "poll. tests/328 part F catches it.",
+    [("       and age(a.backend_xmin) >= age(v_limit);                                    -- at or before the reference\n",
+      "       and age(a.backend_xmin) >= age(v_limit)\n       and (v_by_xid or not coalesce(a.state = 'active' and a.xact_start > now(), false));\n", 1)],
+)
+MUTATIONS["snapshot_wait_settles_running"] = (
+    _G1241,
+    "Round 2's settle clause, made general: when the budget runs out and every session still waited for is running "
+    "a statement, the swap goes ahead (with a WARNING in round 2) instead of deferring, so a REPEATABLE READ reader in "
+    "the middle of a statement that does not touch the table is swapped under and its next statement reads the range "
+    "empty (round 3's V-03, 0 of 240 on the cutover). One site, at the budget. tests/328 part G catches it.",
+    [("    if v_budget_ms > 0 and clock_timestamp() - v_start >= v_budget_ms * interval '1 millisecond' then\n"
+      "      v_pid := v_still[1];\n",
+      "    if v_budget_ms > 0 and clock_timestamp() - v_start >= v_budget_ms * interval '1 millisecond' then\n"
+      "      exit when not exists (select 1 from pg_stat_activity a where a.pid = any(v_still) and a.state is distinct from 'active');\n"
+      "      v_pid := v_still[1];\n", 1)],
+)
+MUTATIONS["snapshot_wait_no_blocked_exemption"] = (
+    _G1241,
+    "The wait without its one exemption: a session waiting on a lock this one holds (a write queued behind "
+    "regrain()'s SHARE lock, #580) is waited for, though it cannot release its snapshot before the swap commits, so "
+    "regrain() spends its budget on it and refuses (under lock_timeout 0, a hand regrain()'s default, it waits for "
+    "good). One site, the exemption. tests/328 part C catches it (the wait does not pass the writer, regrain() "
+    "refuses).",
+    [("    v_still := array(select s from unnest(v_still) with ordinality as u(s, o) where not s = any(v_blocked) order by o);\n",
+      "", 1)],
+)
+MUTATIONS["snapshot_wait_list_captured_once"] = (
+    _G1241,
+    "Round 3's wait: the sessions are those whose transaction was open when the wait began, a list taken once, so a "
+    "REPEATABLE READ transaction that imports (SET TRANSACTION SNAPSHOT) a snapshot older than the copies after the "
+    "wait began is never waited for; the exporter commits, the swap goes ahead, and the importer reads the range "
+    "empty (round 3's finding V-01 on PR #1253). One site, the predicate. tests/328 part I catches it.",
+    [("       and age(a.backend_xmin) >= age(v_limit);                                    -- at or before the reference\n",
+      "       and age(a.backend_xmin) >= age(v_limit)\n       and (coalesce(a.xact_start, '-infinity') < v_start);\n", 1)],
+)
+MUTATIONS["snapshot_wait_import_strictly_older"] = (
+    _G1241,
+    "Round 4's own-xid rule: beside the sessions open when the wait began, a snapshot that arrives later is waited for "
+    "only when STRICTLY older than every xid still running. An import whose xmin equals the oldest running xid (a "
+    "writer idle in its transaction since before it was exported) is not, so under regrain(), or a run with no "
+    "recorded last write (across the upgrade), the importer is swapped under and reads the range empty (round 4's "
+    "finding V-01 on PR #1253). One site, the predicate. tests/328 part J catches it.",
+    [("       and age(a.backend_xmin) >= age(v_limit);                                    -- at or before the reference\n",
+      "       and age(a.backend_xmin) >= age(v_limit)\n       and (v_by_xid or coalesce(a.xact_start, '-infinity') < v_start or age(a.backend_xmin) > greatest(age(v_self::xid), (select max(age(x.backend_xid)) from pg_stat_activity x where x.backend_xid is not null), (select max(age(t.transaction)) from pg_prepared_xacts t)));\n", 1)],
+)
+MUTATIONS["snapshot_wait_captured_xmin_bound"] = (
+    _G1241,
+    "Round 5's own-xid rule: beside the sessions open when the wait began, a late snapshot is waited for only when at "
+    "or before the newest backend_xmin among them older than the caller's xid. An importer copies the EXPORTED "
+    "snapshot's xmin, and an exporter's backend_xmin is the oldest it holds, so a READ COMMITTED session that "
+    "exported S1 and then, after a writer committed, a newer S2 (both before regrain() was called) lets an importer of "
+    "S2 slip past: it is swapped under and reads the range empty (round 5's finding V-01 on PR #1253). One site, the "
+    "predicate. tests/328 part L catches it.",
+    [("       and age(a.backend_xmin) >= age(v_limit);                                    -- at or before the reference\n",
+      "       and age(a.backend_xmin) >= age(v_limit)\n       and (v_by_xid or coalesce(a.xact_start, '-infinity') < v_start or age(a.backend_xmin) >= (select min(age(c.backend_xmin)) from pg_stat_activity c where c.datid = v_db and c.pid <> pg_backend_pid() and c.backend_xmin is not null and c.xact_start < v_start and age(c.backend_xmin) > age(v_self::xid)));\n", 1)],
+)
+MUTATIONS["snapshot_wait_own_xid_strict"] = (
+    _G1241,
+    "Round 6's first own-xid rule: beside the sessions open when the wait began, wait for snapshots STRICTLY older "
+    "than the caller's xid. A REPEATABLE READ session opened just before regrain(), in a quiet database, holds a "
+    "snapshot whose xmin IS the caller's xid; an import of it made after the wait began is not waited for, and reads "
+    "the range empty after the swap (round 5's finding P1-01 on PR #1253). One site, the predicate. tests/328 part N "
+    "catches it.",
+    [("       and age(a.backend_xmin) >= age(v_limit);                                    -- at or before the reference\n",
+      "       and age(a.backend_xmin) >= age(v_limit)\n       and (v_by_xid or coalesce(a.xact_start, '-infinity') < v_start or age(a.backend_xmin) > age(v_self::xid));\n", 1)],
+)
+MUTATIONS["snapshot_wait_blocked_chain"] = (
+    _G1241,
+    "Round 6's exemption: a session waiting on this one directly OR DOWN A CHAIN of pg_blocking_pids (which names "
+    "soft blockers, sessions queued ahead, too), in every mode, is PASSED. A REPEATABLE READ reader whose snapshot "
+    "predates every copy, queued behind an ordinary DDL that is itself queued behind the swap step's own lock, is "
+    "passed, and reads the range empty after the swap (round 6's finding V-01 on PR #1253). One site, the "
+    "exemption. tests/328 parts O, P and Q catch it.",
+    [("""    select coalesce(array_agg(s.pid), '{}') into v_blocked
+      from unnest(v_still) as s(pid)
+     where not v_by_xid
+       and pg_backend_pid() = any(pg_blocking_pids(s.pid))
+       and exists (select 1 from pg_locks w join pg_locks h
+                     on h.pid = pg_backend_pid() and h.granted
+                    and h.locktype = w.locktype
+                    and h.database is not distinct from w.database and h.relation is not distinct from w.relation
+                    and h.page is not distinct from w.page and h.tuple is not distinct from w.tuple
+                    and h.virtualxid is not distinct from w.virtualxid
+                    and h.transactionid is not distinct from w.transactionid
+                    and h.classid is not distinct from w.classid and h.objid is not distinct from w.objid
+                    and h.objsubid is not distinct from w.objsubid
+                    where w.pid = s.pid and not w.granted);
+""", """    with recursive chain(origin, pid, depth) as (
+      select s.pid, b.pid, 1 from unnest(v_still) as s(pid) cross join lateral unnest(pg_blocking_pids(s.pid)) as b(pid)
+      union
+      select c.origin, b.pid, c.depth + 1 from chain c cross join lateral unnest(pg_blocking_pids(c.pid)) as b(pid)
+       where c.depth < 8
+    )
+    select coalesce(array_agg(distinct c.origin), '{}') into v_blocked from chain c where c.pid = pg_backend_pid();
+""", 1)],
+)
+MUTATIONS["snapshot_wait_chain_waited"] = (
+    _G1241,
+    "Round 7's rule for a session that waits on this one other than the directly blocked writer regrain() passes: it "
+    "is waited for. It can never release its snapshot before the swap commits, and the wait polls in pg_sleep, where "
+    "the deadlock detector cannot see the cycle, so under lock_timeout 0 (a hand regrain()'s default) the call never "
+    "returns and the queued DDL blocks every read and write of the table (round 7's finding V-01 on PR #1253); under "
+    "a budget it is refused only when the budget runs out. One site, the refusal. tests/328 parts O, P and Q catch it.",
+    [("    if cardinality(v_chained) > 0 then\n", "    if false then\n", 1)],
+)
+MUTATIONS["snapshot_wait_peer_ignored"] = (
+    _G1241,
+    "Round 8's wait, blind to another snapshot wait: two hand regrain() calls on two parents (or a hand regrain_step "
+    "or a maintain tick against a regrain()) each list the other's snapshot, neither blocked on a lock of the other, "
+    "and each polls for the other for ever under lock_timeout 0, both parents' SHARE locks held (round 8's finding "
+    "V-01 on PR #1253). One site, the yield. tests/328 parts R and S catch it by their statement_timeout.",
+    [("    if cardinality(v_older) > 0 then\n", "    if false then\n", 1)],
+)
+MUTATIONS["snapshot_wait_peer_older_yields"] = (
+    _G1241,
+    "The peer rule without its order: a wait yields to ANY other snapshot wait it lists, older or younger, so two "
+    "regrain() calls racing each other both refuse and neither ever swaps while they race. One site, the age "
+    "predicate. tests/328 parts R and S catch it (the older must complete and swap).",
+    [("       and (a.backend_xid is null or age(a.backend_xid) > age(v_self::xid))          -- older, or not visible: older\n",
+      "       and true\n", 1)],
+)
+_G1241_HT = "bench/hypertable_cutover_waits_for_older_snapshots.sh"
+MUTATIONS["hypertable_cutover_no_snapshot_wait"] = (
+    _G1241_HT,
+    "Pre-#1241 from_hypertable_cutover: nothing waits for the snapshots older than the copy, so the cutover drops "
+    "the hypertable and renames the copy into its place under a REPEATABLE READ reader opened before the copy and "
+    "holding no lock, which then reads the table empty (0 rows of 240). One site, the call. tests/timescale/db/67 "
+    "catches it (the cutover does not refuse, the hypertable is swapped, the reader's rows are gone).",
+    [("  perform pgpm._snapshot_wait((select s.written_xid from pgpm.scratch s\n"
+      "                                where s.parent_oid = p_hypertable::oid and s.kind = 'hypertable_dest'),\n"
+      "                              'hypertable cutover', 'the table', format('Hypertable: %s', p_hypertable));\n",
+      "", 1)],
+)
+MUTATION_SRC["hypertable_cutover_no_snapshot_wait"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_cutover_no_snapshot_wait"] = "timescale"
+MUTATIONS["hypertable_drain_delete_unrecorded"] = (
+    _G1241_HT,
+    "from_hypertable_drain_delta_step does not record its write, so the cutover's reference is the copy's last "
+    "insert: a drain that only DELETES a key (deleted from the source) leaves no trace, a REPEATABLE READ reader whose "
+    "snapshot falls between the source delete and the drain is not waited for, and after the swap it reads the "
+    "deleted row back from the copy. One site, the step's record. tests/timescale/db/67 part C catches it.",
+    [("  -- #1241: the copy's last write, its delete included (a key deleted from the source leaves no row to date it)\n"
+      "  perform pgpm._scratch_written(p_hypertable);\n", "", 1)],
+)
+MUTATION_SRC["hypertable_drain_delete_unrecorded"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_drain_delete_unrecorded"] = "timescale"
+
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a

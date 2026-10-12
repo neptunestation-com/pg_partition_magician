@@ -541,6 +541,25 @@ whole time, and the swap is atomic, so a concurrent reader never sees a partial 
 children only ever receive inserts, so there are no dead tuples and no vacuum. (The one moment regrain
 touches a foreign key is that swap; see [incoming foreign keys](#incoming-foreign-keys).)
 
+Atomicity alone does not cover one reader: a `REPEATABLE READ` or `SERIALIZABLE` transaction whose snapshot
+was taken before the copies and which first reads the table after the swap. The fine children's rows were
+written after its snapshot, so it would find the regrained range empty. The swap therefore first waits for
+every snapshot older than the copies to be released, as `CREATE INDEX CONCURRENTLY` waits for older
+snapshots, whichever role holds it, whatever it is doing and whatever role runs the regrain: such a reader
+delays the swap rather than undercounting. Under `maintain` the wait is bounded by the tick's 200 ms
+`lock_timeout`, after which the swap is deferred to the next tick with a `skip_regrain` row naming the
+snapshots it waits for; `regrain()` refuses instead. A reader that cannot let go before the swap ends, because
+it is queued behind a migration's DDL queued behind the regrain's own lock, makes the swap give up at once
+rather than wait for ever (`maintain` retries next tick; a call by hand can be run again once the DDL is done).
+Two regrains whose waits would wait on each other (two `regrain()` calls on two tables at once, say) do not:
+the younger gives up at once and the older completes. One case is not caught yet: a hand `regrain()` and a hand
+`regrain_step` run together can wait on each other through a session one of them lets pass, so give hand calls a
+`statement_timeout` (see [`regrain_step`](reference.md#regrain_step)).
+`from_hypertable_cutover` waits the same way before it swaps in its copy. Run `regrain()` and `from_hypertable` from a direct session: a caller that holds a snapshot
+across the call is one of the readers the swap must wait for. See [`regrain_step`](reference.md#regrain_step)
+for exactly which snapshots, and for the narrow window no wait can close (wider under the one-transaction
+`regrain()`, so prefer auto-regrain for a table read by long `REPEATABLE READ` transactions).
+
 **Disk.** Regraining needs transient headroom (about 2x the span being regrained) for the copies before the
 source is dropped. On an elastic or auto-scaling volume this is absorbed; on a fixed volume, regrain
 hierarchically (coarse first, then each coarse child) so each step's footprint stays bounded, or skip
@@ -988,7 +1007,10 @@ A query against a partitioned parent scans only its **attached** partitions, so 
 would be to take a row out of an attached partition and hold it somewhere not yet attached. Nothing in
 pgpm does that. `regrain` **copies** and never deletes from its source: the coarse child stays whole and
 attached until a single transaction detaches it, attaches the fine children and drops it, so every row is
-visible through the parent the entire time and no reader ever sees a partial state.
+visible through the parent the entire time and no reader ever sees a partial state. A long `REPEATABLE READ`
+transaction opened before the copies that has not read the table yet is covered too: the swap waits for its
+snapshot first (see
+[Regrain the history](#regrain-the-history) above).
 
 Its in-flight copies (`status().inflight_partitions`) are therefore duplicates of rows still in the
 monolith, not rows in transit. They cost transient disk; they never cost you a row.
