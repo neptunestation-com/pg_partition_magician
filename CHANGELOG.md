@@ -23,7 +23,8 @@
   each other with no lock between them (two hand `regrain()` calls on two tables, or a hand `regrain_step` or a
   tick against one) are a cycle too: each advertises itself with a transaction-level advisory lock, and the
   younger of two yields at once to an older one, which keeps waiting and completes; no snapshot is ever skipped.
-  So no wait is unbounded under `lock_timeout` 0. At the caller's `lock_timeout` `maintain` defers
+  Known limit (#1256): two hand drivers under `lock_timeout` 0 can still wait on each other through a session
+  one of them passes, until a `statement_timeout`. At the caller's `lock_timeout` `maintain` defers
   the swap (`skip_regrain` naming the snapshots) and `regrain()` and the cutover refuse; none ever goes ahead.
   `regrain()`, which copies in the swap's own transaction, waits for every snapshot open while it runs and, on a
   database never quiet for long enough, refuses at its budget; auto-regrain through `maintain` is the paced path.

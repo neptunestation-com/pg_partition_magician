@@ -1264,7 +1264,7 @@ run_perf() {
     "bench/ci_runs_lint_jobs.sh pgpm_perf351"
     "bench/throws_pinned_sites.sh pgpm_perf350"
     "bench/wrapper_premise_rule.sh pgpm_perf344"
-    "bench/regrain_swap_waits_for_older_snapshots.sh pgpm_perf364"
+    "bench/regrain_swap_waits_for_older_snapshots.sh pgpm_perf365"
   )
   local selected=()
   local n=${#guards[@]} idx

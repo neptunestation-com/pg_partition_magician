@@ -2021,11 +2021,20 @@ broken by refusal:
   than this one, ...`. `maintain` logs it as `skip_regrain`; a hand `regrain`, `regrain_step` or
   `from_hypertable_cutover` refuses, swapping nothing, and can be run again once the other has finished.
 - The **older** wait never yields to a younger one: it keeps waiting, and its wait ends when the younger's
-  refusal releases that snapshot. In any cycle of waits the youngest lists an older one, so every cycle loses a
-  member, no pair waits for ever, and no snapshot is ever skipped.
+  refusal releases that snapshot. A pair that list each other's markers therefore loses its younger member, and
+  no snapshot is ever skipped.
 - The advisory key carries no ACL, so any role can take it, and a wait holds it until its transaction ends, past
   its last poll. Either only ever makes a younger wait refuse sooner than it needed to; neither makes a wait pass a
   snapshot.
+- **Known limit.** The rule breaks a cycle only when the youngest wait lists an older wait's marker.
+  A cycle closed through a third session that one wait passes has no such edge: a hand `regrain` (older,
+  against its own transaction) passes a `REPEATABLE READ` session queued behind its `SHARE` lock and waits for a
+  hand `regrain_step` (younger, against its run's recorded last write), which waits for that queued session but
+  does not list `regrain`. So two hand drivers run together under `lock_timeout` 0 (a hand `regrain` and a hand
+  `regrain_step`, or two of either kind where one waits against a recorded write) can wait on each other through
+  a session one of them passes, with no error, until a `statement_timeout`. `maintain` is bounded by its budget
+  and the cutover by `p_lock_timeout`. For hand calls, set a `statement_timeout` or a `lock_timeout` on the
+  session.
 
 The budget is the caller's `lock_timeout`. Under `maintain` that is 200 ms, after which the step raises and the
 tick logs `skip_regrain` with `method` beginning `pg_partition_magician: regrain swap deferred: N snapshot(s)
@@ -2033,9 +2042,10 @@ older than the copies still open (oldest: pid P, open T; pids ...)` (`T` reads `
 the caller cannot see that session's `xact_start`), and the next tick tries again; nothing was swapped or lost.
 `regrain` refuses with the same message and rolls back whole, copies included. Neither ever goes ahead under a
 snapshot it waits for. Under `lock_timeout` 0, the session default under which a hand `regrain` runs, the wait
-lasts as long as the snapshots do, which ends: a snapshot held by a session waiting on the swap, or by an
-older snapshot wait of another swap, is refused at once, above, rather than waited for. A long reporting transaction opened before the last copy therefore delays the
-swap for as long as it stays open. **Call `regrain` from a direct session**: a caller that holds a snapshot
+lasts as long as the snapshots do: a snapshot held by a session waiting on the swap, or by an older snapshot
+wait of another swap, is refused at once, above, rather than waited for, except in the known limit above,
+where two hand drivers can wait on each other until a `statement_timeout`. A long reporting transaction opened
+before the last copy therefore delays the swap for as long as it stays open. **Call `regrain` from a direct session**: a caller that holds a snapshot
 across the call (a client waiting for it through `dblink`, a wrapper that holds one) is a reader the swap must
 wait for, and would wait for the call while the call waited for it.
 

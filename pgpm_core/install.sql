@@ -7671,8 +7671,13 @@ drop function if exists pgpm._snapshot_wait(xid8, text, text, text);
 --   * A wait that lists a session so marked whose transaction is OLDER than its own (a smaller backend_xid, or
 --     one this role cannot read: NULL counts as older) yields AT ONCE, naming those pids: maintain logs
 --     skip_regrain, a hand driver refuses. The older never yields to a younger one: it keeps waiting, and its
---     wait ends when the younger's refusal releases that snapshot. In any cycle of waits the youngest lists an
---     older one, so every cycle loses a member and none waits for ever; no snapshot is ever skipped.
+--     wait ends when the younger's refusal releases that snapshot. A pair that list each other's markers loses its
+--     younger member; no snapshot is ever skipped.
+--   * KNOWN LIMIT (#1256): a cycle closed through a session one wait PASSES has no marker edge. A hand regrain()
+--     (older, own xid) passes a REPEATABLE READ session queued behind its SHARE lock and waits for a hand
+--     regrain_step (younger, recorded write), which waits for that session but does not list regrain(). Two hand
+--     drivers under lock_timeout 0 can so wait on each other, with no error, until a statement_timeout; maintain
+--     is bounded by its budget, the cutover by p_lock_timeout.
 --   * The marker can be forged (an advisory key carries no ACL) and a wait past its last poll still holds it until
 --     its transaction ends. Either only ever makes a younger wait refuse, never pass a snapshot: a refusal, not an
 --     empty read.
