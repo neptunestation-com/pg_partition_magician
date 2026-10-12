@@ -10114,13 +10114,47 @@ $$;
 -- The staging name the new parent is built under, <table>_pgpm_new, free as a relation (#344) and as a type
 -- (#671: a table's row type takes its name). Asked in the preflight and from step 5's CREATE TABLE, whose
 -- handler then asks the rest of what it takes (see above).
+--
+-- #1273: the remedy is the DROP for what holds the name. A table (or the partitioned table an interrupted run
+-- leaves) gets the leftover diagnosis and `drop table`; anything else is named for what it is
+-- (_relkind_noun, as the monolith and orphan-child refusals do, #509) with its own DROP, since `drop table`
+-- on a sequence, view or index fails 42809. A relation that is part of another object (a constraint's
+-- index, an identity column's sequence, an attached partition index, an extension's member, a table
+-- included) cannot be dropped on its own at all, so for one of those the refusal names the owner and no DROP,
+-- whatever its kind. A kind with no DROP listed here is named with no statement. (A composite type's
+-- relation is internal to its own pg_type, which DROP TYPE drops with it: that is not an owner.)
 create or replace function pgpm._transmute_refuse_staging_squatter(p_nsp name, p_staging name)
 returns void language plpgsql stable as $$
+declare v_oid oid; v_kind "char"; v_type oid; v_noun text; v_owner text; v_drop text;
 begin
-  if exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
-              where n.nspname = p_nsp and c.relname = p_staging) then
+  select c.oid, c.relkind, c.reltype into v_oid, v_kind, v_type
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace
+   where n.nspname = p_nsp and c.relname = p_staging;
+  if v_kind is not null then
+    v_noun := pgpm._relkind_noun(v_kind);
+    v_noun := case when v_noun ~ '^[aeiou]' then 'an ' else 'a ' end || v_noun;
+    select pg_describe_object(d.refclassid, d.refobjid, d.refobjsubid) into v_owner
+      from pg_depend d
+     where d.classid = 'pg_class'::regclass and d.objid = v_oid and d.objsubid = 0 and d.deptype in ('i', 'P', 'e')
+       and not (d.refclassid = 'pg_type'::regclass and d.refobjid = v_type)   -- a composite type's own pg_type
+     order by d.deptype = 'i' desc, d.deptype = 'P' desc
+     limit 1;
+    v_drop := case v_kind when 'S' then 'sequence' when 'v' then 'view' when 'm' then 'materialized view'
+                          when 'f' then 'foreign table' when 'i' then 'index' when 'I' then 'index'
+                          when 'c' then 'type' end;
+  end if;
+  if v_owner is not null then
+    raise exception 'pg_partition_magician: %.% already exists as %, part of %, and transmute needs that name as a staging name for the new parent. It cannot be dropped on its own, so rename it, or drop what it is part of, then retry transmute.',
+      p_nsp, p_staging, v_noun, v_owner;
+  elsif v_kind in ('r', 'p') then
     raise exception 'pg_partition_magician: %.% already exists, and transmute needs it as a staging name for the new parent. Most likely a leftover from an interrupted run. Drop it (drop table %.%) and retry transmute.',
       p_nsp, p_staging, quote_ident(p_nsp), quote_ident(p_staging);
+  elsif v_drop is not null then
+    raise exception 'pg_partition_magician: %.% already exists as %, and transmute needs that name as a staging name for the new parent. Drop it (drop % %.%) or rename it, then retry transmute.',
+      p_nsp, p_staging, v_noun, v_drop, quote_ident(p_nsp), quote_ident(p_staging);
+  elsif v_kind is not null then
+    raise exception 'pg_partition_magician: %.% already exists as %, and transmute needs that name as a staging name for the new parent. Drop or rename it, then retry transmute.',
+      p_nsp, p_staging, v_noun;
   end if;
   if pgpm._type_squatter(p_nsp, p_staging) is not null then
     raise exception 'pg_partition_magician: %.% already exists as %, and transmute needs that name as a staging name for the new parent (a table''s row type takes its name, so no type may hold it). Drop or rename the type, then retry transmute.',

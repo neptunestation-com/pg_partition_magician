@@ -441,7 +441,10 @@ inheritance parent; a relation of any kind already holds the name the monolith w
 (`<table>_p<lo>_to_<hi>`, typically a monolith detached from an earlier conversion of a table by that name)
 or a child-partition name (`<table>_p<label>`, any name pgpm could give a fine child, an id label past 19
 digits or with a fraction included: an orphan from an interrupted regrain, or a sequence or
-view that happens to be named that way); a type that is not a table's row type (an enum, domain or range
+view that happens to be named that way) or the staging name `<table>_pgpm_new` the new parent is built under
+(usually a leftover from an interrupted run; the message names the kind of relation it found and the `DROP`
+for that kind, or, for one that cannot be dropped on its own, such as a constraint's index or an identity
+column's sequence, the object it is part of); a type that is not a table's row type (an enum, domain or range
 type) holds the monolith's name, the staging name `<table>_pgpm_new` or a child-partition name (a table's
 row type takes its name, so the cutover's `CREATE TABLE` and `RENAME`, and every later partition's
 `CREATE TABLE`, need it free as a type too); a key (primary key or unique constraint) exists but
