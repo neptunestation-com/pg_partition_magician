@@ -35,7 +35,10 @@ parameters (`p_region`, `p_endpoint` for S3-compatible stores like MinIO or Supa
 optionally a path prefix (Supabase Storage's is `https://<project-ref>.supabase.co/storage/v1/s3`).
 A trailing slash is dropped, so `http://minio:9000/` and `http://minio:9000` address the same objects,
 and `archive.configure` refuses, naming `p_endpoint`, a value with no such scheme, no host, a query
-string or a fragment.
+string or a fragment, credentials before the host (`user@` or `user:password@`: name the Vault secrets
+in `p_vault_key_id` and `p_vault_secret` instead), or a path prefix with an empty, `.` or `..` segment.
+`p_bucket` must be a bare bucket name: one holding a `/` (put a key path in `p_prefix`), a `?`, a `#`
+or whitespace, or one that is empty, `.` or `..`, is refused naming `p_bucket`.
 `p_part_bytes` (the size of each `archive.to_s3` multipart part, 8 MiB by default) must be at least
 5 MiB, the smallest non-final multipart part S3 accepts: `archive.configure` refuses anything smaller,
 and `archive.to_s3` refuses a row holding zero or less before it sends anything. A positive size under

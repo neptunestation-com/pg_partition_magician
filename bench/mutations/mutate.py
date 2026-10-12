@@ -13388,6 +13388,34 @@ MUTATIONS["archive_endpoint_unrefused"] = (
     [("  if v_endpoint !~ '^https?://[^/?#[:space:]]+(/[^?#[:space:]]*)?$' then\n", "  if false then\n", 1)],
 )
 MUTATION_SRC["archive_endpoint_unrefused"] = "pgpm_archive/install.sql"
+# PR #1301's verification (V-01, V-02): what else the signers splice into the request's host or path is refused at
+# configure too. One clause each, caught by tests/archive/db/53 parts F and G through the same guard.
+MUTATIONS["archive_endpoint_userinfo_unrefused"] = (
+    "bench/archive_configure_endpoint.sh",
+    "archive.configure takes an endpoint with credentials before the host ('http://user@host:9000'): the signers "
+    "sign 'user@host:9000' as the Host while the client sends 'host:9000', so every request is refused 403 "
+    "SignatureDoesNotMatch after the read, and the shape refusal below it echoes the password of a scheme-less one. "
+    "One clause, the refusal. tests/archive/db/53 part F catches it (none is refused as carrying credentials).",
+    [("  if regexp_replace(v_endpoint, '^[^:/?#]*://', '') ~ '^[^/]*@' then\n", "  if false then\n", 1)],
+)
+MUTATION_SRC["archive_endpoint_userinfo_unrefused"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_endpoint_dot_segment_unrefused"] = (
+    "bench/archive_configure_endpoint.sh",
+    "archive.configure takes an endpoint whose path prefix holds an empty, '.' or '..' segment, which the client or "
+    "the store resolves away while the signature covers it as written: every request is refused 403. One clause, "
+    "the refusal. tests/archive/db/53 part F catches it (the three spellings are taken).",
+    [("  if regexp_replace(v_endpoint, '^https?://[^/]+', '') ~ '/\\.\\.?(/|$)|//+[^/]' then\n", "  if false then\n", 1)],
+)
+MUTATION_SRC["archive_endpoint_dot_segment_unrefused"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_bucket_unrefused"] = (
+    "bench/archive_configure_endpoint.sh",
+    "archive.configure stores p_bucket as given, so a bucket spelled '/archive-test-bucket' addresses "
+    "'//archive-test-bucket/<key>' through the signers' endpoint || '/' || bucket || '/' || key, and MinIO answers "
+    "HTTP 400 to every PUT after the read: #1269's failure through the other operand. One clause, the refusal. "
+    "tests/archive/db/53 part G catches it (no bucket is refused, and the last one replaces the stored bucket).",
+    [("  if p_bucket !~ '^[^/?#[:space:]]+$' or p_bucket in ('.', '..') then\n", "  if false then\n", 1)],
+)
+MUTATION_SRC["archive_bucket_unrefused"] = "pgpm_archive/install.sql"
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

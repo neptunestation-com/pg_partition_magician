@@ -14,10 +14,18 @@
 -- configure refuses, naming p_endpoint and before it writes anything, an endpoint that is not an http:// or
 -- https:// URL with a host, or that carries a query string or a fragment. A null endpoint is AWS S3, as before.
 --
+-- The same holds for what else the signers splice into that path or host (PR #1301's verification, V-01 and
+-- V-02). An endpoint carrying credentials ('http://user@host:9000') had the signers sign 'user@host:9000' as the
+-- Host while the client sends 'host:9000', and one whose path prefix holds an empty, '.' or '..' segment was
+-- resolved away by the client or the store while the signature covered it: every request was refused 403. And
+-- a bucket spelled '/my-bucket' addressed '//my-bucket/<key>', the issue's own HTTP 400 through the other
+-- operand. configure refuses each by name (part F the endpoint's, part G the bucket's), without echoing a
+-- password, and each refusal's remedy, typed as the message gives it, configures a table whose export lands.
+--
 -- Each export's object is stated by identity (the rows it holds, two of them, by id and payload), its key
 -- cleared and witnessed absent first, because the bucket outlives the test database; the prefix carries the
 -- database's name so a parallel run of this file in another database cannot meet it.
-select plan(25);
+select plan(46);
 
 create schema t53;
 create table t53.evt (id bigint primary key, payload text not null);
@@ -46,6 +54,18 @@ create function t53.stored() returns text language sql as $$
 create function t53.cfg(p_endpoint text) returns void language sql as $$
   select archive.configure('t53.evt', 'archive-test-bucket', p_endpoint => p_endpoint,
                            p_prefix => current_setting('t53.p')) $$;
+create function t53.cfgb(p_bucket text) returns void language sql as $$
+  select archive.configure('t53.evt', p_bucket, p_endpoint => 'http://minio:9000',
+                           p_prefix => current_setting('t53.p')) $$;
+create function t53.bucket() returns text language sql as $$
+  select bucket from archive.config where parent_table = 't53.evt'::regclass $$;
+-- the message a statement raises, or 'no error'
+create function t53.err(p_sql text) returns text language plpgsql as $$
+begin
+  execute p_sql;
+  return 'no error';
+exception when others then return sqlerrm;
+end $$;
 select set_config('t53.p', :'p', false) as t53_p \gset
 
 -- ---- A. the endpoint without a slash: the store, bucket and credentials are live ----------------------------
@@ -98,6 +118,50 @@ select is((archive.s3_signed_request('GET', 'http://minio:9000/', 'archive-test-
 select is((archive.s3_signed_request_bytea('GET', 'http://minio:9000/', 'archive-test-bucket', 'us-east-1', :'k', '',
              'text/plain', ''::bytea, 'minioadmin', 'minioadmin')).status, 200,
   'archive.s3_signed_request_bytea addresses the key through an endpoint spelled with a trailing slash');
+select is((t53.req('DELETE', :'k')).status, 204, 'LIVENESS: the object is cleared');
+
+-- ---- F. an endpoint with credentials, or a path prefix with an empty, '.' or '..' segment, is refused -------------
+select t53.cfg('http://minio:9000');
+select err as userinfo_err from t53.err($$ select t53.cfg('http://minioadmin:s3cr3t@minio:9000') $$) err \gset
+select ok(:'userinfo_err' like '%p_endpoint must not carry credentials%',
+  'an endpoint with user:password@ before the host is refused, naming p_endpoint (got: ' || :'userinfo_err' || ')');
+select ok(:'userinfo_err' not like '%s3cr3t%', 'and the refusal does not echo the password');
+select throws_like($$ select t53.cfg('http://minioadmin@minio:9000') $$, '%p_endpoint must not carry credentials%',
+  'an endpoint with user@ before the host is refused, naming p_endpoint');
+select throws_like($$ select t53.cfg('minioadmin:s3cr3t@minio:9000') $$, '%p_endpoint must not carry credentials%',
+  'an endpoint with credentials and no scheme is refused as carrying credentials, so its password is not echoed');
+select throws_like($$ select t53.cfg('http://minio:9000/.') $$, '%p_endpoint''s path prefix must not hold%',
+  'an endpoint whose path is a ''.'' segment is refused, naming p_endpoint');
+select throws_like($$ select t53.cfg('http://minio:9000/storage/../s3/') $$, '%p_endpoint''s path prefix must not hold%',
+  'an endpoint whose path prefix holds a ''..'' segment is refused, naming p_endpoint');
+select throws_like($$ select t53.cfg('http://minio:9000//s3') $$, '%p_endpoint''s path prefix must not hold%',
+  'an endpoint whose path prefix holds an empty segment is refused, naming p_endpoint');
+select is(t53.stored(), 'http://minio:9000', 'the refused endpoints leave the stored row as it was');
+-- the remedy, as the message gives it: the URL without the credentials (the key stays in the Vault secrets named
+-- by p_vault_key_id and p_vault_secret, the defaults the fixture fills)
+select t53.cfg('http://minio:9000');
+select is(t53.export(), 'ok', 'the userinfo refusal''s remedy (the URL without the credentials) exports');
+select is(t53.held(:'k'), '1:one,2:two', 'and its object lands at the key holding both rows');
+select is((t53.req('DELETE', :'k')).status, 204, 'LIVENESS: the object is cleared');
+
+-- ---- G. a bucket that is not a bare bucket name is refused by name -----------------------------------------------
+select throws_like($$ select t53.cfgb('/archive-test-bucket') $$, '%p_bucket must be a bare bucket name%',
+  'a bucket with a leading slash is refused, naming p_bucket');
+select throws_like($$ select t53.cfgb('archive-test-bucket/') $$, '%p_bucket must be a bare bucket name%',
+  'a bucket with a trailing slash is refused, naming p_bucket');
+select throws_like($$ select t53.cfgb('archive-test-bucket/sub') $$, '%p_bucket must be a bare bucket name%',
+  'a bucket with a path in it is refused, naming p_bucket');
+select throws_like($$ select t53.cfgb('') $$, '%p_bucket must be a bare bucket name%',
+  'an empty bucket is refused, naming p_bucket');
+select throws_like($$ select t53.cfgb('..') $$, '%p_bucket must be a bare bucket name%',
+  'a ''..'' bucket is refused, naming p_bucket');
+select is(t53.bucket(), 'archive-test-bucket', 'the refused buckets leave the stored row as it was');
+select t53.cfgb('my.bucket-1');
+select is(t53.bucket(), 'my.bucket-1', 'a bucket name with dots and dashes is taken as given');
+-- the remedy, as the message gives it: the bare bucket name
+select t53.cfgb('archive-test-bucket');
+select is(t53.export(), 'ok', 'the bucket refusal''s remedy (the bare name) exports');
+select is(t53.held(:'k'), '1:one,2:two', 'and its object lands at the key holding both rows');
 select is((t53.req('DELETE', :'k')).status, 204, 'LIVENESS: the object is cleared at the end');
 
 select * from finish();

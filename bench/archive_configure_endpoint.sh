@@ -8,7 +8,8 @@
 # the endpoint without them, both signers drop them from the endpoint they are handed, and an export through an
 # endpoint spelled 'http://minio:9000/' lands at the key instead of failing every PUT with HTTP 400 at
 # '//<bucket>/<key>'. And configure refuses by name an endpoint the signers cannot use (no http(s) scheme, no
-# host, a query string or a fragment). The file's own witnesses (the same export through the endpoint spelled
+# host, a query string or a fragment; credentials before the host; an empty, '.' or '..' path segment) and a
+# bucket that is not a bare bucket name ('/my-bucket' addressed '//my-bucket/<key>'). The file's own witnesses (the same export through the endpoint spelled
 # without the slash lands both rows, each key cleared and witnessed absent first) say the store was reachable;
 # a failure of a LIVENESS witness alone is reported as that, not as a catch.
 #
@@ -17,6 +18,12 @@
 #                                           configure stores the slash and both signers address //<bucket>/<key>
 #   archive_endpoint_unrefused           -- configure takes an endpoint with no scheme, no host, a query string
 #                                           or a fragment, found out only at the first PUT
+#   archive_endpoint_userinfo_unrefused  -- configure takes an endpoint with user@ before the host, signed as
+#                                           part of the Host, so every request is refused 403 (part F)
+#   archive_endpoint_dot_segment_unrefused -- configure takes a path prefix with an empty, '.' or '..' segment,
+#                                           resolved away while the signature covers it (part F)
+#   archive_bucket_unrefused             -- configure takes '/archive-test-bucket', which addresses
+#                                           '//archive-test-bucket/<key>' and gets HTTP 400 (part G)
 #
 # Usage: archive_configure_endpoint.sh <container> <db> [archive install.sql]
 # Needs the archive image (pgsql-http + pgtap + pg_prove) AND MinIO on the same network: the file PUTs and

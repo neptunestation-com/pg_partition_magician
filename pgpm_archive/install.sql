@@ -205,13 +205,32 @@ begin
   if p_fetch_rows < 1 then
     raise exception 'archive.configure: p_fetch_rows must be a positive number of rows, not %', p_fetch_rows;
   end if;
+  -- The bucket is one segment of every request's path (endpoint, '/', bucket, '/', key) and, for AWS S3, the
+  -- first label of its host, so a bucket holding a '/' ('/my-bucket' addressed '//my-bucket/<key>', which MinIO
+  -- refuses with HTTP 400), a '?', a '#' or whitespace, or one that is empty, '.' or '..' (segments the store
+  -- resolves away), addresses no object, and was found out only at the first PUT (#1269). Refused, not
+  -- rewritten: unlike an endpoint's trailing slash, none of these is another spelling of a bucket name.
+  if p_bucket !~ '^[^/?#[:space:]]+$' or p_bucket in ('.', '..') then
+    raise exception 'archive.configure: p_bucket must be a bare bucket name (no ''/'', ''?'', ''#'' or whitespace; a key path goes in p_prefix), not %', quote_literal(p_bucket);
+  end if;
   -- The endpoint is stored without its trailing slashes (see archive._s3_endpoint_canonical), and refused here,
   -- where it is chosen, when the signers cannot use it: they take the host from 'http://' or 'https://' up to
   -- the first '/', and append the bucket and key to the rest, so a value with no such scheme, no host, a query
   -- string or a fragment addressed no object at all, and was found out only at the first PUT (#1269).
   v_endpoint := archive._s3_endpoint_canonical(p_endpoint);
+  -- Credentials in the URL (user@ or user:password@ before the host): the signers sign that whole authority as
+  -- the Host header while the client sends the host alone, so the store refused every request (403
+  -- SignatureDoesNotMatch). Tested first, with or without a scheme, so no refusal below echoes a password.
+  if regexp_replace(v_endpoint, '^[^:/?#]*://', '') ~ '^[^/]*@' then
+    raise exception 'archive.configure: p_endpoint must not carry credentials before the host (user@ or user:password@; the value is not shown here): give the URL without them, and the Vault secret names holding the key in p_vault_key_id and p_vault_secret';
+  end if;
   if v_endpoint !~ '^https?://[^/?#[:space:]]+(/[^?#[:space:]]*)?$' then
     raise exception 'archive.configure: p_endpoint must be null (AWS S3) or the http:// or https:// URL of an S3-compatible store, a host and optionally a path prefix with no query string or fragment, not %', quote_literal(p_endpoint);
+  end if;
+  -- A path prefix with an empty, '.' or '..' segment: the client or the store resolves it away while the
+  -- signature covers it as written, so every request was refused (403 SignatureDoesNotMatch).
+  if regexp_replace(v_endpoint, '^https?://[^/]+', '') ~ '/\.\.?(/|$)|//+[^/]' then
+    raise exception 'archive.configure: p_endpoint''s path prefix must not hold an empty, ''.'' or ''..'' segment: spell the path as the store resolves it, not %', quote_literal(p_endpoint);
   end if;
   insert into archive.config
     (parent_table, bucket, region, endpoint, prefix, vault_key_id, vault_secret, compress, part_bytes, fetch_rows)
