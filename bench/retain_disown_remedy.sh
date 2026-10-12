@@ -9,9 +9,12 @@
 # the log row and shows retention runs clean after it; this wrapper exists so the mutation has a guard the
 # discriminate track can run against the mutant, in the shape of bench/retain_recall_moved_parent.sh.
 #
-# The mutation it is required to fail against (bench/mutations/mutate.py):
-#   retain_disown_remedy_keeps_row  -- pgpm._disown_retirement's remedy names the DROP and not the DELETE of
-#                                      the row, the pre-fix remedy. Parts A and B.
+# The mutations it is required to fail against (bench/mutations/mutate.py):
+#   retain_disown_remedy_keeps_row        -- pgpm._disown_retirement's remedy names the DROP and not the DELETE
+#                                            of the row, the pre-fix remedy. Parts A and B.
+#   retain_disown_remedy_drops_unreached  -- the drop remedy is written whatever the partition's state, so the row
+#                                            _retain_recall logs for a partition the lengthened policy keeps spells
+#                                            a DROP that loses its rows. Part C.
 #
 # Runs on the plain core image (pgtap and pg_prove; no pg_cron, which is what makes retire()'s dispatch fail).
 # TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree mounted somewhere

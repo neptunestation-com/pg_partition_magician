@@ -3634,17 +3634,33 @@ $$;
 -- fail_retain_drop), where with it retire() would have dropped the table as its own retirement's. Returns whether a
 -- mark was cleared.
 --
--- THE REMEDY IS THE WHOLE REPAIR, AND IT IS WRITTEN HERE, ONCE (#1272). Every path that disowns a mark (retire(),
--- _detach_reap, _retain_recall and the pass every install.sql run makes) logs through this function, so all of them
--- name it. Attaching the table back on its bounds hands it to retention again. Dropping it is the other way out, and
--- it is half a repair on its own: the row stays attached and anchored to the dropped relation's oid, which retire()
--- refuses as fail_retain_identity on every call, by design (a partition dropped under its row is a wedge for an
--- operator to look at, #1038), so status().retain_drop_failures climbs for good and the row takes a retain_batch slot
--- every tick. So the method spells both statements, the DROP and the DELETE of this row, naming the relation the row
--- records by its oid (where it is now) and the parent by its schema-qualified name, never by the search path.
+-- THE REMEDY IS THE ONE THE PARTITION'S STATE CALLS FOR, AND IT IS WRITTEN HERE, ONCE (#1272). Every path that
+-- disowns a mark (retire(), _detach_reap, _retain_recall and the pass every install.sql run makes) logs through this
+-- function, so none of them can name a remedy the others contradict. Which remedy is true depends on one fact, read
+-- here as of the call rather than assumed per path: whether the policy in force still reaches the partition's range
+-- (its hi at or below the horizon, retire()'s own precondition). retire() disowns only a partition that passed it;
+-- _retain_recall only one it no longer reaches (set_retain lengthened the policy); the install pass and _detach_reap
+-- find either.
+--
+--   REACHED: an aged partition, so the operator may finish the retirement by hand. Two ways out, both spelled as
+--   statements: attach it back on its bounds, and retention retires it; or drop it AND delete its pgpm.part row.
+--   The DROP alone is half a repair: the row stays attached and anchored to the dropped relation's oid, which
+--   retire() refuses as fail_retain_identity on every call, by design (a partition dropped under its row is a wedge
+--   for an operator to look at, #1038), so status().retain_drop_failures climbs for good and the row takes a
+--   retain_batch slot every tick.
+--   NOT REACHED (no policy, or its range ends past the horizon): its rows are rows the policy keeps, so the one
+--   remedy is the ATTACH, and the method says not to drop it. A DROP spelled here would be typed, and lose them.
+--   NOT JUDGED (the horizon or the bounds could not be computed): the ATTACH, which is safe either way, and the
+--   DROP only in words, conditional on retention reaching the range.
+--
+-- The statements name the relation the row records by its oid (where it is now; a row with no oid, by its name in
+-- _child_nsp's schema) and the parent by its schema-qualified name, never through the search path, and the ATTACH
+-- carries the bounds the grid encodes for the row's range, as _retain_recall's own re-attach does.
 create or replace function pgpm._disown_retirement(p_parent regclass, p_child name, p_why text)
 returns boolean language plpgsql as $$
-declare v_lo text; v_hi text; v_child_oid oid; v_rel_q text; v_parent_q text;
+declare
+  cfg pgpm.config; v_lo text; v_hi text; v_child_oid oid; v_rel_q text; v_parent_q text;
+  v_boundary text; v_reached boolean; v_unjudged text; v_attach text; v_unencoded text; v_remedy text;
 begin
   update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
    where parent_table = p_parent and child_name = p_child and retiring_at is not null
@@ -3655,13 +3671,43 @@ begin
   v_rel_q := coalesce(v_rel_q, format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child));
   select format('%I.%I', n.nspname, c.relname) into v_parent_q
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+
+  -- whether the policy in force reaches the range now (null: not judged), and the ATTACH that puts it back
+  begin
+    select * into strict cfg from pgpm.config where parent_table = p_parent;
+    cfg := pgpm._control_followed(cfg);
+    v_boundary := pgpm._retain_boundary(cfg);
+    v_reached := v_boundary is not null and not pgpm._native_gt(cfg.control_kind, v_hi, v_boundary);
+  exception when others then
+    v_reached := null; v_unjudged := sqlerrm;
+  end;
+  begin
+    v_attach := format('alter table %s attach partition %s for values from (%L) to (%L);', v_parent_q, v_rel_q,
+      pgpm._encode(cfg.control_kind, v_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
+      pgpm._encode(cfg.control_kind, v_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));
+  exception when others then
+    v_attach := null; v_unencoded := sqlerrm;
+  end;
+  v_attach := coalesce(v_attach, format('(its bounds [%s, %s) could not be encoded: %s)', v_lo, v_hi, v_unencoded));
+
+  if v_reached then
+    v_remedy := format('Retention reaches its range under the policy in force (horizon %s). If it was pgpm''s own aged retirement, once its detach is finished either attach it back to the parent on its bounds so retention retires it: %s ', v_boundary, v_attach)
+             || format('or drop it and delete its pgpm.part row with it: drop table %s; delete from pgpm.part where parent_table = %L::regclass and child_name = %L; ',
+                       v_rel_q, v_parent_q, p_child)
+             || '(the DROP alone leaves the row recording a relation that is gone, which retire() refuses as fail_retain_identity on every call)';
+  elsif v_reached is not null then
+    v_remedy := format('Retention does not reach its range under the policy in force (%s), so its rows are rows the table keeps: once its detach is finished, attach it back to the parent on its bounds so the table serves them again: %s Do not drop it',
+                       case when v_boundary is null then 'the table has no retention policy'
+                            else format('the range ends past the horizon %s', v_boundary) end,
+                       v_attach);
+  else
+    v_remedy := format('Whether retention reaches its range could not be judged (%s). Once its detach is finished, attach it back to the parent on its bounds, where retention treats it as any partition: %s Drop it only if retention reaches its range, and then delete its pgpm.part row with it',
+                       v_unjudged, v_attach);
+  end if;
   insert into pgpm.log (parent_table, action, lo, hi, method)
     values (p_parent, 'retain_disown', v_lo, v_hi,
             p_why || '; its retirement mark (retiring_at) is cleared, so the detach is the operator''s: once it is finished the table is left standing as one detached by hand, which retention never drops and retire() refuses (fail_retain_drop) on every call while its pgpm.part row stays. '
-            || 'If it was pgpm''s own aged retirement, once its detach is finished either attach it back to the parent on its bounds so retention retires it, '
-            || format('or drop it and delete its pgpm.part row with it: drop table %s; delete from pgpm.part where parent_table = %L::regclass and child_name = %L; ',
-                      v_rel_q, v_parent_q, p_child)
-            || '(the DROP alone leaves the row recording a relation that is gone, which retire() refuses as fail_retain_identity on every call)');
+            || v_remedy);
   return true;
 end;
 $$;
