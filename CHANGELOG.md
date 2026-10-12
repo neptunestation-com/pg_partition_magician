@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- **`from_hypertable` and its cutover ask the grid's mixed-step rule before the swap** (#1268). A `p_interval`
+  that mixes a month count with a duration (`'1 mon 1 day'`) is one `transmute` refuses only in
+  `pgpm._grid_floor`, when it first places a bound, and `pgpm._from_hypertable_check_arguments` did not ask it,
+  so `from_hypertable` copied and `from_hypertable_cutover` committed the swap, dropping the hypertable and its
+  incoming foreign keys, before the handoff refused and left a plain table pgpm does not manage; `'1 mon -40
+  days'` met the frontier check first, with a remedy that deleted the newest rows. The check now calls
+  `_grid_floor` itself on the arguments, so the rule cannot drift from the one `transmute` meets, and refuses
+  before the copy and before the pre-drain (`cannot migrate hypertable ... mixed month + duration interval
+  unsupported`). Test `tests/timescale/db/69`, guard `bench/hypertable_mixed_step_and_unit_remedy.sh`, mutation
+  `hypertable_mixed_step_unchecked`.
+- **The column-unit refusals `from_hypertable` raises name it as the re-run** (#1232). `pgpm._time_unit_contract`'s
+  date-anchor and `timestamp(p)` refusals, asked by the module before its copy and its swap, said "then re-run
+  transmute; ... call pgpm.transmute_abort(...) first", which does not apply to a table that is still a
+  hypertable (`transmute` refuses it, and nothing left a bound to abort). The contract takes the remedy from its
+  caller now (a new `p_remedy` argument, `transmute`'s own by default), and the module passes its own: re-run
+  `pgpm.from_hypertable`, or `pgpm.from_hypertable_cutover` after `pgpm.from_hypertable_copy`. Same test and
+  guard as #1268, mutation `hypertable_unit_rules_transmute_remedy`.
+
 - **`archive.configure` canonicalises its endpoint** (#1269). The endpoint was stored exactly as given and both
   signers append `/` and the bucket to it, so an endpoint spelled with a trailing slash (`http://minio:9000/`)
   addressed `//<bucket>/<key>`: MinIO answered HTTP 400 to every PUT, and every export and every tick's chunk
