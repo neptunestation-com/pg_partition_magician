@@ -5394,8 +5394,7 @@ $$;
 -- before the detach committed, and would still see the table attached. False means the table left the parent
 -- while the caller waited (detached or dropped by hand): the caller hands it to nothing and records nothing,
 -- as it would have had the candidate query seen it (a dropped one stays on the paths that report it, as
--- _part_detached_by_hand's note says). An unanchored row (no child_oid, and no relation passed for it) is left to
--- behave as it did before, as _part_detached_by_hand leaves it. A DETACH ... CONCURRENTLY whose
+-- _part_detached_by_hand's note says). A DETACH ... CONCURRENTLY whose
 -- first transaction has committed leaves the table in pg_inherits with inhdetachpending set: _part_built still
 -- counts it attached, so it can be the candidate, but pg_partition_ancestors stops at a link pending detach, so
 -- this answers false for it and the caller hands it to nothing (retire() leaves the same table alone, #705).
@@ -5408,30 +5407,50 @@ $$;
 -- reading through the parent (pgpm_archive's transports) read none of them, the range was recorded as covered
 -- with 0 rows, and retire() dropped the table on that coverage. The mark used to answer true here; it no longer
 -- does, so such a table is never handed to a strategy: the caller records nothing, retire()'s coverage gate stays
--- shut and keeps the table, and _archive_unheld_retirement says why and how to archive it. p_retiring_at is no
+-- shut and keeps the table, and _archive_unheld_reason says why and how to archive it. p_retiring_at is no
 -- longer read; it stays in the signature its callers (the operator script among them) pass.
+--
+-- NOR IS AN UNANCHORED ROW (round 3 of the same verification; #705's archive-step residue). A row with no
+-- child_oid (one an upgrade from before #421 could not anchor: its partition was not attached, or not under its
+-- name, when the backfill ran) names no relation this can ask, and it used to answer true for it. So a table the
+-- operator detached by hand under such a row (which _part_detached_by_hand, asking by oid, cannot call detached)
+-- was handed to the strategy, which read none of its rows through the parent, and its range was recorded as
+-- covered with 0 rows; attached back, the reference's remedy, retention dropped it. Now false: such a row is
+-- never handed to a strategy, nothing is recorded, retire() keeps the table while the range is uncovered, and
+-- _archive_unheld_reason gives the remedy (anchor the row with adopt_partition, attaching the table back first if
+-- it was detached, or forget the row to keep a detached table). Its name is not asked instead: a name is what
+-- the #421 anchor exists not to trust.
 create or replace function pgpm._archive_hold_partition(p_parent regclass, p_child_oid oid, p_retiring_at timestamptz)
 returns boolean language plpgsql as $$
 begin
   execute format('lock table only %s in access share mode', p_parent);
-  return p_child_oid is null
-      or exists (select 1 from pg_partition_ancestors(p_child_oid::regclass) a where a.relid = p_parent::oid);
+  return p_child_oid is not null
+     and exists (select 1 from pg_partition_ancestors(p_child_oid::regclass) a where a.relid = p_parent::oid);
 end;
 $$;
 
--- _archive_unheld_retirement: why an archive candidate _archive_hold_partition did not hold is not archived, when
--- it is a partition pgpm's own retirement detached (the record of pgpm's dispatch names p_rel, _detach_dispatched),
--- with the remedy; null for any other table (one detached or dropped by hand, which the callers leave alone
--- silently, as before). _archive_step logs it skip_archive on every tick it finds the table, and
--- scripts/archive_partition_whole.sql returns it. The remedy is the reference's: attach the table back on its
--- bounds, once it is no longer pending a detach, so the archive step reads it through the parent and retire()
--- completes the retirement on the coverage that read records.
-create or replace function pgpm._archive_unheld_retirement(p_parent regclass, p_child name, p_rel oid, p_lo text, p_hi text)
+-- _archive_unheld_reason: why an archive candidate _archive_hold_partition did not hold is not archived, with the
+-- remedy, for the two candidates the hold refuses that only an operator can resolve: a partition pgpm's own
+-- retirement detached (the record of pgpm's dispatch names p_rel, the relation the name resolves to,
+-- _detach_dispatched), and a row with no recorded oid (p_child_oid null). Null for any other table (one detached
+-- or dropped by hand while the caller waited, which the callers leave alone silently, as before). _archive_step
+-- logs it skip_archive on every tick it finds the candidate, and scripts/archive_partition_whole.sql returns it.
+-- The retirement's remedy is the reference's: attach the table back on its bounds, once it is no longer pending a
+-- detach, so the archive step reads it through the parent and retire() completes the retirement on the coverage
+-- that read records. The unanchored row's: anchor it (adopt_partition re-anchors a row with no oid), attaching
+-- the table back first if it was detached by hand, or delete the row to keep a detached table as the operator's.
+create or replace function pgpm._archive_unheld_reason(p_parent regclass, p_child name, p_child_oid oid, p_rel oid,
+                                                       p_lo text, p_hi text)
 returns text language plpgsql stable as $$
 declare v_nsp name;
 begin
-  if not pgpm._detach_dispatched(p_parent, p_child, p_rel) then return null; end if;
   v_nsp := pgpm._child_nsp(p_parent, p_child);
+  if p_child_oid is null and not pgpm._detach_dispatched(p_parent, p_child, p_rel) then
+    return format('pgpm.part''s row for %I.%I over [%s, %s) records no oid (an upgrade from before child_oid could not anchor it), so pgpm cannot tell that the relation is a partition of %s and does not hand it to a strategy; not archived and nothing recorded, and retire() keeps it while the range is uncovered. If it is a partition of %s, anchor the row (select pgpm.adopt_partition(%L, %L)) and the next tick archives it; if it was detached by hand, first attach it back on its bounds (ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM (%L) TO (%L)), or, to keep it as yours, forget the row (delete from pgpm.part where parent_table = %L::regclass and child_name = %L)',
+                  v_nsp, p_child, p_lo, p_hi, p_parent, p_parent, p_parent::text, format('%I.%I', v_nsp, p_child),
+                  p_parent, v_nsp, p_child, p_lo, p_hi, p_parent::text, p_child);
+  end if;
+  if not pgpm._detach_dispatched(p_parent, p_child, p_rel) then return null; end if;
   return format('%I.%I was detached from %s by a retirement of pgpm''s before its range [%s, %s) was archived (archiving was configured after the retirement began), so a strategy reading the range through the parent would read none of its rows; not archived and nothing recorded, and retire() keeps the table while the range is uncovered. To archive it, once it is no longer pending a detach attach it back on its bounds (ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM (%L) TO (%L)); the archive step then archives it and retire() completes the retirement',
                 v_nsp, p_child, p_parent, p_lo, p_hi, p_parent, v_nsp, p_child, p_lo, p_hi);
 end;
@@ -5589,14 +5608,12 @@ begin
       -- #1159: the parent held against a DETACH, and the candidate asked again under that hold, before the
       -- first read of it (see _archive_hold_partition). A table detached by hand while this waited is left as
       -- the candidate query leaves one: not handed to the strategy, no coverage recorded, nothing logged. One
-      -- pgpm's own retirement detached before its range was archived is left the same way, and logged
-      -- skip_archive with the remedy (_archive_unheld_retirement). A row with no recorded oid that carries a
-      -- retirement mark is asked by the relation its name resolves to, since its detach may have landed.
-      if not pgpm._archive_hold_partition(p_parent,
-               coalesce(r.child_oid, case when r.retiring_at is not null then v_now::oid end), r.retiring_at) then
+      -- pgpm's own retirement detached before its range was archived, and a row with no recorded oid, are left
+      -- the same way and logged skip_archive with the remedy (_archive_unheld_reason).
+      if not pgpm._archive_hold_partition(p_parent, r.child_oid, r.retiring_at) then
         insert into pgpm.log (parent_table, action, lo, hi, method)
         select p_parent, 'skip_archive', r.lo, r.hi, m
-          from pgpm._archive_unheld_retirement(p_parent, r.child_name, v_now::oid, r.lo, r.hi) m
+          from pgpm._archive_unheld_reason(p_parent, r.child_name, r.child_oid, v_now::oid, r.lo, r.hi) m
          where m is not null;
         continue;
       end if;

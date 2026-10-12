@@ -28,15 +28,18 @@
 --      archiving configured only after the mark: the detached table is still pgpm's, but no strategy reading
 --      through the parent can read it, so it is not handed off, nothing is recorded, retire() keeps it, the step
 --      logs skip_archive with the remedy, and the remedy as typed archives its rows before the drop.
+--   E  an unanchored, unmarked row (the state an upgrade from before #421 leaves) over a table the operator
+--      detached by hand: not handed to the strategy, nothing recorded, kept, skip_archive with the remedy, and the
+--      remedy as typed (attach it back, adopt_partition) archives its rows before the drop.
 --
 -- Identity, not cardinality: every assertion names which partition (by its range) or which ids. Fixtures are
 -- asymmetric: three ids in the operator's table against one in the archived sibling (A), one vouched mark
 -- against two unvouched (B), three ids against two (C).
 --
 -- bench/retirement_mark_needs_dispatch.sh runs this file against bench/mutations/mutate.py's
--- retirement_mark_vouches_alone (parts B and C), archive_hold_vouches_detached_retirement (part D) and
--- retirement_mark_readers_whole (parts A to D). The script's path is the psql variable archive_whole_script, defaulting to
--- the tree's copy.
+-- retirement_mark_vouches_alone (part B), archive_hold_vouches_detached_retirement (parts B and D),
+-- retirement_mark_readers_whole (parts A to D) and archive_hold_passes_unanchored (part E). The script's path is
+-- the psql variable archive_whole_script, defaulting to the tree's copy.
 create extension if not exists pgtap;
 set client_min_messages = warning;
 
@@ -46,7 +49,7 @@ set client_min_messages = warning;
 \endif
 \i :archive_whole_script
 
-select plan(31);
+select plan(40);
 
 create schema t330;
 -- every strategy call, with the ids it read through the parent
@@ -321,5 +324,95 @@ select is((select array_agg(distinct s.id order by s.id) from t330.sink s where 
 
 update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
  where parent_table = 'public.rm330d'::regclass;
+
+-- ======== PART E: an unanchored row is never handed to a strategy (round 3; #705's archive-step residue) ========
+-- A row with no child_oid (one an upgrade from before #421 could not anchor) names no relation the hold can ask,
+-- and the candidate query cannot call its table detached by hand. The hold used to answer true for it, so a table
+-- the operator detached by hand under such a row was handed to the strategy, which read none of its rows through
+-- the parent, and the range was recorded as covered with 0 rows; attached back, retention dropped it. It is now
+-- not handed off, nothing is recorded, retire() keeps it, skip_archive gives the remedy, and the remedy as typed
+-- (attach it back, then anchor the row with adopt_partition) archives ids 1, 2 and 15 before the drop.
+create table t330.gate (open boolean);
+insert into t330.gate values (false);
+-- via_parent behind a gate: closed, it raises, so the archive step defers and retire() keeps every partition
+create function t330.gated(p_parent regclass, p_child name, p_lo text, p_hi text)
+returns pgpm.archive_result language plpgsql as $$
+begin
+  if not (select open from t330.gate) then raise exception 't330: transport not ready yet'; end if;
+  return t330.via_parent(p_parent, p_child, p_lo, p_hi);
+end $$;
+
+create table public.rm330e (id bigint primary key, payload text);
+insert into public.rm330e values (1, 'a'), (2, 'b'), (15, 'c');
+call pgpm.transmute('public.rm330e', 'id', 10::bigint, p_retain => 20, p_paused => false);
+select pgpm.extend_to('public.rm330e', '60');
+insert into public.rm330e values (22, 'aged'), (55, 'frontier');
+select child_name as e_mono, child_oid as e_mono_oid from pgpm.part
+ where parent_table = 'public.rm330e'::regclass and lo = '0' \gset
+select child_name as e_p20 from pgpm.part where parent_table = 'public.rm330e'::regclass and lo = '20' \gset
+select pgpm.set_archive_fn('public.rm330e', 't330.gated(regclass,name,text,text)'::regprocedure);
+update pgpm.config set archive_batch = 5 where parent_table = 'public.rm330e'::regclass;
+
+call pgpm.maintain('public.rm330e');
+select ok(pgpm._is_write_blocked('public.rm330e', :'e_mono') and exists (select 1 from pg_class where oid = :e_mono_oid),
+  'LIVENESS: E: the aged monolith [0, 20) is write-blocked and kept (archiving deferred, its range uncovered)');
+
+-- the operator detaches it by hand; fixture: the row is unanchored, as an upgrade from before #421 leaves a
+-- partition its backfill could not resolve
+select format('alter table public.rm330e detach partition public.%I', :'e_mono') \gexec
+update pgpm.part set child_oid = null where parent_table = 'public.rm330e'::regclass and lo = '0';
+select ok(not exists (select 1 from pg_inherits where inhrelid = :e_mono_oid)
+          and exists (select 1 from pgpm.part where parent_table = 'public.rm330e'::regclass and lo = '0'
+                       and child_oid is null and retiring_at is null),
+  'LIVENESS: E: fixture: the monolith is detached by hand, its row unanchored and unmarked');
+
+update t330.gate set open = true;
+create temporary table marke330 as select coalesce(max(id), 0) as id from pgpm.log;
+call pgpm.maintain('public.rm330e');
+call pgpm.maintain('public.rm330e');
+
+select results_eq($$ select p_child, p_lo, p_hi, seen from t330.calls where parent = 'public.rm330e'::regclass order by n $$,
+  format($$ values (%L::name, '20'::text, '30'::text, '22'::text) $$, :'e_p20'),
+  'E: the strategy was handed [20, 30) (id 22) alone, never the table under the unanchored row');
+select is_empty(format($$ select 1 from pgpm.archive_ledger where parent_table = 'public.rm330e'::regclass
+                            and child_name = %L $$, :'e_mono'),
+  'E: no coverage is recorded for it');
+-- (the table gone: no ids, so the assertion fails rather than the file)
+select case when exists (select 1 from pg_class where oid = :e_mono_oid)
+            then format('select coalesce(string_agg(id::text, '','' order by id), ''none'') as e_ids from public.%I', :'e_mono')
+            else 'select ''gone''::text as e_ids' end as e_sql \gset
+:e_sql \gset
+select is(:'e_ids'::text, '1,2,15', 'E: the detached table is kept with ids 1, 2 and 15');
+select is((select array_agg(distinct l.lo || '-' || l.hi) from pgpm.log l
+            where l.parent_table = 'public.rm330e'::regclass and l.action = 'skip_archive'
+              and l.id > (select id from marke330)
+              and l.method like '%records no oid%' and l.method like '%adopt_partition%'),
+  array['0-20'],
+  'E: the archive step logs skip_archive over [0, 20), with the remedy');
+
+-- the remedy as the log row types it: attach the table back, then anchor the row
+select coalesce((select substring(l.method from 'ALTER TABLE .* FOR VALUES FROM \(''[^'']*''\) TO \(''[^'']*''\)')
+                   from pgpm.log l
+                  where l.parent_table = 'public.rm330e'::regclass and l.action = 'skip_archive' and l.lo = '0'
+                  order by l.id desc limit 1), 'select 1') as e_attach,
+       coalesce((select substring(l.method from 'select pgpm\.adopt_partition\([^)]*\)')
+                   from pgpm.log l
+                  where l.parent_table = 'public.rm330e'::regclass and l.action = 'skip_archive' and l.lo = '0'
+                  order by l.id desc limit 1), 'select 1') as e_adopt \gset
+:e_attach;
+:e_adopt;
+select ok(exists (select 1 from pg_inherits where inhrelid = :e_mono_oid and inhparent = 'public.rm330e'::regclass)
+          and exists (select 1 from pgpm.part where parent_table = 'public.rm330e'::regclass and lo = '0'
+                       and child_oid = :e_mono_oid),
+  'LIVENESS: E: the remedy as typed attached the table back and anchored its row');
+
+call pgpm.maintain('public.rm330e');
+call pgpm.maintain('public.rm330e');
+
+select ok(not exists (select 1 from pg_class where oid = :e_mono_oid),
+  'LIVENESS: E: retention retired the attached-back monolith (dropped)');
+select is((select array_agg(distinct s.id order by s.id) from t330.sink s where s.parent = 'public.rm330e'::regclass),
+  array[1, 2, 15, 22]::bigint[],
+  'E: ids 1, 2 and 15 were archived before the drop, beside [20, 30)''s id 22');
 
 select * from finish();

@@ -16,15 +16,17 @@
 # detach landed) on a table archiving was configured for only after the mark was stamped. _archive_hold_partition
 # vouched for it, so the step handed the detached table to the strategy, which reading through the parent read none
 # of its rows; the range was recorded as covered with 0 rows and retire() dropped the table. No detached table is
-# held now: nothing is recorded, retire() keeps it, and the step logs skip_archive with the remedy.
+# held now: nothing is recorded, retire() keeps it, and the step logs skip_archive with the remedy. Round 3: nor is
+# a row with no recorded oid (an upgrade from before #421), whose table the operator detached by hand (part E).
 #
-# THREE mutations are required to fail against it (bench/mutations/mutate.py):
+# FOUR mutations are required to fail against it (bench/mutations/mutate.py):
 #   retirement_mark_vouches_alone            -- pgpm._retirement_vouched answers from the mark alone, without
 #                                               _detach_dispatched's record. Part B (the predicates and the
 #                                               write-block step).
 #   archive_hold_vouches_detached_retirement -- the hold vouches for a detached table carrying pgpm's own
 #                                               retirement again (V-01). Parts B and D.
 #   retirement_mark_readers_whole            -- #1259's defect whole, both readers. Parts A to D.
+#   archive_hold_passes_unanchored           -- the hold passes a row with no recorded oid again. Part E.
 #
 # Runs on the plain core image (pgtap and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path inside the
 # container, for a worktree mounted somewhere other than /repo.

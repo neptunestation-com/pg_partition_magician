@@ -10328,8 +10328,8 @@ MUTATIONS["archive_hold_recheck_by_snapshot"] = (
     "pg_inherits under the statement's snapshot; under REPEATABLE READ that is the transaction's first, taken before "
     "the detach committed, so the table still reads as attached and is handed to the strategy. One site, the "
     "helper's question. tests/325 part D catches it (the script under REPEATABLE READ records the 0-row range).",
-    [("      or exists (select 1 from pg_partition_ancestors(p_child_oid::regclass) a where a.relid = p_parent::oid);\n",
-      "      or not pgpm._part_detached_by_hand(p_parent, p_child_oid, p_retiring_at);\n", 1)],
+    [("     and exists (select 1 from pg_partition_ancestors(p_child_oid::regclass) a where a.relid = p_parent::oid);\n",
+      "     and not pgpm._part_detached_by_hand(p_parent, p_child_oid, p_retiring_at);\n", 1)],
 )
 MUTATIONS["archive_step_hold_skipped"] = (
     "bench/archive_hold_detach_in_flight.sh",
@@ -10337,11 +10337,10 @@ MUTATIONS["archive_step_hold_skipped"] = (
     "chunk sizing waits out a DETACH in flight, the strategy reads through the parent after it committed and finds "
     "none of the table's rows, and the range is recorded as covered. One site, the step's call of "
     "pgpm._archive_hold_partition. tests/325 part B catches it.",
-    [("      if not pgpm._archive_hold_partition(p_parent,\n"
-      "               coalesce(r.child_oid, case when r.retiring_at is not null then v_now::oid end), r.retiring_at) then\n"
+    [("      if not pgpm._archive_hold_partition(p_parent, r.child_oid, r.retiring_at) then\n"
       "        insert into pgpm.log (parent_table, action, lo, hi, method)\n"
       "        select p_parent, 'skip_archive', r.lo, r.hi, m\n"
-      "          from pgpm._archive_unheld_retirement(p_parent, r.child_name, v_now::oid, r.lo, r.hi) m\n"
+      "          from pgpm._archive_unheld_reason(p_parent, r.child_name, r.child_oid, v_now::oid, r.lo, r.hi) m\n"
       "         where m is not null;\n"
       "        continue;\n      end if;\n",
       "", 1)],
@@ -10352,9 +10351,8 @@ MUTATIONS["archive_whole_hold_skipped"] = (
     "parent and no second question, so the strategy's read through the parent waits out a DETACH in flight and "
     "finds none of the table's rows, and the script records the range as covered. One site, the script's call of "
     "pgpm._archive_hold_partition. tests/325 parts A and D catch it.",
-    [("""  if not pgpm._archive_hold_partition(p_parent,
-           coalesce(r.child_oid, case when r.retiring_at is not null then v_now::oid end), r.retiring_at) then
-    return coalesce(pgpm._archive_unheld_retirement(p_parent, r.child_name, v_now::oid, r.lo, r.hi),
+    [("""  if not pgpm._archive_hold_partition(p_parent, r.child_oid, r.retiring_at) then
+    return coalesce(pgpm._archive_unheld_reason(p_parent, r.child_name, r.child_oid, v_now::oid, r.lo, r.hi),
                     format('%I.%I is no longer a partition of %s (detached or dropped by hand), so it was not '
                            'archived and nothing was recorded for it. Call again for the next partition.',
                            v_nsp, r.child_name, p_parent));
@@ -10374,9 +10372,8 @@ MUTATIONS["archive_whole_unfiltered_and_unheld"] = (
     "recorded as covered with 0 rows; retain() drops the table once it is attached back. Both of the script's "
     "defences, the issue's defect whole. tests/313 parts A and B catch it.",
     [("        and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)\n", "", 1),
-     ("""  if not pgpm._archive_hold_partition(p_parent,
-           coalesce(r.child_oid, case when r.retiring_at is not null then v_now::oid end), r.retiring_at) then
-    return coalesce(pgpm._archive_unheld_retirement(p_parent, r.child_name, v_now::oid, r.lo, r.hi),
+     ("""  if not pgpm._archive_hold_partition(p_parent, r.child_oid, r.retiring_at) then
+    return coalesce(pgpm._archive_unheld_reason(p_parent, r.child_name, r.child_oid, v_now::oid, r.lo, r.hi),
                     format('%I.%I is no longer a partition of %s (detached or dropped by hand), so it was not '
                            'archived and nothing was recorded for it. Call again for the next partition.',
                            v_nsp, r.child_name, p_parent));
@@ -13575,8 +13572,8 @@ MUTATIONS["archive_hold_vouches_detached_retirement"] = (
     "the parent reads none of its rows, the range is recorded as covered with 0 rows, and retire() drops the table: "
     "ids 1, 2 and 15 archived nowhere. One site, the hold's retirement clause. The V-01 reproduction and tests/330 "
     "parts B and D catch it.",
-    [("  return p_child_oid is null\n",
-      "  return p_child_oid is null\n      or pgpm._retirement_vouched(p_parent, p_child_oid, p_retiring_at)\n", 1)],
+    [("  return p_child_oid is not null\n",
+      "  return pgpm._retirement_vouched(p_parent, p_child_oid, p_retiring_at) or p_child_oid is not null\n", 1)],
 )
 # #1259's defect whole. Since V-01 the archive step and the script have two independent defences against handing
 # the strategy a table detached by hand under a mark whose dispatch failed (the candidate query, through
@@ -13595,8 +13592,18 @@ MUTATIONS["retirement_mark_readers_whole"] = (
       "                  where p.parent_table = p_parent and p.child_oid = p_child_oid\n"
       "                    and pgpm._detach_dispatched(p_parent, p.child_name, p_child_oid));\n",
       "  select p_retiring_at is not null;\n", 1),
-     ("  return p_child_oid is null\n",
-      "  return p_child_oid is null\n      or p_retiring_at is not null\n", 1)],
+     ("  return p_child_oid is not null\n",
+      "  return p_retiring_at is not null or p_child_oid is not null\n", 1)],
+)
+MUTATIONS["archive_hold_passes_unanchored"] = (
+    "bench/retirement_mark_needs_dispatch.sh",
+    "The per-PR verification's round 3 on #1259 (#705's archive-step residue): pgpm._archive_hold_partition holds a "
+    "row with no recorded oid (one an upgrade from before #421 could not anchor), as it did before, so a table the "
+    "operator detached by hand under such a row is handed to the strategy, which reads none of its rows through the "
+    "parent; the range is recorded as covered with 0 rows and, once the table is attached back, retention drops "
+    "it. One site, the hold's null pass-through. The round-3 reproduction and tests/330 part E catch it.",
+    [("  return p_child_oid is not null\n",
+      "  return p_child_oid is null or p_child_oid is not null\n", 1)],
 )
 
 

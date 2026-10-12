@@ -18,9 +18,13 @@
   after its retirement began, the archive step used to hand the detached table to a strategy reading through
   the parent, record its range as covered with 0 rows, and let `retire` drop it. It is now not archived,
   `retire` keeps it while its range is uncovered, and the step logs `skip_archive` with the remedy (attach it
-  back on its bounds); the script refuses it with the same message. Test `tests/330`, guard
+  back on its bounds); the script refuses it with the same message. Nor is a row with no recorded `child_oid`
+  (one an upgrade from before 0.6.0 could not anchor), whose table the operator may have detached by hand
+  (#705's archive-step residue): it is not archived, and `skip_archive` names the remedy (anchor it with
+  `adopt_partition`, attaching the table back first, or forget the row). Test `tests/330`, guard
   `bench/retirement_mark_needs_dispatch.sh`, mutations `retirement_mark_vouches_alone`,
-  `archive_hold_vouches_detached_retirement` and `retirement_mark_readers_whole`.
+  `archive_hold_vouches_detached_retirement`, `retirement_mark_readers_whole` and
+  `archive_hold_passes_unanchored`.
 
 - **A retired chunk's bound with no offset is read on the grid's clock, not the caller's** (#1264).
   `pgpm._over_retired_chunks`, which decides the partitions the archive step and `retain()` hold over a retired

@@ -2344,6 +2344,14 @@ PARTITION <partition> FOR VALUES FROM (<lo>) TO (<hi>)`, which the `method` spel
 archives it through the parent and `retire` completes the retirement. `scripts/archive_partition_whole.sql`
 refuses it with the same message.
 
+Nor is a partition whose `pgpm.part` row records no `child_oid` (one an upgrade from before 0.6.0 could not
+anchor: its partition was not attached, or not under its name, when the upgrade ran): pgpm cannot tell that
+the relation is a partition of the parent, so it is not archived, nothing is recorded, `retire` keeps it while
+its range is uncovered, and every tick logs `skip_archive` over its range with the remedy. If it is a
+partition of the parent, anchor the row with [`adopt_partition`](#adopt_partition), and the next tick
+archives it; if it was detached by hand, attach it back on its bounds first, or delete its `pgpm.part` row to
+keep the table as yours. The script refuses it with the same message.
+
 ### `maintain_all`
 
 ```sql
