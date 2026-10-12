@@ -21,15 +21,21 @@
 --           READ: BEGIN ISOLATION LEVEL READ COMMITTED, the call, COMMIT. The renamed partition is recorded by
 --           its oid under its CURRENT name over its own bounds, the untouched one is recorded too, and the
 --           detached table is refused as not a partition, so pgpm.part holds exactly the two attached ones.
+--   PART E  READ COMMITTED, the partition renamed and a standalone table created under its old name, committed
+--           while the call waits for the partition's lock (LOCK TABLE takes a name, and re-resolves it once
+--           granted, so the lock lands on the squatter): refused, naming the partition as it is now, nothing
+--           recorded. The remedy as typed (the call naming the partition's current name) records it, and while
+--           its transaction is open a detach of that partition waits for its lock (the row's guarantee).
 --
 -- adopt_partition is a function, not a committing procedure, so its refusals are pinned by message.
 -- ASYMMETRIC FIXTURES. Three hand partitions: x [900, 1000) holds 950 and is renamed, y [1000, 1100) holds
 -- 1010 and 1020 and is detached, z [1100, 1200) holds 1111, 1122 and 1133 and is left alone. Two end up
--- recorded and one does not, and every check names the relation by oid and name, never a count alone.
+-- recorded and one does not, and every check names the relation by oid and name, never a count alone. E's w
+-- [1200, 1300) holds 1234, 1256 and 1278, and its squatter none.
 create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
-select plan(18);
+select plan(25);
 
 create table public.t332 (id bigint primary key, payload text);
 insert into public.t332 values (150, 'a');
@@ -127,6 +133,72 @@ select is((select string_agg(id::text, ',' order by id) from public.t332 where i
 select is((select string_agg(lo || '..' || hi, ',' order by id) from pgpm.log
             where parent_table = 'public.t332'::regclass and action = 'adopt_partition'),
   '900..1000,1100..1200', 'D: one adoption logged per partition recorded, x''s range then z''s');
+
+-- ============================ (E) a rename and a squatter while the call waits for its lock ============================
+-- READ COMMITTED throughout. Session eb renames w away and creates a standalone table under w's old name, and holds
+-- both uncommitted; the call (session ea, naming w) passes its first check and waits behind eb for w's lock; eb
+-- commits. LOCK TABLE takes a name and resolves it again once granted, so the lock lands on the squatter: the call
+-- must refuse rather than record w with no lock on it. The order is set by the lock queue and witnessed in
+-- pg_locks, not by sleeps.
+create table public.t332_w partition of public.t332 for values from (1200) to (1300);
+insert into public.t332 values (1234, 'w'), (1256, 'w'), (1278, 'w');
+select 'public.t332_w'::regclass::oid as w_oid \gset
+create function pg_temp.t332_waits(p_pid int, p_rel oid) returns boolean
+language plpgsql as $$
+begin
+  for i in 1..500 loop
+    if exists (select 1 from pg_locks l where l.pid = p_pid and not l.granted and l.locktype = 'relation'
+                 and l.relation = p_rel) then
+      return true;
+    end if;
+    perform pg_sleep(0.01);
+  end loop;
+  return false;
+end;
+$$;
+select dblink_connect('ea', 'dbname=' || current_database()) as ea \gset
+select dblink_connect('eb', 'dbname=' || current_database()) as eb \gset
+select pid as ea_pid from dblink('ea', 'select pg_backend_pid()') as t(pid int) \gset
+select pid as o_pid from dblink('o332', 'select pg_backend_pid()') as t(pid int) \gset
+select dblink_exec('eb', 'begin') as eb_begin \gset
+select dblink_exec('eb', 'alter table public.t332_w rename to t332_w_old') as eb_rename \gset
+select dblink_exec('eb', 'create table public.t332_w (id bigint, payload text)') as eb_squat \gset
+select dblink_exec('ea', 'begin isolation level read committed') as ea_begin \gset
+select dblink_send_query('ea', format('select pgpm.adopt_partition(%L, %L)', 'public.t332', 'public.t332_w')) as ea_sent \gset
+select ok(pg_temp.t332_waits(:ea_pid, :w_oid),
+  'LIVENESS: E: adopt_partition passed its first check and waits behind the rename for w''s lock');
+select dblink_exec('eb', 'commit') as eb_commit \gset
+select count(*) as ea_rows from dblink_get_result('ea', false) as t(x text) \gset
+select ok(dblink_error_message('ea') like '%cannot adopt t332_w_old (oid ' || :w_oid || '): the name public.t332_w no longer denotes it%Re-run adopt_partition naming the partition as it is now, t332_w_old%',
+  'E: the name it locked now denotes the squatter, so adopt_partition refuses, naming the partition as it is now');
+select count(*) as ea_drained from dblink_get_result('ea', false) as t(x text) \gset
+-- COMMIT, not ROLLBACK: a call that recorded w under a lock on the squatter would commit its row here
+select dblink_exec('ea', 'commit') as ea_commit0 \gset
+select is((select string_agg(child_name, ',') from pgpm.part where child_oid = :w_oid), null,
+  'E: nothing is recorded for w when the call''s transaction commits');
+select ok(to_regclass('public.t332_w') <> :w_oid
+          and exists (select 1 from pg_inherits where inhparent = 'public.t332'::regclass and inhrelid = :w_oid),
+  'LIVENESS: E: the name is the squatter''s now, and w is still attached as t332_w_old');
+
+-- the remedy, as typed: the call again, naming the partition as it is now. Its lock is on w: a detach of w
+-- from another session waits for it, and gives up at its lock_timeout, while the call's transaction is open.
+select dblink_exec('ea', 'begin isolation level read committed') as ea_begin2 \gset
+select r as e_adopted from dblink('ea', format('select pgpm.adopt_partition(%L, %L)', 'public.t332', 'public.t332_w_old')) as t(r text) \gset
+select dblink_exec('o332', $$set lock_timeout = '300ms'$$) as o_timeout \gset
+select throws_ok(format('select dblink_exec(%L, %L)', 'o332', 'alter table public.t332 detach partition public.t332_w_old'),
+  '55P03', NULL,
+  'E: while the remedy''s transaction is open, a detach of the partition it recorded waits for its lock');
+select dblink_exec('ea', 'commit') as ea_commit \gset
+with mine as materialized (select * from pgpm.part where parent_table = 'public.t332'::regclass)
+select is((select string_agg(child_name || ' [' || lo || ', ' || hi || ')', '; ') from mine where child_oid = :w_oid),
+          't332_w_old [1200, 1300)',
+  'E: the remedy records w by its oid, under its current name, over its own bounds');
+select ok(exists (select 1 from pg_inherits where inhparent = 'public.t332'::regclass and inhrelid = :w_oid)
+          and (select string_agg(id::text, ',' order by id) from public.t332_w_old) = '1234,1256,1278'
+          and not exists (select 1 from pgpm.part where child_oid = to_regclass('public.t332_w')::oid),
+  'E: and w is still attached with its rows 1234, 1256 and 1278 when the row commits; the squatter is recorded nowhere');
+select dblink_disconnect('ea') as ea_gone \gset
+select dblink_disconnect('eb') as eb_gone \gset
 
 select dblink_disconnect('o332') as o332_gone \gset
 select * from finish();

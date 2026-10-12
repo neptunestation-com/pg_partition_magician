@@ -7,15 +7,21 @@
 # snapshot after its SHARE UPDATE EXCLUSIVE lock, and under REPEATABLE READ or SERIALIZABLE that snapshot is the
 # transaction's first, so a DETACH another session committed before the call was read as still attached and a
 # standalone table was recorded in pgpm.part as a partition (a RENAME, under its old name). It refuses any
-# isolation level stricter than READ COMMITTED now, so every read after the lock has a snapshot taken after it.
+# isolation level stricter than READ COMMITTED now, so every read after the lock has a snapshot taken after it,
+# and asks under the lock whether the name it locked still denotes the partition, so the lock is on it.
 # The file is the acceptance test; this wrapper exists so the mutation has a guard the discriminate track can
 # run against the mutant, in the shape of bench/retain_recall_moved_parent.sh.
 #
-# ONE mutation is required to fail against it (bench/mutations/mutate.py):
+# TWO mutations are required to fail against it (bench/mutations/mutate.py):
 #   adopt_partition_strict_isolation_admitted -- the refusal gone, the pre-fix shape: parts A (a detached table
 #                                                recorded), B (a renamed partition recorded under its old name)
 #                                                and C (SERIALIZABLE admitted) catch it, and part D's remedy then
 #                                                meets the rows the admitted calls recorded.
+#   adopt_partition_lock_name_unchecked       -- the lock taken by name and not asked again under the lock: a
+#                                                rename and a squatter on the old name, committed while the call
+#                                                waits, leave the lock on the squatter, and the partition is
+#                                                recorded with no lock on it. Part E catches it (READ COMMITTED,
+#                                                ordered by the lock queue, the detach then lands under the row).
 #
 # Runs on the plain core image (pgtap, dblink and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path
 # inside the container, for a worktree mounted somewhere other than /repo.

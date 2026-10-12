@@ -9290,7 +9290,7 @@ select is((select count(*) || '/' || string_agg(device_id::text, ',' order by de
         "Issue #1082: adopt_partition judges the partition attached without locking it, so a DETACH (or a DROP) "
         "in a second session lands between the judgement and the commit, and the row it records is for a "
         "relation no longer in the table. One site, the lock on the partition. tests/303 part E catches it.",
-        [("  execute format('lock table %s in share update exclusive mode', p_child::text);\n", "", 1)],
+        [("  execute format('lock table %s in share update exclusive mode', v_child_q);\n", "", 1)],
     ),
     "adopt_partition_credits_old_coverage": (
         "bench/adopt_partition.sh",
@@ -13238,6 +13238,15 @@ MUTATIONS["adopt_partition_strict_isolation_admitted"] = (
       "    raise exception 'pg_partition_magician: adopt_partition(%, %) must run in a READ COMMITTED transaction",
       "  if false then\n"
       "    raise exception 'pg_partition_magician: adopt_partition(%, %) must run in a READ COMMITTED transaction", 1)],
+)
+MUTATIONS["adopt_partition_lock_name_unchecked"] = (
+    "bench/adopt_partition_isolation.sh",
+    "PR #1295 round 1 (V-01): adopt_partition locks its partition by NAME and does not ask, under the lock, whether "
+    "the name still denotes p_child. LOCK TABLE re-resolves the name once granted, so a rename of the partition and "
+    "a table created under its old name, committed while the call waits, leave the lock on that new table: the "
+    "call records the partition with no lock on it, and a DETACH commits before the row does. One site, the check "
+    "under the lock. tests/332 part E catches it.",
+    [("  if to_regclass(v_child_q) is distinct from p_child then\n", "  if false then\n", 1)],
 )
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

@@ -14098,6 +14098,7 @@ declare
   cfg pgpm.config; v_rel name; v_relkind "char"; v_bound text; v_m text[];
   v_lo_raw text; v_hi_raw text; v_lo text; v_hi text; v_coltype text; v_exact boolean;
   v_row pgpm.part; v_had boolean; v_tracked name; v_clash_q text; v_chunks int; v_was text; v_method text;
+  v_child_q text;   -- #1262: p_child's schema-qualified name, quoted, as locked
 begin
   if current_setting('transaction_isolation') not in ('read committed', 'read uncommitted') then
     raise exception 'pg_partition_magician: adopt_partition(%, %) must run in a READ COMMITTED transaction (this one is %): it records % only while it is attached to % once its lock on it is granted, and asks that through a snapshot taken after the lock, which a stricter isolation level cannot provide. Re-run it in a READ COMMITTED transaction: BEGIN ISOLATION LEVEL READ COMMITTED, the call, COMMIT',
@@ -14114,7 +14115,22 @@ begin
     raise exception 'pg_partition_magician: % is not a partition of %: adopt_partition records a relation attached to the table, and a partition being detached is leaving it',
       p_child, p_parent;
   end if;
-  execute format('lock table %s in share update exclusive mode', p_child::text);
+  -- #1262 (V-01): LOCK TABLE takes a NAME, and resolves it again once the lock is granted, so a rename of the
+  -- partition and a new table created under its old name, committed while this call waits, leave the lock on
+  -- that new table and none on p_child. The name is read schema-qualified (the caller's search_path chooses
+  -- nothing), locked, and asked again under the lock: it must still denote p_child's oid, or the call refuses.
+  -- Under the lock the answer is stable, because a rename takes ACCESS EXCLUSIVE.
+  select format('%I.%I', n.nspname, c.relname) into v_child_q
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_child;
+  if not found then
+    raise exception 'pg_partition_magician: % is not a partition of % any more (dropped while this call waited)',
+      p_child, p_parent;
+  end if;
+  execute format('lock table %s in share update exclusive mode', v_child_q);
+  if to_regclass(v_child_q) is distinct from p_child then
+    raise exception 'pg_partition_magician: cannot adopt % (oid %): the name % no longer denotes it (renamed, or the name taken by another relation, while this call waited for its lock), so the lock this call took is not on it. Re-run adopt_partition naming the partition as it is now, %',
+      p_child, p_child::oid, v_child_q, p_child;
+  end if;
   select c.relname, c.relkind, pg_get_expr(c.relpartbound, c.oid) into v_rel, v_relkind, v_bound
     from pg_class c join pg_inherits i on i.inhrelid = c.oid
    where c.oid = p_child and i.inhparent = p_parent and not i.inhdetachpending;

@@ -9,6 +9,11 @@
   standalone table as a partition of the parent, and a rename was recorded under the old name. It now refuses
   any stricter level up front, before any lock, as `untransmute` does, so every read after the lock has a
   snapshot taken after it; the refusal names the remedy (`BEGIN ISOLATION LEVEL READ COMMITTED`, the call,
+  `COMMIT`). Its `SHARE UPDATE EXCLUSIVE` lock was taken by name, too, which `LOCK TABLE` resolves again once
+  granted: a rename of the partition and a table created under its old name, committed while the call waited,
+  left the lock on that new table, and a `DETACH` of the recorded partition could commit before its row. It now
+  locks the schema-qualified name and asks under the lock whether that name still denotes `p_child`, refusing
+  with the partition's current name when it does not.
   `COMMIT`).
 - **`check_time_monotonic` gives the same answer from every session zone** (#1265). It cast the time column to
   `timestamptz` in the caller's `TimeZone`, so a naive `timestamp` (or text) column with a wall time inside that
