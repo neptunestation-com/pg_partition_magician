@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **`archive.configure` canonicalises its endpoint** (#1269). The endpoint was stored exactly as given and both
+  signers append `/` and the bucket to it, so an endpoint spelled with a trailing slash (`http://minio:9000/`)
+  addressed `//<bucket>/<key>`: MinIO answered HTTP 400 to every PUT, and every export and every tick's chunk
+  through it failed after the read. `archive.configure` now stores the endpoint without its trailing slashes,
+  and `archive.s3_signed_request` and `archive.s3_signed_request_bytea` drop them from the endpoint they are
+  handed, so a row stored with one before this release, or a direct call spelled with one, addresses the same
+  object as the endpoint spelled without. A path prefix is kept. `archive.configure` also refuses, naming
+  `p_endpoint`, an endpoint with no `http://` or `https://` scheme, no host, a query string or a fragment,
+  which the signers could never use. A null endpoint (AWS S3) is unchanged.
+
 - **A resumed `text_time` transmute refuses another encoding** (#1270). The claim a failed attempt leaves
   recorded the bound, its zone (#506) and its column (#628), but not the `text_time` encoding the
   `pgpm_monolith_bound` `CHECK`'s literals were written in, so a re-run with another `p_tt_epoch` (or prefix,

@@ -13368,6 +13368,27 @@ MUTATIONS["surface_prepare_grantor_unchecked"] = (
       "    raise exception using errcode = 'insufficient_privilege', message = format(\n", 1)],
 )
 
+# Issue #1269: an S3-compatible endpoint's trailing slashes are not part of it, and archive.configure refuses one the
+# signers cannot use. bench/archive_configure_endpoint.sh runs tests/archive/db/53 against each mutant.
+MUTATIONS["archive_endpoint_trailing_slash_kept"] = (
+    "bench/archive_configure_endpoint.sh",
+    "Pre-#1269 endpoint handling: archive._s3_endpoint_canonical hands the endpoint back as given, so archive.configure "
+    "stores 'http://minio:9000/' with its slash and both signers, which append '/' || bucket to it, address "
+    "'//<bucket>/<key>'. MinIO answers HTTP 400 to every PUT, so every export and every tick's chunk through it fails "
+    "after the read. One clause, the strip. tests/archive/db/53 parts B and E catch it (the stored endpoint keeps the "
+    "slash, the export fails, its object never lands, and both signers' GET through the slashed endpoint is refused).",
+    [("  select regexp_replace(p_endpoint, '/+$', '');\n", "  select p_endpoint;\n", 1)],
+)
+MUTATION_SRC["archive_endpoint_trailing_slash_kept"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_endpoint_unrefused"] = (
+    "bench/archive_configure_endpoint.sh",
+    "Pre-#1269 archive.configure: an endpoint the signers cannot use (no http:// or https:// scheme, no host, a query "
+    "string or a fragment) is stored, and found out only at the first PUT. One clause, the refusal. "
+    "tests/archive/db/53 part D catches it (nothing is refused, and the last bad endpoint replaces the stored one).",
+    [("  if v_endpoint !~ '^https?://[^/?#[:space:]]+(/[^?#[:space:]]*)?$' then\n", "  if false then\n", 1)],
+)
+MUTATION_SRC["archive_endpoint_unrefused"] = "pgpm_archive/install.sql"
+
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a

@@ -994,6 +994,10 @@ run_archive() {
   # bench/discriminate.sh completes with archive._owned_key claiming the key base as the prefix was stored.
   echo "--- one object, one claim, whatever the prefix's spelling guard (issue #1260) ---"
   bash "$(dirname "$0")/bench/archive_key_base_canonical.sh" pgpm_test-archive pgpm_perf368 || fail=1
+  # The endpoint guard (#1269) re-runs tests/archive/db/53 for the same reason: the clean-code half of the pair
+  # bench/discriminate.sh completes with an endpoint's trailing slash kept, or a bad endpoint taken, again.
+  echo "--- an endpoint's trailing slash addresses the key, and a bad endpoint is refused guard (issue #1269) ---"
+  bash "$(dirname "$0")/bench/archive_configure_endpoint.sh" pgpm_test-archive pgpm_perf377 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi

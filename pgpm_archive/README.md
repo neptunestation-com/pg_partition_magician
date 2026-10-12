@@ -31,6 +31,11 @@ That's it: `pgpm.maintain()` now archives every eligible partition automatically
 chunks, and `pgpm.retire()` won't drop one until it's fully archived. `archive.configure`'s other
 parameters (`p_region`, `p_endpoint` for S3-compatible stores like MinIO or Supabase Storage,
 `p_prefix`, `p_compress`, etc.) all have sensible defaults -- pass only what you need to override.
+`p_endpoint` is null for AWS S3 itself, or the `http://` or `https://` URL of the store, a host and
+optionally a path prefix (Supabase Storage's is `https://<project-ref>.supabase.co/storage/v1/s3`).
+A trailing slash is dropped, so `http://minio:9000/` and `http://minio:9000` address the same objects,
+and `archive.configure` refuses, naming `p_endpoint`, a value with no such scheme, no host, a query
+string or a fragment.
 `p_part_bytes` (the size of each `archive.to_s3` multipart part, 8 MiB by default) must be at least
 5 MiB, the smallest non-final multipart part S3 accepts: `archive.configure` refuses anything smaller,
 and `archive.to_s3` refuses a row holding zero or less before it sends anything. A positive size under
