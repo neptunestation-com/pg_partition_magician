@@ -7711,7 +7711,7 @@ begin
        and age(a.backend_xmin) >= age(v_limit);                                    -- at or before the reference
     -- the exemption, against this transaction's own xid only: a session whose ungranted request a lock this session
     -- holds directly blocks (pg_blocking_pids names this session, and this session holds a granted lock on the very
-    -- object the request waits for); no chain is followed
+    -- object the request waits for). A session that waits on this one any other way is refused at once, below
     select coalesce(array_agg(s.pid), '{}') into v_blocked
       from unnest(v_still) as s(pid)
      where not v_by_xid
