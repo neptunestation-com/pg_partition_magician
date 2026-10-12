@@ -7639,11 +7639,16 @@ drop function if exists pgpm._snapshot_wait(xid8, text, text, text);
 -- sessions, which cannot read this table, and a hot standby's, which pg_stat_activity does not show, are not
 -- consulted.
 --
--- THE ONE EXEMPTION, because waiting would deadlock: a listed session waiting, directly or down a chain, on a lock
--- THIS session holds (a write queued behind regrain()'s SHARE lock on the parent, #580). It cannot release its
--- snapshot before this transaction commits, so it is passed with a WARNING naming its pid, for as long as it waits,
--- and returned. That is the documented residual: a READ COMMITTED statement takes a fresh snapshot once it has its
--- lock, and is safe; a REPEATABLE READ transaction queued there cannot be protected without a deadlock.
+-- THE ONE EXEMPTION (round 7), only against this transaction's own xid, because there waiting would deadlock: a
+-- session whose ungranted lock request a lock THIS session HOLDS directly blocks (a write queued behind regrain()'s
+-- SHARE lock on the parent, #580). It cannot release its snapshot before this transaction commits, so it is passed
+-- with a WARNING naming its pid, for as long as it waits, and returned. Not a session queued behind another queued
+-- one, nor one this session blocks only by being queued ahead of it (pg_blocking_pids counts those too): those are
+-- waited for and refused at the budget. That is the documented residual: a READ COMMITTED statement takes a fresh
+-- snapshot once it has its lock, and is safe; a REPEATABLE READ transaction directly queued there cannot be
+-- protected without a deadlock. Against an earlier transaction's reference there is no exemption at all: a session
+-- blocked behind locks this step took (its read of the frontier, say) is a session it waits for, and the deferral
+-- (maintain) or refusal (a hand regrain_step, the cutover) at the budget releases those locks.
 --
 -- THE BUDGET is the caller's lock_timeout, as for every lock the swap takes. When it runs out with a session still
 -- listed the step raises 'pg_partition_magician: <p_what> deferred: N snapshot(s) older than the copies still open
@@ -7653,12 +7658,16 @@ drop function if exists pgpm._snapshot_wait(xid8, text, text, text);
 -- a lock. So a client that holds a snapshot across its call (a dblink caller waiting for the call, a wrapper that
 -- holds one) is a reader the swap must wait for: call these from a direct session.
 --
--- What it cannot cover, CREATE INDEX CONCURRENTLY's own residual: a snapshot taken after the wait's last poll, or
--- held by a session it passed, that first reads the table after the swap commits misses what this transaction
--- wrote: the residual
--- reconcile's rows under maintain, every row of the range under regrain(), the
--- under-lock catch-up's rows in the cutover. DETACH, ATTACH and a DROP and rename are not MVCC-safe in that sense,
--- and no wait before them can be.
+-- What it cannot cover, CREATE INDEX CONCURRENTLY's own last-mile window: what this transaction itself writes. A
+-- REPEATABLE READ snapshot that this wait does not hold back (taken after the last committed write, so its xmin is
+-- past the reference; or held by a session it passed) and that first reads the table after the swap commits misses
+-- the rows the swap's own transaction moves. Against an earlier transaction's reference those are only the rows
+-- written into the source during the swap step itself: regrain_step reconciles in a committed batch, and returns,
+-- whenever its step begins with a captured change, so its swap starts from an empty delta and its under-lock
+-- reconcile moves just what was written during its wait and its DETACH (none on a quiet table); likewise the
+-- cutover's under-lock catch-up moves just what was written since its last committed pre-drain batch. Against this
+-- transaction's own xid (regrain()) they are every row of the range, for a snapshot taken after the last poll.
+-- DETACH, ATTACH and a DROP and rename are not MVCC-safe in that sense, and no wait before them can be.
 --
 -- p_what names the swap ('regrain swap', 'hypertable cutover'), p_range what a reader would find empty, p_where the
 -- relations it concerns. Returns the pids it passed.
@@ -7693,14 +7702,23 @@ begin
        and a.usesysid is not null                                                   -- autovacuum, auxiliaries
        and a.backend_type is distinct from 'autovacuum worker'                      -- NULL when masked: kept
        and age(a.backend_xmin) >= age(v_limit);                                    -- at or before the reference
-    -- the exemption: those waiting on a lock this session holds, directly or down a chain
-    with recursive chain(origin, pid, depth) as (
-      select s.pid, b.pid, 1 from unnest(v_still) as s(pid) cross join lateral unnest(pg_blocking_pids(s.pid)) as b(pid)
-      union
-      select c.origin, b.pid, c.depth + 1 from chain c cross join lateral unnest(pg_blocking_pids(c.pid)) as b(pid)
-       where c.depth < 8
-    )
-    select coalesce(array_agg(distinct c.origin), '{}') into v_blocked from chain c where c.pid = pg_backend_pid();
+    -- the exemption, against this transaction's own xid only: a session whose ungranted request a lock this session
+    -- holds directly blocks (pg_blocking_pids names this session, and this session holds a granted lock on the very
+    -- object the request waits for); no chain is followed
+    select coalesce(array_agg(s.pid), '{}') into v_blocked
+      from unnest(v_still) as s(pid)
+     where not v_by_xid
+       and pg_backend_pid() = any(pg_blocking_pids(s.pid))
+       and exists (select 1 from pg_locks w join pg_locks h
+                     on h.pid = pg_backend_pid() and h.granted
+                    and h.locktype = w.locktype
+                    and h.database is not distinct from w.database and h.relation is not distinct from w.relation
+                    and h.page is not distinct from w.page and h.tuple is not distinct from w.tuple
+                    and h.virtualxid is not distinct from w.virtualxid
+                    and h.transactionid is not distinct from w.transactionid
+                    and h.classid is not distinct from w.classid and h.objid is not distinct from w.objid
+                    and h.objsubid is not distinct from w.objsubid
+                    where w.pid = s.pid and not w.granted);
     foreach v_new in array v_blocked loop
       if not v_new = any(v_passed) then
         v_passed := v_passed || v_new;

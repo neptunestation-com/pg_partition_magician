@@ -39,6 +39,9 @@
 #   snapshot_wait_own_xid_strict          -- against the caller's own xid, a late snapshot is waited for only when
 #                                            strictly older than it, so an import of one whose xmin IS the caller's
 #                                            xid slips past (part N)
+#   snapshot_wait_blocked_chain           -- the exemption follows pg_blocking_pids down a chain in every mode, so a
+#                                            reader queued behind a DDL queued behind the tick's read lock is passed
+#                                            (part O)
 #
 # Usage: regrain_swap_waits_for_older_snapshots.sh <container> <db> [install.sql]
 # Runs on the plain core image (it needs pgtap, dblink and pg_prove, all of which it has). TAP_GUARD_TEST_FILE

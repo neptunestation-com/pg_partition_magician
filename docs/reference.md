@@ -1000,8 +1000,9 @@ cutover deferred: N snapshot(s) older than the copies still open (oldest: pid P,
 timeout does; re-run it once that transaction has ended. It never goes ahead under one. **Call it (and
 `from_hypertable`) from a direct session**: a caller that holds a snapshot across the call, such as a client
 waiting for it through `dblink`, is a reader the cutover must wait for, and it refuses at `p_lock_timeout`
-naming that caller's pid. A snapshot opened after the wait still misses the rows the `ACCESS EXCLUSIVE` window's
-catch-up writes.
+naming that caller's pid. The last-mile window is the regrain's: a `REPEATABLE READ` snapshot taken after the
+copy's last committed write and before the cutover's commit misses the rows the `ACCESS EXCLUSIVE` window's
+catch-up moves, which are those written into the hypertable since the last pre-drain batch (during the wait).
 Then it takes the **`ACCESS EXCLUSIVE` window**: catch up the writes that arrived during
 the copy (append-only, or a full delta replay when `from_hypertable_copy` ran with `p_track_changes => true`
 -- auto-detected via the delta table, so the two phases cannot disagree), **verify that the source and the
@@ -1979,11 +1980,14 @@ session is judged by what any caller can see of it, so the wait is the same for 
 without `pg_read_all_stats`, to whom another role's `backend_type`, `state` and `xact_start` read `NULL`: the pid
 and `backend_xmin` in `pg_stat_activity`, and the transaction's virtual xid in `pg_locks`, by which each is
 followed. Only sessions with no role (autovacuum, auxiliary processes) are left out, and other databases and hot
-standbys are not consulted. The one exemption is a session waiting, directly or down a chain, on a lock the
-regrain itself holds (a write queued behind `regrain`'s `SHARE` lock): it cannot release its snapshot before the
-swap commits, so waiting for it would never end. It is passed with a `WARNING` naming its pid. A `READ COMMITTED`
-statement there is safe, since it takes a fresh snapshot once it has its lock; a `REPEATABLE READ` transaction
-queued there cannot be protected without a deadlock.
+standbys are not consulted. The one exemption, under `regrain` only, is a session whose lock request a lock
+`regrain` itself holds directly blocks (a write queued behind its `SHARE` lock): it cannot release its snapshot
+before the swap commits, so waiting for it would never end. It is passed with a `WARNING` naming its pid. A `READ
+COMMITTED` statement there is safe, since it takes a fresh snapshot once it has its lock; a `REPEATABLE READ`
+transaction queued there cannot be protected without a deadlock. A session queued behind another queued one (a
+reader behind a DDL behind the step's own read lock, say) is waited for like any other, and under `maintain`, a
+hand `regrain_step` with a recorded last write, or the cutover there is no exemption at all: their deferral or
+refusal at the budget releases the locks the session queues behind.
 
 The budget is the caller's `lock_timeout`. Under `maintain` that is 200 ms, after which the step raises and the
 tick logs `skip_regrain` with `method` beginning `pg_partition_magician: regrain swap deferred: N snapshot(s)
@@ -1996,10 +2000,14 @@ swap for as long as it stays open. **Call `regrain` from a direct session**: a c
 across the call (a client waiting for it through `dblink`, a wrapper that holds one) is a reader the swap must
 wait for, and would wait for the call while the call waited for it.
 
-What no wait before the swap can protect, `CREATE INDEX CONCURRENTLY`'s own residual, is a snapshot it does not
-wait for that first reads the table after the swap commits: one taken after the wait's last poll, or one held by a
-session it passed. It misses what the swap's own transaction wrote: under `maintain` only the residual reconcile above; under `regrain`,
-which copies in the same transaction as its swap, every row of the range.
+What no wait before the swap can protect, `CREATE INDEX CONCURRENTLY`'s own last-mile window, is what the swap's
+own transaction writes: a `REPEATABLE READ` snapshot taken after the last committed write and before the swap's
+commit (or held by a session the wait passed) that first reads the table after the swap misses the rows the swap's
+own reconcile moves. A step that begins with a captured change reconciles it in a committed batch and returns
+instead of swapping, so a swap starts from an empty delta, and those rows are only the ones written into the
+source during the swap step itself (its snapshot wait and its `DETACH`): none on a quiet table. Under `regrain`,
+which copies in the same transaction as its swap, a snapshot taken after the wait's last poll misses every row of
+the range.
 `from_hypertable_cutover` waits the same way before its swap.
 
 `TRUNCATE` is the exception, and it is **refused** rather than honoured. It fires no row trigger, so the

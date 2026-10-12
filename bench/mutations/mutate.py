@@ -12906,8 +12906,8 @@ MUTATION_SRC["test303_adopted_rows_by_count"] = "tests/303_adopt_partition_test.
 # clause: the wait, the record of the run's last write, each way the list lost a reader in an earlier round (a
 # masked backend_type, a transaction opened during regrain(), a masked state, a running statement, a settle at the
 # budget, a list of sessions taken once, an importer only strictly older than every running xid, only at or before a
-# captured xmin, or only strictly older than the caller's xid), the one exemption (a session blocked on this one), caught by tests/328 through
-# bench/regrain_swap_waits_for_older_snapshots.sh; and the cutover's call and the drains' record, caught by
+# captured xmin, or only strictly older than the caller's xid; the exemption followed down a chain), the one
+# exemption (a session blocked on this one), caught by tests/328 through bench/regrain_swap_waits_for_older_snapshots.sh; and the cutover's call and the drains' record, caught by
 # tests/timescale/db/67 through bench/hypertable_cutover_waits_for_older_snapshots.sh.
 _G1241 = "bench/regrain_swap_waits_for_older_snapshots.sh"
 MUTATIONS["regrain_swap_no_snapshot_wait"] = (
@@ -13026,6 +13026,36 @@ MUTATIONS["snapshot_wait_own_xid_strict"] = (
     "catches it.",
     [("       and age(a.backend_xmin) >= age(v_limit);                                    -- at or before the reference\n",
       "       and age(a.backend_xmin) >= age(v_limit)\n       and (v_by_xid or coalesce(a.xact_start, '-infinity') < v_start or age(a.backend_xmin) > age(v_self::xid));\n", 1)],
+)
+MUTATIONS["snapshot_wait_blocked_chain"] = (
+    _G1241,
+    "Round 6's exemption: a session waiting on this one directly OR DOWN A CHAIN of pg_blocking_pids (which names "
+    "soft blockers, sessions queued ahead, too), in every mode. A REPEATABLE READ reader whose snapshot predates "
+    "every copy, queued behind an ordinary DDL that is itself queued behind the swap tick's own read of the frontier, "
+    "reads as 'waits on us', is passed, and reads the range empty after the swap (round 6's finding V-01 on PR #1253). "
+    "One site, the exemption. tests/328 part O catches it.",
+    [("""    select coalesce(array_agg(s.pid), '{}') into v_blocked
+      from unnest(v_still) as s(pid)
+     where not v_by_xid
+       and pg_backend_pid() = any(pg_blocking_pids(s.pid))
+       and exists (select 1 from pg_locks w join pg_locks h
+                     on h.pid = pg_backend_pid() and h.granted
+                    and h.locktype = w.locktype
+                    and h.database is not distinct from w.database and h.relation is not distinct from w.relation
+                    and h.page is not distinct from w.page and h.tuple is not distinct from w.tuple
+                    and h.virtualxid is not distinct from w.virtualxid
+                    and h.transactionid is not distinct from w.transactionid
+                    and h.classid is not distinct from w.classid and h.objid is not distinct from w.objid
+                    and h.objsubid is not distinct from w.objsubid
+                    where w.pid = s.pid and not w.granted);
+""", """    with recursive chain(origin, pid, depth) as (
+      select s.pid, b.pid, 1 from unnest(v_still) as s(pid) cross join lateral unnest(pg_blocking_pids(s.pid)) as b(pid)
+      union
+      select c.origin, b.pid, c.depth + 1 from chain c cross join lateral unnest(pg_blocking_pids(c.pid)) as b(pid)
+       where c.depth < 8
+    )
+    select coalesce(array_agg(distinct c.origin), '{}') into v_blocked from chain c where c.pid = pg_backend_pid();
+""", 1)],
 )
 _G1241_HT = "bench/hypertable_cutover_waits_for_older_snapshots.sh"
 MUTATIONS["hypertable_cutover_no_snapshot_wait"] = (
