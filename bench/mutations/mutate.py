@@ -13136,6 +13136,36 @@ MUTATIONS["hypertable_drain_delete_unrecorded"] = (
 )
 MUTATION_SRC["hypertable_drain_delete_unrecorded"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_drain_delete_unrecorded"] = "timescale"
+# #1263: a transaction older than the copies in ANOTHER database holds back every snapshot's xmin, so the snapshot
+# wait lists sessions that see the copies along with those that do not, and cannot tell them apart. The swap keeps
+# waiting; the refusal names the transaction that holds the floor. Caught by tests/333
+# (bench/snapshot_wait_foreign_floor_holder.sh).
+_G1263 = "bench/snapshot_wait_foreign_floor_holder.sh"
+MUTATIONS["snapshot_wait_holder_this_database_only"] = (
+    _G1263,
+    "The floor holder looked for among this database's transactions only, the floor the issue's suggestion named: "
+    "a transaction of another database older than the copies is never named, and the refusal goes back to calling "
+    "every session it holds back a reader that would find the range empty (the #1263 message). One site, the "
+    "holder query's session branch. tests/333 part A catches it.",
+    [("                 where a.backend_xid is not null\n"
+      "                   and a.pid <> pg_backend_pid()\n",
+      "                 where a.backend_xid is not null\n"
+      "                   and a.datid = v_db\n"
+      "                   and a.pid <> pg_backend_pid()\n", 1)],
+)
+MUTATIONS["snapshot_wait_foreign_floor_exempt"] = (
+    _G1263,
+    "The exemption #1263 asked for: a session whose backend_xmin is explained by a running transaction of another "
+    "database (one at or before both its xmin and the reference) is not listed. It passes the issue's READ COMMITTED "
+    "reader, and with it a REPEATABLE READ transaction that imported a snapshot exported before the copies, which "
+    "shows the same backend_xmin: the swap goes through under it and it reads the regrained range empty. One site, "
+    "the listing predicate. tests/333 part A catches it (the swap does not refuse; the importer's rows are gone).",
+    [("       and age(a.backend_xmin) >= age(v_limit);                                    -- at or before the reference\n",
+      "       and age(a.backend_xmin) >= age(v_limit)                                     -- at or before the reference\n"
+      "       and not exists (select 1 from pg_stat_activity f\n"
+      "                        where f.datid is distinct from v_db and f.backend_xid is not null\n"
+      "                          and age(f.backend_xid) >= greatest(age(a.backend_xmin), age(v_limit)));\n", 1)],
+)
 
 # Issue #1258: every regrain driver refuses a REPEATABLE READ or SERIALIZABLE transaction
 # (pgpm._regrain_refuse_strict_isolation), asked by regrain_step (and so by maintain's auto-regrain tick), regrain()

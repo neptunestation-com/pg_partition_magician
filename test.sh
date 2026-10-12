@@ -307,9 +307,16 @@ run_version() {  # <pg_version>
     # `postgres`, as they always have (see below). PGPM_JOBS=1 is the old serial run.
     local n=0 failed=0 pg_ready="" jobs="${PGPM_JOBS:-4}" logdir
     logdir=$(mktemp -d)
-    local -a parallel=() serial=()
+    local -a parallel=() serial=() alone=()
     for f in tests/*.sql; do
       local b; b="$(basename "$f")"; n=$((n + 1))
+      if [ "$b" = "333_snapshot_wait_foreign_floor_holder_test.sql" ]; then
+        # Holds a transaction open in another database for seconds, which holds back the xmin of every
+        # snapshot in the cluster, so every other file's regrain swap would defer behind it (#1263). It
+        # runs in its own clone like the rest, but after them and one at a time, never beside them.
+        alone+=("$n:$b")
+        continue
+      fi
       if [ "$b" = "31_schedule_test.sql" ] || [ "$b" = "78_retain_detach_dispatch_test.sql" ]; then
         # pg_cron can only be created in the database named by cron.database_name (postgres on these
         # images: "can only create extension in database postgres"), so these files cannot run in a
@@ -330,7 +337,12 @@ run_version() {  # <pg_version>
     done
     wait
     local e nn
-    for e in "${parallel[@]}"; do
+    for e in ${alone[@]+"${alone[@]}"}; do
+      nn="${e%%:*}"
+      if prove_one "$p" "$s" "pgpm_t$nn" "${e#*:}" "$logdir/$nn.log"; then echo 0 > "$logdir/$nn.rc"; else echo 1 > "$logdir/$nn.rc"; fi
+      printf '    %-58s %s  %s\n' "${e#*:} (alone)" "$(grep -m1 -oE '^Files=1, Tests=[0-9]+,[[:space:]]+[0-9]+ wallclock secs' "$logdir/$nn.log" | sed -E 's/Files=1, //; s/[[:space:]]+/ /g')" "$(grep -m1 -E '^Result: ' "$logdir/$nn.log" || echo 'Result: ERROR (no verdict)')"
+    done
+    for e in "${parallel[@]}" ${alone[@]+"${alone[@]}"}; do
       nn="${e%%:*}"
       echo; echo "### ${e#*:}"
       cat "$logdir/$nn.log"
@@ -1273,6 +1285,7 @@ run_perf() {
     "bench/regrain_not_valid_check.sh pgpm_perf369"
     "bench/check_time_monotonic_session_zone.sh pgpm_perf373"
     "bench/adopt_partition_isolation.sh pgpm_perf370"
+    "bench/snapshot_wait_foreign_floor_holder.sh pgpm_perf371"
   )
   local selected=()
   local n=${#guards[@]} idx
