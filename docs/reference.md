@@ -1699,11 +1699,11 @@ refuse to run in a `REPEATABLE READ` or `SERIALIZABLE` transaction, up front, be
 anything: `pg_partition_magician: regrain must run in a READ COMMITTED transaction (this one is repeatable read):
 set default_transaction_isolation = 'read committed' ...`, naming the call and then the table. A regrain reads the
 source, and its swap the changes captured while it waited for a lock, each through a snapshot taken at that
-statement; a stricter level keeps the transaction's first, so the copy missed a row committed after it, the swap
-missed a change captured after it, and either was dropped with the source. Open no stricter transaction around
+statement; a stricter level keeps the transaction's first, so the copy would miss a row committed after it, the
+swap would miss a change captured after it, and either would be dropped with the source. Open no stricter transaction around
 the call and run it with `default_transaction_isolation = 'read committed'`, then re-run. Only the calling
 transaction's own level is asked, so an explicit `BEGIN ISOLATION LEVEL READ COMMITTED` under a stricter session
-default is accepted. `maintain`'s transactions take the session's default after each of its commits, so under a
+default is accepted. `maintain` runs at the top level, so each of its transactions takes the session's default: under a
 stricter default (a role's or a database's, which `pg_cron`'s session inherits) every tick logs the refusal as
 `skip_regrain` and the run does not start or move on; `ALTER ROLE` or `ALTER DATABASE ... SET
 default_transaction_isolation = 'read committed'` for the role that runs it, and the next tick goes on.
