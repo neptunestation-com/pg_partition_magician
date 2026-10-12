@@ -5263,12 +5263,18 @@ $$;
 -- A native bound's position as a number, read the same from every session (#1264): the value for an id kind, and
 -- for a time kind the epoch of the instant the text names, with text that names no zone read as wall time in
 -- p_tz (the grid's config.partition_tz, the zone its cells are computed and named in, and the one
--- _col_to_native reads a naive column's wall time in) and text shaped by a DateStyle read as ISO, MDY, the style
--- _ts_text writes every bound in. Text that carries its offset (every bound pgpm writes since #500) is the
--- instant it names under any zone, so this changes nothing for it. The SET clauses scope the zone this call sets
--- to the call: the caller's session keeps its own.
+-- _col_to_native reads a naive column's wall time in), text shaped by a DateStyle read as ISO, MDY, the style
+-- _ts_text writes every bound in, and a zone abbreviation (a pre-#500 render under DateStyle SQL or Postgres
+-- ends in one, '01/01/2026 03:00:00 IST') read in the Default set, where IST is Israel's +02 and not, as under
+-- the India set an operator may run with, +05:30. Text that carries its offset (every bound pgpm writes since
+-- #500) is the instant it names under any zone, so this changes nothing for it. The SET clauses scope the zone
+-- this call sets to the call: the caller's session keeps its own.
 create or replace function pgpm._native_bound_key(p_kind text, p_text text, p_tz text)
-returns numeric language plpgsql stable set timezone = 'UTC' set datestyle = 'ISO, MDY' as $$
+returns numeric language plpgsql stable
+  set timezone = 'UTC'
+  set datestyle = 'ISO, MDY'
+  set timezone_abbreviations = 'Default'
+as $$
 begin
   if p_text is null then return null; end if;
   if p_kind = 'id' then return p_text::numeric; end if;

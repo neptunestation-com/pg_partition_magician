@@ -11910,8 +11910,17 @@ MUTATIONS["native_bound_key_session_datestyle"] = (
     "Issue #1264's DateStyle half: the bound's parse is not pinned to ISO, MDY, so a DateStyle-shaped bound a pre-#500 "
     "session wrote ('11/03/2026') reads as 3 November from an MDY session and 11 March from a DMY one, and the call "
     "holds a different partition over it. One clause. tests/334 parts C and E catch it.",
-    [("returns numeric language plpgsql stable set timezone = 'UTC' set datestyle = 'ISO, MDY' as $$\n",
-      "returns numeric language plpgsql stable set timezone = 'UTC' as $$\n", 1)],
+    [("  set timezone = 'UTC'\n  set datestyle = 'ISO, MDY'\n  set timezone_abbreviations = 'Default'\n",
+      "  set timezone = 'UTC'\n  set timezone_abbreviations = 'Default'\n", 1)],
+)
+MUTATIONS["native_bound_key_session_abbreviations"] = (
+    _G1264,
+    "Issue #1264, PR #1305's first head (V-01): the bound's parse pins TimeZone and DateStyle but not "
+    "timezone_abbreviations, so a pre-#500 render that names its zone by abbreviation ('01/01/2026 03:00:00 IST') "
+    "is Israel's +02 from a session on the Default set and India's +05:30 from one on the India set, and the call "
+    "holds the first partition from the one and not from the other. One clause. tests/334 part H catches it.",
+    [("  set datestyle = 'ISO, MDY'\n  set timezone_abbreviations = 'Default'\nas $$\n",
+      "  set datestyle = 'ISO, MDY'\nas $$\n", 1)],
 )
 
 

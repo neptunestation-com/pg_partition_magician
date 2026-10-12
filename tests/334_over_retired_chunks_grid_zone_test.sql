@@ -14,7 +14,8 @@
 -- same partitions over the same chunks from every session's TimeZone and DateStyle. A bound with an offset is the
 -- instant it names; one with no offset is wall time in the grid's own zone, config.partition_tz (the zone the
 -- grid's cells are computed and named in, and the one _col_to_native reads a naive column's wall time in); a
--- DateStyle-shaped one reads as ISO, MDY, the style _ts_text writes every bound in.
+-- DateStyle-shaped one reads as ISO, MDY, the style _ts_text writes every bound in; a zone abbreviation (a
+-- pre-#500 render under DateStyle SQL ends in one) reads in the Default set, whatever set the caller runs with.
 --
 -- THE FIXTURE. The grid is registered in Asia/Tokyo (+09), so its wall clock is not UTC's and a fix that reads
 -- offset-less text as UTC fails here too. Five retired chunks, every one of them read differently by some session
@@ -30,7 +31,7 @@
 create extension if not exists pgtap;
 set client_min_messages = warning;
 set timezone = 'Asia/Tokyo';
-select plan(16);
+select plan(22);
 
 create schema t334;
 
@@ -132,6 +133,39 @@ select ok('2026-01-01 03:00:00'::timestamptz < '2026-01-01 00:00:00+00'::timesta
 select is((select string_agg(o.child_name::text || ': ' || o.chunks, E'\n') from pgpm._over_retired_chunks('t334.u') o),
           'u_p2026_01_to_2026_11: [2025-12-31 20:00:00+00, 2026-01-01 03:00:00) recorded for gone_u, whose relation no longer exists, at obj/u',
           'from Asia/Tokyo the UTC grid''s first partition is held over gone_u, read on the UTC grid''s clock');
+set timezone = 'UTC';
+
+-- H. A zone abbreviation, read in the Default set whatever the caller's (PR #1305's V-01). A pre-#500 install
+-- rendered a bound in its session's DateStyle, and under SQL a render ends in the zone's abbreviation: a writer in
+-- Asia/Jerusalem wrote one hour into this UTC grid's first partition as '01/01/2026 03:00:00 IST'. IST is Israel's
+-- +02 in the Default set and India's +05:30 in the India set an operator in India may run with, where the same text
+-- ends two and a half hours BEFORE that partition's lo.
+create table t334.v (id bigint generated always as identity, ts timestamptz not null, primary key (id, ts));
+insert into t334.v (ts) select timestamptz '2026-01-05 00:00:00+00' + g * interval '1 hour' from generate_series(1, 90) g;
+call pgpm.transmute('t334.v', 'ts', interval '1 month', p_obtain => 2, p_paused => true);
+select pgpm.set_archive_fn('t334.v', 'pgpm._archive_noop(regclass,name,text,text)'::regprocedure);
+insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, s3_key, retired_at, child_oid) values
+  ('t334.v', '2025-12-31 20:00:00+00', '01/01/2026 03:00:00 IST', 'gone_v', 'obj/v', now(), 4290000107);
+\set held_v 'v_p2026_01_to_2026_11: [2025-12-31 20:00:00+00, 01/01/2026 03:00:00 IST) recorded for gone_v, whose relation no longer exists, at obj/v'
+select is((select lo from pgpm.part where parent_table = 't334.v'::regclass and child_name = 'v_p2026_01_to_2026_11'),
+          '2026-01-01 00:00:00+00', 'GUARD: the third grid''s first partition starts at midnight UTC on 1 January');
+set timezone = 'Asia/Jerusalem';
+set datestyle = 'SQL, MDY';
+select is((timestamptz '2026-01-01 01:00:00+00')::text, '01/01/2026 03:00:00 IST',
+          'GUARD: the hi is what a session in Asia/Jerusalem under SQL, MDY renders for an hour into that partition');
+reset datestyle;
+set timezone = 'UTC';
+select is((select string_agg(o.child_name::text || ': ' || o.chunks, E'\n') from pgpm._over_retired_chunks('t334.v') o),
+          :'held_v', 'from a UTC session on the Default abbreviations the first partition is held over gone_v');
+set timezone = 'Asia/Kolkata';
+set timezone_abbreviations = 'India';
+select ok('01/01/2026 03:00:00 IST'::timestamptz < '2026-01-01 00:00:00+00'::timestamptz,
+          'LIVENESS: read with the India abbreviations, gone_v''s hi ends before the first partition''s lo');
+select is((select string_agg(o.child_name::text || ': ' || o.chunks, E'\n') from pgpm._over_retired_chunks('t334.v') o),
+          :'held_v', 'from Asia/Kolkata on the India abbreviations the call holds the same partition over gone_v');
+select is(current_setting('timezone_abbreviations'), 'India',
+          'the call leaves the caller''s timezone_abbreviations as they were');
+reset timezone_abbreviations;
 set timezone = 'UTC';
 
 select * from finish();

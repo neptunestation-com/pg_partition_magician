@@ -7,19 +7,22 @@
 # and a retired ledger row an older install wrote can carry a bound with no offset (a pre-#977 strategy's
 # covered_hi, stored verbatim; no upgrade rewrites a retired row), so the same call held a partition from pg_cron's
 # UTC session and not from an operator's Asia/Kolkata one. The file pins what the call returns, by partition and by
-# chunk, from five sessions on four zones and three DateStyles, over a grid registered in Asia/Tokyo, each with a
+# chunk, from sessions on five zones, three DateStyles and two abbreviation sets, over a grid registered in Asia/Tokyo, each with a
 # LIVENESS witness that the session's own parse would give another answer. The file is the acceptance test; this
 # wrapper exists so the mutations have a guard the discriminate track can run against the mutant, in the shape of
 # bench/retain_recall_moved_parent.sh. Each failed assertion is printed as its `not ok` line, which is what
 # discriminate.sh's starved() reads, so a mutant that failed only a LIVENESS witness is not certified as a catch.
 #
-# THREE mutations are required to fail against it (bench/mutations/mutate.py):
+# FOUR mutations are required to fail against it (bench/mutations/mutate.py):
 #   over_retired_chunks_session_zone     -- the bounds are read in the caller's TimeZone again, the pre-fix
 #                                           shape. Parts B to E.
 #   native_bound_key_utc                 -- the plausible-but-wrong fix: a bound with no offset is read as UTC,
 #                                           not on the grid's clock. Parts A to E (the grid is Asia/Tokyo's).
 #   native_bound_key_session_datestyle   -- the parse is not pinned to ISO, MDY, so a DateStyle-shaped bound
 #                                           reads by the caller's DateStyle. Parts C and E.
+#   native_bound_key_session_abbreviations -- the parse is not pinned to the Default abbreviations, so 'IST' in a
+#                                           legacy bound is India's +05:30 from a session on the India set.
+#                                           Part H.
 #
 # Runs on the plain core image (pgtap and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path inside the
 # container, for a worktree mounted somewhere other than /repo.

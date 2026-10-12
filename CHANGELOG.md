@@ -9,10 +9,12 @@
   and no upgrade rewrites a retired row). The same call then held a partition from pg_cron's UTC session and not
   from an operator's Asia/Kolkata one, which archived it over the retired range. Every bound it compares, the
   ledger's and the partitions', now goes through `pgpm._native_bound_key`: a bound with an offset is the instant
-  it names, one without is wall time in `config.partition_tz`, and a DateStyle-shaped one reads as `ISO, MDY`, so
-  every session gets the same answer; the caller's settings are left as they were. The rows are read, not
+  it names, one without is wall time in `config.partition_tz`, a DateStyle-shaped one reads as `ISO, MDY`, and a
+  zone abbreviation in a pre-#500 render reads in the `Default` set (`IST` is Israel's +02 there, India's +05:30
+  under the India set), so every session gets the same answer; the caller's settings are left as they were. The rows are read, not
   rewritten: a retired row is the record of the only copy. Test `tests/334`; guard
   `bench/over_retired_chunks_grid_zone.sh`; mutations `over_retired_chunks_session_zone`, `native_bound_key_utc`,
+  `native_bound_key_session_datestyle`, `native_bound_key_session_abbreviations`.
   `native_bound_key_session_datestyle`.
 - **`from_hypertable` and its cutover ask the grid's mixed-step rule before the swap** (#1268). A `p_interval`
   that mixes a month count with a duration (`'1 mon 1 day'`) is one `transmute` refuses only in
