@@ -12906,7 +12906,7 @@ MUTATION_SRC["test303_adopted_rows_by_count"] = "tests/303_adopt_partition_test.
 # clause: the wait, the record of the run's last write, each way the list lost a reader in an earlier round (a
 # masked backend_type, a transaction opened during regrain(), a masked state, a running statement, a settle at the
 # budget, a list of sessions taken once, an importer only strictly older than every running xid, only at or before a
-# captured xmin, or only strictly older than the caller's xid; the exemption followed down a chain), the one
+# captured xmin, or only strictly older than the caller's xid; a chained waiter passed, or waited for), the one
 # exemption (a session blocked on this one), caught by tests/328 through bench/regrain_swap_waits_for_older_snapshots.sh; and the cutover's call and the drains' record, caught by
 # tests/timescale/db/67 through bench/hypertable_cutover_waits_for_older_snapshots.sh.
 _G1241 = "bench/regrain_swap_waits_for_older_snapshots.sh"
@@ -13030,10 +13030,10 @@ MUTATIONS["snapshot_wait_own_xid_strict"] = (
 MUTATIONS["snapshot_wait_blocked_chain"] = (
     _G1241,
     "Round 6's exemption: a session waiting on this one directly OR DOWN A CHAIN of pg_blocking_pids (which names "
-    "soft blockers, sessions queued ahead, too), in every mode. A REPEATABLE READ reader whose snapshot predates "
-    "every copy, queued behind an ordinary DDL that is itself queued behind the swap tick's own read of the frontier, "
-    "reads as 'waits on us', is passed, and reads the range empty after the swap (round 6's finding V-01 on PR #1253). "
-    "One site, the exemption. tests/328 part O catches it.",
+    "soft blockers, sessions queued ahead, too), in every mode, is PASSED. A REPEATABLE READ reader whose snapshot "
+    "predates every copy, queued behind an ordinary DDL that is itself queued behind the swap step's own lock, is "
+    "passed, and reads the range empty after the swap (round 6's finding V-01 on PR #1253). One site, the "
+    "exemption. tests/328 parts O, P and Q catch it.",
     [("""    select coalesce(array_agg(s.pid), '{}') into v_blocked
       from unnest(v_still) as s(pid)
      where not v_by_xid
@@ -13056,6 +13056,15 @@ MUTATIONS["snapshot_wait_blocked_chain"] = (
     )
     select coalesce(array_agg(distinct c.origin), '{}') into v_blocked from chain c where c.pid = pg_backend_pid();
 """, 1)],
+)
+MUTATIONS["snapshot_wait_chain_waited"] = (
+    _G1241,
+    "Round 7's rule for a session that waits on this one other than the directly blocked writer regrain() passes: it "
+    "is waited for. It can never release its snapshot before the swap commits, and the wait polls in pg_sleep, where "
+    "the deadlock detector cannot see the cycle, so under lock_timeout 0 (a hand regrain()'s default) the call never "
+    "returns and the queued DDL blocks every read and write of the table (round 7's finding V-01 on PR #1253); under "
+    "a budget it is refused only when the budget runs out. One site, the refusal. tests/328 parts O, P and Q catch it.",
+    [("    if cardinality(v_chained) > 0 then\n", "    if false then\n", 1)],
 )
 _G1241_HT = "bench/hypertable_cutover_waits_for_older_snapshots.sh"
 MUTATIONS["hypertable_cutover_no_snapshot_wait"] = (

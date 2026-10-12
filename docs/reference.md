@@ -1980,14 +1980,30 @@ session is judged by what any caller can see of it, so the wait is the same for 
 without `pg_read_all_stats`, to whom another role's `backend_type`, `state` and `xact_start` read `NULL`: the pid
 and `backend_xmin` in `pg_stat_activity`, and the transaction's virtual xid in `pg_locks`, by which each is
 followed. Only sessions with no role (autovacuum, auxiliary processes) are left out, and other databases and hot
-standbys are not consulted. The one exemption, under `regrain` only, is a session whose lock request a lock
-`regrain` itself holds directly blocks (a write queued behind its `SHARE` lock): it cannot release its snapshot
-before the swap commits, so waiting for it would never end. It is passed with a `WARNING` naming its pid. A `READ
-COMMITTED` statement there is safe, since it takes a fresh snapshot once it has its lock; a `REPEATABLE READ`
-transaction queued there cannot be protected without a deadlock. A session queued behind another queued one (a
-reader behind a DDL behind the step's own read lock, say) is waited for like any other, and under `maintain`, a
-hand `regrain_step` with a recorded last write, or the cutover there is no exemption at all: their deferral or
-refusal at the budget releases the locks the session queues behind.
+standbys are not consulted.
+
+A session that waits on the swap's own transaction, for a lock it holds, cannot release its snapshot before the
+swap commits, so it is never waited for: the wait polls, outside the lock manager, so the deadlock detector would
+never see the cycle and under `lock_timeout` 0 it would never end. Two cases, treated differently:
+
+- When the reference is the swap's own transaction (`regrain`, or a run whose last write is not recorded), a
+  session whose lock request a lock the swap's transaction holds **directly** blocks (a write queued behind
+  `regrain`'s `SHARE` lock) is passed, with a `WARNING` naming its pid. Every write to the table queues
+  there for the whole call, so refusing would refuse every `regrain` under a writer. A `READ COMMITTED`
+  statement there is safe, since it takes a fresh snapshot once it has its lock; a `REPEATABLE READ` transaction
+  queued there cannot be protected without a deadlock.
+- Every other such session, one queued behind **another queued request** (a reader behind a migration's
+  `ALTER TABLE` behind the step's own read lock, say; the transitive closure of `pg_blocking_pids` reaching the
+  swap's backend), and any directly blocked session against a recorded last write (`maintain`, a hand
+  `regrain_step`, the cutover), makes the swap give up **at once**. The step raises `pg_partition_magician:
+  regrain swap deferred at once: pids ... hold a snapshot older than the copies and wait on a lock this session
+  holds, directly or behind another queued request (queued on ...)` (`hypertable cutover` for the cutover),
+  naming the pids and the requests queued on its locks. `maintain` logs that as `skip_regrain` and its tick's
+  locks go, so the queue drains and the next tick waits for the reader normally; a hand `regrain`,
+  `regrain_step` or `from_hypertable_cutover` refuses, swapping nothing, and can be run again once the queued
+  request has completed. A chain needs a conflicting request between the reader and the swap, which is rare, so
+  refusing costs little, while passing it would let a `REPEATABLE READ` reader there read the range empty and
+  waiting for it would never end.
 
 The budget is the caller's `lock_timeout`. Under `maintain` that is 200 ms, after which the step raises and the
 tick logs `skip_regrain` with `method` beginning `pg_partition_magician: regrain swap deferred: N snapshot(s)
@@ -1995,7 +2011,8 @@ older than the copies still open (oldest: pid P, open T; pids ...)` (`T` reads `
 the caller cannot see that session's `xact_start`), and the next tick tries again; nothing was swapped or lost.
 `regrain` refuses with the same message and rolls back whole, copies included. Neither ever goes ahead under a
 snapshot it waits for. Under `lock_timeout` 0, the session default under which a hand `regrain` runs, the wait
-lasts as long as the snapshots do. A long reporting transaction opened before the last copy therefore delays the
+lasts as long as the snapshots do, which ends: a snapshot held by a session waiting on the swap is refused at
+once, above, rather than waited for. A long reporting transaction opened before the last copy therefore delays the
 swap for as long as it stays open. **Call `regrain` from a direct session**: a caller that holds a snapshot
 across the call (a client waiting for it through `dblink`, a wrapper that holds one) is a reader the swap must
 wait for, and would wait for the call while the call waited for it.

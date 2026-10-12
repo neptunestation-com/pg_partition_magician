@@ -16,8 +16,11 @@
   start or role: every session is judged by its pid, `backend_xmin` and virtual xid, which any caller sees, so the
   table's non-superuser owner without `pg_read_all_stats` waits for another role's reader alike. The one
   exemption, under `regrain()` only and which would otherwise deadlock, is a session whose request a lock the caller
-  holds directly blocks (a write behind `regrain()`'s `SHARE` lock), passed with a `WARNING` naming it; no chain of
-  queued sessions is followed. At the caller's `lock_timeout` `maintain` defers
+  holds directly blocks (a write behind `regrain()`'s `SHARE` lock), passed with a `WARNING` naming it. Any other
+  session waiting on the caller, directly or behind another queued request (a reader behind a DDL behind the
+  swap's lock), can never let go before the swap and is not waited for: the swap gives up at once, naming the
+  pids and the queued requests (`maintain` logs `skip_regrain`, a hand call refuses), so no wait is unbounded
+  under `lock_timeout` 0. At the caller's `lock_timeout` `maintain` defers
   the swap (`skip_regrain` naming the snapshots) and `regrain()` and the cutover refuse; none ever goes ahead.
   `regrain()`, which copies in the swap's own transaction, waits for every snapshot open while it runs and, on a
   database never quiet for long enough, refuses at its budget; auto-regrain through `maintain` is the paced path.
@@ -31,6 +34,7 @@
   `snapshot_wait_masked_state_dropped`, `snapshot_wait_running_statement_exempt`, `snapshot_wait_settles_running`,
   `snapshot_wait_no_blocked_exemption`, `snapshot_wait_list_captured_once`, `snapshot_wait_import_strictly_older`,
   `snapshot_wait_captured_xmin_bound`, `snapshot_wait_own_xid_strict`, `snapshot_wait_blocked_chain`,
+  `snapshot_wait_chain_waited`,
   `hypertable_cutover_no_snapshot_wait` and
   `hypertable_drain_delete_unrecorded`.
 

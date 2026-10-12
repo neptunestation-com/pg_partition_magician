@@ -7639,16 +7639,23 @@ drop function if exists pgpm._snapshot_wait(xid8, text, text, text);
 -- sessions, which cannot read this table, and a hot standby's, which pg_stat_activity does not show, are not
 -- consulted.
 --
--- THE ONE EXEMPTION (round 7), only against this transaction's own xid, because there waiting would deadlock: a
--- session whose ungranted lock request a lock THIS session HOLDS directly blocks (a write queued behind regrain()'s
--- SHARE lock on the parent, #580). It cannot release its snapshot before this transaction commits, so it is passed
--- with a WARNING naming its pid, for as long as it waits, and returned. Not a session queued behind another queued
--- one, nor one this session blocks only by being queued ahead of it (pg_blocking_pids counts those too): those are
--- waited for and refused at the budget. That is the documented residual: a READ COMMITTED statement takes a fresh
--- snapshot once it has its lock, and is safe; a REPEATABLE READ transaction directly queued there cannot be
--- protected without a deadlock. Against an earlier transaction's reference there is no exemption at all: a session
--- blocked behind locks this step took (its read of the frontier, say) is a session it waits for, and the deferral
--- (maintain) or refusal (a hand regrain_step, the cutover) at the budget releases those locks.
+-- A SESSION THAT WAITS ON THIS ONE (round 8) can never release its snapshot before this transaction commits, so it
+-- is never waited for: waiting would be a cycle the deadlock detector cannot see (this wait polls in pg_sleep, not
+-- in the lock manager; CREATE INDEX CONCURRENTLY waits through the lock manager and lets the detector cancel it).
+--   * Against this transaction's own xid only (regrain()), a session whose ungranted request a lock THIS session
+--     HOLDS directly blocks (a write queued behind regrain()'s SHARE lock on the parent, #580, and the steady writer
+--     of #447) is PASSED, with a WARNING naming its pid, and returned: the documented residual (a READ COMMITTED
+--     statement takes a fresh snapshot once it has its lock, and is safe; a REPEATABLE READ transaction directly
+--     queued there cannot be protected without a deadlock). Refusing it would refuse every regrain() under a writer.
+--   * Every other session that waits on this one, directly or through a chain of ungranted requests (the
+--     transitive closure of pg_blocking_pids reaching this backend; a soft blocker, a session merely queued ahead,
+--     counts too, which errs on the safe side since the outcome is a refusal), makes the step raise AT ONCE,
+--     naming the pids and the lock they queue on: maintain logs it as skip_regrain (its locks go with the tick, the
+--     queue drains, and the next tick waits for the reader normally), a hand driver (regrain(), regrain_step, the
+--     cutover) refuses, rolled back whole, and can be run again once the queued request (a DDL, say) has completed.
+--     A chain needs a conflicting request queued between the reader and this session, so refusing there costs
+--     little; passing it lets a REPEATABLE READ reader behind a DDL behind this lock read the range empty (round
+--     6), and waiting for it never ends under lock_timeout 0 (round 7).
 --
 -- THE BUDGET is the caller's lock_timeout, as for every lock the swap takes. When it runs out with a session still
 -- listed the step raises 'pg_partition_magician: <p_what> deferred: N snapshot(s) older than the copies still open
@@ -7681,7 +7688,7 @@ declare
   v_self xid8 := pg_current_xact_id();
   v_by_xid boolean;
   v_limit xid;
-  v_still int[]; v_blocked int[]; v_passed int[] := '{}'; v_n int; v_pid int;
+  v_still int[]; v_blocked int[]; v_chained int[]; v_queue text; v_passed int[] := '{}'; v_n int; v_pid int;
   v_open text; v_new int;
   v_sleep float8 := 0.005;
 begin
@@ -7727,6 +7734,22 @@ begin
       end if;
     end loop;
     v_still := array(select s from unnest(v_still) with ordinality as u(s, o) where not s = any(v_blocked) order by o);
+    -- every other session that waits on this one, directly or down a chain of ungranted requests: refused at once
+    with recursive chain(origin, pid, depth) as (
+      select s.pid, b.pid, 1 from unnest(v_still) as s(pid) cross join lateral unnest(pg_blocking_pids(s.pid)) as b(pid)
+      union
+      select c.origin, b.pid, c.depth + 1 from chain c cross join lateral unnest(pg_blocking_pids(c.pid)) as b(pid)
+       where c.depth < 16
+    )
+    select coalesce(array_agg(distinct c.origin), '{}') into v_chained from chain c where c.pid = pg_backend_pid();
+    if cardinality(v_chained) > 0 then
+      select string_agg(distinct coalesce(w.relation::regclass::text, w.locktype) || ' (' || w.mode || ', pid ' || w.pid || ')', ', ')
+        into v_queue
+        from pg_locks w
+       where not w.granted and pg_backend_pid() = any(pg_blocking_pids(w.pid));
+      raise exception 'pg_partition_magician: % deferred at once: pids % hold a snapshot older than the copies and wait on a lock this session holds, directly or behind another queued request (queued on %), so none can release its snapshot before the swap commits: refused rather than waited for or swapped under. %. Nothing was swapped: maintain retries on its next tick, and a call by hand can be run again once the queued request (a DDL, say) has completed.',
+        p_what, array_to_string(v_chained, ', '), coalesce(v_queue, 'a lock of this session'), p_where;
+    end if;
     v_n := cardinality(v_still);
     exit when v_n = 0;
     if v_budget_ms > 0 and clock_timestamp() - v_start >= v_budget_ms * interval '1 millisecond' then

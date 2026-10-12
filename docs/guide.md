@@ -548,8 +548,10 @@ every snapshot older than the copies to be released, as `CREATE INDEX CONCURRENT
 snapshots, whichever role holds it, whatever it is doing and whatever role runs the regrain: such a reader
 delays the swap rather than undercounting. Under `maintain` the wait is bounded by the tick's 200 ms
 `lock_timeout`, after which the swap is deferred to the next tick with a `skip_regrain` row naming the
-snapshots it waits for; `regrain()` refuses instead. `from_hypertable_cutover` waits the same way before it
-swaps in its copy. Run `regrain()` and `from_hypertable` from a direct session: a caller that holds a snapshot
+snapshots it waits for; `regrain()` refuses instead. A reader that cannot let go before the swap ends, because
+it is queued behind a migration's DDL queued behind the regrain's own lock, makes the swap give up at once
+rather than wait for ever (`maintain` retries next tick; a call by hand can be run again once the DDL is done).
+`from_hypertable_cutover` waits the same way before it swaps in its copy. Run `regrain()` and `from_hypertable` from a direct session: a caller that holds a snapshot
 across the call is one of the readers the swap must wait for. See [`regrain_step`](reference.md#regrain_step)
 for exactly which snapshots, and for the narrow window no wait can close (wider under the one-transaction
 `regrain()`, so prefer auto-regrain for a table read by long `REPEATABLE READ` transactions).
