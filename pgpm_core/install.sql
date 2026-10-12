@@ -14365,10 +14365,20 @@ $$;
 -- down. This is the tier-2 safety check for retaining by time against an id partition
 -- key (REDESIGN.md): mapping "older than T" to an id boundary is only sound when id and
 -- time co-increase. Heuristic, not a proof -- mirrors check_uuidv7's plausibility sampling.
+--
+-- The time column is read through ::timestamptz, and the function runs in UTC (#1265) so that cast never
+-- takes the caller's zone. A naive column (timestamp, date, or text with no offset) is then compared as its
+-- own wall-clock values; UTC has no gap and no repeated hour. In the caller's zone a wall time inside a
+-- spring-forward gap read an hour late (02:30 on 2026-03-08 in America/New_York is 03:30 EDT, past 03:15), so
+-- the same column reported 1.0 from UTC and 0.5 from New York, and a pair that falls across the gap read as
+-- rising. A timestamptz column, or text with an explicit offset, is compared by instant as before. The SET
+-- clause restores the caller's TimeZone when the call returns.
 create or replace function pgpm.check_time_monotonic(
   p_table regclass, p_id name, p_time name, p_sample int default 1000
 ) returns table (sampled bigint, monotonic bigint, fraction numeric)
-language plpgsql as $$
+language plpgsql
+set timezone = 'UTC'
+as $$
 begin
   -- #951: refused before anything is read or committed; no argument here has a null meaning
   perform pgpm._refuse_null_arguments('check_time_monotonic', json_build_object(

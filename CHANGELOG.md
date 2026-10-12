@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **`check_time_monotonic` gives the same answer from every session zone** (#1265). It cast the time column to
+  `timestamptz` in the caller's `TimeZone`, so a naive `timestamp` (or text) column with a wall time inside that
+  zone's spring-forward gap read an hour late: a column rising with the id across New York's gap (01:50, 02:30,
+  03:15 on 2026-03-08) reported 1.0 from UTC and 0.5 from `America/New_York`, and a pair that falls across the
+  gap read as rising. The function now runs in UTC (a `SET timezone` clause, the caller's zone restored on
+  return), so a naive column is compared as its own wall-clock values and a `timestamptz` column, or text with
+  an explicit offset, by instant as before.
 - **A regrain copies the rows a `NOT VALID` `CHECK` tolerates** (#1261). `_regrain_copy_make` made each copy `LIKE`
   the parent `INCLUDING CONSTRAINTS`, which gave the copy the parent's `NOT VALID` `CHECK` as a validated one, so a
   row written before the `CHECK`, which the table still serves, failed every copy batch of its sub-range with

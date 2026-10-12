@@ -13213,6 +13213,18 @@ MUTATIONS["regrain_drift_compares_not_valid_check"] = (
 """, "", 1)],
 )
 
+# Issue #1265: check_time_monotonic runs in UTC, so its ::timestamptz cast of the time column never takes the
+# caller's zone. Caught by tests/335 through bench/check_time_monotonic_session_zone.sh.
+MUTATIONS["check_time_monotonic_session_zone"] = (
+    "bench/check_time_monotonic_session_zone.sh",
+    "Pre-#1265 check_time_monotonic: no SET timezone clause, so the time column is cast to timestamptz in the "
+    "caller's session zone, and a naive wall time inside that zone's spring-forward gap reads an hour late: a "
+    "column rising across New York's gap reports 0.5 from America/New_York and 1.0 from UTC, and a pair that "
+    "falls across it reads as rising. One site, the clause. tests/335 parts A, B and C catch it.",
+    [(") returns table (sampled bigint, monotonic bigint, fraction numeric)\nlanguage plpgsql\nset timezone = 'UTC'\nas $$\n",
+      ") returns table (sampled bigint, monotonic bigint, fraction numeric)\nlanguage plpgsql\nas $$\n", 1)],
+)
+
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
