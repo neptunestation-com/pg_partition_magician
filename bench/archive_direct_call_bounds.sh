@@ -5,20 +5,25 @@
 # WHY A WRAPPER EXISTS AT ALL. Test 54 is a plain pgTAP file and the archive track already runs it, so on
 # correct code this script adds nothing. What it adds is the standing proof that the file DISCRIMINATES.
 # Its contract (issue #814, the archive bullet) is that a direct archive_fn strategy call names its object
-# after the instant (or the id) the call READ: from a 'SQL, DMY' session the text '02/01/2024' is 2 January
-# to the read, so the object is keyed 2 January, never 1 February, which is how the stem's own pinned parse
-# read it; from a New York session an offset-less bound is keyed from the 05:00Z the read began at, not
-# 00:00Z; and an id bound spelled '0100' is keyed _100. Each claim is an EXACT key and the object's rows by
-# identity, paired with witnesses that the session really reads the text as another instant than the
-# default DateStyle and zone do, and a negative ("nothing at the other chunk's key") that an upload that
-# never happened would satisfy too; pointing the file at the mutants every CI run checks that those
-# assertions fail when an encoder hands the stem the caller's spelling again.
+# after the instant (or the id) the call READ, read once on the grid's clock: from a 'SQL, DMY' session the
+# text '02/01/2024' is 2 January to the read, so the object is keyed 2 January, never 1 February, which is how
+# the stem's own pinned parse read it; an offset-less bound is read in the grid's partition_tz, never the
+# caller's TimeZone, so a date grid's '2024-01-02' is keyed by the cell's start, 00:00Z, from New York and from
+# UTC alike (V-01 of the fix's verification); and an id bound spelled '0100' is keyed _100. Each claim is an
+# EXACT key and the object's rows by identity, paired with witnesses that the session really reads the text as
+# another instant than the grid does, and a negative ("nothing at the other key") that an upload that never
+# happened would satisfy too; pointing the file at the mutants every CI run checks that those assertions fail
+# when an encoder hands the stem the caller's spelling, or reads the bound in the caller's zone, again.
 #
 # The mutations it is required to fail against (bench/mutations/mutate.py):
 #   archive_ndjson_bounds_caller_spelling  -- archive._encode_upload_ndjson_single keys its object by the lo
 #                                             as the caller spelled it, so the stem's pinned parse names
 #                                             another instant than the read (parts A, C and D)
 #   archive_parquet_bounds_caller_spelling -- the same in archive._encode_upload_parquet (part B)
+#   archive_ndjson_bounds_session_zone     -- archive._encode_upload_ndjson_single reads the lo in the
+#                                             caller's TimeZone, so one cell gets one key per session zone
+#                                             (parts C and E)
+#   archive_parquet_bounds_session_zone    -- the same in archive._encode_upload_parquet (part F)
 #
 # Usage: archive_direct_call_bounds.sh <container> <db> [archive install.sql]
 # Needs the archive image (pgsql-http + pgtap + pg_prove) AND MinIO on the same network: the file PUTs

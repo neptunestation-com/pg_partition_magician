@@ -7,6 +7,12 @@
   `p_lo` in the caller's session while `archive._object_stem` parsed it under its own pinned `TimeZone` and
   `DateStyle`, so from a `SQL, DMY` session `02/01/2024` archived the 2 January rows at the 1 February chunk's key,
   and an offset-less bound from a New York session was read from 05:00Z and keyed from 00:00Z. Each encoder now
+  reads its bounds once, on the grid's clock (`archive._bound_native`: an offset-less bound in the table's
+  `partition_tz`, the spelling under the session's `DateStyle`, an `id` bound at its least scale, so `'0100'` is
+  keyed `100`), and the read, the check and the key take that text: a `date` grid's `'2024-01-02'` is keyed by
+  the cell's start from every session. `tests/archive/db/54`, run by `bench/archive_direct_call_bounds.sh`
+  against the mutations `archive_{ndjson,parquet}_bounds_caller_spelling` and
+  `archive_{ndjson,parquet}_bounds_session_zone`.
   reads its bounds once, as `pgpm._native_text` renders what the session reads (an `id` bound at its least scale,
   so `'0100'` is keyed `100`), and the read, the check and the key take that text. `tests/archive/db/54`, run by
   `bench/archive_direct_call_bounds.sh` against the mutations `archive_ndjson_bounds_caller_spelling` and

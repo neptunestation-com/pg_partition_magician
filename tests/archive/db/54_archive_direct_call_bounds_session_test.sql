@@ -11,16 +11,20 @@
 -- PUT at the 1 February chunk's key, and offset-less text from a New York session was read from 05:00Z and
 -- keyed from 00:00Z. The object's name misstated its rows, and it sat at the key another chunk is archived to.
 --
--- Now each encoder reads the bounds ONCE, as the canonical text of what the calling session reads them as
--- (pgpm._native_text, the reading pgpm applies to an archive_fn's covered_hi, #977), and the read, the
--- recorded-chunk check and the key all take that text. The key is asserted EXACTLY, from sessions chosen so
--- that the stem's own reading of the text would name another instant, and each object by its rows.
+-- Now each encoder reads the bounds ONCE, as the canonical text of the instant the GRID reads them as
+-- (archive._bound_native: pgpm._native_text, the reading pgpm applies to an archive_fn's covered_hi (#977), on
+-- the grid's clock, config.partition_tz, with the caller's DateStyle), and the read, the recorded-chunk check
+-- and the key all take that text. Offset-less text is read in partition_tz, never the caller's TimeZone: read
+-- in the caller's zone (the first cut of this fix, V-01 of its verification), '2024-01-02' on a date-column day
+-- grid was 05:00Z from New York, a key no cell starts at, while the date column read the whole 2 January cell,
+-- and the same chunk got the cell's own key from UTC. The key is asserted EXACTLY, from sessions chosen so that
+-- another reading of the text would name another instant, and each object by its rows.
 --
 -- Fixtures are asymmetric: the range as the session reads it holds two or three rows, and the range the
 -- stem's reading names holds one or two others, so an object at the wrong key, or the right key over the
 -- wrong rows, cannot pass an identity check. Every candidate key is cleared and witnessed absent first,
 -- because the bucket outlives a test database; the prefix carries current_database().
-select plan(28);
+select plan(44);
 
 create schema t54;
 
@@ -118,36 +122,40 @@ select is(t54.status('t54.pq', 'GET', :'p' || 't54.pq_2024020100000000.parquet')
   'nothing was written at the 1 February chunk''s key');
 
 -- ======================= PART C: offset-less bounds from a New York session =======================
--- The same text in another zone names another instant: '2024-01-02 00:00:00' is 05:00Z to a New York session
--- and 00:00Z to a UTC one. Ids 1 and 2 sit inside both readings of the day, id 4 (03:00Z on 3 January) only
--- inside New York's, id 5 (02:00Z on 2 January) only inside UTC's.
+-- Offset-less text is read on the grid's clock (partition_tz, UTC here), not the caller's zone: '2024-01-02
+-- 00:00:00' is 00:00Z to the grid and 05:00Z to a New York session. Ids 1 and 2 sit inside both readings of the
+-- day, id 5 (02:00Z on 2 January) only inside the grid's, id 4 (03:00Z on 3 January) only inside New York's.
 
 create table t54.nz (id bigint not null, ts timestamptz not null, primary key (ts, id));
 insert into t54.nz values (1, '2024-01-02 12:00:00+00'), (2, '2024-01-02 13:00:00+00'),
                           (4, '2024-01-03 03:00:00+00'), (5, '2024-01-02 02:00:00+00');
+set timezone = 'UTC';
 call pgpm.transmute('t54.nz', 'ts', interval '1 day', p_paused => true);
+reset timezone;
 select archive.configure('t54.nz', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
 
 select is(t54.clear('t54.nz', :'p' || 't54.nz_2024010205000000.ndjson'), 404, 'LIVENESS: no object at t54.nz''s 05:00Z key');
 select is(t54.clear('t54.nz', :'p' || 't54.nz_2024010200000000.ndjson'), 404, 'LIVENESS: no object at t54.nz''s 00:00Z key');
+select is((select partition_tz from pgpm.config where parent_table = 't54.nz'::regclass), 'UTC',
+  'LIVENESS: t54.nz''s grid runs on UTC, so its day cells start at 00:00Z');
+select is((select array_agg(id order by id) from t54.nz where ts >= '2024-01-02 00:00:00+00' and ts < '2024-01-03 00:00:00+00'),
+  array[1, 2, 5]::bigint[], 'LIVENESS: the range as the grid reads it holds ids 1, 2 and 5');
 
 set timezone = 'America/New_York';
 select is(pgpm._ts_text('2024-01-02 00:00:00'::timestamptz), '2024-01-02 00:00:00-05',
-  'LIVENESS: a New York session reads 2024-01-02 00:00:00 as 05:00Z');
-select is(t54.default_reading('2024-01-02 00:00:00'), '2024-01-02 00:00:00+00',
-  'LIVENESS: the same text names 00:00Z in UTC, so a second reading of it would differ');
+  'LIVENESS: a New York session reads 2024-01-02 00:00:00 as 05:00Z, so its own reading would differ from the grid''s');
 select is((select array_agg(id order by id) from t54.nz where ts >= '2024-01-02 00:00:00' and ts < '2024-01-03 00:00:00'),
   array[1, 2, 4]::bigint[], 'LIVENESS: the range as this session reads it holds ids 1, 2 and 4');
 
 select (pgpm.archive_to_s3_ndjson('t54.nz', null, '2024-01-02 00:00:00', '2024-01-03 00:00:00')).* \gset nz_
 reset timezone;
 
-select is(:'nz_s3_key'::text, :'p' || 't54.nz_2024010205000000.ndjson',
-  'the object is keyed by the 05:00Z the call read, not the 00:00Z the text names in UTC');
-select is(t54.ids('t54.nz', :'p' || 't54.nz_2024010205000000.ndjson'), array[1, 2, 4]::bigint[],
-  'the object at the 05:00Z key holds exactly ids 1, 2 and 4');
-select is(t54.status('t54.nz', 'GET', :'p' || 't54.nz_2024010200000000.ndjson'), 404,
-  'nothing was written at the 00:00Z key');
+select is(:'nz_s3_key'::text, :'p' || 't54.nz_2024010200000000.ndjson',
+  'the object is keyed by the 00:00Z the grid reads, not the 05:00Z the caller''s zone reads');
+select is(t54.ids('t54.nz', :'p' || 't54.nz_2024010200000000.ndjson'), array[1, 2, 5]::bigint[],
+  'the object at the 00:00Z key holds exactly ids 1, 2 and 5, the rows of the range the key names');
+select is(t54.status('t54.nz', 'GET', :'p' || 't54.nz_2024010205000000.ndjson'), 404,
+  'nothing was written at the 05:00Z key');
 
 -- ======================= PART D: an id grid's bounds spelled with leading zeros =======================
 -- The id kind reads its bounds as numbers, so '0100' is the chunk lo 100, whose key a tick writes as _100.
@@ -167,5 +175,68 @@ select is(t54.ids('t54.id', :'p' || 't54.id_100.ndjson'), array[150, 160]::bigin
   'the object at the key for lo 100 holds exactly ids 150 and 160');
 select is(t54.status('t54.id', 'GET', :'p' || 't54.id_0100.ndjson'), 404,
   'nothing was written at a key spelled the way the call spelled its lo');
+
+-- ======================= PART E: a date-column day grid from New York and from UTC, NDJSON =======================
+-- A date column's grid runs on UTC (partition_tz), and its read truncates a bound to the date, so '2024-01-02'
+-- reads the whole 2 January cell from any session. The key must name that cell's start, 00:00Z, from every
+-- session: read in the caller's zone, New York's call was keyed 05:00Z (V-01), a key no cell starts at.
+
+create table t54.dd (id bigint not null, d date not null, primary key (d, id));
+insert into t54.dd values (1, '2024-01-02'), (2, '2024-01-02'), (3, '2024-01-03');
+call pgpm.transmute('t54.dd', 'd', interval '1 day', p_paused => true);
+select archive.configure('t54.dd', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
+
+select is(t54.clear('t54.dd', :'p' || 't54.dd_2024010200000000.ndjson'), 404, 'LIVENESS: no object at t54.dd''s 2 January cell key');
+select is(t54.clear('t54.dd', :'p' || 't54.dd_2024010205000000.ndjson'), 404, 'LIVENESS: no object at t54.dd''s 05:00Z key');
+select is((select partition_tz from pgpm.config where parent_table = 't54.dd'::regclass), 'UTC',
+  'LIVENESS: a date grid runs on UTC, so 2 January''s cell starts at 00:00Z and none starts at 05:00Z');
+
+set timezone = 'America/New_York';
+select is(pgpm._ts_text('2024-01-02'::timestamptz), '2024-01-02 00:00:00-05',
+  'LIVENESS: a New York session reads 2024-01-02 as 05:00Z');
+select (pgpm.archive_to_s3_ndjson('t54.dd', null, '2024-01-02', '2024-01-03')).* \gset ddny_
+reset timezone;
+select is(:'ddny_rows_archived'::bigint, 2::bigint, 'LIVENESS: the New York call read the whole 2 January cell (ids 1 and 2)');
+
+select is(:'ddny_s3_key'::text, :'p' || 't54.dd_2024010200000000.ndjson',
+  'the 2 January cell archived from New York is keyed by the cell''s start, 00:00Z');
+select is(t54.status('t54.dd', 'GET', :'p' || 't54.dd_2024010205000000.ndjson'), 404,
+  'nothing lands at a 05:00Z key no cell of the day grid starts at');
+
+set timezone = 'UTC';
+select (pgpm.archive_to_s3_ndjson('t54.dd', null, '2024-01-02', '2024-01-03')).* \gset ddutc_
+reset timezone;
+select is(:'ddutc_s3_key'::text, :'ddny_s3_key'::text,
+  'the same cell gets the same key from a UTC session as from a New York one');
+select is(t54.ids('t54.dd', :'p' || 't54.dd_2024010200000000.ndjson'), array[1, 2]::bigint[],
+  'the object at the cell''s key holds exactly ids 1 and 2');
+
+-- ======================= PART F: a naive-timestamp day grid from New York and from UTC, Parquet =======================
+-- The Parquet encoder takes no date column, so its half runs on a timestamp (without time zone) column, the other
+-- naive kind: its grid runs on UTC as well, and '2024-01-02' is the 2 January cell's start on the grid's clock.
+
+create table t54.dp (id bigint not null, t timestamp not null, primary key (t, id));
+insert into t54.dp values (1, '2024-01-02 12:00'), (2, '2024-01-02 13:00'), (3, '2024-01-03 12:00');
+call pgpm.transmute('t54.dp', 't', interval '1 day', p_paused => true);
+select archive.configure('t54.dp', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => :'p');
+
+select is(t54.clear('t54.dp', :'p' || 't54.dp_2024010200000000.parquet'), 404, 'LIVENESS: no object at t54.dp''s 2 January cell key');
+select is(t54.clear('t54.dp', :'p' || 't54.dp_2024010205000000.parquet'), 404, 'LIVENESS: no object at t54.dp''s 05:00Z key');
+
+set timezone = 'America/New_York';
+select (pgpm.archive_to_s3_parquet('t54.dp', null, '2024-01-02', '2024-01-03')).* \gset dpny_
+reset timezone;
+select is(:'dpny_rows_archived'::bigint, 2::bigint, 'LIVENESS: the New York Parquet call read ids 1 and 2 of the 2 January cell');
+
+select is(:'dpny_s3_key'::text, :'p' || 't54.dp_2024010200000000.parquet',
+  'the 2 January cell archived to Parquet from New York is keyed by the cell''s start, 00:00Z');
+select is(t54.status('t54.dp', 'GET', :'p' || 't54.dp_2024010205000000.parquet'), 404,
+  'nothing lands at a 05:00Z Parquet key no cell starts at');
+
+set timezone = 'UTC';
+select (pgpm.archive_to_s3_parquet('t54.dp', null, '2024-01-02', '2024-01-03')).* \gset dputc_
+reset timezone;
+select is(:'dputc_s3_key'::text, :'dpny_s3_key'::text,
+  'the same cell gets the same Parquet key from a UTC session as from a New York one');
 
 select * from finish();

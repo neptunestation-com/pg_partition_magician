@@ -2932,11 +2932,13 @@ included), and for every time kind the digits of `lo` rendered in UTC (`2024-01-
 (`2024-01-01 00:00:00.1+00` becomes `20240101000000.100`) and ending `BC` for a BC instant
 (`2024-01-01 00:00:00+00 BC` becomes `2024010100000000BC`), so a BC chunk and an AD chunk of one calendar
 day, or a fraction of a second and a five-digit year, never share a key. A direct call of either strategy
-reads its `p_lo` and `p_hi` once, as the calling session reads them (its `DateStyle` and `TimeZone`, the way
-it reads any timestamp literal; an `id` bound as a number, at its least scale), and the range it reads, the
-recorded-chunk check and the key all take that one reading: from a `SQL, DMY` session a `p_lo` of
-`02/01/2024 00:00:00+00` reads the rows of 2 January and is keyed `2024010200000000`, and `'0100'` on an
-`id` grid is keyed `100`, as a tick keys that chunk. Objects uploaded before this key
+reads its `p_lo` and `p_hi` once, on the grid's clock: a bound that carries an offset names that instant, an
+offset-less one is read in the table's `partition_tz` (never the session's `TimeZone`), the spelling is read
+under the session's `DateStyle`, and an `id` bound is read as a number, at its least scale. The range it reads,
+the recorded-chunk check and the key all take that one reading: from a `SQL, DMY` session a `p_lo` of
+`02/01/2024 00:00:00+00` reads the rows of 2 January and is keyed `2024010200000000`; on a `date` grid
+`'2024-01-02'` is keyed `2024010200000000`, the cell's start, from a New York session as from a UTC one; and
+`'0100'` on an `id` grid is keyed `100`, as a tick keys that chunk. Objects uploaded before this key
 shape stay where they are: each `pgpm.archive_ledger` row records the key its object was written to, and
 nothing derives a key from a chunk's bounds after the upload. A table whose ticks ran with its schema on the `search_path`
 (a `public` table under pg_cron, typically) had its earlier chunks keyed `<prefix><table>_<stem>`, so its

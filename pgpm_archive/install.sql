@@ -2831,7 +2831,7 @@ $$;
 -- other kind. Two chunks of one table must never share a key, because the store overwrites whatever
 -- object already sits at one while the ledger records both rows as archived (#502).
 --
--- That text is canonical (pgpm._native_text: ISO with its offset, or a number at its least scale), the one
+-- That text is canonical (archive._bound_native: ISO with its offset, or a number at its least scale), the one
 -- form this function's pinned parse reads as the same instant every other reader in the call read. The two
 -- encoders read their bounds once and hand it that text, never the caller's own spelling (#814): from a
 -- 'SQL, DMY' session '02/01/2024' is 2 January to the read and was 1 February here, so the 2 January rows
@@ -3171,6 +3171,22 @@ begin
 end;
 $$;
 
+-- A bound handed to an archive_fn strategy, as the canonical text of the instant (or number) the grid reads it
+-- as (#814): pgpm._native_text, read on the grid's own clock. Text that carries an offset names its instant
+-- whatever the zone; offset-less text ('2024-01-02') is read in p_tz, the grid's partition_tz, the zone its
+-- cells start in, never in the caller's TimeZone. Read in the caller's zone, '2024-01-02' from a New York session
+-- was 05:00Z, a key no cell of a UTC day grid starts at, while the date column the read compared it with
+-- truncated it to the whole 2 January cell; from UTC the same chunk got the cell's own key. DateStyle is the
+-- caller's: it is how the caller spelled the text, and every DateStyle reads canonical text alike. The SET
+-- clause makes set_config's change last only as long as this call, and the session's zone comes back on return.
+create or replace function archive._bound_native(p_kind text, p_text text, p_tz text)
+returns text language plpgsql set timezone = 'UTC' as $$
+begin
+  if p_kind <> 'id' then perform pg_catalog.set_config('timezone', coalesce(p_tz, 'UTC'), true); end if;
+  return pgpm._native_text(p_kind, p_text);
+end;
+$$;
+
 -- single read, single PUT (optionally one gzip member for the whole body). No pagination, so no
 -- tiebreak is needed: a plain `order by` with no LIMIT never splits a run of ties across pages.
 --
@@ -3196,17 +3212,17 @@ begin
   pcfg := pgpm._control_followed(pcfg);
   if not found then raise exception 'archive._encode_upload_ndjson_single: % is not managed', p_parent; end if;
 
-  -- The bounds are read ONCE, here, as the canonical text of what the calling session reads them as
-  -- (pgpm._native_text, the reading _archive_step gives a strategy's covered_hi, #977), and p_lo and p_hi
-  -- hold that text from here on: the read, the recorded-chunk check and the object key all take it (#814).
-  -- A tick hands over canonical text already, which every reading agrees on. A direct call need not: the
-  -- read and the recorded-chunk check parse in the caller's session while archive._object_stem parses under
-  -- its own pinned TimeZone and DateStyle, so from a 'SQL, DMY' session '02/01/2024 00:00:00+00' read the
-  -- 2 January rows and PUT them at the 1 February chunk's key, and an offset-less bound from a New York
-  -- session was read from 05:00Z and keyed from 00:00Z. An id bound is read at its least scale the same
-  -- way, so '0100' is keyed _100, as a tick keys the chunk.
-  p_lo := pgpm._native_text(pcfg.control_kind, p_lo);
-  p_hi := pgpm._native_text(pcfg.control_kind, p_hi);
+  -- The bounds are read ONCE, here, as the canonical text of the instant the grid reads them as
+  -- (archive._bound_native: on the grid's clock, config.partition_tz), and p_lo and p_hi hold that text from
+  -- here on: the read, the recorded-chunk check and the object key all take it (#814). A tick hands over
+  -- canonical text already, which every reading agrees on. A direct call need not: the read and the
+  -- recorded-chunk check parsed in the caller's session while archive._object_stem parses under its own
+  -- pinned TimeZone and DateStyle, so from a 'SQL, DMY' session '02/01/2024 00:00:00+00' read the 2 January
+  -- rows and PUT them at the 1 February chunk's key, and an offset-less bound from a New York session was
+  -- read from 05:00Z and keyed from 00:00Z. An id bound is read at its least scale the same way, so '0100'
+  -- is keyed _100, as a tick keys the chunk.
+  p_lo := archive._bound_native(pcfg.control_kind, p_lo, pcfg.partition_tz);
+  p_hi := archive._bound_native(pcfg.control_kind, p_hi, pcfg.partition_tz);
 
   -- [p_lo, p_hi) as literals of the column's type, rendered in config.partition_tz like every other
   -- reader of a chunk in pgpm_core (#501). On a timestamptz column any zone's rendering names the same
@@ -3296,9 +3312,9 @@ begin
   pcfg := pgpm._control_followed(pcfg);
   if not found then raise exception 'archive._encode_upload_parquet: % is not managed', p_parent; end if;
 
-  -- read once, as canonical text, for the reason given in _encode_upload_ndjson_single (#814)
-  p_lo := pgpm._native_text(pcfg.control_kind, p_lo);
-  p_hi := pgpm._native_text(pcfg.control_kind, p_hi);
+  -- read once, as canonical text on the grid's clock, for the reason given in _encode_upload_ndjson_single (#814)
+  p_lo := archive._bound_native(pcfg.control_kind, p_lo, pcfg.partition_tz);
+  p_hi := archive._bound_native(pcfg.control_kind, p_hi, pcfg.partition_tz);
   -- in config.partition_tz, for the reason given in _encode_upload_ndjson_single (#501)
   v_lo_lit := pgpm._encode(pcfg.control_kind, p_lo, pcfg.text_time_prefix, pcfg.text_time_width,
                            pcfg.text_time_radix, pcfg.text_time_unit, pcfg.text_time_alphabet,

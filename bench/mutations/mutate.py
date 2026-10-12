@@ -13892,6 +13892,40 @@ MUTATIONS["archive_parquet_bounds_caller_spelling"] = (
       "  -- read once, as canonical text, for the reason given in _encode_upload_ndjson_single (#814)\n", 1)],
 )
 MUTATION_SRC["archive_parquet_bounds_caller_spelling"] = "pgpm_archive/install.sql"
+# #814 (the archive bullet, F19-03 of pass 12, and V-01 of its per-PR verification): each archive_fn encoder reads
+# its bounds once, as canonical text on the grid's clock (archive._bound_native), before the read, the
+# recorded-chunk check and the object key take them. Two mutations per encoder: one takes out the lo's reading, so
+# the key is the stem's own parse of the caller's spelling again; one reads the lo in the caller's TimeZone, not
+# the grid's partition_tz. All four are caught by tests/archive/db/54 through bench/archive_direct_call_bounds.sh
+# (against the archive image and MinIO).
+_BOUNDS_814 = {
+    "ndjson": ("  -- is keyed _100, as a tick keys the chunk.\n", "archive._encode_upload_ndjson_single",
+               "pgpm.archive_to_s3_ndjson", "parts A, C and D", "parts C and E"),
+    "parquet": ("  -- read once, as canonical text on the grid's clock, for the reason given in _encode_upload_ndjson_single (#814)\n",
+                "archive._encode_upload_parquet", "pgpm.archive_to_s3_parquet", "part B", "part F"),
+}
+for _fmt, (_ctx, _fn, _strategy, _parts_spelling, _parts_zone) in _BOUNDS_814.items():
+    MUTATIONS[f"archive_{_fmt}_bounds_caller_spelling"] = (
+        "bench/archive_direct_call_bounds.sh",
+        f"Pre-#814 {_fn}: a direct {_strategy} call's lo reaches the object key as the caller spelled it, so "
+        f"archive._object_stem parses it under its own pinned TimeZone and DateStyle while the read parsed it in the "
+        f"caller's session: from a 'SQL, DMY' session '02/01/2024' reads the 2 January rows and PUTs them at the "
+        f"1 February chunk's key. One clause, the lo's reading. tests/archive/db/54 catches it in {_parts_spelling} "
+        f"(the object is keyed by another instant than the one the read began at).",
+        [(_ctx + "  p_lo := archive._bound_native(pcfg.control_kind, p_lo, pcfg.partition_tz);\n", _ctx, 1)],
+    )
+    MUTATION_SRC[f"archive_{_fmt}_bounds_caller_spelling"] = "pgpm_archive/install.sql"
+    MUTATIONS[f"archive_{_fmt}_bounds_session_zone"] = (
+        "bench/archive_direct_call_bounds.sh",
+        f"{_fn} reads a direct {_strategy} call's lo once but in the CALLER's TimeZone (pgpm._native_text alone), "
+        f"not on the grid's clock: on a naive (date or timestamp) day grid (partition_tz UTC) '2024-01-02' from a New York "
+        f"session is 05:00Z, so the 2 January cell is keyed 2024010205000000, a key no cell "
+        f"starts at, while from UTC the same chunk is keyed 2024010200000000 (V-01). One clause, the lo's reading. "
+        f"tests/archive/db/54 catches it in {_parts_zone} (one chunk, two keys by session zone).",
+        [(_ctx + "  p_lo := archive._bound_native(pcfg.control_kind, p_lo, pcfg.partition_tz);\n",
+          _ctx + "  p_lo := pgpm._native_text(pcfg.control_kind, p_lo);\n", 1)],
+    )
+    MUTATION_SRC[f"archive_{_fmt}_bounds_session_zone"] = "pgpm_archive/install.sql"
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
