@@ -13546,6 +13546,14 @@ for _name in ("hypertable_mixed_step_unchecked", "hypertable_unit_rules_transmut
               "hypertable_unit_remedy_recopy_unnamed"):
     MUTATION_SRC[_name] = "pgpm_hypertable/install.sql"
     MUTATION_TRACK[_name] = "timescale"
+MUTATIONS["transmute_time_oldest_infinity_unchecked"] = (
+    "bench/transmute_negative_infinity_oldest.sh",
+    "Issue #769 (bullet 2) put back: _transmute refuses a time control's +infinity newest value and an id "
+    "control's non-finite oldest one, never a time control's -infinity oldest value, so a timestamptz, timestamp or "
+    "date key holding one reaches _grid_floor raw ('cannot convert infinity to integer', 'cannot subtract infinite "
+    "timestamps') with no remedy named. One clause, the refusal's condition. tests/343 parts A, B, C and D catch it.",
+    [("    if v_min_raw::timestamptz = '-infinity'::timestamptz then\n", "    if false then\n", 1)],
+)
 
 # Issue #1259: the readers of a retirement mark (pgpm._part_built and through it _part_detached_by_hand, and
 # _archive_hold_partition) vouch for it only with the record of pgpm's dispatch, by _detach_dispatched's rule, through

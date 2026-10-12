@@ -1298,6 +1298,7 @@ run_perf() {
     "bench/snapshot_wait_foreign_floor_holder.sh pgpm_perf371"
     "bench/install_keeps_surface_grants.sh pgpm_perf375"
     "bench/retirement_mark_needs_dispatch.sh pgpm_perf367"
+    "bench/transmute_negative_infinity_oldest.sh pgpm_perf395"
   )
   local selected=()
   local n=${#guards[@]} idx

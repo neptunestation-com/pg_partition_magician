@@ -11056,7 +11056,8 @@ begin
     else
       execute format('select max(t.%I) from %s t', p_control, p_parent::text) into v_max_ts;
     end if;
-    if v_max_ts is not null and not isfinite(v_max_ts) then
+    -- A -infinity maximum means every value is -infinity: that is the oldest-value refusal's (#769), below.
+    if v_max_ts = 'infinity'::timestamptz then
       -- no range bound covers it (the upper bound is exclusive), so there is nothing p_force_frontier could accept
       raise exception 'pg_partition_magician: % cannot be partitioned on a time grid using %: its newest value is infinity, and no partition can hold it (a range partition''s upper bound is exclusive, and the monolith''s would have to lie past it). Delete or correct the rows whose % is infinity and re-run.',
         p_parent, quote_ident(p_control), quote_ident(p_control);
@@ -11099,6 +11100,13 @@ begin
   if p_control_kind = 'time' and v_min_raw is not null then
     v_min_raw := case when v_typname in ('timestamp', 'date') then pgpm._ts_text(v_min_raw::timestamp at time zone v_tz)
                       else pgpm._ts_text(v_min_raw::timestamptz) end;
+    -- #769: the oldest value's side of the newest value's infinity refusal above. The monolith's lo is the grid
+    -- point at or below the oldest value, and none lies at or below -infinity, so _grid_floor died on it raw
+    -- ('cannot convert infinity to integer', 'cannot subtract infinite timestamps'). Nothing has been committed.
+    if v_min_raw::timestamptz = '-infinity'::timestamptz then
+      raise exception 'pg_partition_magician: % cannot be partitioned on a time grid using %: its oldest value is -infinity, and no partition can hold it (the monolith''s lower bound is the grid boundary at or below the oldest value, and no grid boundary lies at or below -infinity). Delete or correct the rows whose % is -infinity and re-run.',
+        p_parent, quote_ident(p_control), quote_ident(p_control);
+    end if;
   end if;
   -- #895: a numeric control column can hold NaN, Infinity and -Infinity, and the id branch above read
   -- whatever ORDER BY put last (NaN sorts above every number, then Infinity) straight into the frontier,

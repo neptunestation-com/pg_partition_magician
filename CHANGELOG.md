@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **`transmute` refuses a `-infinity` oldest value on a `time` control in its own words** (#769, bullet 2). Only
+  the newest value of a `timestamptz`, `timestamp` or `date` control was checked for infinity (and the #895
+  non-finite check on the oldest value covered `id` controls alone), so a table whose oldest value is `-infinity`
+  reached `_grid_floor` raw and stopped with `cannot convert infinity to integer` or `cannot subtract infinite
+  timestamps`, naming neither the row nor the remedy; a table whose every value is `-infinity` was refused as if
+  its newest value were `+infinity`. Both now get pgpm's refusal before anything is committed, naming the table
+  and the column, with the remedy the `+infinity` side gives (delete or correct the rows whose value is
+  `-infinity` and re-run). Test `tests/343`, guard `bench/transmute_negative_infinity_oldest.sh`, mutation
+  `transmute_time_oldest_infinity_unchecked`.
+
 - **Every reader of a retirement mark asks for the record of pgpm's dispatch** (#1259). `retire()` stamps
   `pgpm.part.retiring_at` before it dispatches the concurrent detach, and #705 taught `retire`, `_detach_reap`,
   `_retain_recall` and the install's pass that a mark without `detach_dispatched_oid` vouches for nothing. The
