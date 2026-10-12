@@ -634,6 +634,13 @@ create table if not exists pgpm.transmute_inflight (
   -- refused; null on a claim recorded before the column existed, which a resume reads as "not checked",
   -- the old behaviour.
   control_attnum smallint,
+  -- #1270: the text_time encoding the CHECK's two literals were written in (p_tt_prefix, p_tt_width,
+  -- p_tt_radix, p_tt_unit, p_tt_alphabet with a null one written out as the default it stands for,
+  -- p_tt_discard_bits, and p_tt_epoch as seconds since 1970-01-01 UTC, so another spelling of the same
+  -- instant is the same encoding). A resume under another encoding is refused. Null for every other kind,
+  -- which encodes nothing, and on a claim recorded before the column existed, which a resume reads as
+  -- "not checked", the old behaviour.
+  text_time_encoding jsonb,
   started_at    timestamptz not null default now(),
   owner_pid           int,
   owner_backend_start timestamptz
@@ -645,6 +652,7 @@ alter table pgpm.transmute_inflight add column if not exists owner_pid int;
 alter table pgpm.transmute_inflight add column if not exists owner_backend_start timestamptz;
 alter table pgpm.transmute_inflight add column if not exists partition_tz text;
 alter table pgpm.transmute_inflight add column if not exists control_attnum smallint;
+alter table pgpm.transmute_inflight add column if not exists text_time_encoding jsonb;
 
 -- This session's own backend_start, the half of a transmute claim's owner identity that a recycled pid
 -- cannot forge (#771). pg_stat_activity shows a backend's backend_start only to a role with the privileges
@@ -10277,6 +10285,8 @@ declare
   v_tz text;   -- #455: the zone the grid is computed in, recorded in config.partition_tz
   v_claim_tz text;   -- #506: the zone recorded with the claim, which a resume adopts along with the bound
   v_claim_attnum smallint;   -- #628: the control column recorded with the claim, which a resume must match
+  v_tt_encoding jsonb;        -- #1270: this call's text_time encoding, recorded with a fresh claim
+  v_claim_tt_encoding jsonb;  -- #1270: the encoding recorded with the claim, which a resume must match
   v_frontier_native text; v_min_raw text; v_max_raw text; v_min_native text; v_lo_native text; v_hi_native text;
   v_max_ts timestamptz; v_skew_limit timestamptz;   -- #457: the decoded data maximum and how far ahead of now() it may sit
   -- #277: everything CREATE TABLE ... LIKE does NOT carry, captured before the rename and replayed onto
@@ -10987,9 +10997,17 @@ begin
       session_user,
       (select pg_get_userbyid(proowner) from pg_proc where oid = 'pgpm._own_backend_start_definer()'::regprocedure);
   end if;
+  -- #1270: the encoding the bound's CHECK is about to be written in, in a form where two spellings of one
+  -- encoding compare equal (see the column's comment). Null for every kind but text_time.
+  if p_control_kind = 'text_time' then
+    v_tt_encoding := jsonb_build_object(
+      'prefix', p_tt_prefix, 'width', p_tt_width, 'radix', p_tt_radix, 'unit', p_tt_unit,
+      'alphabet', coalesce(p_tt_alphabet, substr('0123456789abcdefghijklmnopqrstuvwxyz', 1, p_tt_radix)),
+      'discard_bits', p_tt_discard_bits, 'epoch', trim_scale(extract(epoch from p_tt_epoch)::numeric));
+  end if;
   insert into pgpm.transmute_inflight (parent_table, nsp, rel, control_kind, lo, hi, partition_tz,
-                                       control_attnum, owner_pid, owner_backend_start)
-  values (p_parent, v_nsp, v_rel, p_control_kind, v_lo_native, v_hi_native, v_tz, v_ctl_attnum,
+                                       control_attnum, text_time_encoding, owner_pid, owner_backend_start)
+  values (p_parent, v_nsp, v_rel, p_control_kind, v_lo_native, v_hi_native, v_tz, v_ctl_attnum, v_tt_encoding,
           pg_backend_pid(), v_own_start)
       on conflict (parent_table) do update
          set owner_pid           = excluded.owner_pid,
@@ -10997,8 +11015,8 @@ begin
        where not pgpm._session_alive(transmute_inflight.owner_pid, transmute_inflight.owner_backend_start)
           or (transmute_inflight.owner_pid = excluded.owner_pid
               and transmute_inflight.owner_backend_start = excluded.owner_backend_start)
-  returning lo, hi, partition_tz, control_attnum, (xmax <> 0)
-       into v_lo_native, v_hi_native, v_claim_tz, v_claim_attnum, v_resumed;
+  returning lo, hi, partition_tz, control_attnum, text_time_encoding, (xmax <> 0)
+       into v_lo_native, v_hi_native, v_claim_tz, v_claim_attnum, v_claim_tt_encoding, v_resumed;
 
   if not found then
     raise exception 'pg_partition_magician: a transmute of % is already in progress in another session', p_parent;
@@ -11035,6 +11053,18 @@ begin
                  where a.attrelid = p_parent and a.attnum = v_claim_attnum and not a.attisdropped),
                'a column since dropped'),
       p_parent;
+  end if;
+  -- #1270: and the CHECK has to be in the encoding THIS call attaches with. On a text_time key the
+  -- pgpm_monolith_bound CHECK's two literals are the bound encoded (prefix, width, radix, unit, alphabet,
+  -- discard bits, epoch), and a re-run given another encoding took the claim over, skipped phases 1 and 2
+  -- (a validated constraint by that name exists) and attached with the bound encoded the new way, which
+  -- the CHECK does not imply: the cutover's ATTACH scanned the whole table under ACCESS EXCLUSIVE and died
+  -- raw on the rows outside it. Compared as recorded (see the column's comment), so the same encoding
+  -- spelled otherwise resumes. A claim recorded before the column existed carries null and is not checked.
+  -- Still the first transaction: the raise rolls the take-over back.
+  if v_resumed and v_claim_tt_encoding is not null and v_claim_tt_encoding is distinct from v_tt_encoding then
+    raise exception 'pg_partition_magician: cannot resume the transmute of % with text_time encoding %: the bound [%, %) an earlier attempt recorded (and put in the pgpm_monolith_bound CHECK) is encoded with %, and a CHECK in another encoding cannot certify a partition bound in this one, so the cutover would scan the whole table under ACCESS EXCLUSIVE. Re-run with the encoding of the attempt that recorded the bound (epoch is in seconds since 1970-01-01 UTC), or call pgpm.transmute_abort(%) to drop the bound and start over.',
+      p_parent, coalesce(v_tt_encoding::text, 'none'), v_lo_native, v_hi_native, v_claim_tt_encoding, p_parent;
   end if;
   -- #952: and the bound has to be one the column can hold, finite and unchanged by its type's coercion. A
   -- fresh bound was computed from this call's grid and the rows, and a resumed one was recorded by an earlier

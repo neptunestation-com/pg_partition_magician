@@ -909,6 +909,14 @@ TRANSMUTE_RESUME_COLUMN_RE = re.compile(
     r"  end if;\n",
     re.DOTALL,
 )
+# #1270's resume text_time-encoding check, whole (comment and code). The claim still records
+# text_time_encoding, so the mutant is exactly "recorded but never compared".
+TRANSMUTE_RESUME_ENCODING_RE = re.compile(
+    r"  -- #1270: and the CHECK has to be in the encoding THIS call attaches with\..*?"
+    r"      p_parent, coalesce\(v_tt_encoding::text, 'none'\), v_lo_native, v_hi_native, v_claim_tt_encoding, p_parent;\n"
+    r"  end if;\n",
+    re.DOTALL,
+)
 # #581's three transmute refusals: the step's sign and the lookahead's, which sit together after the
 # retain check, and the date column's whole-day rule, which sits at the head of _time_unit_contract (the
 # control-type chain asks it there since #1118, so pgpm_hypertable can ask the same rule before its swap).
@@ -4253,6 +4261,19 @@ $$;''',
         "kept. tests/182's re-run on b of a claim recorded on a is what catches it: it is not refused, "
         "dies at its first COMMIT inside throws_like with 2D000, and the refusal's message is pinned.",
         [(TRANSMUTE_RESUME_COLUMN_RE, "", 1)],
+    ),
+    "transmute_resume_any_encoding": (
+        "bench/transmute_resume_text_time_encoding.sh",
+        "Pre-#1270 _transmute: a resume of a text_time conversion reuses the claim's bound whatever "
+        "encoding (p_tt_prefix, width, radix, unit, alphabet, discard bits, epoch) the re-run is given. The "
+        "validated pgpm_monolith_bound CHECK's literals are in the first attempt's encoding, phases 1 and 2 "
+        "are skipped because a validated constraint by that name exists, and the cutover attaches with the "
+        "bound encoded the NEW way, which the CHECK does not imply: the ATTACH scans the whole table under "
+        "ACCESS EXCLUSIVE and dies raw on the rows outside it. The comparison is removed whole and the "
+        "recording kept. tests/337's re-runs with the epoch one day earlier are what catch it: neither is "
+        "refused, each dies at its first COMMIT inside throws_like with 2D000, and the refusal's message "
+        "is pinned.",
+        [(TRANSMUTE_RESUME_ENCODING_RE, "", 1)],
     ),
     "transmute_reap_by_name": (
         "bench/transmute_reap_identity.sh",
