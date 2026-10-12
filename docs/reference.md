@@ -1969,11 +1969,10 @@ transaction): a snapshot taken now has an `xmin` past it unless a transaction at
 so the wait ends once no session holds a snapshot that could miss a copy. When the swap's own transaction made
 them (`regrain`, which copies and swaps in one transaction), or the run's last write is not recorded (a run in
 flight across the upgrade that added the column), the reference is the swap's own transaction, which no snapshot
-taken while it runs can see. There the wait is for every session whose transaction was open when the wait began
-(one opened during the call before the copies included), and for any snapshot at or before the newest snapshot
-that was open then and predates the swap's transaction: an imported snapshot carries its exporter's `xmin`, and
-the exporter was open then, so every import from before the wait is caught. Any other snapshot taken during the
-call is the residual below, whatever the wait does: it misses this transaction's copies.
+taken while it runs can see, so `regrain` waits for every snapshot open in the database (every `backend_xmin` at
+or before its own transaction) and, on a database that is never quiet for long enough, refuses at its budget
+rather than undercount: use the paced auto-regrain through `maintain` (whose copies commit before the swap, so its
+wait has an earlier reference to judge by), or a quiet moment.
 
 There is no exemption by what the session is doing, when its transaction began or which role it is. Every
 session is judged by what any caller can see of it, so the wait is the same for the table's non-superuser owner
@@ -1998,9 +1997,8 @@ across the call (a client waiting for it through `dblink`, a wrapper that holds 
 wait for, and would wait for the call while the call waited for it.
 
 What no wait before the swap can protect, `CREATE INDEX CONCURRENTLY`'s own residual, is a snapshot it does not
-wait for that first reads the table after the swap commits: one taken after the wait ended, one held by a session
-it passed, or, under `regrain`, one taken during the call that is newer than every snapshot open when the wait began. It
-misses what the swap's own transaction wrote: under `maintain` only the residual reconcile above; under `regrain`,
+wait for that first reads the table after the swap commits: one taken after the wait's last poll, or one held by a
+session it passed. It misses what the swap's own transaction wrote: under `maintain` only the residual reconcile above; under `regrain`,
 which copies in the same transaction as its swap, every row of the range.
 `from_hypertable_cutover` waits the same way before its swap.
 

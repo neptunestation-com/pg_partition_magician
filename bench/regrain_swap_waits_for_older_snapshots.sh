@@ -33,6 +33,12 @@
 #   snapshot_wait_import_strictly_older   -- against the caller's own xid, a late importer is waited for only when
 #                                            older than every running xid, so one equal to an idle writer's is not
 #                                            (part J)
+#   snapshot_wait_captured_xmin_bound     -- against the caller's own xid, a late importer is waited for only when
+#                                            at or before the newest captured xmin, so an import of a newer exported
+#                                            snapshot slips past (part L)
+#   snapshot_wait_own_xid_strict          -- against the caller's own xid, a late snapshot is waited for only when
+#                                            strictly older than it, so an import of one whose xmin IS the caller's
+#                                            xid slips past (part N)
 #
 # Usage: regrain_swap_waits_for_older_snapshots.sh <container> <db> [install.sql]
 # Runs on the plain core image (it needs pgtap, dblink and pg_prove, all of which it has). TAP_GUARD_TEST_FILE

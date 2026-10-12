@@ -88,13 +88,14 @@ select ok(exists (select 1 from pg_stat_activity where pid = :rpid and state = '
                    and query like '%pgpm.regrain(%'),
   'LIVENESS: ...while regrain() is still running, so the write arrived before the swap committed');
 
--- Wait for R to finish from short top-level statements, each its own transaction, before collecting. The swap
--- waits for every snapshot older than its copies (#1241), and a statement that held this session's snapshot across
--- the whole call (the DO below, blocked in dblink_get_result) is one: R would wait for it while it waited for R.
+-- Wait for R to finish with no statement of this session running, before collecting. regrain() copies and swaps in
+-- one transaction, so its swap waits for every snapshot open while it runs (#1241): a statement of this session
+-- waiting on R (the DO below, blocked in dblink_get_result) would be one, and R would wait for it while it waited for
+-- R. So the wait is a shell loop (\!), which holds no snapshot here, asking a separate short-lived psql about R.
 -- W is not such a reader to R: it waits on R's SHARE lock, which is the wait's one exemption.
-\o /dev/null
-select format('select pg_sleep(0.05) where dblink_is_busy(%L) = 1', 'rww_r') from generate_series(1, 2400) \gexec
-\o
+\setenv T149_DB :DBNAME
+\setenv T149_RPID :rpid
+\! for i in $(seq 1 1200); do [ "$(psql -X -U postgres -d "$T149_DB" -Atc "select count(*) from pg_stat_activity where pid = $T149_RPID and state = 'active'")" = "0" ] && break; sleep 0.1; done
 -- Collect both sides, recording each one's SQLSTATE rather than dying on it.
 do $$
 declare v text;
