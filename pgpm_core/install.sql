@@ -14083,6 +14083,15 @@ $$;
 -- mode, which conflicts with DETACH in both forms and with DROP but with no read or write, so the relation
 -- judged attached is still attached when its row commits. The SET clause pins the rendering of the catalog's
 -- bounds to ISO, the one form every session parses alike (see _ts_text).
+--
+-- READ COMMITTED only (#1262). Every judgement after that lock (attached and not pending, the name, the
+-- bounds, what pgpm.part records) is a read of the catalog or of pgpm.part, and is only worth the lock when its
+-- snapshot was taken after the lock was granted. READ COMMITTED takes one per statement, so it is. REPEATABLE
+-- READ and SERIALIZABLE pin the transaction's first snapshot, which can predate a DETACH, a rename or a
+-- detach-and-reattach at other bounds committed before this call, and through it the call recorded a table
+-- the parent no longer held (or one under a name or a range it no longer had). Refused up front, as untransmute
+-- refuses, before any lock is taken; READ UNCOMMITTED is READ COMMITTED in PostgreSQL and passes. A function
+-- commits nothing, so the transaction's own level is the one that matters, not default_transaction_isolation.
 create or replace function pgpm.adopt_partition(p_parent regclass, p_child regclass)
 returns text language plpgsql set datestyle = 'ISO, MDY' as $$
 declare
@@ -14090,6 +14099,10 @@ declare
   v_lo_raw text; v_hi_raw text; v_lo text; v_hi text; v_coltype text; v_exact boolean;
   v_row pgpm.part; v_had boolean; v_tracked name; v_clash_q text; v_chunks int; v_was text; v_method text;
 begin
+  if current_setting('transaction_isolation') not in ('read committed', 'read uncommitted') then
+    raise exception 'pg_partition_magician: adopt_partition(%, %) must run in a READ COMMITTED transaction (this one is %): it records % only while it is attached to % once its lock on it is granted, and asks that through a snapshot taken after the lock, which a stricter isolation level cannot provide. Re-run it in a READ COMMITTED transaction: BEGIN ISOLATION LEVEL READ COMMITTED, the call, COMMIT',
+      p_parent, p_child, current_setting('transaction_isolation'), p_child, p_parent;
+  end if;
   perform pgpm._refuse_null_arguments('adopt_partition', json_build_object('p_parent', p_parent, 'p_child', p_child));
   perform pgpm._regrain_lock(p_parent);
   select * into cfg from pgpm.config where parent_table = p_parent for key share;

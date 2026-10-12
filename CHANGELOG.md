@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **`adopt_partition` refuses a transaction stricter than `READ COMMITTED`** (#1262). It judged the partition
+  attached and not pending, and read its name and bounds, through the caller's snapshot after its `SHARE UPDATE
+  EXCLUSIVE` lock, and under `REPEATABLE READ` or `SERIALIZABLE` that is the transaction's first snapshot: a
+  `DETACH` another session committed before the call was read as still attached, so `pgpm.part` recorded a
+  standalone table as a partition of the parent, and a rename was recorded under the old name. It now refuses
+  any stricter level up front, before any lock, as `untransmute` does, so every read after the lock has a
+  snapshot taken after it; the refusal names the remedy (`BEGIN ISOLATION LEVEL READ COMMITTED`, the call,
+  `COMMIT`).
 - **`check_time_monotonic` gives the same answer from every session zone** (#1265). It cast the time column to
   `timestamptz` in the caller's `TimeZone`, so a naive `timestamp` (or text) column with a wall time inside that
   zone's spring-forward gap read an hour late: a column rising with the id across New York's gap (01:50, 02:30,

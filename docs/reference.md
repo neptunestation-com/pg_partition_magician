@@ -3055,6 +3055,7 @@ or export it with `archive.to_s3` first.
 
 It refuses, writing nothing:
 
+- a transaction stricter than `READ COMMITTED` (see the next paragraph), before it takes any lock;
 - a `p_parent` pgpm does not manage, or a `p_child` that is not attached to it (a partition in the middle of
   a detach is leaving it), or one that is not a plain table;
 - a `p_child` `pgpm.part` already records by oid (there is nothing to adopt);
@@ -3066,7 +3067,12 @@ It refuses, writing nothing:
 
 It holds the table's regrain lock and a `SHARE UPDATE EXCLUSIVE` lock on `p_child` while it judges, so the
 partition cannot be detached or dropped between the check and the row; reads and writes of the partition are
-not blocked. The bounds are read the same way whatever the caller's `DateStyle` and `TimeZone`.
+not blocked. That check, and the name and bounds it records, are read through a snapshot taken after the lock,
+so `adopt_partition` must run in a `READ COMMITTED` transaction (the default). Under `REPEATABLE READ` or
+`SERIALIZABLE` the snapshot is the transaction's first, which can predate a `DETACH` or a rename another session
+committed before the call, so it refuses, naming the remedy: `BEGIN ISOLATION LEVEL READ COMMITTED`, the call,
+`COMMIT` (a session whose `default_transaction_isolation` is stricter included). The bounds are read the same
+way whatever the caller's `DateStyle` and `TimeZone`.
 
 ### `resume` / `pause`
 

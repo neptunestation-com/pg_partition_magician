@@ -13226,6 +13226,20 @@ MUTATIONS["check_time_monotonic_session_zone"] = (
 )
 
 
+# Issue #1262: adopt_partition refuses a transaction stricter than READ COMMITTED.
+MUTATIONS["adopt_partition_strict_isolation_admitted"] = (
+    "bench/adopt_partition_isolation.sh",
+    "Pre-#1262 adopt_partition: no isolation level is refused, so under REPEATABLE READ or SERIALIZABLE every read "
+    "after the partition's lock (attached and not pending, the name, the bounds) goes through the transaction's "
+    "first snapshot. A DETACH another session committed before the call is read as still attached and the "
+    "standalone table is recorded in pgpm.part as a partition; a RENAME is recorded under the old name. One site, "
+    "the refusal's condition. tests/332 parts A, B and C catch it.",
+    [("  if current_setting('transaction_isolation') not in ('read committed', 'read uncommitted') then\n"
+      "    raise exception 'pg_partition_magician: adopt_partition(%, %) must run in a READ COMMITTED transaction",
+      "  if false then\n"
+      "    raise exception 'pg_partition_magician: adopt_partition(%, %) must run in a READ COMMITTED transaction", 1)],
+)
+
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
 # cost), and discriminate.sh's --shard=I/N interleaves that list, so the heavy ones spread over the

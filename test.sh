@@ -1272,6 +1272,7 @@ run_perf() {
     "bench/regrain_refuses_strict_isolation.sh pgpm_perf366"
     "bench/regrain_not_valid_check.sh pgpm_perf369"
     "bench/check_time_monotonic_session_zone.sh pgpm_perf373"
+    "bench/adopt_partition_isolation.sh pgpm_perf370"
   )
   local selected=()
   local n=${#guards[@]} idx
