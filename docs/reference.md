@@ -1505,9 +1505,12 @@ else vouches for a mark, not a `retain_detach` row, not the job's command and no
 `retiring_at` mark without the record (its dispatch failed, with no `pg_cron` or no `pgpm_detach` job, and the
 operator's own detach then completed) vouches for nothing: `retire` clears it, logged `retain_disown`, disarms
 the job if it still holds that detach, and refuses the table as one detached by hand. `_retain_recall` does the
-same rather than attach such a table back when retention stops reaching it. A partition whose detach pgpm
-dispatched, and which an operator then detached by hand, is pgpm's retirement still: it is dropped when the
-retirement completes, as any partition pgpm detached.
+same rather than attach such a table back when retention stops reaching it. Every other reader of the mark asks
+the same record, before `retire` has cleared it: `maintain`'s write-block and archive steps, its auto-regrain
+scan, `obtain`, `status`, `progress` and `scripts/archive_partition_whole.sql` take such a table for one
+detached by hand, so it is never handed to the archive strategy and no coverage is recorded for it. A
+partition whose detach pgpm dispatched, and which an operator then detached by hand, is pgpm's retirement
+still: it is dropped when the retirement completes, as any partition pgpm detached.
 
 A partition pending a concurrent detach that pgpm did not issue (an operator's `DETACH PARTITION ...
 CONCURRENTLY` still waiting, or interrupted in its wait, leaving `pg_inherits.inhdetachpending` set) is left
@@ -2307,13 +2310,15 @@ the real partition's coverage alone. Write-blocked is one of `retire()`'s drop p
 
 A partition detached by hand (an operator's own `DETACH PARTITION`, to keep the table) is not walked at
 all, though its `pgpm.part` row still says attached: the step asks the catalog, as `obtain` does, and a
-child whose table still exists, is no longer a partition of the parent and carries no `retiring_at` is the
-operator's. No write block goes on it however far retention reaches, none is lifted from it and its
-coverage is not judged, and nothing is logged by this step; `retire` refuses the same table and logs
-`fail_retain_drop` (see [`retire`](#retire)). A block pgpm put on the partition before it was detached
-stays, since pgpm no longer touches the table; drop the trigger `pgpm_write_block` by hand to write to it.
-A partition `retire` is detaching concurrently (`retiring_at` set) is still pgpm's and stays blocked, and
-one dropped by hand is still attempted and logged `skip_write_block`.
+child whose table still exists, is no longer a partition of the parent and carries no retirement of pgpm's
+(a `retiring_at` mark with the record of pgpm's dispatch, `pgpm.part.detach_dispatched_oid`; a mark whose
+dispatch failed is not one) is the operator's. No write block goes on it however far retention reaches,
+none is lifted from it and its coverage is not judged, and nothing is logged by this step; `retire` refuses
+the same table and logs `fail_retain_drop` (see [`retire`](#retire)). A block pgpm put on the partition
+before it was detached stays, since pgpm no longer touches the table; drop the trigger `pgpm_write_block` by
+hand to write to it. A partition `retire` is detaching concurrently (`retiring_at` set and its dispatch
+recorded) is still pgpm's and stays blocked, and one dropped by hand is still attempted and logged
+`skip_write_block`.
 
 Chunked archiving: `archived=N` counts how many chunks this tick recorded via
 `pgpm._archive_step` -- see [Archive strategy contract](#archive-strategy-contract) for the

@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **Every reader of a retirement mark asks for the record of pgpm's dispatch** (#1259). `retire()` stamps
+  `pgpm.part.retiring_at` before it dispatches the concurrent detach, and #705 taught `retire`, `_detach_reap`,
+  `_retain_recall` and the install's pass that a mark without `detach_dispatched_oid` vouches for nothing. The
+  other readers still vouched for the mark by itself: `pgpm._part_built` (and through it
+  `_part_detached_by_hand`) and `_archive_hold_partition`. So a partition whose dispatch failed (no `pg_cron`)
+  and which the operator then detached by hand was handed to the archive strategy by the next `maintain` tick,
+  whose archive step runs before `retain`, and recorded as covered with none of its rows read; once the
+  operator attached it back, the remedy the reference gives, retention dropped it on that coverage and its rows
+  were in neither the table nor the archive. The readers now share one rule, the new
+  `pgpm._retirement_vouched`, built on `_detach_dispatched`: a mark vouches only with the record naming the
+  relation, so the write-block and archive steps, the auto-regrain scan, `obtain`, `status`, `progress` and
+  `scripts/archive_partition_whole.sql` take such a table for one detached by hand. Test `tests/330`, guard
+  `bench/retirement_mark_needs_dispatch.sh`, mutation `retirement_mark_vouches_alone`.
+
 - **A retired chunk's bound with no offset is read on the grid's clock, not the caller's** (#1264).
   `pgpm._over_retired_chunks`, which decides the partitions the archive step and `retain()` hold over a retired
   chunk's range, compared the bounds with `::timestamptz` in the caller's session, and a retired ledger row an

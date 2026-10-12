@@ -8020,7 +8020,7 @@ select ok(
         "by hand (its table kept) is never rebuilt and nothing is logged, while every write into its range is "
         "refused. One site, the anchored branch. tests/280 parts A and B catch it.",
         [("    else exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = p_child_oid)\n"
-          "         or (p_retiring_at is not null and exists (select 1 from pg_class c where c.oid = p_child_oid))\n",
+          "         or (pgpm._retirement_vouched(p_parent, p_child_oid, p_retiring_at) and exists (select 1 from pg_class c where c.oid = p_child_oid))\n",
           "    else exists (select 1 from pg_class c where c.oid = p_child_oid)\n", 1)],
     ),
     "detached_cell_name_refused": (
@@ -8039,7 +8039,7 @@ select ok(
         "Issue #956, the over-correction: a partition retire() is detaching concurrently (retiring_at set) "
         "reads as detached by hand, so obtain forgets its row and builds the range again under a retirement "
         "in flight. One site, the anchored branch. tests/280 part C catches it.",
-        [("\n         or (p_retiring_at is not null and exists (select 1 from pg_class c where c.oid = p_child_oid))\n",
+        [("\n         or (pgpm._retirement_vouched(p_parent, p_child_oid, p_retiring_at) and exists (select 1 from pg_class c where c.oid = p_child_oid))\n",
           "\n", 1)],
     ),
     # Issue #705: a table the operator DETACHed by hand is not write-blocked or archived by maintain().
@@ -13539,6 +13539,23 @@ for _name in ("hypertable_mixed_step_unchecked", "hypertable_unit_rules_transmut
               "hypertable_unit_remedy_recopy_unnamed"):
     MUTATION_SRC[_name] = "pgpm_hypertable/install.sql"
     MUTATION_TRACK[_name] = "timescale"
+
+# Issue #1259: the readers of a retirement mark (pgpm._part_built and through it _part_detached_by_hand, and
+# _archive_hold_partition) vouch for it only with the record of pgpm's dispatch, by _detach_dispatched's rule, through
+# pgpm._retirement_vouched. bench/retirement_mark_needs_dispatch.sh runs tests/330 against the mutant.
+MUTATIONS["retirement_mark_vouches_alone"] = (
+    "bench/retirement_mark_needs_dispatch.sh",
+    "Pre-#1259 readers: a retiring_at mark vouches for pgpm's own retirement by itself, so a mark whose dispatch failed "
+    "(no pg_cron) on a table the operator then detached by hand reads as a retirement in flight: the next maintain() "
+    "tick's archive step hands the operator's table to the strategy and records coverage for it, and once the table is "
+    "attached back retention drops it on that coverage, its rows archived nowhere. One site, the record clause of "
+    "pgpm._retirement_vouched. The acceptance reproduction (F14-01) and tests/330 parts A to C catch it.",
+    [("  select p_retiring_at is not null\n"
+      "     and exists (select 1 from pgpm.part p\n"
+      "                  where p.parent_table = p_parent and p.child_oid = p_child_oid\n"
+      "                    and pgpm._detach_dispatched(p_parent, p.child_name, p_child_oid));\n",
+      "  select p_retiring_at is not null;\n", 1)],
+)
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

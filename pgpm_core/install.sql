@@ -2270,6 +2270,40 @@ begin
 end;
 $$;
 
+-- _detach_dispatched: whether pgpm recorded its own dispatch of the detach of p_child, the relation p_rel (#705). The
+-- record is pgpm.part.detach_dispatched_oid (see its comment), written only by retire() in the transaction in which
+-- the dispatch armed the pgpm_detach job and cleared with the mark; it has to name the relation that is there now.
+-- Nothing else vouches: not the job's command, not a retain_detach row, not pg_cron's run history, all of which a pgpm
+-- older than the record wrote alike for a detach it issued and for an operator's it adopted, and the first two of
+-- which spell the parent's name, which a rename changes.
+create or replace function pgpm._detach_dispatched(p_parent regclass, p_child name, p_rel oid)
+returns boolean language plpgsql stable as $$
+begin
+  return p_rel is not null
+     and exists (select 1 from pgpm.part p
+                  where p.parent_table = p_parent and p.child_name = p_child
+                    and p.retiring_at is not null and p.detach_dispatched_oid = p_rel);
+end;
+$$;
+
+-- _retirement_vouched: whether a retirement mark on the pgpm.part row of p_parent anchored at p_child_oid stands for
+-- a retirement of pgpm's own, by the one rule retire(), _detach_reap, _retain_recall and the install's pass apply
+-- (_detach_dispatched, #705): the mark (p_retiring_at, the row's own retiring_at as its caller read it) AND the
+-- record of pgpm's dispatch of its detach, naming this relation. The readers that ask "is this detached relation
+-- still pgpm's" (_part_built and through it _part_detached_by_hand, and _archive_hold_partition) ask it here, so a
+-- mark whose dispatch failed (no pg_cron, a refused dispatch) vouches for nothing at any of them (#1259): the mark
+-- is stamped before the dispatch, and once the operator detaches such a partition by hand it is the operator's
+-- table at every site, as retire() judges it (retain_disown), not a retirement in flight that the archive step
+-- hands to its strategy and records as covered. Keyed by the row's anchor oid, so it answers only for an anchored
+-- row; an unanchored one (no child_oid) is never asked, as before.
+create or replace function pgpm._retirement_vouched(p_parent regclass, p_child_oid oid, p_retiring_at timestamptz)
+returns boolean language sql stable as $$
+  select p_retiring_at is not null
+     and exists (select 1 from pgpm.part p
+                  where p.parent_table = p_parent and p.child_oid = p_child_oid
+                    and pgpm._detach_dispatched(p_parent, p.child_name, p_child_oid));
+$$;
+
 -- _part_built: whether the cell an ATTACHED pgpm.part row of p_parent stands for is built, i.e. a write into
 -- its range has a partition to land in. The one predicate every reader of "is this cell there" shares:
 -- obtain and extend_to (through _cell_attached), status() and progress(), so they cannot disagree.
@@ -2278,8 +2312,11 @@ $$;
 --     pg_inherits (#956). The relation existing is not enough: a forward cell DETACHed by hand keeps its
 --     table, and judging by the relation (#908's first test) took it for built, so it was never rebuilt and
 --     every write into its range was refused for good. The one detached partition that IS still pgpm's is
---     the one a retirement is in flight on (retiring_at set): retire()'s concurrent detach leaves the
---     relation standing outside the table until retire drops it, so it stays built while it exists.
+--     the one a retirement of pgpm's is in flight on: retire()'s concurrent detach leaves the relation
+--     standing outside the table until retire drops it, so it stays built while it exists. A retiring_at
+--     mark says so only with the record of pgpm's dispatch (_retirement_vouched, #1259): a mark whose
+--     dispatch failed is on a partition pgpm never asked anything to detach, and once the operator detaches
+--     it by hand it is not built, as for any other table detached by hand.
 --   * A row with a NULL child_oid is one an upgrade from before #421 could not anchor: its backfill resolves
 --     attached partitions through pg_inherits by name, and finds nothing for a cell dropped by hand before
 --     the upgrade (#981). That used to read as built, and forget_missing (which only clears rows whose
@@ -2298,14 +2335,15 @@ returns boolean language sql stable as $$
                  and not exists (select 1 from pgpm.part a
                                   where a.parent_table = p_parent and a.child_oid = i.inhrelid))
     else exists (select 1 from pg_inherits i where i.inhparent = p_parent and i.inhrelid = p_child_oid)
-         or (p_retiring_at is not null and exists (select 1 from pg_class c where c.oid = p_child_oid))
+         or (pgpm._retirement_vouched(p_parent, p_child_oid, p_retiring_at) and exists (select 1 from pg_class c where c.oid = p_child_oid))
   end;
 $$;
 
 -- _part_detached_by_hand: whether an ATTACHED pgpm.part row of p_parent stands for a table the operator
 -- DETACHed by hand, i.e. one pgpm no longer manages (#705). True when the row's relation (by child_oid)
 -- still exists and is not built in _part_built's sense: not a partition of p_parent, and no retirement of
--- pgpm's in flight on it (retiring_at). pgpm.part.attached says what pgpm did, not what the catalog holds,
+-- pgpm's in flight on it (a retiring_at mark WITH the record of pgpm's dispatch, _retirement_vouched; a mark
+-- whose dispatch failed is not one, #1259). pgpm.part.attached says what pgpm did, not what the catalog holds,
 -- and an operator's own DETACH PARTITION never touches it, so every maintain() step that acts on an
 -- attached row asks this first: _enforce_write_blocks (no write block goes on the operator's table),
 -- _archive_step (it is not handed to the strategy, and no coverage is recorded for it) and the auto-regrain
@@ -2314,8 +2352,8 @@ $$;
 -- fail_retain_drop on every call, which is why its row is LEFT, not forgotten as _cell_attached forgets a
 -- forward cell's: the row is what keeps that refusal counted in status().
 --
--- One-directional, like _part_built. A child pgpm's own retirement detached (retiring_at set) is still
--- pgpm's. A row whose relation is gone is not a table anyone keeps: it stays on the paths that report it
+-- One-directional, like _part_built. A child pgpm's own retirement detached (retiring_at set and its dispatch
+-- recorded) is still pgpm's. A row whose relation is gone is not a table anyone keeps: it stays on the paths that report it
 -- (skip_write_block from the write-block step, tests/94; fail_retain_identity from retire()). A row with no
 -- recorded oid (an upgrade from before #421) cannot be told apart from a renamed partition and is left to
 -- behave as it did before.
@@ -3605,22 +3643,6 @@ begin
     values (p_parent, 'retain_disown', v_lo, v_hi,
             p_why || '; its retirement mark (retiring_at) is cleared, so the detach is the operator''s: once it is finished the table is left standing as one detached by hand, and retention never drops it');
   return true;
-end;
-$$;
-
--- _detach_dispatched: whether pgpm recorded its own dispatch of the detach of p_child, the relation p_rel (#705). The
--- record is pgpm.part.detach_dispatched_oid (see its comment), written only by retire() in the transaction in which
--- the dispatch armed the pgpm_detach job and cleared with the mark; it has to name the relation that is there now.
--- Nothing else vouches: not the job's command, not a retain_detach row, not pg_cron's run history, all of which a pgpm
--- older than the record wrote alike for a detach it issued and for an operator's it adopted, and the first two of
--- which spell the parent's name, which a rename changes.
-create or replace function pgpm._detach_dispatched(p_parent regclass, p_child name, p_rel oid)
-returns boolean language plpgsql stable as $$
-begin
-  return p_rel is not null
-     and exists (select 1 from pgpm.part p
-                  where p.parent_table = p_parent and p.child_name = p_child
-                    and p.retiring_at is not null and p.detach_dispatched_oid = p_rel);
 end;
 $$;
 
@@ -5371,8 +5393,9 @@ $$;
 -- before the detach committed, and would still see the table attached. False means the table left the parent
 -- while the caller waited (detached or dropped by hand): the caller hands it to nothing and records nothing,
 -- as it would have had the candidate query seen it (a dropped one stays on the paths that report it, as
--- _part_detached_by_hand's note says). A row pgpm's own retirement is detaching (retiring_at) and an unanchored row (no child_oid) are
--- left to behave as they did before, as _part_detached_by_hand leaves them. A DETACH ... CONCURRENTLY whose
+-- _part_detached_by_hand's note says). A row pgpm's own retirement is detaching (a retiring_at mark with the record
+-- of pgpm's dispatch, _retirement_vouched: a mark whose dispatch failed vouches for nothing here either, #1259) and
+-- an unanchored row (no child_oid) are left to behave as they did before, as _part_detached_by_hand leaves them. A DETACH ... CONCURRENTLY whose
 -- first transaction has committed leaves the table in pg_inherits with inhdetachpending set: _part_built still
 -- counts it attached, so it can be the candidate, but pg_partition_ancestors stops at a link pending detach, so
 -- this answers false for it and the caller hands it to nothing (retire() leaves the same table alone, #705).
@@ -5381,7 +5404,7 @@ returns boolean language plpgsql as $$
 begin
   execute format('lock table only %s in access share mode', p_parent);
   return p_child_oid is null
-      or p_retiring_at is not null
+      or pgpm._retirement_vouched(p_parent, p_child_oid, p_retiring_at)
       or exists (select 1 from pg_partition_ancestors(p_child_oid::regclass) a where a.relid = p_parent::oid);
 end;
 $$;

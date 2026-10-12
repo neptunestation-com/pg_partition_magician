@@ -183,7 +183,8 @@ select child_name as rt_ret, child_oid as rt_ret_oid from pgpm.part
  where parent_table = 'public.rt307'::regclass and lo = '20000' \gset
 select child_oid as rt_sib_oid from pgpm.part where parent_table = 'public.rt307'::regclass and lo = '30000' \gset
 select format('alter table public.rt307 detach partition public.%I', :'rt_ret') \gexec
-update pgpm.part set retiring_at = clock_timestamp(), retiring_oid = child_oid
+-- with the record of pgpm's dispatch of the detach, which retire() writes beside the mark (#1259)
+update pgpm.part set retiring_at = clock_timestamp(), retiring_oid = child_oid, detach_dispatched_oid = child_oid
  where parent_table = 'public.rt307'::regclass and child_name = :'rt_ret';
 
 select ok(not exists (select 1 from pg_inherits where inhparent = 'public.rt307'::regclass
