@@ -13,6 +13,9 @@
   What changed is the refusal and the contract: at the budget, against a run's recorded last write (`maintain`,
   a hand `regrain_step`, the hypertable cutover), the message names the oldest transaction still running at or
   before it, with its database, pid (or prepared gid) and xid, and says the listed sessions cannot be told from
+  snapshots that miss the copies; ending that transaction is the remedy. The clause comes before the pid list,
+  and `maintain`'s `skip_regrain` row keeps the message through it (past the 200 characters every `skip_` row
+  keeps), so the row an operator reads every tick carries it. The reference documents the limit.
   snapshots that miss the copies; ending that transaction is the remedy. The reference documents the limit.
 - **`adopt_partition` refuses a transaction stricter than `READ COMMITTED`** (#1262). It judged the partition
   attached and not pending, and read its name and bounds, through the caller's snapshot after its `SHARE UPDATE

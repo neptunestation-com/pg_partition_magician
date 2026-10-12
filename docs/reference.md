@@ -2010,10 +2010,12 @@ database that began after the copies, and sees them, is listed with the rest. Th
 that cannot see the copies: a `REPEATABLE READ` transaction begun after the copies that imported a snapshot
 exported before them shows the same `backend_xmin`, state and start times, and passing one passes the other.
 So it waits for both, as `CREATE INDEX CONCURRENTLY` does (its reference `xmin` is cluster-wide too), and such a
-transaction defers the swap for as long as it stays open. At the budget the refusal names it, after the listed
-pids: `a transaction older than the copies is still running in database D (pid H, xid X, open T)` (a prepared
-one reads `prepared transaction 'G'` for the pid), and says the listed sessions cannot be told from snapshots
-that miss the copies. End that transaction, or wait for it: once it has ended, a new statement's snapshot has
+transaction defers the swap for as long as it stays open. At the budget the refusal names it right after the
+oldest listed session, before the list of pids (which has no bound), so `maintain`'s `skip_regrain` row always
+carries it: `(oldest: pid P, open T); a transaction older than the copies is still running in database D (pid
+H, xid X, open T)` (a prepared one reads `prepared transaction 'G'` for the pid), then says the listed sessions
+cannot be told from snapshots that miss the copies and ends `the swap waits for them all (pids ...)`. End that
+transaction, or wait for it: once it has ended, a new statement's snapshot has
 an `xmin` past the copies, and the sessions it held back drop out as they release theirs (a `READ COMMITTED`
 one when its statement finishes). This applies to a reference that is an earlier transaction; against the
 swap's own transaction (`regrain`) every snapshot open during the call is listed whatever else runs, and the
@@ -2076,8 +2078,11 @@ beside the call, say). So the cycle is broken by refusal:
 The budget is the caller's `lock_timeout`. Under `maintain` that is 200 ms, after which the step raises and the
 tick logs `skip_regrain` with `method` beginning `pg_partition_magician: regrain swap deferred: N snapshot(s)
 older than the copies still open (oldest: pid P, open T; pids ...)` (`T` reads `not visible to this role` when
-the caller cannot see that session's `xact_start`; the holder clause above follows when a transaction older than
-the copies is still running), and the next tick tries again; nothing was swapped or lost.
+the caller cannot see that session's `xact_start`; when a transaction older than the copies is still running the
+head closes after `open T)` and the holder clause above follows; the row keeps 200 characters of the message, as
+every `skip_` row does, or as many as reach the end of the holder clause, so the holder is always in it), and the
+next tick tries again;
+nothing was swapped or lost.
 `regrain` refuses with the same message and rolls back whole, copies included. Neither ever goes ahead under a
 snapshot it waits for. Under `lock_timeout` 0, the session default under which a hand `regrain` runs, the wait
 lasts as long as the snapshots do: a snapshot held by a session waiting on the swap, or by an older snapshot

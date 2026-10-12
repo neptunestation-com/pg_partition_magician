@@ -17,6 +17,8 @@
 #   snapshot_wait_foreign_floor_exempt      -- the exemption the issue asked for: a session whose xmin another
 #                                              database's transaction explains is not listed, so the swap goes
 #                                              through under the importer, which reads the range empty (part A)
+#   snapshot_wait_holder_log_truncated      -- maintain's skip_regrain row keeps 200 characters only, not through
+#                                              the holder clause, so its database, pid and xid never reach it (D)
 #
 # Usage: snapshot_wait_foreign_floor_holder.sh <container> <db> [install.sql]
 # Runs on the plain core image (pgtap, dblink and pg_prove). It holds a transaction open across several seconds,

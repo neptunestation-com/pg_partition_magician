@@ -13153,6 +13153,15 @@ MUTATIONS["snapshot_wait_holder_this_database_only"] = (
       "                   and a.datid = v_db\n"
       "                   and a.pid <> pg_backend_pid()\n", 1)],
 )
+MUTATIONS["snapshot_wait_holder_log_truncated"] = (
+    _G1263,
+    "maintain keeps 200 characters of a deferred regrain swap's message in its skip_regrain row, as the other skip "
+    "rows do, and no longer reaches to the end of the floor-holder clause: the head runs past 200 before the "
+    "holder's database, so the row an operator reads every tick never says which transaction to end (#1263, round "
+    "2). One site, the row's bound. tests/333 part D catches it.",
+    [("              left(sqlerrm, greatest(200, strpos(sqlerrm, '): while it runs every snapshot of the cluster'))));\n",
+      "              left(sqlerrm, 200));\n", 1)],
+)
 MUTATIONS["snapshot_wait_foreign_floor_exempt"] = (
     _G1263,
     "The exemption #1263 asked for: a session whose backend_xmin is explained by a running transaction of another "

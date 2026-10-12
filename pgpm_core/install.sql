@@ -7729,13 +7729,14 @@ drop function if exists pgpm._snapshot_wait(xid8, text, text, text);
 --
 -- THE BUDGET is the caller's lock_timeout, as for every lock the swap takes. When it runs out with a session still
 -- listed the step raises 'pg_partition_magician: <p_what> deferred: N snapshot(s) older than the copies still open
--- (oldest: pid P, open T; pids ...)', followed, when a transaction older than an earlier transaction's reference is
--- still running, by 'a transaction older than the copies is still running in database D (pid H, xid X, open T)'
--- (a prepared one: 'prepared transaction G' for the pid) and why the listed sessions cannot be told apart, else by
--- 'a reader in one would find <p_range> empty': maintain logs that as skip_regrain and the next tick tries again,
--- regrain() and the cutover refuse with it, rolled back whole. It never goes ahead. lock_timeout 0 (the session default,
--- under which a hand regrain() runs) waits for as long as they take, as the DETACH would wait for a reader holding
--- a lock. So a client that holds a snapshot across its call (a dblink caller waiting for the call, a wrapper that
+-- (oldest: pid P, open T; pids ...)' and 'a reader in one would find <p_range> empty'. When a transaction older than an
+-- earlier transaction's reference is still running, the head closes after 'open T)' and goes on 'a transaction older
+-- than the copies is still running in database D (pid H, xid X, open T)' (a prepared one: 'prepared transaction G'
+-- for the pid), why the listed sessions cannot be told apart, and then '(pids ...)': the holder before the unbounded
+-- list, and maintain's skip_regrain row keeps the message through that clause (past its usual 200 characters). maintain logs that as skip_regrain and
+-- the next tick tries again, regrain() and the cutover refuse with it, rolled back whole. It never goes ahead.
+-- lock_timeout 0 (the session default, under which a hand regrain() runs) waits for as long as they take, as the
+-- DETACH would wait for a reader holding a lock. So a client that holds a snapshot across its call (a dblink caller waiting for the call, a wrapper that
 -- holds one) is a reader the swap must wait for: call these from a direct session.
 --
 -- What it cannot cover, CREATE INDEX CONCURRENTLY's own last-mile window: what this transaction itself writes. A
@@ -7869,8 +7870,10 @@ begin
          limit 1;
       end if;
       if v_holder is not null then
-        raise exception 'pg_partition_magician: % deferred: % snapshot(s) older than the copies still open (oldest: pid %, open %; pids %); a transaction older than the copies is still running %: while it runs every snapshot of the cluster has an xmin at or before it, so these cannot be told from snapshots that miss the copies (a reader in one of those would find % empty after the swap), and the swap waits for them all. %. Nothing was swapped: maintain retries a regrain on its next tick, and a call by hand is refused and can be run again once that transaction has ended and these have released their snapshots (a READ COMMITTED statement releases its own when it finishes).',
-          p_what, v_n, v_pid, v_open, array_to_string(v_still, ', '), v_holder, p_range, p_where;
+        -- the holder comes BEFORE the pid list, which has no bound: maintain logs this through a bounded left(), and
+        -- the clause it exists for (which transaction to end) must reach that row however many sessions are listed
+        raise exception 'pg_partition_magician: % deferred: % snapshot(s) older than the copies still open (oldest: pid %, open %); a transaction older than the copies is still running %: while it runs every snapshot of the cluster has an xmin at or before it, so these cannot be told from snapshots that miss the copies (a reader in one of those would find % empty after the swap), and the swap waits for them all (pids %). %. Nothing was swapped: maintain retries a regrain on its next tick, and a call by hand is refused and can be run again once that transaction has ended and these have released their snapshots (a READ COMMITTED statement releases its own when it finishes).',
+          p_what, v_n, v_pid, v_open, v_holder, p_range, array_to_string(v_still, ', '), p_where;
       end if;
       raise exception 'pg_partition_magician: % deferred: % snapshot(s) older than the copies still open (oldest: pid %, open %; pids %); a reader in one would find % empty after the swap. %. Nothing was swapped: maintain retries a regrain on its next tick, and a call by hand is refused and can be run again once those transactions have ended (from a direct session: a caller that holds a snapshot across the call is one of them).',
         p_what, v_n, v_pid, v_open, array_to_string(v_still, ', '), p_range, p_where;
@@ -13553,7 +13556,13 @@ begin
     exception when others then
       v_regrain := 'deferred';
       v_note := v_note || ' regrain_deferred';
-      insert into pgpm.log (parent_table, action, method) values (p_parent, 'skip_regrain', left(sqlerrm, 200));
+      -- 200 characters, as every skip row keeps, or (#1263) through the end of the floor-holder clause of
+      -- _snapshot_wait's deferral, which names the transaction to end (database, pid or prepared gid, xid) after a
+      -- head of up to about 150 characters: the remedy the row exists to carry. The clause ends at the text found
+      -- here, and comes before the pid list, so what is kept is bounded (about 600 with the longest gid)
+      insert into pgpm.log (parent_table, action, method)
+      values (p_parent, 'skip_regrain',
+              left(sqlerrm, greatest(200, strpos(sqlerrm, '): while it runs every snapshot of the cluster'))));
     end;
   end if;
 
