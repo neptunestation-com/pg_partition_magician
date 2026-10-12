@@ -888,11 +888,12 @@ select dblink_exec('b328l', format('set transaction snapshot %L', (select v from
 insert into t328l_state select 'bpid', p::text from dblink('b328l', 'select pg_backend_pid()') as t(p int);
 select ok((select b.xact_start > (select v::timestamptz from t328l_state where k = 'm_waiting_at')
                   and age(b.backend_xmin) <= age(e.backend_xmin)
+                  and (select n from dblink('b328l', 'select count(*) from public.t328l_w') as x(n bigint)) = 1
                   and age(b.backend_xmin) > age(m.backend_xid)
              from pg_stat_activity b, pg_stat_activity e, pg_stat_activity m
             where b.pid = (select v::int from t328l_state where k = 'bpid') and e.pid = (select v::int from t328l_state where k = 'epid')
               and m.pid = (select v::int from t328l_state where k = 'mpid')),
-  'LIVENESS: (L) B began after M''s wait did; its xmin (S2''s) is at or after its exporter E''s (S1''s; after it when no other database''s transaction pins both) and older than M''s xid');
+  'LIVENESS: (L) B began after M''s wait did; it holds S2, not S1 (it sees W''s committed row, which S1 cannot), its xmin at or after E''s and older than M''s xid');
 select dblink_exec('e328l', 'commit');
 create temp table t328l_result as select r from dblink_get_result('m328l', false) as t(r text);
 select ok(dblink_error_message('m328l') ~ ('^ERROR:  pg_partition_magician: regrain swap deferred: [0-9]+ snapshot\(s\) older than the copies still open \(oldest: pid [0-9]+, open [^;]*; pids ([0-9]+, )*'
@@ -970,12 +971,13 @@ select dblink_exec('b328m', 'begin isolation level repeatable read');
 select dblink_exec('b328m', format('set transaction snapshot %L', (select v from t328m_state where k = 's2')));
 insert into t328m_state select 'bpid', p::text from dblink('b328m', 'select pg_backend_pid()') as t(p int);
 select ok((select b.xact_start > (select v::timestamptz from t328m_state where k = 'm_waiting_at')
-                  and age(b.backend_xmin) < age(e.backend_xmin)
+                  and age(b.backend_xmin) <= age(e.backend_xmin)
+                  and (select n from dblink('b328m', 'select count(*) from public.t328m_w') as x(n bigint)) = 1
                   and age(b.backend_xmin) > age(m.backend_xid)
              from pg_stat_activity b, pg_stat_activity e, pg_stat_activity m
             where b.pid = (select v::int from t328m_state where k = 'bpid') and e.pid = (select v::int from t328m_state where k = 'epid')
               and m.pid = (select v::int from t328m_state where k = 'mpid')),
-  'LIVENESS: (M) B began after M''s wait did; its xmin (S2''s) is newer than its exporter E''s (S1''s) and older than M''s xid');
+  'LIVENESS: (M) B began after M''s wait did; it holds S2, not S1 (it sees W''s committed row, which S1 cannot), its xmin at or after E''s and older than M''s xid');
 select dblink_exec('e328m', 'commit');
 create temp table t328m_result as select r from dblink_get_result('m328m', false) as t(r text);
 select ok(dblink_error_message('m328m') ~ ('^ERROR:  pg_partition_magician: regrain swap deferred: [0-9]+ snapshot\(s\) older than the copies still open \(oldest: pid [0-9]+, open [^;]*; pids ([0-9]+, )*'
