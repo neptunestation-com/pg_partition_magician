@@ -143,9 +143,17 @@ alter table archive.object_key_claim add column if not exists rows_digest text;
 -- the endpoint they are handed through it too, so a row stored with the slash (by an install before #1269, or by
 -- hand) and a direct call spelled with it address the same object as the endpoint spelled without. A path prefix
 -- (Supabase Storage's /storage/v1/s3) is kept; null (AWS S3) stays null.
+-- And without the scheme's default port (':80' after http://, ':443' after https://): the signers sign the
+-- endpoint's authority as the Host, and the client (libcurl, through the http extension) leaves a default port
+-- out of the Host it sends, so 'http://host:80' was refused 403 SignatureDoesNotMatch on every request. Any
+-- other port is kept: the client sends it.
 create or replace function archive._s3_endpoint_canonical(p_endpoint text)
-returns text language sql immutable set search_path = pg_catalog, pg_temp as $$
-  select regexp_replace(p_endpoint, '/+$', '');
+returns text language plpgsql immutable set search_path = pg_catalog, pg_temp as $$
+begin
+  p_endpoint := regexp_replace(p_endpoint, '/+$', '');
+  p_endpoint := regexp_replace(p_endpoint, '^(http://[^/]*):80(/|$)|^(https://[^/]*):443(/|$)', '\1\2\3\4');
+  return p_endpoint;
+end;
 $$;
 
 -- Operator interface for archive.config: an upsert with every connection-setting column as a
@@ -227,9 +235,10 @@ begin
   if v_endpoint !~ '^https?://[^/?#[:space:]]+(/[^?#[:space:]]*)?$' then
     raise exception 'archive.configure: p_endpoint must be null (AWS S3) or the http:// or https:// URL of an S3-compatible store, a host and optionally a path prefix with no query string or fragment, not %', quote_literal(p_endpoint);
   end if;
-  -- A path prefix with an empty, '.' or '..' segment: the client or the store resolves it away while the
-  -- signature covers it as written, so every request was refused (403 SignatureDoesNotMatch).
-  if regexp_replace(v_endpoint, '^https?://[^/]+', '') ~ '/\.\.?(/|$)|//+[^/]' then
+  -- A path prefix with an empty, '.' or '..' segment, the dots spelled or percent-encoded ('%2E'): the client or
+  -- the store resolves it away while the signature covers it as written, so every request was refused (403
+  -- SignatureDoesNotMatch).
+  if regexp_replace(v_endpoint, '^https?://[^/]+', '') ~ '/(\.|%2[eE]){1,2}(/|$)|//+[^/]' then
     raise exception 'archive.configure: p_endpoint''s path prefix must not hold an empty, ''.'' or ''..'' segment: spell the path as the store resolves it, not %', quote_literal(p_endpoint);
   end if;
   insert into archive.config

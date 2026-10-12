@@ -33,12 +33,25 @@ parameters (`p_region`, `p_endpoint` for S3-compatible stores like MinIO or Supa
 `p_prefix`, `p_compress`, etc.) all have sensible defaults -- pass only what you need to override.
 `p_endpoint` is null for AWS S3 itself, or the `http://` or `https://` URL of the store, a host and
 optionally a path prefix (Supabase Storage's is `https://<project-ref>.supabase.co/storage/v1/s3`).
-A trailing slash is dropped, so `http://minio:9000/` and `http://minio:9000` address the same objects,
-and `archive.configure` refuses, naming `p_endpoint`, a value with no such scheme, no host, a query
-string or a fragment, credentials before the host (`user@` or `user:password@`: name the Vault secrets
-in `p_vault_key_id` and `p_vault_secret` instead), or a path prefix with an empty, `.` or `..` segment.
-`p_bucket` must be a bare bucket name: one holding a `/` (put a key path in `p_prefix`), a `?`, a `#`
-or whitespace, or one that is empty, `.` or `..`, is refused naming `p_bucket`.
+`archive.configure` stores it in a canonical form, and the signers use the same form:
+
+- trailing slashes are dropped (`http://minio:9000/` is `http://minio:9000`);
+- the scheme's default port is dropped (`http://host:80` is `http://host`, `https://host:443` is
+  `https://host`); any other port is kept.
+
+It refuses, naming `p_endpoint`:
+
+- a value with no `http://` or `https://` scheme, or no host;
+- a query string or a fragment;
+- credentials before the host (`user@` or `user:password@`; the message does not echo them): name the
+  Vault secrets in `p_vault_key_id` and `p_vault_secret` instead;
+- a path prefix with an empty, `.` or `..` segment, the dots spelled or percent-encoded (`%2E`).
+
+And it refuses, naming `p_bucket`, a bucket that is not a bare bucket name: one holding a `/` (put a
+key path in `p_prefix`), a `?`, a `#` or whitespace, or one that is empty, `.` or `..`. Those are the
+only endpoint and bucket checks. Any other spelling the store cannot take is not caught at
+`archive.configure`: it fails loudly at the first request, with the store's HTTP status in the error,
+and nothing is written.
 `p_part_bytes` (the size of each `archive.to_s3` multipart part, 8 MiB by default) must be at least
 5 MiB, the smallest non-final multipart part S3 accepts: `archive.configure` refuses anything smaller,
 and `archive.to_s3` refuses a row holding zero or less before it sends anything. A positive size under

@@ -8,14 +8,17 @@
   through it failed after the read. `archive.configure` now stores the endpoint without its trailing slashes,
   and `archive.s3_signed_request` and `archive.s3_signed_request_bytea` drop them from the endpoint they are
   handed, so a row stored with one before this release, or a direct call spelled with one, addresses the same
-  object as the endpoint spelled without. A path prefix is kept. `archive.configure` also refuses, naming
-  `p_endpoint`, an endpoint with no `http://` or `https://` scheme, no host, a query string or a fragment,
-  which the signers could never use, one with credentials before the host (the signers signed them as part of
-  the Host, so every request was refused 403; the refusal does not echo the password), and one whose path prefix
-  holds an empty, `.` or `..` segment (resolved away by the client or the store, refused 403 the same way). It
-  refuses, naming `p_bucket`, a bucket that is not a bare bucket name: one holding a `/` (`/my-bucket` addressed
-  `//my-bucket/<key>`, the same HTTP 400), a `?`, a `#` or whitespace, or one that is empty, `.` or `..`. A null
-  endpoint (AWS S3) is unchanged.
+  object as the endpoint spelled without. The scheme's default port (`:80` after `http://`, `:443` after
+  `https://`) is dropped the same way: the signers signed it as part of the Host while the client leaves it out
+  of the Host it sends, so every request was refused 403. A path prefix and any other port are kept.
+  `archive.configure` also refuses, naming `p_endpoint`, an endpoint with no `http://` or `https://` scheme or
+  no host, one with a query string or a fragment, one with credentials before the host (signed as part of the
+  Host, refused 403; the refusal does not echo the password), and one whose path prefix holds an empty, `.` or
+  `..` segment, spelled or percent-encoded (resolved away by the client or the store, refused 403 the same
+  way). It refuses, naming `p_bucket`, a bucket that is not a bare bucket name: one holding a `/` (`/my-bucket`
+  addressed `//my-bucket/<key>`, the same HTTP 400), a `?`, a `#` or whitespace, or one that is empty, `.` or
+  `..`. Those are the only checks: any other endpoint or bucket spelling the store cannot take still fails
+  loudly at the first request, with the store's HTTP status, as before. A null endpoint (AWS S3) is unchanged.
 
 - **A resumed `text_time` transmute refuses another encoding** (#1270). The claim a failed attempt leaves
   recorded the bound, its zone (#506) and its column (#628), but not the `text_time` encoding the

@@ -22,10 +22,18 @@
 -- operand. configure refuses each by name (part F the endpoint's, part G the bucket's), without echoing a
 -- password, and each refusal's remedy, typed as the message gives it, configures a table whose export lands.
 --
+-- And the scheme's default port (the third verification round, V-01): 'http://host:80' had the signers sign
+-- 'host:80' as the Host while libcurl, which leaves a default port out, sends 'host', so the store refused every
+-- request 403. The endpoint is stored, and used by both signers, without ':80' after http:// or ':443' after
+-- https:// (part H). MinIO answers on 9000 here, so part H puts a stand-in in the place of the transport that
+-- does what a store on port 80 would see: it sends the request to minio:9000 with the Host libcurl would send
+-- for the URL the signer built (its authority, a trailing ':80' left out), and MinIO checks the signature
+-- against that Host. A percent-encoded dot segment ('%2E%2E') is refused like a spelled one (part F).
+--
 -- Each export's object is stated by identity (the rows it holds, two of them, by id and payload), its key
 -- cleared and witnessed absent first, because the bucket outlives the test database; the prefix carries the
 -- database's name so a parallel run of this file in another database cannot meet it.
-select plan(46);
+select plan(61);
 
 create schema t53;
 create table t53.evt (id bigint primary key, payload text not null);
@@ -136,6 +144,10 @@ select throws_like($$ select t53.cfg('http://minio:9000/storage/../s3/') $$, '%p
   'an endpoint whose path prefix holds a ''..'' segment is refused, naming p_endpoint');
 select throws_like($$ select t53.cfg('http://minio:9000//s3') $$, '%p_endpoint''s path prefix must not hold%',
   'an endpoint whose path prefix holds an empty segment is refused, naming p_endpoint');
+select throws_like($$ select t53.cfg('http://minio:9000/storage/%2E%2E/s3') $$, '%p_endpoint''s path prefix must not hold%',
+  'an endpoint whose path prefix holds a percent-encoded ''..'' segment is refused, naming p_endpoint');
+select throws_like($$ select t53.cfg('http://minio:9000/%2e/') $$, '%p_endpoint''s path prefix must not hold%',
+  'an endpoint whose path prefix is a percent-encoded ''.'' segment is refused, naming p_endpoint');
 select is(t53.stored(), 'http://minio:9000', 'the refused endpoints leave the stored row as it was');
 -- the remedy, as the message gives it: the URL without the credentials (the key stays in the Vault secrets named
 -- by p_vault_key_id and p_vault_secret, the defaults the fixture fills)
@@ -161,6 +173,47 @@ select is(t53.bucket(), 'my.bucket-1', 'a bucket name with dots and dashes is ta
 -- the remedy, as the message gives it: the bare bucket name
 select t53.cfgb('archive-test-bucket');
 select is(t53.export(), 'ok', 'the bucket refusal''s remedy (the bare name) exports');
+select is(t53.held(:'k'), '1:one,2:two', 'and its object lands at the key holding both rows');
+select is((t53.req('DELETE', :'k')).status, 204, 'LIVENESS: the object is cleared');
+
+-- ---- H. the scheme's default port is not part of the endpoint ---------------------------------------------------
+select t53.cfg('http://minio:80/');
+select is(t53.stored(), 'http://minio', 'an http:// endpoint is stored without its default port :80');
+select archive.configure('t53.evt', 'archive-test-bucket', p_endpoint => 'https://ref.supabase.co:443/storage/v1/s3/',
+                         p_prefix => current_setting('t53.p'));
+select is(t53.stored(), 'https://ref.supabase.co/storage/v1/s3',
+  'an https:// endpoint is stored without its default port :443, its path prefix kept');
+select t53.cfg('http://minio:8080');
+select is(t53.stored(), 'http://minio:8080', 'any other port is kept');
+select t53.cfg('https://minio:80');
+select is(t53.stored(), 'https://minio:80', 'and :80 after https://, not its default, is kept too');
+
+-- the stand-in: a store on port 80, as MinIO sees it (see the header)
+select mk_transport_standin('t53');
+create function t53.http(r http_request) returns http_response language sql as $$
+  select public.http((r.method, regexp_replace(r.uri, '^http://[^/]*', 'http://minio:9000'),
+                      r.headers || public.http_header('host', regexp_replace(substring(r.uri from '^http://([^/]*)'), ':80$', '')),
+                      r.content_type, r.content)::http_request) $$;
+create function t53.export_port80() returns text language plpgsql as $$
+begin
+  perform set_config('t53.standin', 'on', true);
+  perform archive.to_s3('t53.evt', 'evt', null, null);
+  perform set_config('t53.standin', 'off', true);
+  return 'ok';
+exception when others then
+  perform set_config('t53.standin', 'off', true);
+  return sqlerrm;
+end $$;
+select t53.cfg('http://minio');
+select is(t53.export_port80(), 'ok', 'LIVENESS: through the stand-in, an export through the endpoint spelled without a port reaches the store');
+select is(t53.held(:'k'), '1:one,2:two', 'LIVENESS: and its object holds both rows');
+select is((t53.req('DELETE', :'k')).status, 204, 'LIVENESS: the object is cleared');
+select t53.cfg('http://minio:80');
+select is(t53.export_port80(), 'ok', 'an export through an endpoint configured with its default port is not refused by the store');
+select is(t53.held(:'k'), '1:one,2:two', 'and its object lands at the key holding both rows');
+select is((t53.req('DELETE', :'k')).status, 204, 'LIVENESS: the object is cleared');
+update archive.config set endpoint = 'http://minio:80' where parent_table = 't53.evt'::regclass;
+select is(t53.export_port80(), 'ok', 'an export through a row stored by hand with the default port is not refused by the store');
 select is(t53.held(:'k'), '1:one,2:two', 'and its object lands at the key holding both rows');
 select is((t53.req('DELETE', :'k')).status, 204, 'LIVENESS: the object is cleared at the end');
 

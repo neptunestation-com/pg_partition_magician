@@ -8,7 +8,8 @@
 # the endpoint without them, both signers drop them from the endpoint they are handed, and an export through an
 # endpoint spelled 'http://minio:9000/' lands at the key instead of failing every PUT with HTTP 400 at
 # '//<bucket>/<key>'. And configure refuses by name an endpoint the signers cannot use (no http(s) scheme, no
-# host, a query string or a fragment; credentials before the host; an empty, '.' or '..' path segment) and a
+# host, a query string or a fragment; credentials before the host; an empty, '.' or '..' path segment, spelled
+# or percent-encoded; the scheme's default port is canonicalised away rather than refused) and a
 # bucket that is not a bare bucket name ('/my-bucket' addressed '//my-bucket/<key>'). The file's own witnesses (the same export through the endpoint spelled
 # without the slash lands both rows, each key cleared and witnessed absent first) say the store was reachable;
 # a failure of a LIVENESS witness alone is reported as that, not as a catch.
@@ -24,6 +25,11 @@
 #                                           resolved away while the signature covers it (part F)
 #   archive_bucket_unrefused             -- configure takes '/archive-test-bucket', which addresses
 #                                           '//archive-test-bucket/<key>' and gets HTTP 400 (part G)
+#   archive_endpoint_default_port_kept   -- the canonical endpoint keeps ':80' after http:// (':443' after
+#                                           https://), signed as part of the Host libcurl sends without it,
+#                                           so the store refuses every request 403 (part H, through a
+#                                           transport stand-in that sends what a store on port 80 receives)
+#   archive_endpoint_encoded_dot_segment_unrefused -- configure takes a '%2E%2E' or '%2e' path segment (part F)
 #
 # Usage: archive_configure_endpoint.sh <container> <db> [archive install.sql]
 # Needs the archive image (pgsql-http + pgtap + pg_prove) AND MinIO on the same network: the file PUTs and

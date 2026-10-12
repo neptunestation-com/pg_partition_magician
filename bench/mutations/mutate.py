@@ -13377,7 +13377,7 @@ MUTATIONS["archive_endpoint_trailing_slash_kept"] = (
     "'//<bucket>/<key>'. MinIO answers HTTP 400 to every PUT, so every export and every tick's chunk through it fails "
     "after the read. One clause, the strip. tests/archive/db/53 parts B and E catch it (the stored endpoint keeps the "
     "slash, the export fails, its object never lands, and both signers' GET through the slashed endpoint is refused).",
-    [("  select regexp_replace(p_endpoint, '/+$', '');\n", "  select p_endpoint;\n", 1)],
+    [("  p_endpoint := regexp_replace(p_endpoint, '/+$', '');\n", "", 1)],
 )
 MUTATION_SRC["archive_endpoint_trailing_slash_kept"] = "pgpm_archive/install.sql"
 MUTATIONS["archive_endpoint_unrefused"] = (
@@ -13404,9 +13404,30 @@ MUTATIONS["archive_endpoint_dot_segment_unrefused"] = (
     "archive.configure takes an endpoint whose path prefix holds an empty, '.' or '..' segment, which the client or "
     "the store resolves away while the signature covers it as written: every request is refused 403. One clause, "
     "the refusal. tests/archive/db/53 part F catches it (the three spellings are taken).",
-    [("  if regexp_replace(v_endpoint, '^https?://[^/]+', '') ~ '/\\.\\.?(/|$)|//+[^/]' then\n", "  if false then\n", 1)],
+    [("  if regexp_replace(v_endpoint, '^https?://[^/]+', '') ~ '/(\\.|%2[eE]){1,2}(/|$)|//+[^/]' then\n", "  if false then\n", 1)],
 )
 MUTATION_SRC["archive_endpoint_dot_segment_unrefused"] = "pgpm_archive/install.sql"
+# PR #1301's third verification round (V-01 and its note): the scheme's default port is canonicalised away, and a
+# percent-encoded dot segment is refused like a spelled one. Caught by tests/archive/db/53 parts F and H.
+MUTATIONS["archive_endpoint_default_port_kept"] = (
+    "bench/archive_configure_endpoint.sh",
+    "archive._s3_endpoint_canonical keeps the scheme's default port, so 'http://minio:80' is stored as given and the "
+    "signers sign 'minio:80' as the Host while libcurl sends 'minio' (it leaves a default port out): the store "
+    "answers 403 SignatureDoesNotMatch to every request, after the read. One clause, the port's removal. "
+    "tests/archive/db/53 part H catches it (the stored endpoint keeps the port, and the exports through a "
+    "default-port endpoint, configured and stored by hand, are refused 403 by MinIO).",
+    [("  p_endpoint := regexp_replace(p_endpoint, '^(http://[^/]*):80(/|$)|^(https://[^/]*):443(/|$)', '\\1\\2\\3\\4');\n",
+      "", 1)],
+)
+MUTATION_SRC["archive_endpoint_default_port_kept"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_endpoint_encoded_dot_segment_unrefused"] = (
+    "bench/archive_configure_endpoint.sh",
+    "archive.configure's dot-segment refusal reads only a spelled '.' or '..', so a path prefix holding '%2E%2E' or "
+    "'%2e' is taken, and the store resolves it away while the signature covers it as written. One clause, the "
+    "segment's spelling. tests/archive/db/53 part F catches it (both percent-encoded spellings are taken).",
+    [("~ '/(\\.|%2[eE]){1,2}(/|$)|//+[^/]' then\n", "~ '/\\.\\.?(/|$)|//+[^/]' then\n", 1)],
+)
+MUTATION_SRC["archive_endpoint_encoded_dot_segment_unrefused"] = "pgpm_archive/install.sql"
 MUTATIONS["archive_bucket_unrefused"] = (
     "bench/archive_configure_endpoint.sh",
     "archive.configure stores p_bucket as given, so a bucket spelled '/archive-test-bucket' addresses "
