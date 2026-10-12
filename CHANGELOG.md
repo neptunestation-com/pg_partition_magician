@@ -17,8 +17,10 @@
   transmute; ... call pgpm.transmute_abort(...) first", which does not apply to a table that is still a
   hypertable (`transmute` refuses it, and nothing left a bound to abort). The contract takes the remedy from its
   caller now (a new `p_remedy` argument, `transmute`'s own by default), and the module passes its own: re-run
-  `pgpm.from_hypertable`, or `pgpm.from_hypertable_cutover` after `pgpm.from_hypertable_copy`. Same test and
-  guard as #1268, mutation `hypertable_unit_rules_transmute_remedy`.
+  `pgpm.from_hypertable`, or on the two-phase path `pgpm.from_hypertable_cutover`, re-running
+  `pgpm.from_hypertable_copy` first if the column's type was changed (the `timestamp(p)` refusal offers widening
+  it, and the copy keeps the type it was made with). Same test and guard as #1268, mutations
+  `hypertable_unit_rules_transmute_remedy` and `hypertable_unit_remedy_recopy_unnamed`.
 
 - **`archive.configure` canonicalises its endpoint** (#1269). The endpoint was stored exactly as given and both
   signers append `/` and the bucket to it, so an endpoint spelled with a trailing slash (`http://minio:9000/`)

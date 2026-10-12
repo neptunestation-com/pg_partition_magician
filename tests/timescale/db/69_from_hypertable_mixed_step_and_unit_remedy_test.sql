@@ -25,11 +25,12 @@
 -- ASYMMETRIC FIXTURES. a69 (keyed, ids 1, 2, 3, id 2 referenced by a69_ref) goes through the one-shot driver
 -- and b69 (keyed, ids 7 and 8, id 8 referenced by b69_ref) through the two phases, for #1268; d69 (a date
 -- key, 4, 5, 6) and t69 (a timestamptz(0) key, 10 and 20) through the driver and e69 (a date key, 31 to 34)
--- through the two phases, for #1232. WITNESSES: transmute refuses the mixed step on a plain table, and
+-- through the two phases, for #1232, and u69 (a timestamptz(0) key, 41 to 43) through the two phases with its
+-- column widened as the timestamp(p) remedy offers. WITNESSES: transmute refuses the mixed step on a plain table, and
 -- refuses the noon anchor on a plain date table with its own remedy, so the rules asked are transmute's and
 -- only the remedy is the caller's; the frontier check, asked of '1 mon -40 days', would refuse a69 with the
 -- delete-the-rows remedy. Then each remedy is TYPED as the message gives it, and each table migrates.
-select plan(27);
+select plan(30);
 
 create table public.a69 (id bigint not null, ts timestamptz not null, v int, primary key (id, ts));
 select create_hypertable('public.a69', 'ts', chunk_time_interval => interval '1 day');
@@ -53,6 +54,9 @@ create table public.e69 (d date not null, v int);
 select create_hypertable('public.e69', 'd', chunk_time_interval => interval '7 days');
 insert into public.e69 values (current_date - 40, 31), (current_date - 20, 32), (current_date - 10, 33),
                               (current_date - 2, 34);
+create table public.u69 (ts timestamptz(0) not null, v int);
+select create_hypertable('public.u69', 'ts', chunk_time_interval => interval '1 day');
+insert into public.u69 select date_trunc('second', now() - g * interval '20 hours'), 40 + g from generate_series(1, 3) g;
 create table public.p69 (ts timestamptz not null, v int);
 insert into public.p69 values (now() - interval '1 hour', 1);
 create table public.p69d (d date not null, v int);
@@ -136,13 +140,13 @@ insert into msg69 values
   ('t', pg_temp.err($$ call pgpm.from_hypertable('public.t69', 'ts', interval '500 milliseconds') $$)),
   ('e', pg_temp.err($$ call pgpm.from_hypertable_cutover('public.e69', 'd', interval '1 day', p_anchor => '2000-01-01 05:00:00+00', p_predrain => false) $$));
 select alike((select m from msg69 where k = 'd'),
-  'pg_partition_magician: cannot partition d69 on d with step 1 day and anchor % -- the column is a date, %this anchor falls at 12:00:00 UTC%then re-run pgpm.from_hypertable (or pgpm.from_hypertable_cutover, the call that follows pgpm.from_hypertable_copy): this call was refused before anything was changed, so the table is still a hypertable, which transmute does not take, and no transmute bound was left to abort.',
+  'pg_partition_magician: cannot partition d69 on d with step 1 day and anchor % -- the column is a date, %this anchor falls at 12:00:00 UTC%then re-run pgpm.from_hypertable, or on the two-phase path pgpm.from_hypertable_cutover, re-running pgpm.from_hypertable_copy before it if the column''s type was changed (the copy keeps the type it was made with, and the cutover refuses a copy whose shape is not the hypertable''s): this call was refused before anything was changed, so the table is still a hypertable, which transmute does not take, and no transmute bound was left to abort.',
   'from_hypertable''s date-anchor refusal names from_hypertable as the call to re-run (#1232)');
 select alike((select m from msg69 where k = 't'),
-  'pg_partition_magician: cannot partition t69 on ts with step 00:00:00.5 and anchor % -- the column is timestamp(0) with time zone, which keeps whole seconds only%or widen the column''s precision (ALTER TABLE t69 ALTER COLUMN ts TYPE timestamp with time zone), then re-run pgpm.from_hypertable (or pgpm.from_hypertable_cutover, the call that follows pgpm.from_hypertable_copy): this call was refused before anything was changed%',
+  'pg_partition_magician: cannot partition t69 on ts with step 00:00:00.5 and anchor % -- the column is timestamp(0) with time zone, which keeps whole seconds only%or widen the column''s precision (ALTER TABLE t69 ALTER COLUMN ts TYPE timestamp with time zone), then re-run pgpm.from_hypertable, or on the two-phase path pgpm.from_hypertable_cutover, re-running pgpm.from_hypertable_copy before it if the column''s type was changed (the copy keeps the type it was made with, and the cutover refuses a copy whose shape is not the hypertable''s): this call was refused before anything was changed%',
   'from_hypertable''s timestamp(0) refusal names from_hypertable as the call to re-run (#1232)');
 select alike((select m from msg69 where k = 'e'),
-  'pg_partition_magician: cannot partition e69 on d with step 1 day and anchor % -- the column is a date, %this anchor falls at 05:00:00 UTC%then re-run pgpm.from_hypertable (or pgpm.from_hypertable_cutover, the call that follows pgpm.from_hypertable_copy)%',
+  'pg_partition_magician: cannot partition e69 on d with step 1 day and anchor % -- the column is a date, %this anchor falls at 05:00:00 UTC%then re-run pgpm.from_hypertable, or on the two-phase path pgpm.from_hypertable_cutover, re-running pgpm.from_hypertable_copy before it if the column''s type was changed (the copy keeps the type it was made with, and the cutover refuses a copy whose shape is not the hypertable''s)%',
   'from_hypertable_cutover''s date-anchor refusal names the cutover as the call to re-run (#1232)');
 select is((select string_agg(k, ',' order by k) from msg69 where m like '%transmute_abort%' or m like '%re-run transmute%'), null,
   'none of the three tells the operator to re-run transmute or to call pgpm.transmute_abort on a hypertable');
@@ -187,6 +191,28 @@ select is(
   || '/' || (select partition_step::text from pgpm.config where parent_table = 'public.e69'::regclass)
   || '/' || (select string_agg(v::text, ',' order by v) from public.e69),
   'p/1 day/31,32,33,34', 'the cutover re-run with the anchor at 00:00 UTC migrates e69, every row');
+-- #1232 timestamp(0), the two-phase path (PR #1302 round 1, P1-02): "or widen the column's precision (ALTER TABLE
+-- ...), then re-run ... on the two-phase path pgpm.from_hypertable_cutover, re-running pgpm.from_hypertable_copy
+-- before it if the column's type was changed". u69 (41, 42, 43) is copied before the refusal, so its copy keeps
+-- timestamptz(0); the cutover alone after the ALTER is refused by the shape check, the re-copy then the cutover is
+-- the whole repair.
+call pgpm.from_hypertable_copy('public.u69', 'ts');
+select alike(pg_temp.err($$ call pgpm.from_hypertable_cutover('public.u69', 'ts', interval '500 milliseconds', p_predrain => false) $$),
+  'pg_partition_magician: cannot partition u69 on ts with step 00:00:00.5 and anchor % -- the column is timestamp(0) with time zone, which keeps whole seconds only%or widen the column''s precision (ALTER TABLE u69 ALTER COLUMN ts TYPE timestamp with time zone), then re-run pgpm.from_hypertable, or on the two-phase path pgpm.from_hypertable_cutover, re-running pgpm.from_hypertable_copy before it if the column''s type was changed%',
+  'the cutover''s timestamp(0) refusal names the re-copy a widened column needs before the cutover is re-run (#1232)');
+alter table public.u69 alter column ts type timestamp with time zone;
+select alike(pg_temp.err($$ call pgpm.from_hypertable_cutover('public.u69', 'ts', interval '500 milliseconds', p_predrain => false) $$),
+  'pg_partition_magician: from_hypertable_cutover(u69) refusing to swap: the copy % no longer has the source''s shape: %',
+  'LIVENESS: after the ALTER, the cutover alone (no re-copy) is refused by the shape check: the re-copy is needed');
+call pgpm.from_hypertable_copy('public.u69', 'ts');
+call pgpm.from_hypertable_cutover('public.u69', 'ts', interval '500 milliseconds', p_obtain => 2);
+select is(
+  (select relkind::text from pg_class where oid = 'public.u69'::regclass)
+  || '/' || (select partition_step::text from pgpm.config where parent_table = 'public.u69'::regclass)
+  || '/' || (select format_type(atttypid, atttypmod) from pg_attribute where attrelid = 'public.u69'::regclass and attname = 'ts')
+  || '/' || (select string_agg(v::text, ',' order by v) from public.u69),
+  'p/00:00:00.5/timestamp with time zone/41,42,43',
+  'the two-phase remedy as typed (ALTER, re-copy, cutover with the same step) migrates u69, every row');
 -- #1232 timestamp(0): "or widen the column's precision (ALTER TABLE ...), then re-run pgpm.from_hypertable"
 alter table public.t69 alter column ts type timestamp with time zone;
 call pgpm.from_hypertable('public.t69', 'ts', interval '500 milliseconds', p_obtain => 2);
@@ -195,10 +221,11 @@ select is(
   || '/' || (select partition_step::text from pgpm.config where parent_table = 'public.t69'::regclass)
   || '/' || (select string_agg(v::text, ',' order by v) from public.t69),
   'p/00:00:00.5/10,20', 'with the column widened as the message says, from_hypertable re-run with the same step migrates t69');
-select is((select count(*)::int from timescaledb_information.hypertables where hypertable_name in ('a69', 'b69', 'd69', 't69', 'e69')), 0,
-  'none of the five is a hypertable any more');
+select is((select count(*)::int from timescaledb_information.hypertables where hypertable_name in ('a69', 'b69', 'd69', 't69', 'e69', 'u69')), 0,
+  'none of the six is a hypertable any more');
 select is((select count(*)::int from pgpm.scratch where parent_oid in ('public.a69'::regclass::oid, 'public.b69'::regclass::oid,
-                                                                    'public.d69'::regclass::oid, 'public.t69'::regclass::oid, 'public.e69'::regclass::oid)), 0,
+                                                                    'public.d69'::regclass::oid, 'public.t69'::regclass::oid, 'public.e69'::regclass::oid,
+                                                                    'public.u69'::regclass::oid)), 0,
   'and no scratch record is left for any');
 select is((select count(*)::int from pgpm.handoff), 0,
   'and no handoff was left behind by a refused one');

@@ -1079,10 +1079,12 @@ dimension a step that is a whole number of days or months (`... the date column 
 and an anchor at 00:00 UTC (`... the column is a date ...`), and on a `timestamp(p)` or `timestamptz(p)`
 dimension a step and an anchor in whole multiples of its precision (`... the column is timestamp(0) with
 time zone, which keeps whole seconds only ...`). Raised here, those two name the call to re-run as their
-remedy (`... then re-run pgpm.from_hypertable (or pgpm.from_hypertable_cutover, the call that follows
-pgpm.from_hypertable_copy) ...`), not `transmute`, which refuses a hypertable, nor `transmute_abort`, which
-has nothing to abort; for `timestamp(p)` widening the column first (the `ALTER TABLE` the message gives)
-also works. The rule the grid itself puts on the step is asked there too: a `p_interval` that mixes a
+remedy (`... then re-run pgpm.from_hypertable, or on the two-phase path pgpm.from_hypertable_cutover,
+re-running pgpm.from_hypertable_copy before it if the column's type was changed ...`), not `transmute`, which
+refuses a hypertable, nor `transmute_abort`, which has nothing to abort. For `timestamp(p)`, widening the
+column (the `ALTER TABLE` the message gives) also works: then re-run `from_hypertable`, or on the two-phase
+path `from_hypertable_copy` and then the cutover, since the copy keeps the type it was made with and the
+cutover's shape check refuses a copy whose shape is not the hypertable's. The rule the grid itself puts on the step is asked there too: a `p_interval` that mixes a
 month count with a duration (`'1 mon 1 day'`, `'1 year 2 hours'`, `'1 mon -40 days'`) is refused before
 the copy and the swap (`... cannot migrate hypertable ... mixed month + duration interval unsupported ...`),
 where `transmute` would meet it only when it first places a bound. `'1 mon -40 days'`, which is below zero

@@ -432,7 +432,9 @@ end $$;
 -- them. A column that is not a timestamp or a date is the dimension check's to refuse, not these rules'.
 -- #1232: with this path's remedy, not transmute's. Raised here the table is still a hypertable, which transmute
 -- refuses (it has inheritance children), and nothing has left a pgpm_monolith_bound CHECK for transmute_abort
--- to remove, so the call to correct and re-run is the one that refused.
+-- to remove, so the call to correct and re-run is the one that refused. On the two-phase path that is the
+-- cutover, after a re-run of from_hypertable_copy when the column's type was changed (the timestamp(p) remedy
+-- offers widening it): the copy keeps the type it was made with, and the cutover's shape check refuses it.
 -- #1268: and the rule the grid itself puts on the step, which transmute meets in pgpm._grid_floor when it first
 -- places a bound: a month count mixed with a duration ('1 mon 1 day', '1 mon -40 days') is refused there,
 -- 'mixed month + duration interval unsupported', and transmute's preflight does not ask it first, so on this
@@ -449,7 +451,7 @@ create or replace function pgpm._from_hypertable_check_arguments(
 begin
   perform pgpm._refuse_bad_transmute_arguments('time', p_interval::text, p_obtain, p_retain::text);
   perform pgpm._time_unit_contract(p_hypertable, p_control, p_interval::text, pgpm._ts_text(p_anchor),
-    're-run pgpm.from_hypertable (or pgpm.from_hypertable_cutover, the call that follows pgpm.from_hypertable_copy): this call was refused before anything was changed, so the table is still a hypertable, which transmute does not take, and no transmute bound was left to abort');
+    're-run pgpm.from_hypertable, or on the two-phase path pgpm.from_hypertable_cutover, re-running pgpm.from_hypertable_copy before it if the column''s type was changed (the copy keeps the type it was made with, and the cutover refuses a copy whose shape is not the hypertable''s): this call was refused before anything was changed, so the table is still a hypertable, which transmute does not take, and no transmute bound was left to abort');
   begin
     perform pgpm._grid_floor('time', p_interval::text, pgpm._ts_text(p_anchor), pgpm._ts_text(p_anchor), 'UTC');
   exception when others then
