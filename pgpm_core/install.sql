@@ -7816,6 +7816,29 @@ begin
 end;
 $$;
 
+-- READ COMMITTED only, for every regrain driver (#1258): regrain_step, and so maintain's auto-regrain tick, and
+-- regrain() and regrain_history(), which ask before their own locks so a refusal waits for nothing. A regrain reads
+-- the source and the change-capture delta and acts on what it read: the copy reads the source once capture is on
+-- (installing it waits for the source's writers), and the swap reconciles and counts the delta after its DETACH
+-- waited for a writer, then drops the source. Each read is only right from a snapshot taken at that statement,
+-- after the wait, which READ COMMITTED takes and REPEATABLE READ and SERIALIZABLE do not: they keep the
+-- transaction's first. So a row committed after that snapshot and before capture existed was in no copy, a change
+-- captured after it was in no reconcile, and the swap dropped either with the source (a regrain() in a REPEATABLE
+-- READ transaction lost the row; a swap tick reverted a committed UPDATE). Only the transaction's own level is
+-- asked: these are functions, which commit nothing, so a default_transaction_isolation stricter than the
+-- transaction they run in reaches no read of theirs. maintain's ticks take that default after each COMMIT, which
+-- is how it reaches this one; its handler logs the refusal as skip_regrain and keeps the first 200 characters, so
+-- the remedy comes before the table's name and the reason.
+create or replace function pgpm._regrain_refuse_strict_isolation(p_routine text, p_parent regclass)
+returns void language plpgsql stable as $$
+begin
+  if current_setting('transaction_isolation') not in ('read committed', 'read uncommitted') then
+    raise exception 'pg_partition_magician: % must run in a READ COMMITTED transaction (this one is %): set default_transaction_isolation = ''read committed'' (ALTER ROLE or ALTER DATABASE ... SET it for maintain''s scheduled ticks), open no REPEATABLE READ or SERIALIZABLE transaction around it, and re-run. It was to regrain %: a regrain reads the source and its captured changes through a snapshot taken after each wait, which a stricter level cannot provide, and its swap would drop a row committed after the transaction''s first snapshot with the source. This call copied and swapped nothing.',
+      p_routine, current_setting('transaction_isolation'), p_parent;
+  end if;
+end;
+$$;
+
 -- one resumable microbatch of regrain work on coarse child p_child toward target step p_target_step.
 -- Returns: 'copied:N' (copied N rows into the current fine child), 'swapped:K' (cursor reached hi -> detached
 -- the source, attached K fine children, dropped it: regrain done), or a soft no-progress status ('active' =
@@ -7845,6 +7868,7 @@ begin
   -- #951: refused before anything is read or committed; p_target_step (null: the partition step) and p_batch
   -- (null: config.regrain_batch) are not
   perform pgpm._refuse_null_arguments('regrain_step', json_build_object('p_parent', p_parent, 'p_child', p_child));
+  perform pgpm._regrain_refuse_strict_isolation('regrain_step', p_parent);   -- #1258: before the lock and every read
   -- #554: before the config read below, so a second driver of this parent (a tick, a hand-driven step, a
   -- cancel) waits for this step to commit and this step reads what the last one left
   perform pgpm._regrain_lock(p_parent);
@@ -8631,6 +8655,7 @@ declare v_status text; v_iter int := 0; v_child name := p_child; v_next name; v_
 begin
   -- #951: refused before anything is read or committed; p_target_step (null: the partition step) is not
   perform pgpm._refuse_null_arguments('regrain', json_build_object('p_parent', p_parent, 'p_child', p_child));
+  perform pgpm._regrain_refuse_strict_isolation('regrain', p_parent);   -- #1258: before its locks
   -- regrain_step may rename the source child on its first pass (#266: a child exactly one step wide is
   -- renamed to its coarse-form name on the target grid so its own first sub-range can take _p<lo>). Follow
   -- it by lo, which never changes, and re-resolve the name each iteration -- otherwise every iteration after
@@ -8687,6 +8712,7 @@ declare cfg pgpm.config; v_ncast text; v_mon name;
 begin
   -- #951: refused before anything is read or committed; p_target_step (null: the partition step) is not
   perform pgpm._refuse_null_arguments('regrain_history', json_build_object('p_parent', p_parent));
+  perform pgpm._regrain_refuse_strict_isolation('regrain_history', p_parent);   -- #1258
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;

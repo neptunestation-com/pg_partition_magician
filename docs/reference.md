@@ -1694,6 +1694,21 @@ rules [`set_regrain`](#set_regrain) lists), or another regrain is already in fli
 Only one regrain runs per parent at a time: a second one is refused with an error naming the one in
 flight. Let it finish, or stop it with [`regrain_cancel`](#regrain_cancel), then re-run.
 
+**`READ COMMITTED` only.** `regrain`, `regrain_history` and `regrain_step` (and so `maintain`'s auto-regrain)
+refuse to run in a `REPEATABLE READ` or `SERIALIZABLE` transaction, up front, before they take a lock or read
+anything: `pg_partition_magician: regrain must run in a READ COMMITTED transaction (this one is repeatable read):
+set default_transaction_isolation = 'read committed' ...`, naming the call and then the table. A regrain reads the
+source, and its swap the changes captured while it waited for a lock, each through a snapshot taken at that
+statement; a stricter level keeps the transaction's first, so the copy missed a row committed after it, the swap
+missed a change captured after it, and either was dropped with the source. Open no stricter transaction around
+the call and run it with `default_transaction_isolation = 'read committed'`, then re-run. Only the calling
+transaction's own level is asked, so an explicit `BEGIN ISOLATION LEVEL READ COMMITTED` under a stricter session
+default is accepted. `maintain`'s transactions take the session's default after each of its commits, so under a
+stricter default (a role's or a database's, which `pg_cron`'s session inherits) every tick logs the refusal as
+`skip_regrain` and the run does not start or move on; `ALTER ROLE` or `ALTER DATABASE ... SET
+default_transaction_isolation = 'read committed'` for the role that runs it, and the next tick goes on.
+`transmute` and `untransmute` refuse a stricter level too, for their own reasons.
+
 **A step at a target the run in flight on that child was not cut on is refused too**, whichever
 driver sends it: a hand `regrain_step` or `regrain` at another target on the child an auto-regrain is
 splitting, and the `maintain` tick that meets a run started by hand at a step other than `regrain_to` (logged
@@ -1752,7 +1767,8 @@ pgpm.regrain_step(p_parent regclass, p_child name, p_target_step text default nu
 One resumable microbatch of `regrain`: it **copies** (never deletes) a within-horizon sub-range's next
 budget-sized batch into its fine child, and performs the atomic swap once the cursor
 (`config.regrain_cursor`) reaches the coarse `hi`. A null `p_target_step` takes the partition step, and a null
-`p_batch` takes `config.regrain_batch`.
+`p_batch` takes `config.regrain_batch`. It runs only in a `READ COMMITTED` transaction and refuses a stricter one
+before it reads anything (see [`regrain`](#regrain)).
 
 A **below-horizon** sub-range is handled one of two ways, depending on whether the table archives. With
 `config.archive_fn` unset it is skipped, logged as `regrain_aged`, and discarded with the source at the
@@ -2009,9 +2025,9 @@ Two of these waits can also list each other with no lock between them: two hand 
 (each waits for every snapshot open while it runs, the other's included), or a hand `regrain_step` or a
 `maintain` tick against a `regrain`. Neither is blocked on the other, so neither rule above applies, and under
 `lock_timeout` 0 each would wait for the other for ever. `CREATE INDEX CONCURRENTLY` has the same cycle between
-two index builds and breaks it by ignoring the other build's snapshot; that is not sound here, since a
-`REPEATABLE READ` caller of `regrain` goes on reading through its old snapshot after the call. So the cycle is
-broken by refusal:
+two index builds and breaks it by ignoring the other build's snapshot; that is not sound here, since the other
+driver's statement holds its snapshot until it ends and can go on to read this table after the swap (a subquery
+beside the call, say). So the cycle is broken by refusal:
 
 - A wait that finds a session to wait for advertises itself with a transaction-level advisory lock, keys
   (1885826423, its own pid), which every role sees in `pg_locks` and which goes with its transaction.
@@ -2183,7 +2199,8 @@ pgpm.regrain_history(p_parent regclass, p_target_step text default null) returns
 
 Convenience: `regrain` the oldest coarse child (the monolith -- the smallest-`lo` attached partition) to
 `p_target_step`. The hierarchical monolith to coarse to fine path is just repeated `regrain` calls with
-chosen steps.
+chosen steps. Like `regrain`, it refuses a `REPEATABLE READ` or `SERIALIZABLE` transaction up front, naming
+`regrain_history`.
 
 ### `maintain`
 

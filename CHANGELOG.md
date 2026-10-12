@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **Every regrain driver refuses a `REPEATABLE READ` or `SERIALIZABLE` transaction** (#1258). `transmute`,
+  `untransmute` and `from_hypertable` refused a stricter isolation level; `regrain()`, `regrain_history()` and
+  `regrain_step()` did not, and every read they make then goes through the transaction's first snapshot.
+  `regrain_history()` in a `REPEATABLE READ` transaction copied the monolith without a row another session committed
+  after that snapshot, and the swap dropped the row with the source ({10,20} left of {10,20,500}); a hand swap step
+  in one reconciled and counted the captured delta without a writer's change committed while it waited, and dropped
+  the source with a committed `UPDATE` unapplied. All three now refuse up front, before a lock or a read
+  (`pgpm._regrain_refuse_strict_isolation`), with the remedy (`default_transaction_isolation = 'read committed'`,
+  no stricter transaction around the call) ahead of the table's name, so `maintain`'s `skip_regrain` row, which
+  keeps 200 characters, carries it: a tick under a stricter role or database default reaches the step through
+  `regrain_step` and logs the refusal instead of regraining. Only the calling transaction's own level is asked.
 - **An archive key is claimed and written in one spelling, whatever the prefix's** (#1260). The claims
   (`archive.object_key_owner`, `archive.object_key_claim`) compared keys as text, and `archive._owned_key` took
   the prefix as `archive.configure` stored it, while MinIO reads `/P/x` and `P/x` as one object: a table that
