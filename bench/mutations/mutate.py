@@ -10337,7 +10337,13 @@ MUTATIONS["archive_step_hold_skipped"] = (
     "chunk sizing waits out a DETACH in flight, the strategy reads through the parent after it committed and finds "
     "none of the table's rows, and the range is recorded as covered. One site, the step's call of "
     "pgpm._archive_hold_partition. tests/325 part B catches it.",
-    [("      if not pgpm._archive_hold_partition(p_parent, r.child_oid, r.retiring_at) then\n        continue;\n      end if;\n",
+    [("      if not pgpm._archive_hold_partition(p_parent,\n"
+      "               coalesce(r.child_oid, case when r.retiring_at is not null then v_now::oid end), r.retiring_at) then\n"
+      "        insert into pgpm.log (parent_table, action, lo, hi, method)\n"
+      "        select p_parent, 'skip_archive', r.lo, r.hi, m\n"
+      "          from pgpm._archive_unheld_retirement(p_parent, r.child_name, v_now::oid, r.lo, r.hi) m\n"
+      "         where m is not null;\n"
+      "        continue;\n      end if;\n",
       "", 1)],
 )
 MUTATIONS["archive_whole_hold_skipped"] = (
@@ -10346,10 +10352,12 @@ MUTATIONS["archive_whole_hold_skipped"] = (
     "parent and no second question, so the strategy's read through the parent waits out a DETACH in flight and "
     "finds none of the table's rows, and the script records the range as covered. One site, the script's call of "
     "pgpm._archive_hold_partition. tests/325 parts A and D catch it.",
-    [("""  if not pgpm._archive_hold_partition(p_parent, r.child_oid, r.retiring_at) then
-    return format('%I.%I is no longer a partition of %s (detached or dropped by hand), so it was not '
-                  'archived and nothing was recorded for it. Call again for the next partition.',
-                  v_nsp, r.child_name, p_parent);
+    [("""  if not pgpm._archive_hold_partition(p_parent,
+           coalesce(r.child_oid, case when r.retiring_at is not null then v_now::oid end), r.retiring_at) then
+    return coalesce(pgpm._archive_unheld_retirement(p_parent, r.child_name, v_now::oid, r.lo, r.hi),
+                    format('%I.%I is no longer a partition of %s (detached or dropped by hand), so it was not '
+                           'archived and nothing was recorded for it. Call again for the next partition.',
+                           v_nsp, r.child_name, p_parent));
   end if;
 """, "", 1)],
 )
@@ -10366,10 +10374,12 @@ MUTATIONS["archive_whole_unfiltered_and_unheld"] = (
     "recorded as covered with 0 rows; retain() drops the table once it is attached back. Both of the script's "
     "defences, the issue's defect whole. tests/313 parts A and B catch it.",
     [("        and not pgpm._part_detached_by_hand(p.parent_table, p.child_oid, p.retiring_at)\n", "", 1),
-     ("""  if not pgpm._archive_hold_partition(p_parent, r.child_oid, r.retiring_at) then
-    return format('%I.%I is no longer a partition of %s (detached or dropped by hand), so it was not '
-                  'archived and nothing was recorded for it. Call again for the next partition.',
-                  v_nsp, r.child_name, p_parent);
+     ("""  if not pgpm._archive_hold_partition(p_parent,
+           coalesce(r.child_oid, case when r.retiring_at is not null then v_now::oid end), r.retiring_at) then
+    return coalesce(pgpm._archive_unheld_retirement(p_parent, r.child_name, v_now::oid, r.lo, r.hi),
+                    format('%I.%I is no longer a partition of %s (detached or dropped by hand), so it was not '
+                           'archived and nothing was recorded for it. Call again for the next partition.',
+                           v_nsp, r.child_name, p_parent));
   end if;
 """, "", 1)],
 )
@@ -13549,12 +13559,44 @@ MUTATIONS["retirement_mark_vouches_alone"] = (
     "(no pg_cron) on a table the operator then detached by hand reads as a retirement in flight: the next maintain() "
     "tick's archive step hands the operator's table to the strategy and records coverage for it, and once the table is "
     "attached back retention drops it on that coverage, its rows archived nowhere. One site, the record clause of "
-    "pgpm._retirement_vouched. The acceptance reproduction (F14-01) and tests/330 parts A to C catch it.",
+    "pgpm._retirement_vouched. tests/330 part B catches it (since V-01 the hold refuses the archive hand-off on its "
+    "own, so the acceptance reproduction needs retirement_mark_readers_whole).",
     [("  select p_retiring_at is not null\n"
       "     and exists (select 1 from pgpm.part p\n"
       "                  where p.parent_table = p_parent and p.child_oid = p_child_oid\n"
       "                    and pgpm._detach_dispatched(p_parent, p.child_name, p_child_oid));\n",
       "  select p_retiring_at is not null;\n", 1)],
+)
+MUTATIONS["archive_hold_vouches_detached_retirement"] = (
+    "bench/retirement_mark_needs_dispatch.sh",
+    "The per-PR verification's V-01 on #1259: pgpm._archive_hold_partition holds a detached table that carries a "
+    "retirement of pgpm's own (a mark with its dispatch record), as it did before. With archiving configured after "
+    "the mark was stamped, the archive step hands the detached table to the strategy, a strategy reading through "
+    "the parent reads none of its rows, the range is recorded as covered with 0 rows, and retire() drops the table: "
+    "ids 1, 2 and 15 archived nowhere. One site, the hold's retirement clause. The V-01 reproduction and tests/330 "
+    "parts B and D catch it.",
+    [("  return p_child_oid is null\n",
+      "  return p_child_oid is null\n      or pgpm._retirement_vouched(p_parent, p_child_oid, p_retiring_at)\n", 1)],
+)
+# #1259's defect whole. Since V-01 the archive step and the script have two independent defences against handing
+# the strategy a table detached by hand under a mark whose dispatch failed (the candidate query, through
+# _part_detached_by_hand, and the hold, which holds no detached table), so retirement_mark_vouches_alone leaves the
+# issue's archive hand-off refused by the hold (tests/330 parts B and C still catch it). This one puts both back, the
+# readers as they were before the fix (the mark alone vouches at _part_built and at the hold), so the acceptance
+# reproduction (F14-01) fails against a mutation of the PR.
+MUTATIONS["retirement_mark_readers_whole"] = (
+    "bench/retirement_mark_needs_dispatch.sh",
+    "Pre-#1259 readers whole: pgpm._retirement_vouched answers from the mark alone and pgpm._archive_hold_partition "
+    "holds any table that carries a mark, so a table the operator detached by hand after a failed dispatch is handed "
+    "to the strategy and recorded as covered with 0 rows, and dropped with its rows once attached back. Both sites. "
+    "The acceptance reproduction (F14-01) and tests/330 parts A to D catch it.",
+    [("  select p_retiring_at is not null\n"
+      "     and exists (select 1 from pgpm.part p\n"
+      "                  where p.parent_table = p_parent and p.child_oid = p_child_oid\n"
+      "                    and pgpm._detach_dispatched(p_parent, p.child_name, p_child_oid));\n",
+      "  select p_retiring_at is not null;\n", 1),
+     ("  return p_child_oid is null\n",
+      "  return p_child_oid is null\n      or p_retiring_at is not null\n", 1)],
 )
 
 

@@ -20,17 +20,22 @@
 --   B  the shared predicates, both directions, over three detached partitions of one parent: one whose mark
 --      carries the record of pgpm's dispatch (pgpm's own retirement, still pgpm's), one whose mark carries
 --      none (a failed dispatch) and one whose record names another relation. Only the first is built, only the
---      other two are detached by hand, only the first is held by the archive hold, and the write-block step
---      blocks the first and the attached sibling, never the other two.
+--      other two are detached by hand, the archive hold holds none of the three (only the attached sibling), and
+--      the write-block step blocks the first and the attached sibling, never the other two.
 --   C  scripts/archive_partition_whole.sql over a table detached by hand under a mark with no record: never
 --      handed to the strategy, no coverage recorded, while the attached partition after it is archived.
+--   D  the converse state (the per-PR verification's V-01): a mark WITH its record, pgpm's own detach landed, and
+--      archiving configured only after the mark: the detached table is still pgpm's, but no strategy reading
+--      through the parent can read it, so it is not handed off, nothing is recorded, retire() keeps it, the step
+--      logs skip_archive with the remedy, and the remedy as typed archives its rows before the drop.
 --
 -- Identity, not cardinality: every assertion names which partition (by its range) or which ids. Fixtures are
 -- asymmetric: three ids in the operator's table against one in the archived sibling (A), one vouched mark
 -- against two unvouched (B), three ids against two (C).
 --
 -- bench/retirement_mark_needs_dispatch.sh runs this file against bench/mutations/mutate.py's
--- retirement_mark_vouches_alone. The script's path is the psql variable archive_whole_script, defaulting to
+-- retirement_mark_vouches_alone (parts B and C), archive_hold_vouches_detached_retirement (part D) and
+-- retirement_mark_readers_whole (parts A to D). The script's path is the psql variable archive_whole_script, defaulting to
 -- the tree's copy.
 create extension if not exists pgtap;
 set client_min_messages = warning;
@@ -41,7 +46,7 @@ set client_min_messages = warning;
 \endif
 \i :archive_whole_script
 
-select plan(21);
+select plan(31);
 
 create schema t330;
 -- every strategy call, with the ids it read through the parent
@@ -165,10 +170,10 @@ select is((select array_agg(lo order by lo::int) from b330 where built), array['
 select is((select array_agg(lo order by lo::int) from b330 where by_hand), array['30', '40'],
   'B: _part_detached_by_hand names [30, 40) (no record) and [40, 50) (a record naming another relation)');
 select is((select array_agg(p.lo order by p.lo::int) from pgpm.part p
-            where p.parent_table = 'public.rm330b'::regclass and p.lo in ('20', '30', '40')
+            where p.parent_table = 'public.rm330b'::regclass and p.lo in ('20', '30', '40', '50')
               and pgpm._archive_hold_partition(p.parent_table, p.child_oid, p.retiring_at)),
-  array['20'],
-  'B: _archive_hold_partition holds pgpm''s own retirement [20, 30) alone');
+  array['50'],
+  'B: _archive_hold_partition holds the attached [50, 60) alone: no detached table, whatever its mark (part D says why)');
 
 select pgpm._enforce_write_blocks('public.rm330b');
 
@@ -228,5 +233,93 @@ select is(:'c20_ids'::text, '21,24,27',
 
 update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
  where parent_table = 'public.rm330c'::regclass;
+
+-- ======== PART D: pgpm's own retirement, detached before archiving was configured, is not handed off ========
+-- The mark HAS its record here (pgpm's own dispatched detach, landed), and archiving is switched on only after the
+-- mark was stamped, so retire()'s coverage gate never ran for the range. The rows are no longer in the parent's
+-- range: a strategy reading through the parent would read none of them, and the range used to be recorded as
+-- covered with 0 rows and the table dropped on it (#1259's per-PR verification, V-01). It is now never handed to a
+-- strategy, nothing is recorded, retire() keeps it, the step logs skip_archive with the remedy, and the remedy as
+-- typed (attach it back) archives ids 1, 2 and 15 before the drop.
+create table public.rm330d (id bigint primary key, payload text);
+insert into public.rm330d values (1, 'a'), (2, 'b'), (15, 'c');
+call pgpm.transmute('public.rm330d', 'id', 10::bigint, p_retain => 20, p_paused => false);
+select pgpm.extend_to('public.rm330d', '60');
+insert into public.rm330d values (22, 'aged'), (55, 'frontier');
+create table public.rm330d_ref (id bigint primary key, p_id bigint references public.rm330d (id));
+insert into public.rm330d_ref values (1, 55);   -- referenced: retire() takes the dispatched-detach path
+select child_name as d_mono, child_oid as d_mono_oid from pgpm.part
+ where parent_table = 'public.rm330d'::regclass and lo = '0' \gset
+select child_name as d_p20 from pgpm.part where parent_table = 'public.rm330d'::regclass and lo = '20' \gset
+
+-- no archive strategy yet: retire() stamps the mark and dispatches the detach
+call pgpm.maintain('public.rm330d');
+-- fixture: this harness has no pg_cron, so the dispatch fails here; with pg_cron it succeeds and retire() writes
+-- the record in the same transaction ("update pgpm.part set detach_dispatched_oid = v_child::oid"). Written as
+-- retire() writes it.
+update pgpm.part set detach_dispatched_oid = child_oid
+ where parent_table = 'public.rm330d'::regclass and lo = '0' and retiring_at is not null;
+select ok((select pgpm._detach_dispatched(parent_table, child_name, child_oid) from pgpm.part
+            where parent_table = 'public.rm330d'::regclass and lo = '0'),
+  'LIVENESS: D: fixture: the monolith [0, 20) carries pgpm''s retirement mark with the record of its dispatch');
+-- fixture: pg_cron's pgpm_detach job runs the dispatched detach, which lands
+select format('alter table public.rm330d detach partition public.%I concurrently', :'d_mono') \gexec
+select ok(not exists (select 1 from pg_inherits where inhrelid = :d_mono_oid)
+          and exists (select 1 from pg_class where oid = :d_mono_oid),
+  'LIVENESS: D: fixture: pgpm''s dispatched detach landed; the table stands outside the parent');
+
+select pgpm.set_archive_fn('public.rm330d', 't330.via_parent(regclass,name,text,text)'::regprocedure);
+update pgpm.config set archive_batch = 5 where parent_table = 'public.rm330d'::regclass;
+create temporary table markd330 as select coalesce(max(id), 0) as id from pgpm.log;
+
+call pgpm.maintain('public.rm330d');
+call pgpm.maintain('public.rm330d');
+
+select results_eq($$ select p_child, p_lo, p_hi, seen from t330.calls where parent = 'public.rm330d'::regclass order by n $$,
+  format($$ values (%L::name, '20'::text, '30'::text, '22'::text) $$, :'d_p20'),
+  'D: the strategy was handed [20, 30) (id 22) alone, never the detached monolith of pgpm''s own retirement');
+select is_empty(format($$ select 1 from pgpm.archive_ledger where parent_table = 'public.rm330d'::regclass
+                            and child_name = %L $$, :'d_mono'),
+  'D: no coverage is recorded for the detached monolith');
+select ok(exists (select 1 from pg_class where oid = :d_mono_oid)
+          and not exists (select 1 from pgpm.log where parent_table = 'public.rm330d'::regclass and lo = '0'
+                           and action = 'retain_drop'),
+  'D: retire() keeps the table while its range is uncovered');
+-- (the table gone: no ids, so the assertion fails rather than the file)
+select case when exists (select 1 from pg_class where oid = :d_mono_oid)
+            then format('select coalesce(string_agg(id::text, '','' order by id), ''none'') as d_ids from public.%I', :'d_mono')
+            else 'select ''gone''::text as d_ids' end as d_sql \gset
+:d_sql \gset
+select is(:'d_ids'::text, '1,2,15', 'D: the detached table keeps ids 1, 2 and 15');
+select is((select array_agg(distinct l.lo || '-' || l.hi) from pgpm.log l
+            where l.parent_table = 'public.rm330d'::regclass and l.action = 'skip_archive'
+              and l.id > (select id from markd330)
+              and l.method like '%ATTACH PARTITION%'),
+  array['0-20'],
+  'D: the archive step logs skip_archive over [0, 20), with the remedy');
+
+-- the remedy as the log row types it. The referencing table goes first, so retire() then takes the one-step
+-- path this database can run without pg_cron.
+drop table public.rm330d_ref;
+-- (no such row: a statement that does nothing, so the LIVENESS below fails rather than the file)
+select coalesce((select substring(l.method from 'ALTER TABLE .* FOR VALUES FROM \(''[^'']*''\) TO \(''[^'']*''\)')
+                   from pgpm.log l
+                  where l.parent_table = 'public.rm330d'::regclass and l.action = 'skip_archive' and l.lo = '0'
+                  order by l.id desc limit 1), 'select 1') as d_remedy \gset
+:d_remedy;
+select ok(exists (select 1 from pg_inherits where inhrelid = :d_mono_oid and inhparent = 'public.rm330d'::regclass),
+  'LIVENESS: D: the remedy as typed attached the table back to the parent');
+
+call pgpm.maintain('public.rm330d');
+call pgpm.maintain('public.rm330d');
+
+select ok(not exists (select 1 from pg_class where oid = :d_mono_oid),
+  'LIVENESS: D: retention completed the retirement (the monolith is dropped)');
+select is((select array_agg(distinct s.id order by s.id) from t330.sink s where s.parent = 'public.rm330d'::regclass),
+  array[1, 2, 15, 22]::bigint[],
+  'D: ids 1, 2 and 15 were archived before the drop, beside [20, 30)''s id 22');
+
+update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
+ where parent_table = 'public.rm330d'::regclass;
 
 select * from finish();

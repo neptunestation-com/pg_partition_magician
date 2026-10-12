@@ -2334,6 +2334,16 @@ under it. A partition pending a `DETACH PARTITION ... CONCURRENTLY` (its first t
 detach still waiting or interrupted) is skipped the same way: the parent no longer holds it. Archive coverage
 is `retire()`'s other drop precondition.
 
+No detached table is ever handed to the strategy, a partition `retire` itself detached included: a strategy
+reading the range through the parent would read none of its rows. `retire` dispatches a referenced
+partition's detach only once its range is covered, so this is reached only when archiving was configured
+(`set_archive_fn`) after that retirement began. Such a table is not archived and nothing is recorded for it,
+`retire` keeps it while its range is uncovered, and every tick logs `skip_archive` over its range with the
+remedy: once it is no longer pending a detach, attach it back on its bounds (`ALTER TABLE <parent> ATTACH
+PARTITION <partition> FOR VALUES FROM (<lo>) TO (<hi>)`, which the `method` spells out); the next tick
+archives it through the parent and `retire` completes the retirement. `scripts/archive_partition_whole.sql`
+refuses it with the same message.
+
 ### `maintain_all`
 
 ```sql

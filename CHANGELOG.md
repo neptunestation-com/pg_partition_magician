@@ -13,8 +13,14 @@
   were in neither the table nor the archive. The readers now share one rule, the new
   `pgpm._retirement_vouched`, built on `_detach_dispatched`: a mark vouches only with the record naming the
   relation, so the write-block and archive steps, the auto-regrain scan, `obtain`, `status`, `progress` and
-  `scripts/archive_partition_whole.sql` take such a table for one detached by hand. Test `tests/330`, guard
-  `bench/retirement_mark_needs_dispatch.sh`, mutation `retirement_mark_vouches_alone`.
+  `scripts/archive_partition_whole.sql` take such a table for one detached by hand. And no detached table is
+  held for the strategy any longer, a partition `retire` itself detached included: with archiving configured
+  after its retirement began, the archive step used to hand the detached table to a strategy reading through
+  the parent, record its range as covered with 0 rows, and let `retire` drop it. It is now not archived,
+  `retire` keeps it while its range is uncovered, and the step logs `skip_archive` with the remedy (attach it
+  back on its bounds); the script refuses it with the same message. Test `tests/330`, guard
+  `bench/retirement_mark_needs_dispatch.sh`, mutations `retirement_mark_vouches_alone`,
+  `archive_hold_vouches_detached_retirement` and `retirement_mark_readers_whole`.
 
 - **A retired chunk's bound with no offset is read on the grid's clock, not the caller's** (#1264).
   `pgpm._over_retired_chunks`, which decides the partitions the archive step and `retain()` hold over a retired
