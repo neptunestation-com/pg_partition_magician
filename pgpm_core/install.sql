@@ -6537,7 +6537,8 @@ returns text language sql stable as $$
 $$;
 
 -- A regrain copy's shape (#633): the standalone table regrain_step makes for a fine sub-range, LIKE the parent,
--- with the parent's validated outgoing foreign keys. Made here, by one routine, for two callers: regrain_step,
+-- with the parent's validated outgoing foreign keys and without its NOT VALID CHECK and NOT NULL constraints
+-- (#1261). Made here, by one routine, for two callers: regrain_step,
 -- which then gives the copy its owner and ACL, its bound CHECK and its rows; and _regrain_fresh_copy_drift,
 -- which makes one only to ask whether a copy made now would match the parent, and drops it. The two must make
 -- the same shape for that question to mean anything, so neither makes its own. p_spc_q is the tablespace
@@ -6550,6 +6551,26 @@ begin
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
   execute format('create table %I.%I (like %I.%I including defaults including generated including storage including indexes including constraints excluding identity)%s',
                  p_nsp, p_name, v_nsp, v_rel, p_spc_q);
+  -- #1261: LIKE gives the copy every CHECK of the parent as a VALIDATED one, a NOT VALID one included, and on
+  -- PostgreSQL 18 a NOT VALID NOT NULL the same way. A NOT VALID constraint leaves the rows written before it in
+  -- place, and the parent still serves them, so on the copy it refused the first such row: every copy batch of
+  -- its sub-range failed 23514 (23502), and the run was wedged until regrain_cancel. Each is dropped from the
+  -- copy here, while it is empty, matched to the parent's by name (a CHECK) or by column (a NOT NULL, which
+  -- LIKE may name afresh); the swap adds it back NOT VALID just before the ATTACH, as it does a NOT VALID key
+  -- (#633), where it checks no row and the ATTACH adopts it as the parent holds it. A NOT ENFORCED CHECK
+  -- (PostgreSQL 18) reads convalidated = false too, refuses nothing, and is left as LIKE made it.
+  for r in
+    select c.conname
+      from pg_constraint k
+      join pg_constraint c on c.conrelid = format('%I.%I', p_nsp, p_name)::regclass and c.contype = k.contype
+     where k.conrelid = p_parent and k.contype in ('c', 'n') and not k.convalidated
+       and to_jsonb(k) ->> 'conenforced' is distinct from 'false'
+       and case when k.contype = 'c' then c.conname = k.conname
+                else (select a.attname from pg_attribute a where a.attrelid = k.conrelid and a.attnum = k.conkey[1])
+                   = (select a.attname from pg_attribute a where a.attrelid = c.conrelid and a.attnum = c.conkey[1]) end
+  loop
+    execute format('alter table %I.%I drop constraint %I', p_nsp, p_name, r.conname);
+  end loop;
   -- #348: give the fine child its own already-validated copy of every outgoing FK the parent
   -- has, the same trick regrain_step's bound CHECK uses. The child is still empty here (this runs
   -- before the first row is copied in), so VALIDATE costs nothing -- exactly how an empty
@@ -6609,9 +6630,14 @@ $$;
 -- are compared too, by name and expression (#817): ATTACH requires every one of them on the child, so a
 -- CHECK added to the parent mid-regrain failed every swap tick ('child table is missing constraint'), and a
 -- copy still carrying one the parent dropped would refuse rows the parent now accepts. The expression is
--- compared and not pg_get_constraintdef, because LIKE does not carry NOT VALID and the parent's own CHECK
--- may be NOT VALID; the copy's bound CHECK (<copy>_ck, under the name pgpm.part recorded or the one the copy
--- has now) is the copy's own and is left out. The parent's validated outgoing foreign keys are compared
+-- compared and not pg_get_constraintdef, because LIKE does not carry NOT VALID; the copy's bound CHECK
+-- (<copy>_ck, under the name pgpm.part recorded or the one the copy has now) is the copy's own and is left out.
+-- A NOT VALID CHECK, and on PostgreSQL 18 a NOT VALID NOT NULL, is left out on the parent's side (#1261):
+-- regrain never makes a copy with one (_regrain_copy_make drops it, and the swap adds it back NOT VALID before
+-- the ATTACH), so its absence is not drift. A copy that holds one validated all the same, made while the
+-- parent's was, IS drift and restarts the run: unlike a NOT VALID key pgpm itself re-adds (below), the parent
+-- comes to hold a NOT VALID CHECK only by someone dropping and re-adding it, and a row written in between
+-- would fail the reconcile into that copy on every tick. The parent's validated outgoing foreign keys are compared
 -- too, by definition (#898): regrain_step gives each copy its own validated copy of every one while the
 -- copy is still empty, so that the swap's ATTACH adopts it rather than validating it, and a key added to
 -- the parent after a copy was made reached the swap missing from it, where ATTACH validated it by scanning
@@ -6643,7 +6669,12 @@ returns text language sql stable as $$
            format('%I %s%s%s%s', a.attname, format_type(a.atttypid, a.atttypmod),
                   case when a.attcollation <> 0 and a.attcollation <> t.typcollation
                        then ' collate ' || a.attcollation::regcollation::text else '' end,
-                  case when a.attnotnull then ' not null' else '' end,
+                  case when a.attnotnull
+                        and not (a.attrelid = p_parent      -- #1261: a NOT VALID NOT NULL, the swap's to carry
+                                 and exists (select 1 from pg_constraint n
+                                              where n.conrelid = p_parent and n.contype = 'n' and not n.convalidated
+                                                and n.conkey[1] = a.attnum))
+                       then ' not null' else '' end,
                   case when a.attgenerated <> '' then ' generated' else '' end) as col
       from pg_attribute a join pg_type t on t.oid = a.atttypid
      where (a.attrelid = p_parent or a.attrelid = any(p_copies)) and a.attnum > 0 and not a.attisdropped
@@ -6651,6 +6682,8 @@ returns text language sql stable as $$
     select k.conrelid, format('check %I %s', k.conname, pg_get_expr(k.conbin, k.conrelid))
       from pg_constraint k
      where (k.conrelid = p_parent or k.conrelid = any(p_copies)) and k.contype = 'c'
+       and not (k.conrelid = p_parent and not k.convalidated            -- #1261: the swap's to carry
+                and to_jsonb(k) ->> 'conenforced' is distinct from 'false')
        and not (k.conrelid <> p_parent
                 and (k.conname = ((select c.relname from pg_class c where c.oid = k.conrelid) || '_ck')::name
                      or exists (select 1 from pgpm.part pp
@@ -8561,6 +8594,28 @@ begin
          and not exists (select 1 from pg_constraint c
                           where c.conrelid = v_copy and c.contype = 'f' and c.conparentid = 0
                             and c.conname = k.conname)
+       order by k.conname
+    loop
+      execute format('alter table %s add constraint %I %s not valid', v_copy::text, v_nv.conname, v_nv.def);
+    end loop;
+    -- #1261: and the parent's NOT VALID CHECK constraints (and on PostgreSQL 18 its NOT VALID NOT NULLs) the same
+    -- way. _regrain_copy_make leaves each off the copy, which would otherwise refuse a row written before it
+    -- that the parent still serves; the ATTACH requires each on the copy ('child table is missing constraint',
+    -- 'must be marked NOT NULL'), and adopts a NOT VALID one under a NOT VALID parent constraint without a scan.
+    -- Added here, after the residual reconcile, NOT VALID checks no row. A copy already holding one (under the
+    -- CHECK's name, or a NOT NULL on the column) keeps it: the drift check restarts a run whose copy holds one
+    -- validated, so that is only ever a copy the swap itself would accept.
+    for v_nv in
+      select k.conname, regexp_replace(pg_get_constraintdef(k.oid), ' NOT VALID$', '') as def
+        from pg_constraint k
+       where k.conrelid = p_parent and k.contype in ('c', 'n') and not k.convalidated
+         and to_jsonb(k) ->> 'conenforced' is distinct from 'false'
+         and case when k.contype = 'c'
+                  then not exists (select 1 from pg_constraint c
+                                    where c.conrelid = v_copy and c.contype = 'c' and c.conname = k.conname)
+                  else not exists (select 1 from pg_attribute a join pg_attribute pa
+                                     on pa.attrelid = p_parent and pa.attnum = k.conkey[1] and pa.attname = a.attname
+                                    where a.attrelid = v_copy and a.attnotnull) end
        order by k.conname
     loop
       execute format('alter table %s add constraint %I %s not valid', v_copy::text, v_nv.conname, v_nv.def);
