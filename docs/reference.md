@@ -2034,7 +2034,9 @@ OWNER TO` on the table and its partitions) has them handed over by the next tick
 a role that is a member of both the old owner and the new. A tick run by a role that can do neither (the
 new owner itself, a non-superuser) refuses once, up front, and logs a `skip_regrain` row that leads with the
 step to take: see [Handing a table to a new owner](#handing-a-table-to-a-new-owner-hand_over_scratch). The
-delta and the function are found by the oids `pgpm.config` recorded; with none recorded (a table that has
+delta and the function are found by the oids `pgpm.config` recorded, each in the schema it is in now, so
+`untransmute` and `uninstall.sql` drop one you moved with `SET SCHEMA` where it is, apart from the other,
+and leave a function of yours under the capture's name beside the delta alone; with none recorded (a table that has
 never regrained) there is none, so `regrain_cancel`, `untransmute` and `uninstall.sql` leave alone a table or
 function of yours named `<rel>_pgpm_regrain_delta` or `<rel>_pgpm_regrain_capture()`. Re-running `install.sql`
 (the upgrade) records the pair for a table with none recorded only on proof that pgpm minted it: the capture
