@@ -26,16 +26,23 @@
 --           granted, so the lock lands on the squatter): refused, naming the partition as it is now, nothing
 --           recorded. The remedy as typed (the call naming the partition's current name) records it, and while
 --           its transaction is open a detach of that partition waits for its lock (the row's guarantee).
+--   PART F  READ COMMITTED, the partition's SCHEMA swapped with one holding a partitioned table of the same name
+--           while the call waits, and swapped back while LOCK TABLE waits on that table's partition: the name
+--           denotes the partition again, but the call holds no lock on it. Refused (the lock manager is asked,
+--           not the name), nothing recorded; the remedy as typed records it.
+--   PART G  READ COMMITTED, a rename with nothing put in its place: pgpm's refusal naming the partition as it
+--           is now, not LOCK TABLE's 42P01 about the old name; the remedy as typed records it.
 --
 -- adopt_partition is a function, not a committing procedure, so its refusals are pinned by message.
 -- ASYMMETRIC FIXTURES. Three hand partitions: x [900, 1000) holds 950 and is renamed, y [1000, 1100) holds
 -- 1010 and 1020 and is detached, z [1100, 1200) holds 1111, 1122 and 1133 and is left alone. Two end up
 -- recorded and one does not, and every check names the relation by oid and name, never a count alone. E's w
--- [1200, 1300) holds 1234, 1256 and 1278, and its squatter none.
+-- [1200, 1300) holds 1234, 1256 and 1278, and its squatter none; F's v [1300, 1400) 1301 and 1350; G's u
+-- [1400, 1500) 1444.
 create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
-select plan(25);
+select plan(38);
 
 create table public.t332 (id bigint primary key, payload text);
 insert into public.t332 values (150, 'a');
@@ -169,7 +176,7 @@ select ok(pg_temp.t332_waits(:ea_pid, :w_oid),
   'LIVENESS: E: adopt_partition passed its first check and waits behind the rename for w''s lock');
 select dblink_exec('eb', 'commit') as eb_commit \gset
 select count(*) as ea_rows from dblink_get_result('ea', false) as t(x text) \gset
-select ok(dblink_error_message('ea') like '%cannot adopt t332_w_old (oid ' || :w_oid || '): the name public.t332_w no longer denotes it%Re-run adopt_partition naming the partition as it is now, t332_w_old%',
+select ok(dblink_error_message('ea') like '%cannot adopt t332_w_old (oid ' || :w_oid || '): this call holds no lock on it, because the name public.t332_w it locked by stopped denoting it%Re-run adopt_partition naming the partition as it is now, t332_w_old%',
   'E: the name it locked now denotes the squatter, so adopt_partition refuses, naming the partition as it is now');
 select count(*) as ea_drained from dblink_get_result('ea', false) as t(x text) \gset
 -- COMMIT, not ROLLBACK: a call that recorded w under a lock on the squatter would commit its row here
@@ -183,7 +190,9 @@ select ok(to_regclass('public.t332_w') <> :w_oid
 -- the remedy, as typed: the call again, naming the partition as it is now. Its lock is on w: a detach of w
 -- from another session waits for it, and gives up at its lock_timeout, while the call's transaction is open.
 select dblink_exec('ea', 'begin isolation level read committed') as ea_begin2 \gset
-select r as e_adopted from dblink('ea', format('select pgpm.adopt_partition(%L, %L)', 'public.t332', 'public.t332_w_old')) as t(r text) \gset
+select lives_ok(format('select * from dblink(%L, %L) as t(r text)', 'ea',
+                       format('select pgpm.adopt_partition(%L, %L)', 'public.t332', 'public.t332_w_old')),
+  'E: the call again, naming the partition as it is now, adopts it');
 select dblink_exec('o332', $$set lock_timeout = '300ms'$$) as o_timeout \gset
 select throws_ok(format('select dblink_exec(%L, %L)', 'o332', 'alter table public.t332 detach partition public.t332_w_old'),
   '55P03', NULL,
@@ -199,6 +208,97 @@ select ok(exists (select 1 from pg_inherits where inhparent = 'public.t332'::reg
   'E: and w is still attached with its rows 1234, 1256 and 1278 when the row commits; the squatter is recorded nowhere');
 select dblink_disconnect('ea') as ea_gone \gset
 select dblink_disconnect('eb') as eb_gone \gset
+
+-- ============================ (F) the partition's schema swapped away and back while the lock waits ============================
+-- READ COMMITTED. A schema rename takes no lock on any relation in it. Session fb holds v and swaps its schema
+-- s332 with tmp332, which holds a partitioned table of the same name (S) with one partition (S_c), held by fc.
+-- Once fb commits, LOCK TABLE resolves s332.t332_v to S, locks it and waits for S_c; fb swaps the schemas back,
+-- so the name denotes v again; fc lets go. The call holds S and S_c and nothing on v: a check of the name passes
+-- here, the lock manager's witness does not, so it must refuse rather than record v with no lock on it.
+create schema s332;
+create table s332.t332_v partition of public.t332 for values from (1300) to (1400);
+insert into public.t332 values (1301, 'v'), (1350, 'v');
+create schema tmp332;
+create table tmp332.t332_v (id bigint) partition by range (id);
+create table tmp332.t332_v_c partition of tmp332.t332_v for values from (0) to (10);
+select 's332.t332_v'::regclass::oid as v_oid, 'tmp332.t332_v'::regclass::oid as sv_oid,
+       'tmp332.t332_v_c'::regclass::oid as sc_oid \gset
+select dblink_connect('fa', 'dbname=' || current_database()) as fa \gset
+select dblink_connect('fb', 'dbname=' || current_database()) as fb \gset
+select dblink_connect('fc', 'dbname=' || current_database()) as fc \gset
+select pid as fa_pid from dblink('fa', 'select pg_backend_pid()') as t(pid int) \gset
+select dblink_exec('fc', 'begin') as fc_begin \gset
+select dblink_exec('fc', 'lock table tmp332.t332_v_c in access exclusive mode') as fc_lock \gset
+select dblink_exec('fb', 'begin') as fb_begin \gset
+select dblink_exec('fb', 'lock table s332.t332_v in access exclusive mode') as fb_lock \gset
+select dblink_exec('fb', 'alter schema s332 rename to s332_old') as fb_away \gset
+select dblink_exec('fb', 'alter schema tmp332 rename to s332') as fb_in \gset
+select dblink_exec('fa', 'begin isolation level read committed') as fa_begin \gset
+select dblink_send_query('fa', format('select pgpm.adopt_partition(%L, %s::oid::regclass)', 'public.t332', :v_oid)) as fa_sent \gset
+select ok(pg_temp.t332_waits(:fa_pid, :v_oid),
+  'LIVENESS: F: adopt_partition passed its first check and waits behind the swap for v''s lock');
+select dblink_exec('fb', 'commit') as fb_commit \gset
+select ok(pg_temp.t332_waits(:fa_pid, :sc_oid)
+          and exists (select 1 from pg_locks where pid = :fa_pid and relation = :sv_oid and granted)
+          and not exists (select 1 from pg_locks where pid = :fa_pid and relation = :v_oid),
+  'LIVENESS: F: the lock landed on S, which the name denotes now, and waits for S''s partition, with none on v');
+select dblink_exec('fb', 'begin') as fb_begin2 \gset
+select dblink_exec('fb', 'alter schema s332 rename to tmp332') as fb_back1 \gset
+select dblink_exec('fb', 'alter schema s332_old rename to s332') as fb_back2 \gset
+select dblink_exec('fb', 'commit') as fb_commit2 \gset
+select ok(to_regclass('s332.t332_v') = :v_oid::regclass,
+  'LIVENESS: F: the schemas are swapped back, so the name the call locked by denotes v again');
+select dblink_exec('fc', 'commit') as fc_commit \gset
+select count(*) as fa_rows from dblink_get_result('fa', false) as t(x text) \gset
+select ok(dblink_error_message('fa') like '%cannot adopt s332.t332_v (oid ' || :v_oid || '): this call holds no lock on it%Re-run adopt_partition naming the partition as it is now, s332.t332_v%',
+  'F: the call holds no lock on v, so adopt_partition refuses, though the name denotes v again');
+select count(*) as fa_drained from dblink_get_result('fa', false) as t(x text) \gset
+-- COMMIT, not ROLLBACK, as in E
+select dblink_exec('fa', 'commit') as fa_commit \gset
+select is((select string_agg(child_name, ',') from pgpm.part where child_oid = :v_oid), null,
+  'F: nothing is recorded for v when the call''s transaction commits');
+-- the remedy, as typed
+select lives_ok(format('select pgpm.adopt_partition(%L, %L)', 'public.t332', 's332.t332_v'),
+  'F: the call again, naming the partition as it is now, adopts it');
+with mine as materialized (select * from pgpm.part where parent_table = 'public.t332'::regclass)
+select is((select string_agg(child_name || ' [' || lo || ', ' || hi || ')', '; ') from mine where child_oid = :v_oid)
+            || ' ' || (select string_agg(id::text, ',' order by id) from s332.t332_v),
+          't332_v [1300, 1400) 1301,1350',
+  'F: v is recorded by its oid over its own bounds, attached with its rows 1301 and 1350');
+select dblink_disconnect('fa') as fa_gone \gset
+select dblink_disconnect('fb') as fb_gone \gset
+select dblink_disconnect('fc') as fc_gone \gset
+
+-- ============================ (G) a rename with nothing put in its place ============================
+-- READ COMMITTED. The partition is renamed while the call waits for its lock, and nothing takes the old name:
+-- LOCK TABLE then finds no relation of that name (42P01, naming the OLD name as missing). That is pgpm's
+-- refusal, naming the partition as it is now, not the raw error.
+create table public.t332_u partition of public.t332 for values from (1400) to (1500);
+insert into public.t332 values (1444, 'u');
+select 'public.t332_u'::regclass::oid as u_oid \gset
+select dblink_connect('ga', 'dbname=' || current_database()) as ga \gset
+select dblink_connect('gb', 'dbname=' || current_database()) as gb \gset
+select pid as ga_pid from dblink('ga', 'select pg_backend_pid()') as t(pid int) \gset
+select dblink_exec('gb', 'begin') as gb_begin \gset
+select dblink_exec('gb', 'alter table public.t332_u rename to t332_u_old') as gb_rename \gset
+select dblink_exec('ga', 'begin isolation level read committed') as ga_begin \gset
+select dblink_send_query('ga', format('select pgpm.adopt_partition(%L, %L)', 'public.t332', 'public.t332_u')) as ga_sent \gset
+select ok(pg_temp.t332_waits(:ga_pid, :u_oid),
+  'LIVENESS: G: adopt_partition passed its first check and waits behind the rename for u''s lock');
+select dblink_exec('gb', 'commit') as gb_commit \gset
+select count(*) as ga_rows from dblink_get_result('ga', false) as t(x text) \gset
+select ok(dblink_error_message('ga') like '%pg_partition_magician: cannot adopt t332_u_old (oid ' || :u_oid || '): this call holds no lock on it, because the name public.t332_u it locked by stopped denoting it%Re-run adopt_partition naming the partition as it is now, t332_u_old%',
+  'G: the renamed partition is refused with pgpm''s message naming it as it is now, not a missing old name');
+select count(*) as ga_drained from dblink_get_result('ga', false) as t(x text) \gset
+select dblink_exec('ga', 'commit') as ga_commit \gset
+select is((select string_agg(child_name, ',') from pgpm.part where child_oid = :u_oid), null,
+  'G: nothing is recorded for u');
+select lives_ok(format('select pgpm.adopt_partition(%L, %L)', 'public.t332', 'public.t332_u_old'),
+  'G: the call again, naming the partition as it is now, adopts it');
+select is((select child_name from pgpm.part where child_oid = :u_oid), 't332_u_old',
+  'G: u is recorded by its oid under its current name');
+select dblink_disconnect('ga') as ga_gone \gset
+select dblink_disconnect('gb') as gb_gone \gset
 
 select dblink_disconnect('o332') as o332_gone \gset
 select * from finish();

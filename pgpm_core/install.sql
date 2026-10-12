@@ -14115,20 +14115,32 @@ begin
     raise exception 'pg_partition_magician: % is not a partition of %: adopt_partition records a relation attached to the table, and a partition being detached is leaving it',
       p_child, p_parent;
   end if;
-  -- #1262 (V-01): LOCK TABLE takes a NAME, and resolves it again once the lock is granted, so a rename of the
-  -- partition and a new table created under its old name, committed while this call waits, leave the lock on
-  -- that new table and none on p_child. The name is read schema-qualified (the caller's search_path chooses
-  -- nothing), locked, and asked again under the lock: it must still denote p_child's oid, or the call refuses.
-  -- Under the lock the answer is stable, because a rename takes ACCESS EXCLUSIVE.
+  -- #1262 (PR #1295, V-01): LOCK TABLE takes a NAME, and resolves it again once the lock is granted, so what it
+  -- locks is whatever the name denotes by then: a rename of the partition and a new table created under its old
+  -- name, committed while this call waits, leave the lock on that new table; a schema renamed away and another
+  -- renamed into its place (which takes no relation lock at all) leave it on a relation of that other schema,
+  -- and renaming them back while the lock waits on that relation's partitions makes the name denote p_child
+  -- again with no lock on it. No question about the name can tell, so the call asks the lock manager instead:
+  -- this backend must hold SHARE UPDATE EXCLUSIVE on p_child's oid, granted, or the call refuses. The name is
+  -- read schema-qualified, so the caller's search_path chooses nothing. A name that denotes nothing once the
+  -- wait ends (the partition or its schema renamed, no relation in its place) raises 42P01 or 3F000 naming the
+  -- OLD name as missing; that is the same case, so it is caught and left to the same refusal, which names the
+  -- partition as it is now. A lock taken inside the block stays with the transaction when the block ends.
   select format('%I.%I', n.nspname, c.relname) into v_child_q
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_child;
   if not found then
     raise exception 'pg_partition_magician: % is not a partition of % any more (dropped while this call waited)',
       p_child, p_parent;
   end if;
-  execute format('lock table %s in share update exclusive mode', v_child_q);
-  if to_regclass(v_child_q) is distinct from p_child then
-    raise exception 'pg_partition_magician: cannot adopt % (oid %): the name % no longer denotes it (renamed, or the name taken by another relation, while this call waited for its lock), so the lock this call took is not on it. Re-run adopt_partition naming the partition as it is now, %',
+  begin
+    execute format('lock table %s in share update exclusive mode', v_child_q);
+  exception when undefined_table or invalid_schema_name then
+    null;   -- the name denotes nothing now: no lock on p_child, refused just below
+  end;
+  if not exists (select 1 from pg_catalog.pg_locks l
+                  where l.locktype = 'relation' and l.relation = p_child::oid and l.pid = pg_backend_pid()
+                    and l.mode = 'ShareUpdateExclusiveLock' and l.granted) then
+    raise exception 'pg_partition_magician: cannot adopt % (oid %): this call holds no lock on it, because the name % it locked by stopped denoting it while the call waited (the partition or its schema was renamed, or the name taken by another relation). Re-run adopt_partition naming the partition as it is now, %',
       p_child, p_child::oid, v_child_q, p_child;
   end if;
   select c.relname, c.relkind, pg_get_expr(c.relpartbound, c.oid) into v_rel, v_relkind, v_bound

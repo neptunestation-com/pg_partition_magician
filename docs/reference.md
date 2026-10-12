@@ -3056,8 +3056,9 @@ or export it with `archive.to_s3` first.
 It refuses, writing nothing:
 
 - a transaction stricter than `READ COMMITTED` (see the next paragraph), before it takes any lock;
-- a `p_child` renamed, or whose name another relation took, while the call waited for its lock: the lock
-  would not be on it, so the call names the partition as it is now, to be called again with that name;
+- a `p_child` the call holds no lock on once its wait ends: the partition or its schema renamed while it
+  waited, or its name taken by another relation, so the lock taken by the name is on something else or on
+  nothing. The call names the partition as it is now, to be called again with that name;
 - a `p_parent` pgpm does not manage, or a `p_child` that is not attached to it (a partition in the middle of
   a detach is leaving it), or one that is not a plain table;
 - a `p_child` `pgpm.part` already records by oid (there is nothing to adopt);
@@ -3069,8 +3070,9 @@ It refuses, writing nothing:
 
 It holds the table's regrain lock and a `SHARE UPDATE EXCLUSIVE` lock on `p_child` while it judges, so the
 partition cannot be detached or dropped between the check and the row; reads and writes of the partition are
-not blocked. The lock is taken by the partition's schema-qualified name and that name is asked again under
-it, so it is on the relation `p_child` denotes. That check, and the name and bounds it records, are read through a snapshot taken after the lock,
+not blocked. `LOCK TABLE` takes a name, so the call locks the partition's schema-qualified name and then asks
+`pg_locks` whether it holds the lock on `p_child`'s oid; when it does not, it refuses (above). That check, and
+the name and bounds it records, are read through a snapshot taken after the lock,
 so `adopt_partition` must run in a `READ COMMITTED` transaction (the default). Under `REPEATABLE READ` or
 `SERIALIZABLE` the snapshot is the transaction's first, which can predate a `DETACH` or a rename another session
 committed before the call, so it refuses, naming the remedy: `BEGIN ISOLATION LEVEL READ COMMITTED`, the call,
