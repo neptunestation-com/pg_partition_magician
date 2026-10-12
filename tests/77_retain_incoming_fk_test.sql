@@ -35,7 +35,7 @@
 create extension if not exists pgtap;
 create extension if not exists dblink;
 
-select plan(51);
+select plan(53);
 
 -- ============================ fixture 1: an incoming FK, no crossing ============================
 -- 50000 rows -> monolith [0,60000); the frontier write at 110000 puts the horizon at 80000, so the
@@ -74,6 +74,18 @@ select cmp_ok(
   'LIVENESS: a per-partition FK constraint depends on it -- this is what refuses the bare DROP');
 
 -- ============================ retirement is dispatched, not done inline ============================
+-- A stand-in for pg_cron's job table (as tests/194 has) for this section only, so the dispatch is real: since #705
+-- a mark on a detached partition vouches only with a record of pgpm's dispatch (retain_detach), and a detach
+-- run by hand after a FAILED dispatch is the operator's table, which retire() refuses (tests/327 part G). It is
+-- dropped before the reaper's section, so it and the sections after it run without pg_cron, as they always have.
+create schema cron;
+create table cron.job (jobid bigint primary key, jobname text, database text, command text);
+create function cron.alter_job(job_id bigint, schedule text default null, command text default null,
+                               database text default null, username text default null, active boolean default null)
+returns void language sql as $$
+  update cron.job set command = coalesce(alter_job.command, job.command) where jobid = job_id
+$$;
+insert into cron.job values (1, 'pgpm_detach', current_database(), 'select 1');
 select ok(not pgpm.retire('public.rw77', :'doomed'),
   'retire() does not drop a referenced partition inline: the detach it needs cannot run in-process');
 
@@ -118,7 +130,10 @@ select ok(
 -- Top level, because that is the only context PostgreSQL permits it in -- \gexec rather than a literal
 -- name so a change to the naming scheme fails here loudly instead of detaching nothing. tests/78
 -- asserts pgpm asks cron for precisely this statement.
-select format('alter table public.rw77 detach partition public.%I concurrently', :'doomed') \gexec
+select is((select command from cron.job where jobname = 'pgpm_detach'),
+          format('alter table public.rw77 detach partition public.%I concurrently', :'doomed'),
+  'LIVENESS: the dispatch armed the pgpm_detach job with exactly this detach');
+select command from cron.job where jobname = 'pgpm_detach' \gexec
 
 select is(
   (select count(*)::int from pg_constraint
@@ -203,7 +218,10 @@ select is((select count(*)::int from public.cxref77 where id = 2), 1,
 -- Carry this retirement through to the drop. Partly to prove the crossing was RESOLVED rather than
 -- merely deferred, and partly because retire() dispatches at most one detach database-wide: a fixture
 -- left mid-retirement would correctly short-circuit the next section before it reached the crossing.
-select format('alter table public.cx77 detach partition public.%I concurrently', :'cx_doomed') \gexec
+select is((select command from cron.job where jobname = 'pgpm_detach'),
+          format('alter table public.cx77 detach partition public.%I concurrently', :'cx_doomed'),
+  'LIVENESS: the dispatch armed the pgpm_detach job with exactly this detach');
+select command from cron.job where jobname = 'pgpm_detach' \gexec
 select ok(pgpm.retire('public.cx77', :'cx_doomed'),
   'and the retirement then completes, so the crossing was resolved and not just postponed');
 
@@ -248,6 +266,8 @@ select ok(
 
 select is((select count(*)::int from public.nxref77 where id = 1), 1,
   'the referencing row is untouched: a refused DELETE severs nothing');
+
+drop schema cron cascade;   -- the stand-in above was for the dispatching sections only
 
 -- ============================ the reaper: an interrupted concurrent detach ============================
 -- Killing a backend during the detach's WAIT phase leaves the partition pending AND its rows already
