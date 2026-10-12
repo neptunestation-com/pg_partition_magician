@@ -13303,6 +13303,50 @@ MUTATIONS["adopt_partition_dropped_refused_as_renamed"] = (
       "    if false then\n"
       "      raise exception 'pg_partition_magician: cannot adopt % (oid %): that relation no longer exists", 1)],
 )
+# Issue #1267: a declared surface function _surface_prepare has to reshape keeps its grants. It is kept aside under
+# _surface_kept_<name> rather than dropped, and _surface_carry_grants gives the new shape exactly its grants, each
+# under its own grantor. One mutation for the keeping, one for the grantor, one for the up-front refusal of a grant
+# this session cannot carry, each caught by tests/336 through bench/install_keeps_surface_grants.sh.
+_G1267 = "bench/install_keeps_surface_grants.sh"
+MUTATIONS["surface_prepare_drops_granted"] = (
+    _G1267,
+    "Pre-#1267 _surface_prepare: a declared function whose installed shape cannot be replaced in place is dropped "
+    "whatever its grants, so nothing is kept aside, the carry finds nothing to copy, and the file recreates it at "
+    "its creator's defaults: an operator's REVOKE EXECUTE FROM PUBLIC and GRANT EXECUTE on an older status() are "
+    "gone after the upgrade. One site, the keep. tests/336 parts A and B catch it.",
+    [("    if r.granted and r.kept is null then\n"
+      "      execute format('alter routine %s rename to %I', r.fn, '_surface_kept_' || r.proname);\n"
+      "    else\n"
+      "      execute format('drop function %s', r.fn);\n"
+      "    end if;\n",
+      "    execute format('drop function %s', r.fn);\n", 1)],
+)
+MUTATIONS["surface_carry_grants_as_owner"] = (
+    _G1267,
+    "_surface_carry_grants replays every kept grant as the installing role, the way _acl_carry_ddl did before "
+    "#903: a grant another role made through a grant option is recorded under the owner, so that role's later "
+    "REVOKE finds no grant of its own and the grantee keeps EXECUTE. One site, the grantor. tests/336 part A "
+    "catches it.",
+    [("    if r.grantor = v_owner then\n"
+      "      execute v_grant_q;\n"
+      "    else\n"
+      "      perform pgpm._acl_grant_as(r.grantor, v_grant_q);\n"
+      "    end if;\n",
+      "    execute v_grant_q;\n", 1)],
+)
+MUTATIONS["surface_prepare_grantor_unchecked"] = (
+    _G1267,
+    "_surface_prepare no longer asks, before it takes anything, whether this session can replay as its grantor "
+    "each grant made through a grant option on a function it has to reshape: a function's owner without "
+    "membership in the grantor takes the function aside, the run goes on, and the carry fails after the file has "
+    "created the new shape at its creator's defaults. One site, the refusal. tests/336 part D catches it (no "
+    "refusal, and the function is gone from its place).",
+    [("  if v_uncarried_q is not null then\n"
+      "    raise exception using errcode = 'insufficient_privilege', message = format(\n",
+      "  if false then\n"
+      "    raise exception using errcode = 'insufficient_privilege', message = format(\n", 1)],
+)
+
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a

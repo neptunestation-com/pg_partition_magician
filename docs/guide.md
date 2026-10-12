@@ -144,7 +144,10 @@ You also need `pg_cron` enabled to run scheduled maintenance.
 
 **Upgrade** by re-running the same file. Your views over pgpm's functions (`status()`, `progress()`,
 `observe_window()`, `check_uuidv7()`, `check_text_time()`) survive it: a function whose shape is unchanged is
-replaced in place. When an upgrade changes one's result or arguments and a view of yours depends on it, the
+replaced in place. So do your grants on them: one whose shape changes is recreated with exactly the grants the
+old one held, a `REVOKE EXECUTE ... FROM PUBLIC` and a `GRANT EXECUTE` to a monitoring role included (a grant
+another role made through a grant option is carried as that role, so run the upgrade as a superuser or a member
+of it, or the run refuses up front with SQLSTATE `42501`, naming the grant). When an upgrade changes one's result or arguments and a view of yours depends on it, the
 run refuses before it has changed anything, naming the function and the view (SQLSTATE `2BP01`), and the
 flags above make that refusal stop the run. Save the view's definition
 (`select pg_get_viewdef('<view>'::regclass, true)`), drop it, re-run the file, then recreate the view
