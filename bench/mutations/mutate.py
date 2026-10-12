@@ -13689,6 +13689,21 @@ MUTATIONS["contradicted_reset_blames_detach_only"] = (
       "pending a detach, which is how a pgpm before this check recorded such a chunk; nothing to do, the next tick "
       "archives the partition again and retention then drops it',", 1)],
 )
+MUTATIONS["hypertable_copy_key_constraint_by_index"] = (
+    "bench/hypertable_copy_key_constraint_by_table.sh",
+    "Pre-#1266 from_hypertable_copy: the tracking copy reads the key's name from every constraint on the key's "
+    "index, so when an incoming foreign key that references the key comes first in pg_constraint the copy "
+    "pre-builds <fk>_pgpm_new, the cutover builds the key a second time, and the copy's index survives the swap "
+    "as a stray duplicate UNIQUE index on the migrated table. One site, the copy's read. tests/timescale/db/68 "
+    "parts A and B catch it (the copy built the wrong temp name, the migrated key index is not the copy's, the "
+    "parent carries a second unique index).",
+    [("    select conname into v_keyconname from pg_constraint\n"
+      "     where conrelid = p_hypertable and contype in ('p', 'u') and conindid = v_keyidx;\n",
+      "    select conname into v_keyconname from pg_constraint\n"
+      "     where conindid = v_keyidx;\n", 1)],
+)
+MUTATION_SRC["hypertable_copy_key_constraint_by_index"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_copy_key_constraint_by_index"] = "timescale"
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

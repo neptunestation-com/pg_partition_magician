@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **A tracking copy pre-builds the index of the hypertable's own key** (#1266). `from_hypertable_copy(...,
+  p_track_changes => true)` named the key index it pre-builds after whichever `pg_constraint` row had the key's
+  index as its `conindid`, and an incoming foreign key that references the key has the same one. When its row
+  came first (a `RENAME CONSTRAINT` on the key is enough) the copy built `<fk>_pgpm_new`, the cutover did not find
+  `<key>_pgpm_new`, built the key a second time, and the copy's index survived the swap as a stray redundant
+  UNIQUE index on the migrated parent and every partition, against `docs/reference.md`'s promise that the copy's
+  key index is adopted rather than rebuilt. The copy now reads the hypertable's own primary key or unique
+  constraint on that index (`conrelid` and `contype` as well). Test `tests/timescale/db/68`, guard
+  `bench/hypertable_copy_key_constraint_by_table.sh`, mutation `hypertable_copy_key_constraint_by_index`.
+
 - **A whole-month `text_time` grid needs its `p_tt_epoch` on the encoding's unit** (#1312). `transmute` held a
   `text_time` grid's anchor and step to whole units from `p_tt_epoch` (#989), reasoning that every bound is the
   anchor plus whole steps, but a whole-month step's bounds are midnight on the 1st whatever the anchor: with

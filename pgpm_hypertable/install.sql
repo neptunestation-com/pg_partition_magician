@@ -1304,7 +1304,12 @@ begin
   -- rebuilding it -- one key-index build instead of two. (v_keyidx was chosen above for tracking; tracking is
   -- refused on a keyless table, so it is always set here.)
   if p_track_changes then
-    select conname into v_keyconname from pg_constraint where conindid = v_keyidx;
+    -- #1266: the table's own key, by its table and kind as well as its index. An incoming foreign key that
+    -- references the key carries the same conindid, and when its catalog row came first the copy built the
+    -- index under <that key's name>_pgpm_new, which the cutover never asks for: it built the key a second
+    -- time and the copy's index survived the swap as a stray duplicate on the migrated table.
+    select conname into v_keyconname from pg_constraint
+     where conrelid = p_hypertable and contype in ('p', 'u') and conindid = v_keyidx;
     -- #872: by the destination's identity, as the cutover adopts it (#768), never the bare temp name: after a
     -- RENAME an abandoned copy under the old name can hold it, and the build died 'already exists'
     v_destreg := format('%I.%I', v_nsp, v_dest)::regclass;
