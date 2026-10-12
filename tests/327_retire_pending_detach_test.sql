@@ -514,7 +514,7 @@ update pgpm.part set detach_dispatched_oid = null where parent_table = 'public.r
 select is(pgpm._disown_unvouched_retirements(), 1, 'C: the upgrade''s pass disowns the mark it has no record for');
 select is((select count(*)::int from pgpm.log where parent_table = 'public.rp327c'::regclass
             and action = 'retain_disown' and lo = '100'
-            and method like '%pending a concurrent detach under a retirement mark for which pgpm recorded no dispatch%drop the table by hand%attach it back%'),
+            and method like '%pending a concurrent detach under a retirement mark for which pgpm recorded no dispatch%attach it back%drop table %delete from pgpm.part where %'),
   1, 'C: logged once, retain_disown, with the remedy');
 select is((select command from cron.job where jobname = 'pgpm_detach'), 'select 1',
   'C: the pgpm_detach job is disarmed, so it does not run the detach again');

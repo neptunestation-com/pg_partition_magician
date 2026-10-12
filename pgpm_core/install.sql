@@ -3629,20 +3629,39 @@ $$;
 -- _disown_retirement: clear a retirement mark (retiring_at, retiring_oid, detach_dispatched_oid) that does not vouch
 -- for a retirement of pgpm's, because the partition is pending or detached by a detach pgpm did not issue (#705), and
 -- log it once,
--- retain_disown over the partition's range with p_why and the consequence. Without the mark the operator's detach
--- is theirs: once it is finished the table is detached by hand, which retire() refuses (#652, fail_retain_drop),
--- where with it retire() would have dropped the table as its own retirement's. Returns whether a mark was cleared.
+-- retain_disown over the partition's range with p_why, the consequence and the remedy. Without the mark the
+-- operator's detach is theirs: once it is finished the table is detached by hand, which retire() refuses (#652,
+-- fail_retain_drop), where with it retire() would have dropped the table as its own retirement's. Returns whether a
+-- mark was cleared.
+--
+-- THE REMEDY IS THE WHOLE REPAIR, AND IT IS WRITTEN HERE, ONCE (#1272). Every path that disowns a mark (retire(),
+-- _detach_reap, _retain_recall and the pass every install.sql run makes) logs through this function, so all of them
+-- name it. Attaching the table back on its bounds hands it to retention again. Dropping it is the other way out, and
+-- it is half a repair on its own: the row stays attached and anchored to the dropped relation's oid, which retire()
+-- refuses as fail_retain_identity on every call, by design (a partition dropped under its row is a wedge for an
+-- operator to look at, #1038), so status().retain_drop_failures climbs for good and the row takes a retain_batch slot
+-- every tick. So the method spells both statements, the DROP and the DELETE of this row, naming the relation the row
+-- records by its oid (where it is now) and the parent by its schema-qualified name, never by the search path.
 create or replace function pgpm._disown_retirement(p_parent regclass, p_child name, p_why text)
 returns boolean language plpgsql as $$
-declare v_lo text; v_hi text;
+declare v_lo text; v_hi text; v_child_oid oid; v_rel_q text; v_parent_q text;
 begin
   update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
    where parent_table = p_parent and child_name = p_child and retiring_at is not null
-  returning lo, hi into v_lo, v_hi;
+  returning lo, hi, child_oid into v_lo, v_hi, v_child_oid;
   if not found then return false; end if;
+  select format('%I.%I', n.nspname, c.relname) into v_rel_q
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_child_oid;
+  v_rel_q := coalesce(v_rel_q, format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child));
+  select format('%I.%I', n.nspname, c.relname) into v_parent_q
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
   insert into pgpm.log (parent_table, action, lo, hi, method)
     values (p_parent, 'retain_disown', v_lo, v_hi,
-            p_why || '; its retirement mark (retiring_at) is cleared, so the detach is the operator''s: once it is finished the table is left standing as one detached by hand, and retention never drops it');
+            p_why || '; its retirement mark (retiring_at) is cleared, so the detach is the operator''s: once it is finished the table is left standing as one detached by hand, which retention never drops and retire() refuses (fail_retain_drop) on every call while its pgpm.part row stays. '
+            || 'If it was pgpm''s own aged retirement, once its detach is finished either attach it back to the parent on its bounds so retention retires it, '
+            || format('or drop it and delete its pgpm.part row with it: drop table %s; delete from pgpm.part where parent_table = %L::regclass and child_name = %L; ',
+                      v_rel_q, v_parent_q, p_child)
+            || '(the DROP alone leaves the row recording a relation that is gone, which retire() refuses as fail_retain_identity on every call)');
   return true;
 end;
 $$;
@@ -3706,7 +3725,7 @@ begin
     end if;
     continue when pgpm._detach_dispatched(r.parent_table, r.child_name, r.rel);
     perform pgpm._idle_detach_job(pgpm._detach_cmd(r.parent_table, r.nspname, r.child_name));
-    v_why_q := format('%I.%I is %s under a retirement mark for which pgpm recorded no dispatch of its own (a dispatch that failed, or a pgpm older than that record, which stamped the mark on an operator''s detach as on its own); if it was pgpm''s own aged retirement, once its detach is finished drop the table by hand, or attach it back to the parent on its bounds so retention retires it',
+    v_why_q := format('%I.%I is %s under a retirement mark for which pgpm recorded no dispatch of its own (a dispatch that failed, or a pgpm older than that record, which stamped the mark on an operator''s detach as on its own)',
                       r.nspname, r.child_name,
                       case when r.pending then 'pending a concurrent detach' else 'detached from the parent' end);
     if pgpm._disown_retirement(r.parent_table, r.child_name, v_why_q) then

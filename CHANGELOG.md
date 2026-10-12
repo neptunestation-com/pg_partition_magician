@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **`retain_disown`'s remedy names the whole repair** (#1272). A retirement mark disowned because pgpm recorded no
+  dispatch of its own (#705) was logged with the remedy "once its detach is finished, drop the table by hand, or
+  attach it back", and `docs/reference.md` added that the `pgpm.part` row is kept. Typed as written, the `DROP`
+  left that row attached and anchored to a relation that no longer exists, which `retire` refuses as
+  `fail_retain_identity` on every call by design, so `status().retain_drop_failures` climbed for good and the row
+  took a `retain_batch` slot on every tick. `pgpm._disown_retirement`, the one writer of `retain_disown`, now spells
+  the drop remedy as the two statements to run together, the `DROP` of the table (by the relation the row records,
+  schema-qualified) and the `DELETE` of its `pgpm.part` row, beside attaching it back; every path that disowns a
+  mark (`retire`, `_detach_reap`, `_retain_recall` and the pass every `install.sql` run makes) logs through it, and
+  the reference says the same. Nothing else changes: the refusal of a partition dropped under its row stands.
+  `tests/339` types the remedy out of the log row and shows retention runs clean after it;
+  `bench/retain_disown_remedy.sh` runs it against the mutation that drops the `DELETE` from the remedy.
+
 - **A tracking copy pre-builds the index of the hypertable's own key** (#1266). `from_hypertable_copy(...,
   p_track_changes => true)` named the key index it pre-builds after whichever `pg_constraint` row had the key's
   index as its `conindid`, and an incoming foreign key that references the key has the same one. When its row
