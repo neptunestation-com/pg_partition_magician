@@ -1290,6 +1290,7 @@ run_perf() {
     "bench/transmute_reap_reread.sh pgpm_perf336"
     "bench/set_regrain_restated_target.sh pgpm_perf335"
     "bench/regrain_registered_grid_off_unit.sh pgpm_perf355"
+    "bench/month_grid_anchor_time.sh pgpm_perf384"
     "bench/transmute_child_names_under_lock.sh pgpm_perf337"
     "bench/obtain_walk_reads_rows_once.sh pgpm_perf332"
     "bench/ci_runs_lint_jobs.sh pgpm_perf351"

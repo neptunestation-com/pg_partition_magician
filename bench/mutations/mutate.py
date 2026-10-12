@@ -6092,11 +6092,10 @@ $$;''',
         "anchor test. tests/308 catches it at set_regrain's and regrain_step's refusals of hu (anchor 500 us "
         "off) and ht (a text_time anchor half a second off) and the target a refused call must not store; "
         "hs's off-unit step is still refused.",
-        [("""      if mod((extract(epoch from cfg.partition_anchor::timestamptz) - extract(epoch from v_enc_epoch)) * 1000000,
-             case v_enc_prec when 0 then 1000000 else 1000 end) <> 0
-         or v_enc_unit is not null then
+        [("""      v_enc_anchor_off := mod((extract(epoch from cfg.partition_anchor::timestamptz) - extract(epoch from v_enc_epoch)) * 1000000,
+                              case v_enc_prec when 0 then 1000000 else 1000 end) <> 0;
 """,
-          "      if v_enc_unit is not null then\n", 1)],
+          "      v_enc_anchor_off := false;\n", 1)],
     ),
     "regrain_step_registered_step_unasked": (
         "bench/regrain_target_encoded_unit.sh",
@@ -6155,6 +6154,54 @@ $$;''',
         "regrain refusals still pass, which is what shows the mutant is this clause alone.",
         [("      insert into pgpm.log (parent_table, action, method) values (cfg.parent_table, 'warn_grid_off_unit', v_msg_q);\n",
           "      null;\n", 1)],
+    ),
+    # #1276: a whole-month grid anchored off its column's unit has every bound where pgpm.part records it, so
+    # only a fixed step (registered or target) is held to the anchor. bench/month_grid_anchor_time.sh runs
+    # tests/342 against each.
+    "upgrade_month_grid_anchor_bounds_claimed": (
+        "bench/month_grid_anchor_time.sh",
+        "Issue #1276 put back at the upgrade: warn_grid_off_unit tells a whole-month grid anchored off its "
+        "column's unit (a date key at 12:00 UTC, a timestamptz(0) key 0.4 s off the second) that every partition "
+        "obtain mints is attached at other bounds than pgpm.part records for it and every regrain is refused, "
+        "though a calendar step's bounds are midnight on the 1st whatever the anchor's time, and sends the "
+        "operator to a reconversion for bounds that are right. One clause: the whole-month test in the upgrade "
+        "block. tests/342 catches it at m342's and t342's rows; f342's row (a fixed grid, where the claim is "
+        "true) and every regrain assertion still pass. F2-03's reproduction fails against it.",
+        [("            and extract(year from cfg.partition_step::interval) * 12 + extract(month from cfg.partition_step::interval) <> 0\n",
+          "            and extract(year from cfg.partition_step::interval) * 12 + extract(month from cfg.partition_step::interval) < 0\n", 1)],
+    ),
+    "regrain_month_grid_anchor_month_target_refused": (
+        "bench/month_grid_anchor_time.sh",
+        "Issue #1276 put back at regrain for a time key: _regrain_step_shape refuses every target on a "
+        "whole-month grid anchored off its column's unit, so a 1-month target on a 3-month date grid anchored at "
+        "noon (or a 2-month timestamptz(0) grid anchored 0.4 s off) is refused, though its fine bounds, like the "
+        "grid's, are midnight on the 1st whatever the anchor's time. One clause: the fixed-target test. tests/342 "
+        "catches it at set_regrain's and regrain()'s 1-month runs of m342 and t342; the day and hour refusals and "
+        "f342's still pass.",
+        [("      elsif v_months = 0 then\n", "      else\n", 1)],
+    ),
+    "regrain_month_grid_encoded_anchor_month_target_refused": (
+        "bench/month_grid_anchor_time.sh",
+        "Issue #1276 put back at regrain for an encoded key: _regrain_step_shape refuses every target on a "
+        "whole-month uuidv7 or text_time grid anchored off its encoded unit, so a 1-month target on a 2-month "
+        "uuidv7 grid anchored half a millisecond off is refused, though every bound of the grid and of that "
+        "regrain is midnight on the 1st, a whole millisecond. One clause: the whole-month exemption of the "
+        "anchor. tests/342 catches it at set_regrain's and regrain()'s 1-month runs of v342 and xk342's 1-month "
+        "target, and at the text of v342's day refusal, which the mutant still makes but as the grid's own "
+        "bounds being off; xe342's refusal still passes.",
+        [("      if (v_enc_anchor_off and (v_grid_months = 0 or not v_enc_epoch_on_unit))\n",
+          "      if v_enc_anchor_off\n", 1)],
+    ),
+    "regrain_month_grid_encoded_epoch_unasked": (
+        "bench/month_grid_anchor_time.sh",
+        "#1276's exemption widened past the bounds it is for: _regrain_step_shape exempts every whole-month "
+        "encoded grid anchored off its unit from the anchor test toward a whole-month target, including a "
+        "text_time grid whose epoch is itself off the unit, whose midnight bounds are then off it too, so every "
+        "fine bound is encoded by flooring and a row deleted mid-regrain could come back at the swap. One clause: "
+        "the epoch test. tests/342 catches it at xe342's 1-month refusal; xk342's acceptance and every other "
+        "assertion still pass.",
+        [("      if (v_enc_anchor_off and (v_grid_months = 0 or not v_enc_epoch_on_unit))\n",
+          "      if (v_enc_anchor_off and v_grid_months = 0)\n", 1)],
     ),
     # #669-#671: three transmute contract gaps, each caught by its own pgTAP file through a wrapper in
     # bench/transmute_abort_owner.sh's shape.
