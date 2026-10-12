@@ -116,7 +116,11 @@ q "create schema app;
    create table app.hh_pgpm_dest (like app.hh including defaults including constraints including generated including comments);
    insert into app.hh_pgpm_dest select * from app.hh order by ts;
    -- recorded as from_hypertable_copy records the copy it builds (#955): the cutover swaps in nothing else
-   select pgpm._scratch_record('app.hh', 'hypertable_dest', 'app.hh_pgpm_dest'::regclass::oid);" >/dev/null
+   select pgpm._scratch_record('app.hh', 'hypertable_dest', 'app.hh_pgpm_dest'::regclass::oid);
+   -- and its last write, as every copy batch records it (#1241): the cutover's snapshot wait then waits only for
+   -- snapshots older than the copy, which the session opened below is not. Unrecorded, the copy reads as one made
+   -- before the record existed and the wait holds out for every open snapshot, this guard's own included.
+   select pgpm._scratch_written('app.hh');" >/dev/null
 check "LIVENESS: the copy holds the 48 rows, and both incoming keys are live" \
   "$(q "select (select count(*) from app.hh_pgpm_dest) || '/' || (select string_agg(conname, ',' order by conname)
          from pg_constraint where confrelid = 'app.hh'::regclass and contype = 'f')")" "48/ref_a_fk,ref_b_fk"
@@ -126,6 +130,9 @@ docker exec "$C" psql -U postgres -d "$DB" -qtA -c "set application_name = 'pgpm
   -c "begin; select count(*) from app.ref_a; select pg_sleep($READER_HOLD); commit;" >/dev/null 2>&1 &
 S=$!
 check "LIVENESS: S holds ACCESS SHARE on ref_a" "$(await "$(holds pgpm_hhfk_s AccessShareLock)" 50)" "yes"
+check "LIVENESS: the copy's last write is recorded and S's snapshot is newer (the snapshot wait passes it)" \
+  "$(q "select coalesce(age(a.backend_xmin) < age(s.written_xid::xid), false) from pgpm.scratch s, pg_stat_activity a
+         where s.parent_oid = 'app.hh'::regclass and s.kind = 'hypertable_dest' and a.application_name = 'pgpm_hhfk_s'")" "t"
 
 # The operator's cutover: a bare CALL, no p_lock_timeout, the session's default lock_timeout (0).
 docker exec "$C" psql -U postgres -d "$DB" -qtA -c "set application_name = 'pgpm_hhfk_cutover'" \
