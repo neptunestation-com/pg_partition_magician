@@ -24,6 +24,11 @@
 --   xk342 text_time (unit s) key, 2-month step, epoch on the second, anchor 0.5 s off -> 1 month accepted
 --   xe342 text_time (unit s) key, 2-month step, epoch 0.5 s off the second, anchor on it -> 1 month refused: its
 --         midnight bounds are themselves off the epoch's seconds, so the whole-month exemption does not apply
+--   z342  date key, 3-month step, zone planted America/New_York AND anchor planted at that zone's midnight
+--         (05:00 UTC, "midnight typed in a New York session"), its bounds recorded at that zone's midnight: both
+--         of the upgrade's shapes at once -> 1 month accepted and completes; 1 day refused
+--   r342  date key, 3-month step, anchor planted at 12:00 UTC, every row still in its monolith -> 1 day refused,
+--         and the remedy the refusal names is TYPED: untransmute, transmute again, and 1 day is accepted
 -- (xk342 and xe342 are registered by hand, as tests/308's encoded grids are.)
 -- The monoliths are frozen on an instrumented clock (a shim now() ahead of pg_catalog in search_path, tests/311's
 -- technique). install.sql is read with \ir, relative to this file; the psql variable `install` overrides the
@@ -40,9 +45,9 @@ create table clk342.clock (t timestamptz);
 insert into clk342.clock values ('2024-10-15 00:00:00+00');
 create function clk342.now() returns timestamptz language sql stable as $$ select t from clk342.clock $$;
 set search_path = clk342, pg_catalog, public;
-select plan(37);
+select plan(56);
 
--- ============ four time grids, each converted on the default anchor, then planted off the unit ============
+-- ============ six time grids, each converted on the default anchor, then planted off the unit ============
 create table public.m342 (id bigint, dt date not null, v text, primary key (id, dt));
 insert into public.m342 values (1, '2024-07-01', 'm-0701'), (2, '2024-07-31', 'm-0731'), (3, '2024-08-01', 'm-0801a'),
                                (4, '2024-08-01', 'm-0801b'), (5, '2024-09-30', 'm-0930');
@@ -55,6 +60,12 @@ insert into public.v342 values (21, pgpm._ts_to_uuid('2024-07-01 00:00:00+00')),
                                (25, pgpm._ts_to_uuid('2024-10-06 00:00:00+00'));
 create table public.f342 (id bigint, dt date not null, primary key (id, dt));
 insert into public.f342 select g, date '2024-09-01' + (g % 30) from generate_series(1, 45) g;
+create table public.z342 (id bigint, dt date not null, primary key (id, dt));
+insert into public.z342 values (31, '2024-07-01'), (32, '2024-07-31'), (33, '2024-08-01'), (34, '2024-09-30');
+create table public.r342 (id bigint, dt date not null, v text, primary key (id, dt));
+insert into public.r342 values (41, '2024-07-01', 'r-0701'), (42, '2024-07-31', 'r-0731'), (43, '2024-08-01', 'r-0801');
+call pgpm.transmute('public.z342', 'dt', interval '3 months', p_obtain => 1);
+call pgpm.transmute('public.r342', 'dt', interval '3 months', p_obtain => 1);
 call pgpm.transmute('public.m342', 'dt', interval '3 months', p_obtain => 1);
 call pgpm.transmute('public.t342', 'ts', interval '2 months', p_obtain => 1);
 call pgpm.transmute('public.v342', 'k', interval '2 months', p_obtain => 1);
@@ -62,12 +73,21 @@ call pgpm.transmute('public.f342', 'dt', interval '7 days', p_obtain => 1);
 update clk342.clock set t = '2025-03-15 00:00:00+00';
 -- the older installs' registrations (transmute refuses each of these anchors today)
 update pgpm.config set partition_anchor = '2000-01-01 12:00:00+00'
- where parent_table in ('public.m342'::regclass, 'public.f342'::regclass);
+ where parent_table in ('public.m342'::regclass, 'public.f342'::regclass, 'public.r342'::regclass);
 update pgpm.config set partition_anchor = '2000-01-01 00:00:00.4+00' where parent_table = 'public.t342'::regclass;
 update pgpm.config set partition_anchor = '2000-01-01 00:00:00.0005+00' where parent_table = 'public.v342'::regclass;
+-- z342: an install from before a naive key's grid was recorded in UTC, converting in a New York session with the
+-- anchor typed as midnight there. It recorded the zone, the anchor at 05:00 UTC, and every bound at that zone's
+-- midnight (04:00 or 05:00 UTC) over the catalog's whole dates.
+update pgpm.config set partition_tz = 'America/New_York', partition_anchor = '2000-01-01 05:00:00+00'
+ where parent_table = 'public.z342'::regclass;
+update pgpm.part set lo = pgpm._ts_text((lo::timestamptz at time zone 'UTC') at time zone 'America/New_York'),
+                     hi = pgpm._ts_text((hi::timestamptz at time zone 'UTC') at time zone 'America/New_York')
+ where parent_table = 'public.z342'::regclass;
 -- partitions minted on the planted anchors
 select pgpm.extend_to('public.m342', '2025-09-01') as m_ext \gset
 select pgpm.extend_to('public.f342', '2025-04-01') as f_ext \gset
+select pgpm.extend_to('public.z342', '2025-09-01') as z_ext \gset
 
 create function pg_temp.attempt(p_sql text) returns text language plpgsql as $f$
 begin execute p_sql; return 'completed';
@@ -91,6 +111,19 @@ create function pg_temp.mismatch(p_rel regclass) returns text language sql as $f
   select coalesce(string_agg(format('[%s, %s) attached as [%s, %s)', lo, hi, b[1], b[2]), '; ' order by lo), 'none')
     from cat where b is null or b[1]::timestamptz <> lo::timestamptz or b[2]::timestamptz <> hi::timestamptz
 $f$;
+-- the same for a date grid recorded in a zone (z342): every attached cell whose recorded bounds are not that
+-- zone's midnight on the dates the catalog attached it on
+create function pg_temp.mismatch_in(p_rel regclass, p_tz text) returns text language sql as $f$
+  with mine as materialized (
+    select p.child_oid, p.lo, p.hi from pgpm.part p where p.parent_table = p_rel and p.attached
+  ), cat as (
+    select m.lo, m.hi, regexp_match(pg_get_expr(c.relpartbound, c.oid), $re$FROM \('([^']*)'\) TO \('([^']*)'\)$re$) b
+      from mine m join pg_class c on c.oid = m.child_oid
+  )
+  select coalesce(string_agg(format('[%s, %s) attached as [%s, %s)', lo, hi, b[1], b[2]), '; ' order by lo), 'none')
+    from cat where b is null or b[1]::timestamp <> (lo::timestamptz at time zone p_tz)
+                             or b[2]::timestamp <> (hi::timestamptz at time zone p_tz)
+$f$;
 -- which rows each attached cell whose recorded lo falls in [p_from, p_to) holds, by id
 create function pg_temp.cells(p_rel regclass, p_from timestamptz, p_to timestamptz) returns text language plpgsql as $f$
 declare v text;
@@ -108,6 +141,7 @@ end; $f$;
 select child_name as m_mono from pgpm.part where parent_table = 'public.m342'::regclass and lo = '2024-07-01 00:00:00+00' \gset
 select child_name as t_mono from pgpm.part where parent_table = 'public.t342'::regclass and lo = '2024-07-01 00:00:00+00' \gset
 select child_name as v_mono from pgpm.part where parent_table = 'public.v342'::regclass and lo = '2024-07-01 00:00:00+00' \gset
+select child_name as z_mono from pgpm.part where parent_table = 'public.z342'::regclass and lo = '2024-07-01 04:00:00+00' \gset
 
 select is((select string_agg(c.parent_table::text || '=' || c.partition_anchor || '/' || c.partition_step, ', '
                              order by c.parent_table::text)
@@ -212,6 +246,54 @@ select throws_like(format('select pgpm.set_regrain(%L, %L)', 'public.f342', '1 d
   'pg_partition_magician: cannot regrain f342 -- its grid is not on its control column dt''s unit: the column is date, which keeps whole days only, and the registered partition_anchor 2000-01-01 12:00:00+00 and partition_step 7 days do not both fall on whole multiples of 1 day, so every bound of the grid and of any regrain of it is attached at another instant than pgpm records for it%',
   'set_regrain refuses any regrain of f342, a 7-day grid anchored at noon, with the grid''s own bounds named');
 
+-- ============ both of the upgrade's shapes at once: a zone-recorded date grid anchored at that zone's midnight ============
+select is((select string_agg(c.parent_table::text || '=' || c.partition_tz || '/' || c.partition_anchor || '/' || c.partition_step, ', '
+                             order by c.parent_table::text)
+             from pgpm.config c where c.parent_table::text in ('r342', 'z342')),
+  'r342=UTC/2000-01-01 12:00:00+00/3 mons, z342=America/New_York/2000-01-01 05:00:00+00/3 mons',
+  'LIVENESS: z342 is registered in New York''s zone on an anchor at its midnight (05:00 UTC), r342 on a noon anchor');
+select is((select lo || '/' || hi from pgpm.part where parent_table = 'public.z342'::regclass and child_name = :'z_mono'),
+  '2024-07-01 04:00:00+00/2025-01-01 05:00:00+00',
+  'LIVENESS: z342''s monolith is recorded at New York''s midnight, 04:00 UTC in July and 05:00 UTC in January');
+select is((select string_agg(child_name, ',' order by lo::timestamptz) from pgpm.part
+            where parent_table = 'public.z342'::regclass and lo::timestamptz >= '2025-04-01'),
+  'z342_p2025_04,z342_p2025_07',
+  'LIVENESS: extend_to minted two z342 partitions on the planted zone and anchor');
+select lives_ok($$ select pgpm.set_regrain('public.z342', '1 month') $$,
+  'set_regrain accepts a 1-month target on z342, whose anchor is off the day only by its zone''s offset');
+select lives_ok($$ select pgpm.set_regrain('public.z342', null) $$, 'z342''s target cleared again');
+select is(pg_temp.attempt(format('select pgpm.regrain(%L, %L, %L)', 'public.z342', :'z_mono', '1 month')), 'completed',
+  'regrain splits z342''s monolith into months');
+select is(pg_temp.cells('public.z342', '2024-07-01', '2024-10-01'),
+  'z342_p2024_07@31,32 z342_p2024_08@33 z342_p2024_09@34',
+  'each row of z342 is in the month cell of its date: 07-01 and 07-31 in July, 08-01 in August, 09-30 in September');
+select is(pg_temp.mismatch_in('public.z342', 'America/New_York'), 'none',
+  'and every z342 cell, minted or fine, is recorded at New York''s midnight on the dates the catalog attached it on');
+select throws_like(format('select pgpm.set_regrain(%L, %L)', 'public.z342', '1 day'),
+  'pg_partition_magician: cannot regrain z342 -- its grid is not on its control column dt''s unit: the column is date, which keeps whole days only, and the registered partition_anchor 2000-01-01 05:00:00+00 and partition_step 3 mons put a fixed step''s bounds off it%a regrain toward 1 day counts its fine cells from the anchor%',
+  'set_regrain refuses a 1-day target on z342');
+
+-- ============ the remedy the fixed-target refusal names, typed ============
+select throws_like(format('select pgpm.set_regrain(%L, %L)', 'public.r342', '1 day'),
+  'pg_partition_magician: cannot regrain r342 -- its grid is not on its control column dt''s unit%put a fixed step''s bounds off it%A whole number of months is not refused.%Re-convert the table: while every row is still in its original monolith, pgpm.untransmute(''r342'') hands it back and it can be transmuted again with an anchor and a step that are whole multiples of 1 day (an anchor at 00:00 UTC)%',
+  'set_regrain refuses a 1-day target on r342, naming the reconversion and, while every row is in the monolith, untransmute');
+select lives_ok($$ select pgpm.untransmute('r342') $$,
+  'the remedy as typed: untransmute hands r342 back, every row still being in its monolith');
+select is((select count(*)::int from pgpm.config where parent_table = 'public.r342'::regclass), 0,
+  'and r342 is no longer registered');
+call pgpm.transmute('public.r342', 'dt', interval '3 months', p_obtain => 1);
+select is((select partition_tz || '/' || partition_anchor || '/' || partition_step from pgpm.config
+            where parent_table = 'public.r342'::regclass),
+  'UTC/2000-01-01 00:00:00+00/3 mons',
+  'transmuted again, r342 is anchored at 00:00 UTC on the same 3-month step');
+select lives_ok($$ select pgpm.set_regrain('public.r342', '1 day') $$,
+  'and the 1-day target its noon anchor refused is accepted');
+select is((select regrain_to from pgpm.config where parent_table = 'public.r342'::regclass), '1 day',
+  'and stored');
+select lives_ok($$ select pgpm.set_regrain('public.r342', null) $$, 'r342''s target cleared again');
+select is((select string_agg(v, ',' order by id) from public.r342), 'r-0701,r-0731,r-0801',
+  'with every r342 row in place');
+
 -- ============ the upgrade says what is true of each ============
 select is((select count(*)::int from pgpm.log where action = 'warn_grid_off_unit'), 0,
   'LIVENESS: no grid was flagged before the upgrade');
@@ -232,5 +314,11 @@ select is((select string_agg(parent_table::text, ',' order by parent_table::text
               and method like '%is a whole number of months, whose bounds fall at midnight on the 1st of a month whatever the anchor''s time, so the partitions obtain mints are attached at the bounds pgpm.part records for them and a regrain toward a whole number of months is not refused, but a regrain toward a fixed step (days, hours) counts its fine cells from the anchor and is refused%'),
   'm342,t342',
   'm342''s and t342''s rows say their bounds are the ones pgpm.part records and only a fixed regrain is refused');
+select ok(exists (select 1 from pgpm.log where action = 'warn_grid_off_unit' and parent_table = 'public.z342'::regclass
+                    and method not like '%every partition obtain mints is attached at other bounds than pgpm.part records%'
+                    and method like '%the registered partition_anchor 2000-01-01 05:00:00+00 is not a whole multiple of 1 day: its partition_step 3 mons is a whole number of months, whose bounds fall at midnight on the 1st of a month whatever the anchor''s time%; and the column is date, which carries no zone, but the grid is recorded in partition_tz America/New_York rather than UTC%'),
+  'z342''s row says both: its month bounds are the ones pgpm.part records, and its grid is recorded in New York''s zone');
+select is((select count(*)::int from pgpm.log where action = 'warn_grid_off_unit' and parent_table = 'public.r342'::regclass), 0,
+  'and r342, re-converted by the remedy, is not flagged');
 
 select * from finish();

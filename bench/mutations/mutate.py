@@ -6165,7 +6165,7 @@ $$;''',
         "obtain mints is attached at other bounds than pgpm.part records for it and every regrain is refused, "
         "though a calendar step's bounds are midnight on the 1st whatever the anchor's time, and sends the "
         "operator to a reconversion for bounds that are right. One clause: the whole-month test in the upgrade "
-        "block. tests/342 catches it at m342's and t342's rows; f342's row (a fixed grid, where the claim is "
+        "block. tests/342 catches it at m342's, t342's and z342's rows; f342's row (a fixed grid, where the claim is "
         "true) and every regrain assertion still pass. F2-03's reproduction fails against it.",
         [("            and extract(year from cfg.partition_step::interval) * 12 + extract(month from cfg.partition_step::interval) <> 0\n",
           "            and extract(year from cfg.partition_step::interval) * 12 + extract(month from cfg.partition_step::interval) < 0\n", 1)],
@@ -6176,8 +6176,8 @@ $$;''',
         "whole-month grid anchored off its column's unit, so a 1-month target on a 3-month date grid anchored at "
         "noon (or a 2-month timestamptz(0) grid anchored 0.4 s off) is refused, though its fine bounds, like the "
         "grid's, are midnight on the 1st whatever the anchor's time. One clause: the fixed-target test. tests/342 "
-        "catches it at set_regrain's and regrain()'s 1-month runs of m342 and t342; the day and hour refusals and "
-        "f342's still pass.",
+        "catches it at set_regrain's and regrain()'s 1-month runs of m342, t342 and z342; the day and hour refusals, "
+        "f342's and r342's typed remedy still pass.",
         [("      elsif v_months = 0 then\n", "      else\n", 1)],
     ),
     "regrain_month_grid_encoded_anchor_month_target_refused": (

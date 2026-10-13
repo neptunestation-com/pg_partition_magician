@@ -13,9 +13,10 @@
   grid is accepted and its regrain completes with every fine bound the catalog's; a fixed target (days,
   hours) is still refused, with a message that names the anchor and says a whole number of months is not
   refused; the upgrade still logs the grid, now saying that its bounds agree and only a fixed regrain is
-  refused. A fixed grid anchored off the unit is refused and flagged as before, and so is a `text_time` grid
-  whose own epoch is off its unit (its midnight bounds are off it too). `transmute` still refuses an anchor off
-  the unit on any step. Test `tests/342`; guard `bench/month_grid_anchor_time.sh`, mutations
+  refused. A fixed grid anchored off the unit is refused and flagged as before, and so is a whole-month
+  `text_time` grid anchored off its unit whose own epoch is off the unit as well (its midnight bounds are then
+  off it too). `transmute` still refuses an anchor off the unit on any step. Test `tests/342`, which also types
+  the remedy the fixed-target refusal names; guard `bench/month_grid_anchor_time.sh`, mutations
   `upgrade_month_grid_anchor_bounds_claimed`, `regrain_month_grid_anchor_month_target_refused`,
   `regrain_month_grid_encoded_anchor_month_target_refused` and `regrain_month_grid_encoded_epoch_unasked`.
 
