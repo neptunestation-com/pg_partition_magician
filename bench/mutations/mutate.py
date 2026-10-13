@@ -14479,6 +14479,75 @@ MUTATIONS["restore_gate_any_kind_label"] = (
     [("     and pgpm._grid_can_label(cfg.control_kind, cfg.partition_step, cfg.partition_anchor, cfg.partition_tz,\n"
       "                              substr(c.relname, length(v_rel) + 3))\n", "", 1)],
 )
+# Issue #1287 and three more spellings on #1180 (review pass 12): scripts/check_archive_child_by_oid.py's rule 1
+# reads a cast to regclass in every spelling of the cast, and a relation's name as the name column named as data,
+# as an object's rendered identity and under a set operation. One mutation per clause of the fix, each putting one
+# spelling back; bench/lint_child_by_oid_cast_spellings.sh catches every one, on fixtures planted in the real module.
+_G1287 = "bench/lint_child_by_oid_cast_spellings.sh"
+_G1287_SRC = "scripts/check_archive_child_by_oid.py"
+MUTATIONS["archive_child_by_oid_cast_qualified_unread"] = (
+    _G1287,
+    "Pre-#1287 scripts/check_archive_child_by_oid.py: the type of a cast is matched as the bare word regclass, so "
+    "a name built at run time and cast as (v_nsp || '.' || v_rel)::pg_catalog.regclass passes rule 1 while the "
+    "same cast spelled ::regclass is refused. One site, the type's name.",
+    [('        if kind != "ID" or last_part(text) != RELATION_TYPE:\n',
+      '        if kind != "ID" or text != RELATION_TYPE:\n', 1)],
+)
+MUTATIONS["archive_child_by_oid_cast_as_unread"] = (
+    _G1287,
+    "Pre-#1287 scripts/check_archive_child_by_oid.py: CAST(x AS regclass) is no cast to rule 1, so a name built at "
+    "run time and cast as cast(v_nsp || '.' || v_rel as regclass) passes, and so does a local holding a relname "
+    "cast that way. One site, the CAST form.",
+    [('        elif tok(toks, q - 1)[1] == "as" and tok(toks, e + 1)[1] == ")" \\\n'
+      '                and last_part(tok(toks, match_open(toks, e + 1) - 1)[1]) == "cast":\n'
+      '            span = match_open(toks, e + 1) + 1, q - 2\n', "", 1)],
+)
+MUTATIONS["archive_child_by_oid_cast_call_unread"] = (
+    _G1287,
+    "Pre-#1287 scripts/check_archive_child_by_oid.py: the call form of the cast, regclass(x), is no cast to rule 1, "
+    "so a name built at run time and cast as regclass(v_nsp || '.' || v_rel) passes, and so does a local holding a "
+    "relname cast that way. One site, the call form.",
+    [('        elif tok(toks, k + 1)[1] == "(":\n'
+      '            span = k + 2, match_close(toks, k + 1) - 1\n', "", 1)],
+)
+MUTATIONS["archive_child_by_oid_cast_chain_unread"] = (
+    _G1287,
+    "scripts/check_archive_child_by_oid.py takes a cast to text on the way to regclass as it takes one to oid, a "
+    "value that is no name any more, so (v_nsp || '.' || v_rel)::text::regclass and a local cast as "
+    "v_rel::text::regclass pass rule 1 (the pre-#1287 rule read the token before ::regclass alone). One site, the "
+    "types that end a name.",
+    [("        if last_part(toks[c + 1][1]) in NUMBER_TYPES:\n",
+      "        if last_part(toks[c + 1][1]) in NUMBER_TYPES | TEXT_TYPES:\n", 1)],
+)
+MUTATIONS["archive_child_by_oid_data_read_unread"] = (
+    _G1287,
+    "Pre-fix scripts/check_archive_child_by_oid.py (#1180, F12r-06): a literal naming a name column is no name, so "
+    "a relation found by the column read as data out of its pg_class row, `where to_jsonb(c) ->> 'relname' = "
+    "v_rel`, passes rule 1 while `c.relname = v_rel` is refused. One site, the readings rule 1 judges.",
+    [("    data = named_as_data(toks)\n", "    data = []\n", 1)],
+)
+MUTATIONS["archive_child_by_oid_identity_unread"] = (
+    _G1287,
+    "Pre-fix scripts/check_archive_child_by_oid.py (#1180, F12r-06): an object's rendered identity is no name, so a "
+    "relation found by `(pg_identify_object('pg_class'::regclass, c.oid, 0)).identity = v_rel` passes rule 1 while "
+    "`c.oid::regclass::text = v_rel` is refused. One site, the renderings rule 1 judges.",
+    [("    said = identities(toks)\n", "    said = []\n", 1)],
+)
+MUTATIONS["archive_child_by_oid_set_operation_unread"] = (
+    _G1287,
+    "Pre-fix scripts/check_archive_child_by_oid.py (#1180, F12r-06): a name alone in a select list may stand "
+    "whatever its query is an operand of, so a relation found by `select c.relname, c.oid into ... intersect select "
+    "v_rel, c2.oid ...` passes rule 1 with no comparison token in sight. One site, the set operation's refusal.",
+    [('        op = set_operation(toks, *item) if clause_at[s] == "select" else None\n',
+      "        op = None\n", 1)],
+)
+MUTATION_SRC["archive_child_by_oid_cast_qualified_unread"] = _G1287_SRC
+MUTATION_SRC["archive_child_by_oid_cast_as_unread"] = _G1287_SRC
+MUTATION_SRC["archive_child_by_oid_cast_call_unread"] = _G1287_SRC
+MUTATION_SRC["archive_child_by_oid_cast_chain_unread"] = _G1287_SRC
+MUTATION_SRC["archive_child_by_oid_data_read_unread"] = _G1287_SRC
+MUTATION_SRC["archive_child_by_oid_identity_unread"] = _G1287_SRC
+MUTATION_SRC["archive_child_by_oid_set_operation_unread"] = _G1287_SRC
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

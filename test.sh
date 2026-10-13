@@ -1122,6 +1122,7 @@ run_perf() {
     "bench/archive_keys_row_read.sh pgpm_perf349"
     "bench/archive_keys_inverse_rule.sh pgpm_perf386"
     "bench/lint_child_by_oid_inverse.sh pgpm_perf348"
+    "bench/lint_child_by_oid_cast_spellings.sh pgpm_perf387"
     "bench/tap_verdict.sh pgpm_perf80"
     "bench/retire_straddle.sh pgpm_perf81"
     "bench/archive_overclaim.sh pgpm_perf82"
