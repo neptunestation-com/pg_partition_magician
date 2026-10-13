@@ -30,10 +30,20 @@
 -- for the URL the signer built (its authority, a trailing ':80' left out), and MinIO checks the signature
 -- against that Host. A percent-encoded dot segment ('%2E%2E') is refused like a spelled one (part F).
 --
+-- And two things the fourth round found the refusals did not keep (V-01 and V-03). 'No host' was on the list of
+-- what configure refuses, but an endpoint with a port and no host ('http://:9000') passed the check, was stored,
+-- and every request through it died in the client ('No host part in the URL'): part I refuses it, and types the
+-- remedy its message gives. And the refusals quoted the value they refused, so credentials spelled where the
+-- credentials check did not look ('//user:password@host', 'http:/user:password@host') were printed whole by the
+-- refusal that did fire. Part J states the rule for every refusal archive.configure can raise, ten of them, each
+-- reached with a value carrying a password before an '@': the message is that refusal's own, and the password
+-- is not in it. A refusal still quotes a value that holds no '@' (part J's first four lines), so the absence is
+-- the rule's doing and not a message that shows nothing.
+--
 -- Each export's object is stated by identity (the rows it holds, two of them, by id and payload), its key
 -- cleared and witnessed absent first, because the bucket outlives the test database; the prefix carries the
 -- database's name so a parallel run of this file in another database cannot meet it.
-select plan(61);
+select plan(89);
 
 create schema t53;
 create table t53.evt (id bigint primary key, payload text not null);
@@ -215,6 +225,84 @@ select is((t53.req('DELETE', :'k')).status, 204, 'LIVENESS: the object is cleare
 update archive.config set endpoint = 'http://minio:80' where parent_table = 't53.evt'::regclass;
 select is(t53.export_port80(), 'ok', 'an export through a row stored by hand with the default port is not refused by the store');
 select is(t53.held(:'k'), '1:one,2:two', 'and its object lands at the key holding both rows');
-select is((t53.req('DELETE', :'k')).status, 204, 'LIVENESS: the object is cleared at the end');
+select is((t53.req('DELETE', :'k')).status, 204, 'LIVENESS: the object is cleared after the default-port exports');
+
+-- ---- I. an endpoint with a port and no host is refused, and the remedy its message gives exports ------------------
+select t53.cfg('http://minio:9000');
+select err as nohost_err from t53.err($$ select t53.cfg('http://:9000') $$) err \gset
+select ok(:'nohost_err' like '%p_endpoint has no host before its port%',
+  'an endpoint with a port and no host is refused, naming p_endpoint (got: ' || :'nohost_err' || ')');
+select throws_like($$ select t53.cfg('http://:9000/storage/v1/s3/') $$, '%p_endpoint has no host before its port%',
+  'and so is one with a path prefix after the port');
+select throws_like($$ select t53.cfg('https://:8443') $$, '%p_endpoint has no host before its port%',
+  'and an https:// one');
+select throws_like($$ select t53.cfg('http://:80') $$, '%p_endpoint must be null (AWS S3) or%',
+  'the default port and no host is nothing after the scheme, refused as that, naming p_endpoint');
+select is(t53.stored(), 'http://minio:9000', 'the host-less endpoints leave the stored row as it was');
+-- what the refusal reads is an empty host, not a colon: an IPv6 literal's authority starts with '[' and holds several
+select t53.cfg('http://[::1]:9000');
+select is(t53.stored(), 'http://[::1]:9000', 'LIVENESS: an endpoint whose host is an IPv6 literal is not read as host-less');
+-- the remedy, as the message gives it: the store's host name between the scheme and the port
+select t53.cfg('http://minio:9000');
+select is(t53.export(), 'ok', 'the no-host refusal''s remedy (the host name before the port) exports');
+select is(t53.held(:'k'), '1:one,2:two', 'and its object lands at the key holding both rows');
+select is((t53.req('DELETE', :'k')).status, 204, 'LIVENESS: the object is cleared');
+
+-- ---- J. no refusal of archive.configure prints a value that holds an '@' ------------------------------------------
+-- A refusal's answer to one call, judged: which refusal it is (the witness that the value reached the branch named),
+-- and whether the password typed before the '@' is in it.
+create function t53.judge(p_sql text, p_refusal text) returns text language sql as $$
+  select case when m not like p_refusal then 'another answer: ' || replace(m, 's3cr3t', '<the password>')
+              when m like '%s3cr3t%' then 'that refusal, printing the password'
+              else 'that refusal, without the password' end
+    from t53.err(p_sql) m $$;
+-- the refusals that quote a value do quote one that holds no '@'
+select ok(t53.err($$ select t53.cfg('minio:9000') $$) like '%not ''minio:9000''',
+  'the format refusal quotes the value it refuses when that holds no ''@''');
+select ok(t53.err($$ select t53.cfg('http://:9000') $$) like '%not ''http://:9000''',
+  'and so does the no-host refusal');
+select ok(t53.err($$ select t53.cfg('http://minio:9000/./s3') $$) like '%not ''http://minio:9000/./s3''',
+  'and the path-segment refusal');
+select ok(t53.err($$ select t53.cfgb('/archive-test-bucket') $$) like '%not ''/archive-test-bucket''',
+  'and the bucket refusal');
+-- the credentials refusal, which the three spellings below it used to miss
+select is(t53.judge($$ select t53.cfg('http://user:s3cr3t@minio:9000') $$, '%p_endpoint must not carry credentials%'),
+  'that refusal, without the password', 'the credentials refusal does not print the password');
+-- the format refusal: credentials where the credentials check does not look for them
+select is(t53.judge($$ select t53.cfg('//user:s3cr3t@minio:9000') $$, '%p_endpoint must be null (AWS S3) or%'),
+  'that refusal, without the password', 'the format refusal of //user:password@host does not print the password');
+select is(t53.judge($$ select t53.cfg('http:/user:s3cr3t@minio:9000') $$, '%p_endpoint must be null (AWS S3) or%'),
+  'that refusal, without the password', 'nor that of http:/user:password@host');
+select is(t53.judge($$ select t53.cfg('http:///user:s3cr3t@minio:9000') $$, '%p_endpoint must be null (AWS S3) or%'),
+  'that refusal, without the password', 'nor that of http:///user:password@host');
+select is(t53.judge($$ select t53.cfg('http://user:pa/s3cr3t@minio:9000?x=1') $$, '%p_endpoint must be null (AWS S3) or%'),
+  'that refusal, without the password', 'nor that of a password holding a ''/'', before a query string');
+select is(t53.judge($$ select t53.cfg('http:/user:p@s3cr3t') $$, '%p_endpoint must be null (AWS S3) or%'),
+  'that refusal, without the password', 'nor that of a password holding an ''@'' itself, which no host follows');
+-- the no-host and path-segment refusals, reached with an '@' in the path
+select is(t53.judge($$ select t53.cfg('http://:9000/user:s3cr3t@minio') $$, '%p_endpoint has no host before its port%'),
+  'that refusal, without the password', 'the no-host refusal does not print what precedes an ''@''');
+select is(t53.judge($$ select t53.cfg('http://minio:9000/./user:s3cr3t@minio') $$, '%p_endpoint''s path prefix must not hold%'),
+  'that refusal, without the password', 'the path-segment refusal does not print what precedes an ''@''');
+-- the bucket refusal, reached with the store's whole URL, credentials and all, typed as the bucket
+select is(t53.judge($$ select t53.cfgb('http://user:s3cr3t@minio:9000/archive-test-bucket') $$, '%p_bucket must be a bare bucket name%'),
+  'that refusal, without the password', 'the bucket refusal does not print what precedes an ''@''');
+-- and the five refusals that quote no text value, each raised before the endpoint is read
+create function t53.cfgx(p_parent regclass, p_bucket text, p_part_bytes bigint, p_fetch_rows int) returns void language sql as $$
+  select archive.configure(p_parent, p_bucket, p_endpoint => 'http://user:s3cr3t@minio:9000',
+                           p_prefix => current_setting('t53.p'), p_part_bytes => p_part_bytes, p_fetch_rows => p_fetch_rows) $$;
+create table t53.unmanaged (id bigint primary key);
+select is(t53.judge($$ select t53.cfgx('t53.evt', null, 8388608, 20000) $$, '%archive.configure does not accept null for p_bucket%'),
+  'that refusal, without the password', 'the null-argument refusal does not print the endpoint''s password');
+select is(t53.judge($$ select t53.cfgx('t53.unmanaged', 'archive-test-bucket', 8388608, 20000) $$, '%t53.unmanaged is not managed by pgpm%'),
+  'that refusal, without the password', 'nor the unmanaged-table refusal');
+select is(t53.judge($$ select t53.cfgx('t53.evt', 'archive-test-bucket', 0, 20000) $$, '%p_part_bytes must be a positive number of bytes%'),
+  'that refusal, without the password', 'nor the part-size refusal');
+select is(t53.judge($$ select t53.cfgx('t53.evt', 'archive-test-bucket', 1, 20000) $$, '%p_part_bytes must be at least 5242880 bytes%'),
+  'that refusal, without the password', 'nor the smallest-part refusal');
+select is(t53.judge($$ select t53.cfgx('t53.evt', 'archive-test-bucket', 8388608, 0) $$, '%p_fetch_rows must be a positive number of rows%'),
+  'that refusal, without the password', 'nor the page-size refusal');
+select is(t53.stored() || ' ' || t53.bucket(), 'http://minio:9000 archive-test-bucket',
+  'and every one of them leaves the stored row as it was');
 
 select * from finish();

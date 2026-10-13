@@ -33,25 +33,35 @@ parameters (`p_region`, `p_endpoint` for S3-compatible stores like MinIO or Supa
 `p_prefix`, `p_compress`, etc.) all have sensible defaults -- pass only what you need to override.
 `p_endpoint` is null for AWS S3 itself, or the `http://` or `https://` URL of the store, a host and
 optionally a path prefix (Supabase Storage's is `https://<project-ref>.supabase.co/storage/v1/s3`).
-`archive.configure` stores it in a canonical form, and the signers use the same form:
+`archive.configure` stores it in a canonical form, which the signers also apply to the endpoint they
+are handed, and refuses the spellings below before it writes anything:
 
-- trailing slashes are dropped (`http://minio:9000/` is `http://minio:9000`);
-- the scheme's default port is dropped (`http://host:80` is `http://host`, `https://host:443` is
-  `https://host`); any other port is kept.
+- **Canonical form**: trailing slashes are dropped (`http://minio:9000/` is `http://minio:9000`).
+- **Canonical form**: the scheme's default port, spelled `:80` after `http://` or `:443` after
+  `https://`, is dropped (`http://host:80` is `http://host`, `https://host:443` is `https://host`). A
+  port spelled any other way is kept as written.
+- **Refused, naming `p_endpoint`**: a value that does not start with `http://` or `https://`.
+- **Refused, naming `p_endpoint`**: a value with no host, which is one with nothing after the scheme
+  (`http://`), nothing before the next `/` (`http:///s3`), or a `:` with nothing before it
+  (`http://:9000`).
+- **Refused, naming `p_endpoint`**: a value holding a `?`, a `#` or whitespace (a query string, a
+  fragment).
+- **Refused, naming `p_endpoint`**: a value with an `@` before the first `/` after `<scheme>://`, or
+  before its first `/` when it has no `<scheme>://` (credentials before the host:
+  `http://user:password@host`). Name the Vault secrets in `p_vault_key_id` and `p_vault_secret` instead.
+- **Refused, naming `p_endpoint`**: a path prefix with an empty, `.` or `..` segment, each dot spelled
+  `.`, `%2E` or `%2e`.
+- **Refused, naming `p_bucket`**: a bucket holding a `/` (a key path goes in `p_prefix`), a `?`, a `#`
+  or whitespace, or one that is empty, `.` or `..`.
+- **Never shown**: no refusal `archive.configure` raises quotes a value that holds an `@`, whichever
+  check raises it. A refused value with no `@` in it is quoted as given.
 
-It refuses, naming `p_endpoint`:
+That list is the limit of what `archive.configure` checks about the endpoint and the bucket. Any other
+spelling the client or the store cannot take is accepted there and fails loudly at the first request,
+with the client's error or the store's HTTP status, and no object is written: a port spelled `:09000`
+or `:080`, or a `:` with no port after it (`http://host:`); a password holding a `/`
+(`http://user:pa/ss@host`, which reads as the host `user`); a host that does not resolve.
 
-- a value with no `http://` or `https://` scheme, or no host;
-- a query string or a fragment;
-- credentials before the host (`user@` or `user:password@`; the message does not echo them): name the
-  Vault secrets in `p_vault_key_id` and `p_vault_secret` instead;
-- a path prefix with an empty, `.` or `..` segment, the dots spelled or percent-encoded (`%2E`).
-
-And it refuses, naming `p_bucket`, a bucket that is not a bare bucket name: one holding a `/` (put a
-key path in `p_prefix`), a `?`, a `#` or whitespace, or one that is empty, `.` or `..`. Those are the
-only endpoint and bucket checks. Any other spelling the store cannot take is not caught at
-`archive.configure`: it fails loudly at the first request, with the store's HTTP status in the error,
-and nothing is written.
 `p_part_bytes` (the size of each `archive.to_s3` multipart part, 8 MiB by default) must be at least
 5 MiB, the smallest non-final multipart part S3 accepts: `archive.configure` refuses anything smaller,
 and `archive.to_s3` refuses a row holding zero or less before it sends anything. A positive size under

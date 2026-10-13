@@ -13394,8 +13394,8 @@ MUTATIONS["archive_endpoint_userinfo_unrefused"] = (
     "bench/archive_configure_endpoint.sh",
     "archive.configure takes an endpoint with credentials before the host ('http://user@host:9000'): the signers "
     "sign 'user@host:9000' as the Host while the client sends 'host:9000', so every request is refused 403 "
-    "SignatureDoesNotMatch after the read, and the shape refusal below it echoes the password of a scheme-less one. "
-    "One clause, the refusal. tests/archive/db/53 part F catches it (none is refused as carrying credentials).",
+    "SignatureDoesNotMatch after the read. One clause, the refusal. tests/archive/db/53 part F catches it (none is "
+    "refused as carrying credentials).",
     [("  if regexp_replace(v_endpoint, '^[^:/?#]*://', '') ~ '^[^/]*@' then\n", "  if false then\n", 1)],
 )
 MUTATION_SRC["archive_endpoint_userinfo_unrefused"] = "pgpm_archive/install.sql"
@@ -13437,6 +13437,28 @@ MUTATIONS["archive_bucket_unrefused"] = (
     [("  if p_bucket !~ '^[^/?#[:space:]]+$' or p_bucket in ('.', '..') then\n", "  if false then\n", 1)],
 )
 MUTATION_SRC["archive_bucket_unrefused"] = "pgpm_archive/install.sql"
+# PR #1301's fourth verification round (V-01 and V-03): 'no host' covers a port with no host before it, and no
+# refusal of archive.configure prints a value that holds an '@'. Caught by tests/archive/db/53 parts I and J.
+MUTATIONS["archive_endpoint_empty_host_unrefused"] = (
+    "bench/archive_configure_endpoint.sh",
+    "archive.configure takes an endpoint with a port and no host ('http://:9000'): the format check reads the "
+    "':9000' as the host, the endpoint is stored, and the client refuses to send any request to it ('No host part "
+    "in the URL'), so every export and every tick's chunk fails after the read. One clause, the refusal. "
+    "tests/archive/db/53 part I catches it (the three host-less spellings are taken and replace the stored row).",
+    [("  if v_endpoint ~ '^https?://:' then\n", "  if false then\n", 1)],
+)
+MUTATION_SRC["archive_endpoint_empty_host_unrefused"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_configure_refusal_shows_userinfo"] = (
+    "bench/archive_configure_endpoint.sh",
+    "archive._configure_shown quotes every value, one holding an '@' included, so a refusal of archive.configure "
+    "prints the password of an endpoint whose credentials the credentials check does not recognise "
+    "('//user:password@host', 'http:/user:password@host', 'http:///user:password@host', a password holding a '/' "
+    "before a query string), and of a URL with credentials typed as the bucket, into the client's error and the "
+    "server log. One clause, the test for an '@'. tests/archive/db/53 part J catches it (the format, no-host, "
+    "path-segment and bucket refusals each print the password).",
+    [("  if p_value like '%@%' then\n", "  if false then\n", 1)],
+)
+MUTATION_SRC["archive_configure_refusal_shows_userinfo"] = "pgpm_archive/install.sql"
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

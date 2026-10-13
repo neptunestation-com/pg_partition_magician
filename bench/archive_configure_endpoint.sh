@@ -8,11 +8,12 @@
 # the endpoint without them, both signers drop them from the endpoint they are handed, and an export through an
 # endpoint spelled 'http://minio:9000/' lands at the key instead of failing every PUT with HTTP 400 at
 # '//<bucket>/<key>'. And configure refuses by name an endpoint the signers cannot use (no http(s) scheme, no
-# host, a query string or a fragment; credentials before the host; an empty, '.' or '..' path segment, spelled
-# or percent-encoded; the scheme's default port is canonicalised away rather than refused) and a
-# bucket that is not a bare bucket name ('/my-bucket' addressed '//my-bucket/<key>'). The file's own witnesses (the same export through the endpoint spelled
-# without the slash lands both rows, each key cleared and witnessed absent first) say the store was reachable;
-# a failure of a LIVENESS witness alone is reported as that, not as a catch.
+# host, a port with no host before it, a query string or a fragment; credentials before the host; an empty, '.'
+# or '..' path segment, spelled or percent-encoded; the scheme's default port is canonicalised away rather than
+# refused) and a bucket that is not a bare bucket name ('/my-bucket' addressed '//my-bucket/<key>'), and none of
+# its refusals prints a value that holds an '@'. The file's own witnesses (the same export through the endpoint
+# spelled without the slash lands both rows, each key cleared and witnessed absent first) say the store was
+# reachable; a failure of a LIVENESS witness alone is reported as that, not as a catch.
 #
 # The mutations it is required to fail against (bench/mutations/mutate.py):
 #   archive_endpoint_trailing_slash_kept -- archive._s3_endpoint_canonical hands the endpoint back as given, so
@@ -30,6 +31,11 @@
 #                                           so the store refuses every request 403 (part H, through a
 #                                           transport stand-in that sends what a store on port 80 receives)
 #   archive_endpoint_encoded_dot_segment_unrefused -- configure takes a '%2E%2E' or '%2e' path segment (part F)
+#   archive_endpoint_empty_host_unrefused -- configure takes 'http://:9000', a port with no host before it, which
+#                                           the client refuses to send any request to (part I)
+#   archive_configure_refusal_shows_userinfo -- a refusal quotes a value that holds an '@', so credentials the
+#                                           credentials check does not recognise are printed by the refusal
+#                                           that does fire (part J)
 #
 # Usage: archive_configure_endpoint.sh <container> <db> [archive install.sql]
 # Needs the archive image (pgsql-http + pgtap + pg_prove) AND MinIO on the same network: the file PUTs and
