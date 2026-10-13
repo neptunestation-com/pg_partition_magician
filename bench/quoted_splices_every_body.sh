@@ -26,6 +26,8 @@
 #
 # The mutations it is required to fail against (bench/mutations/mutate.py):
 #   quoted_splices_loop_target_unread   -- a FOR or FOREACH loop's target is not an assignment (F8-01, F12-06)
+#   quoted_splices_loop_first_branch    -- a loop over a set operation is given its first branch's list only
+#   quoted_splices_scan_in_quoted_names -- a `..` or `loop` inside a quoted name is read as the loop's structure
 #   quoted_splices_execute_into_unread  -- an EXECUTE's INTO is not an assignment (F8-01)
 #   quoted_splices_bare_dollar_bodies   -- only a body tagged with the bare `$$` is read (F8-08)
 #   quoted_splices_block_comment_kept   -- a block comment is not blanked (B08-01, F12-03)
@@ -134,6 +136,13 @@ SHAPES = [
      "<<outer>> for v_cols in execute 'select quote_ident(''Foo Bar'')' loop null; end loop;", "$$", ""),
     ("g20_foreach", "a FOREACH ... IN ARRAY loop's target", "v_cols text",
      f"foreach v_cols in array array[{QI}] loop null; end loop;", "$$", ""),
+    # a set operation returns every branch's rows; a `..` or `loop` in a quoted name is part of the name
+    ("g20_for_union", "a FOR target quoted by a UNION's second branch", "v_cols text",
+     f"for v_cols in select 'x' where false union all select {QI} loop null; end loop;", "$$", ""),
+    ("g20_for_dots", "a FOR loop's target beside a column named \"a..b\"", "v_cols text",
+     f"for v_cols in select {QI} as \"a..b\" loop null; end loop;", "$$", ""),
+    ("g20_for_kw", "a FOR loop's target after a column named \"loop\"", "v_cols text",
+     f"for v_x, v_cols in select 'x' as \"loop\", {QI} loop null; end loop;", "$$", ""),
     # #1278, F8-01: an EXECUTE's INTO
     ("g20_exec", "an EXECUTE ... INTO target", "v_cols text",
      "execute 'select quote_ident(''Foo Bar'')' into v_cols;", "$$", ""),

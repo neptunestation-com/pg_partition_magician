@@ -2,18 +2,22 @@
 
 ## [Unreleased]
 
-- **The `_q` lint reads every body and every assignment PL/pgSQL makes** (#1278).
-  `scripts/check_quoted_splices.py` found bodies by splitting each install file on the bare `$$`, so a function
-  whose body was dollar-quoted with any other tag (`$fn$`) was never read, and it never read a FOR loop's target
-  as an assignment, so an unmarked text local given `quote_ident` output by `for v_cols in select ... loop` passed
-  while its SELECT INTO twin was refused. Bodies are now found by lexing the file (comments, literals and quoted
-  identifiers stepped over), every dollar-quoted string whatever its tag; a FOR or FOREACH loop's target is
-  paired with the loop's values (a query's list, a `for ... in execute` statement's, a FOREACH's array), and an
-  EXECUTE's INTO target with the list of the dynamic statement it spells out, so `execute 'select
-  quote_ident(...)' into v` is read while a template's own `%I`, which quotes a name in that statement and not
-  the value coming back, is not. The three install files read the same bodies and judge the same 82 quoting
-  assignments, none of them a violation. Guard `bench/quoted_splices_every_body.sh`, mutations
-  `quoted_splices_loop_target_unread`, `quoted_splices_execute_into_unread` and
+- **The `_q` lint reads every dollar-quoted body, and a loop's target and an EXECUTE's INTO as assignments**
+  (#1278). `scripts/check_quoted_splices.py` found bodies by splitting each install file on the bare `$$`, so a
+  function whose body was dollar-quoted with any other tag (`$fn$`) was never read, and it never read a FOR
+  loop's target as an assignment, so an unmarked text local given `quote_ident` output by `for v_cols in select
+  ... loop` passed while its SELECT INTO twin was refused. Bodies are now found by lexing the file (comments,
+  literals and quoted identifiers stepped over), every dollar-quoted string whatever its tag; a FOR or FOREACH
+  loop's target is paired with the loop's values (a query's list, every branch's when the query is a set
+  operation; a `for ... in execute` statement's; a FOREACH's array), and an EXECUTE's INTO target with the list
+  of the dynamic statement its own expression spells out, so `execute 'select quote_ident(...)' into v` is read
+  while a template's own `%I`, which quotes a name in that statement and not the value coming back, is not. A
+  `..` or the word `loop` inside a quoted name of a loop's query is part of the name. Still not read, and listed
+  in the script's docstring: a FETCH's INTO, an EXECUTE whose statement arrives in a variable, a CALL's INOUT
+  argument, a parameter, a record's field. The three install files read the same bodies and judge the same 82
+  quoting assignments, none of them a violation. Guard `bench/quoted_splices_every_body.sh`, mutations
+  `quoted_splices_loop_target_unread`, `quoted_splices_loop_first_branch`,
+  `quoted_splices_scan_in_quoted_names`, `quoted_splices_execute_into_unread` and
   `quoted_splices_bare_dollar_bodies`.
 - **The `_q` lint lexes block comments and escape strings** (#1236, bullets B08-01 and B08-02).
   `strip_noise()` blanked `--` comments but not `/* */` ones, so a block comment before an assignment kept it

@@ -11474,6 +11474,23 @@ MUTATIONS["quoted_splices_loop_target_unread"] = (
     [("\n    yield from loop_targets(clean, raw)\n", "\n", 1)],
 )
 MUTATION_SRC["quoted_splices_loop_target_unread"] = "scripts/check_quoted_splices.py"
+MUTATIONS["quoted_splices_loop_first_branch"] = (
+    "bench/quoted_splices_every_body.sh",
+    "scripts/check_quoted_splices.py reading a set operation by its first branch: `for v_cols in select 'x' union "
+    "all select quote_ident(attname) ... loop` gives an unmarked text local every branch's rows, the quoted names "
+    "included, and only the first SELECT's list is judged. One site, the branches value_list() reads.",
+    [("    for head in heads:\n", "    for head in heads[:1]:\n", 1)],
+)
+MUTATION_SRC["quoted_splices_loop_first_branch"] = "scripts/check_quoted_splices.py"
+MUTATIONS["quoted_splices_scan_in_quoted_names"] = (
+    "bench/quoted_splices_every_body.sh",
+    "scripts/check_quoted_splices.py reading a loop's structure inside its quoted names: a column aliased "
+    "\"a..b\" makes a query loop an integer loop, and one named \"loop\" ends the loop's head early, so the "
+    "unmarked text target of either is never judged. One site, the text bare() hands the scans.",
+    [("""    return QUOTED_NAME.sub(lambda m: '"' + "_" * (len(m.group(0)) - 2) + '"', clean)\n""",
+      "    return clean\n", 1)],
+)
+MUTATION_SRC["quoted_splices_scan_in_quoted_names"] = "scripts/check_quoted_splices.py"
 MUTATIONS["quoted_splices_execute_into_unread"] = (
     "bench/quoted_splices_every_body.sh",
     "Pre-#1278 scripts/check_quoted_splices.py: an EXECUTE's INTO is not an assignment, so `execute 'select "

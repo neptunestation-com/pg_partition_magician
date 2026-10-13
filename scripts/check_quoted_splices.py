@@ -49,11 +49,18 @@ a call is a call however it is cased, spaced, quoted or schema-qualified (`QUOTE
 format(`), a name is the name PL/pgSQL resolves (`V_COLS` is `v_cols`), and a type is the type it names
 (`pg_catalog.text`, `"text"`, `varchar(200)`, `character varying`).
 
-And every BODY and every way PL/pgSQL assigns is read (#1278, #1236): a body is every dollar-quoted string
-of the file, whatever its tag (`$$`, `$fn$`), found by lexing the file rather than splitting it on `$$`; a
-FOR or FOREACH loop's target is assigned the loop's values as an INTO's target is, and an EXECUTE's INTO
-target the list of the dynamic statement it runs; and a body is lexed for `/* block */` comments as well as
+And every BODY is read, and a loop's target and an EXECUTE's INTO are assignments too (#1278, #1236): a body
+is every dollar-quoted string of the file, whatever its tag (`$$`, `$fn$`), found by lexing the file rather
+than splitting it on `$$`; a FOR or FOREACH loop's target is assigned the loop's values as an INTO's target
+is (every branch's, when the loop's query is a set operation), and an EXECUTE's INTO target the list of the
+dynamic statement its own expression spells out; and a body is lexed for `/* block */` comments as well as
 `-- line` ones, and for an escape string's backslash (`E'it\\'s'` is one literal).
+
+What is still NOT read, so nobody takes the list above for more than it is: a FETCH's INTO (the cursor's
+query is declared or opened somewhere else), an EXECUTE whose statement arrives in a variable (`execute
+v_sql into v`: the value list is not in the statement that assigns), a CALL's INOUT argument, a parameter
+(only DECLAREd locals are typed), a field of a record, and a dollar-quoted string nested inside a body
+(#1236, B08-03: strip_noise reads it as code).
 
   ./scripts/check_quoted_splices.py            # check the module
   ./scripts/check_quoted_splices.py --selftest # prove the checks fail when their defect is present
@@ -453,22 +460,40 @@ VALUE_HEAD = re.compile(
 QUERY_START = re.compile(r"(?is)\s*(?:\(|(?:select|with|values|table|insert|update|delete|merge)(?![\w$]))")
 
 
+QUOTED_NAME = re.compile(r'"(?:[^"]|"")*"')
+
+
+def bare(clean: str) -> str:
+    """`clean` (strip_noise'd) with the text inside every double-quoted identifier replaced by `_`, character
+    for character, so an offset into one is an offset into the other. A statement's STRUCTURE is read from
+    this: a keyword, a `..` or a parenthesis written inside a quoted name (`select quote_ident(a) as "a..b"`,
+    a column named "loop") is part of a name, not of the statement, and reading it as structure hid the loop
+    it stood in. The values are still cut out of `clean`, where a name keeps its spelling."""
+    return QUOTED_NAME.sub(lambda m: '"' + "_" * (len(m.group(0)) - 2) + '"', clean)
+
+
 def value_list(query: str) -> list:
     """The expressions a query (strip_noise'd) returns, in order: its RETURNING list when it has a top-level
-    one, else the list of its first top-level SELECT, cut where the clause after it starts. A query with
-    neither (VALUES, a parenthesised query) is judged whole, as one item."""
-    top = depth0(query)
-    heads = [k for k in VALUE_HEAD.finditer(query) if k.start() in top]
+    one, else the list of its top-level SELECT, cut where the clause after it starts. A set operation has a
+    top-level SELECT for each branch and returns every branch's rows, so each column is judged on every
+    branch's item for it (`select 'x' union all select quote_ident(a)` returns quoted names); branches whose
+    lists cannot be paired are judged whole, as one item, and so is a query with neither head (VALUES, a
+    parenthesised query). The structure is read from bare()."""
+    shape = bare(query)
+    top = depth0(shape)
+    heads = [k for k in VALUE_HEAD.finditer(shape) if k.start() in top]
     rets = [k for k in heads if k.group("ret")]
     if not heads:
         return [query]
-    head = rets[-1] if rets else heads[0]
-    lst = query[head.end():]
-    if not head.group("ret"):
-        ends = [k.start() for k in LIST_END.finditer(lst) if head.end() + k.start() in top]
-        if ends:
-            lst = lst[:ends[0]]
-    return [e.strip() for e in split_top_level(lst, ",")]
+    if rets:
+        return [e.strip() for e in split_top_level(query[rets[-1].end():], ",")]
+    lists = []
+    for head in heads:
+        ends = [k.start() for k in LIST_END.finditer(shape, head.end()) if k.start() in top]
+        lists.append([e.strip() for e in split_top_level(query[head.end():ends[0] if ends else len(query)], ",")])
+    if len({len(lst) for lst in lists}) != 1:
+        return [query]
+    return [" , ".join(col) for col in zip(*lists)]
 
 
 def paired(targets_text: str, values: list):
@@ -558,23 +583,25 @@ def loop_targets(clean: str, raw: str):
     targets are paired with its value list (value_list()), a `for ... in execute` loop's with the dynamic
     statement's (dynamic_values()), and a FOREACH's are judged on the array expression. An integer loop
     (`for i in 1..n`, `in reverse`) assigns an integer and a cursor loop (`for r in cur`) a record; neither
-    is read.
+    is read. Which kind a loop is, and where its head ends, is read from bare(): a `..` or the word `loop`
+    inside a quoted name of the loop's query is neither an integer range nor the end of the head.
     """
+    shape = bare(clean)
     for m in LOOP_HEAD.finditer(clean):
-        end = top_keyword(clean, m.end(), "loop")
+        end = top_keyword(shape, m.end(), "loop")
         if end is None:
             continue
-        src = clean[m.end():end.start()]
+        src, form = clean[m.end():end.start()], shape[m.end():end.start()]
         if m.group("kw").lower() == "foreach":
             values = [re.sub(r"(?is)^\s*array(?![\w$])", "", src).strip()]
-        elif re.match(r"(?is)\s*reverse(?![\w$])", src) or ".." in src:
+        elif re.match(r"(?is)\s*reverse(?![\w$])", form) or ".." in form:
             continue
-        elif re.match(r"(?is)\s*execute(?![\w$])", src):
-            using = top_keyword(clean, m.end(), "using|loop")
+        elif re.match(r"(?is)\s*execute(?![\w$])", form):
+            using = top_keyword(shape, m.end(), "using|loop")
             stop = using.start() if using else end.start()
-            start = re.match(r"(?is)\s*execute", src).end() + m.end()
+            start = re.match(r"(?is)\s*execute", form).end() + m.end()
             values = dynamic_values(raw[start:stop])
-        elif QUERY_START.match(src):
+        elif QUERY_START.match(form):
             values = value_list(src)
         else:
             continue
@@ -589,17 +616,20 @@ def execute_into(clean: str, raw: str):
     """Yield (target, expression, offset) for the INTO of every EXECUTE (#1278, F8-01): the target is given
     the value list of the dynamic statement (dynamic_values()). PL/pgSQL takes INTO and USING after the
     command string in either order; an EXECUTE ended by LOOP is a `for ... in execute` loop's, read by
-    loop_targets(), and one with no INTO assigns nothing."""
-    for st in re.finditer(r"[^;]+", clean):
-        stmt, base = st.group(0), st.start()
-        top = depth0(stmt)
-        for e in EXECUTE.finditer(stmt):
+    loop_targets(), and one with no INTO assigns nothing. The statement read is the one the EXECUTE's own
+    expression spells out; one that arrives in a variable (`execute v_sql into v`) has no list to read here.
+    Where the command string ends is read from bare(), as a loop's head is."""
+    for st in re.finditer(r"[^;]+", bare(clean)):
+        form, base = st.group(0), st.start()
+        stmt = clean[base:st.end()]
+        top = depth0(form)
+        for e in EXECUTE.finditer(form):
             if e.start() not in top:
                 continue
-            first = top_keyword(stmt, e.end(), "into|using|loop")
+            first = top_keyword(form, e.end(), "into|using|loop")
             if first is None or first.group(0).lower() == "loop":
                 continue
-            into = first if first.group(0).lower() == "into" else top_keyword(stmt, first.end(), "into|loop")
+            into = first if first.group(0).lower() == "into" else top_keyword(form, first.end(), "into|loop")
             if into is None or into.group(0).lower() != "into":
                 continue
             m = INTO.match(stmt, into.start())
@@ -761,6 +791,13 @@ SHAPES = {
         "v_cols text", "for v_cols in execute 'select quote_ident(''c'')' loop null; end loop;"),
     "assigned as a FOREACH loop's target": (
         "v_cols text", "foreach v_cols in array array[quote_ident('c')] loop null; end loop;"),
+    # a set operation returns every branch's rows, and a quoted name in a loop's query is a name
+    "assigned as a FOR loop's target by a UNION's second branch": (
+        "v_cols text", "for v_cols in select 'x' union all select quote_ident('c') loop null; end loop;"),
+    "assigned as a FOR loop's target beside a column named \"a..b\"": (
+        "v_cols text", "for v_cols in select quote_ident('c') as \"a..b\" loop null; end loop;"),
+    "assigned as a FOR loop's target after a column named \"loop\"": (
+        "v_cols text; v_x text", "for v_x, v_cols in select 'x' as \"loop\", quote_ident('c') loop null; end loop;"),
     "assigned by EXECUTE ... INTO": ("v_cols text", "execute 'select quote_ident(''c'')' into v_cols;"),
     "assigned by EXECUTE format() USING ... INTO": (
         "v_cols text", "execute format('select quote_ident($1) from %I.t', v_nsp) using 'c' into strict v_cols;"),
