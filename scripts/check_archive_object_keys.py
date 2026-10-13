@@ -24,7 +24,11 @@ parameter had another name assembled a second key it passed). A PREFIX REFERENCE
     same column, was no prefix reference at all and a second key built from it passed);
   * a parameter of a function this file defines, whatever its name, when some call in the file hands
     that parameter a prefix reference (by position or by name). That is a fixed point: a parameter
-    that carries it can hand it on to the next function's parameter;
+    that carries it can hand it on to the next function's parameter. The parameter is the value, not
+    one spelling of it (#1279: a helper handed the prefix by position and reading it as `$1`, the only
+    name a nameless parameter has, assembled a second key this check passed): its name, its name
+    behind the function's (`_join.p_base`) and its number (`$n`) are all it. A `$n` inside a literal
+    EXECUTE runs is that EXECUTE's USING argument, not the function's parameter;
   * a scalar subquery that selects one (`(select prefix from archive.config where ...)`), where the
     subquery stands;
   * the column read out of a row value by its name (#1181: `(to_jsonb(cfg) ->> 'prefix') || p_child`, the
@@ -48,16 +52,43 @@ runs by name (`v_sql := '...'; execute v_sql`). Every other literal stays one op
 A prefix reference is ASSEMBLY when it
 
   * touches `||` on either side,
-  * is assigned (`v := cfg.prefix`, `select prefix into v`, `v text default ...`), returned
-    (`return cfg.prefix`) or selected out as a column (`for r in select prefix ...`, a SQL function's
-    result), any of which would let the value travel under another name, or
+  * is assigned (`v := cfg.prefix`, `v text = cfg.prefix` in a DECLARE, `select prefix into v`,
+    `v text default ...`), returned (`return cfg.prefix`) or selected out as a column (`for r in select
+    prefix ...`, a SQL function's result), any of which would let the value travel under another name,
   * is an argument of a call to anything this file does not define (`format`, `concat`, `coalesce`,
-    `replace`, a pgpm_core function ...): a function this file defines is followed instead, through
-    the parameter that receives it, since its own body is checked by the same rule.
+    `replace`, `unnest`, a pgpm_core function ...), in a FROM clause as anywhere else: a function this
+    file defines is followed instead, through the parameter that receives it, since its own body is
+    checked by the same rule. That takes a body this check reads, a dollar-quoted one: a function
+    defined with a single-quoted body (`as 'select $1 || $2'`) or a SQL-standard one (`return ...`,
+    `begin atomic`) is not followed, and handing it the prefix is assembly; or
+  * stands anywhere WHAT A PREFIX MAY DO does not name.
 
-Anything else is declaring it (`p_prefix text`), storing it (archive.configure's upsert), comparing it
-or passing it along to a function of this file, and is not a key. The rule names no site and has no
-exceptions; an allowlist is the thing that rots (CLAUDE.md, on `_q`).
+WHAT A PREFIX MAY DO (#1279). The first three rules each name a way the value gets out, and each pass
+of review found the next way: bound to an EXECUTE as a USING argument (`execute 'select $1 || $2' using
+cfg.prefix, p_name`), or renamed by a FROM item (`from unnest(array[cfg.prefix]) as u(p)`, `from (values
+(cfg.prefix)) as u(p)`, `from (select prefix as p from archive.config) c`), each a second key this
+check passed. So the last rule is the inverse one: a prefix reference that is not assembly by the first
+three rules is assembly anyway, UNLESS it is
+
+  * declared (`p_prefix text`, a column's definition, a function's header), or the target of an
+    assignment or the label of a named argument (`p_prefix => x`);
+  * handed whole, as one argument, to a function this file defines (`archive._owned_key(p_parent,
+    cfg.prefix, ...)`), which is how it reaches the one function that assembles;
+  * compared or tested: it touches a comparison operator (`=`, `<>`, `<`, `~`, ...), is followed by IS,
+    IN, LIKE, BETWEEN or one of their NOT forms, or follows LIKE, IS [NOT] DISTINCT FROM, EXISTS, or a
+    comparison's ANY, ALL or SOME (`x = any (...)`). `prefix = excluded.prefix` in an upsert's SET is
+    this too, and so is any `col = <prefix>` of an UPDATE's;
+  * stored or named as a column: an item of an INSERT's column list or of a row of its VALUES
+    (archive.configure's upsert), or of the column list of a key (`primary key (...)`, `unique (...)`,
+    `references t (...)`, `on conflict (...)`);
+  * reported: an argument of a RAISE; or
+  * the select item of a subquery, which is then the reference, judged where it stands by this list.
+
+A bare literal naming the column (`'prefix'` standing alone, not a field read through it) keeps to the
+first three rules, since a name as data stands where a value cannot (a list of column names). So does a
+statement outside any body that only defines (ALTER, COMMENT, GRANT, REVOKE, DROP), where the column
+stands however the definition needs. Everything else at top level is judged as a body is. The rule names
+no site and has no exceptions; an allowlist is the thing that rots (CLAUDE.md, on `_q`).
 
 THE CHECK. Exactly one function of pgpm_archive/install.sql assembles a prefix, and that function
 references archive.object_key_owner, the claim. Two assembling functions fail (the shape main had
@@ -73,7 +104,14 @@ this see dynamic SQL whose text is not a literal it can read where EXECUTE runs 
 INTO a local, returned by another function, or spelled in pieces that only name the prefix once
 concatenated (`'select pre' || 'fix'`). And it cannot see a row read without the column's name: a field
 picked by position or out of the row's text (`split_part(cfg::text, ',', 2)`), a row walked as key-value
-pairs (`jsonb_each_text(to_jsonb(cfg))`), or a field name computed at run time (`j ->> ('pre' || 'fix')`).
+pairs (`jsonb_each_text(to_jsonb(cfg))`), a column renamed by a table alias's column list (`from
+archive.config as c(a, b)`), or a field name computed at run time (`j ->> ('pre' || 'fix')`).
+Nor does it read a body that is not dollar-quoted as a body: a single-quoted one is one opaque literal, so
+a prefix it reads from archive.config itself is not seen at all, and a SQL-standard one is top-level text
+in which its parameters are not followed. (A prefix HANDED to such a function is refused where it is
+handed.) And what a prefix may do is judged by the tokens beside it, not by types: a prefix stored (an
+INSERT, a SET) in a table other than archive.config and read back under that column's name is not
+followed, nor is one raised and read back out of the error (GET STACKED DIAGNOSTICS).
 
   ./scripts/check_archive_object_keys.py              # check pgpm_archive/install.sql
   ./scripts/check_archive_object_keys.py <file.sql>   # check another copy (a mutant, an old release)
@@ -100,8 +138,9 @@ NOT_CALLS = {
     "case", "where", "with", "by", "return", "is", "from", "join", "into", "table", "array", "do",
     "update", "references", "primary", "key", "unique", "check", "default", "perform", "query",
 }
-# A relation name before `(` (a column list), not a call.
-RELATION_BEFORE = {"into", "table", "update", "references", "from", "join"}
+# A relation name before `(` (a column list), not a call. FROM and JOIN are not here (#1279): a name
+# before `(` in a FROM clause is a function called there, and what it is handed is an argument.
+RELATION_BEFORE = {"into", "table", "update", "references"}
 # Parameter modes, before a parameter's name.
 PARAM_MODES = {"in", "out", "inout", "variadic"}
 # The words that open a clause of a statement; a prefix read while the clause is `select` is a column.
@@ -112,6 +151,17 @@ NOT_BARE = {"is", "like", "ilike", "in", "not", "between", "similar", "and", "or
             "notnull", "escape", "over", "filter", "within", "at"}
 # The tokens a plpgsql statement can start after, for `x = value` read as an assignment.
 STATEMENT_STARTS = {";", "begin", "then", "else", "loop", "declare"}
+# What a prefix may touch and be compared rather than carried (WHAT A PREFIX MAY DO): a comparison
+# operator on either side, as the lexer splits it, or one of these words after it or before it.
+COMPARISON_OPS = {"=", "<>", "!=", "<", ">", "<=", ">=", "~", "!"}
+TESTED_BY = {"is", "in", "like", "ilike", "between", "similar", "not", "isnull", "notnull"}
+TESTED_AFTER = {"like", "ilike", "exists"}
+# ... or one of these when a comparison operator stands before it (`x = any (...)`): alone, ALL is also
+# `select all` and `union all`, which test nothing.
+QUANTIFIERS = {"any", "all", "some"}
+# The first word of a statement that only defines. Outside any body a prefix may stand in one however
+# the definition needs (`alter table ... alter column prefix set default ...`).
+DEFINING_VERBS = {"alter", "comment", "grant", "revoke", "drop"}
 # The floor: fewer prefix references than this and the lexer is no longer reading the module.
 MIN_PREFIX_REFS = 8
 # A literal that names the column as data, the way a row value is read by field name (#1181): the key
@@ -246,8 +296,11 @@ def names_column(tok):
 def _relex(tok):
     """A STR token's text lexed as code, on the literal's own lines. Dollar quotes inside it are dropped
     (they must not open or close the enclosing body), and so are its parentheses when they do not balance
-    within the literal (`'... in (' || x || ')'`), so a fragment cannot unbalance the rest of the file."""
-    inner = [(k, t, tok[2] + ln - 1) for k, t, ln in lex(_literal_sql(tok[1])) if k != "DOLLAR"]
+    within the literal (`'... in (' || x || ')'`), so a fragment cannot unbalance the rest of the file.
+    A `$n` in it is a BIND token, the EXECUTE's nth USING argument, and not a PARAM, the nth parameter of
+    the function around it (#1279)."""
+    inner = [("BIND" if k == "PARAM" else k, t, tok[2] + ln - 1)
+             for k, t, ln in lex(_literal_sql(tok[1])) if k != "DOLLAR"]
     depth, balanced = 0, True
     for _, t, _ in inner:
         depth += (t == "(") - (t == ")")
@@ -307,9 +360,14 @@ def executed_as_code(toks):
 
 
 def functions(toks):
-    """{name: [[param name or None, ...], ...]}: every function and procedure the file defines, with the
-    parameter names of each overload in order."""
-    defined = {}
+    """({name: [[(param name or None, mode), ...], ...]}, unread): every function and procedure the file
+    defines with a body this check reads, with the parameters of each overload in order, each with its mode
+    (`in` when none is written); and the names it defines with a body it does not read.
+
+    A body is read when it is dollar-quoted, the way scopes are found. One that is not (a single-quoted `as
+    '...'`, a SQL-standard `return ...` or `begin atomic`) cannot be followed into, so a name with such an
+    overload is in `unread` and not in the dictionary: a prefix handed to it is handed out of sight (#1279)."""
+    defined, unread = {}, set()
     for k in range(1, len(toks) - 2):
         if not (toks[k][1] in ("function", "procedure") and toks[k - 1][1] in ("create", "replace")
                 and toks[k + 1][0] == "ID" and toks[k + 2][1] == "("):
@@ -333,13 +391,41 @@ def functions(toks):
             params.append(cur)
         names = []
         for p in params:
-            words = [t for t in p if t[0] == "ID"]
+            words, mode = [t for t in p if t[0] == "ID"], "in"
             while words and words[0][1] in PARAM_MODES:
-                words.pop(0)
+                mode = words.pop(0)[1]
             # a name is followed by its type; a lone word is a nameless parameter's type
-            names.append(words[0][1] if len(words) > 1 else None)
-        defined.setdefault(toks[k + 1][1], []).append(names)
-    return defined
+            names.append((words[0][1] if len(words) > 1 else None, mode))
+        while j < len(toks) and toks[j][0] != "DOLLAR" and toks[j][1] != ";":
+            j += 1
+        if j < len(toks) and toks[j][0] == "DOLLAR":
+            defined.setdefault(toks[k + 1][1], []).append(names)
+        else:
+            unread.add(toks[k + 1][1])
+    return {fn: overloads for fn, overloads in defined.items() if fn not in unread}, unread
+
+
+def receivers(params, arg, named):
+    """Every spelling one overload's body can read an argument by (#1279), given the argument's position
+    in the call, or the name it is passed under: the receiving parameter's name when it has one, and its
+    number. A call's arguments are the input parameters in order, so an OUT parameter takes no position.
+    `$n` counts every parameter in a plpgsql body and the input ones alone in a SQL body, and the body's
+    language is not read, so both numbers are returned. An argument past the last parameter belongs to a
+    trailing VARIADIC one."""
+    inputs = [(pos, name) for pos, (name, mode) in enumerate(params) if mode != "out"]
+    if named is not None:
+        hit = [i for i, (_, name) in enumerate(inputs) if name == named]
+    elif arg < len(inputs):
+        hit = [arg]
+    else:
+        hit = [len(inputs) - 1] if inputs and params[inputs[-1][0]][1] == "variadic" else []
+    spellings = set()
+    for i in hit:
+        pos, name = inputs[i]
+        spellings |= {f"${i + 1}", f"${pos + 1}"}
+        if name is not None:
+            spellings.add(name)
+    return spellings
 
 
 def scan(src):
@@ -352,24 +438,35 @@ def scan(src):
     subquery that selects the prefix is a prefix reference where it stands. That takes a fixed point,
     since a parameter that carries it can hand it on to another function's parameter."""
     toks = executed_as_code(lex(src))
-    defined = functions(toks)
-    carriers = {}   # function name -> the parameter names that carry a prefix into it
+    defined, unread = functions(toks)
+    carriers = {}   # function name -> every spelling (name, $n) of the parameters that carry a prefix into it
+    for fn, overloads in defined.items():
+        for params in overloads:    # a parameter named for the prefix is the prefix under its number too
+            for name in sorted({n for n, mode in params if n and mode != "out" and PREFIX_NAME.match(n)}):
+                carriers.setdefault(fn, set()).update(receivers(params, 0, name))
     while True:
-        refs, assembly, claims, found = _scan_once(toks, defined, carriers)
+        refs, assembly, claims, found = _scan_once(toks, defined, carriers, unread)
         grown = False
         for fn, names in found.items():
             if not names <= carriers.get(fn, set()):
                 carriers.setdefault(fn, set()).update(names)
                 grown = True
         if not grown:
-            return refs, assembly, claims, set(defined)
+            return refs, assembly, claims, set(defined) | unread
 
 
-def _scan_once(toks, defined, carriers):
+def _scan_once(toks, defined, carriers, unread=frozenset()):
     refs, assembly, claims, found = 0, {}, set(), {}
     scope, pending, body_tag = None, None, None
     parens = []                 # one dict per open parenthesis
-    stmt = {"clause": None}     # the statement's own level, outside every parenthesis
+    # the statement's own level, outside every parenthesis: its clause, whether it is an INSERT's VALUES,
+    # its first word, and whether it stands in a DECLARE section
+    stmt = {"clause": None, "insert": False, "verb": None, "declare": False}
+
+    def new_statement(declare=None):
+        stmt.update(clause=None, insert=False, verb=None)
+        if declare is not None:
+            stmt["declare"] = declare
 
     def tok(i):
         return toks[i] if 0 <= i < len(toks) else ("", "", 0)
@@ -433,16 +530,52 @@ def _scan_once(toks, defined, carriers):
         """The token after the expression ending at i (after_idx)."""
         return tok(after_idx(i))
 
-    def judge(s, e, line, label):
+    def carried(text):
+        """Is this identifier a parameter that carries the prefix into the function being read: its name, or
+        its name behind the function's own (`_join.p_base`, how a body names a parameter past a column)?"""
+        names = carriers.get(scope, ())
+        owner, _, name = text.rpartition(".")
+        return text in names or (name in names and scope is not None and owner == scope.rpartition(".")[2])
+
+    def assigned_by_equals(s, level):
+        """Is the `=` before s a plpgsql assignment and not a comparison: the statement `v = x;` or
+        `v[1] = x;`, or a DECLARE's `v text = x;` (the first `=` of a declaration that is not a cursor's)?"""
+        i = s - 2
+        if level is stmt and stmt["declare"]:
+            while tok(i)[1] not in STATEMENT_STARTS | {""}:
+                if tok(i)[1] in ("=", ":=", "default", "cursor"):
+                    return False
+                i -= 1
+            return True
+        while tok(i)[1] == "]":
+            i = match(i, -1) - 1
+        return tok(i)[0] == "ID" and tok(i - 1)[1] in STATEMENT_STARTS
+
+    def compared(s, e):
+        """Does the reference s..e touch a comparison (COMPARISON_OPS, TESTED_BY, TESTED_AFTER)? An
+        operator that reads a field (`->`, `#>>`) ends in `>` and is not one."""
+        before, behind = tok(s - 1), after(e)
+        return ((before[0] == "OP" and before[1] in COMPARISON_OPS and not field_op(s - 1, True))
+                or (before[1] == "*" and tok(s - 2)[1] == "~")          # `~*`, as the lexer splits it
+                or (before[1] == "from" and tok(s - 2)[1] == "distinct")        # IS [NOT] DISTINCT FROM
+                or (before[0] == "ID" and before[1] in TESTED_AFTER)
+                or (before[0] == "ID" and before[1] in QUANTIFIERS and tok(s - 2)[0] == "OP"
+                    and tok(s - 2)[1] in COMPARISON_OPS)
+                or (behind[0] == "OP" and behind[1] in COMPARISON_OPS)
+                or (behind[0] == "ID" and behind[1] in TESTED_BY))
+
+    def judge(s, e, line, label, value=True):
         """Is the prefix reference spanning tokens s..e assembly? Records it, or records the parameter
         it is handed to when that is a parameter of a function this file defines.
 
         The reference is the whole value it stands for, so parentheses that only group it are part of
-        it: `(cfg.prefix) || x` and `v := (to_jsonb(cfg) ->> 'prefix')` are judged at the parentheses."""
+        it: `(cfg.prefix) || x` and `v := (to_jsonb(cfg) ->> 'prefix')` are judged at the parentheses.
+        `value` is False for a bare literal naming the column, a name and not the value, which the
+        inverse rule (WHAT A PREFIX MAY DO) leaves to the rules before it."""
         depth = 0
         while tok(s - 1)[1] == "(" and tok(after_idx(e))[1] == ")" and len(parens) > depth \
                 and parens[-1 - depth]["start"] == s - 1 and parens[-1 - depth]["callee"] is None \
-                and not parens[-1 - depth]["subq"]:
+                and not parens[-1 - depth]["subq"] and not parens[-1 - depth]["stored"]:
             s, e, depth = s - 1, after_idx(e), depth + 1
         prev, nxt = tok(s - 1)[1], after(e)[1]
         level = parens[-1 - depth] if len(parens) > depth else stmt
@@ -450,11 +583,12 @@ def _scan_once(toks, defined, carriers):
         named = None
         if prev in ("=>", ":=") and tok(s - 2)[0] == "ID" and tok(s - 3)[1] in ("(", ",") and call:
             named = tok(s - 2)[1]
+        whole = (named is not None or prev in ("(", ",")) and nxt in (",", ")")
         why = None
         if prev == "||" or nxt == "||":
             why = "concatenated with ||"
         elif (prev == ":=" and named is None) or nxt == "into" or (prev == "default" and call != "<header>") \
-                or (prev == "=" and tok(s - 2)[0] == "ID" and tok(s - 3)[1] in STATEMENT_STARTS):
+                or (prev == "=" and assigned_by_equals(s, level)):
             why = "assigned to another name"
         elif prev == "return":
             why = "returned, which would let the value travel under another name"
@@ -467,13 +601,24 @@ def _scan_once(toks, defined, carriers):
             why = "selected out as a value, which would let it travel under another name"
         elif call is not None and call != "<header>":
             if call in defined:
-                for names in defined[call]:
-                    target = named if named is not None else (
-                        names[level["arg"]] if level["arg"] < len(names) else None)
-                    if target is not None and target in names:
-                        found.setdefault(call, set()).add(target)
+                for params in defined[call]:
+                    found.setdefault(call, set()).update(receivers(params, level["arg"], named))
+            elif call in unread:
+                why = f"passed to {call}(), whose body is not dollar-quoted, so this check cannot follow it there"
             else:
                 why = f"passed to {call}(), which this file does not define"
+        # the inverse rule (#1279): what none of the above judged is assembly unless it stands in one of the
+        # ways WHAT A PREFIX MAY DO names, or in a statement outside any body that only defines
+        may = (call == "<header>"                                       # declared, in a function's header
+               or (call in defined and whole)                           # handed whole to a function of this file
+               or compared(s, e)                                        # compared or tested
+               or (level.get("stored") and whole)                       # a column or a value of an INSERT
+               or (level is stmt and stmt["verb"] == "raise")           # reported
+               or (body_tag is None and stmt["verb"] in DEFINING_VERBS))
+        if why is None and value and not may:
+            why = (f"standing between `{prev[:24]}` and `{nxt[:24]}`, where it is neither compared, stored, "
+                   f"reported nor handed whole to a function of this file, so the value could travel on under "
+                   f"another name")
         if why:
             where = scope if scope is not None else "top level"
             assembly.setdefault(where, []).append((line, f"{label} {why}"))
@@ -489,15 +634,15 @@ def _scan_once(toks, defined, carriers):
         if kind == "DOLLAR":
             if body_tag is None and pending is not None:
                 body_tag, scope, pending = text, pending, None
-                stmt["clause"] = None
+                new_statement(declare=False)
             elif body_tag == text:
                 body_tag, scope = None, None
-                stmt["clause"] = None
+                new_statement(declare=False)
             continue
         if kind == "OP" and text == ";":
             if body_tag is None:
                 pending = None
-            stmt["clause"] = None
+            new_statement()
 
         # calls: what each open parenthesis belongs to, and which argument is being read
         if kind == "OP" and text == "(":
@@ -508,8 +653,16 @@ def _scan_once(toks, defined, carriers):
                     callee = "<header>"
                 elif before not in RELATION_BEFORE:
                     callee = prev[1]
+            # where a value is stored and goes no further, or a column is only named: an INSERT's column
+            # list, a row of its VALUES, the column list of a key, of the table a foreign key references or
+            # of an upsert's conflict target
+            around = parens[-1] if parens else stmt
+            stored = callee is None and (
+                (prev[0] == "ID" and tok(k - 2)[1] in ("into", "references"))
+                or prev[1] in ("key", "unique", "conflict")
+                or (prev[1] in ("values", ",") and around.get("clause") == "values" and around.get("insert")))
             parens.append({"callee": callee, "arg": 0, "subq": nxt[1] == "select", "clause": None,
-                           "selects": False, "start": k})
+                           "selects": False, "start": k, "stored": stored})
             continue
         if kind == "OP" and text == ")":
             if parens:
@@ -538,16 +691,34 @@ def _scan_once(toks, defined, carriers):
             elif field_op(k - 1, True):
                 judge(operand_start(k - 1 - field_op(k - 1, True)), k, line, label)
             else:
-                judge(k, k, line, label)
+                judge(k, k, line, label, value=False)
+            continue
+
+        # a parameter read by its number (#1279): `$1` in the body of a function handed the prefix first
+        if kind == "PARAM" and text in carriers.get(scope, ()):
+            refs += 1
+            judge(k, k, line, f"{text} (a parameter that carries the prefix)")
             continue
 
         if kind != "ID":
             continue
+        if not parens:
+            # the DECLARE section a statement of a body may stand in (a DECLARE opens one where a statement
+            # could start, not inside the text of some other statement), and the statement's first word
+            if body_tag is not None and (text == "begin" or (text == "declare" and (
+                    prev[0] == "DOLLAR" or prev[1] in STATEMENT_STARTS | {">"}))):
+                stmt["declare"] = text == "declare"
+            if body_tag is not None and text in STATEMENT_STARTS:
+                stmt["verb"] = None
+            elif stmt["verb"] is None:
+                stmt["verb"] = text
         if text in CLAUSE_WORDS:
-            (parens[-1] if parens else stmt)["clause"] = text
+            around = parens[-1] if parens else stmt
+            around["insert"] = text == "values" and around.get("clause") == "into"
+            around["clause"] = text
         if text == CLAIM_TABLE and scope is not None:
             claims.add(scope)
-        if not (PREFIX_NAME.match(text) or text in carriers.get(scope, ())):
+        if not (PREFIX_NAME.match(text) or carried(text)):
             continue
         refs += 1
         if nxt[1] in TYPE_WORDS or nxt[1] in ("=>", ":="):
@@ -965,6 +1136,107 @@ end;
 $$;
 """)
 
+# Real instances: review pass 12 (F8-02 and F12r-07, issue #1279). The prefix bound to an EXECUTE as a USING
+# argument, and renamed through a FROM item (a function called there, a VALUES row, a derived table): each
+# stood where none of the rules named a way out, so the second key built from what it became passed.
+def _standing_second(fn, body):
+    return with_extra(f"""
+create or replace function {fn}(p_parent regclass, p_child name) returns text language plpgsql as $$
+declare cfg archive.config; v_key text;
+begin
+  select * into cfg from archive.config where parent_table = p_parent;
+  {body}
+end;
+$$;
+""")
+
+
+USING_SECOND = _standing_second("archive.f8_second_key",
+                                "execute 'select $1 || ''/'' || $2' into v_key using cfg.prefix, p_child;\n"
+                                "  return v_key;")
+FROM_UNNEST_SECOND = _standing_second("archive._f12r_unnest_key",
+                                      "return (select u.p || p_child from unnest(array[cfg.prefix]) as u(p));")
+FROM_VALUES_SECOND = _standing_second("archive._f12r_values_key",
+                                      "return (select u.p || p_child from (values (cfg.prefix)) as u(p));")
+DERIVED_TABLE_SECOND = _standing_second(
+    "archive._derived_key",
+    "return (select c.p || p_child from (select prefix as p from archive.config where parent_table = p_parent) c);")
+# The prefix handed by position to a helper of this file that has no name to read it by: `$1` is the
+# parameter, and so is the number of a parameter that has a name.
+POSITIONAL_SECOND = with_extra(r"""
+create or replace function archive._f12r_join(text, name) returns text language sql immutable as $f$
+  select $1 || $2
+$f$;
+create or replace function archive._f12r_key(p_parent regclass, p_child name) returns text language plpgsql as $f$
+declare cfg archive.config;
+begin
+  select * into cfg from archive.config where parent_table = p_parent;
+  return archive._f12r_join(cfg.prefix, p_child);
+end $f$;
+""")
+NUMBER_OF_NAMED_SECOND = with_extra(r"""
+create or replace function archive._num_join(p_child name, p_base text) returns text language sql as $$
+  select $2 || quote_ident($1);
+$$;
+create or replace function archive._num_key(p_parent regclass, p_child name) returns text language sql as $$
+  select archive._num_join(p_base => c.prefix, p_child => p_child) from archive.config c where c.parent_table = p_parent;
+$$;
+""")
+# A function of this file called in a FROM clause is a call: the prefix it is handed is followed into its
+# parameter, so the helper that assembles is the one named, and one that only hands it on stays clean.
+FROM_HELPER_SECOND = with_extra(r"""
+create or replace function archive._rows_key(p_base text, p_child name) returns setof text language sql as $$
+  select p_base || quote_ident(p_child);
+$$;
+create or replace function archive._rows_caller(p_parent regclass, p_child name) returns text language plpgsql as $$
+declare cfg archive.config; v_key text;
+begin
+  select * into cfg from archive.config where parent_table = p_parent;
+  perform 1 from archive._rows_key(cfg.prefix, p_child) r;
+  return null;
+end;
+$$;
+""")
+# The same `$1 || $2` in a single-quoted body: text this check does not read, so not a function the prefix
+# can be handed to and followed into. Handing it there is the way out.
+UNREAD_BODY_SECOND = with_extra(r"""
+create or replace function archive._quoted_join(text, name) returns text language sql as 'select $1 || $2';
+create or replace function archive._quoted_key(p_parent regclass, p_child name) returns text language sql as $$
+  select archive._quoted_join(c.prefix, p_child) from archive.config c where c.parent_table = p_parent;
+$$;
+""")
+# Everything a prefix may do, and still one key function: handed whole (by position, by name, by number, in
+# a FROM clause), compared and tested, stored by an upsert, reported by RAISE. And a `$1` in the text an
+# EXECUTE runs is its USING argument, not the first parameter of the function, which here carries the prefix.
+STANDING_CLEAN = with_extra(r"""
+create or replace function archive._pass_on(text, regclass, regclass) returns text language sql as $$
+  select archive._child_object_key($2, $1, $3, '.ndjson');
+$$;
+create or replace function archive._pass_rows(p_base text, p_parent regclass, p_child regclass) returns setof text
+language plpgsql as $$
+declare v_n bigint;
+begin
+  execute 'select count(*) from pg_class where oid = $1 or relname = $2' into v_n using p_parent, p_child::text;
+  return next archive._pass_on(p_base, p_parent, p_child);
+end;
+$$;
+create or replace function archive.to_s3_checked(p_parent regclass, p_child regclass) returns text
+language plpgsql as $$
+declare cfg archive.config; v_same boolean = false; v_key text;
+begin
+  select * into cfg from archive.config where parent_table = p_parent;
+  if cfg.prefix is null or cfg.prefix = '' or cfg.prefix not like '%/' or 'events/' <> cfg.prefix then
+    raise exception 'archive.config has the prefix % for %, which is no directory', cfg.prefix, p_parent;
+  end if;
+  v_same := exists (select 1 from archive.config c where c.prefix = cfg.prefix and c.parent_table <> p_parent);
+  insert into archive.config (parent_table, prefix) values (p_child, cfg.prefix)
+  on conflict (parent_table) do update set prefix = excluded.prefix where archive.config.prefix <> excluded.prefix;
+  select k into v_key from archive._pass_rows(cfg.prefix, p_parent, p_child) k;
+  return archive._child_object_key(p_ext => '.ndjson', p_prefix => cfg.prefix, p_parent => p_parent, p_child => p_child);
+end;
+$$;
+""")
+
 NO_CLAIM = CLEAN.replace("""  insert into archive.object_key_owner (key_base, parent_oid) values (v_base_q, p_parent::oid)
     on conflict (key_base) do nothing returning parent_oid into v_owner;
 """, "")
@@ -987,7 +1259,8 @@ def selftest():
             else:
                 print(f"SELFTEST PASS  {label}: clean, every key assembled in {got_owner}")
         else:
-            if not v or (needle and not any(needle in x for x in v)):
+            needles = (needle,) if isinstance(needle, str) else (needle or ())
+            if not v or not any(all(n in x for n in needles) for x in v):
                 print(f"SELFTEST FAIL  {label}: expected a violation mentioning {needle!r}, got {v}")
                 failures += 1
             else:
@@ -1043,6 +1316,24 @@ def selftest():
            "archive._field_key (line")
     expect("the prefix read by name and handed only to the key function", ROW_READ_CLEAN, True,
            owner="archive._owned_key")
+    expect("F8-02: a second assembly from the prefix bound as an EXECUTE ... USING argument", USING_SECOND, False,
+           ("archive.f8_second_key (line", "): cfg.prefix standing between `using`"))
+    expect("F12r-07: a second assembly from the prefix renamed by unnest() in a FROM clause", FROM_UNNEST_SECOND,
+           False, ("archive._f12r_unnest_key (line", "): cfg.prefix passed to unnest()"))
+    expect("F12r-07: a second assembly from the prefix renamed by a VALUES row in a FROM clause",
+           FROM_VALUES_SECOND, False, ("archive._f12r_values_key (line", "): cfg.prefix standing between `values`"))
+    expect("a second assembly from the prefix renamed by a derived table", DERIVED_TABLE_SECOND, False,
+           ("archive._derived_key (line", "): a subquery selecting the prefix standing between `from`"))
+    expect("F12r-07: a second assembly in a helper from its nameless parameter, $1 || $2", POSITIONAL_SECOND,
+           False, ("archive._f12r_join (line", "): $1"))
+    expect("a second assembly from a named parameter read by its number", NUMBER_OF_NAMED_SECOND, False,
+           ("archive._num_join (line", "): $2"))
+    expect("a second assembly in a helper of this file called in a FROM clause", FROM_HELPER_SECOND, False,
+           ("archive._rows_key (line", "): p_base"))
+    expect("the prefix handed to a helper of this file whose body is single-quoted", UNREAD_BODY_SECOND, False,
+           ("archive._quoted_key (line", "): c.prefix passed to archive._quoted_join(), whose body is not dollar-quoted"))
+    expect("the prefix handed whole, compared, stored and reported, and a $1 that is a USING argument",
+           STANDING_CLEAN, True, owner="archive._owned_key")
     expect("the one assembling function never claims", NO_CLAIM, False, "never names archive.object_key_owner")
     expect("no assembly visible at all", NO_ASSEMBLY, False, "no function assembles")
 

@@ -1118,6 +1118,7 @@ run_perf() {
     "bench/lint_value_not_spelling.sh pgpm_perf125"
     "bench/quoted_splices_every_body.sh pgpm_perf385"
     "bench/archive_keys_row_read.sh pgpm_perf349"
+    "bench/archive_keys_inverse_rule.sh pgpm_perf386"
     "bench/lint_child_by_oid_inverse.sh pgpm_perf348"
     "bench/tap_verdict.sh pgpm_perf80"
     "bench/retire_straddle.sh pgpm_perf81"

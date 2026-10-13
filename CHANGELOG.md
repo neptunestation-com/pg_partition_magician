@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+- **The archive object-key lint names what a prefix may do, and refuses the rest** (#1279).
+  `scripts/check_archive_object_keys.py` listed the ways the configured prefix gets out of a function (`||`, an
+  assignment, a `RETURN`, a select item, a call it cannot follow), so a second, unclaimed object key passed it
+  with no violation wherever the prefix stood in a way the list did not name: bound to dynamic SQL
+  (`execute 'select $1 || $2' into v_key using cfg.prefix, p_name`), renamed by a FROM item
+  (`from unnest(array[cfg.prefix]) as u(p)`, `from (values (cfg.prefix)) as u(p)`, a derived table or a `WITH`
+  query selecting `prefix as p`), or handed by position to a helper of the module that reads its nameless
+  parameter as `$1` (`select $1 || $2`). The last rule is now the inverse one: a prefix reference none of the
+  named rules judged is assembly unless it is declared, handed whole to a function the module defines, compared
+  or tested, stored by an `INSERT` (or named in a key's column list), reported by `RAISE`, or stands in a
+  top-level `ALTER`, `COMMENT`, `GRANT`, `REVOKE` or `DROP`. A parameter that carries the prefix is followed
+  under its number (`$n`, by either language's numbering past an `OUT` parameter) and behind its function's
+  name (`_join.p_base`) as under its name, a `$n` inside the text an `EXECUTE` runs is that statement's `USING`
+  argument and not the function's parameter, and a name before `(` after `FROM` or `JOIN` is a function called
+  there, followed into its parameter when the module defines it. A function the module defines without a
+  dollar-quoted body (`as 'select $1 || $2'`, a SQL-standard body) is not one the check can follow, so handing
+  it the prefix is refused where it is handed. The same rule closes what it found on the way: an array
+  constructor, a `CASE` result, a `RETURNING` item, a `DECLARE`'s `v text = cfg.prefix` and `v[1] = cfg.prefix`.
+  The module reads exactly as before (the same prefix references, one owner). The docstring's "What this
+  cannot see" now also names a column renamed by a table alias's column list, a body that is not dollar-quoted,
+  and a prefix stored in another table and read back. Guard `bench/archive_keys_inverse_rule.sh`, mutations
+  `archive_keys_unlisted_standing_passes`, `archive_keys_param_number_unfollowed`,
+  `archive_keys_from_call_is_relation` and `archive_keys_unread_body_followed`.
+
 - **The `_q` lint reads every dollar-quoted body, and a loop's target and an EXECUTE's INTO as assignments**
   (#1278). `scripts/check_quoted_splices.py` found bodies by splitting each install file on the bare `$$`, so a
   function whose body was dollar-quoted with any other tag (`$fn$`) was never read, and it never read a FOR

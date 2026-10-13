@@ -11634,6 +11634,52 @@ MUTATIONS["archive_keys_field_read_unjudged"] = (
       "                judge(operand_start(k - 1 - field_op(k - 1, True)), k, line, label)\n", "", 1)],
 )
 MUTATION_SRC["archive_keys_field_read_unjudged"] = "scripts/check_archive_object_keys.py"
+# Issue #1279 (review pass 12, F8-02 and F12r-07): scripts/check_archive_object_keys.py refuses a prefix that
+# stands, in a body, anywhere it is not compared, stored, reported or handed whole to a function of the file,
+# follows a parameter under its number, and reads a function called in a FROM clause as a call. One mutation
+# per clause of the fix; bench/archive_keys_inverse_rule.sh catches each on fixtures of its own.
+MUTATIONS["archive_keys_unlisted_standing_passes"] = (
+    "bench/archive_keys_inverse_rule.sh",
+    "Pre-#1279 scripts/check_archive_object_keys.py: a prefix reference is assembly only where a rule names the "
+    "way out (||, an assignment, a RETURN, a select item, a call the file does not define), so one bound to an "
+    "EXECUTE as a USING argument (execute 'select $1 || $2' using cfg.prefix, p_name) or renamed by a VALUES row "
+    "in a FROM clause ((values (cfg.prefix)) as u(p)) stands where no rule looks and the second key built from "
+    "it passes the lint. One site, the inverse rule at the end of the judgement.",
+    [("        if why is None and value and not may:\n"
+      "            why = (f\"standing between `{prev[:24]}` and `{nxt[:24]}`, where it is neither compared, stored, \"\n"
+      "                   f\"reported nor handed whole to a function of this file, so the value could travel on under \"\n"
+      "                   f\"another name\")\n", "", 1)],
+)
+MUTATION_SRC["archive_keys_unlisted_standing_passes"] = "scripts/check_archive_object_keys.py"
+MUTATIONS["archive_keys_param_number_unfollowed"] = (
+    "bench/archive_keys_inverse_rule.sh",
+    "Pre-#1279 scripts/check_archive_object_keys.py: a parameter that is handed the prefix carries it under its "
+    "name alone, so a helper of the file whose nameless parameter reads it as $1 (select $1 || $2, handed "
+    "cfg.prefix by position) assembles a second key the lint passes. One site, the spellings a receiving "
+    "parameter is read by.",
+    [('        spellings |= {f"${i + 1}", f"${pos + 1}"}\n', "", 1)],
+)
+MUTATION_SRC["archive_keys_param_number_unfollowed"] = "scripts/check_archive_object_keys.py"
+MUTATIONS["archive_keys_from_call_is_relation"] = (
+    "bench/archive_keys_inverse_rule.sh",
+    "scripts/check_archive_object_keys.py reading a FROM clause as it did before #1279: a name before `(` after "
+    "FROM or JOIN is a relation with a column list, not a function called there, so the prefix handed to a "
+    "function of the file in a FROM clause is not followed into its parameter. The helper that assembles a key "
+    "from it is never named (the inverse rule refuses the caller instead), and a caller that only hands the "
+    "prefix on is refused. One site, the words a relation name follows.",
+    [('RELATION_BEFORE = {"into", "table", "update", "references"}\n',
+      'RELATION_BEFORE = {"into", "table", "update", "references", "from", "join"}\n', 1)],
+)
+MUTATION_SRC["archive_keys_from_call_is_relation"] = "scripts/check_archive_object_keys.py"
+MUTATIONS["archive_keys_unread_body_followed"] = (
+    "bench/archive_keys_inverse_rule.sh",
+    "Pre-#1279 scripts/check_archive_object_keys.py: every function the file defines counts as one the check "
+    "follows, its body dollar-quoted or not, so a helper written `as 'select $1 || $2'` (a literal the lexer "
+    "keeps opaque) or with a SQL-standard body is handed cfg.prefix whole and assembles a second key the lint "
+    "never reads. One site, the test for a body the check reads.",
+    [('        if j < len(toks) and toks[j][0] == "DOLLAR":\n', "        if j <= len(toks):\n", 1)],
+)
+MUTATION_SRC["archive_keys_unread_body_followed"] = "scripts/check_archive_object_keys.py"
 # Issues #1154 and #1180: scripts/check_archive_child_by_oid.py's rule 1 is the inverse rule, a name read only
 # alone in a select item or a RAISE argument, and it reads a regclass rendered as text as a name. One mutation per
 # issue, each taking out one clause of the fix; bench/lint_child_by_oid_inverse.sh catches both, on fixtures built
