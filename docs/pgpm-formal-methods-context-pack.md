@@ -268,7 +268,7 @@ a third. Each means the model is not seeing this codebase's defects and more mod
 
 ## 10. Layout
 
-```
+```text
 formal/
   README.md              how to run, what is modelled, scopes, abstractions
   specs/Base.tla         relations, rows, locks, snapshots, environment
