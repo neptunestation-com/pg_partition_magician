@@ -1,0 +1,15 @@
+- pgpm_archive/install.sql:60-62 | read: yes | the column comment ("stored without a trailing slash"): a doc claim the tree's helper does not keep (P1-01)
+- archive._s3_endpoint_canonical | read: yes | body is `select p_endpoint` on this tree; test 53 fails 10/46 and P1-01 fails 5/11 through it; a slash-dropping body swapped into a scratch db makes both pass
+- archive.configure | read: yes | bucket, userinfo, shape and dot-segment refusals probed with 25 spellings (null-results); order and the untouched-row-on-refusal property hold; insert writes v_endpoint
+- archive.s3_signed_request | read: yes | canonical assignment precedes host/URI/URL; slashed-endpoint direct call returns 400 on this tree (P1-01 check 10), 200 with the slash dropped
+- archive.s3_signed_request_bytea | read: yes | same as the text signer (P1-01 check 11); the only two URL builders in the module
+- archive._encode_upload_ndjson_single | read: yes | both PUTs hand cfg.endpoint to a signer; no URL built here
+- archive._encode_upload_parquet | read: yes | the PUT hands cfg.endpoint to the bytea signer; no URL built here
+- archive._s3_abort_uploads_at | read: yes | the list GET and every abort DELETE go through archive.s3_signed_request with the p_endpoint it was handed
+- archive.to_s3 | read: yes | every request (single PUT, initiate, parts, complete, DELETE, abort) goes through a signer; re-checks part_bytes/fetch_rows but not the endpoint, as the body says; export through a slashed endpoint is HTTP 400 on this tree (P1-01 check 7)
+- archive.to_s3_parquet | read: yes | the one PUT hands cfg.endpoint to the bytea signer
+- CHANGELOG.md | read: yes | the entry's refusal list matches the code; its "stores the endpoint without its trailing slashes" is false on this tree (P1-01)
+- bench/archive_configure_endpoint.sh | read: yes | setup exits read, LIVENESS grep and ran-count separate fixture failure from a catch; names five mutations I cannot verify exist
+- pgpm_archive/README.md | read: yes | endpoint and bucket paragraphs match the refusals as implemented; the trailing-slash sentence is P1-01's doc side
+- test.sh | read: yes | the guard runs in run_archive with pgpm_perf377, a database name unique in the tree
+- tests/archive/db/53_configure_endpoint_canonical_test.sql | read: yes | ran it on the tree: 36/46 pass, 10 fail (7-9, 11, 12, 19, 21-24), every LIVENESS passes; parts A, D, F, G pass; the plan count matches

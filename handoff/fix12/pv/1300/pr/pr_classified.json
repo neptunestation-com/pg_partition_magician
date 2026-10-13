@@ -1,0 +1,80 @@
+{
+  "trees": {
+    "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/base",
+    "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/head",
+    "review": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/review",
+    "mutants": {
+      "transmute_resume_any_encoding": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/mutants/transmute_resume_any_encoding"
+    }
+  },
+  "acceptance": "ACC",
+  "claims": [
+    {
+      "id": "ACC-01",
+      "finder": "ACC",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 10850,
+      "lens": "operator error",
+      "scenario": "#1270 acceptance (F1-06): a text_time transmute re-run with another encoding (here p_tt_epoch one day earlier) takes over the earlier attempt's claim, which checks the column (#628) and the grid (#574) but not the encoding, skips phase 1 because a pgpm_monolith_bound CHECK in the old encoding exists, and the cutover's ATTACH with bounds in the new encoding scans the table under ACCESS EXCLUSIVE and dies raw (partition constraint violated) after the bound and claim are committed; it should be refused up front in pgpm's words, as a resume on another column is",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "------------------------------------------------------------------------------------\n ok 2 - fixture: the re-run, from the claim's own session, returned: raised: partition constraint of relation \"f1tt_p2026_10_12\" is violated by some row\n(1 row)\n\n                                                                                                ok                                                                                                \n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 3 - a resume under another text_time encoding is refused in pgpm's words, before the cutover: raised: partition constraint of relation \"f1tt_p2026_10_12\" is violated by some row        +\n # Failed test 3: \"a resume under another text_time encoding is refused in pgpm's words, before the cutover: raised: partition constraint of relation \"f1tt_p2026_10_12\" is violated by some row\"\n(1 row)\n\n                        is                         \n---------------------------------------------------\n ok 4 - LIVENESS: rows 1..20 are all still in f1tt\n(1 row)\n\n                           ok                           \n--------------------------------------------------------\n ok 5 - LIVENESS: the claim is still there for an abort\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 5\n(1 row)\n\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n ok 3 - a resume under another text_time encoding is refused in pgpm's words, before the cutover: raised: pg_partition_magician: cannot resume the transmute of f1tt with text_time encoding {\"unit\": \"ms\", \"epoch\": -86400, \"radix\": 36, \"width\": 8, \"prefix\": \"c\", \"alphabet\": \"0123456789abcdefghijklmnopqrstuvwxyz\", \"discard_bits\": 0}: the bound [2026-10-12 00:00:00+00, 2026-10-13 00:00:00+00) an earlier attempt recorded (and put in the pgpm_monolith_bound CHECK) is encoded with {\"unit\": \"ms\", \"epoch\": 0, \"radix\": 36, \"width\": 8, \"prefix\": \"c\", \"alphabet\": \"0123456789abcdefghijklmnopqrstuvwxyz\", \"discard_bits\": 0}, and a CHECK in another encoding cannot certify a partition bound in this one, so the cutover would scan the whole table under ACCESS EXCLUSIVE. Re-run with the encoding of the attempt that recorded the bound (epoch is in seconds since 1970-01-01 UTC), or call pgpm.transmute_abort(f1tt) to drop the bound and start over.\n(1 row)\n\n                        is                         \n---------------------------------------------------\n ok 4 - LIVENESS: rows 1..20 are all still in f1tt\n(1 row)\n\n                           ok                           \n--------------------------------------------------------\n ok 5 - LIVENESS: the claim is still there for an abort\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+        },
+        "mutant:transmute_resume_any_encoding": {
+          "fails": true,
+          "exit": 0,
+          "tail": "------------------------------------------------------------------------------------\n ok 2 - fixture: the re-run, from the claim's own session, returned: raised: partition constraint of relation \"f1tt_p2026_10_12\" is violated by some row\n(1 row)\n\n                                                                                                ok                                                                                                \n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 3 - a resume under another text_time encoding is refused in pgpm's words, before the cutover: raised: partition constraint of relation \"f1tt_p2026_10_12\" is violated by some row        +\n # Failed test 3: \"a resume under another text_time encoding is refused in pgpm's words, before the cutover: raised: partition constraint of relation \"f1tt_p2026_10_12\" is violated by some row\"\n(1 row)\n\n                        is                         \n---------------------------------------------------\n ok 4 - LIVENESS: rows 1..20 are all still in f1tt\n(1 row)\n\n                           ok                           \n--------------------------------------------------------\n ok 5 - LIVENESS: the claim is still there for an abort\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 5\n(1 row)\n\n"
+        }
+      },
+      "class": "fixed",
+      "acceptance": {
+        "fails_on_base": true,
+        "passes_on_head": true,
+        "mutant_restores": {
+          "transmute_resume_any_encoding": true
+        },
+        "any_restores": true
+      }
+    },
+    {
+      "id": "P1-01",
+      "finder": "P1",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 10784,
+      "lens": "fresh surface",
+      "scenario": "pgpm._transmute records text_time_encoding on a fresh claim and reads the claim's into v_claim_tt_encoding on a take-over, but never compares the two: a resume under another p_tt_epoch (or any p_tt_*) takes the claim over, skips phases 1 and 2 on the old-encoding validated CHECK, and the cutover's ATTACH scans under ACCESS EXCLUSIVE and dies raw ('partition constraint ... is violated by some row'), exactly #1270's defect; PR #1300's body, CHANGELOG, guide.md, reference.md and tests/337 all promise it is refused up front in pgpm's words naming both encodings and the remedy",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 3,
+          "tail": "CREATE EXTENSION\nCREATE EXTENSION\n plan \n------\n 1..7\n(1 row)\n\nSET\nCREATE TABLE\nINSERT 0 20\nCREATE TABLE\nINSERT 0 1\n dblink_connect \n----------------\n OK\n(1 row)\n\n dblink_exec \n-------------\n SET\n(1 row)\n\nBEGIN\nLOCK TABLE\n                                                      throws_ok                                                      \n---------------------------------------------------------------------------------------------------------------------\n ok 1 - LIVENESS: the first conversion fails in the cutover, on the lock this session holds on the referencing table\n(1 row)\n\nCOMMIT\n dblink_disconnect \n-------------------\n OK\n(1 row)\n\npsql:<stdin>:42: ERROR:  column \"text_time_encoding\" does not exist\nLINE 1: select is((select text_time_encoding ->> 'epoch' from pgpm.t...\n                          ^\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "--------------------------------------------------------------------------------------------\n ok 6 - a resume under another text_time encoding is refused up front in pgpm's words (got: raised: pg_partition_magician: cannot resume the transmute of p1enc with text_time encoding {\"unit\": \"ms\", \"epoch\": -86400, \"radix\": 36, \"width\": 8, \"prefix\": \"c\", \"alphabet\": \"0123456789abcdefghijklmnopqrstuvwxyz\", \"discard_bits\": 0}: the bound [2026-10-12 00:00:00+00, 2026-10-13 00:00:00+00) an earlier attempt recorded (and put in the pgpm_monolith_bound CHECK) is encoded with {\"unit\": \"ms\", \"epoch\": 0, \"radix\": 36, \"width\": 8, \"prefix\": \"c\", \"alphabet\": \"0123456789abcdefghijklmnopqrstuvwxyz\", \"discard_bits\": 0}, and a CHECK in another encoding cannot certify a partition bound in this one, so the cutover would scan the whole table under ACCESS EXCLUSIVE. Re-run with the encoding of the attempt that recorded the bound (epoch is in seconds since 1970-01-01 UTC), or call pgpm.transmute_abort(p1enc) to drop the bound and start over.)\n(1 row)\n\n                                                                     ok                                                                      \n---------------------------------------------------------------------------------------------------------------------------------------------\n ok 7 - the re-run did not reach the cutover's ATTACH (which scans under ACCESS EXCLUSIVE and dies on the rows outside the re-encoded bound)\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                                                                         ok                                                                                              \n----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 6 - a resume under another text_time encoding is refused up front in pgpm's words (got: raised: partition constraint of relation \"p1enc_p2026_10_12\" is violated by some row)        +\n # Failed test 6: \"a resume under another text_time encoding is refused up front in pgpm's words (got: raised: partition constraint of relation \"p1enc_p2026_10_12\" is violated by some row)\"\n(1 row)\n\n                                                                           ok                                                                            \n---------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 7 - the re-run did not reach the cutover's ATTACH (which scans under ACCESS EXCLUSIVE and dies on the rows outside the re-encoded bound)        +\n # Failed test 7: \"the re-run did not reach the cutover's ATTACH (which scans under ACCESS EXCLUSIVE and dies on the rows outside the re-encoded bound)\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 7\n(1 row)\n\n"
+        }
+      },
+      "class": "seed_hit",
+      "seed": "S1"
+    }
+  ]
+}

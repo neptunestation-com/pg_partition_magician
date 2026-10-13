@@ -1,0 +1,7 @@
+- pgpm_core/install.sql:14005-14013 | read: yes | the READ COMMITTED header comment; its promise ("refused up front, before any lock") is what P1-01 shows the code does not keep
+- pgpm.adopt_partition | read: yes | whole function; isolation refusal dead (`if false`, P1-01); name-under-lock check probed with squat, rename-only (P1-02) and drop while waiting; re-reads under the lock in RC held
+- CHANGELOG.md | read: yes | the #1262 entry whole (the only hunk); promises the refusal P1-01 shows absent and the current-name refusal P1-02 shows partial
+- bench/adopt_partition_isolation.sh | read: yes | whole; wrapper in retain_recall_moved_parent.sh's shape, install failure and 0-ran both FAIL; pgpm_perf370 unique
+- docs/reference.md | read: yes | adopt_partition section whole (2983-3041) plus every other adopt_partition and READ COMMITTED mention scanned; refusal list item 2 not kept for the renamed case (P1-02)
+- test.sh | read: yes | the perf guard list and shard loop (1225-1290) and the discriminate hand-off; no pinned guard count, the new entry is selected by idx % SHARD_N
+- tests/332_adopt_partition_isolation_test.sql | read: yes | whole; run on the tree (A-D fail, 9 of 25; E passes) and on a scratch-fixed install (25 of 25)

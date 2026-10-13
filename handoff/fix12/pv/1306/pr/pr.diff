@@ -1,0 +1,436 @@
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/base/CHANGELOG.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/review/CHANGELOG.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/base/CHANGELOG.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/review/CHANGELOG.md	2026-10-12 13:04:36
+@@ -2,6 +2,17 @@
+ 
+ ## [Unreleased]
+ 
++- **Every regrain driver refuses a `REPEATABLE READ` or `SERIALIZABLE` transaction** (#1258). `transmute`,
++  `untransmute` and `from_hypertable` refused a stricter isolation level; `regrain()`, `regrain_history()` and
++  `regrain_step()` did not, and every read they make then goes through the transaction's first snapshot.
++  `regrain_history()` in a `REPEATABLE READ` transaction copied the monolith without a row another session committed
++  after that snapshot, and the swap dropped the row with the source ({10,20} left of {10,20,500}); a hand swap step
++  in one reconciled and counted the captured delta without a writer's change committed while it waited, and dropped
++  the source with a committed `UPDATE` unapplied. All three now refuse up front, before a lock or a read
++  (`pgpm._regrain_refuse_strict_isolation`), with the remedy (`default_transaction_isolation = 'read committed'`,
++  no stricter transaction around the call) ahead of the table's name, so `maintain`'s `skip_regrain` row, which
++  keeps 200 characters, carries it: a tick under a stricter role or database default reaches the step through
++  `regrain_step` and logs the refusal instead of regraining. Only the calling transaction's own level is asked.
+ - **The regrain swap and the hypertable cutover wait for snapshots older than their copies** (#1241). A
+   `REPEATABLE READ` reader whose snapshot predated a regrain's copies, and which first read the table after the
+   swap (so it held no lock the `DETACH` waited on), read the fine children, whose rows its snapshot cannot see,
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/base/bench/regrain_refuses_strict_isolation.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/review/bench/regrain_refuses_strict_isolation.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/base/bench/regrain_refuses_strict_isolation.sh	1969-12-31 16:00:00
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/review/bench/regrain_refuses_strict_isolation.sh	2026-10-12 13:04:36
+@@ -0,0 +1,52 @@
++#!/usr/bin/env bash
++# regrain_refuses_strict_isolation.sh <container> <db> [install.sql]
++#
++# Run tests/329_regrain_refuses_strict_isolation_test.sql against an ARBITRARY copy of pgpm_core/install.sql, so
++# that bench/discriminate.sh can show the file catches the defect its mutations put back (issue #1258): regrain(),
++# regrain_history() and regrain_step() ran in a REPEATABLE READ or SERIALIZABLE transaction, so the copy read the
++# source and the swap read the captured delta through the transaction's first snapshot, and the swap dropped with
++# the source a row committed after it (regrain_history) or a writer's committed UPDATE and DELETE (a hand swap
++# step); maintain's tick took the same path under a stricter default_transaction_isolation. The file is the
++# acceptance test; this wrapper exists so the mutations have a guard the discriminate track can run against the
++# mutant, in the shape of bench/retain_recall_moved_parent.sh.
++#
++# TWO mutations are required to fail against it (bench/mutations/mutate.py):
++#   regrain_step_isolation_unchecked     -- regrain_step's call of the refusal dropped. Parts C and D.
++#   regrain_isolation_serializable_only  -- the refusal asks for SERIALIZABLE alone. Parts A, C and D.
++#
++# Runs on the plain core image (pgtap, dblink and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path
++# inside the container, for a worktree mounted somewhere other than /repo.
++set -uo pipefail
++C="${1:?container}"; DB="${2:?db}"; INSTALL="${3:-/repo/pgpm_core/install.sql}"
++TEST_FILE="${TAP_GUARD_TEST_FILE:-/repo/tests/329_regrain_refuses_strict_isolation_test.sql}"
++fail=0
++
++q() { docker exec "$C" psql -U postgres "$@"; }
++
++q -q -c "drop database if exists $DB" >/dev/null 2>&1
++q -q -c "create database $DB" >/dev/null 2>&1
++q -d "$DB" -q -c "create extension if not exists pgtap; create extension if not exists dblink;" >/dev/null 2>&1
++
++# A mutant that will not even install is NOT a pass: say which happened.
++if ! q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f "$INSTALL" >/dev/null 2>&1; then
++  printf 'FAIL  %-58s %s\n' "the module under test installed" "$INSTALL"
++  fail=1
++fi
++
++if [ "$fail" = 0 ]; then
++  out=$(docker exec "$C" sh -c "pg_prove -v -U postgres -d $DB $TEST_FILE" 2>&1)
++  rc=$?
++  echo "$out" | grep -E '^not ok [0-9]+ -' | sed 's/^/    /' | head -20
++  # the count is asserted separately: a run that never reached the database must not read as a catch
++  ran=$(echo "$out" | grep -cE '^(not )?ok [0-9]+ -')
++  if [ "$rc" = 0 ]; then printf 'PASS  %-58s %s\n' "every regrain driver refuses a stricter isolation level" "$ran ran"
++  else printf 'FAIL  %-58s %s\n' "every regrain driver refuses a stricter isolation level" "$ran ran"; fail=1; fi
++  if [ "$ran" -eq 0 ]; then
++    printf 'FAIL  %-58s %s\n' "LIVENESS: the assertions were reached at all" "0 ran"
++    echo "$out" | tail -20 | sed 's/^/      /'
++    fail=1
++  fi
++fi
++
++q -q -c "drop database if exists $DB" >/dev/null 2>&1
++exit "$fail"
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/base/docs/reference.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/review/docs/reference.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/base/docs/reference.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/review/docs/reference.md	2026-10-12 13:04:36
+@@ -1694,6 +1694,21 @@
+ Only one regrain runs per parent at a time: a second one is refused with an error naming the one in
+ flight. Let it finish, or stop it with [`regrain_cancel`](#regrain_cancel), then re-run.
+ 
++**`READ COMMITTED` only.** `regrain`, `regrain_history` and `regrain_step` (and so `maintain`'s auto-regrain)
++refuse to run in a `REPEATABLE READ` or `SERIALIZABLE` transaction, up front, before they take a lock or read
++anything: `pg_partition_magician: regrain must run in a READ COMMITTED transaction (this one is repeatable read):
++set default_transaction_isolation = 'read committed' ...`, naming the call and then the table. A regrain reads the
++source, and its swap the changes captured while it waited for a lock, each through a snapshot taken at that
++statement; a stricter level keeps the transaction's first, so the copy would miss a row committed after it, the
++swap would miss a change captured after it, and either would be dropped with the source. Open no stricter transaction around
++the call and run it with `default_transaction_isolation = 'read committed'`, then re-run. Only the calling
++transaction's own level is asked, so an explicit `BEGIN ISOLATION LEVEL READ COMMITTED` under a stricter session
++default is accepted. `maintain` runs at the top level, so each of its transactions takes the session's default: under a
++stricter default (a role's or a database's, which `pg_cron`'s session inherits) every tick logs the refusal as
++`skip_regrain` and the run does not start or move on; `ALTER ROLE` or `ALTER DATABASE ... SET
++default_transaction_isolation = 'read committed'` for the role that runs it, and the next tick goes on.
++`transmute` and `untransmute` refuse a stricter level too, for their own reasons.
++
+ **A step at a target the run in flight on that child was not cut on is refused too**, whichever
+ driver sends it: a hand `regrain_step` or `regrain` at another target on the child an auto-regrain is
+ splitting, and the `maintain` tick that meets a run started by hand at a step other than `regrain_to` (logged
+@@ -1752,7 +1767,8 @@
+ One resumable microbatch of `regrain`: it **copies** (never deletes) a within-horizon sub-range's next
+ budget-sized batch into its fine child, and performs the atomic swap once the cursor
+ (`config.regrain_cursor`) reaches the coarse `hi`. A null `p_target_step` takes the partition step, and a null
+-`p_batch` takes `config.regrain_batch`.
++`p_batch` takes `config.regrain_batch`. It runs only in a `READ COMMITTED` transaction and refuses a stricter one
++before it reads anything (see [`regrain`](#regrain)).
+ 
+ A **below-horizon** sub-range is handled one of two ways, depending on whether the table archives. With
+ `config.archive_fn` unset it is skipped, logged as `regrain_aged`, and discarded with the source at the
+@@ -2009,9 +2025,9 @@
+ (each waits for every snapshot open while it runs, the other's included), or a hand `regrain_step` or a
+ `maintain` tick against a `regrain`. Neither is blocked on the other, so neither rule above applies, and under
+ `lock_timeout` 0 each would wait for the other for ever. `CREATE INDEX CONCURRENTLY` has the same cycle between
+-two index builds and breaks it by ignoring the other build's snapshot; that is not sound here, since a
+-`REPEATABLE READ` caller of `regrain` goes on reading through its old snapshot after the call. So the cycle is
+-broken by refusal:
++two index builds and breaks it by ignoring the other build's snapshot; that is not sound here, since the other
++driver's statement holds its snapshot until it ends and can go on to read this table after the swap (a subquery
++beside the call, say). So the cycle is broken by refusal:
+ 
+ - A wait that finds a session to wait for advertises itself with a transaction-level advisory lock, keys
+   (1885826423, its own pid), which every role sees in `pg_locks` and which goes with its transaction.
+@@ -2183,7 +2199,8 @@
+ 
+ Convenience: `regrain` the oldest coarse child (the monolith -- the smallest-`lo` attached partition) to
+ `p_target_step`. The hierarchical monolith to coarse to fine path is just repeated `regrain` calls with
+-chosen steps.
++chosen steps. Like `regrain`, it refuses a `REPEATABLE READ` or `SERIALIZABLE` transaction up front, naming
++`regrain_history`.
+ 
+ ### `maintain`
+ 
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/base/pgpm_core/install.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/review/pgpm_core/install.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/base/pgpm_core/install.sql	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/review/pgpm_core/install.sql	2026-10-12 14:50:12
+@@ -7816,6 +7816,29 @@
+ end;
+ $$;
+ 
++-- READ COMMITTED only, for every regrain driver (#1258): regrain_step, and so maintain's auto-regrain tick, and
++-- regrain() and regrain_history(), which ask before their own locks so a refusal waits for nothing. A regrain reads
++-- the source and the change-capture delta and acts on what it read: the copy reads the source once capture is on
++-- (installing it waits for the source's writers), and the swap reconciles and counts the delta after its DETACH
++-- waited for a writer, then drops the source. Each read is only right from a snapshot taken at that statement,
++-- after the wait, which READ COMMITTED takes and REPEATABLE READ and SERIALIZABLE do not: they keep the
++-- transaction's first. So a row committed after that snapshot and before capture existed was in no copy, a change
++-- captured after it was in no reconcile, and the swap dropped either with the source (a regrain() in a REPEATABLE
++-- READ transaction lost the row; a swap tick reverted a committed UPDATE). Only the transaction's own level is
++-- asked: these are functions, which commit nothing, so a default_transaction_isolation stricter than the
++-- transaction they run in reaches no read of theirs. maintain's ticks take that default after each COMMIT, which
++-- is how it reaches this one; its handler logs the refusal as skip_regrain and keeps the first 200 characters, so
++-- the remedy comes before the table's name and the reason.
++create or replace function pgpm._regrain_refuse_strict_isolation(p_routine text, p_parent regclass)
++returns void language plpgsql stable as $$
++begin
++  if current_setting('transaction_isolation') not in ('read committed', 'read uncommitted') then
++    raise exception 'pg_partition_magician: % must run in a READ COMMITTED transaction (this one is %): set default_transaction_isolation = ''read committed'' (ALTER ROLE or ALTER DATABASE ... SET it for maintain''s scheduled ticks), open no REPEATABLE READ or SERIALIZABLE transaction around it, and re-run. It was to regrain %: a regrain reads the source and its captured changes through a snapshot taken after each wait, which a stricter level cannot provide, and its swap would drop a row committed after the transaction''s first snapshot with the source. This call copied and swapped nothing.',
++      p_routine, current_setting('transaction_isolation'), p_parent;
++  end if;
++end;
++$$;
++
+ -- one resumable microbatch of regrain work on coarse child p_child toward target step p_target_step.
+ -- Returns: 'copied:N' (copied N rows into the current fine child), 'swapped:K' (cursor reached hi -> detached
+ -- the source, attached K fine children, dropped it: regrain done), or a soft no-progress status ('active' =
+@@ -8631,6 +8654,7 @@
+ begin
+   -- #951: refused before anything is read or committed; p_target_step (null: the partition step) is not
+   perform pgpm._refuse_null_arguments('regrain', json_build_object('p_parent', p_parent, 'p_child', p_child));
++  perform pgpm._regrain_refuse_strict_isolation('regrain', p_parent);   -- #1258: before its locks
+   -- regrain_step may rename the source child on its first pass (#266: a child exactly one step wide is
+   -- renamed to its coarse-form name on the target grid so its own first sub-range can take _p<lo>). Follow
+   -- it by lo, which never changes, and re-resolve the name each iteration -- otherwise every iteration after
+@@ -8687,6 +8711,7 @@
+ begin
+   -- #951: refused before anything is read or committed; p_target_step (null: the partition step) is not
+   perform pgpm._refuse_null_arguments('regrain_history', json_build_object('p_parent', p_parent));
++  perform pgpm._regrain_refuse_strict_isolation('regrain_history', p_parent);   -- #1258
+   select * into cfg from pgpm.config where parent_table = p_parent;
+   cfg := pgpm._control_followed(cfg);
+   if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/base/test.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/review/test.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/base/test.sh	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/review/test.sh	2026-10-12 13:04:36
+@@ -1265,6 +1265,7 @@
+     "bench/throws_pinned_sites.sh pgpm_perf350"
+     "bench/wrapper_premise_rule.sh pgpm_perf344"
+     "bench/regrain_swap_waits_for_older_snapshots.sh pgpm_perf365"
++    "bench/regrain_refuses_strict_isolation.sh pgpm_perf366"
+   )
+   local selected=()
+   local n=${#guards[@]} idx
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/base/tests/329_regrain_refuses_strict_isolation_test.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/review/tests/329_regrain_refuses_strict_isolation_test.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/base/tests/329_regrain_refuses_strict_isolation_test.sql	1969-12-31 16:00:00
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1306/pr/review/tests/329_regrain_refuses_strict_isolation_test.sql	2026-10-12 13:04:36
+@@ -0,0 +1,237 @@
++-- Every regrain driver runs only in a READ COMMITTED transaction (issue #1258).
++--
++-- THE BUG. transmute, untransmute and from_hypertable refuse a REPEATABLE READ or SERIALIZABLE caller; regrain(),
++-- regrain_history() and regrain_step() did not. Under a stricter level every statement of the transaction reads
++-- through its first snapshot, so:
++--   * regrain() / regrain_history() copied the monolith through the caller's old snapshot. A row another session
++--     committed after that snapshot, before the call installed change capture, was in the source and in no fine
++--     child, and the swap dropped it with the source (F3-02: {10,20} left of {10,20,500}).
++--   * a hand regrain_step at the swap (or a maintain tick under a database default_transaction_isolation that its
++--     transactions inherit) read the captured delta through the tick's first snapshot, so a writer's change
++--     captured after it was invisible to the residual reconcile and the final count, and the source was dropped
++--     with the change unapplied (F3-04: a committed UPDATE reverted).
++--
++-- THE CONTRACT.
++--   PART A  regrain_history() in a REPEATABLE READ transaction, with a row committed by another session after the
++--           caller's snapshot: refused up front, in pgpm's words, naming the call; nothing changed (the same source
++--           attached by oid, no capture on it, every row in place). The remedy as the message types it (the same
++--           call in a READ COMMITTED transaction) regrains, and every row survives with its payload.
++--   PART B  regrain() in a SERIALIZABLE transaction: refused the same way, naming regrain; the remedy regrains.
++--   PART C  a hand regrain_step at the swap tick in a REPEATABLE READ transaction whose snapshot predates a writer's
++--           committed UPDATE of one row and DELETE of another (both captured in the delta): refused, nothing
++--           swapped; driven on in READ COMMITTED it applies both and swaps: row 10 updated, row 30 gone, row 20
++--           untouched.
++--   PART D  maintain from a session whose default_transaction_isolation is REPEATABLE READ, auto-regrain on: the
++--           tick's regrain step is refused and logged skip_regrain with the message (the 200 characters the log keeps
++--           carry the remedy), nothing is copied; after SET default_transaction_isolation = 'read committed' in that
++--           session, as the message says, the ticks regrain the child and every row survives.
++--
++-- Every negative is paired with its premise: the row or change the stale snapshot misses was committed and is
++-- visible to a fresh session, the caller's snapshot does not see it, and the call ran at the isolation level named.
++-- regrain(), regrain_history() and regrain_step() are functions, not committing procedures, so their refusals are
++-- pinned by message.
++--
++-- ASYMMETRIC FIXTURES. A holds 10 and 20 and gains 500 after the snapshot; B holds 11, 22, 33; C holds 1..100 and
++-- the writer updates 10 and deletes 30 (one in, one out, so a lost update and a resurrected row cannot cancel); D
++-- holds the multiples of 7 below 1000. Each has its own frontier row, and every row check names the ids.
++--
++-- bench/regrain_refuses_strict_isolation.sh runs this file against a mutant, for the discriminate track.
++create extension if not exists pgtap;
++create extension if not exists dblink;
++set client_min_messages = warning;
++select plan(38);
++
++select dblink_connect('w329', 'dbname=' || current_database() || ' user=postgres');
++
++-- ============================================ PART A ============================================
++create table public.t329a (id bigint primary key, payload text);
++insert into public.t329a values (10, 'a-10'), (20, 'a-20');
++call pgpm.transmute('public.t329a', 'id', 1000);
++select pgpm.obtain('public.t329a');
++insert into public.t329a values (5000, 'a-frontier');   -- the monolith [0, 1000) is frozen
++create temp table t329a_src as
++  with p as materialized (select * from pgpm.part where parent_table = 'public.t329a'::regclass)
++  select child_name, child_oid from p where attached and lo = '0';
++select is((select count(*) from t329a_src), 1::bigint, 'LIVENESS: (A) the monolith [0, 1000) is attached');
++
++begin isolation level repeatable read;
++select is((select array_agg(id order by id) from public.t329a), array[10, 20, 5000]::bigint[],
++  'LIVENESS: (A) the caller''s snapshot is taken: 10, 20 and the frontier');
++select dblink_exec('w329', $$insert into public.t329a values (500, 'a-500-after-snapshot')$$);
++select is((select n from dblink('w329', 'select count(*) from public.t329a where id = 500') as t(n bigint)), 1::bigint,
++  'LIVENESS: (A) row 500 is committed and visible to a fresh session');
++select is((select count(*) from public.t329a where id = 500), 0::bigint,
++  'LIVENESS: (A) the caller''s REPEATABLE READ snapshot predates row 500');
++select is(current_setting('transaction_isolation'), 'repeatable read', 'LIVENESS: (A) the call runs in REPEATABLE READ');
++select throws_like(
++  $$ select pgpm.regrain_history('public.t329a', '100') $$,
++  'pg_partition_magician: regrain_history must run in a READ COMMITTED transaction (this one is repeatable read): set default_transaction_isolation = ''read committed''%open no REPEATABLE READ or SERIALIZABLE transaction around it, and re-run. It was to regrain t329a:%',
++  '(A) regrain_history refuses a REPEATABLE READ caller up front, in pgpm''s words');
++commit;
++
++select is((with p as materialized (select * from pgpm.part where parent_table = 'public.t329a'::regclass)
++           select p.child_oid from p, t329a_src s where p.attached and p.child_name = s.child_name),
++  (select child_oid from t329a_src), '(A) the same source is still attached, by oid');
++select ok(not exists (select 1 from pg_trigger where tgrelid = (select child_oid from t329a_src) and not tgisinternal
++                         and tgname = 'pgpm_regrain_capture'),
++  '(A) no change capture was installed on it');
++select is((select regrain_cursor from pgpm.config where parent_table = 'public.t329a'::regclass), null,
++  '(A) no regrain run was begun');
++
++-- the remedy, as typed in the message: the same call in a READ COMMITTED transaction
++begin isolation level read committed;
++select lives_ok($$ select pgpm.regrain_history('public.t329a', '100') $$, '(A) the same call in READ COMMITTED regrains');
++commit;
++select bag_eq($$ with p as materialized (select lo, hi from pgpm.part where parent_table = 'public.t329a'::regclass and attached)
++     select lo::bigint from p where hi::bigint <= 1000 $$,
++  $$ select g::bigint from generate_series(0, 900, 100) g $$, '(A) ten fine children of 100 are attached in its place');
++select is((select string_agg(id || '=' || payload, ',' order by id) from public.t329a),
++  '10=a-10,20=a-20,500=a-500-after-snapshot,5000=a-frontier',
++  '(A) every row survives with its payload: 10 and 20 from before, 500 committed after the refused call''s snapshot');
++select ok(not exists (select 1 from pg_class c, t329a_src s where c.oid = s.child_oid), '(A) and the source is dropped');
++
++-- ============================================ PART B ============================================
++create table public.t329b (id bigint primary key, payload text);
++insert into public.t329b values (11, 'b-11'), (22, 'b-22'), (33, 'b-33');
++call pgpm.transmute('public.t329b', 'id', 1000);
++select pgpm.obtain('public.t329b');
++insert into public.t329b values (5000, 'b-frontier');
++create temp table t329b_src as
++  with p as materialized (select * from pgpm.part where parent_table = 'public.t329b'::regclass)
++  select child_name, child_oid from p where attached and lo = '0';
++
++begin isolation level serializable;
++select is(current_setting('transaction_isolation'), 'serializable', 'LIVENESS: (B) the call runs in SERIALIZABLE');
++select throws_like(
++  format('select pgpm.regrain(%L, %L, %L)', 'public.t329b', (select child_name from t329b_src), '250'),
++  'pg_partition_magician: regrain must run in a READ COMMITTED transaction (this one is serializable): set default_transaction_isolation = ''read committed''%It was to regrain t329b:%',
++  '(B) regrain refuses a SERIALIZABLE caller up front, in pgpm''s words');
++commit;
++select is((with p as materialized (select * from pgpm.part where parent_table = 'public.t329b'::regclass)
++           select p.child_oid from p, t329b_src s where p.attached and p.child_name = s.child_name),
++  (select child_oid from t329b_src), '(B) the same source is still attached, by oid');
++select lives_ok(format('select pgpm.regrain(%L, %L, %L)', 'public.t329b', (select child_name from t329b_src), '250'),
++  '(B) the same call in READ COMMITTED regrains');
++select bag_eq($$ with p as materialized (select lo, hi from pgpm.part where parent_table = 'public.t329b'::regclass and attached)
++     select lo::bigint from p where hi::bigint <= 1000 $$,
++  $$ values (0::bigint), (250), (500), (750) $$, '(B) four fine children of 250 are attached in its place');
++select is((select string_agg(id || '=' || payload, ',' order by id) from public.t329b),
++  '11=b-11,22=b-22,33=b-33,5000=b-frontier', '(B) every row survives with its payload');
++
++-- ============================================ PART C ============================================
++create table public.t329c (id bigint primary key, payload text);
++insert into public.t329c select g, 'orig' from generate_series(1, 100) g;
++call pgpm.transmute('public.t329c', 'id', 1000);
++select pgpm.obtain('public.t329c');
++insert into public.t329c values (5000, 'c-frontier');
++create temp table t329c_src as
++  with p as materialized (select * from pgpm.part where parent_table = 'public.t329c'::regclass)
++  select child_name, child_oid from p where attached and lo = '0';
++
++-- the run, by hand, each step its own READ COMMITTED transaction, until the cursor is at hi: the next step swaps
++do $$
++declare v_child name;
++begin
++  for i in 1..40 loop
++    exit when (select regrain_cursor from pgpm.config where parent_table = 'public.t329c'::regclass) = '1000';
++    with p as materialized (select * from pgpm.part where parent_table = 'public.t329c'::regclass)
++    select child_name into v_child from p where attached and child_oid = (select child_oid from t329c_src);
++    perform pgpm.regrain_step('public.t329c', v_child, '100');
++    commit;
++  end loop;
++end $$;
++select is((select regrain_cursor from pgpm.config where parent_table = 'public.t329c'::regclass), '1000',
++  'LIVENESS: (C) the run is copied and its cursor is at hi: the next step is the swap');
++
++begin isolation level repeatable read;
++select is((select string_agg(id || '=' || payload, ',' order by id) from public.t329c where id in (10, 20, 30)),
++  '10=orig,20=orig,30=orig', 'LIVENESS: (C) the caller''s snapshot is taken: 10, 20 and 30 as they were');
++-- the writer: an UPDATE of 10 and a DELETE of 30, committed after that snapshot, captured into the run's delta
++select dblink_exec('w329', $$update public.t329c set payload = 'updated' where id = 10$$);
++select dblink_exec('w329', $$delete from public.t329c where id = 30$$);
++select is((select s from dblink('w329', $q$select string_agg(id || '=' || payload, ',' order by id) from public.t329c
++                                            where id in (10, 20, 30)$q$) as t(s text)),
++  '10=updated,20=orig', 'LIVENESS: (C) the writer''s UPDATE and DELETE are committed and visible to a fresh session');
++select ok((select n from dblink('w329', 'select pgpm._regrain_delta_count(''public.t329c''::regclass)') as t(n bigint)) > 0,
++  'LIVENESS: (C) the writer''s changes are captured in the run''s delta, as a fresh snapshot sees it');
++select is((select pgpm._regrain_delta_count('public.t329c'::regclass)), 0::bigint,
++  'LIVENESS: (C) the caller''s REPEATABLE READ snapshot sees none of them');
++select throws_like(
++  format('select pgpm.regrain_step(%L, %L, %L)', 'public.t329c',
++         (select p.child_name from pgpm.part p, t329c_src s where p.parent_table = 'public.t329c'::regclass
++             and p.child_oid = s.child_oid), '100'),
++  'pg_partition_magician: regrain_step must run in a READ COMMITTED transaction (this one is repeatable read): set default_transaction_isolation = ''read committed''%It was to regrain t329c:%',
++  '(C) the hand swap step refuses a REPEATABLE READ caller up front, in pgpm''s words');
++commit;
++select is((select count(*) from pgpm.log where parent_table = 'public.t329c'::regclass and action = 'regrain'), 0::bigint,
++  '(C) nothing was swapped');
++select is((with p as materialized (select * from pgpm.part where parent_table = 'public.t329c'::regclass)
++           select p.child_oid from p, t329c_src s where p.attached and p.child_oid = s.child_oid),
++  (select child_oid from t329c_src), '(C) the same source is still attached, by oid');
++
++-- the remedy: the step driven on in READ COMMITTED applies the captured changes and swaps
++do $$
++declare v_child name;
++begin
++  for i in 1..10 loop
++    exit when exists (select 1 from pgpm.log where parent_table = 'public.t329c'::regclass and action = 'regrain');
++    with p as materialized (select * from pgpm.part where parent_table = 'public.t329c'::regclass)
++    select child_name into v_child from p where attached and child_oid = (select child_oid from t329c_src);
++    perform pgpm.regrain_step('public.t329c', v_child, '100');
++    commit;
++  end loop;
++end $$;
++select is((select count(*) from pgpm.log where parent_table = 'public.t329c'::regclass and action = 'regrain'), 1::bigint,
++  '(C) driven on in READ COMMITTED, the run swapped');
++select is((select string_agg(id || '=' || payload, ',' order by id) from public.t329c where id in (10, 20, 30)),
++  '10=updated,20=orig', '(C) the writer''s committed UPDATE of 10 and DELETE of 30 both stand; 20 is untouched');
++select is((select count(*) from public.t329c where id < 1000), 99::bigint, '(C) and the other 97 rows of the range are all there');
++
++-- ============================================ PART D ============================================
++create table public.t329d (id bigint primary key, payload text);
++insert into public.t329d select g, 'd-' || g from generate_series(7, 994, 7) g;
++call pgpm.transmute('public.t329d', 'id', 100, p_paused => false);   -- monolith [0, 1000), ten steps wide
++select pgpm.obtain('public.t329d');
++insert into public.t329d values (2500, 'd-frontier');
++select pgpm.set_regrain('public.t329d', '100');
++create temp table t329d_src as
++  with p as materialized (select * from pgpm.part where parent_table = 'public.t329d'::regclass)
++  select child_name, child_oid from p where attached and lo = '0';
++
++select dblink_connect('m329', 'dbname=' || current_database() || ' user=postgres');
++select dblink_exec('m329', 'set default_transaction_isolation = ''repeatable read''');
++select is((select s from dblink('m329', 'select current_setting(''transaction_isolation'')') as t(s text)),
++  'repeatable read', 'LIVENESS: (D) the maintain session''s transactions are REPEATABLE READ');
++select matches((select s from dblink('m329', 'call pgpm.maintain(''public.t329d'')') as t(s text)),
++  ' regrain=deferred regrain_deferred', '(D) the tick defers its regrain step');
++select ok(exists (select 1 from pgpm.log where parent_table = 'public.t329d'::regclass and action = 'skip_regrain'
++                   and method like 'pg_partition_magician: regrain_step must run in a READ COMMITTED transaction (this one is repeatable read): set default_transaction_isolation = ''read committed''%'),
++  '(D) logged skip_regrain with the refusal, its remedy inside the 200 characters the log keeps');
++select is((select count(*) from pgpm.log where parent_table = 'public.t329d'::regclass
++            and action in ('regrain_copy', 'regrain_prepare', 'regrain')), 0::bigint,
++  '(D) nothing was copied');
++select ok(not exists (select 1 from pg_trigger where tgrelid = (select child_oid from t329d_src) and not tgisinternal
++                         and tgname = 'pgpm_regrain_capture'),
++  '(D) no change capture was installed on the source');
++
++-- the remedy, as typed in the message
++select dblink_exec('m329', 'set default_transaction_isolation = ''read committed''');
++select is((select s from dblink('m329', 'select current_setting(''transaction_isolation'')') as t(s text)),
++  'read committed', 'LIVENESS: (D) the maintain session''s transactions are READ COMMITTED now');
++do $$
++begin
++  for i in 1..40 loop
++    exit when exists (select 1 from pgpm.log where parent_table = 'public.t329d'::regclass and action = 'regrain');
++    perform * from dblink('m329', 'call pgpm.maintain(''public.t329d'')') as t(s text);
++    commit;   -- no snapshot of this session is held across the next tick's swap
++  end loop;
++end $$;
++select is((select count(*) from pgpm.log where parent_table = 'public.t329d'::regclass and action = 'regrain'), 1::bigint,
++  '(D) after SET default_transaction_isolation = ''read committed'', the ticks regrain the child');
++select bag_eq($$ select id from public.t329d $$,
++  $$ select g::bigint from generate_series(7, 994, 7) g union all select 2500 $$,
++  '(D) every row survives: the multiples of 7 below 1000, and the frontier');
++
++select dblink_disconnect('m329');
++select dblink_disconnect('w329');
++select * from finish();

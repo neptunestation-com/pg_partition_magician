@@ -1,0 +1,17 @@
+---
+name: pass11-review
+description: Pass 11 review DONE 2026-10-09 on pin 0c38aae (hunt 22:45Z to last verdict 23:25Z): recall 9/9 (read-caught 6/6, the split the method asks for), precision 0.93 (strict 0.72, fell 0.07), 74 claims, 31 findings in 27 groups #1157-#1183 (3 T1: #1157 #1158 #1159; 3 T2: #1160 #1161), 16 re-finds on #633 #709 #1033 #1057 #1117 #1118 #1138 #1141 #1146, lessons #1184; record PR #1185 (docs/pass-11-record, OPEN, user merges); fix phase next; the per-PR mode's two scope gaps
+metadata:
+  type: project
+  modified: 2026-10-09T23:31:01.151Z
+---
+
+**DONE 2026-10-09.** Scratch: `$CLAUDE_JOB_DIR/tmp/pass11/` (claims/, verdicts/, verdicts_aside/ (the two first verdicts the tie-breaker overrode), verdicts_tiebreak/, classified.json, sealed.json, groups.json, issues/filed.json, known_open/, seeds/ (3 novel patches + proofs, STILL TO CATALOGUE), notes.md, tokens_harness.tsv, tokens_verifiers.tsv, record_assembled.md).
+
+**Results.** 74 claims: 22 seed hits (9/9 seeds; S9 found by the fable duplicate ALONE and attributed to the wrong seed by nearest line until `--seeds-dir` isolation fixed it; S1 found by fable in round 1, opus only in round 2), 52 candidates: 31 findings (T1 3, T2 3, T3 9, T5 16), 16 known_open, 5 fell. Tokens 9.79M (finders 7.28M over 19 agents incl. four fresh-surface re-runs; verifiers 2.51M over 52 runs). Issues: #1157 untransmute drops a pending-detach partition's rows (T1); #1158 keyless hypertable cutover reads the copy before its lock, a drain batch applied twice (T1); #1159 scripts/archive_partition_whole.sql archives a hand-detached partition (#705's filter missing in the sibling copy; T1); #1160 the #1141 ledger backfill retires a live partition's chunks under pre-#450 origin-only blocks (T2, on #1152's five-round surface); #1161 regrain swap has no lock budget (T2); #1162-#1169 T3; #1170-#1183 T5 (tests by count, unprefixed premises, discriminate's fallback, the three lints by spelling, throws_pinned's site regex, `test.sh ci` skipping lint.yml).
+
+**Convergence read.** Tier 1 = 3 (passes 5-11: 2,5,6,4,5,2,3); none on per-PR-verified surface within the mode's scope, but #1159 is a sibling copy of a verified fix's mechanism and #1160 an older-install state on verified surface: widen the per-PR finder to every copy of the mechanism the diff touches and every older-install state the file's comments name (lessons #1184 item 2). Criterion 1 (zero T1 two passes running) NOT met; earliest stop after pass 13.
+
+**Harness lessons (#1184):** the fresh-surface slice (241 units, 113 files) never met the coverage gate on either model after four re-runs (0.86 opus, 0.81 fable): split by kind next pass; tests slices overran at 137 files (4 slices next); the core suite check is the long pole (70 min vs 8); backgrounded `&` jobs inside one background shell die with it; usage.py over-counts (use the harness's notification counts); conflicting verdicts on one mechanism need a tie-breaker (F7-08/F7-09); a reproduction's premise must not go through the harness's `$PSQL` (ON_ERROR_STOP).
+
+**Fix phase next:** `/fix-phase` as pass 10's (per-PR verification of every install-touching PR, landq --batch 5), with the 16 re-found bullets (#1146's and #1033's inventories grew by ~12 sites) joining the pass's 27 issues; catalogue the three novel seeds (`$WORK/seeds/`); harness DOWN at the end of the pass. See [[pass11-plan]] for the command that was run and [[lever-phase-pass11]] for the pin.

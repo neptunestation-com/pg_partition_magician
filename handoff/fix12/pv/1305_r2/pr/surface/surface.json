@@ -1,0 +1,189 @@
+{
+ "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/base",
+ "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/review",
+ "files": [
+  {
+   "path": "CHANGELOG.md",
+   "status": "modified",
+   "hunks": [
+    [
+     5,
+     17
+    ]
+   ]
+  },
+  {
+   "path": "bench/over_retired_chunks_grid_zone.sh",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     62
+    ]
+   ]
+  },
+  {
+   "path": "docs/reference.md",
+   "status": "modified",
+   "hunks": [
+    [
+     2474,
+     2478
+    ]
+   ]
+  },
+  {
+   "path": "pgpm_core/install.sql",
+   "status": "modified",
+   "hunks": [
+    [
+     5137,
+     5143
+    ],
+    [
+     5150,
+     5172
+    ],
+    [
+     5176,
+     5176
+    ],
+    [
+     5178,
+     5178
+    ],
+    [
+     5187,
+     5189
+    ],
+    [
+     5195,
+     5198
+    ],
+    [
+     5212,
+     5212
+    ],
+    [
+     5215,
+     5216
+    ],
+    [
+     5218,
+     5218
+    ]
+   ]
+  },
+  {
+   "path": "test.sh",
+   "status": "modified",
+   "hunks": [
+    [
+     1259,
+     1259
+    ]
+   ]
+  },
+  {
+   "path": "tests/334_over_retired_chunks_grid_zone_test.sql",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     171
+    ]
+   ]
+  }
+ ],
+ "units": [
+  {
+   "unit": "pgpm_core/install.sql:5137-5143",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    5137,
+    5143
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm._native_bound_key",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    5159,
+    5171
+   ],
+   "why": "touched at 5150-5172"
+  },
+  {
+   "unit": "pgpm._over_retired_chunks",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    5174,
+    5220
+   ],
+   "why": "touched at 5176-5176"
+  },
+  {
+   "unit": "pgpm.retain",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    4164,
+    4222
+   ],
+   "why": "calls pgpm._over_retired_chunks"
+  },
+  {
+   "unit": "pgpm._archive_step",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    5276,
+    5483
+   ],
+   "why": "calls pgpm._over_retired_chunks"
+  }
+ ],
+ "exercised_by": {
+  "pgpm._over_retired_chunks": [
+   "bench/over_retired_chunks_grid_zone.sh",
+   "bench/over_retired_chunks_range_first.sh",
+   "docs/reviews/2026-10-09-pass11.md",
+   "docs/reviews/2026-10-12-pass12.md",
+   "scripts/archive_partition_whole.sql",
+   "tests/309_archive_retired_chunk_kept_test.sql",
+   "tests/314_ledger_backfill_origin_only_block_test.sql",
+   "tests/317_over_retired_chunks_range_first_test.sql",
+   "tests/334_over_retired_chunks_grid_zone_test.sql"
+  ]
+ },
+ "finder": "P1",
+ "slice": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/over_retired_chunks_grid_zone.sh",
+   "docs/reference.md",
+   "pgpm_core/install.sql",
+   "test.sh",
+   "tests/334_over_retired_chunks_grid_zone_test.sql"
+  ],
+  "units": [
+   "pgpm_core/install.sql:5137-5143",
+   "pgpm._native_bound_key",
+   "pgpm._over_retired_chunks",
+   "pgpm.retain",
+   "pgpm._archive_step"
+  ],
+  "kind": "mixed"
+ },
+ "ledger": [
+  "pgpm_core/install.sql:5137-5143",
+  "pgpm._native_bound_key",
+  "pgpm._over_retired_chunks",
+  "pgpm.retain",
+  "pgpm._archive_step",
+  "CHANGELOG.md",
+  "bench/over_retired_chunks_grid_zone.sh",
+  "docs/reference.md",
+  "test.sh",
+  "tests/334_over_retired_chunks_grid_zone_test.sql"
+ ]
+}

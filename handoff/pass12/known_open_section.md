@@ -1,0 +1,5 @@
+## Known and open
+
+Seven claims re-found six open issues and are recorded on them with their reproductions (none is counted as a finding; each is a true report for precision): F12-03 and F12-05 on #1236 (the `_q` lint's `strip_noise` blind to a block comment before the assignment and to an E'' backslash escape, bullets B08-01 and B08-02), F13-02 on #769 (transmute's `-infinity` oldest value hits `_grid_floor` raw, the second bullet's first reproduction), F16-01 on #1232 (the date-anchor refusal raised through `from_hypertable` tells the operator to re-run `transmute` and call `transmute_abort`), F18-05 on #1216 (a partition of another table at a forward cell's name passes `_transmute_refuse_child_holders`' `pg_inherits` exemption), F19-03 on #814 (a direct strategy call reads `p_lo` under the session's DateStyle while `_object_stem` reads it under its pinned one, so a January row lands under February's key).
+
+A seventh, F12r-06 on #1180 (three more spellings of a relation's name that the child-by-oid lint's rule 1 lets through: `to_jsonb(c) ->> 'relname'`, `pg_identify_object(...).identity`, an INTERSECT against the name), joins the six.

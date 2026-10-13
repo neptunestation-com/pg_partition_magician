@@ -1,0 +1,109 @@
+{
+  "trees": {
+    "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/base",
+    "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/head",
+    "review": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/review",
+    "mutants": {
+      "retain_disown_remedy_keeps_row": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/mutants/retain_disown_remedy_keeps_row"
+    }
+  },
+  "acceptance": "ACC",
+  "claims": [
+    {
+      "id": "ACC-01",
+      "finder": "ACC",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 3573,
+      "lens": "operator error",
+      "scenario": "#1272 acceptance (F4-02): retain_disown's logged remedy (install pass _disown_unvouched_retirements; docs/reference.md retire: 'drop the table by hand ... its pgpm.part row is kept') leaves the attached pgpm.part row anchored to a dropped oid, so every later retire()/retain() logs fail_retain_identity for that range and status().retain_drop_failures climbs for good (and the row takes a retain_batch slot every tick); the remedy should also delete the row, or retire() should forget a disowned row whose relation the operator dropped",
+      "repro": "repro.sql",
+      "repro_used": "repro.verified.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "    +\n #     '1'\n(1 row)\n\n                                                                    is                                                                    \n------------------------------------------------------------------------------------------------------------------------------------------\n not ok 10 - with retain_batch = 1 the first retain() after the remedy spends its slot on the next aged partition, which it drops        +\n # Failed test 10: \"with retain_batch = 1 the first retain() after the remedy spends its slot on the next aged partition, which it drops\"+\n #         have: NULL                                                                                                                    +\n #         want: {retain_drop}\n(1 row)\n\n                                                        is                                                        \n------------------------------------------------------------------------------------------------------------------\n not ok 11 - the parent holds exactly 350 and 450: [100, 200) dropped by the operator, [200, 300) retired        +\n # Failed test 11: \"the parent holds exactly 350 and 450: [100, 200) dropped by the operator, [200, 300) retired\"+\n #         have: {250,350,450}                                                                                   +\n #         want: {350,450}\n(1 row)\n\n                finish                 \n---------------------------------------\n # Looks like you failed 4 tests of 11\n(1 row)\n\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "\n(1 row)\n\n                                         ok                                         \n------------------------------------------------------------------------------------\n ok 7 - LIVENESS: retention ran twice after the remedy and logged what it attempted\n(1 row)\n\n                                                 is                                                 \n----------------------------------------------------------------------------------------------------\n ok 8 - after the remedy as logged, retention logs no failure (fail_retain_identity) for [100, 200)\n(1 row)\n\n                         cmp_ok                          \n---------------------------------------------------------\n ok 9 - and status().retain_drop_failures does not climb\n(1 row)\n\n                                                              is                                                              \n------------------------------------------------------------------------------------------------------------------------------\n ok 10 - with retain_batch = 1 the first retain() after the remedy spends its slot on the next aged partition, which it drops\n(1 row)\n\n                                                  is                                                  \n------------------------------------------------------------------------------------------------------\n ok 11 - the parent holds exactly 350 and 450: [100, 200) dropped by the operator, [200, 300) retired\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+        },
+        "mutant:retain_disown_remedy_keeps_row": {
+          "fails": true,
+          "exit": 0,
+          "tail": "    +\n #     '1'\n(1 row)\n\n                                                                    is                                                                    \n------------------------------------------------------------------------------------------------------------------------------------------\n not ok 10 - with retain_batch = 1 the first retain() after the remedy spends its slot on the next aged partition, which it drops        +\n # Failed test 10: \"with retain_batch = 1 the first retain() after the remedy spends its slot on the next aged partition, which it drops\"+\n #         have: NULL                                                                                                                    +\n #         want: {retain_drop}\n(1 row)\n\n                                                        is                                                        \n------------------------------------------------------------------------------------------------------------------\n not ok 11 - the parent holds exactly 350 and 450: [100, 200) dropped by the operator, [200, 300) retired        +\n # Failed test 11: \"the parent holds exactly 350 and 450: [100, 200) dropped by the operator, [200, 300) retired\"+\n #         have: {250,350,450}                                                                                   +\n #         want: {350,450}\n(1 row)\n\n                finish                 \n---------------------------------------\n # Looks like you failed 4 tests of 11\n(1 row)\n\n"
+        }
+      },
+      "class": "fixed",
+      "acceptance": {
+        "fails_on_base": true,
+        "passes_on_head": true,
+        "mutant_restores": {
+          "retain_disown_remedy_keeps_row": true
+        },
+        "any_restores": true
+      }
+    },
+    {
+      "id": "P1-01",
+      "finder": "P1",
+      "tier": 4,
+      "file": "pgpm_core/install.sql",
+      "line": 3510,
+      "lens": "fresh surface",
+      "scenario": "pgpm._disown_retirement's retain_disown remedy still spells the DROP alone ('or drop it: drop table X;'; v_parent_q is computed and never used), so the remedy typed as logged drops the table and leaves its pgpm.part row anchored to a gone oid, and every later retain()/retire() logs fail_retain_identity for [100, 200) while status().retain_drop_failures climbs (#1272 unfixed); the PR body, docs/reference.md's retire entry and log-action row, tests/339 (fails 7 of 23 on this tree) and tests/327 part C all say the method spells the DELETE of the row beside the DROP",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "s                                  \n----------------------------------------------------------------------\n not ok 10 - and status().retain_drop_failures does not climb        +\n # Failed test 10: \"and status().retain_drop_failures does not climb\"+\n #         have: 1                                                   +\n #         want: 0\n(1 row)\n\n                                                                  is                                                                  \n--------------------------------------------------------------------------------------------------------------------------------------\n not ok 11 - pgpm.part keeps no row for the table the operator dropped as told, nor for the retired one, and keeps [300, 400)        +\n # Failed test 11: \"pgpm.part keeps no row for the table the operator dropped as told, nor for the retired one, and keeps [300, 400)\"+\n #         have: {\"Ev T_p0000000000000000100\",\"Ev T_p0000000000000000300\"}                                                           +\n #         want: {\"Ev T_p0000000000000000300\"}\n(1 row)\n\n                                              is                                              \n----------------------------------------------------------------------------------------------\n ok 12 - the parent holds exactly 350 and 450 (150, 160 dropped by the operator, 250 retired)\n(1 row)\n\n                finish                 \n---------------------------------------\n # Looks like you failed 6 tests of 12\n(1 row)\n\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "-\n      0\n(1 row)\n\n                                                  ok                                                   \n-------------------------------------------------------------------------------------------------------\n ok 8 - LIVENESS: retention ran twice after the remedy and reached the next aged partition, [200, 300)\n(1 row)\n\n                                           is                                            \n-----------------------------------------------------------------------------------------\n ok 9 - after the remedy as logged, retention logs nothing for [100, 200) on later calls\n(1 row)\n\n                            is                            \n----------------------------------------------------------\n ok 10 - and status().retain_drop_failures does not climb\n(1 row)\n\n                                                            is                                                            \n--------------------------------------------------------------------------------------------------------------------------\n ok 11 - pgpm.part keeps no row for the table the operator dropped as told, nor for the retired one, and keeps [300, 400)\n(1 row)\n\n                                              is                                              \n----------------------------------------------------------------------------------------------\n ok 12 - the parent holds exactly 350 and 450 (150, 160 dropped by the operator, 250 retired)\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": "s                                  \n----------------------------------------------------------------------\n not ok 10 - and status().retain_drop_failures does not climb        +\n # Failed test 10: \"and status().retain_drop_failures does not climb\"+\n #         have: 1                                                   +\n #         want: 0\n(1 row)\n\n                                                                  is                                                                  \n--------------------------------------------------------------------------------------------------------------------------------------\n not ok 11 - pgpm.part keeps no row for the table the operator dropped as told, nor for the retired one, and keeps [300, 400)        +\n # Failed test 11: \"pgpm.part keeps no row for the table the operator dropped as told, nor for the retired one, and keeps [300, 400)\"+\n #         have: {\"Ev T_p0000000000000000100\",\"Ev T_p0000000000000000300\"}                                                           +\n #         want: {\"Ev T_p0000000000000000300\"}\n(1 row)\n\n                                              is                                              \n----------------------------------------------------------------------------------------------\n ok 12 - the parent holds exactly 350 and 450 (150, 160 dropped by the operator, 250 retired)\n(1 row)\n\n                finish                 \n---------------------------------------\n # Looks like you failed 4 tests of 12\n(1 row)\n\n"
+        }
+      },
+      "class": "seed_hit",
+      "seed": "S1"
+    },
+    {
+      "id": "V-01",
+      "finder": "V",
+      "tier": 4,
+      "file": "pgpm_core/install.sql",
+      "line": 3508,
+      "lens": "closing claim",
+      "scenario": "PR #1303 writes the drop remedy ('drop table X; delete from pgpm.part ...', and 'attach it back ... so retention retires it') into EVERY retain_disown row through pgpm._disown_retirement, including the one _retain_recall logs (install.sql ~4148) for a partition retention NO LONGER REACHES after the operator lengthened retain with set_retain. For that partition both halves are false: retention will not retire it if attached back, and the spelled DROP destroys rows the policy in force keeps. Typed as logged, the remedy drops rows 150 and 160 that retain '1000' keeps. On the base the recall path's retain_disown named no remedy, so this is new with the PR (regression, misleading logged remedy).",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": false,
+          "exit": 0,
+          "tail": "d of a dispatch\n(1 row)\n\nALTER TABLE\n set_retain \n------------\n \n(1 row)\n\n                                      ok                                      \n------------------------------------------------------------------------------\n ok 3 - LIVENESS: under the new policy retention no longer reaches [100, 200)\n(1 row)\n\n retain \n--------\n      0\n(1 row)\n\n                                   ok                                    \n-------------------------------------------------------------------------\n ok 4 - LIVENESS: _retain_recall disowned the mark, logged retain_disown\n(1 row)\n\n                              ok                              \n--------------------------------------------------------------\n ok 5 - LIVENESS: the disowned table stands before the remedy\n(1 row)\n\n ?column? \n----------\n        1\n(1 row)\n\nCREATE FUNCTION\n                                                       is                                                       \n----------------------------------------------------------------------------------------------------------------\n ok 6 - rows 150 and 160, which retention keeps under the policy in force, survive the remedy the log row gives\n(1 row)\n\n                                             ok                                             \n--------------------------------------------------------------------------------------------\n ok 7 - the remedy does not promise that retention retires a partition it no longer reaches\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+        },
+        "head": {
+          "fails": true,
+          "exit": 0,
+          "tail": "disowned the mark, logged retain_disown\n(1 row)\n\n                              ok                              \n--------------------------------------------------------------\n ok 5 - LIVENESS: the disowned table stands before the remedy\n(1 row)\n\nDROP TABLE\nDELETE 1\nCREATE FUNCTION\n                                                             is                                                             \n----------------------------------------------------------------------------------------------------------------------------\n not ok 6 - rows 150 and 160, which retention keeps under the policy in force, survive the remedy the log row gives        +\n # Failed test 6: \"rows 150 and 160, which retention keeps under the policy in force, survive the remedy the log row gives\"+\n #         have: {350}                                                                                                     +\n #         want: {150,160,350}\n(1 row)\n\n                                                   ok                                                   \n--------------------------------------------------------------------------------------------------------\n not ok 7 - the remedy does not promise that retention retires a partition it no longer reaches        +\n # Failed test 7: \"the remedy does not promise that retention retires a partition it no longer reaches\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 7\n(1 row)\n\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": "n_recall disowned the mark, logged retain_disown\n(1 row)\n\n                              ok                              \n--------------------------------------------------------------\n ok 5 - LIVENESS: the disowned table stands before the remedy\n(1 row)\n\nDROP TABLE\nCREATE FUNCTION\n                                                             is                                                             \n----------------------------------------------------------------------------------------------------------------------------\n not ok 6 - rows 150 and 160, which retention keeps under the policy in force, survive the remedy the log row gives        +\n # Failed test 6: \"rows 150 and 160, which retention keeps under the policy in force, survive the remedy the log row gives\"+\n #         have: {350}                                                                                                     +\n #         want: {150,160,350}\n(1 row)\n\n                                                   ok                                                   \n--------------------------------------------------------------------------------------------------------\n not ok 7 - the remedy does not promise that retention retires a partition it no longer reaches        +\n # Failed test 7: \"the remedy does not promise that retention retires a partition it no longer reaches\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 7\n(1 row)\n\n"
+        }
+      },
+      "class": "regression"
+    }
+  ]
+}

@@ -1,0 +1,162 @@
+{
+  "claims": [
+    {
+      "id": "F1-01",
+      "finder": "F1",
+      "tier": 1,
+      "file": "pgpm_core/install.sql",
+      "line": 12243,
+      "lens": "fresh surface",
+      "scenario": "untransmute never calls _refuse_detach_pending (the #1157 gate is defined but asked nowhere), so with a forward partition left pending a concurrent detach the outside-rows gate passes, the reverse succeeds, and the parent's DROP destroys the pending partition's rows; it should refuse, naming the partition and FINALIZE, and change nothing",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "---------------------------------------------------------------------\n not ok 4 - untransmute refuses while a partition is pending a concurrent detach: returned        +\n # Failed test 4: \"untransmute refuses while a partition is pending a concurrent detach: returned\"\n(1 row)\n\n                                                   is                                                    \n---------------------------------------------------------------------------------------------------------\n not ok 5 - rows 1001 and 1002 still exist (in the pending partition) after the untransmute call        +\n # Failed test 5: \"rows 1001 and 1002 still exist (in the pending partition) after the untransmute call\"+\n #         have: NULL                                                                                   +\n #         want: {1001,1002}\n(1 row)\n\n                                   is                                    \n-------------------------------------------------------------------------\n not ok 6 - and no untransmute was logged over rows it destroyed        +\n # Failed test 6: \"and no untransmute was logged over rows it destroyed\"+\n #         have: 1                                                      +\n #         want: 0\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 6\n(1 row)\n\npsql:<stdin>:76: NOTICE:  trigger \"pgpm_write_block\" for relation \"public.f1pd_p2026_10_11_to_2026_10_13\" does not exist, skipping\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n ok 4 - untransmute refuses while a partition is pending a concurrent detach: raised: pg_partition_magician: cannot untransmute f1pd -- its partition(s) public.f1pd_p2026_10_15 are pending a concurrent detach (pg_inherits.inhdetachpending), so their rows are already invisible through the parent, where the check that every row still lives in the monolith reads, and the reverse's DROP of the parent would take them with it. If the detach is still running, let it finish; if its session died, finish it with ALTER TABLE f1pd DETACH PARTITION <partition> FINALIZE. The partition is then a standalone table of yours, which untransmute leaves standing; re-run it then. Nothing was changed.\n(1 row)\n\n                                             is                                              \n---------------------------------------------------------------------------------------------\n ok 5 - rows 1001 and 1002 still exist (in the pending partition) after the untransmute call\n(1 row)\n\n                             is                              \n-------------------------------------------------------------\n ok 6 - and no untransmute was logged over rows it destroyed\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+      },
+      "class": "seed_hit",
+      "seed": "S1"
+    },
+    {
+      "id": "F1-02",
+      "finder": "F1",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 14840,
+      "lens": "fresh surface",
+      "scenario": "restore_incoming_fks parks a failed one-step re-add (partitioned referencer, PG<18) with validate_retry_after five minutes out, but its loop never reads that column, so the next unscoped call (maintain's every tick) rescans the referencing table under SHARE ROW EXCLUSIVE on the managed table and fails again; reference.md promises the key is not retried before validate_retry_after",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "fk and failed it on the orphan\n(1 row)\n\n                                         ok                                         \n------------------------------------------------------------------------------------\n ok 3 - LIVENESS: and parked f1r_fk: validate_retry_after is about five minutes out\n(1 row)\n\n                                        ok                                        \n----------------------------------------------------------------------------------\n ok 4 - LIVENESS: the orphan is still there, so a retry would scan and fail again\n(1 row)\n\n                                                                  is                                                                   \n---------------------------------------------------------------------------------------------------------------------------------------\n not ok 5 - the parked key is not retried by an unscoped call before validate_retry_after (one failed attempt logged, not two)        +\n # Failed test 5: \"the parked key is not retried by an unscoped call before validate_retry_after (one failed attempt logged, not two)\"+\n #         have: 2                                                                                                                    +\n #         want: 1\n(1 row)\n\n               is                \n---------------------------------\n ok 6 - and nothing was re-added\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 6\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": " before 18, where a partitioned referencer's key is re-added in one step\n(1 row)\n\nCREATE TABLE\nINSERT 0 20\nCREATE TABLE\nCREATE TABLE\nINSERT 0 2\nCALL\nINSERT 0 1\n                                               is                                                \n-------------------------------------------------------------------------------------------------\n ok 2 - LIVENESS: the first call tried the one-step re-add of f1r_fk and failed it on the orphan\n(1 row)\n\n                                         ok                                         \n------------------------------------------------------------------------------------\n ok 3 - LIVENESS: and parked f1r_fk: validate_retry_after is about five minutes out\n(1 row)\n\n                                        ok                                        \n----------------------------------------------------------------------------------\n ok 4 - LIVENESS: the orphan is still there, so a retry would scan and fail again\n(1 row)\n\n                                                            is                                                             \n---------------------------------------------------------------------------------------------------------------------------\n ok 5 - the parked key is not retried by an unscoped call before validate_retry_after (one failed attempt logged, not two)\n(1 row)\n\n               is                \n---------------------------------\n ok 6 - and nothing was re-added\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+      },
+      "class": "seed_hit",
+      "seed": "S9"
+    },
+    {
+      "id": "F1-03",
+      "finder": "F1",
+      "tier": 4,
+      "file": "docs/reference.md",
+      "line": 683,
+      "lens": "contracts versus documentation",
+      "scenario": "the untransmute entry's remedy for a partition left pending a concurrent detach is `ALTER TABLE <table> DETACH PARTITION <partition>`, which PostgreSQL refuses for a pending partition (only DETACH PARTITION ... FINALIZE completes it), so the operator's typed remedy fails and the partition stays pending; the document should name FINALIZE as the code's own message does",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - fixture: the reference's remedy for an interrupted detach reads: ALTER TABLE <table> DETACH PARTITION <partition>\nok - LIVENESS: public.f1rd_p2026_10_15 is pending a concurrent detach under public.f1rd, its detacher gone\n# ran: ALTER TABLE public.f1rd DETACH PARTITION public.\"f1rd_p2026_10_15\" -> rc=1 ERROR:  cannot detach partition \"f1rd_p2026_10_15\"\nDETAIL:  The partition is being detached concurrently or has an unfinished detach.\nHINT:  Use ALTER TABLE ... DETACH PARTITION ... FINALIZE to complete the pending detach operation.\nnot ok - the documented remedy runs (it fails: ERROR:  cannot detach partition \"f1rd_p2026_10_15\"\nDETAIL:  The partition is being detached concurrently or has an unfinished detach.\nHINT:  Use ALTER TABLE ... DETACH PARTITION ... FINALIZE to complete the pending detach operation.)\nnot ok - and leaves no partition of public.f1rd pending detach (still pending: 1)\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "ok - fixture: the reference's remedy for an interrupted detach reads: ALTER TABLE <table> DETACH PARTITION <partition> FINALIZE\nok - LIVENESS: public.f1rd_p2026_10_15 is pending a concurrent detach under public.f1rd, its detacher gone\n# ran: ALTER TABLE public.f1rd DETACH PARTITION public.\"f1rd_p2026_10_15\" FINALIZE -> rc=0 ALTER TABLE\nok - the documented remedy runs\nok - and leaves no partition of public.f1rd pending detach\n"
+      },
+      "class": "seed_hit",
+      "seed": "S7"
+    },
+    {
+      "id": "F1-04",
+      "finder": "F1",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 2929,
+      "lens": "contracts versus documentation",
+      "scenario": "when a stranger's table holds a forward cell's name, obtain (and extend_to, line 3096) leaves the cell unbuilt and logs nothing, because the branch that should call _log_unbuilt_cell is `null;` and _log_unbuilt_cell is called from nowhere; reference.md promises a fail_obtain_name row naming the holder every tick, so the hole (every write into it refused) is invisible in pgpm.log",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "                   \n---------------------------------------------------------------------\n ok 2 - LIVENESS: the cell at 2026-10-15 00:00:00+00 is left unbuilt\n(1 row)\n\n                                    ok                                     \n---------------------------------------------------------------------------\n ok 3 - LIVENESS: its name is held by a standalone table of the operator's\n(1 row)\n\n                                                          is                                                           \n-----------------------------------------------------------------------------------------------------------------------\n not ok 4 - obtain logs fail_obtain_name for the unbuilt cell [2026-10-15 00:00:00+00, 2026-10-16 00:00:00+00)        +\n # Failed test 4: \"obtain logs fail_obtain_name for the unbuilt cell [2026-10-15 00:00:00+00, 2026-10-16 00:00:00+00)\"+\n #         have: 0                                                                                                    +\n #         want: 1\n(1 row)\n\n                                    ok                                     \n---------------------------------------------------------------------------\n not ok 5 - and the row names the relation holding the cell's name        +\n # Failed test 5: \"and the row names the relation holding the cell's name\"+\n #     (test result was NULL)\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 5\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "CREATE EXTENSION\n plan \n------\n 1..5\n(1 row)\n\nSET\nCREATE TABLE\nINSERT 0 20\nCALL\nCREATE TABLE\n set_obtain \n------------\n \n(1 row)\n\n                                              ok                                               \n-----------------------------------------------------------------------------------------------\n ok 1 - LIVENESS: obtain built the cells past the held one (it ran over the widened lookahead)\n(1 row)\n\n                                 ok                                  \n---------------------------------------------------------------------\n ok 2 - LIVENESS: the cell at 2026-10-15 00:00:00+00 is left unbuilt\n(1 row)\n\n                                    ok                                     \n---------------------------------------------------------------------------\n ok 3 - LIVENESS: its name is held by a standalone table of the operator's\n(1 row)\n\n                                                    is                                                     \n-----------------------------------------------------------------------------------------------------------\n ok 4 - obtain logs fail_obtain_name for the unbuilt cell [2026-10-15 00:00:00+00, 2026-10-16 00:00:00+00)\n(1 row)\n\n                              ok                               \n---------------------------------------------------------------\n ok 5 - and the row names the relation holding the cell's name\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+      },
+      "class": "seed_hit",
+      "seed": "S3"
+    },
+    {
+      "id": "F1-05",
+      "finder": "F1",
+      "tier": 4,
+      "file": "pgpm_core/install.sql",
+      "line": 9572,
+      "lens": "operator error",
+      "scenario": "the orphan-child guard matches any label of the control kind rather than of the grid being registered, so an operator's standalone table sales_p2023 (a name only a yearly grid could give) refuses the transmute of sales on a monthly grid, whose cells and regrain children can never take it, and the refusal calls it a regrain orphan and tells the operator to drop table it, a remedy that drops their rows; it should let the conversion through (or at least not prescribe dropping the operator's table)",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "ator's sales_p2023 still holds rows 7 and 8 (nothing was dropped)\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 4\n(1 row)\n\npsql:<stdin>:24: ERROR:  pg_partition_magician: public.sales_p2023 already exists as a standalone table matching this parent's partition naming -- most likely an orphan left by an interrupted regrain. Drop it (drop table public.sales_p2023) and retry transmute.\nCONTEXT:  PL/pgSQL function pgpm._transmute_refuse_child_holders(name,name,text) line 12 at RAISE\nSQL statement \"SELECT pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind)\"\nPL/pgSQL function pgpm._transmute(regclass,name,text,text,text,integer,text,integer,boolean,text,boolean,integer,text,text,integer,integer,text,boolean,text,integer,timestamp with time zone,boolean) line 245 at PERFORM\nSQL statement \"call pgpm._transmute(p_parent, p_control, coalesce(v_kind, 'time'),\n    p_interval::text, pgpm._ts_text(p_anchor), p_obtain,\n    p_retain::text, p_regrain_batch, p_paused, p_incoming_fks, p_force_uuidv7,\n    p_bound_headroom, p_lock_timeout,\n    p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_force_text_time,\n    p_tt_alphabet, p_tt_discard_bits, p_tt_epoch, p_force_frontier)\"\nPL/pgSQL function pgpm.transmute(regclass,name,interval,integer,interval,integer,timestamp with time zone,boolean,text,boolean,integer,text,text,integer,integer,text,boolean,text,integer,timestamp with time zone,boolean) line 10 at CALL\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 0,
+        "tail": "ator's sales_p2023 still holds rows 7 and 8 (nothing was dropped)\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 4\n(1 row)\n\npsql:<stdin>:24: ERROR:  pg_partition_magician: public.sales_p2023 already exists as a standalone table matching this parent's partition naming -- most likely an orphan left by an interrupted regrain. Drop it (drop table public.sales_p2023) and retry transmute.\nCONTEXT:  PL/pgSQL function pgpm._transmute_refuse_child_holders(name,name,text) line 12 at RAISE\nSQL statement \"SELECT pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind)\"\nPL/pgSQL function pgpm._transmute(regclass,name,text,text,text,integer,text,integer,boolean,text,boolean,integer,text,text,integer,integer,text,boolean,text,integer,timestamp with time zone,boolean) line 245 at PERFORM\nSQL statement \"call pgpm._transmute(p_parent, p_control, coalesce(v_kind, 'time'),\n    p_interval::text, pgpm._ts_text(p_anchor), p_obtain,\n    p_retain::text, p_regrain_batch, p_paused, p_incoming_fks, p_force_uuidv7,\n    p_bound_headroom, p_lock_timeout,\n    p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_force_text_time,\n    p_tt_alphabet, p_tt_discard_bits, p_tt_epoch, p_force_frontier)\"\nPL/pgSQL function pgpm.transmute(regclass,name,interval,integer,interval,integer,timestamp with time zone,boolean,text,boolean,integer,text,text,integer,integer,text,boolean,text,integer,timestamp with time zone,boolean) line 10 at CALL\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F1-06",
+      "finder": "F1",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 10850,
+      "lens": "operator error",
+      "scenario": "a text_time transmute re-run with another encoding (here p_tt_epoch one day earlier) takes over the earlier attempt's claim, which checks the column (#628) and the grid (#574) but not the encoding, skips phase 1 because a pgpm_monolith_bound CHECK in the old encoding exists, and the cutover's ATTACH with bounds in the new encoding scans the table under ACCESS EXCLUSIVE and dies raw (partition constraint violated) after the bound and claim are committed; it should be refused up front in pgpm's words, as a resume on another column is",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "--------------\n ok 2 - fixture: the re-run, from the claim's own session, returned: raised: partition constraint of relation \"f1tt_p2026_10_11_to_2026_10_13\" is violated by some row\n(1 row)\n\n                                                                                                       ok                                                                                                       \n----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 3 - a resume under another text_time encoding is refused in pgpm's words, before the cutover: raised: partition constraint of relation \"f1tt_p2026_10_11_to_2026_10_13\" is violated by some row        +\n # Failed test 3: \"a resume under another text_time encoding is refused in pgpm's words, before the cutover: raised: partition constraint of relation \"f1tt_p2026_10_11_to_2026_10_13\" is violated by some row\"\n(1 row)\n\n                        is                         \n---------------------------------------------------\n ok 4 - LIVENESS: rows 1..20 are all still in f1tt\n(1 row)\n\n                           ok                           \n--------------------------------------------------------\n ok 5 - LIVENESS: the claim is still there for an abort\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 5\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 0,
+        "tail": "--------------\n ok 2 - fixture: the re-run, from the claim's own session, returned: raised: partition constraint of relation \"f1tt_p2026_10_11_to_2026_10_13\" is violated by some row\n(1 row)\n\n                                                                                                       ok                                                                                                       \n----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 3 - a resume under another text_time encoding is refused in pgpm's words, before the cutover: raised: partition constraint of relation \"f1tt_p2026_10_11_to_2026_10_13\" is violated by some row        +\n # Failed test 3: \"a resume under another text_time encoding is refused in pgpm's words, before the cutover: raised: partition constraint of relation \"f1tt_p2026_10_11_to_2026_10_13\" is violated by some row\"\n(1 row)\n\n                        is                         \n---------------------------------------------------\n ok 4 - LIVENESS: rows 1..20 are all still in f1tt\n(1 row)\n\n                           ok                           \n--------------------------------------------------------\n ok 5 - LIVENESS: the claim is still there for an abort\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 5\n(1 row)\n\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F1-07",
+      "finder": "F1",
+      "tier": 4,
+      "file": "docs/reference.md",
+      "line": 92,
+      "lens": "time and zones",
+      "scenario": "reference.md says a naive timestamp key written as local wall time east of UTC runs on an hourly grid given obtain above the offset, but transmute's frontier-skew refusal (_frontier_skew_limit, install.sql:10675, now() + step + 1 h on the UTC clock) refuses an Asia/Tokyo table's current rows on an hourly grid as a wrong client clock unless p_force_frontier; either the document should say the conversion needs p_force_frontier (and what it costs) or the allowance should count the documented offset",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "4.862696+00, which is 08:58:59 ahead of now() (2026-10-12 16:00:04.863901+00). The monolith's upper bound has to lie past every row, so that one value would fix the monolith's permanent upper bound at 2026-10-13 01:00:00+00 instead of 2026-10-12 17:00:00+00: every row written until then lands in the monolith, which cannot be regrained, and nothing behind it can be dropped, until the clock actually gets there. Delete or correct the rows whose ts is after 2026-10-12 18:00:04.863901+00 (now() + one step + one hour, the most the newest row may lead the clock by) and re-run, or re-run with p_force_frontier => true to accept that bound.\nCONTEXT:  PL/pgSQL function pgpm._transmute(regclass,name,text,text,text,integer,text,integer,boolean,text,boolean,integer,text,text,integer,integer,text,boolean,text,integer,timestamp with time zone,boolean) line 661 at RAISE\nSQL statement \"call pgpm._transmute(p_parent, p_control, coalesce(v_kind, 'time'),\n    p_interval::text, pgpm._ts_text(p_anchor), p_obtain,\n    p_retain::text, p_regrain_batch, p_paused, p_incoming_fks, p_force_uuidv7,\n    p_bound_headroom, p_lock_timeout,\n    p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_force_text_time,\n    p_tt_alphabet, p_tt_discard_bits, p_tt_epoch, p_force_frontier)\"\nPL/pgSQL function pgpm.transmute(regclass,name,interval,integer,interval,integer,timestamp with time zone,boolean,text,boolean,integer,text,text,integer,integer,text,boolean,text,integer,timestamp with time zone,boolean) line 10 at CALL\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 0,
+        "tail": ":05.341844+00, which is 08:58:59 ahead of now() (2026-10-12 16:00:05.34288+00). The monolith's upper bound has to lie past every row, so that one value would fix the monolith's permanent upper bound at 2026-10-13 01:00:00+00 instead of 2026-10-12 17:00:00+00: every row written until then lands in the monolith, which cannot be regrained, and nothing behind it can be dropped, until the clock actually gets there. Delete or correct the rows whose ts is after 2026-10-12 18:00:05.34288+00 (now() + one step + one hour, the most the newest row may lead the clock by) and re-run, or re-run with p_force_frontier => true to accept that bound.\nCONTEXT:  PL/pgSQL function pgpm._transmute(regclass,name,text,text,text,integer,text,integer,boolean,text,boolean,integer,text,text,integer,integer,text,boolean,text,integer,timestamp with time zone,boolean) line 661 at RAISE\nSQL statement \"call pgpm._transmute(p_parent, p_control, coalesce(v_kind, 'time'),\n    p_interval::text, pgpm._ts_text(p_anchor), p_obtain,\n    p_retain::text, p_regrain_batch, p_paused, p_incoming_fks, p_force_uuidv7,\n    p_bound_headroom, p_lock_timeout,\n    p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_force_text_time,\n    p_tt_alphabet, p_tt_discard_bits, p_tt_epoch, p_force_frontier)\"\nPL/pgSQL function pgpm.transmute(regclass,name,interval,integer,interval,integer,timestamp with time zone,boolean,text,boolean,integer,text,text,integer,integer,text,boolean,text,integer,timestamp with time zone,boolean) line 10 at CALL\n"
+      },
+      "class": "candidate"
+    }
+  ]
+}

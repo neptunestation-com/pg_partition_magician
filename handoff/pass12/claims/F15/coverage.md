@@ -1,0 +1,100 @@
+# F15 coverage ledger (pass 12, slice S11)
+
+- tests/28_pause_resume_test.sql | read: yes | paused/resumed status by exact p_status; throws_ok on resume is 4-arg P0001 (function, not committing); held
+- tests/290_regrain_capture_delta_held_test.sql | read: yes | fresh-ish: rename race by held locks, delta keys by identity, freed-name tables empty with an insert witness; held
+- tests/291_regrain_reconcile_judged_rows_test.sql | read: yes | forged pgpm_seq and NULL-key rows named row by row, purge logged once; held
+- tests/292_archive_covered_hi_column_type_test.sql | read: yes | contracts: ran docs/reference.md's ceil() repair text against the test's use (verbatim); calls recorded by identity; held
+- tests/293_obtain_plain_name_too_long_test.sql | read: yes | boundary: 63/64-byte name edge, fail_obtain_name per cell, C keeps the loud refusal; liveness octet sum odd but literal; held
+- tests/294_regrain_capture_view_writer_test.sql | read: yes | operator/role paths: view writer, search_path operator spoof witnessed, disarmed capture LIVENESS pinned by SQLSTATE+message; held
+- tests/295_regrain_key_column_named_pgpm_seq_test.sql | read: yes | twin row read by xmin to separate whole-key from id-only reconcile; held
+- tests/296_regrain_children_tablespace_test.sql | read: yes | three tablespace rules each failed by one part; held
+- tests/297_identity_sequence_grants_test.sql | read: yes | ACLs compared whole incl. grantor and column grants; (D) refusal pinned; held
+- tests/298_obtain_backoff_hole_test.sql | read: yes | back-off walk per hole position, real lock race via dblink, witness ticks; held
+- tests/299_transmute_cutover_names_held_test.sql | read: no | out of budget (623 lines; pass-11 fix-phase file, not on the pass-12 fresh list)
+- tests/300_transmute_publication_change_refused_test.sql | read: no | out of budget (264 lines)
+- tests/301_check_text_time_epoch_bound_test.sql | read: yes | time and zones: Kolkata and Dublin SQL/DMY sessions, expected values computed in UTC/ISO, PG18 skip of liveness only; held
+- tests/302_check_text_time_overflow_radix_test.sql | read: yes | boundary: interval vs timestamptz overflow each alone, radix floor, width/discard/unit refusals pinned by message; held
+- tests/303_adopt_partition_test.sql | read: yes | identity checks by oid/rows, pending-detach refusal at both checks ordered by pg_locks; held
+- tests/304_canonical_tz_pseudo_zones_test.sql | read: yes | time and zones: localtime/posixrules/Factory any casing, session-zone transmute refusal; held
+- tests/305_bound_contract_remedy_test.sql | read: yes | boundary + operator error: each remedy typed (finest step) and its bound read back; held
+- tests/306_date_key_anchor_midnight_test.sql | read: yes | time and zones: NY session midnight anchor, resume from noon claim, state by identity; held
+- tests/307_write_block_skips_hand_detached_test.sql | read: no | out of budget (353 lines)
+- tests/308_regrain_target_encoded_unit_test.sql | read: no | out of budget (316 lines)
+- tests/309_archive_retired_chunk_kept_test.sql | read: no | out of budget (596 lines)
+- tests/310_transmute_claim_owner_under_set_role_test.sql | read: no | out of budget (213 lines)
+- tests/311_retain_horizon_ambiguous_wall_time_test.sql | read: yes | time and zones: fall-back first/second pass, spring-forward, clk shim; 40-case matrix by identity; held (spring-forward nonexistent wall time for '1 day' not in matrix, noted)
+- tests/312_untransmute_pending_detach_test.sql | read: yes | fresh: abandoned and in-lock-wait detach, poll clears snapshot, rows by identity, remedy (FINALIZE) typed; held
+- tests/313_archive_whole_skips_hand_detached_test.sql | read: yes | fresh: script reads script path from tree, strategy calls by identity, control part B; held
+- tests/314_ledger_backfill_origin_only_block_test.sql | read: yes | fresh: five block states, adopted-anchor successor, object bodies by identity; held
+- tests/315_regrain_swap_lock_budget_test.sql | read: yes | fresh/boundary: line at cap vs cap+1 from server settings, aged prefix, measured swap budget, FK charges; held
+- tests/316_obtain_walk_reads_rows_once_test.sql | read: yes | fresh: _native_gt counts ratio, holes/dead rows asymmetric, time grid part E; held (part E runs in session zone only)
+- tests/317_over_retired_chunks_range_first_test.sql | read: yes | fresh/time and zones: offset-less chunk read in session zone, Kolkata SQL/DMY rerun; read install.sql _over_retired_chunks/_native_order_key; hypothesis H3
+- tests/318_forget_missing_logs_object_keys_test.sql | read: yes | fresh: log method whole-string, live parent untouched by identity; held
+- tests/319_set_regrain_restated_target_test.sql | read: yes | fresh: 050/1 mon/24 hours accepted, 30 days refused, copies named; held
+- tests/31_schedule_test.sql | read: yes | needs pg_cron in the postgres DB: read only, not run (brief); counts per job name with commands/schedules by value; held
+- tests/320_transmute_reap_rereads_claim_test.sql | read: yes | fresh: reaper re-read ordered by held locks, reaped set a,c by name; held
+- tests/321_transmute_child_names_under_lock_test.sql | read: yes | fresh: committed and in-flight holders, every refusal pinned, resumable phase-2 state witnessed; held
+- tests/322_partitioned_referencer_readd_not_valid_test.sql | read: yes | fresh: PG18 vs 15-17 branches; on PG15 several (E)/(H) checks are vacuous by version (skip/zero-vs-zero), noted
+- tests/323_regrain_reconcile_unshaped_key_test.sql | read: yes | fresh: off-shape keys by payload per fine child, aged path, refusal keeps key; held
+- tests/324_regrain_registered_grid_off_unit_test.sql | read: no | out of budget (258 lines)
+- tests/325_archive_hold_detach_in_flight_test.sql | read: yes | fresh: four races by held locks incl. RR snapshot and 200ms lock_timeout skip; held
+- tests/327_retire_pending_detach_test.sql | read: yes | fresh: parts A-R, dispatch record vouching, upgrade pass, cron stand-in; held
+- tests/328_regrain_swap_waits_for_older_snapshots_test.sql | read: yes | fresh (lever): parts A-T, importer snapshots, chains, yielding; read whole; held (documented limit #1256 not re-probed)
+- tests/33_unique_secondary_carry_or_refuse_test.sql | read: yes | refusal + carried unique index enforces 23505; count of carried indexes only (noted); held
+- tests/39_uuidv7_refused_test.sql | read: yes | boundary: 48-bit ceiling exact instant, +1ms refused, LIVENESS decode cannot overflow; held
+- tests/41_no_pg_monitor_dep_test.sql | read: yes | regex negative over prosrc without a witness that the regex can match; noted, not claimed
+- tests/42_coarse_naming_and_overlap_test.sql | read: yes | naming forms and overlap skip; held
+- tests/43_regrain_test.sql | read: yes | counts backed by bag_eq identity; throws_ok 4-arg on a function; held
+- tests/44_status_coarse_test.sql | read: yes | status coarse counts before/after; held
+- tests/45_regrain_feathered_test.sql | read: yes | counts backed by bag_eq; held
+- tests/46_auto_regrain_maintain_test.sql | read: yes | counts backed by bag_eq; held
+- tests/47_auto_regrain_suspends_fk_test.sql | read: yes | header says the FK is never dropped across the swap, but the swap suspends and re-adds incoming FKs (tests/99, 315 E); count cannot see it; noted
+- tests/48_regrain_copy_contract_test.sql | read: yes | (3) names a snapshot() that no longer exists and repeats (1) verbatim; redundant not wrong; noted
+- tests/49_unique_constraint_reuse_test.sql | read: yes | counts backed by bag_eq; held
+- tests/50_unique_constraint_refusals_test.sql | read: yes | refusals pinned by throws_like; held
+- tests/51_unique_constraint_untransmute_test.sql | read: yes | count(*)=25 and contype count after round trip, no identity; noted (no realistic compensating mutant)
+- tests/52_keyless_transmute_test.sql | read: yes | count(*)=40 conserved; noted
+- tests/53_regrain_reused_key_test.sql | read: yes | counts backed by bag_eq; held
+- tests/54_generated_column_test.sql | read: yes | counts backed by bag_eq; held
+- tests/55_check_constraint_test.sql | read: yes | CHECK carried and enforced (23514); held
+- tests/56_identity_sequence_preserve_test.sql | read: yes | next ids by value; held
+- tests/57_minted_child_analyzed_test.sql | read: yes | reltuples > 0; held
+- tests/59_retain_batch_test.sql | read: yes | paced drops by lo; held
+- tests/60_retire_test.sql | read: yes | claim/drop protocol, SKIP LOCKED via dblink; held
+- tests/61_write_block_test.sql | read: yes | trigger presence per child plus behavioural refusals; held
+- tests/62_archive_fn_contract_test.sql | read: yes | contract shape via _run_archive_strategy; held
+- tests/63_archive_chunk_ledger_test.sql | read: yes | sum(rows_archived)=100 backed by contiguity, first lo and last hi (tiling); held
+- tests/64_retire_archive_gate_test.sql | read: yes | gate across ticks; "drops in the same tick coverage finishes" not asserted, noted
+- tests/65_observe_no_pgfr_test.sql | read: yes | observe_window counts on a synthetic log; held
+- tests/66_set_archive_fn_test.sql | read: yes | set/clear/refuse; held
+- tests/67_regrain_name_collision_test.sql | read: yes | counts backed by bag_eq; held
+- tests/68_regrain_write_contract_test.sql | read: yes | mixed DML count 252 plus named rows; untouched-neighbour rows not checked, noted
+- tests/69_regrain_capture_apparatus_test.sql | read: yes | apparatus design checks; held
+- tests/70_transmute_phases_test.sql | read: yes | resume vs restart told apart by a wider recorded bound; rows by count only, noted
+- tests/72_transmute_attributes_test.sql | read: yes | CLAIMED F15-01: RLS asserted only for the role the policy names over a symmetric fixture; green against a policy replayed TO PUBLIC
+- tests/73_restore_fk_validate_test.sql | read: yes | NOT VALID state then validation, behavioural 23503; held
+- tests/74_regrain_archive_gate_test.sql | read: yes | fresh-changed: drops tied to ledger coverage by range_agg and archived_at; aged set by range; held
+- tests/76_no_default_partition_test.sql | read: yes | no DEFAULT, write past lookahead refused; obtain-count check is a count, noted
+- tests/77_retain_incoming_fk_test.sql | read: yes | fresh-changed: dispatch, crossing, abandoned detach, impostor by oid, two marks; held
+- tests/78_retain_detach_dispatch_test.sql | read: yes | needs pg_cron in the postgres DB: read only, not run; command pinned by value; held
+- tests/79_status_survives_dropped_parent_test.sql | read: yes | status per row, forget_missing by oid, orphan reported; held
+- tests/80_transmute_outgoing_fk_test.sql | read: yes | forward-partition enforcement; cascade count=0 without a post-transmute witness for ofk2's rows, noted
+- tests/81_transmute_lock_timeout_test.sql | read: yes | throws_ok on a committing procedure is 4-arg P0001 (pinned SQLSTATE); state checks; held
+- tests/82_identity_always_test.sql | read: yes | behavioural 428C9 before/after/round trip, BY DEFAULT control; held
+- tests/83_pgpm_index_clash_test.sql | read: yes | 4-arg P0001 around transmute plus liveness re-run; header itself says 2-5 are characterisation; held
+- tests/84_version_test.sql | read: yes | installed row by version value; held
+- tests/85_uuidv7_frontier_drought_test.sql | read: yes | drought witness, forward partition past monolith; held
+- tests/86_text_time_codec_test.sql | read: yes | boundary: width-2 ceiling 1295 ms, +1 ms refused 22003; held
+- tests/87_text_time_grid_test.sql | read: yes | dispatch through _encode/_decode; held
+- tests/88_text_time_transmute_test.sql | read: yes | row count conserved by count (2 rows); noted
+- tests/89_text_time_sanity_test.sql | read: yes | sampling fractions and force override; held
+- tests/90_text_time_alphabet_codec_test.sql | read: yes | alphabet length refusal pinned by message; held
+- tests/91_text_time_ulid_ksuid_transmute_test.sql | read: yes | ULID column default collation, KSUID collate C; checked install.sql _check_text_time_collation covers it; held
+- tests/92_regrain_outgoing_fk_test.sql | read: yes | header admits lock-duration is not pinned; not-valid count=0 per partition without a per-partition clone witness, noted
+- tests/93_archive_batch_test.sql | read: yes | chunks by partition and range; held
+- tests/94_write_block_loop_isolation_test.sql | read: yes | poisoned middle child, both neighbours blocked; held
+- tests/95_set_regrain_rejects_coarser_step_test.sql | read: yes | 4-arg P0001 on a function; held
+- tests/96_extend_to_test.sql | read: yes | time and zones: part D floors with _grid_floor in UTC and date_trunc in the session zone, runs only under UTC; noted
+- tests/97_set_obtain_test.sql | read: yes | negative refused, 0 and positive accepted; held
+- tests/98_set_retain_test.sql | read: yes | tighten/loosen/arm-from-null by value; held
+- tests/99_restore_fk_scoped_test.sql | read: yes | swap leaves a stale FK unrestored; held

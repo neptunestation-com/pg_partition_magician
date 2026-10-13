@@ -1,0 +1,11 @@
+{
+ "id": "V-01",
+ "tier": 3,
+ "file": "pgpm_archive/install.sql",
+ "line": 3880,
+ "lens": "closing claim",
+ "scenario": "The head reads a direct call's bounds on the grid's clock (archive._bound_native, offset-less text in partition_tz) for the read, the recorded-chunk check and the key, but archive._refuse_empty_range (#969) still compares the raw text in the caller's session. On a timestamptz grid with partition_tz Asia/Kolkata, a UTC caller's [lo '2024-01-02 18:30:00+00', hi '2024-01-03') is non-empty to the session and empty on the grid's clock (hi = 2024-01-03 00:00 IST = lo), so the call is admitted, reads no row, and PUTs an empty object at the 2 January cell's own key instead of refusing. The base read the range in the session too, so it archived the session's non-empty range: a regression of #969's refusal. The empty-range check should read the same canonical bounds the encoders read.",
+ "repro": "repro.sql",
+ "install": ["tests/archive/fixtures.sql", "pgpm_core/install.sql", "pgpm_archive/install.sql"],
+ "finder": "V"
+}

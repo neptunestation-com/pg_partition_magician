@@ -1,0 +1,308 @@
+[
+ {
+  "id": "RC1",
+  "title": "regrain(), regrain_history() and a hand regrain_step copy and swap through a REPEATABLE READ caller's snapshot, dropping rows committed after it",
+  "tier": 1,
+  "claims": [
+   "F3-02",
+   "F3-04"
+  ],
+  "age": "old"
+ },
+ {
+  "id": "RC2",
+  "title": "the readers of a retirement mark vouch for it without the dispatch record, so the archive step records a hand-detached table as covered and retention drops it once attached back",
+  "tier": 1,
+  "claims": [
+   "F14-01"
+  ],
+  "age": "young"
+ },
+ {
+  "id": "RC3",
+  "title": "archive._owned_key claims key bases as raw text, so under MinIO's leading-slash normalisation a namesake's chunk overwrites the dropped table's only copy",
+  "tier": 1,
+  "claims": [
+   "F5-02"
+  ],
+  "age": "old"
+ },
+ {
+  "id": "RC4",
+  "title": "_regrain_copy_make's LIKE ... INCLUDING CONSTRAINTS validates a NOT VALID CHECK on the copy, so a violating row wedges the regrain until regrain_cancel",
+  "tier": 2,
+  "claims": [
+   "F3-03"
+  ],
+  "age": "old"
+ },
+ {
+  "id": "RC5",
+  "title": "adopt_partition judges attachment and the pending flag through the caller's transaction snapshot, before and after its lock, and does not refuse a stricter isolation level",
+  "tier": 3,
+  "claims": [
+   "F4-03",
+   "F11-03"
+  ],
+  "age": "old"
+ },
+ {
+  "id": "RC6",
+  "title": "_snapshot_wait judges a snapshot by the cluster-wide backend_xmin, so a transaction open in another database defers every swap and the refusal names an innocent pid",
+  "tier": 3,
+  "claims": [
+   "F13-01"
+  ],
+  "age": "young"
+ },
+ {
+  "id": "RC7",
+  "title": "_over_retired_chunks reads a legacy offset-less retired ledger bound in the caller's session TimeZone",
+  "tier": 3,
+  "claims": [
+   "F15-02"
+  ],
+  "age": "old"
+ },
+ {
+  "id": "RC8",
+  "title": "check_time_monotonic casts a naive timestamp column to timestamptz in the caller's session TimeZone",
+  "tier": 3,
+  "claims": [
+   "F2-02"
+  ],
+  "age": "old"
+ },
+ {
+  "id": "RC9",
+  "title": "from_hypertable_copy resolves the key's constraint by conindid alone, so an incoming foreign key on the key pre-builds the wrong index and the key is built twice",
+  "tier": 3,
+  "claims": [
+   "F6-02"
+  ],
+  "age": "old"
+ },
+ {
+  "id": "RC10",
+  "title": "_surface_prepare drops a shape-changed surface function and recreates it, losing the operator's grants the install's header promises to keep",
+  "tier": 3,
+  "claims": [
+   "F6-03"
+  ],
+  "age": "old"
+ },
+ {
+  "id": "RC11",
+  "title": "_from_hypertable_check_arguments does not ask transmute's mixed month-and-duration step rule before the copy and swap",
+  "tier": 3,
+  "claims": [
+   "F16r-01"
+  ],
+  "age": "young"
+ },
+ {
+  "id": "RC12",
+  "title": "archive.configure accepts an endpoint with a trailing slash, after which every signed request addresses //bucket/key and is refused",
+  "tier": 3,
+  "claims": [
+   "F19-02"
+  ],
+  "age": "old"
+ },
+ {
+  "id": "RC13",
+  "title": "transmute's resume checks the claim's column and grid but not the text_time encoding, so a re-run with another encoding fails raw in the cutover",
+  "tier": 3,
+  "claims": [
+   "F1-06"
+  ],
+  "age": "old"
+ },
+ {
+  "id": "RC14",
+  "title": "_regrain_capture_names resolves the recorded capture function only in the delta's current schema, so untransmute and uninstall leave it behind after the delta is moved",
+  "tier": 3,
+  "claims": [
+   "F3-05"
+  ],
+  "age": "old"
+ },
+ {
+  "id": "RC15",
+  "title": "retain_disown's remedy, in the log row and the reference, says to drop the table by hand and omits the pgpm.part row that then wedges retention",
+  "tier": 4,
+  "claims": [
+   "F4-02"
+  ],
+  "age": "old"
+ },
+ {
+  "id": "RC16",
+  "title": "_transmute_refuse_staging_squatter hard-codes a drop table remedy whatever kind of relation holds the staging name",
+  "tier": 4,
+  "claims": [
+   "F18-02"
+  ],
+  "age": "old"
+ },
+ {
+  "id": "RC17",
+  "title": "_transmute_refuse_child_holders accepts any time label of the kind, so an operator's table at a label the grid could never mint blocks the conversion",
+  "tier": 4,
+  "claims": [
+   "F1-05"
+  ],
+  "age": "young"
+ },
+ {
+  "id": "RC18",
+  "title": "the reference says a naive timestamp column holding wall time east of UTC runs on an hourly grid, but the frontier skew refusal stops it unless p_force_frontier is passed",
+  "tier": 4,
+  "claims": [
+   "F1-07"
+  ],
+  "age": "old"
+ },
+ {
+  "id": "RC19",
+  "title": "_time_unit_breach flags a date anchor off midnight for a whole-month step whose bounds all land at midnight: the upgrade warns and set_regrain refuses for a false reason",
+  "tier": 4,
+  "claims": [
+   "F2-03"
+  ],
+  "age": "young"
+ },
+ {
+  "id": "RC20",
+  "title": "CHANGELOG.md's #1161 bullet carries a stale duplicated tail saying set_regrain refuses a run past the lock budget, where it warns",
+  "tier": 4,
+  "claims": [
+   "F17-07",
+   "F12r-01"
+  ],
+  "age": "young"
+ },
+ {
+  "id": "RC21",
+  "title": "check_quoted_splices.py never reads a FOR loop's target as an assignment and never reads a body dollar-quoted with a tag other than $$",
+  "tier": 5,
+  "claims": [
+   "F8-01",
+   "F12-06",
+   "F8-08"
+  ],
+  "age": "young"
+ },
+ {
+  "id": "RC22",
+  "title": "check_archive_object_keys.py misses a prefix bound as an EXECUTE ... USING argument, renamed through a FROM item or handed by position to a helper",
+  "tier": 5,
+  "claims": [
+   "F8-02",
+   "F12r-07"
+  ],
+  "age": "young"
+ },
+ {
+  "id": "RC23",
+  "title": "bench/ci_runs_lint_jobs.sh accepts test.sh's ci on the spelling of its lint call and never requires that ci fails when the lint track fails",
+  "tier": 5,
+  "claims": [
+   "F11-02"
+  ],
+  "age": "young"
+ },
+ {
+  "id": "RC24",
+  "title": "bench/run_fh.sh calls from_hypertable_cutover with p_regrain_batch, a parameter it does not have, so every documented hypertable benchmark run dies after its copy",
+  "tier": 5,
+  "claims": [
+   "F8-03"
+  ],
+  "age": "old"
+ },
+ {
+  "id": "RC25",
+  "title": "bench/run.sh's conservation gate counts history rows where its own comment and the README promise every row is still present",
+  "tier": 5,
+  "claims": [
+   "F8-05"
+  ],
+  "age": "old"
+ },
+ {
+  "id": "RC26",
+  "title": "tests/timescale/db/65 and 66 look for leftover scratch records under the new partitioned tables' oids, not the dropped hypertables' oids the records carry",
+  "tier": 5,
+  "claims": [
+   "F10-02",
+   "F10-03"
+  ],
+  "age": "young"
+ },
+ {
+  "id": "RC27",
+  "title": "tests/archive/db/08, 16 and 44 judge the objects they wrote back by line count, size or a PAR1 prefix, not by identity with the chunk's rows",
+  "tier": 5,
+  "claims": [
+   "F16-02",
+   "F16-03",
+   "F16-04"
+  ],
+  "age": "old"
+ },
+ {
+  "id": "RC28",
+  "title": "tests/72's row-level-security check asks only the role the policy names, so a policy replayed to every role passes",
+  "tier": 5,
+  "claims": [
+   "F15-01"
+  ],
+  "age": "old"
+ },
+ {
+  "id": "RC29",
+  "title": "tests/27 asserts that untransmute preserves all rows by a count of 100 over a fixture whose rows can be told apart",
+  "tier": 5,
+  "claims": [
+   "F14-03"
+  ],
+  "age": "old"
+ },
+ {
+  "id": "RC30",
+  "title": "check_archive_child_by_oid.py's rule 1 refuses a run-time name cast to regclass only as )::regclass, not ::pg_catalog.regclass, CAST(... AS regclass) or regclass(...)",
+  "tier": 5,
+  "claims": [
+   "F12r-08"
+  ],
+  "age": "young"
+ },
+ {
+  "id": "RC31",
+  "title": "stop_check.py judges the stopping thresholds on the record header's two-decimal figures, so 0.696 precision, 0.304 fell or 0.897 coverage read as met",
+  "tier": 5,
+  "claims": [
+   "F12r-02"
+  ],
+  "age": "young"
+ },
+ {
+  "id": "RC32",
+  "title": "pass_metrics.py counts a candidate with no verdict, or an unknown verdict string, as fell, inflating the fell rate the stopping criteria read",
+  "tier": 5,
+  "claims": [
+   "F12r-03"
+  ],
+  "age": "young"
+ },
+ {
+  "id": "RC33",
+  "title": "decisions_queue.py skips a malformed line instead of refusing it, so an indented, star-bulleted or lower-case BLOCKING entry is never read and the loop continues",
+  "tier": 5,
+  "claims": [
+   "F12r-04"
+  ],
+  "age": "young"
+ }
+]

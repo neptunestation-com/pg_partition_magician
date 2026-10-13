@@ -1,0 +1,3 @@
+{"tier": 5, "file": "bench/retire_pending_detach.sh", "line": 178, "lens": "contracts versus documentation",
+ "scenario": "retire_pending_detach.sh's UPGRADE check labelled '[100, 200) still holds rows 111, 112 and 113' asserts count(*) = 3, so it passes a partition holding 111, 112 and 150 (a lost row and a stray one cancel); it should assert the rows by identity (string_agg = '111,112,113')",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

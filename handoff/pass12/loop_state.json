@@ -1,0 +1,96 @@
+{
+  "loop": 12,
+  "pin": "bd55f84021fc4173034d156a41bc91a3f882560d",
+  "phase": "fix",
+  "step": "3: INTERRUPTED 2026-10-12 21:53Z (machine stopped); handoff on branch chore/fix12-handoff; resume per handoff/HANDOFF.md",
+  "prs": [
+    1293,
+    1294,
+    1295,
+    1296,
+    1297,
+    1298,
+    1299,
+    1300,
+    1301,
+    1302,
+    1303,
+    1304,
+    1305,
+    1306
+  ],
+  "started": "2026-10-12T15:39:13Z",
+  "last_progress": "2026-10-13T17:33:20Z",
+  "history": [
+    {
+      "time": "2026-10-12T15:39:13Z",
+      "phase": "init",
+      "step": "initialised"
+    },
+    {
+      "time": "2026-10-12T15:39:13Z",
+      "phase": "review",
+      "step": "2: seeds planted, suite check running; slices and briefs written"
+    },
+    {
+      "time": "2026-10-12T15:41:19Z",
+      "phase": "review",
+      "step": "4: hunt started 15:40Z, 19 finders running; core suite check running"
+    },
+    {
+      "time": "2026-10-12T16:29:30Z",
+      "phase": "record",
+      "step": "8: issues #1258-#1290 filed, lessons #1291, record assembled; PR next"
+    },
+    {
+      "time": "2026-10-12T16:31:13Z",
+      "phase": "record",
+      "step": "8: record PR #1292 open and landing (land.sh + dead-man); issues #1258-#1290, lessons #1291"
+    },
+    {
+      "time": "2026-10-12T17:18:03Z",
+      "phase": "record",
+      "step": "8: record PR #1292 MERGED 17:17:21Z (main b76002e6); fix phase next"
+    },
+    {
+      "time": "2026-10-12T19:40:32Z",
+      "phase": "fix",
+      "step": "1: assigning numbers and grouping issues"
+    },
+    {
+      "time": "2026-10-12T19:51:00Z",
+      "phase": "fix",
+      "step": "2: wave 1 spawned 19:50Z (G1-G12 of 30 groups); 18 queued"
+    },
+    {
+      "time": "2026-10-12T20:27:05Z",
+      "phase": "fix",
+      "step": "3: landing started 21:01Z (landq batch 5); PRs 1293-1297 open; fixers G1-3 G5r2 G6 G7 G9 G11-14 G29 running"
+    },
+    {
+      "time": "2026-10-12T20:27:27Z",
+      "phase": "fix",
+      "step": "3: landing started 20:27Z (landq batch 5); PRs 1293-1297 open; fixers G1-3 G5r2 G6 G7 G9 G11-14 G29 running"
+    },
+    {
+      "time": "2026-10-12T20:45:05Z",
+      "phase": "fix",
+      "step": "3: landing (1294 on Perf summary); clear 1293 1294 1297 1298 1300; round 2: 1295 1296 1299 1301; fixers G1 G3 G7 G9 G11 G13 G14 G29 G30 G15 running"
+    },
+    {
+      "time": "2026-10-12T21:23:11Z",
+      "phase": "fix",
+      "step": "3: landing (1294 in queue since 20:48Z, CI storm); clear 1293 1294 1297 1298 1300; round 2: 1295 1296 1299 1301 1302 1303 1304 1305; fixers G1 G3 G9 G14 G29 G16 G17 G19 G20 + 8 round-2 running"
+    },
+    {
+      "time": "2026-10-12T21:45:29Z",
+      "phase": "fix",
+      "step": "3: landing (1294 in merge queue since 20:48Z, CI at ~2 jobs); clear: 1293 1294 1296 1297 1298 1300; round 3: 1295 1299 1301; round-2 verification: 1302 1303 1304 1305; fixers G1 G9 G14 G29 G16 G17 G19 G20 + G7 G30 r2 pending"
+    },
+    {
+      "time": "2026-10-13T17:33:20Z",
+      "phase": "fix",
+      "step": "3: INTERRUPTED 2026-10-12 21:53Z (machine stopped); handoff on branch chore/fix12-handoff; resume per handoff/HANDOFF.md"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "pinned": "ee22a708ea54d1dadc20c7c124b6b6021bef526c",
+  "seeds": [
+    {
+      "id": "S1",
+      "kind": "mutation",
+      "mutation": "archive_endpoint_trailing_slash_kept",
+      "file": "pgpm_archive/install.sql",
+      "lens": "fresh surface",
+      "tier": 3,
+      "why": "Pre-#1269 endpoint handling: archive._s3_endpoint_canonical hands the endpoint back as given, so archive.configure stores 'http://minio:9000/' with its slash and both signers, which append '/' || bucket to it, address '//<bucket>/<key>'. MinIO answers HTTP 400 to every PUT, so every export and every tick's chunk through it fails after the read. One clause, the strip. tests/archive/db/53 parts B and E catch it (the stored endpoint keeps the slash, the export fails, its object never lands, and both signers' GET through the slashed endpoint is refused).",
+      "lines": [
+        148
+      ]
+    }
+  ]
+}

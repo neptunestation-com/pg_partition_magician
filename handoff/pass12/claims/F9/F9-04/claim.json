@@ -1,0 +1,3 @@
+{"tier": 3, "file": "pgpm_core/install.sql", "line": 7485, "lens": "boundary arithmetic and types",
+ "scenario": "_regrain_fine_count discounts the aged prefix whenever retain is set, though regrain_step skips aged sub-ranges only when archive_fn is null (#278), so with an archive strategy a run whose swap must attach far more than half the shared lock table (4100 one-step children here) passes the prepare tick's budget (and set_regrain's warning) and is prepared and copied, to be refused only at the swap after every copy; it should be counted whole and refused before anything is copied",
+ "repro": "repro.sql", "install": ["pgpm_core/install.sql"], "fixtures": false}

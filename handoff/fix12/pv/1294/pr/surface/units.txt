@@ -1,0 +1,13 @@
+pgpm_core/install.sql:6540-6541
+pgpm._regrain_copy_make
+pgpm_core/install.sql:6621-6628
+pgpm._regrain_shape_drift
+pgpm.regrain_step
+pgpm._regrain_fresh_copy_drift
+pgpm.regrain
+pgpm.maintain
+CHANGELOG.md
+bench/regrain_not_valid_check.sh
+docs/reference.md
+test.sh
+tests/331_regrain_not_valid_check_test.sql

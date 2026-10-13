@@ -1,0 +1,17 @@
+{
+  "pinned": "e79fa9cb0056454034a608e76520b37439e5f688",
+  "seeds": [
+    {
+      "id": "S1",
+      "kind": "mutation",
+      "mutation": "over_retired_chunks_session_zone",
+      "file": "pgpm_core/install.sql",
+      "lens": "fresh surface",
+      "tier": 3,
+      "why": "Pre-#1264 _over_retired_chunks: a retired chunk's bound with no offset (a pre-#977 strategy's covered_hi, kept verbatim) is read in the caller's TimeZone, so the same call holds a partition from pg_cron's UTC session and not from an operator's Asia/Kolkata one, which then archives it over the retired range. One site, the zone the bounds are read in. tests/334 parts B to E catch it.",
+      "lines": [
+        5178
+      ]
+    }
+  ]
+}

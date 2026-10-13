@@ -1,0 +1,10 @@
+{
+ "tier": 1,
+ "file": "pgpm_core/install.sql",
+ "line": 5259,
+ "lens": "closing claim",
+ "scenario": "Sibling of #1259, not its mechanism: a retirement pgpm dispatched (mark WITH detach_dispatched_oid) whose concurrent detach has landed is still an archive candidate (_part_built and _archive_hold_partition vouch for it) when archiving is turned on after the retirement began. A strategy reading through the parent (pgpm_archive's transports) reads none of its rows, the step records the range covered with rows_archived 0, and retire() drops it: rows 1, 2, 15 are in neither table nor archive, nothing logged as a failure. Had set_archive_fn come before pg_cron ran the detach, the rows would have been archived. The dispatch record is written by hand (fixture:) because the harness has no pg_cron. Tier 1 by consequence (silently wrong archive ledger, rows dropped after archiving was configured), narrow: needs archiving enabled during an in-flight referenced retirement. Fails on base and head alike (pre_existing).",
+ "repro": "repro.sql",
+ "install": ["pgpm_core/install.sql"],
+ "fixtures": false
+}

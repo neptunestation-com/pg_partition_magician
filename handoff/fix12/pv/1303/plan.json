@@ -1,0 +1,10 @@
+{
+ "seeds": [
+  {
+   "mutation": "retain_disown_remedy_keeps_row",
+   "lens": "fresh surface",
+   "tier": 3,
+   "why": "the PR's own mutation, its quietest"
+  }
+ ]
+}

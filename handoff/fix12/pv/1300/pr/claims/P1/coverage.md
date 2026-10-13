@@ -1,0 +1,11 @@
+- pgpm_core/install.sql:532-538 | read: yes | the new jsonb column and its comment; matches the backfill line and DEGRADE_COLS
+- pgpm_core/install.sql:550-550 | read: yes | the add-column-if-not-exists backfill; probed by dropping the column over a live claim and re-installing (column restored, claim null)
+- pgpm._transmute | read: yes | whole procedure 10004-11675: recording of v_tt_encoding, the take-over's RETURNING, the #628 and #574 resume checks, phases 1-3, the ATTACH and config insert; found the encoding comparison absent (P1-01, reproduced)
+- pgpm.transmute | read: yes | the public wrapper passes every p_tt_* through unchanged; no diff hunk
+- CHANGELOG.md | read: yes | the #1270 entry matches the PR body; promises the refusal this tree lacks
+- bench/transmute_resume_text_time_encoding.sh | read: yes | pgTAP wrapper over tests/337 through grid_timezone.sh; would fail on this tree (tests 6, 17), so it discriminates
+- bench/upgrade_in_place.sh | read: yes | whole file; DEGRADE_COLS names text_time_encoding and the GUARD catches an unlisted backfill
+- docs/guide.md | read: yes | hunk 338-340 and the surrounding transmute-failure section; prose matches the body, not this tree
+- docs/reference.md | read: yes | hunks 428-432 (resume refusals) and 3803 (transmute_inflight columns) and their sections; same
+- test.sh | read: yes | the perf-track entry for the new guard (pgpm_perf378) beside its sibling pgpm_perf320
+- tests/337_transmute_resume_text_time_encoding_test.sql | read: yes | whole file; throws_like pins the refusal, liveness witnesses present, remedy leg typed

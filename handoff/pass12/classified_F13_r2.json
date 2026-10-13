@@ -1,0 +1,70 @@
+{
+  "claims": [
+    {
+      "id": "F13-01",
+      "finder": "F13",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 7737,
+      "lens": "fresh surface",
+      "scenario": "regrain_step's swap (_snapshot_wait) is refused while any transaction older than the copies' last write is open in ANOTHER database of the cluster, because backend_xmin is cluster-wide and every statement of this database then looks older than the copies though its snapshot sees them; the swap should go through (the comment says other databases' sessions are not consulted) instead of deferring every tick for the foreign transaction's lifetime",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - fixture: (A) h1a is copied to the swap's doorstep\nok - LIVENESS: (A) with no other session in this database the same swap goes through (swapped:10)\nok - fixture: (B) h1b is copied to the swap's doorstep\nok - LIVENESS: (B) a transaction in database rv_f13_01_r_h1o holds xid 251416, older than the copies' last write 251550, and is still open\nok - LIVENESS: (B) the reader's statement (snapshot) started after the last copy was logged, so it sees the copies\nok - LIVENESS: (B) yet its backend_xmin 251416 is held at or before 251550 by the other database's transaction\nnot ok - the swap of h1b is refused because of a transaction in another database: ERROR:  pg_partition_magician: regrain swap deferred: 1 snapshot(s) older than the copies still open (oldest: pid 76015, open 00:00:02; pids 76015); a reader in one would find the regrained range empty after the swap. So\nNOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h1a_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h1a_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h1b_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h1b_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - fixture: (A) h1a is copied to the swap's doorstep\nok - LIVENESS: (A) with no other session in this database the same swap goes through (swapped:10)\nok - fixture: (B) h1b is copied to the swap's doorstep\nok - LIVENESS: (B) a transaction in database rv_f13_01_p_h1o holds xid 252465, older than the copies' last write 252558, and is still open\nok - LIVENESS: (B) the reader's statement (snapshot) started after the last copy was logged, so it sees the copies\nok - LIVENESS: (B) yet its backend_xmin 252465 is held at or before 252558 by the other database's transaction\nnot ok - the swap of h1b is refused because of a transaction in another database: ERROR:  pg_partition_magician: regrain swap deferred: 1 snapshot(s) older than the copies still open (oldest: pid 76745, open 00:00:02; pids 76745); a reader in one would find the regrained range empty after the swap. So\nNOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h1a_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h1a_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h1b_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h1b_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F13-02",
+      "finder": "F13",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 10562,
+      "lens": "boundary arithmetic and types",
+      "scenario": "transmute on a time or date control whose oldest value is -infinity fails with a raw _grid_floor error (cannot convert infinity to integer / cannot subtract infinite timestamps) instead of pgpm's refusal with the remedy that an infinity newest value and a numeric -Infinity id minimum get; it should refuse up front naming the row and the fix",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "-------------------------------------------------------------------\n not ok 3 - a -infinity oldest value on a timestamptz control is refused by pgpm, not by a raw _grid_floor error        +\n # Failed test 3: \"a -infinity oldest value on a timestamptz control is refused by pgpm, not by a raw _grid_floor error\"+\n #    error message: 'cannot convert infinity to integer'                                                               +\n #    doesn't match: 'pg_partition_magician:%'\n(1 row)\n\nCREATE TABLE\nINSERT 0 2\n                                                   throws_like                                                    \n------------------------------------------------------------------------------------------------------------------\n not ok 4 - a -infinity oldest value on a date control is refused by pgpm, not by a raw _grid_floor error        +\n # Failed test 4: \"a -infinity oldest value on a date control is refused by pgpm, not by a raw _grid_floor error\"+\n #    error message: 'cannot subtract infinite timestamps'                                                       +\n #    doesn't match: 'pg_partition_magician:%'\n(1 row)\n\n                                   is                                    \n-------------------------------------------------------------------------\n ok 5 - GUARD: both tables are left plain (nothing committed either way)\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 5\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 0,
+        "tail": "-------------------------------------------------------------------\n not ok 3 - a -infinity oldest value on a timestamptz control is refused by pgpm, not by a raw _grid_floor error        +\n # Failed test 3: \"a -infinity oldest value on a timestamptz control is refused by pgpm, not by a raw _grid_floor error\"+\n #    error message: 'cannot convert infinity to integer'                                                               +\n #    doesn't match: 'pg_partition_magician:%'\n(1 row)\n\nCREATE TABLE\nINSERT 0 2\n                                                   throws_like                                                    \n------------------------------------------------------------------------------------------------------------------\n not ok 4 - a -infinity oldest value on a date control is refused by pgpm, not by a raw _grid_floor error        +\n # Failed test 4: \"a -infinity oldest value on a date control is refused by pgpm, not by a raw _grid_floor error\"+\n #    error message: 'cannot subtract infinite timestamps'                                                       +\n #    doesn't match: 'pg_partition_magician:%'\n(1 row)\n\n                                   is                                    \n-------------------------------------------------------------------------\n ok 5 - GUARD: both tables are left plain (nothing committed either way)\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 5\n(1 row)\n\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F13-03",
+      "finder": "F13",
+      "tier": 5,
+      "file": "tests/101_transmute_claim_test.sql",
+      "line": 49,
+      "lens": "contracts versus documentation",
+      "scenario": "tests/101's header promises a fresh conversion records a claim naming THIS session as its owner, but it only asserts the claim is gone afterwards (count = 0), so it stays green against a transmute that records the claim with no owner, which the reaper and transmute_abort would treat as a dead session's mid-run; it should assert the claim's owner_pid/backend_start during the conversion",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "1\nok - LIVENESS: the installed mutant's _transmute records its claim with owner_pid and owner_backend_start null\nok - LIVENESS: a claim recorded that way reads as a dead session's, although the session that wrote it is alive\nok - LIVENESS: tests/101 ran all its assertions against the mutant (10 ok)\nnot ok - tests/101 stays green against a transmute whose claim names no owner (its header promises the claim names THIS session)\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "1\nok - LIVENESS: the installed mutant's _transmute records its claim with owner_pid and owner_backend_start null\nok - LIVENESS: a claim recorded that way reads as a dead session's, although the session that wrote it is alive\nok - LIVENESS: tests/101 ran all its assertions against the mutant (10 ok)\nnot ok - tests/101 stays green against a transmute whose claim names no owner (its header promises the claim names THIS session)\n"
+      },
+      "class": "candidate"
+    }
+  ]
+}

@@ -1,0 +1,58 @@
+=== 1295 start 21:31:32Z
+pre_existing     1
+fixed            2
+  ACC-01 (acceptance): fails on base True, passes on head True, mutant restores: adopt_partition_lock_name_unchecked=False, adopt_partition_strict_isolation_admitted=True (any: True)
+  ACC-02 (acceptance): fails on base True, passes on head True, mutant restores: adopt_partition_lock_name_unchecked=False, adopt_partition_strict_isolation_admitted=True (any: True)
+  ACC-03 (acceptance): fails on base True, passes on head False, mutant restores: adopt_partition_lock_name_unchecked=True, adopt_partition_strict_isolation_admitted=True (any: True)
+units:        7
+=== 1295 done 21:32:01Z
+=== 1296 start 21:32:01Z
+fixed            2
+  ACC-01 (acceptance): fails on base True, passes on head True, mutant restores: snapshot_wait_foreign_floor_exempt=True, snapshot_wait_holder_log_truncated=False, snapshot_wait_holder_this_database_only=True (any: True)
+  ACC-02 (acceptance): fails on base True, passes on head False, mutant restores: snapshot_wait_foreign_floor_exempt=False, snapshot_wait_holder_log_truncated=True, snapshot_wait_holder_this_database_only=False (any: True)  (mutant run failed only its liveness checks (the mutation starves the fixture rather than restoring the defect): snapshot_wait_foreign_floor_exempt, snapshot_wait_holder_this_database_only)
+  ACC-02: the head run failed only its liveness/guard checks: the fix refuses the fixture's premise; a verifier must say whether that refusal is the behaviour the issue asked for
+units:       13
+=== 1296 done 21:33:01Z
+=== 1299 start 21:33:01Z
+pre_existing     1
+fixed            1
+  ACC-01 (acceptance): fails on base True, passes on head True, mutant restores: archive_hold_vouches_detached_retirement=False, retirement_mark_readers_whole=True, retirement_mark_vouches_alone=False (any: True)
+  ACC-02 (acceptance): fails on base True, passes on head False, mutant restores: archive_hold_vouches_detached_retirement=True, retirement_mark_readers_whole=True, retirement_mark_vouches_alone=True (any: True)
+units:       31
+=== 1299 done 21:33:33Z
+=== 1301 start 21:33:33Z
+fixed            3
+  ACC-01 (acceptance): fails on base True, passes on head True, mutant restores: archive_bucket_unrefused=False, archive_endpoint_dot_segment_unrefused=False, archive_endpoint_trailing_slash_kept=True, archive_endpoint_unrefused=False, archive_endpoint_userinfo_unrefused=False (any: True)
+  ACC-02 (acceptance): fails on base True, passes on head True, mutant restores: archive_bucket_unrefused=False, archive_endpoint_dot_segment_unrefused=False, archive_endpoint_trailing_slash_kept=False, archive_endpoint_unrefused=False, archive_endpoint_userinfo_unrefused=True (any: True)
+  ACC-03 (acceptance): fails on base True, passes on head True, mutant restores: archive_bucket_unrefused=True, archive_endpoint_dot_segment_unrefused=False, archive_endpoint_trailing_slash_kept=False, archive_endpoint_unrefused=False, archive_endpoint_userinfo_unrefused=False (any: True)
+units:       15
+=== 1301 done 21:34:17Z
+=== 1302 start 21:34:17Z
+pre_existing     1
+fixed            2
+  ACC-01 (acceptance): fails on base True, passes on head True, mutant restores: hypertable_mixed_step_unchecked=True, hypertable_unit_remedy_recopy_unnamed=False, hypertable_unit_rules_transmute_remedy=False (any: True)
+  ACC-02 (acceptance): fails on base True, passes on head True, mutant restores: hypertable_mixed_step_unchecked=False, hypertable_unit_remedy_recopy_unnamed=False, hypertable_unit_rules_transmute_remedy=True (any: True)
+  ACC-03 (acceptance): fails on base True, passes on head False, mutant restores: hypertable_mixed_step_unchecked=True, hypertable_unit_remedy_recopy_unnamed=True, hypertable_unit_rules_transmute_remedy=True (any: True)
+units:       11
+=== 1302 done 21:35:09Z
+=== 1303 start 21:35:09Z
+fixed            1
+not_reproduced   1
+  ACC-01 (acceptance): fails on base True, passes on head True, mutant restores: retain_disown_remedy_drops_unreached=False, retain_disown_remedy_keeps_row=True (any: True)
+  ACC-02 (acceptance): fails on base False, passes on head True, mutant restores: retain_disown_remedy_drops_unreached=True, retain_disown_remedy_keeps_row=False (any: True)
+units:       12
+=== 1303 done 21:35:46Z
+=== 1304 start 21:35:46Z
+fixed            1
+not_reproduced   1
+  ACC-01 (acceptance): fails on base True, passes on head True, mutant restores: archive_ndjson_bounds_caller_spelling=True, archive_ndjson_bounds_session_zone=False, archive_parquet_bounds_caller_spelling=False, archive_parquet_bounds_session_zone=False (any: True)
+  ACC-02 (acceptance): fails on base False, passes on head True, mutant restores: archive_ndjson_bounds_caller_spelling=False, archive_ndjson_bounds_session_zone=True, archive_parquet_bounds_caller_spelling=False, archive_parquet_bounds_session_zone=False (any: True)
+units:       11
+=== 1304 done 21:36:26Z
+=== 1305 start 21:36:26Z
+fixed            2
+  ACC-01 (acceptance): fails on base True, passes on head True, mutant restores: native_bound_key_session_abbreviations=False, native_bound_key_session_datestyle=False, native_bound_key_utc=False, over_retired_chunks_session_zone=True (any: True)
+  ACC-02 (acceptance): fails on base True, passes on head True, mutant restores: native_bound_key_session_abbreviations=True, native_bound_key_session_datestyle=False, native_bound_key_utc=False, over_retired_chunks_session_zone=False (any: True)
+units:       10
+=== 1305 done 21:37:01Z
+=== ALL done 21:37:01Z

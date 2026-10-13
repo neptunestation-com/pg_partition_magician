@@ -1,0 +1,2 @@
+retain_disown_remedy_drops_unreached	pgpm_core/install.sql
+retain_disown_remedy_keeps_row	pgpm_core/install.sql

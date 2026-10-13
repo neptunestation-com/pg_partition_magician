@@ -1,0 +1,13 @@
+{
+  "baseRefName": "main",
+  "headRefName": "fix/regrain-copy-leaves-not-valid-checks-unvalidated",
+  "headRefOid": "f96b180af43d5d802d9e9b8b25e5740ad7f2ff69",
+  "number": 1294,
+  "title": "fix(regrain): copy the rows a NOT VALID CHECK tolerates (#1261)",
+  "url": "https://github.com/neptunestation-com/pg_partition_magician/pull/1294",
+  "head": "f96b180af43d5d802d9e9b8b25e5740ad7f2ff69",
+  "base": "b76002e66c9f8b57f9943967babf25a195500f85",
+  "finder": "P1",
+  "seeds": 1,
+  "mutations": "regrain_copy_validates_not_valid_check,regrain_drift_compares_not_valid_check,regrain_drift_excuses_validated_copy_check"
+}

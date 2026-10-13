@@ -1,0 +1,17 @@
+{
+  "pinned": "71f2e9196d64dc4f0cbe02612bb064ae739cd9ae",
+  "seeds": [
+    {
+      "id": "S1",
+      "kind": "mutation",
+      "mutation": "adopt_partition_strict_isolation_admitted",
+      "file": "pgpm_core/install.sql",
+      "lens": "fresh surface",
+      "tier": 3,
+      "why": "Pre-#1262 adopt_partition: no isolation level is refused, so under REPEATABLE READ or SERIALIZABLE every read after the partition's lock (attached and not pending, the name, the bounds) goes through the transaction's first snapshot. A DETACH another session committed before the call is read as still attached and the standalone table is recorded in pgpm.part as a partition; a RENAME is recorded under the old name. One site, the refusal's condition. tests/332 parts A, B and C catch it.",
+      "lines": [
+        14022
+      ]
+    }
+  ]
+}

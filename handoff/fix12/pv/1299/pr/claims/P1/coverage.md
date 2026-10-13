@@ -1,0 +1,28 @@
+# Coverage ledger, finder P1, PR #1299
+
+- pgpm._detach_dispatched | read: yes | body unchanged from the base's (mark + detach_dispatched_oid = p_rel, by child_name); moved ahead of _part_built; the one definition in the tree
+- pgpm._retirement_vouched | read: yes | THE DEFECT: body is `select p_retiring_at is not null`, no _detach_dispatched call; P1-01 (ran the issue's flow: tests 6/7/9 fail, every LIVENESS ok; tests/330 fails 10 of 21 on the tree)
+- pgpm_core/install.sql:2199-2203 | read: yes | _part_built's comment on the vouched rule; matches the body's intent, not the tree's function
+- pgpm._part_built | read: yes | anchored branch calls _retirement_vouched and pg_class; null-child_oid branch unchanged; probed with a mark-no-record detached table (reads built on this tree)
+- pgpm_core/install.sql:2229-2230 | read: yes | _part_detached_by_hand comment (record required); comment only
+- pgpm_core/install.sql:2239-2240 | read: yes | _part_detached_by_hand comment, one-directional note; comment only
+- pgpm._disown_retirement | read: yes | clears mark, retiring_oid and record, logs retain_disown once; unchanged semantics (the hunk at 3530 is the removal of the old _detach_dispatched definition above it)
+- pgpm_core/install.sql:5245-5247 | read: yes | _archive_hold_partition comment; comment only
+- pgpm._archive_hold_partition | read: yes | lock then `p_child_oid is null or _retirement_vouched or pg_partition_ancestors`; on this tree the vouched clause is the mark alone (P1-01 part of the same defect)
+- pgpm._part_detached_by_hand | read: yes | not _part_built and relation exists; probed directly in the upgrade probe and through _archive_step/_enforce_write_blocks (tests/330 B on the tree)
+- pgpm._cell_attached | read: yes | forgets unbuilt overlapping rows then judges; a vouched mark keeps the retiring cell (tests/280 C); no change in shape
+- pgpm._cell_walk_rows | read: yes | reads _part_built once per row; order total; no change
+- pgpm._disown_unvouched_retirements | read: yes | install pass: attached+armed gets the record, pending/detached without record disowned; ran it over an older-install-shaped row (disowned, retain_disown logged, row then reads detached by hand)
+- pgpm.retire | read: yes | mark stamped before dispatch, record only on success; disown for detached/pending without record; tiebreak over attached/pending marks unchanged as the body says; dropped-FK one-step path after reattach (the flow P1-01 drives)
+- pgpm._retain_recall | read: yes | prefilter attached+mark; detached without record disowned, with record reattached; unchanged
+- pgpm._archive_step | read: yes | candidate query excludes _part_detached_by_hand; hold asked before the first read; runs before retain() in maintain (the ordering the defect needs)
+- pgpm._detach_reap | read: yes | disowns a pending mark without record before finalize; unchanged
+- pgpm.status | read: yes | n_partitions/coarse/newest_bound through _part_built; retain_detaching counts every mark (unchanged, as the body says)
+- pgpm.progress | read: yes | write_child through _part_built, coarse_frozen through _part_detached_by_hand; unchanged
+- CHANGELOG.md | read: yes | entry describes the mark-AND-record rule the tree's function does not implement (follows P1-01)
+- bench/retirement_mark_needs_dispatch.sh | read: yes | wrapper runs tests/330 under pg_prove; counts assertions ran; install failure reported as FAIL; sound
+- docs/reference.md | read: yes | both hunks and every retiring_at / detached-by-hand statement (grep); the retire and maintain sections state the mark-AND-record rule; the rest of the file read by grep only
+- test.sh | read: yes | guard list entry pgpm_perf367 in run_perf's shard array; the rest of the file not read (out of the hunk)
+- tests/280_obtain_rebuilds_detached_cell_test.sql | read: yes | part C now stamps detach_dispatched_oid; passes on both rules (it tests the vouched direction only; the negative is tests/330 B)
+- tests/307_write_block_skips_hand_detached_test.sql | read: yes | part C stamps the record; same note as tests/280
+- tests/330_retirement_mark_needs_dispatch_test.sql | read: yes | ran on the tree with the script inlined: 10 non-LIVENESS failures (A 4/5/8, B 11/12/13/15/16, C 19/20), every LIVENESS ok; asymmetric fixtures hold

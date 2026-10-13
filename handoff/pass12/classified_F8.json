@@ -1,0 +1,138 @@
+{
+  "claims": [
+    {
+      "id": "F8-01",
+      "finder": "F8",
+      "tier": 5,
+      "file": "scripts/check_quoted_splices.py",
+      "line": 370,
+      "lens": "fresh surface",
+      "scenario": "check_quoted_splices.py (read by value since #1179) never reads a FOR ... IN SELECT loop target as an assignment, so a text local holding quote_ident output with no _q suffix passes the lint (as does one assigned by EXECUTE ... INTO from a dynamic SELECT of quote_ident), while the same local assigned by SELECT ... INTO is refused; the lint should refuse every quote-derived text local CLAUDE.md says it does",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: (A) the lint passes the tree's unedited install files\nok - LIVENESS: (B) the planted function is read: its SELECT INTO twin is refused for v_col\nnot ok - the lint refuses an unmarked text local holding quote_ident output assigned by FOR ... IN SELECT (exit 0: PASS  every already-quoted fragment is _q-marked, and every _q name is earned (82 quoting )\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: (A) the lint passes the tree's unedited install files\nok - LIVENESS: (B) the planted function is read: its SELECT INTO twin is refused for v_col\nnot ok - the lint refuses an unmarked text local holding quote_ident output assigned by FOR ... IN SELECT (exit 0: PASS  every already-quoted fragment is _q-marked, and every _q name is earned (82 quoting )\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F8-02",
+      "finder": "F8",
+      "tier": 5,
+      "file": "scripts/check_archive_object_keys.py",
+      "line": 58,
+      "lens": "fresh surface",
+      "scenario": "check_archive_object_keys.py (read by value since #1181) treats a prefix reference passed as an EXECUTE ... USING bind parameter as 'passing it along', so a second function that assembles a key with execute 'select $1 || ''/'' || $2' using cfg.prefix, p_name passes the lint, while the same function written cfg.prefix || '/' || p_name is refused; the one-assembling-function rule should refuse both",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: (A) the lint passes the tree's unedited pgpm_archive/install.sql\nok - LIVENESS: (B) the planted second key function is read: its || twin is refused as a second assembly\nnot ok - the lint refuses a second key assembled from cfg.prefix passed to EXECUTE ... USING (exit 0: PASS  every object key in /var/folders/98/7c8wgdp97k586wddz7s0jp900000gn/T/tmp.E)\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: (A) the lint passes the tree's unedited pgpm_archive/install.sql\nok - LIVENESS: (B) the planted second key function is read: its || twin is refused as a second assembly\nnot ok - the lint refuses a second key assembled from cfg.prefix passed to EXECUTE ... USING (exit 0: PASS  every object key in /var/folders/98/7c8wgdp97k586wddz7s0jp900000gn/T/tmp.h)\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F8-03",
+      "finder": "F8",
+      "tier": 5,
+      "file": "bench/run_fh.sh",
+      "line": 287,
+      "lens": "contracts versus documentation",
+      "scenario": "bench/run_fh.sh (driven by run_rung_fh.sh) calls pgpm.from_hypertable_cutover(..., p_regrain_batch => $BENCH_DRAIN_BATCH, ...), a named argument the procedure does not have (it takes p_drain_batch), so every run dies with 'procedure ... does not exist' right after the online copy and never measures the cutover, conservation or regrain its header promises; it should name p_drain_batch",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: (A) run_fh.sh's cutover call was read from the tree\nok - LIVENESS: (B) pgpm.from_hypertable_cutover is installed, one procedure\nok - LIVENESS: (C) the call with p_drain_batch resolves and runs its body (refusing the plain table: ERROR:  pg_partition_magician: bench.events is not a hypertable)\nnot ok - run_fh.sh's cutover call resolves to pgpm.from_hypertable_cutover: ERROR:  procedure pgpm.from_hypertable_cutover(unknown, unknown, interval, p_obtain => integer, p_regrain_batch => integer, p_paused => bool\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: (A) run_fh.sh's cutover call was read from the tree\nok - LIVENESS: (B) pgpm.from_hypertable_cutover is installed, one procedure\nok - LIVENESS: (C) the call with p_drain_batch resolves and runs its body (refusing the plain table: ERROR:  pg_partition_magician: bench.events is not a hypertable)\nnot ok - run_fh.sh's cutover call resolves to pgpm.from_hypertable_cutover: ERROR:  procedure pgpm.from_hypertable_cutover(unknown, unknown, interval, p_obtain => integer, p_regrain_batch => integer, p_paused => bool\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F8-04",
+      "finder": "F8",
+      "tier": 5,
+      "file": "bench/retire_pending_detach.sh",
+      "line": 177,
+      "lens": "contracts versus documentation",
+      "scenario": "retire_pending_detach.sh's UPGRADE check is labelled '[100, 200) still holds rows 111, 112 and 113' but asserts count(*) = 3 over the partition, so an upgrade or disown that loses row 113 and leaves any third row in its place passes it; the check should name the rows (string_agg of the ids = '111,112,113'), as the label and CLAUDE.md's identity rule require",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: (A) the guard's survival check was read from the tree\nok - LIVENESS: (B) [100, 200) holds 111, 112 and 114, not 113\nok - LIVENESS: (C) the guard's check evaluated here (got 3, want 3)\nnot ok - the check labelled 'still holds rows 111, 112 and 113' refuses a partition without 113 (it passes: 3 = 3)\n"
+      },
+      "pristine": {
+        "fails": false,
+        "liveness_failed": true,
+        "exit": 1,
+        "tail": "not ok - LIVENESS: (A) the guard's survival check was read from the tree\n"
+      },
+      "class": "candidate",
+      "note": "the pristine run failed only its liveness/guard checks, so it never reached the defect; the verifier must rebuild the setup before ruling"
+    },
+    {
+      "id": "F8-05",
+      "finder": "F8",
+      "tier": 5,
+      "file": "bench/run.sh",
+      "line": 546,
+      "lens": "contracts versus documentation",
+      "scenario": "run.sh's CONSERVATION GATE promises 'every history row (id < B) must still be present' after the regrain swap but compares count(*) before with count(*) where id < B after, so a regrain that loses a history row and invents another in the range reports CONSERVED; it should compare the ids (and payloads) by identity",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: (A) the gate's anchor, its re-count and its comparison were read from run.sh\nok - LIVENESS: (B) the history lost row 5 and holds the stranger 50\nok - LIVENESS: (C) the gate evaluated here (before 10, after 10)\nnot ok - the conservation gate reports the lost history row as a correctness defect (it reads CONSERVED: 10 = 10)\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: (A) the gate's anchor, its re-count and its comparison were read from run.sh\nok - LIVENESS: (B) the history lost row 5 and holds the stranger 50\nok - LIVENESS: (C) the gate evaluated here (before 10, after 10)\nnot ok - the conservation gate reports the lost history row as a correctness defect (it reads CONSERVED: 10 = 10)\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F8-06",
+      "finder": "F8",
+      "tier": 5,
+      "file": "bench/upgrade_in_place.sh",
+      "line": 485,
+      "lens": "contracts versus documentation",
+      "scenario": "upgrade_in_place.sh's assertion 7 (the upgraded install still obtains a partition for the pre-existing table) is a post-condition of the upgrade but prints as 'FAIL  LIVENESS: ...', so discriminate.sh's starved() reads a mutant that only breaks post-upgrade obtain as a starved fixture and never certifies the guard catching it; the line should carry no premise prefix",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: (A) starved() and the guard's assertion-7 failure line were read from the tree\nok - LIVENESS: (B) starved() counts the same failure as a catch when it is unprefixed\nnot ok - a run whose only failure is 'the upgraded install no longer obtains' is read as a catch, not as a starved fixture\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: (A) starved() and the guard's assertion-7 failure line were read from the tree\nok - LIVENESS: (B) starved() counts the same failure as a catch when it is unprefixed\nnot ok - a run whose only failure is 'the upgraded install no longer obtains' is read as a catch, not as a starved fixture\n"
+      },
+      "class": "candidate"
+    }
+  ]
+}

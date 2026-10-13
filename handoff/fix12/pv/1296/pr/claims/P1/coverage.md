@@ -1,0 +1,10 @@
+- pgpm_core/install.sql:7639-7652 | read: yes | the comment's "never listed / transactions count through the xmin" and "WHAT IT CANNOT TELL APART" paragraphs, checked against the code and the B/I argument
+- pgpm_core/install.sql:7699-7703 | read: yes | the budget paragraph's description of the two message shapes, checked against the two RAISEs
+- pgpm._snapshot_wait | read: yes | whole function; ran tests/333 (26/27, assertion 8 fails); holder lookup's datid filter (P1-01); xmin/xid semantics, non-superuser visibility, holder-ends-between-reads, prepared branch read only
+- pgpm._regrain_snapshot_wait | read: yes | pass-through of config.regrain_written_xid; driven by P1-01 (hand regrain_step) and P1-02 (maintain tick)
+- pgpm.from_hypertable_cutover | read: yes | header, the snapshot-wait call at 1816 and its lock_timeout handling; same lookup as P1-01; not run, timescale container absent
+- CHANGELOG.md | read: yes | the #1263 bullet against the code: "names the oldest transaction ... with its database, pid (or prepared gid) and xid" is what P1-01 and P1-02 fail
+- bench/snapshot_wait_foreign_floor_holder.sh | read: yes | install-or-FAIL, pg_prove run, TAP count liveness, cleanup of the other database; mutations not runnable here
+- docs/reference.md | read: yes | the four hunks in context (cutover 985-1010, regrain_step 1960-2075): holder clause and maintain's skip_regrain method documented; P1-01 and P1-02 are where the code parts from it
+- test.sh | read: yes | the alone list (310-345), prove_one, the perf guard entry (1280); held on reading
+- tests/333_snapshot_wait_foreign_floor_holder_test.sql | read: yes | whole file, run against the tree: parts A assertion 8 fails, B and C pass; its B/I pair supports the PR's refusal of the exemption

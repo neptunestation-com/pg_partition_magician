@@ -1,0 +1,13 @@
+{
+  "baseRefName": "main",
+  "headRefName": "fix/from-hypertable-asks-mixed-interval-rule",
+  "headRefOid": "e1989695d778cce023c15350680bad5435e7b7df",
+  "number": 1302,
+  "title": "fix(hypertable): ask the mixed-step rule before the swap and name from_hypertable as the re-run",
+  "url": "https://github.com/neptunestation-com/pg_partition_magician/pull/1302",
+  "head": "e1989695d778cce023c15350680bad5435e7b7df",
+  "base": "b76002e66c9f8b57f9943967babf25a195500f85",
+  "finder": "P1",
+  "seeds": 1,
+  "mutations": "hypertable_mixed_step_unchecked,hypertable_unit_remedy_recopy_unnamed,hypertable_unit_rules_transmute_remedy"
+}

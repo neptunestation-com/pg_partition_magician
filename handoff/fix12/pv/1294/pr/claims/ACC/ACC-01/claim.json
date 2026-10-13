@@ -1,0 +1,14 @@
+{
+ "tier": 2,
+ "file": "pgpm_core/install.sql",
+ "line": 6551,
+ "lens": "fresh surface",
+ "scenario": "#1261 acceptance (F3-03): _regrain_copy_make makes each copy LIKE the parent INCLUDING CONSTRAINTS, which turns a NOT VALID CHECK on the parent into a validated one on the copy, so a row written before the CHECK (which the table still serves) fails every copy batch (23514): regrain()/regrain_history() raise and auto-regrain logs skip_regrain on that child every tick with capture and the TRUNCATE refusal left on, where the copy should carry the parent's NOT VALID CHECK as NOT VALID (as #633 does for NOT VALID foreign keys) and regrain should complete",
+ "repro": "repro.sql",
+ "install": [
+  "pgpm_core/install.sql"
+ ],
+ "fixtures": false,
+ "id": "ACC-01",
+ "finder": "ACC"
+}

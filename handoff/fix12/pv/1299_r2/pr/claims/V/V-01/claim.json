@@ -1,0 +1,15 @@
+{
+ "tier": 1,
+ "file": "pgpm_core/install.sql",
+ "line": 5448,
+ "lens": "closing claim",
+ "scenario": "An unanchored pgpm.part row (child_oid null: the state an upgrade from before #421 leaves for a partition not attached when its backfill ran) with NO retirement mark, whose write-blocked table the operator DETACHed by hand, is still handed to the archive strategy: the candidate query cannot call it detached by hand (_part_detached_by_hand is false for a null oid) and the head's hold is asked about the name's relation only when the row carries a mark (coalesce(r.child_oid, case when r.retiring_at is not null then v_now::oid end)), so _archive_hold_partition gets a null oid and answers true. A strategy reading through the parent reads none of its rows and [0, 20) is recorded covered with rows_archived 0. retire() refuses to drop it (fail_retain_drop) until the operator takes the reference's remedy (attach it back so retention retires it); retention then drops it on the false coverage and rows 1, 2 and 15 are in neither table nor archive. #1259's consequence through a path PR #1299's body claims ('Neither archive path ... hands a strategy a table that is not a partition of its parent as of the hold's lock, whatever its mark') but the code carves out (the hold's comment: an unanchored row with no relation passed is left as before). The mechanism (the archive step reaching an operator-detached table) is #705's open archive bullet, residue for unanchored rows. scripts/archive_partition_whole.sql carries the same coalesce at line 162. Fixture: child_oid set null by hand to stand for the older install's state. Fails on base and head alike (pre_existing).",
+ "repro": "repro.sql",
+ "install": [
+  "pgpm_core/install.sql"
+ ],
+ "fixtures": false,
+ "id": "V-01",
+ "finder": "V",
+ "known_open_mechanism": 705
+}

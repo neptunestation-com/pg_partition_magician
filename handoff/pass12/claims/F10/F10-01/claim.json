@@ -1,0 +1,12 @@
+{
+ "tier": 3,
+ "file": "pgpm_core/install.sql",
+ "line": 7485,
+ "lens": "fresh surface",
+ "scenario": "_regrain_fine_count leaves the aged prefix out of the prepare tick's lock-budget count whenever retain is set, but regrain_step's copy skips that prefix only when no archive_fn is set (#278); with an archive_fn a run whose swap attaches 2 cap + 4 children is prepared and goes on to copy the prefix it was not counted for, where the #1161 contract (tests/315 header, _regrain_swap_budget) says the prepare tick refuses it before anything is copied",
+ "repro": "repro.sql",
+ "install": [
+  "pgpm_core/install.sql"
+ ],
+ "fixtures": false
+}

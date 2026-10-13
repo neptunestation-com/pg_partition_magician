@@ -1,0 +1,3 @@
+{"tier": 5, "file": "bench/doc_log_actions.sh", "line": 90, "lens": "contracts versus documentation",
+ "scenario": "run with no third argument, doc_log_actions.sh judges the tree only through the line 'LIVENESS: check 6 passes this tree', so a runbook alert on an action nothing writes fails only a premise-prefixed line and discriminate.sh's starved() reads the guard's catch as a starved fixture; the tree's verdict should be a defect check, with the premise (the SQL extractor read literals) kept apart",
+ "repro": "repro.sh", "install": [], "fixtures": false}

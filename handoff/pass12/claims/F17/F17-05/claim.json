@@ -1,0 +1,3 @@
+{"tier": 1, "file": "scripts/archive_partition_whole.sql", "line": 121, "lens": "fresh surface",
+ "scenario": "scripts/archive_partition_whole.sql's candidate query never asks pgpm._part_detached_by_hand (its comment, CHANGELOG #1159 and docs/reference.md say it does), so a write-blocked partition the operator detached by hand is handed to a strategy reading through the parent, [0, 100) is recorded covered with 0 rows, and once the table is attached back retain() drops rows 1..50 that nothing archived; it should skip the table, record nothing and archive the next eligible partition",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

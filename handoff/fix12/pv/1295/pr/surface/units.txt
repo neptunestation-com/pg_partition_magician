@@ -1,0 +1,7 @@
+pgpm_core/install.sql:14005-14013
+pgpm.adopt_partition
+CHANGELOG.md
+bench/adopt_partition_isolation.sh
+docs/reference.md
+test.sh
+tests/332_adopt_partition_isolation_test.sql

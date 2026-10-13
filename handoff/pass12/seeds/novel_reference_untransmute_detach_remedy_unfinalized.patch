@@ -1,0 +1,13 @@
+diff --git a/docs/reference.md b/docs/reference.md
+index c6a1129..87ec737 100644
+--- a/docs/reference.md
++++ b/docs/reference.md
+@@ -680,7 +680,7 @@ It refuses, the same two ways, while a partition of the managed table is pending
+ transaction until it finishes, and left set when the detaching session dies in its wait). That partition's rows
+ are already invisible through the parent, where the door is checked, and the drop of the parent would take them
+ with it. The refusal names every such partition: let a running detach finish, or finish an interrupted one with
+-`ALTER TABLE <table> DETACH PARTITION <partition> FINALIZE` (or let the next maintenance tick's
++`ALTER TABLE <table> DETACH PARTITION <partition>` (or let the next maintenance tick's
+ [`_detach_reap`](#_detach_reap) do it), then re-run `untransmute`, which leaves the detached partition standing
+ as a table of yours.
+ 

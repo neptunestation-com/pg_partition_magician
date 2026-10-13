@@ -1,0 +1,3 @@
+surface_carry_grants_as_owner	pgpm_core/install.sql
+surface_prepare_drops_granted	pgpm_core/install.sql
+surface_prepare_grantor_unchecked	pgpm_core/install.sql

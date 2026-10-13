@@ -1,0 +1,3 @@
+{"tier": 5, "file": "scripts/check_quoted_splices.py", "line": 370, "lens": "fresh surface",
+ "scenario": "the Quoted splices lint, which since #1179 claims to read every assignment by value, passes an install file whose unmarked text local v_cols receives a quote_ident'd column list as a FOR loop's target (for v_cols in select string_agg(quote_ident(attname), ', ') ... loop) and is spliced with %s: assignments() reads only :=/= and SELECT ... INTO; the same list assigned by SELECT INTO inside a loop is refused, as both should be",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

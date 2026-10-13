@@ -1,0 +1,124 @@
+{
+  "trees": {
+    "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/base",
+    "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/head",
+    "review": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/review",
+    "mutants": {
+      "regrain_copy_validates_not_valid_check": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/mutants/regrain_copy_validates_not_valid_check",
+      "regrain_drift_compares_not_valid_check": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/mutants/regrain_drift_compares_not_valid_check",
+      "regrain_drift_excuses_validated_copy_check": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/mutants/regrain_drift_excuses_validated_copy_check"
+    }
+  },
+  "acceptance": "ACC",
+  "claims": [
+    {
+      "id": "ACC-01",
+      "finder": "ACC",
+      "tier": 2,
+      "file": "pgpm_core/install.sql",
+      "line": 6551,
+      "lens": "fresh surface",
+      "scenario": "#1261 acceptance (F3-03): _regrain_copy_make makes each copy LIKE the parent INCLUDING CONSTRAINTS, which turns a NOT VALID CHECK on the parent into a validated one on the copy, so a row written before the CHECK (which the table still serves) fails every copy batch (23514): regrain()/regrain_history() raise and auto-regrain logs skip_regrain on that child every tick with capture and the TRUNCATE refusal left on, where the copy should carry the parent's NOT VALID CHECK as NOT VALID (as #633 does for NOT VALID foreign keys) and regrain should complete",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "          +\n #             PL/pgSQL function pgpm.regrain_history(regclass,text) line 13 at RETURN                                                  +\n #             SQL statement \" select pgpm.regrain_history('public.nv303b', '100') \"                                                    +\n #             PL/pgSQL function lives_ok(text,text) line 14 at EXECUTE\n(1 row)\n\n                         is                         \n----------------------------------------------------\n ok 5 - every row is still served, row 7 among them\n(1 row)\n\n                   is                   \n----------------------------------------\n not ok 6 - the regrain swapped        +\n # Failed test 6: \"the regrain swapped\"+\n #         have: 0                     +\n #         want: 1\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\npsql:<stdin>:30: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"nv303a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:30: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"nv303a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"nv303b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"nv303b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "                                     is                                                  \n-----------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: (B) the same table without the NOT VALID CHECK regrains [0, 1000) into 10 children\n(1 row)\n\n                                            lives_ok                                             \n-------------------------------------------------------------------------------------------------\n ok 4 - regrain of a table whose parent has a NOT VALID CHECK that an old row violates completes\n(1 row)\n\n                         is                         \n----------------------------------------------------\n ok 5 - every row is still served, row 7 among them\n(1 row)\n\n             is             \n----------------------------\n ok 6 - the regrain swapped\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:30: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"nv303a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:30: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"nv303a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"nv303b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"nv303b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\n"
+        },
+        "mutant:regrain_copy_validates_not_valid_check": {
+          "fails": true,
+          "exit": 0,
+          "tail": "          +\n #             PL/pgSQL function pgpm.regrain_history(regclass,text) line 13 at RETURN                                                  +\n #             SQL statement \" select pgpm.regrain_history('public.nv303b', '100') \"                                                    +\n #             PL/pgSQL function lives_ok(text,text) line 14 at EXECUTE\n(1 row)\n\n                         is                         \n----------------------------------------------------\n ok 5 - every row is still served, row 7 among them\n(1 row)\n\n                   is                   \n----------------------------------------\n not ok 6 - the regrain swapped        +\n # Failed test 6: \"the regrain swapped\"+\n #         have: 0                     +\n #         want: 1\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\npsql:<stdin>:30: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"nv303a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:30: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"nv303a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"nv303b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"nv303b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\n"
+        },
+        "mutant:regrain_drift_compares_not_valid_check": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                                                                                                                                                                                                                                                                                              +\n #             PL/pgSQL function lives_ok(text,text) line 14 at EXECUTE\n(1 row)\n\n                         is                         \n----------------------------------------------------\n ok 5 - every row is still served, row 7 among them\n(1 row)\n\n                   is                   \n----------------------------------------\n not ok 6 - the regrain swapped        +\n # Failed test 6: \"the regrain swapped\"+\n #         have: 0                     +\n #         want: 1\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\npsql:<stdin>:30: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"nv303a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:30: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"nv303a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"nv303b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"nv303b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\n"
+        },
+        "mutant:regrain_drift_excuses_validated_copy_check": {
+          "fails": false,
+          "exit": 0,
+          "tail": "                                     is                                                  \n-----------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: (B) the same table without the NOT VALID CHECK regrains [0, 1000) into 10 children\n(1 row)\n\n                                            lives_ok                                             \n-------------------------------------------------------------------------------------------------\n ok 4 - regrain of a table whose parent has a NOT VALID CHECK that an old row violates completes\n(1 row)\n\n                         is                         \n----------------------------------------------------\n ok 5 - every row is still served, row 7 among them\n(1 row)\n\n             is             \n----------------------------\n ok 6 - the regrain swapped\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:30: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"nv303a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:30: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"nv303a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"nv303b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"nv303b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\n"
+        }
+      },
+      "class": "fixed",
+      "acceptance": {
+        "fails_on_base": true,
+        "passes_on_head": true,
+        "mutant_restores": {
+          "regrain_copy_validates_not_valid_check": true,
+          "regrain_drift_compares_not_valid_check": true,
+          "regrain_drift_excuses_validated_copy_check": false
+        },
+        "any_restores": true
+      }
+    },
+    {
+      "id": "P1-01",
+      "finder": "P1",
+      "tier": 2,
+      "file": "pgpm_core/install.sql",
+      "line": 6561,
+      "lens": "fresh surface",
+      "scenario": "REGRESSION (passes on the base, fails on this tree): _regrain_copy_make still makes every copy LIKE the parent INCLUDING CONSTRAINTS and drops nothing after it (the hunk at 6554-6561 is comment only), while _regrain_shape_drift now leaves the parent's NOT VALID CHECK out on the parent's side (6673), so on a parent holding a NOT VALID CHECK that NO row violates every copy reads as drift, the probe copy drifts too, and the resumed tick is refused on every tick ('a copy made from the parent now would differ from it too'): regrain_history raises and auto-regrain logs skip_regrain with capture and the TRUNCATE refusal left on the source until regrain_cancel, where the base regrained it (the old drift check compared both sides by expression) and the body says it completes without a restart.",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": ", each by the fine child (or frontier partition) that holds it\n(1 row)\n\n                                                        is                                                         \n-------------------------------------------------------------------------------------------------------------------\n not ok 8 - every fine child of [0, 1000) carries the parent's CHECK NOT VALID                                    +\n # Failed test 8: \"every fine child of [0, 1000) carries the parent's CHECK NOT VALID\"                            +\n #         have: 0:true,100:true,200:true,300:true,400:true,500:true,600:true,700:true,800:true,900:true          +\n #         want: 0:false,100:false,200:false,300:false,400:false,500:false,600:false,700:false,800:false,900:false\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 8\n(1 row)\n\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"p101a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"p101a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:38: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"p101b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:38: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"p101b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "            \n---------------------------------------------------------------------------------------------------------------------\n ok 6 - the run swapped [0, 1000) once, without a restart (its copies are not drift for want of the NOT VALID CHECK)\n(1 row)\n\n                                                            is                                                            \n--------------------------------------------------------------------------------------------------------------------------\n ok 7 - rows 1, 7, 342, 400 and the frontier row are served, each by the fine child (or frontier partition) that holds it\n(1 row)\n\n                                    is                                     \n---------------------------------------------------------------------------\n ok 8 - every fine child of [0, 1000) carries the parent's CHECK NOT VALID\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"p101a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"p101a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:38: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"p101b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:38: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"p101b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": "       +\n #         want: 0:1,0:7,300:342,400:400,5000:5000\n(1 row)\n\n                                                        is                                                         \n-------------------------------------------------------------------------------------------------------------------\n not ok 8 - every fine child of [0, 1000) carries the parent's CHECK NOT VALID                                    +\n # Failed test 8: \"every fine child of [0, 1000) carries the parent's CHECK NOT VALID\"                            +\n #         have: 0:false                                                                                          +\n #         want: 0:false,100:false,200:false,300:false,400:false,500:false,600:false,700:false,800:false,900:false\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 4 tests of 8\n(1 row)\n\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"p101a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"p101a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:38: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"p101b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:38: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"p101b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\n"
+        }
+      },
+      "class": "seed_hit",
+      "seed": "S1"
+    },
+    {
+      "id": "P1-02",
+      "finder": "P1",
+      "tier": 2,
+      "file": "pgpm_core/install.sql",
+      "line": 6552,
+      "lens": "fresh surface",
+      "scenario": "The defect of #1261 is still present (fails on the base and on this tree): _regrain_copy_make's LIKE ... INCLUDING CONSTRAINTS gives the copy the parent's NOT VALID CHECK validated and no statement after the LIKE drops it (only the comment at 6554-6561 says it is dropped), so the first old row the parent still serves fails the copy batch with 23514 (regrain_history raises; auto-regrain skip_regrain every tick with capture and the TRUNCATE guard left on until regrain_cancel); the swap's pre-ATTACH add (8565-8582) and the drift exclusion (6673) are never reached, and the body's guarantee ('copies every row the parent serves, rows written before the constraint included') does not hold. Same root cause as P1-01.",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "           +\n #         want: 0:6,0:7,0:8,300:342,5000:5000\n(1 row)\n\n                                                        is                                                         \n-------------------------------------------------------------------------------------------------------------------\n not ok 8 - every fine child of [0, 1000) carries the parent's CHECK NOT VALID                                    +\n # Failed test 8: \"every fine child of [0, 1000) carries the parent's CHECK NOT VALID\"                            +\n #         have: 0:false                                                                                          +\n #         want: 0:false,100:false,200:false,300:false,400:false,500:false,600:false,700:false,800:false,900:false\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 4 tests of 8\n(1 row)\n\npsql:<stdin>:32: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"p102a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:32: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"p102a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:36: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"p102b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:36: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"p102b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "history of a parent holding a NOT VALID CHECK that old rows violate completes\n(1 row)\n\n                  is                   \n---------------------------------------\n ok 6 - the run swapped [0, 1000) once\n(1 row)\n\n                                                                   is                                                                   \n----------------------------------------------------------------------------------------------------------------------------------------\n ok 7 - rows 7 and 342 are still served, each by the fine child [0, 100) and [300, 400) that holds it, beside 6, 8 and the frontier row\n(1 row)\n\n                                    is                                     \n---------------------------------------------------------------------------\n ok 8 - every fine child of [0, 1000) carries the parent's CHECK NOT VALID\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:32: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"p102a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:32: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"p102a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:36: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"p102b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:36: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"p102b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": "           +\n #         want: 0:6,0:7,0:8,300:342,5000:5000\n(1 row)\n\n                                                        is                                                         \n-------------------------------------------------------------------------------------------------------------------\n not ok 8 - every fine child of [0, 1000) carries the parent's CHECK NOT VALID                                    +\n # Failed test 8: \"every fine child of [0, 1000) carries the parent's CHECK NOT VALID\"                            +\n #         have: 0:false                                                                                          +\n #         want: 0:false,100:false,200:false,300:false,400:false,500:false,600:false,700:false,800:false,900:false\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 4 tests of 8\n(1 row)\n\npsql:<stdin>:32: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"p102a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:32: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"p102a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:36: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"p102b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:36: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"p102b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\n"
+        }
+      },
+      "class": "seed_hit",
+      "seed": "S1"
+    }
+  ]
+}

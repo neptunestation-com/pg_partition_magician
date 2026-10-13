@@ -1,0 +1,93 @@
+# F5 coverage ledger (pass 12, slice S5)
+
+- archive.configure | read: yes | operator error: part_bytes/fetch_rows/null refusals held; endpoint trailing slash, no scheme, bad prefixes accepted (loud later, null-results); leading-slash prefix aliases objects: F5-02
+- archive.unconfigure | read: yes | null refusal; mid-export delete harmless (config read once); held
+- archive._key_columns | read: yes | PK then plain UNIQUE constraint on a partitioned parent; held
+- archive.s3_url_encode | read: yes | unreserved set, UTF-8 bytewise, null refusal; held
+- archive._s3_encode_path | read: yes | per-segment encoding, empty key, '//' and leading '/' segments probed against MinIO; leading '/' aliasing feeds F5-02
+- archive._extension_schema | read: yes | pinned search_path, per-call lookup; held
+- archive._sha256 | read: yes | pgcrypto by schema, pinned path; held
+- archive._hmac_sha256 | read: yes | pgcrypto by schema, pinned path; held
+- archive._s3_send | read: yes | single transport, 300 s curl timeout, record return; held
+- archive.s3_signed_request | read: yes | SigV4 canonical request, clock_timestamp date, UTF-8 body; endpoint trailing slash probed (400, loud)
+- archive.s3_signed_request_bytea | read: yes | bytea-native hash, same canonical request; held
+- archive._pq_byte | read: yes | set_byte primitive; held
+- archive._pq_reverse_bytes | read: yes | little-endian conversion; held
+- archive._pq_varint | read: yes | ULEB128, negative refused; held
+- archive._pq_zigzag | read: yes | sign edges; INT64 min overflows but unreachable; held
+- archive._pq_field_hdr | read: yes | delta 1..15 short form, long form zigzag id; held
+- archive._pq_stop | read: yes | held
+- archive._pq_write_i32 | read: yes | held
+- archive._pq_write_i64 | read: yes | held
+- archive._pq_write_bool | read: yes | type nibble 1/2; held
+- archive._pq_write_binary | read: yes | held
+- archive._pq_write_struct | read: yes | held
+- archive._pq_list_hdr | read: yes | <=14 short form; held
+- archive._pq_write_list_struct | read: yes | held
+- archive._pq_write_list_i32 | read: yes | held
+- archive._pq_write_list_binary | read: yes | held
+- archive._pq_plain_int32 | read: yes | held
+- archive._pq_plain_int64 | read: yes | held
+- archive._pq_epoch_micros | read: yes | time lens: infinity sentinels, far-future clamp, numeric extract, immutability vs zone (offset literal); held
+- archive._pq_plain_double | read: yes | held
+- archive._pq_plain_bytearray | read: yes | held
+- archive._pq_plain_text | read: yes | UTF-8 conversion; held
+- archive._pq_plain_uuid | read: yes | held
+- archive._pq_decimal_byte_width | read: yes | boundary: smallest n with 2^(8n-1)-1 >= 10^p-1; held
+- archive._pq_decimal_shape | read: yes | signed 11-bit scale, negative scale, scale > precision; held
+- archive._pq_plain_decimal | read: yes | div/mod exact, two's complement; held
+- archive._pq_plain_boolean_array | read: yes | LSB-first packing; held
+- archive._pq_definition_levels | read: yes | bit-packed header (nbytes<<1)|1, length prefix; held
+- archive._pq_crc32_table | read: yes | reflected 0xEDB88320; held
+- archive._pq_crc32 | read: yes | held
+- archive._pq_lz_match_len | read: yes | binary search over monotone prefix equality; held
+- archive._pq_bit_reverse | read: yes | held
+- archive._pq_deflate_encode_chunks | read: yes | fixed Huffman table, length/distance codes and extra bits at range edges; held
+- archive._pq_deflate_encode | read: yes | held
+- archive._pq_gzip_compress | read: yes | header, CRC/ISIZE unsigned->signed; held
+- archive._pq_huffman_lengths | read: yes | merge order, length-limit repair weight -1 per step, single symbol; held
+- archive._pq_canonical_codes | read: yes | held
+- archive._pq_lz77_tokens | read: yes | window 32768, min match 3, max 258, backfill; held
+- archive._pq_clc_rle | read: yes | 16/17/18 run ranges; held
+- archive._pq_deflate_encode_dynamic_chunks | read: yes | HLIT/HDIST/HCLEN, clc order, one-distance-code rule, accumulator width; held
+- archive._pq_deflate_encode_dynamic | read: yes | held
+- archive._pq_gzip_compress_dynamic | read: yes | empty payload member; held
+- archive._pq_build_schema_root | read: yes | field ids 4,5; held
+- archive._pq_logical_timestamp_micros | read: yes | LogicalType TIMESTAMP field 8, isAdjustedToUTC, MICROS 2; held
+- archive._pq_build_schema_leaf | read: yes | field ids 1-10, optional fields; held
+- archive._pq_build_data_page_header | read: yes | PLAIN/RLE codes; held
+- archive._pq_build_page_header | read: yes | held
+- archive._pq_build_column_metadata | read: yes | field ids 1-7,9; held
+- archive._pq_build_column_chunk | read: yes | held
+- archive._pq_build_row_group | read: yes | held
+- archive._pq_build_file_metadata | read: yes | held
+- archive._pq_has_nan | read: yes | held
+- archive._pq_from_item | read: yes | %I/%L quoting; held
+- archive._pq_encode_column_data | read: yes | every type branch, NaN null, naive timestamp at UTC, pinned extra_float_digits; held
+- archive._held_relations | read: yes | held
+- archive._refuse_foreign_read | read: yes | rules (1)/(2), catalog exclusion, descendants; false-refusal paths looked for (encode/digest reads), none; held
+- archive._pq_from_relation | read: yes | regclass rendered at read; held
+- archive._pq_snapshot | read: yes | shape check, lock-before-render, one-statement read; held
+- archive._pq_to_parquet | read: yes | type switch, snapshot ctid order on multi-heap child; held
+- archive._pq_to_parquet_range_counted | read: yes | order by control+key, digest over snapshot s.*; date/varchar refused (H1)
+- archive._pq_to_parquet_range | read: yes | wrapper; held
+- archive._object_stem | read: yes | UTC/ISO pinned, era, fraction, five-digit year, id text kept whole; held
+- archive._claim_object_key | read: yes | held
+- archive._owned_key | read: yes | base/whole-key claims, oid shape, relation check; text identity vs store normalisation: F5-02
+- archive._object_key | read: yes | held
+- archive._claim_archived_key_bases | read: yes | base regex vs fractional/negative/BC stems and oid shape; held
+- archive._claim_archived_keys | read: yes | earliest-archived claim; held
+- archive._record_claim_relations | read: yes | chunk-only backfill; held
+- archive._refuse_recorded_chunk_overwrite | read: yes | fresh surface: FOR UPDATE before lookup, native range compare, digest compare and record; offset-less p_lo from another zone; held
+- archive._encode_upload_ndjson_single | read: yes | read in partition_tz, digest in same statement, foreign-read check, claim before PUT; held
+- archive._encode_upload_parquet | read: yes | same; held
+- archive._resolve_child | read: yes | one-snapshot resolve, lock, identity recheck, anchor; held
+- archive._child_object_key | read: yes | held
+- archive._s3_abort_uploads_at | read: yes | canonical query order, exact-key filter, pagination; MinIO marker gap is H2
+- archive._cursor_text | read: yes | time lens: pinned ISO/UTC; probed timetz/interval/bytea/timestamptz/real/date/time under odd session settings; held
+- archive.to_s3 | read: yes | fresh surface #1168: cursor cast loses typmod (char(n), bit(n)): F5-01; NULL run, multi-heap, abort handlers held
+- archive.to_s3_parquet | read: yes | resolve, RLS, encode, claim, PUT order; held
+- archive._refuse_empty_range | read: yes | native compare; held
+- pgpm.archive_to_s3_ndjson | read: yes | null, empty range, RLS refusals; direct-call re-run paths; leading-slash prefix: F5-02
+- pgpm.archive_to_s3_parquet | read: yes | same refusals; held
+- archive._row_digest | read: yes | every output-affecting setting pinned (TimeZone, DateStyle, IntervalStyle, extra_float_digits, bytea_output, lc_monetary, search_path); held

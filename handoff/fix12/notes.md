@@ -1,0 +1,53 @@
+- 19:50Z fix phase: plan.md + 30 briefs written; wave 1 spawned: G1-G12 (12 fixers, worktrees); queue G13 G14 G29 G30 then wave 2
+- 20:24Z G8 reported PR 1293 (checks green); pv P1+V running; G13 launched
+- 20:31Z V on 1293 and 1294: closing holds, no claims
+- 20:36Z 1293 CLEAR posted, landq; 1295 V partial (V-01 lock-by-name race), ACC rebuilt and swapped in
+- 20:44Z 1296 open (G6 reframed #1263: names the foreign holder, refuses the exemption); pv P1+V running; G10 paused
+- 20:59Z V on 1296 holds (exemption unsafe: assertion 16 empty read); ACC rebuilt + swapped; landq starting with 1294 (T2) then 1293
+- 20:27Z NOTE: timestamps above from 20:24Z on were estimated and run ~30 min fast; the clock now reads 20:27Z. landq started 20:27Z (1294 first); G7 dead-man fired, nudged
+- 20:27Z 1295 round-1 BLOCKED posted (V-01 verified T3 finding); G5 round 2 running
+- 20:31Z 1296: V holds, P1-02 (log truncation) to verifier + G6 round 2; 1297: V holds
+- 20:33Z 1296 round-1 posted (P1-02 verified T3, round 2 pending); 1298 (G3 T1) P1+V launched
+- 20:34Z 1297 CLEAR posted, landq (T3). Lesson: two per-PR finders on the shared pgpm_prv-15 chose the same scratch db name (prv_p1_a); one dropped the other's
+- 20:35Z 1299 (G2 T1) P1+V launched (26 units)
+- 20:39Z 1298 CLEAR posted, landq T1
+- 20:40Z 1301 (G12) P1+V launched; G1 dead-man fired (no PR 35 min after pause)
+- 20:42Z 1299: V-01 T1 in surface (live re-run found it; the read-only first verdict missed it); G2 round 2; V-01 verifier launched
+- 20:43Z 1301 V holds + V-01/V-02 T3 siblings; G12 round 2; round-2 acceptance claims staged in acc_extra/
+- 20:44Z 1299 round-1 BLOCKED posted (V-01 verified T1)
+- 20:44Z 1300 CLEAR posted, landq T3
+- 20:45Z launched G30, G15 (wave 2 begins); agents: 14 fixers + 1 verification
+- 20:46Z 1301 round-1 posted (V-01/V-02 to round 2)
+- 20:54Z 1302 (G11) P1+V launched on the timescale harness
+- 21:03Z 1302 r1: P1-02 T4 in the PR's own remedy text -> round 2; 1303 prepared (ACC fails on head by design: old remedy typed)
+- 21:08Z 1303: V-01 regression (recall remedy) -> G15 round 2
+- 21:09Z 1303 round-1 BLOCKED posted
+- 21:13Z 1304 (G30, #814 archive bullet) P1+V launched
+- 21:17Z 1305 (G7, #1264) P1+V launched
+- 21:18Z 1304: V-01 regression on a date grid -> G30 round 2
+- 21:19Z 1304 round-1 BLOCKED posted
+- 21:20Z 1305: V-01 (timezone_abbreviations) -> G7 round 2
+- 21:22Z 1305 round-1 BLOCKED posted; seeds caught 13/13
+- 21:23Z round 1 complete for 13 PRs (5 clear, 8 in round 2); launched G16 G17 G19 G20; 17 fixers running
+- 21:29Z CI storm: ~2 concurrent jobs org-wide, 38 queued runs; cancelled 33 queued runs on the 8 round-2 branches (their heads will be re-pushed; the workflows cancel superseded runs on push anyway) to let the merge group and the clear PRs through
+- 21:32Z LESSON: the branch-wide cancel also hit the already-pushed round-2 heads; re-ran 16 runs on the current heads
+- 21:33Z 1295 r2 P1+V launched (ACC-03 = r1 V-01 fails on head at its LIVENESS 3: premise_removed shape, V rebuilds)
+- 21:33Z 1296 r2 P1+V launched
+- 21:35Z 1299 r2 P1+V launched; 19 agents running
+- 21:35Z 1301 r2 ready; queued (agent cap)
+- 21:35Z 1302 r2 ready; queued
+- 21:37Z 1296 r2 V holds (ACC-02 rebuilt); 1301 r2 P1+V launched
+- 21:38Z 1295 r2: V-01 (schema swap) -> G5 round 3 (pg_locks witness)
+- 21:39Z G15 r2 reported; 1302 r2 V launched (P1 waits for a slot); G5 round-3 addendum (P1-02 42P01)
+- 21:39Z 1295 round-2 BLOCKED posted
+- 21:40Z G2 r2 reported (1299 head 356f52e7): the archive step holds every detached table, logs skip_archive with the attach-back remedy
+- 21:41Z 1301 r2: V-01 (default port) -> G12 round 3, declared last round
+- 21:41Z 1303 r2 V launched (P1 waits for a slot)
+- 21:43Z 1296 r2 CLEAR posted, landq T3
+- 21:44Z 1299 r2 V partial (#705 mechanism) -> G2 round 3; 1302 r2 V holds; 1304 r2 P1+V launched
+- 21:45Z 1299 r2 + 1301 r2 reports posted (blocked, round 3 each); 1305 r2 P1+V launched
+- 21:46Z 1302 r2 CLEAR posted, landq T3
+- 21:47Z 1305 r2 V holds (675 sessions, one key each)
+- 21:50Z 1304 r2 V partial -> G30 round 3 (last); 1306 (G1, T1) prepared
+- 21:51Z 1305 r2 CLEAR -> landq; 1304 r2 BLOCKED posted; 1306 P1+V launched; G1 reported
+- 21:52Z gate backlog 24 queued runs; 13 fixer containers; landq has 8 PRs (1294 in merge queue since 20:48Z)

@@ -1,0 +1,26 @@
+{
+  "claims": [
+    {
+      "id": "F15-01",
+      "finder": "F15",
+      "tier": 5,
+      "file": "tests/72_transmute_attributes_test.sql",
+      "line": 61,
+      "lens": "contracts versus documentation",
+      "scenario": "tests/72's RLS assertion asks only the role the policy names (a count of 400 over a symmetric 5-tenant fixture), so all 15 assertions pass against a transmute that replays tenant_iso TO PUBLIC, under which t72_writer reads tenant 1's 402 rows; it should also assert that a role the policy does not name still sees nothing through the parent",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - GUARD: the mutant differs from the tree's install.sql in exactly one line (the roles of the first policy replay)\nok - fixture: the mutant installs\nok - LIVENESS: tests/72 ran against the mutant (15 ok, 0 not ok)\nok - LIVENESS: under the mutant the parent's tenant_iso policy is TO PUBLIC ({-}) and t72_writer, which it does not name, reads tenant 1's 402 rows\nnot ok - tests/72 passes all its assertions against a transmute that replays tenant_iso TO PUBLIC (t72_writer reads tenant 1's rows where the table it converted showed it none)\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - GUARD: the mutant differs from the tree's install.sql in exactly one line (the roles of the first policy replay)\nok - fixture: the mutant installs\nok - LIVENESS: tests/72 ran against the mutant (15 ok, 0 not ok)\nok - LIVENESS: under the mutant the parent's tenant_iso policy is TO PUBLIC ({-}) and t72_writer, which it does not name, reads tenant 1's 402 rows\nnot ok - tests/72 passes all its assertions against a transmute that replays tenant_iso TO PUBLIC (t72_writer reads tenant 1's rows where the table it converted showed it none)\n"
+      },
+      "class": "candidate"
+    }
+  ]
+}

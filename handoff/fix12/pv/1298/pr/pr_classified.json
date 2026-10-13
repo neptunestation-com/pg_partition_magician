@@ -1,0 +1,119 @@
+{
+  "trees": {
+    "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1298/pr/base",
+    "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1298/pr/head",
+    "review": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1298/pr/review",
+    "mutants": {
+      "archive_key_base_spelled_as_stored": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1298/pr/mutants/archive_key_base_spelled_as_stored",
+      "archive_recorded_chunk_ledger_spelled": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1298/pr/mutants/archive_recorded_chunk_ledger_spelled"
+    }
+  },
+  "acceptance": "ACC",
+  "claims": [
+    {
+      "id": "ACC-01",
+      "finder": "ACC",
+      "tier": 1,
+      "file": "pgpm_archive/install.sql",
+      "line": 2875,
+      "lens": "operator error",
+      "scenario": "#1260 acceptance (F5-02): archive._owned_key claims object keys as TEXT (key base = p_prefix as archive.configure stored it), but the store (MinIO, the harness's and README's S3-compatible store) reads '/P/x' and 'P/x' as one object; a table that takes a dropped table's name and is configured with the same prefix spelled with a leading slash claims the unclaimed base '/P/public.t', keeps the plain key shape, and its chunk PUT replaces the dropped table's object (the only copy of its rows) instead of getting the oid shape; configure should refuse or canonicalise a leading '/' (and the claims compare the key the store will use)",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                 isnt                        \n---------------------------------------------------\n ok 5 - LIVENESS: the namesake is another relation\n(1 row)\n\n                                              is                                               \n-----------------------------------------------------------------------------------------------\n ok 6 - LIVENESS: the store reads the leading-slash spelling of the key as the existing object\n(1 row)\n\nCREATE FUNCTION\n                        ok                        \n--------------------------------------------------\n ok 7 - LIVENESS: the namesake's archive call ran\n(1 row)\n\n                                                 is                                                  \n-----------------------------------------------------------------------------------------------------\n not ok 8 - the dropped table's object still holds its nine rows after the namesake archived        +\n # Failed test 8: \"the dropped table's object still holds its nine rows after the namesake archived\"+\n #         have: 1:new,2:new,3:new,4:new                                                            +\n #         want: 1:old,2:old,3:old,4:old,5:old,6:old,7:old,8:old,9:old\n(1 row)\n\n            is            \n--------------------------\n ok 9 - GUARD: cleaned up\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 9\n(1 row)\n\npsql:<stdin>:9: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "rows\n(1 row)\n\n                                               is                                               \n------------------------------------------------------------------------------------------------\n ok 4 - LIVENESS: the first table owns the key base, so a later namesake must get the oid shape\n(1 row)\n\nDROP TABLE\nCREATE TABLE\nINSERT 0 4\nINSERT 0 15\nCALL\n configure \n-----------\n \n(1 row)\n\n                       isnt                        \n---------------------------------------------------\n ok 5 - LIVENESS: the namesake is another relation\n(1 row)\n\n                                              is                                               \n-----------------------------------------------------------------------------------------------\n ok 6 - LIVENESS: the store reads the leading-slash spelling of the key as the existing object\n(1 row)\n\nCREATE FUNCTION\n                        ok                        \n--------------------------------------------------\n ok 7 - LIVENESS: the namesake's archive call ran\n(1 row)\n\n                                           is                                            \n-----------------------------------------------------------------------------------------\n ok 8 - the dropped table's object still holds its nine rows after the namesake archived\n(1 row)\n\n            is            \n--------------------------\n ok 9 - GUARD: cleaned up\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:9: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "mutant:archive_key_base_spelled_as_stored": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                 isnt                        \n---------------------------------------------------\n ok 5 - LIVENESS: the namesake is another relation\n(1 row)\n\n                                              is                                               \n-----------------------------------------------------------------------------------------------\n ok 6 - LIVENESS: the store reads the leading-slash spelling of the key as the existing object\n(1 row)\n\nCREATE FUNCTION\n                        ok                        \n--------------------------------------------------\n ok 7 - LIVENESS: the namesake's archive call ran\n(1 row)\n\n                                                 is                                                  \n-----------------------------------------------------------------------------------------------------\n not ok 8 - the dropped table's object still holds its nine rows after the namesake archived        +\n # Failed test 8: \"the dropped table's object still holds its nine rows after the namesake archived\"+\n #         have: 1:new,2:new,3:new,4:new                                                            +\n #         want: 1:old,2:old,3:old,4:old,5:old,6:old,7:old,8:old,9:old\n(1 row)\n\n            is            \n--------------------------\n ok 9 - GUARD: cleaned up\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 9\n(1 row)\n\npsql:<stdin>:9: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "mutant:archive_recorded_chunk_ledger_spelled": {
+          "fails": false,
+          "exit": 0,
+          "tail": "rows\n(1 row)\n\n                                               is                                               \n------------------------------------------------------------------------------------------------\n ok 4 - LIVENESS: the first table owns the key base, so a later namesake must get the oid shape\n(1 row)\n\nDROP TABLE\nCREATE TABLE\nINSERT 0 4\nINSERT 0 15\nCALL\n configure \n-----------\n \n(1 row)\n\n                       isnt                        \n---------------------------------------------------\n ok 5 - LIVENESS: the namesake is another relation\n(1 row)\n\n                                              is                                               \n-----------------------------------------------------------------------------------------------\n ok 6 - LIVENESS: the store reads the leading-slash spelling of the key as the existing object\n(1 row)\n\nCREATE FUNCTION\n                        ok                        \n--------------------------------------------------\n ok 7 - LIVENESS: the namesake's archive call ran\n(1 row)\n\n                                           is                                            \n-----------------------------------------------------------------------------------------\n ok 8 - the dropped table's object still holds its nine rows after the namesake archived\n(1 row)\n\n            is            \n--------------------------\n ok 9 - GUARD: cleaned up\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:9: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        }
+      },
+      "class": "fixed",
+      "acceptance": {
+        "fails_on_base": true,
+        "passes_on_head": true,
+        "mutant_restores": {
+          "archive_key_base_spelled_as_stored": true,
+          "archive_recorded_chunk_ledger_spelled": false
+        },
+        "any_restores": true
+      }
+    },
+    {
+      "id": "P1-01",
+      "finder": "P1",
+      "tier": 1,
+      "file": "pgpm_archive/install.sql",
+      "line": 2893,
+      "lens": "fresh surface",
+      "scenario": "archive._owned_key claims and PUTs the key base as assembled from the stored prefix and never calls archive._canonical_key (the body says it canonicalises before claiming), so a namesake configured with the same prefix spelled '/P/' claims a fresh base, keeps the plain key shape and its chunk PUT replaces the dropped table's object on MinIO (the only copy of the rows retire() dropped); it should have reached the 'P/' claim and taken the oid shape",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n (204,,\"{\"\"(Accept-Ranges,bytes)\"\",\"\"(Server,MinIO)\"\",\"\"(Strict-Transport-Security,\\\\\"\"max-age=31536000; includeSubDomains\\\\\"\")\"\",\"\"(Vary,Origin)\"\",\"\"(Vary,Accept-Encoding)\"\",\"\"(X-Amz-Id-2,dd9025bab4ad464b049177c95eb6ebf374d3b3fd1af9251148b658df7ac2e3e8)\"\",\"\"(X-Amz-Request-Id,18DDE2C2D03C826A)\"\",\"\"(X-Content-Type-Options,nosniff)\"\",\"\"(X-Ratelimit-Limit,5747)\"\",\"\"(X-Ratelimit-Remaining,5747)\"\",\"\"(X-Xss-Protection,\\\\\"\"1; mode=block\\\\\"\")\"\",\"\"(Date,\\\\\"\"Mon, 12 Oct 2026 20:39:13 GMT\\\\\"\")\"\",\"\"(Connection,close)\"\"}\",)\n (204,,\"{\"\"(Accept-Ranges,bytes)\"\",\"\"(Server,MinIO)\"\",\"\"(Strict-Transport-Security,\\\\\"\"max-age=31536000; includeSubDomains\\\\\"\")\"\",\"\"(Vary,Origin)\"\",\"\"(Vary,Accept-Encoding)\"\",\"\"(X-Amz-Id-2,dd9025bab4ad464b049177c95eb6ebf374d3b3fd1af9251148b658df7ac2e3e8)\"\",\"\"(X-Amz-Request-Id,18DDE2C2D0AFA312)\"\",\"\"(X-Content-Type-Options,nosniff)\"\",\"\"(X-Ratelimit-Limit,5747)\"\",\"\"(X-Ratelimit-Remaining,5747)\"\",\"\"(X-Xss-Protection,\\\\\"\"1; mode=block\\\\\"\")\"\",\"\"(Date,\\\\\"\"Mon, 12 Oct 2026 20:39:13 GMT\\\\\"\")\"\",\"\"(Connection,close)\"\"}\",)\n(2 rows)\n\n            is            \n--------------------------\n ok 9 - GUARD: cleaned up\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 9\n(1 row)\n\npsql:<stdin>:8: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n (204,,\"{\"\"(Accept-Ranges,bytes)\"\",\"\"(Server,MinIO)\"\",\"\"(Strict-Transport-Security,\\\\\"\"max-age=31536000; includeSubDomains\\\\\"\")\"\",\"\"(Vary,Origin)\"\",\"\"(Vary,Accept-Encoding)\"\",\"\"(X-Amz-Id-2,dd9025bab4ad464b049177c95eb6ebf374d3b3fd1af9251148b658df7ac2e3e8)\"\",\"\"(X-Amz-Request-Id,18DDE2C2FFE31C36)\"\",\"\"(X-Content-Type-Options,nosniff)\"\",\"\"(X-Ratelimit-Limit,5747)\"\",\"\"(X-Ratelimit-Remaining,5747)\"\",\"\"(X-Xss-Protection,\\\\\"\"1; mode=block\\\\\"\")\"\",\"\"(Date,\\\\\"\"Mon, 12 Oct 2026 20:39:13 GMT\\\\\"\")\"\",\"\"(Connection,close)\"\"}\",)\n (204,,\"{\"\"(Accept-Ranges,bytes)\"\",\"\"(Server,MinIO)\"\",\"\"(Strict-Transport-Security,\\\\\"\"max-age=31536000; includeSubDomains\\\\\"\")\"\",\"\"(Vary,Origin)\"\",\"\"(Vary,Accept-Encoding)\"\",\"\"(X-Amz-Id-2,dd9025bab4ad464b049177c95eb6ebf374d3b3fd1af9251148b658df7ac2e3e8)\"\",\"\"(X-Amz-Request-Id,18DDE2C2FFF9286B)\"\",\"\"(X-Content-Type-Options,nosniff)\"\",\"\"(X-Ratelimit-Limit,5747)\"\",\"\"(X-Ratelimit-Remaining,5747)\"\",\"\"(X-Xss-Protection,\\\\\"\"1; mode=block\\\\\"\")\"\",\"\"(Date,\\\\\"\"Mon, 12 Oct 2026 20:39:13 GMT\\\\\"\")\"\",\"\"(Connection,close)\"\"}\",)\n(2 rows)\n\n            is            \n--------------------------\n ok 9 - GUARD: cleaned up\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:8: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": "-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n (204,,\"{\"\"(Accept-Ranges,bytes)\"\",\"\"(Server,MinIO)\"\",\"\"(Strict-Transport-Security,\\\\\"\"max-age=31536000; includeSubDomains\\\\\"\")\"\",\"\"(Vary,Origin)\"\",\"\"(Vary,Accept-Encoding)\"\",\"\"(X-Amz-Id-2,dd9025bab4ad464b049177c95eb6ebf374d3b3fd1af9251148b658df7ac2e3e8)\"\",\"\"(X-Amz-Request-Id,18DDE2C33F1D4711)\"\",\"\"(X-Content-Type-Options,nosniff)\"\",\"\"(X-Ratelimit-Limit,5747)\"\",\"\"(X-Ratelimit-Remaining,5747)\"\",\"\"(X-Xss-Protection,\\\\\"\"1; mode=block\\\\\"\")\"\",\"\"(Date,\\\\\"\"Mon, 12 Oct 2026 20:39:14 GMT\\\\\"\")\"\",\"\"(Connection,close)\"\"}\",)\n (204,,\"{\"\"(Accept-Ranges,bytes)\"\",\"\"(Server,MinIO)\"\",\"\"(Strict-Transport-Security,\\\\\"\"max-age=31536000; includeSubDomains\\\\\"\")\"\",\"\"(Vary,Origin)\"\",\"\"(Vary,Accept-Encoding)\"\",\"\"(X-Amz-Id-2,dd9025bab4ad464b049177c95eb6ebf374d3b3fd1af9251148b658df7ac2e3e8)\"\",\"\"(X-Amz-Request-Id,18DDE2C33F31C4D6)\"\",\"\"(X-Content-Type-Options,nosniff)\"\",\"\"(X-Ratelimit-Limit,5747)\"\",\"\"(X-Ratelimit-Remaining,5747)\"\",\"\"(X-Xss-Protection,\\\\\"\"1; mode=block\\\\\"\")\"\",\"\"(Date,\\\\\"\"Mon, 12 Oct 2026 20:39:14 GMT\\\\\"\")\"\",\"\"(Connection,close)\"\"}\",)\n(2 rows)\n\n            is            \n--------------------------\n ok 9 - GUARD: cleaned up\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 9\n(1 row)\n\npsql:<stdin>:8: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        }
+      },
+      "class": "seed_hit",
+      "seed": "S1"
+    },
+    {
+      "id": "P1-02",
+      "finder": "P1",
+      "tier": 1,
+      "file": "pgpm_archive/install.sql",
+      "line": 3064,
+      "lens": "fresh surface",
+      "scenario": "introduced: archive._refuse_recorded_chunk_overwrite now matches the ledger row by archive._canonical_key(a.s3_key) = p_key, but p_key is still the raw key archive._owned_key assembles, so for a table configured with a prefix spelled with a leading '/' (its tick recorded the chunk at '/P/...') no ledger row matches, the #975/#1069 refusal the base gave (a.s3_key = p_key) is lost, and a direct call over the recorded chunk after retire() PUTs an empty object over the only copy of its rows; it should have been refused naming the chunk",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": false,
+          "exit": 0,
+          "tail": "                                                                                                   req                                                                                                                                                                                                                                                                 \n-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n (204,,\"{\"\"(Accept-Ranges,bytes)\"\",\"\"(Server,MinIO)\"\",\"\"(Strict-Transport-Security,\\\\\"\"max-age=31536000; includeSubDomains\\\\\"\")\"\",\"\"(Vary,Origin)\"\",\"\"(Vary,Accept-Encoding)\"\",\"\"(X-Amz-Id-2,dd9025bab4ad464b049177c95eb6ebf374d3b3fd1af9251148b658df7ac2e3e8)\"\",\"\"(X-Amz-Request-Id,18DDE2C36B006D26)\"\",\"\"(X-Content-Type-Options,nosniff)\"\",\"\"(X-Ratelimit-Limit,5747)\"\",\"\"(X-Ratelimit-Remaining,5747)\"\",\"\"(X-Xss-Protection,\\\\\"\"1; mode=block\\\\\"\")\"\",\"\"(Date,\\\\\"\"Mon, 12 Oct 2026 20:39:15 GMT\\\\\"\")\"\",\"\"(Connection,close)\"\"}\",)\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:9: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "head": {
+          "fails": false,
+          "liveness_failed": true,
+          "exit": 0,
+          "tail": "  req                                                                                                                                                                                                                                                                 \n-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n (204,,\"{\"\"(Accept-Ranges,bytes)\"\",\"\"(Server,MinIO)\"\",\"\"(Strict-Transport-Security,\\\\\"\"max-age=31536000; includeSubDomains\\\\\"\")\"\",\"\"(Vary,Origin)\"\",\"\"(Vary,Accept-Encoding)\"\",\"\"(X-Amz-Id-2,dd9025bab4ad464b049177c95eb6ebf374d3b3fd1af9251148b658df7ac2e3e8)\"\",\"\"(X-Amz-Request-Id,18DDE2C3995D3654)\"\",\"\"(X-Content-Type-Options,nosniff)\"\",\"\"(X-Ratelimit-Limit,5747)\"\",\"\"(X-Ratelimit-Remaining,5747)\"\",\"\"(X-Xss-Protection,\\\\\"\"1; mode=block\\\\\"\")\"\",\"\"(Date,\\\\\"\"Mon, 12 Oct 2026 20:39:16 GMT\\\\\"\")\"\",\"\"(Connection,close)\"\"}\",)\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 8\n(1 row)\n\npsql:<stdin>:9: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": "  req                                                                                                                                                                                                                                                                 \n-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n (204,,\"{\"\"(Accept-Ranges,bytes)\"\",\"\"(Server,MinIO)\"\",\"\"(Strict-Transport-Security,\\\\\"\"max-age=31536000; includeSubDomains\\\\\"\")\"\",\"\"(Vary,Origin)\"\",\"\"(Vary,Accept-Encoding)\"\",\"\"(X-Amz-Id-2,dd9025bab4ad464b049177c95eb6ebf374d3b3fd1af9251148b658df7ac2e3e8)\"\",\"\"(X-Amz-Request-Id,18DDE2C3CAB73852)\"\",\"\"(X-Content-Type-Options,nosniff)\"\",\"\"(X-Ratelimit-Limit,5747)\"\",\"\"(X-Ratelimit-Remaining,5747)\"\",\"\"(X-Xss-Protection,\\\\\"\"1; mode=block\\\\\"\")\"\",\"\"(Date,\\\\\"\"Mon, 12 Oct 2026 20:39:17 GMT\\\\\"\")\"\",\"\"(Connection,close)\"\"}\",)\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 4 tests of 8\n(1 row)\n\npsql:<stdin>:9: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        }
+      },
+      "class": "seed_hit",
+      "seed": null,
+      "note": "seed hit with no seed near this file:line (or no --sealed); check the claim's location"
+    }
+  ]
+}

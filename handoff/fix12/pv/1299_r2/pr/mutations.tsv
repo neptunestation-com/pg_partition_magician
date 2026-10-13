@@ -1,0 +1,3 @@
+archive_hold_vouches_detached_retirement	pgpm_core/install.sql
+retirement_mark_readers_whole	pgpm_core/install.sql
+retirement_mark_vouches_alone	pgpm_core/install.sql

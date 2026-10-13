@@ -1,0 +1,350 @@
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/base/CHANGELOG.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/head/CHANGELOG.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/base/CHANGELOG.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/head/CHANGELOG.md	2026-10-12 13:28:52
+@@ -2,6 +2,16 @@
+ 
+ ## [Unreleased]
+ 
++- **A resumed `text_time` transmute refuses another encoding** (#1270). The claim a failed attempt leaves
++  recorded the bound, its zone (#506) and its column (#628), but not the `text_time` encoding the
++  `pgpm_monolith_bound` `CHECK`'s literals were written in, so a re-run with another `p_tt_epoch` (or prefix,
++  width, radix, unit, alphabet or discard bits) took the claim over, skipped phases 1 and 2, and attached the
++  monolith with the bound encoded the new way: the `ATTACH` scanned the table under `ACCESS EXCLUSIVE` and
++  died raw on the rows outside it, after the bound and claim had committed. The claim now records the
++  encoding (`transmute_inflight.text_time_encoding`), and a resume under another one is refused up front,
++  naming both and the remedy (`transmute_abort`, then re-run); the same encoding spelled otherwise resumes.
++  A claim recorded before the column existed is not checked.
++
+ - **The regrain swap and the hypertable cutover wait for snapshots older than their copies** (#1241). A
+   `REPEATABLE READ` reader whose snapshot predated a regrain's copies, and which first read the table after the
+   swap (so it held no lock the `DETACH` waited on), read the fine children, whose rows its snapshot cannot see,
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/base/bench/transmute_resume_text_time_encoding.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/head/bench/transmute_resume_text_time_encoding.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/base/bench/transmute_resume_text_time_encoding.sh	1969-12-31 16:00:00
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/head/bench/transmute_resume_text_time_encoding.sh	2026-10-12 13:28:52
+@@ -0,0 +1,27 @@
++#!/usr/bin/env bash
++# Run tests/337_transmute_resume_text_time_encoding_test.sql against an ARBITRARY copy of
++# pgpm_core/install.sql, so bench/discriminate.sh can point it at a mutant. The harness is
++# bench/grid_timezone.sh's, selected by its GRID_TZ_TEST_FILE override (see that file's header for why a
++# wrapper around a plain pgTAP file exists at all, and bench/transmute_resume_control_column.sh for this
++# one's closest sibling).
++#
++# What THIS file guards (issue #1270): a text_time transmute resumed after a failed cutover refuses an
++# encoding (p_tt_prefix, p_tt_width, p_tt_radix, p_tt_unit, p_tt_alphabet, p_tt_discard_bits, p_tt_epoch)
++# other than the one the recorded bound's CHECK was written in, instead of reusing that validated CHECK and
++# attaching with the bound encoded the new way, which scans the whole table under ACCESS EXCLUSIVE and
++# dies on the rows outside it. tests/337's witnesses pin that the first attempts really failed in the
++# cutover and left validated CHECKs, that some row really lies outside the bound encoded the re-run's way
++# (so nothing but the refusal stops it), and that the same encoding spelled otherwise really resumes; this
++# wrapper proves those witnesses would notice the refusal removed.
++#
++# The mutation it is required to fail against (bench/mutations/mutate.py):
++#   transmute_resume_any_encoding  -- the resume's encoding check removed, which is pre-#1270 behaviour
++#                                     exactly: the re-runs with the epoch one day earlier are not refused,
++#                                     die at their first COMMIT inside throws_like with 2D000, and
++#                                     tests/337 pins the refusal's message
++#
++# Usage: transmute_resume_text_time_encoding.sh <container> <db> [install.sql]
++set -uo pipefail
++GRID_TZ_TEST_FILE="${GRID_TZ_TEST_FILE:-/repo/tests/337_transmute_resume_text_time_encoding_test.sql}" \
++GRID_TZ_LABEL="a resumed transmute refuses another text_time encoding" \
++exec bash "$(dirname "$0")/grid_timezone.sh" "$@"
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/base/bench/upgrade_in_place.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/head/bench/upgrade_in_place.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/base/bench/upgrade_in_place.sh	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/head/bench/upgrade_in_place.sh	2026-10-12 13:28:52
+@@ -152,6 +152,7 @@
+ pgpm.transmute_inflight:owner_backend_start
+ pgpm.transmute_inflight:partition_tz
+ pgpm.transmute_inflight:control_attnum
++pgpm.transmute_inflight:text_time_encoding
+ pgpm.dropped_fk:restored_at
+ pgpm.dropped_fk:validated_at
+ pgpm.dropped_fk:validate_retry_after
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/base/docs/guide.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/head/docs/guide.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/base/docs/guide.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/head/docs/guide.md	2026-10-12 13:28:52
+@@ -335,8 +335,9 @@
+ long scan is never mistaken for a dead one. The sweep gives up on the table's lock after 5 s, like
+ `transmute` itself, and retries next tick (a `skip_transmute_reap` row) rather than queue the table's
+ traffic behind it. Re-running `transmute` resumes from the recorded bound, in the zone that bound was
+-computed in, rather than recomputing one, so re-run it on the same control column: one on another
+-column is refused, because the bound constrains the first.
++computed in, rather than recomputing one, so re-run it on the same control column and, on a `text_time`
++key, with the same encoding (`p_tt_*`): one on another column, or in another encoding, is refused, because
++the bound's `CHECK` constrains the first column in the first encoding.
+ 
+ The one hard requirement is that the **control column be `NOT NULL`** (a partition key cannot be null, and
+ `transmute` never scans to enforce it). A key is *not* required: if the table's **primary key** includes
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/base/docs/reference.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/head/docs/reference.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/base/docs/reference.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/head/docs/reference.md	2026-10-12 13:28:52
+@@ -425,7 +425,11 @@
+ computed in: re-run with the step and anchor of the attempt that recorded it, or abort it), or was
+ recorded on another control column (the bound's `CHECK` is on that column, so it cannot certify this one's
+ partition bound and the cutover would scan the whole table under `ACCESS EXCLUSIVE`: re-run on the column
+-that attempt used, which a rename in between does not change, or abort it); the session's own
++that attempt used, which a rename in between does not change, or abort it), or on a `text_time` key was
++recorded in another encoding (any of `p_tt_prefix`, `p_tt_width`, `p_tt_radix`, `p_tt_unit`, `p_tt_alphabet`,
++`p_tt_discard_bits` or `p_tt_epoch` differs, so the `CHECK`'s literals cannot certify this call's partition
++bound either: re-run with that attempt's encoding, where an epoch at another offset for the same instant and
++the default alphabet written out are the same encoding, or abort it and re-run); the session's own
+ `backend_start` is visible neither to the current role nor to pgpm's owner (a session under `SET ROLE` to a
+ role without the session user's privileges, with pgpm owned by a role that has neither those nor
+ `pg_read_all_stats`: the claim records it as its owner's identity, which a resume and the reaper match on,
+@@ -3796,6 +3800,7 @@
+ | `lo` / `hi` | `text` | the native bounds the `CHECK` is enforcing; a retry reuses these rather than recomputing |
+ | `partition_tz` | `text` | the zone `lo` and `hi` were computed in; a retry adopts it along with them, whatever zone its own session runs in (null on a row written before the column existed, which a retry reads as "keep this session's zone") |
+ | `control_attnum` | `smallint` | the attribute number of the control column `lo` and `hi` were computed on, which the `CHECK` constrains; a retry on another column is refused, one on the same column under a new name resumes (null on a row written before the column existed, which a retry does not check) |
++| `text_time_encoding` | `jsonb` | on a `text_time` key, the encoding the `CHECK`'s literals were written in (`prefix`, `width`, `radix`, `unit`, `alphabet` with an omitted one written out as the default it stands for, `discard_bits`, and `epoch` in seconds since 1970-01-01 UTC); a retry under another encoding is refused, the same one spelled otherwise resumes (null for every other kind, and on a row written before the column existed, which a retry does not check) |
+ | `started_at` | `timestamptz` | when the conversion added the bound |
+ 
+ ### `pgpm.archive_ledger`
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/base/pgpm_core/install.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/head/pgpm_core/install.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/base/pgpm_core/install.sql	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/head/pgpm_core/install.sql	2026-10-12 13:28:52
+@@ -529,6 +529,13 @@
+   -- refused; null on a claim recorded before the column existed, which a resume reads as "not checked",
+   -- the old behaviour.
+   control_attnum smallint,
++  -- #1270: the text_time encoding the CHECK's two literals were written in (p_tt_prefix, p_tt_width,
++  -- p_tt_radix, p_tt_unit, p_tt_alphabet with a null one written out as the default it stands for,
++  -- p_tt_discard_bits, and p_tt_epoch as seconds since 1970-01-01 UTC, so another spelling of the same
++  -- instant is the same encoding). A resume under another encoding is refused. Null for every other kind,
++  -- which encodes nothing, and on a claim recorded before the column existed, which a resume reads as
++  -- "not checked", the old behaviour.
++  text_time_encoding jsonb,
+   started_at    timestamptz not null default now(),
+   owner_pid           int,
+   owner_backend_start timestamptz
+@@ -540,6 +547,7 @@
+ alter table pgpm.transmute_inflight add column if not exists owner_backend_start timestamptz;
+ alter table pgpm.transmute_inflight add column if not exists partition_tz text;
+ alter table pgpm.transmute_inflight add column if not exists control_attnum smallint;
++alter table pgpm.transmute_inflight add column if not exists text_time_encoding jsonb;
+ 
+ -- This session's own backend_start, the half of a transmute claim's owner identity that a recycled pid
+ -- cannot forge (#771). pg_stat_activity shows a backend's backend_start only to a role with the privileges
+@@ -10042,6 +10050,8 @@
+   v_tz text;   -- #455: the zone the grid is computed in, recorded in config.partition_tz
+   v_claim_tz text;   -- #506: the zone recorded with the claim, which a resume adopts along with the bound
+   v_claim_attnum smallint;   -- #628: the control column recorded with the claim, which a resume must match
++  v_tt_encoding jsonb;        -- #1270: this call's text_time encoding, recorded with a fresh claim
++  v_claim_tt_encoding jsonb;  -- #1270: the encoding recorded with the claim, which a resume must match
+   v_frontier_native text; v_min_raw text; v_max_raw text; v_min_native text; v_lo_native text; v_hi_native text;
+   v_max_ts timestamptz; v_skew_limit timestamptz;   -- #457: the decoded data maximum and how far ahead of now() it may sit
+   -- #277: everything CREATE TABLE ... LIKE does NOT carry, captured before the rename and replayed onto
+@@ -10752,9 +10762,17 @@
+       session_user,
+       (select pg_get_userbyid(proowner) from pg_proc where oid = 'pgpm._own_backend_start_definer()'::regprocedure);
+   end if;
++  -- #1270: the encoding the bound's CHECK is about to be written in, in a form where two spellings of one
++  -- encoding compare equal (see the column's comment). Null for every kind but text_time.
++  if p_control_kind = 'text_time' then
++    v_tt_encoding := jsonb_build_object(
++      'prefix', p_tt_prefix, 'width', p_tt_width, 'radix', p_tt_radix, 'unit', p_tt_unit,
++      'alphabet', coalesce(p_tt_alphabet, substr('0123456789abcdefghijklmnopqrstuvwxyz', 1, p_tt_radix)),
++      'discard_bits', p_tt_discard_bits, 'epoch', trim_scale(extract(epoch from p_tt_epoch)::numeric));
++  end if;
+   insert into pgpm.transmute_inflight (parent_table, nsp, rel, control_kind, lo, hi, partition_tz,
+-                                       control_attnum, owner_pid, owner_backend_start)
+-  values (p_parent, v_nsp, v_rel, p_control_kind, v_lo_native, v_hi_native, v_tz, v_ctl_attnum,
++                                       control_attnum, text_time_encoding, owner_pid, owner_backend_start)
++  values (p_parent, v_nsp, v_rel, p_control_kind, v_lo_native, v_hi_native, v_tz, v_ctl_attnum, v_tt_encoding,
+           pg_backend_pid(), v_own_start)
+       on conflict (parent_table) do update
+          set owner_pid           = excluded.owner_pid,
+@@ -10762,8 +10780,8 @@
+        where not pgpm._session_alive(transmute_inflight.owner_pid, transmute_inflight.owner_backend_start)
+           or (transmute_inflight.owner_pid = excluded.owner_pid
+               and transmute_inflight.owner_backend_start = excluded.owner_backend_start)
+-  returning lo, hi, partition_tz, control_attnum, (xmax <> 0)
+-       into v_lo_native, v_hi_native, v_claim_tz, v_claim_attnum, v_resumed;
++  returning lo, hi, partition_tz, control_attnum, text_time_encoding, (xmax <> 0)
++       into v_lo_native, v_hi_native, v_claim_tz, v_claim_attnum, v_claim_tt_encoding, v_resumed;
+ 
+   if not found then
+     raise exception 'pg_partition_magician: a transmute of % is already in progress in another session', p_parent;
+@@ -10800,6 +10818,18 @@
+                  where a.attrelid = p_parent and a.attnum = v_claim_attnum and not a.attisdropped),
+                'a column since dropped'),
+       p_parent;
++  end if;
++  -- #1270: and the CHECK has to be in the encoding THIS call attaches with. On a text_time key the
++  -- pgpm_monolith_bound CHECK's two literals are the bound encoded (prefix, width, radix, unit, alphabet,
++  -- discard bits, epoch), and a re-run given another encoding took the claim over, skipped phases 1 and 2
++  -- (a validated constraint by that name exists) and attached with the bound encoded the new way, which
++  -- the CHECK does not imply: the cutover's ATTACH scanned the whole table under ACCESS EXCLUSIVE and died
++  -- raw on the rows outside it. Compared as recorded (see the column's comment), so the same encoding
++  -- spelled otherwise resumes. A claim recorded before the column existed carries null and is not checked.
++  -- Still the first transaction: the raise rolls the take-over back.
++  if v_resumed and v_claim_tt_encoding is not null and v_claim_tt_encoding is distinct from v_tt_encoding then
++    raise exception 'pg_partition_magician: cannot resume the transmute of % with text_time encoding %: the bound [%, %) an earlier attempt recorded (and put in the pgpm_monolith_bound CHECK) is encoded with %, and a CHECK in another encoding cannot certify a partition bound in this one, so the cutover would scan the whole table under ACCESS EXCLUSIVE. Re-run with the encoding of the attempt that recorded the bound (epoch is in seconds since 1970-01-01 UTC), or call pgpm.transmute_abort(%) to drop the bound and start over.',
++      p_parent, coalesce(v_tt_encoding::text, 'none'), v_lo_native, v_hi_native, v_claim_tt_encoding, p_parent;
+   end if;
+   -- #952: and the bound has to be one the column can hold, finite and unchanged by its type's coercion. A
+   -- fresh bound was computed from this call's grid and the rows, and a resumed one was recorded by an earlier
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/base/test.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/head/test.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/base/test.sh	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/head/test.sh	2026-10-12 13:28:52
+@@ -1111,6 +1111,7 @@
+     "bench/reread_under_lock_remaining_tap.sh pgpm_perf319"
+     "bench/frontier_malformed_max.sh pgpm_perf111"
+     "bench/transmute_resume_control_column.sh pgpm_perf320"
++    "bench/transmute_resume_text_time_encoding.sh pgpm_perf378"
+     "bench/dropped_fk_reconcile.sh pgpm_perf109"
+     "bench/regrain_target_shape.sh pgpm_perf97"
+     "bench/regrain_target_integral.sh pgpm_perf98"
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/base/tests/337_transmute_resume_text_time_encoding_test.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/head/tests/337_transmute_resume_text_time_encoding_test.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/base/tests/337_transmute_resume_text_time_encoding_test.sql	1969-12-31 16:00:00
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/head/tests/337_transmute_resume_text_time_encoding_test.sql	2026-10-12 13:28:52
+@@ -0,0 +1,150 @@
++-- A resumed text_time transmute refuses an encoding other than the one its recorded bound was written in
++-- (issue #1270).
++--
++-- A failure between transmute's phases leaves a claim in pgpm.transmute_inflight and a validated
++-- pgpm_monolith_bound CHECK on the table, and the documented remedy is to re-run transmute, which resumes
++-- from that bound (#275) in its zone (#506), on a grid it lies on (#574), on the column it constrains
++-- (#628). On a text_time key the CHECK's two literals are the bound ENCODED (p_tt_prefix, p_tt_width,
++-- p_tt_radix, p_tt_unit, p_tt_alphabet, p_tt_discard_bits, p_tt_epoch), and the claim did not record the
++-- encoding. A re-run with another one took the claim over, skipped phases 1 and 2 (a validated constraint
++-- by that name exists), and attached the monolith with the bound encoded the NEW way: the CHECK does not
++-- imply that partition bound, so the cutover's ATTACH scanned the whole table under ACCESS EXCLUSIVE and,
++-- here, died raw on the rows outside it, after the bound and the claim had been committed.
++--
++-- The contract: the claim records the encoding, and a resume under another one is refused before anything
++-- is committed, naming both; a resume under the SAME encoding resumes, however it is spelled (the epoch is
++-- an instant, so another offset for it is the same encoding, and an alphabet left null is the default one
++-- written out). The remedy the refusal names, transmute_abort and a re-run, is typed below and converts.
++--
++-- Fixture, twice (ttenc, ttabt): twenty classic-cuid-shaped ids (prefix 'c', 8 base-36 digits of
++-- milliseconds since 1970, then a suffix) one hour apart back from now, and a referencing table holding ONE
++-- of them. The re-run's epoch is one day earlier, which decodes every id one day later: still plausible
++-- (the shape check samples them as recent), so nothing but the refusal stops it, and the ATTACH would fail
++-- on the rows below the bound's lo encoded that way rather than pass.
++--
++-- The failing first conversions run in a dblink session (a committing procedure cannot run inside
++-- throws_ok, and pg_prove runs this file under ON_ERROR_STOP). Each fails deterministically in the
++-- cutover: this session holds ACCESS SHARE on the REFERENCING table, which the incoming-FK drop needs
++-- ACCESS EXCLUSIVE on, while phases 1 and 2 touch only the table being converted and so commit the claim.
++-- bench/transmute_resume_text_time_encoding.sh runs this file against a mutant with the refusal removed
++-- (transmute_resume_any_encoding), so it is also required to FAIL there.
++create extension if not exists pgtap;
++create extension if not exists dblink;
++select plan(21);
++set timezone = 'UTC';
++
++-- two tables in the same state: ttenc for the refusals and the same-encoding resume, ttabt for the remedy
++create function pg_temp.mk(p_rel text) returns void language plpgsql as $f$
++begin
++  execute format('create table public.%I (id text collate "C" not null primary key, v int)', p_rel);
++  execute format($i$insert into public.%I
++    select pgpm._encode('text_time', pgpm._ts_text(now() - g * interval '1 hour'), 'c', 8, 36, 'ms', null, 0,
++                        '1970-01-01 00:00:00+00', 'UTC') || 'x' || lpad(g::text, 4, '0'), g
++      from generate_series(1, 20) g$i$, p_rel);
++  execute format('create table public.%I (rid int primary key, id text collate "C" references public.%I)',
++                 p_rel || '_ref', p_rel);
++  execute format('insert into public.%I select 1, id from public.%I where v = 7', p_rel || '_ref', p_rel);
++end $f$;
++select pg_temp.mk('ttenc');
++select pg_temp.mk('ttabt');
++
++-- session A: phases 1 and 2 commit the bound and the claim, the cutover times out on the referencing
++-- table, A ends. Once per table, with both referencing tables locked by this session.
++select dblink_connect('a', 'dbname=' || current_database());
++select dblink_exec('a', $c$ set timezone = 'UTC' $c$);
++begin;
++lock table public.ttenc_ref, public.ttabt_ref in access share mode;
++select throws_ok(
++  $$ select dblink_exec('a', $c$ call pgpm.transmute('public.ttenc', 'id', interval '1 day', p_obtain => 2,
++                                                     p_incoming_fks => 'preserve', p_lock_timeout => '300ms',
++                                                     p_tt_prefix => 'c', p_tt_width => 8, p_tt_radix => 36,
++                                                     p_tt_unit => 'ms') $c$) $$,
++  '55P03', NULL,
++  'LIVENESS: the first conversion of ttenc fails in the cutover, on the lock this session holds on the referencing table');
++select throws_ok(
++  $$ select dblink_exec('a', $c$ call pgpm.transmute('public.ttabt', 'id', interval '1 day', p_obtain => 2,
++                                                     p_incoming_fks => 'preserve', p_lock_timeout => '300ms',
++                                                     p_tt_prefix => 'c', p_tt_width => 8, p_tt_radix => 36,
++                                                     p_tt_unit => 'ms') $c$) $$,
++  '55P03', NULL,
++  'LIVENESS: and so does the first conversion of ttabt');
++commit;
++select dblink_disconnect('a');
++select is((select text_time_encoding from pgpm.transmute_inflight where parent_table = 'public.ttenc'::regclass),
++  '{"unit": "ms", "epoch": 0, "radix": 36, "width": 8, "prefix": "c", "alphabet": "0123456789abcdefghijklmnopqrstuvwxyz", "discard_bits": 0}'::jsonb,
++  'the failed attempt''s claim records the encoding its bound was written in');
++select is((select string_agg(k.relname || ' ' || c.convalidated, ', ' order by k.relname)
++             from pg_constraint c join pg_class k on k.oid = c.conrelid
++            where c.conname = 'pgpm_monolith_bound' and k.relname in ('ttenc', 'ttabt')),
++  'ttabt true, ttenc true',
++  'LIVENESS: each left a VALIDATED pgpm_monolith_bound CHECK, so a resume skips phases 1 and 2');
++create temp table claim0 as
++  select lo, hi, pg_get_constraintdef(c.oid) as chk
++    from pgpm.transmute_inflight i, pg_constraint c
++   where i.parent_table = 'public.ttenc'::regclass
++     and c.conrelid = 'public.ttenc'::regclass and c.conname = 'pgpm_monolith_bound';
++select ok(exists (select 1 from public.ttenc t
++                   where t.id < pgpm._encode('text_time', (select lo from claim0), 'c', 8, 36, 'ms', null, 0,
++                                             '1969-12-31 00:00:00+00', 'UTC')),
++  'LIVENESS: some row lies below the bound''s lo encoded with the re-run''s epoch, so an ATTACH that way could not pass');
++
++-- the first attempts' session has ended (tests/101's stand-in: its backend's exit is asynchronous)
++update pgpm.transmute_inflight set owner_pid = null, owner_backend_start = null
++ where parent_table in ('public.ttenc'::regclass, 'public.ttabt'::regclass);
++
++-- a re-run with the epoch one day earlier: refused up front, naming both encodings and the remedy
++select throws_like(
++  $$ call pgpm.transmute('public.ttenc', 'id', interval '1 day', p_obtain => 2, p_incoming_fks => 'preserve',
++                         p_tt_prefix => 'c', p_tt_width => 8, p_tt_radix => 36, p_tt_unit => 'ms',
++                         p_tt_epoch => '1969-12-31 00:00:00+00') $$,
++  '%cannot resume the transmute of ttenc with text_time encoding {%"epoch": -86400,%}: the bound [%) an earlier attempt recorded (and put in the pgpm_monolith_bound CHECK) is encoded with {%"epoch": 0,%}%transmute_abort(ttenc)%',
++  'a resume under another p_tt_epoch is refused, naming both encodings and the remedy');
++select is((select lo || ' ' || hi || ' ' || coalesce(owner_pid::text, 'no owner') from pgpm.transmute_inflight
++            where parent_table = 'public.ttenc'::regclass),
++  (select lo || ' ' || hi || ' no owner' from claim0),
++  'the refusals left the claim exactly as it was: same bound, not taken over');
++select is((select pg_get_constraintdef(oid) from pg_constraint
++            where conrelid = 'public.ttenc'::regclass and conname = 'pgpm_monolith_bound'),
++  (select chk from claim0), 'and the recorded bound on the table');
++select is((select relkind::text from pg_class where oid = 'public.ttenc'::regclass), 'r', 'the table is still a plain table');
++select ok(not exists (select 1 from pgpm.config where parent_table = 'public.ttenc'::regclass), 'nothing was registered');
++
++-- the SAME encoding, spelled otherwise (the epoch at another offset, the default alphabet written out): resumes
++call pgpm.transmute('public.ttenc', 'id', interval '1 day', p_obtain => 2, p_incoming_fks => 'preserve',
++                    p_tt_prefix => 'c', p_tt_width => 8, p_tt_radix => 36, p_tt_unit => 'ms',
++                    p_tt_alphabet => '0123456789abcdefghijklmnopqrstuvwxyz', p_tt_epoch => '1970-01-01 01:00:00+01');
++select is((select relkind::text from pg_class where oid = 'public.ttenc'::regclass), 'p',
++  'LIVENESS: the re-run in the same encoding completed the conversion');
++select is((select count(*)::int from pgpm.log where parent_table = 'public.ttenc'::regclass and action = 'transmute_resume'), 1,
++  'LIVENESS: it RESUMED on the recorded bound');
++select is((select p.lo || ' ' || p.hi from pgpm.part p join claim0 c on p.lo = c.lo
++            where p.parent_table = 'public.ttenc'::regclass and p.attached),
++  (select lo || ' ' || hi from claim0), 'the monolith is the recorded bound');
++select is((select array_agg(v order by v) from public.ttenc), (select array_agg(g order by g) from generate_series(1, 20) g),
++  'rows 1..20 are all in the converted table');
++select is((select string_agg(t.v::text, ' ') from public.ttenc_ref r join public.ttenc t using (id)), '7',
++  'the referencing row survived the conversion and still references row 7');
++select ok(not exists (select 1 from pgpm.transmute_inflight where parent_table = 'public.ttenc'::regclass),
++  'the completed conversion released the claim');
++
++-- the remedy the refusal names, typed: on ttabt, the re-run in the new epoch is refused the same way, and
++-- after transmute_abort the same call converts the table fresh, in that encoding
++select throws_like(
++  $$ call pgpm.transmute('public.ttabt', 'id', interval '1 day', p_obtain => 2, p_incoming_fks => 'preserve',
++                         p_tt_prefix => 'c', p_tt_width => 8, p_tt_radix => 36, p_tt_unit => 'ms',
++                         p_tt_epoch => '1969-12-31 00:00:00+00') $$,
++  '%cannot resume the transmute of ttabt with text_time encoding {%"epoch": -86400,%}%transmute_abort(ttabt)%',
++  'ttabt: the resume in the new epoch is refused too');
++select ok(pgpm.transmute_abort('public.ttabt'), 'the remedy: transmute_abort abandons the half-done conversion');
++call pgpm.transmute('public.ttabt', 'id', interval '1 day', p_obtain => 2, p_incoming_fks => 'preserve',
++                    p_tt_prefix => 'c', p_tt_width => 8, p_tt_radix => 36, p_tt_unit => 'ms',
++                    p_tt_epoch => '1969-12-31 00:00:00+00');
++select is((select k.relkind::text || ' ' || c.text_time_epoch from pg_class k, pgpm.config c
++            where k.oid = 'public.ttabt'::regclass and c.parent_table = 'public.ttabt'::regclass),
++  'p 1969-12-31 00:00:00+00', 'and the re-run then converts the table, registered in the new encoding');
++select is((select count(*)::int from pgpm.log where parent_table = 'public.ttabt'::regclass and action = 'transmute_resume'), 0,
++  'it started over rather than resuming');
++select is((select array_agg(v order by v) from public.ttabt), (select array_agg(g order by g) from generate_series(1, 20) g),
++  'rows 1..20 are all in ttabt');
++
++select * from finish();

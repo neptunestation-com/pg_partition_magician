@@ -1,0 +1,212 @@
+{
+ "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303_r2/pr/base",
+ "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303_r2/pr/review",
+ "files": [
+  {
+   "path": "CHANGELOG.md",
+   "status": "modified",
+   "hunks": [
+    [
+     4,
+     21
+    ]
+   ]
+  },
+  {
+   "path": "bench/retain_disown_remedy.sh",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     55
+    ]
+   ]
+  },
+  {
+   "path": "docs/reference.md",
+   "status": "modified",
+   "hunks": [
+    [
+     1510,
+     1538
+    ],
+    [
+     1544,
+     1545
+    ],
+    [
+     3213,
+     3216
+    ],
+    [
+     3750,
+     3750
+    ]
+   ]
+  },
+  {
+   "path": "pgpm_core/install.sql",
+   "status": "modified",
+   "hunks": [
+    [
+     3480,
+     3506
+    ],
+    [
+     3509,
+     3511
+    ],
+    [
+     3515,
+     3515
+    ],
+    [
+     3517,
+     3553
+    ],
+    [
+     3556,
+     3557
+    ],
+    [
+     3637,
+     3637
+    ]
+   ]
+  },
+  {
+   "path": "test.sh",
+   "status": "modified",
+   "hunks": [
+    [
+     1268,
+     1268
+    ]
+   ]
+  },
+  {
+   "path": "tests/327_retire_pending_detach_test.sql",
+   "status": "modified",
+   "hunks": [
+    [
+     517,
+     517
+    ]
+   ]
+  },
+  {
+   "path": "tests/339_retain_disown_remedy_test.sql",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     221
+    ]
+   ]
+  }
+ ],
+ "units": [
+  {
+   "unit": "pgpm_core/install.sql:3480-3506",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    3480,
+    3506
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm._disown_retirement",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    3507,
+    3560
+   ],
+   "why": "touched at 3509-3511"
+  },
+  {
+   "unit": "pgpm._disown_unvouched_retirements",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    3611,
+    3646
+   ],
+   "why": "touched at 3637-3637"
+  },
+  {
+   "unit": "pgpm.retire",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    3685,
+    4074
+   ],
+   "why": "calls pgpm._disown_retirement"
+  },
+  {
+   "unit": "pgpm._retain_recall",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    4113,
+    4226
+   ],
+   "why": "calls pgpm._disown_retirement"
+  },
+  {
+   "unit": "pgpm._detach_reap",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    12019,
+    12090
+   ],
+   "why": "calls pgpm._disown_retirement"
+  }
+ ],
+ "exercised_by": {
+  "pgpm._disown_retirement": [
+   "bench/retain_disown_remedy.sh",
+   "docs/reviews/2026-10-12-pass12.md",
+   "tests/339_retain_disown_remedy_test.sql"
+  ],
+  "pgpm._disown_unvouched_retirements": [
+   "docs/reviews/2026-10-09-pass11.md",
+   "docs/reviews/2026-10-12-pass12.md",
+   "tests/327_retire_pending_detach_test.sql",
+   "tests/339_retain_disown_remedy_test.sql"
+  ]
+ },
+ "finder": "P1",
+ "slice": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/retain_disown_remedy.sh",
+   "docs/reference.md",
+   "pgpm_core/install.sql",
+   "test.sh",
+   "tests/327_retire_pending_detach_test.sql",
+   "tests/339_retain_disown_remedy_test.sql"
+  ],
+  "units": [
+   "pgpm_core/install.sql:3480-3506",
+   "pgpm._disown_retirement",
+   "pgpm._disown_unvouched_retirements",
+   "pgpm.retire",
+   "pgpm._retain_recall",
+   "pgpm._detach_reap"
+  ],
+  "kind": "mixed"
+ },
+ "ledger": [
+  "pgpm_core/install.sql:3480-3506",
+  "pgpm._disown_retirement",
+  "pgpm._disown_unvouched_retirements",
+  "pgpm.retire",
+  "pgpm._retain_recall",
+  "pgpm._detach_reap",
+  "CHANGELOG.md",
+  "bench/retain_disown_remedy.sh",
+  "docs/reference.md",
+  "test.sh",
+  "tests/327_retire_pending_detach_test.sql",
+  "tests/339_retain_disown_remedy_test.sql"
+ ]
+}

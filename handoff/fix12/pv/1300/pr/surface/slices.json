@@ -1,0 +1,21 @@
+{
+ "P1": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/transmute_resume_text_time_encoding.sh",
+   "bench/upgrade_in_place.sh",
+   "docs/guide.md",
+   "docs/reference.md",
+   "pgpm_core/install.sql",
+   "test.sh",
+   "tests/337_transmute_resume_text_time_encoding_test.sql"
+  ],
+  "units": [
+   "pgpm_core/install.sql:532-538",
+   "pgpm_core/install.sql:550-550",
+   "pgpm._transmute",
+   "pgpm.transmute"
+  ],
+  "kind": "mixed"
+ }
+}

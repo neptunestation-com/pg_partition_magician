@@ -1,0 +1,94 @@
+{
+  "trees": {
+    "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1297/pr/base",
+    "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1297/pr/head",
+    "review": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1297/pr/review",
+    "mutants": {
+      "surface_carry_grants_as_owner": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1297/pr/mutants/surface_carry_grants_as_owner",
+      "surface_prepare_drops_granted": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1297/pr/mutants/surface_prepare_drops_granted",
+      "surface_prepare_grantor_unchecked": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1297/pr/mutants/surface_prepare_grantor_unchecked"
+    }
+  },
+  "acceptance": "ACC",
+  "claims": [
+    {
+      "id": "ACC-01",
+      "finder": "ACC",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 117,
+      "lens": "contracts versus documentation",
+      "scenario": "#1267 acceptance (F6-03): re-running install.sql over an older install whose pgpm.status() has an earlier result shape drops and recreates it (_surface_prepare); _surface_unreplaceable counts only pg_depend dependants, never the ACL, so the operator's REVOKE EXECUTE FROM PUBLIC and GRANT EXECUTE TO f603_mon are silently lost and PUBLIC can execute status() again, where the section header promises the upgrade keeps the function's grants or refuses",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 1,
+          "tail": "ok - LIVENESS: before the upgrade, status() has the older shape, PUBLIC cannot execute it and f603_mon can\nok - LIVENESS: the re-run upgraded status() to the declared shape (it was dropped and recreated)\nnot ok - the operator's REVOKE EXECUTE FROM PUBLIC on pgpm.status() survives the upgrade\nnot ok - the operator's GRANT EXECUTE on pgpm.status() to f603_mon survives the upgrade\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "ok - LIVENESS: before the upgrade, status() has the older shape, PUBLIC cannot execute it and f603_mon can\nok - LIVENESS: the re-run upgraded status() to the declared shape (it was dropped and recreated)\nok - the operator's REVOKE EXECUTE FROM PUBLIC on pgpm.status() survives the upgrade\nok - the operator's GRANT EXECUTE on pgpm.status() to f603_mon survives the upgrade\n"
+        },
+        "mutant:surface_carry_grants_as_owner": {
+          "fails": false,
+          "exit": 0,
+          "tail": "ok - LIVENESS: before the upgrade, status() has the older shape, PUBLIC cannot execute it and f603_mon can\nok - LIVENESS: the re-run upgraded status() to the declared shape (it was dropped and recreated)\nok - the operator's REVOKE EXECUTE FROM PUBLIC on pgpm.status() survives the upgrade\nok - the operator's GRANT EXECUTE on pgpm.status() to f603_mon survives the upgrade\n"
+        },
+        "mutant:surface_prepare_drops_granted": {
+          "fails": true,
+          "exit": 1,
+          "tail": "ok - LIVENESS: before the upgrade, status() has the older shape, PUBLIC cannot execute it and f603_mon can\nok - LIVENESS: the re-run upgraded status() to the declared shape (it was dropped and recreated)\nnot ok - the operator's REVOKE EXECUTE FROM PUBLIC on pgpm.status() survives the upgrade\nnot ok - the operator's GRANT EXECUTE on pgpm.status() to f603_mon survives the upgrade\n"
+        },
+        "mutant:surface_prepare_grantor_unchecked": {
+          "fails": false,
+          "exit": 0,
+          "tail": "ok - LIVENESS: before the upgrade, status() has the older shape, PUBLIC cannot execute it and f603_mon can\nok - LIVENESS: the re-run upgraded status() to the declared shape (it was dropped and recreated)\nok - the operator's REVOKE EXECUTE FROM PUBLIC on pgpm.status() survives the upgrade\nok - the operator's GRANT EXECUTE on pgpm.status() to f603_mon survives the upgrade\n"
+        }
+      },
+      "class": "fixed",
+      "acceptance": {
+        "fails_on_base": true,
+        "passes_on_head": true,
+        "mutant_restores": {
+          "surface_carry_grants_as_owner": false,
+          "surface_prepare_drops_granted": true,
+          "surface_prepare_grantor_unchecked": false
+        },
+        "any_restores": true
+      }
+    },
+    {
+      "id": "P1-01",
+      "finder": "P1",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 176,
+      "lens": "fresh surface",
+      "scenario": "pgpm._surface_prepare() still drops every reshaped declared function whatever its ACL (its loop computes `granted` and `kept` and then runs `drop function` unconditionally; no ALTER ROUTINE ... RENAME to pgpm._surface_kept_<name> exists in the file), so nothing is ever kept aside, every _surface_carry_grants() call is a no-op, and re-running install.sql over an older install whose status() lacks regrain_to loses the operator's REVOKE EXECUTE FROM PUBLIC and GRANT EXECUTE TO a monitoring role: the #1267 defect the PR body, CHANGELOG, header comment (install.sql:56-60) and docs/guide.md:147-150 say is fixed; the prepare should have renamed the granted function to pgpm._surface_kept_status() and the re-run should have carried both grants",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 1,
+          "tail": "ok - LIVENESS: status() has the older shape (no regrain_to), _surface_unreplaceable() lists it with no dependant, PUBLIC cannot execute it and p101_mon can\nok - LIVENESS: its ACL is non-default: owner>owner:EXECUTE owner>p101_mon:EXECUTE\nok - LIVENESS: the prepare took pgpm.status() away (it is reshaped, so it cannot be replaced in place)\nnot ok - the prepare kept the granted status() aside as pgpm._surface_kept_status() rather than dropping it\nnot ok - the kept function holds the operator's ACL (owner>owner:EXECUTE owner>p101_mon:EXECUTE)\nok - LIVENESS: before the re-run status() is the older shape again with the operator's ACL\nok - LIVENESS: the re-run created status() in the declared shape (regrain_to present) and left nothing kept aside\nnot ok - after the upgrade status() holds exactly the older one's ACL: owner>owner:EXECUTE owner>p101_mon:EXECUTE (REVOKE FROM PUBLIC and the GRANT to p101_mon carried)\nnot ok - PUBLIC still cannot execute pgpm.status() after the upgrade\nNOTICE:  function pgpm._surface_kept_status() does not exist, skipping\nNOTICE:  function pgpm.status() does not exist, skipping\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "ok - LIVENESS: status() has the older shape (no regrain_to), _surface_unreplaceable() lists it with no dependant, PUBLIC cannot execute it and p101_mon can\nok - LIVENESS: its ACL is non-default: owner>owner:EXECUTE owner>p101_mon:EXECUTE\nok - LIVENESS: the prepare took pgpm.status() away (it is reshaped, so it cannot be replaced in place)\nok - the prepare kept the granted status() aside as pgpm._surface_kept_status() rather than dropping it\nok - the kept function holds the operator's ACL (owner>owner:EXECUTE owner>p101_mon:EXECUTE)\nok - LIVENESS: before the re-run status() is the older shape again with the operator's ACL\nok - LIVENESS: the re-run created status() in the declared shape (regrain_to present) and left nothing kept aside\nok - after the upgrade status() holds exactly the older one's ACL: owner>owner:EXECUTE owner>p101_mon:EXECUTE (REVOKE FROM PUBLIC and the GRANT to p101_mon carried)\nok - PUBLIC still cannot execute pgpm.status() after the upgrade\nNOTICE:  function pgpm.status() does not exist, skipping\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 1,
+          "tail": "ok - LIVENESS: status() has the older shape (no regrain_to), _surface_unreplaceable() lists it with no dependant, PUBLIC cannot execute it and p101_mon can\nok - LIVENESS: its ACL is non-default: owner>owner:EXECUTE owner>p101_mon:EXECUTE\nok - LIVENESS: the prepare took pgpm.status() away (it is reshaped, so it cannot be replaced in place)\nnot ok - the prepare kept the granted status() aside as pgpm._surface_kept_status() rather than dropping it\nnot ok - the kept function holds the operator's ACL (owner>owner:EXECUTE owner>p101_mon:EXECUTE)\nok - LIVENESS: before the re-run status() is the older shape again with the operator's ACL\nok - LIVENESS: the re-run created status() in the declared shape (regrain_to present) and left nothing kept aside\nnot ok - after the upgrade status() holds exactly the older one's ACL: owner>owner:EXECUTE owner>p101_mon:EXECUTE (REVOKE FROM PUBLIC and the GRANT to p101_mon carried)\nnot ok - PUBLIC still cannot execute pgpm.status() after the upgrade\nNOTICE:  function pgpm._surface_kept_status() does not exist, skipping\nNOTICE:  function pgpm.status() does not exist, skipping\n"
+        }
+      },
+      "class": "seed_hit",
+      "seed": "S1"
+    }
+  ]
+}

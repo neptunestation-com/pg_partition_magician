@@ -1,0 +1,13 @@
+{
+  "baseRefName": "main",
+  "headRefName": "fix/snapshot-wait-this-database-only",
+  "headRefOid": "d3180a225d776eff38c27209209f4e8692c5acea",
+  "number": 1296,
+  "title": "fix(core): a regrain swap deferred by another database's transaction names that transaction (#1263)",
+  "url": "https://github.com/neptunestation-com/pg_partition_magician/pull/1296",
+  "head": "d3180a225d776eff38c27209209f4e8692c5acea",
+  "base": "b76002e66c9f8b57f9943967babf25a195500f85",
+  "finder": "P1",
+  "seeds": 1,
+  "mutations": "snapshot_wait_foreign_floor_exempt,snapshot_wait_holder_this_database_only"
+}

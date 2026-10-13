@@ -1,0 +1,235 @@
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/base/CHANGELOG.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/head/CHANGELOG.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/base/CHANGELOG.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/head/CHANGELOG.md	2026-10-12 12:55:40
+@@ -2,6 +2,13 @@
+ 
+ ## [Unreleased]
+ 
++- **`check_time_monotonic` gives the same answer from every session zone** (#1265). It cast the time column to
++  `timestamptz` in the caller's `TimeZone`, so a naive `timestamp` (or text) column with a wall time inside that
++  zone's spring-forward gap read an hour late: a column rising with the id across New York's gap (01:50, 02:30,
++  03:15 on 2026-03-08) reported 1.0 from UTC and 0.5 from `America/New_York`, and a pair that falls across the
++  gap read as rising. The function now runs in UTC (a `SET timezone` clause, the caller's zone restored on
++  return), so a naive column is compared as its own wall-clock values and a `timestamptz` column, or text with
++  an explicit offset, by instant as before.
+ - **The regrain swap and the hypertable cutover wait for snapshots older than their copies** (#1241). A
+   `REPEATABLE READ` reader whose snapshot predated a regrain's copies, and which first read the table after the
+   swap (so it held no lock the `DETACH` waited on), read the fine children, whose rows its snapshot cannot see,
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/base/bench/check_time_monotonic_session_zone.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/head/bench/check_time_monotonic_session_zone.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/base/bench/check_time_monotonic_session_zone.sh	1969-12-31 16:00:00
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/head/bench/check_time_monotonic_session_zone.sh	2026-10-12 12:55:40
+@@ -0,0 +1,51 @@
++#!/usr/bin/env bash
++# check_time_monotonic_session_zone.sh <container> <db> [install.sql]
++#
++# Run tests/335_check_time_monotonic_session_zone_test.sql against an ARBITRARY copy of pgpm_core/install.sql,
++# so that bench/discriminate.sh can show the file catches the defect its mutation puts back (issue #1265,
++# F2-02): check_time_monotonic cast the time column to timestamptz in the CALLER's session zone, so a naive
++# column with a wall time inside that zone's spring-forward gap read an hour late, and the same column
++# reported 1.0 from UTC and 0.5 from America/New_York. The file is the acceptance test; this wrapper exists so
++# the mutation has a guard the discriminate track can run against the mutant, in the shape of
++# bench/retain_recall_moved_parent.sh.
++#
++# The mutation required to fail against it (bench/mutations/mutate.py):
++#   check_time_monotonic_session_zone  -- the function's SET timezone clause dropped, so the cast takes the
++#                                         caller's zone again. Parts A, B and C.
++#
++# Runs on the plain core image (pgtap and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path inside
++# the container, for a worktree mounted somewhere other than /repo.
++set -uo pipefail
++C="${1:?container}"; DB="${2:?db}"; INSTALL="${3:-/repo/pgpm_core/install.sql}"
++TEST_FILE="${TAP_GUARD_TEST_FILE:-/repo/tests/335_check_time_monotonic_session_zone_test.sql}"
++fail=0
++
++q() { docker exec "$C" psql -U postgres "$@"; }
++
++q -q -c "drop database if exists $DB" >/dev/null 2>&1
++q -q -c "create database $DB" >/dev/null 2>&1
++q -d "$DB" -q -c "create extension if not exists pgtap;" >/dev/null 2>&1
++
++# A mutant that will not even install is NOT a pass: say which happened.
++if ! q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f "$INSTALL" >/dev/null 2>&1; then
++  printf 'FAIL  %-58s %s\n' "the module under test installed" "$INSTALL"
++  fail=1
++fi
++
++if [ "$fail" = 0 ]; then
++  out=$(docker exec "$C" sh -c "pg_prove -v -U postgres -d $DB $TEST_FILE" 2>&1)
++  rc=$?
++  echo "$out" | grep -E '^not ok [0-9]+ -' | sed 's/^/    /' | head -20
++  # the count is asserted separately: a run that never reached the database must not read as a catch
++  ran=$(echo "$out" | grep -cE '^(not )?ok [0-9]+ -')
++  if [ "$rc" = 0 ]; then printf 'PASS  %-58s %s\n' "check_time_monotonic's answer is the same from every zone" "$ran ran"
++  else printf 'FAIL  %-58s %s\n' "check_time_monotonic's answer is the same from every zone" "$ran ran"; fail=1; fi
++  if [ "$ran" -eq 0 ]; then
++    printf 'FAIL  %-58s %s\n' "LIVENESS: the assertions were reached at all" "0 ran"
++    echo "$out" | tail -20 | sed 's/^/      /'
++    fail=1
++  fi
++fi
++
++q -q -c "drop database if exists $DB" >/dev/null 2>&1
++exit "$fail"
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/base/docs/reference.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/head/docs/reference.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/base/docs/reference.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/head/docs/reference.md	2026-10-12 12:55:40
+@@ -3478,6 +3478,11 @@
+ `~1.0` means an id column and a timestamp column co-increase; backfills and out-of-order arrival drive it
+ down. Use it before retaining an id-partitioned table by a time horizon.
+ 
++The answer does not depend on the caller's `TimeZone`: the time column is read as `timestamptz` in UTC, so a
++naive `timestamp`, `date` or offset-free text column is compared as its own wall-clock values (a wall time in
++a spring-forward gap of the caller's zone does not read an hour late), and a `timestamptz` column, or text
++with an explicit offset, by instant.
++
+ ### Observability with pg_flight_recorder (`observe`)
+ 
+ Part of `pgpm_core`: functions that correlate `pgpm.log` against
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/base/pgpm_core/install.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/head/pgpm_core/install.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/base/pgpm_core/install.sql	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/head/pgpm_core/install.sql	2026-10-12 12:55:40
+@@ -14284,10 +14284,20 @@
+ -- down. This is the tier-2 safety check for retaining by time against an id partition
+ -- key (REDESIGN.md): mapping "older than T" to an id boundary is only sound when id and
+ -- time co-increase. Heuristic, not a proof -- mirrors check_uuidv7's plausibility sampling.
++--
++-- The time column is read through ::timestamptz, and the function runs in UTC (#1265) so that cast never
++-- takes the caller's zone. A naive column (timestamp, date, or text with no offset) is then compared as its
++-- own wall-clock values; UTC has no gap and no repeated hour. In the caller's zone a wall time inside a
++-- spring-forward gap read an hour late (02:30 on 2026-03-08 in America/New_York is 03:30 EDT, past 03:15), so
++-- the same column reported 1.0 from UTC and 0.5 from New York, and a pair that falls across the gap read as
++-- rising. A timestamptz column, or text with an explicit offset, is compared by instant as before. The SET
++-- clause restores the caller's TimeZone when the call returns.
+ create or replace function pgpm.check_time_monotonic(
+   p_table regclass, p_id name, p_time name, p_sample int default 1000
+ ) returns table (sampled bigint, monotonic bigint, fraction numeric)
+-language plpgsql as $$
++language plpgsql
++set timezone = 'UTC'
++as $$
+ begin
+   -- #951: refused before anything is read or committed; no argument here has a null meaning
+   perform pgpm._refuse_null_arguments('check_time_monotonic', json_build_object(
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/base/test.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/head/test.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/base/test.sh	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/head/test.sh	2026-10-12 12:55:40
+@@ -1265,6 +1265,7 @@
+     "bench/throws_pinned_sites.sh pgpm_perf350"
+     "bench/wrapper_premise_rule.sh pgpm_perf344"
+     "bench/regrain_swap_waits_for_older_snapshots.sh pgpm_perf365"
++    "bench/check_time_monotonic_session_zone.sh pgpm_perf373"
+   )
+   local selected=()
+   local n=${#guards[@]} idx
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/base/tests/335_check_time_monotonic_session_zone_test.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/head/tests/335_check_time_monotonic_session_zone_test.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/base/tests/335_check_time_monotonic_session_zone_test.sql	1969-12-31 16:00:00
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/head/tests/335_check_time_monotonic_session_zone_test.sql	2026-10-12 12:55:40
+@@ -0,0 +1,108 @@
++-- check_time_monotonic's answer does not depend on the caller's TimeZone (issue #1265).
++--
++-- THE BUG. check_time_monotonic compared %I::timestamptz, so a naive `timestamp` column (or a text column
++-- holding naive wall times) was cast in the CALLER's session zone before adjacent pairs were compared. A wall
++-- time inside that zone's spring-forward gap reads an hour later: 02:30 on 2026-03-08 in America/New_York is
++-- 03:30 EDT, past 03:15. The same column then reported 1.0 from a UTC session and 0.5 from New York, and a pair
++-- that DOES decrease across the gap read as non-decreasing. docs/reference.md defines the result as the
++-- fraction of adjacent pairs whose time is non-decreasing, the column's own values, with no word of a zone.
++--
++-- THE CONTRACT.
++--   PART A  the issue's column, naive and rising with the id across New York's gap: 1.0 from UTC and from New
++--           York alike.
++--   PART B  the other direction, so the fixture cannot pass by reading everything as rising: four rows with one
++--           pair that falls across the gap (03:15 then 02:30). From UTC and from New York alike, exactly two of
++--           the three pairs are non-decreasing, and the count says which ones are not by its total.
++--   PART C  the same for a text column holding naive wall times, which the cast reads the same way.
++--   PART D  the cast is still a cast: a text column whose values carry explicit offsets is compared by instant,
++--           not as text (its lexical order is the reverse of its instants), and a timestamptz column by instant.
++--   PART E  the call leaves the caller's TimeZone as it found it, in autocommit and inside a transaction that
++--           set it LOCAL.
++create extension if not exists pgtap;
++set client_min_messages = warning;
++select plan(17);
++
++-- ---------------------------------------------------------------- fixtures
++create table public.mono335 (id bigint primary key, t timestamp not null);
++insert into public.mono335 values
++  (1, '2026-03-08 01:50:00'), (2, '2026-03-08 02:30:00'), (3, '2026-03-08 03:15:00');
++
++-- asymmetric: three pairs, one falls (2 -> 3: 03:15 then 02:30), two rise
++create table public.dip335 (id bigint primary key, t timestamp not null);
++insert into public.dip335 values
++  (1, '2026-03-08 01:00:00'), (2, '2026-03-08 03:15:00'), (3, '2026-03-08 02:30:00'), (4, '2026-03-08 04:00:00');
++
++create table public.txt335 (id bigint primary key, t text not null);
++insert into public.txt335 values
++  (1, '2026-03-08 01:00:00'), (2, '2026-03-08 03:15:00'), (3, '2026-03-08 02:30:00'), (4, '2026-03-08 04:00:00');
++
++-- instants 03:00Z, 07:00Z, 09:00Z: rising; as text they fall
++create table public.off335 (id bigint primary key, t text not null);
++insert into public.off335 values
++  (1, '2026-03-08 03:00:00+00'), (2, '2026-03-08 02:00:00-05'), (3, '2026-03-08 01:00:00-08');
++
++create table public.tz335 (id bigint primary key, t timestamptz not null);
++insert into public.tz335 values
++  (1, '2026-03-08 06:50:00+00'), (2, '2026-03-08 07:10:00+00'), (3, '2026-03-08 06:55:00+00');
++
++set timezone = 'America/New_York';
++select ok((timestamp '2026-03-08 02:30:00')::timestamptz > (timestamp '2026-03-08 03:15:00')::timestamptz,
++  'LIVENESS: in America/New_York 02:30 on 2026-03-08 is inside the spring-forward gap and casts past 03:15');
++
++-- ---------------------------------------------------------------- PART A
++set timezone = 'UTC';
++select is((select (sampled, monotonic, fraction)::text from pgpm.check_time_monotonic('public.mono335', 'id', 't')),
++  '(2,2,1.0000)', 'A: from a UTC session the rising naive column reports both pairs non-decreasing');
++set timezone = 'America/New_York';
++select is((select (sampled, monotonic, fraction)::text from pgpm.check_time_monotonic('public.mono335', 'id', 't')),
++  '(2,2,1.0000)', 'A: from an America/New_York session the same column reports both pairs non-decreasing too');
++
++-- ---------------------------------------------------------------- PART B
++select is((select string_agg(id::text, ',' order by id) from public.dip335 d
++            where t < (select t from public.dip335 p where p.id = d.id - 1)),
++  '3', 'LIVENESS: dip335 falls at exactly one pair, into id 3');
++set timezone = 'UTC';
++select is((select (sampled, monotonic, fraction)::text from pgpm.check_time_monotonic('public.dip335', 'id', 't')),
++  '(3,2,0.6667)', 'B: from UTC, two of the three pairs of dip335 are non-decreasing');
++set timezone = 'America/New_York';
++select is((select (sampled, monotonic, fraction)::text from pgpm.check_time_monotonic('public.dip335', 'id', 't')),
++  '(3,2,0.6667)', 'B: from America/New_York, the pair that falls across the gap still reads as falling');
++
++-- ---------------------------------------------------------------- PART C
++set timezone = 'UTC';
++select is((select (sampled, monotonic, fraction)::text from pgpm.check_time_monotonic('public.txt335', 'id', 't')),
++  '(3,2,0.6667)', 'C: from UTC, the text column of naive wall times has two non-decreasing pairs of three');
++set timezone = 'America/New_York';
++select is((select (sampled, monotonic, fraction)::text from pgpm.check_time_monotonic('public.txt335', 'id', 't')),
++  '(3,2,0.6667)', 'C: from America/New_York, the same text column reports the same');
++
++-- ---------------------------------------------------------------- PART D
++select ok((select t from public.off335 where id = 2) < (select t from public.off335 where id = 1)
++          and (select t from public.off335 where id = 3) < (select t from public.off335 where id = 2),
++  'LIVENESS: as text, off335 falls at every pair');
++select ok((select t::timestamptz from public.off335 where id = 1) < (select t::timestamptz from public.off335 where id = 2)
++          and (select t::timestamptz from public.off335 where id = 2) < (select t::timestamptz from public.off335 where id = 3),
++  'LIVENESS: as instants, off335 rises at every pair');
++select is((select (sampled, monotonic, fraction)::text from pgpm.check_time_monotonic('public.off335', 'id', 't')),
++  '(2,2,1.0000)', 'D: a text column with explicit offsets is compared by instant, not as text');
++select is((select (sampled, monotonic, fraction)::text from pgpm.check_time_monotonic('public.tz335', 'id', 't')),
++  '(2,1,0.5000)', 'D: a timestamptz column is compared by instant (one rise, one fall)');
++set timezone = 'Asia/Kolkata';
++select is((select (sampled, monotonic, fraction)::text from pgpm.check_time_monotonic('public.tz335', 'id', 't')),
++  '(2,1,0.5000)', 'D: and the same from another zone');
++
++-- ---------------------------------------------------------------- PART E
++set timezone = 'America/New_York';
++select is((select fraction from pgpm.check_time_monotonic('public.tz335', 'id', 't')), 0.5000::numeric,
++  'LIVENESS: the call before the check below ran and read its column');
++select is(current_setting('TimeZone'), 'America/New_York',
++  'E: after the call the caller''s session TimeZone is still America/New_York');
++begin;
++set local timezone = 'Europe/Berlin';
++select is((select fraction from pgpm.check_time_monotonic('public.dip335', 'id', 't')), 0.6667::numeric,
++  'E: inside a transaction that set its zone LOCAL the call reports the same fraction');
++select is(current_setting('TimeZone'), 'Europe/Berlin',
++  'E: and leaves the transaction''s LOCAL zone in place');
++commit;
++
++select * from finish();

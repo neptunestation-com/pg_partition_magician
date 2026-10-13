@@ -1,0 +1,14 @@
+{
+ "tier": 3,
+ "file": "pgpm_core/install.sql",
+ "line": 117,
+ "lens": "contracts versus documentation",
+ "scenario": "#1267 acceptance (F6-03): re-running install.sql over an older install whose pgpm.status() has an earlier result shape drops and recreates it (_surface_prepare); _surface_unreplaceable counts only pg_depend dependants, never the ACL, so the operator's REVOKE EXECUTE FROM PUBLIC and GRANT EXECUTE TO f603_mon are silently lost and PUBLIC can execute status() again, where the section header promises the upgrade keeps the function's grants or refuses",
+ "repro": "repro.sh",
+ "install": [
+  "pgpm_core/install.sql"
+ ],
+ "fixtures": false,
+ "id": "ACC-01",
+ "finder": "ACC"
+}

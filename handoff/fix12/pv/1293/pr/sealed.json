@@ -1,0 +1,17 @@
+{
+  "pinned": "cf9bc477547f847fc9a4f4166168c6c94b3310f0",
+  "seeds": [
+    {
+      "id": "S1",
+      "kind": "mutation",
+      "mutation": "check_time_monotonic_session_zone",
+      "file": "pgpm_core/install.sql",
+      "lens": "fresh surface",
+      "tier": 3,
+      "why": "Pre-#1265 check_time_monotonic: no SET timezone clause, so the time column is cast to timestamptz in the caller's session zone, and a naive wall time inside that zone's spring-forward gap reads an hour late: a column rising across New York's gap reports 0.5 from America/New_York and 1.0 from UTC, and a pair that falls across it reads as rising. One site, the clause. tests/335 parts A, B and C catch it.",
+      "lines": [
+        14297
+      ]
+    }
+  ]
+}

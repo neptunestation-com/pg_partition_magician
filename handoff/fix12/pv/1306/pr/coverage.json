@@ -1,0 +1,25 @@
+{
+ "threshold": 0.9,
+ "rows": [
+  {
+   "finder": "P1",
+   "kind": "mixed",
+   "units": 9,
+   "read": 0,
+   "coverage": 0.0,
+   "unread": [
+    "pgpm._regrain_refuse_strict_isolation",
+    "pgpm.regrain",
+    "pgpm.regrain_history",
+    "pgpm.set_regrain",
+    "CHANGELOG.md",
+    "bench/regrain_refuses_strict_isolation.sh",
+    "docs/reference.md",
+    "test.sh",
+    "tests/329_regrain_refuses_strict_isolation_test.sql"
+   ],
+   "extra": [],
+   "ledger": "missing"
+  }
+ ]
+}

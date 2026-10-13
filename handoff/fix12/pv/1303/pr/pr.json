@@ -1,0 +1,13 @@
+{
+  "baseRefName": "main",
+  "headRefName": "fix/retain-disown-remedy-names-the-row",
+  "headRefOid": "d337c3e18271fddb4904a67414342efd42c59d57",
+  "number": 1303,
+  "title": "fix(core): retain_disown's remedy names the pgpm.part row with the table (#1272)",
+  "url": "https://github.com/neptunestation-com/pg_partition_magician/pull/1303",
+  "head": "d337c3e18271fddb4904a67414342efd42c59d57",
+  "base": "b76002e66c9f8b57f9943967babf25a195500f85",
+  "finder": "P1",
+  "seeds": 1,
+  "mutations": "retain_disown_remedy_keeps_row"
+}

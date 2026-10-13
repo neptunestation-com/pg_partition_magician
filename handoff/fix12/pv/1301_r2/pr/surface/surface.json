@@ -1,0 +1,332 @@
+{
+ "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301_r2/pr/base",
+ "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301_r2/pr/review",
+ "files": [
+  {
+   "path": "CHANGELOG.md",
+   "status": "modified",
+   "hunks": [
+    [
+     4,
+     18
+    ]
+   ]
+  },
+  {
+   "path": "bench/archive_configure_endpoint.sh",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     112
+    ]
+   ]
+  },
+  {
+   "path": "pgpm_archive/README.md",
+   "status": "modified",
+   "hunks": [
+    [
+     34,
+     41
+    ]
+   ]
+  },
+  {
+   "path": "pgpm_archive/install.sql",
+   "status": "modified",
+   "hunks": [
+    [
+     60,
+     62
+    ],
+    [
+     139,
+     150
+    ],
+    [
+     169,
+     169
+    ],
+    [
+     200,
+     226
+    ],
+    [
+     230,
+     230
+    ],
+    [
+     408,
+     409
+    ],
+    [
+     485,
+     485
+    ]
+   ]
+  },
+  {
+   "path": "test.sh",
+   "status": "modified",
+   "hunks": [
+    [
+     981,
+     984
+    ]
+   ]
+  },
+  {
+   "path": "tests/archive/db/53_configure_endpoint_canonical_test.sql",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     167
+    ]
+   ]
+  }
+ ],
+ "units": [
+  {
+   "unit": "pgpm_archive/install.sql:60-62",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    60,
+    62
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "archive._s3_endpoint_canonical",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    146,
+    149
+   ],
+   "why": "touched at 139-150"
+  },
+  {
+   "unit": "archive.configure",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    157,
+    236
+   ],
+   "why": "touched at 169-169"
+  },
+  {
+   "unit": "archive.s3_signed_request",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    390,
+    455
+   ],
+   "why": "touched at 408-409"
+  },
+  {
+   "unit": "archive.s3_signed_request_bytea",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    470,
+    521
+   ],
+   "why": "touched at 485-485"
+  },
+  {
+   "unit": "archive._encode_upload_ndjson_single",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    3087,
+    3165
+   ],
+   "why": "calls archive.s3_signed_request, archive.s3_signed_request_bytea"
+  },
+  {
+   "unit": "archive._encode_upload_parquet",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    3176,
+    3226
+   ],
+   "why": "calls archive.s3_signed_request_bytea"
+  },
+  {
+   "unit": "archive._s3_abort_uploads_at",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    3354,
+    3411
+   ],
+   "why": "calls archive.s3_signed_request"
+  },
+  {
+   "unit": "archive.to_s3",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    3436,
+    3812
+   ],
+   "why": "calls archive.s3_signed_request, archive.s3_signed_request_bytea"
+  },
+  {
+   "unit": "archive.to_s3_parquet",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    3823,
+    3853
+   ],
+   "why": "calls archive.s3_signed_request_bytea"
+  }
+ ],
+ "exercised_by": {
+  "archive._s3_endpoint_canonical": [
+   "bench/archive_configure_endpoint.sh"
+  ],
+  "archive.configure": [
+   "bench/archive_configure_endpoint.sh",
+   "bench/archive_keys_row_read.sh",
+   "bench/archive_null_arguments.sh",
+   "bench/archive_recorded_chunk_tick_race.sh",
+   "bench/archive_to_s3_loud_edges.sh",
+   "bench/archive_to_s3_part_bytes.sh",
+   "bench/lint_value_not_spelling.sh",
+   "docs/guide.md",
+   "docs/reference.md",
+   "docs/reviews/2026-09-28.md",
+   "docs/reviews/2026-10-04-pass8.md",
+   "docs/reviews/2026-10-08-pass10.md",
+   "docs/reviews/2026-10-12-pass12.md",
+   "scripts/check_archive_object_keys.py",
+   "tests/59_retain_batch_test.sql",
+   "tests/archive/db/09_configure_test.sql",
+   "tests/archive/db/13_to_s3_parquet_child_identity_test.sql",
+   "tests/archive/db/23_to_s3_part_bytes_bound_test.sql",
+   "tests/archive/db/25_to_s3_conservation_identity_test.sql",
+   "tests/archive/db/26_archive_key_schema_zone_test.sql",
+   "tests/archive/db/28_to_s3_loud_edges_test.sql",
+   "tests/archive/db/29_signer_non_utf8_database_test.sql",
+   "tests/archive/db/30_archive_edges_pass5_test.sql",
+   "tests/archive/db/31_parquet_decimal_nan_test.sql",
+   "tests/archive/db/32_float_digits_pinned_test.sql",
+   "tests/archive/db/33_ndjson_row_alias_shadowed_test.sql",
+   "tests/archive/db/34_archive_key_reused_name_test.sql",
+   "tests/archive/db/35_archive_stem_era_test.sql",
+   "tests/archive/db/36_to_s3_cursor_session_settings_test.sql",
+   "tests/archive/db/38_archive_reads_under_caller_rls_test.sql",
+   "tests/archive/db/39_archive_key_owner_every_path_test.sql",
+   "tests/archive/db/40_archive_key_full_claim_test.sql",
+   "tests/archive/db/41_archive_null_arguments_test.sql",
+   "tests/archive/db/42_archive_recorded_chunk_overwrite_test.sql",
+   "tests/archive/db/43_archive_export_key_by_relation_test.sql",
+   "tests/archive/db/44_archive_extension_resolution_test.sql",
+   "tests/archive/db/45_to_s3_child_held_test.sql",
+   "tests/archive/db/46_parquet_read_by_regclass_test.sql",
+   "tests/archive/db/47_resolve_child_one_snapshot_test.sql",
+   "tests/archive/db/48_archive_recorded_chunk_rows_identity_test.sql",
+   "tests/archive/db/49_archive_key_by_resolved_oid_test.sql",
+   "tests/archive/db/50_archive_retired_chunk_kept_test.sql",
+   "tests/archive/db/51_to_s3_multi_heap_relation_test.sql",
+   "tests/archive/db/53_configure_endpoint_canonical_test.sql",
+   "tests/archive/fixtures.sql"
+  ],
+  "archive.s3_signed_request": [
+   "bench/archive_fn_s3_readback.sh",
+   "bench/archive_null_arguments.sh",
+   "bench/archive_recorded_chunk_tick_race.sh",
+   "bench/archive_signer_non_utf8.sh",
+   "docs/reference.md",
+   "docs/reviews/2026-10-04-pass8.md",
+   "docs/reviews/2026-10-09-pass11.md",
+   "scripts/check_archive_object_keys.py",
+   "tests/archive/db/08_archive_fn_s3_test.sql",
+   "tests/archive/db/12_to_s3_tied_rows_test.sql",
+   "tests/archive/db/13_to_s3_parquet_child_identity_test.sql",
+   "tests/archive/db/15_parquet_single_snapshot_test.sql",
+   "tests/archive/db/16_archive_object_key_identity_test.sql",
+   "tests/archive/db/16_encode_partition_tz_test.sql",
+   "tests/archive/db/16_to_s3_compress_test.sql",
+   "tests/archive/db/17_sigv4_wall_clock_test.sql",
+   "tests/archive/db/24_to_s3_cancel_aborts_multipart_test.sql",
+   "tests/archive/db/25_to_s3_conservation_identity_test.sql",
+   "tests/archive/db/26_archive_key_schema_zone_test.sql",
+   "tests/archive/db/28_to_s3_loud_edges_test.sql",
+   "tests/archive/db/29_signer_non_utf8_database_test.sql",
+   "tests/archive/db/30_archive_edges_pass5_test.sql",
+   "tests/archive/db/31_parquet_decimal_nan_test.sql",
+   "tests/archive/db/32_float_digits_pinned_test.sql",
+   "tests/archive/db/33_ndjson_row_alias_shadowed_test.sql",
+   "tests/archive/db/34_archive_key_reused_name_test.sql",
+   "tests/archive/db/35_archive_stem_era_test.sql",
+   "tests/archive/db/36_to_s3_cursor_session_settings_test.sql",
+   "tests/archive/db/38_archive_reads_under_caller_rls_test.sql",
+   "tests/archive/db/39_archive_key_owner_every_path_test.sql",
+   "tests/archive/db/40_archive_key_full_claim_test.sql",
+   "tests/archive/db/41_archive_null_arguments_test.sql",
+   "tests/archive/db/42_archive_recorded_chunk_overwrite_test.sql",
+   "tests/archive/db/43_archive_export_key_by_relation_test.sql",
+   "tests/archive/db/44_archive_extension_resolution_test.sql",
+   "tests/archive/db/45_to_s3_child_held_test.sql",
+   "tests/archive/db/46_parquet_read_by_regclass_test.sql",
+   "tests/archive/db/47_resolve_child_one_snapshot_test.sql",
+   "tests/archive/db/48_archive_recorded_chunk_rows_identity_test.sql",
+   "tests/archive/db/49_archive_key_by_resolved_oid_test.sql",
+   "tests/archive/db/50_archive_retired_chunk_kept_test.sql",
+   "tests/archive/db/51_to_s3_multi_heap_relation_test.sql",
+   "tests/archive/db/53_configure_endpoint_canonical_test.sql"
+  ],
+  "archive.s3_signed_request_bytea": [
+   "bench/archive_fn_s3_readback.sh",
+   "bench/archive_null_arguments.sh",
+   "docs/reference.md",
+   "docs/reviews/2026-10-09-pass11.md",
+   "tests/archive/db/17_sigv4_wall_clock_test.sql",
+   "tests/archive/db/38_archive_reads_under_caller_rls_test.sql",
+   "tests/archive/db/39_archive_key_owner_every_path_test.sql",
+   "tests/archive/db/41_archive_null_arguments_test.sql",
+   "tests/archive/db/44_archive_extension_resolution_test.sql",
+   "tests/archive/db/53_configure_endpoint_canonical_test.sql"
+  ]
+ },
+ "finder": "P1",
+ "slice": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/archive_configure_endpoint.sh",
+   "pgpm_archive/README.md",
+   "pgpm_archive/install.sql",
+   "test.sh",
+   "tests/archive/db/53_configure_endpoint_canonical_test.sql"
+  ],
+  "units": [
+   "pgpm_archive/install.sql:60-62",
+   "archive._s3_endpoint_canonical",
+   "archive.configure",
+   "archive.s3_signed_request",
+   "archive.s3_signed_request_bytea",
+   "archive._encode_upload_ndjson_single",
+   "archive._encode_upload_parquet",
+   "archive._s3_abort_uploads_at",
+   "archive.to_s3",
+   "archive.to_s3_parquet"
+  ],
+  "kind": "mixed"
+ },
+ "ledger": [
+  "pgpm_archive/install.sql:60-62",
+  "archive._s3_endpoint_canonical",
+  "archive.configure",
+  "archive.s3_signed_request",
+  "archive.s3_signed_request_bytea",
+  "archive._encode_upload_ndjson_single",
+  "archive._encode_upload_parquet",
+  "archive._s3_abort_uploads_at",
+  "archive.to_s3",
+  "archive.to_s3_parquet",
+  "CHANGELOG.md",
+  "bench/archive_configure_endpoint.sh",
+  "pgpm_archive/README.md",
+  "test.sh",
+  "tests/archive/db/53_configure_endpoint_canonical_test.sql"
+ ]
+}

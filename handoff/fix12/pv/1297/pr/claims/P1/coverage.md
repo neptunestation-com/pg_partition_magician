@@ -1,0 +1,16 @@
+- pgpm_core/install.sql:56-60 | read: yes | header comment now promising the keep-aside and the carry; compared against the prepare's loop (P1-01)
+- pgpm_core/install.sql:132-137 | read: yes | prepare's leading comment (keep vs drop, stopped-run case); compared against the loop (P1-01)
+- pgpm._surface_prepare | read: yes | dependants refusal, inlined grantor rule vs _acl_may_grant_as, final loop drops unconditionally: claim P1-01
+- pgpm._surface_sig_kept | read: yes | name mapping for all five signatures; shared by prepare, carry and settled
+- pgpm._surface_carry_grants | read: yes | exercised in isolation with a hand-kept status(): plain ACL, 3-deep grant-option chain, other kept owner, default privileges, empty ACL; all held
+- pgpm._surface_settled | read: yes | shape check unchanged; kept-left-behind check reads the same kept name and names the carry call
+- pgpm_core/install.sql:14278-14278 | read: yes | carry call after check_uuidv7's CREATE OR REPLACE, signature matches _surface_shapes
+- pgpm_core/install.sql:14382-14382 | read: yes | carry call after check_text_time's CREATE OR REPLACE, signature matches
+- pgpm_core/install.sql:14558-14558 | read: yes | carry call after status()'s CREATE OR REPLACE, signature matches
+- pgpm_core/install.sql:14722-14722 | read: yes | carry call after progress()'s CREATE OR REPLACE, signature matches
+- pgpm_core/install.sql:14784-14784 | read: yes | carry call after observe_window()'s CREATE OR REPLACE, signature matches
+- CHANGELOG.md | read: yes | entry describes the keep-aside the tree's prepare does not do (P1-01)
+- bench/install_keeps_surface_grants.sh | read: yes | pgTAP wrapper; counts assertions run, fails a mutant that does not install
+- docs/guide.md | read: yes | upgrade paragraph (147-150) promises grants carried and the 42501 refusal; the first is not kept by this tree (P1-01)
+- test.sh | read: yes | perf list entry pgpm_perf375 for the new guard
+- tests/336_install_keeps_surface_grants_test.sql | read: yes | parts A-D read; A and B assert the keep this tree does not perform (same root cause as P1-01)

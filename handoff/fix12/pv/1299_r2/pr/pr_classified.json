@@ -1,0 +1,172 @@
+{
+  "trees": {
+    "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1299_r2/pr/base",
+    "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1299_r2/pr/head",
+    "review": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1299_r2/pr/review",
+    "mutants": {
+      "archive_hold_vouches_detached_retirement": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1299_r2/pr/mutants/archive_hold_vouches_detached_retirement",
+      "retirement_mark_readers_whole": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1299_r2/pr/mutants/retirement_mark_readers_whole",
+      "retirement_mark_vouches_alone": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1299_r2/pr/mutants/retirement_mark_vouches_alone"
+    }
+  },
+  "acceptance": "ACC",
+  "claims": [
+    {
+      "id": "ACC-01",
+      "finder": "ACC",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 2188,
+      "lens": "fresh surface",
+      "scenario": "#1259 acceptance (F14-01): A partition whose retire() stamped retiring_at but whose detach dispatch failed (no pg_cron) and that the operator then DETACHed by hand is handed to the archive strategy and recorded as covered by the next maintain() tick, because _part_built/_part_detached_by_hand (and _archive_hold_partition) still vouch for any retiring_at mark while retire() in the same tick disowns that mark as unvouched (retain_disown, #705 dispatch record); the archive step should skip a table detached by hand and record nothing for it",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "d records no archive coverage for it        +\n # Failed test 7: \"and records no archive coverage for it\"+\n #         have: {0-20}                                   +\n #         want: NULL\n(1 row)\n\nDROP TABLE\nALTER TABLE\n                                        ok                                         \n-----------------------------------------------------------------------------------\n ok 8 - LIVENESS: the operator attached the table back to the parent on its bounds\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=2 restored_fk=0 regrain=skipped\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=0 restored_fk=0 regrain=skipped\n(1 row)\n\n                                                   is                                                    \n---------------------------------------------------------------------------------------------------------\n not ok 9 - every one of the operator's rows 1, 2 and 15 is still in the table or in the archive        +\n # Failed test 9: \"every one of the operator's rows 1, 2 and 15 is still in the table or in the archive\"+\n #         have: {1,2,15}                                                                               +\n #         want: NULL\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 9\n(1 row)\n\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "-----------------------------\n ok 5 - LIVENESS: in the same tick retire() judged the detach the operator's (retain_disown)\n(1 row)\n\n                                            is                                            \n------------------------------------------------------------------------------------------\n ok 6 - the archive step does not hand the strategy a table the operator detached by hand\n(1 row)\n\n                      is                       \n-----------------------------------------------\n ok 7 - and records no archive coverage for it\n(1 row)\n\nDROP TABLE\nALTER TABLE\n                                        ok                                         \n-----------------------------------------------------------------------------------\n ok 8 - LIVENESS: the operator attached the table back to the parent on its bounds\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=1 dropped=2 restored_fk=0 regrain=skipped\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=0 restored_fk=0 regrain=skipped\n(1 row)\n\n                                             is                                              \n---------------------------------------------------------------------------------------------\n ok 9 - every one of the operator's rows 1, 2 and 15 is still in the table or in the archive\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+        },
+        "mutant:archive_hold_vouches_detached_retirement": {
+          "fails": false,
+          "exit": 0,
+          "tail": "-----------------------------\n ok 5 - LIVENESS: in the same tick retire() judged the detach the operator's (retain_disown)\n(1 row)\n\n                                            is                                            \n------------------------------------------------------------------------------------------\n ok 6 - the archive step does not hand the strategy a table the operator detached by hand\n(1 row)\n\n                      is                       \n-----------------------------------------------\n ok 7 - and records no archive coverage for it\n(1 row)\n\nDROP TABLE\nALTER TABLE\n                                        ok                                         \n-----------------------------------------------------------------------------------\n ok 8 - LIVENESS: the operator attached the table back to the parent on its bounds\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=1 dropped=2 restored_fk=0 regrain=skipped\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=0 restored_fk=0 regrain=skipped\n(1 row)\n\n                                             is                                              \n---------------------------------------------------------------------------------------------\n ok 9 - every one of the operator's rows 1, 2 and 15 is still in the table or in the archive\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+        },
+        "mutant:retirement_mark_readers_whole": {
+          "fails": true,
+          "exit": 0,
+          "tail": "d records no archive coverage for it        +\n # Failed test 7: \"and records no archive coverage for it\"+\n #         have: {0-20}                                   +\n #         want: NULL\n(1 row)\n\nDROP TABLE\nALTER TABLE\n                                        ok                                         \n-----------------------------------------------------------------------------------\n ok 8 - LIVENESS: the operator attached the table back to the parent on its bounds\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=2 restored_fk=0 regrain=skipped\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=0 restored_fk=0 regrain=skipped\n(1 row)\n\n                                                   is                                                    \n---------------------------------------------------------------------------------------------------------\n not ok 9 - every one of the operator's rows 1, 2 and 15 is still in the table or in the archive        +\n # Failed test 9: \"every one of the operator's rows 1, 2 and 15 is still in the table or in the archive\"+\n #         have: {1,2,15}                                                                               +\n #         want: NULL\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 9\n(1 row)\n\n"
+        },
+        "mutant:retirement_mark_vouches_alone": {
+          "fails": false,
+          "exit": 0,
+          "tail": "-----------------------------\n ok 5 - LIVENESS: in the same tick retire() judged the detach the operator's (retain_disown)\n(1 row)\n\n                                            is                                            \n------------------------------------------------------------------------------------------\n ok 6 - the archive step does not hand the strategy a table the operator detached by hand\n(1 row)\n\n                      is                       \n-----------------------------------------------\n ok 7 - and records no archive coverage for it\n(1 row)\n\nDROP TABLE\nALTER TABLE\n                                        ok                                         \n-----------------------------------------------------------------------------------\n ok 8 - LIVENESS: the operator attached the table back to the parent on its bounds\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=1 dropped=2 restored_fk=0 regrain=skipped\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=0 restored_fk=0 regrain=skipped\n(1 row)\n\n                                             is                                              \n---------------------------------------------------------------------------------------------\n ok 9 - every one of the operator's rows 1, 2 and 15 is still in the table or in the archive\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+        }
+      },
+      "class": "fixed",
+      "acceptance": {
+        "fails_on_base": true,
+        "passes_on_head": true,
+        "mutant_restores": {
+          "archive_hold_vouches_detached_retirement": false,
+          "retirement_mark_readers_whole": true,
+          "retirement_mark_vouches_alone": false
+        },
+        "any_restores": true
+      }
+    },
+    {
+      "id": "ACC-02",
+      "finder": "ACC",
+      "tier": 1,
+      "file": "pgpm_core/install.sql",
+      "line": 5259,
+      "lens": "closing claim",
+      "scenario": "#1259 acceptance (V-01-1299): Sibling of #1259, not its mechanism: a retirement pgpm dispatched (mark WITH detach_dispatched_oid) whose concurrent detach has landed is still an archive candidate (_part_built and _archive_hold_partition vouch for it) when archiving is turned on after the retirement began. A strategy reading through the parent (pgpm_archive's transports) reads none of its rows, the step records the range covered with rows_archived 0, and retire() drops it: rows 1, 2, 15 are in neither table nor archive, nothing logged as a failure. Had set_archive_fn come before pg_cron ran the detach, the rows would have been archived. The dispatch record is written by hand (fixture:) because the harness has no pg_cron. Tier 1 by consequence (silently wrong archive ledger, rows dropped after archiving was configured), narrow: needs archiving enabled during an in-flight referenced retirement. Fails on base and head alike (pre_existing).",
+      "repro": "repro.sql",
+      "repro_used": "repro.verified.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "dy        +\n # Failed test 7: \"the archive step logs skip_archive over [0, 20) with the remedy\"+\n #         have: NULL                                                              +\n #         want: {0-20}\n(1 row)\n\nDROP TABLE\n ?column? \n----------\n        1\n(1 row)\n\n                                           ok                                           \n----------------------------------------------------------------------------------------\n not ok 8 - LIVENESS: the remedy as typed attached the table back to the parent        +\n # Failed test 8: \"LIVENESS: the remedy as typed attached the table back to the parent\"\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=1 restored_fk=0 regrain=skipped\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=0 restored_fk=0 regrain=skipped\n(1 row)\n\n                                    is                                    \n--------------------------------------------------------------------------\n not ok 9 - after the remedy, rows 1, 2 and 15 are in the archive        +\n # Failed test 9: \"after the remedy, rows 1, 2 and 15 are in the archive\"+\n #         have: NULL                                                    +\n #         want: {1,2,15}\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 5 tests of 9\n(1 row)\n\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "     \n----------------------------------------------------------------------------------\n ok 5 - no coverage is recorded for the detached monolith, which no strategy read\n(1 row)\n\n                                          is                                           \n---------------------------------------------------------------------------------------\n ok 6 - every one of rows 1, 2 and 15 is still in the detached table or in the archive\n(1 row)\n\n                                   is                                   \n------------------------------------------------------------------------\n ok 7 - the archive step logs skip_archive over [0, 20) with the remedy\n(1 row)\n\nDROP TABLE\nALTER TABLE\n                                     ok                                     \n----------------------------------------------------------------------------\n ok 8 - LIVENESS: the remedy as typed attached the table back to the parent\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=1 dropped=2 restored_fk=0 regrain=skipped\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=0 restored_fk=0 regrain=skipped\n(1 row)\n\n                              is                              \n--------------------------------------------------------------\n ok 9 - after the remedy, rows 1, 2 and 15 are in the archive\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+        },
+        "mutant:archive_hold_vouches_detached_retirement": {
+          "fails": true,
+          "exit": 0,
+          "tail": "dy        +\n # Failed test 7: \"the archive step logs skip_archive over [0, 20) with the remedy\"+\n #         have: NULL                                                              +\n #         want: {0-20}\n(1 row)\n\nDROP TABLE\n ?column? \n----------\n        1\n(1 row)\n\n                                           ok                                           \n----------------------------------------------------------------------------------------\n not ok 8 - LIVENESS: the remedy as typed attached the table back to the parent        +\n # Failed test 8: \"LIVENESS: the remedy as typed attached the table back to the parent\"\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=1 restored_fk=0 regrain=skipped\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=0 restored_fk=0 regrain=skipped\n(1 row)\n\n                                    is                                    \n--------------------------------------------------------------------------\n not ok 9 - after the remedy, rows 1, 2 and 15 are in the archive        +\n # Failed test 9: \"after the remedy, rows 1, 2 and 15 are in the archive\"+\n #         have: NULL                                                    +\n #         want: {1,2,15}\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 5 tests of 9\n(1 row)\n\n"
+        },
+        "mutant:retirement_mark_readers_whole": {
+          "fails": true,
+          "exit": 0,
+          "tail": "dy        +\n # Failed test 7: \"the archive step logs skip_archive over [0, 20) with the remedy\"+\n #         have: NULL                                                              +\n #         want: {0-20}\n(1 row)\n\nDROP TABLE\n ?column? \n----------\n        1\n(1 row)\n\n                                           ok                                           \n----------------------------------------------------------------------------------------\n not ok 8 - LIVENESS: the remedy as typed attached the table back to the parent        +\n # Failed test 8: \"LIVENESS: the remedy as typed attached the table back to the parent\"\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=1 restored_fk=0 regrain=skipped\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=0 restored_fk=0 regrain=skipped\n(1 row)\n\n                                    is                                    \n--------------------------------------------------------------------------\n not ok 9 - after the remedy, rows 1, 2 and 15 are in the archive        +\n # Failed test 9: \"after the remedy, rows 1, 2 and 15 are in the archive\"+\n #         have: NULL                                                    +\n #         want: {1,2,15}\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 5 tests of 9\n(1 row)\n\n"
+        },
+        "mutant:retirement_mark_vouches_alone": {
+          "fails": false,
+          "exit": 0,
+          "tail": "     \n----------------------------------------------------------------------------------\n ok 5 - no coverage is recorded for the detached monolith, which no strategy read\n(1 row)\n\n                                          is                                           \n---------------------------------------------------------------------------------------\n ok 6 - every one of rows 1, 2 and 15 is still in the detached table or in the archive\n(1 row)\n\n                                   is                                   \n------------------------------------------------------------------------\n ok 7 - the archive step logs skip_archive over [0, 20) with the remedy\n(1 row)\n\nDROP TABLE\nALTER TABLE\n                                     ok                                     \n----------------------------------------------------------------------------\n ok 8 - LIVENESS: the remedy as typed attached the table back to the parent\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=1 dropped=2 restored_fk=0 regrain=skipped\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=0 restored_fk=0 regrain=skipped\n(1 row)\n\n                              is                              \n--------------------------------------------------------------\n ok 9 - after the remedy, rows 1, 2 and 15 are in the archive\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+        }
+      },
+      "class": "fixed",
+      "acceptance": {
+        "fails_on_base": true,
+        "passes_on_head": true,
+        "mutant_restores": {
+          "archive_hold_vouches_detached_retirement": true,
+          "retirement_mark_readers_whole": true,
+          "retirement_mark_vouches_alone": false
+        },
+        "any_restores": true
+      }
+    },
+    {
+      "id": "P1-01",
+      "finder": "P1",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 2189,
+      "lens": "fresh surface",
+      "scenario": "pgpm._retirement_vouched is `select p_retiring_at is not null`: it never asks _detach_dispatched, so a table the operator detached under a mark whose dispatch failed (no record) still reads as built at _part_built and not detached by hand, and the write-block step puts pgpm's block on the operator's table (and status/progress/obtain/auto-regrain still count it pgpm's); the PR body, the reference and tests/330 part B say the mark vouches only with the record",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 3,
+          "tail": "CREATE EXTENSION\nSET\n plan \n------\n 1..7\n(1 row)\n\nCREATE TABLE\nINSERT 0 2\nCALL\n extend_to \n-----------\n         0\n(1 row)\n\nINSERT 0 4\nUPDATE 1\nUPDATE 1\nALTER TABLE\nALTER TABLE\n                                                      ok                                                      \n--------------------------------------------------------------------------------------------------------------\n ok 1 - LIVENESS: [20, 30) (mark with its record) and [30, 40) (mark, no record) are detached and still exist\n(1 row)\n\n                               ok                               \n----------------------------------------------------------------\n ok 2 - LIVENESS: _detach_dispatched vouches for [20, 30) alone\n(1 row)\n\n                                    ok                                    \n--------------------------------------------------------------------------\n ok 3 - LIVENESS: none of the three carries a write block before the step\n(1 row)\n\npsql:<stdin>:45: ERROR:  function pgpm._retirement_vouched(regclass, oid, timestamp with time zone) does not exist\nLINE 3:               and pgpm._retirement_vouched(p.parent_table, p...\n                          ^\nHINT:  No function matches the given name and argument types. You might need to add explicit type casts.\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "----\n ok 3 - LIVENESS: none of the three carries a write block before the step\n(1 row)\n\n                                                        is                                                         \n-------------------------------------------------------------------------------------------------------------------\n ok 4 - _retirement_vouched vouches for the mark with its record, [20, 30), not for the mark without one, [30, 40)\n(1 row)\n\n                                                     is                                                      \n-------------------------------------------------------------------------------------------------------------\n ok 5 - _part_detached_by_hand names [30, 40), the table detached under a mark pgpm recorded no dispatch for\n(1 row)\n\n _enforce_write_blocks \n-----------------------\n \n(1 row)\n\n                                         ok                                          \n-------------------------------------------------------------------------------------\n ok 6 - LIVENESS: the write-block step ran and blocked the attached sibling [50, 60)\n(1 row)\n\n                                                          is                                                          \n----------------------------------------------------------------------------------------------------------------------\n ok 7 - the write-block step blocks pgpm's own retirement [20, 30) and the sibling, not the operator's table [30, 40)\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": "ames [30, 40), the table detached under a mark pgpm recorded no dispatch for        +\n # Failed test 5: \"_part_detached_by_hand names [30, 40), the table detached under a mark pgpm recorded no dispatch for\"+\n #         have: NULL                                                                                                   +\n #         want: {30}\n(1 row)\n\n _enforce_write_blocks \n-----------------------\n \n(1 row)\n\n                                         ok                                          \n-------------------------------------------------------------------------------------\n ok 6 - LIVENESS: the write-block step ran and blocked the attached sibling [50, 60)\n(1 row)\n\n                                                                is                                                                \n----------------------------------------------------------------------------------------------------------------------------------\n not ok 7 - the write-block step blocks pgpm's own retirement [20, 30) and the sibling, not the operator's table [30, 40)        +\n # Failed test 7: \"the write-block step blocks pgpm's own retirement [20, 30) and the sibling, not the operator's table [30, 40)\"+\n #         have: {20,30,50}                                                                                                      +\n #         want: {20,50}\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 7\n(1 row)\n\n"
+        }
+      },
+      "class": "seed_hit",
+      "seed": "S1"
+    },
+    {
+      "id": "V-01",
+      "finder": "V",
+      "tier": 1,
+      "file": "pgpm_core/install.sql",
+      "line": 5448,
+      "lens": "closing claim",
+      "scenario": "An unanchored pgpm.part row (child_oid null: the state an upgrade from before #421 leaves for a partition not attached when its backfill ran) with NO retirement mark, whose write-blocked table the operator DETACHed by hand, is still handed to the archive strategy: the candidate query cannot call it detached by hand (_part_detached_by_hand is false for a null oid) and the head's hold is asked about the name's relation only when the row carries a mark (coalesce(r.child_oid, case when r.retiring_at is not null then v_now::oid end)), so _archive_hold_partition gets a null oid and answers true. A strategy reading through the parent reads none of its rows and [0, 20) is recorded covered with rows_archived 0. retire() refuses to drop it (fail_retain_drop) until the operator takes the reference's remedy (attach it back so retention retires it); retention then drops it on the false coverage and rows 1, 2 and 15 are in neither table nor archive. #1259's consequence through a path PR #1299's body claims ('Neither archive path ... hands a strategy a table that is not a partition of its parent as of the hold's lock, whatever its mark') but the code carves out (the hold's comment: an unanchored row with no relation passed is left as before). The mechanism (the archive step reaching an operator-detached table) is #705's open archive bullet, residue for unanchored rows. scripts/archive_partition_whole.sql carries the same coalesce at line 162. Fixture: child_oid set null by hand to stand for the older install's state. Fails on base and head alike (pre_existing).",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": " test 5: \"and records no coverage for it\"+\n #         have: {0-20:0}                         +\n #         want: NULL\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=0 restored_fk=0 regrain=skipped\n(1 row)\n\nALTER TABLE\n                                        ok                                         \n-----------------------------------------------------------------------------------\n ok 6 - LIVENESS: the operator attached the table back to the parent on its bounds\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=1 restored_fk=0 regrain=skipped\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=0 restored_fk=0 regrain=skipped\n(1 row)\n\n                                           is                                           \n----------------------------------------------------------------------------------------\n not ok 7 - every one of rows 1, 2 and 15 is still in a table or in the archive        +\n # Failed test 7: \"every one of rows 1, 2 and 15 is still in a table or in the archive\"+\n #         have: {1,2,15}                                                              +\n #         want: NULL\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 7\n(1 row)\n\n"
+        },
+        "head": {
+          "fails": true,
+          "exit": 0,
+          "tail": " test 5: \"and records no coverage for it\"+\n #         have: {0-20:0}                         +\n #         want: NULL\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=0 restored_fk=0 regrain=skipped\n(1 row)\n\nALTER TABLE\n                                        ok                                         \n-----------------------------------------------------------------------------------\n ok 6 - LIVENESS: the operator attached the table back to the parent on its bounds\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=1 restored_fk=0 regrain=skipped\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=0 restored_fk=0 regrain=skipped\n(1 row)\n\n                                           is                                           \n----------------------------------------------------------------------------------------\n not ok 7 - every one of rows 1, 2 and 15 is still in a table or in the archive        +\n # Failed test 7: \"every one of rows 1, 2 and 15 is still in a table or in the archive\"+\n #         have: {1,2,15}                                                              +\n #         want: NULL\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 7\n(1 row)\n\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": " test 5: \"and records no coverage for it\"+\n #         have: {0-20:0}                         +\n #         want: NULL\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=0 restored_fk=0 regrain=skipped\n(1 row)\n\nALTER TABLE\n                                        ok                                         \n-----------------------------------------------------------------------------------\n ok 6 - LIVENESS: the operator attached the table back to the parent on its bounds\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=1 restored_fk=0 regrain=skipped\n(1 row)\n\n                      p_status                      \n----------------------------------------------------\n archived=0 dropped=0 restored_fk=0 regrain=skipped\n(1 row)\n\n                                           is                                           \n----------------------------------------------------------------------------------------\n not ok 7 - every one of rows 1, 2 and 15 is still in a table or in the archive        +\n # Failed test 7: \"every one of rows 1, 2 and 15 is still in a table or in the archive\"+\n #         have: {1,2,15}                                                              +\n #         want: NULL\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 7\n(1 row)\n\n"
+        }
+      },
+      "class": "pre_existing"
+    }
+  ]
+}

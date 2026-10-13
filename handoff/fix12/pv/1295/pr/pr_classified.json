@@ -1,0 +1,146 @@
+{
+  "trees": {
+    "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/base",
+    "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/head",
+    "review": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/review",
+    "mutants": {
+      "adopt_partition_strict_isolation_admitted": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/mutants/adopt_partition_strict_isolation_admitted"
+    }
+  },
+  "acceptance": "ACC",
+  "claims": [
+    {
+      "id": "ACC-01",
+      "finder": "ACC",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 14025,
+      "lens": "fresh surface",
+      "scenario": "#1262 acceptance (F4-03): adopt_partition's attached/not-pending checks (before and after its SHARE UPDATE EXCLUSIVE on the partition) read pg_inherits through the transaction snapshot, so a REPEATABLE READ caller whose snapshot predates a committed DETACH records the detached table in pgpm.part as an attached partition; the header promises 'the relation judged attached is still attached when its row commits' and retire()/_archive_hold_partition ask pg_partition_ancestors (the catalog as of the lock) for this reason",
+      "repro": "repro.sql",
+      "repro_used": "repro.verified.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "----------\n        1\n(1 row)\n\n dblink_exec \n-------------\n ALTER TABLE\n(1 row)\n\n                                                      ok                                                      \n--------------------------------------------------------------------------------------------------------------\n ok 2 - LIVENESS: as of the catalog, f4a_extra is no longer a partition of f4a when adopt_partition is called\n(1 row)\n\n                                  throws_like                                  \n-------------------------------------------------------------------------------\n not ok 3 - adopt_partition refuses a table the parent no longer holds        +\n # Failed test 3: \"adopt_partition refuses a table the parent no longer holds\"+\n #     no exception thrown\n(1 row)\n\nCOMMIT\n                                   ok                                   \n------------------------------------------------------------------------\n ok 4 - LIVENESS: the detach committed: f4a_extra is a standalone table\n(1 row)\n\n                                           ok                                           \n----------------------------------------------------------------------------------------\n not ok 5 - pgpm.part records no row for a table that is not a partition of f4a        +\n # Failed test 5: \"pgpm.part records no row for a table that is not a partition of f4a\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 5\n(1 row)\n\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "CREATE EXTENSION\nCREATE EXTENSION\nSET\n plan \n------\n 1..5\n(1 row)\n\nCREATE TABLE\nINSERT 0 1\nCALL\nCREATE TABLE\nINSERT 0 1\n                          ok                          \n------------------------------------------------------\n ok 1 - LIVENESS: f4a_extra is attached and untracked\n(1 row)\n\nBEGIN\n ?column? \n----------\n        1\n(1 row)\n\n dblink_exec \n-------------\n ALTER TABLE\n(1 row)\n\n                                                      ok                                                      \n--------------------------------------------------------------------------------------------------------------\n ok 2 - LIVENESS: as of the catalog, f4a_extra is no longer a partition of f4a when adopt_partition is called\n(1 row)\n\n                            throws_like                            \n-------------------------------------------------------------------\n ok 3 - adopt_partition refuses a table the parent no longer holds\n(1 row)\n\nCOMMIT\n                                   ok                                   \n------------------------------------------------------------------------\n ok 4 - LIVENESS: the detach committed: f4a_extra is a standalone table\n(1 row)\n\n                                     ok                                     \n----------------------------------------------------------------------------\n ok 5 - pgpm.part records no row for a table that is not a partition of f4a\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+        },
+        "mutant:adopt_partition_strict_isolation_admitted": {
+          "fails": true,
+          "exit": 0,
+          "tail": "----------\n        1\n(1 row)\n\n dblink_exec \n-------------\n ALTER TABLE\n(1 row)\n\n                                                      ok                                                      \n--------------------------------------------------------------------------------------------------------------\n ok 2 - LIVENESS: as of the catalog, f4a_extra is no longer a partition of f4a when adopt_partition is called\n(1 row)\n\n                                  throws_like                                  \n-------------------------------------------------------------------------------\n not ok 3 - adopt_partition refuses a table the parent no longer holds        +\n # Failed test 3: \"adopt_partition refuses a table the parent no longer holds\"+\n #     no exception thrown\n(1 row)\n\nCOMMIT\n                                   ok                                   \n------------------------------------------------------------------------\n ok 4 - LIVENESS: the detach committed: f4a_extra is a standalone table\n(1 row)\n\n                                           ok                                           \n----------------------------------------------------------------------------------------\n not ok 5 - pgpm.part records no row for a table that is not a partition of f4a        +\n # Failed test 5: \"pgpm.part records no row for a table that is not a partition of f4a\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 5\n(1 row)\n\n"
+        }
+      },
+      "class": "fixed",
+      "acceptance": {
+        "fails_on_base": true,
+        "passes_on_head": true,
+        "mutant_restores": {
+          "adopt_partition_strict_isolation_admitted": true
+        },
+        "any_restores": true
+      }
+    },
+    {
+      "id": "ACC-02",
+      "finder": "ACC",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 14023,
+      "lens": "fresh surface",
+      "scenario": "#1262 acceptance (F11-03): adopt_partition's attached check and its re-read under SHARE UPDATE EXCLUSIVE both read pg_inherits under the caller's snapshot, so in a REPEATABLE READ transaction whose snapshot predates another session's committed DETACH it records the detached table in pgpm.part as attached (the READ COMMITTED call on the same state refuses); it should re-read the catalog fresh after the lock, as the archive hold was fixed to (archive_hold_recheck_by_snapshot), or refuse a non-READ COMMITTED caller",
+      "repro": "repro.sql",
+      "repro_used": "repro.verified.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "in a REPEATABLE READ transaction older than the detach\"+\n #     no exception thrown\n(1 row)\n\nCOMMIT\n                                    is                                     \n---------------------------------------------------------------------------\n ok 4 - LIVENESS: at commit the relation is not a partition of public.f11a\n(1 row)\n\n                                                              is                                                              \n------------------------------------------------------------------------------------------------------------------------------\n not ok 5 - adopt_partition records nothing for a relation that is not a partition of the parent when its row commits        +\n # Failed test 5: \"adopt_partition records nothing for a relation that is not a partition of the parent when its row commits\"+\n #         have: f11a_p0000000000000000000_to_0000000000000000020 attached=true                                              +\n #         want: none\n(1 row)\n\nDELETE 1\n                                throws_like                                 \n----------------------------------------------------------------------------\n ok 6 - LIVENESS: in READ COMMITTED the same call on the same state refuses\n(1 row)\n\n                  is                  \n--------------------------------------\n ok 7 - LIVENESS: and records nothing\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 7\n(1 row)\n\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "                 \n----------------------------------------------------------------------------------------------------\n ok 2 - LIVENESS: the detach committed before adopt_partition is called (seen from a fresh session)\n(1 row)\n\n                                      throws_like                                       \n----------------------------------------------------------------------------------------\n ok 3 - adopt_partition refuses, in a REPEATABLE READ transaction older than the detach\n(1 row)\n\nCOMMIT\n                                    is                                     \n---------------------------------------------------------------------------\n ok 4 - LIVENESS: at commit the relation is not a partition of public.f11a\n(1 row)\n\n                                                        is                                                        \n------------------------------------------------------------------------------------------------------------------\n ok 5 - adopt_partition records nothing for a relation that is not a partition of the parent when its row commits\n(1 row)\n\nDELETE 0\n                                throws_like                                 \n----------------------------------------------------------------------------\n ok 6 - LIVENESS: in READ COMMITTED the same call on the same state refuses\n(1 row)\n\n                  is                  \n--------------------------------------\n ok 7 - LIVENESS: and records nothing\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+        },
+        "mutant:adopt_partition_strict_isolation_admitted": {
+          "fails": true,
+          "exit": 0,
+          "tail": "in a REPEATABLE READ transaction older than the detach\"+\n #     no exception thrown\n(1 row)\n\nCOMMIT\n                                    is                                     \n---------------------------------------------------------------------------\n ok 4 - LIVENESS: at commit the relation is not a partition of public.f11a\n(1 row)\n\n                                                              is                                                              \n------------------------------------------------------------------------------------------------------------------------------\n not ok 5 - adopt_partition records nothing for a relation that is not a partition of the parent when its row commits        +\n # Failed test 5: \"adopt_partition records nothing for a relation that is not a partition of the parent when its row commits\"+\n #         have: f11a_p0000000000000000000_to_0000000000000000020 attached=true                                              +\n #         want: none\n(1 row)\n\nDELETE 1\n                                throws_like                                 \n----------------------------------------------------------------------------\n ok 6 - LIVENESS: in READ COMMITTED the same call on the same state refuses\n(1 row)\n\n                  is                  \n--------------------------------------\n ok 7 - LIVENESS: and records nothing\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 7\n(1 row)\n\n"
+        }
+      },
+      "class": "fixed",
+      "acceptance": {
+        "fails_on_base": true,
+        "passes_on_head": true,
+        "mutant_restores": {
+          "adopt_partition_strict_isolation_admitted": true
+        },
+        "any_restores": true
+      }
+    },
+    {
+      "id": "P1-01",
+      "finder": "P1",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 14021,
+      "lens": "fresh surface",
+      "scenario": "adopt_partition's new READ COMMITTED refusal is dead (its condition is the constant false), so a REPEATABLE READ caller whose snapshot predates a committed DETACH or RENAME is admitted and records the detached table (or the old name) in pgpm.part as a partition of the parent, where the header, docs/reference.md and the CHANGELOG say it refuses before taking any lock",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": " adoption was logged for a REPEATABLE READ caller\"+\n #         have: 1000..1100,900..1000                                        +\n #         want: NULL\n(1 row)\n\nBEGIN\n                                lives_ok                                 \n-------------------------------------------------------------------------\n ok 8 - LIVENESS: in READ COMMITTED the untouched partition z is adopted\n(1 row)\n\n                                      throws_like                                      \n---------------------------------------------------------------------------------------\n ok 9 - LIVENESS: in READ COMMITTED the detached table y is refused as not a partition\n(1 row)\n\nCOMMIT\n                                                               is                                                                \n---------------------------------------------------------------------------------------------------------------------------------\n not ok 10 - after the READ COMMITTED control, pgpm.part holds z alone of the three (x and y were refused, not recorded)        +\n # Failed test 10: \"after the READ COMMITTED control, pgpm.part holds z alone of the three (x and y were refused, not recorded)\"+\n #         have: p1a_x [900, 1000); p1a_y [1000, 1100); p1a_z [1100, 1200)                                                      +\n #         want: p1a_z [1100, 1200)\n(1 row)\n\n                finish                 \n---------------------------------------\n # Looks like you failed 4 tests of 10\n(1 row)\n\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "s old name\n(1 row)\n\nDO\nCOMMIT\n                                                        is                                                         \n-------------------------------------------------------------------------------------------------------------------\n ok 6 - B: pgpm.part records no row for x under its old name (a REPEATABLE READ caller is refused before any lock)\n(1 row)\n\n                                is                                \n------------------------------------------------------------------\n ok 7 - A, B: no adoption was logged for a REPEATABLE READ caller\n(1 row)\n\nBEGIN\n                                lives_ok                                 \n-------------------------------------------------------------------------\n ok 8 - LIVENESS: in READ COMMITTED the untouched partition z is adopted\n(1 row)\n\n                                      throws_like                                      \n---------------------------------------------------------------------------------------\n ok 9 - LIVENESS: in READ COMMITTED the detached table y is refused as not a partition\n(1 row)\n\nCOMMIT\n                                                         is                                                          \n---------------------------------------------------------------------------------------------------------------------\n ok 10 - after the READ COMMITTED control, pgpm.part holds z alone of the three (x and y were refused, not recorded)\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": " adoption was logged for a REPEATABLE READ caller\"+\n #         have: 1000..1100,900..1000                                        +\n #         want: NULL\n(1 row)\n\nBEGIN\n                                lives_ok                                 \n-------------------------------------------------------------------------\n ok 8 - LIVENESS: in READ COMMITTED the untouched partition z is adopted\n(1 row)\n\n                                      throws_like                                      \n---------------------------------------------------------------------------------------\n ok 9 - LIVENESS: in READ COMMITTED the detached table y is refused as not a partition\n(1 row)\n\nCOMMIT\n                                                               is                                                                \n---------------------------------------------------------------------------------------------------------------------------------\n not ok 10 - after the READ COMMITTED control, pgpm.part holds z alone of the three (x and y were refused, not recorded)        +\n # Failed test 10: \"after the READ COMMITTED control, pgpm.part holds z alone of the three (x and y were refused, not recorded)\"+\n #         have: p1a_x [900, 1000); p1a_y [1000, 1100); p1a_z [1100, 1200)                                                      +\n #         want: p1a_z [1100, 1200)\n(1 row)\n\n                finish                 \n---------------------------------------\n # Looks like you failed 4 tests of 10\n(1 row)\n\n"
+        }
+      },
+      "class": "seed_hit",
+      "seed": "S1"
+    },
+    {
+      "id": "V-01",
+      "finder": "V",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 14034,
+      "lens": "closing claim",
+      "scenario": "adopt_partition takes its SHARE UPDATE EXCLUSIVE lock by NAME (lock table p_child::text), so when another session renames the partition and creates a standalone table under its old name, committing while the call waits, LOCK TABLE re-resolves the name and locks the new table; the oid re-read (READ COMMITTED, fresh) passes, the row is recorded with no lock on the relation it records, a DETACH commits before the caller's transaction does, and pgpm.part records a standalone table as a partition at commit (the #1262 consequence, in READ COMMITTED), against the header's 'the relation judged attached is still attached when its row commits'; it should lock by oid and verify the name resolution",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "S: adopt_partition recorded the renamed partition (A's transaction still open)\n(1 row)\n\n                                            is                                             \n-------------------------------------------------------------------------------------------\n not ok 4 - adopt_partition's transaction holds a lock on the relation it recorded        +\n # Failed test 4: \"adopt_partition's transaction holds a lock on the relation it recorded\"+\n #         have: 0                                                                        +\n #         want: 1\n(1 row)\n\nSET\nDO\nRESET\n                                  ok                                  \n----------------------------------------------------------------------\n ok 5 - LIVENESS: pgpm.part records the adopted relation after commit\n(1 row)\n\n                                                      ok                                                      \n--------------------------------------------------------------------------------------------------------------\n not ok 6 - the relation pgpm.part records as adopted is still a partition of v1 when the row commits        +\n # Failed test 6: \"the relation pgpm.part records as adopted is still a partition of v1 when the row commits\"\n(1 row)\n\n dblink_disconnect | dblink_disconnect \n-------------------+-------------------\n OK                | OK\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\n"
+        },
+        "head": {
+          "fails": true,
+          "exit": 0,
+          "tail": "S: adopt_partition recorded the renamed partition (A's transaction still open)\n(1 row)\n\n                                            is                                             \n-------------------------------------------------------------------------------------------\n not ok 4 - adopt_partition's transaction holds a lock on the relation it recorded        +\n # Failed test 4: \"adopt_partition's transaction holds a lock on the relation it recorded\"+\n #         have: 0                                                                        +\n #         want: 1\n(1 row)\n\nSET\nDO\nRESET\n                                  ok                                  \n----------------------------------------------------------------------\n ok 5 - LIVENESS: pgpm.part records the adopted relation after commit\n(1 row)\n\n                                                      ok                                                      \n--------------------------------------------------------------------------------------------------------------\n not ok 6 - the relation pgpm.part records as adopted is still a partition of v1 when the row commits        +\n # Failed test 6: \"the relation pgpm.part records as adopted is still a partition of v1 when the row commits\"\n(1 row)\n\n dblink_disconnect | dblink_disconnect \n-------------------+-------------------\n OK                | OK\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": "S: adopt_partition recorded the renamed partition (A's transaction still open)\n(1 row)\n\n                                            is                                             \n-------------------------------------------------------------------------------------------\n not ok 4 - adopt_partition's transaction holds a lock on the relation it recorded        +\n # Failed test 4: \"adopt_partition's transaction holds a lock on the relation it recorded\"+\n #         have: 0                                                                        +\n #         want: 1\n(1 row)\n\nSET\nDO\nRESET\n                                  ok                                  \n----------------------------------------------------------------------\n ok 5 - LIVENESS: pgpm.part records the adopted relation after commit\n(1 row)\n\n                                                      ok                                                      \n--------------------------------------------------------------------------------------------------------------\n not ok 6 - the relation pgpm.part records as adopted is still a partition of v1 when the row commits        +\n # Failed test 6: \"the relation pgpm.part records as adopted is still a partition of v1 when the row commits\"\n(1 row)\n\n dblink_disconnect | dblink_disconnect \n-------------------+-------------------\n OK                | OK\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\n"
+        }
+      },
+      "class": "pre_existing"
+    }
+  ]
+}

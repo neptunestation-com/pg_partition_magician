@@ -1,0 +1,365 @@
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/base/CHANGELOG.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/review/CHANGELOG.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/base/CHANGELOG.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/review/CHANGELOG.md	2026-10-12 13:55:30
+@@ -2,6 +2,19 @@
+ 
+ ## [Unreleased]
+ 
++- **`retain_disown`'s remedy names the whole repair** (#1272). A retirement mark disowned because pgpm recorded no
++  dispatch of its own (#705) was logged with the remedy "once its detach is finished, drop the table by hand, or
++  attach it back", and `docs/reference.md` added that the `pgpm.part` row is kept. Typed as written, the `DROP`
++  left that row attached and anchored to a relation that no longer exists, which `retire` refuses as
++  `fail_retain_identity` on every call by design, so `status().retain_drop_failures` climbed for good and the row
++  took a `retain_batch` slot on every tick. `pgpm._disown_retirement`, the one writer of `retain_disown`, now spells
++  the drop remedy as the two statements to run together, the `DROP` of the table (by the relation the row records,
++  schema-qualified) and the `DELETE` of its `pgpm.part` row, beside attaching it back; every path that disowns a
++  mark (`retire`, `_detach_reap`, `_retain_recall` and the pass every `install.sql` run makes) logs through it, and
++  the reference says the same. Nothing else changes: the refusal of a partition dropped under its row stands.
++  `tests/339` types the remedy out of the log row and shows retention runs clean after it;
++  `bench/retain_disown_remedy.sh` runs it against the mutation that drops the `DELETE` from the remedy.
++
+ - **The regrain swap and the hypertable cutover wait for snapshots older than their copies** (#1241). A
+   `REPEATABLE READ` reader whose snapshot predated a regrain's copies, and which first read the table after the
+   swap (so it held no lock the `DETACH` waited on), read the fine children, whose rows its snapshot cannot see,
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/base/bench/retain_disown_remedy.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/review/bench/retain_disown_remedy.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/base/bench/retain_disown_remedy.sh	1969-12-31 16:00:00
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/review/bench/retain_disown_remedy.sh	2026-10-12 13:55:30
+@@ -0,0 +1,52 @@
++#!/usr/bin/env bash
++# retain_disown_remedy.sh <container> <db> [install.sql]
++#
++# Run tests/339_retain_disown_remedy_test.sql against an ARBITRARY copy of pgpm_core/install.sql, so that
++# bench/discriminate.sh can show the file catches the defect its mutation puts back (issue #1272): the remedy a
++# retain_disown row logs said to drop the disowned table by hand and left out its pgpm.part row, which then
++# stayed attached and anchored to a relation that no longer exists, so every later retire() and retain() refused
++# it as fail_retain_identity and status().retain_drop_failures climbed for good. The file types the remedy out of
++# the log row and shows retention runs clean after it; this wrapper exists so the mutation has a guard the
++# discriminate track can run against the mutant, in the shape of bench/retain_recall_moved_parent.sh.
++#
++# The mutation it is required to fail against (bench/mutations/mutate.py):
++#   retain_disown_remedy_keeps_row  -- pgpm._disown_retirement's remedy names the DROP and not the DELETE of
++#                                      the row, the pre-fix remedy. Parts A and B.
++#
++# Runs on the plain core image (pgtap and pg_prove; no pg_cron, which is what makes retire()'s dispatch fail).
++# TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree mounted somewhere
++# other than /repo.
++set -uo pipefail
++C="${1:?container}"; DB="${2:?db}"; INSTALL="${3:-/repo/pgpm_core/install.sql}"
++TEST_FILE="${TAP_GUARD_TEST_FILE:-/repo/tests/339_retain_disown_remedy_test.sql}"
++fail=0
++
++q() { docker exec "$C" psql -U postgres "$@"; }
++
++q -q -c "drop database if exists $DB" >/dev/null 2>&1
++q -q -c "create database $DB" >/dev/null 2>&1
++q -d "$DB" -q -c "create extension if not exists pgtap;" >/dev/null 2>&1
++
++# A mutant that will not even install is NOT a pass: say which happened.
++if ! q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f "$INSTALL" >/dev/null 2>&1; then
++  printf 'FAIL  %-58s %s\n' "the module under test installed" "$INSTALL"
++  fail=1
++fi
++
++if [ "$fail" = 0 ]; then
++  out=$(docker exec "$C" sh -c "pg_prove -v -U postgres -d $DB $TEST_FILE" 2>&1)
++  rc=$?
++  echo "$out" | grep -E '^not ok [0-9]+ -' | sed 's/^/    /' | head -20
++  # the count is asserted separately: a run that never reached the database must not read as a catch
++  ran=$(echo "$out" | grep -cE '^(not )?ok [0-9]+ -')
++  if [ "$rc" = 0 ]; then printf 'PASS  %-58s %s\n' "retain_disown's remedy, typed as logged, ends the matter" "$ran ran"
++  else printf 'FAIL  %-58s %s\n' "retain_disown's remedy, typed as logged, ends the matter" "$ran ran"; fail=1; fi
++  if [ "$ran" -eq 0 ]; then
++    printf 'FAIL  %-58s %s\n' "LIVENESS: the assertions were reached at all" "0 ran"
++    echo "$out" | tail -20 | sed 's/^/      /'
++    fail=1
++  fi
++fi
++
++q -q -c "drop database if exists $DB" >/dev/null 2>&1
++exit "$fail"
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/base/docs/reference.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/review/docs/reference.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/base/docs/reference.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/review/docs/reference.md	2026-10-12 13:55:30
+@@ -1507,14 +1507,30 @@
+ detached partition without the record is cleared and logged `retain_disown`, and the job disarmed where it
+ still holds that detach. A row an upgrade from before 0.6.0 could not anchor (no `child_oid`) is found by its name.
+ 
++**The remedy for a disowned table is the whole repair, and every `retain_disown` row spells it.** Its `pgpm.part`
++row is kept, still attached, so the table is refused as one detached by hand (`fail_retain_drop`) on every call
++until the operator decides. If it was pgpm's own aged retirement, once its detach is finished either attach it
++back to the parent on its bounds, so retention retires it, or drop it AND delete its `pgpm.part` row together; the
++row's `method` names both statements for that table, schema-qualified:
++
++```sql
++drop table public.events_p2026_01;
++delete from pgpm.part where parent_table = 'public.events'::regclass and child_name = 'events_p2026_01';
++```
++
++The `DROP` alone is half of it: the row stays attached and anchored to the oid of a relation that no longer
++exists, which `retire` refuses as `fail_retain_identity` on every call (a partition dropped under its row is a
++wedge for an operator to look at, see [What `retire` checks a partition's identity
++against](#what-retire-checks-a-partitions-identity-against)), so `status().retain_drop_failures` climbs for good
++and the row takes a `retain_batch` slot on every tick. Deleting the row after the fact stops the refusals.
++
+ **The upgrade to this release disowns every mark on a pending or detached partition, once.** The record is a
+ column the upgrade adds, empty on every row. A pgpm older than it stamped `retiring_at` on an operator's detach
+ (adopting it as its own retirement, where the detach was pending when retention reached the partition) exactly as
+ on its own, and armed the job and logged `retain_detach` alike, so nothing it left can tell the two apart; the
+ upgrade takes the side that drops nothing. So a retirement of pgpm's own that was pending or detached at the
+-moment of the upgrade is left standing too, logged `retain_disown` with the remedy: once its detach is finished,
+-drop the table by hand, or attach it back to the parent on its bounds so retention retires it (its
+-`pgpm.part` row is kept). A retirement still attached at the upgrade, whose dispatched detach is still armed on the
++moment of the upgrade is left standing too, logged `retain_disown` with the remedy. A retirement still attached at
++the upgrade, whose dispatched detach is still armed on the
+ job, is given its record instead (an adopted operator's detach is never attached), and every retirement dispatched
+ after the upgrade carries its record from the start.
+ 
+@@ -3716,7 +3732,7 @@
+ | `obtain` | a forward partition created (`method` = `plain`) |
+ | `retain_drop` | a partition dropped by retention (via `retain()` or `retire()`) |
+ | `retain_detach` / `retain_crossing` / `detach_reap` | a concurrent detach dispatched for a referenced partition / rows deleted to honour a crossing FK's declared `ON DELETE` / an abandoned concurrent detach finalized |
+-| `retain_disown` | a `retiring_at` mark on a pending or detached partition without the record of pgpm's own dispatch (`pgpm.part.detach_dispatched_oid`) was cleared, so the detach is the operator's and the table is never dropped by retention: by `retire`, `_detach_reap`, `_retain_recall` or a run of `install.sql`, the upgrade that adds the record among them (see [`retire`](#retire)). `method` says which, why and the remedy. Logged once per mark |
++| `retain_disown` | a `retiring_at` mark on a pending or detached partition without the record of pgpm's own dispatch (`pgpm.part.detach_dispatched_oid`) was cleared, so the detach is the operator's and the table is never dropped by retention: by `retire`, `_detach_reap`, `_retain_recall` or a run of `install.sql`, the upgrade that adds the record among them (see [`retire`](#retire)). `method` says which, why and the remedy, spelling the `DROP` of the table and the `DELETE` of its `pgpm.part` row as the statements to run together (the `DROP` alone leaves the row refused as `fail_retain_identity` for good). Logged once per mark |
+ | `retain_recall` / `retain_reattach` | retention stopped reaching a partition whose retirement was under way: its dispatched detach was recalled and the `pgpm_detach` job returned to idle / the detach had already landed, and the partition was re-attached on its own bounds (see [`retire`](#retire)) |
+ | `regrain_copy` / `regrain_aged` / `regrain_attach` / `regrain` | a regrain microbatch copied rows into a fine child / skipped a below-horizon sub-range that has no fine child yet (only when `archive_fn` is unset; discarded with the source, never copied, once the swap has re-checked that it is still below the horizon) / attached a fine child (`method` = `check_skip`) / completed (`method` = `copy_swap_drop`) |
+ | `regrain_prepare` / `regrain_capture_orphan` / `regrain_reconcile` / `regrain_reconcile_aged` / `regrain_delta_purge` / `regrain_rename` / `regrain_restart` / `regrain_cancel` | the cross-tick regrain's own steps: change capture installed / a leftover capture table cleared / the source-is-authority reconcile before the swap (and its below-horizon counterpart) / captured keys the swap gate discarded because no reconcile could consume them (out of the source's range, or a `NULL` control value; `rows` counts them) / the source renamed onto the target grid / a stale run restarted (copies that predate capture, or copies a parent altered mid-regrain made stale: their columns or `CHECK` constraints no longer match, the source was rewritten or had a column replaced, or change capture no longer fits the key, or copies no recorded source mark vouches for, as a run in flight across an upgrade has, or change capture's trigger found disabled, origin-only or replica-only rather than enabled `ALWAYS`) / a run cancelled by `regrain_cancel()`, or by `retire` dropping the run's source whole (`method` names `retire`, `rows` counts the copies discarded) |
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/base/pgpm_core/install.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/review/pgpm_core/install.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/base/pgpm_core/install.sql	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/review/pgpm_core/install.sql	2026-10-12 14:02:29
+@@ -3477,20 +3477,38 @@
+ -- _disown_retirement: clear a retirement mark (retiring_at, retiring_oid, detach_dispatched_oid) that does not vouch
+ -- for a retirement of pgpm's, because the partition is pending or detached by a detach pgpm did not issue (#705), and
+ -- log it once,
+--- retain_disown over the partition's range with p_why and the consequence. Without the mark the operator's detach
+--- is theirs: once it is finished the table is detached by hand, which retire() refuses (#652, fail_retain_drop),
+--- where with it retire() would have dropped the table as its own retirement's. Returns whether a mark was cleared.
++-- retain_disown over the partition's range with p_why, the consequence and the remedy. Without the mark the
++-- operator's detach is theirs: once it is finished the table is detached by hand, which retire() refuses (#652,
++-- fail_retain_drop), where with it retire() would have dropped the table as its own retirement's. Returns whether a
++-- mark was cleared.
++--
++-- THE REMEDY IS THE WHOLE REPAIR, AND IT IS WRITTEN HERE, ONCE (#1272). Every path that disowns a mark (retire(),
++-- _detach_reap, _retain_recall and the pass every install.sql run makes) logs through this function, so all of them
++-- name it. Attaching the table back on its bounds hands it to retention again. Dropping it is the other way out, and
++-- it is half a repair on its own: the row stays attached and anchored to the dropped relation's oid, which retire()
++-- refuses as fail_retain_identity on every call, by design (a partition dropped under its row is a wedge for an
++-- operator to look at, #1038), so status().retain_drop_failures climbs for good and the row takes a retain_batch slot
++-- every tick. So the method spells both statements, the DROP and the DELETE of this row, naming the relation the row
++-- records by its oid (where it is now) and the parent by its schema-qualified name, never by the search path.
+ create or replace function pgpm._disown_retirement(p_parent regclass, p_child name, p_why text)
+ returns boolean language plpgsql as $$
+-declare v_lo text; v_hi text;
++declare v_lo text; v_hi text; v_child_oid oid; v_rel_q text; v_parent_q text;
+ begin
+   update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
+    where parent_table = p_parent and child_name = p_child and retiring_at is not null
+-  returning lo, hi into v_lo, v_hi;
++  returning lo, hi, child_oid into v_lo, v_hi, v_child_oid;
+   if not found then return false; end if;
++  select format('%I.%I', n.nspname, c.relname) into v_rel_q
++    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = v_child_oid;
++  v_rel_q := coalesce(v_rel_q, format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child));
++  select format('%I.%I', n.nspname, c.relname) into v_parent_q
++    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+   insert into pgpm.log (parent_table, action, lo, hi, method)
+     values (p_parent, 'retain_disown', v_lo, v_hi,
+-            p_why || '; its retirement mark (retiring_at) is cleared, so the detach is the operator''s: once it is finished the table is left standing as one detached by hand, and retention never drops it');
++            p_why || '; its retirement mark (retiring_at) is cleared, so the detach is the operator''s: once it is finished the table is left standing as one detached by hand, which retention never drops and retire() refuses (fail_retain_drop) on every call while its pgpm.part row stays. '
++            || 'If it was pgpm''s own aged retirement, once its detach is finished either attach it back to the parent on its bounds so retention retires it, '
++            || format('or drop it: drop table %s; ', v_rel_q)
++            || '(the DROP alone leaves the row recording a relation that is gone, which retire() refuses as fail_retain_identity on every call)');
+   return true;
+ end;
+ $$;
+@@ -3570,7 +3588,7 @@
+     end if;
+     continue when pgpm._detach_dispatched(r.parent_table, r.child_name, r.rel);
+     perform pgpm._idle_detach_job(pgpm._detach_cmd(r.parent_table, r.nspname, r.child_name));
+-    v_why_q := format('%I.%I is %s under a retirement mark for which pgpm recorded no dispatch of its own (a dispatch that failed, or a pgpm older than that record, which stamped the mark on an operator''s detach as on its own); if it was pgpm''s own aged retirement, once its detach is finished drop the table by hand, or attach it back to the parent on its bounds so retention retires it',
++    v_why_q := format('%I.%I is %s under a retirement mark for which pgpm recorded no dispatch of its own (a dispatch that failed, or a pgpm older than that record, which stamped the mark on an operator''s detach as on its own)',
+                       r.nspname, r.child_name,
+                       case when r.pending then 'pending a concurrent detach' else 'detached from the parent' end);
+     if pgpm._disown_retirement(r.parent_table, r.child_name, v_why_q) then
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/base/test.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/review/test.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/base/test.sh	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/review/test.sh	2026-10-12 13:55:30
+@@ -1265,6 +1265,7 @@
+     "bench/throws_pinned_sites.sh pgpm_perf350"
+     "bench/wrapper_premise_rule.sh pgpm_perf344"
+     "bench/regrain_swap_waits_for_older_snapshots.sh pgpm_perf365"
++    "bench/retain_disown_remedy.sh pgpm_perf380"
+   )
+   local selected=()
+   local n=${#guards[@]} idx
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/base/tests/327_retire_pending_detach_test.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/review/tests/327_retire_pending_detach_test.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/base/tests/327_retire_pending_detach_test.sql	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/review/tests/327_retire_pending_detach_test.sql	2026-10-12 13:55:30
+@@ -514,7 +514,7 @@
+ select is(pgpm._disown_unvouched_retirements(), 1, 'C: the upgrade''s pass disowns the mark it has no record for');
+ select is((select count(*)::int from pgpm.log where parent_table = 'public.rp327c'::regclass
+             and action = 'retain_disown' and lo = '100'
+-            and method like '%pending a concurrent detach under a retirement mark for which pgpm recorded no dispatch%drop the table by hand%attach it back%'),
++            and method like '%pending a concurrent detach under a retirement mark for which pgpm recorded no dispatch%attach it back%drop table %delete from pgpm.part where %'),
+   1, 'C: logged once, retain_disown, with the remedy');
+ select is((select command from cron.job where jobname = 'pgpm_detach'), 'select 1',
+   'C: the pgpm_detach job is disarmed, so it does not run the detach again');
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/base/tests/339_retain_disown_remedy_test.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/review/tests/339_retain_disown_remedy_test.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/base/tests/339_retain_disown_remedy_test.sql	1969-12-31 16:00:00
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1303/pr/review/tests/339_retain_disown_remedy_test.sql	2026-10-12 13:55:30
+@@ -0,0 +1,156 @@
++-- retain_disown's remedy, typed as logged, ends the matter (issue #1272).
++--
++-- THE BUG. A retirement mark without the record of pgpm's own dispatch (#705: its dispatch failed, or a pgpm older
++-- than the record stamped it) on a partition that is then pending or detached is disowned: the mark is cleared and
++-- retain_disown is logged with a remedy for the operator. That remedy (the install pass's method, and
++-- docs/reference.md's retire entry) said "once its detach is finished, drop the table by hand, or attach it back to
++-- the parent on its bounds", and the reference added "its pgpm.part row is kept". Typed as written, it left that row
++-- attached and anchored to the oid of a table that no longer exists, which retire() refuses as fail_retain_identity
++-- on every call, by design (#1038: a partition dropped under its row is a wedge an operator has to look at). So the
++-- remedy never ended anything: every retain() logged a failure for the range, status().retain_drop_failures climbed
++-- for good, and the row took a retain_batch slot on every tick.
++--
++-- THE CONTRACT. Every retain_disown row's method names the whole repair, by the relation it is about: either attach
++-- the table back on its bounds, or drop it AND delete its pgpm.part row, spelled as the two statements to run. The
++-- remedy lives in pgpm._disown_retirement, the one writer of retain_disown, so every path that disowns a mark carries
++-- it: the pass every install.sql run makes (PART A), retire() (PART B), _detach_reap and _retain_recall (the same
++-- function, not exercised here). Each part reads the statements OUT OF THE LOG ROW and runs them as typed, then
++-- shows retention runs clean over the range afterwards: nothing logged for the disowned range, retain_drop_failures
++-- not climbing, and retention reaching the next aged partition, which a row stuck at the head of the backlog would
++-- have stood in front of.
++--
++-- ASYMMETRIC FIXTURES. Each parent holds two rows (150, 160) in the partition that is disowned, one (250) in the
++-- next aged partition, which retention drops after the remedy, and two (350, 450) that survive; PART B's parent
++-- lives in a schema of its own, so a remedy that names the wrong schema drops nothing and fails.
++--
++-- No pg_cron in this database: retire()'s dispatch of a referenced partition's detach fails (fail_retain_detach),
++-- which is the mark without a record the parts need. Each part's mark is cleared (disowned) before the part ends.
++-- bench/retain_disown_remedy.sh runs this file against the mutation that puts the defect back.
++create extension if not exists pgtap;
++set client_min_messages = warning;
++
++select plan(23);
++
++-- ============================ PART A: the pass every install.sql run makes ============================
++create table public.rd339a (id bigint primary key, payload text);
++insert into public.rd339a values (150, 'old'), (160, 'old');
++call pgpm.transmute('public.rd339a', 'id', 100::bigint, p_obtain => 1, p_paused => false, p_retain => '100');
++select pgpm.extend_to('public.rd339a', '500');
++insert into public.rd339a values (250, 'aged'), (350, 'kept');   -- horizon floor(350 - 100) = 200: [100, 200) alone
++create table public.rd339a_ref (rid int primary key, pid bigint references public.rd339a (id));
++
++select child_name as a_old from pgpm.part where parent_table = 'public.rd339a'::regclass and lo = '100' \gset
++select child_name as a_aged from pgpm.part where parent_table = 'public.rd339a'::regclass and lo = '200' \gset
++select ok(:'a_old' is not null and pgpm._retain_boundary(c) = '200',
++  'LIVENESS: A: the partition [100, 200) is past the horizon and [200, 300) is not')
++  from pgpm.config c where c.parent_table = 'public.rd339a'::regclass;
++
++select is(pgpm.retire('public.rd339a', :'a_old'), false, 'LIVENESS: A: retire() took the referenced path');
++select ok(exists (select 1 from pgpm.log where parent_table = 'public.rd339a'::regclass
++                   and action = 'fail_retain_detach' and lo = '100')
++          and exists (select 1 from pgpm.part where parent_table = 'public.rd339a'::regclass and child_name = :'a_old'
++                       and retiring_at is not null and detach_dispatched_oid is null),
++  'LIVENESS: A: its dispatch failed, and the mark stands without the record of a dispatch');
++
++alter table public.rd339a detach partition :"a_old";
++select is(pgpm._disown_unvouched_retirements(), 1, 'LIVENESS: A: the install pass disowned one mark');
++
++select method as a_method from pgpm.log
++ where parent_table = 'public.rd339a'::regclass and action = 'retain_disown' and lo = '100' \gset
++select is((regexp_match(:'a_method', 'drop table [^;]+; delete from pgpm\.part where [^;]+;'))[1],
++  format('drop table public.%I; delete from pgpm.part where parent_table = %L::regclass and child_name = %L;',
++         :'a_old', 'public.rd339a', :'a_old'),
++  'A: the remedy names the table to drop AND the pgpm.part row to delete with it, both by name');
++select ok(:'a_method' like '%attach it back to the parent on its bounds%',
++  'A: and still names the other way out, attaching it back');
++
++-- the operator types the drop remedy exactly as the log row spells it: its DROP, and its DELETE when it spells one
++-- (a remedy that names the DROP alone is typed as that, and the checks below show what it leaves; 'select 1' when it
++-- spells no DROP at all, so the file goes on)
++select coalesce((regexp_match(:'a_method', '(drop table [^;]+;(?: delete from pgpm\.part where [^;]+;)?)'))[1], 'select 1;')
++  as a_remedy \gset
++:a_remedy
++
++select is(to_regclass(format('public.%I', :'a_old')), null, 'A: the disowned table is gone');
++
++-- nothing references the parent any more, so retention's next drop takes the one-step path; 450 moves the horizon
++-- to 300, so [200, 300) is aged too
++alter table public.rd339a_ref drop constraint rd339a_ref_pid_fkey;
++insert into public.rd339a values (450, 'kept');
++select max(id) as a_before from pgpm.log \gset
++select pgpm.retain('public.rd339a');
++select pgpm.retain('public.rd339a');
++
++select ok(exists (select 1 from pgpm.log where parent_table = 'public.rd339a'::regclass and id > :a_before
++                   and action = 'retain_drop' and lo = '200'),
++  'LIVENESS: A: retention ran after the remedy and reached the next aged partition, [200, 300)');
++select is((select array_agg(action order by id) from pgpm.log
++            where parent_table = 'public.rd339a'::regclass and id > :a_before and lo = '100'),
++  null, 'A: after the remedy, retention logs nothing for [100, 200) on later calls');
++select is((select retain_drop_failures from pgpm.status() where parent = 'public.rd339a'::regclass), 0::bigint,
++  'A: and status().retain_drop_failures does not climb');
++select is((select array_agg(child_name::text order by lo::bigint) from pgpm.part
++            where parent_table = 'public.rd339a'::regclass and lo::bigint < 400),
++  array[(select child_name::text from pgpm.part where parent_table = 'public.rd339a'::regclass and lo = '300')],
++  'A: pgpm.part keeps no row for the dropped table nor the retired one, and keeps [300, 400)');
++select is((select array_agg(id order by id) from public.rd339a), array[350, 450]::bigint[],
++  'A: the parent holds exactly the rows it should (150 and 160 dropped by the operator, 250 retired)');
++
++-- ============================ PART B: retire() disowns it ============================
++create schema rd339s;
++create table rd339s.rd339b (id bigint primary key, payload text);
++insert into rd339s.rd339b values (150, 'old'), (160, 'old');
++call pgpm.transmute('rd339s.rd339b', 'id', 100::bigint, p_obtain => 1, p_paused => false, p_retain => '100');
++select pgpm.extend_to('rd339s.rd339b', '500');
++insert into rd339s.rd339b values (250, 'aged'), (350, 'kept');
++create table rd339s.rd339b_ref (rid int primary key, pid bigint references rd339s.rd339b (id));
++
++select child_name as b_old from pgpm.part where parent_table = 'rd339s.rd339b'::regclass and lo = '100' \gset
++select is(pgpm.retire('rd339s.rd339b', :'b_old'), false, 'LIVENESS: B: retire() took the referenced path');
++select ok(exists (select 1 from pgpm.log where parent_table = 'rd339s.rd339b'::regclass
++                   and action = 'fail_retain_detach' and lo = '100')
++          and exists (select 1 from pgpm.part where parent_table = 'rd339s.rd339b'::regclass and child_name = :'b_old'
++                       and retiring_at is not null and detach_dispatched_oid is null),
++  'LIVENESS: B: its dispatch failed, and the mark stands without the record of a dispatch');
++
++alter table rd339s.rd339b detach partition rd339s.:"b_old";
++select is(pgpm.retire('rd339s.rd339b', :'b_old'), false, 'LIVENESS: B: retire() refused the table it found detached');
++select is((select array_agg(action order by id) from pgpm.log where parent_table = 'rd339s.rd339b'::regclass
++            and lo = '100' and action in ('retain_disown', 'fail_retain_drop')),
++  array['retain_disown', 'fail_retain_drop'],
++  'LIVENESS: B: and disowned its mark (retain_disown, by retire()), then refused it as detached by hand');
++
++select method as b_method from pgpm.log
++ where parent_table = 'rd339s.rd339b'::regclass and action = 'retain_disown' and lo = '100' \gset
++select is((regexp_match(:'b_method', 'drop table [^;]+; delete from pgpm\.part where [^;]+;'))[1],
++  format('drop table rd339s.%I; delete from pgpm.part where parent_table = %L::regclass and child_name = %L;',
++         :'b_old', 'rd339s.rd339b', :'b_old'),
++  'B: retire()''s retain_disown names the same remedy, in the table''s own schema');
++
++select coalesce((regexp_match(:'b_method', '(drop table [^;]+;(?: delete from pgpm\.part where [^;]+;)?)'))[1], 'select 1;')
++  as b_remedy \gset
++:b_remedy
++
++select is(to_regclass(format('rd339s.%I', :'b_old')), null, 'B: the disowned table is gone');
++
++alter table rd339s.rd339b_ref drop constraint rd339b_ref_pid_fkey;
++insert into rd339s.rd339b values (450, 'kept');
++select max(id) as b_before from pgpm.log \gset
++select pgpm.retain('rd339s.rd339b');
++select pgpm.retain('rd339s.rd339b');
++
++select ok(exists (select 1 from pgpm.log where parent_table = 'rd339s.rd339b'::regclass and id > :b_before
++                   and action = 'retain_drop' and lo = '200'),
++  'LIVENESS: B: retention ran after the remedy and reached the next aged partition, [200, 300)');
++select is((select array_agg(action order by id) from pgpm.log
++            where parent_table = 'rd339s.rd339b'::regclass and id > :b_before and lo = '100'),
++  null, 'B: after the remedy, retention logs nothing for [100, 200) on later calls');
++select is((select retain_drop_failures from pgpm.status() where parent = 'rd339s.rd339b'::regclass), 0::bigint,
++  'B: and status().retain_drop_failures does not climb');
++select is((select array_agg(id order by id) from rd339s.rd339b), array[350, 450]::bigint[],
++  'B: the parent holds exactly the rows it should');
++select is((select count(*)::int from pgpm.part where retiring_at is not null
++            and parent_table in ('public.rd339a'::regclass, 'rd339s.rd339b'::regclass)),
++  0, 'no retirement mark is left in flight by either part');
++
++select * from finish();

@@ -1,0 +1,15 @@
+- pgpm_archive/install.sql:60-62 | read: yes | comment on archive.config.endpoint now promising no trailing slash; the tree does not keep it (P1-01)
+- archive._s3_endpoint_canonical | read: yes | is `select p_endpoint` in this tree; verified by value and by the PR's own test 53 (P1-01)
+- archive.configure | read: yes | refusal order, regex on 25 spellings, row untouched on refusal, stores canonical form (stripping helper probed in scratch db)
+- archive.s3_signed_request | read: yes | canonical applied before host/uri/url; slashed direct call 200 with stripping helper, 400 on the tree
+- archive.s3_signed_request_bytea | read: yes | same as above for the bytea signer
+- archive._encode_upload_ndjson_single | read: yes | both PUT branches hand cfg.endpoint to a signer; no URL built here
+- archive._encode_upload_parquet | read: yes | PUT hands cfg.endpoint to the bytea signer
+- archive._s3_abort_uploads_at | read: yes | list and abort both go through archive.s3_signed_request with p_endpoint as handed
+- archive.to_s3 | read: yes | all eight endpoint sites (PUT, initiate, parts, complete, DELETE, abort) go through a signer; export through slashed row probed
+- archive.to_s3_parquet | read: yes | single PUT through the bytea signer
+- CHANGELOG.md | read: yes | entry promises the strip and the refusal; the strip is not kept in this tree (P1-01)
+- bench/archive_configure_endpoint.sh | read: yes | setup exits read, LIVENESS line named, 0-ran guarded; db name unique in test.sh
+- pgpm_archive/README.md | read: yes | documents the drop and the refusal; the drop is not kept in this tree (P1-01)
+- test.sh | read: yes | run_archive hook for the guard on pgpm_perf377, after the #1173 guard, before down -v
+- tests/archive/db/53_configure_endpoint_canonical_test.sql | read: yes | run on the tree (10 defect failures, LIVENESS all held) and with a stripping helper (25/25)

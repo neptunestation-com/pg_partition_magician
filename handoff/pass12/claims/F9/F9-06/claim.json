@@ -1,0 +1,3 @@
+{"tier": 3, "file": "pgpm_core/install.sql", "line": 7232, "lens": "time and zones",
+ "scenario": "_naive_grid_zone_off compares each month's offset with 2000-01-01's instead of with zero, so a date grid an older install recorded in a constant-offset zone (Asia/Tokyo) reads as on the column's clock: set_regrain (and the prepare tick, and the install's warn_grid_off_unit) accept a '1 day' target whose first fine cell encodes as an empty date range [2025-01-01, 2025-01-01), the #504/#1117 failure at the swap; the same grid in America/New_York is refused, and Tokyo should be too",
+ "repro": "repro.sql", "install": ["pgpm_core/install.sql"], "fixtures": false}

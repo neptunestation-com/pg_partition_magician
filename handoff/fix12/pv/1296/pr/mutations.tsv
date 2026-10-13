@@ -1,0 +1,2 @@
+snapshot_wait_foreign_floor_exempt	pgpm_core/install.sql
+snapshot_wait_holder_this_database_only	pgpm_core/install.sql

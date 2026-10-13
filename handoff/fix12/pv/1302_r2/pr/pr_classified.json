@@ -1,0 +1,192 @@
+{
+  "trees": {
+    "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302_r2/pr/base",
+    "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302_r2/pr/head",
+    "review": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302_r2/pr/review",
+    "mutants": {
+      "hypertable_mixed_step_unchecked": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302_r2/pr/mutants/hypertable_mixed_step_unchecked",
+      "hypertable_unit_remedy_recopy_unnamed": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302_r2/pr/mutants/hypertable_unit_remedy_recopy_unnamed",
+      "hypertable_unit_rules_transmute_remedy": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302_r2/pr/mutants/hypertable_unit_rules_transmute_remedy"
+    }
+  },
+  "acceptance": "ACC",
+  "claims": [
+    {
+      "id": "ACC-01",
+      "finder": "ACC",
+      "tier": 3,
+      "file": "pgpm_hypertable/install.sql",
+      "line": 439,
+      "lens": "operator error",
+      "scenario": "#1268 acceptance (F16r-01): from_hypertable / from_hypertable_cutover with a mixed month + duration p_interval ('1 mon 1 day') copy, commit the swap (hypertable dropped, incoming FK dropped) and only then hit transmute's 'mixed month + duration interval unsupported', leaving a plain unmanaged table; _from_hypertable_check_arguments should ask that transmute rule before the copy/swap as it does the sign rules (#1085), and '1 mon -40 days' is refused by the frontier check with a delete-the-newest-rows remedy, which tests/timescale/db/58 lines 78-81 pin as correct",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 1,
+          "tail": " 1 day' before its copy: mx_a is still a hypertable, its incoming key in place (got '0/0/0/1,2,3', want '1/1/0/1,2,3')\nnot ok - from_hypertable_cutover refused '1 mon 1 day' before its swap: mx_b is still a hypertable, its incoming key in place (got '0/0/0/1,2,3', want '1/1/0/1,2,3')\n# c: ERROR:  pg_partition_magician: cannot migrate hypertable mx_c with p_interval 1 mon -40 days -- refused before anything is changed, because transmute, which takes the table over once the cutover's swa\nok - LIVENESS: (C) the '1 mon -40 days' call on mx_c was refused\nnot ok - a '1 mon -40 days' step is not refused by the frontier check with a remedy that deletes the newest rows (got '1', want '0')\nok - LIVENESS: (D) the control mx_c migrates with a pure month step: partitioned, registered, its key back, every row\nNOTICE:  pg_partition_magician: from_hypertable will copy mx_b into a second table before cutover (about 120 kB); ensure that much free disk until the old hypertable is dropped at cutover and the space is reclaimed.\nNOTICE:  pg_partition_magician: estimated online copy time ~ 00:00:00.00293 (120 kB at ~40 MiB/s, cache-resident: estimated size fits effective_cache_size). This covers the copy only -- the cutover then rebuilds the primary key and secondary indexes (extra, scales with row count) and a later regrain (if used) is a similar second pass. Rough (measured on a 2XL gp3): more RAM/IOPS/throughput is faster. Override the rate with pgpm.from_hypertable_time_estimate(table, mibps).\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "ok - LIVENESS: (B) both calls with p_interval '1 mon 1 day' were refused\nok - from_hypertable refused '1 mon 1 day' before its copy: mx_a is still a hypertable, its incoming key in place\nok - from_hypertable_cutover refused '1 mon 1 day' before its swap: mx_b is still a hypertable, its incoming key in place\n# c: ERROR:  pg_partition_magician: cannot migrate hypertable mx_c with p_interval 1 mon -40 days -- refused before anything is changed, because transmute, which takes the table over once the cutover's swa\nok - LIVENESS: (C) the '1 mon -40 days' call on mx_c was refused\nok - a '1 mon -40 days' step is not refused by the frontier check with a remedy that deletes the newest rows\nok - LIVENESS: (D) the control mx_c migrates with a pure month step: partitioned, registered, its key back, every row\nNOTICE:  pg_partition_magician: from_hypertable will copy mx_b into a second table before cutover (about 120 kB); ensure that much free disk until the old hypertable is dropped at cutover and the space is reclaimed.\nNOTICE:  pg_partition_magician: estimated online copy time ~ 00:00:00.00293 (120 kB at ~40 MiB/s, cache-resident: estimated size fits effective_cache_size). This covers the copy only -- the cutover then rebuilds the primary key and secondary indexes (extra, scales with row count) and a later regrain (if used) is a similar second pass. Rough (measured on a 2XL gp3): more RAM/IOPS/throughput is faster. Override the rate with pgpm.from_hypertable_time_estimate(table, mibps).\n"
+        },
+        "mutant:hypertable_mixed_step_unchecked": {
+          "fails": true,
+          "exit": 1,
+          "tail": " 1 day' before its copy: mx_a is still a hypertable, its incoming key in place (got '0/0/0/1,2,3', want '1/1/0/1,2,3')\nnot ok - from_hypertable_cutover refused '1 mon 1 day' before its swap: mx_b is still a hypertable, its incoming key in place (got '0/0/0/1,2,3', want '1/1/0/1,2,3')\n# c: ERROR:  pg_partition_magician: cannot migrate hypertable mx_c with p_interval 1 mon -40 days -- refused before anything is changed, because transmute, which takes the table over once the cutover's swa\nok - LIVENESS: (C) the '1 mon -40 days' call on mx_c was refused\nnot ok - a '1 mon -40 days' step is not refused by the frontier check with a remedy that deletes the newest rows (got '1', want '0')\nok - LIVENESS: (D) the control mx_c migrates with a pure month step: partitioned, registered, its key back, every row\nNOTICE:  pg_partition_magician: from_hypertable will copy mx_b into a second table before cutover (about 120 kB); ensure that much free disk until the old hypertable is dropped at cutover and the space is reclaimed.\nNOTICE:  pg_partition_magician: estimated online copy time ~ 00:00:00.00293 (120 kB at ~40 MiB/s, cache-resident: estimated size fits effective_cache_size). This covers the copy only -- the cutover then rebuilds the primary key and secondary indexes (extra, scales with row count) and a later regrain (if used) is a similar second pass. Rough (measured on a 2XL gp3): more RAM/IOPS/throughput is faster. Override the rate with pgpm.from_hypertable_time_estimate(table, mibps).\n"
+        },
+        "mutant:hypertable_unit_remedy_recopy_unnamed": {
+          "fails": false,
+          "exit": 0,
+          "tail": "ok - LIVENESS: (B) both calls with p_interval '1 mon 1 day' were refused\nok - from_hypertable refused '1 mon 1 day' before its copy: mx_a is still a hypertable, its incoming key in place\nok - from_hypertable_cutover refused '1 mon 1 day' before its swap: mx_b is still a hypertable, its incoming key in place\n# c: ERROR:  pg_partition_magician: cannot migrate hypertable mx_c with p_interval 1 mon -40 days -- refused before anything is changed, because transmute, which takes the table over once the cutover's swa\nok - LIVENESS: (C) the '1 mon -40 days' call on mx_c was refused\nok - a '1 mon -40 days' step is not refused by the frontier check with a remedy that deletes the newest rows\nok - LIVENESS: (D) the control mx_c migrates with a pure month step: partitioned, registered, its key back, every row\nNOTICE:  pg_partition_magician: from_hypertable will copy mx_b into a second table before cutover (about 120 kB); ensure that much free disk until the old hypertable is dropped at cutover and the space is reclaimed.\nNOTICE:  pg_partition_magician: estimated online copy time ~ 00:00:00.00293 (120 kB at ~40 MiB/s, cache-resident: estimated size fits effective_cache_size). This covers the copy only -- the cutover then rebuilds the primary key and secondary indexes (extra, scales with row count) and a later regrain (if used) is a similar second pass. Rough (measured on a 2XL gp3): more RAM/IOPS/throughput is faster. Override the rate with pgpm.from_hypertable_time_estimate(table, mibps).\n"
+        },
+        "mutant:hypertable_unit_rules_transmute_remedy": {
+          "fails": false,
+          "exit": 0,
+          "tail": "ok - LIVENESS: (B) both calls with p_interval '1 mon 1 day' were refused\nok - from_hypertable refused '1 mon 1 day' before its copy: mx_a is still a hypertable, its incoming key in place\nok - from_hypertable_cutover refused '1 mon 1 day' before its swap: mx_b is still a hypertable, its incoming key in place\n# c: ERROR:  pg_partition_magician: cannot migrate hypertable mx_c with p_interval 1 mon -40 days -- refused before anything is changed, because transmute, which takes the table over once the cutover's swa\nok - LIVENESS: (C) the '1 mon -40 days' call on mx_c was refused\nok - a '1 mon -40 days' step is not refused by the frontier check with a remedy that deletes the newest rows\nok - LIVENESS: (D) the control mx_c migrates with a pure month step: partitioned, registered, its key back, every row\nNOTICE:  pg_partition_magician: from_hypertable will copy mx_b into a second table before cutover (about 120 kB); ensure that much free disk until the old hypertable is dropped at cutover and the space is reclaimed.\nNOTICE:  pg_partition_magician: estimated online copy time ~ 00:00:00.00293 (120 kB at ~40 MiB/s, cache-resident: estimated size fits effective_cache_size). This covers the copy only -- the cutover then rebuilds the primary key and secondary indexes (extra, scales with row count) and a later regrain (if used) is a similar second pass. Rough (measured on a 2XL gp3): more RAM/IOPS/throughput is faster. Override the rate with pgpm.from_hypertable_time_estimate(table, mibps).\n"
+        }
+      },
+      "class": "fixed",
+      "acceptance": {
+        "fails_on_base": true,
+        "passes_on_head": true,
+        "mutant_restores": {
+          "hypertable_mixed_step_unchecked": true,
+          "hypertable_unit_remedy_recopy_unnamed": false,
+          "hypertable_unit_rules_transmute_remedy": false
+        },
+        "any_restores": true
+      }
+    },
+    {
+      "id": "ACC-02",
+      "finder": "ACC",
+      "tier": 4,
+      "file": "pgpm_core/install.sql",
+      "line": 9086,
+      "lens": "operator error",
+      "scenario": "#1268 acceptance (F16-01): from_hypertable (and from_hypertable_cutover) refuse an off-midnight anchor on a date dimension, or a step/anchor finer than a timestamp(p) dimension, up front via the shared pgpm._time_unit_contract (#1118/#1138), but the refusal's remedy says 'then re-run transmute; ... call pgpm.transmute_abort(<table>) first': transmute refuses a hypertable outright ('has inheritance children'), and nothing from_hypertable did needs a transmute_abort; the message should name from_hypertable / from_hypertable_cutover as the call to re-run (tests/timescale/db/66 pins only the message's first half, so the wrong remedy is unwatched)",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                                                      \n--------------------------------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: re-running transmute on this hypertable, as the message says, is refused (it is not the call to re-run)\n(1 row)\n\n                                                           ok                                                            \n-------------------------------------------------------------------------------------------------------------------------\n not ok 4 - the refusal raised by from_hypertable does not tell the operator to re-run transmute on a hypertable        +\n # Failed test 4: \"the refusal raised by from_hypertable does not tell the operator to re-run transmute on a hypertable\"\n(1 row)\n\n                                                           ok                                                            \n-------------------------------------------------------------------------------------------------------------------------\n not ok 5 - nor to call pgpm.transmute_abort on it first (from_hypertable never left a transmute bound to abort)        +\n # Failed test 5: \"nor to call pgpm.transmute_abort on it first (from_hypertable never left a transmute bound to abort)\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 5\n(1 row)\n\npsql:<stdin>:6: NOTICE:  extension \"timescaledb\" already exists, skipping\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": " up front\n(1 row)\n\n                                                   is                                                    \n---------------------------------------------------------------------------------------------------------\n ok 2 - LIVENESS: the table is still a hypertable, so the operator is about to retry the hypertable path\n(1 row)\n\n                                                            ok                                                            \n--------------------------------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: re-running transmute on this hypertable, as the message says, is refused (it is not the call to re-run)\n(1 row)\n\n                                                     ok                                                      \n-------------------------------------------------------------------------------------------------------------\n ok 4 - the refusal raised by from_hypertable does not tell the operator to re-run transmute on a hypertable\n(1 row)\n\n                                                     ok                                                      \n-------------------------------------------------------------------------------------------------------------\n ok 5 - nor to call pgpm.transmute_abort on it first (from_hypertable never left a transmute bound to abort)\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:6: NOTICE:  extension \"timescaledb\" already exists, skipping\n"
+        },
+        "mutant:hypertable_mixed_step_unchecked": {
+          "fails": false,
+          "exit": 0,
+          "tail": " up front\n(1 row)\n\n                                                   is                                                    \n---------------------------------------------------------------------------------------------------------\n ok 2 - LIVENESS: the table is still a hypertable, so the operator is about to retry the hypertable path\n(1 row)\n\n                                                            ok                                                            \n--------------------------------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: re-running transmute on this hypertable, as the message says, is refused (it is not the call to re-run)\n(1 row)\n\n                                                     ok                                                      \n-------------------------------------------------------------------------------------------------------------\n ok 4 - the refusal raised by from_hypertable does not tell the operator to re-run transmute on a hypertable\n(1 row)\n\n                                                     ok                                                      \n-------------------------------------------------------------------------------------------------------------\n ok 5 - nor to call pgpm.transmute_abort on it first (from_hypertable never left a transmute bound to abort)\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:6: NOTICE:  extension \"timescaledb\" already exists, skipping\n"
+        },
+        "mutant:hypertable_unit_remedy_recopy_unnamed": {
+          "fails": false,
+          "exit": 0,
+          "tail": " up front\n(1 row)\n\n                                                   is                                                    \n---------------------------------------------------------------------------------------------------------\n ok 2 - LIVENESS: the table is still a hypertable, so the operator is about to retry the hypertable path\n(1 row)\n\n                                                            ok                                                            \n--------------------------------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: re-running transmute on this hypertable, as the message says, is refused (it is not the call to re-run)\n(1 row)\n\n                                                     ok                                                      \n-------------------------------------------------------------------------------------------------------------\n ok 4 - the refusal raised by from_hypertable does not tell the operator to re-run transmute on a hypertable\n(1 row)\n\n                                                     ok                                                      \n-------------------------------------------------------------------------------------------------------------\n ok 5 - nor to call pgpm.transmute_abort on it first (from_hypertable never left a transmute bound to abort)\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:6: NOTICE:  extension \"timescaledb\" already exists, skipping\n"
+        },
+        "mutant:hypertable_unit_rules_transmute_remedy": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                                                      \n--------------------------------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: re-running transmute on this hypertable, as the message says, is refused (it is not the call to re-run)\n(1 row)\n\n                                                           ok                                                            \n-------------------------------------------------------------------------------------------------------------------------\n not ok 4 - the refusal raised by from_hypertable does not tell the operator to re-run transmute on a hypertable        +\n # Failed test 4: \"the refusal raised by from_hypertable does not tell the operator to re-run transmute on a hypertable\"\n(1 row)\n\n                                                           ok                                                            \n-------------------------------------------------------------------------------------------------------------------------\n not ok 5 - nor to call pgpm.transmute_abort on it first (from_hypertable never left a transmute bound to abort)        +\n # Failed test 5: \"nor to call pgpm.transmute_abort on it first (from_hypertable never left a transmute bound to abort)\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 5\n(1 row)\n\npsql:<stdin>:6: NOTICE:  extension \"timescaledb\" already exists, skipping\n"
+        }
+      },
+      "class": "fixed",
+      "acceptance": {
+        "fails_on_base": true,
+        "passes_on_head": true,
+        "mutant_restores": {
+          "hypertable_mixed_step_unchecked": false,
+          "hypertable_unit_remedy_recopy_unnamed": false,
+          "hypertable_unit_rules_transmute_remedy": true
+        },
+        "any_restores": true
+      }
+    },
+    {
+      "id": "ACC-03",
+      "finder": "ACC",
+      "tier": 4,
+      "file": "pgpm_hypertable/install.sql",
+      "line": 451,
+      "lens": "contracts versus documentation",
+      "scenario": "#1268 acceptance (P1-02-1302): On the two-phase path, from_hypertable_cutover's timestamp(p) refusal (the #1232 remedy this PR wrote) tells the operator to widen the column (ALTER TABLE ... TYPE timestamp with time zone) then re-run pgpm.from_hypertable_cutover, and docs/reference.md says widening first 'also works'; typed as given, the cutover is refused again (the copy from_hypertable_copy made still has the old type, so _from_hypertable_check_shape refuses the swap) and the operator must re-run from_hypertable_copy first, which neither the message nor the reference says. The remedy should name the re-copy on this path (or the reference should say the copy must be redone).",
+      "repro": "repro.sh",
+      "repro_used": "repro.verified.sh",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 1,
+          "tail": "ok - fixture: u1 is a timestamptz(0) hypertable holding 1,2,3 with its copy recorded\n# remedy: widen the column's precision (ALTER TABLE u1 ALTER COLUMN ts TYPE timestamp with time zone), then re-run transmute; if an earlier attempt left a pgpm_monolith_bound CHECK on the table, call pgpm.transmute_abort(u1) first, since a re-run resumes its recorded bound.\nok - LIVENESS: the cutover refused '500 milliseconds' on the timestamptz(0) key, offering to widen the column with the ALTER TABLE\nok - LIVENESS: u1 is still a hypertable, its copy still recorded, holding 1,2,3\nnot ok - the refusal names re-running from_hypertable_copy (the copy keeps the type it was made with) (got '0', want '1')\nok - GUARD: the ALTER TABLE the message gives ran on the hypertable\n# typing: transmute\n# re-run: ERROR:  pg_partition_magician: u1 has inheritance children (_timescaledb_internal._hyper_1_1_chunk, _timescaledb_internal._hyper_1_2_chunk, _timescaledb_internal._hyper_1_3_chunk). transmute converts a standalone table only: its cutover attaches the table to a\nnot ok - the remedy as printed runs without a refusal (got '1', want '0')\nnot ok - u1 is migrated by the remedy as printed: partitioned, registered, holding 1,2,3 (got 'r/0/1,2,3', want 'p/1/1,2,3')\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "ok - fixture: u1 is a timestamptz(0) hypertable holding 1,2,3 with its copy recorded\n# remedy: widen the column's precision (ALTER TABLE u1 ALTER COLUMN ts TYPE timestamp with time zone), then re-run pgpm.from_hypertable, or on the two-phase path pgpm.from_hypertable_cutover, re-running pgpm.from_hypertable_copy before it if the column's type was changed (the copy keeps the type it was made with, and the cutover refuses a copy whose shape is not the hypertable's): this call was refused befo\nok - LIVENESS: the cutover refused '500 milliseconds' on the timestamptz(0) key, offering to widen the column with the ALTER TABLE\nok - LIVENESS: u1 is still a hypertable, its copy still recorded, holding 1,2,3\nok - the refusal names re-running from_hypertable_copy (the copy keeps the type it was made with)\nok - GUARD: the ALTER TABLE the message gives ran on the hypertable\n# typing: from_hypertable_copy, then from_hypertable_cutover\nok - the remedy as printed runs without a refusal\nok - u1 is migrated by the remedy as printed: partitioned, registered, holding 1,2,3\n"
+        },
+        "mutant:hypertable_mixed_step_unchecked": {
+          "fails": false,
+          "exit": 0,
+          "tail": "ok - fixture: u1 is a timestamptz(0) hypertable holding 1,2,3 with its copy recorded\n# remedy: widen the column's precision (ALTER TABLE u1 ALTER COLUMN ts TYPE timestamp with time zone), then re-run pgpm.from_hypertable, or on the two-phase path pgpm.from_hypertable_cutover, re-running pgpm.from_hypertable_copy before it if the column's type was changed (the copy keeps the type it was made with, and the cutover refuses a copy whose shape is not the hypertable's): this call was refused befo\nok - LIVENESS: the cutover refused '500 milliseconds' on the timestamptz(0) key, offering to widen the column with the ALTER TABLE\nok - LIVENESS: u1 is still a hypertable, its copy still recorded, holding 1,2,3\nok - the refusal names re-running from_hypertable_copy (the copy keeps the type it was made with)\nok - GUARD: the ALTER TABLE the message gives ran on the hypertable\n# typing: from_hypertable_copy, then from_hypertable_cutover\nok - the remedy as printed runs without a refusal\nok - u1 is migrated by the remedy as printed: partitioned, registered, holding 1,2,3\n"
+        },
+        "mutant:hypertable_unit_remedy_recopy_unnamed": {
+          "fails": true,
+          "exit": 1,
+          "tail": "ok - fixture: u1 is a timestamptz(0) hypertable holding 1,2,3 with its copy recorded\n# remedy: widen the column's precision (ALTER TABLE u1 ALTER COLUMN ts TYPE timestamp with time zone), then re-run pgpm.from_hypertable, or on the two-phase path pgpm.from_hypertable_cutover: this call was refused before anything was changed, so the table is still a hypertable, which transmute does not take, and no transmute bound was left to abort.\nok - LIVENESS: the cutover refused '500 milliseconds' on the timestamptz(0) key, offering to widen the column with the ALTER TABLE\nok - LIVENESS: u1 is still a hypertable, its copy still recorded, holding 1,2,3\nnot ok - the refusal names re-running from_hypertable_copy (the copy keeps the type it was made with) (got '0', want '1')\nok - GUARD: the ALTER TABLE the message gives ran on the hypertable\n# typing: from_hypertable_cutover alone\n# re-run: ERROR:  pg_partition_magician: from_hypertable_cutover(u1) refusing to swap: the copy u1_pgpm_dest no longer has the source's shape: column ts has type timestamp with time zone on the source but timestamp(0) with time zone on the copy. from_hypertable_copy fix\nnot ok - the remedy as printed runs without a refusal (got '1', want '0')\nnot ok - u1 is migrated by the remedy as printed: partitioned, registered, holding 1,2,3 (got 'r/0/1,2,3', want 'p/1/1,2,3')\n"
+        },
+        "mutant:hypertable_unit_rules_transmute_remedy": {
+          "fails": true,
+          "exit": 1,
+          "tail": "ok - fixture: u1 is a timestamptz(0) hypertable holding 1,2,3 with its copy recorded\n# remedy: widen the column's precision (ALTER TABLE u1 ALTER COLUMN ts TYPE timestamp with time zone), then re-run transmute; if an earlier attempt left a pgpm_monolith_bound CHECK on the table, call pgpm.transmute_abort(u1) first, since a re-run resumes its recorded bound.\nok - LIVENESS: the cutover refused '500 milliseconds' on the timestamptz(0) key, offering to widen the column with the ALTER TABLE\nok - LIVENESS: u1 is still a hypertable, its copy still recorded, holding 1,2,3\nnot ok - the refusal names re-running from_hypertable_copy (the copy keeps the type it was made with) (got '0', want '1')\nok - GUARD: the ALTER TABLE the message gives ran on the hypertable\n# typing: transmute\n# re-run: ERROR:  pg_partition_magician: u1 has inheritance children (_timescaledb_internal._hyper_1_1_chunk, _timescaledb_internal._hyper_1_2_chunk, _timescaledb_internal._hyper_1_3_chunk). transmute converts a standalone table only: its cutover attaches the table to a\nnot ok - the remedy as printed runs without a refusal (got '1', want '0')\nnot ok - u1 is migrated by the remedy as printed: partitioned, registered, holding 1,2,3 (got 'r/0/1,2,3', want 'p/1/1,2,3')\n"
+        }
+      },
+      "class": "fixed",
+      "acceptance": {
+        "fails_on_base": true,
+        "passes_on_head": true,
+        "mutant_restores": {
+          "hypertable_mixed_step_unchecked": false,
+          "hypertable_unit_remedy_recopy_unnamed": true,
+          "hypertable_unit_rules_transmute_remedy": true
+        },
+        "any_restores": true
+      }
+    },
+    {
+      "id": "P1-01",
+      "finder": "P1",
+      "tier": 3,
+      "file": "pgpm_hypertable/install.sql",
+      "line": 456,
+      "lens": "fresh surface",
+      "scenario": "pgpm._from_hypertable_check_arguments holds `begin null; exception when others ... end;` where the PR's pgpm._grid_floor('time', p_interval, ...) call should be, so the mixed month + duration step rule is never asked: from_hypertable('1 mon 1 day') copies and from_hypertable_cutover swaps (hypertable and incoming FK dropped) and only the handoff refuses, leaving a plain unmanaged table, and '1 mon -40 days' is refused by the frontier check with a delete-the-newest-rows remedy; both should be refused before the copy and the swap with the module's 'cannot migrate hypertable ... (mixed month + duration interval unsupported)' message, as the PR body, docs/reference.md lines 1081-1084 and test 69 parts A/B state (test 69 fails its 6 #1268 checks on this tree)",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 1,
+          "tail": "d '1 mon 1 day' in the module's pre-swap words (got '0', want '1')\nnot ok - from_hypertable_cutover refused '1 mon 1 day' before its swap: mx_b is still a hypertable, its incoming key in place, unregistered, holding 7,8 (got '0/0/0/7,8', want '1/1/0/7,8')\n# c: ERROR:  pg_partition_magician: cannot migrate hypertable mx_c with p_interval 1 mon -40 days -- refused before anything is changed, because transmute, which takes the table over once the cutover's swap has committed, wou\nok - LIVENESS: the '1 mon -40 days' call on mx_c was refused\nnot ok - '1 mon -40 days' is refused as a mixed step, not by the frontier check with a remedy that deletes the newest rows (got '0/1', want '1/0')\nok - LIVENESS: the control mx_c migrates with a pure month step: partitioned, registered, its key back, holding 1,2,3\nNOTICE:  pg_partition_magician: from_hypertable will copy mx_b into a second table before cutover (about 80 kB); ensure that much free disk until the old hypertable is dropped at cutover and the space is reclaimed.\nNOTICE:  pg_partition_magician: estimated online copy time ~ 00:00:00.001953 (80 kB at ~40 MiB/s, cache-resident: estimated size fits effective_cache_size). This covers the copy only -- the cutover then rebuilds the primary key and secondary indexes (extra, scales with row count) and a later regrain (if used) is a similar second pass. Rough (measured on a 2XL gp3): more RAM/IOPS/throughput is faster. Override the rate with pgpm.from_hypertable_time_estimate(table, mibps).\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "s incoming key in place, unregistered, holding 1,2,3\nok - from_hypertable_cutover refused '1 mon 1 day' in the module's pre-swap words\nok - from_hypertable_cutover refused '1 mon 1 day' before its swap: mx_b is still a hypertable, its incoming key in place, unregistered, holding 7,8\n# c: ERROR:  pg_partition_magician: cannot migrate hypertable mx_c with p_interval 1 mon -40 days -- refused before anything is changed, because transmute, which takes the table over once the cutover's swap has committed, wou\nok - LIVENESS: the '1 mon -40 days' call on mx_c was refused\nok - '1 mon -40 days' is refused as a mixed step, not by the frontier check with a remedy that deletes the newest rows\nok - LIVENESS: the control mx_c migrates with a pure month step: partitioned, registered, its key back, holding 1,2,3\nNOTICE:  pg_partition_magician: from_hypertable will copy mx_b into a second table before cutover (about 80 kB); ensure that much free disk until the old hypertable is dropped at cutover and the space is reclaimed.\nNOTICE:  pg_partition_magician: estimated online copy time ~ 00:00:00.001953 (80 kB at ~40 MiB/s, cache-resident: estimated size fits effective_cache_size). This covers the copy only -- the cutover then rebuilds the primary key and secondary indexes (extra, scales with row count) and a later regrain (if used) is a similar second pass. Rough (measured on a 2XL gp3): more RAM/IOPS/throughput is faster. Override the rate with pgpm.from_hypertable_time_estimate(table, mibps).\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 1,
+          "tail": "d '1 mon 1 day' in the module's pre-swap words (got '0', want '1')\nnot ok - from_hypertable_cutover refused '1 mon 1 day' before its swap: mx_b is still a hypertable, its incoming key in place, unregistered, holding 7,8 (got '0/0/0/7,8', want '1/1/0/7,8')\n# c: ERROR:  pg_partition_magician: cannot migrate hypertable mx_c with p_interval 1 mon -40 days -- refused before anything is changed, because transmute, which takes the table over once the cutover's swap has committed, wou\nok - LIVENESS: the '1 mon -40 days' call on mx_c was refused\nnot ok - '1 mon -40 days' is refused as a mixed step, not by the frontier check with a remedy that deletes the newest rows (got '0/1', want '1/0')\nok - LIVENESS: the control mx_c migrates with a pure month step: partitioned, registered, its key back, holding 1,2,3\nNOTICE:  pg_partition_magician: from_hypertable will copy mx_b into a second table before cutover (about 80 kB); ensure that much free disk until the old hypertable is dropped at cutover and the space is reclaimed.\nNOTICE:  pg_partition_magician: estimated online copy time ~ 00:00:00.001953 (80 kB at ~40 MiB/s, cache-resident: estimated size fits effective_cache_size). This covers the copy only -- the cutover then rebuilds the primary key and secondary indexes (extra, scales with row count) and a later regrain (if used) is a similar second pass. Rough (measured on a 2XL gp3): more RAM/IOPS/throughput is faster. Override the rate with pgpm.from_hypertable_time_estimate(table, mibps).\n"
+        }
+      },
+      "class": "seed_hit",
+      "seed": "S1"
+    }
+  ]
+}

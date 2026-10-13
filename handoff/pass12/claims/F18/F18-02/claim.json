@@ -1,0 +1,3 @@
+{"tier": 4, "file": "pgpm_core/install.sql", "line": 9508, "lens": "operator error",
+ "scenario": "_transmute_refuse_staging_squatter tells the operator to type `drop table <schema>.<table>_pgpm_new` whatever relkind holds the staging name; against a sequence or a view that command fails ('is not a table'), so the remedy the refusal names does not repair the state it describes, where the sibling child-name and monolith-name refusals (#509, _relkind_noun) name what they found.",
+ "repro": "repro.sql", "install": ["pgpm_core/install.sql"], "fixtures": false}

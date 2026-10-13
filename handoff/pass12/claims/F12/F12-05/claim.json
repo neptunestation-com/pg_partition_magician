@@ -1,0 +1,3 @@
+{"tier": 5, "file": "scripts/check_quoted_splices.py", "line": 163, "lens": "fresh surface",
+ "scenario": "the Quoted splices lint passes an install file whose unmarked quoted list (v_cols := quote_ident(..) || .., spliced with %s) follows an E-string with a backslash-escaped quote (raise notice E'it\\'s'): strip_noise reads the \\' as the literal's end and the next quote as a new literal, blanking the assignment, so it is never judged; after a plain literal the same function is refused, as both should be",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

@@ -1,0 +1,13 @@
+- pgpm_core/install.sql:6540-6541 | read: yes | the header comment of _regrain_copy_make: says the copy is made "without its NOT VALID CHECK and NOT NULL constraints"; the body below does not do it (P1-01, P1-02)
+- pgpm._regrain_copy_make | read: yes | whole body: LIKE INCLUDING CONSTRAINTS, the #1261 comment, then only the #348 validated-FK loop; no drop of a NOT VALID CHECK/NOT NULL; both claims root here
+- pgpm_core/install.sql:6621-6628 | read: yes | the drift comment hunk: parent-side exclusion rationale, copy side not excused; consistent with the code at 6661 and 6673
+- pgpm._regrain_shape_drift | read: yes | parent-side exclusion of NOT VALID CHECK (conenforced via to_jsonb) and NOT VALID NOT NULL by attnum; copy side includes any CHECK but the bound _ck; held by reading, exercised by P1-01 (drift fired)
+- pgpm.regrain_step | read: yes | whole procedure 7844-8666: prepare, restart branch with the probe (8117-8170), copy branch calling _regrain_copy_make (8362), swap with the #633 key loop and the new #1261 add (8565-8582) before each ATTACH; the add is unreachable on this tree
+- pgpm._regrain_fresh_copy_drift | read: yes | probe via _regrain_copy_make with '' tablespace, compared and dropped in-tick; on this tree the probe holds the CHECK and turns a restart into a refusal (P1-01)
+- pgpm.regrain | read: yes | loops regrain_step in one transaction under the regrain lock and SHARE on the parent; surfaces the defect as a raise (both repros via regrain_history)
+- pgpm.maintain | read: yes | auto-regrain block 13452-13477: regrain_step inside the handler, failure logged skip_regrain with capture and the TRUNCATE guard left on; read, not run
+- CHANGELOG.md | read: yes | the new entry 5-17 describes the drop in _regrain_copy_make that the tree does not contain; otherwise consistent with the swap and drift code
+- bench/regrain_not_valid_check.sh | read: yes | whole file: install failure is FAIL, pg_prove rc decides, 0 ran is a LIVENESS FAIL; no wrong-reason pass
+- docs/reference.md | read: yes | the regrain drift paragraph 2079-2090 and every NOT VALID mention (97, 215, 265, 334, 1190-1210, 1830-1837, 3520-3574) for consistency with the fix; the hunk promises what _regrain_copy_make does not do
+- test.sh | read: yes | the perf guard list 1225-1270: the new entry at 1268 is selected by the shard loop like the others
+- tests/331_regrain_not_valid_check_test.sql | read: yes | whole file: helpers, parts A-D, identity assertions over named rows and children, pinned throws_ok, part D skip before 18; fails A, B, C on this tree at the first lives_ok

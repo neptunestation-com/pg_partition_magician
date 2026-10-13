@@ -1,0 +1,3 @@
+{"tier": 5, "file": "tests/archive/db/08_archive_fn_s3_test.sql", "line": 103, "lens": "contracts versus documentation",
+ "scenario": "tests/archive/db/08 reads its bigint-keyed NDJSON objects back by line count only (5000 for the monolith, 50 for the PascalCase table) and the two 5-row chunks not at all; against a pgpm_archive whose NDJSON strategy writes \"id\":1 on every line in place of the row's id (count, rows_archived and digest unchanged) the file stays 22/22 green; it should read the objects back by row identity (ids or id:payload), as 12, 16 and 26 do",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql", "pgpm_archive/install.sql"], "fixtures": false}

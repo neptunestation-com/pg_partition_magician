@@ -1,0 +1,3 @@
+{"tier": 5, "file": "scripts/check_quoted_splices.py", "line": 216, "lens": "contracts versus documentation",
+ "scenario": "check_quoted_splices.py's bodies() splits each install file on a bare $$ only, so a function whose body uses any other dollar tag ($fn$) is never read: an unmarked text local holding string_agg(quote_ident(...)) there passes the lint (and the 12-assignment floor does not notice), while the same function under $$ is refused; nothing enforces the docstring's assumption that every body is $$-tagged",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

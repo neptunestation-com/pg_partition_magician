@@ -1,0 +1,71 @@
+{
+  "claims": [
+    {
+      "id": "F10-01",
+      "finder": "F10",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 7485,
+      "lens": "fresh surface",
+      "scenario": "_regrain_fine_count leaves the aged prefix out of the prepare tick's lock-budget count whenever retain is set, but regrain_step's copy skips that prefix only when no archive_fn is set (#278); with an archive_fn a run whose swap attaches 2 cap + 4 children is prepared and goes on to copy the prefix it was not counted for, where the #1161 contract (tests/315 header, _regrain_swap_budget) says the prepare tick refuses it before anything is copied",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "-------------\n ok 1 - LIVENESS: the source is [0, 4P): 2 cap + 4 sub-ranges of 100, past the line\n(1 row)\n\n                                          isnt                                           \n-----------------------------------------------------------------------------------------\n ok 2 - LIVENESS: an archive_fn is set, so the copy does not skip the aged prefix (#278)\n(1 row)\n\n                      is                      \n----------------------------------------------\n ok 3 - LIVENESS: the retention horizon is 3P\n(1 row)\n\nCREATE FUNCTION\n                                                     ok                                                      \n-------------------------------------------------------------------------------------------------------------\n not ok 4 - the prepare tick refuses a run whose swap attaches 2 cap + 4 children: returned prepared        +\n # Failed test 4: \"the prepare tick refuses a run whose swap attaches 2 cap + 4 children: returned prepared\"\n(1 row)\n\n                                                            is                                                             \n---------------------------------------------------------------------------------------------------------------------------\n ok 5 - LIVENESS: no sub-range was skipped as aged: with archive_fn set the aged prefix is copied, so the swap attaches it\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 5\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "ranges of 100, past the line\n(1 row)\n\n                                          isnt                                           \n-----------------------------------------------------------------------------------------\n ok 2 - LIVENESS: an archive_fn is set, so the copy does not skip the aged prefix (#278)\n(1 row)\n\n                      is                      \n----------------------------------------------\n ok 3 - LIVENESS: the retention horizon is 3P\n(1 row)\n\nCREATE FUNCTION\n                                                                                                   ok                                                                                                   \n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n ok 4 - the prepare tick refuses a run whose swap attaches 2 cap + 4 children: raised: pg_partition_magician: cannot regrain f10a_p0000000000000000000_to_0000000000000320400 of f10a at target step 10\n(1 row)\n\n                                                            is                                                             \n---------------------------------------------------------------------------------------------------------------------------\n ok 5 - LIVENESS: no sub-range was skipped as aged: with archive_fn set the aged prefix is copied, so the swap attaches it\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+      },
+      "class": "seed_hit",
+      "seed": "S5"
+    },
+    {
+      "id": "F10-02",
+      "finder": "F10",
+      "tier": 5,
+      "file": "tests/timescale/db/65_from_hypertable_cutover_moved_delta_by_record_test.sql",
+      "line": 128,
+      "lens": "fresh surface",
+      "scenario": "tests/timescale/db/65's 'and no scratch record is left' asks pgpm.scratch for parent_oid in ('g65a.a65'::regclass, 'g65a.b65'::regclass) after both cutovers, when those names are the new partitioned tables, not the hypertables the records are keyed by; the whole file stays green against a cutover that leaves all 6 scratch rows behind, where it should name the hypertables by the oids recorded before the swap",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ecorded delta is gone and its capture function remains\n  65: ok 3 - LIVENESS: W1 reached the moved delta (the capture follows it by oid)\n  65: ok 4 - the drain step reconciles the two keys W1 wrote into the moved delta\n  65: ok 5 - the step consumed the moved delta and applied W1 to the copy\n  65: ok 6 - LIVENESS: W2 reached the moved delta\n  65: ok 7 - the drain consumed the moved delta and applied W2 to the copy\n  65: ok 8 - LIVENESS: W3 reached the moved delta, for the cutover to read under its lock\n  65: ok 9 - both hypertables were cut over\n  65: ok 10 - a65 holds every change the moved delta logged: W1 and W2 by the drains, W3 by the cutover's reconcile\n  65: ok 11 - b65 holds its rows\n  65: ok 12 - the swap dropped a65's moved delta and its capture function by their recorded oids\n  65: ok 13 - the swap dropped b65's capture function by its recorded oid, its delta already gone\n  65: ok 14 - and no scratch record is left\n  65: ok 15 - the operator's table under the delta's minted name keeps its row: never read, emptied or dropped\n  65: ok 16 - g65side holds nothing the moved delta left\n  65: ok 17 - g65a holds no capture function\nok - LIVENESS: both hypertables were cut over by the broken copy\nok - LIVENESS: the broken copy left 6 pgpm.scratch rows keyed by the dropped hypertables' oids\nnot ok - tests/65 reports 'ok 14 - and no scratch record is left' with 6 scratch rows of the cut-over hypertables left behind: the assertion asks the new tables' oids and cannot see them\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ecorded delta is gone and its capture function remains\n  65: ok 3 - LIVENESS: W1 reached the moved delta (the capture follows it by oid)\n  65: ok 4 - the drain step reconciles the two keys W1 wrote into the moved delta\n  65: ok 5 - the step consumed the moved delta and applied W1 to the copy\n  65: ok 6 - LIVENESS: W2 reached the moved delta\n  65: ok 7 - the drain consumed the moved delta and applied W2 to the copy\n  65: ok 8 - LIVENESS: W3 reached the moved delta, for the cutover to read under its lock\n  65: ok 9 - both hypertables were cut over\n  65: ok 10 - a65 holds every change the moved delta logged: W1 and W2 by the drains, W3 by the cutover's reconcile\n  65: ok 11 - b65 holds its rows\n  65: ok 12 - the swap dropped a65's moved delta and its capture function by their recorded oids\n  65: ok 13 - the swap dropped b65's capture function by its recorded oid, its delta already gone\n  65: ok 14 - and no scratch record is left\n  65: ok 15 - the operator's table under the delta's minted name keeps its row: never read, emptied or dropped\n  65: ok 16 - g65side holds nothing the moved delta left\n  65: ok 17 - g65a holds no capture function\nok - LIVENESS: both hypertables were cut over by the broken copy\nok - LIVENESS: the broken copy left 6 pgpm.scratch rows keyed by the dropped hypertables' oids\nnot ok - tests/65 reports 'ok 14 - and no scratch record is left' with 6 scratch rows of the cut-over hypertables left behind: the assertion asks the new tables' oids and cannot see them\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F10-03",
+      "finder": "F10",
+      "tier": 5,
+      "file": "tests/timescale/db/66_from_hypertable_column_unit_rules_test.sql",
+      "line": 136,
+      "lens": "fresh surface",
+      "scenario": "tests/timescale/db/66's 'LIVENESS: and no scratch record is left for any' asks pgpm.scratch for parent_oid in ('public.d66'::regclass::oid, t66, e66) after all three migrations, when those names are the new partitioned tables and not the hypertables the records are keyed by; the file stays green against a cutover that leaves its scratch rows behind, where it should name the hypertables by the oids taken before the swap",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "stered, with no copy recorded, holding 1,2,3 and 10,20\n  66: ok 9 - LIVENESS: the copy of e66 ran, holds 7,8,9,10 and is recorded\n  66: ok 10 - from_hypertable_cutover refuses a sub-day step on a date dimension before the swap (#1118)\n  66: ok 11 - from_hypertable_cutover refuses an anchor off 00:00 UTC on a date dimension before the swap (#1138 bullet 2)\n  66: ok 12 - from_hypertable_cutover refuses a sub-day step before its pre-drain\n  66: ok 13 - invariant: e66 is still a hypertable, unregistered, holding 7,8,9,10, its copy in place\n  66: ok 14 - LIVENESS: the cutover migrates e66 on a whole-month step, its rows by value\n  66: ok 15 - LIVENESS: from_hypertable migrates d66 on a two-day step anchored at another midnight UTC\n  66: ok 16 - LIVENESS: from_hypertable migrates t66 with a whole-second anchor off midnight\n  66: ok 17 - LIVENESS: t66's grid keeps its 00:00:01 anchor and d66's its 2000-01-02 one, as given\n  66: ok 18 - LIVENESS: none of the three is a hypertable any more\n  66: ok 19 - LIVENESS: and no scratch record is left for any\n  66: ok 20 - LIVENESS: and no handoff was left behind by a refused one\nok - LIVENESS: all three hypertables were migrated by the broken copy\nok - LIVENESS: the broken copy left 3 pgpm.scratch rows keyed by the dropped hypertables' oids\nnot ok - tests/66 reports 'ok 19 - LIVENESS: and no scratch record is left for any' with 3 scratch rows of the cut-over hypertables left behind: the assertion asks the new tables' oids and cannot see them\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "stered, with no copy recorded, holding 1,2,3 and 10,20\n  66: ok 9 - LIVENESS: the copy of e66 ran, holds 7,8,9,10 and is recorded\n  66: ok 10 - from_hypertable_cutover refuses a sub-day step on a date dimension before the swap (#1118)\n  66: ok 11 - from_hypertable_cutover refuses an anchor off 00:00 UTC on a date dimension before the swap (#1138 bullet 2)\n  66: ok 12 - from_hypertable_cutover refuses a sub-day step before its pre-drain\n  66: ok 13 - invariant: e66 is still a hypertable, unregistered, holding 7,8,9,10, its copy in place\n  66: ok 14 - LIVENESS: the cutover migrates e66 on a whole-month step, its rows by value\n  66: ok 15 - LIVENESS: from_hypertable migrates d66 on a two-day step anchored at another midnight UTC\n  66: ok 16 - LIVENESS: from_hypertable migrates t66 with a whole-second anchor off midnight\n  66: ok 17 - LIVENESS: t66's grid keeps its 00:00:01 anchor and d66's its 2000-01-02 one, as given\n  66: ok 18 - LIVENESS: none of the three is a hypertable any more\n  66: ok 19 - LIVENESS: and no scratch record is left for any\n  66: ok 20 - LIVENESS: and no handoff was left behind by a refused one\nok - LIVENESS: all three hypertables were migrated by the broken copy\nok - LIVENESS: the broken copy left 3 pgpm.scratch rows keyed by the dropped hypertables' oids\nnot ok - tests/66 reports 'ok 19 - LIVENESS: and no scratch record is left for any' with 3 scratch rows of the cut-over hypertables left behind: the assertion asks the new tables' oids and cannot see them\n"
+      },
+      "class": "candidate"
+    }
+  ]
+}

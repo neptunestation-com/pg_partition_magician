@@ -1,0 +1,17 @@
+{
+  "pinned": "ba30f7a141ff52d6d811e405f673f672e97bb2aa",
+  "seeds": [
+    {
+      "id": "S1",
+      "kind": "mutation",
+      "mutation": "surface_prepare_drops_granted",
+      "file": "pgpm_core/install.sql",
+      "lens": "fresh surface",
+      "tier": 3,
+      "why": "Pre-#1267 _surface_prepare: a declared function whose installed shape cannot be replaced in place is dropped whatever its grants, so nothing is kept aside, the carry finds nothing to copy, and the file recreates it at its creator's defaults: an operator's REVOKE EXECUTE FROM PUBLIC and GRANT EXECUTE on an older status() are gone after the upgrade. One site, the keep. tests/336 parts A and B catch it.",
+      "lines": [
+        178
+      ]
+    }
+  ]
+}

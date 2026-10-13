@@ -1,0 +1,14 @@
+{
+ "tier": 3,
+ "file": "pgpm_core/install.sql",
+ "line": 3573,
+ "lens": "operator error",
+ "scenario": "#1272 acceptance (F4-02): retain_disown's logged remedy (install pass _disown_unvouched_retirements; docs/reference.md retire: 'drop the table by hand ... its pgpm.part row is kept') leaves the attached pgpm.part row anchored to a dropped oid, so every later retire()/retain() logs fail_retain_identity for that range and status().retain_drop_failures climbs for good (and the row takes a retain_batch slot every tick); the remedy should also delete the row, or retire() should forget a disowned row whose relation the operator dropped",
+ "repro": "repro.sql",
+ "install": [
+  "pgpm_core/install.sql"
+ ],
+ "fixtures": false,
+ "id": "ACC-01",
+ "finder": "ACC"
+}

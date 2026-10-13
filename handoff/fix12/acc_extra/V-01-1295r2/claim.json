@@ -1,0 +1,15 @@
+{
+ "tier": 3,
+ "file": "pgpm_core/install.sql",
+ "line": 14048,
+ "lens": "closing claim",
+ "scenario": "#1262 round 2 (closing claim): adopt_partition locks p_child by its schema-qualified NAME and then checks to_regclass(name) = p_child, relying on 'a rename takes ACCESS EXCLUSIVE, which the held lock conflicts with'. A SCHEMA rename takes no relation lock. When the partition's schema is renamed away and another schema (holding a partitioned table S of the same name) renamed into its place, committed while the call waits, LOCK TABLE re-resolves the name and locks S, then recurses into S's partitions and waits on one; while it waits the schemas are renamed back, so the check under the lock sees the name denote p_child and passes with NO lock on p_child. The re-read by oid (READ COMMITTED) finds it attached, the row is recorded, a DETACH of p_child commits before the call's transaction, and pgpm.part records a standalone table as a partition at commit, in READ COMMITTED, against the header's 'the relation judged attached is still attached when its row commits' and the body's guarantee (2). Deterministic (every order set by a lock queue, witnessed in pg_locks). It should hold a lock on the oid p_child itself (e.g. lock by oid, or verify the lock in pg_locks/by oid after LOCK) rather than infer it from the name.",
+ "repro": "repro.sql",
+ "install": [
+  "pgpm_core/install.sql"
+ ],
+ "fixtures": false,
+ "container": "pgpm_prv-15",
+ "id": "V-01",
+ "finder": "V"
+}

@@ -1,0 +1,457 @@
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/base/CHANGELOG.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/review/CHANGELOG.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/base/CHANGELOG.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/review/CHANGELOG.md	2026-10-12 13:06:24
+@@ -2,6 +2,24 @@
+ 
+ ## [Unreleased]
+ 
++- **`from_hypertable` and its cutover ask the grid's mixed-step rule before the swap** (#1268). A `p_interval`
++  that mixes a month count with a duration (`'1 mon 1 day'`) is one `transmute` refuses only in
++  `pgpm._grid_floor`, when it first places a bound, and `pgpm._from_hypertable_check_arguments` did not ask it,
++  so `from_hypertable` copied and `from_hypertable_cutover` committed the swap, dropping the hypertable and its
++  incoming foreign keys, before the handoff refused and left a plain table pgpm does not manage; `'1 mon -40
++  days'` met the frontier check first, with a remedy that deleted the newest rows. The check now calls
++  `_grid_floor` itself on the arguments, so the rule cannot drift from the one `transmute` meets, and refuses
++  before the copy and before the pre-drain (`cannot migrate hypertable ... mixed month + duration interval
++  unsupported`). Test `tests/timescale/db/69`, guard `bench/hypertable_mixed_step_and_unit_remedy.sh`, mutation
++  `hypertable_mixed_step_unchecked`.
++- **The column-unit refusals `from_hypertable` raises name it as the re-run** (#1232). `pgpm._time_unit_contract`'s
++  date-anchor and `timestamp(p)` refusals, asked by the module before its copy and its swap, said "then re-run
++  transmute; ... call pgpm.transmute_abort(...) first", which does not apply to a table that is still a
++  hypertable (`transmute` refuses it, and nothing left a bound to abort). The contract takes the remedy from its
++  caller now (a new `p_remedy` argument, `transmute`'s own by default), and the module passes its own: re-run
++  `pgpm.from_hypertable`, or `pgpm.from_hypertable_cutover` after `pgpm.from_hypertable_copy`. Same test and
++  guard as #1268, mutation `hypertable_unit_rules_transmute_remedy`.
++
+ - **The regrain swap and the hypertable cutover wait for snapshots older than their copies** (#1241). A
+   `REPEATABLE READ` reader whose snapshot predated a regrain's copies, and which first read the table after the
+   swap (so it held no lock the `DETACH` waited on), read the fine children, whose rows its snapshot cannot see,
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/base/bench/hypertable_mixed_step_and_unit_remedy.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/review/bench/hypertable_mixed_step_and_unit_remedy.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/base/bench/hypertable_mixed_step_and_unit_remedy.sh	1969-12-31 16:00:00
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/review/bench/hypertable_mixed_step_and_unit_remedy.sh	2026-10-12 13:06:24
+@@ -0,0 +1,98 @@
++#!/usr/bin/env bash
++# Run tests/timescale/db/69_from_hypertable_mixed_step_and_unit_remedy_test.sql against an ARBITRARY copy of
++# pgpm_hypertable/install.sql, so bench/discriminate.sh can point it at a mutant (issues #1268 and #1232).
++#
++# The file is plain pgTAP and the timescale track runs it already; this wrapper is the standing proof that
++# its assertions DISCRIMINATE. Two subjects, both in pgpm._from_hypertable_check_arguments, which
++# from_hypertable asks before its copy and from_hypertable_cutover before its pre-drain and its swap:
++#   #1268  the grid's mixed-step rule (pgpm._grid_floor: 'mixed month + duration interval unsupported'),
++#          which transmute meets only when it first places a bound, so on this path it came after the swap
++#          had committed and dropped the hypertable and its incoming keys;
++#   #1232  the remedy of the column-unit refusals (pgpm._time_unit_contract's date-anchor and timestamp(p)
++#          messages), which named transmute and transmute_abort, neither of which applies to a hypertable.
++# Every refusal is of a committing procedure, so it is wrapped (throws_like, or the file's capturing
++# pg_temp.err), and a procedure that wrongly does NOT refuse dies at its first COMMIT inside the wrapper with
++# 2D000 and rolls back into the state a refusal leaves: the pinned message is the only thing that tells them
++# apart, and pointing the file at a mutant is how that is known.
++#
++# The mutations it is required to fail against (bench/mutations/mutate.py):
++#   hypertable_mixed_step_unchecked         -- _from_hypertable_check_arguments no longer asks _grid_floor:
++#                                              both entry points go on to the copy and the swap. Parts A, B.
++#   hypertable_unit_rules_transmute_remedy  -- it asks _time_unit_contract without the hypertable path's
++#                                              remedy, so the refusals name transmute again. The #1232 part.
++#
++# Usage: hypertable_mixed_step_and_unit_remedy.sh <container> <db> [pgpm_hypertable/install.sql]
++# Runs on the TIMESCALE track's container (supabase/postgres + TimescaleDB), which is why its mutations
++# sit in MUTATION_TRACK=timescale. That image does not trust the local socket, so every psql call goes
++# over TCP (see run_timescale). run_timescale also runs it against the real install, so a harness broken
++# enough to fail against everything cannot read as discriminating.
++set -uo pipefail
++C="${1:?container}"; DB="${2:?db}"; HT="${3:-/repo/pgpm_hypertable/install.sql}"
++TEST_FILE="${HYPERTABLE_MIXED_STEP_TEST_FILE:-/repo/tests/timescale/db/69_from_hypertable_mixed_step_and_unit_remedy_test.sql}"
++LABEL="the mixed-step rule is asked before the swap, remedies are this path's"
++fail=0
++
++q() { docker exec -e PGPASSWORD=postgres "$C" psql -h 127.0.0.1 -U postgres "$@"; }
++
++q -d postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
++if ! q -d postgres -v ON_ERROR_STOP=1 -q -c "create database $DB" >/dev/null 2>&1 \
++   || ! q -d postgres -v ON_ERROR_STOP=1 -q -c "alter database $DB set client_min_messages = warning" >/dev/null 2>&1 \
++   || ! q -d "$DB" -v ON_ERROR_STOP=1 -q -c "create extension if not exists timescaledb; create extension if not exists pgtap;" >/dev/null 2>&1; then
++  printf 'FAIL  %-58s %s\n' "the scratch database was set up" "$DB"
++  fail=1
++fi
++if [ "$fail" = 0 ] && ! q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f /repo/pgpm_core/install.sql >/dev/null 2>&1; then
++  printf 'FAIL  %-58s %s\n' "pgpm_core installed" "/repo/pgpm_core/install.sql"
++  fail=1
++fi
++if [ "$fail" = 0 ] && ! q -d "$DB" -v ON_ERROR_STOP=1 -q -f "$HT" >/dev/null 2>&1; then
++  printf 'FAIL  %-58s %s\n' "the module under test installed" "$HT"
++  fail=1
++fi
++if [ "$fail" = 0 ] && ! q -d "$DB" -v ON_ERROR_STOP=1 -q -f /repo/tests/timescale/fixtures.sql >/dev/null 2>&1; then
++  printf 'FAIL  %-58s %s\n' "the timescale fixtures loaded" "tests/timescale/fixtures.sql"
++  fail=1
++fi
++
++if [ "$fail" = 0 ]; then
++  # >>> pgTAP verdict: the same in every timescale wrapper; bench/wrapper_tap_verdicts.sh evaluates it.
++  out=$(q -d "$DB" -tAq -f "$TEST_FILE" 2>&1); rc=$?
++  # grep -E, not a sed alternation: this half runs on the HOST, and BSD sed has no `\|`.
++  echo "$out" | grep -E '^not ok [0-9]+' | sed 's/^/    /' | head -20
++  planned=$(echo "$out" | sed -nE 's/^1\.\.([0-9]+)$/\1/p' | head -1)
++  ran=$(echo "$out" | grep -cE '^(not )?ok [0-9]+( |$)')
++  bad=$(echo "$out" | grep -cE '^not ok [0-9]+( |$)')
++  # pg_prove's verdict, which this runner has to apply itself. Three ways a file fails with no `not ok`,
++  # each reported apart from assertions that ran and failed (discriminate.sh reads any non-zero exit as
++  # "the guard caught the defect", so a harness that fails everything must say why): a raw ERROR:; a
++  # psql exit other than 0, which is how a session that died part-way (FATAL, no ERROR:) shows, since it
++  # never reaches finish() to print "# Looks like you planned" (#795); and a count of assertions
++  # that is not the 1..N plan's, which a silently skipped assertion leaves (#601, #712).
++  # A file that reached no assertion failed on its fixture, whatever stopped it, so its setup lines are
++  # premises then and discriminate.sh's starved() does not read them as a catch (#1177).
++  unreached=""; [ "$ran" -gt 0 ] || unreached="fixture: "
++  if echo "$out" | grep -qE '^ERROR:|^psql:.*ERROR:'; then
++    printf 'FAIL  %-58s %s\n' "${unreached}the file ran without a raw error" "see below"
++    echo "$out" | grep -E 'ERROR:' | head -5 | sed 's/^/      /'
++    fail=1
++  fi
++  if [ "$rc" != 0 ]; then
++    printf 'FAIL  %-58s %s\n' "${unreached}psql ran the file to its end" "exit $rc"
++    echo "$out" | grep -E 'FATAL:|connection' | head -5 | sed 's/^/      /'
++    fail=1
++  fi
++  if [ -z "$planned" ] || [ "$ran" != "$planned" ]; then
++    printf 'FAIL  %-58s %s\n' "${unreached}the file ran every assertion it planned" "planned ${planned:-nothing}, $ran ran"
++    echo "$out" | tail -20 | sed 's/^/      /'
++    fail=1
++  fi
++  if [ "$bad" = 0 ] && [ "$fail" = 0 ]; then
++    printf 'PASS  %-58s %s\n' "$LABEL" "$ran ran"
++  else
++    printf 'FAIL  %-58s %s\n' "$LABEL" "$ran ran, $bad failed"; fail=1
++  fi
++  # <<< pgTAP verdict
++fi
++
++q -d postgres -q -c "drop database if exists $DB" >/dev/null 2>&1
++exit "$fail"
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/base/docs/reference.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/review/docs/reference.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/base/docs/reference.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/review/docs/reference.md	2026-10-12 13:06:24
+@@ -1071,7 +1071,15 @@
+ dimension a step that is a whole number of days or months (`... the date column ... holds whole days ...`)
+ and an anchor at 00:00 UTC (`... the column is a date ...`), and on a `timestamp(p)` or `timestamptz(p)`
+ dimension a step and an anchor in whole multiples of its precision (`... the column is timestamp(0) with
+-time zone, which keeps whole seconds only ...`).
++time zone, which keeps whole seconds only ...`). Raised here, those two name the call to re-run as their
++remedy (`... then re-run pgpm.from_hypertable (or pgpm.from_hypertable_cutover, the call that follows
++pgpm.from_hypertable_copy) ...`), not `transmute`, which refuses a hypertable, nor `transmute_abort`, which
++has nothing to abort; for `timestamp(p)` widening the column first (the `ALTER TABLE` the message gives)
++also works. The rule the grid itself puts on the step is asked there too: a `p_interval` that mixes a
++month count with a duration (`'1 mon 1 day'`, `'1 year 2 hours'`, `'1 mon -40 days'`) is refused before
++the copy and the swap (`... cannot migrate hypertable ... mixed month + duration interval unsupported ...`),
++where `transmute` would meet it only when it first places a bound. `'1 mon -40 days'`, which is below zero
++by interval ordering, is refused that way, never by the frontier check.
+ 
+ **The handoff runs after the swap has committed, and can still refuse.** `transmute` applies its own
+ preconditions to the plain table (for example, a secondary index whose name leaves no room for the `_pgpm`
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/base/pgpm_core/install.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/review/pgpm_core/install.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/base/pgpm_core/install.sql	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/review/pgpm_core/install.sql	2026-10-12 13:06:24
+@@ -9061,10 +9061,19 @@
+ -- key's TYPE puts on the grid arguments: pgpm_hypertable asks it of the hypertable's dimension before its copy
+ -- and before its swap (#1118, #1138), where transmute's own asking would come only after the swap had dropped
+ -- the hypertable. A column that is not a timestamp or a date is not this function's (the rules return null).
+-create or replace function pgpm._time_unit_contract(p_parent regclass, p_control name, p_step text, p_anchor text)
++-- #1232: the remedy is the caller's. Transmute's (re-run transmute, aborting a bound an earlier attempt left) is
++-- the default; raised through pgpm_hypertable, where the table is still a hypertable that transmute refuses and
++-- nothing has left a bound to abort, it named two calls that could not repair anything, so a caller that is not
++-- transmute passes p_remedy, the clause that follows "then" in both off-unit refusals. The four-argument shape
++-- is dropped, not left beside this one, so a call by arity cannot bind to a copy without the parameter.
++drop function if exists pgpm._time_unit_contract(regclass, name, text, text);
++create or replace function pgpm._time_unit_contract(p_parent regclass, p_control name, p_step text, p_anchor text,
++                                                    p_remedy text default null)
+ returns void language plpgsql stable as $$
+-declare v_type oid; v_typmod int; v_keeps text; v_unit text;
++declare v_type oid; v_typmod int; v_keeps text; v_unit text; v_remedy text;
+ begin
++  v_remedy := coalesce(p_remedy, format('re-run transmute; if an earlier attempt left a pgpm_monolith_bound CHECK on the table, call pgpm.transmute_abort(%s) first, since a re-run resumes its recorded bound',
++                                        p_parent));
+   select a.atttypid, a.atttypmod into v_type, v_typmod
+     from pg_attribute a where a.attrelid = p_parent and a.attname = p_control and not a.attisdropped;
+   if v_type = 'date'::regtype
+@@ -9082,15 +9091,15 @@
+   -- UTC (the #581 rule above has already held the step to whole days), so it is named that way:
+   -- widening the column's precision is not a remedy for a date.
+   if v_unit is not null and v_type = 'date'::regtype then
+-    raise exception 'pg_partition_magician: cannot partition % on % with step % and anchor % -- the column is a date, which holds whole days and has no zone, so its grid is computed in UTC and every partition bound must fall at 00:00 UTC; this anchor falls at % UTC, and every bound literal would be attached at the date it falls in while pgpm records the instant: rows dated a partition''s first day would sit outside its recorded range, and the monolith''s bound CHECK could exclude the table''s own newest rows. Give an anchor at 00:00 UTC (the default ''2000-01-01 00:00:00+00'', or any date written with +00: a literal without an offset is read in the session''s time zone, %) and a step that is a whole number of days or months, then re-run transmute; if an earlier attempt left a pgpm_monolith_bound CHECK on the table, call pgpm.transmute_abort(%) first, since a re-run resumes its recorded bound.',
++    raise exception 'pg_partition_magician: cannot partition % on % with step % and anchor % -- the column is a date, which holds whole days and has no zone, so its grid is computed in UTC and every partition bound must fall at 00:00 UTC; this anchor falls at % UTC, and every bound literal would be attached at the date it falls in while pgpm records the instant: rows dated a partition''s first day would sit outside its recorded range, and the monolith''s bound CHECK could exclude the table''s own newest rows. Give an anchor at 00:00 UTC (the default ''2000-01-01 00:00:00+00'', or any date written with +00: a literal without an offset is read in the session''s time zone, %) and a step that is a whole number of days or months, then %.',
+       p_parent, quote_ident(p_control), p_step, p_anchor,
+       coalesce(nullif(to_char(p_anchor::timestamptz at time zone 'UTC', 'HH24:MI:SS'), ''), p_anchor),
+-      current_setting('TimeZone'), p_parent;
++      current_setting('TimeZone'), v_remedy;
+   end if;
+   if v_unit is not null then
+-    raise exception 'pg_partition_magician: cannot partition % on % with step % and anchor % -- the column is %, which keeps %, and every partition bound is the anchor plus whole steps, which the cutover''s ATTACH (and obtain''s CREATE TABLE ... PARTITION OF, for every forward partition) rounds to that precision: two bounds would round to the same instant and the cutover would fail (empty range bound) after committing a bound CHECK that rejects every write past it, or a bound would be attached at another instant than pgpm records for it. Give a step and an anchor that are whole multiples of %, or widen the column''s precision (ALTER TABLE % ALTER COLUMN % TYPE %), then re-run transmute; if an earlier attempt left a pgpm_monolith_bound CHECK on the table, call pgpm.transmute_abort(%) first, since a re-run resumes its recorded bound.',
++    raise exception 'pg_partition_magician: cannot partition % on % with step % and anchor % -- the column is %, which keeps %, and every partition bound is the anchor plus whole steps, which the cutover''s ATTACH (and obtain''s CREATE TABLE ... PARTITION OF, for every forward partition) rounds to that precision: two bounds would round to the same instant and the cutover would fail (empty range bound) after committing a bound CHECK that rejects every write past it, or a bound would be attached at another instant than pgpm records for it. Give a step and an anchor that are whole multiples of %, or widen the column''s precision (ALTER TABLE % ALTER COLUMN % TYPE %), then %.',
+       p_parent, quote_ident(p_control), p_step, p_anchor, format_type(v_type, v_typmod), v_keeps, v_unit,
+-      p_parent::text, quote_ident(p_control), format_type(v_type, -1), p_parent;
++      p_parent::text, quote_ident(p_control), format_type(v_type, -1), v_remedy;
+   end if;
+ end;
+ $$;
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/base/pgpm_hypertable/install.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/review/pgpm_hypertable/install.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/base/pgpm_hypertable/install.sql	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/review/pgpm_hypertable/install.sql	2026-10-12 13:54:26
+@@ -430,6 +430,17 @@
+ -- table the handoff gives transmute, so asked of the hypertable's column they answer what transmute will, with
+ -- transmute's messages; the step and the anchor are rendered the way transmute's interval overload renders
+ -- them. A column that is not a timestamp or a date is the dimension check's to refuse, not these rules'.
++-- #1232: with this path's remedy, not transmute's. Raised here the table is still a hypertable, which transmute
++-- refuses (it has inheritance children), and nothing has left a pgpm_monolith_bound CHECK for transmute_abort
++-- to remove, so the call to correct and re-run is the one that refused.
++-- #1268: and the rule the grid itself puts on the step, which transmute meets in pgpm._grid_floor when it first
++-- places a bound: a month count mixed with a duration ('1 mon 1 day', '1 mon -40 days') is refused there,
++-- 'mixed month + duration interval unsupported', and transmute's preflight does not ask it first, so on this
++-- path the copy ran and the cutover's swap committed, dropping the hypertable and its incoming keys, before
++-- the handoff refused; a step that is negative by interval ordering ('1 mon -40 days') met the frontier check
++-- first, with a remedy that deleted the newest rows. Asked by calling _grid_floor itself on the anchor, the
++-- way _from_hypertable_check_handoff asks _part_name, so the rule cannot drift from the one transmute meets,
++-- and refused in this module's pre-swap words; any other error _grid_floor raises is re-raised as it is.
+ drop function if exists pgpm._from_hypertable_check_arguments(interval, int, interval);
+ create or replace function pgpm._from_hypertable_check_arguments(
+   p_hypertable regclass, p_control name, p_interval interval, p_anchor timestamptz, p_obtain int,
+@@ -437,7 +448,15 @@
+ ) returns void language plpgsql stable as $$
+ begin
+   perform pgpm._refuse_bad_transmute_arguments('time', p_interval::text, p_obtain, p_retain::text);
+-  perform pgpm._time_unit_contract(p_hypertable, p_control, p_interval::text, pgpm._ts_text(p_anchor));
++  perform pgpm._time_unit_contract(p_hypertable, p_control, p_interval::text, pgpm._ts_text(p_anchor),
++    're-run pgpm.from_hypertable (or pgpm.from_hypertable_cutover, the call that follows pgpm.from_hypertable_copy): this call was refused before anything was changed, so the table is still a hypertable, which transmute does not take, and no transmute bound was left to abort');
++  begin
++    null;
++  exception when others then
++    if sqlerrm not like 'pg_partition_magician: mixed month + duration interval unsupported %' then raise; end if;
++    raise exception 'pg_partition_magician: cannot migrate hypertable % with p_interval % -- refused before anything is changed, because transmute, which takes the table over once the cutover''s swap has committed, would refuse it: a partition step is a whole number of calendar months or a fixed duration, never both (mixed month + duration interval unsupported). Give a whole number of months or a pure duration, then re-run pgpm.from_hypertable (or pgpm.from_hypertable_cutover, the call that follows pgpm.from_hypertable_copy).',
++      p_hypertable, p_interval;
++  end;
+ end $$;
+ 
+ -- _from_hypertable_check_frontier: transmute's frontier refusal (#457), asked of the hypertable before the
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/base/test.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/review/test.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/base/test.sh	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/review/test.sh	2026-10-12 13:06:24
+@@ -598,6 +598,10 @@
+     # half of the pair discriminate.sh completes with its mutant.
+     echo "--- the cutover waits for snapshots older than its copy before it swaps (issue #1241) ---"
+     bash "$(dirname "$0")/bench/hypertable_cutover_waits_for_older_snapshots.sh" pgpm_test-timescale pgpm_perf364 || fail=1
++    # #1268 and #1232's guard, the same way: it re-runs tests/timescale/db/69 against the real install, the clean-code
++    # half of the pairs discriminate.sh completes with its two mutants.
++    echo "--- from_hypertable asks the mixed-step rule before the swap, and names itself as the re-run (issues #1268, #1232) ---"
++    bash "$(dirname "$0")/bench/hypertable_mixed_step_and_unit_remedy.sh" pgpm_test-timescale pgpm_perf376 || fail=1
+     # #1091's guard, the same way: tests_fail_on_defect.sh judges tests/timescale/db/33 only when named, so the
+     # clean-code half of the pair discriminate.sh completes with hypertable_cutover_capture_fn_drop_concatenated
+     # runs here, on this container.
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/base/tests/timescale/db/69_from_hypertable_mixed_step_and_unit_remedy_test.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/review/tests/timescale/db/69_from_hypertable_mixed_step_and_unit_remedy_test.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/base/tests/timescale/db/69_from_hypertable_mixed_step_and_unit_remedy_test.sql	1969-12-31 16:00:00
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/review/tests/timescale/db/69_from_hypertable_mixed_step_and_unit_remedy_test.sql	2026-10-12 13:06:24
+@@ -0,0 +1,206 @@
++-- from_hypertable and from_hypertable_cutover ask the grid's mixed-step rule before anything is changed (issue
++-- #1268), and the column-unit refusals they raise name the call to re-run, not transmute's (issue #1232).
++--
++-- #1268. transmute refuses a p_interval that mixes a month count with a duration ('1 mon 1 day', '1 year 2
++-- hours', '1 mon -40 days'): pgpm._grid_floor raises 'mixed month + duration interval unsupported' when it
++-- first places a bound. Its preflight does not ask that rule, and neither did the module's
++-- _from_hypertable_check_arguments, which asks only _refuse_bad_transmute_arguments (it reads the step as
++-- positive: a whole month first) and _time_unit_contract. So both entry points copied, the cutover's swap
++-- committed, the hypertable and its incoming foreign key were dropped, and only the handoff refused, leaving
++-- a plain table pgpm does not manage. '1 mon -40 days' met the frontier check first instead, whose limit
++-- (now() + step + 1 hour) then lay in the past, with a remedy that deleted the newest rows.
++--
++-- #1232. _time_unit_contract's two off-unit refusals (a date key's anchor off 00:00 UTC, #769; a step or an
++-- anchor finer than a timestamp(p) key keeps, #1039), asked by the module before its copy and its swap,
++-- carried transmute's remedy: "then re-run transmute; ... call pgpm.transmute_abort(<table>) first". Raised
++-- there the table is still a hypertable, which transmute refuses, and nothing left a bound to abort.
++--
++-- WHAT THE HARNESS ALLOWS. Every refused call is a committing procedure. Wrapped by throws_like, or by the
++-- capturing pg_temp.err below, one that wrongly does NOT refuse dies at its first COMMIT inside that function
++-- context with 2D000 (the copy's, or with p_predrain => false the swap's) and rolls back into the state a
++-- refusal leaves. So the pinned messages, anchored at the start, are the discriminating assertions; the state
++-- checks after them are invariants, marked so. Each remedy check that says what a message does NOT name is
++-- paired with one that pins what it does, so a 2D000 cannot satisfy it.
++--
++-- ASYMMETRIC FIXTURES. a69 (keyed, ids 1, 2, 3, id 2 referenced by a69_ref) goes through the one-shot driver
++-- and b69 (keyed, ids 7 and 8, id 8 referenced by b69_ref) through the two phases, for #1268; d69 (a date
++-- key, 4, 5, 6) and t69 (a timestamptz(0) key, 10 and 20) through the driver and e69 (a date key, 31 to 34)
++-- through the two phases, for #1232. WITNESSES: transmute refuses the mixed step on a plain table, and
++-- refuses the noon anchor on a plain date table with its own remedy, so the rules asked are transmute's and
++-- only the remedy is the caller's; the frontier check, asked of '1 mon -40 days', would refuse a69 with the
++-- delete-the-rows remedy. Then each remedy is TYPED as the message gives it, and each table migrates.
++select plan(27);
++
++create table public.a69 (id bigint not null, ts timestamptz not null, v int, primary key (id, ts));
++select create_hypertable('public.a69', 'ts', chunk_time_interval => interval '1 day');
++insert into public.a69 select g, now() - g * interval '20 hours', g * 10 from generate_series(1, 3) g;
++create table public.a69_ref (rid int primary key, h_id bigint, h_ts timestamptz,
++  constraint a69_ref_fk foreign key (h_id, h_ts) references public.a69 (id, ts));
++insert into public.a69_ref select 1, id, ts from public.a69 where id = 2;
++create table public.b69 (id bigint not null, ts timestamptz not null, v int, primary key (id, ts));
++select create_hypertable('public.b69', 'ts', chunk_time_interval => interval '1 day');
++insert into public.b69 values (7, now() - interval '3 days', 70), (8, now() - interval '2 hours', 80);
++create table public.b69_ref (rid int primary key, h_id bigint, h_ts timestamptz,
++  constraint b69_ref_fk foreign key (h_id, h_ts) references public.b69 (id, ts));
++insert into public.b69_ref select 5, id, ts from public.b69 where id = 8;
++create table public.d69 (d date not null, v int);
++select create_hypertable('public.d69', 'd', chunk_time_interval => interval '7 days');
++insert into public.d69 values (current_date - 9, 4), (current_date - 5, 5), (current_date - 1, 6);
++create table public.t69 (ts timestamptz(0) not null, v int);
++select create_hypertable('public.t69', 'ts', chunk_time_interval => interval '1 day');
++insert into public.t69 values (now() - interval '30 hours', 10), (now() - interval '2 hours', 20);
++create table public.e69 (d date not null, v int);
++select create_hypertable('public.e69', 'd', chunk_time_interval => interval '7 days');
++insert into public.e69 values (current_date - 40, 31), (current_date - 20, 32), (current_date - 10, 33),
++                              (current_date - 2, 34);
++create table public.p69 (ts timestamptz not null, v int);
++insert into public.p69 values (now() - interval '1 hour', 1);
++create table public.p69d (d date not null, v int);
++insert into public.p69d values (current_date - 1, 1);
++
++-- the message of a refused statement, or 'ok'; a committing procedure that does not refuse returns the 2D000's
++create function pg_temp.err(p_sql text) returns text language plpgsql as $$
++begin execute p_sql; return 'ok';
++exception when others then return sqlerrm; end $$;
++
++-- ================================ the rules are transmute's ================================
++select throws_like(
++  $$ call pgpm.transmute('public.p69', 'ts', interval '1 mon 1 day') $$,
++  'pg_partition_magician: mixed month + duration interval unsupported (1 mon 1 day)',
++  'LIVENESS: transmute refuses a step that mixes a month count with a duration on a plain table');
++select throws_like(
++  $$ select pgpm._from_hypertable_check_frontier('public.a69', 'ts', interval '1 mon -40 days', false) $$,
++  'pg_partition_magician: cannot migrate hypertable a69 with p_interval 1 mon -40 days -- %Delete or correct the rows whose ts is after %',
++  'LIVENESS: asked of ''1 mon -40 days'', the frontier check would refuse a69 telling the operator to delete rows');
++select alike(pg_temp.err($$ call pgpm.transmute('public.p69d', 'd', interval '1 day', p_anchor => '2000-01-01 12:00:00+00') $$),
++  'pg_partition_magician: cannot partition p69d on d with step 1 day and anchor % -- the column is a date, %this anchor falls at 12:00:00 UTC%then re-run transmute; if an earlier attempt left a pgpm_monolith_bound CHECK on the table, call pgpm.transmute_abort(p69d) first, since a re-run resumes its recorded bound.',
++  'LIVENESS: transmute refuses a noon anchor on a plain date table, and its own refusal keeps transmute''s remedy');
++
++-- ================================ #1268 A: the one-shot driver, before its copy ================================
++select throws_like(
++  $$ call pgpm.from_hypertable('public.a69', 'ts', interval '1 mon 1 day') $$,
++  'pg_partition_magician: cannot migrate hypertable a69 with p_interval 1 mon 1 day -- refused before anything is changed, %(mixed month + duration interval unsupported). Give a whole number of months or a pure duration, then re-run pgpm.from_hypertable %',
++  'from_hypertable refuses ''1 mon 1 day'' before its copy (#1268)');
++select throws_like(
++  $$ call pgpm.from_hypertable('public.a69', 'ts', interval '1 year 2 hours') $$,
++  'pg_partition_magician: cannot migrate hypertable a69 with p_interval 1 year 02:00:00 -- refused before anything is changed, %(mixed month + duration interval unsupported)%',
++  'from_hypertable refuses a year mixed with hours before its copy');
++select throws_like(
++  $$ call pgpm.from_hypertable('public.a69', 'ts', interval '1 mon -40 days') $$,
++  'pg_partition_magician: cannot migrate hypertable a69 with p_interval 1 mon -40 days -- refused before anything is changed, %(mixed month + duration interval unsupported)%',
++  'from_hypertable refuses ''1 mon -40 days'' as a mixed step, not as a frontier with rows to delete');
++select throws_like(
++  $$ call pgpm.from_hypertable('public.a69', 'ts', interval '1 mon -40 days', p_force_frontier => true) $$,
++  'pg_partition_magician: cannot migrate hypertable a69 with p_interval 1 mon -40 days -- refused before anything is changed, %(mixed month + duration interval unsupported)%',
++  'from_hypertable refuses ''1 mon -40 days'' with p_force_frontier too');
++select is(
++  (select count(*) from timescaledb_information.hypertables where hypertable_name = 'a69')
++  || '/' || (select count(*) from pg_constraint where conname = 'a69_ref_fk' and confrelid = 'public.a69'::regclass)
++  || '/' || (select count(*) from pgpm.config where parent_table::text = 'a69')
++  || '/' || (select count(*) from pgpm.scratch where parent_oid = 'public.a69'::regclass::oid)
++  || '/' || (select string_agg(id::text, ',' order by id) from public.a69),
++  '1/1/0/0/1,2,3', 'invariant: a69 is still a hypertable, its incoming key in place, unregistered, no copy recorded, holding 1,2,3');
++
++-- ================================ #1268 B: the cutover, before its pre-drain and its swap ================================
++call pgpm.from_hypertable_copy('public.b69', 'ts');
++select is(
++  (select string_agg(id::text, ',' order by id) from public.b69_pgpm_dest)
++  || '/' || (pgpm._from_hypertable_scratch('public.b69', 'hypertable_dest') is not null)::text,
++  '7,8/true', 'LIVENESS: the copy of b69 ran, holds 7,8 and is recorded');
++-- p_predrain => false, so nothing commits ahead of the swap for an unrelated reason: a cutover that does not
++-- refuse dies on the swap's COMMIT inside throws_like, which its pinned message tells apart.
++select throws_like(
++  $$ call pgpm.from_hypertable_cutover('public.b69', 'ts', interval '1 mon 1 day', p_predrain => false) $$,
++  'pg_partition_magician: cannot migrate hypertable b69 with p_interval 1 mon 1 day -- refused before anything is changed, %(mixed month + duration interval unsupported)%',
++  'from_hypertable_cutover refuses ''1 mon 1 day'' before its swap (#1268)');
++-- the pre-drain is the cutover's first COMMIT: the refusal comes before it too
++select throws_like(
++  $$ call pgpm.from_hypertable_cutover('public.b69', 'ts', interval '1 mon 1 day') $$,
++  'pg_partition_magician: cannot migrate hypertable b69 with p_interval 1 mon 1 day -- refused before anything is changed, %(mixed month + duration interval unsupported)%',
++  'from_hypertable_cutover refuses ''1 mon 1 day'' before its pre-drain');
++select is(
++  (select count(*) from timescaledb_information.hypertables where hypertable_name = 'b69')
++  || '/' || (select count(*) from pg_constraint where conname = 'b69_ref_fk' and confrelid = 'public.b69'::regclass)
++  || '/' || (select count(*) from pgpm.config where parent_table::text = 'b69')
++  || '/' || (select string_agg(id::text, ',' order by id) from public.b69)
++  || '/' || (select string_agg(id::text, ',' order by id) from public.b69_pgpm_dest),
++  '1/1/0/7,8/7,8', 'invariant: b69 is still a hypertable, its incoming key in place, unregistered, holding 7,8, its copy in place');
++
++-- ================================ #1232: the column-unit refusals name the call to re-run ================================
++call pgpm.from_hypertable_copy('public.e69', 'd');
++select is((select string_agg(v::text, ',' order by v) from public.e69_pgpm_dest), '31,32,33,34',
++  'LIVENESS: the copy of e69 ran and holds 31,32,33,34');
++create temp table msg69 (k text primary key, m text);
++insert into msg69 values
++  ('d', pg_temp.err($$ call pgpm.from_hypertable('public.d69', 'd', interval '1 day', p_anchor => '2000-01-01 12:00:00+00') $$)),
++  ('t', pg_temp.err($$ call pgpm.from_hypertable('public.t69', 'ts', interval '500 milliseconds') $$)),
++  ('e', pg_temp.err($$ call pgpm.from_hypertable_cutover('public.e69', 'd', interval '1 day', p_anchor => '2000-01-01 05:00:00+00', p_predrain => false) $$));
++select alike((select m from msg69 where k = 'd'),
++  'pg_partition_magician: cannot partition d69 on d with step 1 day and anchor % -- the column is a date, %this anchor falls at 12:00:00 UTC%then re-run pgpm.from_hypertable (or pgpm.from_hypertable_cutover, the call that follows pgpm.from_hypertable_copy): this call was refused before anything was changed, so the table is still a hypertable, which transmute does not take, and no transmute bound was left to abort.',
++  'from_hypertable''s date-anchor refusal names from_hypertable as the call to re-run (#1232)');
++select alike((select m from msg69 where k = 't'),
++  'pg_partition_magician: cannot partition t69 on ts with step 00:00:00.5 and anchor % -- the column is timestamp(0) with time zone, which keeps whole seconds only%or widen the column''s precision (ALTER TABLE t69 ALTER COLUMN ts TYPE timestamp with time zone), then re-run pgpm.from_hypertable (or pgpm.from_hypertable_cutover, the call that follows pgpm.from_hypertable_copy): this call was refused before anything was changed%',
++  'from_hypertable''s timestamp(0) refusal names from_hypertable as the call to re-run (#1232)');
++select alike((select m from msg69 where k = 'e'),
++  'pg_partition_magician: cannot partition e69 on d with step 1 day and anchor % -- the column is a date, %this anchor falls at 05:00:00 UTC%then re-run pgpm.from_hypertable (or pgpm.from_hypertable_cutover, the call that follows pgpm.from_hypertable_copy)%',
++  'from_hypertable_cutover''s date-anchor refusal names the cutover as the call to re-run (#1232)');
++select is((select string_agg(k, ',' order by k) from msg69 where m like '%transmute_abort%' or m like '%re-run transmute%'), null,
++  'none of the three tells the operator to re-run transmute or to call pgpm.transmute_abort on a hypertable');
++select is(
++  (select count(*) from timescaledb_information.hypertables where hypertable_name in ('d69', 't69', 'e69'))
++  || '/' || (select count(*) from pgpm.config where parent_table::text in ('d69', 't69', 'e69'))
++  || '/' || (select string_agg(v::text, ',' order by v) from public.d69)
++  || '/' || (select string_agg(v::text, ',' order by v) from public.t69)
++  || '/' || (select string_agg(v::text, ',' order by v) from public.e69),
++  '3/0/4,5,6/10,20/31,32,33,34', 'invariant: d69, t69 and e69 are still hypertables, unregistered, holding their rows');
++-- the remedy the old message named, typed: transmute refuses the hypertable outright
++select alike(pg_temp.err($$ call pgpm.transmute('public.d69', 'd', interval '1 day') $$),
++  'pg_partition_magician: d69 has inheritance children%',
++  'LIVENESS: transmute on the hypertable, the re-run the old remedy named, is refused');
++
++-- ================================ the remedies, typed as the messages give them ================================
++-- #1268: "a whole number of months or a pure duration, then re-run pgpm.from_hypertable (or the cutover)"
++call pgpm.from_hypertable('public.a69', 'ts', interval '1 month', p_obtain => 2, p_paused => true);
++select is(
++  (select relkind::text from pg_class where oid = 'public.a69'::regclass)
++  || '/' || (select partition_step::text from pgpm.config where parent_table = 'public.a69'::regclass)
++  || '/' || (select count(*) from pg_constraint where conname = 'a69_ref_fk' and confrelid = 'public.a69'::regclass)
++  || '/' || (select string_agg(id::text, ',' order by id) from public.a69),
++  'p/1 mon/1/1,2,3', 'from_hypertable re-run with a whole-month step migrates a69: registered, its key back, every row');
++call pgpm.from_hypertable_cutover('public.b69', 'ts', interval '1 day', p_obtain => 2, p_paused => true);
++select is(
++  (select relkind::text from pg_class where oid = 'public.b69'::regclass)
++  || '/' || (select partition_step::text from pgpm.config where parent_table = 'public.b69'::regclass)
++  || '/' || (select count(*) from pg_constraint where conname = 'b69_ref_fk' and confrelid = 'public.b69'::regclass)
++  || '/' || (select string_agg(id::text, ',' order by id) from public.b69),
++  'p/1 day/1/7,8', 'the cutover re-run with a pure-duration step migrates b69: registered, its key back, every row');
++-- #1232 date: "an anchor at 00:00 UTC ... then re-run pgpm.from_hypertable (or the cutover)"
++call pgpm.from_hypertable('public.d69', 'd', interval '1 day', p_anchor => '2000-01-01 00:00:00+00', p_obtain => 2);
++select is(
++  (select relkind::text from pg_class where oid = 'public.d69'::regclass)
++  || '/' || (select extract(epoch from partition_anchor::timestamptz)::bigint::text from pgpm.config where parent_table = 'public.d69'::regclass)
++  || '/' || (select string_agg(v::text, ',' order by v) from public.d69),
++  'p/946684800/4,5,6', 'from_hypertable re-run with the anchor at 00:00 UTC migrates d69, every row');
++call pgpm.from_hypertable_cutover('public.e69', 'd', interval '1 day', p_anchor => '2000-01-01 00:00:00+00', p_obtain => 2);
++select is(
++  (select relkind::text from pg_class where oid = 'public.e69'::regclass)
++  || '/' || (select partition_step::text from pgpm.config where parent_table = 'public.e69'::regclass)
++  || '/' || (select string_agg(v::text, ',' order by v) from public.e69),
++  'p/1 day/31,32,33,34', 'the cutover re-run with the anchor at 00:00 UTC migrates e69, every row');
++-- #1232 timestamp(0): "or widen the column's precision (ALTER TABLE ...), then re-run pgpm.from_hypertable"
++alter table public.t69 alter column ts type timestamp with time zone;
++call pgpm.from_hypertable('public.t69', 'ts', interval '500 milliseconds', p_obtain => 2);
++select is(
++  (select relkind::text from pg_class where oid = 'public.t69'::regclass)
++  || '/' || (select partition_step::text from pgpm.config where parent_table = 'public.t69'::regclass)
++  || '/' || (select string_agg(v::text, ',' order by v) from public.t69),
++  'p/00:00:00.5/10,20', 'with the column widened as the message says, from_hypertable re-run with the same step migrates t69');
++select is((select count(*)::int from timescaledb_information.hypertables where hypertable_name in ('a69', 'b69', 'd69', 't69', 'e69')), 0,
++  'none of the five is a hypertable any more');
++select is((select count(*)::int from pgpm.scratch where parent_oid in ('public.a69'::regclass::oid, 'public.b69'::regclass::oid,
++                                                                    'public.d69'::regclass::oid, 'public.t69'::regclass::oid, 'public.e69'::regclass::oid)), 0,
++  'and no scratch record is left for any');
++select is((select count(*)::int from pgpm.handoff), 0,
++  'and no handoff was left behind by a refused one');
++
++select * from finish();

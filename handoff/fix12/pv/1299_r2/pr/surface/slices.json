@@ -1,0 +1,41 @@
+{
+ "P1": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/retirement_mark_needs_dispatch.sh",
+   "docs/reference.md",
+   "pgpm_core/install.sql",
+   "scripts/archive_partition_whole.sql",
+   "test.sh",
+   "tests/280_obtain_rebuilds_detached_cell_test.sql",
+   "tests/307_write_block_skips_hand_detached_test.sql",
+   "tests/330_retirement_mark_needs_dispatch_test.sql"
+  ],
+  "units": [
+   "pgpm._detach_dispatched",
+   "pgpm._retirement_vouched",
+   "pgpm_core/install.sql:2200-2204",
+   "pgpm._part_built",
+   "pgpm_core/install.sql:2230-2231",
+   "pgpm_core/install.sql:2240-2241",
+   "pgpm._disown_retirement",
+   "pgpm_core/install.sql:5246-5247",
+   "pgpm_core/install.sql:5251-5261",
+   "pgpm._archive_hold_partition",
+   "pgpm._archive_unheld_retirement",
+   "pgpm._archive_step",
+   "pgpm._part_detached_by_hand",
+   "pgpm._cell_attached",
+   "pgpm._cell_walk_rows",
+   "pgpm._disown_unvouched_retirements",
+   "pgpm.retire",
+   "pgpm._retain_recall",
+   "pgpm.retain",
+   "pgpm._detach_reap",
+   "pgpm.maintain",
+   "pgpm.status",
+   "pgpm.progress"
+  ],
+  "kind": "mixed"
+ }
+}

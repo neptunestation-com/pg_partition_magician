@@ -1,0 +1,3 @@
+{"tier": 2, "file": "pgpm_archive/install.sql", "line": 3534, "lens": "boundary arithmetic and types",
+ "scenario": "archive.to_s3 casts its keyset cursor back as the control column's bare type name (v_ctl_typ::regtype::text), dropping the typmod the comment promises, so on a char(3) (or bit(3)) relation the cursor 'abc' reads back as char(1) 'a', every later page re-admits the rows above it and the export never ends; it should cast with format_type's typmod and complete with each row once.",
+ "repro": "repro.sql", "install": ["tests/archive/fixtures.sql", "pgpm_core/install.sql", "pgpm_archive/install.sql"], "fixtures": false}

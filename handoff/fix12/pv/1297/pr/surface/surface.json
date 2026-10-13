@@ -1,0 +1,269 @@
+{
+ "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1297/pr/base",
+ "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1297/pr/review",
+ "files": [
+  {
+   "path": "CHANGELOG.md",
+   "status": "modified",
+   "hunks": [
+    [
+     5,
+     17
+    ]
+   ]
+  },
+  {
+   "path": "bench/install_keeps_surface_grants.sh",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     58
+    ]
+   ]
+  },
+  {
+   "path": "docs/guide.md",
+   "status": "modified",
+   "hunks": [
+    [
+     147,
+     150
+    ]
+   ]
+  },
+  {
+   "path": "pgpm_core/install.sql",
+   "status": "modified",
+   "hunks": [
+    [
+     56,
+     60
+    ],
+    [
+     132,
+     137
+    ],
+    [
+     140,
+     140
+    ],
+    [
+     152,
+     177
+    ],
+    [
+     182,
+     245
+    ],
+    [
+     260,
+     263
+    ],
+    [
+     14278,
+     14278
+    ],
+    [
+     14382,
+     14382
+    ],
+    [
+     14558,
+     14558
+    ],
+    [
+     14722,
+     14722
+    ],
+    [
+     14784,
+     14784
+    ]
+   ]
+  },
+  {
+   "path": "test.sh",
+   "status": "modified",
+   "hunks": [
+    [
+     1268,
+     1268
+    ]
+   ]
+  },
+  {
+   "path": "tests/336_install_keeps_surface_grants_test.sql",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     248
+    ]
+   ]
+  }
+ ],
+ "units": [
+  {
+   "unit": "pgpm_core/install.sql:56-60",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    56,
+    60
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm_core/install.sql:132-137",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    132,
+    137
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm._surface_prepare",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    138,
+    180
+   ],
+   "why": "touched at 140-140"
+  },
+  {
+   "unit": "pgpm._surface_sig_kept",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    183,
+    186
+   ],
+   "why": "touched at 182-245"
+  },
+  {
+   "unit": "pgpm._surface_carry_grants",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    195,
+    242
+   ],
+   "why": "touched at 182-245"
+  },
+  {
+   "unit": "pgpm._surface_settled",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    246,
+    266
+   ],
+   "why": "touched at 260-263"
+  },
+  {
+   "unit": "pgpm_core/install.sql:14278-14278",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    14278,
+    14278
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm_core/install.sql:14382-14382",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    14382,
+    14382
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm_core/install.sql:14558-14558",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    14558,
+    14558
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm_core/install.sql:14722-14722",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    14722,
+    14722
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm_core/install.sql:14784-14784",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    14784,
+    14784
+   ],
+   "why": "top-level hunk, outside every function"
+  }
+ ],
+ "exercised_by": {
+  "pgpm._surface_prepare": [
+   "bench/doc_install_stops_on_error.sh",
+   "bench/install_keeps_surface_grants.sh",
+   "docs/reviews/2026-10-06-pass9.md",
+   "docs/reviews/2026-10-12-pass12.md",
+   "tests/281_install_keeps_dependent_views_test.sql",
+   "tests/336_install_keeps_surface_grants_test.sql"
+  ],
+  "pgpm._surface_settled": [
+   "bench/doc_install_stops_on_error.sh",
+   "docs/reviews/2026-10-06-pass9.md",
+   "tests/281_install_keeps_dependent_views_test.sql",
+   "tests/336_install_keeps_surface_grants_test.sql"
+  ],
+  "pgpm._surface_carry_grants": [
+   "tests/336_install_keeps_surface_grants_test.sql"
+  ]
+ },
+ "finder": "P1",
+ "slice": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/install_keeps_surface_grants.sh",
+   "docs/guide.md",
+   "pgpm_core/install.sql",
+   "test.sh",
+   "tests/336_install_keeps_surface_grants_test.sql"
+  ],
+  "units": [
+   "pgpm_core/install.sql:56-60",
+   "pgpm_core/install.sql:132-137",
+   "pgpm._surface_prepare",
+   "pgpm._surface_sig_kept",
+   "pgpm._surface_carry_grants",
+   "pgpm._surface_settled",
+   "pgpm_core/install.sql:14278-14278",
+   "pgpm_core/install.sql:14382-14382",
+   "pgpm_core/install.sql:14558-14558",
+   "pgpm_core/install.sql:14722-14722",
+   "pgpm_core/install.sql:14784-14784"
+  ],
+  "kind": "mixed"
+ },
+ "ledger": [
+  "pgpm_core/install.sql:56-60",
+  "pgpm_core/install.sql:132-137",
+  "pgpm._surface_prepare",
+  "pgpm._surface_sig_kept",
+  "pgpm._surface_carry_grants",
+  "pgpm._surface_settled",
+  "pgpm_core/install.sql:14278-14278",
+  "pgpm_core/install.sql:14382-14382",
+  "pgpm_core/install.sql:14558-14558",
+  "pgpm_core/install.sql:14722-14722",
+  "pgpm_core/install.sql:14784-14784",
+  "CHANGELOG.md",
+  "bench/install_keeps_surface_grants.sh",
+  "docs/guide.md",
+  "test.sh",
+  "tests/336_install_keeps_surface_grants_test.sql"
+ ]
+}

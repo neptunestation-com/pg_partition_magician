@@ -1,0 +1,344 @@
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/base/CHANGELOG.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/review/CHANGELOG.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/base/CHANGELOG.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/review/CHANGELOG.md	2026-10-12 12:57:25
+@@ -2,6 +2,16 @@
+ 
+ ## [Unreleased]
+ 
++- **`archive.configure` canonicalises its endpoint** (#1269). The endpoint was stored exactly as given and both
++  signers append `/` and the bucket to it, so an endpoint spelled with a trailing slash (`http://minio:9000/`)
++  addressed `//<bucket>/<key>`: MinIO answered HTTP 400 to every PUT, and every export and every tick's chunk
++  through it failed after the read. `archive.configure` now stores the endpoint without its trailing slashes,
++  and `archive.s3_signed_request` and `archive.s3_signed_request_bytea` drop them from the endpoint they are
++  handed, so a row stored with one before this release, or a direct call spelled with one, addresses the same
++  object as the endpoint spelled without. A path prefix is kept. `archive.configure` also refuses, naming
++  `p_endpoint`, an endpoint with no `http://` or `https://` scheme, no host, a query string or a fragment,
++  which the signers could never use. A null endpoint (AWS S3) is unchanged.
++
+ - **The regrain swap and the hypertable cutover wait for snapshots older than their copies** (#1241). A
+   `REPEATABLE READ` reader whose snapshot predated a regrain's copies, and which first read the table after the
+   swap (so it held no lock the `DETACH` waited on), read the fine children, whose rows its snapshot cannot see,
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/base/bench/archive_configure_endpoint.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/review/bench/archive_configure_endpoint.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/base/bench/archive_configure_endpoint.sh	1969-12-31 16:00:00
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/review/bench/archive_configure_endpoint.sh	2026-10-12 12:57:25
+@@ -0,0 +1,105 @@
++#!/usr/bin/env bash
++# Run tests/archive/db/53_configure_endpoint_canonical_test.sql against an ARBITRARY copy of
++# pgpm_archive/install.sql, so bench/discriminate.sh can point it at a mutant.
++#
++# WHY A WRAPPER EXISTS AT ALL (issue #1269). Test 53 is a plain pgTAP file and the archive track already runs it,
++# so on correct code this script adds nothing. What it adds is the standing proof that the file DISCRIMINATES.
++# Its contract is that an S3-compatible endpoint's trailing slashes are not part of it: archive.configure stores
++# the endpoint without them, both signers drop them from the endpoint they are handed, and an export through an
++# endpoint spelled 'http://minio:9000/' lands at the key instead of failing every PUT with HTTP 400 at
++# '//<bucket>/<key>'. And configure refuses by name an endpoint the signers cannot use (no http(s) scheme, no
++# host, a query string or a fragment). The file's own witnesses (the same export through the endpoint spelled
++# without the slash lands both rows, each key cleared and witnessed absent first) say the store was reachable;
++# a failure of a LIVENESS witness alone is reported as that, not as a catch.
++#
++# The mutations it is required to fail against (bench/mutations/mutate.py):
++#   archive_endpoint_trailing_slash_kept -- archive._s3_endpoint_canonical hands the endpoint back as given, so
++#                                           configure stores the slash and both signers address //<bucket>/<key>
++#   archive_endpoint_unrefused           -- configure takes an endpoint with no scheme, no host, a query string
++#                                           or a fragment, found out only at the first PUT
++#
++# Usage: archive_configure_endpoint.sh <container> <db> [archive install.sql]
++# Needs the archive image (pgsql-http + pgtap + pg_prove) AND MinIO on the same network: the file PUTs and
++# reads back an NDJSON object. run_archive creates the bucket before any test runs; run_discriminate does not,
++# so it is created here too, idempotently and the same way (a SigV4 PUT from the curl image; 200 is created,
++# 409 is already there), after waiting for MinIO to report ready. PGPM_TEST_NET names the network MinIO answers
++# on (default pgpm_test_net, the compose network).
++set -uo pipefail
++C="${1:?container}"; DB="${2:?db}"; ARCHIVE_INSTALL="${3:-/repo/pgpm_archive/install.sql}"
++# Overridable so a worktree mounted somewhere other than /repo can point it at its own copy of the file.
++TEST_FILE="${TAP_GUARD_TEST_FILE:-/repo/tests/archive/db/53_configure_endpoint_canonical_test.sql}"
++NET="${PGPM_TEST_NET:-pgpm_test_net}"
++LABEL="an endpoint's trailing slash addresses the key; a bad one is refused (#1269)"
++fail=0
++
++q() { docker exec "$C" psql -U postgres "$@"; }
++
++# --- MinIO: ready, and the bucket the file points at exists ---------------------------------------
++ready=""
++for _ in $(seq 1 60); do
++  if docker run --rm --network "$NET" curlimages/curl -sf http://minio:9000/minio/health/cluster >/dev/null 2>&1; then ready=1; break; fi
++  sleep 1
++done
++if [ -z "$ready" ]; then
++  printf 'FAIL  %-58s %s\n' "MinIO reported ready (/minio/health/cluster)" "not within 60 s"
++  exit 1
++fi
++code=$(docker run --rm --network "$NET" curlimages/curl -s -o /dev/null -w '%{http_code}' \
++         --aws-sigv4 aws:amz:us-east-1:s3 -u minioadmin:minioadmin \
++         -X PUT http://minio:9000/archive-test-bucket) || code="curl exit $?"
++if [ "$code" != 200 ] && [ "$code" != 409 ]; then
++  printf 'FAIL  %-58s %s\n' "the MinIO bucket exists" "PUT returned $code"
++  exit 1
++fi
++
++# --- the database: fixtures, core, and the archive module under test ------------------------------
++# Every setup step runs under ON_ERROR_STOP with its exit read, so the file can never be judged against a
++# database that was not built.
++q -q -c "drop database if exists $DB" >/dev/null 2>&1
++if ! q -v ON_ERROR_STOP=1 -q -c "create database $DB" >/dev/null 2>&1 \
++   || ! q -d "$DB" -v ON_ERROR_STOP=1 -q -c "create extension if not exists http; create extension if not exists pgcrypto; create extension if not exists pgtap;" >/dev/null 2>&1; then
++  printf 'FAIL  %-58s %s\n' "the database and its extensions were created" "no"
++  fail=1
++fi
++
++# A mutant that will not even install is NOT a pass: the guard would then be reported as failing for
++# a reason that has nothing to do with what it asserts. Say which happened.
++if ! q -d "$DB" -v ON_ERROR_STOP=1 -q -f /repo/tests/archive/fixtures.sql >/dev/null 2>&1; then
++  printf 'FAIL  %-58s %s\n' "the archive fixtures installed" "no"
++  fail=1
++fi
++if ! q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f /repo/pgpm_core/install.sql >/dev/null 2>&1; then
++  printf 'FAIL  %-58s %s\n' "pgpm_core installed" "no"
++  fail=1
++fi
++if ! q -d "$DB" -v ON_ERROR_STOP=1 -q -f "$ARCHIVE_INSTALL" >/dev/null 2>&1; then
++  printf 'FAIL  %-58s %s\n' "the archive module under test installed" "$ARCHIVE_INSTALL"
++  fail=1
++fi
++
++if [ "$fail" = 0 ]; then
++  out=$(docker exec "$C" sh -c "pg_prove -v -U postgres -d $DB $TEST_FILE" 2>&1)
++  rc=$?
++  # grep -E, not a sed alternation: this half runs on the HOST, and BSD sed has no `\|`.
++  echo "$out" | grep -E '^not ok [0-9]+ -' | sed 's/^/    /' | head -20
++  # pg_prove's exit status covers "fewer assertions ran than planned"; the count separates a real
++  # failure from a run that never reached the database, which discriminate.sh would otherwise read as
++  # "the guard caught the defect".
++  ran=$(echo "$out" | grep -cE '^(not )?ok [0-9]+ -')
++  if [ "$rc" = 0 ]; then printf 'PASS  %-58s %s\n' "$LABEL" "$ran ran"
++  else printf 'FAIL  %-58s %s\n' "$LABEL" "$ran ran"; fail=1; fi
++  # A failure is only evidence against the code when the setup it depends on held. Name any
++  # LIVENESS witness that failed, so a mutant run that fails for the fixture's sake reads as that.
++  if echo "$out" | grep -qE '^not ok [0-9]+ - .*LIVENESS'; then
++    printf 'FAIL  %-58s %s\n' "every LIVENESS witness held" "no (see above)"
++    fail=1
++  fi
++  if [ "$ran" -eq 0 ]; then
++    printf 'FAIL  %-58s %s\n' "LIVENESS: the assertions were reached at all" "0 ran"
++    echo "$out" | tail -20 | sed 's/^/      /'
++    fail=1
++  fi
++fi
++
++q -q -c "drop database if exists $DB" >/dev/null 2>&1
++exit "$fail"
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/base/pgpm_archive/README.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/review/pgpm_archive/README.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/base/pgpm_archive/README.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/review/pgpm_archive/README.md	2026-10-12 12:57:25
+@@ -31,6 +31,11 @@
+ chunks, and `pgpm.retire()` won't drop one until it's fully archived. `archive.configure`'s other
+ parameters (`p_region`, `p_endpoint` for S3-compatible stores like MinIO or Supabase Storage,
+ `p_prefix`, `p_compress`, etc.) all have sensible defaults -- pass only what you need to override.
++`p_endpoint` is null for AWS S3 itself, or the `http://` or `https://` URL of the store, a host and
++optionally a path prefix (Supabase Storage's is `https://<project-ref>.supabase.co/storage/v1/s3`).
++A trailing slash is dropped, so `http://minio:9000/` and `http://minio:9000` address the same objects,
++and `archive.configure` refuses, naming `p_endpoint`, a value with no such scheme, no host, a query
++string or a fragment.
+ `p_part_bytes` (the size of each `archive.to_s3` multipart part, 8 MiB by default) must be at least
+ 5 MiB, the smallest non-final multipart part S3 accepts: `archive.configure` refuses anything smaller,
+ and `archive.to_s3` refuses a row holding zero or less before it sends anything. A positive size under
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/base/pgpm_archive/install.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/review/pgpm_archive/install.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/base/pgpm_archive/install.sql	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/review/pgpm_archive/install.sql	2026-10-12 13:40:32
+@@ -57,7 +57,9 @@
+   endpoint        text,                                    -- null = AWS S3; an
+                                                              -- URL for S3-compatible
+                                                              -- stores (path prefix
+-                                                             -- and all)
++                                                             -- and all), stored
++                                                             -- without a trailing
++                                                             -- slash (#1269)
+   prefix          text        not null default 'events/',
+   vault_key_id    text        not null default 's3_archive_access_key_id',
+   vault_secret    text        not null default 's3_archive_secret_access_key',
+@@ -134,6 +136,18 @@
+ alter table archive.object_key_claim add column if not exists relation_oid oid;
+ alter table archive.object_key_claim add column if not exists rows_digest text;
+ 
++-- An S3-compatible endpoint without its trailing slashes (#1269). Both signers address an object as the endpoint,
++-- '/', the bucket, '/', the key, so an endpoint spelled with a trailing slash ('http://host:9000/', as a URL is
++-- often written) addressed '//<bucket>/<key>', which MinIO refuses with HTTP 400: every export and every tick's
++-- chunk through it failed at the PUT. archive.configure stores the endpoint through this, and both signers pass
++-- the endpoint they are handed through it too, so a row stored with the slash (by an install before #1269, or by
++-- hand) and a direct call spelled with it address the same object as the endpoint spelled without. A path prefix
++-- (Supabase Storage's /storage/v1/s3) is kept; null (AWS S3) stays null.
++create or replace function archive._s3_endpoint_canonical(p_endpoint text)
++returns text language sql immutable set search_path = pg_catalog, pg_temp as $$
++  select p_endpoint;
++$$;
++
+ -- Operator interface for archive.config: an upsert with every connection-setting column as a
+ -- named, defaulted parameter, guarding that p_parent is actually pgpm-managed first -- an operator
+ -- should never need a raw `insert into archive.config` for normal use. Needed by BOTH paths this
+@@ -152,7 +166,7 @@
+   p_part_bytes   bigint  default 8 * 1024 * 1024,
+   p_fetch_rows   int     default 20000
+ ) returns void language plpgsql as $$
+-declare v_prefix_given boolean;
++declare v_prefix_given boolean; v_endpoint text;
+ begin
+   -- #969: refused before anything is read or written; p_endpoint (null = AWS S3) is not. The prefix is
+   -- handed over as whether it was given, never as itself: every object key starts with it, and
+@@ -183,10 +197,18 @@
+   if p_fetch_rows < 1 then
+     raise exception 'archive.configure: p_fetch_rows must be a positive number of rows, not %', p_fetch_rows;
+   end if;
++  -- The endpoint is stored without its trailing slashes (see archive._s3_endpoint_canonical), and refused here,
++  -- where it is chosen, when the signers cannot use it: they take the host from 'http://' or 'https://' up to
++  -- the first '/', and append the bucket and key to the rest, so a value with no such scheme, no host, a query
++  -- string or a fragment addressed no object at all, and was found out only at the first PUT (#1269).
++  v_endpoint := archive._s3_endpoint_canonical(p_endpoint);
++  if v_endpoint !~ '^https?://[^/?#[:space:]]+(/[^?#[:space:]]*)?$' then
++    raise exception 'archive.configure: p_endpoint must be null (AWS S3) or the http:// or https:// URL of an S3-compatible store, a host and optionally a path prefix with no query string or fragment, not %', quote_literal(p_endpoint);
++  end if;
+   insert into archive.config
+     (parent_table, bucket, region, endpoint, prefix, vault_key_id, vault_secret, compress, part_bytes, fetch_rows)
+   values
+-    (p_parent, p_bucket, p_region, p_endpoint, p_prefix, p_vault_key_id, p_vault_secret, p_compress, p_part_bytes, p_fetch_rows)
++    (p_parent, p_bucket, p_region, v_endpoint, p_prefix, p_vault_key_id, p_vault_secret, p_compress, p_part_bytes, p_fetch_rows)
+   on conflict (parent_table) do update set
+     bucket = excluded.bucket, region = excluded.region, endpoint = excluded.endpoint,
+     prefix = excluded.prefix, vault_key_id = excluded.vault_key_id, vault_secret = excluded.vault_secret,
+@@ -364,6 +386,8 @@
+   perform pgpm._refuse_null_arguments('archive.s3_signed_request', json_build_object(
+     'p_method', p_method, 'p_bucket', p_bucket, 'p_region', p_region, 'p_key', p_key, 'p_query', p_query,
+     'p_ctype', p_ctype, 'p_payload', octet_length(p_payload), 'p_key_id', p_key_id, 'p_secret', p_secret));
++  -- without its trailing slashes, which would address '//<bucket>/<key>' (#1269, archive._s3_endpoint_canonical)
++  p_endpoint := archive._s3_endpoint_canonical(p_endpoint);
+   if p_endpoint is null then
+     v_host := p_bucket || '.s3.' || p_region || '.amazonaws.com';   -- virtual-hosted style
+     v_uri  := '/' || archive._s3_encode_path(p_key);
+@@ -439,6 +463,7 @@
+   perform pgpm._refuse_null_arguments('archive.s3_signed_request_bytea', json_build_object(
+     'p_method', p_method, 'p_bucket', p_bucket, 'p_region', p_region, 'p_key', p_key, 'p_query', p_query,
+     'p_ctype', p_ctype, 'p_payload', octet_length(p_payload), 'p_key_id', p_key_id, 'p_secret', p_secret));
++  p_endpoint := archive._s3_endpoint_canonical(p_endpoint);   -- as archive.s3_signed_request's (#1269)
+   if p_endpoint is null then
+     v_host := p_bucket || '.s3.' || p_region || '.amazonaws.com';
+     v_uri  := '/' || archive._s3_encode_path(p_key);
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/base/test.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/review/test.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/base/test.sh	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/review/test.sh	2026-10-12 12:57:25
+@@ -978,6 +978,10 @@
+   # half of the pair bench/discriminate.sh completes with the refusal's digest comparison dropped.
+   echo "--- tests/archive/db/50 reaches the digest check it names guard (issue #1173) ---"
+   bash "$(dirname "$0")/bench/archive_retired_chunk_digest_layer.sh" pgpm_test-archive pgpm_perf341 || fail=1
++  # The endpoint guard (#1269) re-runs tests/archive/db/53 for the same reason: the clean-code half of the pair
++  # bench/discriminate.sh completes with an endpoint's trailing slash kept, or a bad endpoint taken, again.
++  echo "--- an endpoint's trailing slash addresses the key, and a bad endpoint is refused guard (issue #1269) ---"
++  bash "$(dirname "$0")/bench/archive_configure_endpoint.sh" pgpm_test-archive pgpm_perf377 || fail=1
+ 
+   $DC --profile "$prof" down -v
+   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/base/tests/archive/db/53_configure_endpoint_canonical_test.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/review/tests/archive/db/53_configure_endpoint_canonical_test.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/base/tests/archive/db/53_configure_endpoint_canonical_test.sql	1969-12-31 16:00:00
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/review/tests/archive/db/53_configure_endpoint_canonical_test.sql	2026-10-12 12:57:25
+@@ -0,0 +1,103 @@
++-- archive.configure's p_endpoint is the URL of an S3-compatible store, path prefix and all, and both signers
++-- (archive.s3_signed_request and archive.s3_signed_request_bytea) address an object as the endpoint, '/', the
++-- bucket, '/', the key. The endpoint used to be stored and used exactly as given, so one spelled with a
++-- trailing slash ('http://host:9000/', as a URL is often written) addressed '//<bucket>/<key>': MinIO answers
++-- HTTP 400 to that, so every export and every tick's chunk through it failed at the PUT after the read, and
++-- configure, which refuses a p_part_bytes or p_fetch_rows that cannot work (#594, #636), took it without a word
++-- (issue #1269). And an endpoint with no http:// or https:// scheme, or with a query string, was taken too,
++-- though the signers cannot take a host out of it.
++--
++-- The contract: an endpoint's trailing slashes are not part of it. archive.configure stores the endpoint
++-- without them, and the signers drop them from the endpoint they are handed, so a row stored with one (by an
++-- install before this, or by hand) and a direct call spelled with one address the same object as the endpoint
++-- spelled without. A path prefix is kept (Supabase Storage's endpoint is https://<ref>.supabase.co/storage/v1/s3).
++-- configure refuses, naming p_endpoint and before it writes anything, an endpoint that is not an http:// or
++-- https:// URL with a host, or that carries a query string or a fragment. A null endpoint is AWS S3, as before.
++--
++-- Each export's object is stated by identity (the rows it holds, two of them, by id and payload), its key
++-- cleared and witnessed absent first, because the bucket outlives the test database; the prefix carries the
++-- database's name so a parallel run of this file in another database cannot meet it.
++select plan(25);
++
++create schema t53;
++create table t53.evt (id bigint primary key, payload text not null);
++insert into t53.evt values (1, 'one'), (2, 'two');
++call pgpm.transmute('t53.evt', 'id', 10000::bigint, p_paused => true);
++select 't53-' || current_database() || '/' as p \gset
++select :'p' || 't53.evt.ndjson' as k \gset
++
++-- The store, through the endpoint spelled the way every other test spells it.
++create function t53.req(p_method text, p_key text) returns http_response language sql as $$
++  select archive.s3_signed_request(p_method, 'http://minio:9000', 'archive-test-bucket', 'us-east-1', p_key, '',
++                                   'text/plain', '', 'minioadmin', 'minioadmin') $$;
++create function t53.export() returns text language plpgsql as $$
++begin
++  perform archive.to_s3('t53.evt', 'evt', null, null);
++  return 'ok';
++exception when others then return sqlerrm;
++end $$;
++-- the object's rows, by identity: each NDJSON line's id and payload, in id order
++create function t53.held(p_key text) returns text language sql as $$
++  select string_agg((l::json ->> 'id') || ':' || (l::json ->> 'payload'), ',' order by (l::json ->> 'id')::bigint)
++    from (select r.content from t53.req('GET', p_key) r where r.status = 200) g,
++         regexp_split_to_table(rtrim(g.content, e'\n'), e'\n') l $$;
++create function t53.stored() returns text language sql as $$
++  select coalesce(endpoint, '<null>') from archive.config where parent_table = 't53.evt'::regclass $$;
++create function t53.cfg(p_endpoint text) returns void language sql as $$
++  select archive.configure('t53.evt', 'archive-test-bucket', p_endpoint => p_endpoint,
++                           p_prefix => current_setting('t53.p')) $$;
++select set_config('t53.p', :'p', false) as t53_p \gset
++
++-- ---- A. the endpoint without a slash: the store, bucket and credentials are live ----------------------------
++select is((t53.req('DELETE', :'k')).status, 204, 'LIVENESS: the object key is cleared before the first export');
++select t53.cfg('http://minio:9000');
++select is(t53.stored(), 'http://minio:9000', 'LIVENESS: an endpoint without a trailing slash is stored as given');
++select is(t53.export(), 'ok', 'LIVENESS: an export through it reaches the store');
++select is(t53.held(:'k'), '1:one,2:two', 'LIVENESS: and its object holds both rows');
++select is((t53.req('DELETE', :'k')).status, 204, 'LIVENESS: the object is cleared again');
++select is((t53.req('GET', :'k')).status, 404, 'LIVENESS: and is gone before the slashed endpoint is tried');
++
++-- ---- B. the endpoint with a trailing slash is stored without it, and an export through it lands at the key ---
++select t53.cfg('http://minio:9000/');
++select is(t53.stored(), 'http://minio:9000', 'archive.configure stores an endpoint without its trailing slash');
++select is(t53.export(), 'ok', 'an export through an endpoint configured with a trailing slash reaches the store');
++select is(t53.held(:'k'), '1:one,2:two', 'and its object lands at the key holding both rows');
++select is((t53.req('DELETE', :'k')).status, 204, 'LIVENESS: the object is cleared');
++select t53.cfg('http://minio:9000///');
++select is(t53.stored(), 'http://minio:9000', 'every trailing slash is dropped, not just one');
++
++-- ---- C. a path prefix is kept, only its trailing slash dropped -------------------------------------------------
++select t53.cfg('http://minio:9000/storage/v1/s3/');
++select is(t53.stored(), 'http://minio:9000/storage/v1/s3',
++  'an endpoint with a path prefix is taken, the prefix kept and its trailing slash dropped');
++select t53.cfg(null);
++select is(t53.stored(), '<null>', 'a null endpoint (AWS S3) is still taken, as null');
++
++-- ---- D. an endpoint the signers cannot use is refused by name, and the row is left as it was --------------------
++select t53.cfg('http://minio:9000/');
++select throws_like($$ select t53.cfg('minio:9000') $$, '%p_endpoint%',
++  'an endpoint with no scheme is refused, naming p_endpoint');
++select throws_like($$ select t53.cfg('ftp://minio:9000') $$, '%p_endpoint%',
++  'an endpoint with a scheme other than http or https is refused, naming p_endpoint');
++select throws_like($$ select t53.cfg('http://minio:9000/?x=1') $$, '%p_endpoint%',
++  'an endpoint with a query string is refused, naming p_endpoint');
++select throws_like($$ select t53.cfg('http://minio:9000#f') $$, '%p_endpoint%',
++  'an endpoint with a fragment is refused, naming p_endpoint');
++select throws_like($$ select t53.cfg('http:///') $$, '%p_endpoint%',
++  'an endpoint with no host is refused, naming p_endpoint');
++select is(t53.stored(), 'http://minio:9000', 'a refused endpoint leaves the stored row as it was');
++
++-- ---- E. a row stored with the slash (before this, or by hand) and a direct signer call spelled with it -----------
++update archive.config set endpoint = 'http://minio:9000/' where parent_table = 't53.evt'::regclass;
++select is(t53.stored(), 'http://minio:9000/', 'LIVENESS: the row holds an endpoint with a trailing slash');
++select is(t53.export(), 'ok', 'an export through a row stored with a trailing slash reaches the store');
++select is(t53.held(:'k'), '1:one,2:two', 'and its object lands at the key holding both rows');
++select is((archive.s3_signed_request('GET', 'http://minio:9000/', 'archive-test-bucket', 'us-east-1', :'k', '',
++             'text/plain', '', 'minioadmin', 'minioadmin')).status, 200,
++  'archive.s3_signed_request addresses the key through an endpoint spelled with a trailing slash');
++select is((archive.s3_signed_request_bytea('GET', 'http://minio:9000/', 'archive-test-bucket', 'us-east-1', :'k', '',
++             'text/plain', ''::bytea, 'minioadmin', 'minioadmin')).status, 200,
++  'archive.s3_signed_request_bytea addresses the key through an endpoint spelled with a trailing slash');
++select is((t53.req('DELETE', :'k')).status, 204, 'LIVENESS: the object is cleared at the end');
++
++select * from finish();

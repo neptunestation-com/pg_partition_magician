@@ -1,0 +1,3 @@
+{"tier": 5, "file": "tests/timescale/db/65_from_hypertable_cutover_moved_delta_by_record_test.sql", "line": 128, "lens": "fresh surface",
+ "scenario": "tests/timescale/db/65's 'and no scratch record is left' asks pgpm.scratch for parent_oid in ('g65a.a65'::regclass, 'g65a.b65'::regclass) after both cutovers, when those names are the new partitioned tables, not the hypertables the records are keyed by; the whole file stays green against a cutover that leaves all 6 scratch rows behind, where it should name the hypertables by the oids recorded before the swap",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql", "pgpm_hypertable/install.sql"], "fixtures": false}

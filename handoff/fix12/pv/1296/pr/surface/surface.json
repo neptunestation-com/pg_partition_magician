@@ -1,0 +1,190 @@
+{
+ "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/base",
+ "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/review",
+ "files": [
+  {
+   "path": "CHANGELOG.md",
+   "status": "modified",
+   "hunks": [
+    [
+     5,
+     16
+    ]
+   ]
+  },
+  {
+   "path": "bench/snapshot_wait_foreign_floor_holder.sh",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     63
+    ]
+   ]
+  },
+  {
+   "path": "docs/reference.md",
+   "status": "modified",
+   "hunks": [
+    [
+     1000,
+     1003
+    ],
+    [
+     1973,
+     1974
+    ],
+    [
+     1986,
+     2004
+    ],
+    [
+     2063,
+     2064
+    ]
+   ]
+  },
+  {
+   "path": "pgpm_core/install.sql",
+   "status": "modified",
+   "hunks": [
+    [
+     7639,
+     7652
+    ],
+    [
+     7699,
+     7703
+    ],
+    [
+     7732,
+     7732
+    ],
+    [
+     7811,
+     7842
+    ]
+   ]
+  },
+  {
+   "path": "test.sh",
+   "status": "modified",
+   "hunks": [
+    [
+     310,
+     310
+    ],
+    [
+     313,
+     319
+    ],
+    [
+     340,
+     345
+    ],
+    [
+     1280,
+     1280
+    ]
+   ]
+  },
+  {
+   "path": "tests/333_snapshot_wait_foreign_floor_holder_test.sql",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     236
+    ]
+   ]
+  }
+ ],
+ "units": [
+  {
+   "unit": "pgpm_core/install.sql:7639-7652",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    7639,
+    7652
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm_core/install.sql:7699-7703",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    7699,
+    7703
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm._snapshot_wait",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    7721,
+    7855
+   ],
+   "why": "touched at 7732-7732"
+  },
+  {
+   "unit": "pgpm._regrain_snapshot_wait",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    7858,
+    7864
+   ],
+   "why": "calls pgpm._snapshot_wait"
+  },
+  {
+   "unit": "pgpm.from_hypertable_cutover",
+   "file": "pgpm_hypertable/install.sql",
+   "lines": [
+    1618,
+    2399
+   ],
+   "why": "calls pgpm._snapshot_wait"
+  }
+ ],
+ "exercised_by": {
+  "pgpm._snapshot_wait": [
+   "bench/hypertable_cutover_waits_for_older_snapshots.sh",
+   "docs/reviews/2026-10-09-pass11.md",
+   "docs/reviews/2026-10-12-pass12.md",
+   "tests/328_regrain_swap_waits_for_older_snapshots_test.sql",
+   "tests/333_snapshot_wait_foreign_floor_holder_test.sql"
+  ]
+ },
+ "finder": "P1",
+ "slice": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/snapshot_wait_foreign_floor_holder.sh",
+   "docs/reference.md",
+   "pgpm_core/install.sql",
+   "pgpm_hypertable/install.sql",
+   "test.sh",
+   "tests/333_snapshot_wait_foreign_floor_holder_test.sql"
+  ],
+  "units": [
+   "pgpm_core/install.sql:7639-7652",
+   "pgpm_core/install.sql:7699-7703",
+   "pgpm._snapshot_wait",
+   "pgpm._regrain_snapshot_wait",
+   "pgpm.from_hypertable_cutover"
+  ],
+  "kind": "mixed"
+ },
+ "ledger": [
+  "pgpm_core/install.sql:7639-7652",
+  "pgpm_core/install.sql:7699-7703",
+  "pgpm._snapshot_wait",
+  "pgpm._regrain_snapshot_wait",
+  "pgpm.from_hypertable_cutover",
+  "CHANGELOG.md",
+  "bench/snapshot_wait_foreign_floor_holder.sh",
+  "docs/reference.md",
+  "test.sh",
+  "tests/333_snapshot_wait_foreign_floor_holder_test.sql"
+ ]
+}

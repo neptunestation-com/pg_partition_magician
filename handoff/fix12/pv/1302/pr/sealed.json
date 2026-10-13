@@ -1,0 +1,17 @@
+{
+  "pinned": "cf00e724b062d8ac3bcbc198d5c0b18f7488804e",
+  "seeds": [
+    {
+      "id": "S1",
+      "kind": "mutation",
+      "mutation": "hypertable_mixed_step_unchecked",
+      "file": "pgpm_hypertable/install.sql",
+      "lens": "fresh surface",
+      "tier": 3,
+      "why": "Pre-#1268 pgpm_hypertable: _from_hypertable_check_arguments never asks _grid_floor, so a p_interval that mixes a month count with a duration ('1 mon 1 day') passes the sign rule and the column-unit rules, from_hypertable copies and from_hypertable_cutover commits the swap (the hypertable and its incoming key dropped), and only the handoff refuses; '1 mon -40 days' meets the frontier check first, with its delete-the-rows remedy. One site, the _grid_floor call. tests/timescale/db/69 parts A and B fail (the copy's or the swap's COMMIT dies 2D000 inside throws_like, and the negative-by-ordering step meets the frontier's message).",
+      "lines": [
+        454
+      ]
+    }
+  ]
+}

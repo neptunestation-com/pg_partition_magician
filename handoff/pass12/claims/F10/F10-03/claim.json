@@ -1,0 +1,3 @@
+{"tier": 5, "file": "tests/timescale/db/66_from_hypertable_column_unit_rules_test.sql", "line": 136, "lens": "fresh surface",
+ "scenario": "tests/timescale/db/66's 'LIVENESS: and no scratch record is left for any' asks pgpm.scratch for parent_oid in ('public.d66'::regclass::oid, t66, e66) after all three migrations, when those names are the new partitioned tables and not the hypertables the records are keyed by; the file stays green against a cutover that leaves its scratch rows behind, where it should name the hypertables by the oids taken before the swap",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql", "pgpm_hypertable/install.sql"], "fixtures": false}

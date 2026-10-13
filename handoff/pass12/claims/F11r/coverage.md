@@ -1,0 +1,64 @@
+# F11r coverage ledger (slice S8c re-run)
+
+- bench/adopt_partition.sh | read: yes | fresh surface: header's FIVE mutations against tests/303 parts F and G (read in full); pg_prove wrapper verdict + LIVENESS reached-at-all line; held
+- bench/archive_fn_s3_readback.sh | read: yes | failure injection: plants PAR1-only Parquet PUT into the checkout's archive module, CONTROL/DEFECT via starved()-based caught(); its "planted the defect:" FAIL is unprefixed (hypothesis H2); held otherwise
+- bench/archive_recorded_chunk_tick_race.sh | read: yes | fresh surface: checked the new _archive_hold_partition (ACCESS SHARE on parent) cannot make the direct call wait and mask the claim-lock mutant; witnesses are premises; held
+- bench/archive_to_s3_multi_heap.sh | read: yes | fresh surface: pg_prove wrapper for tests/archive/db/51, LIVENESS-only failure path, 0-ran witness; wrapper held. Running the tree's own lint over the to_s3 rewrite it guards found F11r-01
+- bench/doc_archive_identity_recovery.sh | read: yes | contracts vs docs: measured repairs (adopt_partition, detach+delete, forbidden delete) and doc scan controls; typed the runbook's adopt_partition call shape against the signature; held
+- bench/doc_install_stops_on_error.sh | read: yes | contracts vs docs: RAN it against pgpm_test-15 on the tree (PASS, 8 commands, every LIVENESS held); parser for -f/stdin forms read; held
+- bench/hypertable_argument_rules.sh | read: yes | header + mutations read; body byte-identical (md5) to hypertable_column_unit_rules.sh's verdict block read in full; held
+- bench/hypertable_capture_delta_by_record.sh | read: yes | header read; body identical to the shared timescale wrapper read in full (unreached/fixture: rule); held
+- bench/hypertable_capture_delta_held.sh | read: yes | header read; body identical to the shared wrapper; held
+- bench/hypertable_carry_capture_by_provenance.sh | read: yes | header read; body identical to the shared wrapper; held
+- bench/hypertable_carry_capture_by_record.sh | read: yes | header read; body identical to the shared wrapper; held
+- bench/hypertable_carry_publications_replica_identity.sh | read: yes | header read; body identical to the shared wrapper; held
+- bench/hypertable_catchup_identity.sh | read: yes | fresh surface: inverted wrapper reading starved() out of discriminate.sh, defect splice + EXCEPT ALL witness; "planted the defect:" FAIL unprefixed (H2); held otherwise
+- bench/hypertable_column_unit_rules.sh | read: yes | fresh surface (new): setup under ON_ERROR_STOP with exits read, shared verdict block, unreached->fixture:; held (test 66 not read)
+- bench/hypertable_copy_rerun_by_record.sh | read: yes | header read; body identical to the shared wrapper; held
+- bench/hypertable_cutover_carries_access.sh | read: yes | header read; body identical to the shared wrapper; held
+- bench/hypertable_cutover_conservation.sh | read: yes | header/mutation read; body diff vs shared wrapper is a comment only; held
+- bench/hypertable_cutover_exclusion_window.sh | read: yes | failure injection/fresh surface: PART B holder on the copy vs the new copy-under-SHARE read and snapshot wait; witnesses are premises, verdicts unprefixed; held
+- bench/hypertable_cutover_foreign_keys.sh | read: yes | header/mutation read; body = shared wrapper (comment-only diff); held
+- bench/hypertable_cutover_identity.sh | read: yes | header/mutation read; body = shared wrapper (comment-only diff); held
+- bench/hypertable_cutover_identity_options.sh | read: yes | header/mutation read; body = shared wrapper; held
+- bench/hypertable_cutover_lock_timeout.sh | read: yes | fresh surface: _scratch_written recorded by hand so the snapshot wait passes the reader, witnessed by age(backend_xmin) < age(written_xid); held
+- bench/hypertable_cutover_serial_sequences.sh | read: yes | header/mutation read; body = shared wrapper; held
+- bench/hypertable_cutover_shape.sh | read: yes | PART B held-lock window, premises vs verdicts; held
+- bench/hypertable_delta_writer_grants.sh | read: yes | header read; body = shared wrapper; held
+- bench/hypertable_derived_names.sh | read: yes | header read; body = shared wrapper (the one read in full and hashed); held
+- bench/hypertable_empty_copy_watermark.sh | read: yes | operator error/failure injection: checked tests/timescale/db/30 reaches assertions before its raising CALLs, so the new unreached->fixture: rule cannot starve this guard; held
+- bench/hypertable_exclusion_refusal.sh | read: yes | header/mutation read; body = shared wrapper; held
+- bench/hypertable_grant_carry_resets_acl.sh | read: yes | header/mutation read; body = shared wrapper; held
+- bench/hypertable_handoff_fk_lock_timeout.sh | read: yes | fresh surface: same hand-recorded _scratch_written witness as lock_timeout; held
+- bench/hypertable_handoff_refusals.sh | read: yes | header/mutations read; body = shared wrapper; held
+- bench/hypertable_index_names.sh | read: yes | header/mutations read; body = shared wrapper; held
+- bench/hypertable_isolation_refused.sh | read: yes | header/mutations read; body = shared wrapper; held
+- bench/hypertable_key_index_on_destination.sh | read: yes | two-file run_file variant: fail folding across files read; held
+- bench/hypertable_late_appends.sh | read: yes | header/mutations read; body = shared wrapper; held
+- bench/hypertable_reads_caller_rls.sh | read: yes | header/mutations read; body = shared wrapper; held
+- bench/hypertable_replica_capture.sh | read: yes | header/mutations read; body = shared wrapper; held
+- bench/hypertable_scratch_owner_follow.sh | read: yes | header/mutation read; body = shared wrapper; held
+- bench/hypertable_scratch_tables_in_pg_temp.sh | read: yes | header/mutations read; body = shared wrapper; held
+- bench/hypertable_shared_preflight.sh | read: yes | header/mutations read; body = column_unit_rules variant; held
+- bench/hypertable_time_rendering.sh | read: yes | time and zones: two-file run_file over tests 35 (zone) and 36 (DateStyle SQL); the zones each file plants not read (H4); held
+- bench/lint_child_by_oid_inverse.sh | read: yes | fresh surface (new): RAN it on the tree: FAILS its three LIVENESS lines on clean code because the tree's checker refuses archive.to_s3 line 3534 -> claim F11r-01
+- bench/lint_value_not_spelling.sh | read: yes | fresh surface: RAN it on the tree, all 42 checks PASS; every defect check has a LIVENESS twin; held
+- bench/liveness_witness_labels.sh | read: yes | fresh surface: RAN it on the tree (PASS, 117 labels, 0 HITs); its FLOOR, SPELLING scans and controls read; held
+- bench/lock_trace.sh | read: no | only its diff (seven premise labels prefixed LIVENESS:) and its FLOOR entries read; eBPF, cannot run on this Mac; out of budget for the body
+- bench/maintain_all_sweep_turns.sh | read: yes | pg_prove wrapper, LIVENESS reached-at-all prefix; held
+- bench/pages_deploy_after_release.sh | read: yes | contracts vs docs (new): evaluator, conditions, pages.yml read; the deploy on a failed Release puts a dbdev version publish-dbdev refused on install.html (hypothesis H1)
+- bench/reads_under_caller_rls.sh | read: yes | three-module dispatcher, PART H window, prove()'s WITNESS line; held
+- bench/regrain_delta_seq_name.sh | read: yes | pg_prove wrapper, two mutations; held
+- bench/regrain_outgoing_fk_lock.sh | read: yes | fresh surface: the swap's new snapshot wait vs the probe's per-iteration COMMITs (probe snapshots newer than the copies); premises prefixed, verdict unprefixed; held
+- bench/regrain_truncate_guard_upgrade.sh | read: yes | upgrade path, premise labels (resume restarted nothing, swap ran) are premises; held
+- bench/retire_detach_lock.sh | read: yes | premise labels prefixed are witnesses (overlap, reads, writes, scan); verdict unprefixed; install not under ON_ERROR_STOP (pre-existing, discriminate checks installs); held
+- bench/scratch_relations.sh | read: yes | core/ts dispatcher by mutant content, unreached rule; held
+- bench/scratch_sequences.sh | read: yes | header and both halves' TEST_FILE/verdicts read; held
+- bench/tests_fail_on_defect.sh | read: yes | fresh surface: G14 (93/74/141) and S7 (303) sections read in full, plant patterns, LIVENESS probes; "planted the defect:" now fixture:-prefixed; held
+- bench/transmute_claim_squat.sh | read: yes | each LIVENESS line checked to be a premise (squat real, owner dead/alive); defect checks unprefixed; held
+- bench/uninstall_hypertable_capture.sh | read: yes | header/mutations, uninstall passed by \ir variable; shared verdict block; held
+- bench/uninstall_hypertable_copy.sh | read: yes | header/mutations; shared verdict block; held
+- bench/uninstall_hypertable_scratch_by_record.sh | read: yes | header/mutation; shared verdict block; held
+- bench/upgrade_from_release.sh | read: no | only its diff (premise labels prefixed LIVENESS:/GUARD:/fixture:) and FLOOR entries read; out of budget for the body
+- bench/upgrade_in_place.sh | read: yes | fresh surface: DEGRADE_COLS gained regrain_written_xid, detach_dispatched_oid, scratch.written_xid; checked install.sql's NULL written_xid rule (waits for every snapshot) and the install-time _disown_unvouched_retirements for the in-flight states the guard does not stage (H3); held
+- bench/upgrade_unanchored_cell.sh | read: yes | upgrade from v0.5.0, LIVENESS lines are premises of the unanchored state; held

@@ -1,0 +1,3 @@
+{"tier": 3, "file": "pgpm_core/install.sql", "line": 2188, "lens": "fresh surface",
+ "scenario": "A partition whose retire() stamped retiring_at but whose detach dispatch failed (no pg_cron) and that the operator then DETACHed by hand is handed to the archive strategy and recorded as covered by the next maintain() tick, because _part_built/_part_detached_by_hand (and _archive_hold_partition) still vouch for any retiring_at mark while retire() in the same tick disowns that mark as unvouched (retain_disown, #705 dispatch record); the archive step should skip a table detached by hand and record nothing for it",
+ "repro": "repro.sql", "install": ["pgpm_core/install.sql"], "fixtures": false}

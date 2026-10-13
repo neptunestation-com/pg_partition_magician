@@ -1,0 +1,18 @@
+{
+ "F3-02": "old (regrain() unchanged since 2026-06-25; its unit marked read in passes 8 to 11; the strict-isolation refusal written for transmute in the lever phase before pass 11 was never extended to regrain)",
+ "F3-04": "old (regrain_step's swap unchanged since 2026-08-14; its unit marked read in passes 8 to 11)",
+ "F14-01": "young (the readers of retiring_at, _part_built, _part_detached_by_hand and _archive_hold_partition, that #1250 in the lever phase before this pass left asymmetric when it added the dispatch record; the state itself, a mark whose dispatch failed, reached the archive step before #1250 too)",
+ "F5-02": "old (archive._owned_key claims key bases as raw text since pass 9's fix phase; its unit marked read in passes 10 and 11)",
+ "F3-03": "old (the copy's LIKE ... INCLUDING CONSTRAINTS predates the previous pin in regrain_step, whose unit was marked read in passes 8 to 11; #633's fix in the pass-11 fix phase carried NOT VALID keys and left NOT VALID CHECKs, and moved the clause into the new _regrain_copy_make)",
+ "F4-03": "old (adopt_partition since the pass-10 fix phase, read in pass 11; the snapshot its re-read uses has never been as of the lock)",
+ "F11-03": "old (as F4-03)",
+ "F13-01": "young (_snapshot_wait, the lever phase's #1253)",
+ "F15-02": "old (the ledger's offset-less legacy hi has been read in the session zone since _over_retired_chunks was written in the pass-10 fix phase; read in pass 11)",
+ "F2-02": "old (check_time_monotonic unchanged since pass 1; read in passes 8 to 11)",
+ "F6-02": "old (from_hypertable_copy's key lookup by conindid since pass 1; read in passes 8 to 11)",
+ "F6-03": "old (_surface_prepare since the pass-9 fix phase; read in passes 10 and 11)",
+ "F16r-01": "young (_from_hypertable_check_arguments reshaped by #1118 and #1138 in the pass-11 fix phase)",
+ "F19-02": "old (archive.configure's endpoint stored verbatim since pass 1)",
+ "F1-06": "old (transmute's resume since pass 2's fix phase)",
+ "F3-05": "old (_regrain_capture_names since the pass-9 fix phase)"
+}

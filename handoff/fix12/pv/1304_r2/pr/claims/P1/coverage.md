@@ -1,0 +1,11 @@
+- pgpm_archive/install.sql:2747-2752 | read: yes | the _object_stem comment hunk; claims both encoders hand canonical text, which the NDJSON encoder does not (P1-01)
+- archive._bound_native | read: yes | SET clause restore, null p_tz, id branch, explicit-offset and offset-less text east and west of the grid, DST gap versus _refuse_empty_range (P1-02)
+- archive._encode_upload_ndjson_single | read: yes | only p_hi is read through _bound_native, p_lo reaches _encode and _object_key raw: SQL,DMY key and Tokyo date-grid contents (P1-01)
+- archive._encode_upload_parquet | read: yes | both bounds read; SQL,DMY key correct (P1-01 GUARD); inverted range after the grid's DST-gap reading writes an empty object (P1-02)
+- pgpm.archive_to_s3_ndjson | read: yes | refusal order, covered_hi returned raw, no bound read of its own; drives P1-01
+- pgpm.archive_to_s3_parquet | read: yes | same shape; _refuse_empty_range parses in the session, drives P1-02
+- CHANGELOG.md | read: yes | the hunk (lines 5-15) read whole; the rest skimmed by section headings only; its "each encoder reads its bounds once" is false of NDJSON on this tree
+- bench/archive_direct_call_bounds.sh | read: yes | bucket creation, install order, ran-count and LIVENESS reporting, exit status
+- docs/reference.md | read: yes | the hunk (2765-2772) and the surrounding archive-key section (2740-2790) read; the rest of the 3979-line file not read for this PR
+- test.sh | read: yes | the hunk (981-984) and the surrounding run_archive guard list (940-990) read; database name uniqueness checked; the rest of the file not read for this PR
+- tests/archive/db/54_archive_direct_call_bounds_session_test.sql | read: yes | plan count, fixture asymmetry, identity checks, which parts fail on this tree (A, C, D, E), Parquet rows not read back in B and F

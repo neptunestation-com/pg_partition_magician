@@ -1,0 +1,3 @@
+{"tier": 5, "file": "bench/retire_pending_detach.sh", "line": 177, "lens": "contracts versus documentation",
+ "scenario": "retire_pending_detach.sh's UPGRADE check is labelled '[100, 200) still holds rows 111, 112 and 113' but asserts count(*) = 3 over the partition, so an upgrade or disown that loses row 113 and leaves any third row in its place passes it; the check should name the rows (string_agg of the ids = '111,112,113'), as the label and CLAUDE.md's identity rule require",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

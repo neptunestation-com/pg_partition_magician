@@ -1,0 +1,74 @@
+finder	slice	model	tokens	coverage	claims(r2)	seeds	findings	known_open	fell	precision	strict
+F1	S1	opus	347623	1.0	7(3)	4	3	0	0	1.00	1.00
+    seeds: F1-01:S1, F1-02:S9, F1-03:S7, F1-04:S3
+    findings: F1-05:T4, F1-06:T3, F1-07:T4
+F2	S2	opus	245227	1.0	3(1)	1	2	0	0	1.00	1.00
+    seeds: F2-01:S4
+    findings: F2-02:T3, F2-03:T4
+F3	S3	opus	297321	1.0	5(2)	1	4	0	0	1.00	1.00
+    seeds: F3-01:S5
+    findings: F3-02:T1, F3-03:T2, F3-04:T1, F3-05:T3
+F4	S4	opus	237623	1.0	3(1)	1	2	0	0	1.00	1.00
+    seeds: F4-01:S3
+    findings: F4-02:T4, F4-03:T3
+F5	S5	opus	285250	1.0	3(1)	1	1	0	1	0.67	0.67
+    seeds: F5-01:S8
+    findings: F5-02:T1
+    fell: F5-03
+F6	S6	opus	283235	1.0	3(1)	1	2	0	0	1.00	1.00
+    seeds: F6-01:S2
+    findings: F6-02:T3, F6-03:T3
+F7	S7a	opus	540302	0.941	3(2)	1	0	0	2	0.33	0.33
+    seeds: F7-01:S8
+    fell: F7-02, F7-03
+F8	S7b	opus	374453	0.286	8(2)	1	5	0	2	0.75	0.75
+    seeds: F8-04:S6
+    findings: F8-01:T5, F8-02:T5, F8-03:T5, F8-05:T5, F8-08:T5
+    fell: F8-06, F8-07
+F9	S8a	opus	370320	1.0	6(2)	6	0	0	0	1.00	1.00
+    seeds: F9-01:S1, F9-02:S3, F9-03:S9, F9-04:S5, F9-05:S2, F9-06:S4
+F10	S8b	opus	412882	0.974	4(1)	2	2	0	0	1.00	1.00
+    seeds: F10-01:S5, F10-04:S5
+    findings: F10-02:T5, F10-03:T5
+F11	S8c	opus	246803	0.104	3(1)	1	2	0	0	1.00	1.00
+    seeds: F11-01:S6
+    findings: F11-02:T5, F11-03:T3
+F12	S8d	opus	256843	0.233	6(2)	3	1	2	0	1.00	0.67
+    seeds: F12-01:S2, F12-02:S2, F12-04:S8
+    findings: F12-06:T5
+    known: F12-03:#1236, F12-05:#1236
+F13	S9	opus	620350	1.0	3(3)	0	1	1	1	0.67	0.33
+    findings: F13-01:T3
+    known: F13-02:#769
+    fell: F13-03
+F14	S10	opus	557851	0.907	3(2)	0	2	0	1	0.67	0.67
+    findings: F14-01:T1, F14-03:T5
+    fell: F14-02
+F15	S11	opus	503467	0.929	2(1)	0	2	0	0	1.00	1.00
+    findings: F15-01:T5, F15-02:T3
+F16	S12	opus	511586	0.793	4(3)	0	3	1	0	1.00	0.75
+    findings: F16-02:T5, F16-03:T5, F16-04:T5
+    known: F16-01:#1232
+F17	S13	opus	484605	0.917	7(1)	6	1	0	0	1.00	1.00
+    seeds: F17-01:S7, F17-02:S1, F17-03:S3, F17-04:S3, F17-05:S2, F17-06:S2
+    findings: F17-07:T4
+F18	S1	fable	305363	1.0	5(2)	3	1	1	0	1.00	0.80
+    seeds: F18-01:S1, F18-03:S9, F18-04:S3
+    findings: F18-02:T4
+    known: F18-05:#1216
+F19	S5	fable	260566	1.0	4(1)	1	1	1	1	0.75	0.50
+    seeds: F19-01:S8
+    findings: F19-02:T3
+    known: F19-03:#814
+    fell: F19-04
+F11r2					0(0)	0	0	0	0	0.00	0.00
+F11r	S8c-r	opus	328789	0.968	1(0)	1	0	0	0	1.00	1.00
+    seeds: F11r-01:S8
+F16r	S12-r	opus	264517	1.0	1(0)	0	1	0	0	1.00	1.00
+    findings: F16r-01:T3
+F8r	S7b-r	opus	409572	1.0	1(0)	1	0	0	0	1.00	1.00
+    seeds: F8r-01:S8
+F12r	S8d-r	opus	465813	1.0	8(0)	1	6	1	0	1.00	0.88
+    seeds: F12r-05:S8
+    findings: F12r-01:T4, F12r-02:T5, F12r-03:T5, F12r-04:T5, F12r-07:T5, F12r-08:T5
+    known: F12r-06:#1180

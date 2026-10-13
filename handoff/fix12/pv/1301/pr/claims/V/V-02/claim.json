@@ -1,0 +1,12 @@
+{
+ "tier": 3,
+ "file": "pgpm_archive/install.sql",
+ "line": 397,
+ "lens": "closing claim",
+ "scenario": "The #1269 consequence through p_bucket rather than p_endpoint: archive.configure stores the bucket verbatim and both signers build endpoint || '/' || bucket || '/' || key, so a bucket spelled '/archive-test-bucket' addresses '//archive-test-bucket/<key>' and MinIO answers HTTP 400 to every PUT, after the read. configure checks nothing about the bucket. Sibling of the mechanism the PR fixes; outside the body's claim. Loud, nothing lost.",
+ "repro": "repro.sql",
+ "install": ["tests/archive/fixtures.sql", "pgpm_core/install.sql", "pgpm_archive/install.sql"],
+ "fixtures": false,
+ "id": "V-02",
+ "finder": "V"
+}

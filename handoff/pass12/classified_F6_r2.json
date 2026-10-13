@@ -1,0 +1,71 @@
+{
+  "claims": [
+    {
+      "id": "F6-01",
+      "finder": "F6",
+      "tier": 1,
+      "file": "scripts/archive_partition_whole.sql",
+      "line": 119,
+      "lens": "fresh surface",
+      "scenario": "pgpm_archive_next_partition_whole's candidate query has no pgpm._part_detached_by_hand filter and the function never calls pgpm._archive_hold_partition, though its header and comments (#1159) say both: a partition the operator DETACHed by hand is handed to the strategy, which reads its range through the parent and finds nothing, [lo,hi) is recorded covered with 0 rows, and once the operator attaches it back retain() drops ids 7, 42, 88 that nothing archived; it should be left out of the candidates (as _archive_step does) and no coverage recorded",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: [0,100) and [100,200) are write-blocked and uncovered candidates\nok - LIVENESS: [0,100) is detached by hand: attached pgpm.part row, _part_detached_by_hand true\nok - LIVENESS: the detached table holds ids 7, 42, 88\n# call 1: f601_ev_p0000000000000000000: fully archived in one file (0 rows, s3_key=f601/0)\n# call 2: f601_ev_p0000000000000000100: fully archived in one file (2 rows, s3_key=f601/100)\nok - LIVENESS: the script ran and archived [100,200), reading ids 150 and 160\nnot ok - the strategy was never handed the detached table's range [0,100)\nnot ok - no archive_ledger coverage is recorded for the table detached by hand\nnot ok - retire()'s drop gate stays shut on [0,100)\nok - LIVENESS: [0,100) is attached back with ids 7, 42, 88\nok - LIVENESS: retention ran (it retired the archived [100,200))\nnot ok - rows 7, 42, 88, which no strategy call ever read, are still in the table after retention\nNOTICE:  trigger \"pgpm_write_block\" for relation \"public.f601_ev_p0000000000000000200\" does not exist, skipping\nNOTICE:  trigger \"pgpm_write_block\" for relation \"public.f601_ev_p0000000000000000300\" does not exist, skipping\nNOTICE:  trigger \"pgpm_write_block\" for relation \"public.f601_ev_p0000000000000000400\" does not exist, skipping\nNOTICE:  trigger \"pgpm_write_block\" for relation \"public.f601_ev_p0000000000000000500\" does not exist, skipping\nNOTICE:  trigger \"pgpm_write_block\" for relation \"public.f601_ev_p0000000000000000600\" does not exist, skipping\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "ok - LIVENESS: [0,100) and [100,200) are write-blocked and uncovered candidates\nok - LIVENESS: [0,100) is detached by hand: attached pgpm.part row, _part_detached_by_hand true\nok - LIVENESS: the detached table holds ids 7, 42, 88\n# call 1: f601_ev_p0000000000000000100: fully archived in one file (2 rows, s3_key=f601/100)\n# call 2: nothing eligible left to archive for f601_ev\nok - LIVENESS: the script ran and archived [100,200), reading ids 150 and 160\nok - the strategy was never handed the detached table's range [0,100)\nok - no archive_ledger coverage is recorded for the table detached by hand\nok - retire()'s drop gate stays shut on [0,100)\nok - LIVENESS: [0,100) is attached back with ids 7, 42, 88\nok - LIVENESS: retention ran (it retired the archived [100,200))\nok - rows 7, 42, 88, which no strategy call ever read, are still in the table after retention\nNOTICE:  trigger \"pgpm_write_block\" for relation \"public.f601_ev_p0000000000000000200\" does not exist, skipping\nNOTICE:  trigger \"pgpm_write_block\" for relation \"public.f601_ev_p0000000000000000300\" does not exist, skipping\nNOTICE:  trigger \"pgpm_write_block\" for relation \"public.f601_ev_p0000000000000000400\" does not exist, skipping\nNOTICE:  trigger \"pgpm_write_block\" for relation \"public.f601_ev_p0000000000000000500\" does not exist, skipping\nNOTICE:  trigger \"pgpm_write_block\" for relation \"public.f601_ev_p0000000000000000600\" does not exist, skipping\n"
+      },
+      "class": "seed_hit",
+      "seed": "S2"
+    },
+    {
+      "id": "F6-02",
+      "finder": "F6",
+      "tier": 3,
+      "file": "pgpm_hypertable/install.sql",
+      "line": 1286,
+      "lens": "contracts versus documentation",
+      "scenario": "from_hypertable_copy(p_track_changes => true) takes the key's conname by `where conindid = v_keyidx` alone, so when an incoming foreign key referencing the hypertable's primary key (TimescaleDB 2.16) comes first in pg_constraint the copy builds <fk>_pgpm_new; the cutover does not find <pk>_pgpm_new, builds the key a second time, and the migrated partitioned table keeps a stray redundant UNIQUE index (f602_ref_fk_pgpm_new_pgpm) on every partition, where the reference promises the copy's key index is adopted rather than rebuilt",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "                   \n----------------------------------------------------------------------------------------------------------\n not ok 3 - the tracking copy pre-built the primary key's index under the primary key's temp name        +\n # Failed test 3: \"the tracking copy pre-built the primary key's index under the primary key's temp name\"+\n #         have: {f602_ref_fk_pgpm_new}                                                                  +\n #         want: {f602_pkey_pgpm_new}\n(1 row)\n\nCALL\n                                   ok                                   \n------------------------------------------------------------------------\n ok 4 - LIVENESS: the cutover swapped and handed the table to transmute\n(1 row)\n\n                                                           is                                                            \n-------------------------------------------------------------------------------------------------------------------------\n not ok 5 - the migrated table carries exactly one unique index, its primary key (no stray copy-built duplicate)        +\n # Failed test 5: \"the migrated table carries exactly one unique index, its primary key (no stray copy-built duplicate)\"+\n #         have: {f602_pkey,f602_ref_fk_pgpm_new_pgpm}                                                                  +\n #         want: {f602_pkey}\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 5\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 0,
+        "tail": "                   \n----------------------------------------------------------------------------------------------------------\n not ok 3 - the tracking copy pre-built the primary key's index under the primary key's temp name        +\n # Failed test 3: \"the tracking copy pre-built the primary key's index under the primary key's temp name\"+\n #         have: {f602_ref_fk_pgpm_new}                                                                  +\n #         want: {f602_pkey_pgpm_new}\n(1 row)\n\nCALL\n                                   ok                                   \n------------------------------------------------------------------------\n ok 4 - LIVENESS: the cutover swapped and handed the table to transmute\n(1 row)\n\n                                                           is                                                            \n-------------------------------------------------------------------------------------------------------------------------\n not ok 5 - the migrated table carries exactly one unique index, its primary key (no stray copy-built duplicate)        +\n # Failed test 5: \"the migrated table carries exactly one unique index, its primary key (no stray copy-built duplicate)\"+\n #         have: {f602_pkey,f602_ref_fk_pgpm_new_pgpm}                                                                  +\n #         want: {f602_pkey}\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 5\n(1 row)\n\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F6-03",
+      "finder": "F6",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 117,
+      "lens": "contracts versus documentation",
+      "scenario": "re-running install.sql over an older install whose pgpm.status() has an earlier result shape drops and recreates it (_surface_prepare); _surface_unreplaceable counts only pg_depend dependants, never the ACL, so the operator's REVOKE EXECUTE FROM PUBLIC and GRANT EXECUTE TO f603_mon are silently lost and PUBLIC can execute status() again, where the section header promises the upgrade keeps the function's grants or refuses",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: before the upgrade, status() has the older shape, PUBLIC cannot execute it and f603_mon can\nok - LIVENESS: the re-run upgraded status() to the declared shape (it was dropped and recreated)\nnot ok - the operator's REVOKE EXECUTE FROM PUBLIC on pgpm.status() survives the upgrade\nnot ok - the operator's GRANT EXECUTE on pgpm.status() to f603_mon survives the upgrade\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: before the upgrade, status() has the older shape, PUBLIC cannot execute it and f603_mon can\nok - LIVENESS: the re-run upgraded status() to the declared shape (it was dropped and recreated)\nnot ok - the operator's REVOKE EXECUTE FROM PUBLIC on pgpm.status() survives the upgrade\nnot ok - the operator's GRANT EXECUTE on pgpm.status() to f603_mon survives the upgrade\n"
+      },
+      "class": "candidate"
+    }
+  ]
+}

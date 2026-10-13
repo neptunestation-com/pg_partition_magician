@@ -1,0 +1,26 @@
+# P1 null results: PR #1299 round 2
+
+## Fresh surface
+
+- `pgpm._retirement_vouched` (install.sql 2187-2190): READ. Its body in this tree is `select p_retiring_at is not null`, with no call to `_detach_dispatched`; the body, the reference (retire section) and tests/330 part B say the mark vouches only with the record. Reproduced as P1-01 (Tier 3: the write-block step blocks the operator's table; `_part_detached_by_hand` does not name it). tests/330 part B would fail on this tree for the same reason.
+- `pgpm._archive_hold_partition`: the mark clause is gone; answers by `pg_partition_ancestors` under ACCESS SHARE on the parent. Probed: a detached table with a vouched mark (part D shape) is not held, so `_archive_step` records nothing and logs `skip_archive` with the remedy; `_archive_fully_covered` stays false and `retire()` keeps the table. Held.
+- `_archive_step`'s hold call for an unanchored row: `coalesce(r.child_oid, case when retiring_at is not null then v_now::oid end)`; with no mark it passes NULL and the hold answers true, as before (documented as unchanged). With a mark and a name resolving to nothing it also answers true (p_child_oid null) and the later `_refuse_filtered_reads(null)` / chunk sizing raise into `skip_archive`; pre-existing behaviour for unanchored rows, no coverage recorded. Held.
+- Coverage with rows_archived 0 on a non-empty table through any path: `_archive_step` and `scripts/archive_partition_whole.sql` both refuse a detached table at the hold; `_archive_noop` reads the partition itself (count); `_run_archive_strategy` with no archive_fn returns null rows but `_archive_fully_covered` is true then anyway. Two-session probe (operator's `DETACH PARTITION ... CONCURRENTLY` issued while the strategy was between the hold and its read through the parent, pre-read work modelled by a 4 s sleep): the first transaction committed `inhdetachpending` while the hold was open, yet the strategy's read through the parent still saw ids 1, 2 and 15, the ledger row carried rows_archived 3, and after the reattach the drop left the rows in the archive. Held (the detach-pending partition stays visible to the holding transaction's reads).
+- `retire()`: the detached-without-record path disowns and refuses (fail_retain_drop); the pending path requires mark AND record; dispatch writes `detach_dispatched_oid` in the dispatch's transaction. Unchanged by the diff; read and consistent with the new rule.
+- `_retain_recall`, `_detach_reap`, `_disown_unvouched_retirements`, `_disown_retirement`: unchanged bodies; each asks `_detach_dispatched` directly, not `_retirement_vouched`, so P1-01's defect does not reach them. Held.
+- `maintain()` order (write blocks, archive, retain, regrain): unchanged; the archive step still runs before retain, which is why the hold's refusal (not the mark) is what shuts the archive hand-off in this tree.
+- tests/280 and 307: the hand-stamped marks now also stamp `detach_dispatched_oid`, matching what retire() writes; their assertions are unchanged.
+- `bench/retirement_mark_needs_dispatch.sh`, `test.sh` registration (`pgpm_perf367`): the wrapper runs tests/330 against an arbitrary install, reports the count ran and treats a non-installing mutant as FAIL. Sound in shape.
+- `scripts/archive_partition_whole.sql`: same hold call and `_archive_unheld_retirement` fallback as `_archive_step`; returns the remedy text instead of logging it. Held.
+
+## Identity and names
+
+- `_retirement_vouched` is keyed by the row's anchor oid and `_detach_dispatched` compares `detach_dispatched_oid = p_rel`, so a record naming another relation does not vouch (tests/330 part B's third case). In this tree the key is never consulted (P1-01), so the "record names another relation" case is also misjudged; same root cause, not a separate claim.
+- `_archive_unheld_retirement` is asked with `v_now::oid` (the name's current relation), after the identity check (`v_now::oid is distinct from r.child_oid` → `fail_archive_identity`), so the remedy text names the relation that is there. Held.
+- The remedy text spells `ALTER TABLE <parent> ATTACH PARTITION <nsp>.<child> FOR VALUES FROM (%L) TO (%L)` with `lo`/`hi` as native text; for an `id` grid the literals are quoted numerics, which PostgreSQL accepts for a bigint bound (part D types it). Not probed for `time`/`text_time` grids (budget).
+
+## Hypotheses (no reproduction)
+
+- With `_retirement_vouched` as in this tree, `maintain()`'s auto-regrain candidate scan (`not _part_detached_by_hand`) could pick a monolith the operator detached by hand under a failed-dispatch mark; what `regrain_step` does with a detached source (the regrain-source-detached reclaim path) was not followed. Possibly higher than Tier 3 if the source is dropped; not built.
+- The hold logs `skip_archive` with the remedy on every tick for a vouched retirement detached before archiving was configured (documented as "every tick"); on a parent with many such tables and a frequent tick this is log growth rather than a defect.
+- The remedy for `time`/`text_time` grids: the `%L`-quoted bounds in the typed `ATTACH PARTITION` should be checked against `_encode` for text_time (the `FOR VALUES` literal must be the encoded control value, not pgpm's native text).

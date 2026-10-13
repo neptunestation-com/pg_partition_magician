@@ -1,0 +1,3 @@
+{"tier": 5, "file": "tests/27_untransmute_test.sql", "line": 37, "lens": "contracts versus documentation",
+ "scenario": "tests/27 asserts 'all rows are preserved' after untransmute as count(*) = 100, though its fixture's rows are named (bodies b1..b100); the assertion passes for any 100 rows, so a reversal that loses rows and gains as many others to the same count is certified; it should assert the rows by identity",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

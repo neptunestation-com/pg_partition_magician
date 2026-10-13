@@ -1,0 +1,17 @@
+{
+  "pinned": "f96b180af43d5d802d9e9b8b25e5740ad7f2ff69",
+  "seeds": [
+    {
+      "id": "S1",
+      "kind": "mutation",
+      "mutation": "regrain_copy_validates_not_valid_check",
+      "file": "pgpm_core/install.sql",
+      "lens": "fresh surface",
+      "tier": 3,
+      "why": "Pre-#1261 _regrain_copy_make: the copy keeps every CHECK LIKE ... INCLUDING CONSTRAINTS gave it, the parent's NOT VALID one as a validated one, so the first row written before that CHECK, which the parent still serves, fails its copy batch with 23514 on every tick and the run is wedged until regrain_cancel. One site, the drop after the LIKE. tests/331 catches it: (A) regrain_history dies 23514 and never swaps, (B) the run restarts and then dies on row 7 every tick, (C) never swaps, and (D) on PostgreSQL 18 dies 23502 on the NOT NULL.",
+      "lines": [
+        6562
+      ]
+    }
+  ]
+}

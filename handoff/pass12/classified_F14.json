@@ -1,0 +1,26 @@
+{
+  "claims": [
+    {
+      "id": "F14-01",
+      "finder": "F14",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 2188,
+      "lens": "fresh surface",
+      "scenario": "A partition whose retire() stamped retiring_at but whose detach dispatch failed (no pg_cron) and that the operator then DETACHed by hand is handed to the archive strategy and recorded as covered by the next maintain() tick, because _part_built/_part_detached_by_hand (and _archive_hold_partition) still vouch for any retiring_at mark while retire() in the same tick disowns that mark as unvouched (retain_disown, #705 dispatch record); the archive step should skip a table detached by hand and record nothing for it",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "----------------------------------------------------------------------------------------\n ok 4 - LIVENESS: the archive step ran this tick and handed the strategy the attached aged partition [20, 30)\n(1 row)\n\n                                             ok                                              \n---------------------------------------------------------------------------------------------\n ok 5 - LIVENESS: in the same tick retire() judged the detach the operator's (retain_disown)\n(1 row)\n\n                                                  is                                                  \n------------------------------------------------------------------------------------------------------\n not ok 6 - the archive step does not hand the strategy a table the operator detached by hand        +\n # Failed test 6: \"the archive step does not hand the strategy a table the operator detached by hand\"+\n #         have: {0-20}                                                                              +\n #         want: NULL\n(1 row)\n\n                            is                             \n-----------------------------------------------------------\n not ok 7 - and records no archive coverage for it        +\n # Failed test 7: \"and records no archive coverage for it\"+\n #         have: {0-20}                                   +\n #         want: NULL\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 7\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 0,
+        "tail": "----------------------------------------------------------------------------------------\n ok 4 - LIVENESS: the archive step ran this tick and handed the strategy the attached aged partition [20, 30)\n(1 row)\n\n                                             ok                                              \n---------------------------------------------------------------------------------------------\n ok 5 - LIVENESS: in the same tick retire() judged the detach the operator's (retain_disown)\n(1 row)\n\n                                                  is                                                  \n------------------------------------------------------------------------------------------------------\n not ok 6 - the archive step does not hand the strategy a table the operator detached by hand        +\n # Failed test 6: \"the archive step does not hand the strategy a table the operator detached by hand\"+\n #         have: {0-20}                                                                              +\n #         want: NULL\n(1 row)\n\n                            is                             \n-----------------------------------------------------------\n not ok 7 - and records no archive coverage for it        +\n # Failed test 7: \"and records no archive coverage for it\"+\n #         have: {0-20}                                   +\n #         want: NULL\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 7\n(1 row)\n\n"
+      },
+      "class": "candidate"
+    }
+  ]
+}

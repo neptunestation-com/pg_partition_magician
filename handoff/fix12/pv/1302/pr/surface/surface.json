@@ -1,0 +1,219 @@
+{
+ "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/base",
+ "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1302/pr/review",
+ "files": [
+  {
+   "path": "CHANGELOG.md",
+   "status": "modified",
+   "hunks": [
+    [
+     4,
+     21
+    ]
+   ]
+  },
+  {
+   "path": "bench/hypertable_mixed_step_and_unit_remedy.sh",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     98
+    ]
+   ]
+  },
+  {
+   "path": "docs/reference.md",
+   "status": "modified",
+   "hunks": [
+    [
+     1074,
+     1082
+    ]
+   ]
+  },
+  {
+   "path": "pgpm_core/install.sql",
+   "status": "modified",
+   "hunks": [
+    [
+     9064,
+     9071
+    ],
+    [
+     9073,
+     9073
+    ],
+    [
+     9075,
+     9076
+    ],
+    [
+     9094,
+     9094
+    ],
+    [
+     9097,
+     9097
+    ],
+    [
+     9100,
+     9100
+    ],
+    [
+     9102,
+     9102
+    ]
+   ]
+  },
+  {
+   "path": "pgpm_hypertable/install.sql",
+   "status": "modified",
+   "hunks": [
+    [
+     433,
+     443
+    ],
+    [
+     451,
+     459
+    ]
+   ]
+  },
+  {
+   "path": "test.sh",
+   "status": "modified",
+   "hunks": [
+    [
+     601,
+     604
+    ]
+   ]
+  },
+  {
+   "path": "tests/timescale/db/69_from_hypertable_mixed_step_and_unit_remedy_test.sql",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     206
+    ]
+   ]
+  }
+ ],
+ "units": [
+  {
+   "unit": "pgpm._time_unit_contract",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    9070,
+    9105
+   ],
+   "why": "touched at 9064-9071"
+  },
+  {
+   "unit": "pgpm_hypertable/install.sql:433-443",
+   "file": "pgpm_hypertable/install.sql",
+   "lines": [
+    433,
+    443
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm._from_hypertable_check_arguments",
+   "file": "pgpm_hypertable/install.sql",
+   "lines": [
+    445,
+    460
+   ],
+   "why": "touched at 451-459"
+  },
+  {
+   "unit": "pgpm._transmute",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    10005,
+    11666
+   ],
+   "why": "calls pgpm._time_unit_contract"
+  },
+  {
+   "unit": "pgpm.from_hypertable_cutover",
+   "file": "pgpm_hypertable/install.sql",
+   "lines": [
+    1637,
+    2418
+   ],
+   "why": "calls pgpm._from_hypertable_check_arguments"
+  },
+  {
+   "unit": "pgpm.from_hypertable",
+   "file": "pgpm_hypertable/install.sql",
+   "lines": [
+    2430,
+    2471
+   ],
+   "why": "calls pgpm._from_hypertable_check_arguments"
+  }
+ ],
+ "exercised_by": {
+  "pgpm._from_hypertable_check_arguments": [
+   "bench/hypertable_argument_rules.sh",
+   "bench/hypertable_column_unit_rules.sh",
+   "bench/hypertable_mixed_step_and_unit_remedy.sh",
+   "docs/reviews/2026-10-09-pass11.md",
+   "docs/reviews/2026-10-12-pass12.md",
+   "tests/timescale/db/58_from_hypertable_argument_rules_test.sql",
+   "tests/timescale/db/66_from_hypertable_column_unit_rules_test.sql",
+   "tests/timescale/db/69_from_hypertable_mixed_step_and_unit_remedy_test.sql"
+  ],
+  "pgpm._time_unit_contract": [
+   "bench/hypertable_column_unit_rules.sh",
+   "bench/hypertable_mixed_step_and_unit_remedy.sh",
+   "bench/transmute_step_precision.sh",
+   "docs/reviews/2026-10-06-pass9.md",
+   "docs/reviews/2026-10-08-pass10.md",
+   "docs/reviews/2026-10-09-pass11.md",
+   "docs/reviews/2026-10-12-pass12.md",
+   "tests/287_transmute_time_step_precision_test.sql",
+   "tests/306_date_key_anchor_midnight_test.sql",
+   "tests/timescale/db/66_from_hypertable_column_unit_rules_test.sql",
+   "tests/timescale/db/69_from_hypertable_mixed_step_and_unit_remedy_test.sql"
+  ]
+ },
+ "finder": "P1",
+ "slice": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/hypertable_mixed_step_and_unit_remedy.sh",
+   "docs/reference.md",
+   "pgpm_core/install.sql",
+   "pgpm_hypertable/install.sql",
+   "test.sh",
+   "tests/timescale/db/69_from_hypertable_mixed_step_and_unit_remedy_test.sql"
+  ],
+  "units": [
+   "pgpm._time_unit_contract",
+   "pgpm_hypertable/install.sql:433-443",
+   "pgpm._from_hypertable_check_arguments",
+   "pgpm._transmute",
+   "pgpm.from_hypertable_cutover",
+   "pgpm.from_hypertable"
+  ],
+  "kind": "mixed"
+ },
+ "ledger": [
+  "pgpm._time_unit_contract",
+  "pgpm_hypertable/install.sql:433-443",
+  "pgpm._from_hypertable_check_arguments",
+  "pgpm._transmute",
+  "pgpm.from_hypertable_cutover",
+  "pgpm.from_hypertable",
+  "CHANGELOG.md",
+  "bench/hypertable_mixed_step_and_unit_remedy.sh",
+  "docs/reference.md",
+  "test.sh",
+  "tests/timescale/db/69_from_hypertable_mixed_step_and_unit_remedy_test.sql"
+ ]
+}

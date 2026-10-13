@@ -1,0 +1,253 @@
+{
+  "F1-05": {
+    "verdict": "finding",
+    "tier": 4,
+    "root_cause": "_transmute_refuse_child_holders asks _is_fine_child_label(p_control_kind, ...), which accepts any time label of the KIND (^YYYY(_NN)*), not a label of the grid being registered; a monthly grid (and set_regrain, which refuses coarser targets, #341) can never create <rel>_pYYYY, so an operator's standalone sales_p2023 refuses the conversion with a message calling it a regrain orphan and prescribing 'drop table public.sales_p2023', which destroys the operator's rows. Not documented as intended: reference.md scopes the refusal to 'any name pgpm could give a fine child', and the code comment to 'a name pgpm could give one of this table's fine children'. Distinct from open #1216 (under-refusal via the pg_inherits exemption). Reproduced on both trees by the classifier; finder's repro used unchanged."
+  },
+  "F1-06": {
+    "verdict": "finding",
+    "tier": 3,
+    "root_cause": "transmute's resume checks the claim's column (#628) and grid (#574) but not the text_time encoding (p_tt_prefix/width/radix/unit/alphabet/discard_bits/epoch): it skips phase 1 on the old-encoding pgpm_monolith_bound CHECK and the cutover's ATTACH in the new encoding scans under ACCESS EXCLUSIVE and dies raw (partition constraint violated) after the bound and claim committed. Reproduced 3/3 on the pristine tree with the finder's repro unchanged (held locks, not timing); not documented (guide.md 'A timeout is safe to retry' and reference.md's resume refusals name only the column and grid); no open issue covers the encoding."
+  },
+  "F1-07": {
+    "verdict": "finding",
+    "tier": 4,
+    "root_cause": "reference.md's transmute entry (line 90-93) says a naive timestamp column written as local wall time east of UTC runs on an hourly grid given obtain greater than the offset, but transmute's frontier-skew refusal (pgpm._frontier_skew_limit = now() + step + 1 h, install.sql:9805/10674) refuses such a table's current rows for any offset over one hour on a sub-day grid, so the documented call fails and the operator must also pass p_force_frontier, which the document never says; the refusal is a policy check with a documented override, so the document is what is wrong (Tier 4). Reproduced on both trees with the finder's repro unchanged; not in the open-issue list."
+  },
+  "F10-02": {
+    "verdict": "finding",
+    "tier": 5,
+    "root_cause": "tests/timescale/db/65 line 128 resolves 'g65a.a65'/'g65a.b65'::regclass after the swap, so it asks the new partitioned tables' oids while pgpm.scratch is keyed by the dropped hypertables' oids (from_hypertable_cutover deletes where parent_oid = p_hypertable::oid before the rename); the assertion is vacuous and stays ok with all 6 scratch rows left by a cutover missing that delete. Reproduced on both trees via the classifier; not a re-find of #1057 or #1138 (those concern the cutover itself, not this assertion)."
+  },
+  "F10-03": {
+    "verdict": "finding",
+    "tier": 5,
+    "root_cause": "tests/timescale/db/66 line 136 resolves d66/t66/e66 by name after the swap, so it reads the new partitioned tables' oids, never the hypertable oids pgpm.scratch is keyed by; the assertion is vacuous and stays green with 3 orphaned scratch rows when the cutover's scratch delete is removed (re-run on the pristine pin: fails, 3 rows left, assertion ok 19). Not a re-find of an open issue (#1138 bullet 5 is the tests/42 hand-delete arm, a different mechanism)."
+  },
+  "F11-02": {
+    "verdict": "finding",
+    "tier": 5,
+    "root_cause": "ci_runs_lint_jobs.sh check 5 accepts test.sh's ci on the spelling of a \"$0\" lint command and never requires that a failed lint track fail ci, so a ci that runs lint and drops its exit (the `*) ci_failed=...lint` arm emptied) passes the guard while printing ci: PASS over a red Lint summary, #1183's consequence; no open issue covers it and neither mutation (ci_lint_job_dropped, ci_skips_lint_track) exercises the failure arm"
+  },
+  "F11-03": {
+    "verdict": "finding",
+    "tier": 3,
+    "root_cause": "adopt_partition judges attachment (both the pre-lock check and the re-read under SHARE UPDATE EXCLUSIVE) through the caller's transaction snapshot and does not refuse a non-READ COMMITTED caller, so a REPEATABLE READ call whose snapshot predates a committed DETACH records the detached table in pgpm.part as attached, breaking the documented refusal of 'a p_child that is not attached to it' and the reference's 'the partition cannot be detached or dropped between the check and the row'; no isolation requirement is documented for adopt_partition while untransmute and transmute refuse stricter isolation and retire's docs promise the catalog as of its lock 'a caller in REPEATABLE READ included'. Reproduced on both trees by the finder's repro.sql unchanged (READ COMMITTED control refuses on the same state); the resulting row is the hand-detached state pgpm's #705 handling already leaves standing, so no loss: Tier 3. Not a re-find of any open issue."
+  },
+  "F12-03": {
+    "verdict": "known_open",
+    "issue": 1236
+  },
+  "F12-05": {
+    "verdict": "known_open",
+    "issue": 1236
+  },
+  "F12-06": {
+    "verdict": "finding",
+    "tier": 5,
+    "root_cause": "assignments() reads only :=/= and SELECT ... INTO (plus DECLARE initialisers), never a FOR loop's target, so `for v_cols in select string_agg(quote_ident(attname), ', ') ... loop` assigns an unmarked text local the #409 quoted list and CHECK 1 passes it (exit 0), while the same list by SELECT INTO in the same loop is refused; the docstring's 'read by VALUE ... wherever PL/pgSQL takes it' (#1179) and select_into()'s explicit exclusions (EXECUTE, FETCH, INSERT INTO) do not exclude it. Distinct from #1236 (strip_noise comment/literal blanking) and #1031 A1031-3 (statement anchoring). Rebuilt: the finder's premise for (B) grepped the edited file for the fixture's spelling; the verified repro instead creates and runs the FOR-target function in the fresh database and shows v_cols receives id, \"Foo Bar\", proving PL/pgSQL accepts and assigns the quoted list.",
+    "rebuilt": true,
+    "repro": "repro.verified.sh"
+  },
+  "F13-01": {
+    "verdict": "finding",
+    "tier": 3,
+    "root_cause": "_snapshot_wait judges 'cannot see the copies' by backend_xmin, which is the cluster-wide oldest running xid: a transaction older than regrain_written_xid open in ANOTHER database holds every statement of this database at or before the reference, so the swap defers at its budget (maintain: skip_regrain every tick) for that transaction's lifetime and names an innocent local pid as a reader that 'would find the regrained range empty', against docs/reference.md ('the wait ends once no session holds a snapshot that could miss a copy'; 'other databases and hot standbys are not consulted') and the function comment. Reproduced on both trees by the finder's repro.sh (control A swaps, B refused with every LIVENESS passing; held transaction, not timing); not among the open issues (#1256 is the marker-cycle limit, a different mechanism). Over-wait only, no loss: Tier 3, documented contract not kept."
+  },
+  "F13-02": {
+    "verdict": "known_open",
+    "issue": 769,
+    "reason": "Reproduces on both trees (classifier re-run: pristine and review both fail tests 3 and 4 with 'cannot convert infinity to integer' / 'cannot subtract infinite timestamps', nothing committed). Same mechanism as open #769's second bullet, unstruck: 'The time-kind maximum path refuses +infinity up front; the -infinity side is unchecked.' In _transmute (pgpm_core/install.sql ~10559) only v_max_ts gets the isfinite refusal; the #895 non-finite check on v_min_raw is limited to p_control_kind = 'id', so a time/date -infinity minimum reaches _grid_floor raw. The bullet guessed the symptom at _time_literal; the run shows it dies earlier in _grid_floor, same missing refusal and same fix. This reproduction is the bullet's first built one; Tier 3 if counted (loud wrong refusal, no remedy text, nothing committed)."
+  },
+  "F13-03": {
+    "verdict": "fell",
+    "reason": "The reproduction does fail on both trees (tests/101 stays green against the null-owner mutant), but the contract it says goes unguarded is pinned elsewhere in the suite, so nothing passes for the wrong reason. tests/101's assertion 5 claims only what it checks ('a completed conversion releases its claim by deleting the row'); the stale comment above it is not a test defect with a Tier 5 consequence. The same mutant (the _transmute claim insert writing owner_pid, owner_backend_start as null, null) run on the pristine tree fails tests/310 on 13 assertions, among them 'not ok 2 - A: the claim on t310s records the owning session's pid and its real backend_start' and 'not ok 10 - B: ... records the owning session's real backend_start, not NULL'. It also fails tests/125 on 5, among them 'not ok 30 - LIVENESS: (C) the claim is owned by the op backend' and 'not ok 32 - C: from ANOTHER session the same conversion is still refused while the owner is alive'. So ./test.sh goes red on exactly this defect, which is what the reaper/transmute_abort consequence the claim names would need to stay hidden."
+  },
+  "F14-01": {
+    "verdict": "finding",
+    "tier": 1,
+    "rebuilt": true,
+    "repro": "repro.verified.sql",
+    "root_cause": "_part_detached_by_hand/_part_built and _archive_hold_partition vouch for a retiring_at mark by itself, without the dispatch record (detach_dispatched_oid) that retire() requires (#705), and maintain() runs _archive_step before retain(). So a table carrying an unvouched mark (the dispatch failed) that the operator detached by hand is handed to the strategy and recorded as fully covered in the same tick in which retire() disowns it. docs/reference.md (retire) says the archive step leaves such a table alone and offers 'attach the table back to the parent ... so retention retires it' as the remedy. Taking that remedy, retention drops the reattached table on the false coverage without archiving it, and rows 1, 2 and 15 are lost. The finder's repro stopped at the wrong ledger row (filed at Tier 3) and used a strategy that reads nothing. The rebuild reads through the parent as pgpm_archive's transports do and continues to the documented reattach. With the bogus ledger row removed the same rows are archived before the drop. Distinct from #705's body by mechanism: that issue is about trusting pgpm.part.attached, which was fixed; this one trusts a mark the dispatch record does not back."
+  },
+  "F14-02": {
+    "verdict": "fell",
+    "reason": "The repro does fail on both trees, but only because it runs the one assertion on its own, against an empty table the repro builds itself. Inside tests/260 the comparison it is meant to witness cannot be over nothing: assertions 5 to 7 (and 13 to 14 for B) read public.ny after the regrain and require it to hold the named edge rows (nov-tail-1, nov-tail-2, dec-head; mar-tail, apr-head-1, apr-head-2), and the identity check (A 8 / B 15) then forces ny_before to hold them too. Checked on pristine in pgpm_test-15: with ny_before snapshotted empty (where false), the file fails at 'not ok 8 - A: the table holds exactly the rows it held before the regrain' and 'not ok 9'. The count LIVENESS adds nothing beyond the identity check, so it is redundant, but the file accepts no state it should refuse and does not pass for the wrong reason. Same standard as pass 9's F10r-04 ('the vacuous pass the claim describes is not reachable; no state the test should refuse is accepted'). Not Tier 5 by the rubric."
+  },
+  "F14-03": {
+    "verdict": "finding",
+    "tier": 5,
+    "root_cause": "tests/27's 'all rows are preserved' after untransmute is count(*) = 100 over a fixture whose rows are named b1..b100, so it accepts 100 substituted rows; not the #1034 count-only sites (tests/67, 48)"
+  },
+  "F15-01": {
+    "verdict": "finding",
+    "tier": 5,
+    "root_cause": "tests/72's only RLS assertion asks the role the policy names (count 400), never a role it does not name, so a transmute that replays tenant_iso TO PUBLIC (t72_writer then reads tenant 1's 402 rows) passes all 15 assertions; reproduced on both trees via classify_claims.py, and the same one-line mutant also passes tests 159, 176, 185, 205, 218, 220, 241 and 250 (no other suite test pins policy roles); not in the open-issue list"
+  },
+  "F15-02": {
+    "verdict": "finding",
+    "tier": 3,
+    "root_cause": "_over_retired_chunks casts a legacy offset-less retired ledger hi (a pre-#977 strategy's covered_hi stored verbatim, a state the #977 and _native_order_key comments acknowledge and no upgrade normalises) with ::timestamptz in the caller's TimeZone, so the #1141 hold depends on the session: held from UTC, not held from Asia/Kolkata, which breaks tests/317's stated contract (same answer from any session's TimeZone); Tier 3 because in the reproduced shape the unheld partition is archived under its own lo/key (acts where it should hold, nothing overwritten). Rebuilt: the original also wrote the chunk's lo offset-less, which no install writes (lo is always part.lo or the rendered max(hi)); the rebuild gives lo pgpm's canonical text with a GUARD and still fails on pristine with every liveness passing. Not known-open (#1030 bullet 4 is the IMMUTABLE labels, struck).",
+    "rebuilt": true,
+    "repro": "repro.verified.sql"
+  },
+  "F16-01": {
+    "verdict": "known_open",
+    "issue": 1232,
+    "reason": "Reproduces on both trees (tests 4 and 5 fail), but it is the same mechanism as open #1232 (LB2/B04-03): pgpm_hypertable's _from_hypertable_check_arguments (install.sql:440) passes pgpm._time_unit_contract's transmute-only remedy ('re-run transmute ... pgpm.transmute_abort') through unwrapped on the date-anchor message (pgpm_core/install.sql:9085), so a pre-copy hypertable refusal names the wrong call."
+  },
+  "F16-02": {
+    "verdict": "finding",
+    "tier": 5,
+    "root_cause": "tests/archive/db/16 Part B judges the Parquet object at the [-10000, 0) key by size (neg_bytes > pos_bytes), not by identity with the chunk's file: its own assertion text ('is the larger, 1000-row file') and header ('a clobbered object cannot pass an identity check') promise identity, and a strategy that uploads 500 of the chunk's 1000 rows passes 23/23 on both trees (reproduced by the classifier on the pristine tree). Count-for-identity in the CLAUDE.md sense; 08 Part B's parquet_object_holds is the identity comparison the file lacks. The #502 key-collision defect itself is still caught (isnt on the keys, Part C's key shape, and a 10-row clobber is smaller), so Tier 5 only, not a gap in #502's coverage."
+  },
+  "F16-03": {
+    "verdict": "finding",
+    "tier": 5,
+    "root_cause": "tests/archive/db/08 reads its bigint-keyed NDJSON objects back by line count only (fetch_ndjson_row_count at lines 100-103 and 268-270; the two 5-row chunks never read), so a strategy that writes \"id\":1 on every line stays 22/22 green despite the file's own comment promising 'proof the object genuinely holds every row'; reproduced on pristine and review trees, no open issue covers this file (#1034 A1034-5 is tests/67 and 48)"
+  },
+  "F16-04": {
+    "verdict": "finding",
+    "tier": 5,
+    "root_cause": "tests/archive/db/44 checks its two Parquet tick objects by the 4-byte PAR1 prefix instead of by identity with archive._pq_to_parquet of each ledgered [lo, hi), contrary to its own header ('the objects they wrote are read back by identity') and assertion text ('are Parquet files'); it repeats the exact gap #1093 closed in tests/archive/db/08 (a transport uploading only PAR1 while ledgering the rows), and stays 15/15 against that mutant on the pristine tree. Not among the open issues (#774, #1030, #1034 do not name it)."
+  },
+  "F16r-01": {
+    "verdict": "finding",
+    "tier": 3,
+    "root_cause": "_from_hypertable_check_arguments (pgpm_hypertable/install.sql:434) does not ask transmute's mixed month + duration step rule (pgpm._grid_floor, pgpm_core/install.sql:1638), which _refuse_bad_transmute_arguments reads as positive, so from_hypertable and from_hypertable_cutover with p_interval '1 mon 1 day' copy, commit the swap (hypertable and incoming FK dropped) and are refused only at the handoff, leaving a plain unmanaged table (rows intact); and '1 mon -40 days' reaches the frontier check, whose limit lies in the past, and is refused with a delete-the-newest-rows remedy (tests/timescale/db/58 pins only the 'cannot migrate hypertable' prefix). Breaks docs/reference.md's '`transmute`'s argument rules are asked first' contract. Reproduced unchanged on the pristine tree (by the classifier and by hand: mx_a and mx_b left relkind r, 0 FKs, unregistered). Not known-open: #1221 is the #455 session-zone rule and #1232 is _time_unit_contract's remedy text, different rules on the same pre-swap contract. Tier 3, as #1221: no row lost, the documented handoff remedy finishes it, but the call acts where it should refuse."
+  },
+  "F17-07": {
+    "verdict": "finding",
+    "tier": 4,
+    "root_cause": "stale duplicated tail of the #1161 CHANGELOG bullet (merge leftover) says set_regrain refuses a run past half the lock table; the code and docs/reference.md (set_regrain only warns, logs warn_regrain_lock_budget and stores the target) and the bullet own first half disagree; the CHANGELOG is wrong"
+  },
+  "F18-02": {
+    "verdict": "finding",
+    "tier": 4,
+    "root_cause": "_transmute_refuse_staging_squatter's relation refusal hard-codes the remedy 'drop table <nsp>.<rel>_pgpm_new' without asking the holder's relkind (its monolith and orphan-child siblings use _relkind_noun or name no statement), so for a sequence, view or index holding the staging name the statement the operator is told to type fails 42809 'is not a table'. Not documented (docs/reference.md only promises 'the up-front message and remedy'); no open issue shares the mechanism (#1217 is the CREATE's 23505 arm naming the wrong holder). Rebuilt: the original gated a LIVENESS check on the message containing a parenthesised drop statement, so a fix that names no statement (the monolith refusal's 'Drop or rename it') would still fail it; the rebuild treats the named statement as the thing tested, not a premise.",
+    "rebuilt": true,
+    "repro": "repro.verified.sql"
+  },
+  "F18-05": {
+    "verdict": "known_open",
+    "issue": 1216
+  },
+  "F19-02": {
+    "verdict": "finding",
+    "tier": 3,
+    "root_cause": "archive.configure stores p_endpoint verbatim and both signers append '/' || bucket to it, so a trailing-slash endpoint (a valid spelling of the documented 'URL ... path prefix and all') yields //bucket/key and every PUT fails HTTP 400 after the read; refused nowhere, unlike p_part_bytes/p_fetch_rows (#594, #636). Fails loudly, nothing lost: Tier 3 (acts when it should refuse). Rebuilt: the original asserted configure ACCEPTS the slash as LIVENESS, so a fix that refuses it there could never close the issue; the rebuild passes on either a refusal naming the endpoint or a working export.",
+    "rebuilt": true,
+    "repro": "repro.verified.sql"
+  },
+  "F19-03": {
+    "verdict": "known_open",
+    "issue": 814,
+    "reason": "Reproduces on both trees (liveness 1-4 pass on pristine, 5-7 fail: the Jan 2 row is PUT at f19d.ev_2024020100000000). Same mechanism as #814's open bullet 'pgpm_archive/install.sql:2445: the S3 key's time label is built from p_lo::timestamptz::text, so the same chunk gets a different key from sessions with a different DateStyle or zone': line 2445 at pass 6 (ae5dddc) is archive._object_stem with the identical set datestyle = 'ISO, MDY' pin, so the only way that bullet holds is the stem parsing p_lo under its pinned DateStyle while the session (range read, empty-range and recorded-chunk checks) parses it under its own, which is this claim. The bullet is neither struck nor marked fixed. Were it not open, it would be Tier 3: docs/reference.md says the stem is the chunk's lo and the key does not depend on the session."
+  },
+  "F19-04": {
+    "verdict": "fell",
+    "reason": "Reproduces on both trees, but the refusal is the documented contract, not a breach of it. docs/reference.md (archive_fn section) says a call at a recorded chunk's key 'is written only when it reproduces that chunk', and defines the rows' identity as 'archive.object_key_claim.rows_digest, the md5 of the sorted md5s of each row's JSON text, rendered under pinned settings so a re-run from a session in another time zone, with another IntervalStyle or another search_path finds the same rows': the normalisation it promises is over session settings, not table shape. After ALTER TABLE ... ADD COLUMN the re-run does not reproduce the chunk: archive_to_s3_ndjson renders the payload as row_to_json(t.*) (pgpm_archive/install.sql ~3078), so the object it would PUT carries a new \"note\":null key in every line (and the Parquet strategy a different schema), i.e. other bytes than the chunk recorded. Refusing is the conservative side the code's own comment chooses ('refusing a re-run is the safe side of not knowing'), nothing is lost or acted on, no tick path is affected (_next_archive_chunk never hands a strategy a recorded key), and the message's parenthetical names exactly what differed ('their digest is not the one archive.object_key_claim recorded when the chunk was written'). No open issue shares the mechanism."
+  },
+  "F2-02": {
+    "verdict": "finding",
+    "tier": 3,
+    "root_cause": "check_time_monotonic compares %I::timestamptz, casting a naive timestamp column in the caller's session TimeZone, so wall times in that zone's spring-forward gap reorder (02:30 reads as 03:30 EDT, past 03:15) and the fraction docs/reference.md defines as 'adjacent pairs (ordered by the id) whose time is non-decreasing' depends on who runs it (1.0 from UTC, 0.5 from America/New_York; a decreasing pair across the gap reads as non-decreasing the same way). Reproduced on pristine and review by the classifier; not documented as zone-dependent; distinct from #1144 bullet 2 (check_text_time/check_uuidv7 plausibility floor) and #1030 (archive IMMUTABLE helpers) by mechanism. Tier 3: a documented contract not kept, in an advisory heuristic, without loss."
+  },
+  "F2-03": {
+    "verdict": "finding",
+    "tier": 4,
+    "root_cause": "_time_unit_breach flags a date anchor off 00:00 UTC even for a whole-month step, whose bounds _grid_floor's calendar branch computes from date_trunc('month', anchor) and so lands at midnight; the upgrade's warn_grid_off_unit (and docs/reference.md's warn_grid_off_unit row, and set_regrain's refusal text) then states every minted partition is attached at other bounds than pgpm.part records, which is false (pgpm.part and the catalog agree on every partition, checked on pristine, also for a 3-month grid), and sends the operator to a reconversion; set_regrain also refuses a 1-month target on a 3-month such grid with the same false reason. Finder's repro reproduced unchanged on both trees; distinct from #1139 b1 (under-flagging) and #1222 (dedup key)."
+  },
+  "F3-02": {
+    "verdict": "finding",
+    "tier": 1,
+    "root_cause": "regrain()/regrain_history() do not refuse a REPEATABLE READ/SERIALIZABLE caller (no _refuse_strict_isolation, unlike transmute/untransmute/from_hypertable), so the copy reads the source through the caller's pre-call snapshot; a row committed after that snapshot but before the capture trigger exists is in no fine child and is dropped with the source at the swap (have {10,20}, want {10,20,500}). Silent committed-row loss; docs/reference.md contemplates 'a REPEATABLE READ caller of regrain' and documents no such refusal or loss. Not the #1256 mechanism (that is a wait cycle, not a copy through the caller's snapshot). Reproduced on pristine by the classifier with the finder's repro.sql unchanged; deterministic (dblink commit, no timing)."
+  },
+  "F3-03": {
+    "verdict": "finding",
+    "tier": 2,
+    "root_cause": "_regrain_copy_make's LIKE ... INCLUDING CONSTRAINTS gives each regrain copy the parent's NOT VALID CHECK as a validated one, so a pre-existing violating row the table still serves fails every copy batch (23514). Reproduced on the pristine commit by the finder's repro.sql unchanged (liveness 1-3 pass, regrain_history dies at row 7) and by hand on the cross-tick path: regrain_step returns prepared, then raises 23514 on every later tick with pgpm_regrain_capture and the truncate guard left enabled on the source until regrain_cancel. Not documented as refused for regrain (the transmute preflight refusal, reference.md:215, covers only the monolith before conversion), and the code itself expects the case (_regrain_shape_drift comment: 'LIKE does not carry NOT VALID and the parent's own CHECK may be NOT VALID'); the NOT VALID FK sibling is handled (#633). Not #766 (transmute preflight) nor #817 (CHECK added mid-regrain). Tier 2: a regrain that cannot make progress."
+  },
+  "F3-04": {
+    "verdict": "finding",
+    "tier": 1,
+    "root_cause": "regrain_step's swap does not refuse a stricter isolation level: its residual reconcile loop and _regrain_delta_count after the DETACH read pgpm's delta through the transaction's first (REPEATABLE READ) snapshot, so keys a writer captured while the DETACH waited on it are invisible, the count is 0, and the source is dropped with the writer's committed UPDATE unapplied (row 10 reverted to 'orig'). Reproduced unchanged on both trees, all three LIVENESS passing. Not documented: reference.md's regrain_step section states no isolation requirement, while _refuse_strict_isolation (transmute, from_hypertable) and untransmute's #443 check refuse exactly this for the same snapshot-after-wait reason; reachable by a hand step in an RR transaction or a database default_transaction_isolation that maintain's ticks inherit (narrowed there by the 200 ms lock_timeout, not closed). Tier 1: a committed write silently lost. Not #1256 (a wait cycle, not a stale snapshot)."
+  },
+  "F3-05": {
+    "verdict": "finding",
+    "tier": 3,
+    "root_cause": "_regrain_capture_names resolves the recorded capture function oid only within the delta's current schema (p.pronamespace = nsp), so after a documented ALTER TABLE <delta> SET SCHEMA the function resolves to null and untransmute (and uninstall.sql, same helper) drops the delta but leaves the SECURITY DEFINER <rel>_pgpm_regrain_capture() behind, against reference.md ('found by oid ... a delta you rename or move mid-regrain') and guide.md ('The copy, the delta and the function are found by oid, so one you renamed or moved since is still found'). Reproduced by hand on pristine: liveness 1-4 pass, test 5 fails (have 1, want 0). Distinct from #555 item 1 (callers pairing the delta name with the parent's schema) and item 2 (pre-#496 legacy orphan after a parent rename). Not Tier 2: the next prepare tears down by recorded oid, so regrain is not wedged; consequence is a leaked object and a broken uninstall contract."
+  },
+  "F4-02": {
+    "verdict": "finding",
+    "tier": 4,
+    "root_cause": "retain_disown's remedy (install.sql _disown_unvouched_retirements method, line 3573, and docs/reference.md retire 'once its detach is finished, drop the table by hand ... (its pgpm.part row is kept)') omits deleting the pgpm.part row; a hand-dropped partition under an attached row is refused fail_retain_identity on every call by design (install.sql comments at _part_detached_by_hand and _install_write_block; #1038 A1038-2 struck that wedge as intended), so the remedy typed as written never ends the refusal and status().retain_drop_failures keeps climbing. The document is wrong, not the code: tiered 4, not the finder's 3. Reproduced on both trees with liveness 1-6 passing; finder's repro.sql kept unchanged."
+  },
+  "F4-03": {
+    "verdict": "finding",
+    "tier": 3,
+    "root_cause": "adopt_partition judges 'attached, not pending' from pg_inherits through the transaction snapshot, before and after its SHARE UPDATE EXCLUSIVE lock, so a REPEATABLE READ caller whose snapshot predates a committed DETACH records the detached table in pgpm.part; its header promises 'the relation judged attached is still attached when its row commits', and retire() (install.sql ~3726) asks pg_partition_ancestors as of the lock for exactly this case. Tier 3: acts when it should refuse, bookkeeping only, no rows lost (retire leaves an operator-detached child alone). Reproduced on both trees with the finder's repro unchanged; no open issue shares the mechanism."
+  },
+  "F5-02": {
+    "verdict": "finding",
+    "tier": 1,
+    "root_cause": "archive._owned_key claims key bases as raw TEXT (p_prefix as archive.configure stored it, never canonicalised), while MinIO (named by pgpm_archive/README.md) resolves '/P/x' and 'P/x' to one object: a namesake configured with the same prefix spelled with a leading '/' claims a fresh base, keeps the plain key shape and its chunk PUT replaces the dropped table's object, the only copy of its rows (docs/reference.md promises a later namesake under the same prefix gets the oid shape). Reproduced unchanged by classify_claims on pristine and review; no open issue shares the mechanism; configure places no constraint on p_prefix and no document restricts its spelling."
+  },
+  "F5-03": {
+    "verdict": "fell",
+    "reason": "Reproduces on both trees, but every part of it is documented and intended. pgpm_archive/README.md (Limits) says 'Parquet supports eleven types: int4, int8, float8, boolean, text, timestamp/timestamptz, uuid, json/jsonb, and numeric(p,s)'. date is not on that list, so the encoder raising 'unsupported column type date' is the documented limit, and the claim's own scenario concedes the README documents it. docs/reference.md says pgpm.set_archive_fn checks only the argument list (the regprocedure cast) and the return type, nothing about the columns a given strategy can encode. It also documents the automatic-path consequence: 'A strategy that genuinely cannot make progress on a call should raise rather than return p_lo: a raise is logged as skip_archive and retried with the same chunk ... correct the strategy (or point pgpm.set_archive_fn at a corrected one) and archiving resumes'. A date control column is not a special case: any column outside the eleven types (int2, varchar, a composite) behaves the same way. That fails safe by design: nothing is retired unarchived, no rows are lost. A set-time preflight would be an enhancement, not a defect in a documented contract. Not a re-find: #774 bullet 1 is the duplicated type mapping, not this."
+  },
+  "F6-02": {
+    "verdict": "finding",
+    "tier": 3,
+    "root_cause": "from_hypertable_copy resolves the key's conname by conindid alone (no conrelid/contype filter), so an incoming FK on the reused key (a supported path, #264) can name the pre-built index; the cutover then builds the key again and the copy's index survives as a stray redundant UNIQUE index, breaking reference.md's 'A key index the tracking copy already built on the destination ... is adopted rather than rebuilt'. Distinct from #768 (adoption by temp name of a squatter) and #816."
+  },
+  "F6-03": {
+    "verdict": "finding",
+    "tier": 3,
+    "root_cause": "_surface_prepare drops a shape-changed surface function (e.g. a pre-#343 status() without regrain_to) and the file recreates it with default ACL; _surface_unreplaceable weighs only pg_depend dependants, never proacl, so an operator's REVOKE FROM PUBLIC / GRANT TO a role is silently reset, against the #983 header (install.sql:52) that says the upgrade keeps the function's grants and refuses rather than lose what depends on it. Reproduced on both trees by the classifier; fixture is the shape the file's own comments say an older install has; no rebuild needed."
+  },
+  "F7-02": {
+    "verdict": "fell",
+    "reason": "The repro reproduces (classifier: candidate, fails on both trees) but it pairs two things no pipeline pairs. bench/discriminate.sh, the only caller that applies starved(), always passes the guard a third argument: line 205 runs `bash \"$ROOT/$guard\" \"$target_c\" \"$db\" \"/repo/bench/results/mutants/$name.sql\"`. So for both of its mutations (runbook_phantom_alert_action, runbook_alert_on_method) the guard runs its JUDGED step, and that step fails with an unprefixed defect line, 'FAIL every action <doc> names is written by an install.sql' (doc_log_actions.sh lines 153-163), which starved() counts as a catch. Without a third argument the guard runs only in the perf track (test.sh line 1137), where only its exit code matters, and on a tree whose runbook alerts on a phantom action it exits 1 (the repro's own third ok line confirms this), so the track goes red. The header says so explicitly: 'With none, the LIVENESS run is the judgment of the tree' (line 29). No guard, track or rule accepts the defective state. The only fault left is that the no-argument failure line is labelled LIVENESS, which is a naming question and not a Tier 5 acceptance of a state the guard should refuse."
+  },
+  "F7-03": {
+    "verdict": "fell",
+    "reason": "The rendering is real on both trees (lock_trace.sh:153 prints 'the probe attached and is delivering events' unprefixed and exits, and discriminate.sh starved() reads that log as a catch), but no mutant can make it the run's only failure: the check gates on lock_probe.py printing READY after its uprobes attach to the postgres BINARY (lock_trace.sh:143-153, lock_probe.py:41,152), with oids of tables the guard creates by plain SQL, so nothing in pgpm_core/install.sql reaches it. The locktrace track's one mutation (maintain_no_commits_trace, mutate.py --list --track=locktrace) only removes maintain_all's commits, and a mutant that does not install is refused by discriminate.sh's installed=0 branch before starved() is asked. A failed attach is therefore the environment's (no privileged container, kernel headers, a probe timeout), and the same job's unmutated run of lock_trace.sh (test.sh run_locktrace, before discriminate.sh --track=locktrace) fails red in such an environment. This is the shape the pass-12 backlog verification struck as B06-01 on #1146: 'no mutant can make one of them its only failure ... they are environment probes the mutant does not touch ... A failure there comes from the environment, which the rubric strikes.' Not known_open: #1146 bullet 1 (unprefixed witnesses, lock_trace.sh among them) is recorded fixed by #1211."
+  },
+  "F8-01": {
+    "verdict": "finding",
+    "tier": 5,
+    "root_cause": "check_quoted_splices.py's assignments() reads :=, =, initialisers and SELECT/RETURNING INTO but never a FOR ... IN SELECT loop target, so an unmarked text local filled with quote_ident output by a FOR loop passes CHECK 1 (valid PL/pgSQL, holds \"Foo Bar\" at run time), contrary to CLAUDE.md's 'fails CI when a quote-derived text local lacks the suffix'; the docstring's deliberate scope narrows expressions, not assignment forms; distinct from #1236 (strip_noise) and #1031 A1031-3 (initialisers). Finder's repro.sh used unchanged."
+  },
+  "F8-02": {
+    "verdict": "finding",
+    "tier": 5,
+    "root_cause": "check_archive_object_keys.py does not count a prefix reference bound as an EXECUTE ... USING argument as assembly (it is neither ||-adjacent, assigned, returned, nor an argument of a call), so a second key built as execute 'select $1 || ...' using cfg.prefix passes while its || twin is refused; the docstring's 'Exactly one function ... assembles a prefix' and 'Dynamic SQL is code' contract is broken and its 'What this cannot see' list does not name USING"
+  },
+  "F8-03": {
+    "verdict": "finding",
+    "tier": 5,
+    "root_cause": "#291's p_drain_batch->p_regrain_batch rename sweep (c2abad5e) rewrote bench/run_fh.sh:287's from_hypertable_cutover call too, but the cutover kept p_drain_batch (pgpm_hypertable/install.sql:1621, documented as p_drain_batch in docs/reference.md:767/960 and docs/runbook.md:652), so the documented at-scale harness (bench/README.md 'Migrating a TimescaleDB hypertable') cannot resolve the call and dies after the copy on every run; the harness is wrong, the procedure and docs agree. Reproduced on both trees with the finder's repro.sh unchanged (liveness C shows the p_drain_batch spelling resolves and runs the body). Not among the open issues (#1243 is transmute's p_regrain_batch range, a different mechanism)."
+  },
+  "F8-05": {
+    "verdict": "finding",
+    "tier": 5,
+    "root_cause": "bench/run.sh's 4f conservation gate judges 'every history row still present' (its own comment; bench/README.md: 'asserts row conservation (every history row still present after the swap)') by count(*) before vs count(*) where id < MONO_HI after, so a regrain that loses row 5 and invents row 50 in the range is reported conserved (REGRAIN_CONSERVED stays partial/1, never 0); count-for-identity. Not known-open (no open issue names this gate). Rebuilt: the original grepped three exact spellings of run.sh's lines, so any fix that respelled them would fail its LIVENESS and never pass; the rebuild runs run.sh's own section-4 anchor region and whole 4f block against the tree's bench/sql/00_schema.sql and reads the gate's verdict REGRAIN_CONSERVED, with an intact-history control so an always-failing gate cannot pass; confirmed it passes against an identity-checking gate.",
+    "rebuilt": true,
+    "repro": "repro.verified.sh"
+  },
+  "F8-06": {
+    "verdict": "fell",
+    "reason": "Reproduces on both trees, but the behaviour is documented and intended, and nothing accepts a state it should refuse. upgrade_in_place.sh's header names it as such: '7. LIVENESS WITNESS: the machine still runs afterwards ... every assertion above it is satisfied by a database that merely sits there.' bench/liveness_witness_labels.sh's FLOOR deliberately holds it as a witness ('upgrade_in_place|W|maintain_obtain\\(\\) minted nothing after the upgrade', line 209), set beside the one check it holds as a defect check because a mutation exists to fail it (DEGRADE_COLS, #1175). Consequence: none of Tier 5's kind. On an install that breaks post-upgrade obtain, the guard still sets fail=1 and exits nonzero in CI. discriminate.sh's starved() would fail closed, refusing such a mutant as starved rather than certifying anything. No mutation in bench/mutations/ models that defect. The claim is a disagreement over labelling, not a guard passing on broken code."
+  },
+  "F8-07": {
+    "verdict": "fell",
+    "reason": "Reproduces on both trees, but it is the documented, deliberate rule. bench/discriminate.sh's comment on starved() says: 'a guard that failed without printing any failure line, or only a restated verdict, is not read as starved (the classifier's rule too)'. #1177 (commit 939bfb83) carved out only the case where the file reached no assertion, because the wrapper then prints 'LIVENESS: the assertions were reached at all' itself. In this case the LIVENESS premise passed, and by the contract (header, #713: a LIVENESS witness 'says the fixture reached the state the defect needs') a failure after it counts as evidence against the code. A raise there cannot be told apart from the mutated function raising under test. Reading it as starved would refuse real catches. classify_claims.py's failure_kind applies the same rule: a psql error is 'defect' whatever premises passed. The sibling bullet A1033-1 on #1033 (a guard that exits non-zero without a failure line is certified) was struck on the same grounds. The 'later fixture statement' in the repro is only the finder's label on a statement placed after the premise."
+  },
+  "F8-08": {
+    "verdict": "finding",
+    "tier": 5,
+    "root_cause": "check_quoted_splices.py bodies() splits on the bare $$ tag only, so a function body dollar-quoted with any other tag ($fn$) is never read and its unmarked quote_ident-derived text local passes CHECK 1; nothing (sql-syntax counts only $$, the 12-assignment floor is file-wide) enforces the docstring's every-body-is-$$ assumption. Distinct from #1236 B08-03 (strip_noise and $tag$ strings nested inside a $$ body)."
+  }
+}

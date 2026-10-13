@@ -1,0 +1,10 @@
+{
+ "closing": {
+  "verdict": "holds",
+  "reason": "1) Call sites: every cfg.endpoint reader in pgpm_archive/install.sql (to_s3 PUT/multipart POST/DELETE, the archive_fn chunk writers, _s3_abort_uploads_at) hands the endpoint to one of the two signers, and both now canonicalise it; no other module or uninstall.sql builds an S3 URL. 2) Upgrade/hand-stored path: a row updated by hand to 'http://minio:9000/' on the head exports and lands at the key (live, pgpm_prv-archive); scheduled ticks use the same signers. Also live on the head: 'http://minio:9000///' and '//' canonicalise and export ok; 'HTTP://' is refused (the signers could not use it either). 3) Body promises: the refusal admits userinfo ('http://minioadmin@minio:9000' is taken, signed with host 'minioadmin@minio:9000', every PUT 403 SignatureDoesNotMatch): V-01, Tier 3, fails on base and head (pre_existing; also 'http://minio:9000/.' is taken and 403s, same class, not filed separately). The #1269 consequence itself (//bucket/key, HTTP 400) is still reachable through p_bucket spelled '/archive-test-bucket', which configure stores verbatim: V-02, Tier 3, fails on base and head, a sibling operand outside the body's claim. 4) Mutations: archive_endpoint_trailing_slash_kept alone restores the issue's defect (ACC fails); archive_endpoint_unrefused alone does not, as expected, since it guards the new refusal half (test 53's refusal assertions), not the trailing slash. 5) Contract change: the refusal rejects only endpoints the signers could never use, and a path prefix (Supabase Storage) is kept; no documented workflow is refused. The trailing-slash endpoint path the issue names is closed on every entry point: holds.",
+  "claims": [
+   "V-01",
+   "V-02"
+  ]
+ }
+}

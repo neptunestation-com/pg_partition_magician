@@ -1,0 +1,93 @@
+# F19 coverage ledger (slice S5: pgpm_archive/install.sql, whole)
+
+- archive.configure | read: yes | operator error: knob edges refused (part_bytes, fetch_rows, nulls, unmanaged parent); trailing-slash endpoint accepted and every PUT then fails: F19-02
+- archive.unconfigure | read: yes | operator error: null refused; mid-export unconfigure leaves the running export its row; held
+- archive._key_columns | read: yes | boundary: PK, then predicate-free unique constraint, null for keyless (#597); held
+- archive.s3_url_encode | read: yes | boundary: byte-wise UTF-8 encoding; keys with reserved and non-ASCII bytes round-trip through PUT/GET; held
+- archive._s3_encode_path | read: yes | boundary: per-segment encoding, '/' literal, empty key to '' for the bucket listing; held
+- archive._extension_schema | read: yes | fresh surface (#984): schema read per call, raise when absent; held
+- archive._sha256 | read: yes | fresh surface (#984): pgcrypto by schema under pinned search_path; held
+- archive._hmac_sha256 | read: yes | as _sha256; held
+- archive._s3_send | read: yes | failure injection: one transport, timeout 300 s, response held as record; held
+- archive.s3_signed_request | read: yes | time: wall clock for x-amz-date; operator error: endpoint with trailing slash builds //bucket/key: F19-02; canonical query ordering held
+- archive.s3_signed_request_bytea | read: yes | as s3_signed_request, bytea-native hash; same endpoint defect: F19-02
+- archive._pq_byte | read: yes | boundary: single byte; held
+- archive._pq_reverse_bytes | read: yes | boundary: empty input; held
+- archive._pq_varint | read: yes | boundary: negative refused, 7-bit groups; held
+- archive._pq_zigzag | read: yes | boundary: sign edges unreachable from the writer; held
+- archive._pq_field_hdr | read: yes | boundary: delta 1..15 short form, else long form; held
+- archive._pq_stop | read: yes | held
+- archive._pq_write_i32 | read: yes | held
+- archive._pq_write_i64 | read: yes | held
+- archive._pq_write_bool | read: yes | held
+- archive._pq_write_binary | read: yes | held
+- archive._pq_write_struct | read: yes | held
+- archive._pq_list_hdr | read: yes | boundary: 14/15 element split; held
+- archive._pq_write_list_struct | read: yes | boundary: empty list; held
+- archive._pq_write_list_i32 | read: yes | held
+- archive._pq_write_list_binary | read: yes | held
+- archive._pq_plain_int32 | read: yes | held
+- archive._pq_plain_int64 | read: yes | held
+- archive._pq_epoch_micros | read: yes | time: infinity sentinels, finite clamp, far past, naive-as-UTC; held
+- archive._pq_plain_double | read: yes | held
+- archive._pq_plain_bytearray | read: yes | held
+- archive._pq_plain_text | read: yes | held
+- archive._pq_plain_uuid | read: yes | held
+- archive._pq_decimal_byte_width | read: yes | boundary: precision 1, 3, 7, 1000; held
+- archive._pq_decimal_shape | read: yes | boundary: PG15 signed 11-bit scale, negative scale, scale above precision; held
+- archive._pq_plain_decimal | read: yes | boundary: two's complement at width 1, div/mod exactness; held
+- archive._pq_plain_boolean_array | read: yes | boundary: empty, LSB-first packing; held
+- archive._pq_definition_levels | read: yes | boundary: empty stream, ULEB128 header; held
+- archive._pq_crc32_table | read: yes | held
+- archive._pq_crc32 | read: yes | held
+- archive._pq_lz_match_len | read: yes | boundary: binary search bounds; held
+- archive._pq_bit_reverse | read: yes | held
+- archive._pq_deflate_encode_chunks | read: yes | boundary: chunk flush at 8192, final pad, fixed codes; held
+- archive._pq_deflate_encode | read: yes | held
+- archive._pq_gzip_compress | read: yes | boundary: CRC/ISIZE sign folding; held
+- archive._pq_huffman_lengths | read: yes | boundary: 0/1 symbol, Kraft repair, alphabet cap; held
+- archive._pq_canonical_codes | read: yes | held
+- archive._pq_lz77_tokens | read: yes | resource: 2^24 table, window 32768, backfill; held
+- archive._pq_clc_rle | read: yes | boundary: run splits at 3/6, 3/10, 11/138; held
+- archive._pq_deflate_encode_dynamic_chunks | read: yes | boundary: hlit/hdist/hclen, single distance code; held
+- archive._pq_deflate_encode_dynamic | read: yes | held
+- archive._pq_gzip_compress_dynamic | read: yes | held
+- archive._pq_build_schema_root | read: yes | held
+- archive._pq_logical_timestamp_micros | read: yes | time: isAdjustedToUTC per column type (#465, #711); held
+- archive._pq_build_schema_leaf | read: yes | boundary: optional trailing fields and field-id deltas; held
+- archive._pq_build_data_page_header | read: yes | held
+- archive._pq_build_page_header | read: yes | held
+- archive._pq_build_column_metadata | read: yes | held
+- archive._pq_build_column_chunk | read: yes | held
+- archive._pq_build_row_group | read: yes | held
+- archive._pq_build_file_metadata | read: yes | held
+- archive._pq_has_nan | read: yes | boundary: NaN on NOT NULL numeric flips the leaf optional; held
+- archive._pq_from_item | read: yes | held (#408 typed inputs)
+- archive._pq_encode_column_data | read: yes | time: timestamp at time zone 'UTC', timestamptz epoch; H1 on array_json interval/timestamptz text; held
+- archive._held_relations | read: yes | fresh surface (#1055); held
+- archive._refuse_foreign_read | read: yes | fresh surface (#1055): rules (1) and (2); held by reading
+- archive._pq_from_relation | read: yes | held
+- archive._pq_snapshot | read: yes | fresh surface (#1055, #632): lock-then-render order, shape reuse, archive_pq_ord reservation; held
+- archive._pq_to_parquet | read: yes | boundary: type table, numeric typmod -1 refused, composite refused; held
+- archive._pq_to_parquet_range_counted | read: yes | fresh surface (#1069): digest off the snapshot as s.* in attnum order; held
+- archive._pq_to_parquet_range | read: yes | held
+- archive._object_stem | read: yes | time: pinned UTC/ISO render held for canonical text; non-ISO text parsed differently from the rest of the call: F19-03; id text kept whole (H2)
+- archive._claim_object_key | read: yes | fresh surface: ON CONFLICT then re-read; held
+- archive._owned_key | read: yes | fresh surface (#890, #976, #1064): base claim, whole-key claim, oid shape, two refusals; held
+- archive._object_key | read: yes | held
+- archive._claim_archived_key_bases | read: yes | boundary: regexp against stems holding '.', 'BC', '-' and names holding '_'; held
+- archive._claim_archived_keys | read: yes | held
+- archive._record_claim_relations | read: yes | held
+- archive._refuse_recorded_chunk_overwrite | read: yes | fresh surface (#975, #1069): range by native type, count, digest, null-digest refusal, FOR UPDATE before the ledger read; held; H4 on a renamed column
+- archive._encode_upload_ndjson_single | read: yes | time: range literal in partition_tz, digest and payload in one statement; held
+- archive._encode_upload_parquet | read: yes | held
+- archive._resolve_child | read: yes | fresh surface (#1062, #1030): one-snapshot resolve, LOCK, identity re-check, anchor; held
+- archive._child_object_key | read: yes | held
+- archive._s3_abort_uploads_at | read: yes | failure injection: paging markers, exact-key filter, canonical query order; held by reading
+- archive._cursor_text | read: yes | time: every allowlisted type read back under foreign TimeZone/DateStyle/IntervalStyle/bytea_output; held
+- archive.to_s3 | read: yes | fresh surface (#1168): cursor cast uses the bare type name, v_ctl_mod unused, char(3)/bit(3) never end: F19-01; NULL run, multi-heap order, conservation check, handlers held; endpoint: F19-02
+- archive.to_s3_parquet | read: yes | identity, hold, key by oid; held
+- archive._refuse_empty_range | read: yes | boundary: native-type compare; parses p_lo in the session, unlike _object_stem: F19-03
+- pgpm.archive_to_s3_ndjson | read: yes | operator error: nulls, inverted range, RLS refusal; stem/range DateStyle split: F19-03
+- pgpm.archive_to_s3_parquet | read: yes | as archive_to_s3_ndjson; held
+- archive._row_digest | read: yes | fresh surface (#1069): pinned settings enumerated against row_to_json's inputs; held

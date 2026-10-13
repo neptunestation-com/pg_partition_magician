@@ -1,0 +1,14 @@
+{
+ "tier": 3,
+ "file": "pgpm_core/install.sql",
+ "line": 14025,
+ "lens": "fresh surface",
+ "scenario": "#1262 acceptance (ACC-01-1295): #1262 acceptance (F4-03): adopt_partition's attached/not-pending checks (before and after its SHARE UPDATE EXCLUSIVE on the partition) read pg_inherits through the transaction snapshot, so a REPEATABLE READ caller whose snapshot predates a committed DETACH records the detached table in pgpm.part as an attached partition; the header promises 'the relation judged attached is still attached when its row commits' and retire()/_archive_hold_partition ask pg_partition_ancestors (the catalog as of the lock) for this reason",
+ "repro": "repro.sql",
+ "install": [
+  "pgpm_core/install.sql"
+ ],
+ "fixtures": false,
+ "id": "ACC-01",
+ "finder": "ACC"
+}

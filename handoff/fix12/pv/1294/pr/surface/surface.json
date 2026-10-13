@@ -1,0 +1,345 @@
+{
+ "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/base",
+ "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/review",
+ "files": [
+  {
+   "path": "CHANGELOG.md",
+   "status": "modified",
+   "hunks": [
+    [
+     4,
+     17
+    ]
+   ]
+  },
+  {
+   "path": "bench/regrain_not_valid_check.sh",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     62
+    ]
+   ]
+  },
+  {
+   "path": "docs/reference.md",
+   "status": "modified",
+   "hunks": [
+    [
+     2082,
+     2088
+    ]
+   ]
+  },
+  {
+   "path": "pgpm_core/install.sql",
+   "status": "modified",
+   "hunks": [
+    [
+     6540,
+     6541
+    ],
+    [
+     6554,
+     6561
+    ],
+    [
+     6621,
+     6628
+    ],
+    [
+     6660,
+     6665
+    ],
+    [
+     6673,
+     6674
+    ],
+    [
+     8561,
+     8582
+    ]
+   ]
+  },
+  {
+   "path": "test.sh",
+   "status": "modified",
+   "hunks": [
+    [
+     1268,
+     1268
+    ]
+   ]
+  },
+  {
+   "path": "tests/331_regrain_not_valid_check_test.sql",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     222
+    ]
+   ]
+  }
+ ],
+ "units": [
+  {
+   "unit": "pgpm_core/install.sql:6540-6541",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    6540,
+    6541
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm._regrain_copy_make",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    6546,
+    6584
+   ],
+   "why": "touched at 6554-6561"
+  },
+  {
+   "unit": "pgpm_core/install.sql:6621-6628",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    6621,
+    6628
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm._regrain_shape_drift",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    6653,
+    6706
+   ],
+   "why": "touched at 6660-6665"
+  },
+  {
+   "unit": "pgpm.regrain_step",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    7844,
+    8666
+   ],
+   "why": "touched at 8561-8582"
+  },
+  {
+   "unit": "pgpm._regrain_fresh_copy_drift",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    6596,
+    6611
+   ],
+   "why": "calls pgpm._regrain_copy_make, pgpm._regrain_shape_drift"
+  },
+  {
+   "unit": "pgpm.regrain",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    8671,
+    8722
+   ],
+   "why": "calls pgpm.regrain_step"
+  },
+  {
+   "unit": "pgpm.maintain",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    13312,
+    13515
+   ],
+   "why": "calls pgpm.regrain_step"
+  }
+ ],
+ "exercised_by": {
+  "pgpm.regrain_step": [
+   "bench/README.md",
+   "bench/grid_floor_across_era.sh",
+   "bench/maintain_regrain_lock_timeout.sh",
+   "bench/month_step_dst_gap.sh",
+   "bench/part_name_labels_injective.sh",
+   "bench/part_name_length.sh",
+   "bench/regrain_candidate_subdivides.sh",
+   "bench/regrain_capture_enabled_always.sh",
+   "bench/regrain_capture_origin_only_upgrade.sh",
+   "bench/regrain_children_tablespace.sh",
+   "bench/regrain_clamped_subrange_names.sh",
+   "bench/regrain_copy_name_clash.sh",
+   "bench/regrain_fk_drift_swap_scan.sh",
+   "bench/regrain_moved_parent_identity.sh",
+   "bench/regrain_names_fit_clamped_cell.sh",
+   "bench/regrain_null_source_mark.sh",
+   "bench/regrain_outgoing_fk_lock.sh",
+   "bench/regrain_parent_rename_midcopy.sh",
+   "bench/regrain_perf.sh",
+   "bench/regrain_restart_null_cursor.sh",
+   "bench/regrain_retarget_in_flight.sh",
+   "bench/regrain_step_positive.sh",
+   "bench/regrain_swap_timing.sh",
+   "bench/regrain_target_column_scale.sh",
+   "bench/regrain_target_encoded_unit.sh",
+   "bench/regrain_target_integral.sh",
+   "bench/regrain_target_shape.sh",
+   "bench/regrain_target_step_spelling.sh",
+   "bench/regrain_target_time_precision.sh",
+   "bench/regrain_truncate_guard_upgrade.sh",
+   "bench/retain_horizon_ambiguous_wall_time.sh",
+   "bench/run.sh",
+   "bench/run_fh.sh",
+   "bench/tests_fail_on_defect.sh",
+   "bench/upgrade_in_place.sh",
+   "bench/uuidv7_regrain_archive.sh",
+   "docs/adversarial-review.md",
+   "docs/guide.md",
+   "docs/reference.md",
+   "docs/reviews/2026-09-25.md",
+   "docs/reviews/2026-09-28.md",
+   "docs/reviews/2026-10-01-pass6.md",
+   "docs/reviews/2026-10-02-pass7.md",
+   "docs/reviews/2026-10-06-pass9.md",
+   "docs/reviews/2026-10-08-pass10.md",
+   "docs/reviews/2026-10-09-pass11.md",
+   "docs/reviews/2026-10-12-pass12.md",
+   "scripts/verify_parquet_range.py",
+   "tests/106_progress_regrain_test.sql",
+   "tests/107_regrain_swap_reconcile_complete_test.sql",
+   "tests/108_retain_sign_test.sql",
+   "tests/110_triggers_enable_always_test.sql",
+   "tests/119_regrain_truncate_guard_test.sql",
+   "tests/120_regrain_reconcile_offgrid_lo_test.sql",
+   "tests/121_regrain_recheck_aged_at_swap_test.sql",
+   "tests/124_part_name_length_refused_test.sql",
+   "tests/124_quoted_schema_test.sql",
+   "tests/124_regrain_capture_identity_test.sql",
+   "tests/124_regrain_reconcile_snapshot_test.sql",
+   "tests/125_archive_chunk_ties_test.sql",
+   "tests/125_archive_ledger_identity_test.sql",
+   "tests/125_regrain_candidate_subdivides_test.sql",
+   "tests/125_untransmute_residue_test.sql",
+   "tests/125_uuidv7_regrain_archive_test.sql",
+   "tests/127_month_step_dst_gap_test.sql",
+   "tests/129_retire_regrain_source_test.sql",
+   "tests/129_set_regrain_off_midflight_test.sql",
+   "tests/135_regrain_restart_null_cursor_test.sql",
+   "tests/136_regrain_reconcile_datestyle_test.sql",
+   "tests/137_archive_chunk_uuidv7_ties_test.sql",
+   "tests/148_regrain_candidate_lock_race_deferred_test.sql",
+   "tests/149_regrain_writer_waits_test.sql",
+   "tests/150_part_name_labels_injective_test.sql",
+   "tests/151_set_partition_tz_every_bound_test.sql",
+   "tests/153_regrain_parent_rename_midcopy_test.sql",
+   "tests/154_regrain_step_positive_test.sql",
+   "tests/155_uninstall_residue_test.sql",
+   "tests/160_regrain_capture_name_fits_test.sql",
+   "tests/162_regrain_drivers_serialize_test.sql",
+   "tests/163_set_partition_tz_midflight_test.sql",
+   "tests/164_regrain_target_mixed_step_test.sql",
+   "tests/165_regrain_target_integral_step_test.sql",
+   "tests/168_retain_nan_test.sql",
+   "tests/169_regrain_truncate_guard_resume_test.sql",
+   "tests/172_regrain_copy_name_clash_test.sql",
+   "tests/183_regrain_reconcile_identity_test.sql",
+   "tests/184_regrain_child_oid_sites_test.sql",
+   "tests/185_reread_under_lock_remaining_sites_test.sql",
+   "tests/189_transmute_refusal_edges_test.sql",
+   "tests/190_reverse_and_legibility_edges_test.sql",
+   "tests/191_maintain_regrain_reads_target_under_lock_test.sql",
+   "tests/209_regrain_clamped_subrange_names_test.sql",
+   "tests/210_regrain_target_step_spelling_test.sql",
+   "tests/233_grid_floor_across_era_test.sql",
+   "tests/237_regrain_moved_parent_identity_test.sql",
+   "tests/238_regrain_names_fit_clamped_cell_test.sql",
+   "tests/239_moved_parent_recorded_identity_test.sql",
+   "tests/241_reads_under_caller_rls_conformance_test.sql",
+   "tests/242_regrain_untransmute_caller_rls_test.sql",
+   "tests/243_regrain_null_source_mark_test.sql",
+   "tests/244_regrain_capture_enabled_always_test.sql",
+   "tests/245_regrain_capture_origin_only_upgrade_test.sql",
+   "tests/251_regrain_fk_drift_test.sql",
+   "tests/252_regrain_target_column_scale_test.sql",
+   "tests/261_regrain_step_retarget_in_flight_test.sql",
+   "tests/267_scratch_relations_test.sql",
+   "tests/268_shared_preflight_refusals_test.sql",
+   "tests/270_regrain_capture_backfill_by_proof_test.sql",
+   "tests/272_scratch_sequence_acl_test.sql",
+   "tests/276_hand_over_scratch_reports_what_it_did_test.sql",
+   "tests/277_regrain_target_time_precision_test.sql",
+   "tests/288_regrain_capture_delta_by_record_test.sql",
+   "tests/290_regrain_capture_delta_held_test.sql",
+   "tests/291_regrain_reconcile_judged_rows_test.sql",
+   "tests/295_regrain_key_column_named_pgpm_seq_test.sql",
+   "tests/296_regrain_children_tablespace_test.sql",
+   "tests/308_regrain_target_encoded_unit_test.sql",
+   "tests/311_retain_horizon_ambiguous_wall_time_test.sql",
+   "tests/315_regrain_swap_lock_budget_test.sql",
+   "tests/319_set_regrain_restated_target_test.sql",
+   "tests/322_partitioned_referencer_readd_not_valid_test.sql",
+   "tests/323_regrain_reconcile_unshaped_key_test.sql",
+   "tests/324_regrain_registered_grid_off_unit_test.sql",
+   "tests/328_regrain_swap_waits_for_older_snapshots_test.sql",
+   "tests/331_regrain_not_valid_check_test.sql",
+   "tests/46_auto_regrain_maintain_test.sql",
+   "tests/67_regrain_name_collision_test.sql",
+   "tests/68_regrain_write_contract_test.sql",
+   "tests/69_regrain_capture_apparatus_test.sql",
+   "tests/74_regrain_archive_gate_test.sql",
+   "tests/92_regrain_outgoing_fk_test.sql",
+   "tests/95_set_regrain_rejects_coarser_step_test.sql",
+   "tests/99_restore_fk_scoped_test.sql"
+  ],
+  "pgpm._regrain_shape_drift": [
+   "bench/regrain_fk_drift_swap_scan.sh",
+   "docs/reviews/2026-10-02-pass7.md",
+   "docs/reviews/2026-10-04-pass8.md",
+   "tests/251_regrain_fk_drift_test.sql"
+  ],
+  "pgpm._regrain_copy_make": [
+   "bench/regrain_not_valid_check.sh",
+   "docs/reviews/2026-10-12-pass12.md",
+   "tests/331_regrain_not_valid_check_test.sql"
+  ]
+ },
+ "finder": "P1",
+ "slice": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/regrain_not_valid_check.sh",
+   "docs/reference.md",
+   "pgpm_core/install.sql",
+   "test.sh",
+   "tests/331_regrain_not_valid_check_test.sql"
+  ],
+  "units": [
+   "pgpm_core/install.sql:6540-6541",
+   "pgpm._regrain_copy_make",
+   "pgpm_core/install.sql:6621-6628",
+   "pgpm._regrain_shape_drift",
+   "pgpm.regrain_step",
+   "pgpm._regrain_fresh_copy_drift",
+   "pgpm.regrain",
+   "pgpm.maintain"
+  ],
+  "kind": "mixed"
+ },
+ "ledger": [
+  "pgpm_core/install.sql:6540-6541",
+  "pgpm._regrain_copy_make",
+  "pgpm_core/install.sql:6621-6628",
+  "pgpm._regrain_shape_drift",
+  "pgpm.regrain_step",
+  "pgpm._regrain_fresh_copy_drift",
+  "pgpm.regrain",
+  "pgpm.maintain",
+  "CHANGELOG.md",
+  "bench/regrain_not_valid_check.sh",
+  "docs/reference.md",
+  "test.sh",
+  "tests/331_regrain_not_valid_check_test.sql"
+ ]
+}

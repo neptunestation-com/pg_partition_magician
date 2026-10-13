@@ -1,0 +1,3 @@
+{"tier": 5, "file": "bench/lock_trace.sh", "line": 153, "lens": "contracts versus documentation",
+ "scenario": "lock_trace.sh's premise 'the probe attached and is delivering events' is printed without a LIVENESS: prefix and the guard exits right after it, so a locktrace run whose probe never attached (nothing traced) is certified by discriminate.sh's starved() as catching its mutant; it should carry the premise prefix so that run reads as a starved fixture",
+ "repro": "repro.sh", "install": [], "fixtures": false}

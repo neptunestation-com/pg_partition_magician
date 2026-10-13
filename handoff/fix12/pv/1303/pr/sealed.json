@@ -1,0 +1,17 @@
+{
+  "pinned": "d337c3e18271fddb4904a67414342efd42c59d57",
+  "seeds": [
+    {
+      "id": "S1",
+      "kind": "mutation",
+      "mutation": "retain_disown_remedy_keeps_row",
+      "file": "pgpm_core/install.sql",
+      "lens": "fresh surface",
+      "tier": 3,
+      "why": "Pre-#1272 remedy: retain_disown's method tells the operator to drop the disowned table and leaves out the DELETE of its pgpm.part row, so typed as logged it leaves the row attached and anchored to a relation that is gone, every later retire() and retain() logs fail_retain_identity for the range, and status().retain_drop_failures climbs for good. One site, the DELETE clause of the remedy. tests/339 parts A and B catch it.",
+      "lines": [
+        3510
+      ]
+    }
+  ]
+}

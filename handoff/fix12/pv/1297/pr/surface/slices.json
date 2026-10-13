@@ -1,0 +1,26 @@
+{
+ "P1": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/install_keeps_surface_grants.sh",
+   "docs/guide.md",
+   "pgpm_core/install.sql",
+   "test.sh",
+   "tests/336_install_keeps_surface_grants_test.sql"
+  ],
+  "units": [
+   "pgpm_core/install.sql:56-60",
+   "pgpm_core/install.sql:132-137",
+   "pgpm._surface_prepare",
+   "pgpm._surface_sig_kept",
+   "pgpm._surface_carry_grants",
+   "pgpm._surface_settled",
+   "pgpm_core/install.sql:14278-14278",
+   "pgpm_core/install.sql:14382-14382",
+   "pgpm_core/install.sql:14558-14558",
+   "pgpm_core/install.sql:14722-14722",
+   "pgpm_core/install.sql:14784-14784"
+  ],
+  "kind": "mixed"
+ }
+}

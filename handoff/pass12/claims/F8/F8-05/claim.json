@@ -1,0 +1,3 @@
+{"tier": 5, "file": "bench/run.sh", "line": 546, "lens": "contracts versus documentation",
+ "scenario": "run.sh's CONSERVATION GATE promises 'every history row (id < B) must still be present' after the regrain swap but compares count(*) before with count(*) where id < B after, so a regrain that loses a history row and invents another in the range reports CONSERVED; it should compare the ids (and payloads) by identity",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

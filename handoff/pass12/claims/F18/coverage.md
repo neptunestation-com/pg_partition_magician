@@ -1,0 +1,60 @@
+- pgpm._session_alive | read: yes | liveness degrade (pid-only when backend_start masked, null pid/start never alive, own pid via _own_backend_start); fresh surface / failure injection; held
+- pgpm._relkind_noun | read: yes | every relkind mapped, else-branch for unknown; operator error (remedy wording); held
+- pgpm._type_squatter | read: yes | typrelid = 0 filter, implicit array exclusion via typelem/typarray; boundary; held
+- pgpm._identity_options | read: yes | every pg_sequence option carried except type; held
+- pgpm._identity_options_locked | read: yes | pg_sequence_last_value as the ROW EXCLUSIVE lock, null-safe; held
+- pgpm._seq_next | read: yes | last_value + increment when called, numeric past bigint; boundary; held
+- pgpm._identity_reseed | read: yes | lattice walk for positive and negative increments, bound clamp, null p_next from start; boundary; held
+- pgpm._fk_definition | read: yes | search_path pinned to pg_catalog so REFERENCES is schema-qualified; held
+- pgpm._fk_readd_definition | read: yes | regexp over quoted/unquoted identifiers and PERIOD, target replaced by position; boundary; held
+- pgpm._forget_dangling_fks | read: yes | forget (table gone, live record with no key) and adopt (suspended record with live key), both logged; held
+- pgpm._refuse_null_arguments | read: yes | json_each order, null typeof; operator error; held
+- pgpm._transmute_carried_indexes | read: yes | EXCLUDE refusal, uncarriable UNIQUE, <idx>_pgpm length and collision, pgpm_key_<oid> collision; boundary (63 bytes); held
+- pgpm._transmute_outgoing_fks | read: yes | validated top-level keys listed, NOT VALID refused, NOT ENFORCED left to key gate; held
+- pgpm._identity_resume_at | read: yes | index-answered max/min under the lock, else caller's floors; held
+- pgpm._refuse_unconvertible_keys | read: yes | NOT ENFORCED via jsonb image, NOT VALID incoming; held
+- pgpm._id_step_contract | read: yes | negative-scale numeric through domains; NaN passes (NaN = NaN) but the bigint overload cannot pass one; boundary; held
+- pgpm._text_time_unit_contract | read: yes | anchor-epoch and step modulo the unit in microseconds; time and zones; held
+- pgpm._time_unit_contract | read: yes | date whole-day step, _time_unit_breach of timestamp(p), date anchor at 00:00 UTC and its message; time and zones; held
+- pgpm._control_bound_contract | read: yes | finite check, round trip through the column type, finest-step remedy through domains; boundary; held
+- pgpm._transmute_incoming_gate | read: yes | 'error' refusal, key gate, reused-key match for preserve/drop ('drop' = 'preserve' is documented); held
+- pgpm._refuse_filtered_reads | read: yes | row_security_active and the FORCE/owner wording; held
+- pgpm._transmute_refuse_generated_control | read: yes | attgenerated <> ''; held
+- pgpm._transmute_refuse_uncarried_constraints | read: yes | NOT ENFORCED, NOT VALID (pgpm_monolith_bound excluded), NO INHERIT; held
+- pgpm._transmute_refuse_transition_triggers | read: yes | row triggers with transition tables only; held
+- pgpm._refuse_oid_bound_dependants | read: yes | pg_depend over the oid and row/array types, untransmute's tree minus the monolith; held
+- pgpm._transmute_key_shape | read: yes | constraints, identity kinds, control NOT NULL compared after the staging LIKE; held
+- pgpm._transmute_bare_unique | read: yes | the bare-index shape and the remedy ADD CONSTRAINT ... USING INDEX; held
+- pgpm._frontier_skew_limit | read: yes | now() + step + 1 hour; time and zones; held
+- pgpm._acl_reset | read: yes | revoke every grantee incl. owner and PUBLIC (grantee 0), owner regranted at default; held
+- pgpm._acl_may_grant_as | read: yes | SET vs MEMBER by version, schema USAGE; held
+- pgpm._acl_grant_as | read: yes | SET ROLE and restore of the caller's role ('none' handled); held
+- pgpm._acl_carry_ddl | read: yes | grant chain depth ordering, column grants, TABLE-form GRANT on a sequence (USAGE accepted, probed on PG 15); held
+- pgpm._transmute | read: yes | all three phases and the cutover: argument gates, zone recording, claim take-over, resume checks, both renames' handlers, forward CREATE handler, final child-holder ask; probed IntervalStyle renderings of p_step/p_retain (round-trip under all four styles); held
+- pgpm.transmute | read: yes | time overload: kind from column type, p_interval::text and _ts_text(p_anchor); held
+- pgpm.transmute | read: yes | id overload: bigint step/anchor/retain as text; held
+- pgpm.transmute_abort | read: yes | own-session abort, lock_timeout bound and restore, no claim -> false; matches the reference; held
+- pgpm._transmute_reap | read: yes | lock first then claim re-read FOR UPDATE SKIP LOCKED, PGPMR rollback, skip_transmute_reap on timeout; failure injection; held
+- pgpm._detach_reap | read: yes | three liveness signals, #705 disown before FINALIZE, when-others logs fail_detach_reap; held
+- pgpm._publication_adds | read: yes | ADD TABLE text with column list and row filter, compared by text in untransmute; held
+- pgpm._is_clone_pkey_name | read: yes | _pkey[N] regexp with 63-byte prefix clipping; boundary; held
+- pgpm.untransmute | read: yes | claimed F18-01: _refuse_detach_pending is never called despite the #1157 comment at both gate sites; the rest (monolith by oid, door twice, grants/RLS/policies/publications/replica identity/schema hand-back, key and index renames) read and held
+- pgpm.restore_incoming_fks | read: yes | claimed F18-03: validate_retry_after written but never read, so the parked one-step re-add is retried on every unscoped call; in-flight gate and NOT VALID split read and held
+- pgpm.validate_incoming_fks | read: yes | back-off respected only with p_respect_backoff, cleared on success; held
+- pgpm.incoming_fk_orphans | read: yes | MATCH FULL vs SIMPLE null rules, both sides' RLS refusals; held
+- pgpm.suspend_incoming_fks | read: yes | p_force gate, restored records dropped and reset; held
+- pgpm._own_backend_start_definer | read: yes | own row only, security definer; held
+- pgpm._own_backend_start | read: yes | coalesce of own read and definer read; held
+- pgpm._identity_acl_carry_ddl | read: yes | one _acl_carry_ddl per identity column onto the destination name; held
+- pgpm._array_type_name | read: yes | underscore prefix cut to 63 bytes on a character boundary; boundary; held
+- pgpm._transmute_names_present | read: yes | r<oid>/t<oid> keys over the taken names; held
+- pgpm._transmute_taken_names | read: yes | names plus array names plus p_also; held
+- pgpm._transmute_refuse_names_held | read: yes | relation then type holders, p_own and p_skip exclusions, wording by _relkind_noun/_type_squatter; held
+- pgpm._transmute_refuse_monolith_squatter | read: yes | relation and type holders of <rel>_p<lo>_to_<hi>, remedy "drop or rename" (no command); held
+- pgpm._transmute_refuse_staging_squatter | read: yes | claimed F18-02: the remedy says `drop table` for any relkind, which fails against a sequence or a view
+- pgpm._transmute_refuse_publications | read: yes | filtered membership without pubviaroot, unowned publication; held
+- pgpm._refuse_bad_transmute_arguments | read: yes | retain sign, step sign for id and interval (months then seconds), obtain null/negative; NaN id step passes but is unreachable from the bigint overload; held
+- pgpm._refuse_strict_isolation | read: yes | both transaction and default isolation; held
+- pgpm._transmute_refuse_child_holders | read: yes | pg_class arm (any relkind, not in pg_inherits) and pg_type arm via _type_squatter; a partition of ANOTHER parent at a forward name is not a holder (hypothesis, see null-results); held otherwise
+- pgpm._fk_def_unvalidated | read: yes | strips a trailing NOT VALID only; pg_get_constraintdef puts NOT VALID last on 15-18; held
+- pgpm._refuse_detach_pending | read: yes | correct in itself (inhdetachpending, FINALIZE remedy verified by running it) but has no caller: F18-01

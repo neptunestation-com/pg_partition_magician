@@ -1,0 +1,3 @@
+{"tier": 4, "file": "docs/reference.md", "line": 683, "lens": "contracts versus documentation",
+ "scenario": "the untransmute entry's remedy for a partition left pending a concurrent detach is `ALTER TABLE <table> DETACH PARTITION <partition>`, which PostgreSQL refuses for a pending partition (only DETACH PARTITION ... FINALIZE completes it), so the operator's typed remedy fails and the partition stays pending; the document should name FINALIZE as the code's own message does",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

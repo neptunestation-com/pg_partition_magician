@@ -1,0 +1,64 @@
+{
+ "seeds": [
+  {
+   "mutation": "untransmute_detach_pending_unchecked",
+   "lens": "operator error",
+   "tier": 1,
+   "side_effects": "untransmute's gate passes a partition left pending a concurrent detach (its rows invisible through the parent): a claim that expects untransmute to refuse while an operator's DETACH ... CONCURRENTLY is pending sees it proceed, and the parent's DROP takes the pending partition's rows"
+  },
+  {
+   "mutation": "archive_whole_unfiltered_and_unheld",
+   "lens": "operator error",
+   "tier": 1,
+   "side_effects": "scripts/archive_partition_whole.sql's candidate query lacks the #705 filter and the parent hold: a claim running the script against a parent with a hand-detached partition sees that partition archived and recorded as covered"
+  },
+  {
+   "mutation": "obtain_unbuilt_cell_unlogged",
+   "lens": "contracts versus documentation",
+   "tier": 2,
+   "side_effects": "obtain skips a forward cell whose name a relation of the operator's squats WITHOUT the fail_obtain_name log row the reference promises: a claim that reads pgpm.log for that row after a squatted cell sees none, and status() counts nothing for it"
+  },
+  {
+   "patch": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/pass12/seeds/novel_naive_grid_zone_off_dst_only.patch",
+   "file": "pgpm_core/install.sql",
+   "lens": "time and zones",
+   "tier": 3,
+   "why": "pgpm._naive_grid_zone_off (#1117 V-01, the pass-11 fix phase) judges a naive date or timestamp key's recorded partition_tz 'off' only when the zone's offset MOVES over the century (a daylight-saving test: each monthly sample's offset compared with the first's), not when it is off UTC at all. A grid an install before #504 recorded in a fixed-offset zone (Asia/Tokyo, America/Phoenix, Asia/Kolkata) sits at that zone's midnight, nine hours off the column's own clock, and reads as not off: set_regrain and regrain_step admit a fixed-step target on it (the run copies every sub-range and every swap then fails, as #1117 found), and the upgrade's warn_grid_off_unit does not flag the table. New York and London, the zones tests/324 plants, keep moving offsets and still read as off.",
+   "side_effects": "pgpm._naive_grid_zone_off reads a fixed-offset zone (Asia/Tokyo, America/Phoenix, Asia/Kolkata) as not off: a regrain toward a fixed step on a naive key whose grid is recorded in such a zone is admitted by set_regrain and the prepare tick instead of refused, and the install's warn_grid_off_unit block logs nothing for it"
+  },
+  {
+   "patch": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/pass12/seeds/novel_regrain_fine_count_skips_archived_prefix.patch",
+   "file": "pgpm_core/install.sql",
+   "lens": "boundary arithmetic and types",
+   "tier": 3,
+   "why": "pgpm._regrain_fine_count (#1161, the pass-11 fix phase) leaves the aged prefix below the retention horizon out of the lock-budget count whether or not an archive_fn is set, while regrain_step's copy skips that prefix only when no archive_fn is set (#278: with one, the aged sub-ranges are copied and attached like the rest, since retention cannot drop them until they are archived). With an archive_fn and a retention policy, a run whose swap would attach more fine children than half the shared lock table is counted as fitting: set_regrain stores the target without its WARNING or warn_regrain_lock_budget row, the prepare tick prepares it, and the run copies every sub-range before the swap's own measured budget refuses it, rolling back whole, on every swap tick until regrain_cancel.",
+   "side_effects": "with an archive_fn set, set_regrain's warning and the prepare tick's refusal count only the sub-ranges above the retention horizon though the copy will make every one: a claim sizing a run at the lock-table line on a table with an archive_fn and a retention policy sees no warning and a prepare where the budget should refuse"
+  },
+  {
+   "patch": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/pass12/seeds/novel_retire_pending_detach_guard_rows_by_count.patch",
+   "file": "bench/retire_pending_detach.sh",
+   "lens": "fresh surface",
+   "tier": 5,
+   "why": "bench/retire_pending_detach.sh (#1250's guard, the lever phase before pass 12): the UPGRADE phase's last check, that the pending partition [100, 200) still holds its rows 111, 112 and 113 after the re-run of the install, is a count of its rows (3) under a label naming them (the count-for-identity class of #997 and #998, pass 11's S7 shape): a re-run that disowns the mark and then lets retention or a reap replace the rows with any three others, or a fixture whose detach never left the rows where the label says, passes it."
+  },
+  {
+   "patch": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/pass12/seeds/novel_reference_untransmute_detach_remedy_unfinalized.patch",
+   "file": "docs/reference.md",
+   "lens": "contracts versus documentation",
+   "tier": 4,
+   "why": "docs/reference.md's untransmute entry (#1157, the pass-11 fix phase) tells the operator to finish an interrupted concurrent detach with `ALTER TABLE <table> DETACH PARTITION <partition>`, without FINALIZE: PostgreSQL refuses a plain DETACH of a partition already pending detach (55P03/42P16 'partition ... already pending detach in partitioned table ...', hint: use FINALIZE), so the documented remedy fails as typed, while the retire and _detach_reap entries still say FINALIZE."
+  },
+  {
+   "mutation": "to_s3_cursor_type_typmod_dropped",
+   "lens": "boundary arithmetic and types",
+   "tier": 2,
+   "side_effects": "archive.to_s3 of a relation whose control-named column is char(n) or bit(n) never ends (each page re-reads the row it ended on, the cursor cut to one character or one bit): a claim exporting such a relation hangs until its statement_timeout and uploads a part per part_bytes meanwhile"
+  },
+  {
+   "mutation": "restore_one_step_no_backoff",
+   "lens": "failure injection",
+   "tier": 2,
+   "side_effects": "restore_incoming_fks rescans a referencer whose one-step validating re-add failed on an orphan on EVERY call without p_ids (every maintain tick), under SHARE ROW EXCLUSIVE on the managed table: a claim that counts scans, reads validate_retry_after's effect or times a tick after such a failure sees a full scan per tick"
+  }
+ ]
+}

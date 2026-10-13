@@ -1,0 +1,3 @@
+{"tier": 5, "file": "scripts/review/pass_metrics.py", "line": 102, "lens": "contracts versus documentation",
+ "scenario": "pass_metrics.compute() counts a candidate with no verdict (or with a verdict string it does not know, e.g. 'known-open') as FELL: it is listed under 'Fell in verification' with an empty reason, counted in both fell and unverified, and raises the fell rate the stopping criteria and the abandon-at-0.5 rule read (1 fell of 4 reads 0.50); README.md says such a candidate is reported as unverified, and the fell rate counts only claims that fell in verification",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

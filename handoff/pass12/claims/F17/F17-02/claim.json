@@ -1,0 +1,3 @@
+{"tier": 1, "file": "pgpm_core/install.sql", "line": 12244, "lens": "fresh surface",
+ "scenario": "untransmute on a table one of whose partitions is pending an interrupted DETACH ... CONCURRENTLY returns the restored table, logs untransmute and drops the pending partition with its rows (150, 160 gone); CHANGELOG #1157, docs/reference.md and the comment at the gate promise a refusal before the gate and again under ACCESS EXCLUSIVE, but pgpm._refuse_detach_pending is defined and called nowhere",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

@@ -1,0 +1,22 @@
+{
+ "P1": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/hypertable_mixed_step_and_unit_remedy.sh",
+   "docs/reference.md",
+   "pgpm_core/install.sql",
+   "pgpm_hypertable/install.sql",
+   "test.sh",
+   "tests/timescale/db/69_from_hypertable_mixed_step_and_unit_remedy_test.sql"
+  ],
+  "units": [
+   "pgpm._time_unit_contract",
+   "pgpm_hypertable/install.sql:433-443",
+   "pgpm._from_hypertable_check_arguments",
+   "pgpm._transmute",
+   "pgpm.from_hypertable_cutover",
+   "pgpm.from_hypertable"
+  ],
+  "kind": "mixed"
+ }
+}

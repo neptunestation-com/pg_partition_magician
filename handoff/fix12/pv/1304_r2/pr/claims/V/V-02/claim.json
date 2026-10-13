@@ -1,0 +1,11 @@
+{
+ "id": "V-02",
+ "tier": 3,
+ "file": "pgpm_archive/install.sql",
+ "line": 3090,
+ "lens": "closing claim",
+ "scenario": "On a date-column day grid (partition_tz UTC), a direct pgpm.archive_to_s3_ndjson call keys the object by the instant its lo names, while the read compares the date column, which truncates that instant to its day. A Tokyo caller's lo '2024-01-02 00:00:00+09' (2024-01-01 15:00Z) reads the whole 1 January cell and PUTs it at d.ev_2024010115000000, a key no cell starts at, while a tick keys the same chunk d.ev_2024010100000000: one chunk, two objects, and the recorded-chunk check (looked up by key) never meets the ledger row at the cell's key. The PR body's guarantee 'the object key's stem is the stem of the instant the call's range read began at' from any TimeZone does not hold on a date grid for a bound with an explicit offset (or any offset-less bound that is not a midnight). The key should name the cell the read covers (the lo as the column reads it), or the bound be refused.",
+ "repro": "repro.sql",
+ "install": ["tests/archive/fixtures.sql", "pgpm_core/install.sql", "pgpm_archive/install.sql"],
+ "finder": "V"
+}

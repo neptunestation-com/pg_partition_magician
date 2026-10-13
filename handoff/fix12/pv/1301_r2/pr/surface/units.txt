@@ -1,0 +1,15 @@
+pgpm_archive/install.sql:60-62
+archive._s3_endpoint_canonical
+archive.configure
+archive.s3_signed_request
+archive.s3_signed_request_bytea
+archive._encode_upload_ndjson_single
+archive._encode_upload_parquet
+archive._s3_abort_uploads_at
+archive.to_s3
+archive.to_s3_parquet
+CHANGELOG.md
+bench/archive_configure_endpoint.sh
+pgpm_archive/README.md
+test.sh
+tests/archive/db/53_configure_endpoint_canonical_test.sql

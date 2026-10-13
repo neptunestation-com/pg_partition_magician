@@ -1,0 +1,3 @@
+{"tier": 5, "file": "scripts/review/pass_metrics.py", "line": 235, "lens": "boundary arithmetic and types",
+ "scenario": "stop_check.py judges precision >= 0.7, fell rate <= 0.3 and coverage >= 0.9 on the two-decimal figures pass_metrics.py writes into the record, so a pass at precision 16/23 = 0.696, fell rate 7/23 = 0.304 and a finder at coverage 26/29 = 0.897 (which pass_metrics' own status rows read NOT met) reads as met, and two such passes are reported CONVERGED (stop); the criteria should be judged on the unrounded values",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

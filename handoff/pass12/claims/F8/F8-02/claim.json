@@ -1,0 +1,3 @@
+{"tier": 5, "file": "scripts/check_archive_object_keys.py", "line": 58, "lens": "fresh surface",
+ "scenario": "check_archive_object_keys.py (read by value since #1181) treats a prefix reference passed as an EXECUTE ... USING bind parameter as 'passing it along', so a second function that assembles a key with execute 'select $1 || ''/'' || $2' using cfg.prefix, p_name passes the lint, while the same function written cfg.prefix || '/' || p_name is refused; the one-assembling-function rule should refuse both",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

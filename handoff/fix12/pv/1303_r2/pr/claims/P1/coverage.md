@@ -1,0 +1,12 @@
+- pgpm_core/install.sql:3480-3506 | read: yes | the header comment: the three remedies as promised; the REACHED paragraph promises "drop it AND delete its pgpm.part row", which the code below does not spell (P1-01)
+- pgpm._disown_retirement | read: yes | state judgement, relation/parent naming by oid and schema, ATTACH encoding, the three texts; reached text lacks the DELETE (P1-01); recall and no-policy rows typed on the tree and held
+- pgpm._disown_unvouched_retirements | read: yes | p_why no longer carries a remedy; the pass's disown typed on the tree (reached and no-policy states)
+- pgpm.retire | read: yes | horizon check before the detached/pending disowns; both disown sites and the fail_retain_drop/skip_retain that follow; retire() row in schema s2 typed on the tree
+- pgpm._retain_recall | read: yes | disowns only after the reached `continue`, so the judgement is the complement; part C scenario typed on the tree and held
+- pgpm._detach_reap | read: yes | disown ahead of the FINALIZE through the same function; not run (needs an abandoned detach session)
+- CHANGELOG.md | read: yes | the new entry (lines 4-21) against the code: promises the DELETE in the reached remedy, which the tree does not spell
+- bench/retain_disown_remedy.sh | read: yes | wrapper shape, ran-count liveness, install failure reported as FAIL, test.sh registration
+- docs/reference.md | read: yes | the retire remedy block (1510-1538), the upgrade paragraph (1544), set_retain (3213-3216), the log-action row (3750), and every other retain_disown mention by grep; the DELETE statement is typeable (no FK/trigger on pgpm.part)
+- test.sh | read: yes | the guard list entry (pgpm_perf380) and the shard loop around it
+- tests/327_retire_pending_detach_test.sql | read: yes | part C's remedy pattern (517) and its fixture; the pattern requires the DELETE the tree does not spell
+- tests/339_retain_disown_remedy_test.sql | read: yes | all three parts, the typed-remedy extraction, the asymmetric fixtures and the identity assertions; parts A and B fail on this tree for P1-01's reason

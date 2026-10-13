@@ -1,0 +1,279 @@
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/base/CHANGELOG.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/head/CHANGELOG.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/base/CHANGELOG.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/head/CHANGELOG.md	2026-10-12 13:02:29
+@@ -2,6 +2,14 @@
+ 
+ ## [Unreleased]
+ 
++- **`adopt_partition` refuses a transaction stricter than `READ COMMITTED`** (#1262). It judged the partition
++  attached and not pending, and read its name and bounds, through the caller's snapshot after its `SHARE UPDATE
++  EXCLUSIVE` lock, and under `REPEATABLE READ` or `SERIALIZABLE` that is the transaction's first snapshot: a
++  `DETACH` another session committed before the call was read as still attached, so `pgpm.part` recorded a
++  standalone table as a partition of the parent, and a rename was recorded under the old name. It now refuses
++  any stricter level up front, before any lock, as `untransmute` does, so every read after the lock has a
++  snapshot taken after it; the refusal names the remedy (`BEGIN ISOLATION LEVEL READ COMMITTED`, the call,
++  `COMMIT`).
+ - **The regrain swap and the hypertable cutover wait for snapshots older than their copies** (#1241). A
+   `REPEATABLE READ` reader whose snapshot predated a regrain's copies, and which first read the table after the
+   swap (so it held no lock the `DETACH` waited on), read the fine children, whose rows its snapshot cannot see,
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/base/bench/adopt_partition_isolation.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/head/bench/adopt_partition_isolation.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/base/bench/adopt_partition_isolation.sh	1969-12-31 16:00:00
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/head/bench/adopt_partition_isolation.sh	2026-10-12 13:02:29
+@@ -0,0 +1,55 @@
++#!/usr/bin/env bash
++# adopt_partition_isolation.sh <container> <db> [install.sql]
++#
++# Run tests/332_adopt_partition_isolation_test.sql against an ARBITRARY copy of pgpm_core/install.sql, so that
++# bench/discriminate.sh can show the file catches the defect its mutation puts back (issue #1262):
++# adopt_partition judged the partition (attached and not pending, its name, its bounds) through the caller's
++# snapshot after its SHARE UPDATE EXCLUSIVE lock, and under REPEATABLE READ or SERIALIZABLE that snapshot is the
++# transaction's first, so a DETACH another session committed before the call was read as still attached and a
++# standalone table was recorded in pgpm.part as a partition (a RENAME, under its old name). It refuses any
++# isolation level stricter than READ COMMITTED now, so every read after the lock has a snapshot taken after it.
++# The file is the acceptance test; this wrapper exists so the mutation has a guard the discriminate track can
++# run against the mutant, in the shape of bench/retain_recall_moved_parent.sh.
++#
++# ONE mutation is required to fail against it (bench/mutations/mutate.py):
++#   adopt_partition_strict_isolation_admitted -- the refusal gone, the pre-fix shape: parts A (a detached table
++#                                                recorded), B (a renamed partition recorded under its old name)
++#                                                and C (SERIALIZABLE admitted) catch it, and part D's remedy then
++#                                                meets the rows the admitted calls recorded.
++#
++# Runs on the plain core image (pgtap, dblink and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path
++# inside the container, for a worktree mounted somewhere other than /repo.
++set -uo pipefail
++C="${1:?container}"; DB="${2:?db}"; INSTALL="${3:-/repo/pgpm_core/install.sql}"
++TEST_FILE="${TAP_GUARD_TEST_FILE:-/repo/tests/332_adopt_partition_isolation_test.sql}"
++fail=0
++
++q() { docker exec "$C" psql -U postgres "$@"; }
++
++q -q -c "drop database if exists $DB" >/dev/null 2>&1
++q -q -c "create database $DB" >/dev/null 2>&1
++q -d "$DB" -q -c "create extension if not exists pgtap;" >/dev/null 2>&1
++
++# A mutant that will not even install is NOT a pass: say which happened.
++if ! q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f "$INSTALL" >/dev/null 2>&1; then
++  printf 'FAIL  %-58s %s\n' "the module under test installed" "$INSTALL"
++  fail=1
++fi
++
++if [ "$fail" = 0 ]; then
++  out=$(docker exec "$C" sh -c "pg_prove -v -U postgres -d $DB $TEST_FILE" 2>&1)
++  rc=$?
++  echo "$out" | grep -E '^not ok [0-9]+ -' | sed 's/^/    /' | head -20
++  # the count is asserted separately: a run that never reached the database must not read as a catch
++  ran=$(echo "$out" | grep -cE '^(not )?ok [0-9]+ -')
++  if [ "$rc" = 0 ]; then printf 'PASS  %-58s %s\n' "adopt_partition() refuses a snapshot older than its lock" "$ran ran"
++  else printf 'FAIL  %-58s %s\n' "adopt_partition() refuses a snapshot older than its lock" "$ran ran"; fail=1; fi
++  if [ "$ran" -eq 0 ]; then
++    printf 'FAIL  %-58s %s\n' "LIVENESS: the assertions were reached at all" "0 ran"
++    echo "$out" | tail -20 | sed 's/^/      /'
++    fail=1
++  fi
++fi
++
++q -q -c "drop database if exists $DB" >/dev/null 2>&1
++exit "$fail"
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/base/docs/reference.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/head/docs/reference.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/base/docs/reference.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/head/docs/reference.md	2026-10-12 13:02:29
+@@ -3018,6 +3018,7 @@
+ 
+ It refuses, writing nothing:
+ 
++- a transaction stricter than `READ COMMITTED` (see the next paragraph), before it takes any lock;
+ - a `p_parent` pgpm does not manage, or a `p_child` that is not attached to it (a partition in the middle of
+   a detach is leaving it), or one that is not a plain table;
+ - a `p_child` `pgpm.part` already records by oid (there is nothing to adopt);
+@@ -3029,7 +3030,12 @@
+ 
+ It holds the table's regrain lock and a `SHARE UPDATE EXCLUSIVE` lock on `p_child` while it judges, so the
+ partition cannot be detached or dropped between the check and the row; reads and writes of the partition are
+-not blocked. The bounds are read the same way whatever the caller's `DateStyle` and `TimeZone`.
++not blocked. That check, and the name and bounds it records, are read through a snapshot taken after the lock,
++so `adopt_partition` must run in a `READ COMMITTED` transaction (the default). Under `REPEATABLE READ` or
++`SERIALIZABLE` the snapshot is the transaction's first, which can predate a `DETACH` or a rename another session
++committed before the call, so it refuses, naming the remedy: `BEGIN ISOLATION LEVEL READ COMMITTED`, the call,
++`COMMIT` (a session whose `default_transaction_isolation` is stricter included). The bounds are read the same
++way whatever the caller's `DateStyle` and `TimeZone`.
+ 
+ ### `resume` / `pause`
+ 
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/base/pgpm_core/install.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/head/pgpm_core/install.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/base/pgpm_core/install.sql	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/head/pgpm_core/install.sql	2026-10-12 13:02:29
+@@ -14002,6 +14002,15 @@
+ -- mode, which conflicts with DETACH in both forms and with DROP but with no read or write, so the relation
+ -- judged attached is still attached when its row commits. The SET clause pins the rendering of the catalog's
+ -- bounds to ISO, the one form every session parses alike (see _ts_text).
++--
++-- READ COMMITTED only (#1262). Every judgement after that lock (attached and not pending, the name, the
++-- bounds, what pgpm.part records) is a read of the catalog or of pgpm.part, and is only worth the lock when its
++-- snapshot was taken after the lock was granted. READ COMMITTED takes one per statement, so it is. REPEATABLE
++-- READ and SERIALIZABLE pin the transaction's first snapshot, which can predate a DETACH, a rename or a
++-- detach-and-reattach at other bounds committed before this call, and through it the call recorded a table
++-- the parent no longer held (or one under a name or a range it no longer had). Refused up front, as untransmute
++-- refuses, before any lock is taken; READ UNCOMMITTED is READ COMMITTED in PostgreSQL and passes. A function
++-- commits nothing, so the transaction's own level is the one that matters, not default_transaction_isolation.
+ create or replace function pgpm.adopt_partition(p_parent regclass, p_child regclass)
+ returns text language plpgsql set datestyle = 'ISO, MDY' as $$
+ declare
+@@ -14009,6 +14018,10 @@
+   v_lo_raw text; v_hi_raw text; v_lo text; v_hi text; v_coltype text; v_exact boolean;
+   v_row pgpm.part; v_had boolean; v_tracked name; v_clash_q text; v_chunks int; v_was text; v_method text;
+ begin
++  if current_setting('transaction_isolation') not in ('read committed', 'read uncommitted') then
++    raise exception 'pg_partition_magician: adopt_partition(%, %) must run in a READ COMMITTED transaction (this one is %): it records % only while it is attached to % once its lock on it is granted, and asks that through a snapshot taken after the lock, which a stricter isolation level cannot provide. Re-run it in a READ COMMITTED transaction: BEGIN ISOLATION LEVEL READ COMMITTED, the call, COMMIT',
++      p_parent, p_child, current_setting('transaction_isolation'), p_child, p_parent;
++  end if;
+   perform pgpm._refuse_null_arguments('adopt_partition', json_build_object('p_parent', p_parent, 'p_child', p_child));
+   perform pgpm._regrain_lock(p_parent);
+   select * into cfg from pgpm.config where parent_table = p_parent for key share;
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/base/test.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/head/test.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/base/test.sh	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/head/test.sh	2026-10-12 13:02:29
+@@ -1265,6 +1265,7 @@
+     "bench/throws_pinned_sites.sh pgpm_perf350"
+     "bench/wrapper_premise_rule.sh pgpm_perf344"
+     "bench/regrain_swap_waits_for_older_snapshots.sh pgpm_perf365"
++    "bench/adopt_partition_isolation.sh pgpm_perf370"
+   )
+   local selected=()
+   local n=${#guards[@]} idx
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/base/tests/332_adopt_partition_isolation_test.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/head/tests/332_adopt_partition_isolation_test.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/base/tests/332_adopt_partition_isolation_test.sql	1969-12-31 16:00:00
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/head/tests/332_adopt_partition_isolation_test.sql	2026-10-12 13:02:29
+@@ -0,0 +1,132 @@
++-- pgpm.adopt_partition() judges the partition through a snapshot taken after its lock: READ COMMITTED only
++-- (issue #1262).
++--
++-- THE BUG. adopt_partition locks the partition in SHARE UPDATE EXCLUSIVE mode and then re-reads the catalog to
++-- judge it attached and not pending, read its name and its bounds. Those reads went through the caller's
++-- snapshot, and under REPEATABLE READ or SERIALIZABLE that is the transaction's first one, which can predate a
++-- change another session committed before the call. A DETACH committed after the snapshot was still read as
++-- attached, so pgpm.part recorded a standalone table as a partition of the parent; a RENAME committed after it
++-- was read under the old name, so the row recorded a name that no longer resolves to the oid it records (the
++-- identity wedge adopt_partition exists to repair). The same call in READ COMMITTED refused, or read the
++-- current name.
++--
++-- THE CONTRACT. adopt_partition refuses any transaction stricter than READ COMMITTED, before it locks or writes
++-- anything, with a refusal that names the remedy, and the remedy works.
++--   PART A  REPEATABLE READ, snapshot taken before another session's DETACH committed: refused, and nothing is
++--           recorded for the detached table.
++--   PART B  REPEATABLE READ, snapshot taken before another session's RENAME committed (the table is still
++--           attached, so asking only whether it is attached would let this through): refused, nothing recorded.
++--   PART C  SERIALIZABLE, a partition nothing touches: refused, nothing recorded.
++--   PART D  the remedy as the refusal types it, in a session whose default_transaction_isolation is REPEATABLE
++--           READ: BEGIN ISOLATION LEVEL READ COMMITTED, the call, COMMIT. The renamed partition is recorded by
++--           its oid under its CURRENT name over its own bounds, the untouched one is recorded too, and the
++--           detached table is refused as not a partition, so pgpm.part holds exactly the two attached ones.
++--
++-- adopt_partition is a function, not a committing procedure, so its refusals are pinned by message.
++-- ASYMMETRIC FIXTURES. Three hand partitions: x [900, 1000) holds 950 and is renamed, y [1000, 1100) holds
++-- 1010 and 1020 and is detached, z [1100, 1200) holds 1111, 1122 and 1133 and is left alone. Two end up
++-- recorded and one does not, and every check names the relation by oid and name, never a count alone.
++create extension if not exists pgtap;
++create extension if not exists dblink;
++set client_min_messages = warning;
++select plan(18);
++
++create table public.t332 (id bigint primary key, payload text);
++insert into public.t332 values (150, 'a');
++call pgpm.transmute('public.t332', 'id', 100::bigint, p_obtain => 1, p_paused => false);
++-- attached partitions pgpm.part has no row for: what adopt_partition exists to record
++create table public.t332_x partition of public.t332 for values from (900) to (1000);
++create table public.t332_y partition of public.t332 for values from (1000) to (1100);
++create table public.t332_z partition of public.t332 for values from (1100) to (1200);
++insert into public.t332 values (950, 'x'), (1010, 'y'), (1020, 'y'), (1111, 'z'), (1122, 'z'), (1133, 'z');
++select 'public.t332_x'::regclass::oid as x_oid, 'public.t332_y'::regclass::oid as y_oid,
++       'public.t332_z'::regclass::oid as z_oid \gset
++
++select is((select string_agg(c.relname || ':' || pg_get_expr(c.relpartbound, c.oid), ', ' order by c.relname)
++             from pg_inherits i join pg_class c on c.oid = i.inhrelid
++            where i.inhparent = 'public.t332'::regclass and c.relname in ('t332_x', 't332_y', 't332_z')),
++          't332_x:FOR VALUES FROM (''900'') TO (''1000''), t332_y:FOR VALUES FROM (''1000'') TO (''1100''), t332_z:FOR VALUES FROM (''1100'') TO (''1200'')',
++          'LIVENESS: x, y and z are attached over their own bounds');
++select is((select string_agg(child_name, ',') from pgpm.part where parent_table = 'public.t332'::regclass
++            and child_oid in (:x_oid, :y_oid, :z_oid)), null,
++          'LIVENESS: and pgpm.part records none of them');
++select dblink_connect('o332', 'dbname=' || current_database()) as o332 \gset
++
++-- ============================ (A) a DETACH committed after the snapshot ============================
++begin isolation level repeatable read;
++select count(*) as a_snap from pgpm.config \gset
++select dblink_exec('o332', 'alter table public.t332 detach partition public.t332_y') as a_detached \gset
++select ok(exists (select 1 from pg_inherits where inhrelid = :y_oid)
++          and not exists (select 1 from pg_partition_ancestors(:y_oid::regclass) a where a.relid = 'public.t332'::regclass)
++          and (select x from dblink('o332', format('select count(*)::int from pg_inherits where inhrelid = %s', :y_oid)) as t(x int)) = 0,
++  'LIVENESS: A: the detach committed, and this transaction''s snapshot still shows y attached');
++select throws_like(
++  $$ select pgpm.adopt_partition('public.t332', 'public.t332_y') $$,
++  'pg_partition_magician: adopt_partition(t332, t332_y) must run in a READ COMMITTED transaction (this one is repeatable read)%BEGIN ISOLATION LEVEL READ COMMITTED, the call, COMMIT',
++  'A: under REPEATABLE READ adopt_partition refuses, naming the remedy');
++commit;
++select is((select string_agg(child_name, ',') from pgpm.part where child_oid = :y_oid), null,
++  'A: nothing is recorded for the detached table');
++
++-- ============================ (B) a RENAME committed after the snapshot ============================
++begin isolation level repeatable read;
++select count(*) as b_snap from pgpm.config \gset
++select dblink_exec('o332', 'alter table public.t332_x rename to t332_x_renamed') as b_renamed \gset
++select ok((select relname from pg_class where oid = :x_oid) = 't332_x'
++          and exists (select 1 from pg_partition_ancestors(:x_oid::regclass) a where a.relid = 'public.t332'::regclass)
++          and (select x from dblink('o332', format('select relname::text from pg_class where oid = %s', :x_oid)) as t(x text)) = 't332_x_renamed',
++  'LIVENESS: B: the rename committed and x is still attached, and this transaction''s snapshot still reads its old name');
++select throws_like(
++  format('select pgpm.adopt_partition(%L, %L)', 'public.t332', :x_oid::regclass::text),
++  'pg_partition_magician: adopt_partition(t332, t332_x_renamed) must run in a READ COMMITTED transaction (this one is repeatable read)%',
++  'B: under REPEATABLE READ adopt_partition refuses a partition that is still attached too');
++commit;
++select is((select string_agg(child_name, ',') from pgpm.part where child_oid = :x_oid), null,
++  'B: nothing is recorded for x, under either name');
++
++-- ============================ (C) SERIALIZABLE ============================
++begin isolation level serializable;
++select throws_like(
++  $$ select pgpm.adopt_partition('public.t332', 'public.t332_z') $$,
++  'pg_partition_magician: adopt_partition(t332, t332_z) must run in a READ COMMITTED transaction (this one is serializable)%',
++  'C: under SERIALIZABLE adopt_partition refuses');
++commit;
++select is((select string_agg(child_name, ',') from pgpm.part where child_oid = :z_oid), null,
++  'C: nothing is recorded for z');
++select is((select count(*)::int from pgpm.log where parent_table = 'public.t332'::regclass and action = 'adopt_partition'),
++  0, 'A, B, C: no refusal logged an adoption');
++
++-- ============================ (D) the remedy, as typed ============================
++-- the session default is REPEATABLE READ, so the remedy is the explicit level the refusal names
++set default_transaction_isolation = 'repeatable read';
++begin isolation level read committed;
++select lives_ok(
++  format('select pgpm.adopt_partition(%L, %L)', 'public.t332', 'public.t332_x_renamed'),
++  'D: BEGIN ISOLATION LEVEL READ COMMITTED, the call, COMMIT adopts the renamed partition');
++select lives_ok(
++  $$ select pgpm.adopt_partition('public.t332', 'public.t332_z') $$,
++  'D: and the untouched one');
++select throws_like(
++  $$ select pgpm.adopt_partition('public.t332', 'public.t332_y') $$,
++  'pg_partition_magician: t332_y is not a partition of t332:%',
++  'D: and refuses the detached table as not a partition, which is what the stale snapshot hid');
++commit;
++reset default_transaction_isolation;
++
++-- filtered by parent in a MATERIALIZED CTE before any bound is cast (#973)
++with mine as materialized (select * from pgpm.part where parent_table = 'public.t332'::regclass)
++select is((select string_agg(child_name || ' [' || lo || ', ' || hi || ') oid ' || case child_oid when :x_oid then 'x' when :z_oid then 'z' else child_oid::text end,
++                             '; ' order by lo::bigint)
++             from mine where child_oid in (:x_oid, :y_oid, :z_oid)),
++          't332_x_renamed [900, 1000) oid x; t332_z [1100, 1200) oid z',
++  'D: pgpm.part records x under its current name and z, each by its oid over its own bounds, and not y');
++select is((select string_agg(id::text, ',' order by id) from public.t332_y), '1010,1020',
++  'LIVENESS: D: the detached table keeps its rows 1010 and 1020, outside the parent');
++select is((select string_agg(id::text, ',' order by id) from public.t332 where id >= 900), '950,1111,1122,1133',
++  'D: the parent holds 950, 1111, 1122 and 1133 through the adopted partitions');
++select is((select string_agg(lo || '..' || hi, ',' order by id) from pgpm.log
++            where parent_table = 'public.t332'::regclass and action = 'adopt_partition'),
++  '900..1000,1100..1200', 'D: one adoption logged per partition recorded, x''s range then z''s');
++
++select dblink_disconnect('o332') as o332_gone \gset
++select * from finish();

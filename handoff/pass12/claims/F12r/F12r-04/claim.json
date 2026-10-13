@@ -1,0 +1,3 @@
+{"tier": 5, "file": "scripts/review/decisions_queue.py", "line": 67, "lens": "operator error",
+ "scenario": "decisions_queue.parse() silently skips any line not starting with '- D', so an open BLOCKING entry written by hand as an indented list item, a '*' bullet or with a lower-case 'd02' id is neither read nor refused: `pending` exits 0 and stop_check.py (which reads the queue through parse()) finds no blocking decision and lets the loop continue, against the docstring's 'written BLOCKING so a grep and stop_check.py find it' and README's 'the scripts refuse a line that does not have this shape'",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

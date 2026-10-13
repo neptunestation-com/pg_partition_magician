@@ -1,0 +1,10 @@
+{
+ "seeds": [
+  {
+   "mutation": "regrain_step_isolation_unchecked",
+   "lens": "fresh surface",
+   "tier": 3,
+   "why": "the PR's own mutation, its quietest"
+  }
+ ]
+}

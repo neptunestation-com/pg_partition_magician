@@ -1,0 +1,3 @@
+{"tier": 3, "file": "pgpm_core/install.sql", "line": 14298, "lens": "fresh surface",
+ "scenario": "pgpm.check_time_monotonic on this tree carries no function-level SET timezone = 'UTC' clause (proconfig is null) although the comment above it, CHANGELOG.md, docs/reference.md and the PR body all say it does, so %I::timestamptz still casts a naive timestamp column in the caller's zone and a four-row column whose only falling pair straddles New York's spring-forward gap reports (3,3,1.0000) from America/New_York and (3,2,0.6667) from UTC; the documented fraction of non-decreasing pairs should be (3,2,0.6667) from every session zone",
+ "repro": "repro.sql", "install": ["pgpm_core/install.sql"], "fixtures": false}

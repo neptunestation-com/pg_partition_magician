@@ -1,0 +1,17 @@
+{
+  "pinned": "26770663c7ea436a472e2758e3f8e6760f403994",
+  "seeds": [
+    {
+      "id": "S1",
+      "kind": "mutation",
+      "mutation": "regrain_step_isolation_unchecked",
+      "file": "pgpm_core/install.sql",
+      "lens": "fresh surface",
+      "tier": 3,
+      "why": "Pre-#1258 regrain_step: no isolation level is refused, so a hand swap step in a REPEATABLE READ transaction reconciles and counts the captured delta through the transaction's first snapshot, misses a writer's UPDATE and DELETE committed after it, and drops the source with both unapplied (row 10 reverted, row 30 back); and a maintain tick in a session whose default_transaction_isolation is REPEATABLE READ copies instead of logging the refusal. One site, the step's call. tests/329 parts C and D catch it.",
+      "lines": [
+        7871
+      ]
+    }
+  ]
+}

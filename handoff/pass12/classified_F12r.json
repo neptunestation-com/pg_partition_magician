@@ -1,0 +1,181 @@
+{
+  "claims": [
+    {
+      "id": "F12r-01",
+      "finder": "F12r",
+      "tier": 4,
+      "file": "CHANGELOG.md",
+      "line": 525,
+      "lens": "fresh surface",
+      "scenario": "CHANGELOG.md's Unreleased section carries unresolved merge residue: after #1161's bullet says set_regrain WARNS and stores an over-budget target, a stray second copy of its tail says `set_regrain` now REFUSES such a run (the code warns and stores, as reference.md says), and five bullets (#1157, #1170, #1171, #1172, the outgoing-FK restart) appear twice verbatim; the index of promises should state each fix once and as the code keeps it",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - fixture: the CHANGELOG has an Unreleased section\nok - LIVENESS: set_regrain on a run of cap+1 children warns, logs warn_regrain_lock_budget and stores the target (rc=0 stored=100)\nnot ok - CHANGELOG Unreleased says `set_regrain` now refuses a run over the lock budget, which the code warns about and stores: 525:  `set_regrain` now refuse a run whose fine children above the retention horizon would take more than half of\nnot ok - CHANGELOG Unreleased carries these bullets twice (an unresolved merge): - **`tests/141` names the partition a `timestamptz` write a day out lands in** (#1172). \"t|- **`tests/74` ties every dropped range to the chunks archived before its drop** (#1171). |- **`tests/93` names the chunks the archive step takes, and the partitions `archive_batch`|- **`untransmute` refuses while a partition of the table is pending a concurrent detach** |- **An outgoing foreign key added to a parent mid-regrain restarts the run instead of bein|\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - fixture: the CHANGELOG has an Unreleased section\nok - LIVENESS: set_regrain on a run of cap+1 children warns, logs warn_regrain_lock_budget and stores the target (rc=0 stored=100)\nnot ok - CHANGELOG Unreleased says `set_regrain` now refuses a run over the lock budget, which the code warns about and stores: 525:  `set_regrain` now refuse a run whose fine children above the retention horizon would take more than half of\nnot ok - CHANGELOG Unreleased carries these bullets twice (an unresolved merge): - **`tests/141` names the partition a `timestamptz` write a day out lands in** (#1172). \"t|- **`tests/74` ties every dropped range to the chunks archived before its drop** (#1171). |- **`tests/93` names the chunks the archive step takes, and the partitions `archive_batch`|- **`untransmute` refuses while a partition of the table is pending a concurrent detach** |- **An outgoing foreign key added to a parent mid-regrain restarts the run instead of bein|\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F12r-02",
+      "finder": "F12r",
+      "tier": 5,
+      "file": "scripts/review/pass_metrics.py",
+      "line": 235,
+      "lens": "boundary arithmetic and types",
+      "scenario": "stop_check.py judges precision >= 0.7, fell rate <= 0.3 and coverage >= 0.9 on the two-decimal figures pass_metrics.py writes into the record, so a pass at precision 16/23 = 0.696, fell rate 7/23 = 0.304 and a finder at coverage 26/29 = 0.897 (which pass_metrics' own status rows read NOT met) reads as met, and two such passes are reported CONVERGED (stop); the criteria should be judged on the unrounded values",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: one finder's coverage (26 of 29 units, 0.897) is below the 0.9 gate, and the line's count says so (coverage: 0.90 (1 of 2 finders at or above 0.90))\nok - LIVENESS: the pass's precision is 16/23 and its fell rate 7/23, below and above the lines (precision 0.6957, fell 0.3043)\nok - LIVENESS: pass_metrics' own status rows for this pass read precision and fell rate NOT met\nok - fixture: the record carries the rounded figures stop_check reads (lenses: fresh surface, operator error, failure injection, contracts versus documentation, tests that pass for the wrong reason, resource cliffs | previous pass lenses: fresh surface, operator error / coverage: 0.90 (1 of 2 finders at or above 0.90) / seeds K=9, recall 1.00 (suite-caught 0/0, read-caught 9/9; late-survivor 3/3); claims 23; findings 7; precision 0.70 (strict 0.70, fell rate 0.30))\nnot ok - stop_check judges precision >= 0.7 NOT met for a pass at 16/23 = 0.696 (read {'12': 0.7, '13': 0.7})\nnot ok - stop_check judges fell rate <= 0.3 NOT met for a pass at 7/23 = 0.304 (read {'12': 0.3, '13': 0.3})\nnot ok - stop_check judges coverage NOT at the 0.9 gate when a finder read 0.897 (coverage read ['0.90', '0.90'])\nnot ok - stop_check does not declare the campaign converged on these two passes (verdict: stop: converged: the full lens cycle with zero Tier 1 and coverage >= 0.9 in passes 12 and 13, precision, fell rate and both recalls met in each, and t)\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: one finder's coverage (26 of 29 units, 0.897) is below the 0.9 gate, and the line's count says so (coverage: 0.90 (1 of 2 finders at or above 0.90))\nok - LIVENESS: the pass's precision is 16/23 and its fell rate 7/23, below and above the lines (precision 0.6957, fell 0.3043)\nok - LIVENESS: pass_metrics' own status rows for this pass read precision and fell rate NOT met\nok - fixture: the record carries the rounded figures stop_check reads (lenses: fresh surface, operator error, failure injection, contracts versus documentation, tests that pass for the wrong reason, resource cliffs | previous pass lenses: fresh surface, operator error / coverage: 0.90 (1 of 2 finders at or above 0.90) / seeds K=9, recall 1.00 (suite-caught 0/0, read-caught 9/9; late-survivor 3/3); claims 23; findings 7; precision 0.70 (strict 0.70, fell rate 0.30))\nnot ok - stop_check judges precision >= 0.7 NOT met for a pass at 16/23 = 0.696 (read {'12': 0.7, '13': 0.7})\nnot ok - stop_check judges fell rate <= 0.3 NOT met for a pass at 7/23 = 0.304 (read {'12': 0.3, '13': 0.3})\nnot ok - stop_check judges coverage NOT at the 0.9 gate when a finder read 0.897 (coverage read ['0.90', '0.90'])\nnot ok - stop_check does not declare the campaign converged on these two passes (verdict: stop: converged: the full lens cycle with zero Tier 1 and coverage >= 0.9 in passes 12 and 13, precision, fell rate and both recalls met in each, and t)\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F12r-03",
+      "finder": "F12r",
+      "tier": 5,
+      "file": "scripts/review/pass_metrics.py",
+      "line": 102,
+      "lens": "contracts versus documentation",
+      "scenario": "pass_metrics.compute() counts a candidate with no verdict (or with a verdict string it does not know, e.g. 'known-open') as FELL: it is listed under 'Fell in verification' with an empty reason, counted in both fell and unverified, and raises the fell rate the stopping criteria and the abandon-at-0.5 rule read (1 fell of 4 reads 0.50); README.md says such a candidate is reported as unverified, and the fell rate counts only claims that fell in verification",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: one candidate (F1-04) has no verdict and is counted unverified; exactly one (F1-03) fell (unverified=1)\nnot ok - the candidate without a verdict is not counted as fell (fell rows ['F1-03', 'F1-04'])\nnot ok - the fell rate is the one claim that fell over four, 0.25 (fell rate 0.5)\nnot ok - the record's Fell in verification section does not list the unverified candidate (- F1-03: documented | - F1-04:)\nnot ok - a verdict string compute() does not know (\"known-open\") is not silently counted as fell (fell rows ['F1-03', 'F1-04'])\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: one candidate (F1-04) has no verdict and is counted unverified; exactly one (F1-03) fell (unverified=1)\nnot ok - the candidate without a verdict is not counted as fell (fell rows ['F1-03', 'F1-04'])\nnot ok - the fell rate is the one claim that fell over four, 0.25 (fell rate 0.5)\nnot ok - the record's Fell in verification section does not list the unverified candidate (- F1-03: documented | - F1-04:)\nnot ok - a verdict string compute() does not know (\"known-open\") is not silently counted as fell (fell rows ['F1-03', 'F1-04'])\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F12r-04",
+      "finder": "F12r",
+      "tier": 5,
+      "file": "scripts/review/decisions_queue.py",
+      "line": 67,
+      "lens": "operator error",
+      "scenario": "decisions_queue.parse() silently skips any line not starting with '- D', so an open BLOCKING entry written by hand as an indented list item, a '*' bullet or with a lower-case 'd02' id is neither read nor refused: `pending` exits 0 and stop_check.py (which reads the queue through parse()) finds no blocking decision and lets the loop continue, against the docstring's 'written BLOCKING so a grep and stop_check.py find it' and README's 'the scripts refuse a line that does not have this shape'",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: a hand-written BLOCKING entry of the exact shape makes pending exit 1\nok - LIVENESS: variant 1 holds an open BLOCKING entry a grep finds: '  - D02 | 2026-10-12 | B...'\nnot ok - variant 1: pending exits 0, reading no pending BLOCKING decision and refusing nothing\nnot ok - variant 1: the parse stop_check.py uses sees 0 pending BLOCKING entries\nok - LIVENESS: variant 2 holds an open BLOCKING entry a grep finds: '* D02 | 2026-10-12 | BLO...'\nnot ok - variant 2: pending exits 0, reading no pending BLOCKING decision and refusing nothing\nnot ok - variant 2: the parse stop_check.py uses sees 0 pending BLOCKING entries\nok - LIVENESS: variant 3 holds an open BLOCKING entry a grep finds: '- d02 | 2026-10-12 | BLO...'\nnot ok - variant 3: pending exits 0, reading no pending BLOCKING decision and refusing nothing\nnot ok - variant 3: the parse stop_check.py uses sees 0 pending BLOCKING entries\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: a hand-written BLOCKING entry of the exact shape makes pending exit 1\nok - LIVENESS: variant 1 holds an open BLOCKING entry a grep finds: '  - D02 | 2026-10-12 | B...'\nnot ok - variant 1: pending exits 0, reading no pending BLOCKING decision and refusing nothing\nnot ok - variant 1: the parse stop_check.py uses sees 0 pending BLOCKING entries\nok - LIVENESS: variant 2 holds an open BLOCKING entry a grep finds: '* D02 | 2026-10-12 | BLO...'\nnot ok - variant 2: pending exits 0, reading no pending BLOCKING decision and refusing nothing\nnot ok - variant 2: the parse stop_check.py uses sees 0 pending BLOCKING entries\nok - LIVENESS: variant 3 holds an open BLOCKING entry a grep finds: '- d02 | 2026-10-12 | BLO...'\nnot ok - variant 3: pending exits 0, reading no pending BLOCKING decision and refusing nothing\nnot ok - variant 3: the parse stop_check.py uses sees 0 pending BLOCKING entries\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F12r-05",
+      "finder": "F12r",
+      "tier": 2,
+      "file": "pgpm_archive/install.sql",
+      "line": 3534,
+      "lens": "boundary arithmetic and types",
+      "scenario": "archive.to_s3 casts its paging cursor back as the bare type name (v_ctltype := v_ctl_typ::regtype::text), dropping the typmod it computes into v_ctl_mod and never uses, against its own comment; a quiescent relation whose control-named column is char(3), paged one row per page, has its cursor 'abc' read back as 'a', every page re-admits rows already read, and the export never ends (cancelled by statement_timeout, nothing written) instead of writing rows j, k and l once; scripts/check_archive_child_by_oid.py also fails the tree's module on this line",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "                    \n---------------------------------------------------------------------------\n ok 2 - LIVENESS: one row per page, so the export pages through the cursor\n(1 row)\n\n                                     is                                     \n----------------------------------------------------------------------------\n ok 3 - LIVENESS: no object at the char(3) relation's key before its export\n(1 row)\n\nSET\n                                                   is                                                   \n--------------------------------------------------------------------------------------------------------\n not ok 4 - archive.to_s3 of a quiescent char(3) relation, one row per page, ends and completes        +\n # Failed test 4: \"archive.to_s3 of a quiescent char(3) relation, one row per page, ends and completes\"+\n #         have: cancelled by statement_timeout: the export did not end                                +\n #         want: ok\n(1 row)\n\nRESET\n                               is                               \n----------------------------------------------------------------\n not ok 5 - its object holds rows j, k and l, each once        +\n # Failed test 5: \"its object holds rows j, k and l, each once\"+\n #         have: NULL                                          +\n #         want: {j,k,l}\n(1 row)\n\n clear \n-------\n   404\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 5\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": " \n------\n 1..5\n(1 row)\n\nCREATE SCHEMA\nCREATE TABLE\nINSERT 0 1\nCALL\n configure \n-----------\n \n(1 row)\n\nCREATE TABLE\nINSERT 0 3\nCREATE FUNCTION\nCREATE FUNCTION\nCREATE FUNCTION\nCREATE FUNCTION\n                                                 is                                                 \n----------------------------------------------------------------------------------------------------\n ok 1 - LIVENESS: the relation's id is character(3), and abc cast as the bare type name is cut to a\n(1 row)\n\n                                    is                                     \n---------------------------------------------------------------------------\n ok 2 - LIVENESS: one row per page, so the export pages through the cursor\n(1 row)\n\n                                     is                                     \n----------------------------------------------------------------------------\n ok 3 - LIVENESS: no object at the char(3) relation's key before its export\n(1 row)\n\nSET\n                                             is                                             \n--------------------------------------------------------------------------------------------\n ok 4 - archive.to_s3 of a quiescent char(3) relation, one row per page, ends and completes\n(1 row)\n\nRESET\n                         is                         \n----------------------------------------------------\n ok 5 - its object holds rows j, k and l, each once\n(1 row)\n\n clear \n-------\n   404\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+      },
+      "class": "seed_hit",
+      "seed": "S8"
+    },
+    {
+      "id": "F12r-06",
+      "finder": "F12r",
+      "tier": 5,
+      "file": "scripts/check_archive_child_by_oid.py",
+      "line": 114,
+      "lens": "fresh surface",
+      "scenario": "check_archive_child_by_oid.py's rule 1 (no relation is found by its name, outside archive._resolve_child) passes a function that finds a relation by the name read as data out of its pg_class row, `where to_jsonb(c) ->> 'relname' = p_name` (the #1181 shape the sibling object-key lint now refuses for the prefix), or by pg_identify_object(...).identity, or by an INTERSECT of the name standing alone in its own select list with the name looked for; neither is in its 'What this cannot see' list, and the lint should refuse both as it refuses c.relname = p_name",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: the lint reads the appended function and refuses c.relname = p_name there (rc=1)\nnot ok - the lint names no violation in archive._f12r_probe, which finds a relation by its name as: to_jsonb(c) ->> 'relname' = p_name (rc=1; any failure it reports is elsewhere in the file)\nnot ok - the lint names no violation in archive._f12r_probe, which finds a relation by its name as: (pg_identify_object('pg_class'::regclass, c.oid, 0)).identity = p_name (rc=1; any failure it reports is elsewhere in the file)\nnot ok - the lint names no violation in archive._f12r_probe, which finds a relation by its name through INTERSECT (select c.relname, c.oid ... intersect select p_name::name, c2.oid ...) (rc=1)\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: the lint reads the appended function and refuses c.relname = p_name there (rc=1)\nnot ok - the lint names no violation in archive._f12r_probe, which finds a relation by its name as: to_jsonb(c) ->> 'relname' = p_name (rc=0; any failure it reports is elsewhere in the file)\nnot ok - the lint names no violation in archive._f12r_probe, which finds a relation by its name as: (pg_identify_object('pg_class'::regclass, c.oid, 0)).identity = p_name (rc=0; any failure it reports is elsewhere in the file)\nnot ok - the lint names no violation in archive._f12r_probe, which finds a relation by its name through INTERSECT (select c.relname, c.oid ... intersect select p_name::name, c2.oid ...) (rc=0)\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F12r-07",
+      "finder": "F12r",
+      "tier": 5,
+      "file": "scripts/check_archive_object_keys.py",
+      "line": 104,
+      "lens": "fresh surface",
+      "scenario": "check_archive_object_keys.py passes a second object key assembled outside archive._owned_key when the prefix is renamed through a FROM item (`return (select u.p || p_child from unnest(array[cfg.prefix]) as u(p))`, or `... from (values (cfg.prefix)) as u(p)`: a call after FROM is lexed as a relation name, a VALUES row as a value list) or handed by position to a helper of the file whose nameless parameter assembles it (`select $1 || $2`, though the docstring follows a carrying parameter 'whatever its name'); none of these is in its 'What this cannot see' list, and the lint should refuse each as it refuses cfg.prefix || p_child",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - GUARD: the lint passes the module as it is (rc=0)\nok - LIVENESS: the lint reads the appended function and refuses a second key assembled there with || (rc=1)\nnot ok - the lint passes a second key assembled outside archive._owned_key as: return (select u.p || p_child from unnest(array[cfg.prefix]) as u(p)); (rc=0: PASS  every object key in /var/folders/98/7c8wgdp97k586wddz7s0jp900000gn/T/tmp.V)\nnot ok - the lint passes a second key assembled outside archive._owned_key as: return (select u.p || p_child from (values (cfg.prefix)) as u(p)); (rc=0: PASS  every object key in /var/folders/98/7c8wgdp97k586wddz7s0jp900000gn/T/tmp.V)\nnot ok - the lint passes a second key assembled in archive._f12r_join as $1 || $2, handed cfg.prefix by position (rc=0)\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - GUARD: the lint passes the module as it is (rc=0)\nok - LIVENESS: the lint reads the appended function and refuses a second key assembled there with || (rc=1)\nnot ok - the lint passes a second key assembled outside archive._owned_key as: return (select u.p || p_child from unnest(array[cfg.prefix]) as u(p)); (rc=0: PASS  every object key in /var/folders/98/7c8wgdp97k586wddz7s0jp900000gn/T/tmp.3)\nnot ok - the lint passes a second key assembled outside archive._owned_key as: return (select u.p || p_child from (values (cfg.prefix)) as u(p)); (rc=0: PASS  every object key in /var/folders/98/7c8wgdp97k586wddz7s0jp900000gn/T/tmp.3)\nnot ok - the lint passes a second key assembled in archive._f12r_join as $1 || $2, handed cfg.prefix by position (rc=0)\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F12r-08",
+      "finder": "F12r",
+      "tier": 5,
+      "file": "scripts/check_archive_child_by_oid.py",
+      "line": 613,
+      "lens": "fresh surface",
+      "scenario": "check_archive_child_by_oid.py's rule 1 says nothing is cast to regclass from a parenthesised expression (a relation found by a name built at run time), but matches it by spelling, a ')' then '::' then the token 'regclass': the same cast written (...)::pg_catalog.regclass, CAST(... AS regclass) or regclass(...) (the last two named by its own docstring as casts) passes with no violation; the lint should refuse all three as it refuses (...)::regclass",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: the lint reads the appended function and refuses (...)::regclass there\nnot ok - the lint names no violation in archive._f12r_probe, which casts a name built at run time to regclass as: (quote_ident(p_nsp) || '.' || quote_ident(p_name))::pg_catalog.regclass\nnot ok - the lint names no violation in archive._f12r_probe, which casts a name built at run time to regclass as: cast(quote_ident(p_nsp) || '.' || quote_ident(p_name) as regclass)\nnot ok - the lint names no violation in archive._f12r_probe, which casts a name built at run time to regclass as: regclass(quote_ident(p_nsp) || '.' || quote_ident(p_name))\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: the lint reads the appended function and refuses (...)::regclass there\nnot ok - the lint names no violation in archive._f12r_probe, which casts a name built at run time to regclass as: (quote_ident(p_nsp) || '.' || quote_ident(p_name))::pg_catalog.regclass\nnot ok - the lint names no violation in archive._f12r_probe, which casts a name built at run time to regclass as: cast(quote_ident(p_nsp) || '.' || quote_ident(p_name) as regclass)\nnot ok - the lint names no violation in archive._f12r_probe, which casts a name built at run time to regclass as: regclass(quote_ident(p_nsp) || '.' || quote_ident(p_name))\n"
+      },
+      "class": "candidate"
+    }
+  ]
+}

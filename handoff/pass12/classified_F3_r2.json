@@ -1,0 +1,115 @@
+{
+  "claims": [
+    {
+      "id": "F3-01",
+      "finder": "F3",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 7485,
+      "lens": "fresh surface",
+      "scenario": "_regrain_fine_count drops the aged prefix from the lock-budget count whether or not archive_fn is set, so the prepare tick (and set_regrain's warning) admits a run whose swap attaches every aged sub-range (archive_fn set materializes them, #278); a 2500-child run is prepared and copied and only the swap refuses, where reference.md says the aged prefix is uncounted only with archive_fn unset and the prepare tick should refuse before copying",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "b-ranges are all attached\"+\n #     no exception thrown\n(1 row)\n\n                                    is                                     \n---------------------------------------------------------------------------\n not ok 9 - no regrain_prepare was logged for that over-budget run        +\n # Failed test 9: \"no regrain_prepare was logged for that over-budget run\"+\n #         have: 1                                                        +\n #         want: 0\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 9\n(1 row)\n\npsql:<stdin>:57: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"f301b_p0000000000000000000_to_0000000000000002500\" does not exist, skipping\npsql:<stdin>:57: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"f301b_p0000000000000000000_to_0000000000000002500\" does not exist, skipping\npsql:<stdin>:64: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"f301d_p0000000000000000000_to_0000000000000002500\" does not exist, skipping\npsql:<stdin>:64: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"f301d_p0000000000000000000_to_0000000000000002500\" does not exist, skipping\npsql:<stdin>:77: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"f301c_p0000000000000000000_to_0000000000000002500\" does not exist, skipping\npsql:<stdin>:77: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"f301c_p0000000000000000000_to_0000000000000002500\" does not exist, skipping\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "0) (ids 1..99) rather than skipping it\n(1 row)\n\n                                      is                                       \n-------------------------------------------------------------------------------\n ok 7 - LIVENESS: (C) logged as regrain_copy of [0, 100), with no regrain_aged\n(1 row)\n\n                                                       throws_like                                                       \n-------------------------------------------------------------------------------------------------------------------------\n ok 8 - the prepare tick refuses a 2500-child run of a table with archive_fn set, whose aged sub-ranges are all attached\n(1 row)\n\n                              is                               \n---------------------------------------------------------------\n ok 9 - no regrain_prepare was logged for that over-budget run\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:57: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"f301b_p0000000000000000000_to_0000000000000002500\" does not exist, skipping\npsql:<stdin>:57: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"f301b_p0000000000000000000_to_0000000000000002500\" does not exist, skipping\npsql:<stdin>:64: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"f301d_p0000000000000000000_to_0000000000000002500\" does not exist, skipping\npsql:<stdin>:64: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"f301d_p0000000000000000000_to_0000000000000002500\" does not exist, skipping\n"
+      },
+      "class": "seed_hit",
+      "seed": "S5"
+    },
+    {
+      "id": "F3-02",
+      "finder": "F3",
+      "tier": 1,
+      "file": "pgpm_core/install.sql",
+      "line": 8629,
+      "lens": "operator error",
+      "scenario": "regrain()/regrain_history() called in a REPEATABLE READ transaction copies the monolith through the caller's old snapshot, so a row another session committed after that snapshot (before capture was installed) is in no fine child and the swap drops it with the source (have {10,20}, want {10,20,500}); transmute/untransmute/from_hypertable refuse a stricter isolation (_refuse_strict_isolation) and regrain should refuse it too or copy under a fresh snapshot",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "------------------------------------------------------------------------------------------------------\n not ok 4 - every row of the monolith's range is still in the table after regrain (10 and 20 before, 500 committed after the caller's snapshot)        +\n # Failed test 4: \"every row of the monolith's range is still in the table after regrain (10 and 20 before, 500 committed after the caller's snapshot)\"+\n #         have: {10,20}                                                                                                                               +\n #         want: {10,20,500}\n(1 row)\n\n                            is                            \n----------------------------------------------------------\n not ok 5 - row 500 survives with its own payload        +\n # Failed test 5: \"row 500 survives with its own payload\"+\n #         have: NULL                                    +\n #         want: committed-after-snapshot\n(1 row)\n\n      diag       \n-----------------\n # swapped: true\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 5\n(1 row)\n\npsql:<stdin>:37: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"f302_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:37: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"f302_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:37: NOTICE:  regrain_history ran under REPEATABLE READ\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 0,
+        "tail": "------------------------------------------------------------------------------------------------------\n not ok 4 - every row of the monolith's range is still in the table after regrain (10 and 20 before, 500 committed after the caller's snapshot)        +\n # Failed test 4: \"every row of the monolith's range is still in the table after regrain (10 and 20 before, 500 committed after the caller's snapshot)\"+\n #         have: {10,20}                                                                                                                               +\n #         want: {10,20,500}\n(1 row)\n\n                            is                            \n----------------------------------------------------------\n not ok 5 - row 500 survives with its own payload        +\n # Failed test 5: \"row 500 survives with its own payload\"+\n #         have: NULL                                    +\n #         want: committed-after-snapshot\n(1 row)\n\n      diag       \n-----------------\n # swapped: true\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 5\n(1 row)\n\npsql:<stdin>:37: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"f302_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:37: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"f302_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:37: NOTICE:  regrain_history ran under REPEATABLE READ\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F3-03",
+      "finder": "F3",
+      "tier": 2,
+      "file": "pgpm_core/install.sql",
+      "line": 6551,
+      "lens": "fresh surface",
+      "scenario": "_regrain_copy_make makes each copy LIKE the parent INCLUDING CONSTRAINTS, which turns a NOT VALID CHECK on the parent into a validated one on the copy, so a row written before the CHECK (which the table still serves) fails every copy batch (23514): regrain()/regrain_history() raise and auto-regrain logs skip_regrain on that child every tick with capture and the TRUNCATE refusal left on, where the copy should carry the parent's NOT VALID CHECK as NOT VALID (as #633 does for NOT VALID foreign keys) and regrain should complete",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "          +\n #             PL/pgSQL function pgpm.regrain_history(regclass,text) line 13 at RETURN                                                  +\n #             SQL statement \" select pgpm.regrain_history('public.nv303b', '100') \"                                                    +\n #             PL/pgSQL function lives_ok(text,text) line 14 at EXECUTE\n(1 row)\n\n                         is                         \n----------------------------------------------------\n ok 5 - every row is still served, row 7 among them\n(1 row)\n\n                   is                   \n----------------------------------------\n not ok 6 - the regrain swapped        +\n # Failed test 6: \"the regrain swapped\"+\n #         have: 0                     +\n #         want: 1\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\npsql:<stdin>:30: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"nv303a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:30: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"nv303a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"nv303b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"nv303b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 0,
+        "tail": "          +\n #             PL/pgSQL function pgpm.regrain_history(regclass,text) line 13 at RETURN                                                  +\n #             SQL statement \" select pgpm.regrain_history('public.nv303b', '100') \"                                                    +\n #             PL/pgSQL function lives_ok(text,text) line 14 at EXECUTE\n(1 row)\n\n                         is                         \n----------------------------------------------------\n ok 5 - every row is still served, row 7 among them\n(1 row)\n\n                   is                   \n----------------------------------------\n not ok 6 - the regrain swapped        +\n # Failed test 6: \"the regrain swapped\"+\n #         have: 0                     +\n #         want: 1\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\npsql:<stdin>:30: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"nv303a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:30: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"nv303a_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"nv303b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"nv303b_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F3-04",
+      "finder": "F3",
+      "tier": 1,
+      "file": "pgpm_core/install.sql",
+      "line": 8500,
+      "lens": "operator error",
+      "scenario": "regrain_step's swap tick under REPEATABLE READ (an RR transaction, or default_transaction_isolation that maintain inherits) runs its residual reconcile and final delta count through the tick's start snapshot, so a writer that committed during the DETACH wait has its captured keys ignored and the source is dropped: a committed UPDATE of row 10 is reverted (have 10=orig, want 10=updated); regrain_step should refuse a stricter isolation level as transmute/untransmute/from_hypertable do (sibling of F3-02's regrain())",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: (A) the run is copied, cursor at hi 1000: the next tick is the swap\n# S: BEGIN\n# S: iso=repeatable read\n# S: w_committed_at_start=false\n# S: step=swapped:10\n# S: COMMIT\nok - LIVENESS: (B) W's update of row 10 committed\nok - LIVENESS: (C) the swap tick ran in REPEATABLE READ with a snapshot taken before W committed\n# swapped: t\nnot ok - W's committed update of row 10 was reverted by the swap (have 10=orig,20=orig, want 10=updated,20=orig)\nNOTICE:  trigger \"pgpm_regrain_capture\" for relation \"f304_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"f304_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: (A) the run is copied, cursor at hi 1000: the next tick is the swap\n# S: BEGIN\n# S: iso=repeatable read\n# S: w_committed_at_start=false\n# S: step=swapped:10\n# S: COMMIT\nok - LIVENESS: (B) W's update of row 10 committed\nok - LIVENESS: (C) the swap tick ran in REPEATABLE READ with a snapshot taken before W committed\n# swapped: t\nnot ok - W's committed update of row 10 was reverted by the swap (have 10=orig,20=orig, want 10=updated,20=orig)\nNOTICE:  trigger \"pgpm_regrain_capture\" for relation \"f304_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"f304_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F3-05",
+      "finder": "F3",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 5582,
+      "lens": "operator error",
+      "scenario": "_regrain_capture_names looks the recorded capture function up only in the delta's current schema, so after the delta is moved by SET SCHEMA (which the reference says capture tolerates) the function resolves to null and untransmute drops the delta but leaves public.<rel>_pgpm_regrain_capture() behind (uninstall.sql reads the same helper); without the move both are dropped",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "ICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h4_p0000000000000025000\" does not exist, skipping\npsql:<stdin>:15: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h4_p0000000000000026000\" does not exist, skipping\npsql:<stdin>:15: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h4_p0000000000000026000\" does not exist, skipping\npsql:<stdin>:15: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h4_p0000000000000027000\" does not exist, skipping\npsql:<stdin>:15: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h4_p0000000000000027000\" does not exist, skipping\npsql:<stdin>:15: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h4_p0000000000000028000\" does not exist, skipping\npsql:<stdin>:15: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h4_p0000000000000028000\" does not exist, skipping\npsql:<stdin>:15: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h4_p0000000000000029000\" does not exist, skipping\npsql:<stdin>:15: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h4_p0000000000000029000\" does not exist, skipping\npsql:<stdin>:15: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h4_p0000000000000030000\" does not exist, skipping\npsql:<stdin>:15: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h4_p0000000000000030000\" does not exist, skipping\npsql:<stdin>:26: NOTICE:  trigger \"pgpm_write_block\" for relation \"public.h4_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 0,
+        "tail": "ICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h4_p0000000000000025000\" does not exist, skipping\npsql:<stdin>:15: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h4_p0000000000000026000\" does not exist, skipping\npsql:<stdin>:15: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h4_p0000000000000026000\" does not exist, skipping\npsql:<stdin>:15: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h4_p0000000000000027000\" does not exist, skipping\npsql:<stdin>:15: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h4_p0000000000000027000\" does not exist, skipping\npsql:<stdin>:15: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h4_p0000000000000028000\" does not exist, skipping\npsql:<stdin>:15: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h4_p0000000000000028000\" does not exist, skipping\npsql:<stdin>:15: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h4_p0000000000000029000\" does not exist, skipping\npsql:<stdin>:15: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h4_p0000000000000029000\" does not exist, skipping\npsql:<stdin>:15: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h4_p0000000000000030000\" does not exist, skipping\npsql:<stdin>:15: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h4_p0000000000000030000\" does not exist, skipping\npsql:<stdin>:26: NOTICE:  trigger \"pgpm_write_block\" for relation \"public.h4_p0000000000000000000_to_0000000000000001000\" does not exist, skipping\n"
+      },
+      "class": "candidate"
+    }
+  ]
+}

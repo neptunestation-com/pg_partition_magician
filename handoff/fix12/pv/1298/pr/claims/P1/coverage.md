@@ -1,0 +1,14 @@
+- archive.configure | read: yes | dot-segment regex and remedy; refusal order vs the upsert; prefix `P/..`, `./`, `/`; ran configure in the harness
+- archive._canonical_key | read: yes | regex semantics; found it is called by only two units, not by _owned_key (P1-01)
+- archive._owned_key | read: yes | base assembled raw from the stored prefix, never canonicalised; ran test 52 and P1-01 against it; dot-segment regex branches
+- archive._claim_canonical_spellings | read: yes | distinct-on ordering, columns copied, conflict policy, install order; ran on a fresh install and via test 52 part B
+- archive._refuse_recorded_chunk_overwrite | read: yes | new join on p_key and canonical match of a.s3_key; with a raw p_key no ledger row matches (P1-02, introduced)
+- archive._object_key | read: yes | thin wrapper, tail shape, passes the prefix through untouched
+- archive._encode_upload_ndjson_single | read: yes | key from _object_key handed unchanged to the refusal and the PUT; no second key site
+- archive._encode_upload_parquet | read: yes | same path as ndjson, same key to refusal and PUT
+- archive._child_object_key | read: yes | thin wrapper over _owned_key for exports; no second key site
+- CHANGELOG.md | read: yes | the #1260 entry (hunk and surrounding entries); claims it makes vs the tree (not kept, see P1-01)
+- bench/archive_key_base_canonical.sh | read: yes | whole file: setup exit checks, LIVENESS separation, zero-ran guard; ran test 52 by hand on the tree
+- docs/reference.md | read: yes | the new key-spelling paragraph and the surrounding object-key section; promises vs the tree
+- test.sh | read: yes | the archive-track hunk and its neighbours (perf341/perf368 wiring)
+- tests/archive/db/52_archive_key_base_canonical_test.sql | read: yes | whole file; ran on the tree (6 of 26 fail, all LIVENESS held); part B's prefix choice noted in hypotheses

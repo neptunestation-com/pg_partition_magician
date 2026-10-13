@@ -1,0 +1,13 @@
+{
+  "baseRefName": "main",
+  "headRefName": "fix/over-retired-chunks-legacy-bound-zone",
+  "headRefOid": "c7573904e733a28fe954b6f3158935e189069be8",
+  "number": 1305,
+  "title": "fix(archive): read a retired chunk's offset-less bound on the grid's clock",
+  "url": "https://github.com/neptunestation-com/pg_partition_magician/pull/1305",
+  "head": "c7573904e733a28fe954b6f3158935e189069be8",
+  "base": "b76002e66c9f8b57f9943967babf25a195500f85",
+  "finder": "P1",
+  "seeds": 1,
+  "mutations": "native_bound_key_session_datestyle,native_bound_key_utc,over_retired_chunks_session_zone"
+}

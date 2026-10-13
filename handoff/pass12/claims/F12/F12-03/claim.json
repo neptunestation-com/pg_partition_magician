@@ -1,0 +1,3 @@
+{"tier": 5, "file": "scripts/check_quoted_splices.py", "line": 365, "lens": "fresh surface",
+ "scenario": "the Quoted splices lint, which since #1179 claims to read every assignment by value wherever a statement starts, passes an install file whose unmarked quote_ident'd list (v_cols := quote_ident(..) || ..., spliced with %s) is preceded by a /* block comment */: strip_noise blanks only -- comments and ASSIGN anchors on the raw text after ;/begin/then, so the assignment is never read; the same function without the comment is refused, as both should be",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

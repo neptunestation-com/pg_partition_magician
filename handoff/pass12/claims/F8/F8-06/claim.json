@@ -1,0 +1,3 @@
+{"tier": 5, "file": "bench/upgrade_in_place.sh", "line": 485, "lens": "contracts versus documentation",
+ "scenario": "upgrade_in_place.sh's assertion 7 (the upgraded install still obtains a partition for the pre-existing table) is a post-condition of the upgrade but prints as 'FAIL  LIVENESS: ...', so discriminate.sh's starved() reads a mutant that only breaks post-upgrade obtain as a starved fixture and never certifies the guard catching it; the line should carry no premise prefix",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

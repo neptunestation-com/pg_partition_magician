@@ -1,0 +1,3 @@
+{"tier": 3, "file": "pgpm_core/install.sql", "line": 14839, "lens": "contracts versus documentation",
+ "scenario": "restore_incoming_fks sets dropped_fk.validate_retry_after when a one-step (pre-18, partitioned referencer) re-add fails but never reads it: its loop takes every record with restored_at null, so maintain's unscoped call retries the validating re-add, a full scan of the referencing table under SHARE ROW EXCLUSIVE on the managed table, on every tick and logs fail_restore_incoming_fk each time, where the reference promises a retry at most every five minutes (and at once only when named in p_ids).",
+ "repro": "repro.sql", "install": ["pgpm_core/install.sql"], "fixtures": false}

@@ -1,0 +1,3 @@
+{"tier": 1, "file": "pgpm_archive/install.sql", "line": 2893, "lens": "fresh surface",
+ "scenario": "archive._owned_key claims and PUTs the key base as assembled from the stored prefix and never calls archive._canonical_key (the body says it canonicalises before claiming), so a namesake configured with the same prefix spelled '/P/' claims a fresh base, keeps the plain key shape and its chunk PUT replaces the dropped table's object on MinIO (the only copy of the rows retire() dropped); it should have reached the 'P/' claim and taken the oid shape",
+ "repro": "repro.sql", "install": ["tests/archive/fixtures.sql", "pgpm_core/install.sql", "pgpm_archive/install.sql"], "fixtures": false}

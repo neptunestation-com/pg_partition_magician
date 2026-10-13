@@ -1,0 +1,23 @@
+group	pr	issue	state
+G8	1293	1265	CLEAR 20:35Z (posted); landq
+G4	1294	1261	CLEAR 20:50Z (posted); landq
+G5	1295	1262	BLOCKED r1 20:50Z: closing partial (V-01 lock by name, T3 pre_existing in surface); fixer round 2 + V-01 verifier
+G6	1296	1263	r1: V holds, ACC rebuilt; P1-02 T3 pre_existing (skip_regrain log truncates holder clause) verifier running; fixer round 2 asked
+G10	1297	1267	V holds; P1 running
+G3	1298	1260	CLEAR (posted); landq T1
+G2	1299	1259	r1: V holds + V-01 T1 pre_existing IN SURFACE (archive step hands a recorded-detach table to the strategy, coverage 0 rows, drop); verifier running; G2 round 2 asked
+G13	1300	1270	CLEAR (posted); landq T3
+G12	1301	1269	r1: V holds + V-01 (userinfo endpoint accepted) V-02 (bucket with leading slash) T3 pre_existing; G12 round 2 asked; P1 running
+G11	1302	1268+1232	r1: V holds, seed caught; P1-02 T4 (new #1232 remedy wrong on two-phase path) -> G11 round 2
+G15	1303	1272	r1: V holds, ACC rebuilt; V-01 T4 REGRESSION (recall row's remedy drops kept rows) -> G15 round 2; P1 running
+G30	1304	814	r1: V partial, V-01 T3 REGRESSION (date grid keyed by session zone) -> G30 round 2; P1 running
+G7	1305	1264	r1: V partial, V-01 T3 pre_existing (timezone_abbreviations unpinned) -> G7 round 2; P1 running
+G5	1295_r2	1262	r2: V partial again (V-01 r2: ALTER SCHEMA RENAME swap defeats the name check, T3 pre_existing) -> G5 round 3; ACC-03 rebuilt; P1 running
+G6	1296_r2	1263	CLEAR r2 (posted); landq T3
+G2	1299_r2	1259	r2: V partial (V-01 r2: unanchored null-oid row handed to the strategy, known_open #705 mechanism) -> G2 round 3 (last); ACC-02 rebuilt; P1 running
+G12	1301_r2	1269	r2: V partial again (V-01 r2: default port spelled -> signed Host mismatch; %2E%2E accepted) -> G12 round 3 (LAST: canonicalise port, refuse %2E%2E, state the limit); P1 running
+G11	1302_r2	1268+1232	CLEAR r2 (posted); landq T3
+G15	1303_r2	1272	ready; queued for slots
+G30	1304_r2	814	r2 BLOCKED posted (V-01, P1-02 regression: empty-range check in session zone; V-02 date grid offset) -> G30 round 3 (last)
+G7	1305_r2	1264	CLEAR r2 (posted); landq T3
+G1	1306	1258	P1+V running

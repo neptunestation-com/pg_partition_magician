@@ -1,0 +1,49 @@
+{
+  "claims": [
+    {
+      "id": "F2-01",
+      "finder": "F2",
+      "tier": 1,
+      "file": "pgpm_core/install.sql",
+      "line": 7232,
+      "lens": "fresh surface",
+      "scenario": "_naive_grid_zone_off calls a naive key's recorded zone off the column's clock only when its offset VARIES over 2000-2100 (it compares each month's offset with 2000-01-01's, not with zero), so a fixed-offset zone such as America/Phoenix (-07 always) passes as 'UTC by another name'; on a date grid recorded in it (tests/324's planted pre-#504 state) regrain toward '1 day' is not refused, every fine bound renders as the date before, and the swap drops the source's last day (rows 9001, 9002 dated 2024-10-31 vanish, 184 -> 182 in a wider run); it should refuse exactly as it does for America/New_York (the comment, docs/reference.md set_regrain and CHANGELOG say any zone whose offset is not always zero), and the upgrade block should flag the grid as warn_grid_off_unit, which it also skips",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "------------------------------------------------\n ok 4 - LIVENESS: the zone check calls a daylight-saving zone off a date column's clock\n(1 row)\n\n                                           throws_like                                           \n-------------------------------------------------------------------------------------------------\n ok 5 - LIVENESS: and the same regrain on the New York grid is refused before anything is copied\n(1 row)\n\n                                                                      is                                                                      \n----------------------------------------------------------------------------------------------------------------------------------------------\n not ok 6 - rows 9001 and 9002 (dated 2024-10-31) survive a fixed-step regrain of the Phoenix-recorded date grid (outcome: completed)        +\n # Failed test 6: \"rows 9001 and 9002 (dated 2024-10-31) survive a fixed-step regrain of the Phoenix-recorded date grid (outcome: completed)\"+\n #         have: NULL                                                                                                                        +\n #         want: 9001,9002\n(1 row)\n\n                           is                           \n--------------------------------------------------------\n ok 7 - rows 90 and 9003 (dated 2024-10-30) survive too\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 7\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "----------\n ok 6 - rows 9001 and 9002 (dated 2024-10-31) survive a fixed-step regrain of the Phoenix-recorded date grid (outcome: P0001 pg_partition_magician: cannot regrain ph toward 1 day -- its control column dt is date, which carries no zone, but its grid is recorded in partition_tz America/Phoenix rather than UTC (an install from before pgpm held a naive column's grid to the column's own clock recorded the converting session's zone): every bound sits at that zone's midnight instead of the column's, and a fixed step's fine bounds land at the zone's offset on the column's clock, so the run would copy every sub-range before its swap failed. A whole number of months is not refused. Re-convert the table: while every row is still in its original monolith, pgpm.untransmute('ph') hands it back and it can be transmuted again with the zone transmute now records for such a column (UTC, whatever the session's zone); once a row lives past the monolith (a forward partition holds one, or a regrain has split it), untransmute refuses it as a one-way door and pgpm has no in-place repair, so create a new table like it, copy its rows in, swap the two tables' names and transmute the new one with the zone transmute now records for such a column (UTC, whatever the session's zone))\n(1 row)\n\n                           is                           \n--------------------------------------------------------\n ok 7 - rows 90 and 9003 (dated 2024-10-30) survive too\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+      },
+      "class": "seed_hit",
+      "seed": "S4"
+    },
+    {
+      "id": "F2-02",
+      "finder": "F2",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 14298,
+      "lens": "time and zones",
+      "scenario": "check_time_monotonic casts a naive timestamp time column to timestamptz in the caller's session zone before comparing adjacent pairs, so a column whose values increase with the id (01:50, 02:30, 03:15 on 2026-03-08) reports fraction 0.5 from an America/New_York session (02:30 is in the spring-forward gap and casts past 03:15 EDT) and 1.0 from UTC; it should compare the column's own values (or cast in one fixed zone) so the documented fraction of non-decreasing pairs does not depend on who runs it",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "                                is                                 \n--------------------------------------------------------------------\n ok 1 - LIVENESS: three rows whose naive time increases with the id\n(1 row)\n\nSET\n                                         is                                          \n-------------------------------------------------------------------------------------\n ok 2 - LIVENESS: from a UTC session both adjacent pairs are reported non-decreasing\n(1 row)\n\nSET\n                                                       ok                                                       \n----------------------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: in America/New_York 02:30 on 2026-03-08 is inside the spring-forward gap and casts past 03:15\n(1 row)\n\n                                                 is                                                  \n-----------------------------------------------------------------------------------------------------\n not ok 4 - from an America/New_York session the same column is reported fully monotonic too        +\n # Failed test 4: \"from an America/New_York session the same column is reported fully monotonic too\"+\n #         have: 0.5000                                                                             +\n #         want: 1.0000\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 4\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 0,
+        "tail": "                                is                                 \n--------------------------------------------------------------------\n ok 1 - LIVENESS: three rows whose naive time increases with the id\n(1 row)\n\nSET\n                                         is                                          \n-------------------------------------------------------------------------------------\n ok 2 - LIVENESS: from a UTC session both adjacent pairs are reported non-decreasing\n(1 row)\n\nSET\n                                                       ok                                                       \n----------------------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: in America/New_York 02:30 on 2026-03-08 is inside the spring-forward gap and casts past 03:15\n(1 row)\n\n                                                 is                                                  \n-----------------------------------------------------------------------------------------------------\n not ok 4 - from an America/New_York session the same column is reported fully monotonic too        +\n # Failed test 4: \"from an America/New_York session the same column is reported fully monotonic too\"+\n #         have: 0.5000                                                                             +\n #         want: 1.0000\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 4\n(1 row)\n\n"
+      },
+      "class": "candidate"
+    }
+  ]
+}

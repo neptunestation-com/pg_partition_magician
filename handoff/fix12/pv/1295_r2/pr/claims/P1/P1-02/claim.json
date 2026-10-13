@@ -1,0 +1,3 @@
+{"tier": 4, "file": "pgpm_core/install.sql", "line": 14048, "lens": "concurrency and locks",
+ "scenario": "a partition renamed (no squatter) while adopt_partition waits for its lock is refused by LOCK TABLE's own 42P01 `relation \"public.old\" does not exist`, naming the old name as non-existent; docs/reference.md promises the call names the partition as it is now for exactly this case (only the squatter path does)",
+ "repro": "repro.sql", "install": ["pgpm_core/install.sql"], "fixtures": false}

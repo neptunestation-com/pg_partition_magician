@@ -1,0 +1,5 @@
+archive_bucket_unrefused	pgpm_archive/install.sql
+archive_endpoint_dot_segment_unrefused	pgpm_archive/install.sql
+archive_endpoint_trailing_slash_kept	pgpm_archive/install.sql
+archive_endpoint_unrefused	pgpm_archive/install.sql
+archive_endpoint_userinfo_unrefused	pgpm_archive/install.sql

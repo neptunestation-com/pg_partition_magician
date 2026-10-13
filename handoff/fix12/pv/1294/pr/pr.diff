@@ -1,0 +1,443 @@
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/base/CHANGELOG.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/review/CHANGELOG.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/base/CHANGELOG.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/review/CHANGELOG.md	2026-10-12 13:04:53
+@@ -2,6 +2,20 @@
+ 
+ ## [Unreleased]
+ 
++- **A regrain copies the rows a `NOT VALID` `CHECK` tolerates** (#1261). `_regrain_copy_make` made each copy `LIKE`
++  the parent `INCLUDING CONSTRAINTS`, which gave the copy the parent's `NOT VALID` `CHECK` as a validated one, so a
++  row written before the `CHECK`, which the table still serves, failed every copy batch of its sub-range with
++  23514: `regrain()` and `regrain_history()` raised, and auto-regrain logged `skip_regrain` on every tick with
++  capture and the `TRUNCATE` refusal left on the source, until `regrain_cancel`. The copy is now made without the
++  parent's enforced `NOT VALID` `CHECK` constraints (and, on PostgreSQL 18, its `NOT VALID` `NOT NULL`s), the swap
++  adds each back `NOT VALID` just before the `ATTACH`, which adopts it without a scan, and the drift check leaves
++  them out on the parent's side. A copy holding one validated (made while the parent's was, before it was dropped
++  and re-added `NOT VALID`) used to pass the drift check, by expression, and refuse a row reconciled into it on
++  every tick; it is drift now, and the run restarts. A run already in flight whose copies hold one validated
++  restarts once after the upgrade. Test `tests/331`, guard `bench/regrain_not_valid_check.sh`, mutations
++  `regrain_copy_validates_not_valid_check`, `regrain_drift_excuses_validated_copy_check` and
++  `regrain_drift_compares_not_valid_check`.
++
+ - **The regrain swap and the hypertable cutover wait for snapshots older than their copies** (#1241). A
+   `REPEATABLE READ` reader whose snapshot predated a regrain's copies, and which first read the table after the
+   swap (so it held no lock the `DETACH` waited on), read the fine children, whose rows its snapshot cannot see,
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/base/bench/regrain_not_valid_check.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/review/bench/regrain_not_valid_check.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/base/bench/regrain_not_valid_check.sh	1969-12-31 16:00:00
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/review/bench/regrain_not_valid_check.sh	2026-10-12 13:04:53
+@@ -0,0 +1,62 @@
++#!/usr/bin/env bash
++# regrain_not_valid_check.sh <container> <db> [install.sql]
++#
++# Run tests/331_regrain_not_valid_check_test.sql against an ARBITRARY copy of pgpm_core/install.sql, so that
++# bench/discriminate.sh can show the file catches the defect its mutations put back (issue #1261): a regrain
++# copy made LIKE the parent INCLUDING CONSTRAINTS took the parent's NOT VALID CHECK as a validated one, refused
++# the row written before it that the parent still serves, and every copy batch of that sub-range failed 23514,
++# wedging the run until regrain_cancel. The file is the acceptance test; this wrapper exists so the mutations
++# have a guard the discriminate track can run against the mutant, in the shape of
++# bench/retain_recall_moved_parent.sh.
++#
++# THREE mutations are required to fail against it (bench/mutations/mutate.py):
++#   regrain_copy_validates_not_valid_check     -- _regrain_copy_make leaves the parent's NOT VALID CHECKs on
++#                                                 the copy, validated, the pre-fix shape. Parts A, B and C
++#                                                 (and D on PostgreSQL 18).
++#   regrain_drift_excuses_validated_copy_check -- the plausible-but-wrong drift rule: a copy's validated CHECK
++#                                                 under the name of the parent's NOT VALID one is excused, as
++#                                                 #633 excuses such a key, so a copy made before the parent's
++#                                                 CHECK was re-added NOT VALID refuses a row reconciled into
++#                                                 it on every tick. Part C.
++#   regrain_drift_compares_not_valid_check     -- the drift check still asks every copy for the parent's NOT
++#                                                 VALID CHECK, which no copy is made with, so every copy reads
++#                                                 as drift and so does the probe copy, and the run is refused
++#                                                 rather than restarted. Parts A, B and C.
++#
++# Runs on the plain core image (pgtap and pg_prove). Part D (a NOT VALID NOT NULL) needs PostgreSQL 18 and
++# skips before it. TAP_GUARD_TEST_FILE overrides the test file's path inside the container, for a worktree
++# mounted somewhere other than /repo.
++set -uo pipefail
++C="${1:?container}"; DB="${2:?db}"; INSTALL="${3:-/repo/pgpm_core/install.sql}"
++TEST_FILE="${TAP_GUARD_TEST_FILE:-/repo/tests/331_regrain_not_valid_check_test.sql}"
++fail=0
++
++q() { docker exec "$C" psql -U postgres "$@"; }
++
++q -q -c "drop database if exists $DB" >/dev/null 2>&1
++q -q -c "create database $DB" >/dev/null 2>&1
++q -d "$DB" -q -c "create extension if not exists pgtap;" >/dev/null 2>&1
++
++# A mutant that will not even install is NOT a pass: say which happened.
++if ! q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f "$INSTALL" >/dev/null 2>&1; then
++  printf 'FAIL  %-58s %s\n' "the module under test installed" "$INSTALL"
++  fail=1
++fi
++
++if [ "$fail" = 0 ]; then
++  out=$(docker exec "$C" sh -c "pg_prove -v -U postgres -d $DB $TEST_FILE" 2>&1)
++  rc=$?
++  echo "$out" | grep -E '^not ok [0-9]+ -' | sed 's/^/    /' | head -20
++  # the count is asserted separately: a run that never reached the database must not read as a catch
++  ran=$(echo "$out" | grep -cE '^(not )?ok [0-9]+ -')
++  if [ "$rc" = 0 ]; then printf 'PASS  %-58s %s\n' "a regrain copies the rows a NOT VALID CHECK tolerates" "$ran ran"
++  else printf 'FAIL  %-58s %s\n' "a regrain copies the rows a NOT VALID CHECK tolerates" "$ran ran"; fail=1; fi
++  if [ "$ran" -eq 0 ]; then
++    printf 'FAIL  %-58s %s\n' "LIVENESS: the assertions were reached at all" "0 ran"
++    echo "$out" | tail -20 | sed 's/^/      /'
++    fail=1
++  fi
++fi
++
++q -q -c "drop database if exists $DB" >/dev/null 2>&1
++exit "$fail"
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/base/docs/reference.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/review/docs/reference.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/base/docs/reference.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/review/docs/reference.md	2026-10-12 13:04:53
+@@ -2079,7 +2079,13 @@
+ constraints. Every tick that resumes a run compares each copy's columns (name, type, collation, `NOT
+ NULL`, generated), `CHECK` constraints (name and expression) and outgoing foreign keys (definition; a
+ `NOT VALID` key on the parent is carried by the swap rather than onto the copy, so it is not compared, nor is a
+-copy's key under that key's own name and definition, made while it was still validated) with the parent's first. A copy made
++copy's key under that key's own name and definition, made while it was still validated) with the parent's first. A
++`NOT VALID` `CHECK` on the parent (and, on PostgreSQL 18, a `NOT VALID` `NOT NULL`) is carried by the swap too: the
++copy is made without it, so a row written before it that the parent still serves is copied, and the swap adds it to
++each copy `NOT VALID` just before the `ATTACH`, which adopts it without a scan, so every fine child holds it as the
++parent does and refuses a new violating write. It is not compared on the parent's side; a copy that holds it
++validated (made while the parent's was, before it was dropped and re-added `NOT VALID`) is drift and restarts the
++run, since it would refuse a row the parent now accepts. A copy made
+ before a key was added would otherwise reach the swap without it, and `ATTACH` would validate the key by
+ scanning the copy under the swap's lock; restarted, every copy is made again carrying the key, validated
+ while it is empty. It also compares the source with what the run recorded when it began copying
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/base/pgpm_core/install.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/review/pgpm_core/install.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/base/pgpm_core/install.sql	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/review/pgpm_core/install.sql	2026-10-12 13:14:54
+@@ -6537,7 +6537,8 @@
+ $$;
+ 
+ -- A regrain copy's shape (#633): the standalone table regrain_step makes for a fine sub-range, LIKE the parent,
+--- with the parent's validated outgoing foreign keys. Made here, by one routine, for two callers: regrain_step,
++-- with the parent's validated outgoing foreign keys and without its NOT VALID CHECK and NOT NULL constraints
++-- (#1261). Made here, by one routine, for two callers: regrain_step,
+ -- which then gives the copy its owner and ACL, its bound CHECK and its rows; and _regrain_fresh_copy_drift,
+ -- which makes one only to ask whether a copy made now would match the parent, and drops it. The two must make
+ -- the same shape for that question to mean anything, so neither makes its own. p_spc_q is the tablespace
+@@ -6550,6 +6551,14 @@
+     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
+   execute format('create table %I.%I (like %I.%I including defaults including generated including storage including indexes including constraints excluding identity)%s',
+                  p_nsp, p_name, v_nsp, v_rel, p_spc_q);
++  -- #1261: LIKE gives the copy every CHECK of the parent as a VALIDATED one, a NOT VALID one included, and on
++  -- PostgreSQL 18 a NOT VALID NOT NULL the same way. A NOT VALID constraint leaves the rows written before it in
++  -- place, and the parent still serves them, so on the copy it refused the first such row: every copy batch of
++  -- its sub-range failed 23514 (23502), and the run was wedged until regrain_cancel. Each is dropped from the
++  -- copy here, while it is empty, matched to the parent's by name (a CHECK) or by column (a NOT NULL, which
++  -- LIKE may name afresh); the swap adds it back NOT VALID just before the ATTACH, as it does a NOT VALID key
++  -- (#633), where it checks no row and the ATTACH adopts it as the parent holds it. A NOT ENFORCED CHECK
++  -- (PostgreSQL 18) reads convalidated = false too, refuses nothing, and is left as LIKE made it.
+   -- #348: give the fine child its own already-validated copy of every outgoing FK the parent
+   -- has, the same trick regrain_step's bound CHECK uses. The child is still empty here (this runs
+   -- before the first row is copied in), so VALIDATE costs nothing -- exactly how an empty
+@@ -6609,9 +6618,14 @@
+ -- are compared too, by name and expression (#817): ATTACH requires every one of them on the child, so a
+ -- CHECK added to the parent mid-regrain failed every swap tick ('child table is missing constraint'), and a
+ -- copy still carrying one the parent dropped would refuse rows the parent now accepts. The expression is
+--- compared and not pg_get_constraintdef, because LIKE does not carry NOT VALID and the parent's own CHECK
+--- may be NOT VALID; the copy's bound CHECK (<copy>_ck, under the name pgpm.part recorded or the one the copy
+--- has now) is the copy's own and is left out. The parent's validated outgoing foreign keys are compared
++-- compared and not pg_get_constraintdef, because LIKE does not carry NOT VALID; the copy's bound CHECK
++-- (<copy>_ck, under the name pgpm.part recorded or the one the copy has now) is the copy's own and is left out.
++-- A NOT VALID CHECK, and on PostgreSQL 18 a NOT VALID NOT NULL, is left out on the parent's side (#1261):
++-- regrain never makes a copy with one (_regrain_copy_make drops it, and the swap adds it back NOT VALID before
++-- the ATTACH), so its absence is not drift. A copy that holds one validated all the same, made while the
++-- parent's was, IS drift and restarts the run: unlike a NOT VALID key pgpm itself re-adds (below), the parent
++-- comes to hold a NOT VALID CHECK only by someone dropping and re-adding it, and a row written in between
++-- would fail the reconcile into that copy on every tick. The parent's validated outgoing foreign keys are compared
+ -- too, by definition (#898): regrain_step gives each copy its own validated copy of every one while the
+ -- copy is still empty, so that the swap's ATTACH adopts it rather than validating it, and a key added to
+ -- the parent after a copy was made reached the swap missing from it, where ATTACH validated it by scanning
+@@ -6643,7 +6657,12 @@
+            format('%I %s%s%s%s', a.attname, format_type(a.atttypid, a.atttypmod),
+                   case when a.attcollation <> 0 and a.attcollation <> t.typcollation
+                        then ' collate ' || a.attcollation::regcollation::text else '' end,
+-                  case when a.attnotnull then ' not null' else '' end,
++                  case when a.attnotnull
++                        and not (a.attrelid = p_parent      -- #1261: a NOT VALID NOT NULL, the swap's to carry
++                                 and exists (select 1 from pg_constraint n
++                                              where n.conrelid = p_parent and n.contype = 'n' and not n.convalidated
++                                                and n.conkey[1] = a.attnum))
++                       then ' not null' else '' end,
+                   case when a.attgenerated <> '' then ' generated' else '' end) as col
+       from pg_attribute a join pg_type t on t.oid = a.atttypid
+      where (a.attrelid = p_parent or a.attrelid = any(p_copies)) and a.attnum > 0 and not a.attisdropped
+@@ -6651,6 +6670,8 @@
+     select k.conrelid, format('check %I %s', k.conname, pg_get_expr(k.conbin, k.conrelid))
+       from pg_constraint k
+      where (k.conrelid = p_parent or k.conrelid = any(p_copies)) and k.contype = 'c'
++       and not (k.conrelid = p_parent and not k.convalidated            -- #1261: the swap's to carry
++                and to_jsonb(k) ->> 'conenforced' is distinct from 'false')
+        and not (k.conrelid <> p_parent
+                 and (k.conname = ((select c.relname from pg_class c where c.oid = k.conrelid) || '_ck')::name
+                      or exists (select 1 from pgpm.part pp
+@@ -8537,6 +8558,28 @@
+          and not exists (select 1 from pg_constraint c
+                           where c.conrelid = v_copy and c.contype = 'f' and c.conparentid = 0
+                             and c.conname = k.conname)
++       order by k.conname
++    loop
++      execute format('alter table %s add constraint %I %s not valid', v_copy::text, v_nv.conname, v_nv.def);
++    end loop;
++    -- #1261: and the parent's NOT VALID CHECK constraints (and on PostgreSQL 18 its NOT VALID NOT NULLs) the same
++    -- way. _regrain_copy_make leaves each off the copy, which would otherwise refuse a row written before it
++    -- that the parent still serves; the ATTACH requires each on the copy ('child table is missing constraint',
++    -- 'must be marked NOT NULL'), and adopts a NOT VALID one under a NOT VALID parent constraint without a scan.
++    -- Added here, after the residual reconcile, NOT VALID checks no row. A copy already holding one (under the
++    -- CHECK's name, or a NOT NULL on the column) keeps it: the drift check restarts a run whose copy holds one
++    -- validated, so that is only ever a copy the swap itself would accept.
++    for v_nv in
++      select k.conname, regexp_replace(pg_get_constraintdef(k.oid), ' NOT VALID$', '') as def
++        from pg_constraint k
++       where k.conrelid = p_parent and k.contype in ('c', 'n') and not k.convalidated
++         and to_jsonb(k) ->> 'conenforced' is distinct from 'false'
++         and case when k.contype = 'c'
++                  then not exists (select 1 from pg_constraint c
++                                    where c.conrelid = v_copy and c.contype = 'c' and c.conname = k.conname)
++                  else not exists (select 1 from pg_attribute a join pg_attribute pa
++                                     on pa.attrelid = p_parent and pa.attnum = k.conkey[1] and pa.attname = a.attname
++                                    where a.attrelid = v_copy and a.attnotnull) end
+        order by k.conname
+     loop
+       execute format('alter table %s add constraint %I %s not valid', v_copy::text, v_nv.conname, v_nv.def);
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/base/test.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/review/test.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/base/test.sh	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/review/test.sh	2026-10-12 13:04:53
+@@ -1265,6 +1265,7 @@
+     "bench/throws_pinned_sites.sh pgpm_perf350"
+     "bench/wrapper_premise_rule.sh pgpm_perf344"
+     "bench/regrain_swap_waits_for_older_snapshots.sh pgpm_perf365"
++    "bench/regrain_not_valid_check.sh pgpm_perf369"
+   )
+   local selected=()
+   local n=${#guards[@]} idx
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/base/tests/331_regrain_not_valid_check_test.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/review/tests/331_regrain_not_valid_check_test.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/base/tests/331_regrain_not_valid_check_test.sql	1969-12-31 16:00:00
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1294/pr/review/tests/331_regrain_not_valid_check_test.sql	2026-10-12 13:04:53
+@@ -0,0 +1,222 @@
++-- Issue #1261 (review pass 12, F3-03): a regrain copies every row the parent serves, a row written before a
++-- NOT VALID CHECK included, and the fine children carry that CHECK as the parent holds it, NOT VALID.
++--
++-- THE DEFECT. _regrain_copy_make made each copy `LIKE <parent> INCLUDING CONSTRAINTS`, and LIKE gives the copy
++-- every CHECK of the parent as a VALIDATED one, a NOT VALID one included. A NOT VALID CHECK is how a check is
++-- added to a large table without a scan, and it leaves the rows written before it in place, so the copy
++-- refused the first such row: every copy batch of its sub-range failed 23514, regrain() and regrain_history()
++-- raised, and auto-regrain logged skip_regrain on every tick with capture and the TRUNCATE refusal left on the
++-- source, until regrain_cancel. #633 leaves the parent's NOT VALID foreign keys off the copy for exactly this
++-- reason; its NOT VALID CHECKs were not. On PostgreSQL 18 a NOT VALID NOT NULL is the same case.
++--
++-- THE CONTRACT. The copy is made without the parent's enforced NOT VALID CHECK (and NOT NULL) constraints, the
++-- swap adds each to the copy NOT VALID just before its ATTACH (the residual reconcile has written the copy's
++-- last rows, so it checks none) and the ATTACH adopts it, and the drift check leaves them out on the parent's
++-- side. A copy holding one VALIDATED (made while the parent's was) is drift, and restarts the run: it would
++-- refuse a row the parent now accepts.
++--
++-- (A) the single-call path, regrain_history: two old violating rows in two sub-ranges are served by the fine
++--     children that hold them, every fine child carries the CHECK NOT VALID, and it still refuses a new write.
++-- (B) the cross-tick path, regrain_step, with the CHECK added mid-run: a copy made before it, a row made
++--     violating through the reconcile before it, and one copied after it, all swapped without a restart.
++-- (C) a copy made while the parent's CHECK was validated, which the parent then holds NOT VALID with a row
++--     violating it: the run restarts, never reconciles that row into a copy that refuses it, and swaps.
++-- (D) PostgreSQL 18: a NOT VALID NOT NULL, as (A).
++-- bench/regrain_not_valid_check.sh runs this file against the mutants regrain_copy_validates_not_valid_check
++-- and regrain_drift_excuses_validated_copy_check.
++set client_min_messages = warning;
++create extension if not exists pgtap;
++select plan(28);
++
++-- the fine children of [0, 1000) of a parent, by pgpm.part, filtered by parent first (#973); the 100-wide ones
++-- only, so that the source [0, 1000) never counts as one
++create function pg_temp.fine(p_parent regclass) returns table (lo bigint, child_oid oid) language sql as $f$
++  with mine as materialized (
++    select p.lo, p.hi, p.child_oid from pgpm.part p where p.parent_table = p_parent and p.attached)
++  select m.lo::bigint, m.child_oid from mine m
++   where m.hi::bigint <= 1000 and m.hi::bigint - m.lo::bigint = 100 order by m.lo::bigint
++$f$;
++-- each fine child of [0, 1000) as lo:convalidated:conislocal of the named constraint on it ('-' when absent)
++create function pg_temp.carried(p_parent regclass, p_con name) returns text language sql as $f$
++  select string_agg(f.lo::text || ':' || coalesce((select k.convalidated::text || ':' || k.conislocal::text
++                                                    from pg_constraint k
++                                                   where k.conrelid = f.child_oid and k.conname = p_con), '-'),
++                    ',' order by f.lo)
++    from pg_temp.fine(p_parent) f
++$f$;
++-- which fine child serves each row a predicate selects, as lo:id
++create function pg_temp.served(p_parent regclass, p_where text) returns text language plpgsql as $f$
++declare v text;
++begin
++  execute format('select string_agg(f.lo::text || '':'' || t.id::text, '','' order by t.id)
++                    from %s t join pg_temp.fine(%L) f on f.child_oid = t.tableoid where %s',
++                 p_parent::text, p_parent::text, p_where) into v;
++  return v;
++end $f$;
++create function pg_temp.mono(p_parent regclass) returns name language sql as $f$
++  select child_name from pgpm.part where parent_table = p_parent and attached and lo = '0'
++$f$;
++-- one regrain_step tick of [0, 1000) toward 100, its result, or the SQLSTATE it died with (rolled back whole,
++-- as a failed tick is), so that a tick that fails is recorded rather than ending the file
++create function pg_temp.tick(p_parent regclass) returns text language plpgsql as $f$
++begin
++  return pgpm.regrain_step(p_parent, pg_temp.mono(p_parent), '100', 1000);
++exception when others then
++  return 'died:' || sqlstate;
++end $f$;
++
++-- ===================================== (A) regrain_history over a NOT VALID CHECK two old rows violate
++create table public.nva331 (id bigint primary key, payload text);
++insert into public.nva331 select g, case when g in (7, 342) then 'bad' else 'x' end from generate_series(1, 400) g;
++call pgpm.transmute('public.nva331', 'id', 1000);
++select pgpm.obtain('public.nva331');
++insert into public.nva331 values (5000, 'frontier');
++alter table public.nva331 add constraint nva331_no_bad check (payload <> 'bad') not valid;
++
++select is((select convalidated from pg_constraint
++            where conrelid = 'public.nva331'::regclass and conname = 'nva331_no_bad'),
++  false, 'LIVENESS: (A) the parent carries the CHECK NOT VALID');
++select is((select array_agg(id order by id) from public.nva331 where payload = 'bad'), array[7, 342]::bigint[],
++  'LIVENESS: (A) rows 7 and 342, written before it, violate it and are served by the table');
++select throws_ok($$ insert into public.nva331 values (450, 'bad') $$, '23514', NULL,
++  'LIVENESS: (A) the CHECK refuses a new violating write before the regrain');
++
++select lives_ok($$ select pgpm.regrain_history('public.nva331', '100') $$,
++  '(A) regrain_history completes over the NOT VALID CHECK');
++select is((select array_agg(method) from pgpm.log
++            where parent_table = 'public.nva331'::regclass and action = 'regrain'),
++  array['copy_swap_drop'], '(A) the regrain swapped [0, 1000) once');
++select is(pg_temp.served('public.nva331', $$t.payload = 'bad'$$), '0:7,300:342',
++  '(A) rows 7 and 342 are served, each by the fine child [0, 100) and [300, 400) that holds it');
++select is((select array_agg(id order by id) from public.nva331),
++  (select array_agg(g order by g) from (select generate_series(1, 400)::bigint as g union all select 5000) s),
++  '(A) every row is served: 1 to 400 and the frontier row, no more and no fewer');
++select is(pg_temp.carried('public.nva331', 'nva331_no_bad'),
++  '0:false:false,100:false:false,200:false:false,300:false:false,400:false:false,'
++  '500:false:false,600:false:false,700:false:false,800:false:false,900:false:false',
++  '(A) every fine child carries the parent''s CHECK NOT VALID, inherited from it');
++select throws_ok($$ insert into public.nva331 values (450, 'bad') $$, '23514', NULL,
++  '(A) the fine child still refuses a new violating write');
++select lives_ok($$ insert into public.nva331 values (451, 'fine') $$,
++  '(A) and takes a new conforming one');
++select is((select tableoid from public.nva331 where id = 451),
++  (select child_oid from pg_temp.fine('public.nva331') where lo = 400),
++  '(A) into the fine child [400, 500)');
++
++-- ===================================== (B) regrain_step, the CHECK added mid-run
++-- S0 [0, 100) is copied before the CHECK exists, row 150 is made violating after S1 [100, 200) was copied (so
++-- only the reconcile carries it), row 650 is written violating in a sub-range not yet copied, and then the
++-- CHECK is added NOT VALID. Rows 7 and 342 violate it from the start.
++create table public.nvb331 (id bigint primary key, payload text);
++insert into public.nvb331 select g, case when g in (7, 342) then 'bad' else 'x' end from generate_series(1, 400) g;
++call pgpm.transmute('public.nvb331', 'id', 1000);
++select pgpm.obtain('public.nvb331');
++insert into public.nvb331 values (5000, 'frontier');
++create temp table ticks (n serial, r text);
++insert into ticks (r) select pg_temp.tick('public.nvb331');
++insert into ticks (r) select pg_temp.tick('public.nvb331');
++insert into ticks (r) select pg_temp.tick('public.nvb331');
++update public.nvb331 set payload = 'bad' where id = 150;
++insert into public.nvb331 values (650, 'bad');
++alter table public.nvb331 add constraint nvb331_no_bad check (payload <> 'bad') not valid;
++select is((select string_agg(r, ',' order by n) from ticks), 'prepared,copied:99,copied:100',
++  'LIVENESS: (B) S0 and S1 were copied before the CHECK was added');
++select throws_ok($$ update public.nvb331 set payload = 'bad' where id = 151 $$, '23514', NULL,
++  'LIVENESS: (B) the CHECK is enforced on the source mid-run');
++truncate ticks;
++insert into ticks (r) select pg_temp.tick('public.nvb331');
++insert into ticks (r) select pg_temp.tick('public.nvb331');
++insert into ticks (r) select pg_temp.tick('public.nvb331');
++insert into ticks (r) select pg_temp.tick('public.nvb331');
++insert into ticks (r) select pg_temp.tick('public.nvb331');
++insert into ticks (r) select pg_temp.tick('public.nvb331');
++insert into ticks (r) select pg_temp.tick('public.nvb331');
++insert into ticks (r) select pg_temp.tick('public.nvb331');
++insert into ticks (r) select pg_temp.tick('public.nvb331');
++insert into ticks (r) select pg_temp.tick('public.nvb331');
++insert into ticks (r) select pg_temp.tick('public.nvb331');
++select is((select string_agg(r, ',' order by n) from ticks),
++  'reconciled:2,copied:100,copied:100,copied:1,copied:0,copied:1,reconciled:1,copied:0,copied:0,copied:0,swapped:10',
++  '(B) the run reconciles row 150, copies S2 to S9 (row 342''s and row 650''s sub-ranges among them) and swaps');
++select is((select count(*)::int from pgpm.log
++            where parent_table = 'public.nvb331'::regclass and action = 'regrain_restart'), 0,
++  '(B) without a restart: the copies are not drift for want of the parent''s NOT VALID CHECK');
++select is(pg_temp.served('public.nvb331', $$t.payload = 'bad'$$), '0:7,100:150,300:342,600:650',
++  '(B) rows 7, 150 (by the reconcile), 342 and 650 are served, each by its own fine child');
++select is(pg_temp.carried('public.nvb331', 'nvb331_no_bad'),
++  '0:false:false,100:false:false,200:false:false,300:false:false,400:false:false,'
++  '500:false:false,600:false:false,700:false:false,800:false:false,900:false:false',
++  '(B) every fine child carries the CHECK NOT VALID, those copied before it was added included');
++select throws_ok($$ insert into public.nvb331 values (450, 'bad') $$, '23514', NULL,
++  '(B) the fine child refuses a new violating write');
++
++-- ===================================== (C) a copy holding the CHECK validated, the parent's now NOT VALID
++-- S0 is copied while the parent holds the CHECK validated, so its copy carries it validated. The CHECK is
++-- dropped, row 55 is made violating (captured, for the reconcile to apply to S0's copy), and the CHECK comes
++-- back NOT VALID. Reconciled into S0's copy, row 55 would fail it on every tick.
++create table public.nvc331 (id bigint primary key, payload text);
++insert into public.nvc331 select g, 'x' from generate_series(1, 400) g;
++call pgpm.transmute('public.nvc331', 'id', 1000);
++select pgpm.obtain('public.nvc331');
++insert into public.nvc331 values (5000, 'frontier');
++alter table public.nvc331 add constraint nvc331_no_bad check (payload <> 'bad');
++truncate ticks;
++insert into ticks (r) select pg_temp.tick('public.nvc331');
++insert into ticks (r) select pg_temp.tick('public.nvc331');
++select is(
++  (select string_agg(t.r, ',' order by t.n) || ' ' || k.convalidated::text
++     from ticks t, pg_constraint k
++     join pgpm.part p on p.child_oid = k.conrelid and p.parent_table = 'public.nvc331'::regclass and not p.attached
++    where k.conname = 'nvc331_no_bad'
++    group by k.convalidated),
++  'prepared,copied:99 true', 'LIVENESS: (C) S0''s copy was made carrying the CHECK validated');
++alter table public.nvc331 drop constraint nvc331_no_bad;
++update public.nvc331 set payload = 'bad' where id = 55;
++alter table public.nvc331 add constraint nvc331_no_bad check (payload <> 'bad') not valid;
++select lives_ok($$ select pgpm.regrain_history('public.nvc331', '100') $$,
++  '(C) the run completes');
++select is((select array_agg(action || ':' || coalesce(rows::text, '') order by id) from pgpm.log
++            where parent_table = 'public.nvc331'::regclass and action in ('regrain_restart', 'regrain')),
++  array['regrain_restart:1', 'regrain:10'],
++  '(C) by restarting once, discarding S0''s copy, and then swapping');
++select is(pg_temp.served('public.nvc331', $$t.payload = 'bad'$$), '0:55',
++  '(C) row 55 is served by the fine child [0, 100), as the parent now accepts it');
++select is(pg_temp.carried('public.nvc331', 'nvc331_no_bad'),
++  '0:false:false,100:false:false,200:false:false,300:false:false,400:false:false,'
++  '500:false:false,600:false:false,700:false:false,800:false:false,900:false:false',
++  '(C) every fine child carries the CHECK NOT VALID');
++
++-- ===================================== (D) PostgreSQL 18: a NOT VALID NOT NULL two old rows violate
++create table public.nvd331 (id bigint primary key, payload text);
++insert into public.nvd331 select g, case when g in (7, 342) then null else 'x' end from generate_series(1, 400) g;
++call pgpm.transmute('public.nvd331', 'id', 1000);
++select pgpm.obtain('public.nvd331');
++insert into public.nvd331 values (5000, 'frontier');
++create temp table v18 as select current_setting('server_version_num')::int >= 180000 as on18;
++do $$
++begin
++  if (select on18 from v18) then
++    execute 'alter table public.nvd331 add constraint nvd331_nn not null payload not valid';
++  end if;
++end $$;
++select case when (select on18 from v18)
++            then is((select contype::text || ':' || convalidated::text from pg_constraint
++                      where conrelid = 'public.nvd331'::regclass and conname = 'nvd331_nn'),
++                    'n:false', 'LIVENESS: (D) the parent carries the NOT NULL NOT VALID')
++            else skip('(D) NOT NULL NOT VALID needs PostgreSQL 18', 1) end;
++select lives_ok($$ select pgpm.regrain_history('public.nvd331', '100') $$,
++  '(D) regrain_history completes over the NOT NULL NOT VALID');
++select is(pg_temp.served('public.nvd331', 't.payload is null'), '0:7,300:342',
++  '(D) rows 7 and 342 are served, each by the fine child that holds it');
++select case when (select on18 from v18)
++            then is(pg_temp.carried('public.nvd331', 'nvd331_nn'),
++                    '0:false:false,100:false:false,200:false:false,300:false:false,400:false:false,'
++                    '500:false:false,600:false:false,700:false:false,800:false:false,900:false:false',
++                    '(D) every fine child carries the NOT NULL NOT VALID, inherited')
++            else skip('(D) NOT NULL NOT VALID needs PostgreSQL 18', 1) end;
++select case when (select on18 from v18)
++            then throws_ok($$ insert into public.nvd331 values (450, null) $$, '23502', NULL,
++                           '(D) the fine child refuses a new null')
++            else skip('(D) NOT NULL NOT VALID needs PostgreSQL 18', 1) end;
++
++select * from finish();

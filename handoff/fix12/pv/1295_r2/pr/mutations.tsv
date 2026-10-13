@@ -1,0 +1,2 @@
+adopt_partition_lock_name_unchecked	pgpm_core/install.sql
+adopt_partition_strict_isolation_admitted	pgpm_core/install.sql

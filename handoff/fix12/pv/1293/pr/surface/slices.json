@@ -1,0 +1,17 @@
+{
+ "P1": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/check_time_monotonic_session_zone.sh",
+   "docs/reference.md",
+   "pgpm_core/install.sql",
+   "test.sh",
+   "tests/335_check_time_monotonic_session_zone_test.sql"
+  ],
+  "units": [
+   "pgpm_core/install.sql:14287-14294",
+   "pgpm.check_time_monotonic"
+  ],
+  "kind": "mixed"
+ }
+}

@@ -1,0 +1,5 @@
+{"tier": 3, "file": "pgpm_archive/install.sql", "line": 148, "lens": "fresh surface",
+ "scenario": "archive._s3_endpoint_canonical is `select p_endpoint` (the identity) in this tree, so archive.configure stores 'http://minio:9000/' with its slash and both signers still address //<bucket>/<key> (HTTP 400 on every PUT, the issue #1269 defect intact), while the PR body, CHANGELOG and pgpm_archive/README.md say the trailing slash is dropped and the tree's own tests/archive/db/53 fails tests 7-9, 11, 12, 19, 21-24 (the set the body lists for the archive_endpoint_trailing_slash_kept mutant); the helper should return the endpoint without its trailing slashes.",
+ "repro": "repro.sql",
+ "install": ["tests/archive/fixtures.sql", "pgpm_core/install.sql", "pgpm_archive/install.sql"],
+ "fixtures": false}

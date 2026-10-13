@@ -1,0 +1,96 @@
+{
+  "claims": [
+    {
+      "id": "F9-01",
+      "finder": "F9",
+      "tier": 1,
+      "file": "pgpm_core/install.sql",
+      "line": 12246,
+      "lens": "fresh surface",
+      "scenario": "untransmute never asks _refuse_detach_pending (#1157: neither before the gate nor under its ACCESS EXCLUSIVE), so with a forward partition pending a concurrent detach (an operator's DETACH ... CONCURRENTLY that died in its wait) its row is invisible to the outside-rows gate, the reverse goes ahead and the DROP of the parent takes the partition and its row; it should refuse naming the pending partition",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "detach (pg_inherits.inhdetachpending)\n(1 row)\n\n                                        ok                                         \n-----------------------------------------------------------------------------------\n ok 2 - LIVENESS: the pending partition holds the row id 150, outside the monolith\n(1 row)\n\nCREATE TABLE\nDO\n                                           ok                                            \n-----------------------------------------------------------------------------------------\n not ok 3 - untransmute refuses while a partition is pending a concurrent detach        +\n # Failed test 3: \"untransmute refuses while a partition is pending a concurrent detach\"\n(1 row)\n\nCREATE FUNCTION\n                                                        ok                                                         \n-------------------------------------------------------------------------------------------------------------------\n not ok 4 - the row id 150 still exists (in the pending partition or the table) after the untransmute call        +\n # Failed test 4: \"the row id 150 still exists (in the pending partition or the table) after the untransmute call\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 4\n(1 row)\n\npsql:<stdin>:20: NOTICE:  canceling statement due to statement timeout\npsql:<stdin>:40: NOTICE:  trigger \"pgpm_write_block\" for relation \"public.f9u_p0000000000000000000\" does not exist, skipping\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "link_exec \n-------------\n ERROR\n(1 row)\n\n dblink_exec \n-------------\n COMMIT\n(1 row)\n\n dblink_disconnect \n-------------------\n OK\n(1 row)\n\n dblink_disconnect \n-------------------\n OK\n(1 row)\n\n plan \n------\n 1..4\n(1 row)\n\n                                                   ok                                                    \n---------------------------------------------------------------------------------------------------------\n ok 1 - LIVENESS: f9u_p0000000000000000100 is pending a concurrent detach (pg_inherits.inhdetachpending)\n(1 row)\n\n                                        ok                                         \n-----------------------------------------------------------------------------------\n ok 2 - LIVENESS: the pending partition holds the row id 150, outside the monolith\n(1 row)\n\nCREATE TABLE\nDO\n                                     ok                                      \n-----------------------------------------------------------------------------\n ok 3 - untransmute refuses while a partition is pending a concurrent detach\n(1 row)\n\nCREATE FUNCTION\n                                                  ok                                                   \n-------------------------------------------------------------------------------------------------------\n ok 4 - the row id 150 still exists (in the pending partition or the table) after the untransmute call\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:20: NOTICE:  canceling statement due to statement timeout\n"
+      },
+      "class": "seed_hit",
+      "seed": "S1"
+    },
+    {
+      "id": "F9-02",
+      "finder": "F9",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 2929,
+      "lens": "contracts versus documentation",
+      "scenario": "obtain (and extend_to, line 3096) leave a cell whose name a stranger holds unbuilt but log nothing: the 'a hole in the grid, so it is logged (#710)' branch is an empty `null;` and _log_unbuilt_cell is never called, so no fail_obtain_name row names the hole while every write into it is refused; it should log fail_obtain_name over the cell naming the holder",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "CREATE EXTENSION\nCREATE TABLE\nINSERT 0 50\nCALL\nCREATE TABLE\n set_obtain \n------------\n \n(1 row)\n\n plan \n------\n 1..4\n(1 row)\n\n                                    ok                                    \n--------------------------------------------------------------------------\n ok 1 - LIVENESS: the cell [200, 300) was left unbuilt (no pgpm.part row)\n(1 row)\n\n                              ok                               \n---------------------------------------------------------------\n ok 2 - LIVENESS: obtain did walk past it and build [300, 400)\n(1 row)\n\n                               throws_like                                \n--------------------------------------------------------------------------\n ok 3 - LIVENESS: a write into [200, 300) is refused (a hole in the grid)\n(1 row)\n\n                                        ok                                         \n-----------------------------------------------------------------------------------\n not ok 4 - obtain logged fail_obtain_name for the unbuilt cell [200, 300)        +\n # Failed test 4: \"obtain logged fail_obtain_name for the unbuilt cell [200, 300)\"\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 4\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "CREATE EXTENSION\nCREATE TABLE\nINSERT 0 50\nCALL\nCREATE TABLE\n set_obtain \n------------\n \n(1 row)\n\n plan \n------\n 1..4\n(1 row)\n\n                                    ok                                    \n--------------------------------------------------------------------------\n ok 1 - LIVENESS: the cell [200, 300) was left unbuilt (no pgpm.part row)\n(1 row)\n\n                              ok                               \n---------------------------------------------------------------\n ok 2 - LIVENESS: obtain did walk past it and build [300, 400)\n(1 row)\n\n                               throws_like                                \n--------------------------------------------------------------------------\n ok 3 - LIVENESS: a write into [200, 300) is refused (a hole in the grid)\n(1 row)\n\n                                  ok                                   \n-----------------------------------------------------------------------\n ok 4 - obtain logged fail_obtain_name for the unbuilt cell [200, 300)\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+      },
+      "class": "seed_hit",
+      "seed": "S3"
+    },
+    {
+      "id": "F9-03",
+      "finder": "F9",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 14839,
+      "lens": "fresh surface",
+      "scenario": "restore_incoming_fks parks a failed one-step re-add (validate_retry_after five minutes out, 'retried in 5 minutes') but its loop never reads the park, so the very next call with p_ids null (every maintain tick) re-adds the key again, rescanning the referencing table under SHARE ROW EXCLUSIVE on the managed parent, the #633 cost the park was promised to stop; a parked key should be skipped unless named in p_ids",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "ore 18 (one-step re-add path)\n(1 row)\n\n                          is                           \n-------------------------------------------------------\n ok 2 - LIVENESS: the first re-add fails on the orphan\n(1 row)\n\n                                                ok                                                 \n---------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: the failure parked the key (validate_retry_after five minutes out, not restored)\n(1 row)\n\n                                        is                                         \n-----------------------------------------------------------------------------------\n ok 4 - LIVENESS: one fail_restore_incoming_fk row, promising a retry in 5 minutes\n(1 row)\n\n restore_incoming_fks \n----------------------\n                    0\n(1 row)\n\n                                               is                                                \n-------------------------------------------------------------------------------------------------\n not ok 5 - a call within the park (p_ids null) does not attempt the parked re-add again        +\n # Failed test 5: \"a call within the park (p_ids null) does not attempt the parked re-add again\"+\n #         have: 2                                                                              +\n #         want: 1\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 5\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "CREATE EXTENSION\nCREATE TABLE\nINSERT 0 50\nCREATE TABLE\nCREATE TABLE\nINSERT 0 1\nCALL\nINSERT 0 1\n plan \n------\n 1..5\n(1 row)\n\n                            ok                             \n-----------------------------------------------------------\n ok 1 - GUARD: PostgreSQL before 18 (one-step re-add path)\n(1 row)\n\n                          is                           \n-------------------------------------------------------\n ok 2 - LIVENESS: the first re-add fails on the orphan\n(1 row)\n\n                                                ok                                                 \n---------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: the failure parked the key (validate_retry_after five minutes out, not restored)\n(1 row)\n\n                                        is                                         \n-----------------------------------------------------------------------------------\n ok 4 - LIVENESS: one fail_restore_incoming_fk row, promising a retry in 5 minutes\n(1 row)\n\n restore_incoming_fks \n----------------------\n                    0\n(1 row)\n\n                                         is                                          \n-------------------------------------------------------------------------------------\n ok 5 - a call within the park (p_ids null) does not attempt the parked re-add again\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+      },
+      "class": "seed_hit",
+      "seed": "S9"
+    },
+    {
+      "id": "F9-04",
+      "finder": "F9",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 7485,
+      "lens": "boundary arithmetic and types",
+      "scenario": "_regrain_fine_count discounts the aged prefix whenever retain is set, though regrain_step skips aged sub-ranges only when archive_fn is null (#278), so with an archive strategy a run whose swap must attach far more than half the shared lock table (4100 one-step children here) passes the prepare tick's budget (and set_regrain's warning) and is prepared and copied, to be refused only at the swap after every copy; it should be counted whole and refused before anything is copied",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "                is                      \n---------------------------------------------\n ok 5 - LIVENESS: the twin's run is prepared\n(1 row)\n\n                                                      is                                                       \n---------------------------------------------------------------------------------------------------------------\n ok 6 - LIVENESS: with an archive_fn set the next tick copies the aged sub-range [0, 1) instead of skipping it\n(1 row)\n\n                                               ok                                               \n------------------------------------------------------------------------------------------------\n ok 7 - LIVENESS: a fine child for the aged sub-range [0, 1) exists, to be attached at the swap\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 7\n(1 row)\n\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"f9g_p0000000000000000000_to_0000000000000004100\" does not exist, skipping\npsql:<stdin>:34: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"f9g_p0000000000000000000_to_0000000000000004100\" does not exist, skipping\npsql:<stdin>:47: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"f9h_p0000000000000000000_to_0000000000000000500\" does not exist, skipping\npsql:<stdin>:47: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"f9h_p0000000000000000000_to_0000000000000000500\" does not exist, skipping\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "------------------------------------------------------------------------\n ok 4 - the prepare tick refuses the run whose swap would attach all 4100 children (the aged ones included, since an archive_fn is set)\n(1 row)\n\nCREATE TABLE\nINSERT 0 400\nCALL\n extend_to \n-----------\n         3\n(1 row)\n\nINSERT 0 1\n set_retain \n------------\n \n(1 row)\n\n set_archive_fn \n----------------\n \n(1 row)\n\n                     is                      \n---------------------------------------------\n ok 5 - LIVENESS: the twin's run is prepared\n(1 row)\n\n                                                      is                                                       \n---------------------------------------------------------------------------------------------------------------\n ok 6 - LIVENESS: with an archive_fn set the next tick copies the aged sub-range [0, 1) instead of skipping it\n(1 row)\n\n                                               ok                                               \n------------------------------------------------------------------------------------------------\n ok 7 - LIVENESS: a fine child for the aged sub-range [0, 1) exists, to be attached at the swap\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:47: NOTICE:  trigger \"pgpm_regrain_capture\" for relation \"f9h_p0000000000000000000_to_0000000000000000500\" does not exist, skipping\npsql:<stdin>:47: NOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"f9h_p0000000000000000000_to_0000000000000000500\" does not exist, skipping\n"
+      },
+      "class": "seed_hit",
+      "seed": "S5"
+    }
+  ]
+}

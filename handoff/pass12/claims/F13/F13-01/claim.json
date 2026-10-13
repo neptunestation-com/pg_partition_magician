@@ -1,0 +1,3 @@
+{"tier": 3, "file": "pgpm_core/install.sql", "line": 7737, "lens": "fresh surface",
+ "scenario": "regrain_step's swap (_snapshot_wait) is refused while any transaction older than the copies' last write is open in ANOTHER database of the cluster, because backend_xmin is cluster-wide and every statement of this database then looks older than the copies though its snapshot sees them; the swap should go through (the comment says other databases' sessions are not consulted) instead of deferring every tick for the foreign transaction's lifetime",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

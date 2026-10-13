@@ -1,0 +1,384 @@
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/base/CHANGELOG.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/head/CHANGELOG.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/base/CHANGELOG.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/head/CHANGELOG.md	2026-10-12 14:22:50
+@@ -2,6 +2,19 @@
+ 
+ ## [Unreleased]
+ 
++- **A retired chunk's bound with no offset is read on the grid's clock, not the caller's** (#1264).
++  `pgpm._over_retired_chunks`, which decides the partitions the archive step and `retain()` hold over a retired
++  chunk's range, compared the bounds with `::timestamptz` in the caller's session, and a retired ledger row an
++  older install wrote can carry a bound with no offset (before #977 a strategy's `covered_hi` was stored verbatim,
++  and no upgrade rewrites a retired row). The same call then held a partition from pg_cron's UTC session and not
++  from an operator's Asia/Kolkata one, which archived it over the retired range. Every bound it compares, the
++  ledger's and the partitions', now goes through `pgpm._native_bound_key`: a bound with an offset is the instant
++  it names, one without is wall time in `config.partition_tz`, a DateStyle-shaped one reads as `ISO, MDY`, and a
++  zone abbreviation in a pre-#500 render reads in the `Default` set (`IST` is Israel's +02 there, India's +05:30
++  under the India set), so every session gets the same answer; the caller's settings are left as they were. The rows are read, not
++  rewritten: a retired row is the record of the only copy. Test `tests/334`; guard
++  `bench/over_retired_chunks_grid_zone.sh`; mutations `over_retired_chunks_session_zone`, `native_bound_key_utc`,
++  `native_bound_key_session_datestyle`, `native_bound_key_session_abbreviations`.
+ - **The regrain swap and the hypertable cutover wait for snapshots older than their copies** (#1241). A
+   `REPEATABLE READ` reader whose snapshot predated a regrain's copies, and which first read the table after the
+   swap (so it held no lock the `DETACH` waited on), read the fine children, whose rows its snapshot cannot see,
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/base/bench/over_retired_chunks_grid_zone.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/head/bench/over_retired_chunks_grid_zone.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/base/bench/over_retired_chunks_grid_zone.sh	1969-12-31 16:00:00
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/head/bench/over_retired_chunks_grid_zone.sh	2026-10-12 14:22:50
+@@ -0,0 +1,62 @@
++#!/usr/bin/env bash
++# over_retired_chunks_grid_zone.sh <container> <db> [install.sql]
++#
++# Run tests/334_over_retired_chunks_grid_zone_test.sql against an ARBITRARY copy of pgpm_core/install.sql, so that
++# bench/discriminate.sh can show the file catches the defect its mutations put back (issue #1264).
++# pgpm._over_retired_chunks compared the bounds of the retired chunks with ::timestamptz in the CALLER's session,
++# and a retired ledger row an older install wrote can carry a bound with no offset (a pre-#977 strategy's
++# covered_hi, stored verbatim; no upgrade rewrites a retired row), so the same call held a partition from pg_cron's
++# UTC session and not from an operator's Asia/Kolkata one. The file pins what the call returns, by partition and by
++# chunk, from sessions on five zones, three DateStyles and two abbreviation sets, over a grid registered in Asia/Tokyo, each with a
++# LIVENESS witness that the session's own parse would give another answer. The file is the acceptance test; this
++# wrapper exists so the mutations have a guard the discriminate track can run against the mutant, in the shape of
++# bench/retain_recall_moved_parent.sh. Each failed assertion is printed as its `not ok` line, which is what
++# discriminate.sh's starved() reads, so a mutant that failed only a LIVENESS witness is not certified as a catch.
++#
++# FOUR mutations are required to fail against it (bench/mutations/mutate.py):
++#   over_retired_chunks_session_zone     -- the bounds are read in the caller's TimeZone again, the pre-fix
++#                                           shape. Parts B to E.
++#   native_bound_key_utc                 -- the plausible-but-wrong fix: a bound with no offset is read as UTC,
++#                                           not on the grid's clock. Parts A to E (the grid is Asia/Tokyo's).
++#   native_bound_key_session_datestyle   -- the parse is not pinned to ISO, MDY, so a DateStyle-shaped bound
++#                                           reads by the caller's DateStyle. Parts C and E.
++#   native_bound_key_session_abbreviations -- the parse is not pinned to the Default abbreviations, so 'IST' in a
++#                                           legacy bound is India's +05:30 from a session on the India set.
++#                                           Part H.
++#
++# Runs on the plain core image (pgtap and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path inside the
++# container, for a worktree mounted somewhere other than /repo.
++set -uo pipefail
++C="${1:?container}"; DB="${2:?db}"; INSTALL="${3:-/repo/pgpm_core/install.sql}"
++TEST_FILE="${TAP_GUARD_TEST_FILE:-/repo/tests/334_over_retired_chunks_grid_zone_test.sql}"
++fail=0
++
++q() { docker exec "$C" psql -U postgres "$@"; }
++
++q -q -c "drop database if exists $DB" >/dev/null 2>&1
++q -q -c "create database $DB" >/dev/null 2>&1
++q -d "$DB" -q -c "create extension if not exists pgtap;" >/dev/null 2>&1
++
++# A mutant that will not even install is NOT a pass: say which happened.
++if ! q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f "$INSTALL" >/dev/null 2>&1; then
++  printf 'FAIL  %-58s %s\n' "the module under test installed" "$INSTALL"
++  fail=1
++fi
++
++if [ "$fail" = 0 ]; then
++  out=$(docker exec "$C" sh -c "pg_prove -v -U postgres -d $DB $TEST_FILE" 2>&1)
++  rc=$?
++  echo "$out" | grep -E '^not ok [0-9]+ -' | sed 's/^/    /' | head -20
++  # the count is asserted separately: a run that never reached the database must not read as a catch
++  ran=$(echo "$out" | grep -cE '^(not )?ok [0-9]+ -')
++  if [ "$rc" = 0 ]; then printf 'PASS  %-58s %s\n' "a retired chunk's bounds read the same from every session" "$ran ran"
++  else printf 'FAIL  %-58s %s\n' "a retired chunk's bounds read the same from every session" "$ran ran"; fail=1; fi
++  if [ "$ran" -eq 0 ]; then
++    printf 'FAIL  %-58s %s\n' "LIVENESS: the assertions were reached at all" "0 ran"
++    echo "$out" | tail -20 | sed 's/^/      /'
++    fail=1
++  fi
++fi
++
++q -q -c "drop database if exists $DB" >/dev/null 2>&1
++exit "$fail"
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/base/docs/reference.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/head/docs/reference.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/base/docs/reference.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/head/docs/reference.md	2026-10-12 14:22:50
+@@ -2471,7 +2471,11 @@
+   read from another relation (`child_oid`), as a partition's coverage, so a partition re-created under the
+   dropped one's own name (the name pgpm would give it) does not start past rows nothing archived. A chunk
+   whose partition was dropped outside `retire()` (by hand) is marked retired by the step that finds its
+-  relation gone (`archive_chunk_retired`) and holds the range the same way.
++  relation gone (`archive_chunk_retired`) and holds the range the same way. Which partitions a retired chunk
++  holds is the same answer from every session: a bound with no offset (one an older install stored
++  verbatim from a strategy's `covered_hi`) is read as wall time on the grid's clock, `config.partition_tz`, one
++  shaped by a DateStyle as `ISO, MDY`, and a zone abbreviation in the `Default` set (`IST` is Israel's), never in
++  the caller's `TimeZone`, `DateStyle` or `timezone_abbreviations`.
+ - `config.archive_batch` (default **1**; `null` = unbounded) caps how many *different* partitions
+   one `_archive_step` call touches -- the same shape as `retain_batch` (nullable `int`, `null`
+   means unlimited, caps attempts not successes), but a different default, and for a reason worth
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/base/pgpm_core/install.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/head/pgpm_core/install.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/base/pgpm_core/install.sql	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/head/pgpm_core/install.sql	2026-10-12 14:22:50
+@@ -5134,18 +5134,48 @@
+ -- every attached partition and that is no row at all. When an attached lo has no key, there is no floor and every
+ -- retired row is read, as before.
+ --
++-- THE GRID'S CLOCK (#1264). Every bound is compared as pgpm._native_bound_key gives it, never with a cast in the
++-- caller's session: a retired row an older install wrote can carry a bound with no offset (before #977 a
++-- strategy's covered_hi was stored verbatim, and no upgrade rewrites a retired row, the record of the only copy),
++-- and read with ::timestamptz such text named a different instant in every zone, so the same call held a
++-- partition from pg_cron's UTC session and not from an operator's Asia/Kolkata one, which then archived it over
++-- the retired range.
++--
+ -- other_names lists the names those chunks were recorded under when they are not the partition's own (null when
+ -- every one is). That is the shape a partition renamed before an upgrade leaves, its ledger rows left under the
+ -- old name: the upgrade cannot tell that from a partition dropped by hand (both are a name no relation and no
+ -- pgpm.part row has), marks the rows retired, and holds the live renamed partition. The skip row names the remedy
+ -- that is safe only then. A chunk with no child_name (a row written before pgpm recorded one) is described as
+ -- such rather than raising: format's %I refuses a null.
++-- A native bound's position as a number, read the same from every session (#1264): the value for an id kind, and
++-- for a time kind the epoch of the instant the text names, with text that names no zone read as wall time in
++-- p_tz (the grid's config.partition_tz, the zone its cells are computed and named in, and the one
++-- _col_to_native reads a naive column's wall time in), text shaped by a DateStyle read as ISO, MDY, the style
++-- _ts_text writes every bound in, and a zone abbreviation (a pre-#500 render under DateStyle SQL or Postgres
++-- ends in one, '01/01/2026 03:00:00 IST') read in the Default set, where IST is Israel's +02 and not, as under
++-- the India set an operator may run with, +05:30. Text that carries its offset (every bound pgpm writes since
++-- #500) is the instant it names under any zone, so this changes nothing for it. The SET clauses scope the zone
++-- this call sets to the call: the caller's session keeps its own.
++create or replace function pgpm._native_bound_key(p_kind text, p_text text, p_tz text)
++returns numeric language plpgsql stable
++  set timezone = 'UTC'
++  set datestyle = 'ISO, MDY'
++  set timezone_abbreviations = 'Default'
++as $$
++begin
++  if p_text is null then return null; end if;
++  if p_kind = 'id' then return p_text::numeric; end if;
++  perform set_config('TimeZone', p_tz, true);
++  return extract(epoch from p_text::timestamptz);
++end;
++$$;
++
+ drop function if exists pgpm._over_retired_chunks(regclass);
+ create or replace function pgpm._over_retired_chunks(p_parent regclass)
+ returns table(child_name name, lo text, hi text, chunks text, other_names text) language plpgsql stable as $$
+-declare v_ncast text; v_floor numeric; v_unkeyed boolean;
++declare v_kind text; v_tz text; v_floor numeric; v_unkeyed boolean;
+ begin
+-  select pgpm._native_type(c.control_kind) into v_ncast from pgpm.config c where c.parent_table = p_parent;
++  select c.control_kind, c.partition_tz into v_kind, v_tz from pgpm.config c where c.parent_table = p_parent;
+   if not found then return; end if;
+   -- the floor: no retired chunk ending at or below the lowest attached lo can overlap an attached partition
+   select min(pgpm._native_order_key(p.lo)), bool_or(pgpm._native_order_key(p.lo) is null)
+@@ -5154,13 +5184,18 @@
+   if v_unkeyed is null then return; end if;   -- no attached partition, nothing to hold
+   if v_unkeyed then v_floor := null; end if;  -- a lo with no key gives no floor: every retired row is read
+   return query execute format(
+-    'with led as materialized (select l.lo, l.hi, l.child_name, l.s3_key, l.child_oid
++    'with led as materialized (select l.lo, l.hi, l.child_name, l.s3_key, l.child_oid,
++                                      pgpm._native_bound_key(%1$L, l.lo, %4$L) as lo_k,
++                                      pgpm._native_bound_key(%1$L, l.hi, %4$L) as hi_k
+                                 from pgpm.archive_ledger l
+                                 where l.parent_table = %2$L::regclass and l.retired_at is not null
+                                   and (%3$L::numeric is null
+                                        or pgpm._native_order_key(l.hi) > %3$L::numeric
+                                        or pgpm._native_order_key(l.hi) is null)),
+-          mine as materialized (select p.child_name, p.lo, p.hi from pgpm.part p
++          mine as materialized (select p.child_name, p.lo, p.hi,
++                                       pgpm._native_bound_key(%1$L, p.lo, %4$L) as lo_k,
++                                       pgpm._native_bound_key(%1$L, p.hi, %4$L) as hi_k
++                                  from pgpm.part p
+                                  where p.parent_table = %2$L::regclass and p.attached)
+      select m.child_name, m.lo, m.hi,
+             string_agg(format(''[%%s, %%s) recorded for %%s%%s at %%s'', l.lo, l.hi,
+@@ -5174,13 +5209,13 @@
+                                    then '', whose relation no longer exists,''
+                                    else '', which pgpm cannot tie to the relation holding that name now,'' end,
+                               coalesce(l.s3_key, ''no object key'')),
+-                       ''; '' order by l.lo::%1$s),
++                       ''; '' order by l.lo_k),
+             string_agg(distinct quote_ident(l.child_name), '', '')
+               filter (where l.child_name is distinct from m.child_name)
+-       from mine m join led l on l.lo::%1$s < m.hi::%1$s and l.hi::%1$s > m.lo::%1$s
+-      where m.lo::%1$s < (select max(x.hi::%1$s) from led x)
++       from mine m join led l on l.lo_k < m.hi_k and l.hi_k > m.lo_k
++      where m.lo_k < (select max(x.hi_k) from led x)
+       group by m.child_name, m.lo, m.hi',
+-    v_ncast, p_parent::text, v_floor);
++    v_kind, p_parent::text, v_floor, v_tz);
+ end;
+ $$;
+ 
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/base/test.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/head/test.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/base/test.sh	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/head/test.sh	2026-10-12 14:22:50
+@@ -1256,6 +1256,7 @@
+     "bench/regrain_swap_lock_budget.sh pgpm_perf331"
+     "bench/forget_missing_logs_object_keys.sh pgpm_perf334"
+     "bench/over_retired_chunks_range_first.sh pgpm_perf333"
++    "bench/over_retired_chunks_grid_zone.sh pgpm_perf372"
+     "bench/transmute_reap_reread.sh pgpm_perf336"
+     "bench/set_regrain_restated_target.sh pgpm_perf335"
+     "bench/regrain_registered_grid_off_unit.sh pgpm_perf355"
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/base/tests/334_over_retired_chunks_grid_zone_test.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/head/tests/334_over_retired_chunks_grid_zone_test.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/base/tests/334_over_retired_chunks_grid_zone_test.sql	1969-12-31 16:00:00
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/head/tests/334_over_retired_chunks_grid_zone_test.sql	2026-10-12 14:22:50
+@@ -0,0 +1,171 @@
++-- pgpm._over_retired_chunks reads a bound that names no zone as the grid's wall clock, not the caller's
++-- (issue #1264).
++--
++-- THE DEFECT. _over_retired_chunks finds the attached partitions over a retired chunk's range (#1141), which the
++-- archive step skips and retain() leaves out of its batch. It compared the bounds with ::timestamptz in the
++-- CALLER's session, and a retired ledger row an older install wrote can carry a bound with no offset: before #977
++-- a strategy's covered_hi was stored verbatim, and no upgrade rewrites those rows. Such text names a different
++-- instant in every zone, so the same call held a partition from pg_cron's UTC session and not from an operator's
++-- Asia/Kolkata one (a hand _archive_step or retain()), which then archived it over the retired range. The same
++-- held for a bound shaped by a pre-#500 session's DateStyle ('11/03/2026'), read as March under DMY and as
++-- November under MDY.
++--
++-- THE CONTRACT (tests/317 states it; this file holds it for the bounds that name no zone). The call returns the
++-- same partitions over the same chunks from every session's TimeZone and DateStyle. A bound with an offset is the
++-- instant it names; one with no offset is wall time in the grid's own zone, config.partition_tz (the zone the
++-- grid's cells are computed and named in, and the one _col_to_native reads a naive column's wall time in); a
++-- DateStyle-shaped one reads as ISO, MDY, the style _ts_text writes every bound in; a zone abbreviation (a
++-- pre-#500 render under DateStyle SQL ends in one) reads in the Default set, whatever set the caller runs with.
++--
++-- THE FIXTURE. The grid is registered in Asia/Tokyo (+09), so its wall clock is not UTC's and a fix that reads
++-- offset-less text as UTC fails here too. Five retired chunks, every one of them read differently by some session
++-- below, and each check names the partitions and the chunks:
++--   gone_a  [p0.lo - 6h, p0.lo - 3h)  hi offset-less: ends below p0 on Tokyo's clock; held by any zone to its west
++--   gone_b  [p0.lo - 4h, p0.lo + 3h)  hi offset-less: reaches into p0 on Tokyo's clock; not from Pacific/Kiritimati
++--   gone_c  [p1.lo + 2h, p1.lo + 5h)  lo offset-less: inside p1 on Tokyo's clock; reaches into p0 from Kiritimati,
++--                                     and is empty (lo past hi) from UTC
++--   gone_d  [11/03/2026, 11/04/2026)  both offset-less and DateStyle-shaped: 3 November (inside p1) as MDY,
++--                                     11 March (inside p0) as DMY
++--   gone_e  [p2.lo + 9h, p2.lo + 15h) both with an offset (+00): the same instant in every session
++-- Expected: p0 over gone_b alone, p1 over gone_c and gone_d, p2 over gone_e; gone_a nowhere.
++create extension if not exists pgtap;
++set client_min_messages = warning;
++set timezone = 'Asia/Tokyo';
++select plan(22);
++
++create schema t334;
++
++create table t334.t (id bigint generated always as identity, ts timestamptz not null, primary key (id, ts));
++insert into t334.t (ts) select timestamptz '2026-01-05 00:00:00+00' + g * interval '1 hour' from generate_series(1, 90) g;
++call pgpm.transmute('t334.t', 'ts', interval '1 month', p_obtain => 2, p_paused => true);
++select pgpm.set_archive_fn('t334.t', 'pgpm._archive_noop(regclass,name,text,text)'::regprocedure);
++
++-- what the call holds, one line per partition
++create function t334.held() returns text language sql as $$
++  select coalesce(string_agg(format('%s: %s', o.child_name, o.chunks), E'\n' order by o.child_name), '')
++    from pgpm._over_retired_chunks('t334.t') o;
++$$;
++
++insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, s3_key, retired_at, child_oid) values
++  ('t334.t', '2025-12-31 18:00:00+09', '2025-12-31 21:00:00',    'gone_a', 'obj/a', now(), 4290000101),
++  ('t334.t', '2025-12-31 20:00:00+09', '2026-01-01 03:00:00',    'gone_b', 'obj/b', now(), 4290000102),
++  ('t334.t', '2026-11-01 02:00:00',    '2026-11-01 05:00:00+09', 'gone_c', 'obj/c', now(), 4290000103),
++  ('t334.t', '11/03/2026 00:00:00',    '11/04/2026 00:00:00',    'gone_d', 'obj/d', now(), 4290000104),
++  ('t334.t', '2026-12-01 00:00:00+00', '2026-12-01 06:00:00+00', 'gone_e', 'obj/e', now(), 4290000105);
++
++\set expected 't_p2026_01_to_2026_11: [2025-12-31 20:00:00+09, 2026-01-01 03:00:00) recorded for gone_b, whose relation no longer exists, at obj/b\nt_p2026_11: [2026-11-01 02:00:00, 2026-11-01 05:00:00+09) recorded for gone_c, whose relation no longer exists, at obj/c; [11/03/2026 00:00:00, 11/04/2026 00:00:00) recorded for gone_d, whose relation no longer exists, at obj/d\nt_p2026_12: [2026-12-01 00:00:00+00, 2026-12-01 06:00:00+00) recorded for gone_e, whose relation no longer exists, at obj/e'
++
++-- GUARD: the fixture is the one described above (the grid, and its three partitions' bounds)
++select is((select partition_tz from pgpm.config where parent_table = 't334.t'::regclass), 'Asia/Tokyo',
++          'GUARD: the grid is registered in Asia/Tokyo, a wall clock nine hours east of UTC');
++select is((select string_agg(format('%s [%s, %s)', child_name, lo, hi), '; ' order by lo::timestamptz)
++             from pgpm.part where parent_table = 't334.t'::regclass and attached),
++          't_p2026_01_to_2026_11 [2026-01-01 00:00:00+09, 2026-11-01 00:00:00+09); '
++            || 't_p2026_11 [2026-11-01 00:00:00+09, 2026-12-01 00:00:00+09); '
++            || 't_p2026_12 [2026-12-01 00:00:00+09, 2027-01-01 00:00:00+09)',
++          'GUARD: three attached partitions, p0 from January, p1 November, p2 December');
++
++-- A. From a session on the grid's own zone and the default DateStyle (what the expectation was derived on).
++select is(t334.held(), :'expected',
++          'from Asia/Tokyo, ISO: p0 over gone_b, p1 over gone_c and gone_d, p2 over gone_e, gone_a nowhere');
++
++-- B. UTC, pg_cron's usual zone. Read there, gone_a's hi ends six hours INTO p0 and gone_c's lo lies past its hi.
++set timezone = 'UTC';
++select ok('2025-12-31 21:00:00'::timestamptz > '2026-01-01 00:00:00+09'::timestamptz
++          and '2026-11-01 02:00:00'::timestamptz > '2026-11-01 05:00:00+09'::timestamptz,
++          'LIVENESS: read in UTC, gone_a reaches into p0 and gone_c is empty');
++select is(t334.held(), :'expected', 'from UTC the call holds the same partitions over the same chunks');
++
++-- C. Asia/Kolkata (+05:30) under SQL, DMY: gone_a's hi ends half an hour into p0, and gone_d reads as March.
++set timezone = 'Asia/Kolkata';
++set datestyle = 'SQL, DMY';
++select ok('2025-12-31 21:00:00'::timestamptz > '2026-01-01 00:00:00+09'::timestamptz
++          and '11/03/2026 00:00:00'::timestamptz < '2026-11-01 00:00:00+09'::timestamptz,
++          'LIVENESS: read in Asia/Kolkata under DMY, gone_a reaches into p0 and gone_d lies in March, inside p0');
++select is(t334.held(), :'expected',
++          'from Asia/Kolkata under SQL, DMY the call holds the same partitions over the same chunks');
++reset datestyle;
++
++-- D. Pacific/Kiritimati (+14): gone_b's hi ends two hours before p0, and gone_c's lo three hours before p1.
++set timezone = 'Pacific/Kiritimati';
++select ok('2026-01-01 03:00:00'::timestamptz < '2026-01-01 00:00:00+09'::timestamptz
++          and '2026-11-01 02:00:00'::timestamptz < '2026-11-01 00:00:00+09'::timestamptz,
++          'LIVENESS: read in Pacific/Kiritimati, gone_b ends before p0 and gone_c starts inside p0');
++select is(t334.held(), :'expected',
++          'from Pacific/Kiritimati the call holds the same partitions over the same chunks');
++
++-- E. America/Los_Angeles under German (DMY): every offset-less bound lands a day or more later.
++set timezone = 'America/Los_Angeles';
++set datestyle = 'German';
++select ok('2025-12-31 21:00:00'::timestamptz > '2026-01-01 00:00:00+09'::timestamptz
++          and '11/03/2026 00:00:00'::timestamptz < '2026-11-01 00:00:00+09'::timestamptz,
++          'LIVENESS: read in America/Los_Angeles under German, gone_a reaches into p0 and gone_d lies in March');
++select is(t334.held(), :'expected',
++          'from America/Los_Angeles under German the call holds the same partitions over the same chunks');
++reset datestyle;
++
++-- F. The call leaves the caller's settings as it found them.
++select is(current_setting('TimeZone') || ' / ' || current_setting('DateStyle'), 'America/Los_Angeles / ISO, MDY',
++          'the call leaves the caller''s TimeZone and DateStyle as they were');
++set datestyle = 'SQL, DMY';
++select is((select count(*) from pgpm._over_retired_chunks('t334.t'))::int
++            || ' / ' || current_setting('TimeZone') || ' / ' || current_setting('DateStyle'),
++          '3 / America/Los_Angeles / SQL, DMY',
++          'after a call under SQL, DMY in America/Los_Angeles the session is still on both');
++reset datestyle;
++set timezone = 'Asia/Tokyo';
++
++-- G. The grid's own zone, not UTC. Moved (with the bounds rewritten to UTC wall-clock text, which a UTC grid's
++-- older install would have written), the same chunks must be read on the new grid's clock: the answer follows
++-- partition_tz. gone_b's hi read on Tokyo's clock would end at 18:00 UTC on 31 December, below p0's lo.
++create table t334.u (id bigint generated always as identity, ts timestamptz not null, primary key (id, ts));
++set timezone = 'UTC';
++insert into t334.u (ts) select timestamptz '2026-01-05 00:00:00+00' + g * interval '1 hour' from generate_series(1, 90) g;
++call pgpm.transmute('t334.u', 'ts', interval '1 month', p_obtain => 2, p_paused => true);
++select pgpm.set_archive_fn('t334.u', 'pgpm._archive_noop(regclass,name,text,text)'::regprocedure);
++insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, s3_key, retired_at, child_oid) values
++  ('t334.u', '2025-12-31 20:00:00+00', '2026-01-01 03:00:00', 'gone_u', 'obj/u', now(), 4290000106);
++select is((select partition_tz from pgpm.config where parent_table = 't334.u'::regclass), 'UTC',
++          'GUARD: the second grid is registered in UTC');
++set timezone = 'Asia/Tokyo';
++select ok('2026-01-01 03:00:00'::timestamptz < '2026-01-01 00:00:00+00'::timestamptz,
++          'LIVENESS: read in Asia/Tokyo, gone_u''s hi ends before the UTC grid''s first partition');
++select is((select string_agg(o.child_name::text || ': ' || o.chunks, E'\n') from pgpm._over_retired_chunks('t334.u') o),
++          'u_p2026_01_to_2026_11: [2025-12-31 20:00:00+00, 2026-01-01 03:00:00) recorded for gone_u, whose relation no longer exists, at obj/u',
++          'from Asia/Tokyo the UTC grid''s first partition is held over gone_u, read on the UTC grid''s clock');
++set timezone = 'UTC';
++
++-- H. A zone abbreviation, read in the Default set whatever the caller's (PR #1305's V-01). A pre-#500 install
++-- rendered a bound in its session's DateStyle, and under SQL a render ends in the zone's abbreviation: a writer in
++-- Asia/Jerusalem wrote one hour into this UTC grid's first partition as '01/01/2026 03:00:00 IST'. IST is Israel's
++-- +02 in the Default set and India's +05:30 in the India set an operator in India may run with, where the same text
++-- ends two and a half hours BEFORE that partition's lo.
++create table t334.v (id bigint generated always as identity, ts timestamptz not null, primary key (id, ts));
++insert into t334.v (ts) select timestamptz '2026-01-05 00:00:00+00' + g * interval '1 hour' from generate_series(1, 90) g;
++call pgpm.transmute('t334.v', 'ts', interval '1 month', p_obtain => 2, p_paused => true);
++select pgpm.set_archive_fn('t334.v', 'pgpm._archive_noop(regclass,name,text,text)'::regprocedure);
++insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, s3_key, retired_at, child_oid) values
++  ('t334.v', '2025-12-31 20:00:00+00', '01/01/2026 03:00:00 IST', 'gone_v', 'obj/v', now(), 4290000107);
++\set held_v 'v_p2026_01_to_2026_11: [2025-12-31 20:00:00+00, 01/01/2026 03:00:00 IST) recorded for gone_v, whose relation no longer exists, at obj/v'
++select is((select lo from pgpm.part where parent_table = 't334.v'::regclass and child_name = 'v_p2026_01_to_2026_11'),
++          '2026-01-01 00:00:00+00', 'GUARD: the third grid''s first partition starts at midnight UTC on 1 January');
++set timezone = 'Asia/Jerusalem';
++set datestyle = 'SQL, MDY';
++select is((timestamptz '2026-01-01 01:00:00+00')::text, '01/01/2026 03:00:00 IST',
++          'GUARD: the hi is what a session in Asia/Jerusalem under SQL, MDY renders for an hour into that partition');
++reset datestyle;
++set timezone = 'UTC';
++select is((select string_agg(o.child_name::text || ': ' || o.chunks, E'\n') from pgpm._over_retired_chunks('t334.v') o),
++          :'held_v', 'from a UTC session on the Default abbreviations the first partition is held over gone_v');
++set timezone = 'Asia/Kolkata';
++set timezone_abbreviations = 'India';
++select ok('01/01/2026 03:00:00 IST'::timestamptz < '2026-01-01 00:00:00+00'::timestamptz,
++          'LIVENESS: read with the India abbreviations, gone_v''s hi ends before the first partition''s lo');
++select is((select string_agg(o.child_name::text || ': ' || o.chunks, E'\n') from pgpm._over_retired_chunks('t334.v') o),
++          :'held_v', 'from Asia/Kolkata on the India abbreviations the call holds the same partition over gone_v');
++select is(current_setting('timezone_abbreviations'), 'India',
++          'the call leaves the caller''s timezone_abbreviations as they were');
++reset timezone_abbreviations;
++set timezone = 'UTC';
++
++select * from finish();

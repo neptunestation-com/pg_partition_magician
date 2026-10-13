@@ -1,0 +1,140 @@
+{
+ "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/base",
+ "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1295/pr/review",
+ "files": [
+  {
+   "path": "CHANGELOG.md",
+   "status": "modified",
+   "hunks": [
+    [
+     5,
+     12
+    ]
+   ]
+  },
+  {
+   "path": "bench/adopt_partition_isolation.sh",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     55
+    ]
+   ]
+  },
+  {
+   "path": "docs/reference.md",
+   "status": "modified",
+   "hunks": [
+    [
+     3021,
+     3021
+    ],
+    [
+     3033,
+     3038
+    ]
+   ]
+  },
+  {
+   "path": "pgpm_core/install.sql",
+   "status": "modified",
+   "hunks": [
+    [
+     14005,
+     14013
+    ],
+    [
+     14021,
+     14024
+    ]
+   ]
+  },
+  {
+   "path": "test.sh",
+   "status": "modified",
+   "hunks": [
+    [
+     1268,
+     1268
+    ]
+   ]
+  },
+  {
+   "path": "tests/332_adopt_partition_isolation_test.sql",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     132
+    ]
+   ]
+  }
+ ],
+ "units": [
+  {
+   "unit": "pgpm_core/install.sql:14005-14013",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    14005,
+    14013
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm.adopt_partition",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    14014,
+    14143
+   ],
+   "why": "touched at 14021-14024"
+  }
+ ],
+ "exercised_by": {
+  "pgpm.adopt_partition": [
+   "bench/adopt_partition.sh",
+   "bench/adopt_partition_isolation.sh",
+   "bench/adopt_partition_regrain_lock.sh",
+   "bench/archive_retired_chunk_kept.sh",
+   "bench/doc_archive_identity_recovery.sh",
+   "docs/adversarial-review.md",
+   "docs/guide.md",
+   "docs/reference.md",
+   "docs/reviews/2026-10-08-pass10.md",
+   "docs/reviews/2026-10-09-pass11.md",
+   "docs/reviews/2026-10-12-pass12.md",
+   "docs/runbook.md",
+   "tests/241_reads_under_caller_rls_conformance_test.sql",
+   "tests/303_adopt_partition_test.sql",
+   "tests/309_archive_retired_chunk_kept_test.sql",
+   "tests/332_adopt_partition_isolation_test.sql",
+   "tests/archive/db/50_archive_retired_chunk_kept_test.sql"
+  ]
+ },
+ "finder": "P1",
+ "slice": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/adopt_partition_isolation.sh",
+   "docs/reference.md",
+   "pgpm_core/install.sql",
+   "test.sh",
+   "tests/332_adopt_partition_isolation_test.sql"
+  ],
+  "units": [
+   "pgpm_core/install.sql:14005-14013",
+   "pgpm.adopt_partition"
+  ],
+  "kind": "mixed"
+ },
+ "ledger": [
+  "pgpm_core/install.sql:14005-14013",
+  "pgpm.adopt_partition",
+  "CHANGELOG.md",
+  "bench/adopt_partition_isolation.sh",
+  "docs/reference.md",
+  "test.sh",
+  "tests/332_adopt_partition_isolation_test.sql"
+ ]
+}

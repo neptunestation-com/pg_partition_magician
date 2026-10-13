@@ -1,0 +1,145 @@
+{
+  "trees": {
+    "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/base",
+    "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/head",
+    "review": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/review",
+    "mutants": {
+      "archive_endpoint_trailing_slash_kept": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/mutants/archive_endpoint_trailing_slash_kept",
+      "archive_endpoint_unrefused": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1301/pr/mutants/archive_endpoint_unrefused"
+    }
+  },
+  "acceptance": "ACC",
+  "claims": [
+    {
+      "id": "ACC-01",
+      "finder": "ACC",
+      "tier": 3,
+      "file": "pgpm_archive/install.sql",
+      "line": 152,
+      "lens": "operator error",
+      "scenario": "#1269 acceptance (F19-02): archive.configure accepts p_endpoint 'http://host:port/' (trailing slash); the signers then address '//<bucket>/<key>' and the store answers HTTP 400 on every PUT, so every export and every tick's chunk fails after the read; configure should refuse or normalise an endpoint that can never work, as it refuses p_part_bytes and p_fetch_rows (#594, #636).",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                      \n---------------------------------------------------------------------------------------------------------------\n ok 4 - GUARD: configure either takes the slashed endpoint or refuses it naming the endpoint (got: configured)\n(1 row)\n\n                                                                          ok                                                                          \n------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 5 - archive.to_s3 through an endpoint configured with a trailing slash does not fail at the store with HTTP 400 (a //bucket/key path)        +\n # Failed test 5: \"archive.to_s3 through an endpoint configured with a trailing slash does not fail at the store with HTTP 400 (a //bucket/key path)\"\n(1 row)\n\n                                                    ok                                                     \n-----------------------------------------------------------------------------------------------------------\n not ok 6 - its object lands at the key, as it does through the endpoint spelled without the slash        +\n # Failed test 6: \"its object lands at the key, as it does through the endpoint spelled without the slash\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\npsql:<stdin>:8: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "                       is                                  \n---------------------------------------------------------------------\n ok 2 - LIVENESS: the export reaches the store through that endpoint\n(1 row)\n\n                   is                   \n----------------------------------------\n ok 3 - LIVENESS: and its object landed\n(1 row)\n\n                                                      ok                                                       \n---------------------------------------------------------------------------------------------------------------\n ok 4 - GUARD: configure either takes the slashed endpoint or refuses it naming the endpoint (got: configured)\n(1 row)\n\n                                                                    ok                                                                    \n------------------------------------------------------------------------------------------------------------------------------------------\n ok 5 - archive.to_s3 through an endpoint configured with a trailing slash does not fail at the store with HTTP 400 (a //bucket/key path)\n(1 row)\n\n                                              ok                                               \n-----------------------------------------------------------------------------------------------\n ok 6 - its object lands at the key, as it does through the endpoint spelled without the slash\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:8: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "mutant:archive_endpoint_trailing_slash_kept": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                      \n---------------------------------------------------------------------------------------------------------------\n ok 4 - GUARD: configure either takes the slashed endpoint or refuses it naming the endpoint (got: configured)\n(1 row)\n\n                                                                          ok                                                                          \n------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 5 - archive.to_s3 through an endpoint configured with a trailing slash does not fail at the store with HTTP 400 (a //bucket/key path)        +\n # Failed test 5: \"archive.to_s3 through an endpoint configured with a trailing slash does not fail at the store with HTTP 400 (a //bucket/key path)\"\n(1 row)\n\n                                                    ok                                                     \n-----------------------------------------------------------------------------------------------------------\n not ok 6 - its object lands at the key, as it does through the endpoint spelled without the slash        +\n # Failed test 6: \"its object lands at the key, as it does through the endpoint spelled without the slash\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\npsql:<stdin>:8: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "mutant:archive_endpoint_unrefused": {
+          "fails": false,
+          "exit": 0,
+          "tail": "                       is                                  \n---------------------------------------------------------------------\n ok 2 - LIVENESS: the export reaches the store through that endpoint\n(1 row)\n\n                   is                   \n----------------------------------------\n ok 3 - LIVENESS: and its object landed\n(1 row)\n\n                                                      ok                                                       \n---------------------------------------------------------------------------------------------------------------\n ok 4 - GUARD: configure either takes the slashed endpoint or refuses it naming the endpoint (got: configured)\n(1 row)\n\n                                                                    ok                                                                    \n------------------------------------------------------------------------------------------------------------------------------------------\n ok 5 - archive.to_s3 through an endpoint configured with a trailing slash does not fail at the store with HTTP 400 (a //bucket/key path)\n(1 row)\n\n                                              ok                                               \n-----------------------------------------------------------------------------------------------\n ok 6 - its object lands at the key, as it does through the endpoint spelled without the slash\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:8: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        }
+      },
+      "class": "fixed",
+      "acceptance": {
+        "fails_on_base": true,
+        "passes_on_head": true,
+        "mutant_restores": {
+          "archive_endpoint_trailing_slash_kept": true,
+          "archive_endpoint_unrefused": false
+        },
+        "any_restores": true
+      }
+    },
+    {
+      "id": "P1-01",
+      "finder": "P1",
+      "tier": 3,
+      "file": "pgpm_archive/install.sql",
+      "line": 148,
+      "lens": "fresh surface",
+      "scenario": "archive._s3_endpoint_canonical is `select p_endpoint` (the identity) in this tree, so archive.configure stores 'http://minio:9000/' with its slash and both signers still address //<bucket>/<key> (HTTP 400 on every PUT, the issue #1269 defect intact), while the PR body, CHANGELOG and pgpm_archive/README.md say the trailing slash is dropped and the tree's own tests/archive/db/53 fails tests 7-9, 11, 12, 19, 21-24 (the set the body lists for the archive_endpoint_trailing_slash_kept mutant); the helper should return the endpoint without its trailing slashes.",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 3,
+          "tail": "---\n ok 2 - LIVENESS: the endpoint without a slash is taken\n(1 row)\n\n                  is                  \n--------------------------------------\n ok 3 - LIVENESS: and stored as given\n(1 row)\n\n                           is                            \n---------------------------------------------------------\n ok 4 - LIVENESS: an export through it reaches the store\n(1 row)\n\n                         is                         \n----------------------------------------------------\n ok 5 - LIVENESS: and its object holds rows 1 and 2\n(1 row)\n\n                      is                      \n----------------------------------------------\n ok 6 - LIVENESS: the object is cleared again\n(1 row)\n\n                                is                                 \n-------------------------------------------------------------------\n ok 7 - LIVENESS: and is gone before the slashed endpoint is tried\n(1 row)\n\n                                     is                                      \n-----------------------------------------------------------------------------\n ok 8 - LIVENESS: configure takes the endpoint spelled with a trailing slash\n(1 row)\n\npsql:<stdin>:7: NOTICE:  extension \"pgtap\" already exists, skipping\npsql:<stdin>:53: ERROR:  function archive._s3_endpoint_canonical(unknown) does not exist\nLINE 1: select is(archive._s3_endpoint_canonical('http://minio:9000/...\n                  ^\nHINT:  No function matches the given name and argument types. You might need to add explicit type casts.\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "------------------------------------------------------------------------\n ok 10 - archive.configure stores the endpoint without its trailing slash (README: \"A trailing slash is dropped\")\n(1 row)\n\n                                                            is                                                            \n--------------------------------------------------------------------------------------------------------------------------\n ok 11 - an export through the endpoint configured with a trailing slash reaches the store (not HTTP 400 at //bucket/key)\n(1 row)\n\n                              is                              \n--------------------------------------------------------------\n ok 12 - and its object lands at the key holding rows 1 and 2\n(1 row)\n\n                                                      is                                                      \n--------------------------------------------------------------------------------------------------------------\n ok 13 - archive.s3_signed_request spelled with a trailing slash addresses the key the unslashed export wrote\n(1 row)\n\n                                              is                                              \n----------------------------------------------------------------------------------------------\n ok 14 - archive.s3_signed_request_bytea spelled with a trailing slash addresses the same key\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:7: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": "LL                                                    +\n #         want: 1:one,2:two\n(1 row)\n\n                                                            is                                                            \n--------------------------------------------------------------------------------------------------------------------------\n not ok 13 - archive.s3_signed_request spelled with a trailing slash addresses the key the unslashed export wrote        +\n # Failed test 13: \"archive.s3_signed_request spelled with a trailing slash addresses the key the unslashed export wrote\"+\n #         have: 400                                                                                                     +\n #         want: 200\n(1 row)\n\n                                                    is                                                    \n----------------------------------------------------------------------------------------------------------\n not ok 14 - archive.s3_signed_request_bytea spelled with a trailing slash addresses the same key        +\n # Failed test 14: \"archive.s3_signed_request_bytea spelled with a trailing slash addresses the same key\"+\n #         have: 400                                                                                     +\n #         want: 200\n(1 row)\n\n                finish                 \n---------------------------------------\n # Looks like you failed 6 tests of 14\n(1 row)\n\npsql:<stdin>:7: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        }
+      },
+      "class": "seed_hit",
+      "seed": "S1"
+    },
+    {
+      "id": "V-01",
+      "finder": "V",
+      "tier": 3,
+      "file": "pgpm_archive/install.sql",
+      "line": 205,
+      "lens": "closing claim",
+      "scenario": "PR #1301's new endpoint refusal ('^https?://[^/?#[:space:]]+(/...)?$') admits userinfo: archive.configure takes 'http://minioadmin@minio:9000', the signers take 'minioadmin@minio:9000' as the host they sign, the client sends Host: minio:9000, and every PUT is refused 403 SignatureDoesNotMatch after the read. The body says configure refuses an endpoint the signers cannot use; this one it takes. Loud, nothing lost.",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                                                                     \n---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 5 - archive.to_s3 through a userinfo endpoint configure accepted does not fail at the store (got: archive.to_s3: PUT of evt failed: HTTP 403 <?xml version=\"1.0\" encoding=\"UTF-8\"?>       +\n # <Error><Code>SignatureDoesNotMatch</Code><Message>The request signature we cal)                                                                                                                +\n # Failed test 5: \"archive.to_s3 through a userinfo endpoint configure accepted does not fail at the store (got: archive.to_s3: PUT of evt failed: HTTP 403 <?xml version=\"1.0\" encoding=\"UTF-8\"?>+\n # <Error><Code>SignatureDoesNotMatch</Code><Message>The request signature we cal)\"\n(1 row)\n\n                                          ok                                           \n---------------------------------------------------------------------------------------\n not ok 6 - its object lands at the key, as it does through the plain spelling        +\n # Failed test 6: \"its object lands at the key, as it does through the plain spelling\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\npsql:<stdin>:6: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "head": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                                                                     \n---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 5 - archive.to_s3 through a userinfo endpoint configure accepted does not fail at the store (got: archive.to_s3: PUT of evt failed: HTTP 403 <?xml version=\"1.0\" encoding=\"UTF-8\"?>       +\n # <Error><Code>SignatureDoesNotMatch</Code><Message>The request signature we cal)                                                                                                                +\n # Failed test 5: \"archive.to_s3 through a userinfo endpoint configure accepted does not fail at the store (got: archive.to_s3: PUT of evt failed: HTTP 403 <?xml version=\"1.0\" encoding=\"UTF-8\"?>+\n # <Error><Code>SignatureDoesNotMatch</Code><Message>The request signature we cal)\"\n(1 row)\n\n                                          ok                                           \n---------------------------------------------------------------------------------------\n not ok 6 - its object lands at the key, as it does through the plain spelling        +\n # Failed test 6: \"its object lands at the key, as it does through the plain spelling\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\npsql:<stdin>:6: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                                                                     \n---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 5 - archive.to_s3 through a userinfo endpoint configure accepted does not fail at the store (got: archive.to_s3: PUT of evt failed: HTTP 403 <?xml version=\"1.0\" encoding=\"UTF-8\"?>       +\n # <Error><Code>SignatureDoesNotMatch</Code><Message>The request signature we cal)                                                                                                                +\n # Failed test 5: \"archive.to_s3 through a userinfo endpoint configure accepted does not fail at the store (got: archive.to_s3: PUT of evt failed: HTTP 403 <?xml version=\"1.0\" encoding=\"UTF-8\"?>+\n # <Error><Code>SignatureDoesNotMatch</Code><Message>The request signature we cal)\"\n(1 row)\n\n                                          ok                                           \n---------------------------------------------------------------------------------------\n not ok 6 - its object lands at the key, as it does through the plain spelling        +\n # Failed test 6: \"its object lands at the key, as it does through the plain spelling\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\npsql:<stdin>:6: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        }
+      },
+      "class": "pre_existing"
+    },
+    {
+      "id": "V-02",
+      "finder": "V",
+      "tier": 3,
+      "file": "pgpm_archive/install.sql",
+      "line": 397,
+      "lens": "closing claim",
+      "scenario": "The #1269 consequence through p_bucket rather than p_endpoint: archive.configure stores the bucket verbatim and both signers build endpoint || '/' || bucket || '/' || key, so a bucket spelled '/archive-test-bucket' addresses '//archive-test-bucket/<key>' and MinIO answers HTTP 400 to every PUT, after the read. configure checks nothing about the bucket. Sibling of the mechanism the PR fixes; outside the body's claim. Loud, nothing lost.",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                                                         \n------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 5 - archive.to_s3 through a leading-slash bucket configure accepted does not fail at the store (got: archive.to_s3: PUT of evt failed: HTTP 400 <?xml version=\"1.0\" encoding=\"UTF-8\"?>       +\n # <Error><Code>BadRequest</Code><Message>An unsupported API call for method: PUT)                                                                                                                   +\n # Failed test 5: \"archive.to_s3 through a leading-slash bucket configure accepted does not fail at the store (got: archive.to_s3: PUT of evt failed: HTTP 400 <?xml version=\"1.0\" encoding=\"UTF-8\"?>+\n # <Error><Code>BadRequest</Code><Message>An unsupported API call for method: PUT)\"\n(1 row)\n\n                                          ok                                           \n---------------------------------------------------------------------------------------\n not ok 6 - its object lands at the key, as it does through the plain spelling        +\n # Failed test 6: \"its object lands at the key, as it does through the plain spelling\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\npsql:<stdin>:5: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "head": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                                                         \n------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 5 - archive.to_s3 through a leading-slash bucket configure accepted does not fail at the store (got: archive.to_s3: PUT of evt failed: HTTP 400 <?xml version=\"1.0\" encoding=\"UTF-8\"?>       +\n # <Error><Code>BadRequest</Code><Message>An unsupported API call for method: PUT)                                                                                                                   +\n # Failed test 5: \"archive.to_s3 through a leading-slash bucket configure accepted does not fail at the store (got: archive.to_s3: PUT of evt failed: HTTP 400 <?xml version=\"1.0\" encoding=\"UTF-8\"?>+\n # <Error><Code>BadRequest</Code><Message>An unsupported API call for method: PUT)\"\n(1 row)\n\n                                          ok                                           \n---------------------------------------------------------------------------------------\n not ok 6 - its object lands at the key, as it does through the plain spelling        +\n # Failed test 6: \"its object lands at the key, as it does through the plain spelling\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\npsql:<stdin>:5: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                                                         \n------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 5 - archive.to_s3 through a leading-slash bucket configure accepted does not fail at the store (got: archive.to_s3: PUT of evt failed: HTTP 400 <?xml version=\"1.0\" encoding=\"UTF-8\"?>       +\n # <Error><Code>BadRequest</Code><Message>An unsupported API call for method: PUT)                                                                                                                   +\n # Failed test 5: \"archive.to_s3 through a leading-slash bucket configure accepted does not fail at the store (got: archive.to_s3: PUT of evt failed: HTTP 400 <?xml version=\"1.0\" encoding=\"UTF-8\"?>+\n # <Error><Code>BadRequest</Code><Message>An unsupported API call for method: PUT)\"\n(1 row)\n\n                                          ok                                           \n---------------------------------------------------------------------------------------\n not ok 6 - its object lands at the key, as it does through the plain spelling        +\n # Failed test 6: \"its object lands at the key, as it does through the plain spelling\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\npsql:<stdin>:5: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        }
+      },
+      "class": "pre_existing"
+    }
+  ]
+}

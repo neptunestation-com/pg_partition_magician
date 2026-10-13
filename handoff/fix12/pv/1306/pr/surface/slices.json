@@ -1,0 +1,19 @@
+{
+ "P1": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/regrain_refuses_strict_isolation.sh",
+   "docs/reference.md",
+   "pgpm_core/install.sql",
+   "test.sh",
+   "tests/329_regrain_refuses_strict_isolation_test.sql"
+  ],
+  "units": [
+   "pgpm._regrain_refuse_strict_isolation",
+   "pgpm.regrain",
+   "pgpm.regrain_history",
+   "pgpm.set_regrain"
+  ],
+  "kind": "mixed"
+ }
+}

@@ -1,0 +1,3 @@
+regrain_copy_validates_not_valid_check	pgpm_core/install.sql
+regrain_drift_compares_not_valid_check	pgpm_core/install.sql
+regrain_drift_excuses_validated_copy_check	pgpm_core/install.sql

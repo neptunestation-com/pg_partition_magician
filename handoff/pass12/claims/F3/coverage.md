@@ -1,0 +1,56 @@
+# F3 coverage ledger (pass 12, slice S3)
+
+- pgpm._scratch_mint | read: yes | fresh surface/operator error: owner + owner-only ACL on the relation and its owned sequences (deptype a/i) in the minting transaction; held
+- pgpm._scratch_mint_fn | read: yes | owner follows the parent's for the capture function; held
+- pgpm._scratch_rel | read: yes | resolves pgpm.scratch by oid, relkind r only; held
+- pgpm._scratch_record | read: yes | fresh surface: on conflict resets written_xid to null for a new object (#1241); held
+- pgpm._scratch_objects | read: yes | lists delta, unattached copies, hypertable dest/delta and both capture fns; owned sequences follow their table; held
+- pgpm._scratch_owner_follow | read: yes | operator error (hand-over): insufficient_privilege handler only marks stuck when not a member of the old owner; _capture_definer re-armed per tick; held
+- pgpm.hand_over_scratch | read: yes | contracts vs docs: count read back after the follow, refusal when objects stay with another owner, all-or-nothing by raise; matches reference "Handing a table to a new owner"; held
+- pgpm._regrain_capture_derive | read: yes | boundary: 63-byte fit by octet_length, oid form otherwise; held
+- pgpm._regrain_capture_names | read: yes | identity of delta/fn by recorded oid; fn resolved only in the DELTA's current schema (hypothesis H4: untransmute/uninstall miss a fn when the delta was moved)
+- pgpm._regrain_truncate_guard | read: yes | message and remedy (regrain_cancel) checked; held
+- pgpm._regrain_truncate_guard_ensure | read: yes | idempotent ENABLE ALWAYS install; held
+- pgpm._regrain_capture_grant | read: yes | grantees of parent and source plus owners, PUBLIC as public; held
+- pgpm._regrain_child_rel | read: yes | by child_oid, name fallback for null oid; held
+- pgpm._regrain_capture_install | read: yes | key nullability refusal, namesake refusals, teardown order, generated trigger body (fast path / dynamic path); held
+- pgpm._regrain_capture_active | read: yes | trigger presence by recorded relation; held
+- pgpm._regrain_capture_unarmed | read: yes | tgenabled A only; held
+- pgpm._regrain_delta_count | read: yes | both overloads: whole-delta gate count and the encoded [lo, hi) count at the swap; held
+- pgpm._regrain_delta_count | read: yes | (second overload, range-scoped) encoded comparison against _encode'd bounds; held
+- pgpm._regrain_delta_purge | read: yes | fresh surface (#709/#1070): `is not true` keeps only in-range rows, logs regrain_delta_purge; held
+- pgpm._regrain_reconcile | read: yes | fresh surface (#709 off-shape text_time path), boundary (clamped first sub-range, horizon discard), time and zones (_ts_text rendering of naive keys); held; under REPEATABLE READ its residual pass is blind to rows committed after the tick's snapshot (H1)
+- pgpm._enforce_regrain_capture | read: yes | janitor under try-lock, inclusive-hi keep rule, per-child isolation; held
+- pgpm._regrain_drop_copy | read: yes | drop by recorded oid, name fallback; held
+- pgpm._regrain_shape_drift | read: yes | fresh surface (#633 NOT VALID FK twin by name); NOT VALID CHECK compared by expression only, which is why F3-03's copy-time failure is not drift
+- pgpm._regrain_source_mark | read: yes | relfilenode + attnums; held
+- pgpm._regrain_source_drift | read: yes | null mark over copies is drift (#878); held
+- pgpm._regrain_capture_drift | read: yes | key name/type comparison, gone delta reported; held
+- pgpm._regrain_copy_rel | read: yes | copy resolved in its own schema, refusal names regrain_cancel; held
+- pgpm._regrain_lock | read: yes | row lock on pgpm.regrain_lock, re-entrant; held
+- pgpm._regrain_try_lock | read: yes | skip locked, lock_not_available -> false; held
+- pgpm._regrain_in_flight | read: yes | three marks; held
+- pgpm.regrain_cancel | read: yes | operator error (cancel of nothing, not managed), failure injection (one transaction); leaves regrain_written_xid and source_mark (harmless, reasoned); held
+- pgpm._regrain_reclaim | read: yes | scoped reclaim, cursor-at-bound ambiguity, p_detached logging; held
+- pgpm._regrain_has_child | read: yes | exact native bounds; held
+- pgpm._regrain_off_grid | read: yes | copies and cursor against the requested grid; held
+- pgpm._regrain_step_shape | read: yes | fresh surface (#1117 registered anchor/step/zone, #1039 encoded unit), boundary (numeric negative scale, integral spelling, NaN/Infinity steps fall to nosubdiv or 'coarser'); held
+- pgpm._regrain_step_forward | read: yes | operator error: zero/negative refused; NaN/Infinity pass it but are refused downstream (nosubdiv, set_regrain coarser); held
+- pgpm.regrain_step | read: yes | whole function: prepare budget (F3-01 via _regrain_fine_count), copy via _regrain_copy_make (F3-03), aged skip vs archive_fn, swap re-check, snapshot wait placement, measured budget arithmetic, written_xid writes at copy and reconcile; no isolation-level refusal (F3-02, H1)
+- pgpm.regrain | read: yes | operator error: run inside a REPEATABLE READ transaction loses a row committed after the caller's snapshot (claim F3-02); SHARE lock and lock order held
+- pgpm.regrain_history | read: yes | contracts vs docs: picks the smallest-lo attached child, as its own parenthetical says (H5 on "oldest coarse child")
+- pgpm._regrain_names_fit | read: yes | boundary: first two/last two cells through _regrain_sub_name; held
+- pgpm._native_below | read: yes | boundary: id unit one digit finer than the finest scale, time less 1 us; held
+- pgpm.set_regrain | read: yes | operator error (same target in another spelling, null with run in flight, coarser, NaN), lock budget warning (shares F3-01's undercount with archive_fn set); held otherwise
+- pgpm._capture_definer | read: yes | reach test (schema USAGE + INSERT), definer/invoker switch, null delta no-op; held
+- pgpm._delta_seq | read: yes | identity column by attidentity; held
+- pgpm._delta_seq_add | read: yes | name collision avoidance pgpm_seq_N; held
+- pgpm._regrain_copy_make | read: yes | fresh surface (#633): LIKE INCLUDING CONSTRAINTS validates a NOT VALID parent CHECK on the copy, so an old violating row fails every copy batch (claim F3-03)
+- pgpm._regrain_fresh_copy_drift | read: yes | fresh surface (#633): probe name left(relname,40) by characters, existence check returns null (documented), created and dropped in the tick's transaction so a cancel leaves nothing; held
+- pgpm._reconvert_remedy | read: yes | contracts vs docs: untransmute is a function taking regclass, %L of regclass text round-trips; wording matches reference; held
+- pgpm._regrain_fine_count | read: yes | boundary/fresh surface (#1161): aged prefix skipped regardless of archive_fn (claim F3-01); horizon floor and cap arithmetic otherwise held
+- pgpm._regrain_swap_budget | read: yes | boundary: 2*n > slots/2 at the line, cap slots/4 + 1, warn vs raise; held apart from F3-01's count
+- pgpm._snapshot_wait | read: yes | fresh surface (#1241): age() comparison at/before the reference, own-xid vs recorded rule, direct-block pass, chain refusal, marker yield, budget; xid8->xid truncation past 2^31 only over-waits (H3); held
+- pgpm._regrain_snapshot_wait | read: yes | reads config.regrain_written_xid; held
+- pgpm._same_step | read: yes | operator error/boundary: months + epoch seconds; '1 day'='24 hours', '1 month'<>'30 days', numeric equality for id; held
+- pgpm._scratch_written | read: yes | sets hypertable_dest written_xid to pg_current_xact_id(); callers are S6's; held

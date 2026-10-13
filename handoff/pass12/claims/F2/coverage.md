@@ -1,0 +1,43 @@
+# F2 coverage ledger (slice S2)
+
+- pgpm._uuid_to_ts | read: yes | time and zones, boundary: round trip _uuid_to_ts(_ts_to_uuid(t)) swept monthly 2000..10000 (exact); double-precision decode error far past 2255 judged harmless (bounds are whole ms); held
+- pgpm._ts_to_uuid | read: yes | boundary: 48-bit ceiling refusal and negative epoch read against #299 comment; round trip swept; held
+- pgpm._floor_div | read: yes | boundary: sign rule for negative inexact quotients, -Infinity input (returns -Infinity); held
+- pgpm._radix_decode | read: yes | operator error: alphabet/radix mismatch, invalid digit, case sensitivity; held
+- pgpm._radix_encode | read: yes | boundary: width refusal (no truncation), radix-1 spin guarded by callers (_text_time_radix_floor); held
+- pgpm._text_time_shaped | read: yes | boundary: translate() over a data alphabet, prefix/width checks; held
+- pgpm._text_time_to_ts | read: yes | boundary: ms/s branches, interval_mul float8 path, discard bits through _floor_div; held
+- pgpm._ts_to_text_time | read: yes | boundary: pre-epoch refusal, exact numeric epoch extract; held
+- pgpm._check_text_time_collation | read: yes | contracts: one- and two-digit chain proof against its comment and the check_text_time docs; held
+- pgpm._native_type | read: yes | trivial mapping; held
+- pgpm._native_gt | read: yes | boundary: compares in numeric/timestamptz, not text; held
+- pgpm._ts_text | read: yes | time and zones: DateStyle pinned ISO via SET clause, offset carried; held
+- pgpm._max_hi_native | read: yes | boundary: cast before max(); held
+- pgpm._native_text | read: yes | time and zones / boundary: offset-less archive text read in the checking session, trim_scale for id; held
+- pgpm._retain_nonnegative | read: yes | operator error: field-by-field sign, NaN, Infinity (id: accepted, horizon -Infinity keeps all), PG17 infinite intervals (+inf raises 'interval out of range', -inf refused); held (message noted in null results)
+- pgpm._native_frac | read: yes | boundary: empty-range null; held
+- pgpm._canonical_tz | read: yes | operator error: EST, EST5EDT, US/Eastern, posix/, right/, localtime, case folding against pg_timezone_names of a --with-system-tzdata build; held (legacy-link names absent on this host, noted)
+- pgpm._control_followed | read: yes | renamed key column by attnum; held
+- pgpm._control_naive | read: yes | domain over date reads as not naive; unreachable (transmute refuses a domain-typed time key); held
+- pgpm._time_literal | read: yes | time and zones: 5-digit years, BC, LMT seconds offsets (Asia/Kolkata 1800), parsed back under SQL DMY, German, Postgres, ISO; held
+- pgpm._grid_floor | read: yes | time and zones / boundary: property sweep floor<=x<next and floor(next)=next for 26 DST-midnight and odd-offset zones, 1/3/12-month steps, 1950-2040 local midnights +-90 min; fixed steps far from anchors (year 1, 4000 BC, 9999, 200000); held except range-edge overflow at 4000 BC -> 290000 AD (not realistic)
+- pgpm._grid_next | read: yes | as _grid_floor, including the #505 gap snap; held
+- pgpm._encode | read: yes | contracts: time literal via partition_tz, text_time and uuid encodes; held
+- pgpm._decode | read: yes | time kind returns raw text, callers normalise; held
+- pgpm._col_to_native | read: yes | time and zones: callers checked (extend_to operator text, archive probe via _ts_text, adopt_partition under Asia/Kolkata 'SQL, DMY' records the right instant); held
+- pgpm._id_label | read: yes | boundary: negatives, fractions, >=10^19; injective; held
+- pgpm._is_fine_child_label | read: yes | boundary: round trip of negative fractional labels, BC and 5-digit year regex; held
+- pgpm._part_name | read: yes | contracts: label grains and byte budget against docs/reference.md Partition naming; held
+- pgpm._regrain_sub_name | read: yes | label grain loop and zones per grain; held
+- pgpm._frontier_native | read: yes | failure injection / boundary: dropped parent, NULL ordering (unreachable: no default partition), undecodable text_time max; held
+- pgpm._time_unit_breach | read: yes | fresh surface / boundary: date anchor rule with negative epochs, typmod 0 and -1; month-step date grid anchored at noon is refused/flagged though its month bounds are midnight (noted as hypothesis); held otherwise
+- pgpm.set_partition_tz | read: yes | operator error: abbreviation, localtime, naive key refusal, unknown recorded zone (America/Godthab on a tzdata without it: the switch still succeeds); held
+- pgpm.check_uuidv7 | read: yes | contracts against reference: NULL-skipping max, window; held
+- pgpm.check_text_time | read: yes | contracts: shape-floor refusals, bounded decode, epoch as a bound parameter; held
+- pgpm.check_time_monotonic | read: yes | time and zones: naive timestamp cast through the session zone; CLAIMED F2-02 (Tier 3)
+- pgpm._text_time_radix_floor | read: yes | operator error: radix < 2; held
+- pgpm._text_time_shape_floor | read: yes | operator error: width < 1, negative discard bits; held
+- pgpm._text_time_to_ts_bounded | read: yes | boundary: interval and timestamptz edges one second short, infinite epoch; held
+- pgpm._uuidv7_unit_contract | read: yes | boundary: whole-ms anchor and step; held
+- pgpm._retain_horizon | read: yes | time and zones: calendar part on the wall clock, time part on the instant; Apia 2011 skipped day, spring-forward gap, ambiguous earlier wall time; held
+- pgpm._naive_grid_zone_off | read: yes | fresh surface / time and zones: which zones it calls off; a constant non-zero offset (America/Phoenix) is called on-clock; CLAIMED F2-01 (Tier 1: a fixed-step regrain of a date grid recorded in it drops the last day's rows), the install block's warn_grid_off_unit misses the same grids

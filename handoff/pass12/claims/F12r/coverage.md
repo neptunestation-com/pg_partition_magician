@@ -1,0 +1,25 @@
+# F12r coverage ledger (slice S8d re-run)
+
+- .claude/skills/review-pass/SKILL.md | read: yes | read whole against scripts/review and the method; step 7's pass_metrics command omits --coverage and --capture-recapture (review-loop's skill supplies both), noted as a hypothesis, no claim
+- CHANGELOG.md | read: yes | the Unreleased section (the slice's scope) read whole via the surface diff, each bullet against the code it names; claimed F12r-01 (merge residue: stray "set_regrain now refuse", bullets twice)
+- ONBOARDING.md | read: yes | read whole; test.sh lint/ci lines match test.sh; "only Docker is needed" vs lint's host tools noted, held (lint SKIPs by name)
+- README.md | read: yes | read whole; install/upgrade commands and the ./test.sh ci line checked against test.sh and the guide; held
+- RELEASING.md | read: yes | read whole; the pages.yml redeploy-after-any-conclusion paragraph checked against pages.yml's workflow_run trigger; held
+- docs/adversarial-review.md | read: yes | read whole; the stopping criteria and metric definitions used as the contract for stop_check.py/pass_metrics.py (claims F12r-02, F12r-03)
+- docs/guide.md | read: yes | read whole; typed the regrain/snapshot-wait, PG 15-17 one-step FK re-add and NOT VALID outgoing-key paragraphs against the reference and code; held (read-gap wording noted as a hypothesis)
+- docs/reference.md | read: yes | every changed region (the full surface diff, about 460 lines) read and checked against install.sql: snapshot wait, lock budget, pending-detach, dispatch record, forget_missing format, to_s3 allowlist, hypertable argument rules; unchanged sections not re-read
+- docs/runbook.md | read: yes | read whole; typed the new dropped_fk/restore_incoming_fks(p, array[id]) remedy and the forget_missing log query in pgpm_test-15; both run
+- pgpm_archive/README.md | read: yes | read whole; to_s3 type allowlist and cursor claims checked against archive.to_s3; found the typmod dropped at the cursor cast (claim F12r-05)
+- pgpm_core/uninstall.sql | read: yes | read whole; restore-by-id loop, refusal, scratch sweep by oid; header still lists a DEFAULT partition pgpm never makes (cosmetic), held
+- scripts/check_archive_child_by_oid.py | read: yes | docstring, constants and every rule function (check_text, name_read, rendered_regclass, tainted_locals) read; selftest fixtures skimmed; ran it on the tree (fails on to_s3 line 3534) and on planted spellings: claims F12r-06, F12r-08
+- scripts/check_archive_object_keys.py | read: yes | docstring, lexer, executed_as_code, _scan_once/judge and check_text read; selftest fixtures skimmed; planted spellings: claim F12r-07
+- scripts/review/README.md | read: yes | read whole; used as the contract for decisions_queue (F12r-04) and pass_metrics verdict handling (F12r-03)
+- scripts/review/decisions_queue.py | read: yes | read whole; ran selftest; hand-edited BLOCKING entries in three spellings (claim F12r-04)
+- scripts/review/file_issues.py | read: yes | read whole; ran selftest; ordering, fence, refusal and post-once paths held
+- scripts/review/flake_check.sh | read: yes | read whole; checked each signature's labels against bench/restore_fk_lock.sh and regrain_outgoing_fk_lock.sh (relabelled LIVENESS: lines match); held
+- scripts/review/landq.sh | read: yes | read whole; next_batch rule-first ordering, dedup and tier break traced by hand; held
+- scripts/review/loop_state.py | read: yes | read whole; ran selftest; future-dated last_progress reads ok (noted as hypothesis), thresholds held
+- scripts/review/pass_metrics.py | read: yes | read whole; ran selftest; rounding of precision/fell/coverage into the record (F12r-02) and unverified candidates counted as fell (F12r-03)
+- scripts/review/plant_seeds.py | read: yes | read whole; ran selftest; seed_track, baseline noise and late_survivor sealing held
+- scripts/review/stop_check.py | read: yes | read whole; selftest needs docs/reviews (absent from the review tree by design); criteria judged on rounded record figures (F12r-02); round(0.5) noted as hypothesis
+- test.sh | read: yes | head, argument parsing, helpers, run_version, uninstall_and_verify, run_discriminate, run_perf list head, every changed hunk, run_lint and ci read; compared run_lint to lint.yml job by job; unchanged track-runner bodies (timescale/observe/archive/locktrace/lockview) skimmed only

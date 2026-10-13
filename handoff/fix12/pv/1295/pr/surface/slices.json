@@ -1,0 +1,17 @@
+{
+ "P1": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/adopt_partition_isolation.sh",
+   "docs/reference.md",
+   "pgpm_core/install.sql",
+   "test.sh",
+   "tests/332_adopt_partition_isolation_test.sql"
+  ],
+  "units": [
+   "pgpm_core/install.sql:14005-14013",
+   "pgpm.adopt_partition"
+  ],
+  "kind": "mixed"
+ }
+}

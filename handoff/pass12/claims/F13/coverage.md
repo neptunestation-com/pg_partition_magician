@@ -1,0 +1,112 @@
+# F13 coverage ledger (slice S9: tests/01 .. tests/183, 108 files)
+
+Every file below was opened and read in full against its own header, and every file was also run against the review tree in its own database (pgpm_test-15, a template carrying the install, fixtures/demo.sql, pgtap and dblink); all 108 passed except tests/107 (see null-results.md: an environmental false red under the shared harness, passes when run alone).
+
+- tests/01_structure_test.sql | read: yes | contracts: three structural assertions on the fixture's messages (relkind, partkey, PK incl. control); held, ran green
+- tests/02_routing_test.sql | read: yes | contracts: routing to the premade month by oid, isnt-DEFAULT label is stale (no DEFAULT since #288) but the is() by oid carries it; held
+- tests/06_obtain_test.sql | read: yes | contracts: header still speaks of the DEFAULT; count >= 4 is a cardinality bound but obtain idempotence is pinned by value 0; held
+- tests/07_retain_test.sql | read: yes | boundary/contracts: regrain_aged counted by distinct lo, backed by bag_eq identity of the within-horizon rows; held
+- tests/08_index_propagation_test.sql | read: yes | contracts: header item 3 (DEFAULT has exactly two indexes) has no assertion left (stale, DEFAULT gone); item 5 count=0 has no explicit liveness that pgpm.part has rows (item 4 implies one); hypothesis only
+- tests/09_incoming_fk_test.sql | read: yes | tests-wrong-reason: throws_ok pins P0001 (4-arg), so the 2D000 of a non-refusing transmute is rejected; preserve run is the liveness; held
+- tests/100_obtain_backoff_low_headroom_test.sql | read: yes | boundary: ceil(obtain/2) pinned at obtain 3 vs 4, headroom inside the monolith; each case has a cleared-back-off witness; held
+- tests/101_transmute_claim_test.sql | read: yes | contracts: throws_ok(sql, null, msg, desc) pins the message; assertion 5 (claim released) has no witness that a claim was recorded (header promises one); hypothesis
+- tests/102_archive_identity_test.sql | read: yes | identity: substitute vs real vs sibling with 7/3/2 rows, liveness on every negative; held
+- tests/103_retire_identity_unreferenced_test.sql | read: yes | identity: both anchors checked independently, sibling drop is the liveness; held
+- tests/104_write_block_identity_test.sql | read: yes | identity/operator: install refuses substitute, removal stays name-based; part C null-resolution path; held
+- tests/105_progress_freeze_test.sql | read: yes | time: freeze_in arithmetic under UTC only; id NULL forecast paired with margin; dead-parent row; held
+- tests/106_progress_regrain_test.sql | read: yes | boundary: pct_range vs rows_copied, ETA multiples exact; aged witness counted (2 regrain_aged) not by lo; held
+- tests/107_regrain_swap_reconcile_complete_test.sql | read: yes | fresh surface/failure: FAILED its liveness 9 in the suite run (writer's backend_xmin held back cluster-wide makes _snapshot_wait wait on the writer, who waits on the swap's lock); passes alone; null-result + hypothesis
+- tests/108_retain_sign_test.sql | read: yes | operator error: negative retain refused at transmute/set_retain/_retain_boundary/regrain_step, zero accepted with tick; header admits the untouched-table checks pass pre-fix; held
+- tests/109_untransmute_recheck_under_lock_test.sql | read: yes | concurrency/identity: lock-ordered race, two strays refused at 2 and 1, RR refusal; held
+- tests/110_triggers_enable_always_test.sql | read: yes | contracts: tgenabled A on both triggers, replica-role control write; count 250 is compensating by design but backed by per-key identity; held
+- tests/111_grid_timezone_test.sql | read: yes | time: NY vs UTC lattices for month/day/week/hour, naive columns, POSIX zone refusal; DST zones only (no fixed-offset non-UTC zone varied); held
+- tests/112_preserve_fk_phase_failure_test.sql | read: yes | failure injection: phase-2 stray via ordered dblink, cutover lock timeout, resume; each pinned by SQLSTATE+message; held
+- tests/113_pk_excluding_control_refused_test.sql | read: yes | contracts: header correctly says only the throws_like discriminates; remedy typed and positive control on forward partition; held
+- tests/114_write_block_lift_coverage_test.sql | read: yes | identity: recorder strategy, EXCEPT both ways plus per-id double-hand count where it matters; held
+- tests/115_archive_contract_test.sql | read: yes | failure injection: overshoot/stall/null/garbage strategies each with call record liveness; uses action like 'fail_%' inside results_eq (stricter, not a prefix-match hole); held
+- tests/116_detach_reap_liveness_test.sql | read: yes | concurrency: three liveness signals each isolated, masked-role reaper; abandoned case finalized exactly once; held
+- tests/119_regrain_truncate_guard_test.sql | read: yes | operator error: TRUNCATE parent/child/replica refused, cancel/swap/janitor lift it; held
+- tests/11_id_kind_test.sql | read: yes | identity: bag_eq against the pre-migration snapshot; held
+- tests/120_regrain_reconcile_offgrid_lo_test.sql | read: yes | boundary: clamped first sub-range [20000,21000) on a 7000 grid; aged path and missing-child refusal; held
+- tests/121_regrain_recheck_aged_at_swap_test.sql | read: yes | boundary/operator: loosened retain refuses swap naming the range; half-copied child never skipped; held
+- tests/122_text_time_collation_test.sql | read: yes | boundary: en_US vs C KSUID ordering with seeded random payload, misorder witness before refusal; held
+- tests/123_future_frontier_refused_test.sql | read: yes | time/boundary: one step + 1 h allowance pinned both sides (30 min in, 90 min out); held
+- tests/124_cutover_trigger_tgenabled_test.sql | read: yes | contracts: four tgenabled states by powers of ten through transmute and untransmute; held
+- tests/124_datestyle_independent_bounds_test.sql | read: yes | time: SQL/DMY writer vs ISO/MDY reader; runs under TimeZone UTC only (zone abbreviations not varied here, 136 does); held
+- tests/124_dropped_fk_identity_test.sql | read: yes | identity: search_path decoy, self-ref key on parent, referencer transmuted next, round trips; held
+- tests/124_part_name_length_refused_test.sql | read: yes | boundary: 63/64-byte names pinned both sides for fine, coarse, id, staging and set_regrain; held
+- tests/124_quoted_schema_test.sql | read: yes | identity: "Sales" vs sales twin, control table liveness; held
+- tests/124_regrain_capture_identity_test.sql | read: yes | identity: rename mid-regrain, key rename between regrains, grants; held
+- tests/124_regrain_reconcile_snapshot_test.sql | read: yes | concurrency: T1 capture below the batch watermark committed mid-apply; polls pg_locks (no snapshot pin); held
+- tests/125_archive_chunk_ties_test.sql | read: yes | fresh surface/boundary: 100 rows in one ObjectId second vs 2000-byte budget; deferral check uses exact action list; held
+- tests/125_archive_ledger_identity_test.sql | read: yes | fresh surface/identity: swap retires source coverage, rename procedures v0.6.0 vs now, #266 carry; held
+- tests/125_day_label_utc_test.sql | read: yes | fresh surface/time: UTC-date day labels under NY/Sydney/Azores, fall-back chosen relative to now(); held
+- tests/125_regrain_candidate_subdivides_test.sql | read: yes | fresh surface/boundary: 30-day target on month grid, nosubdiv never answered; held
+- tests/125_transmute_preconditions_test.sql | read: yes | fresh surface/operator: re-run on converted table, name squatters, owner-session resume/abort via one dblink backend; held
+- tests/125_untransmute_residue_test.sql | read: yes | fresh surface/failure: block kept by deferral, by coverage, and in-flight regrain all cleared by untransmute; held
+- tests/125_uuidv7_regrain_archive_test.sql | read: yes | fresh surface/boundary: uuid aggregates; "ledger covers exactly the aged month" is min/max and "every row handed" is sum(rows_archived) (cardinality), backed only by md5 of the kept rows; hypothesis
+- tests/126_naive_column_utc_grid_test.sql | read: yes | time: date/timestamp columns under NY, fall-back hour cells, set_partition_tz refused; held
+- tests/127_month_step_dst_gap_test.sql | read: yes | time: Asuncion/Amman midnight gaps at the adapter under two session zones; regrain walk not driven (stated); held
+- tests/128_transmute_resume_zone_test.sql | read: yes | time/failure: resume takes the claim's zone; held
+- tests/129_coverage_reset_identity_test.sql | read: yes | fresh surface/identity: substituted name keeps the real coverage, positive and null-anchor counterparts; held
+- tests/129_retire_regrain_source_test.sql | read: yes | fresh surface/failure: retire drops a regrain source and reclaims its run, scoped; held
+- tests/129_set_archive_fn_return_type_test.sql | read: yes | fresh surface/contracts: return type and setof refusals, dangling oid; held
+- tests/129_set_regrain_off_midflight_test.sql | read: yes | fresh surface/operator: set_regrain(null) mid-flight cancels, off-already leaves operator run; held
+- tests/12_uuidv7_kind_test.sql | read: yes | identity: bag_eq against the seeded snapshot; held
+- tests/130_retire_unguarded_coverage_test.sql | read: yes | identity: direct retire discards unguarded coverage; per-id hand counts; held
+- tests/131_retain_interval_sign_test.sql | read: yes | operator/time: field-by-field sign rule, '-1 mon 30 days' refused; held
+- tests/132_transmute_publication_membership_test.sql | read: yes | contracts: publication set carried exactly, refusals of leaf-filter shapes; held
+- tests/133_transmute_serial_sequence_owner_test.sql | read: yes | contracts: two owned serials move, unowned stays unowned; retention liveness; held
+- tests/134_text_time_numeric_collation_test.sql | read: yes | boundary: ICU numeric collation refusal with positive controls; held
+- tests/135_regrain_restart_null_cursor_test.sql | read: yes | failure: janitor-reaped capture, copy discarded at re-prepare; held
+- tests/136_regrain_reconcile_datestyle_test.sql | read: yes | time: SQL DateStyle + Asia/Kolkata IST abbreviation; version-aware gap witness; held
+- tests/137_archive_chunk_uuidv7_ties_test.sql | read: yes | boundary: one-ms burst for uuidv7; held
+- tests/138_legacy_day_labels_test.sql | read: yes | upgrade/time: pre-#503 Tokyo labels, explicit-range fallback; held
+- tests/139_transmute_resume_lattice_test.sql | read: yes | operator/failure: resume refused off-lattice, flush step accepted; throws_ok 55P03 NULL is a liveness on dblink; held
+- tests/13_uuidv7_sanity_test.sql | read: yes | contracts: v4 refused via throws_like pinned message; held
+- tests/140_transmute_reap_identity_test.sql | read: yes | identity: reaper by oid across rename, set schema, drop; held
+- tests/141_transmute_step_obtain_preflight_test.sql | read: yes | operator error: non-positive steps, sub-day date step, negative/null obtain; held
+- tests/142_cutover_partitioned_referencer_test.sql | read: yes | contracts: top-level keys only, version-aware NOT VALID expectation; held
+- tests/143_carried_index_name_length_test.sql | read: yes | boundary: refusal pinned at 63 bytes and acceptance at 58; 59..62 never driven (code checks > 63 after suffix, read and sound); held
+- tests/144_cutover_trigger_capture_window_test.sql | read: yes | concurrency: event-trigger window, 1+10 asymmetry; held
+- tests/145_untransmute_fk_not_valid_test.sql | read: yes | contracts: lock-state proof of no VALIDATE under ACCESS EXCLUSIVE; held
+- tests/146_obtain_int_ceiling_test.sql | read: yes | boundary: int4/int2 ceilings at exact cells; held
+- tests/147_maintain_all_sweep_turns_test.sql | read: yes | fresh surface/failure: sweep order by sweep_turn_at under a shared statement_timeout, sequence counters with is_called; held
+- tests/148_regrain_candidate_lock_race_deferred_test.sql | read: yes | failure: candidate search lock race deferred; checked maintain_all orders nulls-first then parent_table, so the X-before-Y liveness is real; held
+- tests/149_regrain_writer_waits_test.sql | read: yes | concurrency: regrain() vs writer, shell-loop wait to avoid holding a snapshot; held
+- tests/150_part_name_labels_injective_test.sql | read: yes | boundary: sub-minute, 10^19 and fractional labels; held
+- tests/151_set_partition_tz_every_bound_test.sql | read: yes | time: date-chosen zone pair, oldest off bound named; held
+- tests/152_month_floor_doubled_midnight_test.sql | read: yes | time: Havana doubled midnight floors; held
+- tests/153_regrain_parent_rename_midcopy_test.sql | read: yes | identity: in-progress child found by bounds after parent rename; held
+- tests/154_regrain_step_positive_test.sql | read: yes | operator error: zero/negative regrain steps at every entry point; held
+- tests/155_uninstall_residue_test.sql | read: yes | fresh surface/failure: uninstall restores restorable key and refuses on the other, copies dropped; PG18 branch; held
+- tests/156_extend_to_lock_budget_test.sql | read: yes | boundary: budget+1 cells refused, 3 accepted; the line itself (measured slots per partition) is not pinned at its edge; read extend_to's measurement, sound; held
+- tests/157_identity_reseed_under_lock_test.sql | read: yes | concurrency: writer ids issued after the preflight, reseed under lock; held
+- tests/158_untransmute_trigger_capture_under_lock_test.sql | read: yes | concurrency: trigger DDL during queued lock, 10 vs 1/11/0; held
+- tests/159_cutover_rereads_carried_state_test.sql | read: yes | concurrency: event-trigger window adds index/key/owner/RLS/comments; held
+- tests/15_pk_reuse_test.sql | read: yes | identity: PK index oid survives, bag_eq; held
+- tests/160_regrain_capture_name_fits_test.sql | read: yes | boundary: 63-byte parents, oid-form capture names, upgrade and uninstall; held
+- tests/161_obtain_explicit_name_too_long_test.sql | read: yes | boundary: explicit-range name 67 bytes skipped, plain 64 refused; held
+- tests/162_regrain_drivers_serialize_test.sql | read: yes | fresh surface/concurrency: retarget refusal, serialised steps, prepare/cancel waits with pg_stat_clear_snapshot; held
+- tests/163_set_partition_tz_midflight_test.sql | read: yes | time/concurrency: Africa/Sao_Tome mid-flight refusal and wait; held
+- tests/164_regrain_target_mixed_step_test.sql | read: yes | operator error: mixed month+duration targets, date sub-day targets; held
+- tests/165_regrain_target_integral_step_test.sql | read: yes | operator/boundary: fractional and zero-fraction steps on integer columns; held
+- tests/166_transmute_reap_lock_timeout_test.sql | read: yes | failure: reaper bounded under a reader, deferral logged, next pass undoes; held
+- tests/167_config_stamp_lock_test.sql | read: yes | failure/concurrency: held config rows skip bookkeeping only; held
+- tests/168_retain_nan_test.sql | read: yes | boundary/operator: NaN retain refused at every site; held
+- tests/169_regrain_truncate_guard_resume_test.sql | read: yes | upgrade/failure: resume tick restores missing guard, same oid when present; held
+- tests/16_time_correlation_test.sql | read: yes | contracts: check_time_monotonic fractions; random() unseeded but margin huge; held
+- tests/170_write_block_enabled_state_test.sql | read: yes | identity: origin-only and disabled blocks discard coverage; held
+- tests/171_retire_detached_unreferenced_test.sql | read: yes | operator error: operator-detached partition refused on both paths, stub cron.job dispatch; held
+- tests/172_regrain_copy_name_clash_test.sql | read: yes | identity: name clashes refused, cancel by oid; held
+- tests/173_dropped_fk_reconcile_test.sql | read: yes | failure/operator: dangling dropped_fk records forgotten on four paths; held
+- tests/174_grid_floor_exact_division_test.sql | read: yes | boundary: exact floor at 3e16 step, year-1 anchor, KSUID all-ones; held
+- tests/175_text_time_frontier_malformed_max_test.sql | read: yes | boundary: malformed max falls back to now(), future max still leads; held
+- tests/176_untransmute_security_state_test.sql | read: yes | contracts: parent's ACL/RLS/policies replayed on the restored table; held
+- tests/177_untransmute_monolith_identity_test.sql | read: yes | identity: monolith_oid refusals after retirement and regrain; held
+- tests/178_transmute_time_future_maximum_test.sql | read: yes | boundary/time: far/near/date/forced/infinity/control; only +infinity maximum is pinned (a -infinity minimum, probed, raises a raw error before any commit); held, hypothesis noted
+- tests/179_carried_index_quoted_name_test.sql | read: yes | identity: quoted/space/ON/quote index names carried by oid; held
+- tests/180_transmute_identity_options_test.sql | read: yes | boundary: increment/min/max/cycle/cache carried, reseed on lattice; held
+- tests/181_transmute_type_squatter_test.sql | read: yes | operator error: enum/domain on staging/monolith name refused, implicit array type not; held
+- tests/182_transmute_resume_control_column_test.sql | read: yes | operator/failure: resume on another column refused, renamed same column accepted; held
+- tests/183_regrain_reconcile_identity_test.sql | read: yes | identity: reconcile refuses a stranger under the copy's name, delta kept; held

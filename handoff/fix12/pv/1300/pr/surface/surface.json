@@ -1,0 +1,209 @@
+{
+ "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/base",
+ "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1300/pr/review",
+ "files": [
+  {
+   "path": "CHANGELOG.md",
+   "status": "modified",
+   "hunks": [
+    [
+     4,
+     13
+    ]
+   ]
+  },
+  {
+   "path": "bench/transmute_resume_text_time_encoding.sh",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     27
+    ]
+   ]
+  },
+  {
+   "path": "bench/upgrade_in_place.sh",
+   "status": "modified",
+   "hunks": [
+    [
+     155,
+     155
+    ]
+   ]
+  },
+  {
+   "path": "docs/guide.md",
+   "status": "modified",
+   "hunks": [
+    [
+     338,
+     340
+    ]
+   ]
+  },
+  {
+   "path": "docs/reference.md",
+   "status": "modified",
+   "hunks": [
+    [
+     428,
+     432
+    ],
+    [
+     3803,
+     3803
+    ]
+   ]
+  },
+  {
+   "path": "pgpm_core/install.sql",
+   "status": "modified",
+   "hunks": [
+    [
+     532,
+     538
+    ],
+    [
+     550,
+     550
+    ],
+    [
+     10053,
+     10054
+    ],
+    [
+     10765,
+     10772
+    ],
+    [
+     10774,
+     10775
+    ],
+    [
+     10783,
+     10784
+    ]
+   ]
+  },
+  {
+   "path": "test.sh",
+   "status": "modified",
+   "hunks": [
+    [
+     1114,
+     1114
+    ]
+   ]
+  },
+  {
+   "path": "tests/337_transmute_resume_text_time_encoding_test.sql",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     150
+    ]
+   ]
+  }
+ ],
+ "units": [
+  {
+   "unit": "pgpm_core/install.sql:532-538",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    532,
+    538
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm_core/install.sql:550-550",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    550,
+    550
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm._transmute",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    10004,
+    11675
+   ],
+   "why": "touched at 10053-10054"
+  },
+  {
+   "unit": "pgpm.transmute",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    11720,
+    11750
+   ],
+   "why": "calls pgpm._transmute"
+  }
+ ],
+ "exercised_by": {
+  "pgpm._transmute": [
+   "bench/cutover_reread_window.sh",
+   "bench/cutover_trigger_window.sh",
+   "bench/frontier_drought.sh",
+   "bench/null_arguments_refused.sh",
+   "bench/tests_fail_on_defect.sh",
+   "bench/transmute_cutover_order.sh",
+   "bench/transmute_cutover_timing.sh",
+   "bench/transmute_reads_caller_rls.sh",
+   "bench/ts_text_archive_chunk_transmute_min.sh",
+   "docs/reference.md",
+   "docs/reviews/2026-09-25.md",
+   "docs/reviews/2026-09-28.md",
+   "docs/reviews/2026-09-29.md",
+   "docs/reviews/2026-10-01-pass6.md",
+   "docs/reviews/2026-10-02-pass7.md",
+   "docs/reviews/2026-10-04-pass8.md",
+   "docs/reviews/2026-10-06-pass9.md",
+   "docs/reviews/2026-10-08-pass10.md",
+   "docs/reviews/2026-10-09-pass11.md",
+   "docs/reviews/2026-10-12-pass12.md",
+   "tests/101_transmute_claim_test.sql",
+   "tests/213_ts_text_archive_chunk_transmute_min_test.sql",
+   "tests/248_transmute_null_arguments_refused_test.sql",
+   "tests/271_not_enforced_check_refused_test.sql"
+  ]
+ },
+ "finder": "P1",
+ "slice": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/transmute_resume_text_time_encoding.sh",
+   "bench/upgrade_in_place.sh",
+   "docs/guide.md",
+   "docs/reference.md",
+   "pgpm_core/install.sql",
+   "test.sh",
+   "tests/337_transmute_resume_text_time_encoding_test.sql"
+  ],
+  "units": [
+   "pgpm_core/install.sql:532-538",
+   "pgpm_core/install.sql:550-550",
+   "pgpm._transmute",
+   "pgpm.transmute"
+  ],
+  "kind": "mixed"
+ },
+ "ledger": [
+  "pgpm_core/install.sql:532-538",
+  "pgpm_core/install.sql:550-550",
+  "pgpm._transmute",
+  "pgpm.transmute",
+  "CHANGELOG.md",
+  "bench/transmute_resume_text_time_encoding.sh",
+  "bench/upgrade_in_place.sh",
+  "docs/guide.md",
+  "docs/reference.md",
+  "test.sh",
+  "tests/337_transmute_resume_text_time_encoding_test.sql"
+ ]
+}

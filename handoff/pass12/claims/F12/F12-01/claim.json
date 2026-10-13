@@ -1,0 +1,3 @@
+{"tier": 1, "file": "scripts/archive_partition_whole.sql", "line": 118, "lens": "fresh surface",
+ "scenario": "the operator script's candidate query has no pgpm._part_detached_by_hand predicate (its header and docs/reference.md say a hand-detached table is not a candidate): a table the operator DETACHed by hand is handed to the strategy, which reads none of its rows through the parent, [0,100) is recorded covered with 0 rows, and once attached back retain() drops ids 7, 42, 88 that nothing archived; it should skip the table and archive the next partition",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

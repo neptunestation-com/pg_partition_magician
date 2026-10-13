@@ -1,0 +1,13 @@
+{
+  "baseRefName": "main",
+  "headRefName": "fix/transmute-resume-checks-text-time-encoding",
+  "headRefOid": "2a721d22a28ba463a1e54bb48c00aefb1edd5208",
+  "number": 1300,
+  "title": "fix(transmute): refuse a resume under another text_time encoding",
+  "url": "https://github.com/neptunestation-com/pg_partition_magician/pull/1300",
+  "head": "2a721d22a28ba463a1e54bb48c00aefb1edd5208",
+  "base": "b76002e66c9f8b57f9943967babf25a195500f85",
+  "finder": "P1",
+  "seeds": 1,
+  "mutations": "transmute_resume_any_encoding"
+}

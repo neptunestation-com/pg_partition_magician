@@ -1,0 +1,64 @@
+# F4 coverage ledger (pass 12, slice S4)
+
+- pgpm._obtain_name | read: yes | contracts/boundary: plain-name refusal, narrowest-label probe, explicit-range stand-in, type squatter; held. Its null result is never logged by either caller (claimed F4-01)
+- pgpm._log_unbuilt_cell | read: yes | contracts: the function is complete but has NO caller anywhere in the tree; obtain and extend_to's #710 branches are `null;` (claimed F4-01)
+- pgpm._part_built | read: yes | fresh surface: null child_oid rule, retiring_at keeps a detached child built; held
+- pgpm._cell_attached | read: yes | boundary: half-open overlap both ends, forget+log by relation fate; held
+- pgpm._analyze | read: yes | trivial ANALYZE wrapper; nothing to probe
+- pgpm._own_like_parent | read: yes | operator error (OWNER TO on parent): no-op guard; held
+- pgpm._replica_identity_like_parent | read: yes | dropped identity index -> NOTHING, once-per-txn log; held on reading
+- pgpm._create_partition | read: yes | encode of both bounds, child_oid recorded in the same statement; held
+- pgpm.obtain | read: yes | fresh surface (#1162 walk) + boundary (lock budget, ceiling exit): walk state vs _cell_attached held; hole not logged (F4-01)
+- pgpm.extend_to | read: yes | operator error (p_max edge, edge cell count, typo) and the #1162 walk; held except the unlogged hole (F4-01, ran)
+- pgpm._retain_boundary | read: yes | time and zones (calendar part in partition_tz, fall-back), NaN/negative hand edit; held
+- pgpm._crossing_keys | read: yes | boundary/collation: control collation on referencing column, _ts_text for timestamptz keys; held on reading
+- pgpm._detach_cmd | read: yes | schema of the partition vs the parent; held
+- pgpm._dispatch_detach | read: yes | failure injection: no cron schema -> reason text, mark left without record (ran: fail_retain_detach); held
+- pgpm._idle_detach_job | read: yes | conditional disarm by exact command; swallow-all handler is documented; held
+- pgpm._child_nsp | read: yes | SET SCHEMA fallbacks; held on reading
+- pgpm.retire | read: yes | fresh surface (#705/#1250 lock-then-ask, disown, pending skip): ran the failed-dispatch -> hand detach -> disown path; the disown remedy leads to a permanent fail_retain_identity (F4-02)
+- pgpm._retain_recall | read: yes | fresh surface: dispatch record gate on the detached branch, marker clear on unarmed attached; held on reading
+- pgpm.retain | read: yes | operator error (retain_batch edge): candidate set includes rows retire() always refuses; documented for hand-detached/pending, not for the disowned-then-dropped row (F4-02)
+- pgpm._write_block_raise | read: yes | trivial raise; nothing to probe
+- pgpm._install_write_block | read: yes | identity refusal, ALWAYS repair logged; held
+- pgpm._remove_write_block | read: yes | deliberately unanchored; held
+- pgpm._enforce_write_blocks | read: yes | failure injection (per-child handler) and #452/#518 discard order; held on reading
+- pgpm._is_write_blocked | read: yes | schema by name equality, tgenabled = 'A'; held
+- pgpm._archive_noop | read: yes | counts rows of [lo, hi); held
+- pgpm._run_archive_strategy | read: yes | null strategy covers whole range; select * from fn() shape; held
+- pgpm._next_archive_chunk | read: yes | boundary (tie extension on the native unit, page of exactly v_batch), DateStyle render via _ts_text; held on reading
+- pgpm._archive_fully_covered | read: yes | watermark through _max_hi_native, oid filter; held
+- pgpm._archive_contract_breach | read: yes | strict lo, hi inclusive, id round trip through base type; held on reading
+- pgpm._archive_step | read: yes | fresh surface (#1159 hold, #1141 held set, orphan discard) and failure injection (per-candidate handler); held on reading
+- pgpm.set_obtain | read: yes | operator error: negative and null refused, zero allowed; held
+- pgpm.set_retain | read: yes | operator error: negative, NaN (via _retain_nonnegative), mixed-sign interval, arm-from-null guard; held on reading
+- pgpm.set_archive_fn | read: yes | return type / setof check; held
+- pgpm.resume | read: yes | null refusal, not-managed; held
+- pgpm.pause | read: yes | null refusal, not-managed; held
+- pgpm.maintain | read: yes | failure injection: per-step handlers, lock_timeout re-applied after each COMMIT; held on reading
+- pgpm._config_try_lock | read: yes | SKIP LOCKED FOR NO KEY UPDATE; held
+- pgpm.maintain_all | read: yes | reapers first, turn stamps; held on reading
+- pgpm.maintain_obtain | read: yes | back-off walk (obtain 0 and holes), rollback of the walk's writes by PGMW; held on reading
+- pgpm.maintain_obtain_all | read: yes | turn order mirror; held
+- pgpm.schedule | read: yes | three jobs, pgpm_detach idle; held
+- pgpm.unschedule | read: yes | held
+- pgpm.forget_missing | read: yes | #1164 chunk listing before delete, conditional disarm by suffix; held on reading
+- pgpm.status | read: yes | contracts: retain_drop_failures action list, retain_backlog on a bad retain; held on reading
+- pgpm.progress | read: yes | write_child through _part_built, coarse_frozen mirrors maintain; held on reading
+- pgpm._observe_has_pgfr | read: yes | schema probe; held
+- pgpm.observe_window | read: yes | 'regrain' action name exists (regrain()'s copy_swap_drop row); held
+- pgpm.impact_report | read: yes | per-section handlers; held on reading
+- pgpm._mark_gone_chunks | read: yes | oid / name rule; held on reading
+- pgpm._mark_retired_chunks | read: yes | upgrade marking by retain_drop after archived_at; held on reading
+- pgpm._backfill_chunk_oids | read: yes | fresh surface (#1160): origin-only and absent block attribute, adopted anchors marked; held on reading
+- pgpm._over_retired_chunks | read: yes | boundary (#1163 floor: half-open test vs key equality, unkeyed lo gives no floor); held
+- pgpm._part_detached_by_hand | read: yes | one-directional; held
+- pgpm.adopt_partition | read: yes | fresh surface (#1239 lock + pending refusal): pending re-check reads pg_inherits through the snapshot, not the catalog as of the lock (hypothesis H3)
+- pgpm._cell_walk_rows | read: yes | boundary: rows with hi > p_from, aligned arrays ordered by native lo; held
+- pgpm._cell_walk_step | read: yes | boundary: covered only by a passed built row with hi > lo and no dead overlap, cell exactly at a row's hi; held
+- pgpm._disown_retirement | read: yes | clears all three columns, logs once; held (remedy text claimed via F4-02)
+- pgpm._detach_dispatched | read: yes | requires retiring_at and oid equality; held
+- pgpm._detach_job_holds | read: yes | failure injection: returns false on any error, so the install pass never stamps a record without pg_cron (safe direction); held
+- pgpm._disown_unvouched_retirements | read: yes | fresh surface: ran it on a failed-dispatch mark that was then detached; disowns as documented; its remedy text is F4-02
+- pgpm._native_order_key | read: yes | time and zones: same epoch under SQL/DMY, German, ISO/YMD, ISO/DMY, +05:30 offset, five-digit year (ran); held
+- pgpm._archive_hold_partition | read: yes | fresh surface: ACCESS SHARE on parent then pg_partition_ancestors; retiring_at and null oid pass; held on reading

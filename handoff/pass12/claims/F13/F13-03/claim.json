@@ -1,0 +1,3 @@
+{"tier": 5, "file": "tests/101_transmute_claim_test.sql", "line": 49, "lens": "contracts versus documentation",
+ "scenario": "tests/101's header promises a fresh conversion records a claim naming THIS session as its owner, but it only asserts the claim is gone afterwards (count = 0), so it stays green against a transmute that records the claim with no owner, which the reaper and transmute_abort would treat as a dead session's mid-run; it should assert the claim's owner_pid/backend_start during the conversion",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

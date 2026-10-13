@@ -1,0 +1,34 @@
+# F12 coverage ledger (slice S8d)
+
+- .claude/skills/fix-phase/SKILL.md | read: yes | fresh surface, contracts versus documentation: steps 1-5 against landq.sh's `rule` third word and the README's Loop tooling; held
+- .claude/skills/pr-verify/SKILL.md | read: yes | contracts versus documentation: steps 1-5 (prepare, hunt, classify, verify, report) against scripts/review/README.md; held
+- .claude/skills/review-loop/SKILL.md | read: yes | contracts versus documentation, failure injection: dead-man switch exits 0/3/4 and the waiting phase against loop_state.py's verdict(); stop_check's "next pass lenses" line exists; held (future last_progress reads ok, hypothesis H5)
+- .claude/skills/review-pass/SKILL.md | read: no | out of budget: not opened
+- .github/workflows/lint.yml | read: yes | fresh surface: the three new selftests and summary.needs against test.sh run_lint's job list and commands; held
+- .github/workflows/pages.yml | read: yes | fresh surface, failure injection: deploy now ungated on Release conclusion; site assembled from the latest release, so a failed-before-publish run redeploys the old page; held
+- CHANGELOG.md | read: no | out of budget: 6819 lines; the Unreleased index was not read against the code
+- ONBOARDING.md | read: no | diff hunks only (lint/ci targets in the command list), checked against test.sh's TRACK parsing; held
+- README.md | read: no | diff hunk only (`./test.sh ci` now runs lint.yml's jobs), checked against test.sh; held
+- RELEASING.md | read: no | diff hunk only (pages redeploy after a red Release) checked against pages.yml; held
+- docs/adversarial-review.md | read: no | Definitions, Roles and the diff hunks (cycle rule, late-survivor set, ceiling) read against stop_check.py's catalogue and CYCLE_SIZE; held; the rest not read
+- docs/guide.md | read: no | diff hunks only: the regrain snapshot-wait paragraph, NOT VALID outgoing key note, PG15-17 one-step re-add of a partitioned referencer; time and zones on '1 day' vs '24 hours' (_same_step, _grid_floor fixed branch is zone-free): held
+- docs/reference.md | read: no | diff hunks only (~700 lines): untransmute pending-detach remedy (tests/312 runs it), the operator script's hand-detach and hold sentences (code does NOT keep them: F12-01, F12-02), to_s3 types incl. char(n)/bit(n) (code does not keep it: F12-04), forget_missing log shape against install.sql, set_regrain same-step spellings against _same_step, lock budget 64 x 100 arithmetic against _regrain_swap_budget
+- docs/reviews/2026-10-08-pass10.md | read: no | removed from the review tree by the coordinator (docs/reviews holds REMOVED.md only)
+- docs/reviews/2026-10-09-pass11.md | read: no | removed from the review tree by the coordinator (docs/reviews holds REMOVED.md only)
+- docs/runbook.md | read: no | diff hunks only: the restore_incoming_fks(parent, array[<id>]) remedy against the signature (p_ids bigint[]) and pgpm.dropped_fk's columns (id, constraint_name, parent_table, restored_at); forget_missing query against the log row install.sql writes; held
+- pgpm_archive/README.md | read: no | out of budget: not opened
+- pgpm_core/uninstall.sql | read: no | out of budget: not opened
+- scripts/archive_partition_whole.sql | read: yes | fresh surface: compared clause by clause with _archive_step: the #705 filter and the #1159 hold promised by its own header and comments are absent; claimed F12-01 (T1) and F12-02 (T1)
+- scripts/check_archive_child_by_oid.py | read: no | docstring, rules and lexer helpers (lines 1-420 of 1120) read; --selftest PASS; run on the tree it FAILS at pgpm_archive/install.sql:3534 (a regtype rendered as text), which led to F12-04
+- scripts/check_archive_object_keys.py | read: no | --selftest and the module check run (PASS); source not read
+- scripts/check_quoted_splices.py | read: yes | fresh surface (#1179 read-by-value): probed 14 spellings through check_text; a /* block comment */ before an := assignment hides it (claimed F12-03, T5); FOR-loop targets, %TYPE of a text column, domains over text and E-string escapes also unread (hypotheses H1-H3)
+- scripts/review/README.md | read: no | diff hunks only (late-survivor seeds, age and lens, Loop tooling, loop_state.json and decisions_queue.md shapes) checked against loop_state.py and stop_check.py's header; held
+- scripts/review/decisions_queue.py | read: no | --selftest run (PASS); source not read
+- scripts/review/file_issues.py | read: no | --selftest run (PASS); source not read
+- scripts/review/flake_check.sh | read: no | out of budget: not opened
+- scripts/review/landq.sh | read: no | out of budget: not opened
+- scripts/review/loop_state.py | read: no | load/save/transition/init/set/progress/verdict/show and the start of selftest (lines 60-200 of 314) read; --selftest PASS; future last_progress reads ok (hypothesis H5)
+- scripts/review/pass_metrics.py | read: no | --selftest run (PASS); source not read
+- scripts/review/plant_seeds.py | read: no | --selftest run (PASS); source not read
+- scripts/review/stop_check.py | read: no | header, parsers (lines 1-140) and the real-history selftest and main (700-760) read; CLI run on the tree exits 2 because docs/reviews was removed from the review tree (an artifact, not a defect)
+- test.sh | read: no | diff hunks only: the lint track (run_lint, lint_job_* against lint.yml's run blocks and summary.needs, exit 3 for SKIPPED) and ci's verdict; held

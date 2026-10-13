@@ -1,0 +1,13 @@
+{
+  "baseRefName": "main",
+  "headRefName": "fix/surface-prepare-keeps-grants",
+  "headRefOid": "ba30f7a141ff52d6d811e405f673f672e97bb2aa",
+  "number": 1297,
+  "title": "fix(install): keep the grants on a surface function the upgrade reshapes",
+  "url": "https://github.com/neptunestation-com/pg_partition_magician/pull/1297",
+  "head": "ba30f7a141ff52d6d811e405f673f672e97bb2aa",
+  "base": "b76002e66c9f8b57f9943967babf25a195500f85",
+  "finder": "P1",
+  "seeds": 1,
+  "mutations": "surface_carry_grants_as_owner,surface_prepare_drops_granted,surface_prepare_grantor_unchecked"
+}

@@ -1,0 +1,26 @@
+{
+  "claims": [
+    {
+      "id": "F16-01",
+      "finder": "F16",
+      "tier": 4,
+      "file": "pgpm_core/install.sql",
+      "line": 9086,
+      "lens": "operator error",
+      "scenario": "from_hypertable (and from_hypertable_cutover) refuse an off-midnight anchor on a date dimension, or a step/anchor finer than a timestamp(p) dimension, up front via the shared pgpm._time_unit_contract (#1118/#1138), but the refusal's remedy says 'then re-run transmute; ... call pgpm.transmute_abort(<table>) first': transmute refuses a hypertable outright ('has inheritance children'), and nothing from_hypertable did needs a transmute_abort; the message should name from_hypertable / from_hypertable_cutover as the call to re-run (tests/timescale/db/66 pins only the message's first half, so the wrong remedy is unwatched)",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "                                                      \n--------------------------------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: re-running transmute on this hypertable, as the message says, is refused (it is not the call to re-run)\n(1 row)\n\n                                                           ok                                                            \n-------------------------------------------------------------------------------------------------------------------------\n not ok 4 - the refusal raised by from_hypertable does not tell the operator to re-run transmute on a hypertable        +\n # Failed test 4: \"the refusal raised by from_hypertable does not tell the operator to re-run transmute on a hypertable\"\n(1 row)\n\n                                                           ok                                                            \n-------------------------------------------------------------------------------------------------------------------------\n not ok 5 - nor to call pgpm.transmute_abort on it first (from_hypertable never left a transmute bound to abort)        +\n # Failed test 5: \"nor to call pgpm.transmute_abort on it first (from_hypertable never left a transmute bound to abort)\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 5\n(1 row)\n\npsql:<stdin>:6: NOTICE:  extension \"timescaledb\" already exists, skipping\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 0,
+        "tail": "                                                      \n--------------------------------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: re-running transmute on this hypertable, as the message says, is refused (it is not the call to re-run)\n(1 row)\n\n                                                           ok                                                            \n-------------------------------------------------------------------------------------------------------------------------\n not ok 4 - the refusal raised by from_hypertable does not tell the operator to re-run transmute on a hypertable        +\n # Failed test 4: \"the refusal raised by from_hypertable does not tell the operator to re-run transmute on a hypertable\"\n(1 row)\n\n                                                           ok                                                            \n-------------------------------------------------------------------------------------------------------------------------\n not ok 5 - nor to call pgpm.transmute_abort on it first (from_hypertable never left a transmute bound to abort)        +\n # Failed test 5: \"nor to call pgpm.transmute_abort on it first (from_hypertable never left a transmute bound to abort)\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 5\n(1 row)\n\npsql:<stdin>:6: NOTICE:  extension \"timescaledb\" already exists, skipping\n"
+      },
+      "class": "candidate"
+    }
+  ]
+}

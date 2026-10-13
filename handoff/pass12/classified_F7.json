@@ -1,0 +1,27 @@
+{
+  "claims": [
+    {
+      "id": "F7-01",
+      "finder": "F7",
+      "tier": 2,
+      "file": "pgpm_archive/install.sql",
+      "line": 3534,
+      "lens": "fresh surface",
+      "scenario": "archive.to_s3 casts its page cursor back as v_ctl_typ::regtype::text, dropping the typmod it computed into v_ctl_mod, so a char(3) (or bit(3)) control column's cursor 'abc' reads back as 'a', every page re-reads the row it ended on and the export never ends; it should cast as format_type(type, typmod) and complete, as its own header and tests/archive/db/51 part H say",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "T 0 3\nCREATE FUNCTION\n                            is                             \n-----------------------------------------------------------\n ok 1 - LIVENESS: the relation's control column is char(3)\n(1 row)\n\n                     is                     \n--------------------------------------------\n ok 2 - LIVENESS: it holds abc, abd and abe\n(1 row)\n\nSET\n                                     is                                     \n----------------------------------------------------------------------------\n ok 3 - LIVENESS: a bigint relation exports through MinIO, one row per page\n(1 row)\n\n                                              is                                              \n----------------------------------------------------------------------------------------------\n not ok 4 - archive.to_s3 of a char(3) relation, one row per page, ends and completes        +\n # Failed test 4: \"archive.to_s3 of a char(3) relation, one row per page, ends and completes\"+\n #         have: cancelled by statement_timeout: the export did not end                      +\n #         want: ok\n(1 row)\n\nRESET\n                                          is                                           \n---------------------------------------------------------------------------------------\n ok 5 - LIVENESS: the bare type character is char(1), so a cursor cast that way is cut\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 5\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "CREATE EXTENSION\n plan \n------\n 1..5\n(1 row)\n\nCREATE SCHEMA\nCREATE TABLE\nINSERT 0 2\nCREATE SCHEMA\nCREATE TABLE\nINSERT 0 1\nCALL\n configure \n-----------\n \n(1 row)\n\nCREATE TABLE\nINSERT 0 3\nCREATE TABLE\nINSERT 0 3\nCREATE FUNCTION\n                            is                             \n-----------------------------------------------------------\n ok 1 - LIVENESS: the relation's control column is char(3)\n(1 row)\n\n                     is                     \n--------------------------------------------\n ok 2 - LIVENESS: it holds abc, abd and abe\n(1 row)\n\nSET\n                                     is                                     \n----------------------------------------------------------------------------\n ok 3 - LIVENESS: a bigint relation exports through MinIO, one row per page\n(1 row)\n\n                                        is                                        \n----------------------------------------------------------------------------------\n ok 4 - archive.to_s3 of a char(3) relation, one row per page, ends and completes\n(1 row)\n\nRESET\n                                          is                                           \n---------------------------------------------------------------------------------------\n ok 5 - LIVENESS: the bare type character is char(1), so a cursor cast that way is cut\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+      },
+      "class": "seed_hit",
+      "seed": "S8"
+    }
+  ]
+}

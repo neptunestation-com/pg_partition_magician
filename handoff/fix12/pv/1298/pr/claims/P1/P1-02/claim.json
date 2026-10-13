@@ -1,0 +1,3 @@
+{"tier": 1, "file": "pgpm_archive/install.sql", "line": 3064, "lens": "fresh surface",
+ "scenario": "introduced: archive._refuse_recorded_chunk_overwrite now matches the ledger row by archive._canonical_key(a.s3_key) = p_key, but p_key is still the raw key archive._owned_key assembles, so for a table configured with a prefix spelled with a leading '/' (its tick recorded the chunk at '/P/...') no ledger row matches, the #975/#1069 refusal the base gave (a.s3_key = p_key) is lost, and a direct call over the recorded chunk after retire() PUTs an empty object over the only copy of its rows; it should have been refused naming the chunk",
+ "repro": "repro.sql", "install": ["tests/archive/fixtures.sql", "pgpm_core/install.sql", "pgpm_archive/install.sql"], "fixtures": false}

@@ -1,0 +1,80 @@
+{
+  "trees": {
+    "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/base",
+    "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/head",
+    "review": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/review",
+    "mutants": {
+      "check_time_monotonic_session_zone": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/mutants/check_time_monotonic_session_zone"
+    }
+  },
+  "acceptance": "ACC",
+  "claims": [
+    {
+      "id": "ACC-01",
+      "finder": "ACC",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 14298,
+      "lens": "time and zones",
+      "scenario": "#1265 acceptance (F2-02): check_time_monotonic casts a naive timestamp time column to timestamptz in the caller's session zone before comparing adjacent pairs, so a column whose values increase with the id (01:50, 02:30, 03:15 on 2026-03-08) reports fraction 0.5 from an America/New_York session (02:30 is in the spring-forward gap and casts past 03:15 EDT) and 1.0 from UTC; it should compare the column's own values (or cast in one fixed zone) so the documented fraction of non-decreasing pairs does not depend on who runs it",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                                is                                 \n--------------------------------------------------------------------\n ok 1 - LIVENESS: three rows whose naive time increases with the id\n(1 row)\n\nSET\n                                         is                                          \n-------------------------------------------------------------------------------------\n ok 2 - LIVENESS: from a UTC session both adjacent pairs are reported non-decreasing\n(1 row)\n\nSET\n                                                       ok                                                       \n----------------------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: in America/New_York 02:30 on 2026-03-08 is inside the spring-forward gap and casts past 03:15\n(1 row)\n\n                                                 is                                                  \n-----------------------------------------------------------------------------------------------------\n not ok 4 - from an America/New_York session the same column is reported fully monotonic too        +\n # Failed test 4: \"from an America/New_York session the same column is reported fully monotonic too\"+\n #         have: 0.5000                                                                             +\n #         want: 1.0000\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 4\n(1 row)\n\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "CREATE EXTENSION\nSET\n plan \n------\n 1..4\n(1 row)\n\nCREATE TABLE\nINSERT 0 3\n                                 is                                 \n--------------------------------------------------------------------\n ok 1 - LIVENESS: three rows whose naive time increases with the id\n(1 row)\n\nSET\n                                         is                                          \n-------------------------------------------------------------------------------------\n ok 2 - LIVENESS: from a UTC session both adjacent pairs are reported non-decreasing\n(1 row)\n\nSET\n                                                       ok                                                       \n----------------------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: in America/New_York 02:30 on 2026-03-08 is inside the spring-forward gap and casts past 03:15\n(1 row)\n\n                                           is                                            \n-----------------------------------------------------------------------------------------\n ok 4 - from an America/New_York session the same column is reported fully monotonic too\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+        },
+        "mutant:check_time_monotonic_session_zone": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                                is                                 \n--------------------------------------------------------------------\n ok 1 - LIVENESS: three rows whose naive time increases with the id\n(1 row)\n\nSET\n                                         is                                          \n-------------------------------------------------------------------------------------\n ok 2 - LIVENESS: from a UTC session both adjacent pairs are reported non-decreasing\n(1 row)\n\nSET\n                                                       ok                                                       \n----------------------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: in America/New_York 02:30 on 2026-03-08 is inside the spring-forward gap and casts past 03:15\n(1 row)\n\n                                                 is                                                  \n-----------------------------------------------------------------------------------------------------\n not ok 4 - from an America/New_York session the same column is reported fully monotonic too        +\n # Failed test 4: \"from an America/New_York session the same column is reported fully monotonic too\"+\n #         have: 0.5000                                                                             +\n #         want: 1.0000\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 4\n(1 row)\n\n"
+        }
+      },
+      "class": "fixed",
+      "acceptance": {
+        "fails_on_base": true,
+        "passes_on_head": true,
+        "mutant_restores": {
+          "check_time_monotonic_session_zone": true
+        },
+        "any_restores": true
+      }
+    },
+    {
+      "id": "P1-01",
+      "finder": "P1",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 14298,
+      "lens": "fresh surface",
+      "scenario": "pgpm.check_time_monotonic on this tree carries no function-level SET timezone = 'UTC' clause (proconfig is null) although the comment above it, CHANGELOG.md, docs/reference.md and the PR body all say it does, so %I::timestamptz still casts a naive timestamp column in the caller's zone and a four-row column whose only falling pair straddles New York's spring-forward gap reports (3,3,1.0000) from America/New_York and (3,2,0.6667) from UTC; the documented fraction of non-decreasing pairs should be (3,2,0.6667) from every session zone",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                  ok                                                             \n----------------------------------------------------------------------------------------------------------------------------\n not ok 5 - check_time_monotonic carries the SET timezone = UTC clause the PR body and the function comment promise        +\n # Failed test 5: \"check_time_monotonic carries the SET timezone = UTC clause the PR body and the function comment promise\"\n(1 row)\n\n                                                      is                                                       \n---------------------------------------------------------------------------------------------------------------\n not ok 6 - from an America/New_York session the pair that falls across the gap still reads as falling        +\n # Failed test 6: \"from an America/New_York session the pair that falls across the gap still reads as falling\"+\n #         have: (3,3,1.0000)                                                                                 +\n #         want: (3,2,0.6667)\n(1 row)\n\n                                                 is                                                 \n----------------------------------------------------------------------------------------------------\n ok 7 - GUARD: the rows whose pair is non-decreasing are ids 2 and 4 (the column itself, zone-free)\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 7\n(1 row)\n\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "         is                           \n-------------------------------------------------------\n ok 3 - LIVENESS: the session zone is America/New_York\n(1 row)\n\n                                                       ok                                                       \n----------------------------------------------------------------------------------------------------------------\n ok 4 - LIVENESS: in America/New_York 02:30 on 2026-03-08 is inside the spring-forward gap and casts past 03:15\n(1 row)\n\n                                                       ok                                                       \n----------------------------------------------------------------------------------------------------------------\n ok 5 - check_time_monotonic carries the SET timezone = UTC clause the PR body and the function comment promise\n(1 row)\n\n                                                is                                                 \n---------------------------------------------------------------------------------------------------\n ok 6 - from an America/New_York session the pair that falls across the gap still reads as falling\n(1 row)\n\n                                                 is                                                 \n----------------------------------------------------------------------------------------------------\n ok 7 - GUARD: the rows whose pair is non-decreasing are ids 2 and 4 (the column itself, zone-free)\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                  ok                                                             \n----------------------------------------------------------------------------------------------------------------------------\n not ok 5 - check_time_monotonic carries the SET timezone = UTC clause the PR body and the function comment promise        +\n # Failed test 5: \"check_time_monotonic carries the SET timezone = UTC clause the PR body and the function comment promise\"\n(1 row)\n\n                                                      is                                                       \n---------------------------------------------------------------------------------------------------------------\n not ok 6 - from an America/New_York session the pair that falls across the gap still reads as falling        +\n # Failed test 6: \"from an America/New_York session the pair that falls across the gap still reads as falling\"+\n #         have: (3,3,1.0000)                                                                                 +\n #         want: (3,2,0.6667)\n(1 row)\n\n                                                 is                                                 \n----------------------------------------------------------------------------------------------------\n ok 7 - GUARD: the rows whose pair is non-decreasing are ids 2 and 4 (the column itself, zone-free)\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 7\n(1 row)\n\n"
+        }
+      },
+      "class": "seed_hit",
+      "seed": "S1"
+    }
+  ]
+}

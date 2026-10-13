@@ -1,0 +1,3 @@
+{"tier": 5, "file": "tests/72_transmute_attributes_test.sql", "line": 61, "lens": "contracts versus documentation",
+ "scenario": "tests/72's RLS assertion asks only the role the policy names (a count of 400 over a symmetric 5-tenant fixture), so all 15 assertions pass against a transmute that replays tenant_iso TO PUBLIC, under which t72_writer reads tenant 1's 402 rows; it should also assert that a role the policy does not name still sees nothing through the parent",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

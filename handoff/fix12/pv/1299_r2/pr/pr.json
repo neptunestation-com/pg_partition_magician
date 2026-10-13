@@ -1,0 +1,13 @@
+{
+  "baseRefName": "main",
+  "headRefName": "fix/retirement-mark-readers-need-dispatch-record",
+  "headRefOid": "356f52e74554c3856c6956db2093c816a66c54e7",
+  "number": 1299,
+  "title": "fix(core): every reader of a retirement mark asks for the dispatch record",
+  "url": "https://github.com/neptunestation-com/pg_partition_magician/pull/1299",
+  "head": "356f52e74554c3856c6956db2093c816a66c54e7",
+  "base": "b76002e66c9f8b57f9943967babf25a195500f85",
+  "finder": "P1",
+  "seeds": 1,
+  "mutations": "archive_hold_vouches_detached_retirement,retirement_mark_readers_whole,retirement_mark_vouches_alone"
+}

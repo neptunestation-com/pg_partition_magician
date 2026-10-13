@@ -1,0 +1,525 @@
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/base/CHANGELOG.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/head/CHANGELOG.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/base/CHANGELOG.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/head/CHANGELOG.md	2026-10-12 13:08:49
+@@ -2,6 +2,18 @@
+ 
+ ## [Unreleased]
+ 
++- **A regrain swap deferred by another database's transaction names that transaction** (#1263). A transaction
++  older than a regrain's copies, open in ANOTHER database (or prepared), holds back the `xmin` of every snapshot in
++  the cluster, so the swap's snapshot wait listed `READ COMMITTED` statements of this database that began after
++  the copies and see them, deferred the swap for that transaction's whole life, and its refusal called each such
++  session a reader that "would find the regrained range empty", while `docs/reference.md` said other databases
++  were not consulted. The wait still waits: nothing a caller can read tells such a statement from a
++  `REPEATABLE READ` transaction that imported a snapshot exported before the copies (tests/333 builds the pair; passing one
++  swaps under the other, which then reads the range empty), and `CREATE INDEX CONCURRENTLY` waits the same way.
++  What changed is the refusal and the contract: at the budget, against a run's recorded last write (`maintain`,
++  a hand `regrain_step`, the hypertable cutover), the message names the oldest transaction still running at or
++  before it, with its database, pid (or prepared gid) and xid, and says the listed sessions cannot be told from
++  snapshots that miss the copies; ending that transaction is the remedy. The reference documents the limit.
+ - **The regrain swap and the hypertable cutover wait for snapshots older than their copies** (#1241). A
+   `REPEATABLE READ` reader whose snapshot predated a regrain's copies, and which first read the table after the
+   swap (so it held no lock the `DETACH` waited on), read the fine children, whose rows its snapshot cannot see,
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/base/bench/snapshot_wait_foreign_floor_holder.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/head/bench/snapshot_wait_foreign_floor_holder.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/base/bench/snapshot_wait_foreign_floor_holder.sh	1969-12-31 16:00:00
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/head/bench/snapshot_wait_foreign_floor_holder.sh	2026-10-12 13:08:49
+@@ -0,0 +1,63 @@
++#!/usr/bin/env bash
++# Run tests/333_snapshot_wait_foreign_floor_holder_test.sql against an ARBITRARY copy of pgpm_core/install.sql, so
++# bench/discriminate.sh can point it at a mutant (issue #1263).
++#
++# The subject: while a transaction older than the copies runs in ANOTHER database, every snapshot of the cluster
++# has an xmin at or before the copies' last write, so the regrain swap's snapshot wait lists sessions that see the
++# copies along with ones that cannot, and nothing a caller reads tells the two apart. The swap keeps waiting (the
++# file builds the indistinguishable pair: a READ COMMITTED statement begun after the copies and a REPEATABLE READ
++# importer of a snapshot exported before them), and the refusal names the transaction that holds the floor, by
++# database, pid and xid, instead of calling every listed session a reader that would find the range empty. Ending
++# that transaction is the remedy, and the file types it. The file needs second sessions and another database,
++# which it opens with dblink and makes itself (<db>_x, dropped at its end).
++#
++# The mutations it is required to fail against (bench/mutations/mutate.py):
++#   snapshot_wait_holder_this_database_only -- the holder is looked for in this database only, so the other
++#                                              database's transaction is never named (part A)
++#   snapshot_wait_foreign_floor_exempt      -- the exemption the issue asked for: a session whose xmin another
++#                                              database's transaction explains is not listed, so the swap goes
++#                                              through under the importer, which reads the range empty (part A)
++#
++# Usage: snapshot_wait_foreign_floor_holder.sh <container> <db> [install.sql]
++# Runs on the plain core image (pgtap, dblink and pg_prove). It holds a transaction open across several seconds,
++# which holds back every snapshot of the cluster, so it must run alone (the perf track runs its guards one at a
++# time; the core suite runs the file after its parallel files). TAP_GUARD_TEST_FILE overrides the test file's path
++# inside the container, for a worktree mounted somewhere other than /repo.
++set -uo pipefail
++C="${1:?container}"; DB="${2:?db}"; INSTALL="${3:-/repo/pgpm_core/install.sql}"
++TEST_FILE="${TAP_GUARD_TEST_FILE:-/repo/tests/333_snapshot_wait_foreign_floor_holder_test.sql}"
++fail=0
++
++q() { docker exec "$C" psql -U postgres "$@"; }
++
++q -q -c "drop database if exists ${DB}_x" >/dev/null 2>&1
++q -q -c "drop database if exists $DB" >/dev/null 2>&1
++q -q -c "create database $DB" >/dev/null 2>&1
++q -d "$DB" -q -c "create extension if not exists pgtap;" >/dev/null 2>&1
++
++# A mutant that will not even install is NOT a pass: say which happened.
++if ! q -d "$DB" -v ON_ERROR_STOP=1 -q --single-transaction -f "$INSTALL" >/dev/null 2>&1; then
++  printf 'FAIL  %-58s %s\n' "the module under test installed" "$INSTALL"
++  fail=1
++fi
++
++if [ "$fail" = 0 ]; then
++  out=$(docker exec "$C" sh -c "pg_prove -v -U postgres -d $DB $TEST_FILE" 2>&1)
++  rc=$?
++  echo "$out" | grep -E '^not ok [0-9]+ -' | sed 's/^/    /' | head -20
++  # the count is asserted separately: a run that never reached the database must not read as a catch
++  ran=$(echo "$out" | grep -cE '^(not )?ok [0-9]+ -')
++  if [ "$rc" = 0 ]; then printf 'PASS  %-58s %s\n' "a foreign floor holder is named, never passed" "$ran ran"
++  else printf 'FAIL  %-58s %s\n' "a foreign floor holder is named, never passed" "$ran ran"; fail=1; fi
++  if [ "$ran" -eq 0 ]; then
++    printf 'FAIL  %-58s %s\n' "LIVENESS: the assertions were reached at all" "0 ran"
++    echo "$out" | tail -20 | sed 's/^/      /'
++    fail=1
++  fi
++fi
++
++# a run that died with the other database's connections still open leaves it behind: close them first
++q -q -c "select pg_terminate_backend(pid) from pg_stat_activity where datname = '${DB}_x'" >/dev/null 2>&1
++q -q -c "drop database if exists ${DB}_x" >/dev/null 2>&1
++q -q -c "drop database if exists $DB" >/dev/null 2>&1
++exit "$fail"
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/base/docs/reference.md /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/head/docs/reference.md
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/base/docs/reference.md	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/head/docs/reference.md	2026-10-12 13:08:49
+@@ -997,7 +997,10 @@
+ record existed has none, and every snapshot older than the swap transaction is waited for. A reader still holding
+ such a snapshot after `p_lock_timeout` makes the cutover refuse whole, with `pg_partition_magician: hypertable
+ cutover deferred: N snapshot(s) older than the copies still open (oldest: pid P, open T; pids ...)`, as a lock
+-timeout does; re-run it once that transaction has ended. It never goes ahead under one. **Call it (and
++timeout does; re-run it once that transaction has ended. It never goes ahead under one. While a transaction
++older than the copy's last write is open in any database, every snapshot's `xmin` is held at or before it, so
++every snapshot taken here meanwhile is waited for, and the refusal also names that transaction (see
++[`regrain_step`](#regrain_step)). **Call it (and
+ `from_hypertable`) from a direct session**: a caller that holds a snapshot across the call, such as a client
+ waiting for it through `dblink`, is a reader the cutover must wait for, and it refuses at `p_lock_timeout`
+ naming that caller's pid. The last-mile window is the regrain's: a `REPEATABLE READ` snapshot taken after the
+@@ -1967,7 +1970,8 @@
+ The reference is the run's last copy or reconcile batch, recorded in `config.regrain_written_xid`, when an
+ earlier transaction made the copies (the run's ticks under `maintain`, or `regrain_step` calls each in its own
+ transaction): a snapshot taken now has an `xmin` past it unless a transaction at or before it is still running,
+-so the wait ends once no session holds a snapshot that could miss a copy. When the swap's own transaction made
++so the wait ends once no session holds a snapshot that could miss a copy (but see the next paragraph for a
++transaction still running at or before it). When the swap's own transaction made
+ them (`regrain`, which copies and swaps in one transaction), or the run's last write is not recorded (a run in
+ flight across the upgrade that added the column), the reference is the swap's own transaction, which no snapshot
+ taken while it runs can see, so `regrain` waits for every snapshot open in the database (every `backend_xmin` at
+@@ -1979,9 +1983,26 @@
+ session is judged by what any caller can see of it, so the wait is the same for the table's non-superuser owner
+ without `pg_read_all_stats`, to whom another role's `backend_type`, `state` and `xact_start` read `NULL`: the pid
+ and `backend_xmin` in `pg_stat_activity`, and the transaction's virtual xid in `pg_locks`, by which each is
+-followed. Only sessions with no role (autovacuum, auxiliary processes) are left out, and other databases and hot
+-standbys are not consulted.
++followed. Only sessions with no role (autovacuum, auxiliary processes) are left out, and the sessions of other
++databases and of hot standbys are never listed.
+ 
++Other databases' **transactions** still count, through the `xmin`. A snapshot's `xmin` is the oldest
++transaction running anywhere in the cluster when it was taken, so while a transaction older than the run's
++last write stays open in any database (a session of another database, or a prepared transaction), every
++snapshot taken anywhere has an `xmin` at or before the reference, and a `READ COMMITTED` statement of this
++database that began after the copies, and sees them, is listed with the rest. The wait cannot tell it from one
++that cannot see the copies: a `REPEATABLE READ` transaction begun after the copies that imported a snapshot
++exported before them shows the same `backend_xmin`, state and start times, and passing one passes the other.
++So it waits for both, as `CREATE INDEX CONCURRENTLY` does (its reference `xmin` is cluster-wide too), and such a
++transaction defers the swap for as long as it stays open. At the budget the refusal names it, after the listed
++pids: `a transaction older than the copies is still running in database D (pid H, xid X, open T)` (a prepared
++one reads `prepared transaction 'G'` for the pid), and says the listed sessions cannot be told from snapshots
++that miss the copies. End that transaction, or wait for it: once it has ended, a new statement's snapshot has
++an `xmin` past the copies, and the sessions it held back drop out as they release theirs (a `READ COMMITTED`
++one when its statement finishes). This applies to a reference that is an earlier transaction; against the
++swap's own transaction (`regrain`) every snapshot open during the call is listed whatever else runs, and the
++refusal names no holder.
++
+ A session that waits on the swap's own transaction, for a lock it holds, cannot release its snapshot before the
+ swap commits, so it is never waited for: the wait polls, outside the lock manager, so the deadlock detector would
+ never see the cycle and under `lock_timeout` 0 it would never end. Two cases, treated differently:
+@@ -2039,7 +2060,8 @@
+ The budget is the caller's `lock_timeout`. Under `maintain` that is 200 ms, after which the step raises and the
+ tick logs `skip_regrain` with `method` beginning `pg_partition_magician: regrain swap deferred: N snapshot(s)
+ older than the copies still open (oldest: pid P, open T; pids ...)` (`T` reads `not visible to this role` when
+-the caller cannot see that session's `xact_start`), and the next tick tries again; nothing was swapped or lost.
++the caller cannot see that session's `xact_start`; the holder clause above follows when a transaction older than
++the copies is still running), and the next tick tries again; nothing was swapped or lost.
+ `regrain` refuses with the same message and rolls back whole, copies included. Neither ever goes ahead under a
+ snapshot it waits for. Under `lock_timeout` 0, the session default under which a hand `regrain` runs, the wait
+ lasts as long as the snapshots do: a snapshot held by a session waiting on the swap, or by an older snapshot
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/base/pgpm_core/install.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/head/pgpm_core/install.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/base/pgpm_core/install.sql	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/head/pgpm_core/install.sql	2026-10-12 13:08:49
+@@ -7636,9 +7636,21 @@
+ -- wait). Left out are the sessions with no role (usesysid null: autovacuum and auxiliary processes, which serve no
+ -- reader) and an autovacuum worker the caller can see is one. A session drops out once its snapshot is released (its
+ -- backend_xmin cleared, as a READ COMMITTED one is between statements) or its transaction ends. Other databases'
+--- sessions, which cannot read this table, and a hot standby's, which pg_stat_activity does not show, are not
+--- consulted.
++-- sessions, which cannot read this table, and a hot standby's, which pg_stat_activity does not show, are never
++-- listed. But other databases' TRANSACTIONS still count, through the xmin (next).
+ --
++-- WHAT IT CANNOT TELL APART (#1263). backend_xmin is cluster-wide: a snapshot's xmin is the oldest xid running
++-- ANYWHERE when it was taken. So while a transaction older than the reference runs in any database (another
++-- database's, or a prepared transaction), every snapshot taken anywhere has an xmin at or before the reference,
++-- and a READ COMMITTED statement of this database that began after the copies committed, and sees them, is listed
++-- with the rest. It is waited for all the same, because nothing a caller can read tells it from one that cannot
++-- see the copies: a REPEATABLE READ transaction begun after the copies that imported a snapshot exported before
++-- them (its exporter since committed) shows the same backend_xmin, backend_xid, state, wait event, transaction and
++-- statement start (tests/333 builds the pair). Passing the one passes the other, which would read the regrained
++-- range empty. CREATE INDEX CONCURRENTLY waits the same way, its reference xmin being cluster-wide too. So such a
++-- transaction defers the swap for as long as it runs, and the refusal at the budget names it (database, pid, xid)
++-- instead of calling the sessions it holds back readers that would find the range empty.
++--
+ -- A SESSION THAT WAITS ON THIS ONE (round 8) can never release its snapshot before this transaction commits, so it
+ -- is never waited for: waiting would be a cycle the deadlock detector cannot see (this wait polls in pg_sleep, not
+ -- in the lock manager; CREATE INDEX CONCURRENTLY waits through the lock manager and lets the detector cancel it).
+@@ -7684,8 +7696,11 @@
+ --
+ -- THE BUDGET is the caller's lock_timeout, as for every lock the swap takes. When it runs out with a session still
+ -- listed the step raises 'pg_partition_magician: <p_what> deferred: N snapshot(s) older than the copies still open
+--- (oldest: pid P, open T; pids ...)': maintain logs that as skip_regrain and the next tick tries again, regrain()
+--- and the cutover refuse with it, rolled back whole. It never goes ahead. lock_timeout 0 (the session default,
++-- (oldest: pid P, open T; pids ...)', followed, when a transaction older than an earlier transaction's reference is
++-- still running, by 'a transaction older than the copies is still running in database D (pid H, xid X, open T)'
++-- (a prepared one: 'prepared transaction G' for the pid) and why the listed sessions cannot be told apart, else by
++-- 'a reader in one would find <p_range> empty': maintain logs that as skip_regrain and the next tick tries again,
++-- regrain() and the cutover refuse with it, rolled back whole. It never goes ahead. lock_timeout 0 (the session default,
+ -- under which a hand regrain() runs) waits for as long as they take, as the DETACH would wait for a reader holding
+ -- a lock. So a client that holds a snapshot across its call (a dblink caller waiting for the call, a wrapper that
+ -- holds one) is a reader the swap must wait for: call these from a direct session.
+@@ -7714,7 +7729,7 @@
+   v_by_xid boolean;
+   v_limit xid;
+   v_still int[]; v_blocked int[]; v_chained int[]; v_queue text; v_passed int[] := '{}'; v_n int; v_pid int;
+-  v_open text; v_new int; v_older int[]; v_marked boolean := false;
++  v_open text; v_holder text; v_new int; v_older int[]; v_marked boolean := false;
+   v_sleep float8 := 0.005;
+ begin
+   -- the copies' own transaction: an earlier one (wait for snapshots at or before it) or this one (wait for every
+@@ -7793,6 +7808,37 @@
+       v_pid := v_still[1];
+       select coalesce(date_trunc('second', clock_timestamp() - a.xact_start)::text, 'not visible to this role')
+         into v_open from pg_stat_activity a where a.pid = v_pid;
++      -- THE FLOOR HOLDER (#1263): against an earlier transaction's reference, the oldest transaction still running
++      -- at or before it, in any database (a session's, or a prepared one). While it runs, every snapshot taken in the
++      -- cluster has an xmin at or before it, so the listed sessions include snapshots that see the copies, and
++      -- nothing a caller can read tells those from one that does not (see WHAT IT CANNOT TELL APART, above): the
++      -- refusal names it rather than calling every listed session a reader that would find the range empty.
++      -- Against this transaction's own xid there is none to name: every snapshot open while it runs is listed
++      -- whatever else runs.
++      v_holder := null;
++      if v_by_xid then
++        select h.what into v_holder
++          from (select format('in database %s (pid %s, xid %s, open %s)', coalesce(d.datname::text, '(none)'), a.pid,
++                              a.backend_xid, coalesce(date_trunc('second', clock_timestamp() - a.xact_start)::text,
++                                                      'not visible to this role')) as what,
++                       age(a.backend_xid) as old
++                  from pg_stat_activity a left join pg_database d on d.oid = a.datid
++                 where a.backend_xid is not null
++                   and a.pid <> pg_backend_pid()
++                   and age(a.backend_xid) >= age(v_limit)
++                union all
++                select format('in database %s (prepared transaction %L, xid %s, prepared %s)', p.database, p.gid,
++                              p.transaction, date_trunc('second', clock_timestamp() - p.prepared)),
++                       age(p.transaction)
++                  from pg_prepared_xacts p
++                 where age(p.transaction) >= age(v_limit)) h
++         order by h.old desc
++         limit 1;
++      end if;
++      if v_holder is not null then
++        raise exception 'pg_partition_magician: % deferred: % snapshot(s) older than the copies still open (oldest: pid %, open %; pids %); a transaction older than the copies is still running %: while it runs every snapshot of the cluster has an xmin at or before it, so these cannot be told from snapshots that miss the copies (a reader in one of those would find % empty after the swap), and the swap waits for them all. %. Nothing was swapped: maintain retries a regrain on its next tick, and a call by hand is refused and can be run again once that transaction has ended and these have released their snapshots (a READ COMMITTED statement releases its own when it finishes).',
++          p_what, v_n, v_pid, v_open, array_to_string(v_still, ', '), v_holder, p_range, p_where;
++      end if;
+       raise exception 'pg_partition_magician: % deferred: % snapshot(s) older than the copies still open (oldest: pid %, open %; pids %); a reader in one would find % empty after the swap. %. Nothing was swapped: maintain retries a regrain on its next tick, and a call by hand is refused and can be run again once those transactions have ended (from a direct session: a caller that holds a snapshot across the call is one of them).',
+         p_what, v_n, v_pid, v_open, array_to_string(v_still, ', '), p_range, p_where;
+     end if;
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/base/test.sh /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/head/test.sh
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/base/test.sh	2026-10-12 10:00:39
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/head/test.sh	2026-10-12 13:08:49
+@@ -307,9 +307,16 @@
+     # `postgres`, as they always have (see below). PGPM_JOBS=1 is the old serial run.
+     local n=0 failed=0 pg_ready="" jobs="${PGPM_JOBS:-4}" logdir
+     logdir=$(mktemp -d)
+-    local -a parallel=() serial=()
++    local -a parallel=() serial=() alone=()
+     for f in tests/*.sql; do
+       local b; b="$(basename "$f")"; n=$((n + 1))
++      if [ "$b" = "333_snapshot_wait_foreign_floor_holder_test.sql" ]; then
++        # Holds a transaction open in another database for seconds, which holds back the xmin of every
++        # snapshot in the cluster, so every other file's regrain swap would defer behind it (#1263). It
++        # runs in its own clone like the rest, but after them and one at a time, never beside them.
++        alone+=("$n:$b")
++        continue
++      fi
+       if [ "$b" = "31_schedule_test.sql" ] || [ "$b" = "78_retain_detach_dispatch_test.sql" ]; then
+         # pg_cron can only be created in the database named by cron.database_name (postgres on these
+         # images: "can only create extension in database postgres"), so these files cannot run in a
+@@ -330,8 +337,13 @@
+     done
+     wait
+     local e nn
+-    for e in "${parallel[@]}"; do
++    for e in ${alone[@]+"${alone[@]}"}; do
+       nn="${e%%:*}"
++      if prove_one "$p" "$s" "pgpm_t$nn" "${e#*:}" "$logdir/$nn.log"; then echo 0 > "$logdir/$nn.rc"; else echo 1 > "$logdir/$nn.rc"; fi
++      printf '    %-58s %s  %s\n' "${e#*:} (alone)" "$(grep -m1 -oE '^Files=1, Tests=[0-9]+,[[:space:]]+[0-9]+ wallclock secs' "$logdir/$nn.log" | sed -E 's/Files=1, //; s/[[:space:]]+/ /g')" "$(grep -m1 -E '^Result: ' "$logdir/$nn.log" || echo 'Result: ERROR (no verdict)')"
++    done
++    for e in "${parallel[@]}" ${alone[@]+"${alone[@]}"}; do
++      nn="${e%%:*}"
+       echo; echo "### ${e#*:}"
+       cat "$logdir/$nn.log"
+       [ "$(cat "$logdir/$nn.rc" 2>/dev/null)" = 0 ] || failed=$((failed + 1))
+@@ -1265,6 +1277,7 @@
+     "bench/throws_pinned_sites.sh pgpm_perf350"
+     "bench/wrapper_premise_rule.sh pgpm_perf344"
+     "bench/regrain_swap_waits_for_older_snapshots.sh pgpm_perf365"
++    "bench/snapshot_wait_foreign_floor_holder.sh pgpm_perf371"
+   )
+   local selected=()
+   local n=${#guards[@]} idx
+diff -ruN -x .git /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/base/tests/333_snapshot_wait_foreign_floor_holder_test.sql /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/head/tests/333_snapshot_wait_foreign_floor_holder_test.sql
+--- /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/base/tests/333_snapshot_wait_foreign_floor_holder_test.sql	1969-12-31 16:00:00
++++ /Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296/pr/head/tests/333_snapshot_wait_foreign_floor_holder_test.sql	2026-10-12 13:08:49
+@@ -0,0 +1,236 @@
++-- The regrain swap's snapshot wait, while a transaction older than the copies runs in ANOTHER database (issue #1263).
++--
++-- THE REPORT. _snapshot_wait lists every session of this database whose pg_stat_activity.backend_xmin is at or
++-- before the copies' last write. backend_xmin is cluster-wide: while a transaction that took its xid before that
++-- write stays open in another database, every snapshot taken anywhere in the cluster has an xmin at or before it,
++-- so a READ COMMITTED statement of this database that began after the copies committed, and sees them whole, is
++-- listed too, and the swap defers at its budget for the foreign transaction's whole life. The refusal named that
++-- local pid as a reader that "would find the regrained range empty", and docs/reference.md said other databases
++-- were not consulted.
++--
++-- WHY THE SWAP STILL WAITS. The issue asks for that statement to be passed. Nothing a caller can read tells it
++-- from a snapshot that cannot see the copies: part A builds the pair. B, the issue's reader, runs a statement that
++-- began after the copies. I began its transaction after the copies too, imported (SET TRANSACTION SNAPSHOT) a
++-- snapshot that E exported before them, and E has since committed. Their pg_stat_activity rows agree on the
++-- database, backend_xmin (both the foreign transaction's xid), backend_xid, backend_type, state and wait event, and
++-- both began after the copies; yet B's statement counts every copy's log row and I's counts none. A rule that
++-- passes B passes I, and I, first reading the table after the swap, would find the regrained range empty: the
++-- #1241 loss. PostgreSQL's own CREATE INDEX CONCURRENTLY waits the same way (its reference xmin is cluster-wide).
++-- So the wait keeps waiting, and the fix is the contract and the message.
++--
++-- THE CONTRACT.
++--   PART A  with the foreign transaction open, a hand regrain_step refuses at its budget, and the refusal names the
++--           transaction that holds every snapshot back (its database, pid and xid) and says the sessions it lists
++--           cannot be told from snapshots that miss the copies, instead of calling them readers that would find
++--           the range empty. B and I are both listed. Nothing swapped, and I reads exactly its rows.
++--   PART B  the remedy the message types: end that transaction. Once it has committed (and I has ended), B's next
++--           statement has an xmin past the copies, and the same swap goes through with B running it.
++--   PART C  against the call's own transaction (regrain(), which copies and swaps in one transaction) every snapshot
++--           open during the call is listed whatever else runs, so a foreign transaction explains nothing there: the
++--           refusal has no holder clause and still names its reader as one that would find the range empty.
++--
++-- This file holds a transaction open in another database across several seconds, which holds back every snapshot
++-- of the cluster, so the suite runs it ALONE, after the parallel files (test.sh), never beside them.
++-- Every negative is paired with its premise: the foreign transaction is older than the copies' last write, the
++-- run is at the swap, and both readers' statements are running with their snapshots held when the swap is tried.
++-- ASYMMETRIC FIXTURES. A holds the multiples of 26 to 494 and frontier 2600; C the multiples of 29 to 493 and
++-- frontier 2900; every row check names the ids.
++create extension if not exists pgtap;
++create extension if not exists dblink;
++set client_min_messages = warning;
++select plan(27);
++
++create temp table t333_state (k text primary key, v text);
++-- the other database, made and dropped by this file
++select dblink_exec('dbname=' || current_database() || ' user=postgres',
++                   format('create database %I', current_database() || '_x'));
++
++-- ============================================ PART A ============================================
++create table public.t333a (id bigint generated by default as identity primary key, payload text);
++insert into public.t333a (id, payload) select g, 'a' || g from generate_series(26, 494, 26) g;
++call pgpm.transmute('public.t333a', 'id', 100, p_paused => false);                  -- monolith [0, 500)
++insert into public.t333a (id, payload) values (2600, 'frontier');                    -- freezes the monolith
++insert into t333_state select 'src', child_name from pgpm.part
++ where parent_table = 'public.t333a'::regclass and attached and lo = '0';
++insert into t333_state select 'src_oid', child_oid::text from pgpm.part
++ where parent_table = 'public.t333a'::regclass and attached and lo = '0';
++
++-- X: a transaction in the other database, its xid taken before any copy
++select dblink_connect('x333', 'dbname=' || current_database() || '_x user=postgres');
++select dblink_exec('x333', 'begin');
++insert into t333_state select 'xxid', x from dblink('x333', 'select pg_current_xact_id()::text') as t(x text);
++insert into t333_state select 'xpid', p::text from dblink('x333', 'select pg_backend_pid()') as t(p int);
++-- E: REPEATABLE READ in this database, its snapshot taken before any copy and exported; no lock on the table
++select dblink_connect('e333', 'dbname=' || current_database() || ' user=postgres');
++select dblink_exec('e333', 'begin isolation level repeatable read');
++insert into t333_state select 'snap', s from dblink('e333', 'select pg_export_snapshot()') as t(s text);
++
++-- the copies, one regrain_step per transaction, up to the swap's doorstep (the cursor at hi)
++do $$
++begin
++  for i in 1..40 loop
++    exit when (select regrain_cursor from pgpm.config where parent_table = 'public.t333a'::regclass) = '500';
++    perform pgpm.regrain_step('public.t333a', (select v from t333_state where k = 'src'), '100');
++    commit;
++  end loop;
++end $$;
++select is((select regrain_cursor from pgpm.config where parent_table = 'public.t333a'::regclass), '500',
++  'LIVENESS: (A) every sub-range is copied and the run is at the swap');
++select bag_eq(
++  $$ select lo::bigint from pgpm.log where parent_table = 'public.t333a'::regclass and action = 'regrain_copy' $$,
++  $$ values (0::bigint), (100), (200), (300), (400) $$,
++  'LIVENESS: (A) the copies ran, one batch for each of the five sub-ranges of [0, 500)');
++select ok((select (select v from t333_state where k = 'xxid')::xid8 < c.regrain_written_xid
++             from pgpm.config c where c.parent_table = 'public.t333a'::regclass),
++  'LIVENESS: (A) the other database''s transaction X took its xid before the copies'' last write');
++
++-- I: begins after the copies, imports E's snapshot; then E commits
++select dblink_connect('i333', 'dbname=' || current_database() || ' user=postgres');
++select dblink_exec('i333', 'begin isolation level repeatable read');
++select dblink_exec('i333', format('set transaction snapshot %L', (select v from t333_state where k = 'snap')));
++insert into t333_state select 'ipid', p::text from dblink('i333', 'select pg_backend_pid()') as t(p int);
++select dblink_exec('e333', 'commit');
++-- B: the issue's reader, READ COMMITTED, its statement started after the copies
++select dblink_connect('b333', 'dbname=' || current_database() || ' user=postgres');
++insert into t333_state select 'bpid', p::text from dblink('b333', 'select pg_backend_pid()') as t(p int);
++-- the same statement in both: what its snapshot sees of the copies' log rows, then a sleep that holds it
++select dblink_send_query(c, $q$select (select count(*) from pgpm.log where parent_table = 'public.t333a'::regclass
++                                       and action = 'regrain_copy'), pg_sleep(4)$q$)
++  from (values ('b333'), ('i333')) v(c);
++do $$
++begin
++  for i in 1..500 loop
++    perform pg_stat_clear_snapshot();
++    exit when (select count(*) from pg_stat_activity
++                where pid in (select v::int from t333_state where k in ('bpid', 'ipid'))
++                  and state = 'active' and wait_event = 'PgSleep' and backend_xmin is not null) = 2;
++    perform pg_sleep(0.01);
++  end loop;
++end $$;
++create temp table t333_seen as
++  select a.pid, a.datid, a.backend_xmin, a.backend_xid, a.backend_type, a.state, a.wait_event, a.xact_start, a.query_start
++    from pg_stat_activity a where a.pid in (select v::int from t333_state where k in ('bpid', 'ipid'));
++select is((select count(*) from t333_seen where state = 'active' and wait_event = 'PgSleep'), 2::bigint,
++  'LIVENESS: (A) B and I are both running their statement when the swap is tried');
++select ok((select bool_and(s.xact_start > l.at and s.query_start > l.at)
++             from t333_seen s,
++                  (select max(at) as at from pgpm.log where parent_table = 'public.t333a'::regclass and action = 'regrain_copy') l),
++  'LIVENESS: (A) B''s and I''s transactions and statements all began after the last copy was logged');
++select ok((select b.datid = i.datid and b.backend_xmin = i.backend_xmin and b.backend_xid is null and i.backend_xid is null
++                  and b.backend_type = i.backend_type and b.state = i.state and b.wait_event = i.wait_event
++             from t333_seen b, t333_seen i
++            where b.pid = (select v::int from t333_state where k = 'bpid') and i.pid = (select v::int from t333_state where k = 'ipid')),
++  'LIVENESS: (A) B and I agree on every column a caller judges a session by: database, backend_xmin, backend_xid, type, state, wait event');
++select is((select backend_xmin::text from t333_seen where pid = (select v::int from t333_state where k = 'bpid')),
++  (select v from t333_state where k = 'xxid'),
++  'LIVENESS: (A) and that backend_xmin is X''s xid: the other database''s transaction holds every snapshot back');
++
++set lock_timeout = '300ms';
++select throws_like(
++  format($$ select pgpm.regrain_step('public.t333a', %L, '100') $$, (select v from t333_state where k = 'src')),
++  'pg_partition_magician: regrain swap deferred: 2 snapshot(s) older than the copies still open (oldest: pid '
++    || least((select v::int from t333_state where k = 'bpid'), (select v::int from t333_state where k = 'ipid'))
++    || ', open %; pids %); a transaction older than the copies is still running in database '
++    || current_database() || '_x (pid ' || (select v from t333_state where k = 'xpid')
++    || ', xid ' || (select v from t333_state where k = 'xxid')
++    || ', open %): while it runs every snapshot of the cluster has an xmin at or before it, so these cannot be told from snapshots that miss the copies%',
++  '(A) the refusal names the transaction holding every snapshot back, by database, pid and xid');
++select throws_like(
++  format($$ select pgpm.regrain_step('public.t333a', %L, '100') $$, (select v from t333_state where k = 'src')),
++  '%pids ' || least((select v::int from t333_state where k = 'bpid'), (select v::int from t333_state where k = 'ipid'))
++    || ', ' || greatest((select v::int from t333_state where k = 'bpid'), (select v::int from t333_state where k = 'ipid')) || ')%',
++  '(A) and lists both B and I, the one that sees the copies and the one that does not');
++reset lock_timeout;
++select is((select count(*) from pgpm.log where parent_table = 'public.t333a'::regclass and action = 'regrain'), 0::bigint,
++  '(A) nothing was swapped');
++select is((select child_oid::text from pgpm.part where parent_table = 'public.t333a'::regclass and attached and lo = '0'),
++  (select v from t333_state where k = 'src_oid'), '(A) the same source is still attached, by oid');
++
++-- what each statement's snapshot saw: B every copy, I none, though nothing above told them apart
++select is((select n from dblink_get_result('b333') as t(n bigint, s text)), 5::bigint,
++  '(A) B''s statement saw all five copies'' log rows: its snapshot sees the copies');
++select is((select n from dblink_get_result('b333') as t(n bigint, s text)), null::bigint, 'B''s result is drained');
++select is((select n from dblink_get_result('i333') as t(n bigint, s text)), 0::bigint,
++  '(A) I''s statement saw none of them: its snapshot cannot see the copies');
++select is((select n from dblink_get_result('i333') as t(n bigint, s text)), null::bigint, 'I''s result is drained');
++select bag_eq(
++  $$ select id from dblink('i333', 'select id from public.t333a') as t(id bigint) $$,
++  $$ select g::bigint from generate_series(26, 494, 26) g union all select 2600 $$,
++  '(A) I reads exactly its rows: the multiples of 26 to 494, and 2600');
++
++-- ============================================ PART B ============================================
++-- the remedy the message names: end the transaction that holds every snapshot back (and I, which cannot see the
++-- copies, ends too)
++select dblink_exec('i333', 'commit');
++select dblink_exec('x333', 'commit');
++select dblink_send_query('b333', 'select pg_sleep(3)');
++do $$
++begin
++  for i in 1..500 loop
++    perform pg_stat_clear_snapshot();
++    exit when exists (select 1 from pg_stat_activity
++                       where pid = (select v::int from t333_state where k = 'bpid')
++                         and state = 'active' and wait_event = 'PgSleep' and backend_xmin is not null);
++    perform pg_sleep(0.01);
++  end loop;
++end $$;
++select ok((select age(a.backend_xmin) < age(c.regrain_written_xid::xid)
++             from pg_stat_activity a, pgpm.config c
++            where a.pid = (select v::int from t333_state where k = 'bpid') and a.state = 'active'
++              and c.parent_table = 'public.t333a'::regclass),
++  'LIVENESS: (B) B is running a statement again, and its backend_xmin is now past the copies'' last write');
++set lock_timeout = '300ms';
++select is(pgpm.regrain_step('public.t333a', (select v from t333_state where k = 'src'), '100'), 'swapped:5',
++  '(B) once X has ended, the same swap goes through with B''s statement running');
++reset lock_timeout;
++select bag_eq(
++  $$ select lo::bigint, hi::bigint from pgpm.part where parent_table = 'public.t333a'::regclass and attached and hi::bigint <= 500 $$,
++  $$ values (0::bigint, 100::bigint), (100, 200), (200, 300), (300, 400), (400, 500) $$,
++  '(B) the five fine children are attached in the source''s place');
++select ok(not exists (select 1 from pg_class where oid = (select v::oid from t333_state where k = 'src_oid')),
++  '(B) and the source is dropped');
++select bag_eq(
++  $$ select id from public.t333a $$,
++  $$ select g::bigint from generate_series(26, 494, 26) g union all select 2600 $$,
++  '(B) a fresh read after the swap holds exactly the same rows');
++select is((select s from dblink_get_result('b333') as t(s text)), '', '(B) B''s statement finished');
++select is((select s from dblink_get_result('b333') as t(s text)), null, 'B''s result is drained');
++
++-- ============================================ PART C ============================================
++create table public.t333c (id bigint generated by default as identity primary key, payload text);
++insert into public.t333c (id, payload) select g, 'c' || g from generate_series(29, 493, 29) g;
++call pgpm.transmute('public.t333c', 'id', 100, p_paused => false);                  -- monolith [0, 500)
++insert into public.t333c (id, payload) values (2900, 'frontier');
++insert into t333_state select 'csrc', child_name from pgpm.part
++ where parent_table = 'public.t333c'::regclass and attached and lo = '0';
++select dblink_exec('x333', 'begin');
++select is((select count(*) from dblink('x333', 'select pg_current_xact_id()') as t(x xid8)), 1::bigint,
++  'LIVENESS: (C) a transaction with an xid is open in the other database again');
++select dblink_connect('r333', 'dbname=' || current_database() || ' user=postgres');
++select dblink_exec('r333', 'begin isolation level repeatable read');
++insert into t333_state select 'rpid', p::text from dblink('r333', 'select pg_backend_pid() from pgpm.config limit 1') as t(p int);
++set lock_timeout = '300ms';
++select throws_like(
++  format($$ select pgpm.regrain('public.t333c', %L, '100') $$, (select v from t333_state where k = 'csrc')),
++  'pg_partition_magician: regrain swap deferred: 1 snapshot(s) older than the copies still open (oldest: pid '
++    || (select v from t333_state where k = 'rpid') || ', open %; pids ' || (select v from t333_state where k = 'rpid')
++    || '); a reader in one would find the regrained range empty after the swap.%',
++  '(C) regrain() against its own transaction names its reader as one that would read the range empty, with no holder clause');
++reset lock_timeout;
++select dblink_exec('r333', 'commit');
++select dblink_exec('x333', 'commit');
++select is(pgpm.regrain('public.t333c', (select v from t333_state where k = 'csrc'), '100'), 5,
++  'LIVENESS: (C) with the reader and X ended, regrain() splits the monolith into its five fine children');
++select bag_eq(
++  $$ select id from public.t333c $$,
++  $$ select g::bigint from generate_series(29, 493, 29) g union all select 2900 $$,
++  '(C) and the table reads exactly its rows: the multiples of 29 to 493, and 2900');
++
++select dblink_disconnect('r333');
++select dblink_disconnect('b333');
++select dblink_disconnect('i333');
++select dblink_disconnect('e333');
++select dblink_disconnect('x333');
++select dblink_exec('dbname=' || current_database() || ' user=postgres',
++                   format('drop database %I', current_database() || '_x'));
++select * from finish();

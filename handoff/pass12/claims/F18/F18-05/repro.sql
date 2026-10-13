@@ -1,0 +1,32 @@
+-- F18-05: _transmute_refuse_child_holders excludes any relation in pg_inherits, so a partition of ANOTHER
+-- parent that holds a forward cell's name is not a holder; obtain then steps over it (to_regclass finds it,
+-- pgpm.part does not), and the conversion completes with that cell unbuilt and nothing refused or logged.
+create extension if not exists pgtap;
+select plan(6);
+create table public.f18k (id bigint primary key, v int);
+insert into public.f18k select i, i from generate_series(1, 50) i;
+-- the first forward cell is [1000, 2000) on a step of 1000 from anchor 0 (monolith [0, 1000))
+select pgpm._part_name('f18k', 'id', '1000', '1000', '2000', 'UTC') as held \gset
+create table public.f18_other (id bigint) partition by range (id);
+select format('create table public.%I partition of public.f18_other for values from (0) to (10)', :'held') \gexec
+select ok(exists (select 1 from pg_inherits where inhrelid = to_regclass(format('public.%I', :'held'))
+                    and inhparent = 'public.f18_other'::regclass),
+          'LIVENESS: a partition of another parent holds the forward cell name ' || :'held');
+-- the conversion, at top level (it commits); a refusal here is the correct outcome, so it must not stop the file
+\set ON_ERROR_STOP off
+call pgpm.transmute('public.f18k', 'id', 1000::bigint, p_obtain => 2);
+\set ON_ERROR_STOP on
+select ok(exists (select 1 from pg_inherits where inhrelid = to_regclass(format('public.%I', :'held'))
+                    and inhparent = 'public.f18_other'::regclass),
+          'LIVENESS: the other parent''s partition still holds the name afterwards');
+-- the defect: the held child name must be refused up front, as a standalone relation at it is
+select ok(not exists (select 1 from pgpm.config where parent_table = 'public.f18k'::regclass),
+          'transmute refused the held forward name: f18k is not registered');
+select is((select relkind::text from pg_class where oid = 'public.f18k'::regclass), 'r',
+          'and f18k is still the ordinary table');
+select ok(not exists (select 1 from pgpm.part where parent_table = 'public.f18k'::regclass and attached and lo <> '1000'
+                        and hi::numeric > 1000),
+          'no forward grid was built past a hole at [1000, 2000) (with the defect: cells [2000, 3000) and on exist, the cell at 1000 does not)');
+select is((select count(*)::int from pgpm.log where parent_table = 'public.f18k'::regclass and action in ('transmute', 'fail_obtain_name')),
+          0, 'no transmute was logged for it (and nothing about the hole)');
+select * from finish();

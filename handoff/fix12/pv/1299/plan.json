@@ -1,0 +1,10 @@
+{
+ "seeds": [
+  {
+   "mutation": "retirement_mark_vouches_alone",
+   "lens": "fresh surface",
+   "tier": 3,
+   "why": "the PR's own mutation, its quietest"
+  }
+ ]
+}

@@ -1,0 +1,10 @@
+{
+  "id": "V-01",
+  "tier": 3,
+  "file": "pgpm_archive/install.sql",
+  "line": 3074,
+  "lens": "closing claim",
+  "scenario": "On a date-column day grid (partition_tz UTC), a direct pgpm.archive_to_s3_ndjson/_parquet call from a non-UTC session with offset-less bounds now keys the chunk by pgpm._native_text's session reading ('2024-01-02' from New York -> 05:00Z, stem 2024010205000000) while the date column's read truncates the bound to the whole 2 January chunk: the same chunk and rows get ..._2024010205000000 from New York and ..._2024010200000000 from UTC, a key no chunk starts at, and the recorded-chunk check looks up the session-shaped key so it never meets the ledger row at the chunk's real key. The base keyed both calls 2024010200000000. The key should name the chunk the read covers (the lo as the column reads it), not the session's instant.",
+  "repro": "repro.sql",
+  "install": ["tests/archive/fixtures.sql", "pgpm_core/install.sql", "pgpm_archive/install.sql"]
+}

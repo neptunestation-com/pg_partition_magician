@@ -1,0 +1,14 @@
+# Coverage ledger: P1, PR #1303
+
+- pgpm_core/install.sql:3480-3492 | read: yes | the header comment promising "the method spells both statements, the DROP and the DELETE"; compared against the body of _disown_retirement below it, which spells the DROP alone (P1-01)
+- pgpm._disown_retirement | read: yes | every line; v_rel_q by child_oid with the _child_nsp fallback, v_parent_q computed and never used, the method text ends at "or drop it: drop table %s; (the DROP alone ...)" with no DELETE (P1-01); ran the install pass and retire() paths on a non-public schema with a quoted name: the DROP as logged is valid SQL
+- pgpm._disown_unvouched_retirements | read: yes | the loop's join by child_oid or name, the attached-with-job branch, the v_why_q text now without the half-remedy; exercised by P1-01 (returns 1, logs retain_disown through _disown_retirement)
+- pgpm.retire | read: yes | both disown call sites (detached, pending), the identity check that refuses a dropped relation under its row (fail_retain_identity, the wedge the remedy leaves), the fail_retain_drop refusal; exercised in P1-01 via retain() after the typed remedy
+- pgpm._retain_recall | read: yes | the disown call site for a detached partition under an unrecorded mark; same function, same remedy text; not run (needs set_retain to loosen, same text by construction)
+- pgpm._detach_reap | read: yes | the disown call site ahead of the FINALIZE, by child_oid or name; same function, same remedy text; not run (needs an abandoned concurrent detach)
+- CHANGELOG.md | read: yes | the new [Unreleased] entry in full (it promises the DELETE the code does not spell, P1-01); the rest of the 6832-line file grep-scanned for retain_disown and the old wording only
+- bench/retain_disown_remedy.sh | read: yes | whole file: install-failure reported as FAIL, pg_prove rc, ran-count liveness, drop of the database; sound as a wrapper
+- docs/reference.md | read: yes | the retire entry (1478-1540, the new remedy paragraph with the two statements), the _detach_reap entry (1678-1686), the identity-wedge remedy at 2545-2565, the log-action row 3735; the rest of the 3988-line file grep-scanned for retain_disown, 'row is kept', 'drop the table by hand'
+- test.sh | read: yes | the perf guard list (1255-1270) with the new pgpm_perf380 entry and the shard loop; the rest of the 1769-line file grep-scanned for the guard and database name
+- tests/327_retire_pending_detach_test.sql | read: yes | whole file; part C's remedy pattern now requires 'drop table %delete from pgpm.part where %', which the tree's method cannot match (same root cause as P1-01; not run here, it needs the cron stand-in and dblink)
+- tests/339_retain_disown_remedy_test.sql | read: yes | whole file; ran it against the tree: not ok 5, 9, 10, 11, 17, 20, 21 of 23, the mutant signature the PR body gives

@@ -1,0 +1,10 @@
+- pgpm_core/install.sql:5137-5143 | read: yes | the new "THE GRID'S CLOCK" header: it promises partition_tz; the code below hands the caller's zone (P1-01)
+- pgpm._native_bound_key | read: yes | probed from a Kolkata/SQL,DMY/India session: offset-less on p_tz, ISO MDY pinned, IST = Israel, id kind, infinity, settings restored; helper sound
+- pgpm._over_retired_chunks | read: yes | v_tz := current_setting('TimeZone') not c.partition_tz (line 5178): P1-01; keys used at every comparison, floor read unchanged, #973 order kept
+- pgpm.retain | read: yes | consumes child_name from the held set unchanged; its own hi::ncast <= boundary cast is the adjacent class the body excludes (hypothesis)
+- pgpm._archive_step | read: yes | held set and skip_archive_retired_range row unchanged; orphan-discard overlap still casts in the session (adjacent, hypothesis)
+- CHANGELOG.md | read: yes | the #1264 entry read whole; promises the grid's clock, which the tree does not keep (P1-01); the pin and restoration claims hold
+- bench/over_retired_chunks_grid_zone.sh | read: yes | pgTAP wrapper in retain_recall_moved_parent.sh's shape; reports not-ok lines and a zero-ran liveness; would FAIL on this head (5 of 22)
+- docs/reference.md | read: yes | the #1264 hunk (2471-2478) and the retired-chunk section around it; grid-clock sentence not kept on this tree (P1-01); other three claims hold
+- test.sh | read: yes | perf list entry pgpm_perf372 (line 1259), no collision with another entry; ci/all version loops 15-18 unchanged
+- tests/334_over_retired_chunks_grid_zone_test.sql | read: yes | run on this head: fails 5, 7, 9, 11, 16; parts F and H (pin restored, abbreviations) pass; its LIVENESS witnesses are sound

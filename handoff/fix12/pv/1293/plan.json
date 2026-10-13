@@ -1,0 +1,10 @@
+{
+ "seeds": [
+  {
+   "mutation": "check_time_monotonic_session_zone",
+   "lens": "fresh surface",
+   "tier": 3,
+   "why": "the PR's own mutation, its quietest"
+  }
+ ]
+}

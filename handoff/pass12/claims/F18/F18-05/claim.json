@@ -1,0 +1,3 @@
+{"tier": 2, "file": "pgpm_core/install.sql", "line": 9573, "lens": "fresh surface",
+ "scenario": "_transmute_refuse_child_holders treats any relation in pg_inherits as not a holder, so a partition of another parent named <rel>_p<label> passes the preflight and both cutover re-asks; obtain steps over it, and the conversion completes with the forward cell right past the monolith unbuilt ([1000,2000) missing beside [2000,3000) built) and nothing refused or logged, so every write with a key in that cell fails with no partition found until the name is freed, where a standalone relation at the same name is refused up front.",
+ "repro": "repro.sql", "install": ["pgpm_core/install.sql"], "fixtures": false}

@@ -1,0 +1,3 @@
+{"tier": 5, "file": "bench/discriminate.sh", "line": 133, "lens": "contracts versus documentation",
+ "scenario": "a pg_prove wrapper whose test file passes its LIVENESS: premise and then raises at a later fixture statement prints only 'FAIL <label> N ran' (no not ok line); starved() sets that restated verdict aside, finds no failure left and reads the run as a catch, so discriminate certifies a guard against a mutant that only starved its fixture; it should be read as starved (no defect check failed)",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

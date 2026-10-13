@@ -1,0 +1,127 @@
+{
+ "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/base",
+ "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1293/pr/review",
+ "files": [
+  {
+   "path": "CHANGELOG.md",
+   "status": "modified",
+   "hunks": [
+    [
+     5,
+     11
+    ]
+   ]
+  },
+  {
+   "path": "bench/check_time_monotonic_session_zone.sh",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     51
+    ]
+   ]
+  },
+  {
+   "path": "docs/reference.md",
+   "status": "modified",
+   "hunks": [
+    [
+     3481,
+     3485
+    ]
+   ]
+  },
+  {
+   "path": "pgpm_core/install.sql",
+   "status": "modified",
+   "hunks": [
+    [
+     14287,
+     14294
+    ],
+    [
+     14298,
+     14299
+    ]
+   ]
+  },
+  {
+   "path": "test.sh",
+   "status": "modified",
+   "hunks": [
+    [
+     1268,
+     1268
+    ]
+   ]
+  },
+  {
+   "path": "tests/335_check_time_monotonic_session_zone_test.sql",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     108
+    ]
+   ]
+  }
+ ],
+ "units": [
+  {
+   "unit": "pgpm_core/install.sql:14287-14294",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    14287,
+    14294
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm.check_time_monotonic",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    14295,
+    14317
+   ],
+   "why": "touched at 14298-14299"
+  }
+ ],
+ "exercised_by": {
+  "pgpm.check_time_monotonic": [
+   "bench/check_time_monotonic_session_zone.sh",
+   "docs/guide.md",
+   "docs/reference.md",
+   "docs/reviews/2026-10-09-pass11.md",
+   "docs/reviews/2026-10-12-pass12.md",
+   "tests/16_time_correlation_test.sql",
+   "tests/241_reads_under_caller_rls_conformance_test.sql",
+   "tests/335_check_time_monotonic_session_zone_test.sql"
+  ]
+ },
+ "finder": "P1",
+ "slice": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/check_time_monotonic_session_zone.sh",
+   "docs/reference.md",
+   "pgpm_core/install.sql",
+   "test.sh",
+   "tests/335_check_time_monotonic_session_zone_test.sql"
+  ],
+  "units": [
+   "pgpm_core/install.sql:14287-14294",
+   "pgpm.check_time_monotonic"
+  ],
+  "kind": "mixed"
+ },
+ "ledger": [
+  "pgpm_core/install.sql:14287-14294",
+  "pgpm.check_time_monotonic",
+  "CHANGELOG.md",
+  "bench/check_time_monotonic_session_zone.sh",
+  "docs/reference.md",
+  "test.sh",
+  "tests/335_check_time_monotonic_session_zone_test.sql"
+ ]
+}

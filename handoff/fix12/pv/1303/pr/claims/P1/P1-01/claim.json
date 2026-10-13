@@ -1,0 +1,3 @@
+{"tier": 4, "file": "pgpm_core/install.sql", "line": 3510, "lens": "fresh surface",
+ "scenario": "pgpm._disown_retirement's retain_disown remedy still spells the DROP alone ('or drop it: drop table X;'; v_parent_q is computed and never used), so the remedy typed as logged drops the table and leaves its pgpm.part row anchored to a gone oid, and every later retain()/retire() logs fail_retain_identity for [100, 200) while status().retain_drop_failures climbs (#1272 unfixed); the PR body, docs/reference.md's retire entry and log-action row, tests/339 (fails 7 of 23 on this tree) and tests/327 part C all say the method spells the DELETE of the row beside the DROP",
+ "repro": "repro.sql", "install": ["pgpm_core/install.sql"], "fixtures": false}

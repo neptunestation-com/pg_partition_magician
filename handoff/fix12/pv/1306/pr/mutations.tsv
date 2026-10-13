@@ -1,0 +1,2 @@
+regrain_isolation_serializable_only	pgpm_core/install.sql
+regrain_step_isolation_unchecked	pgpm_core/install.sql

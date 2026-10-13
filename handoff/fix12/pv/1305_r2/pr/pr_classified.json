@@ -1,0 +1,156 @@
+{
+  "trees": {
+    "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/base",
+    "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/head",
+    "review": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/review",
+    "mutants": {
+      "native_bound_key_session_abbreviations": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/mutants/native_bound_key_session_abbreviations",
+      "native_bound_key_session_datestyle": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/mutants/native_bound_key_session_datestyle",
+      "native_bound_key_utc": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/mutants/native_bound_key_utc",
+      "over_retired_chunks_session_zone": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1305_r2/pr/mutants/over_retired_chunks_session_zone"
+    }
+  },
+  "acceptance": "ACC",
+  "claims": [
+    {
+      "id": "ACC-01",
+      "finder": "ACC",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 5180,
+      "lens": "time and zones",
+      "scenario": "#1264 acceptance (F15-02): _over_retired_chunks casts an offset-less retired ledger bound (an older install's row) with ::timestamptz in the caller's TimeZone, so a partition held over a retired chunk from a UTC session (pg_cron's maintain) is not held from an Asia/Kolkata session (a hand _archive_step or retain()), which then archives it over the retired range; it should read such a bound in the grid's registered partition_tz and give every session the same answer, as its header promises",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "---------------------------------------------------------------------------------\n ok 4 - LIVENESS: from a UTC session the first attached partition is held over the retired chunk\n(1 row)\n\nSET\n                                            ok                                             \n-------------------------------------------------------------------------------------------\n ok 5 - LIVENESS: read in Asia/Kolkata the same chunk text ends before that partition's lo\n(1 row)\n\n                                                                                   is                                                                                    \n-------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 6 - from an Asia/Kolkata session the same call holds the same partition (it does not: the offset-less bound is read in the session zone, not the grid's)        +\n # Failed test 6: \"from an Asia/Kolkata session the same call holds the same partition (it does not: the offset-less bound is read in the session zone, not the grid's)\"+\n #         have: NULL                                                                                                                                                   +\n #         want: t_p2026_01_to_2026_11\n(1 row)\n\nSET\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 6\n(1 row)\n\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "k's lo carries an offset (pgpm's canonical text)\n(1 row)\n\n                                                     ok                                                      \n-------------------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: the retired chunk's hi carries no offset (no order key), the shape an older ledger row has\n(1 row)\n\n                                               is                                                \n-------------------------------------------------------------------------------------------------\n ok 4 - LIVENESS: from a UTC session the first attached partition is held over the retired chunk\n(1 row)\n\nSET\n                                            ok                                             \n-------------------------------------------------------------------------------------------\n ok 5 - LIVENESS: read in Asia/Kolkata the same chunk text ends before that partition's lo\n(1 row)\n\n                                                                             is                                                                              \n-------------------------------------------------------------------------------------------------------------------------------------------------------------\n ok 6 - from an Asia/Kolkata session the same call holds the same partition (it does not: the offset-less bound is read in the session zone, not the grid's)\n(1 row)\n\nSET\n finish \n--------\n(0 rows)\n\n"
+        },
+        "mutant:native_bound_key_session_abbreviations": {
+          "fails": false,
+          "exit": 0,
+          "tail": "k's lo carries an offset (pgpm's canonical text)\n(1 row)\n\n                                                     ok                                                      \n-------------------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: the retired chunk's hi carries no offset (no order key), the shape an older ledger row has\n(1 row)\n\n                                               is                                                \n-------------------------------------------------------------------------------------------------\n ok 4 - LIVENESS: from a UTC session the first attached partition is held over the retired chunk\n(1 row)\n\nSET\n                                            ok                                             \n-------------------------------------------------------------------------------------------\n ok 5 - LIVENESS: read in Asia/Kolkata the same chunk text ends before that partition's lo\n(1 row)\n\n                                                                             is                                                                              \n-------------------------------------------------------------------------------------------------------------------------------------------------------------\n ok 6 - from an Asia/Kolkata session the same call holds the same partition (it does not: the offset-less bound is read in the session zone, not the grid's)\n(1 row)\n\nSET\n finish \n--------\n(0 rows)\n\n"
+        },
+        "mutant:native_bound_key_session_datestyle": {
+          "fails": false,
+          "exit": 0,
+          "tail": "k's lo carries an offset (pgpm's canonical text)\n(1 row)\n\n                                                     ok                                                      \n-------------------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: the retired chunk's hi carries no offset (no order key), the shape an older ledger row has\n(1 row)\n\n                                               is                                                \n-------------------------------------------------------------------------------------------------\n ok 4 - LIVENESS: from a UTC session the first attached partition is held over the retired chunk\n(1 row)\n\nSET\n                                            ok                                             \n-------------------------------------------------------------------------------------------\n ok 5 - LIVENESS: read in Asia/Kolkata the same chunk text ends before that partition's lo\n(1 row)\n\n                                                                             is                                                                              \n-------------------------------------------------------------------------------------------------------------------------------------------------------------\n ok 6 - from an Asia/Kolkata session the same call holds the same partition (it does not: the offset-less bound is read in the session zone, not the grid's)\n(1 row)\n\nSET\n finish \n--------\n(0 rows)\n\n"
+        },
+        "mutant:native_bound_key_utc": {
+          "fails": false,
+          "exit": 0,
+          "tail": "k's lo carries an offset (pgpm's canonical text)\n(1 row)\n\n                                                     ok                                                      \n-------------------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: the retired chunk's hi carries no offset (no order key), the shape an older ledger row has\n(1 row)\n\n                                               is                                                \n-------------------------------------------------------------------------------------------------\n ok 4 - LIVENESS: from a UTC session the first attached partition is held over the retired chunk\n(1 row)\n\nSET\n                                            ok                                             \n-------------------------------------------------------------------------------------------\n ok 5 - LIVENESS: read in Asia/Kolkata the same chunk text ends before that partition's lo\n(1 row)\n\n                                                                             is                                                                              \n-------------------------------------------------------------------------------------------------------------------------------------------------------------\n ok 6 - from an Asia/Kolkata session the same call holds the same partition (it does not: the offset-less bound is read in the session zone, not the grid's)\n(1 row)\n\nSET\n finish \n--------\n(0 rows)\n\n"
+        },
+        "mutant:over_retired_chunks_session_zone": {
+          "fails": true,
+          "exit": 0,
+          "tail": "---------------------------------------------------------------------------------\n ok 4 - LIVENESS: from a UTC session the first attached partition is held over the retired chunk\n(1 row)\n\nSET\n                                            ok                                             \n-------------------------------------------------------------------------------------------\n ok 5 - LIVENESS: read in Asia/Kolkata the same chunk text ends before that partition's lo\n(1 row)\n\n                                                                                   is                                                                                    \n-------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 6 - from an Asia/Kolkata session the same call holds the same partition (it does not: the offset-less bound is read in the session zone, not the grid's)        +\n # Failed test 6: \"from an Asia/Kolkata session the same call holds the same partition (it does not: the offset-less bound is read in the session zone, not the grid's)\"+\n #         have: NULL                                                                                                                                                   +\n #         want: t_p2026_01_to_2026_11\n(1 row)\n\nSET\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 6\n(1 row)\n\n"
+        }
+      },
+      "class": "fixed",
+      "acceptance": {
+        "fails_on_base": true,
+        "passes_on_head": true,
+        "mutant_restores": {
+          "native_bound_key_session_abbreviations": false,
+          "native_bound_key_session_datestyle": false,
+          "native_bound_key_utc": false,
+          "over_retired_chunks_session_zone": true
+        },
+        "any_restores": true
+      }
+    },
+    {
+      "id": "ACC-02",
+      "finder": "ACC",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 5158,
+      "lens": "closing claim",
+      "scenario": "#1264 acceptance (V-01-1305): PR #1305's pgpm._native_bound_key pins TimeZone (to partition_tz) and DateStyle (ISO, MDY) but not timezone_abbreviations, so a legacy retired ledger bound that names its zone by abbreviation (a pre-#500 render under DateStyle SQL or Postgres, e.g. '01/01/2026 01:00:00 IST' from an Asia/Jerusalem writer, or a pre-#977 covered_hi kept verbatim) still reads as a different instant per session: IST is +02 under the Default set and +05:30 under the India set. The same _over_retired_chunks call holds the partition from pg_cron's default session and not from an operator session with timezone_abbreviations = 'India', which then archives it over the retired range (the #1264 consequence), against the helper's 'read the same from every session' and tests/317's same-answer contract. The PR's body claims to cover DateStyle-shaped pre-#500 bounds, and those are exactly the renders that carry abbreviations.",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": " over the retired chunk\n(1 row)\n\nSET\nSET\n                                       ok                                       \n--------------------------------------------------------------------------------\n ok 4 - LIVENESS: with the India abbreviations the same hi reads before p0's lo\n(1 row)\n\n                               is                               \n----------------------------------------------------------------\n ok 5 - GUARD: the operator session keeps the default DateStyle\n(1 row)\n\n                                                                                 is                                                                                 \n--------------------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 6 - from an operator session with timezone_abbreviations = India the same call holds p0 (it does not: the abbreviation is read in the caller's set)        +\n # Failed test 6: \"from an operator session with timezone_abbreviations = India the same call holds p0 (it does not: the abbreviation is read in the caller's set)\"+\n #         have: NULL                                                                                                                                              +\n #         want: t_p2026_01_to_2026_11\n(1 row)\n\nRESET\nSET\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 6\n(1 row)\n\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "   is                                                   \n-------------------------------------------------------------------------------------------------------\n ok 2 - GUARD: under the Default abbreviations the hi is the instant its writer meant, an hour into p0\n(1 row)\n\n                                        is                                         \n-----------------------------------------------------------------------------------\n ok 3 - LIVENESS: from pg_cron's default session p0 is held over the retired chunk\n(1 row)\n\nSET\nSET\n                                       ok                                       \n--------------------------------------------------------------------------------\n ok 4 - LIVENESS: with the India abbreviations the same hi reads before p0's lo\n(1 row)\n\n                               is                               \n----------------------------------------------------------------\n ok 5 - GUARD: the operator session keeps the default DateStyle\n(1 row)\n\n                                                                           is                                                                           \n--------------------------------------------------------------------------------------------------------------------------------------------------------\n ok 6 - from an operator session with timezone_abbreviations = India the same call holds p0 (it does not: the abbreviation is read in the caller's set)\n(1 row)\n\nRESET\nSET\n finish \n--------\n(0 rows)\n\n"
+        },
+        "mutant:native_bound_key_session_abbreviations": {
+          "fails": true,
+          "exit": 0,
+          "tail": " over the retired chunk\n(1 row)\n\nSET\nSET\n                                       ok                                       \n--------------------------------------------------------------------------------\n ok 4 - LIVENESS: with the India abbreviations the same hi reads before p0's lo\n(1 row)\n\n                               is                               \n----------------------------------------------------------------\n ok 5 - GUARD: the operator session keeps the default DateStyle\n(1 row)\n\n                                                                                 is                                                                                 \n--------------------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 6 - from an operator session with timezone_abbreviations = India the same call holds p0 (it does not: the abbreviation is read in the caller's set)        +\n # Failed test 6: \"from an operator session with timezone_abbreviations = India the same call holds p0 (it does not: the abbreviation is read in the caller's set)\"+\n #         have: NULL                                                                                                                                              +\n #         want: t_p2026_01_to_2026_11\n(1 row)\n\nRESET\nSET\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 6\n(1 row)\n\n"
+        },
+        "mutant:native_bound_key_session_datestyle": {
+          "fails": false,
+          "exit": 0,
+          "tail": "   is                                                   \n-------------------------------------------------------------------------------------------------------\n ok 2 - GUARD: under the Default abbreviations the hi is the instant its writer meant, an hour into p0\n(1 row)\n\n                                        is                                         \n-----------------------------------------------------------------------------------\n ok 3 - LIVENESS: from pg_cron's default session p0 is held over the retired chunk\n(1 row)\n\nSET\nSET\n                                       ok                                       \n--------------------------------------------------------------------------------\n ok 4 - LIVENESS: with the India abbreviations the same hi reads before p0's lo\n(1 row)\n\n                               is                               \n----------------------------------------------------------------\n ok 5 - GUARD: the operator session keeps the default DateStyle\n(1 row)\n\n                                                                           is                                                                           \n--------------------------------------------------------------------------------------------------------------------------------------------------------\n ok 6 - from an operator session with timezone_abbreviations = India the same call holds p0 (it does not: the abbreviation is read in the caller's set)\n(1 row)\n\nRESET\nSET\n finish \n--------\n(0 rows)\n\n"
+        },
+        "mutant:native_bound_key_utc": {
+          "fails": false,
+          "exit": 0,
+          "tail": "   is                                                   \n-------------------------------------------------------------------------------------------------------\n ok 2 - GUARD: under the Default abbreviations the hi is the instant its writer meant, an hour into p0\n(1 row)\n\n                                        is                                         \n-----------------------------------------------------------------------------------\n ok 3 - LIVENESS: from pg_cron's default session p0 is held over the retired chunk\n(1 row)\n\nSET\nSET\n                                       ok                                       \n--------------------------------------------------------------------------------\n ok 4 - LIVENESS: with the India abbreviations the same hi reads before p0's lo\n(1 row)\n\n                               is                               \n----------------------------------------------------------------\n ok 5 - GUARD: the operator session keeps the default DateStyle\n(1 row)\n\n                                                                           is                                                                           \n--------------------------------------------------------------------------------------------------------------------------------------------------------\n ok 6 - from an operator session with timezone_abbreviations = India the same call holds p0 (it does not: the abbreviation is read in the caller's set)\n(1 row)\n\nRESET\nSET\n finish \n--------\n(0 rows)\n\n"
+        },
+        "mutant:over_retired_chunks_session_zone": {
+          "fails": false,
+          "exit": 0,
+          "tail": "   is                                                   \n-------------------------------------------------------------------------------------------------------\n ok 2 - GUARD: under the Default abbreviations the hi is the instant its writer meant, an hour into p0\n(1 row)\n\n                                        is                                         \n-----------------------------------------------------------------------------------\n ok 3 - LIVENESS: from pg_cron's default session p0 is held over the retired chunk\n(1 row)\n\nSET\nSET\n                                       ok                                       \n--------------------------------------------------------------------------------\n ok 4 - LIVENESS: with the India abbreviations the same hi reads before p0's lo\n(1 row)\n\n                               is                               \n----------------------------------------------------------------\n ok 5 - GUARD: the operator session keeps the default DateStyle\n(1 row)\n\n                                                                           is                                                                           \n--------------------------------------------------------------------------------------------------------------------------------------------------------\n ok 6 - from an operator session with timezone_abbreviations = India the same call holds p0 (it does not: the abbreviation is read in the caller's set)\n(1 row)\n\nRESET\nSET\n finish \n--------\n(0 rows)\n\n"
+        }
+      },
+      "class": "fixed",
+      "acceptance": {
+        "fails_on_base": true,
+        "passes_on_head": true,
+        "mutant_restores": {
+          "native_bound_key_session_abbreviations": true,
+          "native_bound_key_session_datestyle": false,
+          "native_bound_key_utc": false,
+          "over_retired_chunks_session_zone": false
+        },
+        "any_restores": true
+      }
+    },
+    {
+      "id": "P1-01",
+      "finder": "P1",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 5178,
+      "lens": "time and zones",
+      "scenario": "_over_retired_chunks reads current_setting('TimeZone') into v_tz and hands the CALLER's zone to _native_bound_key as p_tz, not config.partition_tz, so an offset-less retired bound is still wall time in the session's zone: over an Asia/Tokyo grid a UTC session (pg_cron's) holds p0 over a chunk that ends below p0 on the grid's clock, and a Pacific/Kiritimati session holds nothing over the chunk that reaches into p0; it should read the bound on the grid's clock and answer the same from every session, as the PR body, the CHANGELOG, docs/reference.md and the function's own header promise (the PR's own tests/334 fails 5 of 22 on this head: parts B to E and G)",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "00:00) recorded for gone_b, whose relation no longer exists, at obj/b+\n #         want: t_p2026_01_to_2026_11: [2025-12-31 20:00:00+09, 2026-01-01 03:00:00) recorded for gone_b, whose relation no longer exists, at obj/b\n(1 row)\n\nSET\n                                   ok                                    \n-------------------------------------------------------------------------\n ok 7 - LIVENESS: read in Pacific/Kiritimati, gone_b's hi ends before p0\n(1 row)\n\n                                                                         is                                                                          \n-----------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 8 - from a Pacific/Kiritimati session p0 is still held over gone_b                                                                          +\n # Failed test 8: \"from a Pacific/Kiritimati session p0 is still held over gone_b\"                                                                  +\n #         have: <nothing held>                                                                                                                     +\n #         want: t_p2026_01_to_2026_11: [2025-12-31 20:00:00+09, 2026-01-01 03:00:00) recorded for gone_b, whose relation no longer exists, at obj/b\n(1 row)\n\nSET\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 8\n(1 row)\n\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "------------------------------------------------------------------------\n ok 3 - LIVENESS: both retired chunks' hi carry no offset (no order key), the shape an older ledger row has\n(1 row)\n\n                                                      is                                                      \n--------------------------------------------------------------------------------------------------------------\n ok 4 - LIVENESS: from a session on the grid's own zone, p0 is held over gone_b alone (the grid-clock answer)\n(1 row)\n\nSET\n                            ok                            \n----------------------------------------------------------\n ok 5 - LIVENESS: read in UTC, gone_a's hi ends inside p0\n(1 row)\n\n                                             is                                              \n---------------------------------------------------------------------------------------------\n ok 6 - from a UTC session (pg_cron's) p0 is held over gone_b alone, not over gone_a as well\n(1 row)\n\nSET\n                                   ok                                    \n-------------------------------------------------------------------------\n ok 7 - LIVENESS: read in Pacific/Kiritimati, gone_b's hi ends before p0\n(1 row)\n\n                                  is                                   \n-----------------------------------------------------------------------\n ok 8 - from a Pacific/Kiritimati session p0 is still held over gone_b\n(1 row)\n\nSET\n finish \n--------\n(0 rows)\n\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": "00:00) recorded for gone_b, whose relation no longer exists, at obj/b+\n #         want: t_p2026_01_to_2026_11: [2025-12-31 20:00:00+09, 2026-01-01 03:00:00) recorded for gone_b, whose relation no longer exists, at obj/b\n(1 row)\n\nSET\n                                   ok                                    \n-------------------------------------------------------------------------\n ok 7 - LIVENESS: read in Pacific/Kiritimati, gone_b's hi ends before p0\n(1 row)\n\n                                                                         is                                                                          \n-----------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 8 - from a Pacific/Kiritimati session p0 is still held over gone_b                                                                          +\n # Failed test 8: \"from a Pacific/Kiritimati session p0 is still held over gone_b\"                                                                  +\n #         have: <nothing held>                                                                                                                     +\n #         want: t_p2026_01_to_2026_11: [2025-12-31 20:00:00+09, 2026-01-01 03:00:00) recorded for gone_b, whose relation no longer exists, at obj/b\n(1 row)\n\nSET\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 8\n(1 row)\n\n"
+        }
+      },
+      "class": "seed_hit",
+      "seed": "S1"
+    }
+  ]
+}

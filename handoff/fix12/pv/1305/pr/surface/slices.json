@@ -1,0 +1,20 @@
+{
+ "P1": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/over_retired_chunks_grid_zone.sh",
+   "docs/reference.md",
+   "pgpm_core/install.sql",
+   "test.sh",
+   "tests/334_over_retired_chunks_grid_zone_test.sql"
+  ],
+  "units": [
+   "pgpm_core/install.sql:5137-5143",
+   "pgpm._native_bound_key",
+   "pgpm._over_retired_chunks",
+   "pgpm.retain",
+   "pgpm._archive_step"
+  ],
+  "kind": "mixed"
+ }
+}

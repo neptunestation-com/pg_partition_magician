@@ -1,0 +1,3 @@
+{"tier": 1, "file": "pgpm_core/install.sql", "line": 12246, "lens": "fresh surface",
+ "scenario": "untransmute never asks _refuse_detach_pending (#1157: neither before the gate nor under its ACCESS EXCLUSIVE), so with a forward partition pending a concurrent detach (an operator's DETACH ... CONCURRENTLY that died in its wait) its row is invisible to the outside-rows gate, the reverse goes ahead and the DROP of the parent takes the partition and its row; it should refuse naming the pending partition",
+ "repro": "repro.sql", "install": ["pgpm_core/install.sql"], "fixtures": false}

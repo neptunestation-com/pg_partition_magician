@@ -1,0 +1,78 @@
+# F9 coverage ledger (slice S8a)
+
+- archive.to_s3 | read: yes | fresh surface / boundary: three-column keyset, NULL run switch on an empty page, page of exactly fetch_rows, relkind refusal over the inheritance tree, type allowlist and probe, typmod through domains, conservation count+hash; held (no repro; DateStyle-abbreviation cursor round trip is caught by the conservation check)
+- pgpm_core/install.sql:278-281 | read: yes | config.regrain_written_xid: writers (copy batch, reconcile) and reader (_regrain_snapshot_wait); a stale xid from a finished run is only used when the new run wrote nothing; held
+- pgpm_core/install.sql:411-421 | read: yes | part.detach_dispatched_oid column comment against retire()/_detach_dispatched/_disown_retirement; held
+- pgpm_core/install.sql:429-454 | read: yes | upgrade_adopted_anchor block, ordering against _backfill_chunk_oids and its drop; held
+- pgpm_core/install.sql:792-796 | read: yes | scratch.written_xid; _scratch_record resets it on a new object; held
+- pgpm._cell_walk_rows | read: yes | materialized filter before casts, ordering total over (lo_n, lo_t, lo, hi, built), arrays aligned; held
+- pgpm._cell_walk_step | read: yes | one-directional covered verdict (built reach vs dead reach), passed-row invariant on an ascending walk; held
+- pgpm._scratch_written | read: yes | called by the copy per chunk and both drain steps; held
+- pgpm._scratch_record | read: yes | on-conflict resets written_xid; held
+- pgpm.obtain | read: yes | contracts: the #710 hole branch is an empty `null;`, fail_obtain_name never logged -> claim F9-02
+- pgpm.extend_to | read: yes | same empty hole branch (line 3096), covered by F9-02; dry count with the edge cell and lock projection read, held
+- pgpm._disown_retirement | read: yes | clears all three columns, logs retain_disown once; held
+- pgpm._detach_dispatched | read: yes | keyed by child_name and oid with the mark; held (rename edge noted in null results)
+- pgpm._detach_job_holds | read: yes | swallows every error to false; only read for an attached partition; held
+- pgpm._disown_unvouched_retirements | read: yes | pending null (detached) vs false (attached) arms, record-after-the-fact for an armed attached mark; held
+- pgpm.retire | read: yes | lock-then-read via pg_partition_ancestors, disown on detached/pending without record, mark+dispatch+record in one transaction; held
+- pgpm._retain_recall | read: yes | armed/pending/detached arms, disown of an unvouched detached mark, reattach; held
+- pgpm._native_order_key | read: yes | id and offset-bearing ISO regexes, null arm for offset-less or BC text, parallel unsafe; held
+- pgpm_core/install.sql:4788-4816 | read: yes | _backfill_chunk_oids header against its body (adopted anchors, block states A/O vs D/R); held
+- pgpm._backfill_chunk_oids | read: yes | identity-only attribution, retired marking of the rest, _mark_gone_chunks; held
+- pgpm_core/install.sql:4854-4871 | read: yes | the two upgrade DO blocks and the adopted-anchor drop ordering; held
+- pgpm_core/install.sql:5126-5135 | read: yes | range-first header of _over_retired_chunks; held
+- pgpm._over_retired_chunks | read: yes | floor by min attached key, unkeyed lo disables the floor, null-hi rows always read; held
+- pgpm._archive_hold_partition | read: yes | ACCESS SHARE does not exclude DETACH ... CONCURRENTLY's first transaction; built a two-session repro, the strategy still saw the rows (same statement), so no claim (null results)
+- pgpm._archive_step | read: yes | hold then identity then sizing then strategy; orphan discard and retired-range skip; held
+- pgpm._regrain_reconcile | read: yes | ctid batch, eligibility below cursor, off-shape text_time keys placed by encoded range; held
+- pgpm._fk_def_unvalidated | read: yes | strips trailing NOT VALID only; held
+- pgpm._regrain_copy_make | read: yes | LIKE + validated outgoing FKs on the empty copy; held
+- pgpm._regrain_fresh_copy_drift | read: yes | probe name taken -> null (restart proceeds), probe dropped in-transaction; held
+- pgpm_core/install.sql:6620-6633 | read: yes | the #633 name+definition excuse in the drift comment against _regrain_shape_drift's predicate; held
+- pgpm._regrain_shape_drift | read: yes | column/check/fk signatures, copy _ck exclusion, NOT VALID twin excuse by name; held
+- pgpm._naive_grid_zone_off | read: yes | time and zones: tests a constant offset, the comment promises zero offset; a fixed-offset zone (Asia/Tokyo) reads as on the clock; hypothesis only
+- pgpm._reconvert_remedy | read: yes | remedy text names untransmute only while reversible; held
+- pgpm._regrain_step_shape | read: yes | domain unwrap, scale/typmod, registered grid unit, naive zone, encoded unit; held
+- pgpm._regrain_fine_count | read: yes | boundary: discounts the aged prefix even with archive_fn set, unlike regrain_step's copy loop -> claim F9-04
+- pgpm._regrain_swap_budget | read: yes | 2n > slots/2 line, warn vs refuse; inherits F9-04's undercount
+- pgpm._snapshot_wait | read: yes | backend_xmin age predicate re-read per poll, stat snapshot cleared, pass/chain/peer rules, marker key; held
+- pgpm._regrain_snapshot_wait | read: yes | reads config.regrain_written_xid; held
+- pgpm.regrain_step | read: yes | prepare budget gate, aged-skip only without archive_fn (F9-04), written_xid writers, swap wait placement and measured budget; held otherwise
+- pgpm_core/install.sql:9060-9063 | read: yes | _time_unit_contract header (date rule moved in); held
+- pgpm._time_unit_contract | read: yes | date step rule then _time_unit_breach of the anchor; held
+- pgpm._transmute_refuse_child_holders | read: yes | pg_class/pg_type under statement snapshot, attached partitions excluded; held
+- pgpm._transmute | read: yes | skimmed whole (comments stripped), read the cutover's forward-name block, 23505 handler, the refusal after obtain; held
+- pgpm_core/install.sql:11843-11853 | read: yes | the reaper re-read header; held
+- pgpm._transmute_reap | read: yes | ACCESS EXCLUSIVE then FOR UPDATE SKIP LOCKED re-read, PGPMR rollback; held
+- pgpm._detach_reap | read: yes | disown before finalize outside the handler; held
+- pgpm._is_clone_pkey_name | read: yes | 63-byte clip at byte level; held
+- pgpm._refuse_detach_pending | read: yes | defined but never called by untransmute -> claim F9-01
+- pgpm.untransmute | read: yes | both #1157 gates missing; DROP takes a pending partition with its rows -> claim F9-01 (Tier 1)
+- pgpm._same_step | read: yes | months + residual seconds comparison, null handling; held
+- pgpm.set_regrain | read: yes | swap budget warning loop (inherits F9-04), _same_step in-flight check; held
+- pgpm_core/install.sql:13873-13880 | read: yes | forget_missing's #1164 header; held
+- pgpm.forget_missing | read: yes | chunk list read before deletes into the log row; held
+- pgpm.restore_incoming_fks | read: yes | the #633 park is written but never read by the selection loop -> claim F9-03
+- pgpm_core/uninstall.sql:164-167 | read: yes | restore by ids to bypass the park; consistent with the contract F9-03 breaks
+- pgpm_hypertable/install.sql:166-171 | read: yes | delta found by record in any schema; held
+- pgpm_hypertable/install.sql:426-433 | read: yes | _from_hypertable_check_arguments header; held
+- pgpm._from_hypertable_check_arguments | read: yes | _time_unit_contract with _ts_text(anchor); held
+- pgpm.from_hypertable_copy | read: yes | per-chunk _scratch_written, record of dest/delta, FK carry; held
+- pgpm.from_hypertable_drain_delta_step | read: yes | dest ROW EXCLUSIVE first, delta by record, written_xid; held
+- pgpm.from_hypertable_drain_delta | read: yes | lock per iteration, threshold loop; held
+- pgpm.from_hypertable_drain_appends_step | read: yes | watermark predicate, written_xid; held
+- pgpm.from_hypertable_drain_appends | read: yes | #1158 re-lock after each commit; held
+- pgpm.from_hypertable_cutover | read: yes | SHARE on dest, baseline, snapshot wait on scratch.written_xid, under-lock catch-up and conservation; held
+- pgpm.from_hypertable | read: yes | argument checks before copy then cutover; held
+- pgpm._frontier_native | read: yes | dead-oid refusal, RLS refusal, text_time fallback; held
+- pgpm.retain | read: yes | recall first, held-over-retired candidates excluded, per-child subtransaction; held
+- pgpm._regrain_step_forward | read: yes | forward test then shape; held
+- pgpm.regrain | read: yes | lock order, own-xid wait via regrain_step; held
+- pgpm.transmute | read: yes | both overloads pass anchors through _ts_text; held
+- pgpm.set_retain | read: yes | tighten refusal, recall without reattach; held
+- pgpm.maintain | read: yes | step commits, 200 ms lock_timeout as the wait's budget, skip_regrain; held
+- pgpm.maintain_all | read: yes | reapers then sweep order; held
+- pgpm.maintain_obtain | read: yes | back-off walk still per-cell; held
+- pgpm.maintain_obtain_all | read: yes | sweep order shared; held
+- pgpm._from_hypertable_check_shape | read: yes | asked before and under the lock; held

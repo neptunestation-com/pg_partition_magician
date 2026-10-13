@@ -1,0 +1,3 @@
+{"tier": 5, "file": "scripts/check_archive_child_by_oid.py", "line": 613, "lens": "fresh surface",
+ "scenario": "check_archive_child_by_oid.py's rule 1 says nothing is cast to regclass from a parenthesised expression (a relation found by a name built at run time), but matches it by spelling, a ')' then '::' then the token 'regclass': the same cast written (...)::pg_catalog.regclass, CAST(... AS regclass) or regclass(...) (the last two named by its own docstring as casts) passes with no violation; the lint should refuse all three as it refuses (...)::regclass",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

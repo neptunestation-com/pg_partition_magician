@@ -1,0 +1,43 @@
+# F6 coverage ledger (pass 12, slice S6)
+
+- pgpm._surface_shapes | read: yes | contracts: declared shapes vs the five functions; immutable, defaults counted not rendered; held
+- pgpm._surface_unreplaceable | read: yes | fresh surface/operator error: matched by declared sig only (an old shape under another sig is not seen, by design), deptype 'n' dependants incl. views and BEGIN ATOMIC bodies, default-removal rule; held
+- pgpm._surface_prepare | read: yes | operator error (view over status()): refuses whole before any drop with 2BP01; a dropped-and-recreated function loses operator GRANTs (hypothesis H6, no repro)
+- pgpm._surface_settled | read: yes | end-of-file check of every declared shape incl. ndefaults equality; held
+- pgpm.version | read: yes | contracts: returns '0.6.0' while CHANGELOG has an Unreleased section (expected until release); pgpm.installed row appended last; held
+- pgpm.from_hypertable_disk_estimate | read: yes | null refusal, chunk sizes summed by schema/name; held
+- pgpm.from_hypertable_time_estimate | read: yes | operator error: p_copy_mibps NaN raises raw 'interval out of range' (the <= 0 guard misses NaN), Infinity gives 00:00:00; observed, not claimed (informational sizing only)
+- pgpm._from_hypertable_check_dimension | read: yes | dimension_number = 1, type set; held
+- pgpm._from_hypertable_check_names | read: yes | boundary: octet_length of the four derived names vs 63; held
+- pgpm._from_hypertable_scratch | read: yes | fresh surface: copy by record, schema-pinned; held
+- pgpm._from_hypertable_scratch_follow | read: yes | owner follow + delta grant re-sync, no locks taken before the drains' copy lock; held
+- pgpm._from_hypertable_scratch_check | read: yes | name holders vs records, owner membership/CREATE; held
+- pgpm._from_hypertable_check_exclusion | read: yes | asked up front and under the lock; held
+- pgpm._from_hypertable_tmp_name | read: yes | boundary: 63-byte fallback to pgpm_new_<oid>; held
+- pgpm._from_hypertable_key_tmp | read: yes | adopt-or-build by destination identity; held (the caller's conname is the defect, F6-02)
+- pgpm._from_hypertable_index_ddl | read: yes | prefix replaced by identity; held
+- pgpm._from_hypertable_check_key | read: yes | bare unique index refusal + remedy text; held
+- pgpm._from_hypertable_check_handoff | read: yes | time and zones: monolith name rendered in UTC with _ts_text; IntervalStyle iso_8601 run end to end (partition_step stored 'P1D', names fine); held
+- pgpm._from_hypertable_check_frontier | read: yes | naive column read as UTC wall time; skipped under p_force_frontier; held
+- pgpm._from_hypertable_check_publications | read: yes | pubviaroot + filter/column list; held
+- pgpm._from_hypertable_carried_ddl | read: yes | owner/ACL/RLS/policies/comment/triggers/replica identity/publications; capture triggers excluded by record, 0.6.0 proof; held
+- pgpm._from_hypertable_shape_diff | read: yes | columns, NOT NULL, collation, defaults, CHECK, outgoing FKs, order; held
+- pgpm._from_hypertable_check_shape | read: yes | asked up front and under the lock; held
+- pgpm.from_hypertable_preflight | read: yes | refusal order, incoming FK vs reused key, NOTICEs; held
+- pgpm._from_hypertable_ctl_text | read: yes | time and zones: ISO pinned, polymorphic keeps the column type; held
+- pgpm.from_hypertable_copy | read: yes | CLAIM F6-02 (key conname taken by conindid alone picks an incoming FK); chunk bounds per type, written_xid per batch, re-run reset of written_xid by _scratch_record; rest held
+- pgpm.from_hypertable_drain_delta_step | read: yes | fresh surface: copy locked ROW EXCLUSIVE before delta/source, _scratch_written after the pure delete; held
+- pgpm.from_hypertable_drain_delta | read: yes | copy lock first in every batch transaction; best-effort exit; held
+- pgpm._from_hypertable_past | read: yes | NULL watermark = true, inclusive form for keyed catch-up; held
+- pgpm.from_hypertable_drain_appends_step | read: yes | boundary: tie-inclusive batch bound, empty copy, typmod cast; held
+- pgpm.from_hypertable_drain_appends | read: yes | copy lock re-taken after each COMMIT; watermark read under it; held
+- pgpm.from_hypertable_cutover | read: yes | fresh surface: SHARE on copy before baseline, _snapshot_wait after it with written_xid (null = own xid), drains blocked behind SHARE hold no source lock (no deadlock); run end to end with tracking and an incoming FK; held apart from F6-02's consequence
+- pgpm.from_hypertable | read: yes | argument checks before copy; timestamp(0) dimension with a 0.5 s anchor refused before any copy (no m3_pgpm_dest created); held
+- pgpm._from_hypertable_check_arguments | read: yes | boundary/time: delegates to _refuse_bad_transmute_arguments and _time_unit_contract with _ts_text anchor; run: refusal before copy; held
+- pgpm_core/uninstall.sql | read: yes | failure injection: refusal halfway (regrain sweep block runs before the refusal block; only matters without --single-transaction, hypothesis H5); record sweep order fn > delta > dest, copy kept when hypertable gone; held
+- scripts/archive_partition_whole.sql | read: yes | CLAIM F6-01 (no _part_detached_by_hand filter and no _archive_hold_partition call despite header/comments; rows lost after re-attach + retain)
+- scripts/build_install_bundle.sh | read: yes | BEGIN/COMMIT wrap, include inlining, unhandled metacommand exit; held
+- scripts/build_dbdev_package.sh | read: yes | strict/warn cap, header; held
+- scripts/minify_sql.py | read: yes | ran --selftest (PASS) and minified core install.sql (no lexer error; no E'' strings, no top-level COMMENT ON in core); held
+- Dockerfile | read: yes | pins, optional layers, preload config; held
+- docker-compose.yml | read: yes | service names/ports/profiles vs the harness containers; held

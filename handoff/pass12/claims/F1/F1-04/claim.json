@@ -1,0 +1,3 @@
+{"tier": 3, "file": "pgpm_core/install.sql", "line": 2929, "lens": "contracts versus documentation",
+ "scenario": "when a stranger's table holds a forward cell's name, obtain (and extend_to, line 3096) leaves the cell unbuilt and logs nothing, because the branch that should call _log_unbuilt_cell is `null;` and _log_unbuilt_cell is called from nowhere; reference.md promises a fail_obtain_name row naming the holder every tick, so the hole (every write into it refused) is invisible in pgpm.log",
+ "repro": "repro.sql", "install": ["pgpm_core/install.sql"], "fixtures": false}

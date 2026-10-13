@@ -1,0 +1,14 @@
+{
+ "tier": 3,
+ "file": "pgpm_core/install.sql",
+ "line": 5158,
+ "lens": "closing claim",
+ "scenario": "#1264 acceptance (V-01-1305): PR #1305's pgpm._native_bound_key pins TimeZone (to partition_tz) and DateStyle (ISO, MDY) but not timezone_abbreviations, so a legacy retired ledger bound that names its zone by abbreviation (a pre-#500 render under DateStyle SQL or Postgres, e.g. '01/01/2026 01:00:00 IST' from an Asia/Jerusalem writer, or a pre-#977 covered_hi kept verbatim) still reads as a different instant per session: IST is +02 under the Default set and +05:30 under the India set. The same _over_retired_chunks call holds the partition from pg_cron's default session and not from an operator session with timezone_abbreviations = 'India', which then archives it over the retired range (the #1264 consequence), against the helper's 'read the same from every session' and tests/317's same-answer contract. The PR's body claims to cover DateStyle-shaped pre-#500 bounds, and those are exactly the renders that carry abbreviations.",
+ "repro": "repro.sql",
+ "install": [
+  "pgpm_core/install.sql"
+ ],
+ "fixtures": false,
+ "id": "ACC-02",
+ "finder": "ACC"
+}

@@ -1,0 +1,17 @@
+{
+  "pinned": "341b9c876b59f52fadf5bfa75cc1b11a73eff29c",
+  "seeds": [
+    {
+      "id": "S1",
+      "kind": "mutation",
+      "mutation": "archive_ndjson_bounds_caller_spelling",
+      "file": "pgpm_archive/install.sql",
+      "lens": "fresh surface",
+      "tier": 3,
+      "why": "Pre-#814 archive._encode_upload_ndjson_single: a direct pgpm.archive_to_s3_ndjson call's lo reaches the object key as the caller spelled it, so archive._object_stem parses it under its own pinned TimeZone and DateStyle while the read parsed it in the caller's session: from a 'SQL, DMY' session '02/01/2024' reads the 2 January rows and PUTs them at the 1 February chunk's key. One clause, the lo's reading. tests/archive/db/54 catches it in parts A, C and D (the object is keyed by another instant than the one the read began at).",
+      "lines": [
+        3089
+      ]
+    }
+  ]
+}

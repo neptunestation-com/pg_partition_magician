@@ -1,0 +1,17 @@
+{
+  "pinned": "8f77fc00d0d3c1033dae92c3f8c4116d90a60bfc",
+  "seeds": [
+    {
+      "id": "S1",
+      "kind": "mutation",
+      "mutation": "archive_key_base_spelled_as_stored",
+      "file": "pgpm_archive/install.sql",
+      "lens": "fresh surface",
+      "tier": 3,
+      "why": "Pre-#1260 archive._owned_key: the key base is claimed and written as the prefix was stored, so a table that took a dropped table's name, configured with the same prefix spelled with a leading '/', claims the unclaimed base '/P/<schema>.<table>', keeps the plain key shape, and its chunk PUT replaces the dropped table's object (MinIO reads both spellings as one), the only copy of the rows retire() dropped. One clause, the canonicalisation of the base. tests/archive/db/52 part A catches it (the namesake writes at '/<p>t52.f_0.ndjson' and the dropped table's object holds the namesake's four rows), as does the issue's reproduction.",
+      "lines": [
+        2896
+      ]
+    }
+  ]
+}

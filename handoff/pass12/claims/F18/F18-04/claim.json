@@ -1,0 +1,3 @@
+{"tier": 3, "file": "pgpm_core/install.sql", "line": 2975, "lens": "contracts versus documentation",
+ "scenario": "obtain (and extend_to) never log fail_obtain_name: _log_unbuilt_cell is defined but has no call site, and obtain's branch for an unnamed cell is `null;` under the comment that says it is logged, so a forward cell held by an operator's relation stays a silent hole (writes into it fail with no partition found) where the reference promises a fail_obtain_name row per tick naming the holder.",
+ "repro": "repro.sql", "install": ["pgpm_core/install.sql"], "fixtures": false}

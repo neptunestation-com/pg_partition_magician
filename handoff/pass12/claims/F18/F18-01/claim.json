@@ -1,0 +1,3 @@
+{"tier": 1, "file": "pgpm_core/install.sql", "line": 12243, "lens": "fresh surface",
+ "scenario": "untransmute never calls pgpm._refuse_detach_pending (defined, called nowhere) although its #1157 comment and CHANGELOG say it is asked before the gate and again under the lock: with a partition pending an abandoned DETACH ... CONCURRENTLY, whose rows are invisible through the parent, the gate passes, the DROP of the parent destroys the pending partition and its rows, and pgpm.log records a plain untransmute; it should refuse naming the partition and the FINALIZE remedy.",
+ "repro": "repro.sql", "install": ["pgpm_core/install.sql"], "fixtures": false}

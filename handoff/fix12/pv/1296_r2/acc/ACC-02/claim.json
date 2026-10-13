@@ -1,0 +1,14 @@
+{
+ "tier": 3,
+ "file": "pgpm_core/install.sql",
+ "line": 13476,
+ "lens": "fresh surface",
+ "scenario": "#1263 acceptance (P1-02-1296): Under maintain, the swap's refusal with the new holder clause is logged as skip_regrain through left(sqlerrm, 200), and the head up to 'still running in database ' is already 206 characters with one pid listed, so the holder's database, pid and xid never reach the log row: the operator whose only view is maintain's log (the issue's scenario, skip_regrain every tick) cannot learn which transaction to end, against docs/reference.md ('the tick logs skip_regrain with method beginning ...; the holder clause above follows'). The row should carry the holder (or the clause should come before the pid list).",
+ "repro": "repro.sql",
+ "install": [
+  "pgpm_core/install.sql"
+ ],
+ "fixtures": false,
+ "id": "ACC-02",
+ "finder": "ACC"
+}

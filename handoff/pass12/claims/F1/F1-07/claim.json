@@ -1,0 +1,3 @@
+{"tier": 4, "file": "docs/reference.md", "line": 92, "lens": "time and zones",
+ "scenario": "reference.md says a naive timestamp key written as local wall time east of UTC runs on an hourly grid given obtain above the offset, but transmute's frontier-skew refusal (_frontier_skew_limit, install.sql:10675, now() + step + 1 h on the UTC clock) refuses an Asia/Tokyo table's current rows on an hourly grid as a wrong client clock unless p_force_frontier; either the document should say the conversion needs p_force_frontier (and what it costs) or the allowance should count the documented offset",
+ "repro": "repro.sql", "install": ["pgpm_core/install.sql"], "fixtures": false}

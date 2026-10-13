@@ -1,0 +1,411 @@
+{
+ "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296_r2/pr/base",
+ "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296_r2/pr/review",
+ "files": [
+  {
+   "path": "CHANGELOG.md",
+   "status": "modified",
+   "hunks": [
+    [
+     5,
+     18
+    ]
+   ]
+  },
+  {
+   "path": "bench/snapshot_wait_foreign_floor_holder.sh",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     65
+    ]
+   ]
+  },
+  {
+   "path": "docs/reference.md",
+   "status": "modified",
+   "hunks": [
+    [
+     1000,
+     1003
+    ],
+    [
+     1973,
+     1974
+    ],
+    [
+     1986,
+     2006
+    ],
+    [
+     2065,
+     2069
+    ]
+   ]
+  },
+  {
+   "path": "pgpm_core/install.sql",
+   "status": "modified",
+   "hunks": [
+    [
+     7639,
+     7652
+    ],
+    [
+     7699,
+     7706
+    ],
+    [
+     7733,
+     7733
+    ],
+    [
+     7812,
+     7845
+    ],
+    [
+     13479,
+     13485
+    ]
+   ]
+  },
+  {
+   "path": "test.sh",
+   "status": "modified",
+   "hunks": [
+    [
+     310,
+     310
+    ],
+    [
+     313,
+     319
+    ],
+    [
+     340,
+     345
+    ],
+    [
+     1280,
+     1280
+    ]
+   ]
+  },
+  {
+   "path": "tests/333_snapshot_wait_foreign_floor_holder_test.sql",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     312
+    ]
+   ]
+  }
+ ],
+ "units": [
+  {
+   "unit": "pgpm_core/install.sql:7639-7652",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    7639,
+    7652
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm_core/install.sql:7699-7706",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    7699,
+    7706
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm._snapshot_wait",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    7722,
+    7858
+   ],
+   "why": "touched at 7733-7733"
+  },
+  {
+   "unit": "pgpm.maintain",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    13319,
+    13528
+   ],
+   "why": "touched at 13479-13485"
+  },
+  {
+   "unit": "archive._pq_encode_column_data",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    2017,
+    2135
+   ],
+   "why": "calls pgpm.maintain"
+  },
+  {
+   "unit": "pgpm._regrain_snapshot_wait",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    7861,
+    7867
+   ],
+   "why": "calls pgpm._snapshot_wait"
+  },
+  {
+   "unit": "pgpm.maintain_all",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    13548,
+    13629
+   ],
+   "why": "calls pgpm.maintain"
+  },
+  {
+   "unit": "pgpm.from_hypertable_cutover",
+   "file": "pgpm_hypertable/install.sql",
+   "lines": [
+    1618,
+    2399
+   ],
+   "why": "calls pgpm._snapshot_wait"
+  }
+ ],
+ "exercised_by": {
+  "pgpm.maintain": [
+   "bench/README.md",
+   "bench/archive_extension_resolution.sh",
+   "bench/archive_huffman_lock_entries.sh",
+   "bench/archive_key_full_claim.sh",
+   "bench/archive_key_reused_name.sh",
+   "bench/archive_recorded_chunk.sh",
+   "bench/archive_recorded_chunk_rows_identity.sh",
+   "bench/archive_recorded_chunk_tick_race.sh",
+   "bench/archive_retired_chunk_digest_layer.sh",
+   "bench/archive_step_child_isolation.sh",
+   "bench/datestyle_bounds.sh",
+   "bench/doc_archive_identity_recovery.sh",
+   "bench/doc_fks_suspended_meaning.sh",
+   "bench/doc_maintain_does_not_obtain.sh",
+   "bench/doc_remedy_and_symptom.sh",
+   "bench/frontier_drought.sh",
+   "bench/hypertable_handoff_fk_lock_timeout.sh",
+   "bench/hypertable_handoff_remedy.sh",
+   "bench/incoming_not_valid_refused.sh",
+   "bench/ledger_backfill_origin_only_block.sh",
+   "bench/lock_trace.sh",
+   "bench/maintain_lock.sh",
+   "bench/maintain_regrain_lock_timeout.sh",
+   "bench/maintain_sweep_reads_tap.sh",
+   "bench/regrain_candidate_lock_race.sh",
+   "bench/regrain_candidate_subdivides.sh",
+   "bench/regrain_fk_drift_swap_scan.sh",
+   "bench/regrain_perf.sh",
+   "bench/regrain_retarget_in_flight.sh",
+   "bench/regrain_swap_timing.sh",
+   "bench/restore_one_step_backoff.sh",
+   "bench/retain_loop_per_child_isolation.sh",
+   "bench/retire_pending_detach.sh",
+   "bench/run.sh",
+   "bench/run_fh.sh",
+   "bench/set_regrain_off_midflight.sh",
+   "bench/snapshot_wait_foreign_floor_holder.sh",
+   "bench/tests_fail_on_defect.sh",
+   "bench/throws_pinned.sh",
+   "bench/throws_pinned_sites.sh",
+   "bench/upgrade_from_release.sh",
+   "bench/upgrade_in_place.sh",
+   "bench/write_block_skips_hand_detached.sh",
+   "docs/guide.md",
+   "docs/reference.md",
+   "docs/reviews/2026-09-25.md",
+   "docs/reviews/2026-09-28.md",
+   "docs/reviews/2026-09-29.md",
+   "docs/reviews/2026-10-01.md",
+   "docs/reviews/2026-10-02-pass7.md",
+   "docs/reviews/2026-10-04-pass8.md",
+   "docs/reviews/2026-10-06-pass9.md",
+   "docs/reviews/2026-10-08-pass10.md",
+   "docs/reviews/2026-10-09-pass11.md",
+   "docs/reviews/2026-10-12-pass12.md",
+   "docs/runbook.md",
+   "scripts/archive_partition_whole.sql",
+   "tests/102_archive_identity_test.sql",
+   "tests/104_write_block_identity_test.sql",
+   "tests/107_regrain_swap_reconcile_complete_test.sql",
+   "tests/108_retain_sign_test.sql",
+   "tests/110_triggers_enable_always_test.sql",
+   "tests/111_grid_timezone_test.sql",
+   "tests/114_write_block_lift_coverage_test.sql",
+   "tests/115_archive_contract_test.sql",
+   "tests/119_regrain_truncate_guard_test.sql",
+   "tests/122_text_time_collation_test.sql",
+   "tests/124_datestyle_independent_bounds_test.sql",
+   "tests/124_quoted_schema_test.sql",
+   "tests/125_archive_chunk_ties_test.sql",
+   "tests/125_archive_ledger_identity_test.sql",
+   "tests/125_regrain_candidate_subdivides_test.sql",
+   "tests/125_untransmute_residue_test.sql",
+   "tests/125_uuidv7_regrain_archive_test.sql",
+   "tests/129_coverage_reset_identity_test.sql",
+   "tests/129_retire_regrain_source_test.sql",
+   "tests/129_set_archive_fn_return_type_test.sql",
+   "tests/129_set_regrain_off_midflight_test.sql",
+   "tests/130_retire_unguarded_coverage_test.sql",
+   "tests/131_retain_interval_sign_test.sql",
+   "tests/137_archive_chunk_uuidv7_ties_test.sql",
+   "tests/147_maintain_all_sweep_turns_test.sql",
+   "tests/148_regrain_candidate_lock_race_deferred_test.sql",
+   "tests/154_regrain_step_positive_test.sql",
+   "tests/155_uninstall_residue_test.sql",
+   "tests/162_regrain_drivers_serialize_test.sql",
+   "tests/164_regrain_target_mixed_step_test.sql",
+   "tests/165_regrain_target_integral_step_test.sql",
+   "tests/167_config_stamp_lock_test.sql",
+   "tests/168_retain_nan_test.sql",
+   "tests/170_write_block_enabled_state_test.sql",
+   "tests/183_regrain_reconcile_identity_test.sql",
+   "tests/191_maintain_regrain_reads_target_under_lock_test.sql",
+   "tests/194_retain_recall_armed_detach_test.sql",
+   "tests/197_moved_parent_lifecycle_test.sql",
+   "tests/204_retain_recall_moved_parent_test.sql",
+   "tests/209_regrain_clamped_subrange_names_test.sql",
+   "tests/210_regrain_target_step_spelling_test.sql",
+   "tests/211_regrain_survives_parent_ddl_test.sql",
+   "tests/213_ts_text_archive_chunk_transmute_min_test.sql",
+   "tests/216_regrain_drift_values_and_checks_test.sql",
+   "tests/217_regrain_capture_follows_key_test.sql",
+   "tests/228_archive_step_child_isolation_test.sql",
+   "tests/236_regrain_capture_source_grantees_test.sql",
+   "tests/237_regrain_moved_parent_identity_test.sql",
+   "tests/238_regrain_names_fit_clamped_cell_test.sql",
+   "tests/239_moved_parent_recorded_identity_test.sql",
+   "tests/241_reads_under_caller_rls_conformance_test.sql",
+   "tests/242_regrain_untransmute_caller_rls_test.sql",
+   "tests/243_regrain_null_source_mark_test.sql",
+   "tests/244_regrain_capture_enabled_always_test.sql",
+   "tests/245_regrain_capture_origin_only_upgrade_test.sql",
+   "tests/251_regrain_fk_drift_test.sql",
+   "tests/252_regrain_target_column_scale_test.sql",
+   "tests/259_incoming_not_valid_key_refused_test.sql",
+   "tests/261_regrain_step_retarget_in_flight_test.sql",
+   "tests/262_regrain_capture_owner_grant_test.sql",
+   "tests/263_retain_loop_per_child_isolation_test.sql",
+   "tests/267_scratch_relations_test.sql",
+   "tests/268_shared_preflight_refusals_test.sql",
+   "tests/273_archive_covered_hi_canonical_test.sql",
+   "tests/274_text_time_collation_contraction_test.sql",
+   "tests/277_regrain_target_time_precision_test.sql",
+   "tests/289_archive_partition_whole_follows_step_test.sql",
+   "tests/28_pause_resume_test.sql",
+   "tests/292_archive_covered_hi_column_type_test.sql",
+   "tests/294_regrain_capture_view_writer_test.sql",
+   "tests/303_adopt_partition_test.sql",
+   "tests/307_write_block_skips_hand_detached_test.sql",
+   "tests/308_regrain_target_encoded_unit_test.sql",
+   "tests/309_archive_retired_chunk_kept_test.sql",
+   "tests/314_ledger_backfill_origin_only_block_test.sql",
+   "tests/318_forget_missing_logs_object_keys_test.sql",
+   "tests/319_set_regrain_restated_target_test.sql",
+   "tests/322_partitioned_referencer_readd_not_valid_test.sql",
+   "tests/324_regrain_registered_grid_off_unit_test.sql",
+   "tests/325_archive_hold_detach_in_flight_test.sql",
+   "tests/327_retire_pending_detach_test.sql",
+   "tests/328_regrain_swap_waits_for_older_snapshots_test.sql",
+   "tests/333_snapshot_wait_foreign_floor_holder_test.sql",
+   "tests/45_regrain_feathered_test.sql",
+   "tests/46_auto_regrain_maintain_test.sql",
+   "tests/47_auto_regrain_suspends_fk_test.sql",
+   "tests/48_regrain_copy_contract_test.sql",
+   "tests/59_retain_batch_test.sql",
+   "tests/61_write_block_test.sql",
+   "tests/63_archive_chunk_ledger_test.sql",
+   "tests/64_retire_archive_gate_test.sql",
+   "tests/68_regrain_write_contract_test.sql",
+   "tests/69_regrain_capture_apparatus_test.sql",
+   "tests/73_restore_fk_validate_test.sql",
+   "tests/74_regrain_archive_gate_test.sql",
+   "tests/76_no_default_partition_test.sql",
+   "tests/85_uuidv7_frontier_drought_test.sql",
+   "tests/88_text_time_transmute_test.sql",
+   "tests/91_text_time_ulid_ksuid_transmute_test.sql",
+   "tests/93_archive_batch_test.sql",
+   "tests/95_set_regrain_rejects_coarser_step_test.sql",
+   "tests/99_restore_fk_scoped_test.sql",
+   "tests/archive/db/08_archive_fn_s3_test.sql",
+   "tests/archive/db/09_configure_test.sql",
+   "tests/archive/db/14_parquet_naive_timestamp_test.sql",
+   "tests/archive/db/16_archive_object_key_identity_test.sql",
+   "tests/archive/db/17_sigv4_wall_clock_test.sql",
+   "tests/archive/db/19_parquet_timestamp_infinity_test.sql",
+   "tests/archive/db/21_parquet_keyless_test.sql",
+   "tests/archive/db/26_archive_key_schema_zone_test.sql",
+   "tests/archive/db/27_parquet_timestamp_range_test.sql",
+   "tests/archive/db/29_signer_non_utf8_database_test.sql",
+   "tests/archive/db/31_parquet_decimal_nan_test.sql",
+   "tests/archive/db/33_ndjson_row_alias_shadowed_test.sql",
+   "tests/archive/db/34_archive_key_reused_name_test.sql",
+   "tests/archive/db/39_archive_key_owner_every_path_test.sql",
+   "tests/archive/db/40_archive_key_full_claim_test.sql",
+   "tests/archive/db/41_archive_null_arguments_test.sql",
+   "tests/archive/db/42_archive_recorded_chunk_overwrite_test.sql",
+   "tests/archive/db/44_archive_extension_resolution_test.sql",
+   "tests/archive/db/48_archive_recorded_chunk_rows_identity_test.sql",
+   "tests/archive/db/50_archive_retired_chunk_kept_test.sql",
+   "tests/archive/fixtures.sql",
+   "tests/timescale/db/59_from_hypertable_handoff_remedy_test.sql"
+  ],
+  "pgpm._snapshot_wait": [
+   "bench/hypertable_cutover_waits_for_older_snapshots.sh",
+   "docs/reviews/2026-10-09-pass11.md",
+   "docs/reviews/2026-10-12-pass12.md",
+   "tests/328_regrain_swap_waits_for_older_snapshots_test.sql",
+   "tests/333_snapshot_wait_foreign_floor_holder_test.sql"
+  ]
+ },
+ "finder": "P1",
+ "slice": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/snapshot_wait_foreign_floor_holder.sh",
+   "docs/reference.md",
+   "pgpm_archive/install.sql",
+   "pgpm_core/install.sql",
+   "pgpm_hypertable/install.sql",
+   "test.sh",
+   "tests/333_snapshot_wait_foreign_floor_holder_test.sql"
+  ],
+  "units": [
+   "pgpm_core/install.sql:7639-7652",
+   "pgpm_core/install.sql:7699-7706",
+   "pgpm._snapshot_wait",
+   "pgpm.maintain",
+   "archive._pq_encode_column_data",
+   "pgpm._regrain_snapshot_wait",
+   "pgpm.maintain_all",
+   "pgpm.from_hypertable_cutover"
+  ],
+  "kind": "mixed"
+ },
+ "ledger": [
+  "pgpm_core/install.sql:7639-7652",
+  "pgpm_core/install.sql:7699-7706",
+  "pgpm._snapshot_wait",
+  "pgpm.maintain",
+  "archive._pq_encode_column_data",
+  "pgpm._regrain_snapshot_wait",
+  "pgpm.maintain_all",
+  "pgpm.from_hypertable_cutover",
+  "CHANGELOG.md",
+  "bench/snapshot_wait_foreign_floor_holder.sh",
+  "docs/reference.md",
+  "test.sh",
+  "tests/333_snapshot_wait_foreign_floor_holder_test.sql"
+ ]
+}

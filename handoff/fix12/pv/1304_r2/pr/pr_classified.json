@@ -1,0 +1,243 @@
+{
+  "trees": {
+    "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1304_r2/pr/base",
+    "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1304_r2/pr/head",
+    "review": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1304_r2/pr/review",
+    "mutants": {
+      "archive_ndjson_bounds_caller_spelling": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1304_r2/pr/mutants/archive_ndjson_bounds_caller_spelling",
+      "archive_ndjson_bounds_session_zone": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1304_r2/pr/mutants/archive_ndjson_bounds_session_zone",
+      "archive_parquet_bounds_caller_spelling": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1304_r2/pr/mutants/archive_parquet_bounds_caller_spelling",
+      "archive_parquet_bounds_session_zone": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1304_r2/pr/mutants/archive_parquet_bounds_session_zone"
+    }
+  },
+  "acceptance": "ACC",
+  "claims": [
+    {
+      "id": "ACC-01",
+      "finder": "ACC",
+      "tier": 3,
+      "file": "pgpm_archive/install.sql",
+      "line": 2763,
+      "lens": "time and zones",
+      "scenario": "#814 acceptance (F19-03): In one direct strategy call the range read, the empty-range check and the recorded-chunk check parse p_lo under the session's DateStyle while archive._object_stem parses it under its pinned 'ISO, MDY', so from a 'SQL, DMY' session '02/01/2024 00:00:00+00' archives the 2 January rows under the 1 February chunk's key; the object should be keyed by the instant the call read (or the spelling refused).",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "test 7: \"the object at the 2 January key holds the row jan2\"                                                                                                                                                                                                                                                                                                                                                   +\n #         have: <?xml version=\"1.0\" encoding=\"UTF-8\"?>                                                                                                                                                                                                                                                                                                                                                                  +\n # <Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message><Key>f19-03-rv_acc_01_b/f19d.ev_2024010200000000.ndjson</Key><BucketName>archive-test-bucket</BucketName><Resource>/archive-test-bucket/f19-03-rv_acc_01_b/f19d.ev_2024010200000000.ndjson</Resource><RequestId>18DDE6B79F50962B</RequestId><HostId>dd9025bab4ad464b049177c95eb6ebf374d3b3fd1af9251148b658df7ac2e3e8</HostId></Error>+\n #         want: {\"ts\":\"2024-01-02T12:00:00+00:00\",\"payload\":\"jan2\"}\n(1 row)\n\nRESET\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 7\n(1 row)\n\npsql:<stdin>:7: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "                     \n-------------------------------------------------------------------------\n ok 3 - LIVENESS: the stem of the instant the session reads is 2 January\n(1 row)\n\n                                         alike                                          \n----------------------------------------------------------------------------------------\n ok 4 - LIVENESS: the strategy archived one row of that range (or refused the spelling)\n(1 row)\n\n                                                                                 ok                                                                                  \n---------------------------------------------------------------------------------------------------------------------------------------------------------------------\n ok 5 - the chunk read as [2024-01-02, 2024-01-03) is keyed by the stem of 2 January, not 1 February (got f19-03-rv_acc_01_h/f19d.ev_2024010200000000.ndjson rows=1)\n(1 row)\n\n                                       is                                       \n--------------------------------------------------------------------------------\n ok 6 - no object holding the 2 January row lands at the 1 February chunk's key\n(1 row)\n\n                            is                             \n-----------------------------------------------------------\n ok 7 - the object at the 2 January key holds the row jan2\n(1 row)\n\nRESET\n finish \n--------\n(0 rows)\n\npsql:<stdin>:7: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "mutant:archive_ndjson_bounds_caller_spelling": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                                                                                                                                                                                                                                                       +\n #         have: <?xml version=\"1.0\" encoding=\"UTF-8\"?>                                                                                                                                                                                                                                                                                                                                                                                                                                              +\n # <Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message><Key>f19-03-rv_acc_01_m_archive_ndjson_bounds_caller_spelling/f19d.ev_2024010200000000.ndjson</Key><BucketName>archive-test-bucket</BucketName><Resource>/archive-test-bucket/f19-03-rv_acc_01_m_archive_ndjson_bounds_caller_spelling/f19d.ev_2024010200000000.ndjson</Resource><RequestId>18DDE6B7E842E0D3</RequestId><HostId>dd9025bab4ad464b049177c95eb6ebf374d3b3fd1af9251148b658df7ac2e3e8</HostId></Error>+\n #         want: {\"ts\":\"2024-01-02T12:00:00+00:00\",\"payload\":\"jan2\"}\n(1 row)\n\nRESET\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 7\n(1 row)\n\npsql:<stdin>:7: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "mutant:archive_ndjson_bounds_session_zone": {
+          "fails": false,
+          "exit": 0,
+          "tail": "IVENESS: the stem of the instant the session reads is 2 January\n(1 row)\n\n                                         alike                                          \n----------------------------------------------------------------------------------------\n ok 4 - LIVENESS: the strategy archived one row of that range (or refused the spelling)\n(1 row)\n\n                                                                                                   ok                                                                                                   \n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n ok 5 - the chunk read as [2024-01-02, 2024-01-03) is keyed by the stem of 2 January, not 1 February (got f19-03-rv_acc_01_m_archive_ndjson_bounds_session_zone/f19d.ev_2024010200000000.ndjson rows=1)\n(1 row)\n\n                                       is                                       \n--------------------------------------------------------------------------------\n ok 6 - no object holding the 2 January row lands at the 1 February chunk's key\n(1 row)\n\n                            is                             \n-----------------------------------------------------------\n ok 7 - the object at the 2 January key holds the row jan2\n(1 row)\n\nRESET\n finish \n--------\n(0 rows)\n\npsql:<stdin>:7: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "mutant:archive_parquet_bounds_caller_spelling": {
+          "fails": false,
+          "exit": 0,
+          "tail": " stem of the instant the session reads is 2 January\n(1 row)\n\n                                         alike                                          \n----------------------------------------------------------------------------------------\n ok 4 - LIVENESS: the strategy archived one row of that range (or refused the spelling)\n(1 row)\n\n                                                                                                     ok                                                                                                     \n------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n ok 5 - the chunk read as [2024-01-02, 2024-01-03) is keyed by the stem of 2 January, not 1 February (got f19-03-rv_acc_01_m_archive_parquet_bounds_caller_spelling/f19d.ev_2024010200000000.ndjson rows=1)\n(1 row)\n\n                                       is                                       \n--------------------------------------------------------------------------------\n ok 6 - no object holding the 2 January row lands at the 1 February chunk's key\n(1 row)\n\n                            is                             \n-----------------------------------------------------------\n ok 7 - the object at the 2 January key holds the row jan2\n(1 row)\n\nRESET\n finish \n--------\n(0 rows)\n\npsql:<stdin>:7: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "mutant:archive_parquet_bounds_session_zone": {
+          "fails": false,
+          "exit": 0,
+          "tail": "NESS: the stem of the instant the session reads is 2 January\n(1 row)\n\n                                         alike                                          \n----------------------------------------------------------------------------------------\n ok 4 - LIVENESS: the strategy archived one row of that range (or refused the spelling)\n(1 row)\n\n                                                                                                   ok                                                                                                    \n---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n ok 5 - the chunk read as [2024-01-02, 2024-01-03) is keyed by the stem of 2 January, not 1 February (got f19-03-rv_acc_01_m_archive_parquet_bounds_session_zone/f19d.ev_2024010200000000.ndjson rows=1)\n(1 row)\n\n                                       is                                       \n--------------------------------------------------------------------------------\n ok 6 - no object holding the 2 January row lands at the 1 February chunk's key\n(1 row)\n\n                            is                             \n-----------------------------------------------------------\n ok 7 - the object at the 2 January key holds the row jan2\n(1 row)\n\nRESET\n finish \n--------\n(0 rows)\n\npsql:<stdin>:7: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        }
+      },
+      "class": "fixed",
+      "acceptance": {
+        "fails_on_base": true,
+        "passes_on_head": true,
+        "mutant_restores": {
+          "archive_ndjson_bounds_caller_spelling": true,
+          "archive_ndjson_bounds_session_zone": false,
+          "archive_parquet_bounds_caller_spelling": false,
+          "archive_parquet_bounds_session_zone": false
+        },
+        "any_restores": true
+      }
+    },
+    {
+      "id": "ACC-02",
+      "finder": "ACC",
+      "tier": 3,
+      "file": "pgpm_archive/install.sql",
+      "line": 3074,
+      "lens": "closing claim",
+      "scenario": "#814 acceptance (V-01-1304): On a date-column day grid (partition_tz UTC), a direct pgpm.archive_to_s3_ndjson/_parquet call from a non-UTC session with offset-less bounds now keys the chunk by pgpm._native_text's session reading ('2024-01-02' from New York -> 05:00Z, stem 2024010205000000) while the date column's read truncates the bound to the whole 2 January chunk: the same chunk and rows get ..._2024010205000000 from New York and ..._2024010200000000 from UTC, a key no chunk starts at, and the recorded-chunk check looks up the session-shaped key so it never meets the ledger row at the chunk's real key. The base keyed both calls 2024010200000000. The key should name the chunk the read covers (the lo as the column reads it), not the session's instant.",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": false,
+          "exit": 0,
+          "tail": "-------------\n ok 3 - LIVENESS: a New York session reads 2024-01-02 as 05:00Z, not the chunk's 00:00Z\n(1 row)\n\nRESET\n                                                       is                                                       \n----------------------------------------------------------------------------------------------------------------\n ok 4 - LIVENESS: the call read the whole 2 January chunk (ids 1 and 2), as the date column truncates its bound\n(1 row)\n\n                                                                  is                                                                  \n--------------------------------------------------------------------------------------------------------------------------------------\n ok 5 - the 2 January chunk read from New York is keyed by its lo, 2024010200000000 (got v1-rv_acc_02_b/v1.d_2024010200000000.ndjson)\n(1 row)\n\n                                   is                                    \n-------------------------------------------------------------------------\n ok 6 - nothing lands at a 05:00Z key no chunk of the day grid starts at\n(1 row)\n\n                                              is                                               \n-----------------------------------------------------------------------------------------------\n ok 7 - the same chunk, the same rows, gets the same key from a New York session and a UTC one\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:10: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "-------------\n ok 3 - LIVENESS: a New York session reads 2024-01-02 as 05:00Z, not the chunk's 00:00Z\n(1 row)\n\nRESET\n                                                       is                                                       \n----------------------------------------------------------------------------------------------------------------\n ok 4 - LIVENESS: the call read the whole 2 January chunk (ids 1 and 2), as the date column truncates its bound\n(1 row)\n\n                                                                  is                                                                  \n--------------------------------------------------------------------------------------------------------------------------------------\n ok 5 - the 2 January chunk read from New York is keyed by its lo, 2024010200000000 (got v1-rv_acc_02_h/v1.d_2024010200000000.ndjson)\n(1 row)\n\n                                   is                                    \n-------------------------------------------------------------------------\n ok 6 - nothing lands at a 05:00Z key no chunk of the day grid starts at\n(1 row)\n\n                                              is                                               \n-----------------------------------------------------------------------------------------------\n ok 7 - the same chunk, the same rows, gets the same key from a New York session and a UTC one\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:10: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "mutant:archive_ndjson_bounds_caller_spelling": {
+          "fails": false,
+          "exit": 0,
+          "tail": "ET\n                                                       is                                                       \n----------------------------------------------------------------------------------------------------------------\n ok 4 - LIVENESS: the call read the whole 2 January chunk (ids 1 and 2), as the date column truncates its bound\n(1 row)\n\n                                                                                     is                                                                                     \n----------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n ok 5 - the 2 January chunk read from New York is keyed by its lo, 2024010200000000 (got v1-rv_acc_02_m_archive_ndjson_bounds_caller_spelling/v1.d_2024010200000000.ndjson)\n(1 row)\n\n                                   is                                    \n-------------------------------------------------------------------------\n ok 6 - nothing lands at a 05:00Z key no chunk of the day grid starts at\n(1 row)\n\n                                              is                                               \n-----------------------------------------------------------------------------------------------\n ok 7 - the same chunk, the same rows, gets the same key from a New York session and a UTC one\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:10: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "mutant:archive_ndjson_bounds_session_zone": {
+          "fails": true,
+          "exit": 0,
+          "tail": "00.ndjson                                                                                     +\n #         want: v1-rv_acc_02_m_archive_ndjson_bounds_session_zone/v1.d_2024010200000000.ndjson\n(1 row)\n\n                                         is                                          \n-------------------------------------------------------------------------------------\n not ok 6 - nothing lands at a 05:00Z key no chunk of the day grid starts at        +\n # Failed test 6: \"nothing lands at a 05:00Z key no chunk of the day grid starts at\"+\n #         have: 200                                                                +\n #         want: 404\n(1 row)\n\n                                                    is                                                     \n-----------------------------------------------------------------------------------------------------------\n not ok 7 - the same chunk, the same rows, gets the same key from a New York session and a UTC one        +\n # Failed test 7: \"the same chunk, the same rows, gets the same key from a New York session and a UTC one\"+\n #         have: v1-rv_acc_02_m_archive_ndjson_bounds_session_zone/v1.d_2024010205000000.ndjson           +\n #         want: v1-rv_acc_02_m_archive_ndjson_bounds_session_zone/v1.d_2024010200000000.ndjson\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 7\n(1 row)\n\npsql:<stdin>:10: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "mutant:archive_parquet_bounds_caller_spelling": {
+          "fails": false,
+          "exit": 0,
+          "tail": "                                                       is                                                       \n----------------------------------------------------------------------------------------------------------------\n ok 4 - LIVENESS: the call read the whole 2 January chunk (ids 1 and 2), as the date column truncates its bound\n(1 row)\n\n                                                                                     is                                                                                      \n-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n ok 5 - the 2 January chunk read from New York is keyed by its lo, 2024010200000000 (got v1-rv_acc_02_m_archive_parquet_bounds_caller_spelling/v1.d_2024010200000000.ndjson)\n(1 row)\n\n                                   is                                    \n-------------------------------------------------------------------------\n ok 6 - nothing lands at a 05:00Z key no chunk of the day grid starts at\n(1 row)\n\n                                              is                                               \n-----------------------------------------------------------------------------------------------\n ok 7 - the same chunk, the same rows, gets the same key from a New York session and a UTC one\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:10: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "mutant:archive_parquet_bounds_session_zone": {
+          "fails": false,
+          "exit": 0,
+          "tail": ")\n\nRESET\n                                                       is                                                       \n----------------------------------------------------------------------------------------------------------------\n ok 4 - LIVENESS: the call read the whole 2 January chunk (ids 1 and 2), as the date column truncates its bound\n(1 row)\n\n                                                                                    is                                                                                    \n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n ok 5 - the 2 January chunk read from New York is keyed by its lo, 2024010200000000 (got v1-rv_acc_02_m_archive_parquet_bounds_session_zone/v1.d_2024010200000000.ndjson)\n(1 row)\n\n                                   is                                    \n-------------------------------------------------------------------------\n ok 6 - nothing lands at a 05:00Z key no chunk of the day grid starts at\n(1 row)\n\n                                              is                                               \n-----------------------------------------------------------------------------------------------\n ok 7 - the same chunk, the same rows, gets the same key from a New York session and a UTC one\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:10: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        }
+      },
+      "class": "not_reproduced",
+      "acceptance": {
+        "fails_on_base": false,
+        "passes_on_head": true,
+        "mutant_restores": {
+          "archive_ndjson_bounds_caller_spelling": false,
+          "archive_ndjson_bounds_session_zone": true,
+          "archive_parquet_bounds_caller_spelling": false,
+          "archive_parquet_bounds_session_zone": false
+        },
+        "any_restores": true
+      }
+    },
+    {
+      "id": "P1-01",
+      "finder": "P1",
+      "tier": 3,
+      "file": "pgpm_archive/install.sql",
+      "line": 3090,
+      "lens": "fresh surface",
+      "scenario": "archive._encode_upload_ndjson_single reads only p_hi through archive._bound_native and never p_lo, so the NDJSON strategy still keys its object by the caller's spelling of lo and reads the range from the session's parse of it: from a 'SQL, DMY' session '02/01/2024 00:00:00+00' archives the 2 January rows at the 1 February chunk's key (the F19-03 shape the PR says both encoders fix), and on a date grid from Asia/Tokyo '2024-01-02' is read as 2024-01-01 15:00Z, truncated to 1 January by the date column, so the object keyed 2 January holds 1 January's row too; the lo should be read once on the grid's clock as the Parquet encoder's is (3181)",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "0Z\n(1 row)\n\nSET\n                                                 is                                                 \n----------------------------------------------------------------------------------------------------\n ok 12 - LIVENESS: a Tokyo session reads 2024-01-02 as 2024-01-01 15:00Z, inside the 1 January cell\n(1 row)\n\nRESET\n                             is                              \n-------------------------------------------------------------\n ok 13 - LIVENESS: the object is keyed by the 2 January cell\n(1 row)\n\n                                                              is                                                               \n-------------------------------------------------------------------------------------------------------------------------------\n not ok 14 - the object at the 2 January cell's key holds exactly that cell's rows (ids 1 and 2), not 1 January's id 9        +\n # Failed test 14: \"the object at the 2 January cell's key holds exactly that cell's rows (ids 1 and 2), not 1 January's id 9\"+\n #         have: {9}                                                                                                          +\n #         want: {1,2}\n(1 row)\n\n clear | clear | clear | clear \n-------+-------+-------+-------\n   404 |   404 |   404 |   404\n(1 row)\n\n                finish                 \n---------------------------------------\n # Looks like you failed 4 tests of 14\n(1 row)\n\npsql:<stdin>:13: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "                     is                          \n------------------------------------------------------\n ok 10 - fixture: no object at p1a.dd's 2 January key\n(1 row)\n\n                                        is                                         \n-----------------------------------------------------------------------------------\n ok 11 - LIVENESS: the date grid runs on UTC, so 2 January's cell starts at 00:00Z\n(1 row)\n\nSET\n                                                 is                                                 \n----------------------------------------------------------------------------------------------------\n ok 12 - LIVENESS: a Tokyo session reads 2024-01-02 as 2024-01-01 15:00Z, inside the 1 January cell\n(1 row)\n\nRESET\n                             is                              \n-------------------------------------------------------------\n ok 13 - LIVENESS: the object is keyed by the 2 January cell\n(1 row)\n\n                                                        is                                                         \n-------------------------------------------------------------------------------------------------------------------\n ok 14 - the object at the 2 January cell's key holds exactly that cell's rows (ids 1 and 2), not 1 January's id 9\n(1 row)\n\n clear | clear | clear | clear \n-------+-------+-------+-------\n   404 |   404 |   404 |   404\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:13: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": "0Z\n(1 row)\n\nSET\n                                                 is                                                 \n----------------------------------------------------------------------------------------------------\n ok 12 - LIVENESS: a Tokyo session reads 2024-01-02 as 2024-01-01 15:00Z, inside the 1 January cell\n(1 row)\n\nRESET\n                             is                              \n-------------------------------------------------------------\n ok 13 - LIVENESS: the object is keyed by the 2 January cell\n(1 row)\n\n                                                              is                                                               \n-------------------------------------------------------------------------------------------------------------------------------\n not ok 14 - the object at the 2 January cell's key holds exactly that cell's rows (ids 1 and 2), not 1 January's id 9        +\n # Failed test 14: \"the object at the 2 January cell's key holds exactly that cell's rows (ids 1 and 2), not 1 January's id 9\"+\n #         have: {1,2,9}                                                                                                      +\n #         want: {1,2}\n(1 row)\n\n clear | clear | clear | clear \n-------+-------+-------+-------\n   404 |   404 |   404 |   404\n(1 row)\n\n                finish                 \n---------------------------------------\n # Looks like you failed 3 tests of 14\n(1 row)\n\npsql:<stdin>:13: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        }
+      },
+      "class": "seed_hit",
+      "seed": "S1"
+    },
+    {
+      "id": "P1-02",
+      "finder": "P1",
+      "tier": 3,
+      "file": "pgpm_archive/install.sql",
+      "line": 3048,
+      "lens": "time and zones",
+      "scenario": "archive._bound_native reads an offset-less bound in the grid's partition_tz while archive._refuse_empty_range (#969) still reads it in the caller's TimeZone, so the two order a range differently across a DST gap in partition_tz: from a UTC session on an America/New_York 30-minute grid, '2024-03-10 02:30:00'..'03:00:00' passes the refusal (02:30Z < 03:00Z) but the Parquet encoder reads it as [07:30Z, 07:00Z), inverted, finds no row and PUTs an empty object at the live cell [07:30Z, 08:00Z)'s key; the PR body's claim that the refusal reads the same instant the encoder reads is not kept, and the call should be refused (or the refusal should compare the canonical bounds the encoder reads)",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 3,
+          "tail": "CREATE EXTENSION\n plan \n------\n 1..9\n(1 row)\n\nCREATE SCHEMA\nCREATE FUNCTION\nCREATE FUNCTION\nCREATE TABLE\nINSERT 0 2\nSET\nCALL\n configure \n-----------\n \n(1 row)\n\n                          is                           \n-------------------------------------------------------\n ok 1 - LIVENESS: the grid's clock is America/New_York\n(1 row)\n\n status \n--------\n    204\n(1 row)\n\n                         is                         \n----------------------------------------------------\n ok 2 - fixture: no object at the 07:30Z cell's key\n(1 row)\n\nSET\n                                                           ok                                                           \n------------------------------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: the session (UTC) reads [02:30, 03:00) as a non-empty range, so archive._refuse_empty_range admits it\n(1 row)\n\npsql:<stdin>:12: NOTICE:  extension \"pgtap\" already exists, skipping\npsql:<stdin>:42: ERROR:  function archive._bound_native(unknown, unknown, unknown) does not exist\nLINE 1: select is(archive._bound_native('time', '2024-03-10 02:30:00...\n                  ^\nHINT:  No function matches the given name and argument types. You might need to add explicit type casts.\n"
+        },
+        "head": {
+          "fails": true,
+          "exit": 0,
+          "tail": "w)\n\n                                                                    alike                                                                     \n----------------------------------------------------------------------------------------------------------------------------------------------\n not ok 8 - the refusal is archive._refuse_empty_range's (#969), the check the PR body says still reads the instant the encoder reads        +\n # Failed test 8: \"the refusal is archive._refuse_empty_range's (#969), the check the PR body says still reads the instant the encoder reads\"+\n #                   'rv_p1_02_h/p1c/p1c.ny_2024031007300000.parquet rows=0'                                                                 +\n #    doesn't match: '%empty or inverted%'\n(1 row)\n\n                                             is                                              \n---------------------------------------------------------------------------------------------\n not ok 9 - no empty object was written at the key of the live cell [07:30Z, 08:00Z)        +\n # Failed test 9: \"no empty object was written at the key of the live cell [07:30Z, 08:00Z)\"+\n #         have: 200                                                                        +\n #         want: 404\n(1 row)\n\n status \n--------\n    204\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 9\n(1 row)\n\npsql:<stdin>:12: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": "w)\n\n                                                                    alike                                                                     \n----------------------------------------------------------------------------------------------------------------------------------------------\n not ok 8 - the refusal is archive._refuse_empty_range's (#969), the check the PR body says still reads the instant the encoder reads        +\n # Failed test 8: \"the refusal is archive._refuse_empty_range's (#969), the check the PR body says still reads the instant the encoder reads\"+\n #                   'rv_p1_02_r/p1c/p1c.ny_2024031007300000.parquet rows=0'                                                                 +\n #    doesn't match: '%empty or inverted%'\n(1 row)\n\n                                             is                                              \n---------------------------------------------------------------------------------------------\n not ok 9 - no empty object was written at the key of the live cell [07:30Z, 08:00Z)        +\n # Failed test 9: \"no empty object was written at the key of the live cell [07:30Z, 08:00Z)\"+\n #         have: 200                                                                        +\n #         want: 404\n(1 row)\n\n status \n--------\n    204\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 9\n(1 row)\n\npsql:<stdin>:12: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        }
+      },
+      "class": "pre_existing"
+    },
+    {
+      "id": "V-01",
+      "finder": "V",
+      "tier": 3,
+      "file": "pgpm_archive/install.sql",
+      "line": 3880,
+      "lens": "closing claim",
+      "scenario": "The head reads a direct call's bounds on the grid's clock (archive._bound_native, offset-less text in partition_tz) for the read, the recorded-chunk check and the key, but archive._refuse_empty_range (#969) still compares the raw text in the caller's session. On a timestamptz grid with partition_tz Asia/Kolkata, a UTC caller's [lo '2024-01-02 18:30:00+00', hi '2024-01-03') is non-empty to the session and empty on the grid's clock (hi = 2024-01-03 00:00 IST = lo), so the call is admitted, reads no row, and PUTs an empty object at the 2 January cell's own key instead of refusing. The base read the range in the session too, so it archived the session's non-empty range: a regression of #969's refusal. The empty-range check should read the same canonical bounds the encoders read.",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": false,
+          "exit": 0,
+          "tail": "                                                                               \n---------------------------------------------------------------------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: on the grid's clock (offset-less hi read in partition_tz, as docs/reference.md says a direct call reads it) hi equals lo: the range is empty\n(1 row)\n\n                                                 ok                                                 \n----------------------------------------------------------------------------------------------------\n ok 4 - LIVENESS: the call ran to a result (v01-1304-rv_v_01_b/k.ev_2024010218300000.ndjson rows=1)\n(1 row)\n\n                                                                    ok                                                                     \n-------------------------------------------------------------------------------------------------------------------------------------------\n ok 5 - a range the call reads as empty is refused, not archived as zero rows (got v01-1304-rv_v_01_b/k.ev_2024010218300000.ndjson rows=1)\n(1 row)\n\n                                        ok                                        \n----------------------------------------------------------------------------------\n ok 6 - no empty object lands at the 2 January cell's key (k.ev_2024010218300000)\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:9: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "head": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                                         ok                                                 \n----------------------------------------------------------------------------------------------------\n ok 4 - LIVENESS: the call ran to a result (v01-1304-rv_v_01_h/k.ev_2024010218300000.ndjson rows=0)\n(1 row)\n\n                                                                          ok                                                                           \n-------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 5 - a range the call reads as empty is refused, not archived as zero rows (got v01-1304-rv_v_01_h/k.ev_2024010218300000.ndjson rows=0)        +\n # Failed test 5: \"a range the call reads as empty is refused, not archived as zero rows (got v01-1304-rv_v_01_h/k.ev_2024010218300000.ndjson rows=0)\"\n(1 row)\n\n                                              ok                                              \n----------------------------------------------------------------------------------------------\n not ok 6 - no empty object lands at the 2 January cell's key (k.ev_2024010218300000)        +\n # Failed test 6: \"no empty object lands at the 2 January cell's key (k.ev_2024010218300000)\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\npsql:<stdin>:9: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                                         ok                                                 \n----------------------------------------------------------------------------------------------------\n ok 4 - LIVENESS: the call ran to a result (v01-1304-rv_v_01_r/k.ev_2024010218300000.ndjson rows=0)\n(1 row)\n\n                                                                          ok                                                                           \n-------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 5 - a range the call reads as empty is refused, not archived as zero rows (got v01-1304-rv_v_01_r/k.ev_2024010218300000.ndjson rows=0)        +\n # Failed test 5: \"a range the call reads as empty is refused, not archived as zero rows (got v01-1304-rv_v_01_r/k.ev_2024010218300000.ndjson rows=0)\"\n(1 row)\n\n                                              ok                                              \n----------------------------------------------------------------------------------------------\n not ok 6 - no empty object lands at the 2 January cell's key (k.ev_2024010218300000)        +\n # Failed test 6: \"no empty object lands at the 2 January cell's key (k.ev_2024010218300000)\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\npsql:<stdin>:9: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        }
+      },
+      "class": "regression"
+    },
+    {
+      "id": "V-02",
+      "finder": "V",
+      "tier": 3,
+      "file": "pgpm_archive/install.sql",
+      "line": 3090,
+      "lens": "closing claim",
+      "scenario": "On a date-column day grid (partition_tz UTC), a direct pgpm.archive_to_s3_ndjson call keys the object by the instant its lo names, while the read compares the date column, which truncates that instant to its day. A Tokyo caller's lo '2024-01-02 00:00:00+09' (2024-01-01 15:00Z) reads the whole 1 January cell and PUTs it at d.ev_2024010115000000, a key no cell starts at, while a tick keys the same chunk d.ev_2024010100000000: one chunk, two objects, and the recorded-chunk check (looked up by key) never meets the ledger row at the cell's key. The PR body's guarantee 'the object key's stem is the stem of the instant the call's range read began at' from any TimeZone does not hold on a date grid for a bound with an explicit offset (or any offset-less bound that is not a midnight). The key should name the cell the read covers (the lo as the column reads it), or the bound be refused.",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "-----------------------------------------------------------------------------------------------\n not ok 4 - the chunk the read covers (the 1 January cell) is keyed by the cell's start (got v02-1304-rv_v_02_b/d.ev_2024010115000000.ndjson rows=1)        +\n # Failed test 4: \"the chunk the read covers (the 1 January cell) is keyed by the cell's start (got v02-1304-rv_v_02_b/d.ev_2024010115000000.ndjson rows=1)\"\n(1 row)\n\n                                                is                                                \n--------------------------------------------------------------------------------------------------\n not ok 5 - no object lands at d.ev_2024010115000000, a key no cell of the grid starts at        +\n # Failed test 5: \"no object lands at d.ev_2024010115000000, a key no cell of the grid starts at\"+\n #         have: 200                                                                             +\n #         want: 404\n(1 row)\n\n                                          ok                                          \n--------------------------------------------------------------------------------------\n not ok 6 - the object at the 1 January cell's key holds exactly the row jan1        +\n # Failed test 6: \"the object at the 1 January cell's key holds exactly the row jan1\"\n(1 row)\n\nRESET\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 6\n(1 row)\n\npsql:<stdin>:8: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "head": {
+          "fails": true,
+          "exit": 0,
+          "tail": "-----------------------------------------------------------------------------------------------\n not ok 4 - the chunk the read covers (the 1 January cell) is keyed by the cell's start (got v02-1304-rv_v_02_h/d.ev_2024010115000000.ndjson rows=1)        +\n # Failed test 4: \"the chunk the read covers (the 1 January cell) is keyed by the cell's start (got v02-1304-rv_v_02_h/d.ev_2024010115000000.ndjson rows=1)\"\n(1 row)\n\n                                                is                                                \n--------------------------------------------------------------------------------------------------\n not ok 5 - no object lands at d.ev_2024010115000000, a key no cell of the grid starts at        +\n # Failed test 5: \"no object lands at d.ev_2024010115000000, a key no cell of the grid starts at\"+\n #         have: 200                                                                             +\n #         want: 404\n(1 row)\n\n                                          ok                                          \n--------------------------------------------------------------------------------------\n not ok 6 - the object at the 1 January cell's key holds exactly the row jan1        +\n # Failed test 6: \"the object at the 1 January cell's key holds exactly the row jan1\"\n(1 row)\n\nRESET\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 6\n(1 row)\n\npsql:<stdin>:8: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": "-----------------------------------------------------------------------------------------------\n not ok 4 - the chunk the read covers (the 1 January cell) is keyed by the cell's start (got v02-1304-rv_v_02_r/d.ev_2024010115000000.ndjson rows=1)        +\n # Failed test 4: \"the chunk the read covers (the 1 January cell) is keyed by the cell's start (got v02-1304-rv_v_02_r/d.ev_2024010115000000.ndjson rows=1)\"\n(1 row)\n\n                                                is                                                \n--------------------------------------------------------------------------------------------------\n not ok 5 - no object lands at d.ev_2024010115000000, a key no cell of the grid starts at        +\n # Failed test 5: \"no object lands at d.ev_2024010115000000, a key no cell of the grid starts at\"+\n #         have: 200                                                                             +\n #         want: 404\n(1 row)\n\n                                          ok                                          \n--------------------------------------------------------------------------------------\n not ok 6 - the object at the 1 January cell's key holds exactly the row jan1        +\n # Failed test 6: \"the object at the 1 January cell's key holds exactly the row jan1\"\n(1 row)\n\nRESET\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 6\n(1 row)\n\npsql:<stdin>:8: NOTICE:  extension \"pgtap\" already exists, skipping\n"
+        }
+      },
+      "class": "pre_existing"
+    }
+  ]
+}

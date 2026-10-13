@@ -1,0 +1,71 @@
+{
+  "claims": [
+    {
+      "id": "F5-01",
+      "finder": "F5",
+      "tier": 3,
+      "file": "pgpm_archive/install.sql",
+      "line": 3534,
+      "lens": "boundary arithmetic and types",
+      "scenario": "archive.to_s3 casts the keyset cursor back as v_ctl_typ::regtype::text, the bare type name without its typmod, so a char(3) column's cursor 'abc' reads back as char(1) 'a' (bit(3) likewise as bit(1)) and a multi-page export of a relation the README says it pages never ends (cancelled by statement_timeout, nothing written); the cast should carry the column's typmod as the comment and #1168's fix promise",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": " 2 - LIVENESS: three rows, so with fetch_rows 1 the export needs more than one page\n(1 row)\n\n                                     is                                     \n----------------------------------------------------------------------------\n ok 3 - LIVENESS: no object at the char(3) relation's key before its export\n(1 row)\n\nSET\n                                              is                                              \n----------------------------------------------------------------------------------------------\n not ok 4 - archive.to_s3 of a char(3) relation, one row per page, ends and completes        +\n # Failed test 4: \"archive.to_s3 of a char(3) relation, one row per page, ends and completes\"+\n #         have: cancelled by statement_timeout: the export did not end                      +\n #         want: ok\n(1 row)\n\nRESET\n                               is                               \n----------------------------------------------------------------\n not ok 5 - its object holds rows j, k and l, each once        +\n # Failed test 5: \"its object holds rows j, k and l, each once\"+\n #         have: NULL                                          +\n #         want: {j,k,l}\n(1 row)\n\n                         is                          \n-----------------------------------------------------\n ok 6 - GUARD: the object is cleared after the check\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "ATE FUNCTION\n                                                      is                                                       \n---------------------------------------------------------------------------------------------------------------\n ok 1 - LIVENESS: the exported relation's id column is character(3), a type the documentation says to_s3 pages\n(1 row)\n\n                                          is                                           \n---------------------------------------------------------------------------------------\n ok 2 - LIVENESS: three rows, so with fetch_rows 1 the export needs more than one page\n(1 row)\n\n                                     is                                     \n----------------------------------------------------------------------------\n ok 3 - LIVENESS: no object at the char(3) relation's key before its export\n(1 row)\n\nSET\n                                        is                                        \n----------------------------------------------------------------------------------\n ok 4 - archive.to_s3 of a char(3) relation, one row per page, ends and completes\n(1 row)\n\nRESET\n                         is                         \n----------------------------------------------------\n ok 5 - its object holds rows j, k and l, each once\n(1 row)\n\n                         is                          \n-----------------------------------------------------\n ok 6 - GUARD: the object is cleared after the check\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+      },
+      "class": "seed_hit",
+      "seed": "S8"
+    },
+    {
+      "id": "F5-02",
+      "finder": "F5",
+      "tier": 1,
+      "file": "pgpm_archive/install.sql",
+      "line": 2875,
+      "lens": "operator error",
+      "scenario": "archive._owned_key claims object keys as TEXT (key base = p_prefix as archive.configure stored it), but the store (MinIO, the harness's and README's S3-compatible store) reads '/P/x' and 'P/x' as one object; a table that takes a dropped table's name and is configured with the same prefix spelled with a leading slash claims the unclaimed base '/P/public.t', keeps the plain key shape, and its chunk PUT replaces the dropped table's object (the only copy of its rows) instead of getting the oid shape; configure should refuse or canonicalise a leading '/' (and the claims compare the key the store will use)",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "NSERT 0 4\nINSERT 0 15\nCALL\n configure \n-----------\n \n(1 row)\n\n                       isnt                        \n---------------------------------------------------\n ok 5 - LIVENESS: the namesake is another relation\n(1 row)\n\n                                              is                                               \n-----------------------------------------------------------------------------------------------\n ok 6 - LIVENESS: the store reads the leading-slash spelling of the key as the existing object\n(1 row)\n\nCREATE FUNCTION\n                        ok                        \n--------------------------------------------------\n ok 7 - LIVENESS: the namesake's archive call ran\n(1 row)\n\n                                                 is                                                  \n-----------------------------------------------------------------------------------------------------\n not ok 8 - the dropped table's object still holds its nine rows after the namesake archived        +\n # Failed test 8: \"the dropped table's object still holds its nine rows after the namesake archived\"+\n #         have: 1:new,2:new,3:new,4:new                                                            +\n #         want: 1:old,2:old,3:old,4:old,5:old,6:old,7:old,8:old,9:old\n(1 row)\n\n            is            \n--------------------------\n ok 9 - GUARD: cleaned up\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 9\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 0,
+        "tail": "NSERT 0 4\nINSERT 0 15\nCALL\n configure \n-----------\n \n(1 row)\n\n                       isnt                        \n---------------------------------------------------\n ok 5 - LIVENESS: the namesake is another relation\n(1 row)\n\n                                              is                                               \n-----------------------------------------------------------------------------------------------\n ok 6 - LIVENESS: the store reads the leading-slash spelling of the key as the existing object\n(1 row)\n\nCREATE FUNCTION\n                        ok                        \n--------------------------------------------------\n ok 7 - LIVENESS: the namesake's archive call ran\n(1 row)\n\n                                                 is                                                  \n-----------------------------------------------------------------------------------------------------\n not ok 8 - the dropped table's object still holds its nine rows after the namesake archived        +\n # Failed test 8: \"the dropped table's object still holds its nine rows after the namesake archived\"+\n #         have: 1:new,2:new,3:new,4:new                                                            +\n #         want: 1:old,2:old,3:old,4:old,5:old,6:old,7:old,8:old,9:old\n(1 row)\n\n            is            \n--------------------------\n ok 9 - GUARD: cleaned up\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 9\n(1 row)\n\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F5-03",
+      "finder": "F5",
+      "tier": 3,
+      "file": "pgpm_archive/install.sql",
+      "line": 2646,
+      "lens": "boundary arithmetic and types",
+      "scenario": "a table whose pgpm control column is `date` (a control type transmute accepts) is given pgpm.archive_to_s3_parquet by set_archive_fn with no preflight, and archive._pq_to_parquet_range_counted's type switch has no date branch, so every chunk the strategy is handed raises 'unsupported column type date' (on the automatic path: skip_archive every tick, the table never archived or retired); either the encoder should write a date (Parquet DATE) or the strategy should be refused when set; README's 'eleven types' list documents the gap but nothing refuses it where it is chosen",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "---------------------------------------------\n ok 2 - LIVENESS: the control column is date, a control type pgpm.transmute accepted\n(1 row)\n\nCREATE FUNCTION\n                                                is                                                \n--------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: the NDJSON strategy archives the twin's chunk [2024-01-01, 2024-01-06), 20 rows\n(1 row)\n\n                                 is                                  \n---------------------------------------------------------------------\n ok 4 - LIVENESS: the Parquet table's chunk holds 20 rows to archive\n(1 row)\n\n                                                     is                                                     \n------------------------------------------------------------------------------------------------------------\n not ok 5 - the Parquet strategy set_archive_fn accepted archives the date-controlled table's chunk        +\n # Failed test 5: \"the Parquet strategy set_archive_fn accepted archives the date-controlled table's chunk\"+\n #         have: archive._pq_to_parquet_range: unsupported column type date for column dt                  +\n #         want: rows=20\n(1 row)\n\nCREATE FUNCTION\n              is               \n-------------------------------\n ok 6 - GUARD: objects deleted\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 6\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 0,
+        "tail": "---------------------------------------------\n ok 2 - LIVENESS: the control column is date, a control type pgpm.transmute accepted\n(1 row)\n\nCREATE FUNCTION\n                                                is                                                \n--------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: the NDJSON strategy archives the twin's chunk [2024-01-01, 2024-01-06), 20 rows\n(1 row)\n\n                                 is                                  \n---------------------------------------------------------------------\n ok 4 - LIVENESS: the Parquet table's chunk holds 20 rows to archive\n(1 row)\n\n                                                     is                                                     \n------------------------------------------------------------------------------------------------------------\n not ok 5 - the Parquet strategy set_archive_fn accepted archives the date-controlled table's chunk        +\n # Failed test 5: \"the Parquet strategy set_archive_fn accepted archives the date-controlled table's chunk\"+\n #         have: archive._pq_to_parquet_range: unsupported column type date for column dt                  +\n #         want: rows=20\n(1 row)\n\nCREATE FUNCTION\n              is               \n-------------------------------\n ok 6 - GUARD: objects deleted\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 6\n(1 row)\n\n"
+      },
+      "class": "candidate"
+    }
+  ]
+}

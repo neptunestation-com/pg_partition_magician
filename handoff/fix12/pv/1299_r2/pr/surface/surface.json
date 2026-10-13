@@ -1,0 +1,535 @@
+{
+ "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1299_r2/pr/base",
+ "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1299_r2/pr/review",
+ "files": [
+  {
+   "path": "CHANGELOG.md",
+   "status": "modified",
+   "hunks": [
+    [
+     4,
+     23
+    ]
+   ]
+  },
+  {
+   "path": "bench/retirement_mark_needs_dispatch.sh",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     65
+    ]
+   ]
+  },
+  {
+   "path": "docs/reference.md",
+   "status": "modified",
+   "hunks": [
+    [
+     1491,
+     1496
+    ],
+    [
+     2249,
+     2257
+    ],
+    [
+     2272,
+     2281
+    ]
+   ]
+  },
+  {
+   "path": "pgpm_core/install.sql",
+   "status": "modified",
+   "hunks": [
+    [
+     2160,
+     2191
+    ],
+    [
+     2200,
+     2204
+    ],
+    [
+     2223,
+     2223
+    ],
+    [
+     2230,
+     2231
+    ],
+    [
+     2240,
+     2241
+    ],
+    [
+     3531,
+     3531
+    ],
+    [
+     5246,
+     5247
+    ],
+    [
+     5251,
+     5261
+    ],
+    [
+     5267,
+     5285
+    ],
+    [
+     5440,
+     5449
+    ]
+   ]
+  },
+  {
+   "path": "scripts/archive_partition_whole.sql",
+   "status": "modified",
+   "hunks": [
+    [
+     70,
+     70
+    ],
+    [
+     158,
+     166
+    ]
+   ]
+  },
+  {
+   "path": "test.sh",
+   "status": "modified",
+   "hunks": [
+    [
+     1268,
+     1268
+    ]
+   ]
+  },
+  {
+   "path": "tests/280_obtain_rebuilds_detached_cell_test.sql",
+   "status": "modified",
+   "hunks": [
+    [
+     134,
+     136
+    ]
+   ]
+  },
+  {
+   "path": "tests/307_write_block_skips_hand_detached_test.sql",
+   "status": "modified",
+   "hunks": [
+    [
+     186,
+     187
+    ]
+   ]
+  },
+  {
+   "path": "tests/330_retirement_mark_needs_dispatch_test.sql",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     325
+    ]
+   ]
+  }
+ ],
+ "units": [
+  {
+   "unit": "pgpm._detach_dispatched",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    2166,
+    2174
+   ],
+   "why": "touched at 2160-2191"
+  },
+  {
+   "unit": "pgpm._retirement_vouched",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    2187,
+    2190
+   ],
+   "why": "touched at 2160-2191"
+  },
+  {
+   "unit": "pgpm_core/install.sql:2200-2204",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    2200,
+    2204
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm._part_built",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    2214,
+    2225
+   ],
+   "why": "touched at 2223-2223"
+  },
+  {
+   "unit": "pgpm_core/install.sql:2230-2231",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    2230,
+    2231
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm_core/install.sql:2240-2241",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    2240,
+    2241
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm._disown_retirement",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    3519,
+    3532
+   ],
+   "why": "touched at 3531-3531"
+  },
+  {
+   "unit": "pgpm_core/install.sql:5246-5247",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    5246,
+    5247
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm_core/install.sql:5251-5261",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    5251,
+    5261
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "pgpm._archive_hold_partition",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    5262,
+    5269
+   ],
+   "why": "touched at 5267-5285"
+  },
+  {
+   "unit": "pgpm._archive_unheld_retirement",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    5278,
+    5287
+   ],
+   "why": "touched at 5267-5285"
+  },
+  {
+   "unit": "pgpm._archive_step",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    5289,
+    5504
+   ],
+   "why": "touched at 5440-5449"
+  },
+  {
+   "unit": "pgpm._part_detached_by_hand",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    2245,
+    2250
+   ],
+   "why": "calls pgpm._part_built"
+  },
+  {
+   "unit": "pgpm._cell_attached",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    2272,
+    2311
+   ],
+   "why": "calls pgpm._part_built"
+  },
+  {
+   "unit": "pgpm._cell_walk_rows",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    2340,
+    2357
+   ],
+   "why": "calls pgpm._part_built"
+  },
+  {
+   "unit": "pgpm._disown_unvouched_retirements",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    3567,
+    3602
+   ],
+   "why": "calls pgpm._detach_dispatched, pgpm._disown_retirement"
+  },
+  {
+   "unit": "pgpm.retire",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    3641,
+    4030
+   ],
+   "why": "calls pgpm._detach_dispatched, pgpm._disown_retirement"
+  },
+  {
+   "unit": "pgpm._retain_recall",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    4069,
+    4182
+   ],
+   "why": "calls pgpm._detach_dispatched, pgpm._disown_retirement"
+  },
+  {
+   "unit": "pgpm.retain",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    4184,
+    4242
+   ],
+   "why": "calls pgpm._archive_step"
+  },
+  {
+   "unit": "pgpm._detach_reap",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    12011,
+    12082
+   ],
+   "why": "calls pgpm._detach_dispatched, pgpm._disown_retirement"
+  },
+  {
+   "unit": "pgpm.maintain",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    13325,
+    13528
+   ],
+   "why": "calls pgpm._archive_step"
+  },
+  {
+   "unit": "pgpm.status",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    14390,
+    14510
+   ],
+   "why": "calls pgpm._part_built"
+  },
+  {
+   "unit": "pgpm.progress",
+   "file": "pgpm_core/install.sql",
+   "lines": [
+    14554,
+    14673
+   ],
+   "why": "calls pgpm._part_built"
+  }
+ ],
+ "exercised_by": {
+  "pgpm._archive_step": [
+   "bench/archive_chunk_ties.sh",
+   "bench/archive_covered_hi_canonical.sh",
+   "bench/archive_hold_detach_in_flight.sh",
+   "bench/archive_identity_substitution.sh",
+   "bench/archive_ledger_identity.sh",
+   "bench/archive_parquet_snapshot_locks.sh",
+   "bench/archive_partition_whole_contract.sh",
+   "bench/archive_partition_whole_follows_step.sh",
+   "bench/archive_recorded_chunk_tick_race.sh",
+   "bench/archive_retired_chunk_kept.sh",
+   "bench/archive_step_child_isolation.sh",
+   "bench/archive_whole_skips_hand_detached.sh",
+   "bench/coverage_reset_identity.sh",
+   "bench/doc_archive_identity_recovery.sh",
+   "bench/over_retired_chunks_range_first.sh",
+   "bench/tests_fail_on_defect.sh",
+   "bench/write_block_identity.sh",
+   "bench/write_block_skips_hand_detached.sh",
+   "docs/reference.md",
+   "docs/reviews/2026-09-28.md",
+   "docs/reviews/2026-10-01-pass6.md",
+   "docs/reviews/2026-10-02-pass7.md",
+   "docs/reviews/2026-10-06-pass9.md",
+   "docs/reviews/2026-10-08-pass10.md",
+   "docs/reviews/2026-10-09-pass11.md",
+   "docs/reviews/2026-10-12-pass12.md",
+   "scripts/archive_partition_whole.sql",
+   "tests/102_archive_identity_test.sql",
+   "tests/104_write_block_identity_test.sql",
+   "tests/115_archive_contract_test.sql",
+   "tests/125_archive_chunk_ties_test.sql",
+   "tests/125_archive_ledger_identity_test.sql",
+   "tests/129_retire_regrain_source_test.sql",
+   "tests/130_retire_unguarded_coverage_test.sql",
+   "tests/137_archive_chunk_uuidv7_ties_test.sql",
+   "tests/170_write_block_enabled_state_test.sql",
+   "tests/197_moved_parent_lifecycle_test.sql",
+   "tests/213_ts_text_archive_chunk_transmute_min_test.sql",
+   "tests/228_archive_step_child_isolation_test.sql",
+   "tests/239_moved_parent_recorded_identity_test.sql",
+   "tests/241_reads_under_caller_rls_conformance_test.sql",
+   "tests/263_retain_loop_per_child_isolation_test.sql",
+   "tests/273_archive_covered_hi_canonical_test.sql",
+   "tests/286_archive_partition_whole_contract_test.sql",
+   "tests/289_archive_partition_whole_follows_step_test.sql",
+   "tests/292_archive_covered_hi_column_type_test.sql",
+   "tests/303_adopt_partition_test.sql",
+   "tests/307_write_block_skips_hand_detached_test.sql",
+   "tests/309_archive_retired_chunk_kept_test.sql",
+   "tests/313_archive_whole_skips_hand_detached_test.sql",
+   "tests/317_over_retired_chunks_range_first_test.sql",
+   "tests/325_archive_hold_detach_in_flight_test.sql",
+   "tests/330_retirement_mark_needs_dispatch_test.sql",
+   "tests/59_retain_batch_test.sql",
+   "tests/60_retire_test.sql",
+   "tests/63_archive_chunk_ledger_test.sql",
+   "tests/64_retire_archive_gate_test.sql",
+   "tests/93_archive_batch_test.sql",
+   "tests/archive/db/08_archive_fn_s3_test.sql",
+   "tests/archive/db/13_to_s3_parquet_child_identity_test.sql",
+   "tests/archive/db/16_encode_partition_tz_test.sql",
+   "tests/archive/db/17_sigv4_wall_clock_test.sql",
+   "tests/archive/db/22_huffman_lock_entries_test.sql",
+   "tests/archive/db/37_parquet_snapshot_lock_entries_test.sql",
+   "tests/archive/db/38_archive_reads_under_caller_rls_test.sql",
+   "tests/archive/db/50_archive_retired_chunk_kept_test.sql"
+  ],
+  "pgpm._archive_hold_partition": [
+   "bench/archive_hold_detach_in_flight.sh",
+   "bench/archive_whole_skips_hand_detached.sh",
+   "bench/retirement_mark_needs_dispatch.sh",
+   "docs/reviews/2026-10-09-pass11.md",
+   "docs/reviews/2026-10-12-pass12.md",
+   "scripts/archive_partition_whole.sql",
+   "tests/307_write_block_skips_hand_detached_test.sql",
+   "tests/325_archive_hold_detach_in_flight_test.sql",
+   "tests/330_retirement_mark_needs_dispatch_test.sql"
+  ],
+  "pgpm._part_built": [
+   "bench/obtain_rebuilds_detached_cell.sh",
+   "bench/progress_write_child_built.sh",
+   "bench/retirement_mark_needs_dispatch.sh",
+   "docs/reviews/2026-10-06-pass9.md",
+   "docs/reviews/2026-10-08-pass10.md",
+   "docs/reviews/2026-10-09-pass11.md",
+   "docs/reviews/2026-10-12-pass12.md",
+   "tests/279_progress_write_child_exists_test.sql",
+   "tests/298_obtain_backoff_hole_test.sql",
+   "tests/307_write_block_skips_hand_detached_test.sql",
+   "tests/330_retirement_mark_needs_dispatch_test.sql"
+  ],
+  "pgpm._detach_dispatched": [
+   "bench/retirement_mark_needs_dispatch.sh",
+   "docs/reviews/2026-10-12-pass12.md",
+   "tests/330_retirement_mark_needs_dispatch_test.sql"
+  ],
+  "pgpm._retirement_vouched": [
+   "bench/retirement_mark_needs_dispatch.sh",
+   "tests/330_retirement_mark_needs_dispatch_test.sql"
+  ],
+  "pgpm._disown_retirement": [
+   "docs/reviews/2026-10-12-pass12.md"
+  ],
+  "pgpm._archive_unheld_retirement": [
+   "scripts/archive_partition_whole.sql"
+  ]
+ },
+ "finder": "P1",
+ "slice": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/retirement_mark_needs_dispatch.sh",
+   "docs/reference.md",
+   "pgpm_core/install.sql",
+   "scripts/archive_partition_whole.sql",
+   "test.sh",
+   "tests/280_obtain_rebuilds_detached_cell_test.sql",
+   "tests/307_write_block_skips_hand_detached_test.sql",
+   "tests/330_retirement_mark_needs_dispatch_test.sql"
+  ],
+  "units": [
+   "pgpm._detach_dispatched",
+   "pgpm._retirement_vouched",
+   "pgpm_core/install.sql:2200-2204",
+   "pgpm._part_built",
+   "pgpm_core/install.sql:2230-2231",
+   "pgpm_core/install.sql:2240-2241",
+   "pgpm._disown_retirement",
+   "pgpm_core/install.sql:5246-5247",
+   "pgpm_core/install.sql:5251-5261",
+   "pgpm._archive_hold_partition",
+   "pgpm._archive_unheld_retirement",
+   "pgpm._archive_step",
+   "pgpm._part_detached_by_hand",
+   "pgpm._cell_attached",
+   "pgpm._cell_walk_rows",
+   "pgpm._disown_unvouched_retirements",
+   "pgpm.retire",
+   "pgpm._retain_recall",
+   "pgpm.retain",
+   "pgpm._detach_reap",
+   "pgpm.maintain",
+   "pgpm.status",
+   "pgpm.progress"
+  ],
+  "kind": "mixed"
+ },
+ "ledger": [
+  "pgpm._detach_dispatched",
+  "pgpm._retirement_vouched",
+  "pgpm_core/install.sql:2200-2204",
+  "pgpm._part_built",
+  "pgpm_core/install.sql:2230-2231",
+  "pgpm_core/install.sql:2240-2241",
+  "pgpm._disown_retirement",
+  "pgpm_core/install.sql:5246-5247",
+  "pgpm_core/install.sql:5251-5261",
+  "pgpm._archive_hold_partition",
+  "pgpm._archive_unheld_retirement",
+  "pgpm._archive_step",
+  "pgpm._part_detached_by_hand",
+  "pgpm._cell_attached",
+  "pgpm._cell_walk_rows",
+  "pgpm._disown_unvouched_retirements",
+  "pgpm.retire",
+  "pgpm._retain_recall",
+  "pgpm.retain",
+  "pgpm._detach_reap",
+  "pgpm.maintain",
+  "pgpm.status",
+  "pgpm.progress",
+  "CHANGELOG.md",
+  "bench/retirement_mark_needs_dispatch.sh",
+  "docs/reference.md",
+  "scripts/archive_partition_whole.sql",
+  "test.sh",
+  "tests/280_obtain_rebuilds_detached_cell_test.sql",
+  "tests/307_write_block_skips_hand_detached_test.sql",
+  "tests/330_retirement_mark_needs_dispatch_test.sql"
+ ]
+}

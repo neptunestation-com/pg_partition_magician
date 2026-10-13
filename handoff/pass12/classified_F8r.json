@@ -1,0 +1,27 @@
+{
+  "claims": [
+    {
+      "id": "F8r-01",
+      "finder": "F8r",
+      "tier": 2,
+      "file": "pgpm_archive/install.sql",
+      "line": 3534,
+      "lens": "fresh surface",
+      "scenario": "archive.to_s3 casts its keyset cursor back as v_ctl_typ::regtype::text, the bare type name without the typmod its own comment (and v_ctl_mod, computed and never used) promises, so a char(3) control column's cursor 'abc' is cast back as char(1) 'a', every page re-reads from the top and the export never ends (cancelled by statement_timeout, no object); it should cast as format_type(v_ctl_typ, v_ctl_mod) and complete with rows j,k,l once. scripts/check_archive_child_by_oid.py flags the same line, so lint.yml's required Archive object keys job is red on this tree too",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "--------\n ok 2 - LIVENESS: the bare type name `character` cuts a cursor of abc to a\n(1 row)\n\n                                     is                                     \n----------------------------------------------------------------------------\n ok 3 - LIVENESS: no object at the char(3) relation's key before the export\n(1 row)\n\nSET\n                                              is                                              \n----------------------------------------------------------------------------------------------\n not ok 4 - archive.to_s3 of a char(3) relation, one row per page, ends and completes        +\n # Failed test 4: \"archive.to_s3 of a char(3) relation, one row per page, ends and completes\"+\n #         have: cancelled by statement_timeout: the export did not end                      +\n #         want: ok\n(1 row)\n\nRESET\n                               is                               \n----------------------------------------------------------------\n not ok 5 - its object holds rows j, k and l, each once        +\n # Failed test 5: \"its object holds rows j, k and l, each once\"+\n #         have: NULL                                          +\n #         want: {j,k,l}\n(1 row)\n\n clear \n-------\n   404\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 5\n(1 row)\n\npsql:<stdin>:7: NOTICE:  extension \"http\" already exists, skipping\npsql:<stdin>:8: NOTICE:  extension \"pgcrypto\" already exists, skipping\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "TABLE\nINSERT 0 1\nCALL\n configure \n-----------\n \n(1 row)\n\nCREATE TABLE\nINSERT 0 3\nCREATE FUNCTION\nCREATE FUNCTION\nCREATE FUNCTION\nCREATE FUNCTION\n                                      is                                       \n-------------------------------------------------------------------------------\n ok 1 - LIVENESS: the exported relation's control-named column is character(3)\n(1 row)\n\n                                    is                                     \n---------------------------------------------------------------------------\n ok 2 - LIVENESS: the bare type name `character` cuts a cursor of abc to a\n(1 row)\n\n                                     is                                     \n----------------------------------------------------------------------------\n ok 3 - LIVENESS: no object at the char(3) relation's key before the export\n(1 row)\n\nSET\n                                        is                                        \n----------------------------------------------------------------------------------\n ok 4 - archive.to_s3 of a char(3) relation, one row per page, ends and completes\n(1 row)\n\nRESET\n                         is                         \n----------------------------------------------------\n ok 5 - its object holds rows j, k and l, each once\n(1 row)\n\n clear \n-------\n   404\n(1 row)\n\n finish \n--------\n(0 rows)\n\npsql:<stdin>:7: NOTICE:  extension \"http\" already exists, skipping\npsql:<stdin>:8: NOTICE:  extension \"pgcrypto\" already exists, skipping\n"
+      },
+      "class": "seed_hit",
+      "seed": "S8"
+    }
+  ]
+}

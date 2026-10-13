@@ -1,0 +1,17 @@
+{
+  "pinned": "2a721d22a28ba463a1e54bb48c00aefb1edd5208",
+  "seeds": [
+    {
+      "id": "S1",
+      "kind": "mutation",
+      "mutation": "transmute_resume_any_encoding",
+      "file": "pgpm_core/install.sql",
+      "lens": "fresh surface",
+      "tier": 3,
+      "why": "Pre-#1270 _transmute: a resume of a text_time conversion reuses the claim's bound whatever encoding (p_tt_prefix, width, radix, unit, alphabet, discard bits, epoch) the re-run is given. The validated pgpm_monolith_bound CHECK's literals are in the first attempt's encoding, phases 1 and 2 are skipped because a validated constraint by that name exists, and the cutover attaches with the bound encoded the NEW way, which the CHECK does not imply: the ATTACH scans the whole table under ACCESS EXCLUSIVE and dies raw on the rows outside it. The comparison is removed whole and the recording kept. tests/337's re-runs with the epoch one day earlier are what catch it: neither is refused, each dies at its first COMMIT inside throws_like with 2D000, and the refusal's message is pinned.",
+      "lines": [
+        10822
+      ]
+    }
+  ]
+}

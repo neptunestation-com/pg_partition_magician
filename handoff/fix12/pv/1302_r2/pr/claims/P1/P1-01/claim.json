@@ -1,0 +1,5 @@
+{"tier": 3, "file": "pgpm_hypertable/install.sql", "line": 456, "lens": "fresh surface",
+ "scenario": "pgpm._from_hypertable_check_arguments holds `begin null; exception when others ... end;` where the PR's pgpm._grid_floor('time', p_interval, ...) call should be, so the mixed month + duration step rule is never asked: from_hypertable('1 mon 1 day') copies and from_hypertable_cutover swaps (hypertable and incoming FK dropped) and only the handoff refuses, leaving a plain unmanaged table, and '1 mon -40 days' is refused by the frontier check with a delete-the-newest-rows remedy; both should be refused before the copy and the swap with the module's 'cannot migrate hypertable ... (mixed month + duration interval unsupported)' message, as the PR body, docs/reference.md lines 1081-1084 and test 69 parts A/B state (test 69 fails its 6 #1268 checks on this tree)",
+ "repro": "repro.sh",
+ "install": ["pgpm_core/install.sql", "pgpm_hypertable/install.sql", "tests/timescale/fixtures.sql"],
+ "fixtures": false}

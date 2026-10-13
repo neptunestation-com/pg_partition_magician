@@ -1,0 +1,33 @@
+{
+ "claims": [
+  {
+   "id": "P1-02",
+   "finder": "P1",
+   "tier": 3,
+   "file": "pgpm_core/install.sql",
+   "line": 13476,
+   "lens": "fresh surface",
+   "scenario": "Under maintain, the swap's refusal with the new holder clause is logged as skip_regrain through left(sqlerrm, 200), and the head up to 'still running in database ' is already 206 characters with one pid listed, so the holder's database, pid and xid never reach the log row: the operator whose only view is maintain's log (the issue's scenario, skip_regrain every tick) cannot learn which transaction to end, against docs/reference.md ('the tick logs skip_regrain with method beginning ...; the holder clause above follows'). The row should carry the holder (or the clause should come before the pid list).",
+   "repro": "repro.sql",
+   "repro_used": "repro.sql",
+   "runs": {
+    "base": {
+     "fails": true,
+     "exit": 0,
+     "tail": "                                                      ok                                                        \n------------------------------------------------------------------------------------------------------------------\n ok 7 - LIVENESS: the tick logged the deferred swap as skip_regrain, its method beginning with the refusal's head\n(1 row)\n\n                                                 ok                                                  \n-----------------------------------------------------------------------------------------------------\n not ok 8 - LIVENESS: and that row says a transaction older than the copies is still running        +\n # Failed test 8: \"LIVENESS: and that row says a transaction older than the copies is still running\"\n(1 row)\n\n                                                             ok                                                             \n----------------------------------------------------------------------------------------------------------------------------\n not ok 9 - the skip_regrain row names the holder: its database, pid and xid (the remedy maintain's operator needs)        +\n # Failed test 9: \"the skip_regrain row names the holder: its database, pid and xid (the remedy maintain's operator needs)\"\n(1 row)\n\n dblink_exec \n-------------\n ROLLBACK\n(1 row)\n\n dblink_disconnect \n-------------------\n OK\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 9\n(1 row)\n\n"
+    },
+    "head": {
+     "fails": true,
+     "exit": 0,
+     "tail": "rain_deferred\n(1 row)\n\n                is                 \n-----------------------------------\n ok 6 - GUARD: nothing was swapped\n(1 row)\n\n                                                        ok                                                        \n------------------------------------------------------------------------------------------------------------------\n ok 7 - LIVENESS: the tick logged the deferred swap as skip_regrain, its method beginning with the refusal's head\n(1 row)\n\n                                           ok                                            \n-----------------------------------------------------------------------------------------\n ok 8 - LIVENESS: and that row says a transaction older than the copies is still running\n(1 row)\n\n                                                             ok                                                             \n----------------------------------------------------------------------------------------------------------------------------\n not ok 9 - the skip_regrain row names the holder: its database, pid and xid (the remedy maintain's operator needs)        +\n # Failed test 9: \"the skip_regrain row names the holder: its database, pid and xid (the remedy maintain's operator needs)\"\n(1 row)\n\n dblink_exec \n-------------\n ROLLBACK\n(1 row)\n\n dblink_disconnect \n-------------------\n OK\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 9\n(1 row)\n\n"
+    },
+    "review": {
+     "fails": true,
+     "exit": 0,
+     "tail": "rain_deferred\n(1 row)\n\n                is                 \n-----------------------------------\n ok 6 - GUARD: nothing was swapped\n(1 row)\n\n                                                        ok                                                        \n------------------------------------------------------------------------------------------------------------------\n ok 7 - LIVENESS: the tick logged the deferred swap as skip_regrain, its method beginning with the refusal's head\n(1 row)\n\n                                           ok                                            \n-----------------------------------------------------------------------------------------\n ok 8 - LIVENESS: and that row says a transaction older than the copies is still running\n(1 row)\n\n                                                             ok                                                             \n----------------------------------------------------------------------------------------------------------------------------\n not ok 9 - the skip_regrain row names the holder: its database, pid and xid (the remedy maintain's operator needs)        +\n # Failed test 9: \"the skip_regrain row names the holder: its database, pid and xid (the remedy maintain's operator needs)\"\n(1 row)\n\n dblink_exec \n-------------\n ROLLBACK\n(1 row)\n\n dblink_disconnect \n-------------------\n OK\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 9\n(1 row)\n\n"
+    }
+   },
+   "class": "pre_existing"
+  }
+ ]
+}

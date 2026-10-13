@@ -1,0 +1,180 @@
+{
+ "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1304/pr/base",
+ "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1304/pr/review",
+ "files": [
+  {
+   "path": "CHANGELOG.md",
+   "status": "modified",
+   "hunks": [
+    [
+     5,
+     13
+    ]
+   ]
+  },
+  {
+   "path": "bench/archive_direct_call_bounds.sh",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     100
+    ]
+   ]
+  },
+  {
+   "path": "docs/reference.md",
+   "status": "modified",
+   "hunks": [
+    [
+     2765,
+     2770
+    ]
+   ]
+  },
+  {
+   "path": "pgpm_archive/install.sql",
+   "status": "modified",
+   "hunks": [
+    [
+     2747,
+     2752
+    ],
+    [
+     3065,
+     3075
+    ],
+    [
+     3164,
+     3166
+    ]
+   ]
+  },
+  {
+   "path": "test.sh",
+   "status": "modified",
+   "hunks": [
+    [
+     981,
+     984
+    ]
+   ]
+  },
+  {
+   "path": "tests/archive/db/54_archive_direct_call_bounds_session_test.sql",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     171
+    ]
+   ]
+  }
+ ],
+ "units": [
+  {
+   "unit": "pgpm_archive/install.sql:2747-2752",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    2747,
+    2752
+   ],
+   "why": "top-level hunk, outside every function"
+  },
+  {
+   "unit": "archive._encode_upload_ndjson_single",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    3049,
+    3138
+   ],
+   "why": "touched at 3065-3075"
+  },
+  {
+   "unit": "archive._encode_upload_parquet",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    3149,
+    3202
+   ],
+   "why": "touched at 3164-3166"
+  },
+  {
+   "unit": "pgpm.archive_to_s3_ndjson",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    3878,
+    3907
+   ],
+   "why": "calls archive._encode_upload_ndjson_single"
+  },
+  {
+   "unit": "pgpm.archive_to_s3_parquet",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    3909,
+    3934
+   ],
+   "why": "calls archive._encode_upload_parquet"
+  }
+ ],
+ "exercised_by": {
+  "archive._encode_upload_ndjson_single": [
+   "bench/archive_direct_call_bounds.sh",
+   "bench/archive_encode_partition_tz.sh",
+   "bench/archive_float_digits_pinned.sh",
+   "bench/archive_ndjson_row_alias.sh",
+   "docs/reference.md",
+   "scripts/check_archive_object_keys.py",
+   "tests/archive/db/08_archive_fn_s3_test.sql",
+   "tests/archive/db/16_encode_partition_tz_test.sql",
+   "tests/archive/db/32_float_digits_pinned_test.sql",
+   "tests/archive/db/33_ndjson_row_alias_shadowed_test.sql",
+   "tests/archive/db/39_archive_key_owner_every_path_test.sql",
+   "tests/archive/db/46_parquet_read_by_regclass_test.sql"
+  ],
+  "archive._encode_upload_parquet": [
+   "bench/archive_direct_call_bounds.sh",
+   "bench/archive_encode_partition_tz.sh",
+   "bench/archive_fn_s3_readback.sh",
+   "bench/archive_parquet_snapshot.sh",
+   "docs/reference.md",
+   "scripts/check_archive_object_keys.py",
+   "tests/archive/db/08_archive_fn_s3_test.sql",
+   "tests/archive/db/15_parquet_single_snapshot_test.sql",
+   "tests/archive/db/16_encode_partition_tz_test.sql",
+   "tests/archive/db/39_archive_key_owner_every_path_test.sql"
+  ]
+ },
+ "finder": "P1",
+ "slice": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/archive_direct_call_bounds.sh",
+   "docs/reference.md",
+   "pgpm_archive/install.sql",
+   "test.sh",
+   "tests/archive/db/54_archive_direct_call_bounds_session_test.sql"
+  ],
+  "units": [
+   "pgpm_archive/install.sql:2747-2752",
+   "archive._encode_upload_ndjson_single",
+   "archive._encode_upload_parquet",
+   "pgpm.archive_to_s3_ndjson",
+   "pgpm.archive_to_s3_parquet"
+  ],
+  "kind": "mixed"
+ },
+ "ledger": [
+  "pgpm_archive/install.sql:2747-2752",
+  "archive._encode_upload_ndjson_single",
+  "archive._encode_upload_parquet",
+  "pgpm.archive_to_s3_ndjson",
+  "pgpm.archive_to_s3_parquet",
+  "CHANGELOG.md",
+  "bench/archive_direct_call_bounds.sh",
+  "docs/reference.md",
+  "test.sh",
+  "tests/archive/db/54_archive_direct_call_bounds_session_test.sql"
+ ]
+}

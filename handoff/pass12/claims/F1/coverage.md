@@ -1,0 +1,61 @@
+# F1 coverage ledger (slice S1: conversion and reversal)
+
+- pgpm._session_alive | read: yes | operator error/failure injection: own-pid degrade, null start, recycled pid against the claim take-over and the reaper; held
+- pgpm._relkind_noun | read: yes | message helper; every relkind named; held
+- pgpm._type_squatter | read: yes | boundary: implicit array types excluded, row types excluded; used by child-holder guard and squatter refusals; held
+- pgpm._identity_options | read: yes | identity options clause carried on transmute step 6 and untransmute; held
+- pgpm._identity_options_locked | read: yes | lock via pg_sequence_last_value before reading options; held
+- pgpm._seq_next | read: yes | boundary: is_called false/true, numeric past bigint; held
+- pgpm._identity_reseed | read: yes | boundary arithmetic: lattice walk for +/- increments, numeric division, exhausted bound; held
+- pgpm._fk_definition | read: yes | search_path pinned to pg_catalog so REFERENCES is qualified; held
+- pgpm._fk_readd_definition | read: yes | regexp over quoted/unquoted identifiers, PERIOD, qualified target; held
+- pgpm._forget_dangling_fks | read: yes | forget/adopt identity by referencing table + name + confrelid after 0d/0e moves; held
+- pgpm._refuse_null_arguments | read: yes | json null detection, ordering; held
+- pgpm._transmute_carried_indexes | read: yes | EXCLUDE, uncarriable UNIQUE, _pgpm name length/clash, pgpm_key clash; probed an INVALID index (carried, converts and reverses); held
+- pgpm._transmute_outgoing_fks | read: yes | NOT VALID outgoing refused, NOT ENFORCED left to the key gate; held
+- pgpm._identity_resume_at | read: yes | under-lock re-read only when a btree index answers; documented limit for unindexed columns; held
+- pgpm._refuse_unconvertible_keys | read: yes | NOT ENFORCED (PG18 jsonb probe) and NOT VALID incoming; held on PG15
+- pgpm._id_step_contract | read: yes | boundary: negative-scale numeric through domains, typmod -1 returns; held
+- pgpm._text_time_unit_contract | read: yes | unit floor of anchor/step from epoch; held
+- pgpm._time_unit_contract | read: yes | time and zones: date anchor typed in New York (05:00 UTC) refused; timestamptz(0) with 500 ms refused; held
+- pgpm._control_bound_contract | read: yes | NaN/Infinity, type round trip, finest-step remedy; held
+- pgpm._transmute_incoming_gate | read: yes | error/preserve/drop, reused-key match, asked twice; held
+- pgpm._refuse_filtered_reads | read: yes | row_security_active refusal and message branches; held
+- pgpm._transmute_refuse_generated_control | read: yes | generated control column refused preflight and under ACCESS SHARE; held
+- pgpm._transmute_refuse_uncarried_constraints | read: yes | NOT ENFORCED/NOT VALID/NO INHERIT CHECKs, pgpm_monolith_bound excluded; held
+- pgpm._transmute_refuse_transition_triggers | read: yes | row trigger with transition table; held
+- pgpm._refuse_oid_bound_dependants | read: yes | views/rules/policies/row-type dependants, untransmute's partition set; held
+- pgpm._transmute_key_shape | read: yes | key/identity/notnull fingerprint compared after the LIKE; held
+- pgpm._transmute_bare_unique | read: yes | bare unique index detection; held
+- pgpm._frontier_skew_limit | read: yes | time and zones: now()+step+1h; naive local-wall-time east of UTC on an hourly grid hypothesised (see null-results)
+- pgpm._acl_reset | read: yes | revoke every grantee incl. owner, default ACL path; held
+- pgpm._acl_may_grant_as | read: yes | session_user SET/MEMBER by version, schema USAGE; held
+- pgpm._acl_grant_as | read: yes | set role/restore, error path rolls back; held
+- pgpm._acl_carry_ddl | read: yes | grant chain ordering by grantor depth, column grants; held
+- pgpm._transmute | read: yes | all lenses: claim take-over/resume (zone, column, grid), phases 1-2 commits, cutover handlers (#1105, #1135, #1167), 0c-0e records, mixed-sign steps, date/timestamp(p) contracts; no new defect in the body (F1-04's obtain gap is reached from its cutover)
+- pgpm.transmute | read: yes | both overloads: kind by column type, anchor through _ts_text, id overload argument mapping; held
+- pgpm.transmute_abort | read: yes | operator error: abort of nothing returns false; own session; lock timeout path; held
+- pgpm._transmute_reap | read: yes | fresh surface #1166: lock then FOR UPDATE SKIP LOCKED re-read, PGPMR rollback, take-over race; held
+- pgpm._detach_reap | read: yes | three liveness signals, #705 disown before finalize, per-row handler; held
+- pgpm._publication_adds | read: yes | statement-equality comparison by column names; held
+- pgpm._is_clone_pkey_name | read: yes | boundary: 63-byte clip with numbered pkey labels; held
+- pgpm.untransmute | read: yes | fresh surface #1157: _refuse_detach_pending is never called, pending partition's rows destroyed (F1-01, T1); rest (gates, identity, ACL, publications, FKs) held
+- pgpm.restore_incoming_fks | read: yes | fresh surface #633: park written but never read, retried every unscoped call (F1-02, T3); in-flight gate held
+- pgpm.validate_incoming_fks | read: yes | back-off read and written; held
+- pgpm.incoming_fk_orphans | read: yes | MATCH FULL/SIMPLE predicates, RLS refusal both sides; held (does not list a key whose one-step re-add failed: by its documented scope)
+- pgpm.suspend_incoming_fks | read: yes | p_force gate, drop + record; held
+- pgpm._own_backend_start_definer | read: yes | security definer, own pid only; held
+- pgpm._own_backend_start | read: yes | coalesce current-role then definer read; held
+- pgpm._identity_acl_carry_ddl | read: yes | per identity column carry from source sequence; held
+- pgpm._array_type_name | read: yes | boundary: 63-byte clip on a character boundary; held
+- pgpm._transmute_names_present | read: yes | r/t keys for XX000 arm p_skip; held
+- pgpm._transmute_taken_names | read: yes | name + array name + also; held
+- pgpm._transmute_refuse_names_held | read: yes | own row/array types excluded, p_skip; held
+- pgpm._transmute_refuse_monolith_squatter | read: yes | relation and type at the monolith name; held
+- pgpm._transmute_refuse_staging_squatter | read: yes | relation and type at <rel>_pgpm_new; held
+- pgpm._transmute_refuse_publications | read: yes | filter/column list without viaroot, unowned publication; held
+- pgpm._refuse_bad_transmute_arguments | read: yes | operator error: negative/zero/mixed-sign steps ('1 day -1 hour' accepted as 23 h and consistent; '1 month 1 day' refused by _grid_floor before commit), retain via _retain_nonnegative, obtain; held
+- pgpm._refuse_strict_isolation | read: yes | both isolation settings asked; held
+- pgpm._transmute_refuse_child_holders | read: yes | fresh surface #1167: prefix + _is_fine_child_label, attached partitions and row types excluded, asked post-obtain; held (over-broad match of kind-wide labels noted as hypothesis)
+- pgpm._fk_def_unvalidated | read: yes | regexp ' NOT VALID$'; PG18-only consumers, harness is PG15, not exercised
+- pgpm._refuse_detach_pending | read: yes | defined, message names FINALIZE correctly, but called from nowhere (F1-01)

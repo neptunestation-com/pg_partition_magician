@@ -1,0 +1,3 @@
+{"tier": 5, "file": "scripts/check_quoted_splices.py", "line": 370, "lens": "fresh surface",
+ "scenario": "check_quoted_splices.py (read by value since #1179) never reads a FOR ... IN SELECT loop target as an assignment, so a text local holding quote_ident output with no _q suffix passes the lint (as does one assigned by EXECUTE ... INTO from a dynamic SELECT of quote_ident), while the same local assigned by SELECT ... INTO is refused; the lint should refuse every quote-derived text local CLAUDE.md says it does",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

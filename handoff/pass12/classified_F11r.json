@@ -1,0 +1,27 @@
+{
+  "claims": [
+    {
+      "id": "F11r-01",
+      "finder": "F11r",
+      "tier": 5,
+      "file": "pgpm_archive/install.sql",
+      "line": 3534,
+      "lens": "fresh surface",
+      "scenario": "archive.to_s3's new pageable-type code assigns v_ctltype := v_ctl_typ::regtype::text, which the tree's own scripts/check_archive_child_by_oid.py (rule 1, newly refusing a regtype rendered as text) refuses, so CI's Lint job fails on this tree and bench/lint_child_by_oid_inverse.sh fails its LIVENESS premises on clean code; the two fixes should have left the module clean under the lint (e.g. format_type, or the rendering alone in a select list)",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: the checker's selftest passes (it refuses what it should)\nok - LIVENESS: pgpm_archive/install.sql defines archive.to_s3\nnot ok - the tree's archive module passes the tree's check_archive_child_by_oid.py (CI's Lint job)\n#   FAIL  archive.to_s3 (line 3534): a regtype rendered as text (v_ctl_typ :: regtype :: text) stands in a plpgsql expression; a name may be read only alone as an item of a statement's own select list or of a RAISE, or as a bare argument of quote_ident(), format() or json_build_object() there, a relation looked up by name outside archive._resolve_child; take the regclass it returned\nnot ok - bench/lint_child_by_oid_inverse.sh passes on the tree's own checker and module\n#   FAIL  LIVENESS: the checkout's module passes the checker             pgpm_archive/install.sql\n#   FAIL  LIVENESS: a name read off a row found by oid and reported is clean \n#   FAIL  LIVENESS: a name as a bare argument of quote_ident()/format() is clean \n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "ok - LIVENESS: the checker's selftest passes (it refuses what it should)\nok - LIVENESS: pgpm_archive/install.sql defines archive.to_s3\nok - the tree's archive module passes the tree's check_archive_child_by_oid.py (CI's Lint job)\nok - bench/lint_child_by_oid_inverse.sh passes on the tree's own checker and module\n"
+      },
+      "class": "seed_hit",
+      "seed": "S8"
+    }
+  ]
+}

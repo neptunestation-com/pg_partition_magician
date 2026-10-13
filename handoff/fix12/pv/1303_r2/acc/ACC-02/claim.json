@@ -1,0 +1,14 @@
+{
+ "tier": 4,
+ "file": "pgpm_core/install.sql",
+ "line": 3508,
+ "lens": "closing claim",
+ "scenario": "#1272 acceptance (V-01-1303): PR #1303 writes the drop remedy ('drop table X; delete from pgpm.part ...', and 'attach it back ... so retention retires it') into EVERY retain_disown row through pgpm._disown_retirement, including the one _retain_recall logs (install.sql ~4148) for a partition retention NO LONGER REACHES after the operator lengthened retain with set_retain. For that partition both halves are false: retention will not retire it if attached back, and the spelled DROP destroys rows the policy in force keeps. Typed as logged, the remedy drops rows 150 and 160 that retain '1000' keeps. On the base the recall path's retain_disown named no remedy, so this is new with the PR (regression, misleading logged remedy).",
+ "repro": "repro.sql",
+ "install": [
+  "pgpm_core/install.sql"
+ ],
+ "fixtures": false,
+ "id": "ACC-02",
+ "finder": "ACC"
+}

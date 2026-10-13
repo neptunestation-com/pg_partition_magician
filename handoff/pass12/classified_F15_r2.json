@@ -1,0 +1,48 @@
+{
+  "claims": [
+    {
+      "id": "F15-01",
+      "finder": "F15",
+      "tier": 5,
+      "file": "tests/72_transmute_attributes_test.sql",
+      "line": 61,
+      "lens": "contracts versus documentation",
+      "scenario": "tests/72's RLS assertion asks only the role the policy names (a count of 400 over a symmetric 5-tenant fixture), so all 15 assertions pass against a transmute that replays tenant_iso TO PUBLIC, under which t72_writer reads tenant 1's 402 rows; it should also assert that a role the policy does not name still sees nothing through the parent",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - GUARD: the mutant differs from the tree's install.sql in exactly one line (the roles of the first policy replay)\nok - fixture: the mutant installs\nok - LIVENESS: tests/72 ran against the mutant (15 ok, 0 not ok)\nok - LIVENESS: under the mutant the parent's tenant_iso policy is TO PUBLIC ({-}) and t72_writer, which it does not name, reads tenant 1's 402 rows\nnot ok - tests/72 passes all its assertions against a transmute that replays tenant_iso TO PUBLIC (t72_writer reads tenant 1's rows where the table it converted showed it none)\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - GUARD: the mutant differs from the tree's install.sql in exactly one line (the roles of the first policy replay)\nok - fixture: the mutant installs\nok - LIVENESS: tests/72 ran against the mutant (15 ok, 0 not ok)\nok - LIVENESS: under the mutant the parent's tenant_iso policy is TO PUBLIC ({-}) and t72_writer, which it does not name, reads tenant 1's 402 rows\nnot ok - tests/72 passes all its assertions against a transmute that replays tenant_iso TO PUBLIC (t72_writer reads tenant 1's rows where the table it converted showed it none)\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F15-02",
+      "finder": "F15",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 5180,
+      "lens": "time and zones",
+      "scenario": "_over_retired_chunks casts an offset-less retired ledger bound (an older install's row) with ::timestamptz in the caller's TimeZone, so a partition held over a retired chunk from a UTC session (pg_cron's maintain) is not held from an Asia/Kolkata session (a hand _archive_step or retain()), which then archives it over the retired range; it should read such a bound in the grid's registered partition_tz and give every session the same answer, as its header promises",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "---------------------------------------------------------------------------------\n ok 3 - LIVENESS: from a UTC session the first attached partition is held over the retired chunk\n(1 row)\n\nSET\n                                            ok                                             \n-------------------------------------------------------------------------------------------\n ok 4 - LIVENESS: read in Asia/Kolkata the same chunk text ends before that partition's lo\n(1 row)\n\n                                                                                   is                                                                                    \n-------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 5 - from an Asia/Kolkata session the same call holds the same partition (it does not: the offset-less bound is read in the session zone, not the grid's)        +\n # Failed test 5: \"from an Asia/Kolkata session the same call holds the same partition (it does not: the offset-less bound is read in the session zone, not the grid's)\"+\n #         have: NULL                                                                                                                                                   +\n #         want: t_p2026_01_to_2026_11\n(1 row)\n\nSET\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 5\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 0,
+        "tail": "---------------------------------------------------------------------------------\n ok 3 - LIVENESS: from a UTC session the first attached partition is held over the retired chunk\n(1 row)\n\nSET\n                                            ok                                             \n-------------------------------------------------------------------------------------------\n ok 4 - LIVENESS: read in Asia/Kolkata the same chunk text ends before that partition's lo\n(1 row)\n\n                                                                                   is                                                                                    \n-------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 5 - from an Asia/Kolkata session the same call holds the same partition (it does not: the offset-less bound is read in the session zone, not the grid's)        +\n # Failed test 5: \"from an Asia/Kolkata session the same call holds the same partition (it does not: the offset-less bound is read in the session zone, not the grid's)\"+\n #         have: NULL                                                                                                                                                   +\n #         want: t_p2026_01_to_2026_11\n(1 row)\n\nSET\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 5\n(1 row)\n\n"
+      },
+      "class": "candidate"
+    }
+  ]
+}

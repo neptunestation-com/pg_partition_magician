@@ -1,0 +1,15 @@
+{
+ "threshold": 0.9,
+ "rows": [
+  {
+   "finder": "P1",
+   "kind": "mixed",
+   "units": 12,
+   "read": 12,
+   "coverage": 1.0,
+   "unread": [],
+   "extra": [],
+   "ledger": "present"
+  }
+ ]
+}

@@ -1,0 +1,31 @@
+- pgpm._detach_dispatched | read: yes | unchanged body, moved; record must equal the relation's oid; callers checked
+- pgpm._retirement_vouched | read: yes | body ignores the record (P1-01)
+- pgpm_core/install.sql:2200-2204 | read: yes | _part_built comment: the rule it states is not what the tree's _retirement_vouched does
+- pgpm._part_built | read: yes | calls _retirement_vouched for the detached-but-pgpm's case; probed in P1-01
+- pgpm_core/install.sql:2230-2231 | read: yes | _part_detached_by_hand comment
+- pgpm_core/install.sql:2240-2241 | read: yes | _part_detached_by_hand comment (one-directional note)
+- pgpm._disown_retirement | read: yes | clears the three columns, logs retain_disown; unchanged
+- pgpm_core/install.sql:5246-5247 | read: yes | hold comment on unanchored rows
+- pgpm_core/install.sql:5251-5261 | read: yes | hold comment: no detached table is held
+- pgpm._archive_hold_partition | read: yes | pg_partition_ancestors under ACCESS SHARE; two-session concurrent-detach probe held
+- pgpm._archive_unheld_retirement | read: yes | asks _detach_dispatched by v_now oid; remedy text checked for id grids
+- pgpm._archive_step | read: yes | candidate query, identity check, hold with coalesce, skip_archive log, ledger insert; probed through maintain()
+- pgpm._part_detached_by_hand | read: yes | not built and relation exists; probed in P1-01
+- pgpm._cell_attached | read: yes | forgets rows not built; reads _part_built, so inherits P1-01's misjudgement (not separately built)
+- pgpm._cell_walk_rows | read: yes | built verdict per row from _part_built; same inheritance
+- pgpm._disown_unvouched_retirements | read: yes | install pass, asks _detach_dispatched directly
+- pgpm.retire | read: yes | detached/pending paths, dispatch record write, coverage gate, drop; unchanged
+- pgpm._retain_recall | read: yes | asks _detach_dispatched before reattaching a detached mark
+- pgpm.retain | read: yes | recall then retire loop; unchanged
+- pgpm._detach_reap | read: yes | disowns an unrecorded mark before finalize; unchanged
+- pgpm.maintain | read: yes | step order and per-step commits; archive before retain
+- pgpm.status | read: yes | n_partitions/coarse counts via _part_built (grep of the sites)
+- pgpm.progress | read: yes | write_child via _part_built, coarse_frozen via _part_detached_by_hand (grep of the sites)
+- CHANGELOG.md | read: yes | the entry's claims match the body; the tree's _retirement_vouched does not keep them
+- bench/retirement_mark_needs_dispatch.sh | read: yes | wrapper over tests/330; count-ran liveness; non-installing mutant is FAIL
+- docs/reference.md | read: yes | retire and maintain hunks plus archive contract lines on rows_archived; not the whole 3900 lines
+- scripts/archive_partition_whole.sql | read: yes | hold call and unheld-retirement fallback mirror _archive_step
+- test.sh | read: yes | the guard registration hunk and its neighbours only
+- tests/280_obtain_rebuilds_detached_cell_test.sql | read: yes | modified region: mark now stamped with its record
+- tests/307_write_block_skips_hand_detached_test.sql | read: yes | modified region and the retiring-partition assertions
+- tests/330_retirement_mark_needs_dispatch_test.sql | read: yes | all four parts; part B would fail on this tree (P1-01)

@@ -1,0 +1,28 @@
+{
+ "threshold": 0.9,
+ "rows": [
+  {
+   "finder": "P1",
+   "kind": "mixed",
+   "units": 12,
+   "read": 0,
+   "coverage": 0.0,
+   "unread": [
+    "pgpm_core/install.sql:3480-3506",
+    "pgpm._disown_retirement",
+    "pgpm._disown_unvouched_retirements",
+    "pgpm.retire",
+    "pgpm._retain_recall",
+    "pgpm._detach_reap",
+    "CHANGELOG.md",
+    "bench/retain_disown_remedy.sh",
+    "docs/reference.md",
+    "test.sh",
+    "tests/327_retire_pending_detach_test.sql",
+    "tests/339_retain_disown_remedy_test.sql"
+   ],
+   "extra": [],
+   "ledger": "missing"
+  }
+ ]
+}

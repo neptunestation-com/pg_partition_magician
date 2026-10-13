@@ -1,0 +1,3 @@
+{"tier": 3, "file": "pgpm_core/install.sql", "line": 3096, "lens": "contracts versus documentation",
+ "scenario": "extend_to leaves a cell of its walk whose name a stranger table holds unbuilt and logs nothing: its `if v_name is null then null; end if;` no longer calls pgpm._log_unbuilt_cell, so the fail_obtain_name row docs/reference.md promises ('Each time obtain or extend_to leaves a cell unbuilt this way it logs fail_obtain_name') is never written; it should log fail_obtain_name over [lo, hi) naming the holder",
+ "repro": "repro.sql", "install": ["pgpm_core/install.sql"], "fixtures": false}

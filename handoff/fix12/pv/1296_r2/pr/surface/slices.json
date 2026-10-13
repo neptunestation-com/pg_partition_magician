@@ -1,0 +1,25 @@
+{
+ "P1": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/snapshot_wait_foreign_floor_holder.sh",
+   "docs/reference.md",
+   "pgpm_archive/install.sql",
+   "pgpm_core/install.sql",
+   "pgpm_hypertable/install.sql",
+   "test.sh",
+   "tests/333_snapshot_wait_foreign_floor_holder_test.sql"
+  ],
+  "units": [
+   "pgpm_core/install.sql:7639-7652",
+   "pgpm_core/install.sql:7699-7706",
+   "pgpm._snapshot_wait",
+   "pgpm.maintain",
+   "archive._pq_encode_column_data",
+   "pgpm._regrain_snapshot_wait",
+   "pgpm.maintain_all",
+   "pgpm.from_hypertable_cutover"
+  ],
+  "kind": "mixed"
+ }
+}

@@ -1,0 +1,3 @@
+{"tier": 5, "file": "tests/archive/db/44_archive_extension_resolution_test.sql", "line": 207, "lens": "contracts versus documentation",
+ "scenario": "tests/archive/db/44 Part B's header says the objects the ticks write under search_path app are read back by identity, but its two Parquet tick objects are only checked to start with PAR1; against a pgpm_archive whose Parquet strategy PUTs only those four bytes while ledgering 1200 and 5 rows the file stays 15/15 green; it should compare each object with the Parquet file of its ledgered [lo, hi)",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql", "pgpm_archive/install.sql"], "fixtures": false}

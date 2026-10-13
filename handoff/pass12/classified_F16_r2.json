@@ -1,0 +1,92 @@
+{
+  "claims": [
+    {
+      "id": "F16-01",
+      "finder": "F16",
+      "tier": 4,
+      "file": "pgpm_core/install.sql",
+      "line": 9086,
+      "lens": "operator error",
+      "scenario": "from_hypertable (and from_hypertable_cutover) refuse an off-midnight anchor on a date dimension, or a step/anchor finer than a timestamp(p) dimension, up front via the shared pgpm._time_unit_contract (#1118/#1138), but the refusal's remedy says 'then re-run transmute; ... call pgpm.transmute_abort(<table>) first': transmute refuses a hypertable outright ('has inheritance children'), and nothing from_hypertable did needs a transmute_abort; the message should name from_hypertable / from_hypertable_cutover as the call to re-run (tests/timescale/db/66 pins only the message's first half, so the wrong remedy is unwatched)",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "                                                      \n--------------------------------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: re-running transmute on this hypertable, as the message says, is refused (it is not the call to re-run)\n(1 row)\n\n                                                           ok                                                            \n-------------------------------------------------------------------------------------------------------------------------\n not ok 4 - the refusal raised by from_hypertable does not tell the operator to re-run transmute on a hypertable        +\n # Failed test 4: \"the refusal raised by from_hypertable does not tell the operator to re-run transmute on a hypertable\"\n(1 row)\n\n                                                           ok                                                            \n-------------------------------------------------------------------------------------------------------------------------\n not ok 5 - nor to call pgpm.transmute_abort on it first (from_hypertable never left a transmute bound to abort)        +\n # Failed test 5: \"nor to call pgpm.transmute_abort on it first (from_hypertable never left a transmute bound to abort)\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 5\n(1 row)\n\npsql:<stdin>:6: NOTICE:  extension \"timescaledb\" already exists, skipping\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 0,
+        "tail": "                                                      \n--------------------------------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: re-running transmute on this hypertable, as the message says, is refused (it is not the call to re-run)\n(1 row)\n\n                                                           ok                                                            \n-------------------------------------------------------------------------------------------------------------------------\n not ok 4 - the refusal raised by from_hypertable does not tell the operator to re-run transmute on a hypertable        +\n # Failed test 4: \"the refusal raised by from_hypertable does not tell the operator to re-run transmute on a hypertable\"\n(1 row)\n\n                                                           ok                                                            \n-------------------------------------------------------------------------------------------------------------------------\n not ok 5 - nor to call pgpm.transmute_abort on it first (from_hypertable never left a transmute bound to abort)        +\n # Failed test 5: \"nor to call pgpm.transmute_abort on it first (from_hypertable never left a transmute bound to abort)\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 5\n(1 row)\n\npsql:<stdin>:6: NOTICE:  extension \"timescaledb\" already exists, skipping\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F16-02",
+      "finder": "F16",
+      "tier": 5,
+      "file": "tests/archive/db/16_archive_object_key_identity_test.sql",
+      "line": 218,
+      "lens": "contracts versus documentation",
+      "scenario": "tests/archive/db/16 Part B asserts the Parquet object at the [-10000, 0) key only by size (neg_bytes > pos_bytes) though its header promises an identity check; against a pgpm_archive whose Parquet strategy encodes only the top 5% of the chunk's range (500 of 1000 rows, the rest in no object) the file stays 23/23 green; it should compare the object byte for byte with the chunk's file, as 08 Part B does",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - GUARD: the mutation applied to pgpm_archive/install.sql\nok - LIVENESS: (A) the mutant's Parquet strategy archived 500 of the chunk's 1000 rows ([-10000, 0) holds ids -1000..-1)\nok - LIVENESS: (A) the object at the [-10000, 0) key is not the Parquet file of the chunk's rows\nok - LIVENESS: (B) tests/archive/db/16 ran all 23 assertions\nnot ok - tests/archive/db/16 stays green (23/23) against a Parquet strategy that archived half the chunk: its Parquet half compares object sizes, not the chunk's file\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - GUARD: the mutation applied to pgpm_archive/install.sql\nok - LIVENESS: (A) the mutant's Parquet strategy archived 500 of the chunk's 1000 rows ([-10000, 0) holds ids -1000..-1)\nok - LIVENESS: (A) the object at the [-10000, 0) key is not the Parquet file of the chunk's rows\nok - LIVENESS: (B) tests/archive/db/16 ran all 23 assertions\nnot ok - tests/archive/db/16 stays green (23/23) against a Parquet strategy that archived half the chunk: its Parquet half compares object sizes, not the chunk's file\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F16-03",
+      "finder": "F16",
+      "tier": 5,
+      "file": "tests/archive/db/08_archive_fn_s3_test.sql",
+      "line": 103,
+      "lens": "contracts versus documentation",
+      "scenario": "tests/archive/db/08 reads its bigint-keyed NDJSON objects back by line count only (5000 for the monolith, 50 for the PascalCase table) and the two 5-row chunks not at all; against a pgpm_archive whose NDJSON strategy writes \"id\":1 on every line in place of the row's id (count, rows_archived and digest unchanged) the file stays 22/22 green; it should read the objects back by row identity (ids or id:payload), as 12, 16 and 26 do",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - GUARD: the mutation applied to pgpm_archive/install.sql\nok - LIVENESS: (A) the monolith's object holds 5000 lines naming ONE id between them, not ids 1..5000\nok - LIVENESS: (B) tests/archive/db/08 ran all 22 assertions\nnot ok - tests/archive/db/08 stays green (22/22) against an NDJSON strategy that writes id 1 on every line: it reads the objects back by line count, not by which rows\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - GUARD: the mutation applied to pgpm_archive/install.sql\nok - LIVENESS: (A) the monolith's object holds 5000 lines naming ONE id between them, not ids 1..5000\nok - LIVENESS: (B) tests/archive/db/08 ran all 22 assertions\nnot ok - tests/archive/db/08 stays green (22/22) against an NDJSON strategy that writes id 1 on every line: it reads the objects back by line count, not by which rows\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F16-04",
+      "finder": "F16",
+      "tier": 5,
+      "file": "tests/archive/db/44_archive_extension_resolution_test.sql",
+      "line": 207,
+      "lens": "contracts versus documentation",
+      "scenario": "tests/archive/db/44 Part B's header says the objects the ticks write under search_path app are read back by identity, but its two Parquet tick objects are only checked to start with PAR1; against a pgpm_archive whose Parquet strategy PUTs only those four bytes while ledgering 1200 and 5 rows the file stays 15/15 green; it should compare each object with the Parquet file of its ledgered [lo, hi)",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - GUARD: the mutation applied to pgpm_archive/install.sql\nok - LIVENESS: (A) the ledger records 1200 and 5 rows for p44's chunks, and each object at their keys is 4 bytes\nok - LIVENESS: (B) tests/archive/db/44 ran all 15 assertions\nnot ok - tests/archive/db/44 stays green (15/15) against a Parquet strategy that uploads only the magic PAR1 for 1205 ledgered rows: its Parquet tick objects are checked by prefix, not by identity\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - GUARD: the mutation applied to pgpm_archive/install.sql\nok - LIVENESS: (A) the ledger records 1200 and 5 rows for p44's chunks, and each object at their keys is 4 bytes\nok - LIVENESS: (B) tests/archive/db/44 ran all 15 assertions\nnot ok - tests/archive/db/44 stays green (15/15) against a Parquet strategy that uploads only the magic PAR1 for 1205 ledgered rows: its Parquet tick objects are checked by prefix, not by identity\n"
+      },
+      "class": "candidate"
+    }
+  ]
+}

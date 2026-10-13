@@ -1,0 +1,118 @@
+# F16 coverage ledger (slice S12)
+
+- tests/archive/db/04_parquet_and_sync_archive_test.sql | read: yes | time/ops: plain to_s3_parquet calls + retain; lives_ok only, no read-back (header promises only a PUT); held
+- tests/archive/db/08_archive_fn_s3_test.sql | read: yes | contracts: ndjson monolith read back by line COUNT (5000) and sums of rows_archived; Parquet parts read back byte for byte; ndjson 5-row chunks never read back; weak but header-consistent (hypothesis H3)
+- tests/archive/db/09_configure_test.sql | read: yes | operator error: configure/unconfigure upsert, refusal, idempotence; held
+- tests/archive/db/10_encode_boundary_test.sql | read: yes | boundary/injection: SQL payloads per parameter, witness payload shaped to commit; held
+- tests/archive/db/11_parquet_decimal_bytes_test.sql | read: yes | boundary: decimal byte widths vs externally derived refs, -1 at width 8 witness; held
+- tests/archive/db/12_to_s3_tied_rows_test.sql | read: yes | boundary: tie run straddling 10-row pages, identity by id arrays; set_eq plus count covers dupes; held
+- tests/archive/db/13_to_s3_parquet_child_identity_test.sql | read: yes | contracts: decoy/impostor child resolution, byte-for-byte read-back, null-anchor boundary; held
+- tests/archive/db/14_parquet_naive_timestamp_test.sql | read: yes | time and zones: NY vs UTC sessions, byte identity, hand-pinned epochs; only DST zone varied (no fixed-offset, no DateStyle) noted in null results
+- tests/archive/db/15_parquet_single_snapshot_test.sql | read: yes | failure/concurrency: dblink racy encode, before/after byte identity with window witness; held
+- tests/archive/db/16_archive_object_key_identity_test.sql | read: yes | boundary: negative/positive lo stems; NDJSON by ids, Parquet only by SIZE (neg_bytes > pos_bytes), not identity (hypothesis H2)
+- tests/archive/db/16_encode_partition_tz_test.sql | read: yes | time and zones: legacy NY naive grid hand-built, UTC session; ids and bytes by identity; held
+- tests/archive/db/16_to_s3_compress_test.sql | read: yes | contracts: gzip trailer CRC/ISIZE for single PUT; multipart identity deferred to bench (stated in header); held
+- tests/archive/db/17_sigv4_wall_clock_test.sql | read: yes | time: SigV4 stamp from clock_timestamp via recording stand-in; held
+- tests/archive/db/18_parquet_negative_scale_test.sql | read: yes | boundary/types: numeric(5,-2) bytes vs external refs and twin file; held
+- tests/archive/db/19_parquet_timestamp_infinity_test.sql | read: yes | boundary: +-infinity sentinels, tick with archive_batch 1; held
+- tests/archive/db/20_parquet_scale_above_precision_test.sql | read: yes | boundary/types: numeric(2,4) widened to DECIMAL(4,4), twin identity; held
+- tests/archive/db/21_parquet_keyless_test.sql | read: yes | contracts: keyless range encode, tie pairing in either order, tick; held
+- tests/archive/db/22_huffman_lock_entries_test.sql | read: yes | boundary: Huffman lock growth with temp-table control witness and known answers; held
+- tests/archive/db/23_to_s3_part_bytes_bound_test.sql | read: yes | operator error: part_bytes refusals, counting stand-in with dead-counter liveness; held
+- tests/archive/db/24_to_s3_cancel_aborts_multipart_test.sql | read: yes | failure injection: cancel in transport, statement_timeout, pending cancel; abort counted by sequences; held
+- tests/archive/db/25_to_s3_conservation_identity_test.sql | read: yes | failure/concurrency: compensating UPDATE pair mid-export refused on equal counts; held
+- tests/archive/db/26_archive_key_schema_zone_test.sql | read: yes | time and zones: search_path-relative keys and Karachi/Bogota stems, exact keys; Parquet half by size only (H2 sibling)
+- tests/archive/db/27_parquet_timestamp_range_test.sql | read: yes | boundary: int64 microsecond ceiling, BC far past, tick; held
+- tests/archive/db/28_to_s3_loud_edges_test.sql | read: yes | operator error/failure: part_bytes 5 MiB floor, fetch_rows, cancel/error inside initiate, bystander abort sorting; held
+- tests/archive/db/29_signer_non_utf8_database_test.sql | read: yes | boundary/encoding: LATIN1 sibling db; reads install files from /repo, not the tree under test (noted)
+- tests/archive/db/30_archive_edges_pass5_test.sql | read: yes | contracts: schema in synchronous keys, tstz LogicalType bytes, paged abort sweep; held
+- tests/archive/db/31_parquet_decimal_nan_test.sql | read: yes | boundary: numeric NaN as null, OPTIONAL leaf, tick; held
+- tests/archive/db/32_float_digits_pinned_test.sql | read: yes | time/settings: extra_float_digits 0 vs default, row identity and byte identity; held
+- tests/archive/db/33_ndjson_row_alias_shadowed_test.sql | read: yes | contracts: row alias t shadowed by a column (composite, tstz control); held
+- tests/archive/db/34_archive_key_reused_name_test.sql | read: yes | operator error: drop + forget_missing + namesake keyed by oid, seeding re-run; held (oid reuse untestable, H5)
+- tests/archive/db/35_archive_stem_era_test.sql | read: yes | time and zones: BC era and fraction stems under Karachi/SQL DMY; held
+- tests/archive/db/36_to_s3_cursor_session_settings_test.sql | read: yes | time and zones: cursor text under Shanghai/Guam DateStyle Postgres; PG18 skip guarded; held
+- tests/archive/db/37_parquet_snapshot_lock_entries_test.sql | read: yes | boundary: snapshot temp-table reuse lock growth and byte identity across shapes; shape check reviewed in install (names, types, typmods, collations); held
+- tests/archive/db/38_archive_reads_under_caller_rls_test.sql | read: yes | contracts: RLS refusal per reader, catalog enumeration Z; held
+- tests/archive/db/39_archive_key_owner_every_path_test.sql | read: yes | contracts: lexer scan of S3 writes with planted sites, namesake per path; held
+- tests/archive/db/40_archive_key_full_claim_test.sql | read: yes | contracts: chunk vs export whole-key claims, both shapes held refused; held
+- tests/archive/db/41_archive_null_arguments_test.sql | read: yes | operator error: null sweep from catalog with control schema and proxy fence; [9,10) numeric-not-text control; parquet [1,0) inverted not driven (minor)
+- tests/archive/db/42_archive_recorded_chunk_overwrite_test.sql | read: yes | contracts: recorded-chunk overwrite refusals, re-run controls; count arm superseded by 48; held
+- tests/archive/db/43_archive_export_key_by_relation_test.sql | read: yes | contracts: claim records exported relation oid, upgrade claims unrecorded; held
+- tests/archive/db/44_archive_extension_resolution_test.sql | read: yes | injection: extension objects shadowed on search_path; tick Parquet objects checked only for PAR1 prefix (H4)
+- tests/archive/db/45_to_s3_child_held_test.sql | read: yes | concurrency: BEFORE INSERT trigger window on object_key_claim, dblink DROP under lock_timeout; held
+- tests/archive/db/46_parquet_read_by_regclass_test.sql | read: yes | concurrency: event trigger window, schema swap, _refuse_foreign_read; held
+- tests/archive/db/47_resolve_child_one_snapshot_test.sql | read: yes | concurrency: format() shim window inside _resolve_child; held
+- tests/archive/db/48_archive_recorded_chunk_rows_identity_test.sql | read: yes | contracts: digest identity vs count, upgrade claims without digest refused; held
+- tests/archive/db/49_archive_key_by_resolved_oid_test.sql | read: yes | concurrency: row_security_active shim, SET SCHEMA mid-export, rename boundary; held
+- tests/archive/db/50_archive_retired_chunk_kept_test.sql | read: yes | fresh surface: retired chunk kept against adopt_partition re-creation, digest arm pinned; remedy documented in reference; held
+- tests/archive/db/51_to_s3_multi_heap_relation_test.sql | read: yes | fresh surface: multi-heap cursor, NULL runs, typmod casts, allowlist; probed interval round trip under all IntervalStyles and float cursor under to_s3 pinned extra_float_digits: held
+- tests/archive/fixtures.sql | read: yes | contracts: mk_archive_table procedure, transport stand-in renames _s3_send (bytea_to_text of body for forwarded requests); held
+- tests/timescale/db/01_preflight_refusals_test.sql | read: yes | operator error: preflight refusals incl. incoming FK and NOT VALID outgoing FK; held
+- tests/timescale/db/02_from_hypertable_happy_test.sql | read: yes | contracts: count + rows_equal (EXCEPT, set) on distinct-row fixture: sound because fixture rows are distinct
+- tests/timescale/db/03_from_hypertable_keyless_test.sql | read: yes | contracts: keyless, count + EXCEPT set equality; random temp makes rows distinct; held
+- tests/timescale/db/04_from_hypertable_identity_test.sql | read: yes | contracts: identity continuity by distinct count and > max; held
+- tests/timescale/db/05_from_hypertable_catchup_test.sql | read: yes | contracts: bag_eq of source before cutover; held
+- tests/timescale/db/06_retention_translation_test.sql | read: yes | operator error: p_retain carried; held
+- tests/timescale/db/07_schema_fidelity_test.sql | read: yes | contracts: schema fidelity on parent; held
+- tests/timescale/db/08_abort_rollback_test.sql | read: yes | failure injection: view dependency aborts swap, throws_ok pinned SQLSTATE+message; held
+- tests/timescale/db/09_from_hypertable_generated_test.sql | read: yes | contracts: generated column by count and predicate; held
+- tests/timescale/db/10_from_hypertable_delta_test.sql | read: yes | contracts: tracking reconcile asserted by counts (temp = -1 x5), not by which keys; old file, header promises no identity
+- tests/timescale/db/11_from_hypertable_sequence_test.sql | read: yes | boundary: identity sequence ahead of max(id); held
+- tests/timescale/db/12_from_hypertable_disk_estimate_test.sql | read: yes | contracts: disk estimate equals chunk sizes (expected computed by the same query family; acceptable for a pure helper)
+- tests/timescale/db/13_from_hypertable_time_estimate_test.sql | read: yes | contracts: time estimate formula; held
+- tests/timescale/db/14_from_hypertable_online_drain_test.sql | read: yes | contracts: online drain by counts; key-changing update by device 7/500 identity; held for its header
+- tests/timescale/db/15_from_hypertable_append_predrain_test.sql | read: yes | contracts: append drain by counts; held for its header
+- tests/timescale/db/16_from_hypertable_foreign_keys_test.sql | read: yes | contracts: FK carry both directions, LIVENESS enforcement before; held
+- tests/timescale/db/17_from_hypertable_cutover_identity_test.sql | read: yes | injection: event trigger substitution of source and destination, sequence liveness; held
+- tests/timescale/db/18_from_hypertable_dimension_preflight_test.sql | read: yes | operator error: integer dimension and non-dimension control refused at every entry point; held
+- tests/timescale/db/19_from_hypertable_naive_timestamp_bounds_test.sql | read: yes | time and zones: Tokyo/LA naive and date dimensions, identity; no DateStyle variation here (36 covers)
+- tests/timescale/db/20_from_hypertable_late_appends_test.sql | read: yes | fresh surface: late rows behind/at/past watermark, counts named in refusals; held
+- tests/timescale/db/21_from_hypertable_swap_order_test.sql | read: yes | failure ordering: dropped_fk and log written before handoff; held
+- tests/timescale/db/22_from_hypertable_conservation_identity_test.sql | read: yes | fresh surface: fingerprint vs compensating shapes, D positive with duplicates; held
+- tests/timescale/db/23_from_hypertable_derived_names_test.sql | read: yes | boundary: 63-byte name budget at 48/49/55 bytes; held
+- tests/timescale/db/24_from_hypertable_cutover_lock_timeout_test.sql | read: yes | operator error: bad p_lock_timeout refused up front; held
+- tests/timescale/db/25_from_hypertable_replica_role_capture_test.sql | read: yes | failure injection: replica-role write refused by horizon check; held
+- tests/timescale/db/26_from_hypertable_exclusion_test.sql | read: yes | operator error: exclusion constraints refused at every entry point, remedy typed; held
+- tests/timescale/db/27_from_hypertable_identity_options_test.sql | read: yes | boundary: identity kind and options, next values off lattice; held
+- tests/timescale/db/28_from_hypertable_cutover_shape_test.sql | read: yes | operator error: source shape drift since copy refused; held
+- tests/timescale/db/29_from_hypertable_index_names_test.sql | read: yes | boundary: index names with spaces and 63 bytes, monolith name length refusal; held
+- tests/timescale/db/30_from_hypertable_empty_copy_watermark_test.sql | read: yes | boundary: NULL watermark of an empty copy; held
+- tests/timescale/db/32_uninstall_hypertable_capture_test.sql | read: yes | contracts: uninstall removes capture objects incl. unrecorded copy by comment sweep; held
+- tests/timescale/db/33_from_hypertable_cutover_carries_access_test.sql | read: no | only the setup and assertion lines grepped (budget)
+- tests/timescale/db/34_from_hypertable_handoff_refusals_test.sql | read: no | only assertion lines grepped (budget)
+- tests/timescale/db/35_from_hypertable_naive_watermark_zone_test.sql | read: no | only assertion lines grepped (budget)
+- tests/timescale/db/36_from_hypertable_session_datestyle_test.sql | read: no | only assertion lines grepped (budget)
+- tests/timescale/db/37_from_hypertable_reads_caller_rls_test.sql | read: yes | contracts: caller RLS refusals A-D; code read whole, header skimmed
+- tests/timescale/db/38_from_hypertable_grant_carry_resets_acl_test.sql | read: yes | contracts: grants exact after swap, default privileges; code read whole, header skimmed
+- tests/timescale/db/39_from_hypertable_serial_sequences_test.sql | read: yes | contracts: owned sequences kept by oid; code read whole, header skimmed
+- tests/timescale/db/40_from_hypertable_cutover_foreign_keys_test.sql | read: yes | contracts: FK drift since copy refused; code read whole, header skimmed
+- tests/timescale/db/41_from_hypertable_cutover_exclusion_window_test.sql | read: yes | contracts: EXCLUDE added after copy refused; code read whole, header skimmed
+- tests/timescale/db/42_from_hypertable_capture_by_record_test.sql | read: yes | contracts: stale capture trigger not carried; code read whole, header skimmed
+- tests/timescale/db/43_from_hypertable_publications_replica_identity_test.sql | read: yes | contracts: publications and replica identity kept; code read whole, header skimmed
+- tests/timescale/db/44_from_hypertable_key_index_on_destination_test.sql | read: no | only assertion and DML lines grepped (budget)
+- tests/timescale/db/45_from_hypertable_copy_key_index_renamed_test.sql | read: no | only assertion and DML lines grepped (budget)
+- tests/timescale/db/46_from_hypertable_reads_under_caller_rls_test.sql | read: no | only assertion and DML lines grepped (budget)
+- tests/timescale/db/47_from_hypertable_scratch_tables_in_pg_temp_test.sql | read: no | only assertion and DML lines grepped (budget)
+- tests/timescale/db/48_uninstall_drops_abandoned_copy_test.sql | read: no | only assertion and DML lines grepped (budget)
+- tests/timescale/db/49_from_hypertable_scratch_relations_test.sql | read: no | not opened (budget)
+- tests/timescale/db/50_from_hypertable_shared_preflight_test.sql | read: no | not opened (budget)
+- tests/timescale/db/51_from_hypertable_scratch_sequence_acl_test.sql | read: no | only assertion and DML lines grepped (budget)
+- tests/timescale/db/52_from_hypertable_delta_writer_grants_test.sql | read: no | only assertion and DML lines grepped (budget)
+- tests/timescale/db/53_from_hypertable_scratch_owner_follow_test.sql | read: no | only first lines grepped (budget)
+- tests/timescale/db/54_uninstall_drops_renamed_scratch_test.sql | read: no | only assertion lines grepped (budget)
+- tests/timescale/db/55_from_hypertable_capture_by_provenance_test.sql | read: no | not opened (budget)
+- tests/timescale/db/56_from_hypertable_capture_delta_by_record_test.sql | read: no | only assertion lines grepped (budget)
+- tests/timescale/db/57_from_hypertable_capture_delta_held_test.sql | read: no | not opened (budget)
+- tests/timescale/db/58_from_hypertable_argument_rules_test.sql | read: no | only assertion lines grepped (budget)
+- tests/timescale/db/59_from_hypertable_handoff_remedy_test.sql | read: no | only assertion lines grepped (budget)
+- tests/timescale/db/60_from_hypertable_copy_rerun_by_record_test.sql | read: no | not opened (budget)
+- tests/timescale/db/61_from_hypertable_capture_view_writer_test.sql | read: no | not opened beyond the pre-pass throws_ok hits (budget)
+- tests/timescale/db/62_from_hypertable_key_column_named_pgpm_seq_test.sql | read: no | only assertion lines grepped (budget)
+- tests/timescale/db/63_from_hypertable_isolation_refused_test.sql | read: no | only header and first assertion grepped (budget)
+- tests/timescale/db/64_from_hypertable_cutover_reads_copy_under_lock_test.sql | read: yes | fresh surface: copy read under SHARE, drains take copy first, deterministic pg_locks waits; held
+- tests/timescale/db/65_from_hypertable_cutover_moved_delta_by_record_test.sql | read: yes | fresh surface: moved/renamed delta by record, recorded function dropped; held
+- tests/timescale/db/66_from_hypertable_column_unit_rules_test.sql | read: yes | fresh surface: _time_unit_contract asked by from_hypertable; probed naive timestamp(0) (held) and the refusal remedy: CLAIMED F16-01 (remedy names transmute/transmute_abort)
+- tests/timescale/db/67_from_hypertable_cutover_waits_for_older_snapshots_test.sql | read: yes | fresh surface: snapshot wait parts A-G, paired liveness; read F/G regexes; held
+- tests/timescale/fixtures.sql | read: yes | contracts: rows_equal is EXCEPT (set) not EXCEPT ALL; every caller pairs it with a count over distinct-row fixtures, so sound
+- fixtures/demo.sql | read: yes | contracts: seeded snapshots taken before transmute for identity; uuid fixture carries version nibble 4 (not 7) in its low bits; held

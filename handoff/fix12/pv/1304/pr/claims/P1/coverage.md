@@ -1,0 +1,10 @@
+- pgpm_archive/install.sql:2747-2752 | read: yes | comment hunk on _object_stem; describes both encoders handing canonical text, which the NDJSON encoder does not (P1-01)
+- archive._encode_upload_ndjson_single | read: yes | whole function; only p_hi canonicalised at 3073, p_lo reaches _object_key raw; probed DMY, New York and id '0100' (P1-01)
+- archive._encode_upload_parquet | read: yes | whole function; both bounds canonicalised at 3165-3166; probed from SQL, DMY: keyed 2 January, held
+- pgpm.archive_to_s3_ndjson | read: yes | whole function; unchanged, empty-range check parses raw text in session, covered_hi returned raw as the body says
+- pgpm.archive_to_s3_parquet | read: yes | whole function; same shape as the ndjson wrapper, held
+- CHANGELOG.md | read: yes | entry read; its "each encoder reads its bounds once" is not kept for NDJSON (folded into P1-01)
+- bench/archive_direct_call_bounds.sh | read: yes | whole file; LIVENESS separation, ran-count, bucket setup read; fails against this tree via test 54 parts A, C, D
+- docs/reference.md | read: yes | the key-stem paragraph and the new direct-call sentences read; NDJSON claim not kept (folded into P1-01)
+- test.sh | read: yes | run_archive tail read; the new guard line with pgpm_perf396, nothing further
+- tests/archive/db/54_archive_direct_call_bounds_session_test.sql | read: yes | whole file; fixtures asymmetric, LIVENESS witnesses present; parts A, C, D fail on this tree, B passes

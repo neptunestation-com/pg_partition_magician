@@ -1,0 +1,143 @@
+{
+  "trees": {
+    "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296_r2/pr/base",
+    "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296_r2/pr/head",
+    "review": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296_r2/pr/review",
+    "mutants": {
+      "snapshot_wait_foreign_floor_exempt": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296_r2/pr/mutants/snapshot_wait_foreign_floor_exempt",
+      "snapshot_wait_holder_log_truncated": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296_r2/pr/mutants/snapshot_wait_holder_log_truncated",
+      "snapshot_wait_holder_this_database_only": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1296_r2/pr/mutants/snapshot_wait_holder_this_database_only"
+    }
+  },
+  "acceptance": "ACC",
+  "claims": [
+    {
+      "id": "ACC-01",
+      "finder": "ACC",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 7737,
+      "lens": "fresh surface",
+      "scenario": "#1263 acceptance (ACC-01-1296): #1263 acceptance (F13-01): regrain_step's swap (_snapshot_wait) is refused while any transaction older than the copies' last write is open in ANOTHER database of the cluster, because backend_xmin is cluster-wide and every statement of this database then looks older than the copies though its snapshot sees them; the swap should go through (the comment says other databases' sessions are not consulted) instead of deferring every tick for the foreign transaction's lifetime",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 1,
+          "tail": " transaction\nok - fixture: (B) the source monolith is attached (oid 626380)\nok - LIVENESS: (B) the foreign transaction is pid 28689 in rv_acc_01_b_h1o\nok - the swap is still deferred while the foreign transaction runs\nok - the refusal lists the local reader pid 28883\nnot ok - the refusal names the innocent local pid 28883 without the holding transaction in rv_acc_01_b_h1o (pid 28689, xid 21010): SET ERROR:  pg_partition_magician: regrain swap deferred: 1 snapshot(s) older than the copies still open (oldest: pid 28883, open 00:00:02; pids 28883); a reader in one would find the regrained range empty after the swap. Source: h1b_p0000000000000000000_to_0000000000000200000 of h1b. Nothing was swapped: maintain retries a regrain on its next tick, and a call by hand is refused and can be run aga\nnot ok - the refusal calls the listed sessions readers that would find the range empty, unqualified\nok - nothing was swapped: no regrain row, the same source attached by oid\nNOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h1a_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h1a_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h1b_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h1b_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": " the same swap goes through (swapped:10)\nok - fixture: (B) h1b is copied to the swap's doorstep\nok - LIVENESS: (B) a transaction in database rv_acc_01_h_h1o holds xid 21082, older than the copies' last write 21164, and is still open\nok - LIVENESS: (B) the reader's statement (snapshot) started after the last copy was logged, so it sees the copies\nok - LIVENESS: (B) yet its backend_xmin 21082 is held at or before 21164 by the other database's transaction\nok - fixture: (B) the source monolith is attached (oid 627378)\nok - LIVENESS: (B) the foreign transaction is pid 29261 in rv_acc_01_h_h1o\nok - the swap is still deferred while the foreign transaction runs\nok - the refusal lists the local reader pid 29449\nok - the refusal names the holding transaction: database rv_acc_01_h_h1o, pid 29261, xid 21082\nok - the refusal says the listed sessions cannot be told from snapshots that miss the copies\nok - nothing was swapped: no regrain row, the same source attached by oid\nNOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h1a_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h1a_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h1b_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h1b_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\n"
+        },
+        "mutant:snapshot_wait_foreign_floor_exempt": {
+          "fails": true,
+          "exit": 1,
+          "tail": " last write 21219, and is still open\nok - LIVENESS: (B) the reader's statement (snapshot) started after the last copy was logged, so it sees the copies\nok - LIVENESS: (B) yet its backend_xmin 21201 is held at or before 21219 by the other database's transaction\nok - fixture: (B) the source monolith is attached (oid 630090)\nok - LIVENESS: (B) the foreign transaction is pid 29791 in rv_acc_01_m_snapshot_wait_foreign_floor_exempt_h1o\nnot ok - the swap is still deferred while the foreign transaction runs (it went through: SET swapped:10 )\nnot ok - the refusal does not list the local reader 29978: SET swapped:10 \nnot ok - the refusal names the innocent local pid 29978 without the holding transaction in rv_acc_01_m_snapshot_wait_foreign_floor_exempt_h1o (pid 29791, xid 21201): SET swapped:10 \nnot ok - the refusal calls the listed sessions readers that would find the range empty, unqualified\nnot ok - the swap went ahead (regrain rows 1, source now 630325, was 630090)\nNOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h1a_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h1a_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h1b_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h1b_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\n"
+        },
+        "mutant:snapshot_wait_holder_log_truncated": {
+          "fails": false,
+          "exit": 0,
+          "tail": "NESS: (B) a transaction in database rv_acc_01_m_snapshot_wait_holder_log_truncated_h1o holds xid 21256, older than the copies' last write 21267, and is still open\nok - LIVENESS: (B) the reader's statement (snapshot) started after the last copy was logged, so it sees the copies\nok - LIVENESS: (B) yet its backend_xmin 21256 is held at or before 21267 by the other database's transaction\nok - fixture: (B) the source monolith is attached (oid 631093)\nok - LIVENESS: (B) the foreign transaction is pid 30315 in rv_acc_01_m_snapshot_wait_holder_log_truncated_h1o\nok - the swap is still deferred while the foreign transaction runs\nok - the refusal lists the local reader pid 30504\nok - the refusal names the holding transaction: database rv_acc_01_m_snapshot_wait_holder_log_truncated_h1o, pid 30315, xid 21256\nok - the refusal says the listed sessions cannot be told from snapshots that miss the copies\nok - nothing was swapped: no regrain row, the same source attached by oid\nNOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h1a_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h1a_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h1b_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h1b_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\n"
+        },
+        "mutant:snapshot_wait_holder_this_database_only": {
+          "fails": true,
+          "exit": 1,
+          "tail": " LIVENESS: (B) the foreign transaction is pid 30871 in rv_acc_01_m_snapshot_wait_holder_this_database_only_h1o\nok - the swap is still deferred while the foreign transaction runs\nok - the refusal lists the local reader pid 31060\nnot ok - the refusal names the innocent local pid 31060 without the holding transaction in rv_acc_01_m_snapshot_wait_holder_this_database_only_h1o (pid 30871, xid 21320): SET ERROR:  pg_partition_magician: regrain swap deferred: 1 snapshot(s) older than the copies still open (oldest: pid 31060, open 00:00:02; pids 31060); a reader in one would find the regrained range empty after the swap. Source: h1b_p0000000000000000000_to_0000000000000200000 of h1b. Nothing was swapped: maintain retries a regrain on its next tick, and a call by hand is refused and can be run aga\nnot ok - the refusal calls the listed sessions readers that would find the range empty, unqualified\nok - nothing was swapped: no regrain row, the same source attached by oid\nNOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h1a_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h1a_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_capture\" for relation \"h1b_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\nNOTICE:  trigger \"pgpm_regrain_truncate_guard\" for relation \"h1b_p0000000000000000000_to_0000000000000200000\" does not exist, skipping\n"
+        }
+      },
+      "class": "fixed",
+      "acceptance": {
+        "fails_on_base": true,
+        "passes_on_head": true,
+        "mutant_restores": {
+          "snapshot_wait_foreign_floor_exempt": true,
+          "snapshot_wait_holder_log_truncated": false,
+          "snapshot_wait_holder_this_database_only": true
+        },
+        "any_restores": true
+      }
+    },
+    {
+      "id": "ACC-02",
+      "finder": "ACC",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 13476,
+      "lens": "fresh surface",
+      "scenario": "#1263 acceptance (P1-02-1296): Under maintain, the swap's refusal with the new holder clause is logged as skip_regrain through left(sqlerrm, 200), and the head up to 'still running in database ' is already 206 characters with one pid listed, so the holder's database, pid and xid never reach the log row: the operator whose only view is maintain's log (the issue's scenario, skip_regrain every tick) cannot learn which transaction to end, against docs/reference.md ('the tick logs skip_regrain with method beginning ...; the holder clause above follows'). The row should carry the holder (or the clause should come before the pid list).",
+      "repro": "repro.sql",
+      "repro_used": "repro.verified.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": "-------------------\n ok 7 - LIVENESS: the tick logged the deferred swap as skip_regrain, its method beginning with the refusal's head\n(1 row)\n\n                                                                ok                                                                 \n-----------------------------------------------------------------------------------------------------------------------------------\n not ok 8 - and that row says a transaction older than the copies is still running (no clause at all is the base's defect)        +\n # Failed test 8: \"and that row says a transaction older than the copies is still running (no clause at all is the base's defect)\"\n(1 row)\n\n                                                                        ok                                                                        \n--------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 9 - the skip_regrain row carries the holder clause whole: database, pid, xid and its close (the remedy maintain's operator needs)        +\n # Failed test 9: \"the skip_regrain row carries the holder clause whole: database, pid, xid and its close (the remedy maintain's operator needs)\"\n(1 row)\n\n dblink_exec \n-------------\n ROLLBACK\n(1 row)\n\n dblink_disconnect \n-------------------\n OK\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 9\n(1 row)\n\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "------------------------------------------\n archived=0 dropped=0 restored_fk=0 regrain=deferred regrain_deferred\n(1 row)\n\n                is                 \n-----------------------------------\n ok 6 - GUARD: nothing was swapped\n(1 row)\n\n                                                        ok                                                        \n------------------------------------------------------------------------------------------------------------------\n ok 7 - LIVENESS: the tick logged the deferred swap as skip_regrain, its method beginning with the refusal's head\n(1 row)\n\n                                                          ok                                                           \n-----------------------------------------------------------------------------------------------------------------------\n ok 8 - and that row says a transaction older than the copies is still running (no clause at all is the base's defect)\n(1 row)\n\n                                                                  ok                                                                  \n--------------------------------------------------------------------------------------------------------------------------------------\n ok 9 - the skip_regrain row carries the holder clause whole: database, pid, xid and its close (the remedy maintain's operator needs)\n(1 row)\n\n dblink_exec \n-------------\n ROLLBACK\n(1 row)\n\n dblink_disconnect \n-------------------\n OK\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+        },
+        "mutant:snapshot_wait_foreign_floor_exempt": {
+          "fails": false,
+          "exit": 0,
+          "tail": "------------------------------------------\n archived=0 dropped=0 restored_fk=0 regrain=deferred regrain_deferred\n(1 row)\n\n                is                 \n-----------------------------------\n ok 6 - GUARD: nothing was swapped\n(1 row)\n\n                                                        ok                                                        \n------------------------------------------------------------------------------------------------------------------\n ok 7 - LIVENESS: the tick logged the deferred swap as skip_regrain, its method beginning with the refusal's head\n(1 row)\n\n                                                          ok                                                           \n-----------------------------------------------------------------------------------------------------------------------\n ok 8 - and that row says a transaction older than the copies is still running (no clause at all is the base's defect)\n(1 row)\n\n                                                                  ok                                                                  \n--------------------------------------------------------------------------------------------------------------------------------------\n ok 9 - the skip_regrain row carries the holder clause whole: database, pid, xid and its close (the remedy maintain's operator needs)\n(1 row)\n\n dblink_exec \n-------------\n ROLLBACK\n(1 row)\n\n dblink_disconnect \n-------------------\n OK\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+        },
+        "mutant:snapshot_wait_holder_log_truncated": {
+          "fails": true,
+          "exit": 0,
+          "tail": "                 ok                                                        \n------------------------------------------------------------------------------------------------------------------\n ok 7 - LIVENESS: the tick logged the deferred swap as skip_regrain, its method beginning with the refusal's head\n(1 row)\n\n                                                          ok                                                           \n-----------------------------------------------------------------------------------------------------------------------\n ok 8 - and that row says a transaction older than the copies is still running (no clause at all is the base's defect)\n(1 row)\n\n                                                                        ok                                                                        \n--------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 9 - the skip_regrain row carries the holder clause whole: database, pid, xid and its close (the remedy maintain's operator needs)        +\n # Failed test 9: \"the skip_regrain row carries the holder clause whole: database, pid, xid and its close (the remedy maintain's operator needs)\"\n(1 row)\n\n dblink_exec \n-------------\n ROLLBACK\n(1 row)\n\n dblink_disconnect \n-------------------\n OK\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 9\n(1 row)\n\n"
+        },
+        "mutant:snapshot_wait_holder_this_database_only": {
+          "fails": false,
+          "exit": 0,
+          "tail": "------------------------------------------\n archived=0 dropped=0 restored_fk=0 regrain=deferred regrain_deferred\n(1 row)\n\n                is                 \n-----------------------------------\n ok 6 - GUARD: nothing was swapped\n(1 row)\n\n                                                        ok                                                        \n------------------------------------------------------------------------------------------------------------------\n ok 7 - LIVENESS: the tick logged the deferred swap as skip_regrain, its method beginning with the refusal's head\n(1 row)\n\n                                                          ok                                                           \n-----------------------------------------------------------------------------------------------------------------------\n ok 8 - and that row says a transaction older than the copies is still running (no clause at all is the base's defect)\n(1 row)\n\n                                                                  ok                                                                  \n--------------------------------------------------------------------------------------------------------------------------------------\n ok 9 - the skip_regrain row carries the holder clause whole: database, pid, xid and its close (the remedy maintain's operator needs)\n(1 row)\n\n dblink_exec \n-------------\n ROLLBACK\n(1 row)\n\n dblink_disconnect \n-------------------\n OK\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+        }
+      },
+      "class": "fixed",
+      "acceptance": {
+        "fails_on_base": true,
+        "passes_on_head": true,
+        "mutant_restores": {
+          "snapshot_wait_foreign_floor_exempt": false,
+          "snapshot_wait_holder_log_truncated": true,
+          "snapshot_wait_holder_this_database_only": false
+        },
+        "any_restores": true
+      }
+    },
+    {
+      "id": "P1-01",
+      "finder": "P1",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 7828,
+      "lens": "fresh surface",
+      "scenario": "_snapshot_wait's floor-holder query is filtered to this database (a.datid = v_db), so a transaction open in ANOTHER database (the #1263 case, which the PR body says the clause names: 'a session of any database') is never found: at the budget the refusal falls back to the old message calling the held-back local pid a reader that 'would find the regrained range empty', and maintain's skip_regrain row carries no holder; the refusal should name that transaction's database, pid and xid (tests/333 parts A and D fail on this tree: 8, 9, 32)",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "runs": {
+        "base": {
+          "fails": true,
+          "exit": 0,
+          "tail": " a regrain on its next tick, and a call by hand is refused and can be run again once those transactions have ended (from a direct session: a caller that holds a snapshot across the call is one of them).'+\n #    doesn't match: 'pg_partition_magician: regrain swap deferred: 1 snapshot(s) older than the copies still open (oldest: pid 31347, open %); a transaction older than the copies is still running in database rv_p1_01_b_x (pid 31346, xid 21731, open %'\n(1 row)\n\nRESET\n                is                 \n-----------------------------------\n ok 6 - GUARD: nothing was swapped\n(1 row)\n\n                  is                  \n--------------------------------------\n ok 7 - GUARD: B's statement finished\n(1 row)\n\n dblink_exec \n-------------\n COMMIT\n(1 row)\n\n                            is                             \n-----------------------------------------------------------\n ok 8 - GUARD: once X has ended the same swap goes through\n(1 row)\n\n                                        bag_eq                                        \n--------------------------------------------------------------------------------------\n ok 9 - GUARD: the table reads exactly its rows: the multiples of 26 to 494, and 2600\n(1 row)\n\n dblink_disconnect \n-------------------\n OK\n(1 row)\n\n dblink_disconnect \n-------------------\n OK\n(1 row)\n\n  dblink_exec  \n---------------\n DROP DATABASE\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 9\n(1 row)\n\n"
+        },
+        "head": {
+          "fails": false,
+          "exit": 0,
+          "tail": "-----------------------------------------------------------------------------------------------\n ok 4 - LIVENESS: and B's backend_xmin is X's xid: the other database's transaction holds its snapshot back\n(1 row)\n\nSET\n                                                  throws_like                                                  \n---------------------------------------------------------------------------------------------------------------\n ok 5 - the refusal names the transaction holding the snapshot back: its database (the other one), pid and xid\n(1 row)\n\nRESET\n                is                 \n-----------------------------------\n ok 6 - GUARD: nothing was swapped\n(1 row)\n\n                  is                  \n--------------------------------------\n ok 7 - GUARD: B's statement finished\n(1 row)\n\n dblink_exec \n-------------\n COMMIT\n(1 row)\n\n                            is                             \n-----------------------------------------------------------\n ok 8 - GUARD: once X has ended the same swap goes through\n(1 row)\n\n                                        bag_eq                                        \n--------------------------------------------------------------------------------------\n ok 9 - GUARD: the table reads exactly its rows: the multiples of 26 to 494, and 2600\n(1 row)\n\n dblink_disconnect \n-------------------\n OK\n(1 row)\n\n dblink_disconnect \n-------------------\n OK\n(1 row)\n\n  dblink_exec  \n---------------\n DROP DATABASE\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+        },
+        "review": {
+          "fails": true,
+          "exit": 0,
+          "tail": " a regrain on its next tick, and a call by hand is refused and can be run again once those transactions have ended (from a direct session: a caller that holds a snapshot across the call is one of them).'+\n #    doesn't match: 'pg_partition_magician: regrain swap deferred: 1 snapshot(s) older than the copies still open (oldest: pid 31424, open %); a transaction older than the copies is still running in database rv_p1_01_r_x (pid 31423, xid 21819, open %'\n(1 row)\n\nRESET\n                is                 \n-----------------------------------\n ok 6 - GUARD: nothing was swapped\n(1 row)\n\n                  is                  \n--------------------------------------\n ok 7 - GUARD: B's statement finished\n(1 row)\n\n dblink_exec \n-------------\n COMMIT\n(1 row)\n\n                            is                             \n-----------------------------------------------------------\n ok 8 - GUARD: once X has ended the same swap goes through\n(1 row)\n\n                                        bag_eq                                        \n--------------------------------------------------------------------------------------\n ok 9 - GUARD: the table reads exactly its rows: the multiples of 26 to 494, and 2600\n(1 row)\n\n dblink_disconnect \n-------------------\n OK\n(1 row)\n\n dblink_disconnect \n-------------------\n OK\n(1 row)\n\n  dblink_exec  \n---------------\n DROP DATABASE\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 9\n(1 row)\n\n"
+        }
+      },
+      "class": "seed_hit",
+      "seed": "S1"
+    }
+  ]
+}

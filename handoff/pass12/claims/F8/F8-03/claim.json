@@ -1,0 +1,3 @@
+{"tier": 5, "file": "bench/run_fh.sh", "line": 287, "lens": "contracts versus documentation",
+ "scenario": "bench/run_fh.sh (driven by run_rung_fh.sh) calls pgpm.from_hypertable_cutover(..., p_regrain_batch => $BENCH_DRAIN_BATCH, ...), a named argument the procedure does not have (it takes p_drain_batch), so every run dies with 'procedure ... does not exist' right after the online copy and never measures the cutover, conservation or regrain its header promises; it should name p_drain_batch",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql", "pgpm_hypertable/install.sql"], "fixtures": false}

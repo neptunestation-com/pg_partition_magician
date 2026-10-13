@@ -1,0 +1,164 @@
+{
+  "claims": [
+    {
+      "id": "F17-01",
+      "finder": "F17",
+      "tier": 4,
+      "file": "docs/reference.md",
+      "line": 683,
+      "lens": "contracts versus documentation",
+      "scenario": "reference.md's untransmute section tells the operator to finish an interrupted DETACH ... CONCURRENTLY with `ALTER TABLE <table> DETACH PARTITION <partition>`; typed against a pending detach PostgreSQL refuses it ('has an unfinished detach', HINT use FINALIZE) and the partition stays pending; the remedy should read `... DETACH PARTITION <partition> FINALIZE`, as untransmute's own message, retire's skip_retain row and the CHANGELOG say",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - fixture: the reference's remedy for a pending detach was found: ALTER TABLE <table> DETACH PARTITION <partition>\nok - fixture: forward partition t_p0000000000000000100 holds row 150\nok - LIVENESS: t_p0000000000000000100 is pending a concurrent detach (the interrupted state the reference describes)\nok - LIVENESS: row 150 is invisible through the parent while t_p0000000000000000100 is pending\n# typed: ALTER TABLE public.t DETACH PARTITION public.t_p0000000000000000100\n# server said: ERROR:  cannot detach partition \"t_p0000000000000000100\"\nDETAIL:  The partition is being detached concurrently or has an unfinished detach.\nHINT:  Use ALTER TABLE ... DETACH PARTITION ... FINALIZE to complete the pending detach operation.\nnot ok - the reference's remedy finished the pending detach of t_p0000000000000000100 (pg_inherits still says pending=true)\nok - the partition, now detached, still holds row 150\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "ok - fixture: the reference's remedy for a pending detach was found: ALTER TABLE <table> DETACH PARTITION <partition> FINALIZE\nok - fixture: forward partition t_p0000000000000000100 holds row 150\nok - LIVENESS: t_p0000000000000000100 is pending a concurrent detach (the interrupted state the reference describes)\nok - LIVENESS: row 150 is invisible through the parent while t_p0000000000000000100 is pending\n# typed: ALTER TABLE public.t DETACH PARTITION public.t_p0000000000000000100 FINALIZE\n# server said: \nok - the reference's remedy finished the pending detach of t_p0000000000000000100\nok - the partition, now detached, still holds row 150\n"
+      },
+      "class": "seed_hit",
+      "seed": "S7"
+    },
+    {
+      "id": "F17-02",
+      "finder": "F17",
+      "tier": 1,
+      "file": "pgpm_core/install.sql",
+      "line": 12244,
+      "lens": "fresh surface",
+      "scenario": "untransmute on a table one of whose partitions is pending an interrupted DETACH ... CONCURRENTLY returns the restored table, logs untransmute and drops the pending partition with its rows (150, 160 gone); CHANGELOG #1157, docs/reference.md and the comment at the gate promise a refusal before the gate and again under ACCESS EXCLUSIVE, but pgpm._refuse_detach_pending is defined and called nowhere",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - fixture: forward partition t_p0000000000000000100 holds rows 150 and 160\nok - LIVENESS: t_p0000000000000000100 is pending a concurrent detach\nok - LIVENESS: t_p0000000000000000100 holds rows 150 and 160, which the parent no longer shows\n# untransmute said: NOTICE:  trigger \"pgpm_write_block\" for relation \"public.t_p0000000000000000000\" does not exist, skipping t\nnot ok - untransmute refuses while t_p0000000000000000100 is pending a concurrent detach\nnot ok - rows 150 and 160 still exist in t_p0000000000000000100 (got: ERROR:  relation \"public.t_p0000000000000000100\" does not exist)\nnot ok - no untransmute was logged (pgpm.log records a plain untransmute)\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "ok - fixture: forward partition t_p0000000000000000100 holds rows 150 and 160\nok - LIVENESS: t_p0000000000000000100 is pending a concurrent detach\nok - LIVENESS: t_p0000000000000000100 holds rows 150 and 160, which the parent no longer shows\n# untransmute said: ERROR:  pg_partition_magician: cannot untransmute t -- its partition(s) public.t_p0000000000000000100 are pending a concurrent detach (pg_inherits.inhdetachpending), so their rows are already invisible through the parent, where the check that every row still lives in the monolith reads, and the reverse's DROP of the parent would take them with it. If the detach is still running, let it finish; if its session died, finish it with ALTER TABLE t DETACH PARTITION <partition> FINALIZE. The partition is then a standalone table of yours, which untransmute leaves standing; re-run it then. Nothing was changed. CONTEXT:  PL/pgSQL function pgpm._refuse_detach_pending(regclass) line 12 at RAISE SQL statement \"SELECT pgpm._refuse_detach_pending(p_parent)\" PL/pgSQL function pgpm.untransmute(regclass) line 93 at PERFORM\nok - untransmute refuses while t_p0000000000000000100 is pending a concurrent detach\nok - rows 150 and 160 still exist in t_p0000000000000000100\nok - no untransmute was logged\n"
+      },
+      "class": "seed_hit",
+      "seed": "S1"
+    },
+    {
+      "id": "F17-03",
+      "finder": "F17",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 2929,
+      "lens": "contracts versus documentation",
+      "scenario": "obtain leaves a forward cell whose name a stranger table holds unbuilt and logs nothing: its `if v_name is null then null; end if;` no longer calls pgpm._log_unbuilt_cell (now called from nowhere), so the fail_obtain_name row docs/reference.md (obtain, Partition naming, pgpm.log vocabulary) and the runbook's 'A write is refused' entry promise for the hole is never written; it should log fail_obtain_name over [lo, hi) naming the holder",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "Output format is unaligned.\nCREATE EXTENSION\nBEGIN\n1..4\nCREATE TABLE\nINSERT 0 50\nCOMMIT\nCALL\nBEGIN\nCREATE TABLE\n\n2\nok 1 - LIVENESS: obtain left the cell [300, 400) unbuilt, its name held by a stranger\nok 2 - LIVENESS: obtain built the cells on both sides of it, [200, 300) and [400, 500)\nnot ok 3 - obtain logged fail_obtain_name for the unbuilt cell [300, 400)\n# Failed test 3: \"obtain logged fail_obtain_name for the unbuilt cell [300, 400)\"\nnot ok 4 - the fail_obtain_name row names the relation that holds the name\n# Failed test 4: \"the fail_obtain_name row names the relation that holds the name\"\n# Looks like you failed 2 tests of 4\nROLLBACK\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "Output format is unaligned.\nCREATE EXTENSION\nBEGIN\n1..4\nCREATE TABLE\nINSERT 0 50\nCOMMIT\nCALL\nBEGIN\nCREATE TABLE\n\n2\nok 1 - LIVENESS: obtain left the cell [300, 400) unbuilt, its name held by a stranger\nok 2 - LIVENESS: obtain built the cells on both sides of it, [200, 300) and [400, 500)\nok 3 - obtain logged fail_obtain_name for the unbuilt cell [300, 400)\nok 4 - the fail_obtain_name row names the relation that holds the name\nROLLBACK\n"
+      },
+      "class": "seed_hit",
+      "seed": "S3"
+    },
+    {
+      "id": "F17-04",
+      "finder": "F17",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 3096,
+      "lens": "contracts versus documentation",
+      "scenario": "extend_to leaves a cell of its walk whose name a stranger table holds unbuilt and logs nothing: its `if v_name is null then null; end if;` no longer calls pgpm._log_unbuilt_cell, so the fail_obtain_name row docs/reference.md promises ('Each time obtain or extend_to leaves a cell unbuilt this way it logs fail_obtain_name') is never written; it should log fail_obtain_name over [lo, hi) naming the holder",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "Output format is unaligned.\nCREATE EXTENSION\nBEGIN\n1..4\nCREATE TABLE\nINSERT 0 50\nCOMMIT\nCALL\nBEGIN\nCREATE TABLE\n2\nok 1 - LIVENESS: extend_to left the cell [300, 400) unbuilt, its name held by a stranger\nok 2 - LIVENESS: extend_to built the cells on both sides of it, [200, 300) and [400, 500)\nnot ok 3 - extend_to logged fail_obtain_name for the unbuilt cell [300, 400)\n# Failed test 3: \"extend_to logged fail_obtain_name for the unbuilt cell [300, 400)\"\nnot ok 4 - the fail_obtain_name row names the relation that holds the name\n# Failed test 4: \"the fail_obtain_name row names the relation that holds the name\"\n# Looks like you failed 2 tests of 4\nROLLBACK\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "Output format is unaligned.\nCREATE EXTENSION\nBEGIN\n1..4\nCREATE TABLE\nINSERT 0 50\nCOMMIT\nCALL\nBEGIN\nCREATE TABLE\n2\nok 1 - LIVENESS: extend_to left the cell [300, 400) unbuilt, its name held by a stranger\nok 2 - LIVENESS: extend_to built the cells on both sides of it, [200, 300) and [400, 500)\nok 3 - extend_to logged fail_obtain_name for the unbuilt cell [300, 400)\nok 4 - the fail_obtain_name row names the relation that holds the name\nROLLBACK\n"
+      },
+      "class": "seed_hit",
+      "seed": "S3"
+    },
+    {
+      "id": "F17-05",
+      "finder": "F17",
+      "tier": 1,
+      "file": "scripts/archive_partition_whole.sql",
+      "line": 121,
+      "lens": "fresh surface",
+      "scenario": "scripts/archive_partition_whole.sql's candidate query never asks pgpm._part_detached_by_hand (its comment, CHANGELOG #1159 and docs/reference.md say it does), so a write-blocked partition the operator detached by hand is handed to a strategy reading through the parent, [0, 100) is recorded covered with 0 rows, and once the table is attached back retain() drops rows 1..50 that nothing archived; it should skip the table, record nothing and archive the next eligible partition",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: maintain write-blocked t_p0000000000000000000 [0, 100) and t_p0000000000000000100 [100, 200), archiving nothing\nok - fixture: nothing is archived yet\nok - LIVENESS: t_p0000000000000000000 is detached by hand and still carries pgpm's write block\n# the script returned: t_p0000000000000000000: fully archived in one file (0 rows, s3_key=<none>)\nnot ok - no coverage is recorded for the hand-detached t_p0000000000000000000 (the ledger holds [0, 100) rows 0)\nnot ok - the call archived the next eligible partition t_p0000000000000000100 [100, 200), its 100 rows\nnot ok - rows 1, 25 and 50, never archived, survive retention after the table is attached back (got: none)\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "ok - LIVENESS: maintain write-blocked t_p0000000000000000000 [0, 100) and t_p0000000000000000100 [100, 200), archiving nothing\nok - fixture: nothing is archived yet\nok - LIVENESS: t_p0000000000000000000 is detached by hand and still carries pgpm's write block\n# the script returned: t_p0000000000000000100: fully archived in one file (100 rows, s3_key=<none>)\nok - no coverage is recorded for the hand-detached t_p0000000000000000000\nok - the call archived the next eligible partition t_p0000000000000000100 [100, 200), its 100 rows\nok - rows 1, 25 and 50, never archived, survive retention after the table is attached back\n"
+      },
+      "class": "seed_hit",
+      "seed": "S2"
+    },
+    {
+      "id": "F17-06",
+      "finder": "F17",
+      "tier": 1,
+      "file": "scripts/archive_partition_whole.sql",
+      "line": 156,
+      "lens": "fresh surface",
+      "scenario": "scripts/archive_partition_whole.sql keeps only the comment of its #1159 hold: it never calls pgpm._archive_hold_partition before the strategy reads, so an operator's DETACH PARTITION in flight when the call picks its candidate commits under the strategy's read through the parent, which finds 0 rows, and [0, 100) is recorded covered for the operator's table (retire() drops it once attached back); docs/reference.md promises the call holds the parent, asks again, leaves the table alone and says so",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: t_p0000000000000000000 [0, 100) is write-blocked, uncovered, the oldest candidate\nok - fixture: the operator's DETACH is in flight\nok - LIVENESS: the call is waiting behind the detach's lock\n# the script returned: RESULT: t_p0000000000000000000: fully archived in one file (0 rows, s3_key=<none>)\nok - LIVENESS: the detach committed; t_p0000000000000000000 is the operator's table\nnot ok - no coverage is recorded for t_p0000000000000000000, which left the parent while the call waited (the ledger holds [0, 100) rows 0)\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "ok - LIVENESS: t_p0000000000000000000 [0, 100) is write-blocked, uncovered, the oldest candidate\nok - fixture: the operator's DETACH is in flight\nok - LIVENESS: the call is waiting behind the detach's lock\n# the script returned: RESULT: public.t_p0000000000000000000 is no longer a partition of t (detached or dropped by hand), so it was not archived and nothing was recorded for it. Call again for the next partition.\nok - LIVENESS: the detach committed; t_p0000000000000000000 is the operator's table\nok - no coverage is recorded for t_p0000000000000000000, which left the parent while the call waited\n"
+      },
+      "class": "seed_hit",
+      "seed": "S2"
+    },
+    {
+      "id": "F17-07",
+      "finder": "F17",
+      "tier": 4,
+      "file": "CHANGELOG.md",
+      "line": 525,
+      "lens": "contracts versus documentation",
+      "scenario": "CHANGELOG.md's #1161 bullet carries a stale second half (lines 524-530) saying the prepare tick and `set_regrain` now refuse a run past half the lock table; set_regrain on a 2000-child run (past 6400/2 slots at two each) warns, logs warn_regrain_lock_budget and stores the target, as the bullet's own first half and docs/reference.md say; the stale half (a merge leftover duplicating the bullet's tail) should be removed",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "# CHANGELOG promises that set_regrain refuses such a run: yes\nok - LIVENESS: the monolith [0, 2000000) split to '1000' is 2000 fine children, past half of 6400 lock slots at two each\n# set_regrain exit 0, regrain_to=1000, warn rows=1\nok - LIVENESS: set_regrain judged the run against the lock budget (one warn_regrain_lock_budget row)\nnot ok - CHANGELOG.md's statement that set_regrain refuses a run past the lock budget matches the code (set_regrain warned and stored '1000')\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "# CHANGELOG promises that set_regrain refuses such a run: yes\nok - LIVENESS: the monolith [0, 2000000) split to '1000' is 2000 fine children, past half of 6400 lock slots at two each\n# set_regrain exit 0, regrain_to=1000, warn rows=1\nok - LIVENESS: set_regrain judged the run against the lock budget (one warn_regrain_lock_budget row)\nnot ok - CHANGELOG.md's statement that set_regrain refuses a run past the lock budget matches the code (set_regrain warned and stored '1000')\n"
+      },
+      "class": "candidate"
+    }
+  ]
+}

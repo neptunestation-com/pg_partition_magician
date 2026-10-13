@@ -1,0 +1,117 @@
+{
+  "claims": [
+    {
+      "id": "F18-01",
+      "finder": "F18",
+      "tier": 1,
+      "file": "pgpm_core/install.sql",
+      "line": 12243,
+      "lens": "fresh surface",
+      "scenario": "untransmute never calls pgpm._refuse_detach_pending (defined, called nowhere) although its #1157 comment and CHANGELOG say it is asked before the gate and again under the lock: with a partition pending an abandoned DETACH ... CONCURRENTLY, whose rows are invisible through the parent, the gate passes, the DROP of the parent destroys the pending partition and its rows, and pgpm.log records a plain untransmute; it should refuse naming the partition and the FINALIZE remedy.",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "-------------------------------------------------\n not ok 7 - rows 1001 and 1002 are still in the pending partition (the relation still exists)        +\n # Failed test 7: \"rows 1001 and 1002 are still in the pending partition (the relation still exists)\"+\n #         have: NULL                                                                                +\n #         want: {1001,1002}\n(1 row)\n\n                           is                           \n--------------------------------------------------------\n not ok 8 - f18a is still the partitioned table        +\n # Failed test 8: \"f18a is still the partitioned table\"+\n #         have: r                                     +\n #         want: p\n(1 row)\n\n                    is                    \n------------------------------------------\n not ok 9 - pgpm still manages it        +\n # Failed test 9: \"pgpm still manages it\"+\n #         have: 0                       +\n #         want: 1\n(1 row)\n\n                        is                         \n---------------------------------------------------\n not ok 10 - and no untransmute was logged        +\n # Failed test 10: \"and no untransmute was logged\"+\n #         have: 1                                +\n #         want: 0\n(1 row)\n\n                finish                 \n---------------------------------------\n # Looks like you failed 5 tests of 10\n(1 row)\n\npsql:<stdin>:79: NOTICE:  trigger \"pgpm_write_block\" for relation \"public.f18a_p2026_10_11_to_2026_10_13\" does not exist, skipping\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "3 - LIVENESS: its detacher is gone: an abandoned detach, not a live one\n(1 row)\n\n                               is                                \n-----------------------------------------------------------------\n ok 4 - LIVENESS: the pending partition holds rows 1001 and 1002\n(1 row)\n\n                                             is                                              \n---------------------------------------------------------------------------------------------\n ok 5 - LIVENESS: which the parent no longer shows, so the outside-rows gate cannot see them\n(1 row)\n\n                                 throws_like                                 \n-----------------------------------------------------------------------------\n ok 6 - untransmute refuses while a partition is pending a concurrent detach\n(1 row)\n\n                                            is                                            \n------------------------------------------------------------------------------------------\n ok 7 - rows 1001 and 1002 are still in the pending partition (the relation still exists)\n(1 row)\n\n                     is                     \n--------------------------------------------\n ok 8 - f18a is still the partitioned table\n(1 row)\n\n              is              \n------------------------------\n ok 9 - pgpm still manages it\n(1 row)\n\n                  is                   \n---------------------------------------\n ok 10 - and no untransmute was logged\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+      },
+      "class": "seed_hit",
+      "seed": "S1"
+    },
+    {
+      "id": "F18-02",
+      "finder": "F18",
+      "tier": 4,
+      "file": "pgpm_core/install.sql",
+      "line": 9508,
+      "lens": "operator error",
+      "scenario": "_transmute_refuse_staging_squatter tells the operator to type `drop table <schema>.<table>_pgpm_new` whatever relkind holds the staging name; against a sequence or a view that command fails ('is not a table'), so the remedy the refusal names does not repair the state it describes, where the sibling child-name and monolith-name refusals (#509, _relkind_noun) name what they found.",
+      "repro": "repro.sql",
+      "repro_used": "repro.verified.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "                                                      \n--------------------------------------------------------------------------------------------------------------------------------\n not ok 3 - the remedy the refusal names (or, naming none, the holder's own drop) runs: drop table public.f18s_pgpm_new        +\n # Failed test 3: \"the remedy the refusal names (or, naming none, the holder's own drop) runs: drop table public.f18s_pgpm_new\"+\n #     died: 42809: \"f18s_pgpm_new\" is not a table                                                                             +\n #         HINT:       Use DROP SEQUENCE to remove a sequence.                                                                 +\n #         CONTEXT:                                                                                                            +\n #             SQL statement \"drop table public.f18s_pgpm_new\"                                                                 +\n #             PL/pgSQL function lives_ok(text,text) line 14 at EXECUTE\n(1 row)\n\n                             is                             \n------------------------------------------------------------\n not ok 4 - and the staging name is free afterwards        +\n # Failed test 4: \"and the staging name is free afterwards\"+\n #         have: f18s_pgpm_new                             +\n #         want: NULL\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 4\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 0,
+        "tail": "                                                      \n--------------------------------------------------------------------------------------------------------------------------------\n not ok 3 - the remedy the refusal names (or, naming none, the holder's own drop) runs: drop table public.f18s_pgpm_new        +\n # Failed test 3: \"the remedy the refusal names (or, naming none, the holder's own drop) runs: drop table public.f18s_pgpm_new\"+\n #     died: 42809: \"f18s_pgpm_new\" is not a table                                                                             +\n #         HINT:       Use DROP SEQUENCE to remove a sequence.                                                                 +\n #         CONTEXT:                                                                                                            +\n #             SQL statement \"drop table public.f18s_pgpm_new\"                                                                 +\n #             PL/pgSQL function lives_ok(text,text) line 14 at EXECUTE\n(1 row)\n\n                             is                             \n------------------------------------------------------------\n not ok 4 - and the staging name is free afterwards        +\n # Failed test 4: \"and the staging name is free afterwards\"+\n #         have: f18s_pgpm_new                             +\n #         want: NULL\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 4\n(1 row)\n\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F18-03",
+      "finder": "F18",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 14839,
+      "lens": "contracts versus documentation",
+      "scenario": "restore_incoming_fks sets dropped_fk.validate_retry_after when a one-step (pre-18, partitioned referencer) re-add fails but never reads it: its loop takes every record with restored_at null, so maintain's unscoped call retries the validating re-add, a full scan of the referencing table under SHARE ROW EXCLUSIVE on the managed table, on every tick and logs fail_restore_incoming_fk each time, where the reference promises a retry at most every five minutes (and at once only when named in p_ids).",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "---------------------------------\n ok 5 - LIVENESS: and parked the key: validate_retry_after is in the future\n(1 row)\n\n                              is                               \n---------------------------------------------------------------\n ok 6 - a second unscoped call inside the park re-adds nothing\n(1 row)\n\n                                                       is                                                       \n----------------------------------------------------------------------------------------------------------------\n not ok 7 - and did not attempt the parked re-add again: still exactly one fail_restore_incoming_fk row        +\n # Failed test 7: \"and did not attempt the parked re-add again: still exactly one fail_restore_incoming_fk row\"+\n #         have: 2                                                                                             +\n #         want: 1\n(1 row)\n\n                                          is                                          \n--------------------------------------------------------------------------------------\n not ok 8 - the one log row names the p_ids route as the way to retry at once        +\n # Failed test 8: \"the one log row names the p_ids route as the way to retry at once\"+\n #         have: 2                                                                   +\n #         want: 1\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 8\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "            is                                                 \n----------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: the first unscoped call re-adds nothing (the one-step re-add fails on the orphan)\n(1 row)\n\n                                 is                                 \n--------------------------------------------------------------------\n ok 4 - LIVENESS: which it logged once, as fail_restore_incoming_fk\n(1 row)\n\n                                     ok                                     \n----------------------------------------------------------------------------\n ok 5 - LIVENESS: and parked the key: validate_retry_after is in the future\n(1 row)\n\n                              is                               \n---------------------------------------------------------------\n ok 6 - a second unscoped call inside the park re-adds nothing\n(1 row)\n\n                                                 is                                                 \n----------------------------------------------------------------------------------------------------\n ok 7 - and did not attempt the parked re-add again: still exactly one fail_restore_incoming_fk row\n(1 row)\n\n                                    is                                    \n--------------------------------------------------------------------------\n ok 8 - the one log row names the p_ids route as the way to retry at once\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+      },
+      "class": "seed_hit",
+      "seed": "S9"
+    },
+    {
+      "id": "F18-04",
+      "finder": "F18",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 2975,
+      "lens": "contracts versus documentation",
+      "scenario": "obtain (and extend_to) never log fail_obtain_name: _log_unbuilt_cell is defined but has no call site, and obtain's branch for an unnamed cell is `null;` under the comment that says it is logged, so a forward cell held by an operator's relation stays a silent hole (writes into it fail with no partition found) where the reference promises a fail_obtain_name row per tick naming the holder.",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "----------------------------------------------------------------\n ok 1 - LIVENESS: a sequence holds the next forward cell's name f18h_p0000000000000003000\n(1 row)\n\n set_obtain \n------------\n \n(1 row)\n\n                           is                            \n---------------------------------------------------------\n ok 2 - LIVENESS: obtain built nothing for the held cell\n(1 row)\n\n                                  ok                                   \n-----------------------------------------------------------------------\n ok 3 - LIVENESS: the cell [3000, 4000) is unbuilt: a hole in the grid\n(1 row)\n\n                         is                         \n----------------------------------------------------\n ok 4 - LIVENESS: the sequence still holds the name\n(1 row)\n\n                                   is                                   \n------------------------------------------------------------------------\n not ok 5 - obtain logged fail_obtain_name for the unbuilt cell        +\n # Failed test 5: \"obtain logged fail_obtain_name for the unbuilt cell\"+\n #         have: 0                                                     +\n #         want: 1\n(1 row)\n\n                       ok                        \n-------------------------------------------------\n not ok 6 - and the row names the holder        +\n # Failed test 6: \"and the row names the holder\"\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "CREATE EXTENSION\n plan \n------\n 1..6\n(1 row)\n\nCREATE TABLE\nINSERT 0 50\nCALL\nCREATE SEQUENCE\n                                            is                                            \n------------------------------------------------------------------------------------------\n ok 1 - LIVENESS: a sequence holds the next forward cell's name f18h_p0000000000000003000\n(1 row)\n\n set_obtain \n------------\n \n(1 row)\n\n                           is                            \n---------------------------------------------------------\n ok 2 - LIVENESS: obtain built nothing for the held cell\n(1 row)\n\n                                  ok                                   \n-----------------------------------------------------------------------\n ok 3 - LIVENESS: the cell [3000, 4000) is unbuilt: a hole in the grid\n(1 row)\n\n                         is                         \n----------------------------------------------------\n ok 4 - LIVENESS: the sequence still holds the name\n(1 row)\n\n                             is                             \n------------------------------------------------------------\n ok 5 - obtain logged fail_obtain_name for the unbuilt cell\n(1 row)\n\n                 ok                  \n-------------------------------------\n ok 6 - and the row names the holder\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+      },
+      "class": "seed_hit",
+      "seed": "S3"
+    },
+    {
+      "id": "F18-05",
+      "finder": "F18",
+      "tier": 2,
+      "file": "pgpm_core/install.sql",
+      "line": 9573,
+      "lens": "fresh surface",
+      "scenario": "_transmute_refuse_child_holders treats any relation in pg_inherits as not a holder, so a partition of another parent named <rel>_p<label> passes the preflight and both cutover re-asks; obtain steps over it, and the conversion completes with the forward cell right past the monolith unbuilt ([1000,2000) missing beside [2000,3000) built) and nothing refused or logged, so every write with a key in that cell fails with no partition found until the name is freed, where a standalone relation at the same name is refused up front.",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "w)\n\n                           is                            \n---------------------------------------------------------\n not ok 4 - and f18k is still the ordinary table        +\n # Failed test 4: \"and f18k is still the ordinary table\"+\n #         have: p                                      +\n #         want: r\n(1 row)\n\n                                                                           ok                                                                           \n--------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 5 - no forward grid was built past a hole at [1000, 2000) (with the defect: cells [2000, 3000) and on exist, the cell at 1000 does not)        +\n # Failed test 5: \"no forward grid was built past a hole at [1000, 2000) (with the defect: cells [2000, 3000) and on exist, the cell at 1000 does not)\"\n(1 row)\n\n                                       is                                       \n--------------------------------------------------------------------------------\n not ok 6 - no transmute was logged for it (and nothing about the hole)        +\n # Failed test 6: \"no transmute was logged for it (and nothing about the hole)\"+\n #         have: 1                                                             +\n #         want: 0\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 4 tests of 6\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 0,
+        "tail": "w)\n\n                           is                            \n---------------------------------------------------------\n not ok 4 - and f18k is still the ordinary table        +\n # Failed test 4: \"and f18k is still the ordinary table\"+\n #         have: p                                      +\n #         want: r\n(1 row)\n\n                                                                           ok                                                                           \n--------------------------------------------------------------------------------------------------------------------------------------------------------\n not ok 5 - no forward grid was built past a hole at [1000, 2000) (with the defect: cells [2000, 3000) and on exist, the cell at 1000 does not)        +\n # Failed test 5: \"no forward grid was built past a hole at [1000, 2000) (with the defect: cells [2000, 3000) and on exist, the cell at 1000 does not)\"\n(1 row)\n\n                                       is                                       \n--------------------------------------------------------------------------------\n not ok 6 - no transmute was logged for it (and nothing about the hole)        +\n # Failed test 6: \"no transmute was logged for it (and nothing about the hole)\"+\n #         have: 2                                                             +\n #         want: 0\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 4 tests of 6\n(1 row)\n\n"
+      },
+      "class": "candidate"
+    }
+  ]
+}

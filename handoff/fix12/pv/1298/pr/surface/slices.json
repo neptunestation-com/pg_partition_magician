@@ -1,0 +1,24 @@
+{
+ "P1": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/archive_key_base_canonical.sh",
+   "docs/reference.md",
+   "pgpm_archive/install.sql",
+   "test.sh",
+   "tests/archive/db/52_archive_key_base_canonical_test.sql"
+  ],
+  "units": [
+   "archive.configure",
+   "archive._canonical_key",
+   "archive._owned_key",
+   "archive._claim_canonical_spellings",
+   "archive._refuse_recorded_chunk_overwrite",
+   "archive._object_key",
+   "archive._encode_upload_ndjson_single",
+   "archive._encode_upload_parquet",
+   "archive._child_object_key"
+  ],
+  "kind": "mixed"
+ }
+}

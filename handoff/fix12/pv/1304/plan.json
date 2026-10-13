@@ -1,0 +1,10 @@
+{
+ "seeds": [
+  {
+   "mutation": "archive_ndjson_bounds_caller_spelling",
+   "lens": "fresh surface",
+   "tier": 3,
+   "why": "the PR's own mutation, its quietest"
+  }
+ ]
+}

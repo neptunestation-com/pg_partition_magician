@@ -1,0 +1,15 @@
+{
+ "tier": 3,
+ "file": "pgpm_core/install.sql",
+ "line": 14034,
+ "lens": "closing claim",
+ "scenario": "#1262 acceptance (V-01-1295): adopt_partition takes its SHARE UPDATE EXCLUSIVE lock by NAME (lock table p_child::text), so when another session renames the partition and creates a standalone table under its old name, committing while the call waits, LOCK TABLE re-resolves the name and locks the new table; the oid re-read (READ COMMITTED, fresh) passes, the row is recorded with no lock on the relation it records, a DETACH commits before the caller's transaction does, and pgpm.part records a standalone table as a partition at commit (the #1262 consequence, in READ COMMITTED), against the header's 'the relation judged attached is still attached when its row commits'; it should lock by oid and verify the name resolution",
+ "repro": "repro.sql",
+ "install": [
+  "pgpm_core/install.sql"
+ ],
+ "fixtures": false,
+ "container": "pgpm_prv-15",
+ "id": "ACC-03",
+ "finder": "ACC"
+}

@@ -1,0 +1,71 @@
+{
+  "claims": [
+    {
+      "id": "F7-01",
+      "finder": "F7",
+      "tier": 2,
+      "file": "pgpm_archive/install.sql",
+      "line": 3534,
+      "lens": "fresh surface",
+      "scenario": "archive.to_s3 casts its page cursor back as v_ctl_typ::regtype::text, dropping the typmod it computed into v_ctl_mod, so a char(3) (or bit(3)) control column's cursor 'abc' reads back as 'a', every page re-reads the row it ended on and the export never ends; it should cast as format_type(type, typmod) and complete, as its own header and tests/archive/db/51 part H say",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "T 0 3\nCREATE FUNCTION\n                            is                             \n-----------------------------------------------------------\n ok 1 - LIVENESS: the relation's control column is char(3)\n(1 row)\n\n                     is                     \n--------------------------------------------\n ok 2 - LIVENESS: it holds abc, abd and abe\n(1 row)\n\nSET\n                                     is                                     \n----------------------------------------------------------------------------\n ok 3 - LIVENESS: a bigint relation exports through MinIO, one row per page\n(1 row)\n\n                                              is                                              \n----------------------------------------------------------------------------------------------\n not ok 4 - archive.to_s3 of a char(3) relation, one row per page, ends and completes        +\n # Failed test 4: \"archive.to_s3 of a char(3) relation, one row per page, ends and completes\"+\n #         have: cancelled by statement_timeout: the export did not end                      +\n #         want: ok\n(1 row)\n\nRESET\n                                          is                                           \n---------------------------------------------------------------------------------------\n ok 5 - LIVENESS: the bare type character is char(1), so a cursor cast that way is cut\n(1 row)\n\n               finish                \n-------------------------------------\n # Looks like you failed 1 test of 5\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "CREATE EXTENSION\n plan \n------\n 1..5\n(1 row)\n\nCREATE SCHEMA\nCREATE TABLE\nINSERT 0 2\nCREATE SCHEMA\nCREATE TABLE\nINSERT 0 1\nCALL\n configure \n-----------\n \n(1 row)\n\nCREATE TABLE\nINSERT 0 3\nCREATE TABLE\nINSERT 0 3\nCREATE FUNCTION\n                            is                             \n-----------------------------------------------------------\n ok 1 - LIVENESS: the relation's control column is char(3)\n(1 row)\n\n                     is                     \n--------------------------------------------\n ok 2 - LIVENESS: it holds abc, abd and abe\n(1 row)\n\nSET\n                                     is                                     \n----------------------------------------------------------------------------\n ok 3 - LIVENESS: a bigint relation exports through MinIO, one row per page\n(1 row)\n\n                                        is                                        \n----------------------------------------------------------------------------------\n ok 4 - archive.to_s3 of a char(3) relation, one row per page, ends and completes\n(1 row)\n\nRESET\n                                          is                                           \n---------------------------------------------------------------------------------------\n ok 5 - LIVENESS: the bare type character is char(1), so a cursor cast that way is cut\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+      },
+      "class": "seed_hit",
+      "seed": "S8"
+    },
+    {
+      "id": "F7-02",
+      "finder": "F7",
+      "tier": 5,
+      "file": "bench/doc_log_actions.sh",
+      "line": 90,
+      "lens": "contracts versus documentation",
+      "scenario": "run with no third argument, doc_log_actions.sh judges the tree only through the line 'LIVENESS: check 6 passes this tree', so a runbook alert on an action nothing writes fails only a premise-prefixed line and discriminate.sh's starved() reads the guard's catch as a starved fixture; the tree's verdict should be a defect check, with the premise (the SQL extractor read literals) kept apart",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: the phantom action is planted in the runbook's action in (...) list\nok - LIVENESS: check 6 itself fails on the planted runbook, naming the phantom\n# guard: FAIL  LIVENESS: check 6 passes this tree, reading the docs' SQL  FAIL  the operator docs name pgpm.log.action 'fail_retain_phantom_f7_02', but no install.sql writes it, so an alert on it can never fire \n# guard: PASS  CONTROL: a phantom in a runbook action in (...) list fails named fail_retain_phantom_control\n# guard: PASS  LIVENESS: install.sql writes 'copy_swap_drop', as the method of a regrain on a non-comment line\n# guard: PASS  CONTROL: a method value named as an action fails           named copy_swap_drop\nok - LIVENESS: the guard (no third argument) exits non-zero on the planted tree\nok - GUARD: starved() read out of bench/discriminate.sh\nnot ok - the guard's failure on a phantom alert action is read as a catch, not as a starved fixture\n#   its only failure: FAIL  LIVENESS: check 6 passes this tree, reading the docs' SQL  FAIL  the operator docs name pgpm.log.action 'fail_retain_phantom_f7_02', but no install.sql writes it, so an alert on it can never fire \n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: the phantom action is planted in the runbook's action in (...) list\nok - LIVENESS: check 6 itself fails on the planted runbook, naming the phantom\n# guard: FAIL  LIVENESS: check 6 passes this tree, reading the docs' SQL  FAIL  the operator docs name pgpm.log.action 'fail_retain_phantom_f7_02', but no install.sql writes it, so an alert on it can never fire \n# guard: PASS  CONTROL: a phantom in a runbook action in (...) list fails named fail_retain_phantom_control\n# guard: PASS  LIVENESS: install.sql writes 'copy_swap_drop', as the method of a regrain on a non-comment line\n# guard: PASS  CONTROL: a method value named as an action fails           named copy_swap_drop\nok - LIVENESS: the guard (no third argument) exits non-zero on the planted tree\nok - GUARD: starved() read out of bench/discriminate.sh\nnot ok - the guard's failure on a phantom alert action is read as a catch, not as a starved fixture\n#   its only failure: FAIL  LIVENESS: check 6 passes this tree, reading the docs' SQL  FAIL  the operator docs name pgpm.log.action 'fail_retain_phantom_f7_02', but no install.sql writes it, so an alert on it can never fire \n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F7-03",
+      "finder": "F7",
+      "tier": 5,
+      "file": "bench/lock_trace.sh",
+      "line": 153,
+      "lens": "contracts versus documentation",
+      "scenario": "lock_trace.sh's premise 'the probe attached and is delivering events' is printed without a LIVENESS: prefix and the guard exits right after it, so a locktrace run whose probe never attached (nothing traced) is certified by discriminate.sh's starved() as catching its mutant; it should carry the premise prefix so that run reads as a starved fixture",
+      "repro": "repro.sh",
+      "repro_used": "repro.sh",
+      "review": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: lock_trace.sh carries the probe-attach check: the probe attached and is delivering events\nok - LIVENESS: a failed probe-attach check ends the guard at once (its only FAIL line)\nok - GUARD: check() and starved() read from the tree\nok - LIVENESS: starved() refuses a run that failed only a prefixed premise\n# rendered: FAIL  the probe attached and is delivering events              got false, want true\nnot ok - a run whose probe never attached is certified as a catch of the mutant\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 1,
+        "tail": "ok - LIVENESS: lock_trace.sh carries the probe-attach check: the probe attached and is delivering events\nok - LIVENESS: a failed probe-attach check ends the guard at once (its only FAIL line)\nok - GUARD: check() and starved() read from the tree\nok - LIVENESS: starved() refuses a run that failed only a prefixed premise\n# rendered: FAIL  the probe attached and is delivering events              got false, want true\nnot ok - a run whose probe never attached is certified as a catch of the mutant\n"
+      },
+      "class": "candidate"
+    }
+  ]
+}

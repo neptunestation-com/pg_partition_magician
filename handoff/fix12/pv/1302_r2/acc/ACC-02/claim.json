@@ -1,0 +1,15 @@
+{
+ "tier": 4,
+ "file": "pgpm_core/install.sql",
+ "line": 9086,
+ "lens": "operator error",
+ "scenario": "#1268 acceptance (F16-01): from_hypertable (and from_hypertable_cutover) refuse an off-midnight anchor on a date dimension, or a step/anchor finer than a timestamp(p) dimension, up front via the shared pgpm._time_unit_contract (#1118/#1138), but the refusal's remedy says 'then re-run transmute; ... call pgpm.transmute_abort(<table>) first': transmute refuses a hypertable outright ('has inheritance children'), and nothing from_hypertable did needs a transmute_abort; the message should name from_hypertable / from_hypertable_cutover as the call to re-run (tests/timescale/db/66 pins only the message's first half, so the wrong remedy is unwatched)",
+ "repro": "repro.sql",
+ "install": [
+  "pgpm_core/install.sql",
+  "pgpm_hypertable/install.sql"
+ ],
+ "fixtures": false,
+ "id": "ACC-02",
+ "finder": "ACC"
+}

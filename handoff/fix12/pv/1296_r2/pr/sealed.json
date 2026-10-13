@@ -1,0 +1,17 @@
+{
+  "pinned": "15110fd575e0a48b83dbd92845a6e6b08384b201",
+  "seeds": [
+    {
+      "id": "S1",
+      "kind": "mutation",
+      "mutation": "snapshot_wait_holder_this_database_only",
+      "file": "pgpm_core/install.sql",
+      "lens": "fresh surface",
+      "tier": 3,
+      "why": "The floor holder looked for among this database's transactions only, the floor the issue's suggestion named: a transaction of another database older than the copies is never named, and the refusal goes back to calling every session it holds back a reader that would find the range empty (the #1263 message). One site, the holder query's session branch. tests/333 part A catches it.",
+      "lines": [
+        7827
+      ]
+    }
+  ]
+}

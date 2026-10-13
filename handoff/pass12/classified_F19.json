@@ -1,0 +1,71 @@
+{
+  "claims": [
+    {
+      "id": "F19-01",
+      "finder": "F19",
+      "tier": 2,
+      "file": "pgpm_archive/install.sql",
+      "line": 3534,
+      "lens": "boundary arithmetic and types",
+      "scenario": "archive.to_s3 casts its keyset cursor back as the control column's bare type name (v_ctl_typ::regtype::text), dropping the typmod the comment promises, so on a char(3) (or bit(3)) relation the cursor 'abc' reads back as char(1) 'a', every later page re-admits the rows above it and the export never ends; it should cast with format_type's typmod and complete with each row once.",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "------------------------------------------------\n ok 4 - LIVENESS: the relation holds rows j, k and l\n(1 row)\n\n                                 is                                 \n--------------------------------------------------------------------\n ok 5 - LIVENESS: no object at the relation's key before the export\n(1 row)\n\nSET\n                                              is                                              \n----------------------------------------------------------------------------------------------\n not ok 6 - archive.to_s3 of a char(3) relation, one row per page, ends and completes        +\n # Failed test 6: \"archive.to_s3 of a char(3) relation, one row per page, ends and completes\"+\n #         have: cancelled by statement_timeout: the export did not end                      +\n #         want: ok\n(1 row)\n\nRESET\n                               is                               \n----------------------------------------------------------------\n not ok 7 - its object holds rows j, k and l, each once        +\n # Failed test 7: \"its object holds rows j, k and l, each once\"+\n #         have: NULL                                          +\n #         want: {j,k,l}\n(1 row)\n\n                          is                           \n-------------------------------------------------------\n ok 8 - fixture: the object is cleared after the check\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 8\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "oundary twice\n(1 row)\n\n                             is                              \n-------------------------------------------------------------\n ok 2 - LIVENESS: the exported relation's id is character(3)\n(1 row)\n\n                                        is                                         \n-----------------------------------------------------------------------------------\n ok 3 - LIVENESS: a cursor of abc cast as the bare type name character is cut to a\n(1 row)\n\n                         is                          \n-----------------------------------------------------\n ok 4 - LIVENESS: the relation holds rows j, k and l\n(1 row)\n\n                                 is                                 \n--------------------------------------------------------------------\n ok 5 - LIVENESS: no object at the relation's key before the export\n(1 row)\n\nSET\n                                        is                                        \n----------------------------------------------------------------------------------\n ok 6 - archive.to_s3 of a char(3) relation, one row per page, ends and completes\n(1 row)\n\nRESET\n                         is                         \n----------------------------------------------------\n ok 7 - its object holds rows j, k and l, each once\n(1 row)\n\n                          is                           \n-------------------------------------------------------\n ok 8 - fixture: the object is cleared after the check\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+      },
+      "class": "seed_hit",
+      "seed": "S8"
+    },
+    {
+      "id": "F19-02",
+      "finder": "F19",
+      "tier": 3,
+      "file": "pgpm_archive/install.sql",
+      "line": 152,
+      "lens": "operator error",
+      "scenario": "archive.configure accepts p_endpoint 'http://host:port/' (trailing slash); the signers then address '//<bucket>/<key>' and the store answers HTTP 400 on every PUT, so every export and every tick's chunk fails after the read; configure should refuse or normalise an endpoint that can never work, as it refuses p_part_bytes and p_fetch_rows (#594, #636).",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "---------------------------------------------------------------------------------------------\n not ok 5 - archive.to_s3 through an endpoint configured with a trailing slash does not fail at the store with HTTP 400 (a //bucket/key path)                        +\n # Failed test 5: \"archive.to_s3 through an endpoint configured with a trailing slash does not fail at the store with HTTP 400 (a //bucket/key path)\"                +\n #                   'archive.to_s3: PUT of evt failed: HTTP 400 <?xml version=\"1.0\" encoding=\"UTF-8\"?>                                                              +\n # <Error><Code>BadRequest</Code><Message>An unsupported API call for method: PUT at &#39;//archive-test-bucket/f19-02-rv_f19_02_r/f19e.evt.ndjson&#39;</Message><Re'+\n #          matches: '%HTTP 400%'\n(1 row)\n\n                                                    is                                                     \n-----------------------------------------------------------------------------------------------------------\n not ok 6 - its object lands at the key, as it does through the endpoint spelled without the slash        +\n # Failed test 6: \"its object lands at the key, as it does through the endpoint spelled without the slash\"+\n #         have: 404                                                                                      +\n #         want: 200\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 0,
+        "tail": "---------------------------------------------------------------------------------------------\n not ok 5 - archive.to_s3 through an endpoint configured with a trailing slash does not fail at the store with HTTP 400 (a //bucket/key path)                        +\n # Failed test 5: \"archive.to_s3 through an endpoint configured with a trailing slash does not fail at the store with HTTP 400 (a //bucket/key path)\"                +\n #                   'archive.to_s3: PUT of evt failed: HTTP 400 <?xml version=\"1.0\" encoding=\"UTF-8\"?>                                                              +\n # <Error><Code>BadRequest</Code><Message>An unsupported API call for method: PUT at &#39;//archive-test-bucket/f19-02-rv_f19_02_p/f19e.evt.ndjson&#39;</Message><Re'+\n #          matches: '%HTTP 400%'\n(1 row)\n\n                                                    is                                                     \n-----------------------------------------------------------------------------------------------------------\n not ok 6 - its object lands at the key, as it does through the endpoint spelled without the slash        +\n # Failed test 6: \"its object lands at the key, as it does through the endpoint spelled without the slash\"+\n #         have: 404                                                                                      +\n #         want: 200\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 6\n(1 row)\n\n"
+      },
+      "class": "candidate"
+    },
+    {
+      "id": "F19-03",
+      "finder": "F19",
+      "tier": 3,
+      "file": "pgpm_archive/install.sql",
+      "line": 2763,
+      "lens": "time and zones",
+      "scenario": "In one direct strategy call the range read, the empty-range check and the recorded-chunk check parse p_lo under the session's DateStyle while archive._object_stem parses it under its pinned 'ISO, MDY', so from a 'SQL, DMY' session '02/01/2024 00:00:00+00' archives the 2 January rows under the 1 February chunk's key; the object should be keyed by the instant the call read (or the spelling refused).",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "                                                        +\n # Failed test 7: \"the object at the 2 January key holds the row jan2\"                                                                                                                                                                                                                                                                                                                                                   +\n #         have: <?xml version=\"1.0\" encoding=\"UTF-8\"?>                                                                                                                                                                                                                                                                                                                                                                  +\n # <Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message><Key>f19-03-rv_f19_03_r/f19d.ev_2024010200000000.ndjson</Key><BucketName>archive-test-bucket</BucketName><Resource>/archive-test-bucket/f19-03-rv_f19_03_r/f19d.ev_2024010200000000.ndjson</Resource><RequestId>18DDD3ABAE87647E</RequestId><HostId>dd9025bab4ad464b049177c95eb6ebf374d3b3fd1af9251148b658df7ac2e3e8</HostId></Error>+\n #         want: {\"ts\":\"2024-01-02T12:00:00+00:00\",\"payload\":\"jan2\"}\n(1 row)\n\nRESET\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 7\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 0,
+        "tail": "                                                        +\n # Failed test 7: \"the object at the 2 January key holds the row jan2\"                                                                                                                                                                                                                                                                                                                                                   +\n #         have: <?xml version=\"1.0\" encoding=\"UTF-8\"?>                                                                                                                                                                                                                                                                                                                                                                  +\n # <Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message><Key>f19-03-rv_f19_03_p/f19d.ev_2024010200000000.ndjson</Key><BucketName>archive-test-bucket</BucketName><Resource>/archive-test-bucket/f19-03-rv_f19_03_p/f19d.ev_2024010200000000.ndjson</Resource><RequestId>18DDD3ABD47C401E</RequestId><HostId>dd9025bab4ad464b049177c95eb6ebf374d3b3fd1af9251148b658df7ac2e3e8</HostId></Error>+\n #         want: {\"ts\":\"2024-01-02T12:00:00+00:00\",\"payload\":\"jan2\"}\n(1 row)\n\nRESET\n                finish                \n--------------------------------------\n # Looks like you failed 3 tests of 7\n(1 row)\n\n"
+      },
+      "class": "candidate"
+    }
+  ]
+}

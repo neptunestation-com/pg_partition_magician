@@ -1,0 +1,22 @@
+group	agent	started	status
+G1	aacb830c4e965540c	19:50Z	reported PR 1306 (CI pending)
+G2	af62c83faf27ab471	19:50Z	reported r2 PR 1299 head 356f52e7 (CI pending)
+G3	a55aed218a0750b48	19:50Z	reported PR 1298 (41 checks green)
+G4	a6d95b6c7a296aad1	19:50Z	reported PR 1294 (41 checks green)
+G5	ad8a66f1e10b1aa0d	19:50Z	reported r2 PR 1295 head 71f2e919 (CI pending)
+G6	a7ef5062b806ab839	19:50Z	reported r2 PR 1296 head 15110fd5 (CI pending)
+G7	a4679e04a95adaacd	19:50Z	running
+G8	a95accdf827563192	19:50Z	reported 20:24Z PR 1293 checks green
+G9	a08379d3fe696bd2a	19:50Z	running
+G10	a4daf3de88f8c28af	19:50Z	reported PR 1297 (41 checks green)
+G11	a2858b6466d4958f9	19:50Z	reported r2 PR 1302 head e1989695 (CI pending)
+G12	a4b14e69da726d106	19:50Z	running
+G30	-	20:45Z	running
+G15	-	20:45Z	reported r2 PR 1303 head ae02189d (CI pending)
+G13	a108a250d9cf90401	20:24Z	running
+G14	a222c62928cd51f60	20:55Z	running
+G29	a2a2c2a5c3b50c5bb	20:55Z	running
+G16	-	21:23Z	running
+G17	-	21:23Z	running
+G19	-	21:23Z	running
+G20	-	21:23Z	running (rule)

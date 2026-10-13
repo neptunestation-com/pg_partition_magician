@@ -1,0 +1,3 @@
+{"tier": 1, "file": "pgpm_core/install.sql", "line": 8629, "lens": "operator error",
+ "scenario": "regrain()/regrain_history() called in a REPEATABLE READ transaction copies the monolith through the caller's old snapshot, so a row another session committed after that snapshot (before capture was installed) is in no fine child and the swap drops it with the source (have {10,20}, want {10,20,500}); transmute/untransmute/from_hypertable refuse a stricter isolation (_refuse_strict_isolation) and regrain should refuse it too or copy under a fresh snapshot",
+ "repro": "repro.sql", "install": ["pgpm_core/install.sql"], "fixtures": false}

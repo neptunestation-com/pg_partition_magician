@@ -1,0 +1,17 @@
+{
+  "pinned": "527182f4da03cb7172c895463a0cb2ae278a61d4",
+  "seeds": [
+    {
+      "id": "S1",
+      "kind": "mutation",
+      "mutation": "retirement_mark_vouches_alone",
+      "file": "pgpm_core/install.sql",
+      "lens": "fresh surface",
+      "tier": 3,
+      "why": "Pre-#1259 readers: a retiring_at mark vouches for pgpm's own retirement by itself, so a mark whose dispatch failed (no pg_cron) on a table the operator then detached by hand reads as a retirement in flight: the next maintain() tick's archive step hands the operator's table to the strategy and records coverage for it, and once the table is attached back retention drops it on that coverage, its rows archived nowhere. One site, the record clause of pgpm._retirement_vouched. The acceptance reproduction (F14-01) and tests/330 parts A to C catch it.",
+      "lines": [
+        2188
+      ]
+    }
+  ]
+}

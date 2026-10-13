@@ -1,0 +1,3 @@
+{"tier": 5, "file": "scripts/check_archive_child_by_oid.py", "line": 114, "lens": "fresh surface",
+ "scenario": "check_archive_child_by_oid.py's rule 1 (no relation is found by its name, outside archive._resolve_child) passes a function that finds a relation by the name read as data out of its pg_class row, `where to_jsonb(c) ->> 'relname' = p_name` (the #1181 shape the sibling object-key lint now refuses for the prefix), or by pg_identify_object(...).identity, or by an INTERSECT of the name standing alone in its own select list with the name looked for; neither is in its 'What this cannot see' list, and the lint should refuse both as it refuses c.relname = p_name",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

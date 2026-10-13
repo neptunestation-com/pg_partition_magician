@@ -1,0 +1,13 @@
+{
+  "baseRefName": "main",
+  "headRefName": "fix/check-time-monotonic-naive-column",
+  "headRefOid": "cf9bc477547f847fc9a4f4166168c6c94b3310f0",
+  "number": 1293,
+  "title": "fix(core): check_time_monotonic compares a naive time column outside the caller's zone",
+  "url": "https://github.com/neptunestation-com/pg_partition_magician/pull/1293",
+  "head": "cf9bc477547f847fc9a4f4166168c6c94b3310f0",
+  "base": "b76002e66c9f8b57f9943967babf25a195500f85",
+  "finder": "P1",
+  "seeds": 1,
+  "mutations": "check_time_monotonic_session_zone"
+}

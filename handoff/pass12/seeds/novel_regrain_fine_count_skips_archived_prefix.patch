@@ -1,0 +1,13 @@
+diff --git a/pgpm_core/install.sql b/pgpm_core/install.sql
+index 24111b7..105667c 100644
+--- a/pgpm_core/install.sql
++++ b/pgpm_core/install.sql
+@@ -7481,7 +7481,7 @@ returns bigint language plpgsql as $$
+ declare k text := cfg.control_kind; z text := cfg.partition_tz; v_at text := p_lo; v_b text; v_g text; v_n bigint := 0;
+         v_top numeric;
+ begin
+-  if cfg.retain is not null and cfg.archive_fn is null and pgpm._retain_nonnegative(k, cfg.retain) then
++  if cfg.retain is not null and pgpm._retain_nonnegative(k, cfg.retain) then
+     if p_catalog_only and k = 'id' then
+       select max(p.hi::numeric) into v_top from pgpm.part p where p.parent_table = p_parent and p.attached;
+       if v_top is not null then

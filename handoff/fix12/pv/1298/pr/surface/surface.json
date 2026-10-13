@@ -1,0 +1,296 @@
+{
+ "base": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1298/pr/base",
+ "head": "/Users/davida.ventimiglia/.claude/jobs/8d94cdfa/tmp/fix12/pv/1298/pr/review",
+ "files": [
+  {
+   "path": "CHANGELOG.md",
+   "status": "modified",
+   "hunks": [
+    [
+     4,
+     19
+    ]
+   ]
+  },
+  {
+   "path": "bench/archive_key_base_canonical.sh",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     109
+    ]
+   ]
+  },
+  {
+   "path": "docs/reference.md",
+   "status": "modified",
+   "hunks": [
+    [
+     2784,
+     2797
+    ]
+   ]
+  },
+  {
+   "path": "pgpm_archive/install.sql",
+   "status": "modified",
+   "hunks": [
+    [
+     168,
+     175
+    ],
+    [
+     2867,
+     2876
+    ],
+    [
+     2894,
+     2899
+    ],
+    [
+     2989,
+     3016
+    ],
+    [
+     3060,
+     3061
+    ],
+    [
+     3063,
+     3064
+    ]
+   ]
+  },
+  {
+   "path": "test.sh",
+   "status": "modified",
+   "hunks": [
+    [
+     981,
+     984
+    ]
+   ]
+  },
+  {
+   "path": "tests/archive/db/52_archive_key_base_canonical_test.sql",
+   "status": "added",
+   "hunks": [
+    [
+     1,
+     187
+    ]
+   ]
+  }
+ ],
+ "units": [
+  {
+   "unit": "archive.configure",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    143,
+    203
+   ],
+   "why": "touched at 168-175"
+  },
+  {
+   "unit": "archive._canonical_key",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    2872,
+    2875
+   ],
+   "why": "touched at 2867-2876"
+  },
+  {
+   "unit": "archive._owned_key",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    2879,
+    2925
+   ],
+   "why": "touched at 2894-2899"
+  },
+  {
+   "unit": "archive._claim_canonical_spellings",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    2995,
+    3014
+   ],
+   "why": "touched at 2989-3016"
+  },
+  {
+   "unit": "archive._refuse_recorded_chunk_overwrite",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    3054,
+    3086
+   ],
+   "why": "touched at 3060-3061"
+  },
+  {
+   "unit": "archive._object_key",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    2932,
+    2935
+   ],
+   "why": "calls archive._owned_key"
+  },
+  {
+   "unit": "archive._encode_upload_ndjson_single",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    3097,
+    3175
+   ],
+   "why": "calls archive._refuse_recorded_chunk_overwrite"
+  },
+  {
+   "unit": "archive._encode_upload_parquet",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    3186,
+    3236
+   ],
+   "why": "calls archive._refuse_recorded_chunk_overwrite"
+  },
+  {
+   "unit": "archive._child_object_key",
+   "file": "pgpm_archive/install.sql",
+   "lines": [
+    3342,
+    3345
+   ],
+   "why": "calls archive._owned_key"
+  }
+ ],
+ "exercised_by": {
+  "archive._owned_key": [
+   "bench/archive_export_key_by_relation.sh",
+   "bench/archive_key_base_canonical.sh",
+   "bench/archive_key_by_resolved_oid.sh",
+   "bench/archive_key_full_claim.sh",
+   "bench/archive_key_owner_every_path.sh",
+   "bench/archive_keys_row_read.sh",
+   "bench/lint_child_by_oid_inverse.sh",
+   "bench/lint_value_not_spelling.sh",
+   "docs/adversarial-review.md",
+   "docs/reviews/2026-10-02-pass7.md",
+   "docs/reviews/2026-10-06-pass9.md",
+   "docs/reviews/2026-10-08-pass10.md",
+   "docs/reviews/2026-10-09-pass11.md",
+   "docs/reviews/2026-10-12-pass12.md",
+   "scripts/check_archive_child_by_oid.py",
+   "scripts/check_archive_object_keys.py",
+   "tests/archive/db/42_archive_recorded_chunk_overwrite_test.sql",
+   "tests/archive/db/45_to_s3_child_held_test.sql",
+   "tests/archive/db/49_archive_key_by_resolved_oid_test.sql",
+   "tests/archive/db/52_archive_key_base_canonical_test.sql"
+  ],
+  "archive._refuse_recorded_chunk_overwrite": [
+   "bench/archive_fn_s3_readback.sh",
+   "bench/archive_key_base_canonical.sh",
+   "bench/archive_recorded_chunk.sh",
+   "bench/archive_recorded_chunk_tick_race.sh",
+   "bench/archive_retired_chunk_digest_layer.sh",
+   "docs/reviews/2026-10-06-pass9.md",
+   "docs/reviews/2026-10-08-pass10.md",
+   "docs/reviews/2026-10-09-pass11.md",
+   "tests/archive/db/48_archive_recorded_chunk_rows_identity_test.sql",
+   "tests/archive/db/50_archive_retired_chunk_kept_test.sql"
+  ],
+  "archive._canonical_key": [
+   "bench/archive_key_base_canonical.sh"
+  ],
+  "archive.configure": [
+   "bench/archive_keys_row_read.sh",
+   "bench/archive_null_arguments.sh",
+   "bench/archive_recorded_chunk_tick_race.sh",
+   "bench/archive_to_s3_loud_edges.sh",
+   "bench/archive_to_s3_part_bytes.sh",
+   "bench/lint_value_not_spelling.sh",
+   "docs/guide.md",
+   "docs/reference.md",
+   "docs/reviews/2026-09-28.md",
+   "docs/reviews/2026-10-04-pass8.md",
+   "docs/reviews/2026-10-08-pass10.md",
+   "docs/reviews/2026-10-12-pass12.md",
+   "scripts/check_archive_object_keys.py",
+   "tests/59_retain_batch_test.sql",
+   "tests/archive/db/09_configure_test.sql",
+   "tests/archive/db/13_to_s3_parquet_child_identity_test.sql",
+   "tests/archive/db/23_to_s3_part_bytes_bound_test.sql",
+   "tests/archive/db/25_to_s3_conservation_identity_test.sql",
+   "tests/archive/db/26_archive_key_schema_zone_test.sql",
+   "tests/archive/db/28_to_s3_loud_edges_test.sql",
+   "tests/archive/db/29_signer_non_utf8_database_test.sql",
+   "tests/archive/db/30_archive_edges_pass5_test.sql",
+   "tests/archive/db/31_parquet_decimal_nan_test.sql",
+   "tests/archive/db/32_float_digits_pinned_test.sql",
+   "tests/archive/db/33_ndjson_row_alias_shadowed_test.sql",
+   "tests/archive/db/34_archive_key_reused_name_test.sql",
+   "tests/archive/db/35_archive_stem_era_test.sql",
+   "tests/archive/db/36_to_s3_cursor_session_settings_test.sql",
+   "tests/archive/db/38_archive_reads_under_caller_rls_test.sql",
+   "tests/archive/db/39_archive_key_owner_every_path_test.sql",
+   "tests/archive/db/40_archive_key_full_claim_test.sql",
+   "tests/archive/db/41_archive_null_arguments_test.sql",
+   "tests/archive/db/42_archive_recorded_chunk_overwrite_test.sql",
+   "tests/archive/db/43_archive_export_key_by_relation_test.sql",
+   "tests/archive/db/44_archive_extension_resolution_test.sql",
+   "tests/archive/db/45_to_s3_child_held_test.sql",
+   "tests/archive/db/46_parquet_read_by_regclass_test.sql",
+   "tests/archive/db/47_resolve_child_one_snapshot_test.sql",
+   "tests/archive/db/48_archive_recorded_chunk_rows_identity_test.sql",
+   "tests/archive/db/49_archive_key_by_resolved_oid_test.sql",
+   "tests/archive/db/50_archive_retired_chunk_kept_test.sql",
+   "tests/archive/db/51_to_s3_multi_heap_relation_test.sql",
+   "tests/archive/db/52_archive_key_base_canonical_test.sql",
+   "tests/archive/fixtures.sql"
+  ],
+  "archive._claim_canonical_spellings": [
+   "tests/archive/db/52_archive_key_base_canonical_test.sql"
+  ]
+ },
+ "finder": "P1",
+ "slice": {
+  "files": [
+   "CHANGELOG.md",
+   "bench/archive_key_base_canonical.sh",
+   "docs/reference.md",
+   "pgpm_archive/install.sql",
+   "test.sh",
+   "tests/archive/db/52_archive_key_base_canonical_test.sql"
+  ],
+  "units": [
+   "archive.configure",
+   "archive._canonical_key",
+   "archive._owned_key",
+   "archive._claim_canonical_spellings",
+   "archive._refuse_recorded_chunk_overwrite",
+   "archive._object_key",
+   "archive._encode_upload_ndjson_single",
+   "archive._encode_upload_parquet",
+   "archive._child_object_key"
+  ],
+  "kind": "mixed"
+ },
+ "ledger": [
+  "archive.configure",
+  "archive._canonical_key",
+  "archive._owned_key",
+  "archive._claim_canonical_spellings",
+  "archive._refuse_recorded_chunk_overwrite",
+  "archive._object_key",
+  "archive._encode_upload_ndjson_single",
+  "archive._encode_upload_parquet",
+  "archive._child_object_key",
+  "CHANGELOG.md",
+  "bench/archive_key_base_canonical.sh",
+  "docs/reference.md",
+  "test.sh",
+  "tests/archive/db/52_archive_key_base_canonical_test.sql"
+ ]
+}

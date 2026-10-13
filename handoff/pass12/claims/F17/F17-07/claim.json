@@ -1,0 +1,3 @@
+{"tier": 4, "file": "CHANGELOG.md", "line": 525, "lens": "contracts versus documentation",
+ "scenario": "CHANGELOG.md's #1161 bullet carries a stale second half (lines 524-530) saying the prepare tick and `set_regrain` now refuse a run past half the lock table; set_regrain on a 2000-child run (past 6400/2 slots at two each) warns, logs warn_regrain_lock_budget and stores the target, as the bullet's own first half and docs/reference.md say; the stale half (a merge leftover duplicating the bullet's tail) should be removed",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

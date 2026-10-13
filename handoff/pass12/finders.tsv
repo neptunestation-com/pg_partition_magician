@@ -1,0 +1,20 @@
+finder	slice	model	budget
+F1	S1	opus	55 minutes of wall clock or about 450k tokens
+F2	S2	opus	45 minutes of wall clock or about 350k tokens
+F3	S3	opus	50 minutes of wall clock or about 400k tokens
+F4	S4	opus	55 minutes of wall clock or about 450k tokens
+F5	S5	opus	60 minutes of wall clock or about 500k tokens
+F6	S6	opus	50 minutes of wall clock or about 400k tokens
+F7	S7a	opus	60 minutes of wall clock or about 500k tokens
+F8	S7b	opus	60 minutes of wall clock or about 500k tokens
+F9	S8a	opus	55 minutes of wall clock or about 450k tokens
+F10	S8b	opus	60 minutes of wall clock or about 500k tokens
+F11	S8c	opus	65 minutes of wall clock or about 550k tokens
+F12	S8d	opus	45 minutes of wall clock or about 350k tokens
+F13	S9	opus	60 minutes of wall clock or about 500k tokens
+F14	S10	opus	60 minutes of wall clock or about 500k tokens
+F15	S11	opus	60 minutes of wall clock or about 500k tokens
+F16	S12	opus	65 minutes of wall clock or about 550k tokens
+F17	S13	opus	50 minutes of wall clock or about 400k tokens
+F18	S1	fable	55 minutes of wall clock or about 450k tokens
+F19	S5	fable	60 minutes of wall clock or about 500k tokens

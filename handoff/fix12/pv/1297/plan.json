@@ -1,0 +1,10 @@
+{
+ "seeds": [
+  {
+   "mutation": "surface_prepare_drops_granted",
+   "lens": "fresh surface",
+   "tier": 3,
+   "why": "the PR's own mutation, its quietest"
+  }
+ ]
+}

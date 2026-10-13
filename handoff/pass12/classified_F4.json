@@ -1,0 +1,49 @@
+{
+  "claims": [
+    {
+      "id": "F4-01",
+      "finder": "F4",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 2929,
+      "lens": "contracts versus documentation",
+      "scenario": "obtain() and extend_to() leave a forward cell whose name a stranger holds unbuilt (a hole that refuses every write into it) and log nothing: both '#710: a hole in the grid, so it is logged' branches are `null;` and pgpm._log_unbuilt_cell has no caller, where docs/reference.md (the fail_obtain_name action, Partition naming) and runbook 'A write is refused' promise a fail_obtain_name row naming the holder",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "                                          is                                                    \n----------------------------------------------------------------------------------------------------------\n not ok 5 - obtain logged fail_obtain_name for the hole [300, 400), as docs/reference.md promises        +\n # Failed test 5: \"obtain logged fail_obtain_name for the hole [300, 400), as docs/reference.md promises\"+\n #         have: NULL                                                                                    +\n #         want: {300-400}\n(1 row)\n\n                                                ok                                                 \n---------------------------------------------------------------------------------------------------\n ok 6 - LIVENESS: extend_to walked past [700, 800), left it unbuilt, and built [600, 700) below it\n(1 row)\n\n                                             is                                              \n---------------------------------------------------------------------------------------------\n not ok 7 - extend_to logged fail_obtain_name for the hole [700, 800) it walked over        +\n # Failed test 7: \"extend_to logged fail_obtain_name for the hole [700, 800) it walked over\"+\n #         have: NULL                                                                       +\n #         want: {700-800}\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 7\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": false,
+        "exit": 0,
+        "tail": "-----------------------\n ok 2 - LIVENESS: obtain built the cells it could name\n(1 row)\n\n                                               ok                                               \n------------------------------------------------------------------------------------------------\n ok 3 - LIVENESS: obtain walked past [300, 400), left it unbuilt, and built [400, 500) above it\n(1 row)\n\n                               throws_like                               \n-------------------------------------------------------------------------\n ok 4 - LIVENESS: a write into [300, 400) is refused: the cell is a hole\n(1 row)\n\n                                              is                                              \n----------------------------------------------------------------------------------------------\n ok 5 - obtain logged fail_obtain_name for the hole [300, 400), as docs/reference.md promises\n(1 row)\n\n                                                ok                                                 \n---------------------------------------------------------------------------------------------------\n ok 6 - LIVENESS: extend_to walked past [700, 800), left it unbuilt, and built [600, 700) below it\n(1 row)\n\n                                       is                                        \n---------------------------------------------------------------------------------\n ok 7 - extend_to logged fail_obtain_name for the hole [700, 800) it walked over\n(1 row)\n\n finish \n--------\n(0 rows)\n\n"
+      },
+      "class": "seed_hit",
+      "seed": "S3"
+    },
+    {
+      "id": "F4-02",
+      "finder": "F4",
+      "tier": 3,
+      "file": "pgpm_core/install.sql",
+      "line": 3573,
+      "lens": "operator error",
+      "scenario": "retain_disown's logged remedy (install pass _disown_unvouched_retirements; docs/reference.md retire: 'drop the table by hand ... its pgpm.part row is kept') leaves the attached pgpm.part row anchored to a dropped oid, so every later retire()/retain() logs fail_retain_identity for that range and status().retain_drop_failures climbs for good (and the row takes a retain_batch slot every tick); the remedy should also delete the row, or retire() should forget a disowned row whose relation the operator dropped",
+      "repro": "repro.sql",
+      "repro_used": "repro.sql",
+      "review": {
+        "fails": true,
+        "exit": 0,
+        "tail": "-------\n      0\n(1 row)\n\n                          ok                           \n-------------------------------------------------------\n ok 6 - LIVENESS: retention ran twice after the remedy\n(1 row)\n\n                                                   is                                                    \n---------------------------------------------------------------------------------------------------------\n not ok 7 - after the documented remedy, retention logs no failure for [100, 200) on later calls        +\n # Failed test 7: \"after the documented remedy, retention logs no failure for [100, 200) on later calls\"+\n #         have: {fail_retain_identity}                                                                 +\n #         want: NULL\n(1 row)\n\n                                                         is                                                         \n--------------------------------------------------------------------------------------------------------------------\n not ok 8 - and status().retain_drop_failures does not climb for the partition the operator dropped as told        +\n # Failed test 8: \"and status().retain_drop_failures does not climb for the partition the operator dropped as told\"+\n #         have: 3                                                                                                 +\n #         want: 1\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 8\n(1 row)\n\n"
+      },
+      "pristine": {
+        "fails": true,
+        "exit": 0,
+        "tail": "-------\n      0\n(1 row)\n\n                          ok                           \n-------------------------------------------------------\n ok 6 - LIVENESS: retention ran twice after the remedy\n(1 row)\n\n                                                   is                                                    \n---------------------------------------------------------------------------------------------------------\n not ok 7 - after the documented remedy, retention logs no failure for [100, 200) on later calls        +\n # Failed test 7: \"after the documented remedy, retention logs no failure for [100, 200) on later calls\"+\n #         have: {fail_retain_identity}                                                                 +\n #         want: NULL\n(1 row)\n\n                                                         is                                                         \n--------------------------------------------------------------------------------------------------------------------\n not ok 8 - and status().retain_drop_failures does not climb for the partition the operator dropped as told        +\n # Failed test 8: \"and status().retain_drop_failures does not climb for the partition the operator dropped as told\"+\n #         have: 3                                                                                                 +\n #         want: 1\n(1 row)\n\n                finish                \n--------------------------------------\n # Looks like you failed 2 tests of 8\n(1 row)\n\n"
+      },
+      "class": "candidate"
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+{"tier": 5, "file": "tests/260_regrain_calendar_clamped_name_test.sql", "line": 91, "lens": "contracts versus documentation",
+ "scenario": "tests/260's 'LIVENESS: (A) and those are every row the fixture wrote, so the comparison above was over something' (and its (B) twin at line 127) compares count(public.ny) with count(ny_before), a copy taken from public.ny itself; it is implied by the identity check before it and passes when both are empty, so it cannot witness that the comparison was over any row; it should assert the fixture's rows were present (e.g. ny_before is non-empty or equals the rows the fixture inserted)",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}

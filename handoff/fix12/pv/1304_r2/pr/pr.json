@@ -1,0 +1,13 @@
+{
+  "baseRefName": "main",
+  "headRefName": "fix/archive-direct-call-reads-bounds-pinned",
+  "headRefOid": "341b9c876b59f52fadf5bfa75cc1b11a73eff29c",
+  "number": 1304,
+  "title": "fix(archive): key a direct strategy call by the bounds it read",
+  "url": "https://github.com/neptunestation-com/pg_partition_magician/pull/1304",
+  "head": "341b9c876b59f52fadf5bfa75cc1b11a73eff29c",
+  "base": "b76002e66c9f8b57f9943967babf25a195500f85",
+  "finder": "P1",
+  "seeds": 1,
+  "mutations": "archive_ndjson_bounds_caller_spelling,archive_ndjson_bounds_session_zone,archive_parquet_bounds_caller_spelling,archive_parquet_bounds_session_zone"
+}

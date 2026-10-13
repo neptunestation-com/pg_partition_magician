@@ -1,0 +1,3 @@
+{"tier": 4, "file": "CHANGELOG.md", "line": 525, "lens": "fresh surface",
+ "scenario": "CHANGELOG.md's Unreleased section carries unresolved merge residue: after #1161's bullet says set_regrain WARNS and stores an over-budget target, a stray second copy of its tail says `set_regrain` now REFUSES such a run (the code warns and stores, as reference.md says), and five bullets (#1157, #1170, #1171, #1172, the outgoing-FK restart) appear twice verbatim; the index of promises should state each fix once and as the code keeps it",
+ "repro": "repro.sh", "install": ["pgpm_core/install.sql"], "fixtures": false}
