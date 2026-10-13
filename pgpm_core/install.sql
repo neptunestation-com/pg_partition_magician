@@ -10133,7 +10133,9 @@ $$;
 -- PostgreSQL's own: `gone` is what the DROP would take along silently (the holder and everything that
 -- depends on it by an auto, internal or partition dependency, all the way down: its row type, indexes,
 -- constraints, defaults, owned sequences, partitions), and a dependent is anything outside `gone` with a
--- normal dependency on something inside it. Erring towards a dependent costs only the DROP's mention.
+-- normal dependency on something inside it, or anything outside it that something inside is part of (an
+-- extension one of the holder's own sequences or partitions is a member of: PostgreSQL then asks for that
+-- owner to be dropped, and refuses). Erring towards a dependent costs only the DROP's mention.
 create or replace function pgpm._transmute_refuse_staging_squatter(p_nsp name, p_staging name)
 returns void language plpgsql stable as $$
 declare v_oid oid; v_kind "char"; v_type oid; v_noun text; v_owner text; v_drop text; v_dependent text;
@@ -10163,15 +10165,22 @@ begin
         from gone g join pg_depend d on d.refclassid = g.classid and d.refobjid = g.objid
        where d.deptype in ('a', 'i', 'P', 'S')
     )
-    select pg_describe_object(coalesce(o.refclassid, d.classid), coalesce(o.refobjid, d.objid),
-                              coalesce(o.refobjsubid, d.objsubid))
-      into v_dependent
-      from gone g join pg_depend d on d.refclassid = g.classid and d.refobjid = g.objid
-      left join pg_depend o on o.classid = d.classid and o.objid = d.objid and o.objsubid = d.objsubid
-                           and o.deptype = 'i'   -- a view's rule reads it: name the view
-     where d.deptype = 'n'
-       and not exists (select 1 from gone x where x.classid = d.classid and x.objid = d.objid)
-     order by d.classid, d.objid, d.objsubid, o.refclassid, o.refobjid
+    select b.blocker into v_dependent
+      from (select 1 as ord, d.classid, d.objid, d.objsubid,
+                   pg_describe_object(coalesce(o.refclassid, d.classid), coalesce(o.refobjid, d.objid),
+                                      coalesce(o.refobjsubid, d.objsubid)) as blocker
+              from gone g join pg_depend d on d.refclassid = g.classid and d.refobjid = g.objid
+              left join pg_depend o on o.classid = d.classid and o.objid = d.objid and o.objsubid = d.objsubid
+                                   and o.deptype = 'i'   -- a view's rule reads it: name the view
+             where d.deptype = 'n'
+               and not exists (select 1 from gone x where x.classid = d.classid and x.objid = d.objid)
+            union all
+            select 2, o.classid, o.objid, o.objsubid, pg_describe_object(o.refclassid, o.refobjid, o.refobjsubid)
+              from gone g join pg_depend o on o.classid = g.classid and o.objid = g.objid
+             where o.deptype in ('i', 'e')
+               and not exists (select 1 from gone x where x.classid = o.refclassid and x.objid = o.refobjid)) b
+     where b.blocker is not null
+     order by b.ord, b.classid, b.objid, b.objsubid, b.blocker
      limit 1;
   end if;
   if v_owner is not null then

@@ -22,7 +22,7 @@
 #                                         told `drop table`, the pre-fix remedy. Parts A to E, I, J and O.
 #   staging_squatter_dependents_not_for_tables -- a dependent is asked for of every holder but a table or a
 #                                         partitioned table, so one a foreign key references is told
-#                                         `drop table` again, which PostgreSQL refuses. Parts S and T.
+#                                         `drop table` again, which PostgreSQL refuses. Parts S, T and V.
 #
 # Runs on the plain core image (pgtap and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path
 # inside the container, for a worktree mounted somewhere other than /repo.

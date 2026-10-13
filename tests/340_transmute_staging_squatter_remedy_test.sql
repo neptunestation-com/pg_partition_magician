@@ -42,12 +42,14 @@
 --   (S) a table a foreign key references holds ss340's
 --   (T) a partitioned table a foreign key references holds st340's
 --   (U) a free-standing unique index a foreign key uses holds su340's
+--   (V) a table holds sv340's whose own owned sequence is a member of an extension: nothing depends on the
+--       table itself, yet DROP TABLE is refused for the extension; the refusal names the extension
 -- bench/transmute_staging_squatter_remedy.sh runs this file against two mutants, so it is also required to
 -- FAIL on each: one that routes every holder with no owner to the table remedy again
 -- (staging_squatter_remedy_drop_table), and one that asks for a dependent of every kind but a table or a
 -- partitioned table (staging_squatter_dependents_not_for_tables).
 create extension if not exists pgtap;
-select plan(152);
+select plan(159);
 
 set timezone = 'UTC';
 
@@ -537,6 +539,33 @@ select is((select relkind::text from pg_class where oid = 'public.su340'::regcla
 select is((select conindid::regclass::text from pg_constraint where conname = 'su340_ref_fk'
             and conrelid = 'public.su340_ref'::regclass), 'su340_other_v_key',
   'U: the foreign key still uses the index, under its new name');
+
+-- (V) a table one of whose OWN parts belongs to something else: a sequence its column owns is a member of
+-- an extension. DROP TABLE would take the sequence along, PostgreSQL then asks for the extension, and
+-- refuses; nothing has a normal dependency on the table at all.
+create table public.sv340 (id bigint primary key, body text);
+insert into public.sv340 select g, 'v' || g from generate_series(1, 23) g;
+create table public.sv340_pgpm_new (k bigint);
+create sequence public.sv340_owned owned by public.sv340_pgpm_new.k;
+alter extension pgtap add sequence public.sv340_owned;
+select ok((select c.relkind = 'r' from pg_class c where c.oid = 'public.sv340_pgpm_new'::regclass)
+          and not exists (select 1 from pg_depend d where d.refclassid = 'pg_class'::regclass
+                             and d.refobjid = 'public.sv340_pgpm_new'::regclass and d.deptype = 'n'),
+  'LIVENESS: (V) a table nothing has a normal dependency on holds sv340''s staging name');
+select throws_like($$ drop table public.sv340_pgpm_new $$, '%because other objects depend on it%',
+  'LIVENESS: (V) and DROP TABLE is refused, for the extension its owned sequence is a member of');
+select pg_temp.refusal340('public.sv340') as msg_v \gset
+select ok(:'msg_v' like 'pg_partition_magician: public.sv340_pgpm_new already exists as a table, and transmute needs that name as a staging name for the new parent. PostgreSQL refuses to drop it while extension pgtap depends on it,%',
+  'V: refused on the staging name, naming the table and the extension: ' || coalesce(:'msg_v', '(no refusal)'));
+select is(pg_temp.remedy340(:'msg_v'), null, 'V: no DROP statement is named for it');
+select lives_ok($$ alter table public.sv340_pgpm_new rename to sv340_kept $$, 'V: renaming it, as the refusal says, runs');
+select is(to_regclass('public.sv340_pgpm_new'), null, 'V: and the staging name is free afterwards');
+select to_regclass('public.sv340_pgpm_new') is null as free \gset
+\if :free
+call pgpm.transmute('public.sv340', 'id', 100::bigint, p_obtain => 2);
+\endif
+select is((select relkind::text from pg_class where oid = 'public.sv340'::regclass), 'p', 'V: the same call then converts sv340');
+alter extension pgtap drop sequence public.sv340_owned;
 
 -- no conversion left a staging name behind
 select is((select array_agg(c.relname::text order by c.relname) from pg_class c

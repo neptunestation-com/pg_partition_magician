@@ -13281,7 +13281,7 @@ MUTATIONS["staging_squatter_dependents_not_for_tables"] = (
     "kinds the refusal has always named `drop table` for: a table another table's foreign key references (or a view "
     "reads, or a column is typed by) is told `drop table <schema>.<table>_pgpm_new` again, PostgreSQL refuses it with "
     "2BP01 while the dependent exists, and that refusal offers no rename. One site, the dependents branch's condition. "
-    "tests/340 parts S and T catch it (the refusal names no dependent and names a DROP).",
+    "tests/340 parts S, T and V catch it (the refusal names no dependent and names a DROP).",
     [("  elsif v_dependent is not null then\n", "  elsif v_dependent is not null and v_kind not in ('r', 'p') then\n", 1)],
 )
 
