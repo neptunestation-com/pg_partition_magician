@@ -13135,6 +13135,35 @@ MUTATIONS["hypertable_drain_delete_unrecorded"] = (
 MUTATION_SRC["hypertable_drain_delete_unrecorded"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_drain_delete_unrecorded"] = "timescale"
 
+# Issue #1258: every regrain driver refuses a REPEATABLE READ or SERIALIZABLE transaction
+# (pgpm._regrain_refuse_strict_isolation), asked by regrain_step (and so by maintain's auto-regrain tick), regrain()
+# and regrain_history(). One mutation for the step's call, the one every driver goes through; one for the helper's
+# level test, which puts the defect back at every site at once. Both caught by tests/329 through
+# bench/regrain_refuses_strict_isolation.sh.
+_G1258 = "bench/regrain_refuses_strict_isolation.sh"
+MUTATIONS["regrain_step_isolation_unchecked"] = (
+    _G1258,
+    "Pre-#1258 regrain_step: no isolation level is refused, so a hand swap step in a REPEATABLE READ transaction "
+    "reconciles and counts the captured delta through the transaction's first snapshot, misses a writer's UPDATE "
+    "and DELETE committed after it, and drops the source with both unapplied (row 10 reverted, row 30 back); and a "
+    "maintain tick in a session whose default_transaction_isolation is REPEATABLE READ copies instead of logging "
+    "the refusal. One site, the step's call. tests/329 parts C and D catch it.",
+    [("  perform pgpm._regrain_refuse_strict_isolation('regrain_step', p_parent);   -- #1258: before the lock and every read\n",
+      "", 1)],
+)
+MUTATIONS["regrain_isolation_serializable_only"] = (
+    _G1258,
+    "The refusal asks for SERIALIZABLE alone, as if only serialization failures were the hazard: a REPEATABLE READ "
+    "caller keeps the transaction's first snapshot all the same, so regrain_history() copies the monolith without "
+    "a row another session committed after it and the swap drops that row (F3-02: {10,20} of {10,20,500}), and "
+    "the hand swap step reverts a committed UPDATE. One site, the helper's level test. tests/329 parts A, C and D "
+    "catch it.",
+    [("  if current_setting('transaction_isolation') not in ('read committed', 'read uncommitted') then\n"
+      "    raise exception 'pg_partition_magician: % must run in a READ COMMITTED transaction (this one is %): ",
+      "  if current_setting('transaction_isolation') = 'serializable' then\n"
+      "    raise exception 'pg_partition_magician: % must run in a READ COMMITTED transaction (this one is %): ", 1)],
+)
+
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
