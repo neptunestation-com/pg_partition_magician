@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- **`tests/72` asks a role its policy does not name what it reads through the converted parent** (#1285). Its
+  one row-level-security check asked `t72_reader`, the role `tenant_iso` names, for a count of 400 over five
+  tenants of 400 rows each, so a `transmute` that replayed the policy `TO PUBLIC` passed all fifteen
+  assertions while `t72_writer` read tenant 1's rows, where the table it converted showed it none. The file now
+  reads what each role sees by id: `t72_reader` exactly tenant 1's rows, and `t72_writer`, which holds `SELECT`
+  on two columns and is named by no policy, no row (a refusal of the table reads back as `{-1}`, never as the
+  empty answer). The fixture is asymmetric: tenant 1 holds every fifth id and the other tenants 800, 600 and
+  200 rows. `bench/tests_fail_on_defect.sh` judges the file against a `transmute` that captures every policy's
+  roles as `public` and against one that replays the `USING` expression as another 400 rows (mutations
+  `transmute_rls_unnamed_role_unasked` and `transmute_rls_named_role_by_count`). A test change only: `transmute`
+  itself is untouched.
+
+- **`tests/27` names the rows `untransmute` hands back** (#1286). 'all rows are preserved' was `count(*) = 100`
+  over rows the fixture names (`b1` to `b100`), which a table that lost rows and gained as many strangers
+  satisfies. It now compares every row as its id, its body and its minutes behind the newest row with the
+  fixture's own. `bench/tests_fail_on_defect.sh` judges the file with a stranger in place of `b17` after the
+  untransmute, the same 100 rows by count (mutation `untransmute_rows_by_count`).
+
 - **`bench/ci_runs_lint_jobs.sh` requires that `./test.sh ci` fails when its lint track fails** (#1280). Its
   check that `ci` runs the lint track accepted the block on the spelling of a `"$0" lint` command, so a `ci` that
   ran the track and dropped its failure (the `*) ci_failed="$ci_failed lint"` arm emptied) printed `ci: PASS`

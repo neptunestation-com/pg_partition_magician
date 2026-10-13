@@ -33,9 +33,14 @@ select lives_ok(
 select is(
   (select relkind::text from pg_class where oid = 'public.rt'::regclass),
   'r', 'rt is an ordinary (un-partitioned) table again');
+-- By identity (#1286): each row as <id>:<body>:<minutes behind the newest row>, the fixture's b1 .. b100 with
+-- ids 1 .. 100, one a minute back. A count of 100 is also what a table that lost rows and gained as many
+-- strangers comes to.
 select is(
-  (select count(*)::int from public.rt),
-  100, 'all rows are preserved');
+  (select array_agg(id || ':' || body || ':' || (extract(epoch from newest - created_at) / 60)::int order by id)
+     from public.rt, (select max(created_at) as newest from public.rt) n),
+  (select array_agg(g || ':b' || g || ':' || (g - 1) order by g) from generate_series(1, 100) g),
+  'all rows are preserved');
 select is(
   (select count(*)::int from pg_constraint where conrelid = 'public.rt'::regclass and contype = 'p'),
   1, 'the primary key is restored');

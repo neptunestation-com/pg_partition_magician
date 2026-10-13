@@ -14588,6 +14588,48 @@ MUTATION_SRC["archive_child_by_oid_identity_unread"] = _G1287_SRC
 MUTATION_SRC["archive_child_by_oid_set_operation_unread"] = _G1287_SRC
 
 
+# Issues #1285 and #1286 (pass 12 G27): tests/72 asked only the role its policy names what it reads through the
+# converted parent, and by a count; tests/27 counted the rows untransmute hands back. Each mutation is one
+# site's pre-fix shape, and bench/tests_fail_on_defect.sh judges the file against the defect that shape accepted.
+MUTATIONS["transmute_rls_unnamed_role_unasked"] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#1285 tests/72: the row-level-security check asks t72_reader, the role the policy names, and never a role "
+    "it does not name, so a transmute that replays tenant_iso TO PUBLIC (t72_writer then reads tenant 1's rows, "
+    "where the table it converted showed it none) passes every assertion. One clause in two edits: the question to "
+    "t72_writer, and the plan's count of it. The guard's defect captures every policy's roles as public.",
+    [("select plan(16);\n", "select plan(15);\n", 1),
+     ("set role t72_writer;\n"
+      "select is(public.ev72_seen(), '{}'::bigint[],\n"
+      "  'and a role the policy does NOT name still reads no row through the parent');\n", "", 1)],
+)
+MUTATION_SRC["transmute_rls_unnamed_role_unasked"] = "tests/72_transmute_attributes_test.sql"
+MUTATIONS["transmute_rls_named_role_by_count"] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#1285 tests/72: what the role the policy names reads through the parent, asserted as a count of 400, "
+    "which 400 rows of any tenants satisfy. One site, the reader's check. The guard's defect replays the policy's "
+    "USING expression as `id <= 400`: 400 rows, 320 of them another tenant's.",
+    [("select is(public.ev72_seen(), array(select g::bigint from generate_series(5, 2000, 5) g),\n",
+      "select is(cardinality(public.ev72_seen()), 400,\n", 1)],
+)
+MUTATION_SRC["transmute_rls_named_role_by_count"] = "tests/72_transmute_attributes_test.sql"
+MUTATIONS["untransmute_rows_by_count"] = (
+    "bench/tests_fail_on_defect.sh",
+    "Pre-#1286 tests/27: 'all rows are preserved' after untransmute asserted as count(*) = 100 over rows the "
+    "fixture names (b1 .. b100), which a table that lost rows and gained as many strangers satisfies. The exact "
+    "pre-#1286 assertion; the guard's defect leaves a stranger in place of b17 after the untransmute.",
+    [("""select is(
+  (select array_agg(id || ':' || body || ':' || (extract(epoch from newest - created_at) / 60)::int order by id)
+     from public.rt, (select max(created_at) as newest from public.rt) n),
+  (select array_agg(g || ':b' || g || ':' || (g - 1) order by g) from generate_series(1, 100) g),
+  'all rows are preserved');
+""", """select is(
+  (select count(*)::int from public.rt),
+  100, 'all rows are preserved');
+""", 1)],
+)
+MUTATION_SRC["untransmute_rows_by_count"] = "tests/27_untransmute_test.sql"
+
+
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
 # cost), and discriminate.sh's --shard=I/N interleaves that list, so the heavy ones spread over the

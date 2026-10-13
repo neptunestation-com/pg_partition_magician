@@ -10,7 +10,7 @@
 -- SEE when it queries the parent. Likewise a trigger is asserted by whether it FIRES for a row routed to
 -- a partition minted after the conversion, not by whether pg_trigger has a row.
 create extension if not exists pgtap;
-select plan(15);
+select plan(16);
 
 -- Roles are cluster-wide while the test database is per-file, so these are created only if absent and
 -- never dropped. DROP ROLE would fail whenever any other database still holds an object they own, which
@@ -23,8 +23,14 @@ begin
   if not exists (select 1 from pg_roles where rolname = 't72_writer') then create role t72_writer; end if;
 end $$;
 
+-- Asymmetric on purpose (#1285). Tenant 1, the one the policy below admits, holds every fifth id (400 rows,
+-- 5 .. 2000); tenants 2, 3 and 4 hold the ids between, 800, 600 and 200 of them. No other tenant has
+-- tenant 1's count, so what a role reads cannot be mistaken for another tenant's rows, and tenant 1's ids
+-- are not a range a bound could pick out.
 create table public.ev72 (id bigint primary key, tenant int not null, body text);
-insert into public.ev72 select g, (g % 5) + 1, 'x' from generate_series(1, 2000) g;
+insert into public.ev72
+  select g, case when g % 5 = 0 then 1 when g <= 1000 then 2 when g <= 1750 then 3 else 4 end, 'x'
+    from generate_series(1, 2000) g;
 
 comment on table public.ev72 is 'the events table';
 comment on column public.ev72.tenant is 'tenant discriminator';
@@ -46,20 +52,33 @@ create trigger ev72_before before insert on public.ev72
 
 call pgpm.transmute('public.ev72', 'id', 3000, p_paused => false);
 
--- ============================ the security assertion ============================
--- The one that catches the real failure. Under the bug the policy is left on the monolith, the parent has
+-- ============================ the security assertions ============================
+-- The ones that catch the real failure. Under the bug the policy is left on the monolith, the parent has
 -- none, and a reader whose grants have been "repaired" sees EVERY row instead of its own tenant's.
--- Wrapped so a permission error becomes a FAILED ASSERTION rather than an aborted script. Under the bug
--- the reader has no grant at all, and a bare select would kill the file at this line, leaving the
--- remaining thirteen assertions unreported and the session still SET ROLE.
-create function public.ev72_reader_count() returns int language plpgsql as $$
-begin return (select count(*)::int from public.ev72);
-exception when others then return -1;
+--
+-- ev72_seen() is what the calling role reads through the parent, BY ID (#1285): a count of 400 is also
+-- what 400 rows of other tenants come to. Wrapped so a permission error becomes a FAILED ASSERTION rather
+-- than an aborted script. Under the bug the reader has no grant at all, and a bare select would kill the
+-- file at this line, leaving every later assertion unreported and the session still SET ROLE. The error
+-- reads back as {-1}, never as the empty answer, so "reads no row" below cannot be a role that was
+-- refused the table outright.
+create function public.ev72_seen() returns bigint[] language plpgsql as $$
+begin return coalesce((select array_agg(id order by id) from public.ev72), '{}');
+exception when others then return array[-1];
 end $$;
 
+-- Asked of BOTH kinds of role (#1285). A policy says who may read as much as what, and asking only the
+-- role it names cannot tell `to t72_reader` from `to public`: replayed to every role, the reader still
+-- reads tenant 1's rows, and so does everyone else. t72_writer holds SELECT on (id, tenant) and no policy
+-- names it, so on the table as it was converted it read no row at all, and it must read none through the
+-- parent. The reader's answer just above it is that negative's witness: the same function, the same
+-- parent, the rows there to be read and the policy in force.
 set role t72_reader;
-select is(public.ev72_reader_count(), 400,
+select is(public.ev72_seen(), array(select g::bigint from generate_series(5, 2000, 5) g),
   'a non-owner sees ONLY the rows its policy allows, queried through the parent');
+set role t72_writer;
+select is(public.ev72_seen(), '{}'::bigint[],
+  'and a role the policy does NOT name still reads no row through the parent');
 reset role;
 
 -- ============================ owner, grants, RLS, comments ============================
