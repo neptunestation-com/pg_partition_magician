@@ -166,6 +166,14 @@ begin
   if not exists (select 1 from pgpm.config where parent_table = p_parent) then
     raise exception 'archive.configure: % is not managed by pgpm; transmute() it first', p_parent;
   end if;
+  -- A '.' or '..' segment is refused where the prefix is chosen (#1260): no store can be addressed with one, since
+  -- the HTTP client resolves it before sending and the request's signature, taken over the key as spelled, then no
+  -- longer matches. The other spellings a store reads as one object (a leading '/', an empty segment) are taken
+  -- out where every key is assembled and claimed, archive._owned_key, which refuses a stored dot segment too.
+  if p_prefix ~ '(^|/)\.{1,2}/' then
+    raise exception 'archive.configure: p_prefix % has a "." or ".." segment; no store can be addressed with one (the HTTP client resolves it before sending, and the request''s signature no longer matches). Spell the prefix without it',
+      p_prefix;
+  end if;
   -- archive.to_s3 fills each multipart part until it holds part_bytes, so a size of zero or less
   -- never reads a row and uploads empty parts until the store refuses part 10001 (issue #594).
   if p_part_bytes <= 0 then
@@ -2856,6 +2864,16 @@ $$;
 -- diverted or refused below. scripts/check_archive_child_by_oid.py keeps the class closed: outside
 -- archive._resolve_child nothing in this file compares a relname or does anything with a child's name but
 -- resolve it there, report it or render it.
+-- The one spelling of an object key (#1260): without a leading '/' and with every run of '/' one '/'. MinIO, the
+-- store pgpm_archive/README.md names, reads '/P/x', '//P/x' and 'P/x' as one object (and refuses 'P//x'), so the
+-- claims, which compare keys as text, have to compare this spelling, or two spellings of one object are two claims
+-- and the second writer PUTs over the first one's object. archive._owned_key assembles every key in it; the readers
+-- of keys recorded before (pgpm.archive_ledger, the claims an older install spelled otherwise) compare through it.
+create or replace function archive._canonical_key(p_key text)
+returns text language sql immutable strict as $$
+  select regexp_replace(regexp_replace(p_key, '^/+', ''), '/{2,}', '/', 'g');
+$$;
+
 drop function if exists archive._child_object_key(regclass, text, name, text);
 drop function if exists archive._owned_key(regclass, text, name, text);
 create or replace function archive._owned_key(p_parent regclass, p_prefix text, p_child regclass, p_tail text)
@@ -2873,6 +2891,13 @@ begin
       coalesce(p_child, p_parent)::oid;
   end if;
   v_base_q := p_prefix || quote_ident(v_nsp) || '.' || quote_ident(v_name);
+  -- one object, one claim, whatever the prefix's spelling (#1260): the base is claimed, and every key PUT, in the
+  -- canonical spelling, so a namesake configured '/P/' reaches the claim the dropped table's 'P/' base holds
+  v_base_q := archive._canonical_key(v_base_q);
+  if v_base_q ~ '(^|/)\.{1,2}(/|$)' then
+    raise exception 'pg_partition_magician: the object key base % has a "." or ".." segment (archive.config.prefix is %); no store can be addressed with one, so nothing is written there. Spell the prefix without it: archive.configure(%, ..., p_prefix => <the prefix without "." and ".." segments>)',
+      v_base_q, p_prefix, p_parent;
+  end if;
   insert into archive.object_key_owner (key_base, parent_oid) values (v_base_q, p_parent::oid)
     on conflict (key_base) do nothing
     returning parent_oid into v_owner;
@@ -2962,6 +2987,34 @@ create or replace function archive._record_claim_relations() returns int languag
 $$;
 do $$ begin perform archive._record_claim_relations(); end $$;
 
+-- Claims again, in the canonical spelling (#1260, archive._canonical_key), every base and whole key an older install
+-- claimed under another spelling (a prefix configured with a leading '/', say), for the relation and with the digest
+-- it recorded, so a writer whose key is now assembled canonically still finds the claim on the object the store
+-- reads both spellings as. Where several spellings name one canonical key the earliest claim is copied, and a
+-- canonical claim already made is left as it is. Run by install on every (re-)install, after the claims above are
+-- seeded and their relations recorded; returns how many claims it made.
+create or replace function archive._claim_canonical_spellings() returns int language sql as $$
+  with bases as (
+    insert into archive.object_key_owner (key_base, parent_oid, claimed_at)
+    select distinct on (archive._canonical_key(o.key_base)) archive._canonical_key(o.key_base), o.parent_oid, o.claimed_at
+      from archive.object_key_owner o
+     where o.key_base <> archive._canonical_key(o.key_base)
+     order by archive._canonical_key(o.key_base), o.claimed_at, o.parent_oid
+    on conflict (key_base) do nothing
+    returning 1),
+  wholes as (
+    insert into archive.object_key_claim (object_key, parent_oid, kind, claimed_at, relation_oid, rows_digest)
+    select distinct on (archive._canonical_key(k.object_key))
+           archive._canonical_key(k.object_key), k.parent_oid, k.kind, k.claimed_at, k.relation_oid, k.rows_digest
+      from archive.object_key_claim k
+     where k.object_key <> archive._canonical_key(k.object_key)
+     order by archive._canonical_key(k.object_key), k.claimed_at, k.parent_oid
+    on conflict (object_key) do nothing
+    returning 1)
+  select ((select count(*) from bases) + (select count(*) from wholes))::int;
+$$;
+do $$ begin perform archive._claim_canonical_spellings(); end $$;
+
 -- An archive_fn strategy writes over the object pgpm.archive_ledger records a chunk at only to reproduce that
 -- chunk (#975). A chunk's key is derived from its lo alone, and the whole-key claim above admits the same parent
 -- and kind, so the claim cannot tell the tick that archived a chunk from a later direct call aimed at its key.
@@ -3005,9 +3058,11 @@ returns void language plpgsql as $$
 declare l record; v_why text;
 begin
   perform 1 from archive.object_key_claim k where k.object_key = p_key for update;
+  -- p_key is canonical (archive._owned_key); a ledger row an older install recorded under another spelling of the
+  -- same object (#1260) is that chunk too
   for l in select a.lo, a.hi, a.rows_archived, k.rows_digest
-             from pgpm.archive_ledger a left join archive.object_key_claim k on k.object_key = a.s3_key
-            where a.parent_table = p_parent and a.s3_key = p_key loop
+             from pgpm.archive_ledger a left join archive.object_key_claim k on k.object_key = p_key
+            where a.parent_table = p_parent and archive._canonical_key(a.s3_key) = p_key loop
     if pgpm._native_gt(p_kind, l.lo, p_lo) or pgpm._native_gt(p_kind, p_lo, l.lo)
        or pgpm._native_gt(p_kind, l.hi, p_hi) or pgpm._native_gt(p_kind, p_hi, l.hi) then
       v_why := 'this call''s range is not that chunk''s';
