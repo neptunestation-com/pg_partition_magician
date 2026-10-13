@@ -13271,7 +13271,7 @@ MUTATIONS["staging_squatter_remedy_drop_table"] = (
     "Pre-#1273 _transmute_refuse_staging_squatter: every relation holding <table>_pgpm_new that is not part of "
     "another object is refused with the table's remedy, `drop table <schema>.<table>_pgpm_new`, whatever its kind, "
     "so against a sequence, view, materialized view, composite type or index the statement the refusal names "
-    "fails 42809 and the name stays held. One site, the routing clause. tests/340 parts A to E catch it (the "
+    "fails 42809 and the name stays held. One site, the routing clause. tests/340 parts A to E, I and J catch it (the "
     "refusal names no kind, the typed remedy dies, the name is still held, the table never converts).",
     [("  elsif v_kind in ('r', 'p') then\n", "  elsif v_kind is not null then\n", 1)],
 )

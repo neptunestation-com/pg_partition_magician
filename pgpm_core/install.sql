@@ -10122,7 +10122,9 @@ $$;
 -- index, an identity column's sequence, an attached partition index, an extension's member, a table
 -- included) cannot be dropped on its own at all, so for one of those the refusal names the owner and no DROP,
 -- whatever its kind. A kind with no DROP listed here is named with no statement. (A composite type's
--- relation is internal to its own pg_type, which DROP TYPE drops with it: that is not an owner.)
+-- relation is internal to its own pg_type, which DROP TYPE drops with it: that is not an owner. It is also
+-- why a composite type's owner is read off its pg_type's dependencies as well: PostgreSQL records an
+-- extension's membership of the type there, not on the relation.)
 create or replace function pgpm._transmute_refuse_staging_squatter(p_nsp name, p_staging name)
 returns void language plpgsql stable as $$
 declare v_oid oid; v_kind "char"; v_type oid; v_noun text; v_owner text; v_drop text;
@@ -10135,7 +10137,9 @@ begin
     v_noun := case when v_noun ~ '^[aeiou]' then 'an ' else 'a ' end || v_noun;
     select pg_describe_object(d.refclassid, d.refobjid, d.refobjsubid) into v_owner
       from pg_depend d
-     where d.classid = 'pg_class'::regclass and d.objid = v_oid and d.objsubid = 0 and d.deptype in ('i', 'P', 'e')
+     where ((d.classid = 'pg_class'::regclass and d.objid = v_oid)
+            or (v_kind = 'c' and d.classid = 'pg_type'::regclass and d.objid = v_type))   -- its pg_type's, see above
+       and d.objsubid = 0 and d.deptype in ('i', 'P', 'e')
        and not (d.refclassid = 'pg_type'::regclass and d.refobjid = v_type)   -- a composite type's own pg_type
      order by d.deptype = 'i' desc, d.deptype = 'P' desc
      limit 1;
