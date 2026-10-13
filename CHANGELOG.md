@@ -9,6 +9,14 @@
   DEFINER` function behind, against the reference's "found by oid". The resolver now finds the function by its
   oid wherever it lives and returns its schema as `fn_nsp`, and untransmute and uninstall.sql drop it there,
   never in the delta's schema, so a function of yours under the capture's name beside the delta is left
+  alone. The install and the uninstall script have to be this release's for that: this `uninstall.sql` still
+  runs against an older install, but asks that install's resolver, so a moved function is left there as before
+  (re-run `install.sql` first), and an older `uninstall.sql` run against this install drops the capture's
+  name in the delta's schema, which after a move is not the recorded function. `tests/338` is the acceptance
+  test; `bench/regrain_capture_fn_any_schema.sh` runs it against `regrain_capture_fn_in_delta_schema` (the
+  lookup confined again), `untransmute_capture_fn_dropped_in_delta_schema` and
+  `uninstall_capture_fn_dropped_in_delta_schema` (each exit's drop in the delta's schema), and
+  `uninstall_capture_fn_nsp_read_bare` (the script stopping on an older install's three-column resolver).
   alone. `tests/338` is the acceptance test; `bench/regrain_capture_fn_any_schema.sh` runs it against
   `regrain_capture_fn_in_delta_schema` (the lookup confined again) and
   `untransmute_capture_fn_dropped_in_delta_schema` (the drop in the delta's schema).
