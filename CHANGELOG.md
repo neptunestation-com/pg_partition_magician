@@ -5,20 +5,21 @@
 - **`retain_disown`'s remedy is the whole repair the partition's state calls for** (#1272). A retirement mark
   disowned because pgpm recorded no dispatch of its own (#705) was logged with the remedy "once its detach is
   finished, drop the table by hand, or attach it back", and `docs/reference.md` added that the `pgpm.part` row is
-  kept. Typed as written, the `DROP` left that row attached and anchored to a relation that no longer exists, which
+  kept. Typed as written, the `DROP` left that row recording a relation that no longer exists, which
   `retire` refuses as `fail_retain_identity` on every call by design, so `status().retain_drop_failures` climbed
   for good and the row took a `retain_batch` slot on every tick. `pgpm._disown_retirement`, the one writer of
   `retain_disown` (every path that disowns a mark logs through it: `retire`, `_detach_reap`, `_retain_recall` and
   the pass every `install.sql` run makes), now judges whether the retention policy in force reaches the
-  partition's range and spells the remedy as statements to run. Reached: the `ATTACH` back on its bounds, or the
-  `DROP` of the table together with the `DELETE` of its `pgpm.part` row. Not reached (no policy, or `set_retain`
-  lengthened it, which is when `_retain_recall` disowns): the `ATTACH` alone and "do not drop it", since its rows
-  are rows the policy keeps. Not judged: the `ATTACH`, and the `DROP` only in words. The reference's `retire` and
-  `set_retain` entries say the same. The refusal of a partition dropped under its row stands. `tests/339` types
-  each remedy out of its log row (install pass, `retire`, `_retain_recall`) and shows retention runs clean after
-  it, or the kept rows are served again; `bench/retain_disown_remedy.sh` runs it against two mutations, one that
-  drops the `DELETE` from the remedy and one that writes the drop remedy for a partition retention no longer
-  reaches.
+  partition's range and spells the remedy as statements to run once its detach is finished. Reached: the `ATTACH`
+  back on its bounds, or the `DROP` of the table and then the `DELETE` of its `pgpm.part` row. Not reached (no
+  policy, or `set_retain` lengthened it, which is when `_retain_recall` disowns): the `ATTACH` alone and "do not
+  drop it", since its rows are rows the policy keeps. Not judged: the `ATTACH`, and the `DROP` only in words. The
+  reference's `retire` and `set_retain` entries say the same, and delete a `pgpm.part` row only once its table is
+  detached or gone (the rule `bench/doc_archive_identity_recovery.sh` holds every identity-wedge section to). The
+  refusal of a partition dropped under its row stands. `tests/339` types each remedy out of its log row (install
+  pass, `retire`, `_retain_recall`) and shows retention runs clean after it, or the kept rows are served again;
+  `bench/retain_disown_remedy.sh` runs it against two mutations, one that drops the `DELETE` from the remedy and
+  one that writes the drop remedy for a partition retention no longer reaches.
 
 - **A tracking copy pre-builds the index of the hypertable's own key** (#1266). `from_hypertable_copy(...,
   p_track_changes => true)` named the key index it pre-builds after whichever `pg_constraint` row had the key's

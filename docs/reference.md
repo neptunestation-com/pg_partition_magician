@@ -1504,10 +1504,11 @@ hand), and `retire` leaves it alone, whether or not anything references the pare
 logs `fail_retain_drop` for the partition's range with `method` saying why, and neither write-blocks nor
 drops the table; `maintain`'s write-block and archive steps leave it alone too (see [`maintain`](#maintain)).
 Its `pgpm.part` row stays, so every later `retain` refuses and logs it again and
-`status().retain_drop_failures` counts it. To end that, attach the table back to the parent or delete its
-`pgpm.part` row. A partition pgpm's own retirement detached carries `retiring_at` and is dropped as usual
-(see below), but only with the record of pgpm's own dispatch: `pgpm.part.detach_dispatched_oid`, which `retire`
-writes, as the partition's oid, in the transaction in which the dispatch armed the `pgpm_detach` job. Nothing
+`status().retain_drop_failures` counts it. To end that, attach the table back to the parent or, since it is
+detached, delete its `pgpm.part` row. A partition pgpm's own retirement detached carries `retiring_at` and is
+dropped as usual (see below), but only with the record of pgpm's own dispatch:
+`pgpm.part.detach_dispatched_oid`, which `retire` writes, as the partition's oid, in the transaction in which
+the dispatch armed the `pgpm_detach` job. Nothing
 else vouches for a mark, not a `retain_detach` row, not the job's command and not `pg_cron`'s run history. A
 `retiring_at` mark without the record (its dispatch failed, with no `pg_cron` or no `pgpm_detach` job, and the
 operator's own detach then completed) vouches for nothing: `retire` clears it, logged `retain_disown`, disarms
@@ -1535,9 +1536,10 @@ detached partition without the record is cleared and logged `retain_disown`, and
 still holds that detach. A row an upgrade from before 0.6.0 could not anchor (no `child_oid`) is found by its name.
 
 **The remedy for a disowned table is the one its state calls for, and every `retain_disown` row spells it.** Its
-`pgpm.part` row is kept, still attached, so the table is refused as one detached by hand (`fail_retain_drop`) on
-every call until the operator decides. Which remedy is true depends on whether the retention policy in force still
-reaches the partition's range, judged when the mark is disowned, so `method` gives one of three:
+`pgpm.part` row is kept, so once its detach is finished the table is refused as one detached by hand
+(`fail_retain_drop`) on every call until the operator decides. Which remedy is true depends on whether the
+retention policy in force still reaches the partition's range, judged when the mark is disowned, so `method` gives
+one of three, each for the table once its detach is finished:
 
 - **Retention reaches it** (an aged partition; `retire` disowns only these, the install pass and `_detach_reap`
   may find one). If it was pgpm's own aged retirement, once its detach is finished either attach it back to the
@@ -1551,11 +1553,14 @@ reaches the partition's range, judged when the mark is disowned, so `method` giv
   delete from pgpm.part where parent_table = 'public.events'::regclass and child_name = 'events_p2026_01';
   ```
 
-  The `DROP` alone is half of it: the row stays attached and anchored to the oid of a relation that no longer
+  The `DROP` alone is half of it: the row stays, recording the oid of a relation that no longer
   exists, which `retire` refuses as `fail_retain_identity` on every call (a partition dropped under its row is a
   wedge for an operator to look at, see [What `retire` checks a partition's identity
   against](#what-retire-checks-a-partitions-identity-against)), so `status().retain_drop_failures` climbs for
   good and the row takes a `retain_batch` slot on every tick. Deleting the row after the fact stops the refusals.
+  The row is deleted only once the table is detached or gone. While the detach is still pending neither way out
+  applies yet: PostgreSQL refuses the `ATTACH` (the table is still a partition) and, while a foreign key
+  references the parent, the `DROP` too, so do not run the `DELETE` after a `DROP` that failed.
 - **Retention does not reach it** (the table has no policy, or the range ends past the horizon: `_retain_recall`
   disowns only these, after [`set_retain`](#set_retain) lengthened the policy, and the install pass and
   `_detach_reap` may find one). Its rows are rows the policy keeps, so the one remedy is the `ATTACH`, spelled as
@@ -3920,7 +3925,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `obtain` | a forward partition created (`method` = `plain`) |
 | `retain_drop` | a partition dropped by retention (via `retain()` or `retire()`) |
 | `retain_detach` / `retain_crossing` / `detach_reap` | a concurrent detach dispatched for a referenced partition / rows deleted to honour a crossing FK's declared `ON DELETE` / an abandoned concurrent detach finalized |
-| `retain_disown` | a `retiring_at` mark on a pending or detached partition without the record of pgpm's own dispatch (`pgpm.part.detach_dispatched_oid`) was cleared, so the detach is the operator's and the table is never dropped by retention: by `retire`, `_detach_reap`, `_retain_recall` or a run of `install.sql`, the upgrade that adds the record among them (see [`retire`](#retire)). `method` says which, why and the remedy the partition's state calls for, as statements to run: attaching it back on its bounds, and, only when retention reaches its range, the `DROP` of the table with the `DELETE` of its `pgpm.part` row (the `DROP` alone leaves the row refused as `fail_retain_identity` for good). Logged once per mark |
+| `retain_disown` | a `retiring_at` mark on a pending or detached partition without the record of pgpm's own dispatch (`pgpm.part.detach_dispatched_oid`) was cleared, so the detach is the operator's and the table is never dropped by retention: by `retire`, `_detach_reap`, `_retain_recall` or a run of `install.sql`, the upgrade that adds the record among them (see [`retire`](#retire)). `method` says which, why and the remedy the partition's state calls for once its detach is finished, as statements to run: attaching it back on its bounds, and, only when retention reaches its range, the `DROP` of the detached table with the `DELETE` of its `pgpm.part` row after it (the `DROP` alone leaves the row refused as `fail_retain_identity` for good). Logged once per mark |
 | `retain_recall` / `retain_reattach` | retention stopped reaching a partition whose retirement was under way: its dispatched detach was recalled and the `pgpm_detach` job returned to idle / the detach had already landed, and the partition was re-attached on its own bounds (see [`retire`](#retire)) |
 | `regrain_copy` / `regrain_aged` / `regrain_attach` / `regrain` | a regrain microbatch copied rows into a fine child / skipped a below-horizon sub-range that has no fine child yet (only when `archive_fn` is unset; discarded with the source, never copied, once the swap has re-checked that it is still below the horizon) / attached a fine child (`method` = `check_skip`) / completed (`method` = `copy_swap_drop`) |
 | `regrain_prepare` / `regrain_capture_orphan` / `regrain_reconcile` / `regrain_reconcile_aged` / `regrain_delta_purge` / `regrain_rename` / `regrain_restart` / `regrain_cancel` | the cross-tick regrain's own steps: change capture installed / a leftover capture table cleared / the source-is-authority reconcile before the swap (and its below-horizon counterpart) / captured keys the swap gate discarded because no reconcile could consume them (out of the source's range, or a `NULL` control value; `rows` counts them) / the source renamed onto the target grid / a stale run restarted (copies that predate capture, or copies a parent altered mid-regrain made stale: their columns or `CHECK` constraints no longer match, the source was rewritten or had a column replaced, or change capture no longer fits the key, or copies no recorded source mark vouches for, as a run in flight across an upgrade has, or change capture's trigger found disabled, origin-only or replica-only rather than enabled `ALWAYS`) / a run cancelled by `regrain_cancel()`, or by `retire` dropping the run's source whole (`method` names `retire`, `rows` counts the copies discarded) |
