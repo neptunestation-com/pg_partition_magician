@@ -9,7 +9,11 @@
 # text '02/01/2024' is 2 January to the read, so the object is keyed 2 January, never 1 February, which is how
 # the stem's own pinned parse read it; an offset-less bound is read in the grid's partition_tz, never the
 # caller's TimeZone, so a date grid's '2024-01-02' is keyed by the cell's start, 00:00Z, from New York and from
-# UTC alike (V-01 of the fix's verification); and an id bound spelled '0100' is keyed _100. Each claim is an
+# UTC alike (V-01 of the fix's verification); and an id bound spelled '0100' is keyed _100. The same reading
+# feeds the empty-range check (#969), so a range that holds something to the caller's session and is empty or
+# inverted on the grid's clock is refused, not PUT as an empty object at a live cell's key; on a date column
+# the reading is the day the bound falls in, which is what the column makes of it, so the key names the cell the
+# read covers; and the recorded-chunk check reads the ledger's bounds the same way. Each claim is an
 # EXACT key and the object's rows by identity, paired with witnesses that the session really reads the text as
 # another instant than the grid does, and a negative ("nothing at the other key") that an upload that never
 # happened would satisfy too; pointing the file at the mutants every CI run checks that those assertions fail
@@ -24,6 +28,14 @@
 #                                             caller's TimeZone, so one cell gets one key per session zone
 #                                             (parts C and E)
 #   archive_parquet_bounds_session_zone    -- the same in archive._encode_upload_parquet (part F)
+#   archive_ndjson_empty_range_as_spelled  -- archive._encode_upload_ndjson_single asks the empty-range check
+#                                             before it reads the bounds, of the caller's text in the caller's
+#                                             session (parts G and H)
+#   archive_parquet_empty_range_as_spelled -- the same in archive._encode_upload_parquet (part G2)
+#   archive_date_bound_keyed_by_instant    -- archive._grid_bound reads a date column's bound as its instant,
+#                                             not as the day the column reads (part H)
+#   archive_recorded_bounds_unread         -- archive._refuse_recorded_chunk_overwrite compares the ledger's
+#                                             bounds as recorded with the call's as read (part I)
 #
 # Usage: archive_direct_call_bounds.sh <container> <db> [archive install.sql]
 # Needs the archive image (pgsql-http + pgtap + pg_prove) AND MinIO on the same network: the file PUTs

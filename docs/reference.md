@@ -2884,10 +2884,15 @@ empty or inverted range (`p_hi` not above `p_lo`, compared as the grid's native 
 grid, instants otherwise) before anything is read or sent: the chunk's key is derived from `p_lo` alone, so
 such a call would read no row and write an empty object over the one the chunk at `p_lo` was archived to,
 which after `retire()` is the only copy of its rows (`pg_partition_magician: archive_to_s3_ndjson refuses the
-range [lo, hi) of <table> -- it is empty or inverted, ...`). `pgpm._next_archive_chunk` never asks for one;
+range [lo, hi) of <table> -- it is empty or inverted, ...`). The range is judged as the call reads it (see
+the key's paragraph below), and the message names the bounds as read, so it can show a range you did not
+type: on a grid whose `partition_tz` is `Asia/Kolkata`, `['2024-01-02 18:30:00+00', '2024-01-03')` is refused
+as `[2024-01-02 18:30:00+00, 2024-01-02 18:30:00+00)`, because the offset-less `p_hi` is midnight in Kolkata,
+which is that `p_lo`. `pgpm._next_archive_chunk` never asks for an empty range;
 the refusal is for a direct call. A range of the right shape is not enough either: once `pgpm.archive_ledger`
 records a chunk at the key a call would write, the call is written only when it reproduces that chunk, with
-the chunk's own `[lo, hi)` (compared as the grid's native type) and a read that finds the rows the chunk
+the chunk's own `[lo, hi)` (compared as the grid's native type, both read as the call reads its bounds) and a
+read that finds the rows the chunk
 recorded, which is the re-run of a live, write-blocked chunk. The rows are compared by identity, not by
 number: every write a strategy makes records a digest of the rows it wrote on the key's whole-key claim
 (`archive.object_key_claim.rows_digest`, the md5 of the sorted md5s of each row's JSON text, rendered under
@@ -2934,11 +2939,16 @@ included), and for every time kind the digits of `lo` rendered in UTC (`2024-01-
 day, or a fraction of a second and a five-digit year, never share a key. A direct call of either strategy
 reads its `p_lo` and `p_hi` once, on the grid's clock: a bound that carries an offset names that instant, an
 offset-less one is read in the table's `partition_tz` (never the session's `TimeZone`), the spelling is read
-under the session's `DateStyle`, and an `id` bound is read as a number, at its least scale. The range it reads,
+under the session's `DateStyle`, and an `id` bound is read as a number, at its least scale. On a `date`
+control column a bound is the start of the day it falls in on that clock, because a `date` keeps a bound's day
+and drops the rest. The empty-range check, the range it reads,
 the recorded-chunk check and the key all take that one reading: from a `SQL, DMY` session a `p_lo` of
 `02/01/2024 00:00:00+00` reads the rows of 2 January and is keyed `2024010200000000`; on a `date` grid
-`'2024-01-02'` is keyed `2024010200000000`, the cell's start, from a New York session as from a UTC one; and
-`'0100'` on an `id` grid is keyed `100`, as a tick keys that chunk. Objects uploaded before this key
+`'2024-01-02'` is keyed `2024010200000000`, the cell's start, from a New York session as from a UTC one,
+`'2024-01-02 00:00:00+09'` (15:00 UTC on 1 January) reads the whole 1 January cell and is keyed
+`2024010100000000`, and two instants of one day are refused as an empty range; and
+`'0100'` on an `id` grid is keyed `100`, as a tick keys that chunk. The result's `covered_hi` is `p_hi` as
+passed. Objects uploaded before this key
 shape stay where they are: each `pgpm.archive_ledger` row records the key its object was written to, and
 nothing derives a key from a chunk's bounds after the upload. A table whose ticks ran with its schema on the `search_path`
 (a `public` table under pg_cron, typically) had its earlier chunks keyed `<prefix><table>_<stem>`, so its

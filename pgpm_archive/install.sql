@@ -2831,11 +2831,12 @@ $$;
 -- other kind. Two chunks of one table must never share a key, because the store overwrites whatever
 -- object already sits at one while the ledger records both rows as archived (#502).
 --
--- That text is canonical (archive._bound_native: ISO with its offset, or a number at its least scale), the one
+-- That text is canonical (archive._grid_bound: ISO with its offset, or a number at its least scale), the one
 -- form this function's pinned parse reads as the same instant every other reader in the call read. The two
 -- encoders read their bounds once and hand it that text, never the caller's own spelling (#814): from a
 -- 'SQL, DMY' session '02/01/2024' is 2 January to the read and was 1 February here, so the 2 January rows
--- went to the 1 February chunk's key.
+-- went to the 1 February chunk's key. The offset in that text is the calling session's, as in every native
+-- time text pgpm renders (pgpm._ts_text), so the pin below is still what takes the zone out of the key.
 --
 -- The id kind's text is kept whole. It is already `-?[0-9]+(\.[0-9]+)?`, which S3 accepts as is, and
 -- the sign and the point are exactly what the digits-only projection this replaces threw away: lo
@@ -3136,11 +3137,20 @@ do $$ begin perform archive._claim_canonical_spellings(); end $$;
 -- its lookup, a later statement, then reads the chunk the tick recorded. Writers of one key are serialised; a
 -- tick that waits out maintain()'s lock_timeout behind a direct call's PUT defers the chunk (skip_archive) and
 -- retries it.
+--
+-- "The same [lo, hi)" is also the recorded bounds read as the call's own were (#814; archive._grid_bound). p_lo
+-- and p_hi arrive as the grid reads them, and the ledger's lo and hi are what pgpm._archive_step was handing
+-- the strategy when it recorded the chunk, the text before that reading. The two differ only where the grid's
+-- bounds are off the column's own (a date key an install before #769 anchored at noon, which the upgrade logs
+-- as warn_grid_off_unit): the chunk [1 January 12:00Z, 2 January 12:00Z) is read, keyed and handed here as the
+-- dates [1 January, 2 January), so compared as recorded alone its own re-run would be refused as another
+-- range. On every other grid the reading of a recorded bound is the instant it records, and the rule adds
+-- nothing. The refusal names the bounds as the ledger records them.
 drop function if exists archive._refuse_recorded_chunk_overwrite(text, regclass, text, text, text, text, bigint);
 create or replace function archive._refuse_recorded_chunk_overwrite(
   p_routine text, p_parent regclass, p_kind text, p_key text, p_lo text, p_hi text, p_rows bigint, p_rows_digest text)
 returns void language plpgsql as $$
-declare l record; v_why text;
+declare l record; v_why text; v_cfg pgpm.config; v_lo text; v_hi text;
 begin
   perform 1 from archive.object_key_claim k where k.object_key = p_key for update;
   -- p_key is canonical (archive._owned_key); a ledger row an older install recorded under another spelling of the
@@ -3151,6 +3161,20 @@ begin
     if pgpm._native_gt(p_kind, l.lo, p_lo) or pgpm._native_gt(p_kind, p_lo, l.lo)
        or pgpm._native_gt(p_kind, l.hi, p_hi) or pgpm._native_gt(p_kind, p_hi, l.hi) then
       v_why := 'this call''s range is not that chunk''s';
+    end if;
+    -- #814: unless the recorded bounds, read as the call's own were, are the call's (see the header)
+    if v_why is not null then
+      select * into v_cfg from pgpm.config c where c.parent_table = p_parent;
+      v_cfg := pgpm._control_followed(v_cfg);
+      v_lo := archive._grid_bound(p_parent, v_cfg.control_column, p_kind, v_cfg.partition_tz, l.lo);
+      v_hi := archive._grid_bound(p_parent, v_cfg.control_column, p_kind, v_cfg.partition_tz, l.hi);
+      if not (pgpm._native_gt(p_kind, v_lo, p_lo) or pgpm._native_gt(p_kind, p_lo, v_lo)
+              or pgpm._native_gt(p_kind, v_hi, p_hi) or pgpm._native_gt(p_kind, p_hi, v_hi)) then
+        v_why := null;
+      end if;
+    end if;
+    if v_why is not null then
+      null;   -- another range: refused below, whatever rows the read found
     elsif (l.rows_archived is null and coalesce(p_rows, 0) = 0)
           or (l.rows_archived is not null and p_rows is distinct from l.rows_archived) then
       v_why := format('the read found %s row(s) in it now', coalesce(p_rows, 0));
@@ -3179,11 +3203,42 @@ $$;
 -- truncated it to the whole 2 January cell; from UTC the same chunk got the cell's own key. DateStyle is the
 -- caller's: it is how the caller spelled the text, and every DateStyle reads canonical text alike. The SET
 -- clause makes set_config's change last only as long as this call, and the session's zone comes back on return.
+-- The encoders ask through archive._grid_bound, below, which adds what the control column makes of the instant.
 create or replace function archive._bound_native(p_kind text, p_text text, p_tz text)
 returns text language plpgsql set timezone = 'UTC' as $$
 begin
   if p_kind <> 'id' then perform pg_catalog.set_config('timezone', coalesce(p_tz, 'UTC'), true); end if;
   return pgpm._native_text(p_kind, p_text);
+end;
+$$;
+
+-- A bound of p_parent's grid as the call READS it (#814), the one reading every use of the bound in a strategy
+-- call takes: the empty-range check, the range read, the recorded-chunk check and the object key. It is
+-- archive._bound_native's instant (the text on the grid's clock), and on a DATE control column the start of
+-- the day that instant falls in on that clock, because that is what the column makes of it: the read compares
+-- the column with the bound as a literal, a date keeps the literal's day and drops the rest, so a bound of
+-- 15:00 on 1 January reads the whole 1 January cell. Keyed by the instant, a Tokyo caller's
+-- '2024-01-02 00:00:00+09' PUT the 1 January cell at <table>_2024010115000000, a key no cell starts at and
+-- another than the one a tick gives that chunk, and ['2024-01-02 03:00', '2024-01-02 18:00') was a range to
+-- the empty-range check and no row to the read, which PUT an empty object at the 2 January cell's key. A
+-- timestamp or timestamptz column compares the literal whole, so its reading is the instant itself.
+--
+-- Rendered by pgpm._ts_text in the CALLER's zone, as every native time text pgpm hands a strategy is: the
+-- offset in the text makes the instant exact, and archive._object_stem's own pin is what takes the zone out
+-- of the key (#551).
+create or replace function archive._grid_bound(p_parent regclass, p_column name, p_kind text, p_tz text, p_text text)
+returns text language plpgsql as $$
+declare v_at timestamptz;
+begin
+  if p_kind = 'id' then return archive._bound_native('id', p_text, null); end if;
+  v_at := archive._bound_native(p_kind, p_text, p_tz)::timestamptz;
+  if p_kind = 'time'
+     and exists (select 1 from pg_catalog.pg_attribute a
+                  where a.attrelid = p_parent and a.attname = p_column
+                    and a.atttypid = 'date'::regtype and not a.attisdropped) then
+    v_at := date_trunc('day', v_at, coalesce(p_tz, 'UTC'));
+  end if;
+  return pgpm._ts_text(v_at);
 end;
 $$;
 
@@ -3212,17 +3267,24 @@ begin
   pcfg := pgpm._control_followed(pcfg);
   if not found then raise exception 'archive._encode_upload_ndjson_single: % is not managed', p_parent; end if;
 
-  -- The bounds are read ONCE, here, as the canonical text of the instant the grid reads them as
-  -- (archive._bound_native: on the grid's clock, config.partition_tz), and p_lo and p_hi hold that text from
-  -- here on: the read, the recorded-chunk check and the object key all take it (#814). A tick hands over
-  -- canonical text already, which every reading agrees on. A direct call need not: the read and the
-  -- recorded-chunk check parsed in the caller's session while archive._object_stem parses under its own
-  -- pinned TimeZone and DateStyle, so from a 'SQL, DMY' session '02/01/2024 00:00:00+00' read the 2 January
-  -- rows and PUT them at the 1 February chunk's key, and an offset-less bound from a New York session was
-  -- read from 05:00Z and keyed from 00:00Z. An id bound is read at its least scale the same way, so '0100'
-  -- is keyed _100, as a tick keys the chunk.
-  p_lo := archive._bound_native(pcfg.control_kind, p_lo, pcfg.partition_tz);
-  p_hi := archive._bound_native(pcfg.control_kind, p_hi, pcfg.partition_tz);
+  -- The bounds are read ONCE, here, as the canonical text of what the grid reads them as (archive._grid_bound:
+  -- on the grid's clock, config.partition_tz, and as the control column reads them), and p_lo and p_hi hold
+  -- that text from here on: the empty-range check, the read, the recorded-chunk check and the object key all
+  -- take it (#814). A tick hands over canonical text already, which every reading agrees on. A direct call
+  -- need not: the read and the recorded-chunk check parsed in the caller's session while archive._object_stem
+  -- parses under its own pinned TimeZone and DateStyle, so from a 'SQL, DMY' session '02/01/2024 00:00:00+00'
+  -- read the 2 January rows and PUT them at the 1 February chunk's key, and an offset-less bound from a New
+  -- York session was read from 05:00Z and keyed from 00:00Z. An id bound is read at its least scale the same
+  -- way, so '0100' is keyed _100, as a tick keys the chunk.
+  p_lo := archive._grid_bound(p_parent, pcfg.control_column, pcfg.control_kind, pcfg.partition_tz, p_lo);
+  p_hi := archive._grid_bound(p_parent, pcfg.control_column, pcfg.control_kind, pcfg.partition_tz, p_hi);
+  -- #969: an empty or inverted range is refused before anything is read or sent, and it is judged HERE, on
+  -- the reading above, because that reading is the range the call goes on to read. Judged on the caller's
+  -- text in the caller's session, a range the session read as holding something and the grid read as empty
+  -- was admitted, read no row and PUT an empty object at a live cell's key: on a grid whose clock is
+  -- Asia/Kolkata, a UTC caller's ['2024-01-02 18:30:00+00', '2024-01-03'), whose hi is 00:00 on the grid's
+  -- clock, which is its lo. See archive._refuse_empty_range.
+  perform archive._refuse_empty_range('archive_to_s3_ndjson', p_parent, p_lo, p_hi);
 
   -- [p_lo, p_hi) as literals of the column's type, rendered in config.partition_tz like every other
   -- reader of a chunk in pgpm_core (#501). On a timestamptz column any zone's rendering names the same
@@ -3312,9 +3374,11 @@ begin
   pcfg := pgpm._control_followed(pcfg);
   if not found then raise exception 'archive._encode_upload_parquet: % is not managed', p_parent; end if;
 
-  -- read once, as canonical text on the grid's clock, for the reason given in _encode_upload_ndjson_single (#814)
-  p_lo := archive._bound_native(pcfg.control_kind, p_lo, pcfg.partition_tz);
-  p_hi := archive._bound_native(pcfg.control_kind, p_hi, pcfg.partition_tz);
+  -- read once, as the grid reads them, for the reason given in _encode_upload_ndjson_single (#814)
+  p_lo := archive._grid_bound(p_parent, pcfg.control_column, pcfg.control_kind, pcfg.partition_tz, p_lo);
+  p_hi := archive._grid_bound(p_parent, pcfg.control_column, pcfg.control_kind, pcfg.partition_tz, p_hi);
+  -- #969, judged on that reading: as _encode_upload_ndjson_single's
+  perform archive._refuse_empty_range('archive_to_s3_parquet', p_parent, p_lo, p_hi);
   -- in config.partition_tz, for the reason given in _encode_upload_ndjson_single (#501)
   v_lo_lit := pgpm._encode(pcfg.control_kind, p_lo, pcfg.text_time_prefix, pcfg.text_time_width,
                            pcfg.text_time_radix, pcfg.text_time_unit, pcfg.text_time_alphabet,
@@ -4011,6 +4075,14 @@ $$;
 -- dropped the partition is the only copy of its rows. pgpm._next_archive_chunk never asks for such a range;
 -- a direct call could, and nothing refused it. Compared as the grid's native type (numeric for an id grid,
 -- timestamptz otherwise), never as text, where '9' sorts after '10'.
+--
+-- Asked by the two encoders, of the bounds as the call read them (archive._grid_bound), not by the strategies of
+-- the text they were handed (#814): "empty" has to mean empty to the read. The strategies compared the caller's
+-- text in the caller's session while the encoders read it on the grid's clock, so a range that held something
+-- to the session and nothing to the grid (an offset-less hi that is the lo on the grid's clock; two wall times
+-- either side of a DST gap in partition_tz, which the grid reads in the other order) was admitted and PUT the
+-- empty object this refusal exists to stop. The message names the bounds as read, which is why it can name a
+-- range the caller did not type.
 create or replace function archive._refuse_empty_range(p_routine text, p_parent regclass, p_lo text, p_hi text)
 returns void language plpgsql as $$
 declare v_kind text;
@@ -4038,10 +4110,15 @@ begin
   perform pgpm._refuse_null_arguments('archive_to_s3_ndjson', json_build_object('p_parent', p_parent, 'p_lo', p_lo, 'p_hi', p_hi));
   select * into cfg from archive.config where parent_table = p_parent;
   if not found then raise exception 'pgpm.archive_to_s3_ndjson: % has no archive.config row', p_parent; end if;
-  -- #969: and an empty or inverted range, before anything is read or sent. The key is derived from p_lo
-  -- alone, so [lo, lo) or [lo, below lo) read no row and PUT an empty object over the key the chunk
-  -- [lo, hi) was archived to, which after retire() is the only copy of its rows. See archive._refuse_empty_range.
-  perform archive._refuse_empty_range('archive_to_s3_ndjson', p_parent, p_lo, p_hi);
+  -- #969: an empty or inverted range is refused too, before anything is read or sent: the key is derived from
+  -- p_lo alone, so [lo, lo) or [lo, below lo) read no row and PUT an empty object over the key the chunk
+  -- [lo, hi) was archived to, which after retire() is the only copy of its rows. The encoder asks, of the
+  -- bounds as it reads them (#814), not this function of the text it was handed. See archive._refuse_empty_range.
+  -- What that check said first stays here, in its words: a table pgpm does not manage has no grid to read by.
+  perform 1 from pgpm.config c where c.parent_table = p_parent;
+  if not found then
+    raise exception 'pg_partition_magician: % cannot archive a chunk of % -- it is not managed by pgpm', 'archive_to_s3_ndjson', p_parent;
+  end if;
   -- #873: the chunk is read through the parent as the caller, and its ledger row opens retire()'s drop gate
   perform pgpm._refuse_filtered_reads(p_parent, 'archive a chunk of',
     'the object would hold only those rows, and retention would drop the others once it is recorded');
@@ -4067,8 +4144,11 @@ begin
   perform pgpm._refuse_null_arguments('archive_to_s3_parquet', json_build_object('p_parent', p_parent, 'p_lo', p_lo, 'p_hi', p_hi));
   select * into cfg from archive.config where parent_table = p_parent;
   if not found then raise exception 'pgpm.archive_to_s3_parquet: % has no archive.config row', p_parent; end if;
-  -- #969: as archive_to_s3_ndjson's
-  perform archive._refuse_empty_range('archive_to_s3_parquet', p_parent, p_lo, p_hi);
+  -- #969: the empty or inverted range is refused by the encoder, and an unmanaged table here, as archive_to_s3_ndjson's
+  perform 1 from pgpm.config c where c.parent_table = p_parent;
+  if not found then
+    raise exception 'pg_partition_magician: % cannot archive a chunk of % -- it is not managed by pgpm', 'archive_to_s3_parquet', p_parent;
+  end if;
   -- #873: as archive_to_s3_ndjson's
   perform pgpm._refuse_filtered_reads(p_parent, 'archive a chunk of',
     'the object would hold only those rows, and retention would drop the others once it is recorded');

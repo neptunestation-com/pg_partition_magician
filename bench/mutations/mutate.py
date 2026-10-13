@@ -13898,13 +13898,38 @@ MUTATION_SRC["archive_parquet_bounds_caller_spelling"] = "pgpm_archive/install.s
 # the key is the stem's own parse of the caller's spelling again; one reads the lo in the caller's TimeZone, not
 # the grid's partition_tz. All four are caught by tests/archive/db/54 through bench/archive_direct_call_bounds.sh
 # (against the archive image and MinIO).
+# #814 (the archive bullet, F19-03 of pass 12, and the two rounds of its per-PR verification): each archive_fn
+# encoder reads its bounds once, as the canonical text of what the grid reads them as (archive._grid_bound: on the
+# grid's clock, and on a date column the day the instant falls in), before the empty-range check, the read, the
+# recorded-chunk check and the object key take them. Three mutations per encoder: one takes out the lo's reading,
+# so the key is the stem's own parse of the caller's spelling again; one reads the lo in the caller's TimeZone, not
+# the grid's partition_tz; one asks the empty-range check before the reading, of the caller's text. And one each
+# for the two clauses the encoders share: the date column's day, and the recorded chunk's bounds read the same
+# way. All eight are caught by tests/archive/db/54 through bench/archive_direct_call_bounds.sh (against the
+# archive image and MinIO).
+_READ_LO_814 = "  p_lo := archive._grid_bound(p_parent, pcfg.control_column, pcfg.control_kind, pcfg.partition_tz, p_lo);\n"
 _BOUNDS_814 = {
-    "ndjson": ("  -- is keyed _100, as a tick keys the chunk.\n", "archive._encode_upload_ndjson_single",
-               "pgpm.archive_to_s3_ndjson", "parts A, C and D", "parts C and E"),
-    "parquet": ("  -- read once, as canonical text on the grid's clock, for the reason given in _encode_upload_ndjson_single (#814)\n",
-                "archive._encode_upload_parquet", "pgpm.archive_to_s3_parquet", "part B", "part F"),
+    "ndjson": ("  -- way, so '0100' is keyed _100, as a tick keys the chunk.\n", "archive._encode_upload_ndjson_single",
+               "pgpm.archive_to_s3_ndjson", "parts A, C and D", "parts C and E", "parts G and H"),
+    "parquet": ("  -- read once, as the grid reads them, for the reason given in _encode_upload_ndjson_single (#814)\n",
+                "archive._encode_upload_parquet", "pgpm.archive_to_s3_parquet", "part B", "part F", "part G2"),
 }
-for _fmt, (_ctx, _fn, _strategy, _parts_spelling, _parts_zone) in _BOUNDS_814.items():
+for _fmt, (_ctx, _fn, _strategy, _parts_spelling, _parts_zone, _parts_empty) in _BOUNDS_814.items():
+    MUTATIONS[f"archive_{_fmt}_empty_range_as_spelled"] = (
+        "bench/archive_direct_call_bounds.sh",
+        f"{_fn} asks the empty-range check (#969) before it reads the bounds, so the check judges the caller's "
+        f"text in the caller's session while the read takes the grid's reading: a range that holds something to "
+        f"the session and is empty or inverted on the grid's clock (a UTC caller's ['2024-01-02 18:30:00+00', "
+        f"'2024-01-03') on an Asia/Kolkata grid; 02:30 to 03:00 across New York's spring-forward gap) is admitted, "
+        f"reads no row and PUTs an empty object at a live cell's key (V-01 and P1-02 of the PR's second "
+        f"verification). One clause, the order of the check and the reading. tests/archive/db/54 catches it in "
+        f"{_parts_empty} (the call is not refused and the cell's key holds an empty object).",
+        [(f"  perform archive._refuse_empty_range('archive_to_s3_{_fmt}', p_parent, p_lo, p_hi);\n", "", 1),
+         (_ctx + _READ_LO_814,
+          _ctx + f"  perform archive._refuse_empty_range('archive_to_s3_{_fmt}', p_parent, p_lo, p_hi);\n"
+                 + _READ_LO_814, 1)],
+    )
+    MUTATION_SRC[f"archive_{_fmt}_empty_range_as_spelled"] = "pgpm_archive/install.sql"
     MUTATIONS[f"archive_{_fmt}_bounds_caller_spelling"] = (
         "bench/archive_direct_call_bounds.sh",
         f"Pre-#814 {_fn}: a direct {_strategy} call's lo reaches the object key as the caller spelled it, so "
@@ -13912,7 +13937,7 @@ for _fmt, (_ctx, _fn, _strategy, _parts_spelling, _parts_zone) in _BOUNDS_814.it
         f"caller's session: from a 'SQL, DMY' session '02/01/2024' reads the 2 January rows and PUTs them at the "
         f"1 February chunk's key. One clause, the lo's reading. tests/archive/db/54 catches it in {_parts_spelling} "
         f"(the object is keyed by another instant than the one the read began at).",
-        [(_ctx + "  p_lo := archive._bound_native(pcfg.control_kind, p_lo, pcfg.partition_tz);\n", _ctx, 1)],
+        [(_ctx + _READ_LO_814, _ctx, 1)],
     )
     MUTATION_SRC[f"archive_{_fmt}_bounds_caller_spelling"] = "pgpm_archive/install.sql"
     MUTATIONS[f"archive_{_fmt}_bounds_session_zone"] = (
@@ -13922,10 +13947,34 @@ for _fmt, (_ctx, _fn, _strategy, _parts_spelling, _parts_zone) in _BOUNDS_814.it
         f"session is 05:00Z, so the 2 January cell is keyed 2024010205000000, a key no cell "
         f"starts at, while from UTC the same chunk is keyed 2024010200000000 (V-01). One clause, the lo's reading. "
         f"tests/archive/db/54 catches it in {_parts_zone} (one chunk, two keys by session zone).",
-        [(_ctx + "  p_lo := archive._bound_native(pcfg.control_kind, p_lo, pcfg.partition_tz);\n",
+        [(_ctx + _READ_LO_814,
           _ctx + "  p_lo := pgpm._native_text(pcfg.control_kind, p_lo);\n", 1)],
     )
     MUTATION_SRC[f"archive_{_fmt}_bounds_session_zone"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_date_bound_keyed_by_instant"] = (
+    "bench/archive_direct_call_bounds.sh",
+    "archive._grid_bound reads a date column's bound as the instant its text names, not as the start of the day "
+    "the column makes of it: a Tokyo caller's '2024-01-02 00:00:00+09' (15:00Z on 1 January) reads the whole "
+    "1 January cell and PUTs it at <table>_2024010115000000, a key no cell starts at and another than the one a "
+    "tick gives that chunk (V-02 of the PR's second verification), and two instants of one day pass the "
+    "empty-range check and PUT an empty object. One clause, the day. tests/archive/db/54 catches it in part H "
+    "(the 1 January cell's rows are keyed 15:00Z; the one-day range is not refused).",
+    [("    v_at := date_trunc('day', v_at, coalesce(p_tz, 'UTC'));\n", "", 1)],
+)
+MUTATION_SRC["archive_date_bound_keyed_by_instant"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_recorded_bounds_unread"] = (
+    "bench/archive_direct_call_bounds.sh",
+    "archive._refuse_recorded_chunk_overwrite compares the call's bounds, which reach it as the grid reads them, "
+    "with the ledger's as recorded alone: on a date grid an install before #769 anchored off 00:00 UTC, where a tick's "
+    "chunk is recorded [2 January 12:00Z, 3 January 12:00Z) and read and keyed as the dates it covers, the "
+    "chunk's own re-run is refused as another range. One clause, the reading of the recorded bounds. "
+    "tests/archive/db/54 catches it in part I (the re-run of the recorded [lo, hi) is refused).",
+    [("              or pgpm._native_gt(p_kind, v_hi, p_hi) or pgpm._native_gt(p_kind, p_hi, v_hi)) then\n"
+      "        v_why := null;\n",
+      "              or pgpm._native_gt(p_kind, v_hi, p_hi) or pgpm._native_gt(p_kind, p_hi, v_hi)) then\n"
+      "        null;\n", 1)],
+)
+MUTATION_SRC["archive_recorded_bounds_unread"] = "pgpm_archive/install.sql"
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
