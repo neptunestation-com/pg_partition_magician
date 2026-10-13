@@ -10125,9 +10125,18 @@ $$;
 -- relation is internal to its own pg_type, which DROP TYPE drops with it: that is not an owner. It is also
 -- why a composite type's owner is read off its pg_type's dependencies as well: PostgreSQL records an
 -- extension's membership of the type there, not on the relation.)
+--
+-- A DROP is named only for a holder nothing depends on. PostgreSQL refuses DROP ... RESTRICT with 2BP01
+-- while another object depends on the holder (a default that reads the sequence, a view that reads the
+-- view, a column of the composite type, a foreign key into the table or onto the index), so for one of
+-- those, a table included, the refusal names the dependent and the rename, and no DROP. The question is
+-- PostgreSQL's own: `gone` is what the DROP would take along silently (the holder and everything that
+-- depends on it by an auto, internal or partition dependency, all the way down: its row type, indexes,
+-- constraints, defaults, owned sequences, partitions), and a dependent is anything outside `gone` with a
+-- normal dependency on something inside it. Erring towards a dependent costs only the DROP's mention.
 create or replace function pgpm._transmute_refuse_staging_squatter(p_nsp name, p_staging name)
 returns void language plpgsql stable as $$
-declare v_oid oid; v_kind "char"; v_type oid; v_noun text; v_owner text; v_drop text;
+declare v_oid oid; v_kind "char"; v_type oid; v_noun text; v_owner text; v_drop text; v_dependent text;
 begin
   select c.oid, c.relkind, c.reltype into v_oid, v_kind, v_type
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
@@ -10146,10 +10155,31 @@ begin
     v_drop := case v_kind when 'S' then 'sequence' when 'v' then 'view' when 'm' then 'materialized view'
                           when 'f' then 'foreign table' when 'i' then 'index' when 'I' then 'index'
                           when 'c' then 'type' end;
+    with recursive gone(classid, objid) as (
+      select s.classid, s.objid
+        from (values ('pg_class'::regclass::oid, v_oid), ('pg_type'::regclass::oid, nullif(v_type, 0))) s(classid, objid)
+      union
+      select d.classid, d.objid
+        from gone g join pg_depend d on d.refclassid = g.classid and d.refobjid = g.objid
+       where d.deptype in ('a', 'i', 'P', 'S')
+    )
+    select pg_describe_object(coalesce(o.refclassid, d.classid), coalesce(o.refobjid, d.objid),
+                              coalesce(o.refobjsubid, d.objsubid))
+      into v_dependent
+      from gone g join pg_depend d on d.refclassid = g.classid and d.refobjid = g.objid
+      left join pg_depend o on o.classid = d.classid and o.objid = d.objid and o.objsubid = d.objsubid
+                           and o.deptype = 'i'   -- a view's rule reads it: name the view
+     where d.deptype = 'n'
+       and not exists (select 1 from gone x where x.classid = d.classid and x.objid = d.objid)
+     order by d.classid, d.objid, d.objsubid, o.refclassid, o.refobjid
+     limit 1;
   end if;
   if v_owner is not null then
     raise exception 'pg_partition_magician: %.% already exists as %, part of %, and transmute needs that name as a staging name for the new parent. It cannot be dropped on its own, so rename it, or drop what it is part of, then retry transmute.',
       p_nsp, p_staging, v_noun, v_owner;
+  elsif v_dependent is not null then
+    raise exception 'pg_partition_magician: %.% already exists as %, and transmute needs that name as a staging name for the new parent. PostgreSQL refuses to drop it while % depends on it, so rename it, or remove that dependency first, then retry transmute.',
+      p_nsp, p_staging, v_noun, v_dependent;
   elsif v_kind in ('r', 'p') then
     raise exception 'pg_partition_magician: %.% already exists, and transmute needs it as a staging name for the new parent. Most likely a leftover from an interrupted run. Drop it (drop table %.%) and retry transmute.',
       p_nsp, p_staging, quote_ident(p_nsp), quote_ident(p_staging);

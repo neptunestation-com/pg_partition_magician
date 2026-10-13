@@ -30,11 +30,24 @@
 --       names the partitioned index, and renaming the attached one frees the name
 --   (M) a composite type that is a member of an extension holds sm340's: its membership is recorded on the
 --       type, not on its relation; no DROP named (drop type fails 2BP01), and renaming the type frees it
--- bench/transmute_staging_squatter_remedy.sh runs this file against a mutant that routes every holder with
--- no owner to the table remedy again (staging_squatter_remedy_drop_table), so it is also required to FAIL
--- there.
+-- Holders something else depends on: PostgreSQL refuses the DROP for the holder's kind while the dependent
+-- exists (2BP01, "other objects depend on it"), so no DROP is named for one, a table included; the refusal
+-- names the dependent, and the rename frees the name:
+--   (N) a serial column's sequence holds sn340's (the column's default reads it)
+--   (O) control: a sequence a column owns, with no default reading it, holds so340's: nothing depends on
+--       it, so it keeps its `drop sequence`, which works
+--   (P) a view another view reads holds sp340's
+--   (Q) a materialized view a view reads holds sq340's
+--   (R) a composite type a table's column uses holds sr340's
+--   (S) a table a foreign key references holds ss340's
+--   (T) a partitioned table a foreign key references holds st340's
+--   (U) a free-standing unique index a foreign key uses holds su340's
+-- bench/transmute_staging_squatter_remedy.sh runs this file against two mutants, so it is also required to
+-- FAIL on each: one that routes every holder with no owner to the table remedy again
+-- (staging_squatter_remedy_drop_table), and one that asks for a dependent of every kind but a table or a
+-- partitioned table (staging_squatter_dependents_not_for_tables).
 create extension if not exists pgtap;
-select plan(89);
+select plan(152);
 
 set timezone = 'UTC';
 
@@ -326,6 +339,204 @@ call pgpm.transmute('public.sm340', 'id', 100::bigint, p_obtain => 2);
 \endif
 select is((select relkind::text from pg_class where oid = 'public.sm340'::regclass), 'p', 'M: the same call then converts sm340');
 alter extension pgtap drop type public.sm340_kept;
+
+-- ====================================================================================================
+-- Holders something else DEPENDS on. The DROP for the holder's kind is refused by PostgreSQL while the
+-- dependent exists (2BP01, "other objects depend on it"), so the refusal names no DROP for one: it names
+-- the dependent, and the rename, which works. Each part's LIVENESS types the DROP and shows the 2BP01 is
+-- the dependents' one (the owner parts above get PostgreSQL's other 2BP01, "requires it").
+-- ====================================================================================================
+
+-- (N) a serial column's sequence: the column's default reads it
+create table public.sn340 (id bigint primary key, body text);
+insert into public.sn340 select g, 'n' || g from generate_series(1, 15) g;
+create table public.sn340_other (n serial, note text);
+alter sequence public.sn340_other_n_seq rename to sn340_pgpm_new;
+select is((select relkind::text from pg_class where oid = 'public.sn340_pgpm_new'::regclass), 'S',
+  'LIVENESS: (N) a serial column''s sequence holds sn340''s staging name');
+select throws_like($$ drop sequence public.sn340_pgpm_new $$, '%because other objects depend on it%',
+  'LIVENESS: (N) and DROP SEQUENCE is refused while the column''s default depends on it');
+select pg_temp.refusal340('public.sn340') as msg_n \gset
+select ok(:'msg_n' like 'pg_partition_magician: public.sn340_pgpm_new already exists as a sequence, and transmute needs that name as a staging name for the new parent. PostgreSQL refuses to drop it while default value for column n of table sn340_other depends on it,%',
+  'N: refused on the staging name, naming the sequence and the default that depends on it: ' || coalesce(:'msg_n', '(no refusal)'));
+select is(pg_temp.remedy340(:'msg_n'), null, 'N: no DROP statement is named for it');
+select lives_ok($$ alter sequence public.sn340_pgpm_new rename to sn340_other_n_seq $$, 'N: renaming it, as the refusal says, runs');
+select is(to_regclass('public.sn340_pgpm_new'), null, 'N: and the staging name is free afterwards');
+select to_regclass('public.sn340_pgpm_new') is null as free \gset
+\if :free
+call pgpm.transmute('public.sn340', 'id', 100::bigint, p_obtain => 2);
+\endif
+select is((select relkind::text from pg_class where oid = 'public.sn340'::regclass), 'p', 'N: the same call then converts sn340');
+insert into public.sn340_other (note) values ('first'), ('second'), ('third');
+select is((select array_agg(n order by n) from public.sn340_other), array[1, 2, 3],
+  'N: the other table''s serial column still draws from its sequence, under the new name');
+
+-- (O) control: a sequence a column OWNS, with no default reading it. Nothing depends on it (it depends on
+-- the column), so its DROP works and is still named.
+create table public.so340 (id bigint primary key, body text);
+insert into public.so340 select g, 'o' || g from generate_series(1, 16) g;
+create table public.so340_other (n bigint, note text);
+create sequence public.so340_pgpm_new owned by public.so340_other.n;
+select ok(exists (select 1 from pg_depend d where d.classid = 'pg_class'::regclass
+                     and d.objid = 'public.so340_pgpm_new'::regclass and d.deptype = 'a'
+                     and d.refobjid = 'public.so340_other'::regclass)
+          and not exists (select 1 from pg_depend d where d.refclassid = 'pg_class'::regclass
+                             and d.refobjid = 'public.so340_pgpm_new'::regclass),
+  'LIVENESS: (O) a sequence so340_other.n owns, and nothing depends on, holds so340''s staging name');
+select pg_temp.refusal340('public.so340') as msg_o \gset
+select ok(:'msg_o' like 'pg_partition_magician: public.so340_pgpm_new already exists as a sequence, and transmute needs that name as a staging name for the new parent. Drop it (%',
+  'O: refused on the staging name, with a DROP: ' || coalesce(:'msg_o', '(no refusal)'));
+select is(pg_temp.remedy340(:'msg_o'), 'drop sequence public.so340_pgpm_new', 'O: the remedy named is the sequence''s DROP');
+select lives_ok(pg_temp.remedy340(:'msg_o'), 'O: the remedy, typed as named, runs');
+select is(to_regclass('public.so340_pgpm_new'), null, 'O: and the staging name is free afterwards');
+select to_regclass('public.so340_pgpm_new') is null as free \gset
+\if :free
+call pgpm.transmute('public.so340', 'id', 100::bigint, p_obtain => 2);
+\endif
+select is((select relkind::text from pg_class where oid = 'public.so340'::regclass), 'p', 'O: the same call then converts so340');
+select ok(to_regclass('public.so340_other') is not null, 'O: the table whose column owned the sequence is untouched');
+
+-- (P) a view another view reads
+create table public.sp340 (id bigint primary key, body text);
+insert into public.sp340 select g, 'p' || g from generate_series(1, 17) g;
+create view public.sp340_pgpm_new as select 41 as one;
+create view public.sp340_reader as select one + 1 as two from public.sp340_pgpm_new;
+select is((select relkind::text from pg_class where oid = 'public.sp340_pgpm_new'::regclass), 'v',
+  'LIVENESS: (P) a view holds sp340''s staging name');
+select throws_like($$ drop view public.sp340_pgpm_new $$, '%because other objects depend on it%',
+  'LIVENESS: (P) and DROP VIEW is refused while another view reads it');
+select pg_temp.refusal340('public.sp340') as msg_p \gset
+select ok(:'msg_p' like 'pg_partition_magician: public.sp340_pgpm_new already exists as a view, and transmute needs that name as a staging name for the new parent. PostgreSQL refuses to drop it while view sp340_reader depends on it,%',
+  'P: refused on the staging name, naming the view and the view that reads it: ' || coalesce(:'msg_p', '(no refusal)'));
+select is(pg_temp.remedy340(:'msg_p'), null, 'P: no DROP statement is named for it');
+select lives_ok($$ alter view public.sp340_pgpm_new rename to sp340_kept $$, 'P: renaming it, as the refusal says, runs');
+select is(to_regclass('public.sp340_pgpm_new'), null, 'P: and the staging name is free afterwards');
+select to_regclass('public.sp340_pgpm_new') is null as free \gset
+\if :free
+call pgpm.transmute('public.sp340', 'id', 100::bigint, p_obtain => 2);
+\endif
+select is((select relkind::text from pg_class where oid = 'public.sp340'::regclass), 'p', 'P: the same call then converts sp340');
+select is((select two from public.sp340_reader), 42, 'P: the reading view still reads the renamed view');
+
+-- (Q) a materialized view another view reads
+create table public.sq340 (id bigint primary key, body text);
+insert into public.sq340 select g, 'q' || g from generate_series(1, 18) g;
+create materialized view public.sq340_pgpm_new as select 6 as six;
+create view public.sq340_reader as select six * 7 as answer from public.sq340_pgpm_new;
+select is((select relkind::text from pg_class where oid = 'public.sq340_pgpm_new'::regclass), 'm',
+  'LIVENESS: (Q) a materialized view holds sq340''s staging name');
+select throws_like($$ drop materialized view public.sq340_pgpm_new $$, '%because other objects depend on it%',
+  'LIVENESS: (Q) and DROP MATERIALIZED VIEW is refused while a view reads it');
+select pg_temp.refusal340('public.sq340') as msg_q \gset
+select ok(:'msg_q' like 'pg_partition_magician: public.sq340_pgpm_new already exists as a materialized view, and transmute needs that name as a staging name for the new parent. PostgreSQL refuses to drop it while view sq340_reader depends on it,%',
+  'Q: refused on the staging name, naming the materialized view and the view that reads it: ' || coalesce(:'msg_q', '(no refusal)'));
+select is(pg_temp.remedy340(:'msg_q'), null, 'Q: no DROP statement is named for it');
+select lives_ok($$ alter materialized view public.sq340_pgpm_new rename to sq340_kept $$, 'Q: renaming it, as the refusal says, runs');
+select is(to_regclass('public.sq340_pgpm_new'), null, 'Q: and the staging name is free afterwards');
+select to_regclass('public.sq340_pgpm_new') is null as free \gset
+\if :free
+call pgpm.transmute('public.sq340', 'id', 100::bigint, p_obtain => 2);
+\endif
+select is((select relkind::text from pg_class where oid = 'public.sq340'::regclass), 'p', 'Q: the same call then converts sq340');
+select is((select answer from public.sq340_reader), 42, 'Q: the reading view still reads the renamed materialized view');
+
+-- (R) a composite type a table's column uses
+create table public.sr340 (id bigint primary key, body text);
+insert into public.sr340 select g, 'r' || g from generate_series(1, 19) g;
+create type public.sr340_pgpm_new as (a int, b text);
+create table public.sr340_other (c public.sr340_pgpm_new);
+select is((select relkind::text from pg_class where oid = 'public.sr340_pgpm_new'::regclass), 'c',
+  'LIVENESS: (R) a composite type holds sr340''s staging name');
+select throws_like($$ drop type public.sr340_pgpm_new $$, '%because other objects depend on it%',
+  'LIVENESS: (R) and DROP TYPE is refused while a column is of that type');
+select pg_temp.refusal340('public.sr340') as msg_r \gset
+select ok(:'msg_r' like 'pg_partition_magician: public.sr340_pgpm_new already exists as a composite type, and transmute needs that name as a staging name for the new parent. PostgreSQL refuses to drop it while column c of table sr340_other depends on it,%',
+  'R: refused on the staging name, naming the composite type and the column of that type: ' || coalesce(:'msg_r', '(no refusal)'));
+select is(pg_temp.remedy340(:'msg_r'), null, 'R: no DROP statement is named for it');
+select lives_ok($$ alter type public.sr340_pgpm_new rename to sr340_kept $$, 'R: renaming it, as the refusal says, runs');
+select ok(to_regclass('public.sr340_pgpm_new') is null and to_regtype('public.sr340_pgpm_new') is null,
+  'R: and the staging name is free afterwards, as a relation and as a type');
+select to_regclass('public.sr340_pgpm_new') is null as free \gset
+\if :free
+call pgpm.transmute('public.sr340', 'id', 100::bigint, p_obtain => 2);
+\endif
+select is((select relkind::text from pg_class where oid = 'public.sr340'::regclass), 'p', 'R: the same call then converts sr340');
+select is((select format_type(a.atttypid, null) from pg_attribute a
+            where a.attrelid = 'public.sr340_other'::regclass and a.attname = 'c'), 'sr340_kept',
+  'R: the other table''s column is still of that type, under the new name');
+
+-- (S) a table another table's foreign key references: the table branch, whose remedy was `drop table`
+create table public.ss340 (id bigint primary key, body text);
+insert into public.ss340 select g, 's' || g from generate_series(1, 20) g;
+create table public.ss340_pgpm_new (k int, constraint ss340_held_k primary key (k));
+create table public.ss340_ref (r int, constraint ss340_ref_fk foreign key (r) references public.ss340_pgpm_new);
+select is((select relkind::text from pg_class where oid = 'public.ss340_pgpm_new'::regclass), 'r',
+  'LIVENESS: (S) a table holds ss340''s staging name');
+select throws_like($$ drop table public.ss340_pgpm_new $$, '%because other objects depend on it%',
+  'LIVENESS: (S) and DROP TABLE is refused while a foreign key references it');
+select pg_temp.refusal340('public.ss340') as msg_s \gset
+select ok(:'msg_s' like 'pg_partition_magician: public.ss340_pgpm_new already exists as a table, and transmute needs that name as a staging name for the new parent. PostgreSQL refuses to drop it while constraint ss340_ref_fk on table ss340_ref depends on it,%',
+  'S: refused on the staging name, naming the table and the foreign key that references it: ' || coalesce(:'msg_s', '(no refusal)'));
+select is(pg_temp.remedy340(:'msg_s'), null, 'S: no DROP statement is named for it');
+select lives_ok($$ alter table public.ss340_pgpm_new rename to ss340_kept $$, 'S: renaming it, as the refusal says, runs');
+select is(to_regclass('public.ss340_pgpm_new'), null, 'S: and the staging name is free afterwards');
+select to_regclass('public.ss340_pgpm_new') is null as free \gset
+\if :free
+call pgpm.transmute('public.ss340', 'id', 100::bigint, p_obtain => 2);
+\endif
+select is((select relkind::text from pg_class where oid = 'public.ss340'::regclass), 'p', 'S: the same call then converts ss340');
+select is((select confrelid::regclass::text from pg_constraint where conname = 'ss340_ref_fk'
+            and conrelid = 'public.ss340_ref'::regclass), 'ss340_kept',
+  'S: the foreign key still references the table, under its new name');
+
+-- (T) a PARTITIONED table a foreign key references: the same branch, for the shape an interrupted run leaves
+create table public.st340 (id bigint primary key, body text);
+insert into public.st340 select g, 't' || g from generate_series(1, 21) g;
+create table public.st340_pgpm_new (k int, constraint st340_held_k primary key (k)) partition by range (k);
+create table public.st340_ref (r int, constraint st340_ref_fk foreign key (r) references public.st340_pgpm_new);
+select is((select relkind::text from pg_class where oid = 'public.st340_pgpm_new'::regclass), 'p',
+  'LIVENESS: (T) a partitioned table holds st340''s staging name');
+select throws_like($$ drop table public.st340_pgpm_new $$, '%because other objects depend on it%',
+  'LIVENESS: (T) and DROP TABLE is refused while a foreign key references it');
+select pg_temp.refusal340('public.st340') as msg_t \gset
+select ok(:'msg_t' like 'pg_partition_magician: public.st340_pgpm_new already exists as a partitioned table, and transmute needs that name as a staging name for the new parent. PostgreSQL refuses to drop it while constraint st340_ref_fk on table st340_ref depends on it,%',
+  'T: refused on the staging name, naming the partitioned table and the foreign key that references it: ' || coalesce(:'msg_t', '(no refusal)'));
+select is(pg_temp.remedy340(:'msg_t'), null, 'T: no DROP statement is named for it');
+select lives_ok($$ alter table public.st340_pgpm_new rename to st340_kept $$, 'T: renaming it, as the refusal says, runs');
+select is(to_regclass('public.st340_pgpm_new'), null, 'T: and the staging name is free afterwards');
+select to_regclass('public.st340_pgpm_new') is null as free \gset
+\if :free
+call pgpm.transmute('public.st340', 'id', 100::bigint, p_obtain => 2);
+\endif
+select is((select relkind::text from pg_class where oid = 'public.st340'::regclass), 'p', 'T: the same call then converts st340');
+select is((select confrelid::regclass::text from pg_constraint where conname = 'st340_ref_fk'
+            and conrelid = 'public.st340_ref'::regclass), 'st340_kept',
+  'T: the foreign key still references the partitioned table, under its new name');
+
+-- (U) a free-standing unique index a foreign key uses
+create table public.su340 (id bigint primary key, body text);
+insert into public.su340 select g, 'u' || g from generate_series(1, 22) g;
+create table public.su340_other (v int not null);
+create unique index su340_pgpm_new on public.su340_other (v);
+create table public.su340_ref (r int, constraint su340_ref_fk foreign key (r) references public.su340_other (v));
+select is((select relkind::text from pg_class where oid = 'public.su340_pgpm_new'::regclass), 'i',
+  'LIVENESS: (U) a unique index holds su340''s staging name');
+select throws_like($$ drop index public.su340_pgpm_new $$, '%because other objects depend on it%',
+  'LIVENESS: (U) and DROP INDEX is refused while a foreign key uses it');
+select pg_temp.refusal340('public.su340') as msg_u \gset
+select ok(:'msg_u' like 'pg_partition_magician: public.su340_pgpm_new already exists as an index, and transmute needs that name as a staging name for the new parent. PostgreSQL refuses to drop it while constraint su340_ref_fk on table su340_ref depends on it,%',
+  'U: refused on the staging name, naming the index and the foreign key that uses it: ' || coalesce(:'msg_u', '(no refusal)'));
+select is(pg_temp.remedy340(:'msg_u'), null, 'U: no DROP statement is named for it');
+select lives_ok($$ alter index public.su340_pgpm_new rename to su340_other_v_key $$, 'U: renaming it, as the refusal says, runs');
+select is(to_regclass('public.su340_pgpm_new'), null, 'U: and the staging name is free afterwards');
+select to_regclass('public.su340_pgpm_new') is null as free \gset
+\if :free
+call pgpm.transmute('public.su340', 'id', 100::bigint, p_obtain => 2);
+\endif
+select is((select relkind::text from pg_class where oid = 'public.su340'::regclass), 'p', 'U: the same call then converts su340');
+select is((select conindid::regclass::text from pg_constraint where conname = 'su340_ref_fk'
+            and conrelid = 'public.su340_ref'::regclass), 'su340_other_v_key',
+  'U: the foreign key still uses the index, under its new name');
 
 -- no conversion left a staging name behind
 select is((select array_agg(c.relname::text order by c.relname) from pg_class c

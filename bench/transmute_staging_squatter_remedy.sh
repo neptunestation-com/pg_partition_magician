@@ -8,14 +8,21 @@
 # statement fails 42809, so the remedy did not repair the state the refusal described. The file is the
 # acceptance test (each holder kind refused, its named remedy typed verbatim, the name freed and the same
 # transmute call then converting; the holders no DROP can free on their own, a constraint's index, an identity
-# column's sequence, an attached partition index and an extension's table and composite type; a leftover
-# partitioned table as the control); this wrapper exists so the mutation has a guard the discriminate track
-# can run against the mutant, in the shape of bench/retain_recall_moved_parent.sh.
+# column's sequence, an attached partition index and an extension's table and composite type; the holders
+# PostgreSQL refuses to drop while something depends on them, a serial column's sequence, a view or
+# materialized view another view reads, a composite type a column uses, a table or partitioned table a foreign
+# key references and a unique index a foreign key uses, each with the rename typed in its place; a leftover
+# partitioned table and a sequence a column merely owns as the controls); this wrapper exists so the mutations
+# have a guard the discriminate track can run against each mutant, in the shape of
+# bench/retain_recall_moved_parent.sh.
 #
-# The mutation it is required to fail against (bench/mutations/mutate.py):
+# The mutations it is required to fail against (bench/mutations/mutate.py):
 #   staging_squatter_remedy_drop_table -- _transmute_refuse_staging_squatter routes every holder that is not
 #                                         part of another object to the table refusal again, so each one is
-#                                         told `drop table`, the pre-fix remedy. Parts A to E, I and J.
+#                                         told `drop table`, the pre-fix remedy. Parts A to E, I, J and O.
+#   staging_squatter_dependents_not_for_tables -- a dependent is asked for of every holder but a table or a
+#                                         partitioned table, so one a foreign key references is told
+#                                         `drop table` again, which PostgreSQL refuses. Parts S and T.
 #
 # Runs on the plain core image (pgtap and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path
 # inside the container, for a worktree mounted somewhere other than /repo.

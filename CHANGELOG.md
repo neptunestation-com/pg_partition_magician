@@ -10,7 +10,11 @@
   (`drop sequence`, `drop view`, `drop materialized view`, `drop foreign table`, `drop index`, `drop type`), and
   one that cannot be dropped on its own (a constraint's index, an identity column's sequence, an attached
   partition index, an extension's member, a table included) is named with the object it is part of and no
-  `DROP`. The preflight and the cutover's `CREATE` of the new parent ask the same helper, so both say the same.
+  `DROP`. A `DROP` is named only for a holder nothing depends on: PostgreSQL refuses it while a dependent
+  exists (a serial column's default on the sequence, a view that reads the view, a column of the composite
+  type, a foreign key into the table or onto the index), so for one of those, a table included, the refusal
+  names the dependent and says to rename the holder or remove the dependency. The preflight and the cutover's
+  `CREATE` of the new parent ask the same helper, so both say the same.
 
 - **`retain_disown`'s remedy is the whole repair the partition's state calls for** (#1272). A retirement mark
   disowned because pgpm recorded no dispatch of its own (#705) was logged with the remedy "once its detach is

@@ -13271,9 +13271,18 @@ MUTATIONS["staging_squatter_remedy_drop_table"] = (
     "Pre-#1273 _transmute_refuse_staging_squatter: every relation holding <table>_pgpm_new that is not part of "
     "another object is refused with the table's remedy, `drop table <schema>.<table>_pgpm_new`, whatever its kind, "
     "so against a sequence, view, materialized view, composite type or index the statement the refusal names "
-    "fails 42809 and the name stays held. One site, the routing clause. tests/340 parts A to E, I and J catch it (the "
+    "fails 42809 and the name stays held. One site, the routing clause. tests/340 parts A to E, I, J and O catch it (the "
     "refusal names no kind, the typed remedy dies, the name is still held, the table never converts).",
     [("  elsif v_kind in ('r', 'p') then\n", "  elsif v_kind is not null then\n", 1)],
+)
+MUTATIONS["staging_squatter_dependents_not_for_tables"] = (
+    "bench/transmute_staging_squatter_remedy.sh",
+    "_transmute_refuse_staging_squatter asks for a dependent of every holder but a table or a partitioned table, the "
+    "kinds the refusal has always named `drop table` for: a table another table's foreign key references (or a view "
+    "reads, or a column is typed by) is told `drop table <schema>.<table>_pgpm_new` again, PostgreSQL refuses it with "
+    "2BP01 while the dependent exists, and that refusal offers no rename. One site, the dependents branch's condition. "
+    "tests/340 parts S and T catch it (the refusal names no dependent and names a DROP).",
+    [("  elsif v_dependent is not null then\n", "  elsif v_dependent is not null and v_kind not in ('r', 'p') then\n", 1)],
 )
 
 # Issue #1258: every regrain driver refuses a REPEATABLE READ or SERIALIZABLE transaction
