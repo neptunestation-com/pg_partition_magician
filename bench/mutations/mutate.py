@@ -13251,6 +13251,19 @@ MUTATIONS["adopt_partition_lock_unwitnessed"] = (
     "tests/332 parts E and F catch it.",
     [("  if not exists (select 1 from pg_catalog.pg_locks l\n", "  if false and not exists (select 1 from pg_catalog.pg_locks l\n", 1)],
 )
+MUTATIONS["adopt_partition_dropped_refused_as_renamed"] = (
+    "bench/adopt_partition_isolation.sh",
+    "PR #1295 round 3 (V-01, P1-02): the lock witness finds no lock on p_child and does not ask whether p_child "
+    "still exists, so a partition DROPPED by the transaction the call waited on (LOCK TABLE's 42P01 caught, or a "
+    "relation created under the name locked instead) is refused with the rename diagnosis and the remedy 'Re-run "
+    "adopt_partition naming the partition as it is now, <bare oid>', which typed as written is refused. Nothing is "
+    "recorded either way: the defect is the message. One site, the test under the failed witness of whether the "
+    "oid still renders as a name; the one before the lock is left alone. tests/332 parts H and I catch it.",
+    [("    if v_now = p_child::oid::text then\n"
+      "      raise exception 'pg_partition_magician: cannot adopt % (oid %): that relation no longer exists",
+      "    if false then\n"
+      "      raise exception 'pg_partition_magician: cannot adopt % (oid %): that relation no longer exists", 1)],
+)
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a

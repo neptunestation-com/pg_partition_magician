@@ -14099,6 +14099,7 @@ declare
   v_lo_raw text; v_hi_raw text; v_lo text; v_hi text; v_coltype text; v_exact boolean;
   v_row pgpm.part; v_had boolean; v_tracked name; v_clash_q text; v_chunks int; v_was text; v_method text;
   v_child_q text;   -- #1262: p_child's schema-qualified name, quoted, as locked
+  v_now text;       -- p_child as regclass renders it now: its name, or its bare oid when no relation has it
 begin
   if current_setting('transaction_isolation') not in ('read committed', 'read uncommitted') then
     raise exception 'pg_partition_magician: adopt_partition(%, %) must run in a READ COMMITTED transaction (this one is %): it records % only while it is attached to % once its lock on it is granted, and asks that through a snapshot taken after the lock, which a stricter isolation level cannot provide. Re-run it in a READ COMMITTED transaction: BEGIN ISOLATION LEVEL READ COMMITTED, the call, COMMIT',
@@ -14112,8 +14113,15 @@ begin
 
   if not exists (select 1 from pg_inherits i
                   where i.inhparent = p_parent and i.inhrelid = p_child and not i.inhdetachpending) then
+    -- a DROPPED relation is in no pg_inherits row either, and its regclass renders as a bare number: say that
+    -- it is gone, rather than that "<oid> is not a partition" (PR #1295 round 3, below)
+    v_now := p_child::text;
+    if v_now = p_child::oid::text then
+      raise exception 'pg_partition_magician: cannot adopt the relation with oid %: no such relation exists (if it was a partition of %, it was dropped before this call read it or while it waited), so there is nothing to adopt',
+        p_child::oid, p_parent;
+    end if;
     raise exception 'pg_partition_magician: % is not a partition of %: adopt_partition records a relation attached to the table, and a partition being detached is leaving it',
-      p_child, p_parent;
+      v_now, p_parent;
   end if;
   -- #1262 (PR #1295, V-01): LOCK TABLE takes a NAME, and resolves it again once the lock is granted, so what it
   -- locks is whatever the name denotes by then: a rename of the partition and a new table created under its old
@@ -14123,14 +14131,27 @@ begin
   -- again with no lock on it. No question about the name can tell, so the call asks the lock manager instead:
   -- this backend must hold SHARE UPDATE EXCLUSIVE on p_child's oid, granted, or the call refuses. The name is
   -- read schema-qualified, so the caller's search_path chooses nothing. A name that denotes nothing once the
-  -- wait ends (the partition or its schema renamed, no relation in its place) raises 42P01 or 3F000 naming the
-  -- OLD name as missing; that is the same case, so it is caught and left to the same refusal, which names the
-  -- partition as it is now. A lock taken inside the block stays with the transaction when the block ends.
+  -- wait ends raises 42P01 or 3F000 naming the OLD name as missing; that is caught and left to the witness,
+  -- which finds no lock. A lock taken inside the block stays with the transaction when the block ends.
+  --
+  -- No lock on the oid has TWO causes, and the refusal tells them apart by whether the oid still has a name
+  -- (PR #1295 round 3, V-01 and P1-02). It does: the partition or its schema was renamed, or its name taken,
+  -- and the refusal names the partition as it is now, to be called again with. It does not: the partition was
+  -- DROPPED by the transaction this call waited on (LOCK TABLE raised the same 42P01, or locked a relation
+  -- created under the name since), a dropped regclass renders as a bare number, and "re-run naming <that
+  -- number>" is a remedy that can only be refused. So that refusal says the relation is gone, by the name this
+  -- call read for it, and names no re-run. The same holds where the drop is found before the lock is asked
+  -- for (the check above, and the name read here), where there is no name to give.
+  --
+  -- The question is asked of the very text the refusal would print (v_now, p_child rendered ONCE): regclass
+  -- output is the bare oid exactly when no relation has it (a relation named in digits renders quoted), so a
+  -- refusal that names "the partition as it is now" cannot name a number, whenever the drop commits. A read of
+  -- pg_class followed by a second rendering in the raise would leave the instant between them.
   select format('%I.%I', n.nspname, c.relname) into v_child_q
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_child;
   if not found then
-    raise exception 'pg_partition_magician: % is not a partition of % any more (dropped while this call waited)',
-      p_child, p_parent;
+    raise exception 'pg_partition_magician: cannot adopt the relation with oid %: no such relation exists (if it was a partition of %, it was dropped before this call read it or while it waited), so there is nothing to adopt',
+      p_child::oid, p_parent;
   end if;
   begin
     execute format('lock table %s in share update exclusive mode', v_child_q);
@@ -14140,8 +14161,13 @@ begin
   if not exists (select 1 from pg_catalog.pg_locks l
                   where l.locktype = 'relation' and l.relation = p_child::oid and l.pid = pg_backend_pid()
                     and l.mode = 'ShareUpdateExclusiveLock' and l.granted) then
+    v_now := p_child::text;
+    if v_now = p_child::oid::text then
+      raise exception 'pg_partition_magician: cannot adopt % (oid %): that relation no longer exists (dropped while this call waited for its lock), so there is nothing to adopt. Any relation named % now is a different one',
+        v_child_q, p_child::oid, v_child_q;
+    end if;
     raise exception 'pg_partition_magician: cannot adopt % (oid %): this call holds no lock on it, because the name % it locked by stopped denoting it while the call waited (the partition or its schema was renamed, or the name taken by another relation). Re-run adopt_partition naming the partition as it is now, %',
-      p_child, p_child::oid, v_child_q, p_child;
+      v_now, p_child::oid, v_child_q, v_now;
   end if;
   select c.relname, c.relkind, pg_get_expr(c.relpartbound, c.oid) into v_rel, v_relkind, v_bound
     from pg_class c join pg_inherits i on i.inhrelid = c.oid

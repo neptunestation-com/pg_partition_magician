@@ -14,6 +14,12 @@
   and back while the lock waited, committed while the call waited, left the lock on another relation, and a
   `DETACH` of the recorded partition could commit before its row; a rename alone raised `LOCK TABLE`'s 42P01 about
   the old name. It now locks the schema-qualified name and asks `pg_locks` whether it holds the lock on
+  `p_child`'s oid. When it does not and the relation still exists, it refuses with the partition's current name,
+  and the call made again with that name adopts it; when the transaction it waited on dropped the partition, it
+  refuses saying the relation no longer exists and names no call to make again (a dropped relation given by oid
+  is refused the same way before the partition's lock is asked for, where it was called "not a partition"). A
+  name taken by a sequence, an index or a table the caller has no privilege on still fails with `LOCK TABLE`'s
+  own error, recording nothing.
   `p_child`'s oid, refusing with the partition's current name when it does not.
   granted: a rename of the partition and a table created under its old name, committed while the call waited,
   left the lock on that new table, and a `DETACH` of the recorded partition could commit before its row. It now

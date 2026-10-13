@@ -32,17 +32,27 @@
 --           not the name), nothing recorded; the remedy as typed records it.
 --   PART G  READ COMMITTED, a rename with nothing put in its place: pgpm's refusal naming the partition as it
 --           is now, not LOCK TABLE's 42P01 about the old name; the remedy as typed records it.
+--   PART H  READ COMMITTED, the partition DROPPED by the transaction the call waits on, nothing put in its
+--           place. LOCK TABLE raises the same 42P01 as in G, and there is no lock on the oid, but nothing was
+--           renamed and there is no "partition as it is now" to name (a dropped oid renders as a number): the
+--           refusal says the relation no longer exists and that there is nothing to adopt, and names no re-run.
+--           A later call given the dropped oid is refused the same way, before it asks for the partition's lock.
+--   PART I  READ COMMITTED, the partition dropped and a new partition created under its name, committed
+--           while the call waits: the lock lands on the new relation, and the refusal is still the dropped
+--           one, saying the relation of that name now is a different one. It is: a call naming it adopts it,
+--           under its own oid.
 --
 -- adopt_partition is a function, not a committing procedure, so its refusals are pinned by message.
 -- ASYMMETRIC FIXTURES. Three hand partitions: x [900, 1000) holds 950 and is renamed, y [1000, 1100) holds
 -- 1010 and 1020 and is detached, z [1100, 1200) holds 1111, 1122 and 1133 and is left alone. Two end up
 -- recorded and one does not, and every check names the relation by oid and name, never a count alone. E's w
 -- [1200, 1300) holds 1234, 1256 and 1278, and its squatter none; F's v [1300, 1400) 1301 and 1350; G's u
--- [1400, 1500) 1444.
+-- [1400, 1500) 1444; H's d [1500, 1600) 1511 and 1522, dropped with them; I's c [1600, 1700) 1601 and 1602,
+-- dropped with them, and the c created in its place 1666.
 create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
-select plan(38);
+select plan(51);
 
 create table public.t332 (id bigint primary key, payload text);
 insert into public.t332 values (150, 'a');
@@ -299,6 +309,95 @@ select is((select child_name from pgpm.part where child_oid = :u_oid), 't332_u_o
   'G: u is recorded by its oid under its current name');
 select dblink_disconnect('ga') as ga_gone \gset
 select dblink_disconnect('gb') as gb_gone \gset
+
+-- ============================ (H) the partition dropped while the call waits ============================
+-- READ COMMITTED. Session hb drops d and holds the drop uncommitted; the call (session ha) passes its first check
+-- and waits behind it for d's lock; hb commits. LOCK TABLE finds no relation of the name, as in G, and the call
+-- holds no lock on d's oid, as in E, F and G: but nothing was renamed and nothing took the name. The relation is
+-- gone, so the refusal says that, and names no partition "as it is now" and no re-run (typed with the bare oid a
+-- dropped regclass renders as, that re-run could only be refused).
+create table public.t332_d partition of public.t332 for values from (1500) to (1600);
+insert into public.t332 values (1511, 'd'), (1522, 'd');
+select 'public.t332_d'::regclass::oid as d_oid \gset
+select dblink_connect('ha', 'dbname=' || current_database()) as ha \gset
+select dblink_connect('hb', 'dbname=' || current_database()) as hb \gset
+select pid as ha_pid from dblink('ha', 'select pg_backend_pid()') as t(pid int) \gset
+select dblink_exec('hb', 'begin') as hb_begin \gset
+select dblink_exec('hb', 'drop table public.t332_d') as hb_drop \gset
+select dblink_exec('ha', 'begin isolation level read committed') as ha_begin \gset
+select dblink_send_query('ha', format('select pgpm.adopt_partition(%L, %L)', 'public.t332', 'public.t332_d')) as ha_sent \gset
+select ok(pg_temp.t332_waits(:ha_pid, :d_oid),
+  'LIVENESS: H: adopt_partition passed its first check and waits behind the drop for d''s lock');
+select dblink_exec('hb', 'commit') as hb_commit \gset
+select count(*) as ha_rows from dblink_get_result('ha', false) as t(x text) \gset
+select split_part(dblink_error_message('ha'), E'\n', 1) as h_msg \gset
+select count(*) as ha_drained from dblink_get_result('ha', false) as t(x text) \gset
+select dblink_exec('ha', 'commit') as ha_commit \gset
+select ok(not exists (select 1 from pg_class where oid = :d_oid) and to_regclass('public.t332_d') is null
+          and :d_oid::regclass::text = :'d_oid',
+  'LIVENESS: H: the drop committed: d is gone, nothing took its name, and its oid renders as a bare number');
+select is(:'h_msg',
+  'ERROR:  pg_partition_magician: cannot adopt public.t332_d (oid ' || :'d_oid' || '): that relation no longer exists (dropped while this call waited for its lock), so there is nothing to adopt. Any relation named public.t332_d now is a different one',
+  'H: the dropped partition is refused as dropped, by the name it had and its oid');
+select ok(:'h_msg' like 'ERROR:  pg_partition_magician: cannot adopt %' and :'h_msg' !~* 're-run'
+          and :'h_msg' not like '%as it is now%' and :'h_msg' not like '%renamed%'
+          and :'h_msg' not like '%cannot adopt ' || :'d_oid' || ' %',
+  'H: the refusal diagnoses no rename, names no partition "as it is now" and no re-run, and does not call the relation by its bare oid');
+select is((select string_agg(child_name, ',') from pgpm.part where child_oid = :d_oid or child_name = 't332_d'), null,
+  'H: nothing is recorded for d when the call''s transaction commits');
+-- found before the partition's lock is asked for: the same refusal, with no name to give
+select throws_like(format('select pgpm.adopt_partition(%L, %s::oid::regclass)', 'public.t332', :d_oid),
+  'pg_partition_magician: cannot adopt the relation with oid ' || :'d_oid' || ': no such relation exists (if it was a partition of t332, it was dropped before this call read it or while it waited), so there is nothing to adopt',
+  'H: a later call given the dropped oid is refused as dropped too, not as a relation that is "not a partition"');
+select is((select string_agg(id::text, ',' order by id) from public.t332 where id >= 1400), '1444',
+  'LIVENESS: H: d''s rows 1511 and 1522 went with it; u''s 1444 is the last row the parent holds');
+select dblink_disconnect('ha') as ha_gone \gset
+select dblink_disconnect('hb') as hb_gone \gset
+
+-- ============================ (I) dropped, and a new partition created under its name ============================
+-- READ COMMITTED. Session ib drops c and creates a new partition under the same name over the same range, both
+-- uncommitted; the call (session ia, given the OLD c) waits behind the drop; ib commits. LOCK TABLE resolves the
+-- name to the new relation, so the call holds no lock on the oid it was given, as in E: but that oid is gone,
+-- so this is the dropped refusal again, not the squatter one. The relation of the name now is a
+-- different one, as the refusal says: a call naming it resolves to the new oid and adopts that.
+create table public.t332_c partition of public.t332 for values from (1600) to (1700);
+insert into public.t332 values (1601, 'c'), (1602, 'c');
+select 'public.t332_c'::regclass::oid as c_oid \gset
+select dblink_connect('ia', 'dbname=' || current_database()) as ia \gset
+select dblink_connect('ib', 'dbname=' || current_database()) as ib \gset
+select pid as ia_pid from dblink('ia', 'select pg_backend_pid()') as t(pid int) \gset
+select dblink_exec('ib', 'begin') as ib_begin \gset
+select dblink_exec('ib', 'drop table public.t332_c') as ib_drop \gset
+select dblink_exec('ib', 'create table public.t332_c partition of public.t332 for values from (1600) to (1700)') as ib_new \gset
+select dblink_exec('ib', $$insert into public.t332 values (1666, 'c2')$$) as ib_row \gset
+select dblink_exec('ia', 'begin isolation level read committed') as ia_begin \gset
+select dblink_send_query('ia', format('select pgpm.adopt_partition(%L, %L)', 'public.t332', 'public.t332_c')) as ia_sent \gset
+select ok(pg_temp.t332_waits(:ia_pid, :c_oid),
+  'LIVENESS: I: adopt_partition passed its first check and waits behind the drop for the old c''s lock');
+select dblink_exec('ib', 'commit') as ib_commit \gset
+select count(*) as ia_rows from dblink_get_result('ia', false) as t(x text) \gset
+select split_part(dblink_error_message('ia'), E'\n', 1) as i_msg \gset
+select count(*) as ia_drained from dblink_get_result('ia', false) as t(x text) \gset
+select 'public.t332_c'::regclass::oid as c2_oid \gset
+select ok(not exists (select 1 from pg_class where oid = :c_oid) and :c2_oid <> :c_oid
+          and exists (select 1 from pg_inherits where inhparent = 'public.t332'::regclass and inhrelid = :c2_oid),
+  'LIVENESS: I: the old c is gone, and a new partition of the table holds its name under another oid');
+select dblink_exec('ia', 'commit') as ia_commit \gset
+select is(:'i_msg',
+  'ERROR:  pg_partition_magician: cannot adopt public.t332_c (oid ' || :'c_oid' || '): that relation no longer exists (dropped while this call waited for its lock), so there is nothing to adopt. Any relation named public.t332_c now is a different one',
+  'I: the dropped partition is refused as dropped though its name denotes a relation, and the refusal says that one is another');
+select is((select string_agg(child_name, ',') from pgpm.part where child_oid in (:c_oid, :c2_oid) or child_name = 't332_c'), null,
+  'I: nothing is recorded for the old c or the new one when the call''s transaction commits');
+select lives_ok(format('select pgpm.adopt_partition(%L, %L)', 'public.t332', 'public.t332_c'),
+  'I: a call naming the relation of that name now adopts it');
+with mine as materialized (select * from pgpm.part where parent_table = 'public.t332'::regclass)
+select is((select string_agg(child_name || ' [' || lo || ', ' || hi || ') ' || case child_oid when :c2_oid then 'the new oid' when :c_oid then 'the dropped oid' else child_oid::text end, '; ')
+             from mine where child_name = 't332_c')
+            || ' ' || (select string_agg(id::text, ',' order by id) from public.t332_c),
+          't332_c [1600, 1700) the new oid 1666',
+  'I: it is recorded under the new oid over its own bounds, with its row 1666 and none of the dropped one''s');
+select dblink_disconnect('ia') as ia_gone \gset
+select dblink_disconnect('ib') as ib_gone \gset
 
 select dblink_disconnect('o332') as o332_gone \gset
 select * from finish();

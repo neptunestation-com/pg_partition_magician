@@ -3056,9 +3056,17 @@ or export it with `archive.to_s3` first.
 It refuses, writing nothing:
 
 - a transaction stricter than `READ COMMITTED` (see the next paragraph), before it takes any lock;
-- a `p_child` the call holds no lock on once its wait ends: the partition or its schema renamed while it
-  waited, or its name taken by another relation, so the lock taken by the name is on something else or on
-  nothing. The call names the partition as it is now, to be called again with that name;
+- a `p_child` the call holds no lock on once its wait ends, for one of two causes, told apart by whether the
+  relation still exists. It does: the partition or its schema was renamed while the call waited, or its name
+  taken by another relation, so the lock taken by the name is on something else or on nothing. That refusal
+  names the partition as it is now, and the call made again with that name adopts it. It does not: the
+  partition was dropped by the transaction the call waited on. That refusal says the relation no longer
+  exists, by the name it had and its oid, and names no call to make again, because there is nothing to adopt;
+  a relation created under the name since is a different one, and when it is a partition of the table a call
+  of its own adopts it. A dropped relation given to a later call by its oid is refused the same way, before
+  the partition's lock is asked for. One case is not covered: when the name was taken by a relation
+  `LOCK TABLE` cannot lock (a sequence or an index, or a table the caller has no privilege on), the call fails
+  with `LOCK TABLE`'s own error (`cannot lock relation`, `permission denied`), recording nothing;
 - a `p_parent` pgpm does not manage, or a `p_child` that is not attached to it (a partition in the middle of
   a detach is leaving it), or one that is not a plain table;
 - a `p_child` `pgpm.part` already records by oid (there is nothing to adopt);

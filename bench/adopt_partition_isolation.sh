@@ -12,7 +12,7 @@
 # The file is the acceptance test; this wrapper exists so the mutation has a guard the discriminate track can
 # run against the mutant, in the shape of bench/retain_recall_moved_parent.sh.
 #
-# TWO mutations are required to fail against it (bench/mutations/mutate.py):
+# THREE mutations are required to fail against it (bench/mutations/mutate.py):
 #   adopt_partition_strict_isolation_admitted -- the refusal gone, the pre-fix shape: parts A (a detached table
 #                                                recorded), B (a renamed partition recorded under its old name)
 #                                                and C (SERIALIZABLE admitted) catch it, and part D's remedy then
@@ -22,6 +22,11 @@
 #                                                partition's schema swapped away and back while the lock waits
 #                                                (part F), leave the lock on another relation, and the partition
 #                                                is recorded with no lock on it. Parts E and F catch it.
+#   adopt_partition_dropped_refused_as_renamed -- no lock on p_child and no question whether p_child still
+#                                                exists: a partition DROPPED while the call waited is refused
+#                                                as renamed, with a remedy naming its bare oid that can only be
+#                                                refused. Parts H (nothing under the name) and I (a new
+#                                                partition under it) catch it.
 #
 # Runs on the plain core image (pgtap, dblink and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path
 # inside the container, for a worktree mounted somewhere other than /repo.
