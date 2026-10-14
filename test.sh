@@ -1007,6 +1007,10 @@ run_archive() {
   # bench/discriminate.sh completes with an endpoint's trailing slash kept, or a bad endpoint or bucket taken, again.
   echo "--- an endpoint's trailing slash addresses the key, and a bad endpoint or bucket is refused guard (issue #1269) ---"
   bash "$(dirname "$0")/bench/archive_configure_endpoint.sh" pgpm_test-archive pgpm_perf377 || fail=1
+  # The direct-call bounds guard (#814) re-runs tests/archive/db/54 for the same reason: the clean-code half of the
+  # pairs bench/discriminate.sh completes with each encoder keying its object by the caller's spelling of lo again.
+  echo "--- a direct archive_fn strategy call keys the chunk it read, in any DateStyle or zone guard (issue #814) ---"
+  bash "$(dirname "$0")/bench/archive_direct_call_bounds.sh" pgpm_test-archive pgpm_perf396 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi
