@@ -11220,7 +11220,8 @@ MUTATIONS["hypertable_column_unit_rules_unchecked"] = (
     "transmute at the handoff, after the cutover's swap has committed and dropped the hypertable. One clause, "
     "the _time_unit_contract call. tests/timescale/db/66 parts A and B fail: the copy's or the swap's COMMIT dies "
     "2D000 inside throws_like.",
-    [("  perform pgpm._time_unit_contract(p_hypertable, p_control, p_interval::text, pgpm._ts_text(p_anchor));\n",
+    [("  perform pgpm._time_unit_contract(p_hypertable, p_control, p_interval::text, pgpm._ts_text(p_anchor),\n"
+      "    're-run pgpm.from_hypertable, or on the two-phase path pgpm.from_hypertable_cutover, re-running pgpm.from_hypertable_copy before it if the column''s type was changed (the copy keeps the type it was made with, and the cutover refuses a copy whose shape is not the hypertable''s): this call was refused before anything was changed, so the table is still a hypertable, which transmute does not take, and no transmute bound was left to abort');\n",
       "", 1)],
 )
 MUTATION_SRC["hypertable_column_unit_rules_unchecked"] = "pgpm_hypertable/install.sql"
@@ -13459,6 +13460,45 @@ MUTATIONS["archive_configure_refusal_shows_userinfo"] = (
     [("  if p_value like '%@%' then\n", "  if false then\n", 1)],
 )
 MUTATION_SRC["archive_configure_refusal_shows_userinfo"] = "pgpm_archive/install.sql"
+
+# Issues #1268 and #1232: _from_hypertable_check_arguments asks the grid's mixed-step rule (pgpm._grid_floor's
+# 'mixed month + duration interval unsupported') before the copy and the swap, and passes _time_unit_contract the
+# hypertable path's remedy. tests/timescale/db/69 through bench/hypertable_mixed_step_and_unit_remedy.sh.
+_G1268_HT = "bench/hypertable_mixed_step_and_unit_remedy.sh"
+MUTATIONS["hypertable_mixed_step_unchecked"] = (
+    _G1268_HT,
+    "Pre-#1268 pgpm_hypertable: _from_hypertable_check_arguments never asks _grid_floor, so a p_interval that mixes "
+    "a month count with a duration ('1 mon 1 day') passes the sign rule and the column-unit rules, from_hypertable "
+    "copies and from_hypertable_cutover commits the swap (the hypertable and its incoming key dropped), and only "
+    "the handoff refuses; '1 mon -40 days' meets the frontier check first, with its delete-the-rows remedy. One "
+    "site, the _grid_floor call. tests/timescale/db/69 parts A and B fail (the copy's or the swap's COMMIT dies "
+    "2D000 inside throws_like, and the negative-by-ordering step meets the frontier's message).",
+    [("    perform pgpm._grid_floor('time', p_interval::text, pgpm._ts_text(p_anchor), pgpm._ts_text(p_anchor), 'UTC');\n",
+      "    null;\n", 1)],
+)
+MUTATIONS["hypertable_unit_rules_transmute_remedy"] = (
+    _G1268_HT,
+    "Pre-#1232 pgpm_hypertable: _from_hypertable_check_arguments asks _time_unit_contract without the hypertable "
+    "path's remedy, so its date-anchor and timestamp(p) refusals, raised before the copy with the table still a "
+    "hypertable, say 're-run transmute' (which refuses a hypertable) and 'call pgpm.transmute_abort first' (which "
+    "has nothing to abort). One site, the remedy argument. tests/timescale/db/69's #1232 part fails.",
+    [("  perform pgpm._time_unit_contract(p_hypertable, p_control, p_interval::text, pgpm._ts_text(p_anchor),\n"
+      "    're-run pgpm.from_hypertable, or on the two-phase path pgpm.from_hypertable_cutover, re-running pgpm.from_hypertable_copy before it if the column''s type was changed (the copy keeps the type it was made with, and the cutover refuses a copy whose shape is not the hypertable''s): this call was refused before anything was changed, so the table is still a hypertable, which transmute does not take, and no transmute bound was left to abort');\n",
+      "  perform pgpm._time_unit_contract(p_hypertable, p_control, p_interval::text, pgpm._ts_text(p_anchor));\n", 1)],
+)
+MUTATIONS["hypertable_unit_remedy_recopy_unnamed"] = (
+    _G1268_HT,
+    "#1232's remedy without its two-phase half (PR #1302 round 1, P1-02): the refusals name "
+    "from_hypertable_cutover as the re-run but not the re-copy, so an operator who widens a timestamp(p) column as "
+    "the message offers and re-runs the cutover is refused again by the shape check (the copy keeps the type it "
+    "was made with). One clause of the remedy text. tests/timescale/db/69's #1232 pins and its two-phase part fail.",
+    [(", re-running pgpm.from_hypertable_copy before it if the column''s type was changed (the copy keeps the type "
+      "it was made with, and the cutover refuses a copy whose shape is not the hypertable''s)", "", 1)],
+)
+for _name in ("hypertable_mixed_step_unchecked", "hypertable_unit_rules_transmute_remedy",
+              "hypertable_unit_remedy_recopy_unnamed"):
+    MUTATION_SRC[_name] = "pgpm_hypertable/install.sql"
+    MUTATION_TRACK[_name] = "timescale"
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

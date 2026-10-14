@@ -1078,7 +1078,17 @@ therefore refused as a step, with or without `p_force_frontier`, never by the fr
 dimension a step that is a whole number of days or months (`... the date column ... holds whole days ...`)
 and an anchor at 00:00 UTC (`... the column is a date ...`), and on a `timestamp(p)` or `timestamptz(p)`
 dimension a step and an anchor in whole multiples of its precision (`... the column is timestamp(0) with
-time zone, which keeps whole seconds only ...`).
+time zone, which keeps whole seconds only ...`). Raised here, those two name the call to re-run as their
+remedy (`... then re-run pgpm.from_hypertable, or on the two-phase path pgpm.from_hypertable_cutover,
+re-running pgpm.from_hypertable_copy before it if the column's type was changed ...`), not `transmute`, which
+refuses a hypertable, nor `transmute_abort`, which has nothing to abort. For `timestamp(p)`, widening the
+column (the `ALTER TABLE` the message gives) also works: then re-run `from_hypertable`, or on the two-phase
+path `from_hypertable_copy` and then the cutover, since the copy keeps the type it was made with and the
+cutover's shape check refuses a copy whose shape is not the hypertable's. The rule the grid itself puts on the step is asked there too: a `p_interval` that mixes a
+month count with a duration (`'1 mon 1 day'`, `'1 year 2 hours'`, `'1 mon -40 days'`) is refused before
+the copy and the swap (`... cannot migrate hypertable ... mixed month + duration interval unsupported ...`),
+where `transmute` would meet it only when it first places a bound. `'1 mon -40 days'`, which is below zero
+by interval ordering, is refused that way, never by the frontier check.
 
 **The handoff runs after the swap has committed, and can still refuse.** `transmute` applies its own
 preconditions to the plain table (for example, a secondary index whose name leaves no room for the `_pgpm`

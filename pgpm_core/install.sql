@@ -9304,10 +9304,19 @@ $$;
 -- key's TYPE puts on the grid arguments: pgpm_hypertable asks it of the hypertable's dimension before its copy
 -- and before its swap (#1118, #1138), where transmute's own asking would come only after the swap had dropped
 -- the hypertable. A column that is not a timestamp or a date is not this function's (the rules return null).
-create or replace function pgpm._time_unit_contract(p_parent regclass, p_control name, p_step text, p_anchor text)
+-- #1232: the remedy is the caller's. Transmute's (re-run transmute, aborting a bound an earlier attempt left) is
+-- the default; raised through pgpm_hypertable, where the table is still a hypertable that transmute refuses and
+-- nothing has left a bound to abort, it named two calls that could not repair anything, so a caller that is not
+-- transmute passes p_remedy, the clause that follows "then" in both off-unit refusals. The four-argument shape
+-- is dropped, not left beside this one, so a call by arity cannot bind to a copy without the parameter.
+drop function if exists pgpm._time_unit_contract(regclass, name, text, text);
+create or replace function pgpm._time_unit_contract(p_parent regclass, p_control name, p_step text, p_anchor text,
+                                                    p_remedy text default null)
 returns void language plpgsql stable as $$
-declare v_type oid; v_typmod int; v_keeps text; v_unit text;
+declare v_type oid; v_typmod int; v_keeps text; v_unit text; v_remedy text;
 begin
+  v_remedy := coalesce(p_remedy, format('re-run transmute; if an earlier attempt left a pgpm_monolith_bound CHECK on the table, call pgpm.transmute_abort(%s) first, since a re-run resumes its recorded bound',
+                                        p_parent));
   select a.atttypid, a.atttypmod into v_type, v_typmod
     from pg_attribute a where a.attrelid = p_parent and a.attname = p_control and not a.attisdropped;
   if v_type = 'date'::regtype
@@ -9325,15 +9334,15 @@ begin
   -- UTC (the #581 rule above has already held the step to whole days), so it is named that way:
   -- widening the column's precision is not a remedy for a date.
   if v_unit is not null and v_type = 'date'::regtype then
-    raise exception 'pg_partition_magician: cannot partition % on % with step % and anchor % -- the column is a date, which holds whole days and has no zone, so its grid is computed in UTC and every partition bound must fall at 00:00 UTC; this anchor falls at % UTC, and every bound literal would be attached at the date it falls in while pgpm records the instant: rows dated a partition''s first day would sit outside its recorded range, and the monolith''s bound CHECK could exclude the table''s own newest rows. Give an anchor at 00:00 UTC (the default ''2000-01-01 00:00:00+00'', or any date written with +00: a literal without an offset is read in the session''s time zone, %) and a step that is a whole number of days or months, then re-run transmute; if an earlier attempt left a pgpm_monolith_bound CHECK on the table, call pgpm.transmute_abort(%) first, since a re-run resumes its recorded bound.',
+    raise exception 'pg_partition_magician: cannot partition % on % with step % and anchor % -- the column is a date, which holds whole days and has no zone, so its grid is computed in UTC and every partition bound must fall at 00:00 UTC; this anchor falls at % UTC, and every bound literal would be attached at the date it falls in while pgpm records the instant: rows dated a partition''s first day would sit outside its recorded range, and the monolith''s bound CHECK could exclude the table''s own newest rows. Give an anchor at 00:00 UTC (the default ''2000-01-01 00:00:00+00'', or any date written with +00: a literal without an offset is read in the session''s time zone, %) and a step that is a whole number of days or months, then %.',
       p_parent, quote_ident(p_control), p_step, p_anchor,
       coalesce(nullif(to_char(p_anchor::timestamptz at time zone 'UTC', 'HH24:MI:SS'), ''), p_anchor),
-      current_setting('TimeZone'), p_parent;
+      current_setting('TimeZone'), v_remedy;
   end if;
   if v_unit is not null then
-    raise exception 'pg_partition_magician: cannot partition % on % with step % and anchor % -- the column is %, which keeps %, and every partition bound is the anchor plus whole steps, which the cutover''s ATTACH (and obtain''s CREATE TABLE ... PARTITION OF, for every forward partition) rounds to that precision: two bounds would round to the same instant and the cutover would fail (empty range bound) after committing a bound CHECK that rejects every write past it, or a bound would be attached at another instant than pgpm records for it. Give a step and an anchor that are whole multiples of %, or widen the column''s precision (ALTER TABLE % ALTER COLUMN % TYPE %), then re-run transmute; if an earlier attempt left a pgpm_monolith_bound CHECK on the table, call pgpm.transmute_abort(%) first, since a re-run resumes its recorded bound.',
+    raise exception 'pg_partition_magician: cannot partition % on % with step % and anchor % -- the column is %, which keeps %, and every partition bound is the anchor plus whole steps, which the cutover''s ATTACH (and obtain''s CREATE TABLE ... PARTITION OF, for every forward partition) rounds to that precision: two bounds would round to the same instant and the cutover would fail (empty range bound) after committing a bound CHECK that rejects every write past it, or a bound would be attached at another instant than pgpm records for it. Give a step and an anchor that are whole multiples of %, or widen the column''s precision (ALTER TABLE % ALTER COLUMN % TYPE %), then %.',
       p_parent, quote_ident(p_control), p_step, p_anchor, format_type(v_type, v_typmod), v_keeps, v_unit,
-      p_parent::text, quote_ident(p_control), format_type(v_type, -1), p_parent;
+      p_parent::text, quote_ident(p_control), format_type(v_type, -1), v_remedy;
   end if;
 end;
 $$;

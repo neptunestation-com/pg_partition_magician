@@ -430,6 +430,19 @@ end $$;
 -- table the handoff gives transmute, so asked of the hypertable's column they answer what transmute will, with
 -- transmute's messages; the step and the anchor are rendered the way transmute's interval overload renders
 -- them. A column that is not a timestamp or a date is the dimension check's to refuse, not these rules'.
+-- #1232: with this path's remedy, not transmute's. Raised here the table is still a hypertable, which transmute
+-- refuses (it has inheritance children), and nothing has left a pgpm_monolith_bound CHECK for transmute_abort
+-- to remove, so the call to correct and re-run is the one that refused. On the two-phase path that is the
+-- cutover, after a re-run of from_hypertable_copy when the column's type was changed (the timestamp(p) remedy
+-- offers widening it): the copy keeps the type it was made with, and the cutover's shape check refuses it.
+-- #1268: and the rule the grid itself puts on the step, which transmute meets in pgpm._grid_floor when it first
+-- places a bound: a month count mixed with a duration ('1 mon 1 day', '1 mon -40 days') is refused there,
+-- 'mixed month + duration interval unsupported', and transmute's preflight does not ask it first, so on this
+-- path the copy ran and the cutover's swap committed, dropping the hypertable and its incoming keys, before
+-- the handoff refused; a step that is negative by interval ordering ('1 mon -40 days') met the frontier check
+-- first, with a remedy that deleted the newest rows. Asked by calling _grid_floor itself on the anchor, the
+-- way _from_hypertable_check_handoff asks _part_name, so the rule cannot drift from the one transmute meets,
+-- and refused in this module's pre-swap words; any other error _grid_floor raises is re-raised as it is.
 drop function if exists pgpm._from_hypertable_check_arguments(interval, int, interval);
 create or replace function pgpm._from_hypertable_check_arguments(
   p_hypertable regclass, p_control name, p_interval interval, p_anchor timestamptz, p_obtain int,
@@ -437,7 +450,15 @@ create or replace function pgpm._from_hypertable_check_arguments(
 ) returns void language plpgsql stable as $$
 begin
   perform pgpm._refuse_bad_transmute_arguments('time', p_interval::text, p_obtain, p_retain::text);
-  perform pgpm._time_unit_contract(p_hypertable, p_control, p_interval::text, pgpm._ts_text(p_anchor));
+  perform pgpm._time_unit_contract(p_hypertable, p_control, p_interval::text, pgpm._ts_text(p_anchor),
+    're-run pgpm.from_hypertable, or on the two-phase path pgpm.from_hypertable_cutover, re-running pgpm.from_hypertable_copy before it if the column''s type was changed (the copy keeps the type it was made with, and the cutover refuses a copy whose shape is not the hypertable''s): this call was refused before anything was changed, so the table is still a hypertable, which transmute does not take, and no transmute bound was left to abort');
+  begin
+    perform pgpm._grid_floor('time', p_interval::text, pgpm._ts_text(p_anchor), pgpm._ts_text(p_anchor), 'UTC');
+  exception when others then
+    if sqlerrm not like 'pg_partition_magician: mixed month + duration interval unsupported %' then raise; end if;
+    raise exception 'pg_partition_magician: cannot migrate hypertable % with p_interval % -- refused before anything is changed, because transmute, which takes the table over once the cutover''s swap has committed, would refuse it: a partition step is a whole number of calendar months or a fixed duration, never both (mixed month + duration interval unsupported). Give a whole number of months or a pure duration, then re-run pgpm.from_hypertable (or pgpm.from_hypertable_cutover, the call that follows pgpm.from_hypertable_copy).',
+      p_hypertable, p_interval;
+  end;
 end $$;
 
 -- _from_hypertable_check_frontier: transmute's frontier refusal (#457), asked of the hypertable before the
