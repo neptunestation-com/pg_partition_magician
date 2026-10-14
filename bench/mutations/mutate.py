@@ -13777,6 +13777,30 @@ MUTATION_SRC["hypertable_cutover_older_copy_key_index_takes_any"] = "pgpm_hypert
 MUTATION_TRACK["hypertable_cutover_older_copy_key_index_takes_any"] = "timescale"
 
 
+# Issue #1272: the remedy every retain_disown row logs (pgpm._disown_retirement, its one writer) is the whole repair the
+# partition's state calls for. bench/retain_disown_remedy.sh runs tests/339 against each mutant.
+MUTATIONS["retain_disown_remedy_keeps_row"] = (
+    "bench/retain_disown_remedy.sh",
+    "Pre-#1272 remedy: retain_disown's method tells the operator to drop the disowned table and leaves out the "
+    "DELETE of its pgpm.part row, so typed as logged it leaves the row attached and anchored to a relation that is "
+    "gone, every later retire() and retain() logs fail_retain_identity for the range, and "
+    "status().retain_drop_failures climbs for good. One site, the DELETE clause of the remedy. tests/339 parts A "
+    "and B catch it.",
+    [("             || format('or drop it and delete its pgpm.part row with it: drop table %s; delete from pgpm.part where parent_table = %L::regclass and child_name = %L; ',\n"
+      "                       v_rel_q, v_parent_q, p_child)\n",
+      "             || format('or drop it: drop table %s; ', v_rel_q)\n", 1)],
+)
+MUTATIONS["retain_disown_remedy_drops_unreached"] = (
+    "bench/retain_disown_remedy.sh",
+    "#1272's first cut: pgpm._disown_retirement writes the drop remedy whatever the partition's state, as though "
+    "retention reached every disowned partition. _retain_recall disowns one exactly when the policy in force (set_retain "
+    "lengthened it) no longer reaches it, so its retain_disown row spells `drop table ...; delete from pgpm.part ...;` "
+    "and promises that retention retires it once attached back; typed as logged, the drop destroys rows the policy "
+    "keeps. One site, the reach clause. tests/339 part C catches it.",
+    [("    v_reached := v_boundary is not null and not pgpm._native_gt(cfg.control_kind, v_hi, v_boundary);\n",
+      "    v_reached := true;\n", 1)],
+)
+
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
 # cost), and discriminate.sh's --shard=I/N interleaves that list, so the heavy ones spread over the
