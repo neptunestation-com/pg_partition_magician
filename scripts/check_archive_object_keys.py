@@ -112,7 +112,11 @@ a prefix it reads from archive.config itself is not seen at all, and a SQL-stand
 in which its parameters are not followed. (A prefix HANDED to such a function is refused where it is
 handed.) And what a prefix may do is judged by the tokens beside it, not by types: a prefix stored (an
 INSERT, a SET) in a table other than archive.config and read back under that column's name is not
-followed, nor is one raised and read back out of the error (GET STACKED DIAGNOSTICS).
+followed, nor is one raised and read back out of the error (GET STACKED DIAGNOSTICS). Last, a column alias
+spelled LOOP, BEGIN or DECLARE, unquoted (`select 1 as begin, c.prefix text into ...`, or the same in a
+RETURNING list), ends the statement's clause early, as those words do where they open a block, so a prefix
+item after it in the same list aliased with a type word (`text`, `name`, `varchar`, `character`) is read as
+a declaration and not judged.
 
   ./scripts/check_archive_object_keys.py              # check pgpm_archive/install.sql
   ./scripts/check_archive_object_keys.py <file.sql>   # check another copy (a mutant, an old release)
