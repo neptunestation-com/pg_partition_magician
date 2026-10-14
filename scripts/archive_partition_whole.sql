@@ -67,7 +67,7 @@
 -- #977) and pgpm._refuse_filtered_reads (issue #873) for the contract check, the ledger's canonical
 -- hi and the row-level security refusal, pgpm._max_hi_native (issue #500) for the canonical resume
 -- watermark, pgpm._child_nsp (issue #727) for the partition's own schema, pgpm.archive_ledger.retired_at and
--- pgpm._over_retired_chunks and pgpm.archive_ledger.child_oid (issue #1141) to leave retired chunks and the partitions over them alone, pgpm._part_detached_by_hand (issue #705) and pgpm._archive_hold_partition to leave a table the operator detached by hand alone, before or during the call (issue #1159), plus pgpm.part.child_oid for the identity check below (issue #421; added after this
+-- pgpm._over_retired_chunks and pgpm.archive_ledger.child_oid (issue #1141) to leave retired chunks and the partitions over them alone, pgpm._part_detached_by_hand (issue #705) and pgpm._archive_hold_partition to leave a table the operator detached by hand alone, before or during the call (issue #1159), pgpm._archive_unheld_reason to say why a partition pgpm's own retirement detached, or a row with no recorded oid, is not archived, and pgpm._archive_left_reason to say why a range read while a DETACH ... CONCURRENTLY began is not recorded (issue #1259), plus pgpm.part.child_oid for the identity check below (issue #421; added after this
 -- script, so an older core needs that check removed along with the column reference). Not part of pgpm_core/install.sql and never will be without a real feature proposal
 -- and its own issue/PR -- this is scratch space for an operator to paste into a session and run,
 -- not a shipped, versioned function.
@@ -155,10 +155,14 @@ begin
   -- recorded. No lock_timeout is set here, unlike maintain()'s 200 ms: this is a hand-run call whose wait the
   -- caller can see and cancel, it waited just as long before (the strategy's read queued behind the same lock),
   -- and the header leaves statement_timeout, the bound on the whole call, to the caller.
+  -- A partition pgpm's own retirement detached before its range was archived, and a row with no recorded oid,
+  -- are not held either, and the call says so with the remedy (pgpm._archive_unheld_reason), as _archive_step
+  -- logs it.
   if not pgpm._archive_hold_partition(p_parent, r.child_oid, r.retiring_at) then
-    return format('%I.%I is no longer a partition of %s (detached or dropped by hand), so it was not '
-                  'archived and nothing was recorded for it. Call again for the next partition.',
-                  v_nsp, r.child_name, p_parent);
+    return coalesce(pgpm._archive_unheld_reason(p_parent, r.child_name, r.child_oid, v_now::oid, r.lo, r.hi),
+                    format('%I.%I is no longer a partition of %s (detached or dropped by hand), so it was not '
+                           'archived and nothing was recorded for it. Call again for the next partition.',
+                           v_nsp, r.child_name, p_parent));
   end if;
 
   -- Refuse a caller whose reads row-level security filters, BEFORE the strategy runs: the lever (#873)
@@ -194,6 +198,16 @@ begin
   v_resume_lo := coalesce(v_resume_lo, r.lo);
 
   v_result := pgpm._run_archive_strategy(p_parent, r.child_name, v_resume_lo, r.hi);
+
+  -- The hold, asked again, as pgpm._archive_step asks it at the same point (#1259; pgpm._archive_hold_partition
+  -- says why this answer cannot race). ACCESS SHARE does not keep a DETACH PARTITION ... CONCURRENTLY from
+  -- starting: its first transaction commits under the hold, and a read through the parent planned after that saw
+  -- none of this partition's rows. Nothing is recorded unless the partition is still attached now, which under
+  -- the hold means it was at every instant of the strategy's call. Returned as the message _archive_step logs
+  -- (pgpm._archive_left_reason), with the remedy; whatever the strategy wrote for the range is not coverage.
+  if not pgpm._archive_hold_partition(p_parent, r.child_oid, r.retiring_at) then
+    return pgpm._archive_left_reason(p_parent, r.child_name, r.lo, r.hi, v_resume_lo, r.hi);
+  end if;
 
   -- Hold the return to the range it was handed, BEFORE any ledger write: the same contract, through the same
   -- function, that pgpm._archive_step holds it to (issue #454; issue #1030). The ledger row is retire()'s drop

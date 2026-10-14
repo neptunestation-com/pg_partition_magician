@@ -131,8 +131,9 @@ call pgpm.transmute('public.rt280', 'id', 10::bigint, p_obtain => 4);
 create temporary table cellr280 as
   select p.child_name, p.child_oid from pgpm.part p
    where p.parent_table = 'public.rt280'::regclass and p.attached and p.lo = '20';
--- the state retire()'s concurrent detach leaves until retire drops the partition
-update pgpm.part set retiring_at = now(), retiring_oid = child_oid
+-- the state retire()'s concurrent detach leaves until retire drops the partition: the mark and the record of
+-- pgpm's dispatch of the detach (detach_dispatched_oid), which retire() writes in the same transaction (#1259)
+update pgpm.part set retiring_at = now(), retiring_oid = child_oid, detach_dispatched_oid = child_oid
  where parent_table = 'public.rt280'::regclass and lo = '20';
 select format('alter table public.rt280 detach partition public.%I', child_name) from cellr280 \gexec
 select ok(not exists (select 1 from pg_inherits i join cellr280 x on x.child_oid = i.inhrelid)
