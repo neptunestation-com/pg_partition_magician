@@ -32,8 +32,10 @@
 # skipped, so a batch that stopped after some of its PRs had merged is rerun with the same command.
 #
 # Knobs, all environment: LAND_WAIT_CHECKS_MIN (60), LAND_WAIT_MERGE_MIN (60), LAND_WAIT_RUN_MIN (90),
-# LAND_STALL_MIN (10: minutes a merge group may sit with every summary check green while the queue entry
-# still reads AWAITING_CHECKS before the entry is dequeued and enqueued again, once; #1041 and #1049),
+# LAND_STALL_MIN (10: minutes a merge group may sit with each of the three required summaries, Test Summary,
+# Lint summary and Perf summary, present on it and green while the queue entry still reads AWAITING_CHECKS
+# before the entry is dequeued and enqueued again, once; #1041 and #1049; a summary not yet there is a group
+# still running, not a stall),
 # LAND_MERGE_METHOD (merge; must match the ruleset's merge_method), LAND_TOOLING (the scripts/review
 # directory to run keep_both.py and flake_check.sh from; default this checkout's, which means a PR that
 # fixes the landing tooling cannot be landed by the copy it fixes unless this points at its worktree).
@@ -54,7 +56,7 @@ while [ $# -gt 0 ]; do
     --rebase-only) REBASE_ONLY=1; shift;;
     --batch) BATCH=1; shift;;
     --merge-method) METHOD=$2; shift 2;;
-    -h|--help) sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) PRS+=("$1"); shift;;
   esac
 done
@@ -174,9 +176,23 @@ in_queue() { gh api graphql -f query="{repository(owner:\"${REPO%/*}\",name:\"${
 queue_head() { # <pr>: the oid of the PR's merge-group head, empty when it has none
   gh api graphql -f query="{repository(owner:\"${REPO%/*}\",name:\"${REPO#*/}\"){pullRequest(number:$1){mergeQueueEntry{headCommit{oid}}}}}" \
     --jq '.data.repository.pullRequest.mergeQueueEntry.headCommit.oid // ""' 2>/dev/null; }
-summaries_green() { # <oid>: 0 when every summary check-run on the commit is completed and successful (and there is at least one)
-  [ "$(gh api "repos/$REPO/commits/$1/check-runs?per_page=100" \
-        --jq '[.check_runs[] | select(.name | test("summary"; "i"))] | (length > 0) and all(.status == "completed" and .conclusion == "success")' 2>/dev/null)" = "true" ]; }
+# The three summaries main's ruleset requires. A workflow's summary job (needs: its shards, if: always()) has no
+# check-run at all until those shards finish, so "every summary on the commit is green" read a group whose Perf
+# shards were still running as green: on 2026-10-13 three healthy groups were dequeued and enqueued again as
+# stalled 10 minutes after their Test and Lint summaries went green (23:14Z Perf and Archive in progress, 23:17Z
+# the nudge). Each of the three must EXIST and be green; only then has the group finished.
+REQUIRED_SUMMARIES=("Test Summary" "Lint summary" "Perf summary")
+summaries_green() { # <oid>: 0 when each required summary has a check-run on the commit, completed and successful
+  local name ok
+  for name in "${REQUIRED_SUMMARIES[@]}"; do
+    # check_name filters on the server by the exact name (no 100-run page to fall off); filter=latest is the
+    # newest run of that name, so a rerun's success replaces the failure it reran
+    ok=$(gh api "repos/$REPO/commits/$1/check-runs?check_name=${name// /%20}&filter=latest&per_page=100" \
+           --jq "[.check_runs[] | select(.name == \"$name\")] | (length > 0) and all(.status == \"completed\" and .conclusion == \"success\")" 2>/dev/null)
+    [ "$ok" = "true" ] || return 1
+  done
+  return 0
+}
 nudge_queue() { # <pr>: dequeue and enqueue again (the hand recovery for a stalled entry, #1041 and #1049)
   local id; id=$(gh pr view "$1" --repo "$REPO" --json id --jq .id) || return 1
   gh api graphql -f query="mutation { dequeuePullRequest(input:{id:\"$id\"}) { mergeQueueEntry { state } } }" >/dev/null 2>&1

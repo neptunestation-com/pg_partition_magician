@@ -27,6 +27,14 @@
   is never prose: the file is refused, exit 2. Guard `bench/review_tooling_verdicts.sh`, mutation
   `decisions_queue_skips_malformed_line`.
 
+- **`land.sh` no longer takes a merge group still running for a stalled one.** Its stall detector called a group
+  green when every summary check-run that existed on its commit was green, and a summary job has no check-run
+  until the shards it needs finish: with Test Summary and Lint summary green and the Perf shards still running,
+  the group read green, and `LAND_STALL_MIN` (10) minutes later a healthy group was dequeued and enqueued again
+  (three landings on 2026-10-13). Each of the three required summaries (Test Summary, Lint summary, Perf
+  summary) must now have a check-run on the commit, completed and successful, before the clock starts; each is
+  read by its exact name, so the commit's other check-runs cannot push it off the page. Guard
+  `bench/review_tooling_verdicts.sh`, mutation `land_stall_counts_existing_summaries`.
 - **The reference says a naive column of wall time east of UTC converts on a sub-day grid only with
   `p_force_frontier`** (#1275). Its transmute entry said such a column runs ahead of the frontier by its
   offset and that `obtain` greater than the offset in hours covers it on an hourly grid, but transmute's

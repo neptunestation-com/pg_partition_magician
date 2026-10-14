@@ -211,5 +211,48 @@ with tempfile.TemporaryDirectory() as d:
 sys.exit(1 if fail else 0)
 PY
 
+# ---------------------------------------------------------------- (d) land.sh's stall detector
+#   land.sh's summaries_green() called a merge group green when every summary check-run that EXISTED on it was
+#   green, and a summary job (needs: its shards, if: always()) has no check-run until its shards finish: with
+#   the Perf shards still running the group read green, and after LAND_STALL_MIN minutes a healthy group was
+#   dequeued and enqueued again (three landings on 2026-10-13). Driven through land.sh's own function with a
+#   stub `gh` answering from a fixture of check-runs. The controls: a finished group reads green, and the
+#   running group really holds two green summaries, which the old count read as all of them.
+#     land_stall_counts_existing_summaries    a required summary with no check-run reads green again
+fn=$(awk '/^REQUIRED_SUMMARIES=/{print} /^summaries_green\(\) *\{/{on=1} on{print} on&&/^\}/{exit}' "$R/land.sh")
+if ! grep -q '^summaries_green() *{' <<<"$fn"; then
+  bad "fixture: land.sh defines summaries_green()" "not found"
+else
+  # gh api <path> --jq <expr>: the check-runs of a fixture, filtered by ?check_name= as GitHub does
+  gh() {
+    local path="" jqx="." name=""
+    while [ $# -gt 0 ]; do
+      case "$1" in api) shift;; --jq) jqx=$2; shift 2;; -*) shift;; *) path=$1; shift;; esac
+    done
+    case "$path" in *check_name=*) name=${path#*check_name=}; name=${name%%&*}; name=${name//%20/ };; esac
+    jq --arg n "$name" '{check_runs: [.[] | select($n == "" or .name == $n)]}' "$GROUP" | jq -r "$jqx"
+  }
+  eval "$fn"
+  REPO=o/r; export REPO   # read by the eval'd function
+  group() { GROUP="$work/group.json"; printf '%s\n' "$1" > "$GROUP"; }
+  sm() { printf '{"name":"%s","status":"%s","conclusion":%s}' "$1" "$2" "$3"; }
+  green='"success"'
+  group "[$(sm "Test Summary" completed "$green"),$(sm "Lint summary" completed "$green"),$(sm "Perf summary" completed "$green"),$(sm "perf (shard 1/4)" completed "$green")]"
+  summaries_green abc; check $? "LIVENESS: (d) a finished group, all three summaries green, reads green" ""
+  # 23:14Z on 2026-10-13: Test and Lint summaries green, the Perf shards running, so no Perf summary yet
+  group "[$(sm "Test Summary" completed "$green"),$(sm "Lint summary" completed "$green"),$(sm "perf (shard 2/4)" in_progress null),$(sm "archive (PG15)" in_progress null)]"
+  n_green=$(jq '[.[] | select((.name | test("summary"; "i")) and .conclusion == "success")] | length' "$GROUP")
+  check "$([ "$n_green" = 2 ] && echo 0 || echo 1)" "LIVENESS: (d) the running group has two summaries, both green" "$n_green green"
+  if summaries_green abc; then bad "(d) a group whose Perf shards still run is not green" "read green: a stall would be declared"
+  else ok "(d) a group whose Perf shards still run is not green" ""; fi
+  group "[$(sm "Test Summary" completed "$green"),$(sm "Lint summary" completed "$green"),$(sm "Perf summary" in_progress null)]"
+  if summaries_green abc; then bad "(d) a Perf summary still in progress is not green" "read green"
+  else ok "(d) a Perf summary still in progress is not green" ""; fi
+  group "[$(sm "Test Summary" completed "$green"),$(sm "Lint summary" completed '"failure"'),$(sm "Perf summary" completed "$green")]"
+  if summaries_green abc; then bad "(d) a failed Lint summary is not green" "read green"
+  else ok "(d) a failed Lint summary is not green" ""; fi
+  unset -f gh
+fi
+
 if [ "$fail" = 0 ]; then echo "review_tooling_verdicts: PASS"; else echo "review_tooling_verdicts: FAIL"; fi
 exit "$fail"

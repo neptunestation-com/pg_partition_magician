@@ -14182,6 +14182,15 @@ MUTATIONS["decisions_queue_skips_malformed_line"] = (
       '        if not ln.startswith("- D"):\n', 1)],
 )
 MUTATION_SRC["decisions_queue_skips_malformed_line"] = "scripts/review/decisions_queue.py"
+MUTATIONS["land_stall_counts_existing_summaries"] = (
+    "bench/review_tooling_verdicts.sh",
+    "land.sh's stall detector before 2026-10-14: a required summary with no check-run on the merge group's "
+    "commit reads as green, so a group whose Perf shards are still running (no Perf summary check-run yet) "
+    "reads every summary green once Test and Lint are, and LAND_STALL_MIN later the healthy group is dequeued "
+    "and enqueued again. One clause, the per-summary `length > 0`. The guard's (d) catches it.",
+    [("(length > 0) and all(.status", "all(.status", 1)],
+)
+MUTATION_SRC["land_stall_counts_existing_summaries"] = "scripts/review/land.sh"
 
 
 # Issue #1272: the remedy every retain_disown row logs (pgpm._disown_retirement, its one writer) is the whole repair the
