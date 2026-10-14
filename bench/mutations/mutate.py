@@ -14519,6 +14519,15 @@ MUTATIONS["archive_child_by_oid_cast_chain_unread"] = (
     [("        if last_part(toks[c + 1][1]) in NUMBER_TYPES:\n",
       "        if last_part(toks[c + 1][1]) in NUMBER_TYPES | TEXT_TYPES:\n", 1)],
 )
+MUTATIONS["archive_child_by_oid_cast_case_unread"] = (
+    _G1287,
+    "PR #1323's verification (V-01): scripts/check_archive_child_by_oid.py takes the END closing a CASE for a lone "
+    "identifier, so a name built at run time and cast as `case when ... then v_nsp || '.' || v_rel end::regclass` "
+    "passes rule 1 while the same name in parentheses is refused. One site, the CASE in the cast's operand.",
+    [('    elif toks[s] == ("ID", "end", toks[s][2]):\n'
+      "        s = match_case(toks, s)                       # CASE ... END, an expression closed by a keyword\n",
+      "", 1)],
+)
 MUTATIONS["archive_child_by_oid_data_read_unread"] = (
     _G1287,
     "Pre-fix scripts/check_archive_child_by_oid.py (#1180, F12r-06): a literal naming a name column is no name, so "
@@ -14545,6 +14554,7 @@ MUTATION_SRC["archive_child_by_oid_cast_qualified_unread"] = _G1287_SRC
 MUTATION_SRC["archive_child_by_oid_cast_as_unread"] = _G1287_SRC
 MUTATION_SRC["archive_child_by_oid_cast_call_unread"] = _G1287_SRC
 MUTATION_SRC["archive_child_by_oid_cast_chain_unread"] = _G1287_SRC
+MUTATION_SRC["archive_child_by_oid_cast_case_unread"] = _G1287_SRC
 MUTATION_SRC["archive_child_by_oid_data_read_unread"] = _G1287_SRC
 MUTATION_SRC["archive_child_by_oid_identity_unread"] = _G1287_SRC
 MUTATION_SRC["archive_child_by_oid_set_operation_unread"] = _G1287_SRC

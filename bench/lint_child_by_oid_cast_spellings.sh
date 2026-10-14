@@ -30,6 +30,7 @@
 #   archive_child_by_oid_cast_as_unread         -- CAST(x AS regclass) is no cast to the rule (#1287)
 #   archive_child_by_oid_cast_call_unread       -- regclass(x) is no cast to the rule (#1287)
 #   archive_child_by_oid_cast_chain_unread      -- a cast to text on the way makes the value no name (#1287)
+#   archive_child_by_oid_cast_case_unread       -- a CASE ... END cast to regclass is a lone `end` (#1323's V-01)
 #   archive_child_by_oid_data_read_unread       -- a name column named as data is no name (#1180)
 #   archive_child_by_oid_identity_unread        -- an object's rendered identity is no name (#1180)
 #   archive_child_by_oid_set_operation_unread   -- a set operation compares nothing (#1180)
@@ -120,7 +121,9 @@ for label, expr in (("(...)::pg_catalog.regclass", f"({BUILT})::pg_catalog.regcl
                     ("CAST((...) AS pg_catalog.regclass)", f"CAST(({BUILT}) AS pg_catalog.regclass)"),
                     ("regclass(...)", f"regclass({BUILT})"),
                     ("pg_catalog.regclass(...)", f"pg_catalog.regclass({BUILT})"),
-                    ("(...)::text::regclass", f"({BUILT})::text::regclass")):
+                    ("(...)::text::regclass", f"({BUILT})::text::regclass"),
+                    ("case ... end::regclass (#1323 V-01)", f"case when v_nsp is not null then {BUILT} end::regclass"),
+                    ("case ... end::pg_catalog.regclass", f"case when v_rel is null then null else {BUILT} end::pg_catalog.regclass")):
     report(refused(f"  v_x := {expr};", CAST), f"a built name cast as {label} is refused", "#1287")
 
 # ... and the local a relname was selected INTO, cast the same ways

@@ -52,8 +52,9 @@ names to refuse (rule 1's last paragraph):
      same-named columns without naming one. A local a name is selected INTO (item for target) may not be
      compared, stand in a lookup clause, go to format(), to_regclass() or regclassin(), or be cast to regclass.
      And nothing but a lone identifier, literal or parameter (or an element of one, `v_oids[1]`) is cast to
-     regclass: an expression, a call, a parenthesis or an ARRAY[...] cast to it is a relation found by a name
-     built at run time (`(v_nsp || '.' || v_rel)::regclass`). A cast is a cast in every
+     regclass: an expression, a call, a parenthesis, a CASE ... END or an ARRAY[...] cast to it is a relation
+     found by a name built at run time (`(v_nsp || '.' || v_rel)::regclass`, `case when ... then v_nsp || '.' ||
+     v_rel end::regclass`, PR #1323's V-01). A cast is a cast in every
      spelling the grammar has (#1287: only `)::regclass` was read): `x::regclass`, CAST(x AS regclass) and
      regclass(x), the type schema-qualified or quoted (`::pg_catalog.regclass`, `:: pg_catalog . "regclass"`)
      or an array of it (`::regclass[]`), for the built name and for the local alike. Casts on the way are part
@@ -98,7 +99,9 @@ not make by a cast: a regclass-typed parameter, local or column rendered by a ca
 (`array_agg(c.oid::regclass)::text`). A cast the text does not spell: text is cast to regclass implicitly
 wherever a regclass is expected, so a name built at run time and handed to a regclass parameter
 (`pg_relation_size(v_nsp || '.' || v_rel)`) or assigned to a regclass local (`v_x := v_nsp || '.' || v_rel`) is
-not seen. A cast-made regclass or regtype that reaches its rendering through any
+not seen. Nor is a cast to a DOMAIN over regclass (`create domain archive.d as regclass`, then `(v_nsp || '.' ||
+v_rel)::archive.d` or CAST(... AS archive.d)), which resolves the name as regclass does: the cast is read by the
+type's name, and a lexer does not follow a domain to its base type (PR #1323's V-02). A cast-made regclass or regtype that reaches its rendering through any
 expression other than the forms rule 1 follows (further casts, CAST ... AS, grouping parentheses, || and a
 rendering call around it): `coalesce(c.oid::regclass)::text = v_rel`, the same under greatest(), a CASE or a
 scalar subquery, or format() of coalesce(). A name column read without its name: a row walked as key-value
@@ -400,9 +403,25 @@ def value_start(toks, j):
         s = match_open(toks, s)
         if is_call(toks, s):
             s -= 1
+    elif toks[s] == ("ID", "end", toks[s][2]):
+        s = match_case(toks, s)                       # CASE ... END, an expression closed by a keyword
     if s >= 2 and toks[s - 1][1] == "::":
         return value_start(toks, s - 2)
     return s
+
+
+def match_case(toks, q):
+    """The index of the CASE that the END at q closes, counting the CASEs nested in it, or q itself when no CASE
+    of the same statement opens it."""
+    depth = 0
+    for j in range(q, -1, -1):
+        if toks[j][1] == ";" or toks[j][0] == "DOLLAR":
+            break
+        if toks[j][0] == "ID":
+            depth += (toks[j][1] == "end") - (toks[j][1] == "case")
+            if depth == 0:
+                return j
+    return q
 
 
 def identities(toks):
@@ -448,7 +467,7 @@ def cast_source(toks, s, e):
     or parameter, subscripted or not, whose type a lexer cannot know (the docstring's limit), reached through any
     `::` casts but one to a number type; ("number", None) when the last `::` cast on it is to a number type, an
     oid again;
-    ("built", None) for anything else, an expression, a call, a parenthesis or an ARRAY[...] constructor: a
+    ("built", None) for anything else, an expression, a call, a parenthesis, a CASE or an ARRAY[...] constructor: a
     name built at run time."""
     while s <= e:
         while toks[e][1] == "]" and e > s:            # v_oids[1]: the element of a lone array
@@ -1217,6 +1236,10 @@ BUILT_CASTS = {
                         (f"({BUILT})::text::regclass", f"({BUILT})::text::regclass"),
                         (f"({BUILT})::character varying::regclass", f"({BUILT})::character varying::regclass"),
                         (f"cast(cast({BUILT} as text) as regclass)", f"cast(cast({BUILT} as text) as regclass)"),
+                        (f"case when v_nsp is not null then {BUILT} end::regclass (V-01)",
+                         f"case when v_nsp is not null then {BUILT} end::regclass"),
+                        (f"case when v_nsp is not null then {BUILT} end::text::regclass (V-01)",
+                         f"case when v_nsp is not null then {BUILT} end::text::regclass"),
                         ("cast(v_nsp as oid)::regclass", "cast(v_nsp as oid)::regclass"),
                         (f"(array[{BUILT}]::regclass[])[1]", f"(array[{BUILT}]::regclass[])[1]"),
                         (f"(cast(array[{BUILT}] as regclass[]))[1]", f"(cast(array[{BUILT}] as regclass[]))[1]"),

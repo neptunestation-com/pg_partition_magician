@@ -9,14 +9,16 @@
   violation, and so did the name cast through text on the way (`(...)::text::regclass`) and a local holding a
   relname cast any of those ways. The rule now reads the cast, not one spelling of it: `x::regclass`,
   `CAST(x AS regclass)` and `regclass(x)`, the type schema-qualified, quoted or an array of it, and nothing but
-  a lone identifier, literal, parameter or array element may be its operand. A value cast to a number type
-  last (`(x)::oid::regclass`) is an oid again and may be cast; a cast to anything else on the way is part of
-  the cast. Still not seen (the checker's docstring says why, and `tests/archive/db/49` is the net): a lone
+  a lone identifier, literal, parameter or array element may be its operand (an expression, a call, a
+  parenthesis, a `CASE ... END` or an `ARRAY[...]` may not). A value cast to a number type last
+  (`(x)::oid::regclass`) is an oid again and may be cast; a cast to anything else on the way is part of the
+  cast. Still not seen (the checker's docstring says why, and `tests/archive/db/49` is the net): a lone
   identifier that holds text, the implicit cast of text handed to a regclass parameter or assigned to a
-  regclass local, and a type name written as a Unicode escape (`::U&"\0072egclass"`), which the lexer does
-  not decode. Guard `bench/lint_child_by_oid_cast_spellings.sh`, mutations
-  `archive_child_by_oid_cast_qualified_unread`, `archive_child_by_oid_cast_as_unread`,
-  `archive_child_by_oid_cast_call_unread` and `archive_child_by_oid_cast_chain_unread`.
+  regclass local, a cast to a domain over regclass, and a type name written as a Unicode escape
+  (`::U&"\0072egclass"`), which the lexer does not decode. Guard `bench/lint_child_by_oid_cast_spellings.sh`,
+  mutations `archive_child_by_oid_cast_qualified_unread`, `archive_child_by_oid_cast_as_unread`,
+  `archive_child_by_oid_cast_call_unread`, `archive_child_by_oid_cast_chain_unread` and
+  `archive_child_by_oid_cast_case_unread`.
 
 - **The child-by-oid lint reads three more spellings of a relation's name** (#1180). Rule 1 passed a function
   that found a relation by the name column read as data out of its `pg_class` row
