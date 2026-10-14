@@ -34,6 +34,10 @@
 #   archive_child_by_oid_data_read_unread       -- a name column named as data is no name (#1180)
 #   archive_child_by_oid_identity_unread        -- an object's rendered identity is no name (#1180)
 #   archive_child_by_oid_set_operation_unread   -- a set operation compares nothing (#1180)
+#   archive_child_by_oid_set_operation_flat     -- set operations without precedence: `a UNION ALL b INTERSECT c`
+#                                                  refuses a name in a, which nothing compares (PR #1323's review)
+#   archive_child_by_oid_identity_any_field     -- every field of pg_identify_object() is a name, so `.type =
+#                                                  'table'` is refused (PR #1323's review)
 #
 # Usage: lint_child_by_oid_cast_spellings.sh <container> <db> [checker.py]
 # The container and database are accepted for the shape bench/discriminate.sh calls every guard with and are
@@ -180,5 +184,20 @@ report(clean("  select c.relname into v_rel from pg_class c where c.oid = p_pare
              "  union all select c.relname from pg_class c where c.oid = p_parent;\n"
              "  raise notice '%', v_rel;"),
        "LIVENESS: a name alone under UNION ALL is clean")
+
+# --- PR #1323's review: what the rule must NOT refuse (each beside its twin that it must) -------------------------
+# INTERSECT binds tighter than UNION ALL, so in `a UNION ALL b INTERSECT c` only b and c are compared
+report(refused("  select v_nsp into v_rel union all select c.relname from pg_class c\n"
+               "  intersect select v_nsp;", "c.relname stands in the select list of a query under INTERSECT"),
+       "LIVENESS: the name in b of a UNION ALL b INTERSECT c is refused")
+report(clean("  select c.relname into v_rel from pg_class c where c.oid = p_parent\n"
+             "  union all select v_nsp intersect select v_nsp;\n"
+             "  raise notice '%', v_rel;"),
+       "the name in a of a UNION ALL b INTERSECT c is clean", "precedence")
+# an object's type or schema read off pg_identify_object() is no name; its name and identity are
+report(refused(by("(pg_identify_object('pg_class'::regclass, c.oid, 0)).name = v_rel"), SAID),
+       "LIVENESS: a lookup by (pg_identify_object(...)).name is refused")
+report(clean(by("(pg_identify_object('pg_class'::regclass, c.oid, 0)).type = 'table' and c.oid = p_parent")),
+       "(pg_identify_object(...)).type = 'table' is clean", "fields")
 sys.exit(fail)
 PY

@@ -14550,6 +14550,25 @@ MUTATIONS["archive_child_by_oid_set_operation_unread"] = (
     [('        op = set_operation(toks, *item) if clause_at[s] == "select" else None\n',
       "        op = None\n", 1)],
 )
+MUTATIONS["archive_child_by_oid_set_operation_flat"] = (
+    _G1287,
+    "PR #1323's review (codex): scripts/check_archive_child_by_oid.py reads the set operations of a statement "
+    "without the grammar's precedence, so the first query of `a UNION ALL b INTERSECT c`, which INTERSECT does not "
+    "reach, is refused as compared and a report CI should pass fails. One site, the INTERSECT groups.",
+    [('    level = [o for o in ops if o[0] != "intersect"]    # the operators joining INTERSECT groups\n',
+      "    level = ops\n", 1)],
+)
+MUTATIONS["archive_child_by_oid_identity_any_field"] = (
+    _G1287,
+    "PR #1323's review (codex): every field read off pg_identify_object() is a rendered name to "
+    "scripts/check_archive_child_by_oid.py, so `(pg_identify_object(...)).type = 'table'` is refused as a lookup by "
+    "name. One site, the fields that hold no name.",
+    [("                if last_part(tok(toks, e + 3)[1]) not in IDENTITY_FIELDS:\n"
+      "                    continue                          # the object's type, schema or arguments, no name\n",
+      "", 1)],
+)
+MUTATION_SRC["archive_child_by_oid_set_operation_flat"] = _G1287_SRC
+MUTATION_SRC["archive_child_by_oid_identity_any_field"] = _G1287_SRC
 MUTATION_SRC["archive_child_by_oid_cast_qualified_unread"] = _G1287_SRC
 MUTATION_SRC["archive_child_by_oid_cast_as_unread"] = _G1287_SRC
 MUTATION_SRC["archive_child_by_oid_cast_call_unread"] = _G1287_SRC

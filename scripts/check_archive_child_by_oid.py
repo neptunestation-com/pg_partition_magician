@@ -35,7 +35,7 @@ names to refuse (rule 1's last paragraph):
      `j['relname']`, a json[b]_extract_path[_text]() call). And an object's identity is its name as
      pg_identify_object(), pg_identify_object_as_address() or pg_describe_object() render it (#1180:
      `(pg_identify_object('pg_class'::regclass, c.oid, 0)).identity = v_rel`), the call with the field read
-     off it.
+     off it; a field that holds no name (`.type`, `.schema`, `.object_args`) is none.
      The rule is the INVERSE of a list of forbidden places, because each list gained a spelling per round (#1154: a
      simple CASE in an ORDER BY, `order by case c.relname when k.relname then 0 else 1 end limit 1`, has no
      operator token and was in no clause the list named). A name may stand in exactly two places, read off a
@@ -46,7 +46,8 @@ names to refuse (rule 1's last paragraph):
      (`(c.relname)::text` alone is still alone). Not in the select list of a query that is an operand of
      UNION, INTERSECT or EXCEPT, though, which compare it with the other operand's column without an operator
      (#1180: `select c.relname, c.oid into v_name, v_oid from pg_class c intersect select p_name::name, c2.oid
-     from pg_class c2`); UNION ALL compares nothing and is no such operand. Anywhere else is refused: a WHERE,
+     from pg_class c2`); UNION ALL compares nothing, and by the grammar's precedence (INTERSECT binds tighter)
+     the first query of `a UNION ALL b INTERSECT c` is an operand of UNION ALL only. Anywhere else is refused: a WHERE,
      ON, HAVING, USING, ORDER BY or GROUP BY clause, a CASE, an operator or a call in a select item (which a
      positional ORDER BY can sort by), an alias, a plpgsql expression. No NATURAL JOIN, which compares
      same-named columns without naming one. A local a name is selected INTO (item for target) may not be
@@ -181,6 +182,9 @@ NAMES_NAME_COLUMN = re.compile(r'(?:(?:strict|lax)\s+)?(?:\$\s*\.\s*)?(\{\s*)?("
 RAISE_LEVELS = {"debug", "log", "info", "notice", "warning", "exception"}
 # The calls that render an object's identity, a relation's among them, as its (schema-qualified) name.
 IDENTITY_FNS = {"pg_identify_object", "pg_identify_object_as_address", "pg_describe_object"}
+# The fields of their rows that hold the name: pg_identify_object()'s name and identity (for a table, `evt` and
+# `a.evt`), and pg_identify_object_as_address()'s object_names (`{a,evt}`). Its type, schema and object_args do not.
+IDENTITY_FIELDS = {"identity", "name", "object_names"}
 # The set operations that compare a select list with another's. UNION ALL keeps every row and compares nothing.
 SET_OPS = {"union", "intersect", "except"}
 RENDER_FNS = {"text", "varchar", "name", "bpchar", "format", "concat", "concat_ws", "quote_literal", "quote_nullable",
@@ -430,13 +434,18 @@ def match_case(toks, q):
 
 def identities(toks):
     """[(s, e)]: every call that renders an object's identity as its name (IDENTITY_FNS), with the field read off
-    it when the call is a parenthesised row: `(pg_identify_object(...)).identity` is one value (#1180)."""
+    it when the call is a parenthesised row: `(pg_identify_object(...)).identity` is one value (#1180). A field
+    that holds no name (IDENTITY_FIELDS: `.type`, `.schema`, `.object_args`) is no name either (PR #1323's
+    review): `(pg_identify_object(...)).type = 'table'` is not a lookup by name. The row read whole, or in a FROM
+    clause under an alias, is still a name: this check does not follow an alias to the field it reads."""
     out = []
     for k, (kind, text, _) in enumerate(toks):
         if kind == "ID" and last_part(text) in IDENTITY_FNS and tok(toks, k + 1)[1] == "(":
             s, e = k, match_close(toks, k + 1)
             if tok(toks, s - 1)[1] == "(" and tok(toks, e + 1)[1] == ")" and not is_call(toks, s - 1) \
                     and tok(toks, e + 2)[1] == "." and tok(toks, e + 3)[0] == "ID":
+                if last_part(tok(toks, e + 3)[1]) not in IDENTITY_FIELDS:
+                    continue                          # the object's type, schema or arguments, no name
                 s, e = s - 1, e + 3
             out.append((s, e))
     return out
@@ -522,12 +531,18 @@ def regclass_casts(toks):
 
 
 def set_operation(toks, a, b):
-    """The set operation (SET_OPS) the query whose select-list item is toks[a:b] is an operand of, at its own
-    depth in its own statement, or None. UNION ALL is none: it keeps every row and compares no column."""
-    def compares(j):
-        return toks[j][0] == "ID" and toks[j][1] in SET_OPS and (toks[j][1], tok(toks, j + 1)[1]) != ("union", "all")
+    """The set operation (SET_OPS) that compares the rows of the query whose select-list item is toks[a:b], at its
+    own depth in its own statement, or None. By the grammar's precedence (PR #1323's review): INTERSECT binds
+    tighter than UNION and EXCEPT, which associate left, so a query is compared by an INTERSECT beside it, or by
+    the UNION or EXCEPT that joins its INTERSECT group to what precedes, or by any UNION or EXCEPT after that
+    group, whose left operand then holds its rows. UNION ALL compares nothing: `a UNION ALL b INTERSECT c`
+    keeps every row of a."""
+    def op_at(j):
+        if toks[j][0] == "ID" and toks[j][1] in SET_OPS:
+            return toks[j][1], tok(toks, j + 1)[1] == "all"
+        return None
 
-    depth, j = 0, b
+    after, depth, j = [], 0, b
     while j < len(toks):
         kind, t, _ = toks[j]
         if t == "(":
@@ -538,10 +553,10 @@ def set_operation(toks, a, b):
             depth -= 1
         elif depth == 0 and (t == ";" or kind == "DOLLAR" or (kind == "ID" and t == "loop")):
             break
-        elif depth == 0 and compares(j):
-            return t
+        elif depth == 0 and op_at(j):
+            after.append(op_at(j))
         j += 1
-    depth, j = 0, a - 1
+    before, depth, j = [], 0, a - 1
     while j >= 0:
         kind, t, _ = toks[j]
         if t == ")":
@@ -552,9 +567,18 @@ def set_operation(toks, a, b):
             depth -= 1
         elif depth == 0 and (t == ";" or kind == "DOLLAR" or (kind == "ID" and t in ("loop", "begin"))):
             break
-        elif depth == 0 and compares(j):
-            return t
+        elif depth == 0 and op_at(j):
+            before.insert(0, op_at(j))
         j -= 1
+    ops, i = before + after, len(before)               # this query is the operand between ops[i - 1] and ops[i]
+    near = ([ops[i - 1]] if i else []) + ops[i:i + 1]
+    if any(w == "intersect" for w, _ in near):
+        return "intersect"
+    level = [o for o in ops if o[0] != "intersect"]    # the operators joining INTERSECT groups
+    joined = level[len([o for o in before if o[0] != "intersect"]) - 1:] if before else level
+    for w, all_rows in joined:
+        if (w, all_rows) != ("union", True):
+            return w
     return None
 
 
@@ -1281,7 +1305,12 @@ IDENTITY = {
     for label, pred in (("(pg_identify_object('pg_class'::regclass, c.oid, 0)).identity = v_rel",
                          "(pg_identify_object('pg_class'::regclass, c.oid, 0)).identity = v_rel"),
                         ("pg_describe_object('pg_class'::regclass, c.oid, 0) = 'table ' || v_rel",
-                         "pg_describe_object('pg_class'::regclass, c.oid, 0) = 'table ' || v_rel"))}
+                         "pg_describe_object('pg_class'::regclass, c.oid, 0) = 'table ' || v_rel"),
+                        ("(pg_identify_object(...)).name = v_rel",
+                         "(pg_identify_object('pg_class'::regclass, c.oid, 0)).name = v_rel"),
+                        ("(pg_identify_object_as_address(...)).object_names = array[v_nsp, v_rel]::text[]",
+                         "(pg_identify_object_as_address('pg_class'::regclass, c.oid, 0)).object_names"
+                         " = array[v_nsp, v_rel]::text[]"))}
 SET_COMPARED = {
     label: plant(f"  {stmt}", params="p_parent regclass")
     for label, stmt in (("INTERSECT, the name in the first operand",
@@ -1294,7 +1323,25 @@ SET_COMPARED = {
                          "select c.relname, c.oid into v_rel, v_oid from pg_class c\n"
                          "  except select v_nsp, c2.oid from pg_class c2;"),
                         ("UNION",
-                         "select c.relname into v_rel from pg_class c where c.oid = p_parent union select v_nsp;"))}
+                         "select c.relname into v_rel from pg_class c where c.oid = p_parent union select v_nsp;"),
+                        ("INTERSECT, the name in an INTERSECT under a UNION ALL",
+                         "select v_nsp into v_rel union all select c.relname from pg_class c\n"
+                         "  intersect select v_nsp;"),
+                        ("UNION, after a UNION ALL that holds the name",
+                         "select c.relname into v_rel from pg_class c union all select v_nsp union select v_nsp;"))}
+# PR #1323's review: the grammar's precedence. INTERSECT binds tighter, so the name in the first operand of
+# `a UNION ALL b INTERSECT c`, or in the last of `a INTERSECT b UNION ALL c`, is compared by nothing; and an
+# object's type or schema read off pg_identify_object() is no name
+PRECEDENCE_CLEAN = plant(
+    "  select c.relname into v_rel from pg_class c where c.oid = p_parent\n"
+    "  union all select v_nsp intersect select v_nsp;\n"
+    "  select v_nsp into v_rel intersect select v_nsp\n"
+    "  union all select c.relname from pg_class c where c.oid = p_parent;", params="p_parent regclass")
+IDENTITY_FIELD_CLEAN = plant(
+    "  select c.oid into v_oid from pg_class c\n"
+    "   where (pg_identify_object('pg_class'::regclass, c.oid, 0)).type = 'table'\n"
+    "     and (pg_identify_object('pg_class'::regclass, c.oid, 0)).schema = 'archive' and c.oid = p_parent;",
+    params="p_parent regclass")
 # the control: each read alone, off a row found by oid, and reported; a UNION ALL, which compares nothing; a set
 # operation of another statement or of a subquery; and a RAISE whose format string happens to spell a name column
 READ_AS_DATA_REPORTED = plant(
@@ -1429,6 +1476,10 @@ def selftest():
                f"c.relname stands in the select list of a query under {label.split(',')[0]}")
     expect("a name read as data or as an identity and reported, a UNION ALL, another statement's set operation",
            READ_AS_DATA_REPORTED, True)
+    expect("PR #1323's review: a name under UNION ALL beside an INTERSECT of other queries, by precedence",
+           PRECEDENCE_CLEAN, True)
+    expect("PR #1323's review: an object's type and schema read off pg_identify_object() are no name",
+           IDENTITY_FIELD_CLEAN, True)
     expect("a select item comparing relname by a simple CASE, the query sorted by its position", POSITIONAL, False,
            "relname stands in an expression of a select item")
     expect("a function of relname in an ORDER BY", ORDER_FUNCTION, False, "relname stands in the ORDER clause")

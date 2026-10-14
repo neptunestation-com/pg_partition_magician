@@ -28,9 +28,11 @@
   standing alone in its select list (`select c.relname, c.oid ... intersect select v_rel, c2.oid ...`). A
   literal that names a name column (`'relname'`, a path `'{relname}'`, a jsonpath `'$.relname'`) is now the
   column wherever it stands, the whole field read with it; `pg_identify_object()`,
-  `pg_identify_object_as_address()` and `pg_describe_object()` render a name as a cast-made regclass does; and
-  a name may not stand in the select list of a query that is an operand of `UNION`, `INTERSECT` or `EXCEPT`
-  (`UNION ALL` compares nothing and is allowed). Each may still be read alone off a row found by oid and
+  `pg_identify_object_as_address()` and `pg_describe_object()` render a name as a cast-made regclass does (the
+  fields that hold one: `identity`, `name`, `object_names`; not `type`, `schema` or `object_args`); and a name
+  may not stand in the select list of a query that a `UNION`, `INTERSECT` or `EXCEPT` compares, by the
+  grammar's precedence (`UNION ALL` compares nothing, and `INTERSECT` binds tighter, so the first query of
+  `a UNION ALL b INTERSECT c` is allowed). Each may still be read alone off a row found by oid and
   reported. Documented as limits rather than chased (the checker's docstring; `tests/archive/db/49` is the
   net): a row walked as key-value pairs, a field name computed at run time or spelled inside a larger literal,
   a name inside a definition another call renders, and `pg_get_object_address()` handed the name in parts. The
