@@ -1989,16 +1989,35 @@ $$;
 -- which the gate excuses at any label, a coarser one-off regrain's included.
 create or replace function pgpm._grid_can_label(p_kind text, p_step text, p_anchor text, p_tz text, p_suffix text)
 returns boolean language plpgsql stable as $$
-declare v_secs numeric; v_step_hi text; v_coarsest int; v_g text[]; v_rank int;
+declare v_secs numeric; v_step_hi text; v_year_hi text; v_month_hi text; v_coarsest int; v_g text[]; v_rank int;
 begin
   if p_kind = 'id' then
     return true;
   end if;
   v_secs := extract(epoch from p_step::interval);
-  v_step_hi := pgpm._grid_next(p_kind, p_step, p_anchor, p_tz);
+  -- A probe past the end of PostgreSQL's timestamps (an anchor within a year, or a month, of 294276 AD)
+  -- names no cell, and set_regrain cannot accept that target either: that granularity is out of reach. The
+  -- step's own probe overflowing says nothing about reach, so the kind's label test stands alone then.
+  -- Asked of every relation named <rel>_p..., the grid's own partitions included, so a raise here failed
+  -- every conversion and every restore on such a grid, holder or not.
+  begin
+    v_step_hi := pgpm._grid_next(p_kind, p_step, p_anchor, p_tz);
+  exception when datetime_field_overflow then
+    return true;
+  end;
+  begin
+    v_year_hi := pgpm._grid_next(p_kind, '1 year', p_anchor, p_tz);
+  exception when datetime_field_overflow then
+    v_year_hi := null;
+  end;
+  begin
+    v_month_hi := pgpm._grid_next(p_kind, '1 month', p_anchor, p_tz);
+  exception when datetime_field_overflow then
+    v_month_hi := null;
+  end;
   v_coarsest := case
-    when not pgpm._native_gt(p_kind, pgpm._grid_next(p_kind, '1 year', p_anchor, p_tz), v_step_hi) then 1
-    when not pgpm._native_gt(p_kind, pgpm._grid_next(p_kind, '1 month', p_anchor, p_tz), v_step_hi) then 2
+    when v_year_hi is not null and not pgpm._native_gt(p_kind, v_year_hi, v_step_hi) then 1
+    when v_month_hi is not null and not pgpm._native_gt(p_kind, v_month_hi, v_step_hi) then 2
     when v_secs >= 86400 then 3 when v_secs >= 3600 then 4 when v_secs >= 60 then 5
     when v_secs >= 1 then 6 else 7 end;
   -- the label's own granularity, read off its shape: a year, a month, a day, then the fourth group's width

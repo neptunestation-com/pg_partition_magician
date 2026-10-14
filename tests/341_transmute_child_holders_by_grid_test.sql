@@ -38,6 +38,9 @@
 --       renamed aside keeps names like these, #496); the later refusals fire where the names are reached:
 --       regrain_step refuses the first (#631), obtain leaves the second's cell unbuilt and logs
 --       fail_obtain_name naming it, and the other table keeps both partitions and both rows.
+--   (L) t341l, '1 month' grid anchored at 294276-01-01, within a year of PostgreSQL's last timestamp, beside
+--       the operator's t341l_p2023: the '1 year' probe overflows, which is a granularity out of reach, not an
+--       error, so the conversion goes through and the table is left alone.
 --   (H) t341h, '1 month' grid converted with p_incoming_fks => 'preserve' beside the operator's t341h_p2023
 --       (ids 7 and 8): the cutover drops r341h_fk, and restore_incoming_fks, whose in-flight gate recognises a
 --       fine child's name as the orphan guard does, must not take the table the guard let through for an
@@ -51,7 +54,7 @@
 -- hierarchy refusal past the names the conversion creates (child_holders_inherits_any_name).
 create extension if not exists pgtap;
 
-select plan(55);
+select plan(58);
 
 set timezone = 'UTC';
 
@@ -368,5 +371,23 @@ select throws_ok($$ insert into public.r341h values (999, '2024-03-07 00:00+00')
 select is((select relkind::text || '/' || relispartition::text || '/' || (select array_agg(id order by id)::text from public.t341h_p2023)
              from pg_class where oid = 'public.t341h_p2023'::regclass),
           'r/false/{7,8}', '(H) t341h_p2023 is still the operator''s standalone table, holding ids 7 and 8');
+
+-- ---------------------------------------------------------------------------------------------------------
+-- (L) a probe past PostgreSQL's last timestamp is a granularity out of reach, not an error
+create table public.t341l (id bigint not null, ts timestamptz not null, primary key (id, ts));
+insert into public.t341l select g, '2024-03-01 00:00+00'::timestamptz + g * interval '1 day' from generate_series(0, 19) g;
+create table public.t341l_p2023 (note text);
+insert into public.t341l_p2023 values ('mine');
+select throws_ok($$ select pgpm._grid_next('time', '1 year', pgpm._ts_text('294276-01-01 00:00+00'), 'UTC') $$,
+                 '22008', NULL,
+                 'LIVENESS: (L) a year from the anchor 294276-01-01 is past PostgreSQL''s last timestamp');
+\set ON_ERROR_STOP 0
+call pgpm.transmute('public.t341l', 'ts', interval '1 month', p_obtain => 2, p_anchor => '294276-01-01 00:00+00');
+\set ON_ERROR_STOP 1
+select is((select relkind::text from pg_class where oid = 'public.t341l'::regclass), 'p',
+          '(L) t341l converts on its monthly grid anchored in PostgreSQL''s last year: the year probe''s overflow refuses nothing');
+select is((select relkind::text || '/' || (select array_agg(note)::text from public.t341l_p2023)
+             from pg_class where oid = 'public.t341l_p2023'::regclass),
+          'r/{mine}', '(L) and t341l_p2023 is still the operator''s table, with its row');
 
 select * from finish();

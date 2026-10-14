@@ -26,6 +26,8 @@
 #   child_holders_inherits_any_name    -- a hierarchy member at ANY name in reach is a holder: part K's
 #                                         conversion is refused by another table's partition at a regrain
 #                                         cell's name inside the monolith
+#   grid_label_year_probe_overflow_raises -- the '1 year' probe raises past PostgreSQL's last timestamp:
+#                                         part L's conversion dies with a raw 22008
 #   restore_gate_any_kind_label        -- restore_incoming_fks's gate asks the kind's label test alone: part
 #                                         H's incoming key is never re-added beside t341h_p2023
 #

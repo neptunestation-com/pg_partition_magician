@@ -14063,6 +14063,15 @@ MUTATIONS["child_holders_inherits_any_name"] = (
     [("          or (c.relname = any (p_created)\n"
       "              and not exists", "          or (not exists", 1)],
 )
+MUTATIONS["grid_label_year_probe_overflow_raises"] = (
+    _G17,
+    "#1274 with _grid_can_label's '1 year' probe no longer catching datetime_field_overflow: on a grid anchored "
+    "within a year of PostgreSQL's last timestamp the probe raises 22008 for every relation named <rel>_p..., "
+    "the grid's own partitions included, so the conversion fails at its cutover with a raw overflow. One "
+    "clause, the year probe's handler. tests/341 part L catches it.",
+    [("  exception when datetime_field_overflow then\n    v_year_hi := null;\n",
+      "  exception when division_by_zero then\n    v_year_hi := null;\n", 1)],
+)
 MUTATIONS["restore_gate_any_kind_label"] = (
     _G17,
     "#1274 with restore_incoming_fks's in-flight gate still asking the KIND's label test alone: the operator's "
