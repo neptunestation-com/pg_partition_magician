@@ -748,9 +748,10 @@ def _scan_once(toks, defined, carriers, unread=frozenset()):
         here = parens[-1] if parens else stmt
         listed = here.get("clause") in ("select", "returning") or bool(here.get("into_first"))
         # a declaration whose type is not a TYPE_WORD (a domain, `constant`): a DECLARE's local, or a column of a
-        # top-level CREATE, followed by a word that is no keyword
+        # top-level CREATE, followed by a word that is no keyword. A DECLARE's local starts after `;` or DECLARE
+        # only: after THEN or ELSE it is a CASE branch inside some local's default, an expression
         declared = not listed and nxt[0] == "ID" and nxt[1] not in KEYWORDS and (
-            (body_tag is not None and not parens and stmt["declare"] and prev[1] in STATEMENT_STARTS)
+            (body_tag is not None and not parens and stmt["declare"] and prev[1] in (";", "declare"))
             or (body_tag is None and stmt["verb"] == "create" and len(parens) == 1 and prev[1] in ("(", ",")))
         if (nxt[1] in TYPE_WORDS and not listed) or declared or nxt[1] in ("=>", ":="):
             continue  # a declaration, the label of a named argument, or the target of an assignment
@@ -1282,6 +1283,21 @@ begin
   return null;
 end $f$;
 """)
+# ... but a CASE branch in a local's default is an expression, not a declaration, THEN's and ELSE's alike.
+CASE_DEFAULT_SECOND = with_extra(r"""
+create or replace function archive._case_then_key(p_cfg archive.config, p_child name) returns text
+language plpgsql as $f$
+declare v_key text := case when true then p_cfg.prefix end || '/' || p_child;
+begin
+  return v_key;
+end $f$;
+create or replace function archive._case_else_key(p_cfg archive.config, p_child name) returns text
+language plpgsql as $f$
+declare v_key text := case when false then '' else p_cfg.prefix end || '/' || p_child;
+begin
+  return v_key;
+end $f$;
+""")
 # Everything a prefix may do, and still one key function: handed whole (by position, by name, by number, in
 # a FROM clause), compared and tested, stored by an upsert, reported by RAISE. And a `$1` in the text an
 # EXECUTE runs is its USING argument, not the first parameter of the function, which here carries the prefix.
@@ -1419,6 +1435,10 @@ def selftest():
            LOOP_THEN_DECLARE_CLEAN, True, owner="archive._owned_key")
     expect("a local and a column declared with a domain or CONSTANT type are declarations", DOMAIN_DECLARED_CLEAN,
            True, owner="archive._owned_key")
+    expect("a second assembly from the prefix in a CASE ... THEN branch of a DECLARE default", CASE_DEFAULT_SECOND,
+           False, ("archive._case_then_key (line", "): p_cfg.prefix standing between `then`"))
+    expect("a second assembly from the prefix in a CASE ... ELSE branch of a DECLARE default", CASE_DEFAULT_SECOND,
+           False, ("archive._case_else_key (line", "): p_cfg.prefix standing between `else`"))
     expect("the prefix handed whole, compared, stored and reported, and a $1 that is a USING argument",
            STANDING_CLEAN, True, owner="archive._owned_key")
     expect("the one assembling function never claims", NO_CLAIM, False, "never names archive.object_key_owner")

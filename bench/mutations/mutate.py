@@ -11729,6 +11729,16 @@ MUTATIONS["archive_keys_domain_declaration_refused"] = (
       "        if (nxt[1] in TYPE_WORDS and not listed) or nxt[1] in (\"=>\", \":=\"):\n", 1)],
 )
 MUTATION_SRC["archive_keys_domain_declaration_refused"] = "scripts/check_archive_object_keys.py"
+MUTATIONS["archive_keys_case_branch_declared"] = (
+    "bench/archive_keys_inverse_rule.sh",
+    "PR #1314 at af48e4f: scripts/check_archive_object_keys.py takes a DECLARE's local to start after any "
+    "STATEMENT_STARTS token, THEN and ELSE included, so in `declare v_key text := case when true then "
+    "p_cfg.prefix end || '/' || p_child;` the prefix in the CASE branch reads as a declaration and the second key "
+    "built from it passes. One site, the tokens a DECLARE's local starts after.",
+    [('            (body_tag is not None and not parens and stmt["declare"] and prev[1] in (";", "declare"))\n',
+      '            (body_tag is not None and not parens and stmt["declare"] and prev[1] in STATEMENT_STARTS)\n', 1)],
+)
+MUTATION_SRC["archive_keys_case_branch_declared"] = "scripts/check_archive_object_keys.py"
 # Issues #1154 and #1180: scripts/check_archive_child_by_oid.py's rule 1 is the inverse rule, a name read only
 # alone in a select item or a RAISE argument, and it reads a regclass rendered as text as a name. One mutation per
 # issue, each taking out one clause of the fix; bench/lint_child_by_oid_inverse.sh catches both, on fixtures built

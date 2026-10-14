@@ -48,6 +48,8 @@
 #                                             `declare prefix text;` after `for i in select 1 loop` is refused
 #   archive_keys_domain_declaration_refused -- a local or column declared with a type that is no TYPE_WORD
 #                                             (a domain, `constant text`) is refused as assembly
+#   archive_keys_case_branch_declared      -- a DECLARE's local may start after THEN or ELSE again, so the
+#                                             prefix in a CASE branch of a local's default is never judged
 #
 # Usage: archive_keys_inverse_rule.sh <container> <db> [check_archive_object_keys.py]
 # The container and database are accepted for the shape bench/discriminate.sh calls every guard with and are
@@ -235,6 +237,12 @@ for fn, body, decl, what in [
         ("archive.k_into_first",
          "select into v_key prefix text from archive.config where parent_table = p_parent;\n  return v_key || p_child;",
          None, "an INTO-first SELECT's item aliased `text`"),
+        ("archive.k_case_then_default", "return v_key;",
+         "cfg archive.config; v_key text := case when true then cfg.prefix end || p_child;",
+         "a CASE ... THEN branch of a DECLARE default"),
+        ("archive.k_case_else_default", "return v_key;",
+         "cfg archive.config; v_key text := case when false then '' else cfg.prefix end || p_child;",
+         "a CASE ... ELSE branch of a DECLARE default"),
         ("archive.k_select_all",
          "for v_key in select all prefix from archive.config where parent_table = p_parent loop\n"
          "    return v_key || p_child;\n  end loop;", None, "a SELECT ALL item (ALL tests nothing there)"),
