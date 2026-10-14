@@ -7636,6 +7636,11 @@ $$;
 -- transmute's partition step.
 -- _regrain_step_shape also asks it of an encoded key (uuidv7, text_time) as the timestamptz(3) or
 -- timestamptz(0) its encoding keeps (#1039).
+-- The anchor is asked whatever the step, which is stricter than the bounds need (#1276): a whole-month step's
+-- bounds are midnight on the 1st of a month whatever the anchor's time, and only a fixed step counts from the
+-- anchor instant. transmute keeps the strict rule (a grid it registers can then be regrained toward any fixed
+-- step); _regrain_step_shape and the upgrade's warn_grid_off_unit, which judge a grid already registered, hold
+-- the anchor of a whole-month grid only where a fixed step counts from it.
 create or replace function pgpm._time_unit_breach(p_type oid, p_typmod int, p_step text, p_anchor text,
                                                   out r_keeps text, out r_unit text)
 returns record language plpgsql stable as $$
@@ -7752,7 +7757,8 @@ create or replace function pgpm._regrain_step_shape(p_parent regclass, p_step te
 returns void language plpgsql stable as $$
 declare cfg pgpm.config; v_typname name; v_type oid; v_typmod int; v_scale int; v_months numeric; v_rest interval;
         v_time_keeps text; v_time_unit text; v_enc_prec int; v_enc_unit text;
-        v_enc_epoch timestamptz; v_grid_keeps text; v_grid_unit text;
+        v_enc_epoch timestamptz; v_grid_keeps text; v_grid_unit text; v_grid_months numeric;
+        v_enc_anchor_off boolean; v_enc_epoch_on_unit boolean;
 begin
   select * into cfg from pgpm.config where parent_table = p_parent;
   cfg := pgpm._control_followed(cfg);
@@ -7798,6 +7804,7 @@ begin
   else
     v_months := extract(year from p_step::interval) * 12 + extract(month from p_step::interval);
     v_rest   := p_step::interval - make_interval(months => v_months::int);
+    v_grid_months := extract(year from cfg.partition_step::interval) * 12 + extract(month from cfg.partition_step::interval);
     if v_months <> 0 and v_rest <> interval '0' then
       raise exception 'pg_partition_magician: regrain target step % for % mixes a month count with a duration (mixed month + duration interval unsupported) -- the grid steps by calendar months or by a fixed number of seconds, never both, so no tick could floor it, and transmute refuses the same shape as a partition_step; give a whole number of months or a pure duration',
         p_step, p_parent;
@@ -7808,7 +7815,8 @@ begin
     end if;
     -- #1117: and the REGISTERED grid, asked the same rule as the target below. The fine bounds are the
     -- target's multiples from the registered anchor, and the source cell's own bounds are the registered
-    -- step's, so an anchor or a step off the column's unit puts the bounds off it whatever the target: ATTACH
+    -- step's, so an anchor or a step off the column's unit puts the bounds off it (whatever the target on a
+    -- fixed grid, a fixed target on a whole-month one, #1276 below): ATTACH
     -- reads each one at another instant than pgpm records (a date reads it as the date it falls in), and the
     -- run copied every sub-range before every swap failed (empty range bound, or a partition constraint
     -- violated by some row), leaving the copies, the capture trigger and the TRUNCATE refusal on the source
@@ -7818,14 +7826,29 @@ begin
     -- So the registered grid is asked here too, and a run on such a grid, fresh or resumed, is refused before
     -- anything is copied. The upgrade logs such a grid as warn_grid_off_unit (the block after
     -- _regrain_step_forward).
+    -- #1276: but the anchor only where a step counts from it. A whole-month step's bounds are midnight on the 1st
+    -- of a month in partition_tz whatever the anchor's time (_grid_floor's calendar branch keeps only the
+    -- anchor's month), so a whole-month grid whose only breach is its anchor has every bound where pgpm records
+    -- it, and so has a regrain of it toward a whole number of months: that is not refused. A fixed step counts
+    -- from the anchor instant, so a fixed registered step (the grid's own bounds) or a fixed target (the fine
+    -- cells') puts the bounds off the unit, and each is refused, said as what it is. A registered step that is
+    -- itself off the unit is a fixed one (a whole number of months is whole days and whole seconds).
     select b.r_keeps, b.r_unit into v_grid_keeps, v_grid_unit
       from pgpm._time_unit_breach(v_type, v_typmod, cfg.partition_step, cfg.partition_anchor) b;
     if v_grid_unit is not null then
-      raise exception 'pg_partition_magician: cannot regrain % -- its grid is not on its control column %''s unit: the column is %, which keeps %, and the registered partition_anchor % and partition_step % do not both fall on whole multiples of %, so every bound of the grid and of any regrain of it is attached at another instant than pgpm records for it, and the run would copy every sub-range before every swap failed (ATTACH PARTITION refusing a fine range that reads as empty, or a row outside the bounds it attaches). An install that did not hold the grid to the unit registered it. %',
-        p_parent, quote_ident(cfg.control_column), format_type(v_type, v_typmod), v_grid_keeps,
-        cfg.partition_anchor, cfg.partition_step, v_grid_unit,
-        pgpm._reconvert_remedy(p_parent, 'an anchor and a step that are whole multiples of '
-          || case when v_type = 'date'::regtype then '1 day (an anchor at 00:00 UTC)' else v_grid_unit end);
+      if v_grid_months = 0 then
+        raise exception 'pg_partition_magician: cannot regrain % -- its grid is not on its control column %''s unit: the column is %, which keeps %, and the registered partition_anchor % and partition_step % do not both fall on whole multiples of %, so every bound of the grid and of any regrain of it is attached at another instant than pgpm records for it, and the run would copy every sub-range before every swap failed (ATTACH PARTITION refusing a fine range that reads as empty, or a row outside the bounds it attaches). An install that did not hold the grid to the unit registered it. %',
+          p_parent, quote_ident(cfg.control_column), format_type(v_type, v_typmod), v_grid_keeps,
+          cfg.partition_anchor, cfg.partition_step, v_grid_unit,
+          pgpm._reconvert_remedy(p_parent, 'an anchor and a step that are whole multiples of '
+            || case when v_type = 'date'::regtype then '1 day (an anchor at 00:00 UTC)' else v_grid_unit end);
+      elsif v_months = 0 then
+        raise exception 'pg_partition_magician: cannot regrain % -- its grid is not on its control column %''s unit: the column is %, which keeps %, and the registered partition_anchor % and partition_step % put a fixed step''s bounds off it, the anchor not being a whole multiple of %: a whole-month step''s bounds fall at midnight on the 1st of a month whatever the anchor''s time, so the grid''s own bounds are the ones pgpm records, but a regrain toward % counts its fine cells from the anchor, so every fine bound would be attached at another instant than pgpm records for it, and the run would copy every sub-range before every swap failed (ATTACH PARTITION refusing a fine range that reads as empty, or a row outside the bounds it attaches). A whole number of months is not refused. An install that did not hold the grid to the unit registered it. %',
+          p_parent, quote_ident(cfg.control_column), format_type(v_type, v_typmod), v_grid_keeps,
+          cfg.partition_anchor, cfg.partition_step, v_grid_unit, p_step,
+          pgpm._reconvert_remedy(p_parent, 'an anchor and a step that are whole multiples of '
+            || case when v_type = 'date'::regtype then '1 day (an anchor at 00:00 UTC)' else v_grid_unit end);
+      end if;
     end if;
     -- #1117 (per-PR verification V-01): and the registered ZONE of a naive key. A date or timestamp grid an install before #504
     -- recorded in the converting session's zone sits at that zone's midnight, off the column's own clock (see
@@ -7870,8 +7893,15 @@ begin
                                            else 'epoch'::timestamptz end;
       select b.r_unit into v_enc_unit
         from pgpm._time_unit_breach('timestamptz'::regtype, v_enc_prec, cfg.partition_step, null) b;
-      if mod((extract(epoch from cfg.partition_anchor::timestamptz) - extract(epoch from v_enc_epoch)) * 1000000,
-             case v_enc_prec when 0 then 1000000 else 1000 end) <> 0
+      -- #1276: the anchor only where a step counts from it, as for a time key above. A whole-month grid, and a
+      -- whole-month regrain of it, put every bound at midnight on the 1st of a month, a whole second, which is
+      -- whole units from the encoding's epoch when the epoch is (uuidv7's 1970, and every text_time format's).
+      -- So an anchor off the unit is refused on a fixed grid, or on one whose epoch is off the unit (first, with
+      -- the grid's own bounds named), and on a whole-month grid toward a fixed target only (second).
+      v_enc_anchor_off := mod((extract(epoch from cfg.partition_anchor::timestamptz) - extract(epoch from v_enc_epoch)) * 1000000,
+                              case v_enc_prec when 0 then 1000000 else 1000 end) <> 0;
+      v_enc_epoch_on_unit := mod(extract(epoch from v_enc_epoch) * 1000000, case v_enc_prec when 0 then 1000000 else 1000 end) = 0;
+      if (v_enc_anchor_off and (v_grid_months = 0 or not v_enc_epoch_on_unit))
          or v_enc_unit is not null then
         raise exception 'pg_partition_magician: cannot regrain % -- its grid is not on its control column %''s encoded unit: it is a % key, which encodes whole %s from %, and the registered partition_anchor % and partition_step % do not both fall on whole %s, so every bound of the grid and of any regrain of it is encoded by flooring it to that unit, and a row deleted mid-regrain could come back at the swap. An install that did not hold the grid to the unit registered it. %',
           p_parent, quote_ident(cfg.control_column), cfg.control_kind,
@@ -7906,6 +7936,17 @@ begin
             case v_enc_prec when 0 then 'second' else 'millisecond' end,
             case v_enc_prec when 0 then 'second' else 'millisecond' end;
         end if;
+      end if;
+      -- #1276 (second): a whole-month grid anchored off the unit, toward a fixed target, whose fine cells count
+      -- from the anchor. Its epoch is on the unit here (an epoch off it was refused above, either way).
+      if v_enc_anchor_off and v_grid_months <> 0 and v_months = 0 then
+        raise exception 'pg_partition_magician: cannot regrain % -- its grid is not on its control column %''s encoded unit: it is a % key, which encodes whole %s from %, and the registered partition_anchor % and partition_step % put a fixed step''s bounds off it, the anchor not being a whole %: a whole-month step''s bounds fall at midnight on the 1st of a month whatever the anchor''s time, so the grid''s own bounds are encoded exactly, but a regrain toward % counts its fine cells from the anchor, so every fine bound is encoded by flooring it to that unit, and a row deleted mid-regrain could come back at the swap. A whole number of months is not refused. An install that did not hold the grid to the unit registered it. %',
+          p_parent, quote_ident(cfg.control_column), cfg.control_kind,
+          case v_enc_prec when 0 then 'second' else 'millisecond' end, pgpm._ts_text(v_enc_epoch),
+          cfg.partition_anchor, cfg.partition_step,
+          case v_enc_prec when 0 then 'second' else 'millisecond' end, p_step,
+          pgpm._reconvert_remedy(p_parent, 'an anchor and a step that are whole '
+            || case v_enc_prec when 0 then 'seconds' else 'milliseconds' end);
       end if;
       select b.r_unit into v_enc_unit
         from pgpm._time_unit_breach('timestamptz'::regtype, v_enc_prec, p_step, null) b;
@@ -8044,7 +8085,9 @@ $$;
 -- converting session's zone rather than UTC before #504 (_naive_grid_zone_off). On the first, obtain goes on
 -- minting partitions whose recorded bounds the catalog attached at other instants (pgpm.part says
 -- [D 12:00, D+1 12:00) over FOR VALUES FROM ('D') TO ('D+1')), so extend_to can report a range covered that a
--- write into it is refused, and every regrain is refused up front; on the second, a whole-month grid
+-- write into it is refused, and every regrain is refused up front, when the step is fixed; a whole-month step's
+-- bounds are midnight on the 1st whatever the anchor's time, so on a whole-month grid only a regrain toward a
+-- fixed step (which counts from the anchor) is refused, and the row says that instead (#1276); on the second, a whole-month grid
 -- round-trips but every regrain toward a fixed step is refused (_regrain_step_shape above). The upgrade cannot
 -- repair either (the recorded bounds and the catalog disagree, and only a reconversion makes them agree), so it
 -- says so: one warn_grid_off_unit row per grid, naming what is off and the remedy, logged once (a re-run of
@@ -8072,8 +8115,16 @@ begin
       from pgpm._time_unit_breach(v_type, v_typmod, cfg.partition_step, cfg.partition_anchor) b;
     v_zone_off := pgpm._naive_grid_zone_off(v_type, cfg.partition_tz);
     continue when v_unit is null and not v_zone_off;
+    -- #1276: a whole-month step's bounds are midnight on the 1st of a month whatever the anchor's time, so on a
+    -- whole-month grid (whose step is always on the unit) only the anchor is off, and only a regrain toward a
+    -- fixed step, which counts its fine cells from it, is refused (_regrain_step_shape): said so, not that
+    -- obtain's partitions disagree with pgpm.part
     v_why := concat_ws('; and ',
-      case when v_unit is not null then format('the column is %s, which keeps %s, and the registered partition_anchor %s and partition_step %s do not both fall on whole multiples of %s, so every partition obtain mints is attached at other bounds than pgpm.part records for it, and every regrain of the table is refused',
+      case when v_unit is not null
+            and extract(year from cfg.partition_step::interval) * 12 + extract(month from cfg.partition_step::interval) <> 0
+           then format('the column is %s, which keeps %s, and the registered partition_anchor %s is not a whole multiple of %s: its partition_step %s is a whole number of months, whose bounds fall at midnight on the 1st of a month whatever the anchor''s time, so the partitions obtain mints are attached at the bounds pgpm.part records for them and a regrain toward a whole number of months is not refused, but a regrain toward a fixed step (days, hours) counts its fine cells from the anchor and is refused',
+        format_type(v_type, v_typmod), v_keeps, cfg.partition_anchor, v_unit, cfg.partition_step)
+           when v_unit is not null then format('the column is %s, which keeps %s, and the registered partition_anchor %s and partition_step %s do not both fall on whole multiples of %s, so every partition obtain mints is attached at other bounds than pgpm.part records for it, and every regrain of the table is refused',
         format_type(v_type, v_typmod), v_keeps, cfg.partition_anchor, cfg.partition_step, v_unit) end,
       case when v_zone_off then format('the column is %s, which carries no zone, but the grid is recorded in partition_tz %s rather than UTC, so its bounds sit at that zone''s midnight instead of the column''s own: a whole-month step round-trips, but a fixed one (days, hours) does not, and every regrain toward one is refused',
         format_type(v_type, v_typmod), cfg.partition_tz) end);

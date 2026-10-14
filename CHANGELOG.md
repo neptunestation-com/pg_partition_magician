@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- **A whole-month grid anchored off its column's unit is no longer said to be attached at other bounds, nor
+  refused a whole-month regrain** (#1276). A calendar step's bounds are midnight on the 1st of a month whatever
+  the anchor's time, so a `date` grid an older install anchored at noon on a month step (or a `timestamptz(0)`
+  one 0.4 s off the second, or a `uuidv7` one half a millisecond off) has every partition where `pgpm.part`
+  records it. Yet the upgrade's `warn_grid_off_unit` said every partition `obtain` mints is attached at other
+  bounds than `pgpm.part` records, and `set_regrain` refused a 1-month target on a 3-month such grid for the
+  same false reason. The anchor is now held to the column's unit only where a step counts from it: the
+  registered step when it is fixed, and the regrain target when it is fixed. A whole-month target on such a
+  grid is accepted and its regrain completes with every fine bound the catalog's; a fixed target (days,
+  hours) is still refused, with a message that names the anchor and says a whole number of months is not
+  refused; the upgrade still logs the grid, now saying that its bounds agree and only a fixed regrain is
+  refused. A fixed grid anchored off the unit is refused and flagged as before, and so is a whole-month
+  `text_time` grid anchored off its unit whose own epoch is off the unit as well (its midnight bounds are then
+  off it too). `transmute` still refuses an anchor off the unit on any step. Test `tests/342`, which also types
+  the remedy the fixed-target refusal names; guard `bench/month_grid_anchor_time.sh`, mutations
+  `upgrade_month_grid_anchor_bounds_claimed`, `regrain_month_grid_anchor_month_target_refused`,
+  `regrain_month_grid_encoded_anchor_month_target_refused` and `regrain_month_grid_encoded_epoch_unasked`.
+
 - **`transmute`'s staging-name refusal names a remedy that works on what holds the name** (#1273). A relation
   holding `<table>_pgpm_new` was refused with `drop table <schema>.<table>_pgpm_new` whatever its kind, and
   against a sequence, view, materialized view, composite type or index that statement fails ("is not a table"),
