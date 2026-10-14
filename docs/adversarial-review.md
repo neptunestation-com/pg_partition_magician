@@ -18,6 +18,7 @@ and `bench/mutations/`.
 - [Between passes](#between-passes)
 - [Fix phase](#fix-phase)
 - [Per-PR verification](#per-pr-verification)
+- [Size budget](#size-budget)
 - [Lenses](#lenses)
 - [Pass record](#pass-record)
 - [Pass history](#pass-history)
@@ -405,6 +406,58 @@ surface of five to twenty units plus one claims verifier and one verifier per ca
 head checks take anyway. The record of the phase it belongs to carries each verification's head, seed
 result, classes, verdicts and cost, so the mode's own yield can be read against the passes'.
 
+## Size budget
+
+The fix phases have no cost on the code's size, and it grew. Measured on 2026-10-14 against `v0.6.0`
+(pass 1's pin) and `main` at `f3a2b639`: the core install went from 2,900 to 8,205 lines of code, 151 KB to 477 KB
+minified (3.2x; it was 442 KB at pass 12's pin), past dbdev's 250,000-character package cap between
+passes 4 and 6. Every one of the 246 commits that touched it since `v0.6.0` was a `fix`, `perf` or `docs`,
+bar one `feat` (`pgpm.progress()`), and they added about five lines for each they removed. Of 142 PRs that touched the core between `v0.6.0`
+and pass 12, 140 made it larger and two made it smaller. The growth is not copy-paste (the duplicated
+share fell from 13% to 7%); it is many small distinct guards, records and carries. About two thirds of the
+added lines in the conversion path answer a defect one session reaches with some table shape or
+argument, and about one seventh answer a race. Nothing in the process weighed a fix's size against its
+benefit, so nothing slowed it. This section does that, and no more than that: it reports, it asks a
+question when a PR is unusually large, and it never blocks on size alone.
+
+- **Measure the minified size, not the lines.** About half of the added lines are comments, which the
+  dbdev build strips; `scripts/minify_sql.py` is the one definition of what counts. For a PR, per install
+  file, from the repository root:
+
+  ```bash
+  for f in pgpm_core pgpm_archive pgpm_hypertable; do
+    b=$(git show origin/main:$f/install.sql | python3 scripts/minify_sql.py /dev/stdin | wc -c)
+    h=$(python3 scripts/minify_sql.py $f/install.sql | wc -c)
+    echo "$f base=$b head=$h delta=$((h-b))"
+  done
+  ```
+
+- **Every fix PR that touches an install file reports it.** The PR body carries a `Size:` line with the
+  three deltas (a file the PR does not touch is `0`). The fixer writes it; the `/pr-verify` comment repeats
+  it, computed from the head it verified, so a stale body is visible.
+- **A large PR answers three questions.** The trigger is a core delta above **+4,700 minified characters**,
+  the 90th percentile of those 142 PRs (median +1,266, 75th percentile +2,387). Past it the body adds a
+  `Why this size:` paragraph that says (a) which added branches guard a state one session can reach and
+  which only a concurrent session can, (b) whether a refusal up front would replace a carry or a replay
+  (a refusal commits nothing and needs no code to reproduce the attribute), and (c) which existing helper
+  was considered and why it does not extend. The claims verifier reads it as a claim to test: a paragraph
+  that overstates what the extra code is needed for is a body that gets the PR blocked, like any other. The
+  size alone never blocks.
+- **The third patch to a mechanism is a proposal, not a patch.** The unit of repetition is the mechanism,
+  not the function: an attribute the cutover carries (grants, keys, identity options, publications), an
+  identity record (`child_oid` and its siblings), a re-ask after a lock. When the issue's fix is the third
+  to touch one (the `#NNN` references in the code comments and `git log -S` count them; the conversion
+  path averages 4.8 fix issues per attribute, grants and keys nine or ten each), the fixer does not add a
+  third copy. It writes the shared mechanism, or reports it as an adjacent observation of kind
+  `repeat site` with the two earlier issues and the sites, and the coordinator files it. Pass 12's four
+  Tier 1s in three root causes sat on exactly this kind of mechanism.
+- **The pass record carries the size.** Each pass record names the minified size of each install file at
+  the pin and the change since the previous pin (the `size:` line of the template), so a pass's budget
+  and the code's growth are read side by side, with the Tier 1 series.
+- **There is no ceiling yet.** The dbdev cap is already exceeded for the core and the build says so as a
+  warning. A ceiling is a maintainer decision (what to refuse, what to move, what to accept), and it is
+  recorded here when made. Until then this section reports and asks; it does not decide.
+
 ## Lenses
 
 The catalogue to rotate through. Each pass names the ones it uses and states, in the record, which were
@@ -448,6 +501,7 @@ root causes: <n> behind the findings, <m> closed as a class by the fix phase
 known and open (re-found, unfixed from earlier passes): <n>
 capture-recapture (T1): <estimate or "not attempted">
 blind spots (seeds missed, by lens): <list>
+size: minified at the pin, core <n> (<+/-d> since the previous pin), archive <n> (<d>), hypertable <n> (<d>)
 
 ## Findings
 | tier | age | lens | finding | issue | fix PR |

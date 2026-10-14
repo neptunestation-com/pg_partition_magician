@@ -103,6 +103,13 @@ scripts/review/pr_classify.py --claims $W/pr/claims --base $W/pr/base --head $W/
 Nothing from the finder's transcript. A verifier that rebuilt the fixture stores `repro.verified.*` beside
 the original, as in a pass.
 
+## 4b. Size (mechanical)
+
+Compute the net minified delta of each install file on the head you verified, with the loop in
+`docs/adversarial-review.md` ("Size budget"), and put it in the comment beside the head's sha. If the body's
+`Size:` line differs, say so. Past +4,700 characters in the core, the claims verifier is told to test the
+body's `Why this size:` paragraph as a claim. A size alone never blocks.
+
 ## 5. Report and decide (mechanical policy)
 
 ```bash
