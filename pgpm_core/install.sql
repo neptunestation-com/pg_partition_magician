@@ -5213,7 +5213,9 @@ $$;
 -- What it does NOT catch, because it believes a count where the strategy gave one: a chunk recorded with a null
 -- count (the contract lets a strategy report null for a range that held no rows), and one with a count above 0
 -- that is short of the rows there. And a strategy that reports 0 for a chunk without counting its rows no longer
--- has that partition dropped while it holds them: one that does not count reports null.
+-- has that partition dropped while it holds them: one that does not count reports null. The log row cannot tell
+-- the two causes apart, so it names both, each with its remedy (nothing to do for a read that saw none of the
+-- rows; report the count, or null, for a strategy that does not count), and names the configured strategy.
 --
 -- Cost: nothing unless the partition is fully covered and has a chunk of 0 rows, then one EXISTS probe of the
 -- partition per such chunk, on the control column. Returns how many chunks it discarded.
@@ -5245,8 +5247,8 @@ begin
     select p.lo, p.hi into v_lo, v_hi from pgpm.part p where p.parent_table = p_parent and p.child_name = p_child;
     insert into pgpm.log (parent_table, action, lo, hi, rows, method)
       values (p_parent, 'archive_coverage_reset', v_lo, v_hi, v_chunks,
-              format('%s archived chunk(s) were recorded for %I.%I, and [%s, %s) among them records 0 archived rows over a range in which the partition holds rows: the strategy archived none of what is there (a read through the parent sees no row of a partition that is detached or pending a detach, which is how a pgpm before this check recorded such a chunk), so the coverage does not describe the partition; discarded instead of dropping it, and archiving starts over from %s',
-                     v_chunks, v_nsp, p_child, r.lo, r.hi, v_lo));
+              format('%1$s archived chunk(s) were recorded for %2$I.%3$I, and [%4$s, %5$s) among them reports 0 rows archived over a range in which the partition holds rows, so this coverage does not show those rows are in the archive; it is discarded instead of dropping the partition, and archiving starts over from %6$s. One of two causes. The strategy may have read none of them: a read through the parent sees no row of a partition that is detached or pending a detach, which is how a pgpm before this check recorded such a chunk; nothing to do, the next tick archives the partition again and retention then drops it. Or the strategy, %7$s, archived the rows and reported 0 instead of counting them: make it return the number of rows it archived, or null when it does not count (replacing the function in place, or pointing pgpm.set_archive_fn at the corrected one); until then this repeats, and the chunk is archived again, every time retention reaches the partition',
+                     v_chunks, v_nsp, p_child, r.lo, r.hi, v_lo, cfg.archive_fn::text));
     return v_chunks;
   end loop;
   return 0;

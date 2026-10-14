@@ -13649,6 +13649,26 @@ MUTATIONS["retire_drops_on_contradicted_coverage"] = (
       "  end if;\n",
       "", 1)],
 )
+# Round 5: the archive_coverage_reset row that check writes cannot tell its two causes apart, so it names both with
+# their remedies. This one puts back the round-4 text, which blamed a read through a detached parent alone.
+MUTATIONS["contradicted_reset_blames_detach_only"] = (
+    "bench/retirement_mark_needs_dispatch.sh",
+    "The archive_coverage_reset row pgpm._discard_contradicted_coverage writes names one cause only, a read through "
+    "the parent that saw none of a detached partition's rows: an operator whose strategy archived every row and "
+    "reported 0 instead of counting is told there is nothing to do, is never told to report the count or null, and "
+    "the partition is kept, and its chunk archived again, every time retention reaches it. One site, the second "
+    "cause of the row's method text. The round-4 verification's V-01 reproduction and tests/330 part J catch it.",
+    [("One of two causes. The strategy may have read none of them: a read through the parent sees no row of a "
+      "partition that is detached or pending a detach, which is how a pgpm before this check recorded such a chunk; "
+      "nothing to do, the next tick archives the partition again and retention then drops it. Or the strategy, "
+      "%7$s, archived the rows and reported 0 instead of counting them: make it return the number of rows it "
+      "archived, or null when it does not count (replacing the function in place, or pointing pgpm.set_archive_fn "
+      "at the corrected one); until then this repeats, and the chunk is archived again, every time retention "
+      "reaches the partition',",
+      "The strategy read none of them: a read through the parent sees no row of a partition that is detached or "
+      "pending a detach, which is how a pgpm before this check recorded such a chunk; nothing to do, the next tick "
+      "archives the partition again and retention then drops it',", 1)],
+)
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

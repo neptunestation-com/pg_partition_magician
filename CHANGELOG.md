@@ -34,7 +34,10 @@
   and the next tick archives it from `lo`. That is what protects a ledger an install of `main` since #1250 may
   already carry (no release records such a chunk and keeps the table): a 0-row chunk recorded for a table that
   was detached, then attached back. **A custom `archive_fn` that reports `rows_archived` 0 without counting must
-  report `null` instead**, or its partitions are no longer dropped while they hold rows. The check believes a
+  report `null` instead**, or its partitions are no longer dropped while they hold rows: each is kept and its
+  chunk archived again every time retention reaches it, and every time the `archive_coverage_reset` row names
+  both causes the check cannot tell apart (a read that saw none of the rows, nothing to do; or the strategy, which
+  it names, reporting 0 instead of counting, with that remedy). The check believes a
   count where there is one, so a chunk recorded with a `null` or non-zero count for a table that was detached
   is not caught; to find any chunk recorded for a relation that is outside its parent now, before attaching
   such a table back, run `select l.parent_table, l.child_name, l.lo, l.hi, l.rows_archived from
@@ -45,7 +48,8 @@
   `bench/retirement_mark_needs_dispatch.sh`, mutations `retirement_mark_vouches_alone`,
   `archive_hold_vouches_detached_retirement`, `retirement_mark_readers_whole`,
   `archive_hold_passes_unanchored`, `archive_step_records_without_second_ask`,
-  `archive_whole_records_without_second_ask` and `retire_drops_on_contradicted_coverage`.
+  `archive_whole_records_without_second_ask`, `retire_drops_on_contradicted_coverage` and
+  `contradicted_reset_blames_detach_only`.
 
 - **A retired chunk's bound with no offset is read on the grid's clock, not the caller's** (#1264).
   `pgpm._over_retired_chunks`, which decides the partitions the archive step and `retain()` hold over a retired

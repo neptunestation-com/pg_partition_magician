@@ -42,6 +42,9 @@
 --      the chunk's range; it discards the coverage, and the next tick archives ids 1, 2 and 15 before the drop.
 --   I  what that check leaves alone (a 0-row chunk over a range that holds no row: dropped as before), what it
 --      discards with a false chunk (the partition's whole coverage), and a direct retire() call.
+--   J  a strategy that archives everything and reports 0 instead of counting: the partition is kept, and the
+--      archive_coverage_reset row names that cause and its remedy (report null when you do not count); the remedy
+--      as typed (the strategy replaced to report null) lets retention retire the partition.
 --
 -- F and G need two more sessions, through dblink as tests/325 does: a TICK connection runs the call
 -- asynchronously; its strategy takes an advisory lock (so this session sees it inside the strategy) and waits at
@@ -56,9 +59,9 @@
 -- bench/retirement_mark_needs_dispatch.sh runs this file against bench/mutations/mutate.py's
 -- retirement_mark_vouches_alone (part B), archive_hold_vouches_detached_retirement (parts B and D),
 -- retirement_mark_readers_whole (parts A to D), archive_hold_passes_unanchored (part E),
--- archive_step_records_without_second_ask (part F), archive_whole_records_without_second_ask (part G) and
--- retire_drops_on_contradicted_coverage (parts H and I). The script's path is the psql variable
--- archive_whole_script, defaulting to the tree's copy.
+-- archive_step_records_without_second_ask (part F), archive_whole_records_without_second_ask (part G),
+-- retire_drops_on_contradicted_coverage (parts H and I) and contradicted_reset_blames_detach_only (part J). The
+-- script's path is the psql variable archive_whole_script, defaulting to the tree's copy.
 create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
@@ -69,7 +72,7 @@ set client_min_messages = warning;
 \endif
 \i :archive_whole_script
 
-select plan(78);
+select plan(82);
 
 create schema t330;
 -- every strategy call, with the ids it read through the parent
@@ -754,5 +757,59 @@ select ok(not exists (select 1 from pg_class where oid = :i_p20_oid),
 select is((select array_agg(distinct s.id order by s.id) from t330.sink s where s.parent = 'public.rm330i'::regclass),
   array[21, 27]::bigint[],
   'I: ids 21 and 27 were archived before the drop');
+
+-- ======== PART J: a strategy that archives everything and reports 0 instead of counting ========
+-- The check in retire() cannot tell this from a read that saw none of the rows: both leave a chunk of 0 rows over
+-- rows the partition holds. So the partition is kept, and the archive_coverage_reset row must name both causes,
+-- this one with the strategy and its remedy: report the count, or null when it does not count. Typed (the strategy
+-- replaced in place to report null), the remedy lets retention retire the partition.
+create table t330.up (n serial primary key, parent regclass, p_lo text);
+create function t330.uncounted(p_parent regclass, p_child name, p_lo text, p_hi text)
+returns pgpm.archive_result language plpgsql as $$
+declare v pgpm.archive_result;
+begin
+  insert into t330.up (parent, p_lo) values (p_parent, p_lo);   -- stands for an upload of the whole chunk
+  v.covered_hi := p_hi; v.rows_archived := 0;
+  return v;
+end $$;
+create table public.rm330j (id bigint primary key, payload text);
+insert into public.rm330j values (1, 'a'), (2, 'b'), (15, 'c');
+call pgpm.transmute('public.rm330j', 'id', 10::bigint, p_retain => 20, p_paused => false);
+select pgpm.extend_to('public.rm330j', '60');
+insert into public.rm330j values (22, 'aged'), (55, 'frontier');
+select child_oid as j_mono_oid from pgpm.part where parent_table = 'public.rm330j'::regclass and lo = '0' \gset
+select pgpm.set_archive_fn('public.rm330j', 't330.uncounted(regclass,name,text,text)'::regprocedure);
+update pgpm.config set archive_batch = 5 where parent_table = 'public.rm330j'::regclass;
+create temporary table markj330 as select coalesce(max(id), 0) as id from pgpm.log;
+
+call pgpm.maintain('public.rm330j');
+call pgpm.maintain('public.rm330j');
+
+select ok(exists (select 1 from t330.up where parent = 'public.rm330j'::regclass and p_lo = '0'),
+  'LIVENESS: J: the strategy was handed the aged monolith [0, 20)');
+select ok(exists (select 1 from pg_class where oid = :j_mono_oid),
+  'J: retention keeps the monolith, whose chunk reports 0 rows over ids 1, 2 and 15');
+select is((select array_agg(distinct l.lo || '-' || l.hi) from pgpm.log l
+            where l.parent_table = 'public.rm330j'::regclass and l.action = 'archive_coverage_reset'
+              and l.id > (select id from markj330)
+              and l.method like '%t330.uncounted(regclass,name,text,text)%'
+              and l.method like '%reported 0 instead of counting%'
+              and l.method like '%or null when it does not count%'),
+  array['0-20', '20-30'],
+  'J: the archive_coverage_reset rows over [0, 20) and [20, 30) (id 22) name the strategy, the uncounted 0, and the remedy: report null');
+
+-- the remedy as the row names it: the strategy, replaced in place, reports null when it does not count
+create or replace function t330.uncounted(p_parent regclass, p_child name, p_lo text, p_hi text)
+returns pgpm.archive_result language plpgsql as $$
+declare v pgpm.archive_result;
+begin
+  insert into t330.up (parent, p_lo) values (p_parent, p_lo);
+  v.covered_hi := p_hi; v.rows_archived := null;
+  return v;
+end $$;
+call pgpm.maintain('public.rm330j');
+call pgpm.maintain('public.rm330j');
+select ok(not exists (select 1 from pg_class where oid = :j_mono_oid),
+  'J: once the strategy reports null, retention retires the monolith (dropped)');
 
 select * from finish();

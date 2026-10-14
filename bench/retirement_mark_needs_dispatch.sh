@@ -32,7 +32,7 @@
 # defines) is loaded in place of the tree's, with the tree's pgpm_core; anything else is installed as pgpm_core,
 # with the tree's script.
 #
-# SEVEN mutations are required to fail against it (bench/mutations/mutate.py):
+# EIGHT mutations are required to fail against it (bench/mutations/mutate.py):
 #   retirement_mark_vouches_alone            -- pgpm._retirement_vouched answers from the mark alone, without
 #                                               _detach_dispatched's record. Part B (the predicates and the
 #                                               write-block step).
@@ -45,6 +45,9 @@
 #   archive_whole_records_without_second_ask -- the script does. Part G.
 #   retire_drops_on_contradicted_coverage    -- retire() drops on the ledger's watermark alone, a chunk of 0 rows
 #                                               over rows the partition holds included. Parts H and I.
+#   contradicted_reset_blames_detach_only    -- the archive_coverage_reset row that check writes names only a read
+#                                               through a detached parent, never a strategy that reports 0 without
+#                                               counting and its remedy. Part J.
 #
 # A copy that does not even load is not a catch: that is reported as a `fixture:` failure, which
 # bench/discriminate.sh reads as a starved fixture rather than as discrimination.
