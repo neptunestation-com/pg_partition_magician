@@ -1973,14 +1973,20 @@ $$;
 -- is accepted (an '18 months' grid, whose '1 year' cells are named <rel>_pYYYY), a month's when '1 month' is,
 -- else the step's own, a fixed one (a calendar step always takes '1 month'), read by _part_name's thresholds
 -- (a fixed target no wider than a fixed step is no coarser); and every finer one. Those two are the narrowest
--- steps with a year's and a month's label, so no other target reaches further. A label coarser than that is out of the grid's reach: obtain never names a cell
--- by it and auto-regrain never does, so transmute's orphan guard does not refuse a table of the operator's own
--- under it (a monthly grid and <rel>_p2023, a hand-made archive of 2023). A one-off regrain() to a coarser
--- target can (a monthly monolith split into years), and regrain_step refuses a relation it did not create at
--- the name it is about to copy into (#631), loudly and before a row moves. restore_incoming_fks's in-flight gate
--- does NOT ask this: a coarser one-off regrain's un-attached children are exactly what it has to see. An id
--- label is a value, and a finer step reaches any value, so every id label _is_fine_child_label accepts is in
--- reach.
+-- steps with a year's and a month's label, so no other target reaches further. A label coarser than that is
+-- out of the grid's reach: obtain never names a cell by it and auto-regrain never does, so transmute's orphan
+-- guard does not refuse a table of the operator's own under it (a monthly grid and <rel>_p2023, a hand-made
+-- archive of 2023). A one-off regrain() to a coarser target can (a monthly monolith split into years), and
+-- regrain_step refuses a relation it did not create at the name it is about to copy into (#631), loudly and
+-- before a row moves. An id label is a value, and a finer step reaches any value, so every id label
+-- _is_fine_child_label accepts is in reach.
+--
+-- restore_incoming_fks's in-flight gate asks this too, beside _is_fine_child_label, so the two sites still
+-- recognise one set of names (#726). It has to: a standalone table the orphan guard lets a conversion through
+-- with must not be one the gate takes for an in-flight child, or a preserve conversion beside the operator's
+-- <rel>_p2023 drops its incoming keys at the cutover and never re-adds them, on any tick, with nothing logged.
+-- The gate loses nothing of a regrain's by it: a copy is in pgpm.part inside its attached source's range,
+-- which the gate excuses at any label, a coarser one-off regrain's included.
 create or replace function pgpm._grid_can_label(p_kind text, p_step text, p_anchor text, p_tz text, p_suffix text)
 returns boolean language plpgsql stable as $$
 declare v_secs numeric; v_step_hi text; v_coarsest int; v_g text[]; v_rank int;
@@ -10364,10 +10370,11 @@ $$;
 -- with the table it belongs to, and the remedy is a rename, which leaves it where it belongs.
 --
 -- #1274: and only a label THIS grid can give (_grid_can_label: the step's granularity, or a finer one, or the
--- coarser one a regrain target set_regrain accepts on this step and anchor reaches). The test was the kind's alone, so a monthly grid was refused by the
--- operator's own <rel>_p2023, a name neither its cells nor its auto-regrain can take, and told to drop it.
--- A standalone table that IS in reach is still refused, but the remedy leads with the rename: the guard
--- cannot tell an orphan from a table of the operator's own, and a rename loses nothing either way.
+-- coarser one a regrain target set_regrain accepts on this step and anchor reaches). The test was the kind's
+-- alone, so a monthly grid was refused by the operator's own <rel>_p2023, a name neither its cells nor its
+-- auto-regrain can take, and told to drop it. A standalone table that IS in reach is still refused, but the
+-- remedy leads with the rename: the guard cannot tell an orphan from a table of the operator's own, and a
+-- rename loses nothing either way.
 drop function if exists pgpm._transmute_refuse_child_holders(name, name, text);
 create or replace function pgpm._transmute_refuse_child_holders(p_nsp name, p_rel name, p_control_kind text,
                                                                 p_step text, p_anchor text, p_tz text,
@@ -15746,8 +15753,10 @@ begin
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
 
   -- gate 1 (the drained-closed-tail gate) is gone with the DEFAULT (#288): there is no tail to drain.
-  -- gate 2: no in-flight (un-attached) child mid-regrain, recognised by _is_fine_child_label, the helper
-  -- transmute's orphan guard asks too, so the two cannot drift (#726). A regrain copy-child is
+  -- gate 2: no in-flight (un-attached) child mid-regrain, recognised by _is_fine_child_label and
+  -- _grid_can_label, the helpers transmute's orphan guard asks too, so the two cannot drift (#726, #1274: a
+  -- table of the operator's own under a label this grid cannot give, which the orphan guard lets a conversion
+  -- through with, is no in-flight child, and held every re-add off for good). A regrain copy-child is
   -- EXCLUDED (its range is contained in an attached partition): regrain copies without
   -- deleting, so the referenced rows never leave the visible parent, and a copy-regrain never needs the FK
   -- suspended -- so it must not hold the FK off either (that would reopen the RI window the copy design
@@ -15758,6 +15767,8 @@ begin
      and c.relkind = 'r'
      and starts_with(c.relname, v_rel || '_p')
      and pgpm._is_fine_child_label(cfg.control_kind, substr(c.relname, length(v_rel) + 3))
+     and pgpm._grid_can_label(cfg.control_kind, cfg.partition_step, cfg.partition_anchor, cfg.partition_tz,
+                              substr(c.relname, length(v_rel) + 3))
      and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid)
      and not exists (                                            -- a regrain copy is not an absent-row child
            select 1 from pgpm.part cp

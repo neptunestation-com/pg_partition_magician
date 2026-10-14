@@ -14044,11 +14044,21 @@ MUTATIONS["child_holder_types_any_kind_label"] = (
 MUTATIONS["child_holders_any_parent_exempt"] = (
     _G17,
     "Pre-#1216 transmute: a relation with ANY pg_inherits parent is not a holder, so a partition of another table "
-    "(tests/341 part E) or an inheritance child of one (F) at a forward cell's name passes the preflight and the "
-    "cutover's askings, obtain steps over the name, and the conversion completes with that cell unbuilt. One "
-    "clause, the exemption's parent.",
+    "(tests/341 part E), an inheritance child of one (F), an index attached to its partitioned index (I) or a "
+    "foreign-table partition of one (J) at a forward cell's name passes the preflight and the cutover's askings, "
+    "obtain steps over the name, and the conversion completes with that cell unbuilt. One clause, the "
+    "exemption's parent.",
     [("     and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid and i.inhparent = p_parent)\n",
       "     and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid)\n", 1)],
+)
+MUTATIONS["restore_gate_any_kind_label"] = (
+    _G17,
+    "#1274 with restore_incoming_fks's in-flight gate still asking the KIND's label test alone: the operator's "
+    "standalone t341h_p2023, which the orphan guard lets a monthly conversion through with, reads as an in-flight "
+    "regrain child, so the incoming key a preserve conversion dropped is never re-added, on any tick, with "
+    "nothing logged. One site, the gate's grid label test. tests/341 part H catches it (the re-add returns 0).",
+    [("     and pgpm._grid_can_label(cfg.control_kind, cfg.partition_step, cfg.partition_anchor, cfg.partition_tz,\n"
+      "                              substr(c.relname, length(v_rel) + 3))\n", "", 1)],
 )
 
 

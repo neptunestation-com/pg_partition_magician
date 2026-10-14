@@ -1064,8 +1064,11 @@ For step-by-step procedures when an alert fires, see the [runbook](runbook.md). 
   enable auto-regrain (`set_regrain`) or run `regrain_history` by hand once the monolith has frozen.
 - **Re-transmuting a table fails with an "orphan" error.** An interrupted regrain creates child
   partitions as standalone tables before attaching them; an un-attached child survives a `DROP TABLE
-  <parent> CASCADE`. `transmute` detects a leftover and refuses up front; drop the named orphan and retry.
+  <parent> CASCADE`. `transmute` refuses up front when a standalone table holds a name this grid could give
+  a partition (its step's label or a finer one), and cannot tell a leftover from a table of your own: rename
+  the named table out of the way and retry, or drop it if it is a leftover holding nothing you need.
   The same up-front refusal names any other relation (a sequence, a view) holding a child-partition name,
+  a partition or inheritance child of another table holding one (rename it; it stays attached where it is),
   and a relation holding the name the monolith itself will take (`<table>_p<lo>_to_<hi>`), typically a
   monolith detached from an earlier conversion of a table by that name.
 - **Re-running `transmute` on a table it already converted is refused.** `transmute` converts a table

@@ -11,12 +11,16 @@
   both the table and the type halves of the guard ask it. A one-off `regrain()` to a coarser target is left to
   `regrain_step`'s own refusal of a relation it did not create (#631). A standalone table that is in reach is
   still refused, and the remedy now renames it (`alter table ... rename to ...`) rather than dropping it.
+  `restore_incoming_fks`'s in-flight gate, which recognises a fine child's name the same way, asks the same
+  question, so a table the guard lets a `'preserve'` conversion through with does not hold the dropped
+  incoming keys off.
 - **A partition of another table at a forward cell's name is refused up front** (#1216). The orphan-child guard
   excused any relation with a `pg_inherits` parent, so a partition or inheritance child of an unrelated table
   holding `<table>_p<label>` passed the preflight and the cutover's askings, obtain stepped over the name, and
   the conversion completed with that cell unbuilt (`fail_obtain_name`) and every write into its range refused.
-  Only a partition of the table's own new parent is excused now; the refusal names the table the holder
-  belongs to and renames it out of the way.
+  Only a partition of the table's own new parent is excused now; the refusal names the table (or partitioned
+  index) the holder belongs to, and its remedy renames the holder (`alter table`, `alter index` or
+  `alter foreign table`), which leaves it attached where it is.
 - **`untransmute` and `uninstall.sql` drop a moved regrain capture function** (#1271).
   `pgpm._regrain_capture_names` looked the recorded capture function up by its oid only inside the delta's
   current schema, so once the delta (`ALTER TABLE ... SET SCHEMA`) or the function (`ALTER FUNCTION ... SET

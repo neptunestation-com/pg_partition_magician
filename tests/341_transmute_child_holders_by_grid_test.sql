@@ -28,14 +28,24 @@
 --       forward cell's name. Refused naming the table it belongs to; the typed rename converts, the cell
 --       [1000, 2000) is built as t341e's partition and takes a write, and the other table's partition stays.
 --   (F) t341f, id grid step 1000: an INHERITANCE child of another table at the second forward cell's name.
---       Refused naming it as such.
+--       Refused naming it as such; the typed rename converts it and the child stays its parent's.
+--   (I) t341i, id grid step 1000: an INDEX at the first forward cell's name, attached to another table's
+--       partitioned index. Refused with `alter index` as the remedy, which is typed.
+--   (J) t341j, id grid step 1000: a FOREIGN TABLE partition of another table at the first forward cell's
+--       name. Refused with `alter foreign table` as the remedy, which is typed.
+--   (H) t341h, '1 month' grid converted with p_incoming_fks => 'preserve' beside the operator's t341h_p2023
+--       (ids 7 and 8): the cutover drops r341h_fk, and restore_incoming_fks, whose in-flight gate recognises a
+--       fine child's name as the orphan guard does, must not take the table the guard let through for an
+--       in-flight child. A standalone t341h_p2024_03_15 made after the conversion (a day label, in reach)
+--       does hold the re-add off, which is the gate's liveness; renamed away, the key comes back with
+--       t341h_p2023 still in place.
 -- bench/transmute_child_holders_by_grid.sh runs this file against the mutants that drop the grid's label test
 -- from the pg_class half (child_holders_any_kind_label), from the pg_type half
--- (child_holder_types_any_kind_label), and narrow the exemption back to any pg_inherits parent
--- (child_holders_any_parent_exempt).
+-- (child_holder_types_any_kind_label) and from restore_incoming_fks's gate (restore_gate_any_kind_label), and
+-- narrow the exemption back to any pg_inherits parent (child_holders_any_parent_exempt).
 create extension if not exists pgtap;
 
-select plan(34);
+select plan(48);
 
 set timezone = 'UTC';
 
@@ -213,5 +223,100 @@ select ok((select relkind::text from pg_class where oid = 'public.t341f'::regcla
 select is((select array_agg(inhparent::regclass::text) from pg_inherits
             where inhrelid = 'public.t341f_p0000000000000002000'::regclass),
           array['f341_base'], '(F) and the holder is still f341_base''s child');
+-- the remedy, as the message types it
+alter table public.t341f_p0000000000000002000 rename to f341_base_child;
+\set ON_ERROR_STOP 0
+call pgpm.transmute('public.t341f', 'id', 1000::bigint, p_obtain => 2);
+\set ON_ERROR_STOP 1
+select is((select array_agg(c.relname::text order by c.relname)
+             from pg_inherits i join pg_class c on c.oid = i.inhrelid where i.inhparent = 'public.t341f'::regclass),
+          array['t341f_p0000000000000000000', 't341f_p0000000000000001000', 't341f_p0000000000000002000'],
+          '(F) with the child renamed as the message says, t341f converts and the cell [2000, 3000) is its partition');
+select is((select array_agg(inhparent::regclass::text) from pg_inherits where inhrelid = 'public.f341_base_child'::regclass),
+          array['f341_base'], '(F) and the renamed child is still f341_base''s');
+
+-- ---------------------------------------------------------------------------------------------------------
+-- (I) an index at the first forward cell's name, attached to another table's partitioned index
+create table public.t341i (id bigint primary key, v int);
+insert into public.t341i select g, g from generate_series(1, 30) g;   -- step 1000: monolith [0, 1000)
+create table public.f341_iother (id bigint) partition by range (id);
+create table public.f341_iother_p0 partition of public.f341_iother for values from (0) to (10);
+create index f341_iother_idx on public.f341_iother (id);
+alter index public.f341_iother_p0_id_idx rename to t341i_p0000000000000001000;
+
+select throws_like(
+  $$ call pgpm.transmute('public.t341i', 'id', 1000::bigint, p_obtain => 2) $$,
+  'pg_partition_magician: public.t341i_p0000000000000001000 already exists as a partition of public.f341_iother_idx matching this parent''s partition naming%alter index public.t341i_p0000000000000001000 rename to <a new name>%',
+  '(I) transmute refuses an index of another table''s partitioned index at a forward cell''s name, and the remedy is alter index');
+alter index public.t341i_p0000000000000001000 rename to f341_iother_p0_idx;
+\set ON_ERROR_STOP 0
+call pgpm.transmute('public.t341i', 'id', 1000::bigint, p_obtain => 2);
+\set ON_ERROR_STOP 1
+select is((select array_agg(c.relname::text order by c.relname)
+             from pg_inherits i join pg_class c on c.oid = i.inhrelid where i.inhparent = 'public.t341i'::regclass),
+          array['t341i_p0000000000000000000', 't341i_p0000000000000001000', 't341i_p0000000000000002000'],
+          '(I) with the index renamed as the message says, t341i converts and the cell [1000, 2000) is its partition');
+select is((select array_agg(inhparent::regclass::text) from pg_inherits where inhrelid = 'public.f341_iother_p0_idx'::regclass),
+          array['f341_iother_idx'], '(I) and the renamed index is still attached to f341_iother_idx');
+
+-- ---------------------------------------------------------------------------------------------------------
+-- (J) a foreign table, partition of another table, at the first forward cell's name
+create table public.t341j (id bigint primary key, v int);
+insert into public.t341j select g, g from generate_series(1, 20) g;   -- step 1000: monolith [0, 1000)
+create foreign data wrapper fdw341;
+create server srv341 foreign data wrapper fdw341;
+create table public.f341_fother (id bigint) partition by range (id);
+create foreign table public.t341j_p0000000000000001000 partition of public.f341_fother
+  for values from (0) to (10) server srv341;
+
+select throws_like(
+  $$ call pgpm.transmute('public.t341j', 'id', 1000::bigint, p_obtain => 2) $$,
+  'pg_partition_magician: public.t341j_p0000000000000001000 already exists as a partition of public.f341_fother matching this parent''s partition naming%alter foreign table public.t341j_p0000000000000001000 rename to <a new name>%',
+  '(J) transmute refuses a foreign-table partition of another table at a forward cell''s name, and the remedy is alter foreign table');
+alter foreign table public.t341j_p0000000000000001000 rename to f341_fother_p0;
+\set ON_ERROR_STOP 0
+call pgpm.transmute('public.t341j', 'id', 1000::bigint, p_obtain => 2);
+\set ON_ERROR_STOP 1
+select is((select array_agg(c.relname::text order by c.relname)
+             from pg_inherits i join pg_class c on c.oid = i.inhrelid where i.inhparent = 'public.t341j'::regclass),
+          array['t341j_p0000000000000000000', 't341j_p0000000000000001000', 't341j_p0000000000000002000'],
+          '(J) with the foreign table renamed as the message says, t341j converts and the cell [1000, 2000) is its partition');
+select is((select array_agg(inhparent::regclass::text) from pg_inherits where inhrelid = 'public.f341_fother_p0'::regclass),
+          array['f341_fother'], '(J) and the renamed foreign table is still f341_fother''s partition');
+
+-- ---------------------------------------------------------------------------------------------------------
+-- (H) what the guard lets through, restore_incoming_fks's in-flight gate must not take for an in-flight child
+create table public.t341h (id bigint not null, ts timestamptz not null, primary key (id, ts));
+insert into public.t341h select g, '2024-03-01 00:00+00'::timestamptz + g * interval '1 day' from generate_series(0, 19) g;
+create table public.r341h (hid bigint, hts timestamptz,
+                           constraint r341h_fk foreign key (hid, hts) references public.t341h (id, ts));
+insert into public.r341h values (3, '2024-03-04 00:00+00'), (5, '2024-03-06 00:00+00');
+create table public.t341h_p2023 (id bigint not null, ts timestamptz not null);
+insert into public.t341h_p2023 values (7, '2023-03-01 00:00+00'), (8, '2023-09-01 00:00+00');
+
+\set ON_ERROR_STOP 0
+call pgpm.transmute('public.t341h', 'ts', interval '1 month', p_obtain => 2, p_incoming_fks => 'preserve');
+\set ON_ERROR_STOP 1
+select is((select array_agg(d.constraint_name::text || '/' || (d.restored_at is not null)::text)
+             from pgpm.dropped_fk d where d.parent_table = 'public.t341h'::regclass)
+          || (select array_agg(c.conname::text) from pg_constraint c
+               where c.conrelid = 'public.r341h'::regclass and c.contype = 'f'),
+          array['r341h_fk/false'],
+          'LIVENESS: (H) the preserve conversion beside t341h_p2023 dropped r341h_fk and has it to re-add');
+-- the gate's liveness: a standalone table at a label a regrain of this grid gives holds the re-add off
+create table public.t341h_p2024_03_15 (note text);
+select is(pgpm.restore_incoming_fks('public.t341h'), 0,
+          'LIVENESS: (H) a standalone table at a day label, made after the conversion, holds the re-add off');
+alter table public.t341h_p2024_03_15 rename to t341h_mine;
+select is(pgpm.restore_incoming_fks('public.t341h'), 1,
+          '(H) with that table renamed, the key is re-added: t341h_p2023, a label the grid cannot give, is no in-flight child');
+select is((select array_agg(c.conname::text || '/' || c.confrelid::regclass::text) from pg_constraint c
+            where c.conrelid = 'public.r341h'::regclass and c.contype = 'f' and c.conparentid = 0),
+          array['r341h_fk/t341h'], '(H) r341h_fk is back on r341h, against the converted t341h');
+select throws_ok($$ insert into public.r341h values (999, '2024-03-07 00:00+00') $$, '23503', NULL,
+                 '(H) and it is enforced: a row of r341h with no parent row is refused');
+select is((select relkind::text || '/' || relispartition::text || '/' || (select array_agg(id order by id)::text from public.t341h_p2023)
+             from pg_class where oid = 'public.t341h_p2023'::regclass),
+          'r/false/{7,8}', '(H) t341h_p2023 is still the operator''s standalone table, holding ids 7 and 8');
 
 select * from finish();

@@ -8,17 +8,21 @@
 # give, and told to drop it; and it excused any relation with a pg_inherits parent, so a partition or
 # inheritance child of ANOTHER table at a forward cell's name passed, and the conversion completed with that
 # cell unbuilt. The guard now asks _grid_can_label (the step's granularity, or a finer one, or the coarser one a
-# regrain target the step allows reaches) and excuses only a partition of THIS parent. The file is the
-# acceptance test, and pairs each refusal and each conversion with a witness that the name is (or is not) one
-# the grid gives; this wrapper exists so the mutations have a guard the discriminate track can run against the
-# mutant, in the shape of bench/retain_recall_moved_parent.sh.
+# regrain target the step allows reaches) and excuses only a partition of THIS parent; and
+# restore_incoming_fks's in-flight gate, which recognises a fine child's name as the guard does, asks
+# _grid_can_label too, so a table the guard lets a preserve conversion through with does not hold the dropped
+# incoming keys off for good. The file is the acceptance test, and pairs each refusal and each conversion with
+# a witness that the name is (or is not) one the grid gives; this wrapper exists so the mutations have a guard
+# the discriminate track can run against the mutant, in the shape of bench/retain_recall_moved_parent.sh.
 #
 # The mutations required to fail against it (bench/mutations/mutate.py):
 #   child_holders_any_kind_label       -- the pg_class half asks the kind's label test alone: part A's
 #                                         monthly conversion is refused by t341a_p2023, part G's '30 days'
 #                                         one by t341g_p2023_05
 #   child_holder_types_any_kind_label  -- the pg_type half does: part A is refused by the domain t341a_p2022
-#   child_holders_any_parent_exempt    -- any pg_inherits parent excuses a holder: parts E and F convert
+#   child_holders_any_parent_exempt    -- any pg_inherits parent excuses a holder: parts E, F, I and J convert
+#   restore_gate_any_kind_label        -- restore_incoming_fks's gate asks the kind's label test alone: part
+#                                         H's incoming key is never re-added beside t341h_p2023
 #
 # Runs on the plain core image (pgtap and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path inside
 # the container, for a worktree mounted somewhere other than /repo. The file builds its own fixtures, so
