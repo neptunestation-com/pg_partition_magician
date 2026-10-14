@@ -571,8 +571,8 @@ Three sibling refusals share this shape. `... already exists as a sequence match
 naming ...` means a relation that is not a table holds a child-partition name; the message says what kind it
 is, so `drop table` is not the command. `... already exists as a partition of public.other matching this
 parent's partition naming ...` (or `an inheritance child of`) means a partition of ANOTHER table holds the
-name; it is that table's, so rename it (`alter table ... rename to ...`, which keeps it attached where it
-is) rather than drop it. `... already exists, and transmute needs that name for the monolith ...` means a
+name of a forward partition this conversion creates; it is that table's, so rename it (`alter table ...
+rename to ...`, which keeps it attached where it is) rather than drop it. `... already exists, and transmute needs that name for the monolith ...` means a
 relation holds the coarse name the converted table itself will take (`<rel>_p<lo>_to_<hi>`), typically a
 monolith detached from an earlier conversion of a table by that name. In every case the refusal happens
 before anything is committed: no bound, no claim, the table untouched. Rename (or, for an orphan you do not

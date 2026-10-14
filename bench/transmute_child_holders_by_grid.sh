@@ -8,7 +8,9 @@
 # give, and told to drop it; and it excused any relation with a pg_inherits parent, so a partition or
 # inheritance child of ANOTHER table at a forward cell's name passed, and the conversion completed with that
 # cell unbuilt. The guard now asks _grid_can_label (the step's granularity, or a finer one, or the coarser one a
-# regrain target the step allows reaches) and excuses only a partition of THIS parent; and
+# regrain target the step allows reaches), and refuses a relation of another table's hierarchy at a name the
+# conversion itself creates (a forward cell's), leaving one at a name only a later regrain or obtain gives to
+# their own refusals; and
 # restore_incoming_fks's in-flight gate, which recognises a fine child's name as the guard does, asks
 # _grid_can_label too, so a table the guard lets a preserve conversion through with does not hold the dropped
 # incoming keys off for good. The file is the acceptance test, and pairs each refusal and each conversion with
@@ -21,6 +23,9 @@
 #                                         one by t341g_p2023_05
 #   child_holder_types_any_kind_label  -- the pg_type half does: part A is refused by the domain t341a_p2022
 #   child_holders_any_parent_exempt    -- any pg_inherits parent excuses a holder: parts E, F, I and J convert
+#   child_holders_inherits_any_name    -- a hierarchy member at ANY name in reach is a holder: part K's
+#                                         conversion is refused by another table's partition at a regrain
+#                                         cell's name inside the monolith
 #   restore_gate_any_kind_label        -- restore_incoming_fks's gate asks the kind's label test alone: part
 #                                         H's incoming key is never re-added beside t341h_p2023
 #

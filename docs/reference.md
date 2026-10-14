@@ -442,9 +442,13 @@ inheritance parent; a relation of any kind already holds the name the monolith w
 or a child-partition name (`<table>_p<label>`, any name pgpm could give a partition on this grid: a label
 at the step's granularity or a finer one, or the coarser one a regrain target no wider than the step gives,
 such as a year label on an `'18 months'` grid but not on a monthly one; an id label past 19 digits or with
-a fraction included: an orphan from an interrupted regrain, a table of your own, a sequence or view that
-happens to be named that way, or a partition or inheritance child of another table; the remedy renames it,
-which keeps its rows and its place) or the staging name `<table>_pgpm_new` the new parent is built under
+a fraction included: an orphan from an interrupted regrain, a table of your own, or a sequence or view that
+happens to be named that way; the remedy renames it, which keeps its rows and its place); a partition,
+inheritance child or index partition of another table holds the name of a forward partition this call
+creates (the `p_obtain` cells past the monolith; at a name only a later `obtain` or regrain gives, such as
+the partitions a managed table renamed aside keeps, it is left to `obtain`, which leaves that cell unbuilt
+and logs `fail_obtain_name`, and to `regrain_step`, which refuses a relation it did not create); a relation
+of any kind holds the staging name `<table>_pgpm_new` the new parent is built under
 (usually a leftover from an interrupted run; the message names the kind of relation it found and the `DROP`
 for that kind, or, for one that cannot be dropped on its own, such as a constraint's index or an identity
 column's sequence, the object it is part of, or, for one something else depends on, such as a serial

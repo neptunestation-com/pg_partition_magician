@@ -18,9 +18,12 @@
   excused any relation with a `pg_inherits` parent, so a partition or inheritance child of an unrelated table
   holding `<table>_p<label>` passed the preflight and the cutover's askings, obtain stepped over the name, and
   the conversion completed with that cell unbuilt (`fail_obtain_name`) and every write into its range refused.
-  Only a partition of the table's own new parent is excused now; the refusal names the table (or partitioned
-  index) the holder belongs to, and its remedy renames the holder (`alter table`, `alter index` or
-  `alter foreign table`), which leaves it attached where it is.
+  Such a holder at a forward cell's name the conversion creates is refused up front now (only a partition of
+  the table's own new parent is excused), naming the table (or partitioned index) it belongs to, and the
+  remedy renames it (`alter table`, `alter index` or `alter foreign table`), which leaves it attached where it
+  is. At a name only a later `obtain` or regrain gives (the partitions a managed table renamed aside keeps,
+  #496) it is still left to `obtain`'s `fail_obtain_name` and `regrain_step`'s refusal (#631), so a new table
+  under the old name still converts.
 - **`untransmute` and `uninstall.sql` drop a moved regrain capture function** (#1271).
   `pgpm._regrain_capture_names` looked the recorded capture function up by its oid only inside the delta's
   current schema, so once the delta (`ALTER TABLE ... SET SCHEMA`) or the function (`ALTER FUNCTION ... SET

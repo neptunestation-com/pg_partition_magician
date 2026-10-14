@@ -1068,7 +1068,8 @@ For step-by-step procedures when an alert fires, see the [runbook](runbook.md). 
   a partition (its step's label or a finer one), and cannot tell a leftover from a table of your own: rename
   the named table out of the way and retry, or drop it if it is a leftover holding nothing you need.
   The same up-front refusal names any other relation (a sequence, a view) holding a child-partition name,
-  a partition or inheritance child of another table holding one (rename it; it stays attached where it is),
+  a partition or inheritance child of another table holding a forward partition's name this conversion
+  creates (rename it; it stays attached where it is),
   and a relation holding the name the monolith itself will take (`<table>_p<lo>_to_<hi>`), typically a
   monolith detached from an earlier conversion of a table by that name.
 - **Re-running `transmute` on a table it already converted is refused.** `transmute` converts a table

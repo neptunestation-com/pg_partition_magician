@@ -10362,12 +10362,20 @@ $$;
 -- and pg_type under the statement's snapshot, not through to_regclass, for the reason
 -- _transmute_refuse_names_held gives.
 --
--- #1216: a partition of THIS parent (p_parent: the table in the preflight, which has none, and the new parent
--- in the cutover) is the one relation in pg_inherits that is not a holder. The exemption was any pg_inherits
--- row, so a partition or inheritance child of ANOTHER table at a forward cell's name passed the preflight and
--- both of the cutover's askings, obtain stepped over the held name, and the conversion completed with that
--- cell unbuilt (fail_obtain_name) and every write into its range refused. It is refused up front now, named
--- with the table it belongs to, and the remedy is a rename, which leaves it where it belongs.
+-- #1216: a relation in pg_inherits (a partition, an inheritance child, an index attached to a partitioned
+-- index) is a holder when it holds a name THIS conversion creates, p_created (the forward cells' names), and
+-- is not a partition of THIS parent (p_parent: the table up front, which has none, and the new parent in the
+-- cutover). The exemption was any pg_inherits row, so such a relation of ANOTHER table at a forward cell's
+-- name passed the preflight and both of the cutover's askings, obtain stepped over the held name, and the
+-- conversion completed with that cell unbuilt (fail_obtain_name) and every write into its range refused. It
+-- is refused up front now, named with the table it belongs to, and the remedy is a rename, which leaves it
+-- where it belongs. At a name only a LATER obtain or regrain gives it is still no holder here: that is
+-- exactly what a managed table renamed aside keeps (#496), every partition under its old <rel>_p<label>,
+-- and refusing it would refuse a new table under the old name once per old partition. Those later
+-- collisions are refused where they happen: obtain leaves the cell unbuilt and logs fail_obtain_name naming
+-- the holder, and regrain_step refuses a relation it did not create before a row moves (#631). The
+-- monolith's name is refused whatever holds it (_transmute_refuse_monolith_squatter). The askings that do
+-- not know the forward cells yet (the preflight, before the bound) pass none.
 --
 -- #1274: and only a label THIS grid can give (_grid_can_label: the step's granularity, or a finer one, or the
 -- coarser one a regrain target set_regrain accepts on this step and anchor reaches). The test was the kind's
@@ -10378,7 +10386,7 @@ $$;
 drop function if exists pgpm._transmute_refuse_child_holders(name, name, text);
 create or replace function pgpm._transmute_refuse_child_holders(p_nsp name, p_rel name, p_control_kind text,
                                                                 p_step text, p_anchor text, p_tz text,
-                                                                p_parent regclass)
+                                                                p_parent regclass, p_created name[])
 returns void language plpgsql stable as $$
 declare v_orphan name; v_orphan_kind "char"; v_holder_q text; v_is_partition boolean;
 begin
@@ -10392,7 +10400,9 @@ begin
      and starts_with(c.relname, p_rel || '_p')
      and pgpm._is_fine_child_label(p_control_kind, substr(c.relname, length(p_rel) + 3))
      and pgpm._grid_can_label(p_control_kind, p_step, p_anchor, p_tz, substr(c.relname, length(p_rel) + 3))
-     and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid and i.inhparent = p_parent)
+     and (not exists (select 1 from pg_inherits i where i.inhrelid = c.oid)
+          or (c.relname = any (p_created)
+              and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid and i.inhparent = p_parent)))
    limit 1;
   if v_orphan is not null and v_holder_q is not null then
     raise exception 'pg_partition_magician: %.% already exists as % of % matching this parent''s partition naming, and the conversion would collide with it when it creates that partition. It is %''s, so transmute does not touch it: rename it out of the way (alter % %.% rename to <a new name>; it stays where it is) and retry transmute.',
@@ -10868,6 +10878,7 @@ declare
   v_own_arr name;   -- #1105: the table's own array type's name, which the first RENAME updates
   v_pre_names text[];   -- #1105: what held a naming statement's names just before it ran (XX000 arm)
   v_fwd_names name[] := '{}'; v_fwd_lo text; v_fwd_hi text;   -- #1135: the forward cells' names, for a failed obtain
+  v_created name[] := '{}';   -- #1216: the forward cells' names, asked of the orphan guard up front
   v_tz text;   -- #455: the zone the grid is computed in, recorded in config.partition_tz
   v_claim_tz text;   -- #506: the zone recorded with the claim, which a resume adopts along with the bound
   v_claim_attnum smallint;   -- #628: the control column recorded with the claim, which a resume must match
@@ -11089,7 +11100,8 @@ begin
 
   -- Orphaned-child guard (REDESIGN.md, #509, #707): nothing may hold a name pgpm could give one of this
   -- table's fine children. See the helper, which the cutover asks again (#1135, #1167).
-  perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, p_parent);
+  perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, p_parent,
+                                               '{}'::name[]);
 
   -- Staging-name collision guard (#344): phase 3 builds the new parent under a temporary name BEFORE
   -- either rename (so that none of its setup work adds to the outage), which means that name must be
@@ -11698,6 +11710,20 @@ begin
   -- which a lookup of relations cannot see: a type holding it failed the cutover with a raw 42710, same as above.
   -- Both are asked again by the cutover's RENAME (#1104), see the helper.
   perform pgpm._transmute_refuse_monolith_squatter(v_nsp, v_monolith, v_lo_native, v_hi_native);
+  -- #1216: and the orphan guard again, now that the forward cells are known: a relation of another table's
+  -- hierarchy at one of their names is a holder (see the helper). Computed as the cutover computes them.
+  v_fwd_lo := v_hi_native;
+  for v_k in 1 .. p_obtain loop
+    begin
+      v_fwd_hi := pgpm._grid_next(p_control_kind, p_step, v_fwd_lo, v_tz);
+      v_created := v_created || pgpm._part_name(v_rel, p_control_kind, p_step, v_fwd_lo, v_fwd_hi, v_tz);
+    exception when raise_exception or datetime_field_overflow or numeric_value_out_of_range then
+      exit;
+    end;
+    v_fwd_lo := v_fwd_hi;
+  end loop;
+  perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, p_parent,
+                                               v_created);
 
   -- #309: bound the wait for the ADD's ACCESS EXCLUSIVE. Re-applied per phase rather than set once,
   -- because `set local` does not survive a COMMIT -- the same caution maintain() records at its own
@@ -12502,12 +12528,12 @@ begin
     perform pgpm.obtain(v_parent);
   exception
     when duplicate_table or duplicate_object or unique_violation then
-      perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, v_parent);
+      perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, v_parent, v_fwd_names);
       perform pgpm._transmute_refuse_names_held(v_nsp, v_fwd_names, 'CREATE of a forward partition',
                                                 p_skip => v_pre_names);
       raise;
   end;
-  perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, v_parent);
+  perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, v_parent, v_fwd_names);
 
   -- the conversion is complete: deleting the claim row IS releasing the claim, and nothing is left for the
   -- reaper to undo.

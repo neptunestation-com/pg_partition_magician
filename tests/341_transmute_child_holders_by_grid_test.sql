@@ -33,6 +33,11 @@
 --       partitioned index. Refused with `alter index` as the remedy, which is typed.
 --   (J) t341j, id grid step 1000: a FOREIGN TABLE partition of another table at the first forward cell's
 --       name. Refused with `alter foreign table` as the remedy, which is typed.
+--   (K) t341k, id grid step 1000, two forward cells: two partitions of ANOTHER table at names the conversion
+--       does NOT create, a '500' regrain cell inside the monolith and the cell [4000, 5000). Converts (a table
+--       renamed aside keeps names like these, #496); the later refusals fire where the names are reached:
+--       regrain_step refuses the first (#631), obtain leaves the second's cell unbuilt and logs
+--       fail_obtain_name naming it, and the other table keeps both partitions and both rows.
 --   (H) t341h, '1 month' grid converted with p_incoming_fks => 'preserve' beside the operator's t341h_p2023
 --       (ids 7 and 8): the cutover drops r341h_fk, and restore_incoming_fks, whose in-flight gate recognises a
 --       fine child's name as the orphan guard does, must not take the table the guard let through for an
@@ -42,10 +47,11 @@
 -- bench/transmute_child_holders_by_grid.sh runs this file against the mutants that drop the grid's label test
 -- from the pg_class half (child_holders_any_kind_label), from the pg_type half
 -- (child_holder_types_any_kind_label) and from restore_incoming_fks's gate (restore_gate_any_kind_label), and
--- narrow the exemption back to any pg_inherits parent (child_holders_any_parent_exempt).
+-- narrow the exemption back to any pg_inherits parent (child_holders_any_parent_exempt), and widen the
+-- hierarchy refusal past the names the conversion creates (child_holders_inherits_any_name).
 create extension if not exists pgtap;
 
-select plan(48);
+select plan(55);
 
 set timezone = 'UTC';
 
@@ -187,8 +193,11 @@ select throws_like(
   'pg_partition_magician: public.t341e_p0000000000000001000 already exists as a partition of public.f341_other matching this parent''s partition naming%alter table public.t341e_p0000000000000001000 rename to <a new name>%',
   '(E) transmute refuses a partition of another table at a forward cell''s name, naming the table it belongs to');
 select ok((select relkind::text from pg_class where oid = 'public.t341e'::regclass) = 'r'
-          and not exists (select 1 from pgpm.config where parent_table = 'public.t341e'::regclass),
-          '(E) the refusal came up front: t341e is still a plain, unregistered table');
+          and not exists (select 1 from pgpm.config where parent_table = 'public.t341e'::regclass)
+          and not exists (select 1 from pgpm.transmute_inflight where parent_table = 'public.t341e'::regclass)
+          and not exists (select 1 from pg_constraint where conrelid = 'public.t341e'::regclass
+                             and conname = 'pgpm_monolith_bound'),
+          '(E) the refusal came up front: t341e is still a plain, unregistered table, with no claim and no bound');
 alter table public.t341e_p0000000000000001000 rename to f341_other_p0;
 \set ON_ERROR_STOP 0
 call pgpm.transmute('public.t341e', 'id', 1000::bigint, p_obtain => 2);
@@ -283,6 +292,47 @@ select is((select array_agg(c.relname::text order by c.relname)
           '(J) with the foreign table renamed as the message says, t341j converts and the cell [1000, 2000) is its partition');
 select is((select array_agg(inhparent::regclass::text) from pg_inherits where inhrelid = 'public.f341_fother_p0'::regclass),
           array['f341_fother'], '(J) and the renamed foreign table is still f341_fother''s partition');
+
+-- ---------------------------------------------------------------------------------------------------------
+-- (K) a partition of another table at names the conversion does not create is left to the later refusals
+create table public.t341k (id bigint primary key, v int);
+insert into public.t341k select g, g from generate_series(1, 60) g;   -- step 1000: monolith [0, 1000)
+create table public.f341_kother (id bigint) partition by range (id);
+create table public.t341k_p0000000000000000500 partition of public.f341_kother for values from (0) to (10);
+create table public.t341k_p0000000000000004000 partition of public.f341_kother for values from (10) to (20);
+insert into public.f341_kother values (4), (14);
+
+select is(array[pgpm._part_name('t341k', 'id', '500', '500', '1000', 'UTC')::text,
+                pgpm._part_name('t341k', 'id', '1000', '4000', '5000', 'UTC')::text],
+          array['t341k_p0000000000000000500', 't341k_p0000000000000004000'],
+          'LIVENESS: (K) the held names are a ''500'' regrain cell inside the monolith and the cell [4000, 5000), past the two forward cells');
+\set ON_ERROR_STOP 0
+call pgpm.transmute('public.t341k', 'id', 1000::bigint, p_obtain => 2);
+\set ON_ERROR_STOP 1
+select is((select array_agg(c.relname::text order by c.relname)
+             from pg_inherits i join pg_class c on c.oid = i.inhrelid where i.inhparent = 'public.t341k'::regclass),
+          array['t341k_p0000000000000000000', 't341k_p0000000000000001000', 't341k_p0000000000000002000'],
+          '(K) t341k converts beside them: neither is a name the conversion creates');
+insert into public.t341k values (2500, 0);   -- the frontier past the monolith: it is frozen
+select throws_like($$ select pgpm.regrain('public.t341k', 't341k_p0000000000000000000', '500') $$,
+                   '%t341k_p0000000000000000500 already exists and this regrain did not create it%',
+                   '(K) the later regrain to ''500'' refuses the held name before a row moves');
+select is((select array_agg(id order by id) from public.t341k where id < 1000),
+          (select array_agg(g::bigint order by g) from generate_series(1, 60) g),
+          '(K) and every row of the monolith is still read through t341k');
+select is(pgpm.extend_to('public.t341k', '4500'), 1,
+          'LIVENESS: (K) extending the grid to 4500 builds the one cell it can, [3000, 4000)');
+select is((select array_agg(l.lo || '-' || l.hi || ':' || (l.method like '%t341k_p0000000000000004000%')::text)
+             from pgpm.log l where l.parent_table = 'public.t341k'::regclass and l.action = 'fail_obtain_name')
+          || (select array_agg(p.child_name::text) from pgpm.part p
+               where p.parent_table = 'public.t341k'::regclass and p.lo = '4000'),
+          array['4000-5000:true'],
+          '(K) and leaves [4000, 5000) unbuilt, logging fail_obtain_name that names the holder');
+select is((select array_agg(c.relname::text || '/' || i.inhparent::regclass::text order by c.relname)
+             from pg_inherits i join pg_class c on c.oid = i.inhrelid where i.inhparent = 'public.f341_kother'::regclass)
+          || (select array_agg(id::text order by id) from public.f341_kother),
+          array['t341k_p0000000000000000500/f341_kother', 't341k_p0000000000000004000/f341_kother', '4', '14'],
+          '(K) the other table keeps both partitions and both rows');
 
 -- ---------------------------------------------------------------------------------------------------------
 -- (H) what the guard lets through, restore_incoming_fks's in-flight gate must not take for an in-flight child

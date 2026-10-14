@@ -12542,7 +12542,7 @@ MUTATIONS["transmute_child_names_preflight_only"] = (
     "in the preflight only. A table (tests/321 (A)) or an enum (B) committed at a forward cell's name after it "
     "is stepped over by the cutover's obtain, and the conversion completes with that cell unbuilt "
     "(fail_obtain_name): every write into it is refused. One site: the cutover's asking after its obtain.",
-    [("      raise;\n  end;\n  perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, v_parent);\n",
+    [("      raise;\n  end;\n  perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, v_parent, v_fwd_names);\n",
       "      raise;\n  end;\n", 1)],
 )
 MUTATIONS["transmute_forward_create_unhandled"] = (
@@ -12552,16 +12552,16 @@ MUTATIONS["transmute_forward_create_unhandled"] = (
     "or its array type name (D), makes the cutover die raw once it commits, after phases 1 and 2 committed the "
     "bound and the claim. One site: the unique_violation arm of the handler around the cutover's obtain.",
     [("    when duplicate_table or duplicate_object or unique_violation then\n"
-      "      perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, v_parent);\n",
+      "      perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, v_parent, v_fwd_names);\n",
       "    when duplicate_table or duplicate_object then\n"
-      "      perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, v_parent);\n", 1)],
+      "      perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, v_parent, v_fwd_names);\n", 1)],
 )
 MUTATIONS["transmute_forward_orphan_unasked"] = (
     "bench/transmute_child_names_under_lock.sh",
     "#1135 with the forward CREATE's handler asking the general names helper only, not the orphan-child "
     "guard: a table an open transaction was creating at a forward cell's name (tests/321 (C)) is refused in "
     "the general helper's words, not the up-front ones the file pins. One site: that handler's guard call.",
-    [("unique_violation then\n      perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, v_parent);\n"
+    [("unique_violation then\n      perform pgpm._transmute_refuse_child_holders(v_nsp, v_rel, p_control_kind, p_step, p_anchor, v_tz, v_parent, v_fwd_names);\n"
       "      perform pgpm._transmute_refuse_names_held(v_nsp, v_fwd_names,",
       "unique_violation then\n      perform pgpm._transmute_refuse_names_held(v_nsp, v_fwd_names,", 1)],
 )
@@ -14048,8 +14048,20 @@ MUTATIONS["child_holders_any_parent_exempt"] = (
     "foreign-table partition of one (J) at a forward cell's name passes the preflight and the cutover's askings, "
     "obtain steps over the name, and the conversion completes with that cell unbuilt. One clause, the "
     "exemption's parent.",
-    [("     and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid and i.inhparent = p_parent)\n",
+    [("     and (not exists (select 1 from pg_inherits i where i.inhrelid = c.oid)\n"
+      "          or (c.relname = any (p_created)\n"
+      "              and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid and i.inhparent = p_parent)))\n",
       "     and not exists (select 1 from pg_inherits i where i.inhrelid = c.oid)\n", 1)],
+)
+MUTATIONS["child_holders_inherits_any_name"] = (
+    _G17,
+    "#1216 refused at every name the grid can give, not only the names the conversion creates: a relation of "
+    "another table's hierarchy at a name only a later regrain or obtain gives (tests/341 part K, a partition of "
+    "another table at an id label inside the monolith) refuses the conversion up front, so a table renamed aside "
+    "(#496) keeps every new table under its old name from converting until each of its partitions is renamed. "
+    "One clause, the forward-name test.",
+    [("          or (c.relname = any (p_created)\n"
+      "              and not exists", "          or (not exists", 1)],
 )
 MUTATIONS["restore_gate_any_kind_label"] = (
     _G17,
