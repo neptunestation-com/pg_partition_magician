@@ -4,7 +4,9 @@
 # Decide whether a failed workflow run is one of the KNOWN CI flakes, so land.sh may retry it once. Exit
 # 0 when every failed job of the run's latest attempt (or of --attempt N, for checking a signature against
 # an old attempt) matches a signature, 1 when any failed job is something else, 2 when the run has no
-# failed non-summary job and did not itself conclude failure. One line per failed job says which.
+# failed non-summary job and did not itself conclude failure, 3 when nothing could be decided: the jobs could
+# not be listed, or a failed job's log could not be read (it says "could not read the log") and no other job is
+# known not to be a flake. One line per failed job says which.
 #
 # The signatures are deliberately narrow, so a real regression is never retried:
 #   lock_guard_probe   bench/regrain_outgoing_fk_lock.sh's probe assertion, with its liveness witness
@@ -50,6 +52,14 @@ RUN=${1:?run id}; shift
 REPO=""; ATTEMPT=""
 while [ $# -gt 0 ]; do case "$1" in --repo) REPO=$2; shift 2;; --attempt) ATTEMPT=$2; shift 2;; *) echo "unknown option $1"; exit 3;; esac; done
 [ -n "$REPO" ] || REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+# A job log carries terminal escape sequences (GitHub's own colour codes), and gh 2.100 refuses to print such a
+# body unless --allow-escape-sequences is passed: stdout empty, exit 1. Read without the flag, every log read
+# empty and every signature UNKNOWN on that machine. An older gh does not know the flag and refuses it, so it
+# is passed only when `gh api --help` lists it; the codes themselves are stripped before any signature is read.
+LOG_FLAG=()
+case "$(gh api --help 2>/dev/null)" in *--allow-escape-sequences*) LOG_FLAG=(--allow-escape-sequences);; esac
+ESC=$'\033'
+unread=0
 
 run_conclusion=$(gh api "repos/$REPO/actions/runs/$RUN" --jq '.conclusion // "null"' 2>/dev/null)
 if [ -n "$ATTEMPT" ]; then
@@ -98,7 +108,11 @@ while IFS=$'\t' read -r j status concl steps name; do
     echo "job $j ($name): $status/$concl with $steps step(s) beside a job that ran; not a flake this script knows; do not retry"
     rc=1; continue
   fi
-  log=$(gh api "repos/$REPO/actions/jobs/$j/logs" 2>/dev/null | sed 's/^[^ ]* //')
+  log=$(gh api ${LOG_FLAG[@]+"${LOG_FLAG[@]}"} "repos/$REPO/actions/jobs/$j/logs" 2>/dev/null | sed -e "s/$ESC\[[0-9;]*[A-Za-z]//g" -e 's/^[^ ]* //')
+  if ! grep -q '[^[:space:]]' <<<"$log"; then
+    echo "job $j ($name): could not read the log (gh api returned nothing for it); no signature was checked, so this is not a known flake; do not retry"
+    unread=1; continue
+  fi
   other_fails=$(grep -E "^FAIL " <<<"$log" | grep -vc "writes to the MANAGED PARENT are not blocked")
   if grep -qE "^FAIL +writes to the MANAGED PARENT are not blocked +got [0-9]+, want 0" <<<"$log" \
      && [ "$other_fails" = "0" ] \
@@ -121,4 +135,6 @@ while IFS=$'\t' read -r j status concl steps name; do
     rc=1
   fi
 done <<<"$bad"
+# a job known not to be a flake decides; otherwise a log that could not be read leaves the run undecided
+[ "$rc" = 0 ] && [ "$unread" = 1 ] && rc=3
 exit $rc

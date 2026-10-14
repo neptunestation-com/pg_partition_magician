@@ -254,5 +254,76 @@ else
   unset -f gh
 fi
 
+# ---------------------------------------------------------------- (e) flake_check.sh's log read
+#   flake_check.sh read job logs with a bare `gh api .../logs`, which gh 2.100 refuses to print when the body
+#   holds terminal escape sequences (stdout empty, exit 1), so every log signature read UNKNOWN on such a
+#   machine; and an empty log was UNKNOWN by omission rather than said. Driven through the real script with a
+#   stub `gh` on PATH that behaves as gh 2.100 or as an older gh, which does not know the flag. The controls:
+#   the stub really refuses the bare read, and a readable log that matches nothing still reads UNKNOWN.
+#     flake_check_log_without_escape_flag     the log read without --allow-escape-sequences again
+#     flake_check_empty_log_reads_unknown     an unreadable log falls through to UNKNOWN again
+mkdir -p "$work/bin"
+cat > "$work/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+# a stand-in for gh: GH_STUB=new behaves as gh 2.100 (refuses to print an escaped body without
+# --allow-escape-sequences), GH_STUB=old as an older gh (does not know the flag); GH_LOG is the job's log
+flag=""; path=""; jqx=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    api) shift;;
+    --help) if [ "$GH_STUB" = new ]; then printf '      --allow-escape-sequences   Allow printing terminal escape sequences\n'; fi
+            printf '      --jq string   Query to select values from the response using jq syntax\n'; exit 0;;
+    --allow-escape-sequences) flag=1; shift;;
+    --jq) jqx=$2; shift 2;;
+    -*) shift;;
+    *) path=$1; shift;;
+  esac
+done
+if [ -n "$flag" ] && [ "$GH_STUB" = old ]; then echo "unknown flag: --allow-escape-sequences" >&2; exit 1; fi
+case "$path" in
+  */actions/runs/*/jobs*) body='{"jobs":[{"id":101,"status":"completed","conclusion":"failure","steps":[1,2,3,4,5],"name":"perf (shard 2/4)"}]}';;
+  */actions/runs/*) body='{"conclusion":"failure"}';;
+  */annotations) body='[]';;
+  */actions/jobs/*/logs)
+    if [ "$GH_STUB" = new ] && [ -z "$flag" ] && grep -q $'\033' "$GH_LOG"; then
+      echo "the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway" >&2; exit 1
+    fi
+    cat "$GH_LOG"; exit 0;;
+  *) echo "stub gh: unknown path $path" >&2; exit 1;;
+esac
+if [ -n "$jqx" ]; then jq -r "$jqx" <<<"$body"; else printf '%s\n' "$body"; fi
+STUB
+chmod +x "$work/bin/gh"
+E=$'\033'
+{
+  echo "2026-10-13T23:14:00.1Z ##[group]Run ./test.sh perf"
+  echo "2026-10-13T23:14:00.2Z ${E}[36;1m./test.sh perf --shard=2/4${E}[0m"
+  echo "2026-10-13T23:14:09.0Z PASS  LIVENESS: the probe was writing before the restore began   12 writes"
+  echo "2026-10-13T23:14:09.0Z PASS  LIVENESS: attempts overlapped the restore's own window   3 overlapped"
+  echo "2026-10-13T23:14:09.0Z PASS  the FK was actually re-added   yes"
+  echo "2026-10-13T23:14:09.0Z FAIL  writes to the MANAGED PARENT are not blocked   got 1, want 0"
+} > "$work/flake.log"
+{
+  echo "2026-10-13T23:14:00.2Z ${E}[36;1m./test.sh perf --shard=2/4${E}[0m"
+  echo "2026-10-13T23:14:09.0Z FAIL  the partition kept its rows   got 9, want 10"
+} > "$work/real.log"
+: > "$work/empty.log"
+fc() { PATH="$work/bin:$PATH" GH_STUB=$1 GH_LOG=$2 bash "$R/flake_check.sh" 4242 --repo o/r 2>&1; }
+
+out=$(PATH="$work/bin:$PATH" GH_STUB=new GH_LOG="$work/flake.log" gh api repos/o/r/actions/jobs/101/logs 2>/dev/null); rc=$?
+check "$([ "$rc" != 0 ] && [ -z "$out" ] && echo 0 || echo 1)" "LIVENESS: (e) the stub, as gh 2.100, prints nothing for the bare read" "exit $rc, ${#out} bytes"
+out=$(fc new "$work/flake.log"); rc=$?
+check "$([ "$rc" = 0 ] && grep -q "known flake lock_guard_probe" <<<"$out" && echo 0 || echo 1)" \
+  "(e) under gh 2.100 the restore_fk_lock flake is recognised" "exit $rc: ${out:0:70}"
+out=$(fc old "$work/flake.log"); rc=$?
+check "$([ "$rc" = 0 ] && grep -q "known flake lock_guard_probe" <<<"$out" && echo 0 || echo 1)" \
+  "(e) under an older gh the same flake is recognised" "exit $rc: ${out:0:70}"
+out=$(fc new "$work/real.log"); rc=$?
+check "$([ "$rc" = 1 ] && grep -q "UNKNOWN failure" <<<"$out" && echo 0 || echo 1)" \
+  "LIVENESS: (e) a log that reads and matches nothing is UNKNOWN (exit 1)" "exit $rc"
+out=$(fc new "$work/empty.log"); rc=$?
+check "$([ "$rc" = 3 ] && grep -q "could not read the log" <<<"$out" && ! grep -q UNKNOWN <<<"$out" && echo 0 || echo 1)" \
+  "(e) an empty log says it could not be read (exit 3), not UNKNOWN" "exit $rc: ${out:0:70}"
+
 if [ "$fail" = 0 ]; then echo "review_tooling_verdicts: PASS"; else echo "review_tooling_verdicts: FAIL"; fi
 exit "$fail"

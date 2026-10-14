@@ -14191,6 +14191,24 @@ MUTATIONS["land_stall_counts_existing_summaries"] = (
     [("(length > 0) and all(.status", "all(.status", 1)],
 )
 MUTATION_SRC["land_stall_counts_existing_summaries"] = "scripts/review/land.sh"
+MUTATIONS["flake_check_log_without_escape_flag"] = (
+    "bench/review_tooling_verdicts.sh",
+    "flake_check.sh before 2026-10-14: the job log is read with a bare `gh api .../logs`, which gh 2.100 "
+    "refuses to print when the body holds terminal escape sequences, so on such a machine no log reads and "
+    "no signature can match. One clause, the flag's detection. The guard's (e) catches it (the restore_fk_lock "
+    "flake not recognised under gh 2.100).",
+    [('case "$(gh api --help 2>/dev/null)" in *--allow-escape-sequences*) LOG_FLAG=(--allow-escape-sequences);; esac\n',
+      '', 1)],
+)
+MUTATION_SRC["flake_check_log_without_escape_flag"] = "scripts/review/flake_check.sh"
+MUTATIONS["flake_check_empty_log_reads_unknown"] = (
+    "bench/review_tooling_verdicts.sh",
+    "flake_check.sh before 2026-10-14: a log that could not be read falls through every signature to UNKNOWN, "
+    "so an unreadable log is indistinguishable from a real unknown failure. One clause, the empty-log branch. "
+    "The guard's (e) catches it (an empty log says it could not be read, exit 3).",
+    [("  if ! grep -q '[^[:space:]]' <<<\"$log\"; then\n", '  if false; then\n', 1)],
+)
+MUTATION_SRC["flake_check_empty_log_reads_unknown"] = "scripts/review/flake_check.sh"
 
 
 # Issue #1272: the remedy every retain_disown row logs (pgpm._disown_retirement, its one writer) is the whole repair the

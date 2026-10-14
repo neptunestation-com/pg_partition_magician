@@ -228,6 +228,16 @@
   `bench/retain_disown_remedy.sh` runs it against two mutations, one that drops the `DELETE` from the remedy and
   one that writes the drop remedy for a partition retention no longer reaches.
 
+- **`flake_check.sh` reads a job log whatever gh prints it with, and says when it cannot.** It read logs with a
+  bare `gh api .../logs`, and gh 2.100 refuses to print a body holding terminal escape sequences (which GitHub's
+  job logs carry) unless `--allow-escape-sequences` is passed: stdout stayed empty, and every log signature
+  (`lock_guard_probe`, `registry_quota`, `regrain_perf_discriminate`) read UNKNOWN on such a machine. The flag
+  is now passed when `gh api --help` lists it (an older gh does not know it and refuses it), the escape codes
+  are stripped before any signature is read, and a log that still reads empty is its own outcome: the job's
+  line says "could not read the log" and the run exits 3 unless another job is known not to be a flake (exit
+  1). Guard `bench/review_tooling_verdicts.sh`, mutations `flake_check_log_without_escape_flag` and
+  `flake_check_empty_log_reads_unknown`.
+
 - **A tracking copy pre-builds the index of the hypertable's own key** (#1266). `from_hypertable_copy(...,
   p_track_changes => true)` named the key index it pre-builds after whichever `pg_constraint` row had the key's
   index as its `conindid`, and an incoming foreign key that references the key has the same one. When its row
