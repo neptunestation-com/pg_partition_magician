@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **A resumed `text_time` transmute refuses another encoding** (#1270). The claim a failed attempt leaves
+  recorded the bound, its zone (#506) and its column (#628), but not the `text_time` encoding the
+  `pgpm_monolith_bound` `CHECK`'s literals were written in, so a re-run with another `p_tt_epoch` (or prefix,
+  width, radix, unit, alphabet or discard bits) took the claim over, skipped phases 1 and 2, and attached the
+  monolith with the bound encoded the new way: the `ATTACH` scanned the table under `ACCESS EXCLUSIVE` and
+  died raw on the rows outside it, after the bound and claim had committed. The claim now records the
+  encoding (`transmute_inflight.text_time_encoding`), and a resume under another one is refused up front,
+  naming both and the remedy (`transmute_abort`, then re-run); the same encoding spelled otherwise resumes.
+  A claim recorded before the column existed is not checked.
+
 - **Re-running `install.sql` keeps the grants on a function it has to reshape** (#1267). `_surface_prepare()`
   dropped `status()`, `progress()`, `observe_window()`, `check_uuidv7()` or `check_text_time()` when its installed
   shape could not be replaced in place (a pre-#343 `status()` without `regrain_to`), and the file recreated it at

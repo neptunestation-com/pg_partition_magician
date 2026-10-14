@@ -1127,6 +1127,7 @@ run_perf() {
     "bench/reread_under_lock_remaining_tap.sh pgpm_perf319"
     "bench/frontier_malformed_max.sh pgpm_perf111"
     "bench/transmute_resume_control_column.sh pgpm_perf320"
+    "bench/transmute_resume_text_time_encoding.sh pgpm_perf378"
     "bench/dropped_fk_reconcile.sh pgpm_perf109"
     "bench/regrain_target_shape.sh pgpm_perf97"
     "bench/regrain_target_integral.sh pgpm_perf98"

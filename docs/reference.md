@@ -425,7 +425,11 @@ call's grid (its `lo` or `hi` is not a boundary of `p_step` and `p_anchor` in th
 computed in: re-run with the step and anchor of the attempt that recorded it, or abort it), or was
 recorded on another control column (the bound's `CHECK` is on that column, so it cannot certify this one's
 partition bound and the cutover would scan the whole table under `ACCESS EXCLUSIVE`: re-run on the column
-that attempt used, which a rename in between does not change, or abort it); the session's own
+that attempt used, which a rename in between does not change, or abort it), or on a `text_time` key was
+recorded in another encoding (any of `p_tt_prefix`, `p_tt_width`, `p_tt_radix`, `p_tt_unit`, `p_tt_alphabet`,
+`p_tt_discard_bits` or `p_tt_epoch` differs, so the `CHECK`'s literals cannot certify this call's partition
+bound either: re-run with that attempt's encoding, where an epoch at another offset for the same instant and
+the default alphabet written out are the same encoding, or abort it and re-run); the session's own
 `backend_start` is visible neither to the current role nor to pgpm's owner (a session under `SET ROLE` to a
 role without the session user's privileges, with pgpm owned by a role that has neither those nor
 `pg_read_all_stats`: the claim records it as its owner's identity, which a resume and the reaper match on,
@@ -3884,6 +3888,7 @@ carries a `pgpm_monolith_bound` `CHECK` and is refusing writes outside `[lo, hi)
 | `lo` / `hi` | `text` | the native bounds the `CHECK` is enforcing; a retry reuses these rather than recomputing |
 | `partition_tz` | `text` | the zone `lo` and `hi` were computed in; a retry adopts it along with them, whatever zone its own session runs in (null on a row written before the column existed, which a retry reads as "keep this session's zone") |
 | `control_attnum` | `smallint` | the attribute number of the control column `lo` and `hi` were computed on, which the `CHECK` constrains; a retry on another column is refused, one on the same column under a new name resumes (null on a row written before the column existed, which a retry does not check) |
+| `text_time_encoding` | `jsonb` | on a `text_time` key, the encoding the `CHECK`'s literals were written in (`prefix`, `width`, `radix`, `unit`, `alphabet` with an omitted one written out as the default it stands for, `discard_bits`, and `epoch` in seconds since 1970-01-01 UTC); a retry under another encoding is refused, the same one spelled otherwise resumes (null for every other kind, and on a row written before the column existed, which a retry does not check) |
 | `started_at` | `timestamptz` | when the conversion added the bound |
 
 ### `pgpm.archive_ledger`
