@@ -52,15 +52,20 @@ format(`), a name is the name PL/pgSQL resolves (`V_COLS` is `v_cols`), and a ty
 And every BODY is read, and a loop's target and an EXECUTE's INTO are assignments too (#1278, #1236): a body
 is every dollar-quoted string of the file, whatever its tag (`$$`, `$fn$`), found by lexing the file rather
 than splitting it on `$$`; a FOR or FOREACH loop's target is assigned the loop's values as an INTO's target
-is (every branch's, when the loop's query is a set operation), and an EXECUTE's INTO target the list of the
-dynamic statement its own expression spells out; and a body is lexed for `/* block */` comments as well as
-`-- line` ones, and for an escape string's backslash (`E'it\\'s'` is one literal).
+is (every branch's, a parenthesised one included, when the loop's query is a set operation), and an
+EXECUTE's INTO target the list of the dynamic statement its own expression spells out (literals, or a
+format() template read as format() renders it: `%%` is `%`); a target may be qualified by its block's label
+(`blk.v_cols`); and a body is lexed for `/* block */` comments as well as `-- line` ones, for an escape
+string's backslash (`E'it\\'s'` is one literal) and for the dollar-quoted strings nested in it (`$q$/tmp/*$q$`
+is a literal, not the start of a comment).
 
-What is still NOT read, so nobody takes the list above for more than it is: a FETCH's INTO (the cursor's
-query is declared or opened somewhere else), an EXECUTE whose statement arrives in a variable (`execute
-v_sql into v`: the value list is not in the statement that assigns), a CALL's INOUT argument, a parameter
-(only DECLAREd locals are typed), a field of a record, and a dollar-quoted string nested inside a body
-(#1236, B08-03: strip_noise reads it as code).
+What is NOT judged, in either direction, because the value is not in the statement that assigns it: a
+FETCH's INTO (the cursor's query is declared or opened somewhere else), an EXECUTE whose statement is not
+spelled out in its own expression (`execute v_sql into v`, or literals concatenated with code), an item of
+a dynamic statement's list that a format() conversion splices in (`format('select %L', x)`) and that does not
+itself quote, a CALL's INOUT argument and a parameter (only DECLAREd locals are typed). A target qualified
+by its label is read as the local it names, so a record's field (`r.c`, the same spelling) is read as a
+local `c` would be.
 
   ./scripts/check_quoted_splices.py            # check the module
   ./scripts/check_quoted_splices.py --selftest # prove the checks fail when their defect is present
@@ -101,10 +106,18 @@ SPEC_I = re.compile(r"%(?:\d+\$)?-?(?:\d+|\*(?:\d+\$)?)?I")
 # so `V_COLS`, `v_cols` and `"v_cols"` are one local (#1179: the checks matched names, calls and types by
 # their exact lower-case spelling).
 IDENT = r'(?:[a-z_][a-z0-9_$]*|"(?:[^"]|"")+")'
+# An assignment's target as it can be written: a local, or a local qualified by the label of the block that
+# declares it (`<<blk>> declare v_cols text; begin for blk.v_cols in ...`), which PL/pgSQL resolves to the
+# same local. canonical() reads a qualified target as the name after the label.
+TARGET = r"(?:" + IDENT + r"\s*\.\s*)?" + IDENT
+QUALIFIED = re.compile(r"(?is)\A\s*" + IDENT + r"\s*\.\s*(?P<name>" + IDENT + r")\s*\Z")
 
 
 def canonical(tok: str) -> str:
     tok = tok.strip()
+    qualified = QUALIFIED.match(tok)
+    if qualified:
+        tok = qualified.group("name")
     if tok.startswith('"') and tok.endswith('"') and len(tok) >= 2:
         return tok[1:-1].replace('""', '"')
     return tok.lower()
@@ -171,6 +184,25 @@ def escape_string(text: str, i: int) -> bool:
             and not (i > 1 and re.match(r'[\w$"]', text[i - 2])))
 
 
+def blank_literal(text: str) -> str:
+    """A literal's contents blanked character for character as strip_noise() blanks them, KEEPING `%I` (and
+    blanking `%%`, format()'s escaped percent); a newline stays a newline so line numbers hold."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        if text.startswith("%%", i):
+            out.append("  ")
+            i += 2
+            continue
+        spec = SPEC_I.match(text, i)
+        if spec:
+            out.append(spec.group(0))
+            i = spec.end()
+            continue
+        out.append("\n" if text[i] == "\n" else " ")
+        i += 1
+    return "".join(out)
+
+
 def strip_noise(body: str) -> str:
     """Blank out comments and the contents of single-quoted strings, KEEPING `%I`.
 
@@ -190,6 +222,10 @@ def strip_noise(body: str) -> str:
     statement, so it was never read. An escape string's backslash escapes the character after it (#1236,
     B08-02): read as a plain literal, `E'it\\'s'` closed at its escaped quote and the next quote opened a
     literal that blanked the code after it.
+
+    A dollar-quoted string nested in the body (`$q$...$q$`, whatever its tag) is a literal like a quoted one,
+    blanked the same way between a `'` at each end: a `/*`, a `--` or an apostrophe inside it is text. Read as
+    code, a `/*` in `v_path := $q$/tmp/*$q$` opened a block comment that blanked the rest of the body.
     """
     out = []
     i, n = 0, len(body)
@@ -199,6 +235,13 @@ def strip_noise(body: str) -> str:
             end = block_comment_end(body, i)
             out.append(re.sub(r"[^\n]", " ", body[i:end]))
             i = end
+        elif c == "$" and DOLLAR_QUOTE.match(body, i):
+            tag = DOLLAR_QUOTE.match(body, i).group(0)
+            end = body.find(tag, i + len(tag))
+            end = n if end < 0 else end
+            close = "" if end == n else " " * (len(tag) - 1) + "'"
+            out.append("'" + " " * (len(tag) - 1) + blank_literal(body[i + len(tag):end]) + close)
+            i = end + len(close)
         elif c == '"':
             j = i + 1
             while j < n:
@@ -393,9 +436,10 @@ def carries_quoting(expr: str) -> bool:
 
 # The INTO clause of a plpgsql statement: `into [strict] target [, target ...]`. PL/pgSQL takes it
 # almost anywhere in a SELECT (`select list into v from`, `select into v list from`, `select list from t
-# into v`) and after RETURNING (#1179: only the list-first form was read).
+# into v`) and after RETURNING (#1179: only the list-first form was read). A target may carry its block's
+# label (TARGET).
 INTO = re.compile(r"(?is)(?<![\w$])into\s+(?:strict\s+)?"
-                  r"(?P<targets>" + IDENT + r"(?:\s*,\s*" + IDENT + r")*)")
+                  r"(?P<targets>" + TARGET + r"(?:\s*,\s*" + TARGET + r")*)")
 # Where a top-level select list ends.
 LIST_END = re.compile(r"(?is)(?<![\w$])(?:from|where|group|having|window|order|limit|offset|union|"
                       r"intersect|except|fetch|for)(?![\w$])")
@@ -472,37 +516,79 @@ def bare(clean: str) -> str:
     return QUOTED_NAME.sub(lambda m: '"' + "_" * (len(m.group(0)) - 2) + '"', clean)
 
 
+# The operator between two branches of a set operation.
+SET_OP = re.compile(r"(?is)(?<![\w$])(?:union|intersect|except)(?![\w$])\s*(?:(?:all|distinct)(?![\w$]))?")
+
+
+def matching_paren(text: str, i: int) -> int:
+    """The offset of the `)` that closes the `(` at `i`, or the end of the text when none does."""
+    depth = 0
+    for j in range(i, len(text)):
+        if text[j] == "(":
+            depth += 1
+        elif text[j] == ")":
+            depth -= 1
+            if depth == 0:
+                return j
+    return len(text)
+
+
 def value_list(query: str) -> list:
     """The expressions a query (strip_noise'd) returns, in order: its RETURNING list when it has a top-level
-    one, else the list of its top-level SELECT, cut where the clause after it starts. A set operation has a
-    top-level SELECT for each branch and returns every branch's rows, so each column is judged on every
-    branch's item for it (`select 'x' union all select quote_ident(a)` returns quoted names); branches whose
-    lists cannot be paired are judged whole, as one item, and so is a query with neither head (VALUES, a
-    parenthesised query). The structure is read from bare()."""
+    one, else the list of each branch's SELECT, cut where the clause after it starts. A set operation returns
+    every branch's rows, so each column is judged on every branch's item for it (`select 'x' union all select
+    quote_ident(a)` returns quoted names), and a parenthesised branch, `union all (select quote_ident(a) ...)`,
+    is a query of its own, read the same way. Branches whose lists cannot be paired are judged whole, as one
+    item, and so is a branch with no SELECT (VALUES, TABLE). The structure is read from bare()."""
     shape = bare(query)
     top = depth0(shape)
-    heads = [k for k in VALUE_HEAD.finditer(shape) if k.start() in top]
-    rets = [k for k in heads if k.group("ret")]
-    if not heads:
-        return [query]
+    rets = [k for k in VALUE_HEAD.finditer(shape) if k.start() in top and k.group("ret")]
     if rets:
         return [e.strip() for e in split_top_level(query[rets[-1].end():], ",")]
+    spans, pos = [], 0
+    for op in SET_OP.finditer(shape):
+        if op.start() in top:
+            spans.append((pos, op.start()))
+            pos = op.end()
+    spans.append((pos, len(query)))
     lists = []
-    for head in heads:
-        ends = [k.start() for k in LIST_END.finditer(shape, head.end()) if k.start() in top]
-        lists.append([e.strip() for e in split_top_level(query[head.end():ends[0] if ends else len(query)], ",")])
-    if len({len(lst) for lst in lists}) != 1:
+    for a, b in spans:
+        lead = a + len(shape[a:b]) - len(shape[a:b].lstrip())
+        if shape.startswith("(", lead):
+            lists.append(value_list(query[lead + 1:matching_paren(shape, lead)]))
+            continue
+        heads = [k for k in VALUE_HEAD.finditer(shape, a, b) if k.start() in top]
+        if not heads:
+            lists.append([query[a:b].strip()])
+            continue
+        ends = [k.start() for k in LIST_END.finditer(shape, heads[0].end(), b) if k.start() in top]
+        lists.append([e.strip() for e in split_top_level(query[heads[0].end():ends[0] if ends else b], ",")])
+    if not lists or len({len(lst) for lst in lists}) != 1:
         return [query]
     return [" , ".join(col) for col in zip(*lists)]
 
 
-def paired(targets_text: str, values: list):
+# What a dynamic statement's list holds where a format() conversion (`%s`, `%L`, `%I`) splices a value in: the
+# value is the argument's, which the statement does not spell, so an item carrying this is not judged unless
+# it quotes by itself (`quote_ident(%L)`).
+SPLICED = "\x01"
+
+
+def paired(targets_text: str, values):
     """Pair each target of a comma-separated target list with the value it is given; when the counts differ
-    the pairing is unknowable, so each target is judged on the whole list."""
+    the pairing is unknowable, so each target is judged on the whole list. `values` None is a statement this
+    script cannot read (dynamic_values()), and a value a format() conversion splices in (SPLICED) that does
+    not quote by itself is not in the statement either: neither is judged, in either direction, because CHECK
+    2 would refuse a `_q` local whose value is earned elsewhere and CHECK 1 has nothing to read."""
+    if values is None:
+        return
     targets = [canonical(t) for t in split_top_level(targets_text, ",") if t.strip()]
     if len(values) != len(targets):
         values = [", ".join(values)] * len(targets)
-    return zip(targets, values)
+    for target, value in zip(targets, values):
+        if SPLICED in value and not quotes_identifiers(value):
+            continue
+        yield target, value
 
 
 def top_keyword(text: str, start: int, words: str):
@@ -562,16 +648,54 @@ def literal_text(raw: str) -> str:
     return " ".join(out)
 
 
-def dynamic_values(raw_expr: str) -> list:
-    """The value list of the statement an EXECUTE's expression spells out (see literal_text()). A `%I` in a
-    format() template quotes an identifier IN the dynamic statement, never in the value that comes back, so
-    the template's own conversions are not read as quoting: only a quoting call the dynamic statement
-    itself makes in its list (`execute 'select quote_ident(relname) from pg_class' into v`) is."""
-    return value_list(strip_noise(literal_text(raw_expr)))
+# A run of string literals joined by `||`, in strip_noise'd text (a literal's contents are blanked, so it holds
+# no quote of its own; an escape string keeps its E).
+LITERALS = r"[eE]?'[^']*'(?:\s*\|\|\s*[eE]?'[^']*')*"
+# A format() conversion, or format()'s escaped percent.
+FORMAT_SPEC = re.compile(r"%%|%(?:\d+\$)?-?(?:\d+|\*(?:\d+\$)?)?[sIL]")
+
+
+def rendered(template: str) -> str:
+    """A format() template as format() renders it, so far as the template alone can tell: `%%` is a `%`,
+    and each conversion is a value spliced in (SPLICED). `format('select format(''%%I'', a)')` renders the
+    statement `select format('%I', a)`, which quotes."""
+    return FORMAT_SPEC.sub(lambda m: "%" if m.group(0) == "%%" else SPLICED, template)
+
+
+def dynamic_statement(raw_expr: str):
+    """The statement an EXECUTE's expression (raw) spells out, or None when it does not spell one: the text
+    of a literal or of literals joined by `||` (literal_text()), or of a format() call's template so built,
+    rendered (rendered()). Anything else, a variable (`execute v_sql`), a function's result, literals
+    concatenated with code, puts the statement somewhere this script cannot read."""
+    clean = strip_noise(raw_expr)
+    whole = re.fullmatch(r"(?s)\s*(" + LITERALS + r")\s*", clean)
+    if whole:
+        return literal_text(raw_expr)
+    qual = re.match(r'(?is)\s*(?:(?:pg_catalog|"pg_catalog")\s*\.\s*)?', clean)
+    call = FORMAT_CALL.match(clean, qual.end())
+    if not call:
+        return None
+    close = matching_paren(clean, call.end() - 1)
+    template = re.match(r"(?s)\s*(" + LITERALS + r")\s*(?:,|\Z)", clean[call.end():close])
+    if close == len(clean) or clean[close + 1:].strip() or not template:
+        return None
+    return rendered(literal_text(raw_expr[call.end() + template.start(1):call.end() + template.end(1)]))
+
+
+def dynamic_values(raw_expr: str):
+    """The value list of the statement an EXECUTE's expression spells out (dynamic_statement()), or None when
+    it spells none. A `%I` in a format() template quotes an identifier IN the dynamic statement, never in the
+    value that comes back, so the template's own conversions are not read as quoting: only a quoting call
+    the dynamic statement itself makes in its list (`execute 'select quote_ident(relname) from pg_class' into
+    v`) is."""
+    stmt = dynamic_statement(raw_expr)
+    if stmt is None:
+        return None
+    return value_list(strip_noise(stmt))
 
 
 # The head of a FOR or FOREACH loop: its target list, then IN.
-LOOP_HEAD = re.compile(r"(?is)(?<![\w$])(?P<kw>foreach|for)\s+(?P<targets>" + IDENT + r"(?:\s*,\s*" + IDENT
+LOOP_HEAD = re.compile(r"(?is)(?<![\w$])(?P<kw>foreach|for)\s+(?P<targets>" + TARGET + r"(?:\s*,\s*" + TARGET
                        + r")*)\s+(?:slice\s+\d+\s+)?in(?![\w$])")
 
 
@@ -648,7 +772,7 @@ def execute_into(clean: str, raw: str):
 # between.
 ASSIGN = re.compile(
     r"(?is)(?:\A|(?<=;)|(?<=\bbegin)|(?<=\bthen)|(?<=\belse)|(?<=\bloop))\s*"
-    r"(?<![\w$])(?P<target>" + IDENT + r")\s*(?::=|=)\s*(?P<expr>[^;]+);")
+    r"(?<![\w$])(?P<target>" + TARGET + r")\s*(?::=|=)\s*(?P<expr>[^;]+);")
 
 
 def assignments(clean: str, raw: str = None):
@@ -811,12 +935,30 @@ SHAPES = {
     "assigned after an e'' string ending in `\\\\`": ("v_cols text; v_x text", "v_x := e'a\\\\'; v_cols := quote_ident('c');"),
     "assigned after a plain string ending in a backslash": (
         "v_cols text; v_x text", "v_x := 'C:\\'; v_cols := quote_ident('c');"),
+    # PR #1313 round 2: a nested dollar string is a literal (V-04), a parenthesised branch is a branch (V-01), a
+    # format() template is read as rendered (V-02), and a target may carry its block's label (V-05)
+    "assigned after a nested dollar string holding `/*`": (
+        "v_cols text; v_x text", "v_x := $g$/tmp/*$g$; v_cols := quote_ident('c');"),
+    "assigned as a FOR loop's target by a parenthesised UNION branch": (
+        "v_cols text", "for v_cols in select 'x' union all (select quote_ident('c')) loop null; end loop;"),
+    "assigned by EXECUTE ... INTO from a parenthesised UNION branch": (
+        "v_cols text", "execute 'select ''x'' union all (select quote_ident(''c''))' into v_cols;"),
+    "assigned by EXECUTE of a template rendering format('%I')": (
+        "v_cols text", "execute format('select format(''%%I'', %L)', 'c') into v_cols;"),
+    "assigned as a FOR loop's target qualified by its block's label": (
+        "v_cols text", "for blk.v_cols in select quote_ident('c') loop null; end loop;", "<<blk>>\n"),
+    "assigned by EXECUTE ... INTO a target qualified by its block's label": (
+        "v_cols text", "execute 'select quote_ident(''c'')' into blk.v_cols;", "<<blk>>\n"),
+    "assigned by SELECT ... INTO a target qualified by its block's label": (
+        "v_cols text", "select quote_ident('c') into blk.v_cols;", "<<blk>>\n"),
+    "assigned with `:=` to a target qualified by its block's label": (
+        "v_cols text", "blk.v_cols := quote_ident('c');", "<<blk>>\n"),
 }
 
 
 def shape_fixture(name: str, marked: bool) -> str:
-    decl, stmt = SHAPES[name]
-    src = SHAPE_BODY.format(decl=decl, stmt=stmt)
+    decl, stmt, *label = SHAPES[name]
+    src = SHAPE_BODY.format(decl=decl, stmt=stmt).replace("$$\ndeclare", "$$\n" + "".join(label) + "declare", 1)
     return re.sub(r"(?i)\bv_cols\b", lambda m: m.group(0) + "_q", src) if marked else src
 
 
@@ -926,6 +1068,26 @@ def selftest() -> int:
         failures += 1
     else:
         print("SELFTEST PASS  an EXECUTE template's own %I is not read as quoting the value it returns")
+
+    # PR #1313 round 2 (V-03): a dynamic statement this script cannot read is judged in neither direction. The
+    # statement in a variable, and a list item format() splices in, leave a correctly marked local alone; the
+    # lying twin beside them shows check 2 still reads the body
+    for what, stmt in [
+            ("an EXECUTE of a statement held in a variable", "execute v_sql into v_cols_q;"),
+            ("a FOR ... IN EXECUTE of a statement held in a variable",
+             "for v_cols_q in execute v_sql loop null; end loop;"),
+            ("an EXECUTE whose list item a format() %L splices in",
+             "execute format('select %L::text', 'x') into v_cols_q;")]:
+        src = SHAPE_BODY.format(decl="v_cols_q text; v_sql text", stmt=stmt).replace("v_cols,", "v_cols_q,")
+        lie = SHAPE_BODY.format(decl="v_cols_q text; v_sql text",
+                                stmt=stmt + " v_cols_q := 'nothing quoted';").replace("v_cols,", "v_cols_q,")
+        v, q = check_text("unread.sql", src)
+        lv, _ = check_text("unread_lie.sql", lie)
+        if v or q != 0 or not any("nothing in its assignment" in x and "v_cols_q" in x for x in lv):
+            print(f"SELFTEST FAIL  {what}: expected no judgement ({q} quoting, {v}) beside a refused lying twin ({lv})")
+            failures += 1
+        else:
+            print(f"SELFTEST PASS  {what} is not judged; a lying _q beside it still is")
 
     # #1096: check 2 reads the same declarations, so an unearned _q declared `text default ''` is judged
     lying_default = SHAPE_BODY.format(decl="v_cols_q text default ''",

@@ -11424,8 +11424,8 @@ MUTATIONS["quoted_splices_assign_colon_eq_only"] = (
     "Pre-#1179 scripts/check_quoted_splices.py: a body assignment is read only as `:=`, so `v_cols = "
     "quote_ident(c);` (PL/pgSQL takes `=` too) is never judged and an unmarked quoted list assigned that way "
     "passes. One site, the assignment pattern's operator.",
-    [('    r"(?<![\\w$])(?P<target>" + IDENT + r")\\s*(?::=|=)\\s*(?P<expr>[^;]+);")\n',
-      '    r"(?<![\\w$])(?P<target>" + IDENT + r")\\s*:=\\s*(?P<expr>[^;]+);")\n', 1)],
+    [('    r"(?<![\\w$])(?P<target>" + TARGET + r")\\s*(?::=|=)\\s*(?P<expr>[^;]+);")\n',
+      '    r"(?<![\\w$])(?P<target>" + TARGET + r")\\s*:=\\s*(?P<expr>[^;]+);")\n', 1)],
 )
 MUTATION_SRC["quoted_splices_assign_colon_eq_only"] = "scripts/check_quoted_splices.py"
 MUTATIONS["quoted_splices_call_spelled"] = (
@@ -11479,9 +11479,68 @@ MUTATIONS["quoted_splices_loop_first_branch"] = (
     "scripts/check_quoted_splices.py reading a set operation by its first branch: `for v_cols in select 'x' union "
     "all select quote_ident(attname) ... loop` gives an unmarked text local every branch's rows, the quoted names "
     "included, and only the first SELECT's list is judged. One site, the branches value_list() reads.",
-    [("    for head in heads:\n", "    for head in heads[:1]:\n", 1)],
+    [("    for a, b in spans:\n", "    for a, b in spans[:1]:\n", 1)],
 )
 MUTATION_SRC["quoted_splices_loop_first_branch"] = "scripts/check_quoted_splices.py"
+# PR #1313's verification, round 2 (V-01 to V-05): six more clauses of check_quoted_splices.py, one mutation each,
+# judged by the same guard.
+MUTATIONS["quoted_splices_nested_dollar_as_code"] = (
+    "bench/quoted_splices_every_body.sh",
+    "scripts/check_quoted_splices.py reading a dollar-quoted string nested in a body as code: the `/*` in "
+    "`v_x := $g$/tmp/*$g$` opens a block comment that blanks the rest of the body, so an unmarked quoted list "
+    "assigned after it passes (a regression of the block-comment lexing, V-04). One site, strip_noise's "
+    "dollar-quote branch.",
+    [("""        elif c == "$" and DOLLAR_QUOTE.match(body, i):
+            tag = DOLLAR_QUOTE.match(body, i).group(0)
+            end = body.find(tag, i + len(tag))
+            end = n if end < 0 else end
+            close = "" if end == n else " " * (len(tag) - 1) + "'"
+            out.append("'" + " " * (len(tag) - 1) + blank_literal(body[i + len(tag):end]) + close)
+            i = end + len(close)
+""", "", 1)],
+)
+MUTATION_SRC["quoted_splices_nested_dollar_as_code"] = "scripts/check_quoted_splices.py"
+MUTATIONS["quoted_splices_exec_statement_guessed"] = (
+    "bench/quoted_splices_every_body.sh",
+    "scripts/check_quoted_splices.py reading whatever literals an EXECUTE's expression holds as its statement: "
+    "`execute v_sql into v_cols_q` is judged on an empty list, so check 2 refuses a `_q` local that earns its "
+    "suffix (V-03). One site, the statement dynamic_values() reads.",
+    [("    stmt = dynamic_statement(raw_expr)\n", "    stmt = literal_text(raw_expr)\n", 1)],
+)
+MUTATION_SRC["quoted_splices_exec_statement_guessed"] = "scripts/check_quoted_splices.py"
+MUTATIONS["quoted_splices_spliced_value_judged"] = (
+    "bench/quoted_splices_every_body.sh",
+    "scripts/check_quoted_splices.py judging an item a format() conversion splices into a dynamic statement as "
+    "if it were the value: `execute format('select %L::text', v_cols_q) into v_cols_q` is refused by check 2 "
+    "(V-03). One site, the abstention in paired().",
+    [("        if SPLICED in value and not quotes_identifiers(value):\n            continue\n", "", 1)],
+)
+MUTATION_SRC["quoted_splices_spliced_value_judged"] = "scripts/check_quoted_splices.py"
+MUTATIONS["quoted_splices_paren_branch_skipped"] = (
+    "bench/quoted_splices_every_body.sh",
+    "scripts/check_quoted_splices.py skipping a set operation's parenthesised branch: `for v_cols in select 'x' "
+    "union all (select quote_ident(a)) loop` passes (V-01). One site, the parenthesised branch value_list() "
+    "reads.",
+    [("            lists.append(value_list(query[lead + 1:matching_paren(shape, lead)]))\n", "", 1)],
+)
+MUTATION_SRC["quoted_splices_paren_branch_skipped"] = "scripts/check_quoted_splices.py"
+MUTATIONS["quoted_splices_format_template_unrendered"] = (
+    "bench/quoted_splices_every_body.sh",
+    "scripts/check_quoted_splices.py reading an EXECUTE's format() template without format()'s own `%%`: the "
+    "statement `select format('%I', a)` the template renders is read as `format('%%I', a)`, which quotes nothing, "
+    "so its unmarked INTO target passes (V-02). One site, rendered()'s escaped percent.",
+    [("""    return FORMAT_SPEC.sub(lambda m: "%" if m.group(0) == "%%" else SPLICED, template)\n""",
+      """    return FORMAT_SPEC.sub(lambda m: m.group(0) if m.group(0) == "%%" else SPLICED, template)\n""", 1)],
+)
+MUTATION_SRC["quoted_splices_format_template_unrendered"] = "scripts/check_quoted_splices.py"
+MUTATIONS["quoted_splices_label_target_unread"] = (
+    "bench/quoted_splices_every_body.sh",
+    "scripts/check_quoted_splices.py reading only a bare name as a target: `for blk.v_cols in ...` and `execute "
+    "... into blk.v_cols` give an unmarked text local a quoted name the lint never reads (V-05). One site, the "
+    "target pattern every reader shares.",
+    [('TARGET = r"(?:" + IDENT + r"\\s*\\.\\s*)?" + IDENT\n', "TARGET = IDENT\n", 1)],
+)
+MUTATION_SRC["quoted_splices_label_target_unread"] = "scripts/check_quoted_splices.py"
 MUTATIONS["quoted_splices_scan_in_quoted_names"] = (
     "bench/quoted_splices_every_body.sh",
     "scripts/check_quoted_splices.py reading a loop's structure inside its quoted names: a column aliased "
@@ -11517,8 +11576,8 @@ MUTATIONS["quoted_splices_block_comment_kept"] = (
             end = block_comment_end(body, i)
             out.append(re.sub(r"[^\\n]", " ", body[i:end]))
             i = end
-        elif c == '"':
-""", """        if c == '"':
+        elif c == "$" and DOLLAR_QUOTE.match(body, i):
+""", """        if c == "$" and DOLLAR_QUOTE.match(body, i):
 """, 1)],
 )
 MUTATION_SRC["quoted_splices_block_comment_kept"] = "scripts/check_quoted_splices.py"

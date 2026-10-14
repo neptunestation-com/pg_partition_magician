@@ -8,16 +8,21 @@
   loop's target as an assignment, so an unmarked text local given `quote_ident` output by `for v_cols in select
   ... loop` passed while its SELECT INTO twin was refused. Bodies are now found by lexing the file (comments,
   literals and quoted identifiers stepped over), every dollar-quoted string whatever its tag; a FOR or FOREACH
-  loop's target is paired with the loop's values (a query's list, every branch's when the query is a set
-  operation; a `for ... in execute` statement's; a FOREACH's array), and an EXECUTE's INTO target with the list
-  of the dynamic statement its own expression spells out, so `execute 'select quote_ident(...)' into v` is read
+  loop's target is paired with the loop's values (a query's list, every branch's, parenthesised ones included,
+  when the query is a set operation; a `for ... in execute` statement's; a FOREACH's array), and an EXECUTE's
+  INTO target with the list of the dynamic statement its own expression spells out (literals, or a format()
+  template as format() renders it, `%%` read as `%`), so `execute 'select quote_ident(...)' into v` is read
   while a template's own `%I`, which quotes a name in that statement and not the value coming back, is not. A
-  `..` or the word `loop` inside a quoted name of a loop's query is part of the name. Still not read, and listed
-  in the script's docstring: a FETCH's INTO, an EXECUTE whose statement arrives in a variable, a CALL's INOUT
-  argument, a parameter, a record's field. The three install files read the same bodies and judge the same 82
-  quoting assignments, none of them a violation. Guard `bench/quoted_splices_every_body.sh`, mutations
-  `quoted_splices_loop_target_unread`, `quoted_splices_loop_first_branch`,
-  `quoted_splices_scan_in_quoted_names`, `quoted_splices_execute_into_unread` and
+  target qualified by its block's label (`blk.v_cols`) is the local it names, and a `..` or the word `loop`
+  inside a quoted name of a loop's query is part of the name. Not judged in either direction, and listed in the
+  script's docstring: a FETCH's INTO, an EXECUTE whose statement is not spelled out in its own expression (`execute
+  v_sql into v`), a list item a format() conversion splices in, a CALL's INOUT argument, a parameter. The three
+  install files read the same bodies and judge the same 82 quoting assignments, none of them a violation. Guard
+  `bench/quoted_splices_every_body.sh`, mutations `quoted_splices_loop_target_unread`,
+  `quoted_splices_loop_first_branch`, `quoted_splices_paren_branch_skipped`,
+  `quoted_splices_scan_in_quoted_names`, `quoted_splices_execute_into_unread`,
+  `quoted_splices_exec_statement_guessed`, `quoted_splices_spliced_value_judged`,
+  `quoted_splices_format_template_unrendered`, `quoted_splices_label_target_unread` and
   `quoted_splices_bare_dollar_bodies`.
 - **The `_q` lint lexes block comments and escape strings** (#1236, bullets B08-01 and B08-02).
   `strip_noise()` blanked `--` comments but not `/* */` ones, so a block comment before an assignment kept it
@@ -25,8 +30,9 @@
   closed at the escaped quote, so the next quote opened one that blanked the assignment after it. Both passed an
   unmarked quoted list. A block comment, nested ones included, is now blanked like a line comment, and an escape
   string's backslash escapes the character after it (only an escape string's: `'C:\'` still ends at its second
-  quote). Guard `bench/quoted_splices_every_body.sh`, mutations `quoted_splices_block_comment_kept` and
-  `quoted_splices_e_string_unescaped`.
+  quote). A dollar-quoted string nested in a body is a literal too, so a `/*` inside `$q$/tmp/*$q$` opens no
+  comment. Guard `bench/quoted_splices_every_body.sh`, mutations `quoted_splices_block_comment_kept`,
+  `quoted_splices_e_string_unescaped` and `quoted_splices_nested_dollar_as_code`.
 
 - **transmute's orphan-child guard asks this grid's labels** (#1274). It refused any relation whose name carried a
   time label of the control column's kind, so a monthly grid was refused by the operator's own standalone

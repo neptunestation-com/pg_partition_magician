@@ -32,6 +32,18 @@
 #   quoted_splices_bare_dollar_bodies   -- only a body tagged with the bare `$$` is read (F8-08)
 #   quoted_splices_block_comment_kept   -- a block comment is not blanked (B08-01, F12-03)
 #   quoted_splices_e_string_unescaped   -- an escape string's backslash escapes nothing (B08-02, F12-05)
+# and, from PR #1313's verification (round 2):
+#   quoted_splices_nested_dollar_as_code -- a dollar-quoted string nested in a body is read as code, so a `/*`
+#                                           in it blanks the rest of the body (V-04)
+#   quoted_splices_exec_statement_guessed -- an EXECUTE whose statement is in a variable is judged on nothing,
+#                                           so check 2 refuses an earned `_q` (V-03)
+#   quoted_splices_spliced_value_judged  -- an item a format() conversion splices in is judged as if it were
+#                                           the value (V-03)
+#   quoted_splices_paren_branch_skipped  -- a set operation's parenthesised branch is not read (V-01)
+#   quoted_splices_format_template_unrendered -- a format() template's `%%` is not read as `%` (V-02)
+#   quoted_splices_label_target_unread   -- a target qualified by its block's label is not read (V-05)
+# Each round-2 negative (an unreadable statement must not be refused) has a liveness twin: check 2 refuses
+# the same body's `_q` local given a plain literal.
 #
 # Usage: quoted_splices_every_body.sh <container> <db> [checker.py]
 # The database is dropped and created here, and holds only the fixtures. With no third argument the checker
@@ -95,7 +107,7 @@ report(rc == 0, "GUARD: the fixture table is created", err)
 # The #409 shape: v_cols holds a quoted list, spliced with %s. {var} is v_cols, or v_cols_q in the twin.
 FN = """
 create or replace function public.{fn}() returns text language plpgsql as {tag}
-declare v_n bigint; v_x text; v_i int; {decl};
+{label}declare v_n bigint; v_x text; v_i int; {decl};
 begin
   {stmt}
   execute format('select count(*) from (select %s from public.g20_t) s', {var}) into v_n;
@@ -105,8 +117,8 @@ end;
 """
 
 
-def fixture(fn, decl, stmt, tag="$$", marked=False, prefix=""):
-    src = prefix + FN.format(fn=fn, tag=tag, decl=decl, stmt=stmt, var="v_cols")
+def fixture(fn, decl, stmt, tag="$$", marked=False, prefix="", label=""):
+    src = prefix + FN.format(fn=fn, tag=tag, decl=decl, stmt=stmt, var="v_cols", label=label)
     return src.replace("v_cols", "v_cols_q") if marked else src
 
 
@@ -170,13 +182,34 @@ SHAPES = [
      f"v_x := e'a\\\\'; v_cols := {QI};", "$$", ""),
     ("g20_plain_bs", "an assignment after a plain 'C:\\'", "v_cols text",
      f"v_x := 'C:\\'; v_cols := {QI};", "$$", ""),
+    # PR #1313 round 2 (V-04): a `/*` inside a nested dollar-quoted string is text, not a comment
+    ("g20_dollar_glob", "an assignment after $g$/tmp/*$g$", "v_cols text",
+     f"v_x := $g$/tmp/*$g$; v_cols := {QI};", "$$", ""),
+    # (V-01): a set operation's parenthesised branch is read, for a loop and for an EXECUTE
+    ("g20_paren_for", "a FOR target quoted by a parenthesised UNION branch", "v_cols text",
+     f"for v_cols in select 'x' where false union all (select {QI}) loop null; end loop;", "$$", ""),
+    ("g20_paren_exec", "an EXECUTE INTO target quoted by a parenthesised branch", "v_cols text",
+     "execute 'select ''x'' where false union all (select quote_ident(''Foo Bar''))' into v_cols;", "$$", ""),
+    # (V-02): a format() template is read as format() renders it, `%%I` as `%I`
+    ("g20_fmt_pct", "an EXECUTE INTO target quoted by a template's format(%%I)", "v_cols text",
+     "execute format('select format(''%%I'', %L::text)', 'Foo Bar') into v_cols;", "$$", ""),
+    # (V-05): a target qualified by its block's label is the local it names
+    ("g20_label_for", "a FOR target qualified by its block's label", "v_cols text",
+     f"for blk.v_cols in select {QI} loop null; end loop;", "$$", "", "<<blk>>\n"),
+    ("g20_label_exec", "an EXECUTE INTO target qualified by its block's label", "v_cols text",
+     "execute 'select quote_ident(''Foo Bar'')' into blk.v_cols;", "$$", "", "<<blk>>\n"),
+    ("g20_label_into", "a SELECT INTO target qualified by its block's label", "v_cols text",
+     f"select {QI} into blk.v_cols;", "$$", "", "<<blk>>\n"),
+    ("g20_label_assign", "a `:=` target qualified by its block's label", "v_cols text",
+     f"blk.v_cols := {QI};", "$$", "", "<<blk>>\n"),
 ]
-for fn, label, decl, stmt, tag, prefix in SHAPES:
-    src = fixture(fn, decl, stmt, tag, prefix=prefix)
+for fn, label, decl, stmt, tag, prefix, *blk in SHAPES:
+    lab = blk[0] if blk else ""
+    src = fixture(fn, decl, stmt, tag, prefix=prefix, label=lab)
     ok, detail = premise(fn, src)
     report(ok, f"LIVENESS: PL/pgSQL runs {fn} and v_cols holds the quoted name", detail)
     hit, v, n = judged(src)
-    mv, mn = cqs.check_text("twin.sql", fixture(fn, decl, stmt, tag, marked=True, prefix=prefix))
+    mv, mn = cqs.check_text("twin.sql", fixture(fn, decl, stmt, tag, marked=True, prefix=prefix, label=lab))
     twin = not mv and mn == 1
     name = label if label.startswith("LIVENESS:") else f"_q: refused, {label}"
     report(hit and twin, name,
@@ -187,12 +220,36 @@ for fn, label, decl, stmt, tag, prefix in SHAPES:
 # the dynamic statement, and what comes back is the column's VALUE (2), which an unmarked local may hold.
 neg = FN.format(fn="g20_neg", tag="$$", decl="v_cols_q text := quote_ident('Foo Bar'); v_raw text", var="v_cols_q",
                 stmt="execute format('select %I from public.g20_t', 'Foo Bar') into v_raw; "
-                     "if v_raw is distinct from '2' then raise exception 'v_raw holds %', v_raw; end if;")
+                     "if v_raw is distinct from '2' then raise exception 'v_raw holds %', v_raw; end if;", label="")
 rc, out, err = psql(neg + "select public.g20_neg();")
 report(rc == 0 and out == '"Foo Bar"', "LIVENESS: PL/pgSQL runs g20_neg and v_raw holds the column's value 2",
        f"rc {rc}, got {out!r} {err[:120]}")
 v, n = cqs.check_text("neg.sql", neg)
 report(not v and n == 1, "_q: an EXECUTE whose template quotes with %I is not refused", f"violations {v}, quoting {n}")
+
+# PR #1313 round 2 (V-03): a dynamic statement the lint cannot read is judged in NEITHER direction. Each
+# marked local below earns its suffix at run time (the function returns the quoted name out of it), but the
+# value is not in the statement that assigns it: the statement arrives in a variable, or the list item is a
+# value format() splices in. Check 2 must not refuse them; its liveness is the same body with the marked
+# local given a plain literal, which it must refuse.
+SQL_Q = "v_sql := 'select quote_ident(''Foo Bar'')'; "
+UNREAD = [
+    ("g20_un_var", "execute v_sql into v_cols_q", SQL_Q + "execute v_sql into v_cols_q;", 0),
+    ("g20_un_forx", "for v_cols_q in execute v_sql", SQL_Q + "for v_cols_q in execute v_sql loop null; end loop;", 0),
+    ("g20_un_spl", "a template splicing a _q value with %L",
+     f"v_cols_q := {QI}; execute format('select %L::text', v_cols_q) into v_cols_q;", 1),
+]
+lie = FN.format(fn="g20_lie", tag="$$", decl="v_cols_q text; v_sql text", var="v_cols_q",
+                stmt="v_cols_q := 'nothing quoted';", label="")
+v, n = cqs.check_text("lie.sql", lie)
+report(any("v_cols_q" in x and "nothing in its assignment" in x for x in v),
+       "LIVENESS: check 2 refuses this body's _q local given a plain literal", f"violations {v}")
+for fn, what, stmt, quoting in UNREAD:
+    src = FN.format(fn=fn, tag="$$", decl="v_cols_q text; v_sql text", var="v_cols_q", stmt=stmt, label="")
+    ok, detail = premise(fn, src)
+    report(ok, f"LIVENESS: PL/pgSQL runs {fn} and v_cols_q holds the quoted name", detail)
+    v, n = cqs.check_text("unread.sql", src)
+    report(not v and n == quoting, f"_q: not judged, {what}", f"violations {v}, quoting {n}")
 total, bad = 0, []
 for rel in ("pgpm_core/install.sql", "pgpm_hypertable/install.sql", "pgpm_archive/install.sql"):
     v, n = cqs.check_text(rel, open(os.path.join(ROOT, rel)).read())
