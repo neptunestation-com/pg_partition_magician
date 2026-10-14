@@ -1306,6 +1306,7 @@ run_perf() {
     "bench/transmute_negative_infinity_oldest.sh pgpm_perf395"
     "bench/text_time_month_grid_epoch_unit.sh pgpm_perf398"
     "bench/retain_disown_remedy.sh pgpm_perf380"
+    "bench/transmute_staging_squatter_remedy.sh pgpm_perf381"
   )
   local selected=()
   local n=${#guards[@]} idx
