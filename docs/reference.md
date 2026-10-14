@@ -3515,6 +3515,11 @@ Samples rows and reports the fraction of adjacent pairs (ordered by the id) whos
 `~1.0` means an id column and a timestamp column co-increase; backfills and out-of-order arrival drive it
 down. Use it before retaining an id-partitioned table by a time horizon.
 
+The answer does not depend on the caller's `TimeZone`: the time column is read as `timestamptz` in UTC, so a
+naive `timestamp`, `date` or offset-free text column is compared as its own wall-clock values (a wall time in
+a spring-forward gap of the caller's zone does not read an hour late), and a `timestamptz` column, or text
+with an explicit offset, by instant.
+
 ### Observability with pg_flight_recorder (`observe`)
 
 Part of `pgpm_core`: functions that correlate `pgpm.log` against

@@ -1271,6 +1271,7 @@ run_perf() {
     "bench/regrain_swap_waits_for_older_snapshots.sh pgpm_perf365"
     "bench/regrain_refuses_strict_isolation.sh pgpm_perf366"
     "bench/regrain_not_valid_check.sh pgpm_perf369"
+    "bench/check_time_monotonic_session_zone.sh pgpm_perf373"
   )
   local selected=()
   local n=${#guards[@]} idx
