@@ -21,9 +21,10 @@
   Such a holder at a forward cell's name the conversion creates is refused up front now (only a partition of
   the table's own new parent is excused), naming the table (or partitioned index) it belongs to, and the
   remedy renames it (`alter table`, `alter index` or `alter foreign table`), which leaves it attached where it
-  is. At a name only a later `obtain` or regrain gives (the partitions a managed table renamed aside keeps,
-  #496) it is still left to `obtain`'s `fail_obtain_name` and `regrain_step`'s refusal (#631), so a new table
-  under the old name still converts.
+  is. That includes the partitions of a managed table renamed aside (#496) at those names: a new table under
+  the old name on the same step is refused once per held name, with the rename remedy. At a name only a later
+  `obtain` or regrain gives it is still left to `obtain`'s `fail_obtain_name` and `regrain_step`'s refusal
+  (#631).
 - **`untransmute` and `uninstall.sql` drop a moved regrain capture function** (#1271).
   `pgpm._regrain_capture_names` looked the recorded capture function up by its oid only inside the delta's
   current schema, so once the delta (`ALTER TABLE ... SET SCHEMA`) or the function (`ALTER FUNCTION ... SET

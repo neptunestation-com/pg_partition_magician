@@ -10369,11 +10369,13 @@ $$;
 -- name passed the preflight and both of the cutover's askings, obtain stepped over the held name, and the
 -- conversion completed with that cell unbuilt (fail_obtain_name) and every write into its range refused. It
 -- is refused up front now, named with the table it belongs to, and the remedy is a rename, which leaves it
--- where it belongs. At a name only a LATER obtain or regrain gives it is still no holder here: that is
--- exactly what a managed table renamed aside keeps (#496), every partition under its old <rel>_p<label>,
--- and refusing it would refuse a new table under the old name once per old partition. Those later
--- collisions are refused where they happen: obtain leaves the cell unbuilt and logs fail_obtain_name naming
--- the holder, and regrain_step refuses a relation it did not create before a row moves (#631). The
+-- where it belongs. That includes a managed table renamed aside (#496): its partitions keep their old
+-- <rel>_p<label>, and those at names this conversion creates (the same step's forward cells) refuse a new
+-- table under the old name, one held name at a time, each with the rename remedy. At a name only a LATER
+-- obtain or regrain gives it is still no holder here (the rest of a renamed-aside table's partitions, or
+-- all of them on another step or with p_obtain 0): those later collisions are refused where they happen,
+-- obtain leaving the cell unbuilt and logging fail_obtain_name naming the holder, and regrain_step refusing
+-- a relation it did not create before a row moves (#631). The
 -- monolith's name is refused whatever holds it (_transmute_refuse_monolith_squatter). The askings that do
 -- not know the forward cells yet (the preflight, before the bound) pass none.
 --
