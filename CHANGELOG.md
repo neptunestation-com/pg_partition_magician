@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- **A tracking copy pre-builds the index of the hypertable's own key** (#1266). `from_hypertable_copy(...,
+  p_track_changes => true)` named the key index it pre-builds after whichever `pg_constraint` row had the key's
+  index as its `conindid`, and an incoming foreign key that references the key has the same one. When its row
+  came first (a `RENAME CONSTRAINT` on the key is enough) the copy built `<fk>_pgpm_new`, the cutover did not find
+  `<key>_pgpm_new`, built the key a second time, and the copy's index survived the swap as a stray redundant
+  UNIQUE index on the migrated parent and every partition, against `docs/reference.md`'s promise that the copy's
+  key index is adopted rather than rebuilt. The copy now reads the hypertable's own primary key or unique
+  constraint on that index (`conrelid` and `contype` as well). `from_hypertable_cutover` made the same read in
+  the other direction: it carries every index "no constraint sits on" as a secondary index, so a bare unique
+  index that an incoming foreign key had been resolved to (one older than the key, on the same columns) was
+  built by neither of its loops and the migrated table lost it. It now asks whether one of the hypertable's own
+  primary key or unique constraints sits on the index. A tracking copy taken before this release needs no
+  re-run: the cutover recognises a key index the copy built under another name by what it is (an index on the
+  recorded destination with the key's definition, under no temp name another of the table's keys adopts),
+  renames it and adopts it. Test `tests/timescale/db/68`, guard
+  `bench/hypertable_copy_key_constraint_by_table.sh`, mutations `hypertable_copy_key_constraint_by_index`,
+  `hypertable_cutover_secondary_index_by_any_constraint`, `hypertable_cutover_older_copy_key_index_unrecognised`
+  and `hypertable_cutover_older_copy_key_index_takes_any`.
+
 - **A whole-month `text_time` grid needs its `p_tt_epoch` on the encoding's unit** (#1312). `transmute` held a
   `text_time` grid's anchor and step to whole units from `p_tt_epoch` (#989), reasoning that every bound is the
   anchor plus whole steps, but a whole-month step's bounds are midnight on the 1st whatever the anchor: with

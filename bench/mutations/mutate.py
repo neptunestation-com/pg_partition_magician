@@ -665,9 +665,31 @@ HT_CUTOVER_KEY_TMP_BLOCK = """    v_tmp := pgpm._from_hypertable_key_tmp(k.conna
     end if;
     v_tmp_oid := to_regclass(format('%I.%I', v_nsp, v_tmp));
     if not exists (select 1 from pg_index i where i.indexrelid = v_tmp_oid and i.indrelid = v_dest_oid) then
-      execute pgpm._from_hypertable_index_ddl(k.conindid, v_tmp, v_nsp, v_dest);
+      -- #1266: a tracking copy taken by an install from before the fix may have pre-built this key's index under
+      -- an incoming foreign key's temp name, which no key here asks for. It is recognised by what it is, not by
+      -- its name: an index on the recorded destination whose definition is this key's, under no temp name one
+      -- of the table's own keys adopts (so a key never takes another key's pre-build, when two keys share a
+      -- definition). It is renamed to this key's temp name and adopted below, rather than built again and left
+      -- on the migrated table as a stray duplicate.
+      select i.indexrelid::regclass into v_pre_idx
+        from pg_index i join pg_class ic on ic.oid = i.indexrelid
+       where i.indrelid = v_dest_oid
+         and pgpm._from_hypertable_index_ddl(i.indexrelid, v_tmp, v_nsp, v_dest)
+             = pgpm._from_hypertable_index_ddl(k.conindid, v_tmp, v_nsp, v_dest)
+         and ic.relname <> all (array(select pgpm._from_hypertable_key_tmp(o.conname, o.conindid, v_nsp, v_dest_oid)
+                                        from pg_constraint o
+                                       where o.conrelid = p_hypertable and o.contype in ('p', 'u')))
+       order by i.indexrelid
+       limit 1;
+      if v_pre_idx is not null then
+        execute format('alter index %s rename to %I', v_pre_idx::text, v_tmp);
+      else
+        execute pgpm._from_hypertable_index_ddl(k.conindid, v_tmp, v_nsp, v_dest);
+      end if;
     end if;
 """
+# (#1266 added the older copy's recognition inside the block; the two mutations that replace it whole put back
+# their historical cutover, which had no recognition, so their defects are exactly what they were.)
 
 REGRAIN_SWAP_LEDGER_RETIRE = """  -- The source's archive coverage goes with it (#511). A partly archived child can be regrained
   -- (#278), and its chunks sit in pgpm.archive_ledger keyed (parent_table, lo) under its name. Left
@@ -13689,6 +13711,70 @@ MUTATIONS["contradicted_reset_blames_detach_only"] = (
       "pending a detach, which is how a pgpm before this check recorded such a chunk; nothing to do, the next tick "
       "archives the partition again and retention then drops it',", 1)],
 )
+MUTATIONS["hypertable_copy_key_constraint_by_index"] = (
+    "bench/hypertable_copy_key_constraint_by_table.sh",
+    "Pre-#1266 from_hypertable_copy: the tracking copy reads the key's name from every constraint on the key's "
+    "index, so when an incoming foreign key that references the key comes first in pg_constraint the copy "
+    "pre-builds <fk>_pgpm_new (before the cutover recognised such an index by its definition, the key was built "
+    "a second time and the copy's index survived the swap as a stray duplicate UNIQUE index; the cutover's "
+    "recognition, guarded by hypertable_cutover_older_copy_key_index_unrecognised, now repairs that, so this "
+    "mutant shows as the copy's name alone). One site, the copy's read; both of its clauses go, because either "
+    "alone keeps an incoming key out (its conrelid is the referencing table and its contype is 'f'; TimescaleDB "
+    "refuses a key from a hypertable to a hypertable, so no key of the table's own can sit there). "
+    "tests/timescale/db/68 parts A and B catch it (the copy built the index under the incoming key's temp name).",
+    [("    select conname into v_keyconname from pg_constraint\n"
+      "     where conrelid = p_hypertable and contype in ('p', 'u') and conindid = v_keyidx;\n",
+      "    select conname into v_keyconname from pg_constraint\n"
+      "     where conindid = v_keyidx;\n", 1)],
+)
+MUTATION_SRC["hypertable_copy_key_constraint_by_index"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_copy_key_constraint_by_index"] = "timescale"
+MUTATIONS["hypertable_cutover_secondary_index_by_any_constraint"] = (
+    "bench/hypertable_copy_key_constraint_by_table.sh",
+    "Pre-#1266 from_hypertable_cutover: an index counts as secondary when no constraint of ANY table sits on it, "
+    "so a bare unique index that an incoming foreign key was resolved to (one older than the key, on the same "
+    "columns) is built by neither loop and the migrated table loses it. One site, the cutover's secondary-index "
+    "loop, both clauses for the reason hypertable_copy_key_constraint_by_index gives; the copy's read keeps its "
+    "filter. tests/timescale/db/68 part C catches it (the migrated parent's indexes by name, and the columns of "
+    "the one that is gone).",
+    [("              and not exists (select 1 from pg_constraint con\n"
+      "                               where con.conrelid = p_hypertable and con.contype in ('p', 'u')\n"
+      "                                 and con.conindid = i.indexrelid) loop\n",
+      "              and not exists (select 1 from pg_constraint con\n"
+      "                               where con.conindid = i.indexrelid) loop\n", 1)],
+)
+MUTATION_SRC["hypertable_cutover_secondary_index_by_any_constraint"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_cutover_secondary_index_by_any_constraint"] = "timescale"
+MUTATIONS["hypertable_cutover_older_copy_key_index_unrecognised"] = (
+    "bench/hypertable_copy_key_constraint_by_table.sh",
+    "#1266's upgrade path without its recognition: from_hypertable_cutover adopts a key index the copy pre-built "
+    "only under the key's own temp name, so a tracking copy taken before the fix, which built it under the "
+    "incoming foreign key's temp name, has the key built a second time and its index left on the migrated table "
+    "as a stray duplicate UNIQUE index. One clause, the branch that renames the recognised index. "
+    "tests/timescale/db/68 part D catches it (the older copy's index is not the migrated key's, a second unique "
+    "index on the parent).",
+    [("      if v_pre_idx is not null then\n"
+      "        execute format('alter index %s rename to %I', v_pre_idx::text, v_tmp);\n",
+      "      if false then\n"
+      "        execute format('alter index %s rename to %I', v_pre_idx::text, v_tmp);\n", 1)],
+)
+MUTATION_SRC["hypertable_cutover_older_copy_key_index_unrecognised"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_cutover_older_copy_key_index_unrecognised"] = "timescale"
+MUTATIONS["hypertable_cutover_older_copy_key_index_takes_any"] = (
+    "bench/hypertable_copy_key_constraint_by_table.sh",
+    "#1266's recognition of an older copy's key index without its exclusion: any index on the destination with "
+    "the key's definition is taken, including one under a temp name another key of the table adopts. With a "
+    "primary key and a unique constraint on the same columns, the unique constraint met first takes the primary "
+    "key's pre-build, the primary key takes it back, and the swap fails adopting the unique constraint's index. "
+    "One clause, the exclusion. tests/timescale/db/68 part E catches it (the cutover refuses; the copy's index "
+    "is not the primary key's; the parent lacks its keys).",
+    [("         and ic.relname <> all (array(select pgpm._from_hypertable_key_tmp(o.conname, o.conindid, v_nsp, v_dest_oid)\n"
+      "                                        from pg_constraint o\n"
+      "                                       where o.conrelid = p_hypertable and o.contype in ('p', 'u')))\n",
+      "", 1)],
+)
+MUTATION_SRC["hypertable_cutover_older_copy_key_index_takes_any"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_cutover_older_copy_key_index_takes_any"] = "timescale"
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

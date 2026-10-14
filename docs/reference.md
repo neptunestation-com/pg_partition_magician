@@ -989,7 +989,9 @@ O(rows) work, deliberately kept out of the blocking window). Each is built from 
 definition under `<index>_pgpm_new`, or `pgpm_new_<index oid>` when that name would exceed 63 bytes (pgpm
 never cuts it) or, for a key, is held by something not on this destination (an abandoned tracking copy taken
 under the table's old name), so index and table names holding spaces or other quoted characters migrate as they are. A key
-index the tracking copy already built on the destination, under either name, is adopted rather than rebuilt.
+index the tracking copy already built on the destination, under either name, is adopted rather than rebuilt,
+and so is one an older release's copy built under another name: an index on the destination with the key's
+definition, under no name another of the table's keys adopts, is renamed and adopted.
 Before any of that it takes `SHARE` on the copy, which no reader of the copy waits for and every writer
 does, and holds it through the swap: a drain batch in flight is waited for (within `p_lock_timeout`) and a
 later one waits for the swap, so nothing changes the copy between what the cutover reads of it and the
