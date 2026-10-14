@@ -91,7 +91,13 @@ the UTC lattice, so `partition_tz` is recorded as `UTC` for such a column and ca
 write frontier for it is `now()` read on that same clock, so an application writing local wall time from
 a zone east of UTC runs ahead of the frontier by its offset; the forward slack `obtain x partition_step`
 covers that on a day or coarser grid with any `obtain` of at least 1, and on an hourly grid needs `obtain`
-greater than the offset in hours.
+greater than the offset in hours. `transmute` reads the same lead in the table's newest row, and its
+frontier check (see `p_force_frontier`) refuses a newest value more than one partition step plus one hour
+past `now()`: no zone's offset reaches that on a day or coarser grid, but on an hourly grid any offset over
+two hours does (Asia/Tokyo's nine, for one), and on a six-hour grid any over seven. Such a table converts
+only with `p_force_frontier => true`, which accepts the grid bound above the newest row as the monolith's
+permanent upper bound: the monolith takes the rest of that step's writes, and it cannot be regrained until
+`now()` passes that bound, about the offset later than the column's own clock does.
 
 The cutover moves no rows, and runs in **three transactions** so that none of its locks scales with the
 row count: add the monolith's bound `CHECK` as `NOT VALID` (catalog only, instant); commit, which drops

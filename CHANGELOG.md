@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- **The reference says a naive column of wall time east of UTC converts on a sub-day grid only with
+  `p_force_frontier`** (#1275). Its transmute entry said such a column runs ahead of the frontier by its
+  offset and that `obtain` greater than the offset in hours covers it on an hourly grid, but transmute's
+  frontier check refuses a newest value more than one partition step plus one hour past `now()`, so an
+  Asia/Tokyo table's current rows were refused on an hourly grid and the paragraph never named the override.
+  It now states the allowance, which leads it refuses (none on a day grid; over two hours on an hourly one,
+  over seven on a six-hour one), and what `p_force_frontier => true` accepts. Guard
+  `bench/doc_naive_east_of_utc_frontier.sh`, mutation `reference_naive_east_of_utc_no_force`.
+
+- **CHANGELOG.md carries each fix once, and a merge that leaves residue in it fails the Living docs lint**
+  (#1277). Keep-both merges of this file had left five bullets twice word for word, stale older tails glued
+  after four entries, and in #1161's a second tail saying `set_regrain` refuses a run past the lock budget,
+  where it warns, logs `warn_regrain_lock_budget` and stores the target. The residue is removed, and a new
+  check 7 of `scripts/check_living_docs.sh` (`scripts/check_changelog_residue.py`, with its own self-test)
+  refuses a bullet present twice, a bullet repeating an 8-word run of its own text, and a bullet whose
+  parentheses do not balance outside code spans. Guard `bench/changelog_no_merge_residue.sh`, mutation
+  `changelog_1161_stale_tail`.
+
 - **The archive object-key lint names what a prefix may do, and refuses the rest** (#1279).
   `scripts/check_archive_object_keys.py` listed the ways the configured prefix gets out of a function (`||`, an
   assignment, a `RETURN`, a select item, a call it cannot follow), so a second, unclaimed object key passed it
@@ -110,9 +128,6 @@
   lookup confined again), `untransmute_capture_fn_dropped_in_delta_schema` and
   `uninstall_capture_fn_dropped_in_delta_schema` (each exit's drop in the delta's schema), and
   `uninstall_capture_fn_nsp_read_bare` (the script stopping on an older install's three-column resolver).
-  alone. `tests/338` is the acceptance test; `bench/regrain_capture_fn_any_schema.sh` runs it against
-  `regrain_capture_fn_in_delta_schema` (the lookup confined again) and
-  `untransmute_capture_fn_dropped_in_delta_schema` (the drop in the delta's schema).
 - **A direct archive_fn strategy call keys the chunk it read** (#814, the archive bullet). Within one direct call of
   `pgpm.archive_to_s3_ndjson` or `pgpm.archive_to_s3_parquet`, the range read and the recorded-chunk check parsed
   `p_lo` in the caller's session while `archive._object_stem` parsed it under its own pinned `TimeZone` and
@@ -129,14 +144,6 @@
   `bench/archive_direct_call_bounds.sh` against the mutations `archive_{ndjson,parquet}_bounds_caller_spelling`,
   `archive_{ndjson,parquet}_bounds_session_zone`, `archive_{ndjson,parquet}_empty_range_as_spelled`,
   `archive_date_bound_keyed_by_instant` and `archive_recorded_bounds_unread`.
-  keyed `100`), and the read, the check and the key take that text: a `date` grid's `'2024-01-02'` is keyed by
-  the cell's start from every session. `tests/archive/db/54`, run by `bench/archive_direct_call_bounds.sh`
-  against the mutations `archive_{ndjson,parquet}_bounds_caller_spelling` and
-  `archive_{ndjson,parquet}_bounds_session_zone`.
-  reads its bounds once, as `pgpm._native_text` renders what the session reads (an `id` bound at its least scale,
-  so `'0100'` is keyed `100`), and the read, the check and the key take that text. `tests/archive/db/54`, run by
-  `bench/archive_direct_call_bounds.sh` against the mutations `archive_ndjson_bounds_caller_spelling` and
-  `archive_parquet_bounds_caller_spelling`.
 - **A whole-month grid anchored off its column's unit is no longer said to be attached at other bounds, nor
   refused a whole-month regrain** (#1276). A calendar step's bounds are midnight on the 1st of a month whatever
   the anchor's time, so a `date` grid an older install anchored at noon on a month step (or a `timestamptz(0)`
@@ -384,7 +391,6 @@
   snapshots that miss the copies; ending that transaction is the remedy. The clause comes before the pid list,
   and `maintain`'s `skip_regrain` row keeps the message through it (past the 200 characters every `skip_` row
   keeps), so the row an operator reads every tick carries it. The reference documents the limit.
-  snapshots that miss the copies; ending that transaction is the remedy. The reference documents the limit.
 - **`adopt_partition` refuses a transaction stricter than `READ COMMITTED`** (#1262). It judged the partition
   attached and not pending, and read its name and bounds, through the caller's snapshot after its `SHARE UPDATE
   EXCLUSIVE` lock, and under `REPEATABLE READ` or `SERIALIZABLE` that is the transaction's first snapshot: a
@@ -403,12 +409,6 @@
   is refused the same way before the partition's lock is asked for, where it was called "not a partition"). A
   name taken by a sequence, an index or a table the caller has no privilege on still fails with `LOCK TABLE`'s
   own error, recording nothing.
-  `p_child`'s oid, refusing with the partition's current name when it does not.
-  granted: a rename of the partition and a table created under its old name, committed while the call waited,
-  left the lock on that new table, and a `DETACH` of the recorded partition could commit before its row. It now
-  locks the schema-qualified name and asks under the lock whether that name still denotes `p_child`, refusing
-  with the partition's current name when it does not.
-  `COMMIT`).
 - **`check_time_monotonic` gives the same answer from every session zone** (#1265). It cast the time column to
   `timestamptz` in the caller's `TimeZone`, so a naive `timestamp` (or text) column with a wall time inside that
   zone's spring-forward gap read an hour late: a column rising with the id across New York's gap (01:50, 02:30,
@@ -760,27 +760,6 @@
   every action's options and local equivalent, and the `ci` call); mutations `ci_lint_job_dropped` and
   `ci_skips_lint_track`.
 
-- **`tests/93` names the chunks the archive step takes, and the partitions `archive_batch` lets it take**
-  (#1170). Its second tick was asserted as one distinct `child_name` in the ledger, which a second tick that
-  archives nothing satisfies, and `archive_batch = 2` as two ledger rows, which two chunks of the monolith
-  satisfy. It now names the monolith's `[0, 59)` then `[59, 117)` after two ticks, and one chunk each of the
-  two oldest partitions (lo 0 and 6000) under `archive_batch = 2`. `bench/tests_fail_on_defect.sh` judges it
-  against a `_next_archive_chunk` that never resumes a partially archived partition and an `_archive_step`
-  that spends the cap on chunks; mutations `archive_resume_by_distinct_child`, `archive_batch_by_ledger_rows`.
-
-- **`tests/74` ties every dropped range to the chunks archived before its drop** (#1171). Archive-before-drop
-  was asserted as some ledger row, some `retain_drop` and no aged partition left, which one child archived and
-  the rest dropped unarchived satisfies. Each `retain_drop` range must now be covered by ledger chunks recorded
-  at or before the drop, and the dropped ranges must be exactly the aged children that existed before
-  maintenance ran. `bench/tests_fail_on_defect.sh` judges it against a `retire()` whose gate opens once the
-  parent has any ledger row; mutation `archive_before_drop_uncovered`.
-
-- **`tests/141` names the partition a `timestamptz` write a day out lands in** (#1172). "ts_ev takes a write
-  a day out, past its monolith" was `count(*) = 4`, which a write that stays in the monolith satisfies; it now
-  asserts that day's partition by name, as its `id_ev` and `dt_ev` siblings do. `bench/tests_fail_on_defect.sh`
-  judges it against a transmute that reads a `timestamptz` maximum a day late; mutation
-  `transmute_day_out_write_by_count`.
-
 - **The documented-install guard judges a command that feeds install.sql on stdin** (#1178). The parser of
   `bench/doc_install_stops_on_error.sh` kept a psql command only when it named install.sql through `-f`, so a
   documented `psql "$DATABASE_URL" < pgpm_core/install.sql` (which runs past the first error and exits 0) was
@@ -819,17 +798,6 @@
   `to_s3_cursor_null_restart`, `to_s3_cursor_null_run_unread`, `to_s3_cursor_parent_type`,
   `to_s3_cursor_type_typmod_dropped`, `to_s3_cursor_type_unrefused`, `to_s3_cursor_domain_checked`,
   `to_s3_relkind_unrefused`, `to_s3_cursor_probe_base_only` and `to_s3_cursor_type_allowlist_widened`.
-  `to_s3_relkind_unrefused` and `to_s3_cursor_probe_base_only`.
-  `to_s3_cursor_type_typmod_dropped`, `to_s3_cursor_type_unrefused` and `to_s3_cursor_domain_checked`.
-  `to_s3_cursor_type_typmod_dropped` and `to_s3_cursor_first_run_row_gap`.
-  `to_s3_cursor_null_restart`, `to_s3_cursor_null_run_unread`, `to_s3_cursor_parent_type` and
-  `to_s3_cursor_type_typmod_dropped`.
-  `to_s3_cursor_null_restart`, `to_s3_cursor_null_run_unread` and `to_s3_cursor_parent_type`.
-  in a run of their own after every other row, by (tableoid, ctid). `tests/archive/db/51` under
-  `bench/archive_to_s3_multi_heap.sh`, with the mutations `to_s3_cursor_heap_unkeyed`, `to_s3_cursor_null_blind`,
-  `to_s3_cursor_null_restart` and `to_s3_cursor_null_run_unread`.
-  heap, the same order as before. `tests/archive/db/51` under `bench/archive_to_s3_multi_heap.sh`, with the
-  mutation `to_s3_cursor_heap_unkeyed`.
 - **`from_hypertable` refuses a step its time dimension's type cannot hold before the copy, not after the
   swap** (#1118). `pgpm._from_hypertable_check_arguments` (#1085) asked only the rules a value alone breaks,
   so a sub-day `p_interval` on a `date` dimension (#581), or one finer than a `timestamp(p)` dimension keeps
@@ -968,8 +936,6 @@
   parallel one. Test `tests/317`; guard `bench/over_retired_chunks_range_first.sh` (which also upgrades a v0.6.0
   install and rebuilds the index where builds go parallel), mutations `over_retired_chunks_reads_all`,
   `native_order_key_parallel_safe` and `retired_hi_key_idx_before_column`.
-  such number, and describes only the rows it returns; what it returns is unchanged. Test `tests/317`; guard
-  `bench/over_retired_chunks_range_first.sh`, mutation `over_retired_chunks_reads_all`.
 - **`forget_missing()` logs where every chunk of the table it forgets was archived** (#1164). It deleted every
   `pgpm.archive_ledger` row of a parent whose relation is gone, retired rows included, and its `forget_missing`
   log row named no object key, so after the runbook's path for a table past its monolith (drop it, run
@@ -994,13 +960,6 @@
   so it stays under the budget. Test `tests/315`; guard `bench/regrain_swap_lock_budget.sh`, mutations
   `regrain_swap_no_prepare_budget`, `regrain_set_regrain_no_budget_warning`, `regrain_swap_no_measured_budget`,
   `regrain_swap_incoming_fk_uncharged`.
-  and every copy kept. `regrain_step`'s prepare tick (before the source is renamed or anything copied) and
-  `set_regrain` now refuse a run whose fine children above the retention horizon would take more than half of
-  `max_locks_per_transaction x (max_connections + max_prepared_transactions)` at two slots each, and the swap
-  measures what its second `ATTACH` cost, charges each incoming foreign key it re-adds, and refuses, rolled
-  back whole with the copies kept, when the run's children would take more than half. Each message names the
-  knob and how many children fit. Test `tests/315`; guard `bench/regrain_swap_lock_budget.sh`, mutations
-  `regrain_swap_no_prepare_budget`, `regrain_swap_no_measured_budget`, `regrain_swap_incoming_fk_uncharged`.
 - **On PostgreSQL 18 a preserved key on a partitioned referencing table, or a self-referential one, comes back
   `NOT VALID`, so its re-add no longer scans the table under a write-blocking lock** (#633). `restore_incoming_fks`
   (maintain's tick, and every regrain swap) and `untransmute` re-added such a key in one validating step on every
@@ -1067,16 +1026,6 @@
   cannot deadlock. Test `tests/timescale/db/64`; guard `bench/hypertable_cutover_reads_copy_under_lock.sh`,
   mutations `hypertable_cutover_reads_copy_unlocked`, `hypertable_drain_appends_reads_before_copy_lock` and
   `hypertable_drain_delta_step_takes_delta_first`.
-- **`untransmute` refuses while a partition of the table is pending a concurrent detach** (#1157). A partition
-  left pending by an interrupted `DETACH PARTITION ... CONCURRENTLY` (the state `_detach_reap` exists to finish)
-  has its rows already invisible through the parent, so `untransmute`'s one-way-door check, which reads through
-  the parent, passed, and the drop of the parent destroyed the partition and its rows while `pgpm.log` recorded a
-  plain `untransmute`. It now refuses, before that check and again under the `ACCESS EXCLUSIVE` it takes on the
-  parent, naming every pending partition and the remedy (let the detach finish, or `ALTER TABLE ... DETACH
-  PARTITION ... FINALIZE` it, after which the reverse leaves that partition standing). Test `tests/312`; guard
-  `bench/untransmute_pending_detach.sh`, mutations `untransmute_detach_pending_unchecked` and
-  `untransmute_detach_pending_unlocked_only`.
-
 - **`untransmute` refuses while a partition of the table is pending a concurrent detach** (#1157). A partition
   left pending by an interrupted `DETACH PARTITION ... CONCURRENTLY` (the state `_detach_reap` exists to finish)
   has its rows already invisible through the parent, so `untransmute`'s one-way-door check, which reads through
@@ -2453,16 +2402,6 @@
   `p_tt_alphabet` keep theirs). `tests/248` and `tests/249`, guarded by `bench/null_arguments_refused.sh`
   with mutations `transmute_null_arguments_accepted`, `extend_to_null_arguments_accepted` and
   `transmute_refuses_null_retain`.
-- **An outgoing foreign key added to a parent mid-regrain restarts the run instead of being validated
-  under the swap's lock** (#898). Each copy is born with its own validated instance of the parent's
-  outgoing keys while it is still empty, so that the swap's `ATTACH PARTITION` adopts them, but the drift check compared
-  columns and `CHECK` constraints only: a copy made before a key was added reached the swap without it, and
-  `ATTACH` validated the key by scanning the copy while the swap held `ACCESS EXCLUSIVE` on the parent, and a
-  key the parent dropped stayed on the fine child. `_regrain_shape_drift` now compares the parent's validated
-  outgoing keys with each copy's by definition, so a key added, dropped or redefined restarts the run
-  (`regrain_restart`) and every copy is made again carrying the keys the parent has now. `tests/251`, guarded
-  by `bench/regrain_fk_drift_swap_scan.sh` (the copies' scan counters across the swap tick) with mutation
-  `regrain_fk_drift_ignored`.
 - **An outgoing foreign key added to a parent mid-regrain restarts the run instead of being validated
   under the swap's lock** (#898). Each copy is born with its own validated instance of the parent's
   outgoing keys while it is still empty, so that the swap's `ATTACH PARTITION` adopts them, but the drift check compared

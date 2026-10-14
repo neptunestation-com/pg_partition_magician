@@ -1109,6 +1109,8 @@ run_perf() {
     "bench/doc_monolith_retention.sh pgpm_perf144"
     "bench/doc_remedy_and_symptom.sh pgpm_perf243"
     "bench/doc_transmute_no_default.sh pgpm_perf278"
+    "bench/doc_naive_east_of_utc_frontier.sh pgpm_perf383"
+    "bench/changelog_no_merge_residue.sh pgpm_perf399"
     "bench/release_assets_over_cap.sh pgpm_perf307"
     "bench/pages_deploy_after_release.sh pgpm_perf339"
     "bench/doc_maintain_does_not_obtain.sh pgpm_perf118"

@@ -4986,6 +4986,41 @@ $$;''',
           "  safety net. The cutover is one read-only scan plus a metadata flip: no rebuild, no row rewrite, and **no\n"
           "  lock that scales with row count** -- the scan runs under a lock that blocks neither readers nor writers\n", 1)],
     ),
+    "reference_naive_east_of_utc_no_force": (
+        "bench/doc_naive_east_of_utc_frontier.sh",
+        "Pre-#1275 docs/reference.md: the transmute entry says a naive `timestamp` column of local wall time east "
+        "of UTC runs ahead of the frontier by its offset and is covered on an hourly grid by `obtain` greater than "
+        "the offset in hours, and stops there, while transmute's frontier check (now() + one step + one hour) "
+        "refuses such a table's current rows (Asia/Tokyo's nine hours on an hourly grid) unless "
+        "`p_force_frontier`, which the paragraph never names. The exact pre-#1275 text.",
+        [("greater than the offset in hours. `transmute` reads the same lead in the table's newest row, and its\n"
+          "frontier check (see `p_force_frontier`) refuses a newest value more than one partition step plus one hour\n"
+          "past `now()`: no zone's offset reaches that on a day or coarser grid, but on an hourly grid any offset over\n"
+          "two hours does (Asia/Tokyo's nine, for one), and on a six-hour grid any over seven. Such a table converts\n"
+          "only with `p_force_frontier => true`, which accepts the grid bound above the newest row as the monolith's\n"
+          "permanent upper bound: the monolith takes the rest of that step's writes, and it cannot be regrained until\n"
+          "`now()` passes that bound, about the offset later than the column's own clock does.\n",
+          "greater than the offset in hours.\n", 1)],
+    ),
+    "changelog_1161_stale_tail": (
+        "bench/changelog_no_merge_residue.sh",
+        "Pre-#1277 CHANGELOG.md: #1161's bullet carries the stale second tail a keep-both merge left after it, "
+        "saying the prepare tick AND `set_regrain` now refuse a run past half the lock table, where the code, "
+        "the bullet's own first half and docs/reference.md say set_regrain warns, logs "
+        "`warn_regrain_lock_budget` and stores the target. The exact pre-#1277 text.",
+        [("  `regrain_swap_no_prepare_budget`, `regrain_set_regrain_no_budget_warning`, `regrain_swap_no_measured_budget`,\n"
+          "  `regrain_swap_incoming_fk_uncharged`.\n",
+          "  `regrain_swap_no_prepare_budget`, `regrain_set_regrain_no_budget_warning`, `regrain_swap_no_measured_budget`,\n"
+          "  `regrain_swap_incoming_fk_uncharged`.\n"
+          "  and every copy kept. `regrain_step`'s prepare tick (before the source is renamed or anything copied) and\n"
+          "  `set_regrain` now refuse a run whose fine children above the retention horizon would take more than half of\n"
+          "  `max_locks_per_transaction x (max_connections + max_prepared_transactions)` at two slots each, and the swap\n"
+          "  measures what its second `ATTACH` cost, charges each incoming foreign key it re-adds, and refuses, rolled\n"
+          "  back whole with the copies kept, when the run's children would take more than half. Each message names the\n"
+          "  knob and how many children fit. Test `tests/315`; guard `bench/regrain_swap_lock_budget.sh`, mutations\n"
+          "  `regrain_swap_no_prepare_budget`, `regrain_swap_no_measured_budget`, `regrain_swap_incoming_fk_uncharged`.\n",
+          1)],
+    ),
     "readme_maintain_obtains": (
         "bench/doc_maintain_does_not_obtain.sh",
         "Pre-#1087 README.md: the maintain bullet calls it 'the one procedure `pg_cron` calls (`obtain`, "
@@ -9561,6 +9596,8 @@ MUTATION_SRC = {
     "reference_fks_suspended_dead_swap": "docs/reference.md",
     "reference_keyless_monolith_dormant": "docs/reference.md",
     "readme_transmute_fresh_default": "README.md",
+    "reference_naive_east_of_utc_no_force": "docs/reference.md",
+    "changelog_1161_stale_tail": "CHANGELOG.md",
     "readme_maintain_obtains": "README.md",
     "readme_install_runs_past_error": "README.md",
     "runbook_fk_validate_by_restore": "docs/runbook.md",
