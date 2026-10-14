@@ -1286,6 +1286,7 @@ run_perf() {
     "bench/check_time_monotonic_session_zone.sh pgpm_perf373"
     "bench/adopt_partition_isolation.sh pgpm_perf370"
     "bench/snapshot_wait_foreign_floor_holder.sh pgpm_perf371"
+    "bench/install_keeps_surface_grants.sh pgpm_perf375"
   )
   local selected=()
   local n=${#guards[@]} idx

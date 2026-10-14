@@ -53,6 +53,11 @@ create schema if not exists pgpm;
 -- over it, and _surface_prepare() below, the first thing this file runs, drops one only when its installed
 -- shape cannot be replaced in place. When something depends on such a function it refuses the whole run
 -- instead, naming the function, the dependant and the remedy, before anything else in this file has run.
+-- One that has to go and carries grants of its own (a non-default ACL: an operator's REVOKE FROM PUBLIC, a
+-- GRANT to a monitoring role) is not dropped but kept aside, renamed pgpm._surface_kept_<name>, and
+-- _surface_carry_grants(), called right after the file creates its new shape, gives the new one exactly the
+-- kept one's grants and drops it (#1267). A run that stops in between leaves the kept function, grants and
+-- all, for the next run to carry.
 --
 -- _surface_shapes() is the declaration: the signature, the argument list (names and types, as
 -- pg_get_function_identity_arguments renders it), the result (as pg_get_function_result does) and the number
@@ -124,11 +129,15 @@ language sql stable as $$
    order by p.oid::regprocedure::text
 $$;
 
--- Refuse the run while a function that has to change shape has a dependant, else drop every such function so
--- that its CREATE OR REPLACE below creates it afresh. Nothing is dropped unless nothing is refused.
+-- Refuse the run while a function that has to change shape has a dependant, else take every such function
+-- away so that its CREATE OR REPLACE below creates it afresh. Nothing is taken unless nothing is refused. One at
+-- the default ACL is dropped; one with grants of its own is kept aside under _surface_kept_<name> (the same
+-- argument types, so the kept one's signature follows from the declared one's) for _surface_carry_grants() to
+-- copy its grants from (#1267). When a stopped run already kept one aside, that one holds the operator's
+-- grants and the function installed since is the file's, at its creator's defaults, so it is dropped.
 create or replace function pgpm._surface_prepare()
 returns void language plpgsql as $$
-declare v_refused text; r record;
+declare v_refused text; v_uncarried_q text; r record;
 begin
   select string_agg(format('%s (on which %s depends)', u.fn, u.dependants), ', ' order by u.fn::text)
     into v_refused
@@ -140,12 +149,104 @@ begin
       'dependant''s definition (a view''s: select pg_get_viewdef(''<view>''::regclass, true)), drop it, re-run '
       'install.sql, then recreate it against the new shape.', v_refused);
   end if;
-  for r in select u.fn from pgpm._surface_unreplaceable() u loop
-    execute format('drop function %s', r.fn);
+  -- A grant another role made through a grant option is carried as that role (_acl_grant_as, #903), which
+  -- takes SET ROLE to it from this session and its USAGE on pgpm. Asked here, before anything is taken, so a
+  -- grant that cannot be carried refuses the run rather than leaving the new shape at its creator's defaults
+  -- (inline: on an older install this file has not yet created _acl_may_grant_as when this runs).
+  select string_agg(distinct format('%s (granted to %s by %s)', u.fn,
+                      case when a.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(a.grantee)) end,
+                      quote_ident(pg_get_userbyid(a.grantor))), ', ')
+    into v_uncarried_q
+    from pgpm._surface_unreplaceable() u join pg_proc p on p.oid = u.fn, aclexplode(p.proacl) a
+   where p.proacl is not null and a.grantor <> p.proowner
+     and not (pg_has_role(session_user, a.grantor,
+                          case when current_setting('server_version_num')::int >= 160000 then 'SET' else 'MEMBER' end)
+              and has_schema_privilege(a.grantor, p.pronamespace, 'USAGE'));
+  if v_uncarried_q is not null then
+    raise exception using errcode = 'insufficient_privilege', message = format(
+      'pg_partition_magician: install.sql cannot carry the grants on %s onto the new shape it has to create: each '
+      'was made through a grant option, and is carried as the role that made it so that role can still revoke '
+      'it, which takes SET ROLE to that role (and its USAGE on schema pgpm) from this session. Nothing has been '
+      'changed. Run install.sql as a member of each grantor (a superuser is one), or have each revoke its grant, '
+      're-run install.sql, then make the grant again.', v_uncarried_q);
+  end if;
+  for r in select u.fn, p.proname, p.proacl is not null as granted,
+                  to_regprocedure(pgpm._surface_sig_kept(s.sig)) as kept
+             from pgpm._surface_unreplaceable() u
+             join pg_proc p on p.oid = u.fn
+             join pgpm._surface_shapes() s on to_regprocedure(s.sig) = u.fn loop
+    if r.granted and r.kept is null then
+      execute format('alter routine %s rename to %I', r.fn, '_surface_kept_' || r.proname);
+    else
+      execute format('drop function %s', r.fn);
+    end if;
   end loop;
 end $$;
 
--- every declared function exists in its declared shape: run at the end of this file, after they are created
+-- the signature a declared function is kept aside under: its own, renamed pgpm._surface_kept_<name>
+create or replace function pgpm._surface_sig_kept(p_sig text)
+returns text language sql immutable as $$
+  select regexp_replace(p_sig, '^pgpm\.', 'pgpm._surface_kept_')
+$$;
+
+-- Give the function declared as p_sig exactly the grants of the one _surface_prepare() kept aside for it, then
+-- drop the kept one (#1267); nothing kept, nothing to do. The new function is this file's, created by the role
+-- running it, so first every grant its creation gave it is revoked (its owner's own included, as
+-- _acl_reset does for a relation), then the kept one's are replayed: one the kept function's owner made, by
+-- this role, the new owner (the owner's own EXECUTE goes to the new owner); one another role made through a
+-- grant option, as that role (_acl_grant_as, #903), after the grant that gave it the option, so the grantor
+-- can still revoke it. Called right after each declared function's CREATE OR REPLACE.
+create or replace function pgpm._surface_carry_grants(p_sig text)
+returns void language plpgsql as $$
+declare
+  v_kept regprocedure := to_regprocedure(pgpm._surface_sig_kept(p_sig));
+  v_new regprocedure := to_regprocedure(p_sig);
+  v_owner oid; v_kept_owner oid; r record; v_grant_q text;
+begin
+  if v_kept is null or v_new is null then return; end if;
+  select p.proowner into v_owner from pg_proc p where p.oid = v_new;
+  select p.proowner into v_kept_owner from pg_proc p where p.oid = v_kept;
+  for r in
+    select v_owner as grantee
+    union
+    select a.grantee from pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a where p.oid = v_new
+  loop
+    execute format('revoke all on function %s from %s cascade', v_new,
+                   case when r.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(r.grantee)) end);
+  end loop;
+  for r in
+    with recursive g as (
+      select case when a.grantor = v_kept_owner then v_owner else a.grantor end as grantor,
+             case when a.grantee = v_kept_owner then v_owner else a.grantee end as grantee,
+             a.privilege_type, a.is_grantable
+        from pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a where p.oid = v_kept
+    ), chain (grantor, grantee, privilege_type, is_grantable, depth) as (
+      select g.grantor, g.grantee, g.privilege_type, g.is_grantable, 0 from g where g.grantor = v_owner
+      union
+      select g.grantor, g.grantee, g.privilege_type, g.is_grantable, ch.depth + 1
+        from chain ch join g on g.grantor = ch.grantee and g.privilege_type = ch.privilege_type
+       where ch.is_grantable and ch.depth < 32
+    )
+    select g.*, coalesce((select min(ch.depth) from chain ch
+                           where ch.grantor = g.grantor and ch.grantee = g.grantee
+                             and ch.privilege_type = g.privilege_type), 32) as depth
+      from g
+     order by depth, g.grantee, g.privilege_type, g.grantor
+  loop
+    v_grant_q := format('grant %s on function %s to %s%s', r.privilege_type, v_new,
+                        case when r.grantee = 0 then 'public' else quote_ident(pg_get_userbyid(r.grantee)) end,
+                        case when r.is_grantable then ' with grant option' else '' end);
+    if r.grantor = v_owner then
+      execute v_grant_q;
+    else
+      perform pgpm._acl_grant_as(r.grantor, v_grant_q);
+    end if;
+  end loop;
+  execute format('drop routine %s', v_kept);
+end $$;
+
+-- every declared function exists in its declared shape, and none is left kept aside with grants not carried (#1267):
+-- run at the end of this file, after they are created
 create or replace function pgpm._surface_settled()
 returns void language plpgsql as $$
 declare r record;
@@ -160,6 +261,10 @@ begin
       raise exception 'pg_partition_magician: install.sql created % as (%) returns % with % default(s), not the shape pgpm._surface_shapes() declares for it: (%) returns % with % default(s). Update the declaration to what the file creates.',
         r.fn, pg_get_function_identity_arguments(r.fn), pg_get_function_result(r.fn),
         (select p.pronargdefaults from pg_proc p where p.oid = r.fn), r.args, r.result, r.ndefaults;
+    end if;
+    if to_regprocedure(pgpm._surface_sig_kept(r.sig)) is not null then
+      raise exception 'pg_partition_magician: install.sql left %, the older % kept aside for its grants, without carrying them onto the new one. Call pgpm._surface_carry_grants(%) right after its CREATE OR REPLACE.',
+        to_regprocedure(pgpm._surface_sig_kept(r.sig)), r.fn, quote_literal(r.sig);
     end if;
   end loop;
 end $$;
@@ -14377,6 +14482,7 @@ begin
   $q$, p_control, p_table::text, p_sample);
 end;
 $$;
+select pgpm._surface_carry_grants('pgpm.check_uuidv7(regclass,name,integer)');   -- #1267
 
 -- check_text_time(): sanity-sample a text/varchar column against a DECLARED shape (prefix, width,
 -- radix, unit) -- the text_time analogue of check_uuidv7, needed for the same reason: transmute treats
@@ -14480,6 +14586,7 @@ begin
     using p_epoch;
 end;
 $$;
+select pgpm._surface_carry_grants('pgpm.check_text_time(regclass,name,text,integer,integer,text,integer,text,integer,timestamp with time zone)');   -- #1267
 
 -- check_time_monotonic: how co-monotonic is an id column with a timestamp column? Samples p_sample
 -- rows at random, orders them by the id, and reports the fraction of adjacent pairs whose time is
@@ -14665,6 +14772,7 @@ begin
   end loop;
 end;
 $$;
+select pgpm._surface_carry_grants('pgpm.status()');   -- #1267
 -- snapshot() removed with the drain (#288). It existed to paper over the drain's VISIBILITY GAP: during a
 -- multi-batch drain the already-moved rows lived in an unattached child, so a plain read of the parent
 -- undercounted the interval being drained, and snapshot() UNIONed those children back in. regrain never
@@ -14828,6 +14936,7 @@ begin
   end loop;
 end;
 $$;
+select pgpm._surface_carry_grants('pgpm.progress(regclass)');   -- #1267
 
 
 -- ===================== observability: pg_flight_recorder correlation =====================
@@ -14889,6 +14998,7 @@ create or replace function pgpm.observe_window(
   where l.parent_table = p_parent
     and l.at >= now() - p_since;
 $$;
+select pgpm._surface_carry_grants('pgpm.observe_window(regclass,interval)');   -- #1267
 
 -- impact_report: "what did my conversion do to the workload?" Derives the active window from
 -- pgpm.log (observe_window) and asks pgfr_analyze what the database was doing during it. Sections

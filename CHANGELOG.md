@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **Re-running `install.sql` keeps the grants on a function it has to reshape** (#1267). `_surface_prepare()`
+  dropped `status()`, `progress()`, `observe_window()`, `check_uuidv7()` or `check_text_time()` when its installed
+  shape could not be replaced in place (a pre-#343 `status()` without `regrain_to`), and the file recreated it at
+  its creator's default privileges, so the upgrade silently undid an operator's `REVOKE EXECUTE ... FROM PUBLIC`
+  and `GRANT EXECUTE` to a monitoring role, against the #983 promise that it keeps the function's grants. Such a
+  function with grants of its own is now kept aside as `pgpm._surface_kept_<name>` instead, and right after the
+  file creates the new shape `pgpm._surface_carry_grants()` gives it exactly the kept one's grants, each under its
+  own grantor, then drops it; one at the default ACL is dropped as before. A grant made through a grant option
+  that the session could not replay as its grantor refuses the run up front (SQLSTATE `42501`), before anything
+  is taken. A run that stops in between leaves the kept function, grants and all, for the next run to carry, and
+  `_surface_settled()` fails an install that leaves one behind. Guard: `bench/install_keeps_surface_grants.sh`
+  (tests/336); mutations `surface_prepare_drops_granted`, `surface_carry_grants_as_owner`,
+  `surface_prepare_grantor_unchecked`.
 - **A regrain swap deferred by another database's transaction names that transaction** (#1263). A transaction
   older than a regrain's copies, open in ANOTHER database (or prepared), holds back the `xmin` of every snapshot in
   the cluster, so the swap's snapshot wait listed `READ COMMITTED` statements of this database that began after
