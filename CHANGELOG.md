@@ -24,7 +24,8 @@
   `quoted_splices_loop_first_branch`, `quoted_splices_paren_branch_skipped`,
   `quoted_splices_scan_in_quoted_names`, `quoted_splices_execute_into_unread`,
   `quoted_splices_exec_statement_guessed`, `quoted_splices_exec_wrapped_unread`,
-  `quoted_splices_into_crosses_loop`, `quoted_splices_spliced_value_judged`,
+  `quoted_splices_into_crosses_loop`, `quoted_splices_into_boundary_in_quoted_names`,
+  `quoted_splices_into_boundary_qualified`, `quoted_splices_spliced_value_judged`,
   `quoted_splices_format_template_unrendered`, `quoted_splices_label_target_unread` and
   `quoted_splices_bare_dollar_bodies`.
 - **The `_q` lint lexes block comments and escape strings** (#1236, bullets B08-01 and B08-02).

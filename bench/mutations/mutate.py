@@ -11556,10 +11556,28 @@ MUTATIONS["quoted_splices_into_crosses_loop"] = (
     "scripts/check_quoted_splices.py pairing an INTO with any SELECT before it in its `;`-delimited text: in "
     "`for r in select a from t loop execute v_sql into v_cols_q`, the EXECUTE's INTO is judged on the loop's "
     "list and check 2 refuses an earned `_q` (V-02). One site, the statement start select_into() reads from.",
-    [("            start = max([k.end() for k in INTO_BOUNDARY.finditer(rest, 0, m.start()) if k.start() in rtop], "
-      "default=0)\n", "            start = 0\n", 1)],
+    [("            start = max([k.end() for k in words], default=0)\n", "            start = 0\n", 1)],
 )
 MUTATION_SRC["quoted_splices_into_crosses_loop"] = "scripts/check_quoted_splices.py"
+# PR #1313's verification, round 4 (V-01): the boundary words select_into() looks for are read in bare() text and
+# not when qualified. One mutation per clause.
+MUTATIONS["quoted_splices_into_boundary_in_quoted_names"] = (
+    "bench/quoted_splices_every_body.sh",
+    "scripts/check_quoted_splices.py looking for select_into()'s LOOP or EXECUTE boundary inside quoted names: "
+    "`select 'a' as \"loop\", quote_ident(c) into v_x, v_cols` starts its statement after the alias, finds no "
+    "SELECT and never judges the unmarked v_cols (V-01). One site, the text the boundary is searched in.",
+    [("            words = [k for k in INTO_BOUNDARY.finditer(bare(rest), 0, m.start()) if k.start() in rtop]\n",
+      "            words = [k for k in INTO_BOUNDARY.finditer(rest, 0, m.start()) if k.start() in rtop]\n", 1)],
+)
+MUTATION_SRC["quoted_splices_into_boundary_in_quoted_names"] = "scripts/check_quoted_splices.py"
+MUTATIONS["quoted_splices_into_boundary_qualified"] = (
+    "bench/quoted_splices_every_body.sh",
+    "scripts/check_quoted_splices.py taking a qualified column (`t.execute`) for select_into()'s EXECUTE "
+    "boundary: `select t.execute, quote_ident(c) into v_x, v_cols from ... t` never judges the unmarked v_cols "
+    "(V-01). One site, the qualified-word filter.",
+    [('            words = [k for k in words if not rest[:k.start()].rstrip().endswith(".")]\n', "", 1)],
+)
+MUTATION_SRC["quoted_splices_into_boundary_qualified"] = "scripts/check_quoted_splices.py"
 MUTATIONS["quoted_splices_scan_in_quoted_names"] = (
     "bench/quoted_splices_every_body.sh",
     "scripts/check_quoted_splices.py reading a loop's structure inside its quoted names: a column aliased "

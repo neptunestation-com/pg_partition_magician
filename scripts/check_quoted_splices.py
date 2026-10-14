@@ -65,7 +65,10 @@ What is NOT judged, in either direction, because the value is not in the stateme
 FETCH's INTO (the cursor's query is declared or opened somewhere else), an EXECUTE whose statement is not
 spelled out in its own expression (`execute v_sql into v`, or literals concatenated with code), an item of
 a dynamic statement's list that a format() conversion splices in (`format('select %L', x)`) and that does not
-itself quote, a CALL's INOUT argument and a parameter (only DECLAREd locals are typed). Two more limits: a
+itself quote, a CALL's INOUT argument and a parameter (only DECLAREd locals are typed). An EXECUTE whose
+statement is wrapped in a CAST(... AS text) call or carries a trailing COLLATE (`execute cast('select
+quote_ident(c)' as text) into v`) is one of those not spelled out: only parentheses and a `::` cast are set
+aside. Two more limits: a
 value reaching a query's list through a subquery or CTE (`select * from (select quote_ident(a) ...) s`) is
 not followed, the reach SELECT INTO has always had; and a target qualified by its label is read as the local
 it names, so a record's field (`r.c`, the same spelling) is read as a local `c` would be.
@@ -475,7 +478,9 @@ def select_into(clean: str):
     a RETURNING before its INTO (EXECUTE, FETCH, INSERT INTO's own INTO) assigns nothing this check reads.
     The INTO's own statement starts after the last top-level LOOP or EXECUTE before it: in `for r in select
     a from t loop execute v_sql into v`, the INTO is the EXECUTE's (execute_into() reads it), and pairing it
-    with the loop's SELECT judged v on a list it is never given (PR #1313, round 3).
+    with the loop's SELECT judged v on a list it is never given (PR #1313, round 3). The words are found in
+    bare() text and a qualified one (`t.execute`) is a column, so a column aliased `"loop"` or referenced as
+    `t.execute` in the SELECT's own list does not cut the statement short (round 4).
     """
     for st in re.finditer(r"[^;]+", clean):
         stmt = st.group(0)
@@ -488,7 +493,9 @@ def select_into(clean: str):
                 continue
             rest = stmt[:m.start()] + " " * (m.end() - m.start()) + stmt[m.end():]
             rtop = depth0(rest)
-            start = max([k.end() for k in INTO_BOUNDARY.finditer(rest, 0, m.start()) if k.start() in rtop], default=0)
+            words = [k for k in INTO_BOUNDARY.finditer(bare(rest), 0, m.start()) if k.start() in rtop]
+            words = [k for k in words if not rest[:k.start()].rstrip().endswith(".")]
+            start = max([k.end() for k in words], default=0)
             heads = [k for k in re.finditer(
                 r"(?is)(?<![\w$])(?:(?P<ret>returning)|select)(?![\w$])\s*(?:(?:distinct|all)(?![\w$]))?", rest)
                 if k.start() in rtop and start <= k.start() < m.start()]
@@ -995,6 +1002,11 @@ SHAPES = {
         "v_cols text", "execute ('select quote_ident(''c'')') into v_cols;"),
     "assigned by EXECUTE of a format() cast to text": (
         "v_cols text", "execute format('select quote_ident(%L)', 'c')::text into v_cols;"),
+    # round 4 (V-01): a column aliased "loop" or referenced as t.execute is no statement boundary
+    "assigned by SELECT INTO beside a column aliased \"loop\"": (
+        "v_cols text; v_x text", "select 'a' as \"loop\", quote_ident('c') into v_x, v_cols;"),
+    "assigned by SELECT INTO beside a column t.execute": (
+        "v_cols text; v_x text", "select t.execute, quote_ident('c') into v_x, v_cols from (select 'a'::text as execute) t;"),
 }
 
 

@@ -45,6 +45,9 @@
 # and from round 3:
 #   quoted_splices_exec_wrapped_unread   -- parentheses or a trailing cast hide an EXECUTE's statement (V-01)
 #   quoted_splices_into_crosses_loop     -- an EXECUTE's INTO inside a loop is paired with the loop's SELECT (V-02)
+# and from round 4 (V-01):
+#   quoted_splices_into_boundary_in_quoted_names -- a column aliased "loop" cuts a SELECT INTO's statement short
+#   quoted_splices_into_boundary_qualified       -- a column t.execute cuts a SELECT INTO's statement short
 # Each round-2 negative (an unreadable statement must not be refused) has a liveness twin: check 2 refuses
 # the same body's `_q` local given a plain literal.
 #
@@ -206,6 +209,11 @@ SHAPES = [
      "execute ('select quote_ident(''Foo Bar'')') into v_cols;", "$$", ""),
     ("g20_exec_cast", "an EXECUTE INTO target of a format() cast to text", "v_cols text",
      "execute format('select quote_ident(%L)', 'Foo Bar')::text into v_cols;", "$$", ""),
+    # round 4 (V-01): a column aliased "loop" or referenced as t.execute is no statement boundary
+    ("g20_into_kw", "a SELECT INTO target beside a column aliased \"loop\"", "v_cols text",
+     f"select 'a' as \"loop\", {QI} into v_x, v_cols;", "$$", ""),
+    ("g20_into_colref", "a SELECT INTO target beside a column t.execute", "v_cols text",
+     f"select t.execute, {QI} into v_x, v_cols from (select 'a'::text as execute) t;", "$$", ""),
     ("g20_label_into", "a SELECT INTO target qualified by its block's label", "v_cols text",
      f"select {QI} into blk.v_cols;", "$$", "", "<<blk>>\n"),
     ("g20_label_assign", "a `:=` target qualified by its block's label", "v_cols text",
