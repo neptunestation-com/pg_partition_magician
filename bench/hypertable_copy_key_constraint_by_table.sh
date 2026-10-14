@@ -9,10 +9,16 @@
 # them: when its row came first the copy built <fk>_pgpm_new, the cutover built the key a second time, and the
 # copy's index survived the swap as a stray duplicate. The file pins the premise (a bare read of the
 # constraints on the key's index meets the incoming key first) with liveness witnesses, for a primary key
-# (part A) and for a unique constraint on a table with no primary key (part B).
+# (part A) and for a unique constraint on a table with no primary key (part B). Part C is the cutover's read of
+# the same catalog in the other direction: an index is secondary when no constraint sits on it, and an incoming
+# key resolved to a bare unique index made that index a key's, so the migrated table lost it. Its witness is
+# that the incoming key sits on the bare index and not on the key's.
 #
-# The mutation it is required to fail against (bench/mutations/mutate.py):
-#   hypertable_copy_key_constraint_by_index -- the copy reads the key's name by its index alone (parts A and B)
+# The mutations it is required to fail against (bench/mutations/mutate.py):
+#   hypertable_copy_key_constraint_by_index              -- the copy reads the key's name by its index alone
+#                                                           (parts A and B)
+#   hypertable_cutover_secondary_index_by_any_constraint -- the cutover takes any table's constraint on an index
+#                                                           as making it a key's (part C)
 #
 # Usage: hypertable_copy_key_constraint_by_table.sh <container> <db> [pgpm_hypertable/install.sql]
 # Runs on the TIMESCALE track's container (supabase/postgres + TimescaleDB), which is why its mutation sits in
@@ -22,7 +28,7 @@
 set -uo pipefail
 C="${1:?container}"; DB="${2:?db}"; HT="${3:-/repo/pgpm_hypertable/install.sql}"
 TEST_FILE="${HYPERTABLE_COPY_KEY_CONSTRAINT_BY_TABLE_TEST_FILE:-/repo/tests/timescale/db/68_from_hypertable_copy_key_constraint_by_table_test.sql}"
-LABEL="the copy pre-builds the index of the hypertable's own key"
+LABEL="the copy and the cutover read the hypertable's own keys"
 fail=0
 
 q() { docker exec -e PGPASSWORD=postgres "$C" psql -h 127.0.0.1 -U postgres "$@"; }

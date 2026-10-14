@@ -615,8 +615,9 @@ run_timescale() {
     echo "--- from_hypertable asks the mixed-step rule before the swap, and names itself as the re-run (issues #1268, #1232) ---"
     bash "$(dirname "$0")/bench/hypertable_mixed_step_and_unit_remedy.sh" pgpm_test-timescale pgpm_perf376 || fail=1
     # #1266's guard, the same way: it re-runs tests/timescale/db/68 against the real install, the clean-code half of
-    # the pair discriminate.sh completes with hypertable_copy_key_constraint_by_index.
-    echo "--- the tracking copy pre-builds the index of the hypertable's own key (issue #1266) ---"
+    # the pair discriminate.sh completes with hypertable_copy_key_constraint_by_index and
+    # hypertable_cutover_secondary_index_by_any_constraint.
+    echo "--- the copy and the cutover read the hypertable's own keys, not every constraint on an index (issue #1266) ---"
     bash "$(dirname "$0")/bench/hypertable_copy_key_constraint_by_table.sh" pgpm_test-timescale pgpm_perf374 || fail=1
     # #1091's guard, the same way: tests_fail_on_defect.sh judges tests/timescale/db/33 only when named, so the
     # clean-code half of the pair discriminate.sh completes with hypertable_cutover_capture_fn_drop_concatenated

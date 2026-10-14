@@ -13694,9 +13694,11 @@ MUTATIONS["hypertable_copy_key_constraint_by_index"] = (
     "Pre-#1266 from_hypertable_copy: the tracking copy reads the key's name from every constraint on the key's "
     "index, so when an incoming foreign key that references the key comes first in pg_constraint the copy "
     "pre-builds <fk>_pgpm_new, the cutover builds the key a second time, and the copy's index survives the swap "
-    "as a stray duplicate UNIQUE index on the migrated table. One site, the copy's read. tests/timescale/db/68 "
-    "parts A and B catch it (the copy built the wrong temp name, the migrated key index is not the copy's, the "
-    "parent carries a second unique index).",
+    "as a stray duplicate UNIQUE index on the migrated table. One site, the copy's read; both of its clauses go, "
+    "because either alone keeps an incoming key out (its conrelid is the referencing table and its contype is "
+    "'f'; TimescaleDB refuses a key from a hypertable to a hypertable, so no key of the table's own can sit "
+    "there). tests/timescale/db/68 parts A and B catch it (the copy built the wrong temp name, the migrated key "
+    "index is not the copy's, the parent carries a second unique index).",
     [("    select conname into v_keyconname from pg_constraint\n"
       "     where conrelid = p_hypertable and contype in ('p', 'u') and conindid = v_keyidx;\n",
       "    select conname into v_keyconname from pg_constraint\n"
@@ -13704,6 +13706,22 @@ MUTATIONS["hypertable_copy_key_constraint_by_index"] = (
 )
 MUTATION_SRC["hypertable_copy_key_constraint_by_index"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_copy_key_constraint_by_index"] = "timescale"
+MUTATIONS["hypertable_cutover_secondary_index_by_any_constraint"] = (
+    "bench/hypertable_copy_key_constraint_by_table.sh",
+    "Pre-#1266 from_hypertable_cutover: an index counts as secondary when no constraint of ANY table sits on it, "
+    "so a bare unique index that an incoming foreign key was resolved to (one older than the key, on the same "
+    "columns) is built by neither loop and the migrated table loses it. One site, the cutover's secondary-index "
+    "loop, both clauses for the reason hypertable_copy_key_constraint_by_index gives; the copy's read keeps its "
+    "filter. tests/timescale/db/68 part C catches it (the migrated parent's indexes by name, and the columns of "
+    "the one that is gone).",
+    [("              and not exists (select 1 from pg_constraint con\n"
+      "                               where con.conrelid = p_hypertable and con.contype in ('p', 'u')\n"
+      "                                 and con.conindid = i.indexrelid) loop\n",
+      "              and not exists (select 1 from pg_constraint con\n"
+      "                               where con.conindid = i.indexrelid) loop\n", 1)],
+)
+MUTATION_SRC["hypertable_cutover_secondary_index_by_any_constraint"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_cutover_secondary_index_by_any_constraint"] = "timescale"
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

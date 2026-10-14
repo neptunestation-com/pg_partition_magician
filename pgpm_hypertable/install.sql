@@ -1907,9 +1907,15 @@ begin
     v_key_types := array_append(v_key_types, k.contype::text);
     v_key_tmps  := array_append(v_key_tmps, v_tmp);
   end loop;
+  -- Every other index is a secondary one. #1266: "other" means no primary key or unique constraint OF THIS
+  -- TABLE sits on it, the very set the loop above built. Asked of the index alone, an incoming foreign key
+  -- that PostgreSQL resolved to a bare unique index (one older than the key, on the same columns) made that
+  -- index a key's, neither loop built it, and the migrated table lost it.
   for k in select ic.relname as origname, i.indexrelid from pg_index i join pg_class ic on ic.oid = i.indexrelid
             where i.indrelid = p_hypertable and not i.indisprimary
-              and not exists (select 1 from pg_constraint con where con.conindid = i.indexrelid) loop
+              and not exists (select 1 from pg_constraint con
+                               where con.conrelid = p_hypertable and con.contype in ('p', 'u')
+                                 and con.conindid = i.indexrelid) loop
     v_tmp := pgpm._from_hypertable_tmp_name(k.origname, k.indexrelid);
     execute pgpm._from_hypertable_index_ddl(k.indexrelid, v_tmp, v_nsp, v_dest);
     v_idx_orig := array_append(v_idx_orig, k.origname::text);

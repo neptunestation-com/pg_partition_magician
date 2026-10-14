@@ -9,8 +9,13 @@
   `<key>_pgpm_new`, built the key a second time, and the copy's index survived the swap as a stray redundant
   UNIQUE index on the migrated parent and every partition, against `docs/reference.md`'s promise that the copy's
   key index is adopted rather than rebuilt. The copy now reads the hypertable's own primary key or unique
-  constraint on that index (`conrelid` and `contype` as well). Test `tests/timescale/db/68`, guard
-  `bench/hypertable_copy_key_constraint_by_table.sh`, mutation `hypertable_copy_key_constraint_by_index`.
+  constraint on that index (`conrelid` and `contype` as well). `from_hypertable_cutover` made the same read in
+  the other direction: it carries every index "no constraint sits on" as a secondary index, so a bare unique
+  index that an incoming foreign key had been resolved to (one older than the key, on the same columns) was
+  built by neither of its loops and the migrated table lost it. It now asks whether one of the hypertable's own
+  primary key or unique constraints sits on the index. Test `tests/timescale/db/68`, guard
+  `bench/hypertable_copy_key_constraint_by_table.sh`, mutations `hypertable_copy_key_constraint_by_index` and
+  `hypertable_cutover_secondary_index_by_any_constraint`.
 
 - **A whole-month `text_time` grid needs its `p_tt_epoch` on the encoding's unit** (#1312). `transmute` held a
   `text_time` grid's anchor and step to whole units from `p_tt_epoch` (#989), reasoning that every bound is the
