@@ -51,8 +51,13 @@
 # own re-break guards nothing. CI runs the self-test before the check, as it does for
 # check_quoted_splices.py.
 #
-# CHANGELOG.md is excluded from ALL of these: its entries are historical by design and must keep naming the
+# CHANGELOG.md is excluded from checks 1 to 6: its entries are historical by design and must keep naming the
 # machinery, versions and actions they removed.
+#
+# CHECK 7: CHANGELOG.md carries no merge residue (scripts/check_changelog_residue.py): no bullet twice, and
+# no bullet carrying a stale copy of its own text after it. It is a list file every fix PR adds to, and a
+# conflict in it resolved by keeping both sides left five bullets twice and one fix's entry promising the
+# opposite of what the code does in its stale second tail. `--selftest` runs that script's own self-test too.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 fail=0
@@ -436,7 +441,12 @@ selftest() {
   else rc=1; fi
 
   rm -rf "$tmp"
-  if [ "$rc" = 0 ]; then echo "selftest: PASS (checks 5 and 6 fail against each of their eight re-breaks)"
+
+  # Check 7 carries its own re-breaks (a bullet twice, within and across sections; a stale tail; a fragment
+  # opening mid-parenthesis), against a sample changelog rather than the tree's, which moves every PR.
+  python3 scripts/check_changelog_residue.py --selftest || rc=1
+
+  if [ "$rc" = 0 ]; then echo "selftest: PASS (checks 5 and 6 fail against each of their eight re-breaks, check 7 against its four)"
   else echo "selftest: FAIL"; fi
   return "$rc"
 }
@@ -514,5 +524,9 @@ check_version_pins . || fail=1
 
 echo
 check_log_actions . || fail=1
+
+echo
+echo "== check 7: CHANGELOG.md carries no merge residue =="
+python3 scripts/check_changelog_residue.py CHANGELOG.md || fail=1
 
 exit "$fail"
