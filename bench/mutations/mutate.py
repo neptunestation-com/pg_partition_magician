@@ -9289,8 +9289,10 @@ select is((select count(*) || '/' || string_agg(device_id::text, ',' order by de
         "bench/adopt_partition.sh",
         "Issue #1082: adopt_partition judges the partition attached without locking it, so a DETACH (or a DROP) "
         "in a second session lands between the judgement and the commit, and the row it records is for a "
-        "relation no longer in the table. One site, the lock on the partition. tests/303 part E catches it.",
-        [("  execute format('lock table %s in share update exclusive mode', p_child::text);\n", "", 1)],
+        "relation no longer in the table. One site, the lock on the partition (with the pg_locks witness that it is "
+        "held, #1262, which would otherwise refuse every call). tests/303 part E catches it.",
+        [("    execute format('lock table %s in share update exclusive mode', v_child_q);\n", "    null;\n", 1),
+         ("  if not exists (select 1 from pg_catalog.pg_locks l\n", "  if false and not exists (select 1 from pg_catalog.pg_locks l\n", 1)],
     ),
     "adopt_partition_credits_old_coverage": (
         "bench/adopt_partition.sh",
@@ -13225,6 +13227,43 @@ MUTATIONS["check_time_monotonic_session_zone"] = (
       ") returns table (sampled bigint, monotonic bigint, fraction numeric)\nlanguage plpgsql\nas $$\n", 1)],
 )
 
+
+# Issue #1262: adopt_partition refuses a transaction stricter than READ COMMITTED.
+MUTATIONS["adopt_partition_strict_isolation_admitted"] = (
+    "bench/adopt_partition_isolation.sh",
+    "Pre-#1262 adopt_partition: no isolation level is refused, so under REPEATABLE READ or SERIALIZABLE every read "
+    "after the partition's lock (attached and not pending, the name, the bounds) goes through the transaction's "
+    "first snapshot. A DETACH another session committed before the call is read as still attached and the "
+    "standalone table is recorded in pgpm.part as a partition; a RENAME is recorded under the old name. One site, "
+    "the refusal's condition. tests/332 parts A, B and C catch it.",
+    [("  if current_setting('transaction_isolation') not in ('read committed', 'read uncommitted') then\n"
+      "    raise exception 'pg_partition_magician: adopt_partition(%, %) must run in a READ COMMITTED transaction",
+      "  if false then\n"
+      "    raise exception 'pg_partition_magician: adopt_partition(%, %) must run in a READ COMMITTED transaction", 1)],
+)
+MUTATIONS["adopt_partition_lock_unwitnessed"] = (
+    "bench/adopt_partition_isolation.sh",
+    "PR #1295 rounds 1 and 2 (V-01): adopt_partition locks its partition by NAME and does not ask the lock manager "
+    "whether the lock it holds is on p_child. LOCK TABLE re-resolves the name once granted, so a rename of the "
+    "partition and a table created under its old name, or a schema swapped away and back while the lock waits, "
+    "committed while the call waits, leave the lock on another relation: the call records the partition with no "
+    "lock on it, and a DETACH commits before the row does. One site, the pg_locks witness under the lock. "
+    "tests/332 parts E and F catch it.",
+    [("  if not exists (select 1 from pg_catalog.pg_locks l\n", "  if false and not exists (select 1 from pg_catalog.pg_locks l\n", 1)],
+)
+MUTATIONS["adopt_partition_dropped_refused_as_renamed"] = (
+    "bench/adopt_partition_isolation.sh",
+    "PR #1295 round 3 (V-01, P1-02): the lock witness finds no lock on p_child and does not ask whether p_child "
+    "still exists, so a partition DROPPED by the transaction the call waited on (LOCK TABLE's 42P01 caught, or a "
+    "relation created under the name locked instead) is refused with the rename diagnosis and the remedy 'Re-run "
+    "adopt_partition naming the partition as it is now, <bare oid>', which typed as written is refused. Nothing is "
+    "recorded either way: the defect is the message. One site, the test under the failed witness of whether the "
+    "oid still renders as a name; the one before the lock is left alone. tests/332 parts H and I catch it.",
+    [("    if v_now = p_child::oid::text then\n"
+      "      raise exception 'pg_partition_magician: cannot adopt % (oid %): that relation no longer exists",
+      "    if false then\n"
+      "      raise exception 'pg_partition_magician: cannot adopt % (oid %): that relation no longer exists", 1)],
+)
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a

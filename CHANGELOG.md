@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+- **`adopt_partition` refuses a transaction stricter than `READ COMMITTED`** (#1262). It judged the partition
+  attached and not pending, and read its name and bounds, through the caller's snapshot after its `SHARE UPDATE
+  EXCLUSIVE` lock, and under `REPEATABLE READ` or `SERIALIZABLE` that is the transaction's first snapshot: a
+  `DETACH` another session committed before the call was read as still attached, so `pgpm.part` recorded a
+  standalone table as a partition of the parent, and a rename was recorded under the old name. It now refuses
+  any stricter level up front, before any lock, as `untransmute` does, so every read after the lock has a
+  snapshot taken after it; the refusal names the remedy (`BEGIN ISOLATION LEVEL READ COMMITTED`, the call,
+  `COMMIT`). Its `SHARE UPDATE EXCLUSIVE` lock was taken by name, too, which `LOCK TABLE` resolves again once
+  granted: a rename of the partition and a table created under its old name, or its schema swapped with another
+  and back while the lock waited, committed while the call waited, left the lock on another relation, and a
+  `DETACH` of the recorded partition could commit before its row; a rename alone raised `LOCK TABLE`'s 42P01 about
+  the old name. It now locks the schema-qualified name and asks `pg_locks` whether it holds the lock on
+  `p_child`'s oid. When it does not and the relation still exists, it refuses with the partition's current name,
+  and the call made again with that name adopts it; when the transaction it waited on dropped the partition, it
+  refuses saying the relation no longer exists and names no call to make again (a dropped relation given by oid
+  is refused the same way before the partition's lock is asked for, where it was called "not a partition"). A
+  name taken by a sequence, an index or a table the caller has no privilege on still fails with `LOCK TABLE`'s
+  own error, recording nothing.
+  `p_child`'s oid, refusing with the partition's current name when it does not.
+  granted: a rename of the partition and a table created under its old name, committed while the call waited,
+  left the lock on that new table, and a `DETACH` of the recorded partition could commit before its row. It now
+  locks the schema-qualified name and asks under the lock whether that name still denotes `p_child`, refusing
+  with the partition's current name when it does not.
+  `COMMIT`).
 - **`check_time_monotonic` gives the same answer from every session zone** (#1265). It cast the time column to
   `timestamptz` in the caller's `TimeZone`, so a naive `timestamp` (or text) column with a wall time inside that
   zone's spring-forward gap read an hour late: a column rising with the id across New York's gap (01:50, 02:30,
