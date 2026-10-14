@@ -14162,6 +14162,25 @@ MUTATIONS["stop_check_coverage_on_rounded_minimum"] = (
       '        return r["coverage"] is not None and r["coverage"] >= 0.9\n', 1)],
 )
 MUTATION_SRC["stop_check_coverage_on_rounded_minimum"] = "scripts/review/stop_check.py"
+MUTATIONS["pass_metrics_coverage_count_on_rounded"] = (
+    "bench/review_tooling_verdicts.sh",
+    "#1288 beneath the coverage line: pass_metrics.coverage_line counts a finder at the 0.90 gate on the "
+    "three-decimal coverage coverage.py writes, so a finder at 188 of 209 units (0.89952, written 0.9) is "
+    "counted at the gate and stop_check.py, which judges on that count, qualifies the pass. One clause, the "
+    "count. The guard's (a) catches it (1 of 2 finders, the pass does not qualify).",
+    [('    at = sum(1 for v in exact if v >= Fraction(str(COVERAGE_GATE)))\n',
+      '    at = sum(1 for v in vals if round(v, 3) >= COVERAGE_GATE)\n', 1)],
+)
+MUTATION_SRC["pass_metrics_coverage_count_on_rounded"] = "scripts/review/pass_metrics.py"
+MUTATIONS["coverage_gate_on_rounded_figure"] = (
+    "bench/review_tooling_verdicts.sh",
+    "coverage.py's own gate on its three-decimal coverage: a slice at 188 of 209 units (0.89952) is written 0.9 "
+    "and passes a 0.9 threshold, so the coordinator is not told to re-run or split it. One clause, at_gate's "
+    "comparison. The guard's (a) catches it (BELOW 0.9 for 188/209).",
+    [('    return exact >= Fraction(str(threshold))\n',
+      "    return row['coverage'] >= threshold\n", 1)],
+)
+MUTATION_SRC["coverage_gate_on_rounded_figure"] = "scripts/review/coverage.py"
 MUTATIONS["pass_metrics_unverified_reads_fell"] = (
     "bench/review_tooling_verdicts.sh",
     "Pre-#1289 pass_metrics.py: a candidate with no verdict, or with a verdict string none of finding, fell, "

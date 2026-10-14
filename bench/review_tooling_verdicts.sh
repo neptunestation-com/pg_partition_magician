@@ -45,6 +45,11 @@ fi
 #       unit the other side of each line, which converge; each edge is also judged alone beside a clear other.
 #         stop_check_precision_on_rounded_figure  the exact fractions parsed and not used
 #         stop_check_coverage_on_rounded_minimum  the coverage gate on the two-decimal minimum again
+#       Beneath that line, the count of finders at the gate and coverage.py's own gate are judged on the exact
+#       read/units, never on coverage.py's three-decimal figure (188 of 209 = 0.89952 is written 0.9); the
+#       controls: 189 of 210, exactly 0.9, is at both gates.
+#         pass_metrics_coverage_count_on_rounded  the line's count on the three-decimal coverage again
+#         coverage_gate_on_rounded_figure         coverage.py's gate on the three-decimal coverage again
 #   (b) #1289: pass_metrics.py counted a candidate with no verdict, or a verdict string it did not know
 #       ("known-open"), as FELL: under "Fell in verification" and in the fell rate. The controls: the finding
 #       and the seed hit are counted, and the CLI writes the record once the typo is corrected.
@@ -70,7 +75,7 @@ def say(good, what, detail=""):
 # (a) #1288. Two passes of 23 claims: 9 seed hits and 14 candidates, `found` of them findings and the rest fell;
 # finder F2 read `read` of its 29 units. The edge: 16/23 precision, 7/23 fell, 26/29 coverage. The control:
 # 17/23, 6/23, 27/29, which every line clears.
-def pm_pass(n, lenses, found, read):
+def pm_pass(n, lenses, found, read, units=29):
     sealed = {"seeds": [{"id": f"S{i}", "lens": "x", "tier": 2, "mutation": f"m{i}", "suite_caught": [],
                          **({"late_survivor": {"issue": 1000 + i, "passes_survived": 6}} if i <= 3 else {})}
                         for i in range(1, 10)]}
@@ -79,8 +84,9 @@ def pm_pass(n, lenses, found, read):
     verdicts = {f"F2-{i:02d}": ({"verdict": "finding", "tier": 3} if i <= found else {"verdict": "fell", "reason": "r"})
                 for i in range(1, 15)}
     m = pass_metrics.compute(sealed, {"claims": claims}, verdicts)
-    cov = {"rows": [{"finder": "F1", "coverage": 1.0, "ledger": "ok"},
-                    {"finder": "F2", "coverage": round(read / 29, 3), "ledger": "ok"}]}
+    # coverage.py's own row shape: the three-decimal coverage beside the counts it came from
+    cov = {"rows": [{"finder": "F1", "units": 40, "read": 40, "coverage": 1.0, "ledger": "present"},
+                    {"finder": "F2", "units": units, "read": read, "coverage": round(read / units, 3), "ledger": "present"}]}
 
     class A:
         pass_n, date, pinned, release, budget = n, f"2026-10-{n:02d}", "abc1234", "x", "x"
@@ -92,14 +98,14 @@ def pm_pass(n, lenses, found, read):
     return m, pass_metrics.record(m, A)
 
 
-def judge(name, found, read):
+def judge(name, found, read, units=29):
     d = os.path.join(tempfile.mkdtemp(), name)
     rdir = os.path.join(d, "reviews")
     os.makedirs(rdir)
     rows = ["| 1 | 2026-09-24 | `aaaaaaa` | 76 (25 filed as T1) | ~106 | not measured | none | baseline |"]
     m = rec = None
     for n, lenses in ((12, stop_check.A5), (13, stop_check.B5)):
-        m, rec = pm_pass(n, lenses, found, read)
+        m, rec = pm_pass(n, lenses, found, read, units)
         with open(os.path.join(rdir, f"2026-10-{n:02d}.md"), "w") as f:
             f.write(rec)
         rows.append(f"| {n} | 2026-10-{n:02d} | `abc1234` | 7 (0 T1) | 23 | x | 9 / 1.00 | x |")
@@ -130,8 +136,28 @@ try:
     say(not any(p["qualifies"] for p in v["criteria"]["a"]["passes"].values()) and not v["reason"].startswith("converged"),
         "(a) coverage NOT at the 0.9 gate with a finder at 0.897", v["reason"][:70])
     say(v["criteria"]["b"]["met"], "LIVENESS: (a) with precision clear, (b) itself is met", "")
+    # the count beneath the coverage line: coverage.py writes 188 of 209 (0.89952) as 0.9, and 189 of 210 is 0.9
+    m, rec, v = judge("cov_exact_control", 8, 189, 210)
+    say(v["reason"].startswith("converged"), "LIVENESS: (a) a finder at exactly 189/210 = 0.9 is at the gate", v["reason"][:60])
+    m, rec, v = judge("cov_rounded", 8, 188, 209)
+    say(round(188 / 209, 3) == 0.9 and "coverage: 0.90" in rec,
+        "LIVENESS: (a) 188 of 209 (0.89952) is written 0.9 by coverage.py", "")
+    say("(1 of 2 finders at or above 0.90)" in rec and not any(p["qualifies"] for p in v["criteria"]["a"]["passes"].values()),
+        "(a) a finder at 188/209 is not counted at the 0.9 gate", next((ln for ln in rec.split("\n") if ln.startswith("coverage:")), ""))
 except Exception as exc:  # a mutant that breaks the module is a failure of the check, not of the guard
     say(False, "(a) the stopping criteria judge the passes at all", repr(exc)[:120])
+try:
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("coverage_under_test", os.path.join(R, "coverage.py"))
+    cov_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cov_mod)
+    row = {"finder": "F7", "kind": "files", "units": 209, "read": 188, "coverage": round(188 / 209, 3),
+           "unread": [], "extra": [], "ledger": "present"}
+    say(cov_mod.render([{**row, "units": 210, "read": 189}], 0.9).rstrip().endswith("  ok"),
+        "LIVENESS: (a) coverage.py's gate passes a slice at exactly 189/210", "")
+    say("BELOW 0.9" in cov_mod.render([row], 0.9), "(a) coverage.py's own gate holds back a slice at 188/209", "")
+except Exception as exc:
+    say(False, "(a) coverage.py renders its gate at all", repr(exc)[:120])
 
 # (b) #1289. One seed hit, one finding, one fell, one with no verdict, one with a verdict string nobody knows.
 sealed = {"seeds": [{"id": "S1", "lens": "x", "tier": 1, "mutation": "m"}]}

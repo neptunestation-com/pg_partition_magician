@@ -74,6 +74,7 @@ Usage:
 import argparse
 import json
 import sys
+from fractions import Fraction
 
 TIERS = (1, 2, 3, 4, 5)
 
@@ -245,13 +246,18 @@ COVERAGE_GATE = 0.90
 def coverage_line(cov):
     """The record's coverage header line from coverage.py --out's JSON: the minimum over finders (a missing
     ledger scores 0.00, as coverage.py scores it) and how many finders reached the 0.90 gate the stopping
-    criteria read, whatever threshold the coverage run itself used."""
+    criteria read, whatever threshold the coverage run itself used. The minimum is the printed figure; the count
+    is judged on each finder's exact read/units (coverage.py's at_gate), never on its three-decimal coverage:
+    188 of 209 units is 0.89952, written 0.9, and is not at the gate."""
     rows = cov.get("rows") if isinstance(cov, dict) else None
-    if not rows or not all(isinstance(r, dict) and "finder" in r and "coverage" in r for r in rows):
+    if not rows or not all(isinstance(r, dict) and "finder" in r and "coverage" in r
+                           and isinstance(r.get("units"), int) and isinstance(r.get("read"), int) for r in rows):
         raise ValueError("--coverage must be coverage.py --out's JSON: {\"threshold\": t, \"rows\": [{\"finder\": ..., "
-                         "\"coverage\": ...}, ...]} with at least one row")
+                         "\"units\": n, \"read\": k, \"coverage\": ...}, ...]} with at least one row")
     vals = [0.0 if r.get("ledger") == "missing" else float(r["coverage"]) for r in rows]
-    at = sum(1 for v in vals if round(v, 3) >= COVERAGE_GATE)
+    exact = [Fraction(0) if r.get("ledger") == "missing" else (Fraction(r["read"], r["units"]) if r["units"] else Fraction(1))
+             for r in rows]
+    at = sum(1 for v in exact if v >= Fraction(str(COVERAGE_GATE)))
     return f"coverage: {min(vals):.2f} ({at} of {len(vals)} finders at or above {COVERAGE_GATE:.2f})"
 
 
@@ -487,6 +493,20 @@ def selftest_coverage_line(m, A):
     assert line == "coverage: 0.86 (2 of 3 finders at or above 0.90)", line
     cov["rows"].append({"finder": "F4", "kind": "sql", "units": 5, "read": 0, "coverage": 0.0, "ledger": "missing"})
     assert coverage_line(cov) == "coverage: 0.00 (2 of 4 finders at or above 0.90)", coverage_line(cov)
+    # the count on the exact read/units: 188 of 209 (0.89952) is written 0.9 by coverage.py and is not at the
+    # gate, while 189 of 210 (exactly 0.9) is; a row without its units and read is refused
+    edge = {"threshold": 0.9, "rows": [
+        {"finder": "F1", "kind": "sql", "units": 40, "read": 40, "coverage": 1.0, "ledger": "present"},
+        {"finder": "F7", "kind": "files", "units": 209, "read": 188, "coverage": round(188 / 209, 3), "ledger": "present"}]}
+    assert edge["rows"][1]["coverage"] == 0.9 and coverage_line(edge) == "coverage: 0.90 (1 of 2 finders at or above 0.90)", \
+        coverage_line(edge)
+    edge["rows"][1].update(units=210, read=189)
+    assert coverage_line(edge) == "coverage: 0.90 (2 of 2 finders at or above 0.90)", coverage_line(edge)
+    try:
+        coverage_line({"rows": [{"finder": "F1", "coverage": 1.0, "ledger": "present"}]})
+        raise AssertionError("accepted a coverage row without units and read")
+    except ValueError:
+        pass
     for bad in ({}, {"rows": []}, {"rows": [{"finder": "F1"}]}, []):
         try:
             coverage_line(bad)

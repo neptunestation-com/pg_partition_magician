@@ -9,8 +9,12 @@
   `exact: recall a/b, precision c/d, strict e/f, fell rate g/h` header line, and `stop_check.py` judges recall,
   precision and fell rate on those fractions (refusing a record whose fractions do not round to its figures;
   from pass 13 on a record without the line reads them as unknown, NOT met) and the coverage gate on the
-  coverage line's count of finders at 0.90, which it now requires. Guard `bench/review_tooling_verdicts.sh`,
-  mutations `stop_check_precision_on_rounded_figure` and `stop_check_coverage_on_rounded_minimum`.
+  coverage line's count of finders at 0.90, which it now requires. That count, and `coverage.py`'s own gate,
+  are judged on each finder's exact read/units rather than the three-decimal coverage `coverage.py` writes (188
+  of 209 units is 0.89952, written 0.9); the printed figures are unchanged, and `--coverage` now needs each
+  row's `units` and `read`. Guard `bench/review_tooling_verdicts.sh`, mutations
+  `stop_check_precision_on_rounded_figure`, `stop_check_coverage_on_rounded_minimum`,
+  `pass_metrics_coverage_count_on_rounded` and `coverage_gate_on_rounded_figure`.
 
 - **`pass_metrics.py` counts an unverified candidate as unverified, never fell** (#1289). A candidate with no
   verdict, or with a verdict string none of `finding`, `fell`, `known_open` (a `known-open` typo), was listed

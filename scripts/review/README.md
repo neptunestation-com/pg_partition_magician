@@ -331,5 +331,7 @@ keeps the units whose `create` line is inside it), files for a tests, bench, doc
 once for a mixed one, and an explicit `units` list (the shape `pr_surface.py` writes: named units plus a
 `file:lo-hi` label per top-level hunk) when the slice is a pull request's surface. One row
 per finder with the unread units; exit 1 when any finder is below the threshold or has no ledger, which
-the review-pass skill treats as "re-run or split before classifying". `--selftest` covers ranges, files
-slices, a missing ledger, units outside the slice and the threshold.
+the review-pass skill treats as "re-run or split before classifying". The threshold is judged on the exact
+read/units, never on the three-decimal `coverage` it prints and writes (188 of 209 units is 0.89952, written
+0.9, and is below 0.9), and `pass_metrics.py --coverage` counts finders at the gate the same way.
+`--selftest` covers ranges, files slices, a missing ledger, units outside the slice and the threshold.

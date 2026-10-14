@@ -725,7 +725,7 @@ def selftest():
         # met; the same records at 17/23, 6/23 and 27/29 converge, so the NOT met is the figures', not a parse's
         import pass_metrics
 
-        def pm_record(n, lenses, found, read):
+        def pm_record(n, lenses, found, read, units=29):
             sealed = {"seeds": [{"id": f"S{i}", "lens": "x", "tier": 2, "mutation": f"m{i}", "suite_caught": [],
                                  **({"late_survivor": {"issue": 1000 + i, "passes_survived": 6}} if i <= 3 else {})}
                                 for i in range(1, 10)]}
@@ -736,8 +736,9 @@ def selftest():
             verdicts = {f"F2-{i:02d}": ({"verdict": "finding", "tier": 3} if i <= found else
                                         {"verdict": "fell", "reason": "r"}) for i in range(1, 15)}
             m = pass_metrics.compute(sealed, {"claims": claims}, verdicts)
-            cov = {"rows": [{"finder": "F1", "coverage": 1.0, "ledger": "ok"},
-                            {"finder": "F2", "coverage": round(read / 29, 3), "ledger": "ok"}]}
+            cov = {"rows": [{"finder": "F1", "units": 40, "read": 40, "coverage": 1.0, "ledger": "present"},
+                            {"finder": "F2", "units": units, "read": read, "coverage": round(read / units, 3),
+                             "ledger": "present"}]}
 
             class A:
                 pass_n, date, pinned, release, budget = n, f"2026-10-{n:02d}", "abc1234", "x", "x"
@@ -747,12 +748,12 @@ def selftest():
             A.lenses = "fresh surface, " + lenses
             return pass_metrics.record(m, A)
 
-        def pm_case(name, found, read):
+        def pm_case(name, found, read, units=29):
             d = os.path.join(root, name)
             h, r = synth(d, [(12, 0, A5, split, good_prec, "0.93", None), (13, 0, B5, split, good_prec, "0.93", None)])
             for n, lenses in ((12, A5), (13, B5)):
                 with open(os.path.join(r, f"2026-10-{n:02d}.md"), "w") as f:
-                    f.write(pm_record(n, lenses, found, read))
+                    f.write(pm_record(n, lenses, found, read, units))
             return run(h, r, extended_through=14), load(h, r)[2]
 
         v, recs = pm_case("pm_edge", 7, 26)
@@ -770,6 +771,12 @@ def selftest():
         assert v["criteria"]["a"]["met"] and not v["criteria"]["b"]["met"], v["lines"]
         v, _ = pm_case("pm_cov", 8, 26)
         assert not v["criteria"]["a"]["met"] and v["criteria"]["b"]["met"], v["lines"]
+        # the count beneath the line is exact too: 188 of 209 (0.89952) is written 0.900 by coverage.py and does
+        # not qualify; 189 of 210 (exactly 0.9) does
+        v, _ = pm_case("pm_cov_rounded", 8, 188, 209)
+        assert not v["criteria"]["a"]["met"] and v["criteria"]["b"]["met"], v["lines"]
+        v, _ = pm_case("pm_cov_exact", 8, 189, 210)
+        assert v["reason"].startswith("converged"), v["lines"]
         # a record of pass 13 without the exact line states no exact figure: unknown, NOT met; pass 12's figures stand
         h, r = case("noexact", [ok12, ok13], exact={12: None, 13: None})
         v = run(h, r, extended_through=14)
