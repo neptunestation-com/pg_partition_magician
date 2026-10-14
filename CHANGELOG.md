@@ -13,9 +13,13 @@
   the other direction: it carries every index "no constraint sits on" as a secondary index, so a bare unique
   index that an incoming foreign key had been resolved to (one older than the key, on the same columns) was
   built by neither of its loops and the migrated table lost it. It now asks whether one of the hypertable's own
-  primary key or unique constraints sits on the index. Test `tests/timescale/db/68`, guard
-  `bench/hypertable_copy_key_constraint_by_table.sh`, mutations `hypertable_copy_key_constraint_by_index` and
-  `hypertable_cutover_secondary_index_by_any_constraint`.
+  primary key or unique constraints sits on the index. A tracking copy taken before this release needs no
+  re-run: the cutover recognises a key index the copy built under another name by what it is (an index on the
+  recorded destination with the key's definition, under no temp name another of the table's keys adopts),
+  renames it and adopts it. Test `tests/timescale/db/68`, guard
+  `bench/hypertable_copy_key_constraint_by_table.sh`, mutations `hypertable_copy_key_constraint_by_index`,
+  `hypertable_cutover_secondary_index_by_any_constraint`, `hypertable_cutover_older_copy_key_index_unrecognised`
+  and `hypertable_cutover_older_copy_key_index_takes_any`.
 
 - **A whole-month `text_time` grid needs its `p_tt_epoch` on the encoding's unit** (#1312). `transmute` held a
   `text_time` grid's anchor and step to whole units from `p_tt_epoch` (#989), reasoning that every bound is the

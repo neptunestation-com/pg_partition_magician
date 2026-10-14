@@ -19,6 +19,13 @@
 #                                                           (parts A and B)
 #   hypertable_cutover_secondary_index_by_any_constraint -- the cutover takes any table's constraint on an index
 #                                                           as making it a key's (part C)
+#   hypertable_cutover_older_copy_key_index_unrecognised -- the cutover adopts a pre-built key index by its temp
+#                                                           name only, so an older copy's is built again (part D)
+#   hypertable_cutover_older_copy_key_index_takes_any    -- the recognition takes another key's pre-build when two
+#                                                           keys share a definition (part E)
+# Parts D and E are the upgrade path: a tracking copy taken by an install from before the fix built the key's
+# index under the incoming key's temp name, and the cutover recognises it by its definition on the recorded
+# destination.
 #
 # Usage: hypertable_copy_key_constraint_by_table.sh <container> <db> [pgpm_hypertable/install.sql]
 # Runs on the TIMESCALE track's container (supabase/postgres + TimescaleDB), which is why its mutation sits in

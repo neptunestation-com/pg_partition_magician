@@ -15,6 +15,11 @@
 -- migrated table lost it silently (transmute alone carries it). The cutover now asks whether one of the
 -- hypertable's OWN primary key or unique constraints sits on the index, the set its key loop builds.
 --
+-- Parts D and E are the upgrade path. A tracking copy taken by an install from before the fix left the key's
+-- index under the incoming key's temp name, and the cutover, adopting by temp name only, built the key again.
+-- It now recognises such an index by what it is: on the recorded destination, with the key's definition, and
+-- under no temp name another of the table's keys adopts (part E: two keys with one definition).
+--
 -- ASYMMETRIC FIXTURE. Part A's key is a PRIMARY KEY (50 rows, ids 1 to 50, one incoming key); part B's is a
 -- UNIQUE constraint on a table with no primary key (30 rows, ids 101 to 130, one incoming key, and a secondary
 -- index of its own). In each, RENAME CONSTRAINT on the key rewrites its catalog row, so the incoming key's row
@@ -26,7 +31,7 @@
 -- row by id and handed the table to transmute; the incoming key was restored against the new parent. The
 -- checks name the index the copy built, by oid, the one key index the migrated parent carries, and (C) each
 -- index the migrated parent carries with the columns of the one that was lost.
-select plan(19);
+select plan(28);
 
 -- PART A: a primary key, referenced by an incoming foreign key.
 create table public.a68 (id int not null, ts timestamptz not null, v int, constraint a68_pk primary key (id, ts));
@@ -152,5 +157,74 @@ select is((select i.indisunique::text || ' (' || string_agg(a.attname::text, ', 
 select is((select c.confrelid::regclass::text from pg_constraint c
             where c.conrelid = 'public.c68_ref'::regclass and c.conname = 'c68_ref_fk' and c.contype = 'f'),
           'c68', 'LIVENESS: C''s incoming foreign key was restored against the migrated parent');
+
+-- PART D: a tracking copy taken by an install from before the fix, cut over by this one. The older copy built
+-- the key's index under the incoming key's temp name, which the cutover never asks for. The fixture renames
+-- this copy's index to that name, which is the whole of the difference between the two copies.
+create table public.d68 (id int not null, ts timestamptz not null, v int, constraint d68_pk primary key (id, ts));
+select create_hypertable('public.d68', 'ts', chunk_time_interval => interval '1 day');
+insert into public.d68 select g, '2026-10-01'::timestamptz + make_interval(hours => g - 300), g from generate_series(301, 325) g;
+create table public.d68_ref (rid int primary key, id int, ts timestamptz,
+  constraint d68_ref_fk foreign key (id, ts) references public.d68 (id, ts));
+insert into public.d68_ref values (1, 304, '2026-10-01'::timestamptz + interval '4 hours');
+alter table public.d68 rename constraint d68_pk to d68_pkey;
+
+call pgpm.from_hypertable_copy('public.d68', 'ts', true);
+-- (a copy that already built it under that name, as the older one did, is left as it is)
+do $$ begin
+  if to_regclass('public.d68_pkey_pgpm_new') is not null then
+    alter index public.d68_pkey_pgpm_new rename to d68_ref_fk_pgpm_new;
+  end if;
+end $$;
+select is((select array_agg(c.relname::text order by c.relname) from pg_index i join pg_class c on c.oid = i.indexrelid
+            where i.indrelid = to_regclass('public.d68_pgpm_dest')),
+          array['d68_ref_fk_pgpm_new'],
+          'fixture: D''s destination holds the key''s index under the incoming key''s temp name, as an older copy left it');
+select i.indexrelid as d_pre_idx from pg_index i where i.indrelid = to_regclass('public.d68_pgpm_dest') \gset
+
+call pgpm.from_hypertable_cutover('public.d68', 'ts', interval '1 day', p_paused => false);
+
+select ok((select array_agg(id order by id) from public.d68) = (select array_agg(g order by g) from generate_series(301, 325) g)
+          and exists (select 1 from pgpm.config where parent_table = 'public.d68'::regclass),
+          'LIVENESS: D''s cutover migrated rows 301 to 325 and handed the table to transmute');
+select is((select c.conname::text from pg_constraint c where c.conindid = :d_pre_idx and c.contype = 'p'),
+          'pgpm_key_' || :d_pre_idx,
+          'the index D''s older copy built is the migrated table''s key index (recognised and adopted, not rebuilt)');
+select is((select array_agg(c.relname::text order by c.relname) from pg_index i join pg_class c on c.oid = i.indexrelid
+            where i.indrelid = 'public.d68'::regclass and i.indisunique),
+          array['d68_pkey'],
+          'D''s migrated parent carries one unique index, its primary key (no stray copy-built duplicate)');
+select is((select c.confrelid::regclass::text from pg_constraint c
+            where c.conrelid = 'public.d68_ref'::regclass and c.conname = 'd68_ref_fk' and c.contype = 'f'),
+          'd68', 'LIVENESS: D''s incoming foreign key was restored against the migrated parent');
+
+-- PART E: two keys with one definition, a primary key and a unique constraint both on (id, ts), the unique
+-- constraint met first by the cutover's key loop. The copy pre-built the primary key's index; the unique
+-- constraint must not take it for an older copy's (it is under a temp name the primary key adopts), or the
+-- primary key, finding its index gone, takes it back and the unique constraint's adoption fails at the swap.
+create table public.e68 (id int not null, ts timestamptz not null, v int, constraint e68_pk primary key (id, ts));
+select create_hypertable('public.e68', 'ts', chunk_time_interval => interval '1 day');
+alter table public.e68 add constraint e68_dup unique (id, ts);
+alter table public.e68 rename constraint e68_pk to e68_pkey;
+insert into public.e68 select g, '2026-10-01'::timestamptz + make_interval(hours => g - 400), g from generate_series(401, 415) g;
+
+select is((select conname::text from pg_constraint where conrelid = 'public.e68'::regclass and contype in ('p', 'u') limit 1),
+          'e68_dup',
+          'LIVENESS: a bare read of E''s own keys, the cutover''s key loop, meets the unique constraint first');
+
+call pgpm.from_hypertable_copy('public.e68', 'ts', true);
+select i.indexrelid as e_pre_idx from pg_index i where i.indrelid = to_regclass('public.e68_pgpm_dest') \gset
+call pgpm.from_hypertable_cutover('public.e68', 'ts', interval '1 day', p_paused => false);
+
+select ok((select array_agg(id order by id) from public.e68) = (select array_agg(g order by g) from generate_series(401, 415) g)
+          and exists (select 1 from pgpm.config where parent_table = 'public.e68'::regclass),
+          'LIVENESS: E''s cutover migrated rows 401 to 415 and handed the table to transmute');
+select is((select c.contype::text from pg_constraint c where c.conindid = :e_pre_idx and c.conname = 'pgpm_key_' || :e_pre_idx),
+          'p',
+          'the index E''s copy built is the primary key''s on the migrated table, not the unique constraint''s');
+select is((select array_agg(c.relname::text order by c.relname) from pg_index i join pg_class c on c.oid = i.indexrelid
+            where i.indrelid = 'public.e68'::regclass and i.indisunique),
+          array['e68_dup', 'e68_pkey'],
+          'E''s migrated parent carries both keys, each with one index');
 
 select * from finish();

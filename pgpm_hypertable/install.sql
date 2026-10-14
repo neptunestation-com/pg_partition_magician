@@ -1662,6 +1662,7 @@ declare
   v_in_names text[];     -- incoming FKs the swap dropped and recorded (#264, #563)
   v_dest_oid regclass;   -- which relation the destination check found, re-verified under lock (#422)
   v_tmp_oid regclass;    -- what holds a key's temp name: the copy's index only if it is on v_dest_oid (#768)
+  v_pre_idx regclass;    -- a key's index an older copy pre-built under another name, found by definition (#1266)
   v_akey oid;            -- the key the append-only catch-up anti-joins by; null on a keyless table (#460)
   v_src_n bigint; v_dest_n bigint; v_n bigint;   -- conservation: source count under lock vs dest baseline + catch-up (#460)
   -- the untracked-write check on the tracking path (#654): the copy's recorded horizon, the predicates it
@@ -1901,7 +1902,27 @@ begin
     end if;
     v_tmp_oid := to_regclass(format('%I.%I', v_nsp, v_tmp));
     if not exists (select 1 from pg_index i where i.indexrelid = v_tmp_oid and i.indrelid = v_dest_oid) then
-      execute pgpm._from_hypertable_index_ddl(k.conindid, v_tmp, v_nsp, v_dest);
+      -- #1266: a tracking copy taken by an install from before the fix may have pre-built this key's index under
+      -- an incoming foreign key's temp name, which no key here asks for. It is recognised by what it is, not by
+      -- its name: an index on the recorded destination whose definition is this key's, under no temp name one
+      -- of the table's own keys adopts (so a key never takes another key's pre-build, when two keys share a
+      -- definition). It is renamed to this key's temp name and adopted below, rather than built again and left
+      -- on the migrated table as a stray duplicate.
+      select i.indexrelid::regclass into v_pre_idx
+        from pg_index i join pg_class ic on ic.oid = i.indexrelid
+       where i.indrelid = v_dest_oid
+         and pgpm._from_hypertable_index_ddl(i.indexrelid, v_tmp, v_nsp, v_dest)
+             = pgpm._from_hypertable_index_ddl(k.conindid, v_tmp, v_nsp, v_dest)
+         and ic.relname <> all (array(select pgpm._from_hypertable_key_tmp(o.conname, o.conindid, v_nsp, v_dest_oid)
+                                        from pg_constraint o
+                                       where o.conrelid = p_hypertable and o.contype in ('p', 'u')))
+       order by i.indexrelid
+       limit 1;
+      if v_pre_idx is not null then
+        execute format('alter index %s rename to %I', v_pre_idx::text, v_tmp);
+      else
+        execute pgpm._from_hypertable_index_ddl(k.conindid, v_tmp, v_nsp, v_dest);
+      end if;
     end if;
     v_key_names := array_append(v_key_names, k.conname::text);
     v_key_types := array_append(v_key_types, k.contype::text);
