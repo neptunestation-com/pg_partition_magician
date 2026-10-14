@@ -13290,6 +13290,15 @@ MUTATIONS["ci_skips_lint_track"] = (
     [('  lint_rc=0; PGPM_LINT_SKIPPED="$lint_skips" "$0" lint || lint_rc=$?\n', "  lint_rc=0\n", 1)],
 )
 MUTATION_SRC["ci_skips_lint_track"] = "test.sh"
+# Issue #1280: the guard used to accept `ci` on the spelling of its lint call, so this one passed it.
+MUTATIONS["ci_drops_lint_failure"] = (
+    "bench/ci_runs_lint_jobs.sh",
+    "`ci` runs the lint track and its failure arm records nothing, so a failed lint track leaves ci_failed empty "
+    "and `./test.sh ci` prints PASS over a red Lint summary, #1183's symptom with the call still in place. One "
+    "site, the arm.",
+    [('    *) ci_failed="$ci_failed lint" ;;\n', "    *) ;;\n", 1)],
+)
+MUTATION_SRC["ci_drops_lint_failure"] = "test.sh"
 
 # Issue #1182: bench/throws_pinned.sh recognises a site by the procedure its statement CALLs, not by the text
 # `call pgpm.`. Two mutations, one per guard: the first is a test-file mutation like its siblings (the real guard
