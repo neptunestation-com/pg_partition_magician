@@ -52,7 +52,8 @@ format(`), a name is the name PL/pgSQL resolves (`V_COLS` is `v_cols`), and a ty
 And every BODY is read, and a loop's target and an EXECUTE's INTO are assignments too (#1278, #1236): a body
 is every dollar-quoted string of the file, whatever its tag (`$$`, `$fn$`), found by lexing the file rather
 than splitting it on `$$`; a FOR or FOREACH loop's target is assigned the loop's values as an INTO's target
-is (every branch's, a parenthesised one included, when the loop's query is a set operation), and an
+is (every branch's, a parenthesised one included, when the loop's query is a set operation, except EXCEPT's
+right operand, which only removes rows; and never a DISTINCT ON key list, in any SELECT), and an
 EXECUTE's INTO target the list of the dynamic statement its own expression spells out (literals, or a
 format() template read as format() renders it: `%%` is `%`; parentheses around the expression and a cast
 at its end set aside); a target may be qualified by its block's label (`blk.v_cols`); and a body is lexed for `/* block */` comments as well as `-- line` ones, for an escape
@@ -464,6 +465,18 @@ def depth0(text: str):
     return out
 
 
+# A DISTINCT's ON clause, whose key list is not part of what the SELECT returns.
+DISTINCT_ON = re.compile(r"(?is)\s*on\s*(?=\()")
+
+
+def list_start(text: str, pos: int) -> int:
+    """Where a SELECT's returned list starts, given the offset just past its SELECT [DISTINCT | ALL]: past a
+    `DISTINCT ON (...)` key list, which deduplicates and is never returned (`select distinct on
+    (quote_ident(c)) 'raw'` returns 'raw')."""
+    on = DISTINCT_ON.match(text, pos)
+    return matching_paren(text, on.end()) + 1 if on else pos
+
+
 def select_into(clean: str):
     """Yield (target, expression, offset) for the INTO clause of every statement, in any of the places
     PL/pgSQL takes it: the value assigned is the list of the last top-level RETURNING or SELECT before the
@@ -494,9 +507,10 @@ def select_into(clean: str):
             if not heads:
                 break
             head = heads[-1]
-            lst = rest[head.end():]
+            start = head.end() if head.group("ret") else list_start(rest, head.end())
+            lst = rest[start:]
             if not head.group("ret"):
-                ends = [k.start() for k in LIST_END.finditer(lst) if head.end() + k.start() in rtop]
+                ends = [k.start() for k in LIST_END.finditer(lst) if start + k.start() in rtop]
                 if ends:
                     lst = lst[:ends[0]]
             targets = [canonical(t) for t in split_top_level(m.group("targets"), ",") if t.strip()]
@@ -556,14 +570,20 @@ def value_list(query: str) -> list:
     rets = [k for k in VALUE_HEAD.finditer(shape) if k.start() in top and k.group("ret")]
     if rets:
         return [e.strip() for e in split_top_level(query[rets[-1].end():], ",")]
-    spans, pos = [], 0
+    spans, ops, pos = [], [None], 0
     for op in SET_OP.finditer(shape):
         if op.start() in top:
             spans.append((pos, op.start()))
+            ops.append(op.group(0).split()[0].lower())
             pos = op.end()
     spans.append((pos, len(query)))
-    lists = []
-    for a, b in spans:
+    lists, dropped = [], False
+    for (a, b), op in zip(spans, ops):
+        # EXCEPT's right operand only removes rows, and so does whatever INTERSECT binds to it (`a except b
+        # intersect c` is `a except (b intersect c)`): none of its values is ever returned
+        dropped = op == "except" or (op == "intersect" and dropped)
+        if dropped:
+            continue
         lead = a + len(shape[a:b]) - len(shape[a:b].lstrip())
         if shape.startswith("(", lead):
             lists.append(value_list(query[lead + 1:matching_paren(shape, lead)]))
@@ -572,8 +592,9 @@ def value_list(query: str) -> list:
         if not heads:
             lists.append([query[a:b].strip()])
             continue
-        ends = [k.start() for k in LIST_END.finditer(shape, heads[0].end(), b) if k.start() in top]
-        lists.append([e.strip() for e in split_top_level(query[heads[0].end():ends[0] if ends else b], ",")])
+        start = list_start(shape, heads[0].end())
+        ends = [k.start() for k in LIST_END.finditer(shape, start, b) if k.start() in top]
+        lists.append([e.strip() for e in split_top_level(query[start:ends[0] if ends else b], ",")])
     if not lists or len({len(lst) for lst in lists}) != 1:
         return [query]
     return [" , ".join(col) for col in zip(*lists)]
@@ -1003,6 +1024,11 @@ SHAPES = {
         "v_cols text", "select quote_ident('c') as loop into v_cols;"),
     "assigned by SELECT INTO with the bare label `loop`": (
         "v_cols text", "select quote_ident('c') loop into v_cols;"),
+    # review threads on PR #1313: EXCEPT's LEFT operand and a DISTINCT ON query's list are returned
+    "assigned as a FOR loop's target by EXCEPT's left operand": (
+        "v_cols text", "for v_cols in select quote_ident('c') except select 'raw' loop null; end loop;"),
+    "assigned as a FOR loop's target by a DISTINCT ON query's list": (
+        "v_cols text", "for v_cols in select distinct on (1) quote_ident('c') loop null; end loop;"),
 }
 
 
@@ -1127,7 +1153,10 @@ def selftest() -> int:
             ("a FOR ... IN EXECUTE of a statement held in a variable",
              "for v_cols_q in execute v_sql loop null; end loop;"),
             ("an EXECUTE whose list item a format() %L splices in",
-             "execute format('select %L::text', 'x') into v_cols_q;")]:
+             "execute format('select %L::text', 'x') into v_cols_q;"),
+            # review thread on PR #1313: a format() ARGUMENT that spells a call is data, never the statement
+            ("an EXECUTE whose %L argument spells quote_ident(c)",
+             "execute format('select %L::text', 'quote_ident(c)') into v_cols_q;")]:
         src = SHAPE_BODY.format(decl="v_cols_q text; v_sql text", stmt=stmt).replace("v_cols,", "v_cols_q,")
         lie = SHAPE_BODY.format(decl="v_cols_q text; v_sql text",
                                 stmt=stmt + " v_cols_q := 'nothing quoted';").replace("v_cols,", "v_cols_q,")
@@ -1138,6 +1167,32 @@ def selftest() -> int:
             failures += 1
         else:
             print(f"SELFTEST PASS  {what} is not judged; a lying _q beside it still is")
+
+    # Review threads on PR #1313: EXCEPT's right operand and a DISTINCT ON key list are never returned, so a
+    # quoting call there quotes nothing the target holds. The unmarked target is left alone, and a `_q` on it is
+    # unearned and refused by check 2
+    for what, stmt in [
+            ("a FOR target given only EXCEPT's left operand",
+             "for v_cols in select 'raw' except select quote_ident('c') loop null; end loop;"),
+            ("a FOR target of `a except b intersect c`",
+             "for v_cols in select 'raw' except select quote_ident('c') intersect select quote_ident('d') "
+             "loop null; end loop;"),
+            ("an EXECUTE INTO target given only EXCEPT's left operand",
+             "execute 'select ''raw'' except select quote_ident(''c'')' into v_cols;"),
+            ("a FOR target of a DISTINCT ON query, whose key quotes",
+             "for v_cols in select distinct on (quote_ident('c')) 'raw' loop null; end loop;"),
+            ("a SELECT INTO target of a DISTINCT ON query, whose key quotes",
+             "select distinct on (quote_ident('c')) 'raw' into v_cols;")]:
+        raw_src = SHAPE_BODY.format(decl="v_cols text", stmt=stmt)
+        lie_src = re.sub(r"(?i)\bv_cols\b", "v_cols_q", raw_src)
+        v, q = check_text("raw.sql", raw_src)
+        lv, _ = check_text("raw_q.sql", lie_src)
+        if v or q != 0 or not any("nothing in its assignment" in x and "v_cols_q" in x for x in lv):
+            print(f"SELFTEST FAIL  {what}: the unmarked target should be clean ({q} quoting, {v}) and its _q twin "
+                  f"refused by check 2 ({lv})")
+            failures += 1
+        else:
+            print(f"SELFTEST PASS  {what} holds no quoted value: unmarked is clean, a _q on it is refused")
 
     # #1096: check 2 reads the same declarations, so an unearned _q declared `text default ''` is judged
     lying_default = SHAPE_BODY.format(decl="v_cols_q text default ''",

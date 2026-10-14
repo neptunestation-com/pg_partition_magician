@@ -47,6 +47,9 @@
 # Rounds 4 and 5 found that cutting a SELECT INTO's statement at a LOOP or EXECUTE word lost assignments where
 # the word is a column ("loop", t.execute, `as loop`, a bare label `loop`); that rule was taken out, so those
 # shapes are refused as on the base, and are kept here so it does not come back unseen.
+# From the PR's review threads:
+#   quoted_splices_except_operand_read   -- EXCEPT's right operand is read as values the target is given
+#   quoted_splices_distinct_on_keys_read -- a DISTINCT ON key list is read as the SELECT's first item
 # Each round-2 negative (an unreadable statement must not be refused) has a liveness twin: check 2 refuses
 # the same body's `_q` local given a plain literal.
 #
@@ -218,6 +221,11 @@ SHAPES = [
      f"select {QI} as loop into v_cols;", "$$", ""),
     ("g20_into_bare_loop", "a SELECT INTO target with the bare label `loop`", "v_cols text",
      f"select {QI} loop into v_cols;", "$$", ""),
+    # review threads on PR #1313: EXCEPT's left operand and a DISTINCT ON query's list are what is returned
+    ("g20_except_left", "a FOR target quoted by EXCEPT's left operand", "v_cols text",
+     f"for v_cols in select {QI} except select 'raw' loop null; end loop;", "$$", ""),
+    ("g20_distinct_on_list", "a FOR target quoted by a DISTINCT ON query's list", "v_cols text",
+     f"for v_cols in select distinct on (1) {QI} loop null; end loop;", "$$", ""),
     ("g20_label_into", "a SELECT INTO target qualified by its block's label", "v_cols text",
      f"select {QI} into blk.v_cols;", "$$", "", "<<blk>>\n"),
     ("g20_label_assign", "a `:=` target qualified by its block's label", "v_cols text",
@@ -270,6 +278,38 @@ for fn, what, stmt, quoting in UNREAD:
     report(ok, f"LIVENESS: PL/pgSQL runs {fn} and v_cols_q holds the quoted name", detail)
     v, n = cqs.check_text("unread.sql", src)
     report(not v and n == quoting, f"_q: not judged, {what}", f"violations {v}, quoting {n}")
+# Review threads on PR #1313: EXCEPT's right operand and a DISTINCT ON key list are never returned. Each function
+# below is run to show its target holds the RAW value; the lint must leave the unmarked target alone and refuse a
+# `_q` on it (check 2), since the quoting call it sits beside quotes nothing the target is given.
+RAWFN = """
+create or replace function public.{fn}() returns text language plpgsql as $$
+declare v_x text;
+begin
+  {stmt}
+  return v_x;
+end;
+$$;
+"""
+RAW = [
+    ("g20_raw_except", "a FOR target given only EXCEPT's left operand",
+     f"for v_x in select 'raw'::text except select {QI} loop null; end loop;"),
+    ("g20_raw_except_x", "an EXECUTE INTO target given only EXCEPT's left operand",
+     "execute 'select ''raw''::text except select quote_ident(''Foo Bar'')' into v_x;"),
+    ("g20_raw_distinct_on", "a FOR target given a DISTINCT ON list, not its key",
+     f"for v_x in select distinct on ({QI}) 'raw'::text loop null; end loop;"),
+    ("g20_raw_distinct_into", "a SELECT INTO target given a DISTINCT ON list",
+     f"select distinct on ({QI}) 'raw'::text into v_x;"),
+]
+for fn, what, stmt in RAW:
+    src = RAWFN.format(fn=fn, stmt=stmt)
+    rc, out, err = psql(src + f"select public.{fn}();")
+    report(rc == 0 and out == "raw", f"LIVENESS: PL/pgSQL runs {fn} and v_x holds the raw value",
+           f"rc {rc}, got {out!r} {err[:120]}")
+    v, n = cqs.check_text("raw.sql", src)
+    mv, _ = cqs.check_text("raw_q.sql", src.replace("v_x", "v_x_q"))
+    lied = any("v_x_q" in x and "nothing in its assignment" in x for x in mv)
+    report(not v and n == 0 and lied, f"_q: not quoted, {what}",
+           f"unmarked: {v} ({n} quoting); _q twin: {mv}")
 total, bad = 0, []
 for rel in ("pgpm_core/install.sql", "pgpm_hypertable/install.sql", "pgpm_archive/install.sql"):
     v, n = cqs.check_text(rel, open(os.path.join(ROOT, rel)).read())

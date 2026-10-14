@@ -11479,9 +11479,26 @@ MUTATIONS["quoted_splices_loop_first_branch"] = (
     "scripts/check_quoted_splices.py reading a set operation by its first branch: `for v_cols in select 'x' union "
     "all select quote_ident(attname) ... loop` gives an unmarked text local every branch's rows, the quoted names "
     "included, and only the first SELECT's list is judged. One site, the branches value_list() reads.",
-    [("    for a, b in spans:\n", "    for a, b in spans[:1]:\n", 1)],
+    [("    for (a, b), op in zip(spans, ops):\n", "    for (a, b), op in zip(spans[:1], ops):\n", 1)],
 )
 MUTATION_SRC["quoted_splices_loop_first_branch"] = "scripts/check_quoted_splices.py"
+# PR #1313's review threads: EXCEPT's right operand and DISTINCT ON's keys are not returned.
+MUTATIONS["quoted_splices_except_operand_read"] = (
+    "bench/quoted_splices_every_body.sh",
+    "scripts/check_quoted_splices.py reading EXCEPT's right operand as values a query returns: `for v_x_q in "
+    "select 'raw' except select quote_ident(c) loop` earns its `_q` on a call whose rows are only removed, and "
+    "the unmarked v_x is refused. One site, the dropped branches of value_list().",
+    [("        if dropped:\n            continue\n", "", 1)],
+)
+MUTATION_SRC["quoted_splices_except_operand_read"] = "scripts/check_quoted_splices.py"
+MUTATIONS["quoted_splices_distinct_on_keys_read"] = (
+    "bench/quoted_splices_every_body.sh",
+    "scripts/check_quoted_splices.py reading a DISTINCT ON key list as the SELECT's first item: `select distinct "
+    "on (quote_ident(c)) 'raw' into v_x_q` earns its `_q` on the key, and the unmarked v_x is refused. One site, "
+    "list_start(), which both readers of a SELECT's list share.",
+    [("    return matching_paren(text, on.end()) + 1 if on else pos\n", "    return pos\n", 1)],
+)
+MUTATION_SRC["quoted_splices_distinct_on_keys_read"] = "scripts/check_quoted_splices.py"
 # PR #1313's verification, round 2 (V-01 to V-05): six more clauses of check_quoted_splices.py, one mutation each,
 # judged by the same guard.
 MUTATIONS["quoted_splices_nested_dollar_as_code"] = (

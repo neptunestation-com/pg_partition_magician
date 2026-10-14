@@ -8,7 +8,8 @@
   loop's target as an assignment, so an unmarked text local given `quote_ident` output by `for v_cols in select
   ... loop` passed while its SELECT INTO twin was refused. Bodies are now found by lexing the file (comments,
   literals and quoted identifiers stepped over), every dollar-quoted string whatever its tag; a FOR or FOREACH
-  loop's target is paired with the loop's values (a query's list, every branch's, parenthesised ones included,
+  loop's target is paired with the loop's values (a query's list, never its DISTINCT ON keys; every branch's
+  but EXCEPT's right operand, parenthesised ones included,
   when the query is a set operation; a `for ... in execute` statement's; a FOREACH's array), and an EXECUTE's
   INTO target with the list of the dynamic statement its own expression spells out (literals, or a format()
   template as format() renders it, `%%` read as `%`, in parentheses or under a trailing cast or not), so
@@ -25,6 +26,7 @@
   `quoted_splices_loop_first_branch`, `quoted_splices_paren_branch_skipped`,
   `quoted_splices_scan_in_quoted_names`, `quoted_splices_execute_into_unread`,
   `quoted_splices_exec_statement_guessed`, `quoted_splices_exec_wrapped_unread`,
+  `quoted_splices_except_operand_read`, `quoted_splices_distinct_on_keys_read`,
   `quoted_splices_spliced_value_judged`,
   `quoted_splices_format_template_unrendered`, `quoted_splices_label_target_unread` and
   `quoted_splices_bare_dollar_bodies`.
