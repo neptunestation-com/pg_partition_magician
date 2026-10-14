@@ -46,6 +46,8 @@
 #                                             `select into v prefix text` is skipped as a declaration
 #   archive_keys_loop_keeps_clause         -- a LOOP does not end the clause before it, so a nested block's
 #                                             `declare prefix text;` after `for i in select 1 loop` is refused
+#   archive_keys_domain_declaration_refused -- a local or column declared with a type that is no TYPE_WORD
+#                                             (a domain, `constant text`) is refused as assembly
 #
 # Usage: archive_keys_inverse_rule.sh <container> <db> [check_archive_object_keys.py]
 # The container and database are accepted for the shape bench/discriminate.sh calls every guard with and are
@@ -276,6 +278,10 @@ clean("a nested block's declare prefix text; after a FROM-less loop query is a d
       with_fn("archive.k_ok_loop_declare",
               "for v_key in select generate_series(1, 2)::text loop\n    declare prefix text;\n    begin\n"
               "      prefix := 'x';\n      raise notice '% %', v_key, prefix;\n    end;\n  end loop;\n  " + HANDED))
+clean("a local and a column declared with a domain or CONSTANT type are declarations",
+      with_fn("archive.k_ok_domain", "raise notice '% %', prefix, p_prefix;\n  " + HANDED,
+              decl="cfg archive.config; prefix archive.prefix_domain; p_prefix constant text := 'events/';",
+              before="create table archive.config_was (parent_table regclass, prefix archive.prefix_domain);\n"))
 clean("a parameter handed on whole by its number is clean",
       with_fn("archive.k_ok_number", "return archive.k_pass(p_parent, cfg.prefix, p_child);",
               before="create or replace function archive.k_pass(regclass, text, name) returns text language sql as $f$\n"

@@ -23,12 +23,16 @@
   a select item aliased with a type word (`select c.prefix text`, or `select into v prefix text`, once skipped
   as a declaration), and a helper whose `OUT` parameter's mode follows its name (`k out text`, once read as an
   input that shifted every position). A `LOOP`, `BEGIN` or `DECLARE` ends the clause before it, so a nested
-  block's `declare prefix text;` stays a declaration. The module reads exactly as before (the same prefix
-  references, one owner). The docstring's "What this cannot see" now also names a column renamed by a table alias's column list, a body that is not dollar-quoted,
-  and a prefix stored in another table and read back. Guard `bench/archive_keys_inverse_rule.sh`, mutations
-  `archive_keys_unlisted_standing_passes`, `archive_keys_param_number_unfollowed`,
+  block's `declare prefix text;` stays a declaration, and a `DECLARE`'s local or a top-level `CREATE`'s column is
+  a declaration whatever its type (`prefix archive.prefix_domain`, `p_prefix constant text`). The module reads
+  exactly as before (the same prefix references, one owner). The docstring's "What this cannot see" now also
+  names a column renamed by a table alias's column list, a body that is not dollar-quoted, and a prefix stored
+  in another table and read back, and it names the tests the rule refuses by design (the prefix as IN's or
+  BETWEEN's right-hand operand, or a simple `CASE`'s operand). Guard `bench/archive_keys_inverse_rule.sh`,
+  mutations `archive_keys_unlisted_standing_passes`, `archive_keys_param_number_unfollowed`,
   `archive_keys_from_call_is_relation`, `archive_keys_unread_body_followed`, `archive_keys_type_word_alias_skipped`,
-  `archive_keys_mode_after_name_unread`, `archive_keys_into_first_list_unread` and `archive_keys_loop_keeps_clause`.
+  `archive_keys_mode_after_name_unread`, `archive_keys_into_first_list_unread`, `archive_keys_loop_keeps_clause`
+  and `archive_keys_domain_declaration_refused`.
 
 - **The `_q` lint reads every dollar-quoted body, and a loop's target and an EXECUTE's INTO as assignments**
   (#1278). `scripts/check_quoted_splices.py` found bodies by splitting each install file on the bare `$$`, so a

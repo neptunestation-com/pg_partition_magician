@@ -71,8 +71,10 @@ check passed. So the last rule is the inverse one: a prefix reference that is no
 three rules is assembly anyway, UNLESS it is
 
   * declared (`p_prefix text`, a column's definition, a function's header), or the target of an
-    assignment or the label of a named argument (`p_prefix => x`). A type word after an item of a
-    select or RETURNING list is the item's alias (`select c.prefix text`), not a declaration;
+    assignment or the label of a named argument (`p_prefix => x`). A DECLARE's local or a top-level
+    CREATE's column is declared whatever its type (`prefix archive.prefix_domain`, `prefix constant
+    text`). A type word after an item of a select or RETURNING list is the item's alias (`select
+    c.prefix text`), not a declaration;
   * handed whole, as one argument, to a function this file defines (`archive._owned_key(p_parent,
     cfg.prefix, ...)`), which is how it reaches the one function that assembles;
   * compared or tested: it touches a comparison operator (`=`, `<>`, `<`, `~`, ...), is followed by IS,
@@ -117,6 +119,13 @@ spelled LOOP, BEGIN or DECLARE, unquoted (`select 1 as begin, c.prefix text into
 RETURNING list), ends the statement's clause early, as those words do where they open a block, so a prefix
 item after it in the same list aliased with a type word (`text`, `name`, `varchar`, `character`) is read as
 a declaration and not judged.
+
+What this refuses that it could allow, by design: a test the list above does not name. The prefix as the
+right-hand operand of IN or BETWEEN (`x in (cfg.prefix)`, `x between cfg.prefix and 'z'`) or as either
+operand of a simple CASE (`case cfg.prefix when ...`, `case x when cfg.prefix then ...`) only compares, but it
+stands where no listed token sits, so it is refused; write it with a comparison operator (`x = cfg.prefix`,
+`x >= cfg.prefix and x <= 'z'`, a searched CASE). IN after a FOR (`for r in (select prefix ...) loop`) is not
+a test at all, which is why IN is not read as one from the left.
 
   ./scripts/check_archive_object_keys.py              # check pgpm_archive/install.sql
   ./scripts/check_archive_object_keys.py <file.sql>   # check another copy (a mutant, an old release)
@@ -738,7 +747,12 @@ def _scan_once(toks, defined, carriers, unread=frozenset()):
         # a type word after it in a select or RETURNING list is an alias (`select c.prefix text`), not a type
         here = parens[-1] if parens else stmt
         listed = here.get("clause") in ("select", "returning") or bool(here.get("into_first"))
-        if (nxt[1] in TYPE_WORDS and not listed) or nxt[1] in ("=>", ":="):
+        # a declaration whose type is not a TYPE_WORD (a domain, `constant`): a DECLARE's local, or a column of a
+        # top-level CREATE, followed by a word that is no keyword
+        declared = not listed and nxt[0] == "ID" and nxt[1] not in KEYWORDS and (
+            (body_tag is not None and not parens and stmt["declare"] and prev[1] in STATEMENT_STARTS)
+            or (body_tag is None and stmt["verb"] == "create" and len(parens) == 1 and prev[1] in ("(", ",")))
+        if (nxt[1] in TYPE_WORDS and not listed) or declared or nxt[1] in ("=>", ":="):
             continue  # a declaration, the label of a named argument, or the target of an assignment
         # a field selected out of a parenthesised row, `(cfg).prefix`, is a reference from the row on
         judge(operand_start(k - 2) if prev[1] == "." else k, k, line, text)
@@ -1258,6 +1272,16 @@ begin
   return null;
 end $f$;
 """)
+# Review thread on PR #1314: a declaration whose type is no TYPE_WORD is still a declaration.
+DOMAIN_DECLARED_CLEAN = with_extra(r"""
+create table archive.config_was (parent_table regclass, prefix archive.prefix_domain);
+create or replace function archive._domain_note() returns text language plpgsql as $f$
+declare prefix archive.prefix_domain; p_prefix constant text := 'events/';
+begin
+  raise notice '% %', prefix, p_prefix;
+  return null;
+end $f$;
+""")
 # Everything a prefix may do, and still one key function: handed whole (by position, by name, by number, in
 # a FROM clause), compared and tested, stored by an upsert, reported by RAISE. And a `$1` in the text an
 # EXECUTE runs is its USING argument, not the first parameter of the function, which here carries the prefix.
@@ -1393,6 +1417,8 @@ def selftest():
            False, ("archive._into_first_key (line", "): prefix standing between `v_key`"))
     expect("a nested block's `declare prefix text;` after a FROM-less loop query is a declaration",
            LOOP_THEN_DECLARE_CLEAN, True, owner="archive._owned_key")
+    expect("a local and a column declared with a domain or CONSTANT type are declarations", DOMAIN_DECLARED_CLEAN,
+           True, owner="archive._owned_key")
     expect("the prefix handed whole, compared, stored and reported, and a $1 that is a USING argument",
            STANDING_CLEAN, True, owner="archive._owned_key")
     expect("the one assembling function never claims", NO_CLAIM, False, "never names archive.object_key_owner")

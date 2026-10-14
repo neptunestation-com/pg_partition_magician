@@ -11686,8 +11686,8 @@ MUTATIONS["archive_keys_type_word_alias_skipped"] = (
     "varchar or character is skipped as a declaration wherever it stands, so a select item aliased with one "
     "(`(select c.prefix text from archive.config c ...) || p_child`, or a derived table selecting `c.prefix text`) "
     "is no reference at all and the second key built from it passes. One site, the declaration test.",
-    [('        if (nxt[1] in TYPE_WORDS and not listed) or nxt[1] in ("=>", ":="):\n',
-      '        if nxt[1] in TYPE_WORDS or nxt[1] in ("=>", ":="):\n', 1)],
+    [('        if (nxt[1] in TYPE_WORDS and not listed) or declared or nxt[1] in ("=>", ":="):\n',
+      '        if nxt[1] in TYPE_WORDS or declared or nxt[1] in ("=>", ":="):\n', 1)],
 )
 MUTATION_SRC["archive_keys_type_word_alias_skipped"] = "scripts/check_archive_object_keys.py"
 MUTATIONS["archive_keys_mode_after_name_unread"] = (
@@ -11719,6 +11719,16 @@ MUTATIONS["archive_keys_loop_keeps_clause"] = (
       '                stmt.update(clause=None, insert=False, into_first=False)\n', "", 1)],
 )
 MUTATION_SRC["archive_keys_loop_keeps_clause"] = "scripts/check_archive_object_keys.py"
+MUTATIONS["archive_keys_domain_declaration_refused"] = (
+    "bench/archive_keys_inverse_rule.sh",
+    "PR #1314 before its review thread: scripts/check_archive_object_keys.py knows a declaration only by the "
+    "four TYPE_WORDS after it, so a DECLARE's `prefix archive.prefix_domain;` or `p_prefix constant text`, or a "
+    "top-level CREATE TABLE's `prefix archive.prefix_domain` column, falls to the inverse rule and correct code "
+    "is refused as key assembly. One site, the declaration skip.",
+    [("        if (nxt[1] in TYPE_WORDS and not listed) or declared or nxt[1] in (\"=>\", \":=\"):\n",
+      "        if (nxt[1] in TYPE_WORDS and not listed) or nxt[1] in (\"=>\", \":=\"):\n", 1)],
+)
+MUTATION_SRC["archive_keys_domain_declaration_refused"] = "scripts/check_archive_object_keys.py"
 # Issues #1154 and #1180: scripts/check_archive_child_by_oid.py's rule 1 is the inverse rule, a name read only
 # alone in a select item or a RAISE argument, and it reads a regclass rendered as text as a name. One mutation per
 # issue, each taking out one clause of the fix; bench/lint_child_by_oid_inverse.sh catches both, on fixtures built
