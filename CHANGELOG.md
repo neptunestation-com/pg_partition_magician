@@ -2,6 +2,43 @@
 
 ## [Unreleased]
 
+- **`stop_check.py` judges the stopping thresholds on exact values** (#1288). It read precision >= 0.7, fell
+  rate <= 0.3 and coverage >= 0.9 off the two-decimal figures `pass_metrics.py` writes into the record, so a
+  pass at 16/23 = 0.696 precision (printed 0.70), 7/23 = 0.304 fell rate (0.30) and a finder at 26/29 = 0.897
+  coverage (0.90) read as met, and two such passes came back "stop: converged". `pass_metrics.py` now writes an
+  `exact: recall a/b, precision c/d, strict e/f, fell rate g/h` header line, and `stop_check.py` judges recall,
+  precision and fell rate on those fractions (refusing a record whose fractions do not round to its figures;
+  from pass 13 on a record without the line reads them as unknown, NOT met) and the coverage gate on the
+  coverage line's count of finders at 0.90, which it now requires. That count, and `coverage.py`'s own gate,
+  are judged on each finder's exact read/units rather than the three-decimal coverage `coverage.py` writes (188
+  of 209 units is 0.89952, written 0.9); the printed figures are unchanged, and `--coverage` now needs each
+  row's `units` and `read`. Guard `bench/review_tooling_verdicts.sh`, mutations
+  `stop_check_precision_on_rounded_figure`, `stop_check_coverage_on_rounded_minimum`,
+  `pass_metrics_coverage_count_on_rounded` and `coverage_gate_on_rounded_figure`.
+
+- **`pass_metrics.py` counts an unverified candidate as unverified, never fell** (#1289). A candidate with no
+  verdict, or with a verdict string none of `finding`, `fell`, `known_open` (a `known-open` typo), was listed
+  under "Fell in verification" and counted in the fell rate the stopping criteria and the abandon-at-0.5 rule
+  read. Both are now unverified, listed under the record's new "Unverified (not findings)" section, and the CLI
+  refuses a verdicts file holding an unknown string (exit 2). Guard `bench/review_tooling_verdicts.sh`,
+  mutation `pass_metrics_unverified_reads_fell`.
+
+- **`decisions_queue.py` refuses a malformed queue line instead of skipping it** (#1290). Its parse skipped
+  every line not starting with `- D`, so a BLOCKING entry written indented, under a `*` bullet or with a
+  lower-case id was neither read nor refused, `pending` exited 0 and `stop_check.py` let the loop go on. Every
+  line is now blank, a loop heading, the header's prose above the first loop heading, or an entry of the exact
+  shape, and a line that reads as an entry (a list item under any bullet or indent, a `d<nn>` id, a `|` field)
+  is never prose: the file is refused, exit 2. Guard `bench/review_tooling_verdicts.sh`, mutation
+  `decisions_queue_skips_malformed_line`.
+
+- **`land.sh` no longer takes a merge group still running for a stalled one.** Its stall detector called a group
+  green when every summary check-run that existed on its commit was green, and a summary job has no check-run
+  until the shards it needs finish: with Test Summary and Lint summary green and the Perf shards still running,
+  the group read green, and `LAND_STALL_MIN` (10) minutes later a healthy group was dequeued and enqueued again
+  (three landings on 2026-10-13). Each of the three required summaries (Test Summary, Lint summary, Perf
+  summary) must now have a check-run on the commit, completed and successful, before the clock starts; each is
+  read by its exact name, so the commit's other check-runs cannot push it off the page. Guard
+  `bench/review_tooling_verdicts.sh`, mutation `land_stall_counts_existing_summaries`.
 - **The reference says a naive column of wall time east of UTC converts on a sub-day grid only with
   `p_force_frontier`** (#1275). Its transmute entry said such a column runs ahead of the frontier by its
   offset and that `obtain` greater than the offset in hours covers it on an hourly grid, but transmute's
@@ -194,6 +231,16 @@
   pass, `retire`, `_retain_recall`) and shows retention runs clean after it, or the kept rows are served again;
   `bench/retain_disown_remedy.sh` runs it against two mutations, one that drops the `DELETE` from the remedy and
   one that writes the drop remedy for a partition retention no longer reaches.
+
+- **`flake_check.sh` reads a job log whatever gh prints it with, and says when it cannot.** It read logs with a
+  bare `gh api .../logs`, and gh 2.100 refuses to print a body holding terminal escape sequences (which GitHub's
+  job logs carry) unless `--allow-escape-sequences` is passed: stdout stayed empty, and every log signature
+  (`lock_guard_probe`, `registry_quota`, `regrain_perf_discriminate`) read UNKNOWN on such a machine. The flag
+  is now passed when `gh api --help` lists it (an older gh does not know it and refuses it), the escape codes
+  are stripped before any signature is read, and a log that still reads empty is its own outcome: the job's
+  line says "could not read the log" and the run exits 3 unless another job is known not to be a flake (exit
+  1). Guard `bench/review_tooling_verdicts.sh`, mutations `flake_check_log_without_escape_flag` and
+  `flake_check_empty_log_reads_unknown`.
 
 - **A tracking copy pre-builds the index of the hypertable's own key** (#1266). `from_hypertable_copy(...,
   p_track_changes => true)` named the key index it pre-builds after whichever `pg_constraint` row had the key's

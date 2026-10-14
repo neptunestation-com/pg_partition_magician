@@ -29,6 +29,10 @@ An absent issue or PR is written `issue -` / `PR -`, an unresolved entry ends `o
 `pending` prints the unresolved BLOCKING entries and exits 1 when there is one (0 when none); stop_check.py
 reads the same file through parse() and stops the loop on the same condition. Exit 2 is a malformed file or
 a refused argument (text holding `|` or a newline, an unknown id, resolving twice): never a silent default.
+Malformed means any line that is not blank, a `## Loop N` heading, the header's prose above the first loop
+heading, or an entry of the shape above, flush left; a line that reads as an entry (a list item under any
+bullet or indent, a `d<nn>` id, a `|` field) is never prose, so a hand-written BLOCKING entry the parse could
+not read is refused rather than skipped (#1290).
 """
 import argparse
 import contextlib
@@ -50,6 +54,7 @@ HEADER = [
 ENTRY = re.compile(r"^- (D\d+) \| (\d{4}-\d{2}-\d{2}) \| ([A-Za-z]+) \| (.*) \| issue (#\d+|-) \| PR (#\d+|-) \| "
                    r"(open|resolved by (.+?)(?: \((.*)\))?)$")
 LOOP = re.compile(r"^## Loop (\d+)\s*$")
+ENTRY_LIKE = re.compile(r"^\s*(?:[-*+]|\d+[.)])(?:\s|$)|^\s*[Dd]\d+\b|\|")
 
 
 class QueueError(Exception):
@@ -64,11 +69,20 @@ def parse(text):
         if m:
             loop = int(m.group(1))
             continue
-        if not ln.startswith("- D"):
+        if not ln.strip():
+            continue
+        # Only the header's prose, above the first loop heading, is not an entry. Every other line, and any line
+        # that reads as one (a list item of any bullet or indent, a D<nn> id in either case, a `|` field), is an
+        # entry of the exact shape or the file is refused: a BLOCKING entry Markdown renders the same but this
+        # parse skipped was never read, and the loop went on past it (#1290).
+        # search, not match: the list-item and id alternatives anchor themselves with `^`, and a `|` anywhere in
+        # the line is an entry's field separator, so it must be found past position zero too
+        if loop is None and not ENTRY_LIKE.search(ln):
             continue
         m = ENTRY.match(ln.rstrip())
         if not m:
-            raise QueueError(f"line {n} is not a queue entry: {ln!r}")
+            raise QueueError(f"line {n} is not a queue entry of the shape `- D<nn> | <date> | <kind> | <text> | "
+                             f"issue #N|- | PR #N|- | open|resolved by <who>`, flush left: {ln!r}")
         kind = m.group(3).lower()
         if kind not in KINDS:
             raise QueueError(f"line {n}: unknown kind {m.group(3)!r} (one of {', '.join(KINDS)})")
@@ -283,6 +297,34 @@ def selftest():
             try:
                 parse(load(q) + broken)
                 raise AssertionError(f"malformed line accepted: {broken!r}")
+            except QueueError:
+                pass
+        # #1290: a BLOCKING entry Markdown renders the same as the exact shape (indented, a `*` or `+` bullet, a
+        # lower-case id, a numbered item) and prose under a loop heading are refused, never skipped; the header's
+        # prose still parses, and the exact shape appended to the same file blocks
+        good = load(q)
+        assert [e["id"] for e in pending_blocking(parse(good + "- D09 | 2026-10-11 | BLOCKING | x | issue - | PR - | open\n"))] == ["D06", "D09"]
+        for broken in ("  - D09 | 2026-10-11 | BLOCKING | x | issue - | PR - | open\n",
+                       "* D09 | 2026-10-11 | BLOCKING | x | issue - | PR - | open\n",
+                       "+ D09 | 2026-10-11 | BLOCKING | x | issue - | PR - | open\n",
+                       "- d09 | 2026-10-11 | BLOCKING | x | issue - | PR - | open\n",
+                       "1. D09 | 2026-10-11 | BLOCKING | x | issue - | PR - | open\n",
+                       "D09 BLOCKING: cut the release first\n",
+                       "Pending: cut the release first (BLOCKING)\n"):
+            try:
+                parse(good + broken)
+                raise AssertionError(f"malformed line accepted: {broken!r}")
+            except QueueError:
+                pass
+        assert "One line per decision" in good.split("## Loop", 1)[0] and len(parse(good)) == 6, "the header's prose parses"
+        # above the first loop heading too, a line with a `|` field anywhere is an entry, never prose (a `|` past
+        # position zero was missed when the pattern was matched rather than searched)
+        head = "\n".join(HEADER) + "\n"
+        assert parse(head) == [], "the bare header parses"
+        for broken in ("Pending | BLOCKING | cut release\n", "  * D01 | 2026-10-11 | BLOCKING | x | issue - | PR - | open\n"):
+            try:
+                parse(head + broken)
+                raise AssertionError(f"malformed header-region line accepted: {broken!r}")
             except QueueError:
                 pass
         # the CLI: pending exits 1 on the open BLOCKING entry, 0 once it is resolved

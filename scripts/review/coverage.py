@@ -18,8 +18,24 @@ slices.json: {"F1": {"files": ["pgpm_core/install.sql:1-2500", "pgpm_core/uninst
 on an .sql file keeps only the units whose `create` line falls inside it. The ledger's `read:` answer is
 what is scored; notes are for the record. A unit listed twice counts once; a unit the ledger names that
 the slice does not contain is reported (it is usually a slice boundary the coordinator drew wrong).
+
+The printed and written `coverage` is rounded to three decimals; the threshold is judged on the exact
+fraction read/units (at_gate), here and in pass_metrics.py's coverage line, never on the rounded figure: 188
+of 209 units is 0.89952, which rounds to 0.900 and is below a 0.9 gate.
 """
 import argparse, glob, json, os, re, sys, tempfile
+from fractions import Fraction
+
+
+def at_gate(row, threshold):
+    """Whether a coverage row is at or above `threshold`, on the exact fraction read/units (a slice with no
+    units scores 1, as score() scores it; a missing ledger never is). `threshold` goes through its decimal
+    spelling, so 0.9 means nine tenths and not the binary float nearest it."""
+    if row.get('ledger') == 'missing':
+        return False
+    units, read = row['units'], row['read']
+    exact = Fraction(read, units) if units else Fraction(1)
+    return exact >= Fraction(str(threshold))
 
 UNIT_RE = re.compile(r'^\s*create\s+(?:or\s+replace\s+)?(?:function|procedure)\s+([a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*)\s*\(', re.I)
 LEDGER_RE = re.compile(r'^\s*[-*]\s+`?([^`|]+?)`?\s*\|\s*read:\s*(yes|no)\b', re.I)
@@ -123,7 +139,7 @@ def score(tree, slices, claims, threshold):
 def render(rows, threshold):
     out = ['finder  kind   units  read  coverage  verdict']
     for r in rows:
-        verdict = 'ledger missing' if r['ledger'] == 'missing' else ('ok' if r['coverage'] >= threshold else f'BELOW {threshold}: re-run or split')
+        verdict = 'ledger missing' if r['ledger'] == 'missing' else ('ok' if at_gate(r, threshold) else f'BELOW {threshold}: re-run or split')
         out.append(f"{r['finder']:<7} {r['kind']:<6} {r['units']:>5} {r['read']:>5}  {r['coverage']:>8.2f}  {verdict}")
         if r['unread'] and r['ledger'] == 'present':
             out.append('        unread: ' + ', '.join(r['unread'][:12]) + (' ...' if len(r['unread']) > 12 else ''))
@@ -175,7 +191,15 @@ def selftest():
             '- pgpm.b | read: yes |\n- pgpm_core/install.sql:2-2 | read: yes | top-level grant\n- bench/g2.sh | read: no | budget\n')
         rows, worst = score(tree, {'F1': spec}, claims, 0.9)
         assert rows[0]['units'] == 3 and rows[0]['read'] == 2 and rows[0]['unread'] == ['bench/g2.sh'], rows[0]
-    print('coverage.py selftest: PASS (sql units with ranges, files slices, mixed and explicit-unit slices, missing ledger, extra units, threshold)')
+    # the gate on the exact fraction: 188 of 209 (0.89952) is written 0.9 and is BELOW; 189 of 210 (exactly
+    # 0.9) and 189 of 209 (0.90431) are at it; no units scores 1; a missing ledger never is
+    edge = {'finder': 'F7', 'kind': 'files', 'units': 209, 'read': 188, 'coverage': round(188 / 209, 3),
+            'unread': [], 'extra': [], 'ledger': 'present'}
+    assert edge['coverage'] == 0.9 and not at_gate(edge, 0.9), edge
+    assert 'BELOW 0.9' in render([edge], 0.9), render([edge], 0.9)
+    assert at_gate({**edge, 'read': 189, 'units': 210}, 0.9) and at_gate({**edge, 'read': 189}, 0.9)
+    assert at_gate({**edge, 'read': 0, 'units': 0}, 0.9) and not at_gate({**edge, 'read': 209, 'ledger': 'missing'}, 0.9)
+    print('coverage.py selftest: PASS (sql units with ranges, files slices, mixed and explicit-unit slices, missing ledger, extra units, threshold on the exact fraction)')
 
 
 def main(argv):
@@ -193,7 +217,7 @@ def main(argv):
     print(render(rows, a.threshold))
     if a.out:
         json.dump({'threshold': a.threshold, 'rows': rows}, open(a.out, 'w'), indent=1)
-    low = [r['finder'] for r in rows if r['ledger'] == 'missing' or r['coverage'] < a.threshold]
+    low = [r['finder'] for r in rows if not at_gate(r, a.threshold)]
     if low:
         print(f"coverage below {a.threshold} (or no ledger) for: {', '.join(low)}; re-run or split these slices before classifying")
         return 1

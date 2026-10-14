@@ -35,6 +35,13 @@ Definitions used here:
   fell rate  = claims that fell in verification / claims that had a reproduction: the reaching alarm the
                stopping criteria read (at most 0.3), since a fallen claim is the one shape a reviewer
                pushed for defects produces when there are none.
+  unverified = candidates with no verdict, or with a verdict string that is none of finding, fell, known_open:
+               in the denominators (they had a reproduction) and in no numerator, listed under the record's
+               "Unverified (not findings)", never under "Fell in verification". The CLI refuses a verdicts file
+               holding an unknown string (exit 2), so a typo such as "known-open" never reaches a record.
+  exact      = the record's `exact: recall a/b, precision c/d, strict e/f, fell rate g/h` line, right after the
+               summary line: the four figures as fractions. stop_check.py judges the thresholds on it, since a
+               two-decimal 0.70 may be 16/23 = 0.696.
   late-survivor recall = the hits among the seeds sealed with "late_survivor" (plant_seeds.py: the catalogue's
                LATE_SURVIVORS, Tier 1 and 2 defects that survived five or more passes with their units read)
                over their number; printed on the summary line after a semicolon inside the recall's
@@ -67,6 +74,7 @@ Usage:
 import argparse
 import json
 import sys
+from fractions import Fraction
 
 TIERS = (1, 2, 3, 4, 5)
 
@@ -95,12 +103,21 @@ def compute(sealed, classified, verdicts, budget_units=None, ages=None):
         late_split = {"K": len(late_ids), "hit": len(late_ids & hit_ids)}
         late_split["recall"] = late_split["hit"] / late_split["K"]
 
-    findings, fell, known = [], [], []
+    # A candidate is a finding, fell or a known-and-open re-find only by the verifier's word for it. One with no
+    # verdict, or with a verdict string that is none of those three (a "known-open" typo), was not verified: it
+    # is counted unverified, never fell (README.md, "Verdicts"), and an unknown string is also listed so main()
+    # refuses the verdicts file (#1289: both used to land in fell and raise the fell rate the criteria read).
+    findings, fell, known, unknown = [], [], [], []
+    unverified = [{**c, "verdict": None} for c in candidates if c["id"] not in verdicts]
     for c in candidates:
         v = verdicts.get(c["id"], {"verdict": "unverified"})
-        c = {**c, "verdict": v}
-        {"finding": findings, "fell": fell, "known_open": known}.get(v["verdict"], fell).append(c)
-    unverified = [c for c in candidates if c["id"] not in verdicts]
+        bucket = {"finding": findings, "fell": fell, "known_open": known}.get(v.get("verdict"))
+        if bucket is None:
+            if c["id"] in verdicts:
+                unverified.append({**c, "verdict": v})
+                unknown.append({"id": c["id"], "verdict": v.get("verdict")})
+            continue
+        bucket.append({**c, "verdict": v})
 
     by_tier = {t: 0 for t in TIERS}
     for f in findings:
@@ -148,6 +165,11 @@ def compute(sealed, classified, verdicts, budget_units=None, ages=None):
         "K": K, "recall": recall, "claims": n_claims, "hypotheses": len(hypotheses),
         "seed_hits": len(seed_hits), "candidates": len(candidates), "findings": len(findings),
         "precision": precision, "precision_strict": precision_strict, "fell_rate": fell_rate,
+        # the same four figures as the fractions they are, written into the record so stop_check.py judges the
+        # thresholds on them and not on the two-decimal figures (#1288: 16/23 = 0.696 printed 0.70, read as met)
+        "exact": {"recall": (len({s["id"] for s in seeds} & hit_ids), K),
+                  "precision": (len(findings) + len(seed_hits) + len(known), n_claims),
+                  "strict": (len(findings) + len(seed_hits), n_claims), "fell rate": (len(fell), n_claims)},
         "by_tier": by_tier, "root_causes": sorted(root_causes),
         "known_open": len(known), "fell": len(fell), "unverified": len(unverified),
         "cost_per_finding": cost, "cost_per_t1": cost_t1, "per_finder": per_finder,
@@ -157,6 +179,9 @@ def compute(sealed, classified, verdicts, budget_units=None, ages=None):
                           "scenario": f.get("scenario", ""), "issue": f["verdict"].get("issue"),
                           "age": ages.get(f["id"], ""), "lens": f.get("lens") or ""} for f in findings],
         "fell_rows": [{"id": f["id"], "reason": f["verdict"].get("reason", "")} for f in fell],
+        "unverified_rows": [{"id": c["id"], "verdict": None if c["verdict"] is None else c["verdict"].get("verdict")}
+                            for c in unverified],
+        "unknown_verdicts": unknown,
         "known_rows": [{"id": f["id"], "issue": f["verdict"].get("issue")} for f in known],
         "hypothesis_rows": [{"id": h["id"], "finder": h["finder"], "scenario": h.get("scenario", "")} for h in hypotheses],
         "seed_rows": seed_rows, "interaction_candidates": interaction_candidates,
@@ -208,19 +233,31 @@ def split_text(m):
     return f" ({'; '.join(parts)})" if parts else ""
 
 
+def exact_line(m):
+    """The record's `exact:` header line: recall, precision, strict precision and fell rate as the fractions
+    they are (`n/a` over an empty denominator). stop_check.py judges the thresholds on these and not on the
+    two-decimal figures of the summary line (#1288), and refuses a record whose fractions disagree with them."""
+    return "exact: " + ", ".join(f"{k} {f'{n}/{d}' if d else 'n/a'}" for k, (n, d) in m["exact"].items())
+
+
 COVERAGE_GATE = 0.90
 
 
 def coverage_line(cov):
     """The record's coverage header line from coverage.py --out's JSON: the minimum over finders (a missing
     ledger scores 0.00, as coverage.py scores it) and how many finders reached the 0.90 gate the stopping
-    criteria read, whatever threshold the coverage run itself used."""
+    criteria read, whatever threshold the coverage run itself used. The minimum is the printed figure; the count
+    is judged on each finder's exact read/units (coverage.py's at_gate), never on its three-decimal coverage:
+    188 of 209 units is 0.89952, written 0.9, and is not at the gate."""
     rows = cov.get("rows") if isinstance(cov, dict) else None
-    if not rows or not all(isinstance(r, dict) and "finder" in r and "coverage" in r for r in rows):
+    if not rows or not all(isinstance(r, dict) and "finder" in r and "coverage" in r
+                           and isinstance(r.get("units"), int) and isinstance(r.get("read"), int) for r in rows):
         raise ValueError("--coverage must be coverage.py --out's JSON: {\"threshold\": t, \"rows\": [{\"finder\": ..., "
-                         "\"coverage\": ...}, ...]} with at least one row")
+                         "\"units\": n, \"read\": k, \"coverage\": ...}, ...]} with at least one row")
     vals = [0.0 if r.get("ledger") == "missing" else float(r["coverage"]) for r in rows]
-    at = sum(1 for v in vals if round(v, 3) >= COVERAGE_GATE)
+    exact = [Fraction(0) if r.get("ledger") == "missing" else (Fraction(r["read"], r["units"]) if r["units"] else Fraction(1))
+             for r in rows]
+    at = sum(1 for v in exact if v >= Fraction(str(COVERAGE_GATE)))
     return f"coverage: {min(vals):.2f} ({at} of {len(vals)} finders at or above {COVERAGE_GATE:.2f})"
 
 
@@ -233,6 +270,7 @@ def record(m, a):
     ] + ([getattr(a, "coverage_line")] if getattr(a, "coverage_line", None) else []) + [
         f"seeds K={m['K']}, recall {fmt(m['recall'])}{split_text(m)}; claims {m['claims']}; findings {m['findings']}; "
         f"precision {fmt(m['precision'])} (strict {fmt(m['precision_strict'])}, fell rate {fmt(m['fell_rate'])})",
+        exact_line(m),
         f"findings by tier: T1 {t[1]} T2 {t[2]} T3 {t[3]} T4 {t[4]} T5 {t[5]}",
         f"cost per finding: {fmt(m['cost_per_finding'], 1)}; per Tier 1 finding: {fmt(m['cost_per_t1'], 1)}",
         f"root causes: {len(m['root_causes'])} distinct verifier root-cause statements behind the findings"
@@ -266,6 +304,10 @@ def record(m, a):
     lines += ["", "## Null results (by lens)", "", "(from the finders' null-results files)", "",
               "## Fell in verification", ""]
     lines += [f"- {r['id']}: {r['reason']}" for r in m["fell_rows"]] or ["none"]
+    lines += ["", "## Unverified (not findings)", ""]
+    lines += [f"- {r['id']}: " + ("no verdict" if r["verdict"] is None else
+                                  f"verdict `{r['verdict']}` is none of `finding`, `fell`, `known_open`")
+              for r in m["unverified_rows"]] or ["none"]
     lines += ["", "## Known and open", ""]
     lines += [f"- {r['id']}: #{r['issue']}" for r in m["known_rows"]] or ["none"]
     lines += ["", "## Hypotheses (not counted)", ""]
@@ -451,6 +493,20 @@ def selftest_coverage_line(m, A):
     assert line == "coverage: 0.86 (2 of 3 finders at or above 0.90)", line
     cov["rows"].append({"finder": "F4", "kind": "sql", "units": 5, "read": 0, "coverage": 0.0, "ledger": "missing"})
     assert coverage_line(cov) == "coverage: 0.00 (2 of 4 finders at or above 0.90)", coverage_line(cov)
+    # the count on the exact read/units: 188 of 209 (0.89952) is written 0.9 by coverage.py and is not at the
+    # gate, while 189 of 210 (exactly 0.9) is; a row without its units and read is refused
+    edge = {"threshold": 0.9, "rows": [
+        {"finder": "F1", "kind": "sql", "units": 40, "read": 40, "coverage": 1.0, "ledger": "present"},
+        {"finder": "F7", "kind": "files", "units": 209, "read": 188, "coverage": round(188 / 209, 3), "ledger": "present"}]}
+    assert edge["rows"][1]["coverage"] == 0.9 and coverage_line(edge) == "coverage: 0.90 (1 of 2 finders at or above 0.90)", \
+        coverage_line(edge)
+    edge["rows"][1].update(units=210, read=189)
+    assert coverage_line(edge) == "coverage: 0.90 (2 of 2 finders at or above 0.90)", coverage_line(edge)
+    try:
+        coverage_line({"rows": [{"finder": "F1", "coverage": 1.0, "ledger": "present"}]})
+        raise AssertionError("accepted a coverage row without units and read")
+    except ValueError:
+        pass
     for bad in ({}, {"rows": []}, {"rows": [{"finder": "F1"}]}, []):
         try:
             coverage_line(bad)
@@ -470,6 +526,69 @@ def selftest_coverage_line(m, A):
     import stop_check
     mm = _re.match(r"^coverage: " + stop_check.NUM + r"\b", line)
     assert mm and stop_check.num(mm.group(1)) == 0.86, line
+
+
+def selftest_exact_and_unverified():
+    """#1289: a candidate with no verdict and one with a verdict string compute() does not know are unverified,
+    never fell: not in the fell rate, not under "Fell in verification", listed under "Unverified (not findings)",
+    and the CLI refuses the unknown string while it accepts the same file without it. #1288: the record's
+    `exact:` line carries the figures as fractions, and stop_check.py reads them in place of the rounded ones."""
+    import os
+    import subprocess
+    import tempfile
+    sealed = {"seeds": [{"id": "S1", "lens": "time", "tier": 1, "mutation": "a"},
+                        {"id": "S2", "lens": "time", "tier": 2, "mutation": "b"}]}
+    classified = {"claims": [
+        {"id": "F1-01", "finder": "F1", "class": "seed_hit", "seed": "S1", "tier": 1},
+        {"id": "F1-02", "finder": "F1", "class": "candidate", "tier": 3, "scenario": "a real finding"},
+        {"id": "F1-03", "finder": "F1", "class": "candidate", "tier": 3, "scenario": "fell for cause"},
+        {"id": "F1-04", "finder": "F1", "class": "candidate", "tier": 2, "scenario": "not yet verified"},
+        {"id": "F2-01", "finder": "F2", "class": "candidate", "tier": 2, "scenario": "a misspelt verdict"}]}
+    verdicts = {"F1-02": {"verdict": "finding", "tier": 3, "root_cause": "r"},
+                "F1-03": {"verdict": "fell", "reason": "documented"},
+                "F2-01": {"verdict": "known-open", "issue": 439}}
+    m = compute(sealed, classified, verdicts)
+    assert [r["id"] for r in m["fell_rows"]] == ["F1-03"] and m["fell"] == 1, m["fell_rows"]
+    assert m["unverified_rows"] == [{"id": "F1-04", "verdict": None}, {"id": "F2-01", "verdict": "known-open"}], m
+    assert m["unverified"] == 2 and m["unknown_verdicts"] == [{"id": "F2-01", "verdict": "known-open"}], m
+    assert m["claims"] == 5 and abs(m["fell_rate"] - 1 / 5) < 1e-9 and m["known_open"] == 0, m
+    assert m["exact"] == {"recall": (1, 2), "precision": (2, 5), "strict": (2, 5), "fell rate": (1, 5)}, m["exact"]
+
+    class A:
+        pass_n, date, pinned, release = 13, "2026-10-14", "abc", "0.7.0"
+        budget, lenses, previous_lenses, capture_recapture = "", "time", "none", "not attempted"
+        root_cause_groups, root_causes_file, notes_file = None, None, None
+    rec = record(m, A)
+    lines = rec.split("\n")
+    assert lines[4].startswith("seeds K=2, recall 0.50;") and "precision 0.40 (strict 0.40, fell rate 0.20)" in lines[4], lines[:6]
+    assert lines[5] == "exact: recall 1/2, precision 2/5, strict 2/5, fell rate 1/5", lines[5]
+    fell_sec = rec.split("## Fell in verification\n", 1)[1].split("\n## ", 1)[0]
+    assert fell_sec.strip() == "- F1-03: documented", fell_sec
+    unv_sec = rec.split("## Unverified (not findings)\n", 1)[1].split("\n## ", 1)[0]
+    assert unv_sec.strip() == ("- F1-04: no verdict\n- F2-01: verdict `known-open` is none of `finding`, `fell`, "
+                               "`known_open`"), unv_sec
+    # no claims at all: every fraction reads n/a
+    empty = compute({"seeds": []}, {"claims": []}, {})
+    assert exact_line(empty) == "exact: recall n/a, precision n/a, strict n/a, fell rate n/a", exact_line(empty)
+    # the CLI: the unknown string is refused (exit 2) and no record is written; corrected, the record is written
+    with tempfile.TemporaryDirectory() as d:
+        files = {}
+        for name, obj in (("sealed", sealed), ("classified", classified), ("verdicts", verdicts)):
+            files[name] = os.path.join(d, name + ".json")
+            with open(files[name], "w") as fh:
+                json.dump(obj, fh)
+        out = os.path.join(d, "record.md")
+        cmd = [sys.executable, os.path.abspath(__file__), "--sealed", files["sealed"], "--classified", files["classified"],
+               "--verdicts", files["verdicts"], "--pass", "13", "--date", "2026-10-14", "--pinned", "abc", "--out", out]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        assert r.returncode == 2 and "F2-01 'known-open'" in r.stderr and not os.path.exists(out), (r.returncode, r.stderr)
+        verdicts["F2-01"] = {"verdict": "known_open", "issue": 439}
+        with open(files["verdicts"], "w") as fh:
+            json.dump(verdicts, fh)
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        assert r.returncode == 0 and os.path.exists(out), (r.returncode, r.stderr)
+        with open(out) as fh:
+            assert "exact: recall 1/2, precision 3/5, strict 2/5, fell rate 1/5\n" in fh.read()
 
 
 def selftest():
@@ -522,6 +641,7 @@ def selftest():
     selftest_suite_split()
     selftest_late_survivor_and_age()
     selftest_coverage_line(m, A)
+    selftest_exact_and_unverified()
     print("pass_metrics selftest: PASS")
     return 0
 
@@ -569,6 +689,9 @@ def main():
         print("WARNING: no --coverage, so the record has no coverage line and stop_check.py reads coverage as "
               "unknown (NOT met)", file=sys.stderr)
     m = compute(sealed, classified, verdicts, a.budget_units, ages=ages)
+    if m["unknown_verdicts"]:
+        ap.error("--verdicts holds a verdict that is none of finding, fell, known_open (a typo is not a fall, #1289): "
+                 + ", ".join(f"{u['id']} {u['verdict']!r}" for u in m["unknown_verdicts"]))
     print(f"seeds K={m['K']}  recall {fmt(m['recall'])}{split_text(m)}  precision {fmt(m['precision'])} "
           f"(strict {fmt(m['precision_strict'])}, fell rate {fmt(m['fell_rate'])})   (read these first)")
     if not m["late_survivor_split"]:

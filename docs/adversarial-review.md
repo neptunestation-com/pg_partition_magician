@@ -495,6 +495,7 @@ One file per pass, committed under `docs/reviews/` as `YYYY-MM-DD.md`, in this s
 pinned: <sha> (<release>) | budget: <finders> x <hours or tokens>, <wall-clock>
 lenses: <list> | previous pass lenses: <list>
 seeds K=<n>, recall <r> (suite-caught <a>/<b>, read-caught <c>/<d>; late-survivor <e>/<f>); claims <c>; findings <f>; precision <p> (strict <s>, fell rate <e>)
+exact: recall <a>/<b>, precision <c>/<d>, strict <e>/<f>, fell rate <g>/<h>
 findings by tier: T1 <n> T2 <n> T3 <n> T4 <n> T5 <n>
 cost per finding: <x>; per Tier 1 finding: <y>
 root causes: <n> behind the findings, <m> closed as a class by the fix phase

@@ -31,8 +31,13 @@ NOT met where a criterion needs it, and is printed as unknown.
 Record header lines read (pass_metrics.py writes them; anything in parentheses after the recall is optional):
   lenses: <list> | previous pass lenses: <list>
   seeds K=<n>, recall <r> (suite-caught a/b, read-caught c/d; late-survivor e/f); ... precision <p> (strict <s>, fell rate <e>)
+  exact: recall a/b, precision c/d, strict e/f, fell rate g/h   (from pass 13 on; each fraction must round to its figure)
   findings by tier: T1 <n> T2 <n> ...
   coverage: <min over finders> (<n> of <m> finders at or above 0.90)   (optional; pass_metrics.py --coverage)
+The thresholds are judged on exact values, never on a two-decimal figure (#1288: 16/23 = 0.696 prints 0.70):
+recall, precision and fell rate on the `exact:` fractions (a record of pass 13 or later without the line reads
+them as unknown; an earlier record is read on its figures, the only thing it states), the read-caught and
+late-survivor recall on their own counts, and the coverage gate on the count of finders at 0.90, all of them.
   capture-recapture (T1): <prose with `estimate <x>[, found <y>]`, or `not attempted`, or `not computable`>
 and the `## Stopping criteria status` rows `- <criterion>: met|NOT met`, where a row naming coverage stands
 in for the coverage line when the header has none.
@@ -53,6 +58,8 @@ import decisions_queue  # noqa: E402
 CEILING = 13
 BUDGET = 27_000_000
 LATE_SURVIVOR_FROM = 12
+EXACT_FROM = 13  # the first pass whose record pass_metrics.py writes with the `exact:` line (#1288)
+FRAC = r"(\d+/\d+|n/a)"
 CYCLE_SIZE = 5  # lenses per pass besides fresh surface
 FRESH = "fresh surface"
 NUM = r"([0-9]*\.?[0-9]+|n/a)"
@@ -203,6 +210,33 @@ def record(path, lenses):
         raise ParseError(f"{where}: no `precision <p>` in the header")
     r["precision"], r["strict"], r["fell"] = num(m.group(1)), num(m.group(2)), num(m.group(3))
 
+    # The thresholds are judged on the record's `exact:` fractions, never on the two-decimal figures above: 16/23
+    # = 0.696 prints 0.70, and 0.70 >= 0.7 (#1288). Each fraction must round to its figure. From EXACT_FROM on a
+    # record without the line states none of the four, so they read unknown (NOT met); before it, the figures
+    # are all a record has, and they are read as they are.
+    ln = line("exact: ")
+    if ln is not None:
+        m = re.match(r"^exact: recall " + FRAC + r", precision " + FRAC + r", strict " + FRAC + r", fell rate "
+                     + FRAC + r"\s*$", ln)
+        if not m:
+            raise ParseError(f"{where}: `exact:` line not of the shape `exact: recall a/b, precision c/d, strict e/f, "
+                             f"fell rate g/h`: {ln!r}")
+        exact = {}
+        for key, figure, spelled in zip(("recall", "precision", "strict", "fell"),
+                                        (r["recall"], r["precision"], r["strict"], r["fell"]), m.groups()):
+            v = None if spelled == "n/a" else frac(*spelled.split("/"))
+            if (v is None) != (figure is None) or (v is not None and abs(v - figure) > 0.005 + 1e-9):
+                raise ParseError(f"{where}: the exact {key} {spelled} disagrees with the record's figure "
+                                 f"{'n/a' if figure is None else figure}")
+            exact[key] = v
+        r["recall"], r["precision"], r["strict"], r["fell"] = (exact["recall"], exact["precision"], exact["strict"],
+                                                                exact["fell"])
+        r["exact"] = True
+    else:
+        r["exact"] = False
+        if n >= EXACT_FROM:
+            r["recall"] = r["precision"] = r["strict"] = r["fell"] = None
+
     ln = line("findings by tier: ")
     m = ln and re.match(r"^findings by tier: T1 (\d+)\b", ln)
     if not m:
@@ -222,10 +256,18 @@ def record(path, lenses):
             status.append((mm.group(1), mm.group(2) == "met"))
     r["status"] = status
     if ln is not None:
-        m = re.match(r"^coverage: " + NUM + r"\b", ln)
+        # The gate is judged on the count of finders at it, which pass_metrics.py takes from the unrounded
+        # values; the minimum is printed to two decimals, and a finder at 26/29 = 0.897 prints 0.90 (#1288).
+        m = re.match(r"^coverage: " + NUM + r" \((\d+) of (\d+) finders at or above 0\.90\)", ln)
         if not m:
-            raise ParseError(f"{where}: `coverage:` line without a figure: {ln!r}")
+            raise ParseError(f"{where}: `coverage:` line without a figure and its finder count "
+                             f"(`coverage: <min> (<n> of <m> finders at or above 0.90)`): {ln!r}")
         r["coverage"], r["coverage_from"] = num(m.group(1)), "header"
+        r["coverage_at"], r["coverage_of"] = int(m.group(2)), int(m.group(3))
+        if r["coverage_at"] > r["coverage_of"] or r["coverage"] is None or (
+                r["coverage_at"] == r["coverage_of"] and r["coverage"] < 0.895) or (
+                r["coverage_at"] < r["coverage_of"] and r["coverage"] > 0.9 + 1e-9):
+            raise ParseError(f"{where}: the coverage line's minimum and its count of finders at 0.90 disagree: {ln!r}")
     else:
         rows = [ok for name, ok in status if "coverage" in name.lower()]
         r["coverage"] = None
@@ -237,7 +279,7 @@ def record(path, lenses):
 
 def coverage_ok(r):
     if r["coverage_from"] == "header":
-        return r["coverage"] is not None and r["coverage"] >= 0.9
+        return r["coverage_of"] > 0 and r["coverage_at"] == r["coverage_of"]
     if r["coverage_from"].startswith("status rows"):
         return r["coverage_from"] == "status rows: met"
     return False
@@ -245,7 +287,7 @@ def coverage_ok(r):
 
 def coverage_text(r):
     if r["coverage_from"] == "header":
-        return "n/a" if r["coverage"] is None else f"{r['coverage']:.2f}"
+        return f"{r['coverage']:.2f} ({r['coverage_at']} of {r['coverage_of']} finders at 0.90)"
     return r["coverage_from"]
 
 
@@ -489,10 +531,20 @@ B5 = "operator error, failure injection, contracts versus documentation, tests t
 CR_ZERO = "attempted on the two duplicated slices: S8 opus 0 Tier 1, fable 0, estimate 0 on both"
 
 
-def synth(d, passes, history_t1=None, capture_text=None):
+def synth_exact(prec):
+    """The `exact:` line pass_metrics.py would write beside a summary tail like "precision 0.95 (strict 0.80,
+    fell rate 0.05)": each figure over 100 (a figure the tail does not state is n/a), recall 9/9."""
+    def f(label):
+        m = re.search(r"\b" + label + r" ([0-9.]+)", prec)
+        return f"{round(float(m.group(1)) * 100)}/100" if m else "n/a"
+    return f"exact: recall 9/9, precision {f('precision')}, strict {f('strict')}, fell rate {f('fell rate')}"
+
+
+def synth(d, passes, history_t1=None, capture_text=None, exact=None):
     """Write a method document and records for `passes`: [(n, t1, lenses, seeds_paren, precision_tail, coverage,
     status_rows)]; `capture_text` maps a pass to its capture-recapture line (default: an estimate of zero), and
-    a pass mapped to None has no such line."""
+    a pass mapped to None has no such line; `exact` maps a pass to its `exact:` line (default: synth_exact's),
+    None for none."""
     rows = ["| 1 | 2026-09-24 | `aaaaaaa` | 76 (25 filed as T1) | ~106 | not measured | none | baseline |"]
     os.makedirs(os.path.join(d, "reviews"), exist_ok=True)
     for (n, t1, lenses, paren, prec, cov, status) in passes:
@@ -501,9 +553,13 @@ def synth(d, passes, history_t1=None, capture_text=None):
         head = [f"# Review pass {n}: 2026-10-{n:02d}", "", "pinned: `bbbbbbb` | budget: x",
                 f"lenses: fresh surface, {lenses} | previous pass lenses: fresh surface, x (the same, by decision)"]
         if cov is not None:  # pass_metrics.py --coverage's exact spelling, right after the lenses line
-            head.append(f"coverage: {cov} (12 of 13 finders at or above 0.90)")
-        head += [f"seeds K=9, recall 1.00{paren}; claims 70; findings 30; {prec}",
-                 f"findings by tier: T1 {t1} T2 1 T3 2 T4 0 T5 3"]
+            at = 13 if float(cov) >= 0.9 else 12
+            head.append(f"coverage: {cov} ({at} of 13 finders at or above 0.90)")
+        head += [f"seeds K=9, recall 1.00{paren}; claims 70; findings 30; {prec}"]
+        ex = (exact or {}).get(n, synth_exact(prec))
+        if ex is not None:
+            head.append(ex)
+        head += [f"findings by tier: T1 {t1} T2 1 T3 2 T4 0 T5 3"]
         cr = (capture_text or {}).get(n, CR_ZERO)
         if cr is not None:
             head.append(f"capture-recapture (T1): {cr}")
@@ -664,6 +720,86 @@ def selftest():
         h, r = case("covline", [ok12, ok13])
         assert load(h, r)[2][13]["coverage"] == 0.93 and load(h, r)[2][13]["coverage_from"] == "header"
 
+        # #1288: the thresholds on exact values. pass_metrics.py's own record of a pass at 16/23 (0.696, printed
+        # 0.70) and fell 7/23 (0.304, printed 0.30), with a finder at 26/29 (0.897, printed 0.90): every one NOT
+        # met; the same records at 17/23, 6/23 and 27/29 converge, so the NOT met is the figures', not a parse's
+        import pass_metrics
+
+        def pm_record(n, lenses, found, read, units=29):
+            sealed = {"seeds": [{"id": f"S{i}", "lens": "x", "tier": 2, "mutation": f"m{i}", "suite_caught": [],
+                                 **({"late_survivor": {"issue": 1000 + i, "passes_survived": 6}} if i <= 3 else {})}
+                                for i in range(1, 10)]}
+            claims = [{"id": f"F1-{i:02d}", "finder": "F1", "class": "seed_hit", "seed": f"S{i}", "tier": 2}
+                      for i in range(1, 10)]
+            claims += [{"id": f"F2-{i:02d}", "finder": "F2", "class": "candidate", "tier": 3, "scenario": "s"}
+                       for i in range(1, 15)]
+            verdicts = {f"F2-{i:02d}": ({"verdict": "finding", "tier": 3} if i <= found else
+                                        {"verdict": "fell", "reason": "r"}) for i in range(1, 15)}
+            m = pass_metrics.compute(sealed, {"claims": claims}, verdicts)
+            cov = {"rows": [{"finder": "F1", "units": 40, "read": 40, "coverage": 1.0, "ledger": "present"},
+                            {"finder": "F2", "units": units, "read": read, "coverage": round(read / units, 3),
+                             "ledger": "present"}]}
+
+            class A:
+                pass_n, date, pinned, release, budget = n, f"2026-10-{n:02d}", "abc1234", "x", "x"
+                previous_lenses, capture_recapture = "fresh surface", CR_ZERO
+                root_cause_groups, root_causes_file, notes_file = None, None, None
+                coverage_line = pass_metrics.coverage_line(cov)
+            A.lenses = "fresh surface, " + lenses
+            return pass_metrics.record(m, A)
+
+        def pm_case(name, found, read, units=29):
+            d = os.path.join(root, name)
+            h, r = synth(d, [(12, 0, A5, split, good_prec, "0.93", None), (13, 0, B5, split, good_prec, "0.93", None)])
+            for n, lenses in ((12, A5), (13, B5)):
+                with open(os.path.join(r, f"2026-10-{n:02d}.md"), "w") as f:
+                    f.write(pm_record(n, lenses, found, read, units))
+            return run(h, r, extended_through=14), load(h, r)[2]
+
+        v, recs = pm_case("pm_edge", 7, 26)
+        head = open(os.path.join(root, "pm_edge", "reviews", "2026-10-13.md")).read()
+        assert "precision 0.70 (strict 0.70, fell rate 0.30)" in head and "coverage: 0.90 (1 of 2" in head, head[:600]
+        assert abs(recs[13]["precision"] - 16 / 23) < 1e-9 and abs(recs[13]["fell"] - 7 / 23) < 1e-9, recs[13]
+        b = v["criteria"]["b"]["checks"]
+        assert b["precision >= 0.7"]["met"] is False and b["fell rate <= 0.3"]["met"] is False, b
+        assert not any(p["qualifies"] for p in v["criteria"]["a"]["passes"].values()), v["criteria"]["a"]
+        assert v["verdict"] == "continue" and "pass 13 coverage 0.90 (1 of 2 finders at 0.90)" in v["reason"], v["reason"]
+        v, recs = pm_case("pm_clear", 8, 27)
+        assert v["verdict"] == "stop" and v["reason"].startswith("converged"), v["lines"]
+        # each lever alone: the edge precision with clear coverage fails (b) only; the edge coverage alone (a) only
+        v, _ = pm_case("pm_prec", 7, 27)
+        assert v["criteria"]["a"]["met"] and not v["criteria"]["b"]["met"], v["lines"]
+        v, _ = pm_case("pm_cov", 8, 26)
+        assert not v["criteria"]["a"]["met"] and v["criteria"]["b"]["met"], v["lines"]
+        # the count beneath the line is exact too: 188 of 209 (0.89952) is written 0.900 by coverage.py and does
+        # not qualify; 189 of 210 (exactly 0.9) does
+        v, _ = pm_case("pm_cov_rounded", 8, 188, 209)
+        assert not v["criteria"]["a"]["met"] and v["criteria"]["b"]["met"], v["lines"]
+        v, _ = pm_case("pm_cov_exact", 8, 189, 210)
+        assert v["reason"].startswith("converged"), v["lines"]
+        # a record of pass 13 without the exact line states no exact figure: unknown, NOT met; pass 12's figures stand
+        h, r = case("noexact", [ok12, ok13], exact={12: None, 13: None})
+        v = run(h, r, extended_through=14)
+        assert v["criteria"]["b"]["checks"]["precision >= 0.7"]["values"] == {"12": 0.95, "13": None}, v["criteria"]["b"]
+        assert v["verdict"] == "continue" and "precision >= 0.7" in v["reason"], v["reason"]
+        # an exact fraction that does not round to its figure, a malformed exact line, a coverage line without its
+        # count or whose count contradicts its minimum: parse errors
+        for name, kw, edit in (
+                ("exact_off", {"exact": {13: "exact: recall 9/9, precision 16/23, strict 80/100, fell rate 5/100"}}, None),
+                ("exact_shape", {"exact": {13: "exact: precision 95/100"}}, None),
+                ("cov_nocount", {}, ("coverage: 0.93 (13 of 13 finders at or above 0.90)", "coverage: 0.93")),
+                ("cov_all_low", {}, ("coverage: 0.93 (13 of 13 finders", "coverage: 0.86 (13 of 13 finders")),
+                ("cov_some_high", {}, ("coverage: 0.93 (13 of 13 finders", "coverage: 0.93 (12 of 13 finders"))):
+            h, r = case(name, [ok12, ok13], **kw)
+            if edit:
+                p13 = os.path.join(r, "2026-10-13.md")
+                with open(p13) as f:
+                    body = f.read()
+                assert edit[0] in body, (name, body[:400])
+                with open(p13, "w") as f:
+                    f.write(body.replace(edit[0], edit[1]))
+            expect_parse_error(lambda: run(h, r, extended_through=14), name)
+
         # parse errors: never a silent default
         h, r = case("cr_prose", [ok12, ok13], capture_text={13: "both finders agreed, nothing left"})
         expect_parse_error(lambda: run(h, r), "a capture-recapture line that is none of the three readings")
@@ -731,7 +867,8 @@ def selftest():
     assert latest["verdict"] in ("continue", "stop") and latest["pass"] == max(rows), latest
     print("stop_check selftest: PASS (converged, Tier 1, repeated lenses, coverage header/status rows/unknown, "
           "each (b) check alone, read-caught over overall, late-survivor before and from pass 12, ceiling and "
-          "--extended-through, budget, blocking decision, criterion 4 on an estimate and over three passes, parse errors, CLI exits and JSON; the repository's "
+          "--extended-through, budget, blocking decision, criterion 4 on an estimate and over three passes, the thresholds on "
+          "the exact fractions and the coverage count (#1288), parse errors, CLI exits and JSON; the repository's "
           "passes 2 to 11)")
     print("  real history: " + real["lines"][-1])
 

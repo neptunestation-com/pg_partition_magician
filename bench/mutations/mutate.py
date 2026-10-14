@@ -14139,6 +14139,105 @@ MUTATIONS["hypertable_cutover_older_copy_key_index_takes_any"] = (
 )
 MUTATION_SRC["hypertable_cutover_older_copy_key_index_takes_any"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_cutover_older_copy_key_index_takes_any"] = "timescale"
+# #1288, #1289, #1290: the review loop's judging scripts, each put back to the reading it was found making.
+MUTATIONS["stop_check_precision_on_rounded_figure"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Pre-#1288 stop_check.py: the record's `exact:` fractions are parsed and checked against the figures but "
+    "not used, so recall, precision and fell rate are judged on the two-decimal figures again and a pass at "
+    "16/23 = 0.696 precision and 7/23 = 0.304 fell rate reads 0.70 >= 0.7 and 0.30 <= 0.3, met. One clause, "
+    "the assignment of the exact values. The guard's (a) catches it (precision and fell rate NOT met at the "
+    "edge; the 17/23 control converges).",
+    [('        r["recall"], r["precision"], r["strict"], r["fell"] = (exact["recall"], exact["precision"], exact["strict"],\n'
+      '                                                                exact["fell"])\n',
+      '        r["recall"], r["precision"], r["strict"], r["fell"] = (r["recall"], r["precision"], r["strict"],\n'
+      '                                                                r["fell"])\n', 1)],
+)
+MUTATION_SRC["stop_check_precision_on_rounded_figure"] = "scripts/review/stop_check.py"
+MUTATIONS["stop_check_coverage_on_rounded_minimum"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Pre-#1288 stop_check.py's coverage gate: judged on the coverage line's two-decimal minimum instead of its "
+    "count of finders at 0.90, so a finder at 26/29 = 0.897, printed 0.90, reads as at the gate and the pass "
+    "qualifies for the lens cycle. One clause, coverage_ok's header branch. The guard's (a) catches it.",
+    [('        return r["coverage_of"] > 0 and r["coverage_at"] == r["coverage_of"]\n',
+      '        return r["coverage"] is not None and r["coverage"] >= 0.9\n', 1)],
+)
+MUTATION_SRC["stop_check_coverage_on_rounded_minimum"] = "scripts/review/stop_check.py"
+MUTATIONS["pass_metrics_coverage_count_on_rounded"] = (
+    "bench/review_tooling_verdicts.sh",
+    "#1288 beneath the coverage line: pass_metrics.coverage_line counts a finder at the 0.90 gate on the "
+    "three-decimal coverage coverage.py writes, so a finder at 188 of 209 units (0.89952, written 0.9) is "
+    "counted at the gate and stop_check.py, which judges on that count, qualifies the pass. One clause, the "
+    "count. The guard's (a) catches it (1 of 2 finders, the pass does not qualify).",
+    [('    at = sum(1 for v in exact if v >= Fraction(str(COVERAGE_GATE)))\n',
+      '    at = sum(1 for v in vals if round(v, 3) >= COVERAGE_GATE)\n', 1)],
+)
+MUTATION_SRC["pass_metrics_coverage_count_on_rounded"] = "scripts/review/pass_metrics.py"
+MUTATIONS["coverage_gate_on_rounded_figure"] = (
+    "bench/review_tooling_verdicts.sh",
+    "coverage.py's own gate on its three-decimal coverage: a slice at 188 of 209 units (0.89952) is written 0.9 "
+    "and passes a 0.9 threshold, so the coordinator is not told to re-run or split it. One clause, at_gate's "
+    "comparison. The guard's (a) catches it (BELOW 0.9 for 188/209).",
+    [('    return exact >= Fraction(str(threshold))\n',
+      "    return row['coverage'] >= threshold\n", 1)],
+)
+MUTATION_SRC["coverage_gate_on_rounded_figure"] = "scripts/review/coverage.py"
+MUTATIONS["pass_metrics_unverified_reads_fell"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Pre-#1289 pass_metrics.py: a candidate with no verdict, or with a verdict string none of finding, fell, "
+    "known_open (a \"known-open\" typo), is routed to fell, listed under Fell in verification and counted in "
+    "the fell rate the stopping criteria read, and nothing is left for the CLI to refuse. One clause, the "
+    "bucket's default. The guard's (b) catches it (fell rows, the fell rate, the record's sections, the CLI).",
+    [('        bucket = {"finding": findings, "fell": fell, "known_open": known}.get(v.get("verdict"))\n',
+      '        bucket = {"finding": findings, "fell": fell, "known_open": known}.get(v.get("verdict"), fell)\n', 1)],
+)
+MUTATION_SRC["pass_metrics_unverified_reads_fell"] = "scripts/review/pass_metrics.py"
+MUTATIONS["decisions_queue_skips_malformed_line"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Pre-#1290 decisions_queue.parse(): every line not starting with the three characters `- D` is skipped, "
+    "so a BLOCKING entry written indented, under a `*` bullet or with a lower-case id is neither read nor "
+    "refused, `pending` exits 0 and stop_check.py lets the loop go on. One clause, the skip. The guard's (c) "
+    "catches it (each variant refused, exit 2; the exact shape still blocks and the header still parses).",
+    [('        if loop is None and not ENTRY_LIKE.search(ln):\n',
+      '        if not ln.startswith("- D"):\n', 1)],
+)
+MUTATION_SRC["decisions_queue_skips_malformed_line"] = "scripts/review/decisions_queue.py"
+MUTATIONS["decisions_queue_pipe_only_at_line_start"] = (
+    "bench/review_tooling_verdicts.sh",
+    "#1290's refusal with the entry-like pattern matched at position zero instead of searched: its `|` "
+    "alternative carries no `^` of its own, so above the first loop heading a line such as `Pending | BLOCKING "
+    "| cut release` is taken for header prose and skipped, `pending` exits 0 and the loop goes on (the "
+    "codex review thread on #1322). One clause, search back to match. The guard's (c) catches it.",
+    [('        if loop is None and not ENTRY_LIKE.search(ln):\n',
+      '        if loop is None and not ENTRY_LIKE.match(ln):\n', 1)],
+)
+MUTATION_SRC["decisions_queue_pipe_only_at_line_start"] = "scripts/review/decisions_queue.py"
+MUTATIONS["land_stall_counts_existing_summaries"] = (
+    "bench/review_tooling_verdicts.sh",
+    "land.sh's stall detector before 2026-10-14: a required summary with no check-run on the merge group's "
+    "commit reads as green, so a group whose Perf shards are still running (no Perf summary check-run yet) "
+    "reads every summary green once Test and Lint are, and LAND_STALL_MIN later the healthy group is dequeued "
+    "and enqueued again. One clause, the per-summary `length > 0`. The guard's (d) catches it.",
+    [("(length > 0) and all(.status", "all(.status", 1)],
+)
+MUTATION_SRC["land_stall_counts_existing_summaries"] = "scripts/review/land.sh"
+MUTATIONS["flake_check_log_without_escape_flag"] = (
+    "bench/review_tooling_verdicts.sh",
+    "flake_check.sh before 2026-10-14: the job log is read with a bare `gh api .../logs`, which gh 2.100 "
+    "refuses to print when the body holds terminal escape sequences, so on such a machine no log reads and "
+    "no signature can match. One clause, the flag's detection. The guard's (e) catches it (the restore_fk_lock "
+    "flake not recognised under gh 2.100).",
+    [('case "$(gh api --help 2>/dev/null)" in *--allow-escape-sequences*) LOG_FLAG=(--allow-escape-sequences);; esac\n',
+      '', 1)],
+)
+MUTATION_SRC["flake_check_log_without_escape_flag"] = "scripts/review/flake_check.sh"
+MUTATIONS["flake_check_empty_log_reads_unknown"] = (
+    "bench/review_tooling_verdicts.sh",
+    "flake_check.sh before 2026-10-14: a log that could not be read falls through every signature to UNKNOWN, "
+    "so an unreadable log is indistinguishable from a real unknown failure. One clause, the empty-log branch. "
+    "The guard's (e) catches it (an empty log says it could not be read, exit 3).",
+    [("  if ! grep -q '[^[:space:]]' <<<\"$log\"; then\n", '  if false; then\n', 1)],
+)
+MUTATION_SRC["flake_check_empty_log_reads_unknown"] = "scripts/review/flake_check.sh"
 
 
 # Issue #1272: the remedy every retain_disown row logs (pgpm._disown_retirement, its one writer) is the whole repair the
