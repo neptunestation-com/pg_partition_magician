@@ -39,7 +39,11 @@ fragments; never prefix-match `pgpm.log.action`; `throws_*` pinned around commit
    settings (DateStyle, TimeZone, abbreviations, collation); and the discriminate install check when
    your mutation targets a module on a track that did not carry that module before. Pass 3 lost five
    landings to exactly these.
-5. Docs: `CHANGELOG.md` gets one bullet in the file's style; `docs/reference.md` or `docs/guide.md` when
+5. Size (docs/adversarial-review.md, "Size budget"): compute the net minified delta of each install file
+   your diff touches with the loop in that section. The PR body gets a `Size:` line with all three. Past
+   +4,700 characters in the core, or when yours is the third fix to a mechanism, follow the section:
+   a `Why this size:` paragraph, or the shared mechanism, or a `repeat site` adjacent observation.
+6. Docs: `CHANGELOG.md` gets one bullet in the file's style; `docs/reference.md` or `docs/guide.md` when
    a contract or a log action changed (`scripts/check_living_docs.sh` will tell you). No em dashes.
 
 ## What you must not do
@@ -60,7 +64,7 @@ names; pass 3 landed two PRs with another), push your branch, and open the PR wi
 changes and exactly what it guarantees (which sites it covers), `Closes #<issue>` for a whole issue or
 `Addresses #<issue> (bullet k)` for one bullet of an issue with others still open (GitHub's closing-keyword
 parser ignores the qualifier, so `Fixes #N bullet 3` closes all of N; #1035), the acceptance (test file,
-guard, mutation) and any caveat about the issue's reproduction, ending with
+guard, mutation), the `Size:` line and any caveat about the issue's reproduction, ending with
 `🤖 Generated with [Claude Code](https://claude.com/claude-code)`. The PR is adversarially verified before
 it lands (`/pr-verify`): the issue's reproduction is re-run on the base, your head and your mutant, and a
 finder reviews the units you touched and their callers, so a body that overstates what the fix covers is a
