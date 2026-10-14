@@ -42,6 +42,9 @@
 #   quoted_splices_paren_branch_skipped  -- a set operation's parenthesised branch is not read (V-01)
 #   quoted_splices_format_template_unrendered -- a format() template's `%%` is not read as `%` (V-02)
 #   quoted_splices_label_target_unread   -- a target qualified by its block's label is not read (V-05)
+# and from round 3:
+#   quoted_splices_exec_wrapped_unread   -- parentheses or a trailing cast hide an EXECUTE's statement (V-01)
+#   quoted_splices_into_crosses_loop     -- an EXECUTE's INTO inside a loop is paired with the loop's SELECT (V-02)
 # Each round-2 negative (an unreadable statement must not be refused) has a liveness twin: check 2 refuses
 # the same body's `_q` local given a plain literal.
 #
@@ -198,6 +201,11 @@ SHAPES = [
      f"for blk.v_cols in select {QI} loop null; end loop;", "$$", "", "<<blk>>\n"),
     ("g20_label_exec", "an EXECUTE INTO target qualified by its block's label", "v_cols text",
      "execute 'select quote_ident(''Foo Bar'')' into blk.v_cols;", "$$", "", "<<blk>>\n"),
+    # round 3 (V-01): parentheses and a trailing cast around an EXECUTE's statement change nothing
+    ("g20_exec_paren", "an EXECUTE INTO target of a parenthesised literal", "v_cols text",
+     "execute ('select quote_ident(''Foo Bar'')') into v_cols;", "$$", ""),
+    ("g20_exec_cast", "an EXECUTE INTO target of a format() cast to text", "v_cols text",
+     "execute format('select quote_ident(%L)', 'Foo Bar')::text into v_cols;", "$$", ""),
     ("g20_label_into", "a SELECT INTO target qualified by its block's label", "v_cols text",
      f"select {QI} into blk.v_cols;", "$$", "", "<<blk>>\n"),
     ("g20_label_assign", "a `:=` target qualified by its block's label", "v_cols text",
@@ -238,6 +246,9 @@ UNREAD = [
     ("g20_un_forx", "for v_cols_q in execute v_sql", SQL_Q + "for v_cols_q in execute v_sql loop null; end loop;", 0),
     ("g20_un_spl", "a template splicing a _q value with %L",
      f"v_cols_q := {QI}; execute format('select %L::text', v_cols_q) into v_cols_q;", 1),
+    # round 3 (V-02): the EXECUTE's INTO is not paired with the enclosing loop's own SELECT
+    ("g20_un_loopx", "execute v_sql into v_cols_q inside a FOR loop",
+     SQL_Q + "for v_i in select 1 loop execute v_sql into v_cols_q; end loop;", 0),
 ]
 lie = FN.format(fn="g20_lie", tag="$$", decl="v_cols_q text; v_sql text", var="v_cols_q",
                 stmt="v_cols_q := 'nothing quoted';", label="")

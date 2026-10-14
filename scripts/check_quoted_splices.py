@@ -54,7 +54,9 @@ is every dollar-quoted string of the file, whatever its tag (`$$`, `$fn$`), foun
 than splitting it on `$$`; a FOR or FOREACH loop's target is assigned the loop's values as an INTO's target
 is (every branch's, a parenthesised one included, when the loop's query is a set operation), and an
 EXECUTE's INTO target the list of the dynamic statement its own expression spells out (literals, or a
-format() template read as format() renders it: `%%` is `%`); a target may be qualified by its block's label
+format() template read as format() renders it: `%%` is `%`; parentheses around the expression and a cast
+at its end set aside), never the list of a SELECT before the EXECUTE, such as an enclosing FOR loop's
+query; a target may be qualified by its block's label
 (`blk.v_cols`); and a body is lexed for `/* block */` comments as well as `-- line` ones, for an escape
 string's backslash (`E'it\\'s'` is one literal) and for the dollar-quoted strings nested in it (`$q$/tmp/*$q$`
 is a literal, not the start of a comment).
@@ -63,9 +65,10 @@ What is NOT judged, in either direction, because the value is not in the stateme
 FETCH's INTO (the cursor's query is declared or opened somewhere else), an EXECUTE whose statement is not
 spelled out in its own expression (`execute v_sql into v`, or literals concatenated with code), an item of
 a dynamic statement's list that a format() conversion splices in (`format('select %L', x)`) and that does not
-itself quote, a CALL's INOUT argument and a parameter (only DECLAREd locals are typed). A target qualified
-by its label is read as the local it names, so a record's field (`r.c`, the same spelling) is read as a
-local `c` would be.
+itself quote, a CALL's INOUT argument and a parameter (only DECLAREd locals are typed). Two more limits: a
+value reaching a query's list through a subquery or CTE (`select * from (select quote_ident(a) ...) s`) is
+not followed, the reach SELECT INTO has always had; and a target qualified by its label is read as the local
+it names, so a record's field (`r.c`, the same spelling) is read as a local `c` would be.
 
   ./scripts/check_quoted_splices.py            # check the module
   ./scripts/check_quoted_splices.py --selftest # prove the checks fail when their defect is present
@@ -458,6 +461,11 @@ def depth0(text: str):
     return out
 
 
+# Where the statement an INTO belongs to can start inside the `;`-delimited text before it: after a loop's
+# head (`... loop select ... into v`) or at an EXECUTE, whose INTO is its own.
+INTO_BOUNDARY = re.compile(r"(?is)(?<![\w$])(?:loop|execute)(?![\w$])")
+
+
 def select_into(clean: str):
     """Yield (target, expression, offset) for the INTO clause of every statement, in any of the places
     PL/pgSQL takes it: the value assigned is the list of the last top-level RETURNING or SELECT before the
@@ -465,6 +473,9 @@ def select_into(clean: str):
     select ... loop select ... into v`), read with the INTO clause cut out. Statements are split on `;`,
     which strip_noise has left only between statements; a statement with neither a top-level SELECT nor
     a RETURNING before its INTO (EXECUTE, FETCH, INSERT INTO's own INTO) assigns nothing this check reads.
+    The INTO's own statement starts after the last top-level LOOP or EXECUTE before it: in `for r in select
+    a from t loop execute v_sql into v`, the INTO is the EXECUTE's (execute_into() reads it), and pairing it
+    with the loop's SELECT judged v on a list it is never given (PR #1313, round 3).
     """
     for st in re.finditer(r"[^;]+", clean):
         stmt = st.group(0)
@@ -477,9 +488,10 @@ def select_into(clean: str):
                 continue
             rest = stmt[:m.start()] + " " * (m.end() - m.start()) + stmt[m.end():]
             rtop = depth0(rest)
+            start = max([k.end() for k in INTO_BOUNDARY.finditer(rest, 0, m.start()) if k.start() in rtop], default=0)
             heads = [k for k in re.finditer(
                 r"(?is)(?<![\w$])(?:(?P<ret>returning)|select)(?![\w$])\s*(?:(?:distinct|all)(?![\w$]))?", rest)
-                if k.start() in rtop and k.start() < m.start()]
+                if k.start() in rtop and start <= k.start() < m.start()]
             if not heads:
                 break
             head = heads[-1]
@@ -662,12 +674,37 @@ def rendered(template: str) -> str:
     return FORMAT_SPEC.sub(lambda m: "%" if m.group(0) == "%%" else SPLICED, template)
 
 
+# A cast at the end of an expression: `::text`, `::pg_catalog.text`, `::character varying(200)`.
+CAST_TAIL = re.compile(r"(?is)::\s*(?:" + IDENT + r"\s*\.\s*)?" + IDENT + r"(?:\s+varying)?\s*(?:\(\s*\d+\s*\))?\s*\Z")
+
+
+def unwrapped(clean: str):
+    """The (start, end) of a strip_noise'd expression with surrounding whitespace, a trailing cast and
+    parentheses around the whole of it set aside, as often as they nest (`(('select 1'))::text`)."""
+    lo, hi = len(clean) - len(clean.lstrip()), len(clean.rstrip())
+    while lo < hi:
+        cast = CAST_TAIL.search(clean, lo, hi)
+        if cast and cast.start() > lo:
+            hi = len(clean[:cast.start()].rstrip())
+        elif clean[lo] == "(" and matching_paren(clean, lo) == hi - 1:
+            lo, hi = lo + 1, hi - 1
+            lo, hi = lo + len(clean[lo:hi]) - len(clean[lo:hi].lstrip()), lo + len(clean[lo:hi].rstrip())
+        else:
+            break
+    return lo, hi
+
+
 def dynamic_statement(raw_expr: str):
     """The statement an EXECUTE's expression (raw) spells out, or None when it does not spell one: the text
     of a literal or of literals joined by `||` (literal_text()), or of a format() call's template so built,
     rendered (rendered()). Anything else, a variable (`execute v_sql`), a function's result, literals
-    concatenated with code, puts the statement somewhere this script cannot read."""
+    concatenated with code, puts the statement somewhere this script cannot read. Parentheses around the
+    whole expression and a cast at its end (`execute ('select ...')`, `execute format(...)::text`) change
+    nothing about the statement and are set aside first (unwrapped())."""
     clean = strip_noise(raw_expr)
+    lo, hi = unwrapped(clean)
+    if (lo, hi) != (0, len(clean)):
+        return dynamic_statement(raw_expr[lo:hi])
     whole = re.fullmatch(r"(?s)\s*(" + LITERALS + r")\s*", clean)
     if whole:
         return literal_text(raw_expr)
@@ -953,6 +990,11 @@ SHAPES = {
         "v_cols text", "select quote_ident('c') into blk.v_cols;", "<<blk>>\n"),
     "assigned with `:=` to a target qualified by its block's label": (
         "v_cols text", "blk.v_cols := quote_ident('c');", "<<blk>>\n"),
+    # PR #1313 round 3 (V-01): parentheses and a trailing cast around an EXECUTE's statement change nothing
+    "assigned by EXECUTE of a parenthesised literal": (
+        "v_cols text", "execute ('select quote_ident(''c'')') into v_cols;"),
+    "assigned by EXECUTE of a format() cast to text": (
+        "v_cols text", "execute format('select quote_ident(%L)', 'c')::text into v_cols;"),
 }
 
 
@@ -1077,7 +1119,10 @@ def selftest() -> int:
             ("a FOR ... IN EXECUTE of a statement held in a variable",
              "for v_cols_q in execute v_sql loop null; end loop;"),
             ("an EXECUTE whose list item a format() %L splices in",
-             "execute format('select %L::text', 'x') into v_cols_q;")]:
+             "execute format('select %L::text', 'x') into v_cols_q;"),
+            # round 3 (V-02): select_into() must not pair the EXECUTE's INTO with the loop's own SELECT
+            ("an EXECUTE of a variable inside a FOR loop's statement",
+             "for v_n in select 1 loop execute v_sql into v_cols_q; end loop;")]:
         src = SHAPE_BODY.format(decl="v_cols_q text; v_sql text", stmt=stmt).replace("v_cols,", "v_cols_q,")
         lie = SHAPE_BODY.format(decl="v_cols_q text; v_sql text",
                                 stmt=stmt + " v_cols_q := 'nothing quoted';").replace("v_cols,", "v_cols_q,")

@@ -11541,6 +11541,25 @@ MUTATIONS["quoted_splices_label_target_unread"] = (
     [('TARGET = r"(?:" + IDENT + r"\\s*\\.\\s*)?" + IDENT\n', "TARGET = IDENT\n", 1)],
 )
 MUTATION_SRC["quoted_splices_label_target_unread"] = "scripts/check_quoted_splices.py"
+# PR #1313's verification, round 3 (V-01, V-02).
+MUTATIONS["quoted_splices_exec_wrapped_unread"] = (
+    "bench/quoted_splices_every_body.sh",
+    "scripts/check_quoted_splices.py reading an EXECUTE's expression with its parentheses and trailing cast in "
+    "place: `execute ('select quote_ident(...)') into v_cols` and `execute format(...)::text into v_cols` spell "
+    "no statement it recognises, so their unmarked quoted list passes (V-01). One site, dynamic_statement()'s "
+    "unwrapping.",
+    [("    if (lo, hi) != (0, len(clean)):\n        return dynamic_statement(raw_expr[lo:hi])\n", "", 1)],
+)
+MUTATION_SRC["quoted_splices_exec_wrapped_unread"] = "scripts/check_quoted_splices.py"
+MUTATIONS["quoted_splices_into_crosses_loop"] = (
+    "bench/quoted_splices_every_body.sh",
+    "scripts/check_quoted_splices.py pairing an INTO with any SELECT before it in its `;`-delimited text: in "
+    "`for r in select a from t loop execute v_sql into v_cols_q`, the EXECUTE's INTO is judged on the loop's "
+    "list and check 2 refuses an earned `_q` (V-02). One site, the statement start select_into() reads from.",
+    [("            start = max([k.end() for k in INTO_BOUNDARY.finditer(rest, 0, m.start()) if k.start() in rtop], "
+      "default=0)\n", "            start = 0\n", 1)],
+)
+MUTATION_SRC["quoted_splices_into_crosses_loop"] = "scripts/check_quoted_splices.py"
 MUTATIONS["quoted_splices_scan_in_quoted_names"] = (
     "bench/quoted_splices_every_body.sh",
     "scripts/check_quoted_splices.py reading a loop's structure inside its quoted names: a column aliased "
