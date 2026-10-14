@@ -32,7 +32,7 @@
 #             (#1176): that is bench/discriminate.sh's starved() rule, read out of that script by judge()'s
 #             defect-verdict block; and a file that reached no assertion failed on its fixture, so that line
 #             is printed as a `fixture:` premise (#1177). The defects:
-#               tests/18  this checkout's install.sql with the orphan guard's two raises made unreachable;
+#               tests/18  this checkout's install.sql with the orphan guard's three raises made unreachable;
 #               tests/90  the same with _radix_decode's alphabet-length check made unreachable;
 #               tests/11, tests/12  the clean install and fixtures, with two seeded rows ('evt 1', 'evt 2')
 #                         replaced by strangers under the same ids AFTER the migration: rows lost and
@@ -285,12 +285,16 @@ if sel 18; then
     say FAIL "fixture: the clean install loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
   fi
   # The guard lives in pgpm._transmute_refuse_child_holders (#1167), which the preflight and the cutover
-  # both call, so the plant makes the helper's two relation raises unreachable at every asking.
+  # both call, so the plant makes the helper's three relation raises (a holder in another table's hierarchy,
+  # #1216; a standalone table; a relation of another kind) unreachable at every asking.
   if plant no_orphan_guard \
        "   limit 1;
-  if v_orphan is not null and v_orphan_kind = 'r' then
+  if v_orphan is not null and v_holder_q is not null then
 " "   limit 1;
   if false then
+" \
+       "  elsif v_orphan is not null and v_orphan_kind = 'r' then
+" "  elsif false then
 " \
        "  elsif v_orphan is not null then
     raise exception 'pg_partition_magician: %.% already exists as a % matching this parent''s partition naming" \
@@ -308,7 +312,7 @@ if sel 18; then
       say FAIL "fixture: the install with no orphan guard loaded" "$(grep -m1 ERROR "$work/install.log")"; fail=1
     fi
   else
-    say FAIL "fixture: planted the defect: the orphan guard's two raises" "install.sql moved; fix the pattern"; fail=1
+    say FAIL "fixture: planted the defect: the orphan guard's three raises" "install.sql moved; fix the pattern"; fail=1
   fi
 fi
 

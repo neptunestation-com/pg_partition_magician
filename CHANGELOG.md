@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+- **transmute's orphan-child guard asks this grid's labels** (#1274). It refused any relation whose name carried a
+  time label of the control column's kind, so a monthly grid was refused by the operator's own standalone
+  `sales_p2023`, a year label neither its cells nor its auto-regrain can give (`set_regrain` refuses a coarser
+  target, #341), and the message called it a regrain orphan and told the operator to `drop table` it, rows and
+  all. The label must now be one the grid can give (`pgpm._grid_can_label`): the step's granularity or a finer
+  one, or the coarser one a regrain target no wider than the step gives (a year label on an `'18 months'` grid);
+  both the table and the type halves of the guard ask it. A one-off `regrain()` to a coarser target is left to
+  `regrain_step`'s own refusal of a relation it did not create (#631). A standalone table that is in reach is
+  still refused, and the remedy now renames it (`alter table ... rename to ...`) rather than dropping it.
+  `restore_incoming_fks`'s in-flight gate, which recognises a fine child's name the same way, asks the same
+  question, so a table the guard lets a `'preserve'` conversion through with does not hold the dropped
+  incoming keys off.
+- **A partition of another table at a forward cell's name is refused up front** (#1216). The orphan-child guard
+  excused any relation with a `pg_inherits` parent, so a partition or inheritance child of an unrelated table
+  holding `<table>_p<label>` passed the preflight and the cutover's askings, obtain stepped over the name, and
+  the conversion completed with that cell unbuilt (`fail_obtain_name`) and every write into its range refused.
+  Such a holder at a forward cell's name the conversion creates is refused up front now (only a partition of
+  the table's own new parent is excused), naming the table (or partitioned index) it belongs to, and the
+  remedy renames it (`alter table`, `alter index` or `alter foreign table`), which leaves it attached where it
+  is. That includes the partitions of a managed table renamed aside (#496) at those names: a new table under
+  the old name on the same step is refused once per held name, with the rename remedy. At a name only a later
+  `obtain` or regrain gives it is still left to `obtain`'s `fail_obtain_name` and `regrain_step`'s refusal
+  (#631).
 - **`untransmute` and `uninstall.sql` drop a moved regrain capture function** (#1271).
   `pgpm._regrain_capture_names` looked the recorded capture function up by its oid only inside the delta's
   current schema, so once the delta (`ALTER TABLE ... SET SCHEMA`) or the function (`ALTER FUNCTION ... SET
