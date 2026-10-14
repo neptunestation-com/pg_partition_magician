@@ -13368,6 +13368,98 @@ MUTATIONS["surface_prepare_grantor_unchecked"] = (
       "    raise exception using errcode = 'insufficient_privilege', message = format(\n", 1)],
 )
 
+# Issue #1269: an S3-compatible endpoint's trailing slashes are not part of it, and archive.configure refuses one the
+# signers cannot use. bench/archive_configure_endpoint.sh runs tests/archive/db/53 against each mutant.
+MUTATIONS["archive_endpoint_trailing_slash_kept"] = (
+    "bench/archive_configure_endpoint.sh",
+    "Pre-#1269 endpoint handling: archive._s3_endpoint_canonical hands the endpoint back as given, so archive.configure "
+    "stores 'http://minio:9000/' with its slash and both signers, which append '/' || bucket to it, address "
+    "'//<bucket>/<key>'. MinIO answers HTTP 400 to every PUT, so every export and every tick's chunk through it fails "
+    "after the read. One clause, the strip. tests/archive/db/53 parts B and E catch it (the stored endpoint keeps the "
+    "slash, the export fails, its object never lands, and both signers' GET through the slashed endpoint is refused).",
+    [("  p_endpoint := regexp_replace(p_endpoint, '/+$', '');\n", "", 1)],
+)
+MUTATION_SRC["archive_endpoint_trailing_slash_kept"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_endpoint_unrefused"] = (
+    "bench/archive_configure_endpoint.sh",
+    "Pre-#1269 archive.configure: an endpoint the signers cannot use (no http:// or https:// scheme, no host, a query "
+    "string or a fragment) is stored, and found out only at the first PUT. One clause, the refusal. "
+    "tests/archive/db/53 part D catches it (nothing is refused, and the last bad endpoint replaces the stored one).",
+    [("  if v_endpoint !~ '^https?://[^/?#[:space:]]+(/[^?#[:space:]]*)?$' then\n", "  if false then\n", 1)],
+)
+MUTATION_SRC["archive_endpoint_unrefused"] = "pgpm_archive/install.sql"
+# PR #1301's verification (V-01, V-02): what else the signers splice into the request's host or path is refused at
+# configure too. One clause each, caught by tests/archive/db/53 parts F and G through the same guard.
+MUTATIONS["archive_endpoint_userinfo_unrefused"] = (
+    "bench/archive_configure_endpoint.sh",
+    "archive.configure takes an endpoint with credentials before the host ('http://user@host:9000'): the signers "
+    "sign 'user@host:9000' as the Host while the client sends 'host:9000', so every request is refused 403 "
+    "SignatureDoesNotMatch after the read. One clause, the refusal. tests/archive/db/53 part F catches it (none is "
+    "refused as carrying credentials).",
+    [("  if regexp_replace(v_endpoint, '^[^:/?#]*://', '') ~ '^[^/]*@' then\n", "  if false then\n", 1)],
+)
+MUTATION_SRC["archive_endpoint_userinfo_unrefused"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_endpoint_dot_segment_unrefused"] = (
+    "bench/archive_configure_endpoint.sh",
+    "archive.configure takes an endpoint whose path prefix holds an empty, '.' or '..' segment, which the client or "
+    "the store resolves away while the signature covers it as written: every request is refused 403. One clause, "
+    "the refusal. tests/archive/db/53 part F catches it (the three spellings are taken).",
+    [("  if regexp_replace(v_endpoint, '^https?://[^/]+', '') ~ '/(\\.|%2[eE]){1,2}(/|$)|//+[^/]' then\n", "  if false then\n", 1)],
+)
+MUTATION_SRC["archive_endpoint_dot_segment_unrefused"] = "pgpm_archive/install.sql"
+# PR #1301's third verification round (V-01 and its note): the scheme's default port is canonicalised away, and a
+# percent-encoded dot segment is refused like a spelled one. Caught by tests/archive/db/53 parts F and H.
+MUTATIONS["archive_endpoint_default_port_kept"] = (
+    "bench/archive_configure_endpoint.sh",
+    "archive._s3_endpoint_canonical keeps the scheme's default port, so 'http://minio:80' is stored as given and the "
+    "signers sign 'minio:80' as the Host while libcurl sends 'minio' (it leaves a default port out): the store "
+    "answers 403 SignatureDoesNotMatch to every request, after the read. One clause, the port's removal. "
+    "tests/archive/db/53 part H catches it (the stored endpoint keeps the port, and the exports through a "
+    "default-port endpoint, configured and stored by hand, are refused 403 by MinIO).",
+    [("  p_endpoint := regexp_replace(p_endpoint, '^(http://[^/]*):80(/|$)|^(https://[^/]*):443(/|$)', '\\1\\2\\3\\4');\n",
+      "", 1)],
+)
+MUTATION_SRC["archive_endpoint_default_port_kept"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_endpoint_encoded_dot_segment_unrefused"] = (
+    "bench/archive_configure_endpoint.sh",
+    "archive.configure's dot-segment refusal reads only a spelled '.' or '..', so a path prefix holding '%2E%2E' or "
+    "'%2e' is taken, and the store resolves it away while the signature covers it as written. One clause, the "
+    "segment's spelling. tests/archive/db/53 part F catches it (both percent-encoded spellings are taken).",
+    [("~ '/(\\.|%2[eE]){1,2}(/|$)|//+[^/]' then\n", "~ '/\\.\\.?(/|$)|//+[^/]' then\n", 1)],
+)
+MUTATION_SRC["archive_endpoint_encoded_dot_segment_unrefused"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_bucket_unrefused"] = (
+    "bench/archive_configure_endpoint.sh",
+    "archive.configure stores p_bucket as given, so a bucket spelled '/archive-test-bucket' addresses "
+    "'//archive-test-bucket/<key>' through the signers' endpoint || '/' || bucket || '/' || key, and MinIO answers "
+    "HTTP 400 to every PUT after the read: #1269's failure through the other operand. One clause, the refusal. "
+    "tests/archive/db/53 part G catches it (no bucket is refused, and the last one replaces the stored bucket).",
+    [("  if p_bucket !~ '^[^/?#[:space:]]+$' or p_bucket in ('.', '..') then\n", "  if false then\n", 1)],
+)
+MUTATION_SRC["archive_bucket_unrefused"] = "pgpm_archive/install.sql"
+# PR #1301's fourth verification round (V-01 and V-03): 'no host' covers a port with no host before it, and no
+# refusal of archive.configure prints a value that holds an '@'. Caught by tests/archive/db/53 parts I and J.
+MUTATIONS["archive_endpoint_empty_host_unrefused"] = (
+    "bench/archive_configure_endpoint.sh",
+    "archive.configure takes an endpoint with a port and no host ('http://:9000'): the format check reads the "
+    "':9000' as the host, the endpoint is stored, and the client refuses to send any request to it ('No host part "
+    "in the URL'), so every export and every tick's chunk fails after the read. One clause, the refusal. "
+    "tests/archive/db/53 part I catches it (the three host-less spellings are taken and replace the stored row).",
+    [("  if v_endpoint ~ '^https?://:' then\n", "  if false then\n", 1)],
+)
+MUTATION_SRC["archive_endpoint_empty_host_unrefused"] = "pgpm_archive/install.sql"
+MUTATIONS["archive_configure_refusal_shows_userinfo"] = (
+    "bench/archive_configure_endpoint.sh",
+    "archive._configure_shown quotes every value, one holding an '@' included, so a refusal of archive.configure "
+    "prints the password of an endpoint whose credentials the credentials check does not recognise "
+    "('//user:password@host', 'http:/user:password@host', 'http:///user:password@host', a password holding a '/' "
+    "before a query string), and of a URL with credentials typed as the bucket, into the client's error and the "
+    "server log. One clause, the test for an '@'. tests/archive/db/53 part J catches it (the format, no-host, "
+    "path-segment and bucket refusals each print the password).",
+    [("  if p_value like '%@%' then\n", "  if false then\n", 1)],
+)
+MUTATION_SRC["archive_configure_refusal_shows_userinfo"] = "pgpm_archive/install.sql"
+
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a

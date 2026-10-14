@@ -57,7 +57,9 @@ create table if not exists archive.config (
   endpoint        text,                                    -- null = AWS S3; an
                                                              -- URL for S3-compatible
                                                              -- stores (path prefix
-                                                             -- and all)
+                                                             -- and all), stored
+                                                             -- without a trailing
+                                                             -- slash (#1269)
   prefix          text        not null default 'events/',
   vault_key_id    text        not null default 's3_archive_access_key_id',
   vault_secret    text        not null default 's3_archive_secret_access_key',
@@ -134,6 +136,44 @@ create table if not exists archive.object_key_claim (
 alter table archive.object_key_claim add column if not exists relation_oid oid;
 alter table archive.object_key_claim add column if not exists rows_digest text;
 
+-- An S3-compatible endpoint without its trailing slashes (#1269). Both signers address an object as the endpoint,
+-- '/', the bucket, '/', the key, so an endpoint spelled with a trailing slash ('http://host:9000/', as a URL is
+-- often written) addressed '//<bucket>/<key>', which MinIO refuses with HTTP 400: every export and every tick's
+-- chunk through it failed at the PUT. archive.configure stores the endpoint through this, and both signers pass
+-- the endpoint they are handed through it too, so a row stored with the slash (by an install before #1269, or by
+-- hand) and a direct call spelled with it address the same object as the endpoint spelled without. A path prefix
+-- (Supabase Storage's /storage/v1/s3) is kept; null (AWS S3) stays null.
+-- And without the scheme's default port (':80' after http://, ':443' after https://): the signers sign the
+-- endpoint's authority as the Host, and the client (libcurl, through the http extension) leaves a default port
+-- out of the Host it sends, so 'http://host:80' was refused 403 SignatureDoesNotMatch on every request. Only
+-- those two spellings are dropped. Any other port is kept as written, a default port spelled another way
+-- (':080', or a ':' with nothing after it) and a zero-padded one (':09000') included, though the client sends
+-- those as numbers too: such an endpoint is not caught here and is refused by the store at the first request.
+create or replace function archive._s3_endpoint_canonical(p_endpoint text)
+returns text language plpgsql immutable set search_path = pg_catalog, pg_temp as $$
+begin
+  p_endpoint := regexp_replace(p_endpoint, '/+$', '');
+  p_endpoint := regexp_replace(p_endpoint, '^(http://[^/]*):80(/|$)|^(https://[^/]*):443(/|$)', '\1\2\3\4');
+  return p_endpoint;
+end;
+$$;
+
+-- How a refusal of archive.configure shows the text value it refuses (#1269): quoted, unless the value holds an
+-- '@'. What precedes an '@' in a URL is credentials, and the refusals quoted the value whole, so an endpoint whose
+-- credentials the credentials check did not recognise ('//user:password@host', 'http:/user:password@host', a
+-- password holding a '/' before a query string) had its password printed by whichever refusal did fire, into the
+-- client's error and the server log. Every refusal there that quotes p_endpoint or p_bucket quotes it through
+-- this, so none prints a value that holds an '@', whichever check raises it and however the URL is spelled.
+create or replace function archive._configure_shown(p_value text)
+returns text language plpgsql immutable set search_path = pg_catalog, pg_temp as $$
+begin
+  if p_value like '%@%' then
+    return 'a value holding an ''@'' (not shown here: what precedes an ''@'' may be a password)';
+  end if;
+  return quote_literal(p_value);
+end;
+$$;
+
 -- Operator interface for archive.config: an upsert with every connection-setting column as a
 -- named, defaulted parameter, guarding that p_parent is actually pgpm-managed first -- an operator
 -- should never need a raw `insert into archive.config` for normal use. Needed by BOTH paths this
@@ -152,7 +192,7 @@ create or replace function archive.configure(
   p_part_bytes   bigint  default 8 * 1024 * 1024,
   p_fetch_rows   int     default 20000
 ) returns void language plpgsql as $$
-declare v_prefix_given boolean;
+declare v_prefix_given boolean; v_endpoint text;
 begin
   -- #969: refused before anything is read or written; p_endpoint (null = AWS S3) is not. The prefix is
   -- handed over as whether it was given, never as itself: every object key starts with it, and
@@ -191,10 +231,46 @@ begin
   if p_fetch_rows < 1 then
     raise exception 'archive.configure: p_fetch_rows must be a positive number of rows, not %', p_fetch_rows;
   end if;
+  -- The bucket is one segment of every request's path (endpoint, '/', bucket, '/', key) and, for AWS S3, the
+  -- first label of its host, so a bucket holding a '/' ('/my-bucket' addressed '//my-bucket/<key>', which MinIO
+  -- refuses with HTTP 400), a '?', a '#' or whitespace, or one that is empty, '.' or '..' (segments the store
+  -- resolves away), addresses no object, and was found out only at the first PUT (#1269). Refused, not
+  -- rewritten: unlike an endpoint's trailing slash, none of these is another spelling of a bucket name.
+  if p_bucket !~ '^[^/?#[:space:]]+$' or p_bucket in ('.', '..') then
+    raise exception 'archive.configure: p_bucket must be a bare bucket name (no ''/'', ''?'', ''#'' or whitespace; a key path goes in p_prefix), not %', archive._configure_shown(p_bucket);
+  end if;
+  -- The endpoint is stored without its trailing slashes (see archive._s3_endpoint_canonical), and refused here,
+  -- where it is chosen, when the signers cannot use it: they take the host from 'http://' or 'https://' up to
+  -- the first '/', and append the bucket and key to the rest, so a value with no such scheme, no host, a query
+  -- string or a fragment addressed no object at all, and was found out only at the first PUT (#1269).
+  v_endpoint := archive._s3_endpoint_canonical(p_endpoint);
+  -- Credentials in the URL (user@ or user:password@ before the host): the signers sign that whole authority as
+  -- the Host header while the client sends the host alone, so the store refused every request (403
+  -- SignatureDoesNotMatch). This reads an '@' before the first '/' after a '<scheme>://', or in a value with no
+  -- scheme; its message shows no value. Credentials spelled any other way reach a refusal below or none, and
+  -- what keeps a password out of those messages is archive._configure_shown, not this check's place in the order.
+  if regexp_replace(v_endpoint, '^[^:/?#]*://', '') ~ '^[^/]*@' then
+    raise exception 'archive.configure: p_endpoint must not carry credentials before the host (user@ or user:password@; the value is not shown here): give the URL without them, and the Vault secret names holding the key in p_vault_key_id and p_vault_secret';
+  end if;
+  if v_endpoint !~ '^https?://[^/?#[:space:]]+(/[^?#[:space:]]*)?$' then
+    raise exception 'archive.configure: p_endpoint must be null (AWS S3) or the http:// or https:// URL of an S3-compatible store, a host and optionally a path prefix with no query string or fragment, not %', archive._configure_shown(p_endpoint);
+  end if;
+  -- A port and no host ('http://:9000'): the check above reads the ':9000' as the host, and the client refuses
+  -- to send anything to it ('No host part in the URL'), so every export and every tick's chunk failed after the
+  -- read. An IPv6 literal's authority starts with '[', so this reads an empty host and nothing else.
+  if v_endpoint ~ '^https?://:' then
+    raise exception 'archive.configure: p_endpoint has no host before its port: put the store''s host name or address between the scheme and the '':'' (http://<host>:<port>), not %', archive._configure_shown(p_endpoint);
+  end if;
+  -- A path prefix with an empty, '.' or '..' segment, the dots spelled or percent-encoded ('%2E'): the client or
+  -- the store resolves it away while the signature covers it as written, so every request was refused (403
+  -- SignatureDoesNotMatch).
+  if regexp_replace(v_endpoint, '^https?://[^/]+', '') ~ '/(\.|%2[eE]){1,2}(/|$)|//+[^/]' then
+    raise exception 'archive.configure: p_endpoint''s path prefix must not hold an empty, ''.'' or ''..'' segment: spell the path as the store resolves it, not %', archive._configure_shown(p_endpoint);
+  end if;
   insert into archive.config
     (parent_table, bucket, region, endpoint, prefix, vault_key_id, vault_secret, compress, part_bytes, fetch_rows)
   values
-    (p_parent, p_bucket, p_region, p_endpoint, p_prefix, p_vault_key_id, p_vault_secret, p_compress, p_part_bytes, p_fetch_rows)
+    (p_parent, p_bucket, p_region, v_endpoint, p_prefix, p_vault_key_id, p_vault_secret, p_compress, p_part_bytes, p_fetch_rows)
   on conflict (parent_table) do update set
     bucket = excluded.bucket, region = excluded.region, endpoint = excluded.endpoint,
     prefix = excluded.prefix, vault_key_id = excluded.vault_key_id, vault_secret = excluded.vault_secret,
@@ -372,6 +448,8 @@ begin
   perform pgpm._refuse_null_arguments('archive.s3_signed_request', json_build_object(
     'p_method', p_method, 'p_bucket', p_bucket, 'p_region', p_region, 'p_key', p_key, 'p_query', p_query,
     'p_ctype', p_ctype, 'p_payload', octet_length(p_payload), 'p_key_id', p_key_id, 'p_secret', p_secret));
+  -- without its trailing slashes, which would address '//<bucket>/<key>' (#1269, archive._s3_endpoint_canonical)
+  p_endpoint := archive._s3_endpoint_canonical(p_endpoint);
   if p_endpoint is null then
     v_host := p_bucket || '.s3.' || p_region || '.amazonaws.com';   -- virtual-hosted style
     v_uri  := '/' || archive._s3_encode_path(p_key);
@@ -447,6 +525,7 @@ begin
   perform pgpm._refuse_null_arguments('archive.s3_signed_request_bytea', json_build_object(
     'p_method', p_method, 'p_bucket', p_bucket, 'p_region', p_region, 'p_key', p_key, 'p_query', p_query,
     'p_ctype', p_ctype, 'p_payload', octet_length(p_payload), 'p_key_id', p_key_id, 'p_secret', p_secret));
+  p_endpoint := archive._s3_endpoint_canonical(p_endpoint);   -- as archive.s3_signed_request's (#1269)
   if p_endpoint is null then
     v_host := p_bucket || '.s3.' || p_region || '.amazonaws.com';
     v_uri  := '/' || archive._s3_encode_path(p_key);

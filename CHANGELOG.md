@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+- **`archive.configure` canonicalises its endpoint** (#1269). The endpoint was stored exactly as given and both
+  signers append `/` and the bucket to it, so an endpoint spelled with a trailing slash (`http://minio:9000/`)
+  addressed `//<bucket>/<key>`: MinIO answered HTTP 400 to every PUT, and every export and every tick's chunk
+  through it failed after the read. `archive.configure` now stores the endpoint in a canonical form, which
+  `archive.s3_signed_request` and `archive.s3_signed_request_bytea` also apply to the endpoint they are handed
+  (so a row stored before this release, or a direct call, addresses the same object), and it refuses, before
+  it writes anything, the spellings below, each of which was stored and then failed every request. A null
+  endpoint (AWS S3) is unchanged.
+
+  - **Canonical form**: trailing slashes are dropped (`http://minio:9000/` is `http://minio:9000`).
+  - **Canonical form**: the scheme's default port, spelled `:80` after `http://` or `:443` after
+    `https://`, is dropped (`http://host:80` is `http://host`, `https://host:443` is `https://host`). A
+    port spelled any other way is kept as written.
+  - **Refused, naming `p_endpoint`**: a value that does not start with `http://` or `https://`.
+  - **Refused, naming `p_endpoint`**: a value with no host, which is one with nothing after the scheme
+    (`http://`), nothing before the next `/` (`http:///s3`), or a `:` with nothing before it
+    (`http://:9000`).
+  - **Refused, naming `p_endpoint`**: a value holding a `?`, a `#` or whitespace (a query string, a
+    fragment).
+  - **Refused, naming `p_endpoint`**: a value with an `@` before the first `/` after `<scheme>://`, or
+    before its first `/` when it has no `<scheme>://` (credentials before the host:
+    `http://user:password@host`). Name the Vault secrets in `p_vault_key_id` and `p_vault_secret` instead.
+  - **Refused, naming `p_endpoint`**: a path prefix with an empty, `.` or `..` segment, each dot spelled
+    `.`, `%2E` or `%2e`.
+  - **Refused, naming `p_bucket`**: a bucket holding a `/` (a key path goes in `p_prefix`), a `?`, a `#`
+    or whitespace, or one that is empty, `.` or `..`.
+  - **Never shown**: no refusal `archive.configure` raises quotes a value that holds an `@`, whichever
+    check raises it. A refused value with no `@` in it is quoted as given.
+
+  That list is the limit of what `archive.configure` checks about the endpoint and the bucket. Any other
+  spelling the client or the store cannot take is accepted there and fails loudly at the first request,
+  with the client's error or the store's HTTP status, and no object is written: a port spelled `:09000`
+  or `:080`, or a `:` with no port after it (`http://host:`); a password holding a `/`
+  (`http://user:pa/ss@host`, which reads as the host `user`); a host that does not resolve.
+
 - **A resumed `text_time` transmute refuses another encoding** (#1270). The claim a failed attempt leaves
   recorded the bound, its zone (#506) and its column (#628), but not the `text_time` encoding the
   `pgpm_monolith_bound` `CHECK`'s literals were written in, so a re-run with another `p_tt_epoch` (or prefix,
