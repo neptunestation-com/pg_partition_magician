@@ -11700,6 +11700,25 @@ MUTATIONS["archive_keys_mode_after_name_unread"] = (
       "                mode = words.pop(1)[1]\n", "", 1)],
 )
 MUTATION_SRC["archive_keys_mode_after_name_unread"] = "scripts/check_archive_object_keys.py"
+MUTATIONS["archive_keys_into_first_list_unread"] = (
+    "bench/archive_keys_inverse_rule.sh",
+    "Pre-round-3 (PR #1314) scripts/check_archive_object_keys.py: plpgsql's INTO-first SELECT reads `into` as "
+    "the clause when its items are reached, so `select into v_key prefix text from archive.config ...` skips "
+    "the aliased item as a declaration and the second key built from v_key passes. One site, the alias test.",
+    [('        listed = here.get("clause") in ("select", "returning") or bool(here.get("into_first"))\n',
+      '        listed = here.get("clause") in ("select", "returning")\n', 1)],
+)
+MUTATION_SRC["archive_keys_into_first_list_unread"] = "scripts/check_archive_object_keys.py"
+MUTATIONS["archive_keys_loop_keeps_clause"] = (
+    "bench/archive_keys_inverse_rule.sh",
+    "Round-2 regression of PR #1314's scripts/check_archive_object_keys.py: a LOOP, BEGIN or DECLARE does not "
+    "end the clause before it, so after `for i in select generate_series(1, 2) loop` a nested block's correct "
+    "`declare prefix text;` reads as a select item aliased `text` and is refused as key assembly. One site, "
+    "the clause reset at a statement boundary.",
+    [('            if body_tag is not None and text in ("loop", "begin", "declare"):\n'
+      '                stmt.update(clause=None, insert=False, into_first=False)\n', "", 1)],
+)
+MUTATION_SRC["archive_keys_loop_keeps_clause"] = "scripts/check_archive_object_keys.py"
 # Issues #1154 and #1180: scripts/check_archive_child_by_oid.py's rule 1 is the inverse rule, a name read only
 # alone in a select item or a RAISE argument, and it reads a regclass rendered as text as a name. One mutation per
 # issue, each taking out one clause of the fix; bench/lint_child_by_oid_inverse.sh catches both, on fixtures built

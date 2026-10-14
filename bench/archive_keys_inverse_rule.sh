@@ -42,6 +42,10 @@
 #                                             is skipped as a declaration again (PR #1314's V-01)
 #   archive_keys_mode_after_name_unread    -- a mode written after the name (`k out text`) is not read, so
 #                                             every later parameter shifts one position (V-02)
+#   archive_keys_into_first_list_unread    -- an INTO-first SELECT's items are not a select list, so
+#                                             `select into v prefix text` is skipped as a declaration
+#   archive_keys_loop_keeps_clause         -- a LOOP does not end the clause before it, so a nested block's
+#                                             `declare prefix text;` after `for i in select 1 loop` is refused
 #
 # Usage: archive_keys_inverse_rule.sh <container> <db> [check_archive_object_keys.py]
 # The container and database are accepted for the shape bench/discriminate.sh calls every guard with and are
@@ -226,6 +230,9 @@ for fn, body, decl, what in [
         ("archive.k_alias_text",
          "return (select c.prefix text from archive.config c where c.parent_table = p_parent) || p_child;", None,
          "a select item aliased with a type word, `select c.prefix text` (an alias, not a declaration)"),
+        ("archive.k_into_first",
+         "select into v_key prefix text from archive.config where parent_table = p_parent;\n  return v_key || p_child;",
+         None, "an INTO-first SELECT's item aliased `text`"),
         ("archive.k_select_all",
          "for v_key in select all prefix from archive.config where parent_table = p_parent loop\n"
          "    return v_key || p_child;\n  end loop;", None, "a SELECT ALL item (ALL tests nothing there)"),
@@ -265,6 +272,10 @@ clean("a helper called in a FROM clause that only hands the prefix on is clean",
       with_fn("archive.k_ok_from", "return (select r from archive.k_rows(cfg.prefix, p_parent, p_child) r);",
               before="create or replace function archive.k_rows(p_base text, p_parent regclass, p_child name) "
                      "returns setof text language sql as $f$\n  select archive._owned_key(p_parent, p_base, p_child)\n$f$;\n"))
+clean("a nested block's declare prefix text; after a FROM-less loop query is a declaration",
+      with_fn("archive.k_ok_loop_declare",
+              "for v_key in select generate_series(1, 2)::text loop\n    declare prefix text;\n    begin\n"
+              "      prefix := 'x';\n      raise notice '% %', v_key, prefix;\n    end;\n  end loop;\n  " + HANDED))
 clean("a parameter handed on whole by its number is clean",
       with_fn("archive.k_ok_number", "return archive.k_pass(p_parent, cfg.prefix, p_child);",
               before="create or replace function archive.k_pass(regclass, text, name) returns text language sql as $f$\n"

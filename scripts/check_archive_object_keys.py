@@ -469,7 +469,7 @@ def _scan_once(toks, defined, carriers, unread=frozenset()):
     stmt = {"clause": None, "insert": False, "verb": None, "declare": False}
 
     def new_statement(declare=None):
-        stmt.update(clause=None, insert=False, verb=None)
+        stmt.update(clause=None, insert=False, verb=None, into_first=False)
         if declare is not None:
             stmt["declare"] = declare
 
@@ -717,9 +717,14 @@ def _scan_once(toks, defined, carriers, unread=frozenset()):
                 stmt["verb"] = None
             elif stmt["verb"] is None:
                 stmt["verb"] = text
+            # a LOOP, BEGIN or DECLARE ends the clause before it as `;` does (`for i in select 1 loop`)
+            if body_tag is not None and text in ("loop", "begin", "declare"):
+                stmt.update(clause=None, insert=False, into_first=False)
         if text in CLAUSE_WORDS:
             around = parens[-1] if parens else stmt
             around["insert"] = text == "values" and around.get("clause") == "into"
+            # plpgsql's INTO-first SELECT (`select into v prefix text from ...`): its items follow the target
+            around["into_first"] = text == "into" and around.get("clause") == "select" and prev[1] == "select"
             around["clause"] = text
         if text == CLAIM_TABLE and scope is not None:
             claims.add(scope)
@@ -727,7 +732,8 @@ def _scan_once(toks, defined, carriers, unread=frozenset()):
             continue
         refs += 1
         # a type word after it in a select or RETURNING list is an alias (`select c.prefix text`), not a type
-        listed = (parens[-1] if parens else stmt).get("clause") in ("select", "returning")
+        here = parens[-1] if parens else stmt
+        listed = here.get("clause") in ("select", "returning") or bool(here.get("into_first"))
         if (nxt[1] in TYPE_WORDS and not listed) or nxt[1] in ("=>", ":="):
             continue  # a declaration, the label of a named argument, or the target of an assignment
         # a field selected out of a parenthesised row, `(cfg).prefix`, is a reference from the row on
@@ -1229,6 +1235,25 @@ begin
   return archive._out_join(cfg.prefix, p_child);
 end $f$;
 """)
+# Round 3 of the same verification: plpgsql's INTO-first SELECT lists its items after the target, and a LOOP
+# ends the clause before it, so a nested block's `declare prefix text;` after a FROM-less loop query is one.
+INTO_FIRST_ALIAS_SECOND = _standing_second(
+    "archive._into_first_key",
+    "select into v_key prefix text from archive.config where parent_table = p_parent;\n  return v_key || p_child;")
+LOOP_THEN_DECLARE_CLEAN = with_extra(r"""
+create or replace function archive._loop_note() returns text language plpgsql as $f$
+declare i int;
+begin
+  for i in select generate_series(1, 2) loop
+    declare prefix text;
+    begin
+      prefix := 'x';
+      raise notice '% %', i, prefix;
+    end;
+  end loop;
+  return null;
+end $f$;
+""")
 # Everything a prefix may do, and still one key function: handed whole (by position, by name, by number, in
 # a FROM clause), compared and tested, stored by an upsert, reported by RAISE. And a `$1` in the text an
 # EXECUTE runs is its USING argument, not the first parameter of the function, which here carries the prefix.
@@ -1360,6 +1385,10 @@ def selftest():
            False, ("archive._alias_key (line", "): a subquery selecting the prefix standing between `from`"))
     expect("V-02: a second assembly in a helper whose OUT parameter's mode follows its name", OUT_AFTER_NAME_SECOND,
            False, ("archive._out_join (line", "): p_a concatenated with ||"))
+    expect("a second assembly from the prefix aliased `text` in an INTO-first SELECT", INTO_FIRST_ALIAS_SECOND,
+           False, ("archive._into_first_key (line", "): prefix standing between `v_key`"))
+    expect("a nested block's `declare prefix text;` after a FROM-less loop query is a declaration",
+           LOOP_THEN_DECLARE_CLEAN, True, owner="archive._owned_key")
     expect("the prefix handed whole, compared, stored and reported, and a $1 that is a USING argument",
            STANDING_CLEAN, True, owner="archive._owned_key")
     expect("the one assembling function never claims", NO_CLAIM, False, "never names archive.object_key_owner")
