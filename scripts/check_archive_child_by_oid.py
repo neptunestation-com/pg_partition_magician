@@ -101,7 +101,11 @@ wherever a regclass is expected, so a name built at run time and handed to a reg
 (`pg_relation_size(v_nsp || '.' || v_rel)`) or assigned to a regclass local (`v_x := v_nsp || '.' || v_rel`) is
 not seen. Nor is a cast to a DOMAIN over regclass (`create domain archive.d as regclass`, then `(v_nsp || '.' ||
 v_rel)::archive.d` or CAST(... AS archive.d)), which resolves the name as regclass does: the cast is read by the
-type's name, and a lexer does not follow a domain to its base type (PR #1323's V-02). A cast-made regclass or regtype that reaches its rendering through any
+type's name, and a lexer does not follow a domain to its base type (PR #1323's V-02). Nor a CASE ... END
+cast to regclass whose CASE holds a dollar-quoted literal (`case when p_nsp = $q$archive$q$ then v_nsp || '.'
+|| v_rel end::regclass`: the walk from END back to its CASE stops at the literal's delimiter) or an identifier
+spelled "end" (`case when "end" is null then ... end::regclass`: the lexer reads the quoted word as the bare
+END and counts a second one); either way the END is read as a lone identifier (PR #1323's verification of 1a041fb). A cast-made regclass or regtype that reaches its rendering through any
 expression other than the forms rule 1 follows (further casts, CAST ... AS, grouping parentheses, || and a
 rendering call around it): `coalesce(c.oid::regclass)::text = v_rel`, the same under greatest(), a CASE or a
 scalar subquery, or format() of coalesce(). A name column read without its name: a row walked as key-value

@@ -14,7 +14,8 @@
   (`(x)::oid::regclass`) is an oid again and may be cast; a cast to anything else on the way is part of the
   cast. Still not seen (the checker's docstring says why, and `tests/archive/db/49` is the net): a lone
   identifier that holds text, the implicit cast of text handed to a regclass parameter or assigned to a
-  regclass local, a cast to a domain over regclass, and a type name written as a Unicode escape
+  regclass local, a cast to a domain over regclass, a `CASE ... END` operand that holds a dollar-quoted literal
+  or an identifier spelled `"end"`, and a type name written as a Unicode escape
   (`::U&"\0072egclass"`), which the lexer does not decode. Guard `bench/lint_child_by_oid_cast_spellings.sh`,
   mutations `archive_child_by_oid_cast_qualified_unread`, `archive_child_by_oid_cast_as_unread`,
   `archive_child_by_oid_cast_call_unread`, `archive_child_by_oid_cast_chain_unread` and
