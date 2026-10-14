@@ -55,9 +55,7 @@ than splitting it on `$$`; a FOR or FOREACH loop's target is assigned the loop's
 is (every branch's, a parenthesised one included, when the loop's query is a set operation), and an
 EXECUTE's INTO target the list of the dynamic statement its own expression spells out (literals, or a
 format() template read as format() renders it: `%%` is `%`; parentheses around the expression and a cast
-at its end set aside), never the list of a SELECT before the EXECUTE, such as an enclosing FOR loop's
-query; a target may be qualified by its block's label
-(`blk.v_cols`); and a body is lexed for `/* block */` comments as well as `-- line` ones, for an escape
+at its end set aside); a target may be qualified by its block's label (`blk.v_cols`); and a body is lexed for `/* block */` comments as well as `-- line` ones, for an escape
 string's backslash (`E'it\\'s'` is one literal) and for the dollar-quoted strings nested in it (`$q$/tmp/*$q$`
 is a literal, not the start of a comment).
 
@@ -68,10 +66,12 @@ a dynamic statement's list that a format() conversion splices in (`format('selec
 itself quote, a CALL's INOUT argument and a parameter (only DECLAREd locals are typed). An EXECUTE whose
 statement is wrapped in a CAST(... AS text) call or carries a trailing COLLATE (`execute cast('select
 quote_ident(c)' as text) into v`) is one of those not spelled out: only parentheses and a `::` cast are set
-aside. Two more limits: a
-value reaching a query's list through a subquery or CTE (`select * from (select quote_ident(a) ...) s`) is
-not followed, the reach SELECT INTO has always had; and a target qualified by its label is read as the local
-it names, so a record's field (`r.c`, the same spelling) is read as a local `c` would be.
+aside. Three more limits: a value reaching a query's list through a subquery or CTE (`select * from (select
+quote_ident(a) ...) s`) is not followed, the reach SELECT INTO has always had; a target qualified by its label
+is read as the local it names, so a record's field (`r.c`, the same spelling) is read as a local `c` would be;
+and, as on the base, the INTO of an EXECUTE inside a FOR loop's statement (`for r in select a from t loop
+execute v_sql into v_q`) is ALSO read by select_into() as the INTO of the loop's SELECT, so check 2 can refuse
+a `_q` local there that earns its suffix (a false refusal, never a pass; see select_into()).
 
   ./scripts/check_quoted_splices.py            # check the module
   ./scripts/check_quoted_splices.py --selftest # prove the checks fail when their defect is present
@@ -464,11 +464,6 @@ def depth0(text: str):
     return out
 
 
-# Where the statement an INTO belongs to can start inside the `;`-delimited text before it: after a loop's
-# head (`... loop select ... into v`) or at an EXECUTE, whose INTO is its own.
-INTO_BOUNDARY = re.compile(r"(?is)(?<![\w$])(?:loop|execute)(?![\w$])")
-
-
 def select_into(clean: str):
     """Yield (target, expression, offset) for the INTO clause of every statement, in any of the places
     PL/pgSQL takes it: the value assigned is the list of the last top-level RETURNING or SELECT before the
@@ -476,11 +471,11 @@ def select_into(clean: str):
     select ... loop select ... into v`), read with the INTO clause cut out. Statements are split on `;`,
     which strip_noise has left only between statements; a statement with neither a top-level SELECT nor
     a RETURNING before its INTO (EXECUTE, FETCH, INSERT INTO's own INTO) assigns nothing this check reads.
-    The INTO's own statement starts after the last top-level LOOP or EXECUTE before it: in `for r in select
-    a from t loop execute v_sql into v`, the INTO is the EXECUTE's (execute_into() reads it), and pairing it
-    with the loop's SELECT judged v on a list it is never given (PR #1313, round 3). The words are found in
-    bare() text and a qualified one (`t.execute`) is a column, so a column aliased `"loop"` or referenced as
-    `t.execute` in the SELECT's own list does not cut the statement short (round 4).
+    A LIMIT, as on the base: an EXECUTE's INTO in a FOR loop's statement (`for r in select a from t loop
+    execute v_sql into v_q`) is paired here with the loop's SELECT, so check 2 can refuse a `_q` local that
+    earns its suffix. Telling a LOOP or EXECUTE that starts a statement from a column of that name (`select
+    quote_ident(a) as loop into v`) needs the grammar, and a rule without it lost real assignments
+    (PR #1313, rounds 3 to 5), so the base's pairing is kept.
     """
     for st in re.finditer(r"[^;]+", clean):
         stmt = st.group(0)
@@ -493,12 +488,9 @@ def select_into(clean: str):
                 continue
             rest = stmt[:m.start()] + " " * (m.end() - m.start()) + stmt[m.end():]
             rtop = depth0(rest)
-            words = [k for k in INTO_BOUNDARY.finditer(bare(rest), 0, m.start()) if k.start() in rtop]
-            words = [k for k in words if not rest[:k.start()].rstrip().endswith(".")]
-            start = max([k.end() for k in words], default=0)
             heads = [k for k in re.finditer(
                 r"(?is)(?<![\w$])(?:(?P<ret>returning)|select)(?![\w$])\s*(?:(?:distinct|all)(?![\w$]))?", rest)
-                if k.start() in rtop and start <= k.start() < m.start()]
+                if k.start() in rtop and k.start() < m.start()]
             if not heads:
                 break
             head = heads[-1]
@@ -1002,11 +994,15 @@ SHAPES = {
         "v_cols text", "execute ('select quote_ident(''c'')') into v_cols;"),
     "assigned by EXECUTE of a format() cast to text": (
         "v_cols text", "execute format('select quote_ident(%L)', 'c')::text into v_cols;"),
-    # round 4 (V-01): a column aliased "loop" or referenced as t.execute is no statement boundary
+    # rounds 4 and 5: a column named loop or execute, however it is written, does not hide the SELECT INTO
     "assigned by SELECT INTO beside a column aliased \"loop\"": (
         "v_cols text; v_x text", "select 'a' as \"loop\", quote_ident('c') into v_x, v_cols;"),
     "assigned by SELECT INTO beside a column t.execute": (
         "v_cols text; v_x text", "select t.execute, quote_ident('c') into v_x, v_cols from (select 'a'::text as execute) t;"),
+    "assigned by SELECT INTO with the unquoted alias `as loop`": (
+        "v_cols text", "select quote_ident('c') as loop into v_cols;"),
+    "assigned by SELECT INTO with the bare label `loop`": (
+        "v_cols text", "select quote_ident('c') loop into v_cols;"),
 }
 
 
@@ -1131,10 +1127,7 @@ def selftest() -> int:
             ("a FOR ... IN EXECUTE of a statement held in a variable",
              "for v_cols_q in execute v_sql loop null; end loop;"),
             ("an EXECUTE whose list item a format() %L splices in",
-             "execute format('select %L::text', 'x') into v_cols_q;"),
-            # round 3 (V-02): select_into() must not pair the EXECUTE's INTO with the loop's own SELECT
-            ("an EXECUTE of a variable inside a FOR loop's statement",
-             "for v_n in select 1 loop execute v_sql into v_cols_q; end loop;")]:
+             "execute format('select %L::text', 'x') into v_cols_q;")]:
         src = SHAPE_BODY.format(decl="v_cols_q text; v_sql text", stmt=stmt).replace("v_cols,", "v_cols_q,")
         lie = SHAPE_BODY.format(decl="v_cols_q text; v_sql text",
                                 stmt=stmt + " v_cols_q := 'nothing quoted';").replace("v_cols,", "v_cols_q,")

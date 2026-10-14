@@ -11,21 +11,21 @@
   loop's target is paired with the loop's values (a query's list, every branch's, parenthesised ones included,
   when the query is a set operation; a `for ... in execute` statement's; a FOREACH's array), and an EXECUTE's
   INTO target with the list of the dynamic statement its own expression spells out (literals, or a format()
-  template as format() renders it, `%%` read as `%`, in parentheses or under a trailing cast or not), never
-  with an enclosing loop's query, so `execute 'select quote_ident(...)' into v` is read
+  template as format() renders it, `%%` read as `%`, in parentheses or under a trailing cast or not), so
+  `execute 'select quote_ident(...)' into v` is read
   while a template's own `%I`, which quotes a name in that statement and not the value coming back, is not. A
   target qualified by its block's label (`blk.v_cols`) is the local it names, and a `..` or the word `loop`
   inside a quoted name of a loop's query is part of the name. Not judged in either direction, and listed in the
   script's docstring: a FETCH's INTO, an EXECUTE whose statement is not spelled out in its own expression (`execute
   v_sql into v`), a list item a format() conversion splices in, a CALL's INOUT argument, a parameter; nor is a
-  value reaching a query's list through a subquery or CTE followed. The three install files read the same
+  value reaching a query's list through a subquery or CTE followed, and, as before, an EXECUTE's INTO inside a
+  FOR loop's statement is also paired with the loop's SELECT (a possible false refusal). The three install files read the same
   bodies and judge the same 82 quoting assignments, none of them a violation. Guard
   `bench/quoted_splices_every_body.sh`, mutations `quoted_splices_loop_target_unread`,
   `quoted_splices_loop_first_branch`, `quoted_splices_paren_branch_skipped`,
   `quoted_splices_scan_in_quoted_names`, `quoted_splices_execute_into_unread`,
   `quoted_splices_exec_statement_guessed`, `quoted_splices_exec_wrapped_unread`,
-  `quoted_splices_into_crosses_loop`, `quoted_splices_into_boundary_in_quoted_names`,
-  `quoted_splices_into_boundary_qualified`, `quoted_splices_spliced_value_judged`,
+  `quoted_splices_spliced_value_judged`,
   `quoted_splices_format_template_unrendered`, `quoted_splices_label_target_unread` and
   `quoted_splices_bare_dollar_bodies`.
 - **The `_q` lint lexes block comments and escape strings** (#1236, bullets B08-01 and B08-02).
