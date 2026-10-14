@@ -214,7 +214,10 @@ select is(:'f_left'::text, '0,0',
   '(F) and drops the capture function that resolver answers for, in the delta''s schema, and the delta');
 
 -- ==================== uninstall.sql (D, E, and F the control) ====================
-select is((select array_agg(parent_table::text order by parent_table::text) from pgpm.config),
+-- this file's own parents only: the suite's template database carries fixtures/demo.sql's managed tables too
+select is((select array_agg(parent_table::text order by parent_table::text) from pgpm.config
+            where parent_table in ('public.a338'::regclass, 'public.b338'::regclass, 'public.c338'::regclass,
+                                   'public.d338'::regclass, 'public.e338'::regclass, 'public.f338'::regclass)),
   array['d338', 'e338', 'f338'],
   'LIVENESS: d338, e338 and f338 are still managed, with their capture recorded, for the uninstall');
 select is(array[pg_temp.fn_at(:'f_fn'), pg_temp.rel_at(:'f_delta'),
