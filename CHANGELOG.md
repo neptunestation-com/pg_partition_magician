@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **A whole-month `text_time` grid needs its `p_tt_epoch` on the encoding's unit** (#1312). `transmute` held a
+  `text_time` grid's anchor and step to whole units from `p_tt_epoch` (#989), reasoning that every bound is the
+  anchor plus whole steps, but a whole-month step's bounds are midnight on the 1st whatever the anchor: with
+  `p_tt_epoch => '1970-01-01 00:00:00.5+00'` on a seconds encoding and an anchor whole seconds from it, every
+  catalog bound was floored half a second below the bound `pgpm.part` records, and a 1-month regrain (which
+  `_regrain_step_shape` let through) brought back at its swap two rows deleted while it ran. A whole-month step
+  on an epoch that is not itself a whole unit is now refused by `transmute`, and by `set_regrain` and every
+  regrain entry point both on a whole-month grid an older install registered (any target, naming the
+  reconversion) and as a whole-month target on a fixed grid; a fixed step on such an epoch is exact and still
+  accepted. Test `tests/344`, guard `bench/text_time_month_grid_epoch_unit.sh`, mutation
+  `text_time_epoch_unit_swapped`.
+
 - **`transmute` refuses a `-infinity` oldest value on a `time` control in its own words** (#769, bullet 2). Only
   the newest value of a `timestamptz`, `timestamp` or `date` control was checked for infinity (and the #895
   non-finite check on the oldest value covered `id` controls alone), so a table whose oldest value is `-infinity`

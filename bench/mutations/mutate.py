@@ -13555,6 +13555,18 @@ MUTATIONS["transmute_time_oldest_infinity_unchecked"] = (
     [("    if v_min_raw::timestamptz = '-infinity'::timestamptz then\n", "    if false then\n", 1)],
 )
 
+MUTATIONS["text_time_epoch_unit_swapped"] = (
+    "bench/text_time_month_grid_epoch_unit.sh",
+    "Issue #1312 put back by a plausible slip: _text_time_epoch_on_unit measures a seconds epoch against a "
+    "millisecond (the two units swapped), so p_tt_epoch '1970-01-01 00:00:00.5+00' reads as on a seconds "
+    "encoding's unit: transmute registers a whole-month grid on it whose every catalog bound is floored half a "
+    "second below the bound pgpm.part records, and _regrain_step_shape lets a regrain of it (and a whole-month "
+    "target on a fixed grid) through, so the swap brings back rows deleted while the regrain ran. One clause, the "
+    "helper's modulus. tests/344 doors 1, 2 and 3 catch it.",
+    [("             case p_unit when 'ms' then 1000 else 1000000 end) = 0\n",
+      "             case p_unit when 's' then 1000 else 1000000 end) = 0\n", 1)],
+)
+
 # Issue #1259: the readers of a retirement mark (pgpm._part_built and through it _part_detached_by_hand, and
 # _archive_hold_partition) vouch for it only with the record of pgpm's dispatch, by _detach_dispatched's rule, through
 # pgpm._retirement_vouched. bench/retirement_mark_needs_dispatch.sh runs tests/330 against the mutant.
