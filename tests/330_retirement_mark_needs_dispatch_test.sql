@@ -31,16 +31,36 @@
 --   E  an unanchored, unmarked row (the state an upgrade from before #421 leaves) over a table the operator
 --      detached by hand: not handed to the strategy, nothing recorded, kept, skip_archive with the remedy, and the
 --      remedy as typed (attach it back, adopt_partition) archives its rows before the drop.
+--   F  a DETACH PARTITION ... CONCURRENTLY that commits its first transaction UNDER the archive hold, through
+--      maintain() (round 4; V-01 and V-02): ACCESS SHARE does not keep it from starting, and a read through the
+--      parent planned after it sees none of the partition's rows. The hold is asked again after the strategy
+--      returns: nothing is recorded for the monolith, the same step records [20, 30), skip_archive gives the
+--      remedy, and the remedy as typed archives ids 1, 2 and 15 before the drop.
+--   G  the same race through scripts/archive_partition_whole.sql: the call returns the reason, nothing recorded.
+--   H  a chunk of 0 rows recorded for a table detached by hand (what an install before these fixes left; V-03),
+--      the table then attached back: retire() does not drop it on that chunk, because the partition holds rows in
+--      the chunk's range; it discards the coverage, and the next tick archives ids 1, 2 and 15 before the drop.
+--   I  what that check leaves alone (a 0-row chunk over a range that holds no row: dropped as before), what it
+--      discards with a false chunk (the partition's whole coverage), and a direct retire() call.
+--
+-- F and G need two more sessions, through dblink as tests/325 does: a TICK connection runs the call
+-- asynchronously; its strategy takes an advisory lock (so this session sees it inside the strategy) and waits at
+-- a gate; a DETACH connection runs the detach; this session polls pg_inherits until the first transaction has
+-- committed, then opens the gate. No sleep is load-bearing: the read happens only once the gate is open.
 --
 -- Identity, not cardinality: every assertion names which partition (by its range) or which ids. Fixtures are
--- asymmetric: three ids in the operator's table against one in the archived sibling (A), one vouched mark
--- against two unvouched (B), three ids against two (C).
+-- asymmetric: three ids in the operator's table against one in the archived sibling (A, F), one vouched mark
+-- against two unvouched (B), three ids against two (C), one partition dropped with three chunks kept against one
+-- kept with two chunks discarded (I).
 --
 -- bench/retirement_mark_needs_dispatch.sh runs this file against bench/mutations/mutate.py's
 -- retirement_mark_vouches_alone (part B), archive_hold_vouches_detached_retirement (parts B and D),
--- retirement_mark_readers_whole (parts A to D) and archive_hold_passes_unanchored (part E). The script's path is
--- the psql variable archive_whole_script, defaulting to the tree's copy.
+-- retirement_mark_readers_whole (parts A to D), archive_hold_passes_unanchored (part E),
+-- archive_step_records_without_second_ask (part F), archive_whole_records_without_second_ask (part G) and
+-- retire_drops_on_contradicted_coverage (parts H and I). The script's path is the psql variable
+-- archive_whole_script, defaulting to the tree's copy.
 create extension if not exists pgtap;
+create extension if not exists dblink;
 set client_min_messages = warning;
 
 \if :{?archive_whole_script}
@@ -49,7 +69,7 @@ set client_min_messages = warning;
 \endif
 \i :archive_whole_script
 
-select plan(40);
+select plan(78);
 
 create schema t330;
 -- every strategy call, with the ids it read through the parent
@@ -414,5 +434,325 @@ select ok(not exists (select 1 from pg_class where oid = :e_mono_oid),
 select is((select array_agg(distinct s.id order by s.id) from t330.sink s where s.parent = 'public.rm330e'::regclass),
   array[1, 2, 15, 22]::bigint[],
   'E: ids 1, 2 and 15 were archived before the drop, beside [20, 30)''s id 22');
+
+-- ======== PART F: a DETACH ... CONCURRENTLY that begins under the hold, through maintain() (round 4; V-01, V-02) ========
+-- The hold's ACCESS SHARE on the parent does not conflict with the SHARE UPDATE EXCLUSIVE a concurrent detach's
+-- first transaction takes, so that transaction commits while the step is between the hold and the strategy's read.
+-- A read through the parent planned after it (one call below the strategy, as pgpm_archive's transports read)
+-- leaves the partition out: 0 rows, and the chunk used to be recorded as covered. The hold is now asked again when
+-- the strategy has returned, and nothing is recorded on a false answer.
+create table t330.gate_f (go boolean);
+insert into t330.gate_f values (false);
+-- the read, one call below the strategy: planned under the calling statement's snapshot, taken after the gate opened
+create function t330.read_deep(p_parent regclass, p_lo text, p_hi text, out n bigint, out seen text)
+language plpgsql as $$
+begin
+  execute format('insert into t330.sink select %L::regclass, id, payload from %s where id >= %L::bigint and id < %L::bigint',
+                 p_parent, p_parent, p_lo, p_hi);
+  get diagnostics n = row_count;
+  execute format('select string_agg(id::text, '','' order by id) from %s where id >= %L::bigint and id < %L::bigint',
+                 p_parent, p_lo, p_hi)
+    into seen;
+end $$;
+-- says it is inside (an advisory lock another session can see), waits at the gate (bounded at 30 s), then reads
+create function t330.gated_deep(p_parent regclass, p_child name, p_lo text, p_hi text)
+returns pgpm.archive_result language plpgsql as $$
+declare v pgpm.archive_result; v_n bigint; v_seen text; k int := 0;
+begin
+  perform pg_advisory_xact_lock(p_parent::oid::bigint);
+  while not (select go from t330.gate_f) and k < 3000 loop
+    perform pg_sleep(0.01); k := k + 1;
+  end loop;
+  if not (select go from t330.gate_f) then raise exception 't330: the gate never opened'; end if;
+  select d.n, d.seen into v_n, v_seen from t330.read_deep(p_parent, p_lo, p_hi) d;
+  insert into t330.calls (parent, p_child, p_lo, p_hi, seen) values (p_parent, p_child, p_lo, p_hi, coalesce(v_seen, 'none'));
+  v.covered_hi := p_hi; v.rows_archived := v_n; v.s3_key := 't330/' || p_parent::text || '/' || p_lo;
+  return v;
+end $$;
+
+-- The race. Runs p_call in the tick session; waits until that session is inside the strategy (its advisory lock);
+-- starts the operator's DETACH ... CONCURRENTLY of p_child in another; waits until its first transaction has
+-- committed (pg_inherits.inhdetachpending) with the tick still inside the strategy and the gate still shut; opens
+-- the gate (in a session of its own, so the tick sees it); collects the call's result, then the detach's, which
+-- finishes once the tick's transaction ends. Every wait is bounded at 30 s. pg_locks and pg_inherits only: no
+-- pg_stat_activity, so no statistics snapshot to clear.
+create function t330.race_concurrent(p_parent regclass, p_child name, p_call text,
+                                     out entered boolean, out committed_inside boolean, out result text)
+language plpgsql as $$
+declare v_child oid; v_pid int;
+begin
+  entered := false; committed_inside := false;
+  select c.oid into v_child from pg_class c where c.relname = p_child and c.relnamespace = 'public'::regnamespace;
+  perform dblink_connect('a330', 'dbname=' || current_database());
+  select t.pid into v_pid from dblink('a330', 'select pg_backend_pid()') as t(pid int);
+  perform dblink_send_query('a330', p_call);
+  for i in 1 .. 3000 loop
+    entered := exists (select 1 from pg_locks l where l.pid = v_pid and l.locktype = 'advisory'
+                          and l.classid = 0 and l.objid = p_parent::oid and l.granted);
+    exit when entered or dblink_is_busy('a330') = 0;
+    perform pg_sleep(0.01);
+  end loop;
+
+  perform dblink_connect('d330', 'dbname=' || current_database());
+  perform dblink_send_query('d330', format('alter table %s detach partition public.%I concurrently', p_parent, p_child));
+  for i in 1 .. 3000 loop
+    committed_inside := exists (select 1 from pg_inherits h where h.inhrelid = v_child and h.inhdetachpending)
+                    and exists (select 1 from pg_locks l where l.pid = v_pid and l.locktype = 'advisory'
+                                   and l.classid = 0 and l.objid = p_parent::oid and l.granted)
+                    and dblink_is_busy('a330') = 1
+                    and not (select go from t330.gate_f);
+    exit when committed_inside or dblink_is_busy('d330') = 0 or dblink_is_busy('a330') = 0;
+    perform pg_sleep(0.01);
+  end loop;
+
+  perform dblink_exec('dbname=' || current_database(), 'update t330.gate_f set go = true');
+  select t.r into result from dblink_get_result('a330') as t(r text);
+  perform * from dblink_get_result('a330') as t(r text);          -- drain the empty result that ends the query
+  perform * from dblink_get_result('d330', false) as t(r text);   -- the detach finishes once the tick's transaction ends
+  perform * from dblink_get_result('d330', false) as t(r text);
+  perform dblink_disconnect('a330');
+  perform dblink_disconnect('d330');
+end $$;
+
+create table public.rm330f (id bigint primary key, payload text);
+insert into public.rm330f values (1, 'a'), (2, 'b'), (15, 'c');
+call pgpm.transmute('public.rm330f', 'id', 10::bigint, p_retain => 20, p_paused => false);
+select pgpm.extend_to('public.rm330f', '60');
+insert into public.rm330f values (22, 'aged'), (55, 'frontier');
+select pgpm._enforce_write_blocks('public.rm330f');
+select child_name as f_mono, child_oid as f_mono_oid from pgpm.part
+ where parent_table = 'public.rm330f'::regclass and lo = '0' \gset
+select child_name as f_p20 from pgpm.part where parent_table = 'public.rm330f'::regclass and lo = '20' \gset
+select pgpm.set_archive_fn('public.rm330f', 't330.gated_deep(regclass,name,text,text)'::regprocedure);
+update pgpm.config set archive_batch = 5 where parent_table = 'public.rm330f'::regclass;   -- every candidate gets a turn
+
+select ok(pgpm._is_write_blocked('public.rm330f', :'f_mono') and pgpm._is_write_blocked('public.rm330f', :'f_p20')
+          and exists (select 1 from pg_inherits where inhrelid = :f_mono_oid and inhparent = 'public.rm330f'::regclass
+                         and not inhdetachpending)
+          and not exists (select 1 from pgpm.archive_ledger where parent_table = 'public.rm330f'::regclass),
+  'LIVENESS: F: the monolith [0, 20) and [20, 30) are attached, write-blocked and uncovered: both archive candidates');
+
+create temporary table markf330 as select coalesce(max(id), 0) as id from pgpm.log;
+select * from t330.race_concurrent('public.rm330f', :'f_mono', $$call pgpm.maintain('public.rm330f')$$) \gset f_
+
+select ok(:'f_entered'::boolean,
+  'LIVENESS: F: the tick held the monolith and was inside the strategy, before its read, when the detach started');
+select ok(:'f_committed_inside'::boolean,
+  'LIVENESS: F: the operator''s DETACH ... CONCURRENTLY committed its first transaction with the tick still there');
+select ok(exists (select 1 from t330.calls where parent = 'public.rm330f'::regclass and p_child = :'f_mono'
+                     and p_lo = '0' and p_hi = '20' and seen = 'none'),
+  'LIVENESS: F: the strategy''s read through the parent then saw none of the monolith''s rows');
+select ok(exists (select 1 from pgpm.archive_ledger where parent_table = 'public.rm330f'::regclass and lo = '20'
+                     and child_name = :'f_p20' and rows_archived = 1),
+  'LIVENESS: F: the same step recorded [20, 30) (id 22), still attached when asked again');
+select is_empty(format($$ select 1 from pgpm.archive_ledger where parent_table = 'public.rm330f'::regclass
+                            and child_name = %L $$, :'f_mono'),
+  'F: no coverage is recorded for the monolith, whose detach began under the hold');
+select is((select array_agg(distinct l.lo || '-' || l.hi) from pgpm.log l
+            where l.parent_table = 'public.rm330f'::regclass and l.action = 'skip_archive'
+              and l.id > (select id from markf330)
+              and l.method like '%stopped being an attached partition of%' and l.method like '%ATTACH PARTITION%'),
+  array['0-20'],
+  'F: the archive step logs skip_archive over [0, 20), saying why and with the remedy');
+select ok(not exists (select 1 from pg_inherits where inhrelid = :f_mono_oid)
+          and exists (select 1 from pg_class where oid = :f_mono_oid),
+  'LIVENESS: F: the operator''s detach finished once the tick ended; the table stands outside the parent');
+-- (the table gone: no ids, so the assertion fails rather than the file)
+select case when exists (select 1 from pg_class where oid = :f_mono_oid)
+            then format('select coalesce(string_agg(id::text, '','' order by id), ''none'') as f_ids from public.%I', :'f_mono')
+            else 'select ''gone''::text as f_ids' end as f_sql \gset
+:f_sql \gset
+select is(:'f_ids'::text, '1,2,15', 'F: the detached table keeps ids 1, 2 and 15');
+
+-- the remedy as the log row types it
+-- (no such row: a statement that does nothing, so the LIVENESS below fails rather than the file)
+select coalesce((select substring(l.method from 'ALTER TABLE .* FOR VALUES FROM \(''[^'']*''\) TO \(''[^'']*''\)')
+                   from pgpm.log l
+                  where l.parent_table = 'public.rm330f'::regclass and l.action = 'skip_archive' and l.lo = '0'
+                    and l.method like '%stopped being an attached partition of%'
+                  order by l.id desc limit 1), 'select 1') as f_remedy \gset
+:f_remedy;
+select ok(exists (select 1 from pg_inherits where inhrelid = :f_mono_oid and inhparent = 'public.rm330f'::regclass),
+  'LIVENESS: F: the remedy as typed attached the table back to the parent');
+
+call pgpm.maintain('public.rm330f');
+call pgpm.maintain('public.rm330f');
+
+select ok(not exists (select 1 from pg_class where oid = :f_mono_oid),
+  'LIVENESS: F: retention retired the attached-back monolith (dropped)');
+select is((select array_agg(distinct s.id order by s.id) from t330.sink s where s.parent = 'public.rm330f'::regclass),
+  array[1, 2, 15, 22]::bigint[],
+  'F: ids 1, 2 and 15 were archived before the drop, beside [20, 30)''s id 22');
+
+-- ======== PART G: the same race through scripts/archive_partition_whole.sql ========
+update t330.gate_f set go = false;
+create table public.rm330g (id bigint primary key, payload text);
+insert into public.rm330g values (3, 'a'), (4, 'b'), (16, 'c');
+call pgpm.transmute('public.rm330g', 'id', 10::bigint, p_retain => 20, p_paused => false);
+select pgpm.extend_to('public.rm330g', '60');
+insert into public.rm330g values (23, 'aged'), (56, 'frontier');
+select pgpm._enforce_write_blocks('public.rm330g');
+select child_name as g_mono, child_oid as g_mono_oid from pgpm.part
+ where parent_table = 'public.rm330g'::regclass and lo = '0' \gset
+select child_name as g_p20 from pgpm.part where parent_table = 'public.rm330g'::regclass and lo = '20' \gset
+select pgpm.set_archive_fn('public.rm330g', 't330.gated_deep(regclass,name,text,text)'::regprocedure);
+
+select ok(pgpm._is_write_blocked('public.rm330g', :'g_mono')
+          and exists (select 1 from pg_inherits where inhrelid = :g_mono_oid and inhparent = 'public.rm330g'::regclass
+                         and not inhdetachpending)
+          and not exists (select 1 from pgpm.archive_ledger where parent_table = 'public.rm330g'::regclass),
+  'LIVENESS: G: the monolith [0, 20) is attached, write-blocked and uncovered: the script''s next partition');
+
+select * from t330.race_concurrent('public.rm330g', :'g_mono',
+  $$select pgpm_archive_next_partition_whole('public.rm330g'::regclass)$$) \gset g_
+select diag('G: ' || :'g_result');
+
+select ok(:'g_entered'::boolean,
+  'LIVENESS: G: the call held the monolith and was inside the strategy, before its read, when the detach started');
+select ok(:'g_committed_inside'::boolean,
+  'LIVENESS: G: the operator''s DETACH ... CONCURRENTLY committed its first transaction with the call still there');
+select ok(exists (select 1 from t330.calls where parent = 'public.rm330g'::regclass and p_child = :'g_mono'
+                     and p_lo = '0' and p_hi = '20' and seen = 'none'),
+  'LIVENESS: G: the strategy''s read through the parent then saw none of the monolith''s rows');
+select is_empty($$ select 1 from pgpm.archive_ledger where parent_table = 'public.rm330g'::regclass $$,
+  'G: the script recorded no coverage for it');
+select matches(:'g_result'::text, format('^%s\.%s stopped being an attached partition of ', 'public', :'g_mono'),
+  'G: the call says which table began leaving while the strategy ran');
+-- (the table gone: no ids, so the assertion fails rather than the file)
+select case when exists (select 1 from pg_class where oid = :g_mono_oid)
+                 and not exists (select 1 from pg_inherits where inhrelid = :g_mono_oid)
+            then format('select coalesce(string_agg(id::text, '','' order by id), ''none'') as g_ids from public.%I', :'g_mono')
+            else 'select ''gone or still attached''::text as g_ids' end as g_sql \gset
+:g_sql \gset
+select is(:'g_ids'::text, '3,4,16', 'G: the detach finished and the operator''s table keeps ids 3, 4 and 16');
+select pgpm_archive_next_partition_whole('public.rm330g'::regclass);
+select results_eq($$ select p_child, p_lo, p_hi, seen from t330.calls where parent = 'public.rm330g'::regclass order by n $$,
+  format($$ values (%L::name, '0'::text, '20'::text, 'none'::text), (%L::name, '20'::text, '30'::text, '23'::text) $$,
+         :'g_mono', :'g_p20'),
+  'G: the next call leaves the detached table out and archives [20, 30), id 23');
+
+-- ======== PART H: retention does not drop on a 0-row chunk over rows the partition holds (V-03) ========
+-- What an install before these fixes left: the archive step handed a table detached by hand to the strategy, which
+-- read none of its rows through the parent, and [0, 20) was recorded as covered with 0 rows. Attached back, the
+-- reference's remedy, the table read as fully covered and retention dropped it. retire() now asks, where coverage
+-- opens its drop gate, whether a chunk of 0 rows lies over rows the partition holds: it discards the coverage
+-- instead of dropping, and the next tick archives ids 1, 2 and 15 before the drop.
+update t330.gate set open = false;
+create table public.rm330h (id bigint primary key, payload text);
+insert into public.rm330h values (1, 'a'), (2, 'b'), (15, 'c');
+call pgpm.transmute('public.rm330h', 'id', 10::bigint, p_retain => 20, p_paused => false);
+select pgpm.extend_to('public.rm330h', '60');
+insert into public.rm330h values (22, 'aged'), (55, 'frontier');
+select child_name as h_mono, child_oid as h_mono_oid from pgpm.part
+ where parent_table = 'public.rm330h'::regclass and lo = '0' \gset
+select pgpm.set_archive_fn('public.rm330h', 't330.gated(regclass,name,text,text)'::regprocedure);
+update pgpm.config set archive_batch = 5 where parent_table = 'public.rm330h'::regclass;
+
+call pgpm.maintain('public.rm330h');
+select ok(pgpm._is_write_blocked('public.rm330h', :'h_mono') and exists (select 1 from pg_class where oid = :h_mono_oid),
+  'LIVENESS: H: the aged monolith [0, 20) is write-blocked and kept (archiving deferred, its range uncovered)');
+
+-- the operator detached it by hand, and (fixture) the older install's archive step recorded it as covered from a
+-- read through the parent that saw none of its rows
+select format('alter table public.rm330h detach partition public.%I', :'h_mono') \gexec
+insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, rows_archived, child_oid)
+values ('public.rm330h'::regclass, '0', '20', :'h_mono', 0, :h_mono_oid);
+select ok(not exists (select 1 from pg_inherits where inhrelid = :h_mono_oid)
+          and not exists (select 1 from t330.sink where parent = 'public.rm330h'::regclass)
+          and exists (select 1 from pgpm.archive_ledger where parent_table = 'public.rm330h'::regclass and lo = '0'
+                       and hi = '20' and rows_archived = 0 and child_oid = :h_mono_oid and retired_at is null),
+  'LIVENESS: H: fixture: the table is detached by hand, the ledger says [0, 20) is covered with 0 rows, and none of its rows is archived');
+
+update t330.gate set open = true;
+create temporary table markh330 as select coalesce(max(id), 0) as id from pgpm.log;
+call pgpm.maintain('public.rm330h');
+select ok(exists (select 1 from t330.sink where parent = 'public.rm330h'::regclass and id = 22)
+          and exists (select 1 from pgpm.log where parent_table = 'public.rm330h'::regclass and lo = '0'
+                       and action = 'fail_retain_drop' and id > (select id from markh330)),
+  'LIVENESS: H: a tick archived the attached [20, 30) and retire() reported the table as detached by hand (fail_retain_drop)');
+
+-- the reference's remedy for a table detached by hand: attach it back so retention retires it
+select format('alter table public.rm330h attach partition public.%I for values from (0) to (20)', :'h_mono') \gexec
+select ok(exists (select 1 from pg_inherits where inhrelid = :h_mono_oid and inhparent = 'public.rm330h'::regclass)
+          and pgpm._archive_fully_covered('public.rm330h', :'h_mono'),
+  'LIVENESS: H: the operator attached the table back on its bounds, and by the ledger it is fully covered');
+
+call pgpm.maintain('public.rm330h');
+select is((select array_agg(id order by id) from public.rm330h where id < 20), array[1, 2, 15]::bigint[],
+  'H: retention does not drop the attached-back table on a chunk that archived none of its rows: ids 1, 2 and 15 are still there');
+select is_empty(format($$ select 1 from pgpm.archive_ledger where parent_table = 'public.rm330h'::regclass
+                            and child_name = %L and retired_at is null $$, :'h_mono'),
+  'H: retire() discarded the 0-row coverage instead');
+select is((select array_agg(l.lo || '-' || l.hi || ':' || l.rows order by l.id) from pgpm.log l
+            where l.parent_table = 'public.rm330h'::regclass and l.action = 'archive_coverage_reset'
+              and l.id > (select id from markh330)),
+  array['0-20:1'],
+  'H: logged archive_coverage_reset over [0, 20), one chunk');
+
+call pgpm.maintain('public.rm330h');
+select ok(not exists (select 1 from pg_class where oid = :h_mono_oid),
+  'LIVENESS: H: once archived, retention retired the monolith (dropped)');
+select is((select array_agg(distinct s.id order by s.id) from t330.sink s where s.parent = 'public.rm330h'::regclass),
+  array[1, 2, 15, 22]::bigint[],
+  'H: ids 1, 2 and 15 were archived before the drop, beside [20, 30)''s id 22');
+
+-- ======== PART I: what that check leaves alone, and a direct retire() ========
+-- Two fully covered partitions, each with a chunk of 0 rows. The monolith's is true: [5, 10) holds no row, so
+-- retire() drops it as before and its chunks stay as the record of where its rows went. [20, 30)'s is not: [25, 30)
+-- records 0 rows and the partition holds id 27 there, so its whole coverage is discarded (a chunk above or below
+-- a false one keeps nothing covered: coverage is read as a watermark) and it is kept, then archived from lo.
+create table public.rm330i (id bigint primary key, payload text);
+insert into public.rm330i values (1, 'a'), (2, 'b'), (15, 'c');
+call pgpm.transmute('public.rm330i', 'id', 10::bigint, p_retain => 20, p_paused => false);
+select pgpm.extend_to('public.rm330i', '100');
+insert into public.rm330i values (21, 'x'), (27, 'y'), (95, 'frontier');
+select pgpm._enforce_write_blocks('public.rm330i');
+select child_name as i_mono, child_oid as i_mono_oid from pgpm.part
+ where parent_table = 'public.rm330i'::regclass and lo = '0' \gset
+select child_name as i_p20, child_oid as i_p20_oid from pgpm.part
+ where parent_table = 'public.rm330i'::regclass and lo = '20' \gset
+select pgpm.set_archive_fn('public.rm330i', 't330.via_parent(regclass,name,text,text)'::regprocedure);
+update pgpm.config set archive_batch = 5 where parent_table = 'public.rm330i'::regclass;
+-- fixture: the ledger. The monolith, three chunks, the middle one over a range with no row; [20, 30), two chunks,
+-- the second recording 0 rows over id 27.
+insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, rows_archived, child_oid)
+values ('public.rm330i'::regclass, '0',  '5',  :'i_mono', 2, :i_mono_oid),
+       ('public.rm330i'::regclass, '5',  '10', :'i_mono', 0, :i_mono_oid),
+       ('public.rm330i'::regclass, '10', '20', :'i_mono', 1, :i_mono_oid),
+       ('public.rm330i'::regclass, '20', '25', :'i_p20',  1, :i_p20_oid),
+       ('public.rm330i'::regclass, '25', '30', :'i_p20',  0, :i_p20_oid);
+select ok(pgpm._archive_fully_covered('public.rm330i', :'i_mono') and pgpm._archive_fully_covered('public.rm330i', :'i_p20')
+          and pgpm._is_write_blocked('public.rm330i', :'i_mono') and pgpm._is_write_blocked('public.rm330i', :'i_p20')
+          and (select array_agg(id order by id) from public.rm330i where id < 30) = array[1, 2, 15, 21, 27]::bigint[],
+  'LIVENESS: I: fixture: the monolith (ids 1, 2, 15) and [20, 30) (ids 21, 27) are attached, write-blocked and fully covered by the ledger');
+
+create temporary table marki330 as select coalesce(max(id), 0) as id from pgpm.log;
+select is(pgpm.retire('public.rm330i', :'i_mono'), true,
+  'I: a partition whose 0-row chunk lies over a range it holds no row in is dropped, as before');
+select is((select array_agg(l.lo || '-' || l.hi || ':' || l.rows_archived || ':' || (l.retired_at is not null)
+                            order by l.lo::int)
+             from pgpm.archive_ledger l where l.parent_table = 'public.rm330i'::regclass and l.child_name = :'i_mono'),
+  array['0-5:2:true', '5-10:0:true', '10-20:1:true'],
+  'I: and its three chunks are kept, marked retired');
+select is(pgpm.retire('public.rm330i', :'i_p20'), false,
+  'I: a direct retire() does not drop [20, 30), whose chunk [25, 30) records 0 rows over id 27');
+select is((select array_agg(id order by id) from public.rm330i where id >= 20 and id < 30), array[21, 27]::bigint[],
+  'I: ids 21 and 27 are still there');
+select is_empty(format($$ select 1 from pgpm.archive_ledger where parent_table = 'public.rm330i'::regclass
+                            and child_name = %L $$, :'i_p20'),
+  'I: both of its chunks are discarded, the one that records a row too: nothing above or below a false chunk stays covered');
+select is((select array_agg(l.lo || '-' || l.hi || ':' || l.rows order by l.id) from pgpm.log l
+            where l.parent_table = 'public.rm330i'::regclass and l.action = 'archive_coverage_reset'
+              and l.id > (select id from marki330)),
+  array['20-30:2'],
+  'I: logged archive_coverage_reset once, over [20, 30), two chunks: nothing for the monolith');
+
+call pgpm.maintain('public.rm330i');
+call pgpm.maintain('public.rm330i');
+select ok(not exists (select 1 from pg_class where oid = :i_p20_oid),
+  'LIVENESS: I: once archived from lo, retention retired [20, 30) (dropped)');
+select is((select array_agg(distinct s.id order by s.id) from t330.sink s where s.parent = 'public.rm330i'::regclass),
+  array[21, 27]::bigint[],
+  'I: ids 21 and 27 were archived before the drop');
 
 select * from finish();

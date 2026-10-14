@@ -72,7 +72,9 @@ begin
   if p_parent = 'public.sw_p'::regclass or v_first <> p_parent::oid::bigint then
     perform pg_sleep(60);
   end if;
-  v.covered_hi := p_hi; v.rows_archived := 0;
+  -- no count: this stub archives nothing and counts nothing, and a 0 would be taken at its word (retire() does
+  -- not drop a partition on a chunk recorded with 0 rows while the partition holds rows there, #1259)
+  v.covered_hi := p_hi; v.rows_archived := null;
   return v;
 end $$;
 

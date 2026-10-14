@@ -3963,6 +3963,13 @@ begin
     return false;
   end if;
 
+  -- #1259: full coverage opens the gate only if none of it is a chunk of 0 rows over rows the partition holds
+  -- (_discard_contradicted_coverage says why, and what that does not catch). Such coverage is discarded and the
+  -- partition kept: the archive step archives it from lo, and a later call drops it.
+  if pgpm._discard_contradicted_coverage(p_parent, p_child) > 0 then
+    return false;
+  end if;
+
   -- Is anything pointing at this parent at all (issue #268)? With an incoming FK a bare DROP is refused
   -- on the referencing table's per-partition constraint row, whether or not any row references this
   -- child (see the section header above; the operator docs state only the consequence). Without one
@@ -5184,6 +5191,68 @@ begin
 end;
 $$;
 
+-- A CHUNK OF 0 ROWS IS NOT COVERAGE OF ROWS THE PARTITION HOLDS: RETIRE() ASKS BEFORE IT DROPS (#1259's per-PR
+-- verification, round 3, V-03). The watermark above says how far a strategy was handed the partition, not that it
+-- read it. A read through the parent sees no row of a table that is detached, or pending a concurrent detach, and
+-- before #1259's fixes the archive step handed such a table to the strategy (a failed-dispatch mark, pgpm's own
+-- detached retirement, an unanchored row, a DETACH ... CONCURRENTLY begun under the hold): the strategy reported 0
+-- rows for a range the table holds rows in, the chunk was recorded, and once the operator attached the table back,
+-- the reference's remedy, it read as fully covered and retire() dropped it with rows nothing had archived. No step
+-- records such a chunk now, but one recorded then is still in the ledger, and after the attach back nothing about
+-- the row tells it from true coverage, except what it says against what the partition holds.
+--
+-- So where coverage opens the drop gate, each live chunk of this partition recorded with rows_archived 0 is checked
+-- against the partition itself (read directly, never through the parent). A row in such a chunk's range is a row
+-- the strategy did not archive. The partition's whole live coverage is then discarded, as the #452 and #564 resets
+-- discard it (coverage is read as a watermark, so a chunk above the false one would keep its range covered), logged
+-- archive_coverage_reset, and retire() returns false: archiving starts over from lo, and a later call drops the
+-- partition on coverage a strategy read. Retired chunks are not this partition's coverage and are left (#1141).
+-- It does not matter how the chunk got there: an older install, a strategy that reports 0 without reading, or a
+-- path nobody has found yet.
+--
+-- What it does NOT catch, because it believes a count where the strategy gave one: a chunk recorded with a null
+-- count (the contract lets a strategy report null for a range that held no rows), and one with a count above 0
+-- that is short of the rows there. And a strategy that reports 0 for a chunk without counting its rows no longer
+-- has that partition dropped while it holds them: one that does not count reports null.
+--
+-- Cost: nothing unless the partition is fully covered and has a chunk of 0 rows, then one EXISTS probe of the
+-- partition per such chunk, on the control column. Returns how many chunks it discarded.
+create or replace function pgpm._discard_contradicted_coverage(p_parent regclass, p_child name)
+returns int language plpgsql as $$
+declare cfg pgpm.config; v_nsp name; v_rel oid; r record; v_has boolean; v_chunks int; v_lo text; v_hi text;
+begin
+  select * into cfg from pgpm.config where parent_table = p_parent;
+  cfg := pgpm._control_followed(cfg);
+  if not found then raise exception 'pg_partition_magician: % is not managed', p_parent; end if;
+  if cfg.archive_fn is null then return 0; end if;
+  v_nsp := pgpm._child_nsp(p_parent, p_child);   -- #727: the partition's own schema, not the parent's
+  v_rel := to_regclass(format('%I.%I', v_nsp, p_child))::oid;
+  if v_rel is null then return 0; end if;
+  -- this partition's coverage, as _archive_fully_covered reads it: live, and read from this relation
+  for r in select l.lo, l.hi from pgpm.archive_ledger l
+            where l.parent_table = p_parent and l.child_name = p_child and l.retired_at is null
+              and (l.child_oid is null or l.child_oid = v_rel) and l.rows_archived = 0
+  loop
+    execute format('select exists (select 1 from %I.%I where %I >= %L and %I < %L)',
+                   v_nsp, p_child, cfg.control_column, pgpm._encode(cfg.control_kind, r.lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
+                   cfg.control_column, pgpm._encode(cfg.control_kind, r.hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz))
+      into v_has;
+    continue when not v_has;
+    delete from pgpm.archive_ledger l
+     where l.parent_table = p_parent and l.child_name = p_child and l.retired_at is null
+       and (l.child_oid is null or l.child_oid = v_rel);
+    get diagnostics v_chunks = row_count;
+    select p.lo, p.hi into v_lo, v_hi from pgpm.part p where p.parent_table = p_parent and p.child_name = p_child;
+    insert into pgpm.log (parent_table, action, lo, hi, rows, method)
+      values (p_parent, 'archive_coverage_reset', v_lo, v_hi, v_chunks,
+              format('%s archived chunk(s) were recorded for %I.%I, and [%s, %s) among them records 0 archived rows over a range in which the partition holds rows: the strategy archived none of what is there (a read through the parent sees no row of a partition that is detached or pending a detach, which is how a pgpm before this check recorded such a chunk), so the coverage does not describe the partition; discarded instead of dropping it, and archiving starts over from %s',
+                     v_chunks, v_nsp, p_child, r.lo, r.hi, v_lo));
+    return v_chunks;
+  end loop;
+  return 0;
+end;
+$$;
+
 -- THE STRATEGY'S RETURN IS A CLAIM, NOT A FACT (issue #454). archive_fn is a published extension
 -- point, and the covered_hi it returns is written into pgpm.archive_ledger, which is what
 -- _archive_fully_covered reads as retire()'s drop precondition. Recorded verbatim, a strategy bug that
@@ -5382,8 +5451,9 @@ $$;
 -- reading through the parent) then waited on the detach's lock, and once it committed the parent no longer held
 -- the table: a strategy reading through the parent found none of its rows, the range was recorded as covered,
 -- and once the operator attached the table back retire() dropped rows nothing had archived. Taking ACCESS SHARE
--- on the parent here waits out a detach in flight and keeps a later one from starting until the caller's
--- transaction ends (ONLY: the partitions themselves are the reads' to lock). Under maintain()'s 200 ms
+-- on the parent here waits out a detach in flight and keeps a later PLAIN one from starting until the caller's
+-- transaction ends (ONLY: the partitions themselves are the reads' to lock). It does not keep a DETACH ...
+-- CONCURRENTLY from starting, which is why the callers ask twice (below). Under maintain()'s 200 ms
 -- lock_timeout a longer wait raises here, and _archive_step's per-candidate handler defers the partition
 -- (skip_archive), as the read it stands in front of would have.
 --
@@ -5420,6 +5490,37 @@ $$;
 -- _archive_unheld_reason gives the remedy (anchor the row with adopt_partition, attaching the table back first if
 -- it was detached, or forget the row to keep a detached table). Its name is not asked instead: a name is what
 -- the #421 anchor exists not to trust.
+--
+-- ASKED AGAIN AFTER THE READ, AND COVERAGE IS RECORDED ONLY ON THAT SECOND ANSWER (round 4 of the same
+-- verification, V-01 and V-02). ACCESS SHARE keeps a plain detach from starting, but not DETACH PARTITION ...
+-- CONCURRENTLY: its first transaction takes SHARE UPDATE EXCLUSIVE on the parent and the partition, which ACCESS
+-- SHARE does not conflict with, so it commits under the hold, and every plan made from then on under a snapshot
+-- that sees it leaves the partition out. A strategy whose read through the parent was planned after that (a read
+-- one call below the strategy, the shape of pgpm_archive's transports) read none of the partition's rows, the chunk
+-- was recorded as covered with 0 rows, and once the operator attached the table back retire() dropped it. So both
+-- callers call this again when the strategy has returned, before the ledger row, and record nothing unless it
+-- still answers true (_archive_left_reason is what they say instead).
+--
+-- Why the second answer cannot itself race. Under the lock the first call took, the partition's link to the
+-- parent can change in one direction only until the caller's transaction ends, from attached to pending: a plain
+-- detach cannot start; the concurrent form's second transaction, which removes the link, waits for every
+-- transaction holding a lock on the parent (this one); and FINALIZE of a cancelled one waits for every snapshot
+-- older than its own, which the statement both callers run in holds. So the link is never removed under the hold
+-- and the table is never attached back under it. The question is asked of the catalog as of now, not of a
+-- snapshot, so true at the second call means the link was whole at every instant since the first: every plan and
+-- every scan the strategy made saw the partition. A detach whose first transaction commits after the second
+-- answer changes nothing the strategy read. False means a detach began under the hold, and what the strategy
+-- returned is then not recorded whatever it read (a strategy reading the partition itself, as _archive_noop does,
+-- did read the rows, and is refused all the same: one deferred chunk).
+--
+-- Why not a stronger lock instead. SHARE UPDATE EXCLUSIVE on the parent would keep the concurrent detach from
+-- starting, and with it, for as long as a chunk takes to upload, every ATTACH PARTITION (another session's
+-- obtain), ANALYZE and autovacuum of the parent, CREATE INDEX CONCURRENTLY, and pgpm's own concurrent detach of
+-- any sibling. On the partition alone it is retire()'s lever (#705), but retire() owns the partition, and LOCK in
+-- that mode needs UPDATE, DELETE, TRUNCATE or MAINTAIN on it where an archive caller needs SELECT; it would also
+-- make the operator's detach wait out the upload. Asking twice takes no lock the first call did not, and blocks
+-- nothing: the operator's detach starts when it likes, finishes when the caller's transaction ends (as it did
+-- before), and the table is then theirs.
 create or replace function pgpm._archive_hold_partition(p_parent regclass, p_child_oid oid, p_retiring_at timestamptz)
 returns boolean language plpgsql as $$
 begin
@@ -5453,6 +5554,24 @@ begin
   if not pgpm._detach_dispatched(p_parent, p_child, p_rel) then return null; end if;
   return format('%I.%I was detached from %s by a retirement of pgpm''s before its range [%s, %s) was archived (archiving was configured after the retirement began), so a strategy reading the range through the parent would read none of its rows; not archived and nothing recorded, and retire() keeps the table while the range is uncovered. To archive it, once it is no longer pending a detach attach it back on its bounds (ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM (%L) TO (%L)); the archive step then archives it and retire() completes the retirement',
                 v_nsp, p_child, p_parent, p_lo, p_hi, p_parent, v_nsp, p_child, p_lo, p_hi);
+end;
+$$;
+
+-- _archive_left_reason: what both archive paths say instead of recording a chunk when _archive_hold_partition,
+-- asked again after the strategy returned, no longer holds the partition (see there): a detach began under the
+-- hold, so a read through the parent may have seen none of the partition's rows. [p_lo, p_hi) is the partition's
+-- range, [p_chunk_lo, p_chunk_hi) the chunk the strategy was handed. _archive_step logs it skip_archive over the
+-- partition's range, and scripts/archive_partition_whole.sql returns it. The remedy is the reference's for a table
+-- detached by hand: once the detach is finished the table is the operator's to keep, or to attach back on its
+-- bounds so the archive step reads it through the parent and retention retires it.
+create or replace function pgpm._archive_left_reason(p_parent regclass, p_child name, p_lo text, p_hi text,
+                                                     p_chunk_lo text, p_chunk_hi text)
+returns text language plpgsql stable as $$
+declare v_nsp name;
+begin
+  v_nsp := pgpm._child_nsp(p_parent, p_child);
+  return format('%I.%I stopped being an attached partition of %s while the archive strategy ran on its chunk [%s, %s) (a DETACH PARTITION ... CONCURRENTLY began: once its first transaction commits, a read through the parent sees none of the partition''s rows), so what the strategy returned is not coverage: nothing recorded, and retire() keeps the table while the range is uncovered. Whatever the strategy wrote for the chunk is written again if the chunk is archived later. Once the detach is finished the table is yours, left standing; to have it archived and retired after all, attach it back on its bounds (ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM (%L) TO (%L)) and the next tick archives the chunk',
+                v_nsp, p_child, p_parent, p_chunk_lo, p_chunk_hi, p_parent, v_nsp, p_child, p_lo, p_hi);
 end;
 $$;
 
@@ -5630,6 +5749,20 @@ begin
       if not found then continue; end if;
 
       v_result := pgpm._run_archive_strategy(p_parent, r.child_name, v_range.lo, v_range.hi);
+
+      -- THE HOLD, ASKED AGAIN (#1259; _archive_hold_partition says why this answer cannot race). A DETACH
+      -- PARTITION ... CONCURRENTLY can commit its first transaction under the hold, and a read through the parent
+      -- planned after that saw none of this partition's rows. Nothing is recorded unless the partition is still
+      -- attached now, which under the hold means it was at every instant of the strategy's call. `continue`, as
+      -- for the contract refusal below: no ledger row, coverage where it was, retire()'s drop gate shut, and
+      -- skip_archive saying what happened with the remedy. What the strategy wrote for the chunk (an object, rows
+      -- in a sink) is not coverage, and is written again if the chunk is archived later.
+      if not pgpm._archive_hold_partition(p_parent, r.child_oid, r.retiring_at) then
+        insert into pgpm.log (parent_table, action, lo, hi, method)
+          values (p_parent, 'skip_archive', r.lo, r.hi,
+                  pgpm._archive_left_reason(p_parent, r.child_name, r.lo, r.hi, v_range.lo, v_range.hi));
+        continue;
+      end if;
 
       -- Hold the return to the chunk it was handed (issue #454; the rules are _archive_contract_breach's
       -- own comment). Same shape as the identity refusal above: `continue`, and no ledger row, so the

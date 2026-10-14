@@ -13605,6 +13605,50 @@ MUTATIONS["archive_hold_passes_unanchored"] = (
     [("  return p_child_oid is not null\n",
       "  return p_child_oid is null or p_child_oid is not null\n", 1)],
 )
+# Round 4 of the same verification (V-01, V-02): the hold's ACCESS SHARE does not keep a DETACH PARTITION ...
+# CONCURRENTLY from committing its first transaction under it, so both archive paths ask the hold again when the
+# strategy has returned and record nothing on a false answer. One mutation per caller, each removing that one ask.
+MUTATIONS["archive_step_records_without_second_ask"] = (
+    "bench/retirement_mark_needs_dispatch.sh",
+    "pgpm._archive_step asks the hold once, before the read: an operator's DETACH PARTITION ... CONCURRENTLY commits "
+    "its first transaction under the hold, the strategy's read through the parent is planned after it and sees none "
+    "of the partition's rows, and the chunk is recorded as covered with 0 rows; once the table is attached back "
+    "retention drops it, ids 1, 2 and 15 archived nowhere. One site, the step's second call of "
+    "pgpm._archive_hold_partition. The V-01 and V-02 reproductions and tests/330 part F catch it.",
+    [("      if not pgpm._archive_hold_partition(p_parent, r.child_oid, r.retiring_at) then\n"
+      "        insert into pgpm.log (parent_table, action, lo, hi, method)\n"
+      "          values (p_parent, 'skip_archive', r.lo, r.hi,\n"
+      "                  pgpm._archive_left_reason(p_parent, r.child_name, r.lo, r.hi, v_range.lo, v_range.hi));\n"
+      "        continue;\n"
+      "      end if;\n",
+      "", 1)],
+)
+MUTATIONS["archive_whole_records_without_second_ask"] = (
+    "bench/retirement_mark_needs_dispatch.sh",
+    "scripts/archive_partition_whole.sql asks the hold once, before the read: a DETACH PARTITION ... CONCURRENTLY "
+    "that commits its first transaction under the hold leaves the partition out of the strategy's read through the "
+    "parent, and the script records the range as covered with 0 rows. One site, the script's second call of "
+    "pgpm._archive_hold_partition. tests/330 part G catches it.",
+    [("  if not pgpm._archive_hold_partition(p_parent, r.child_oid, r.retiring_at) then\n"
+      "    return pgpm._archive_left_reason(p_parent, r.child_name, r.lo, r.hi, v_resume_lo, r.hi);\n"
+      "  end if;\n",
+      "", 1)],
+)
+MUTATION_SRC["archive_whole_records_without_second_ask"] = "scripts/archive_partition_whole.sql"
+# V-03 of the same round: retire() does not drop on full coverage when a chunk of 0 rows lies over rows the
+# partition holds (pgpm._discard_contradicted_coverage, asked where coverage opens the drop gate).
+MUTATIONS["retire_drops_on_contradicted_coverage"] = (
+    "bench/retirement_mark_needs_dispatch.sh",
+    "retire() opens its drop gate on the ledger's watermark alone: a chunk of 0 rows an older install recorded for a "
+    "table detached by hand (a read through the parent that saw none of its rows) still reads as coverage once the "
+    "operator attaches the table back, and retention drops it, ids 1, 2 and 15 archived nowhere. One site, "
+    "retire()'s call of pgpm._discard_contradicted_coverage. The V-03 reproduction and tests/330 parts H and I "
+    "catch it.",
+    [("  if pgpm._discard_contradicted_coverage(p_parent, p_child) > 0 then\n"
+      "    return false;\n"
+      "  end if;\n",
+      "", 1)],
+)
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

@@ -21,10 +21,31 @@
   back on its bounds); the script refuses it with the same message. Nor is a row with no recorded `child_oid`
   (one an upgrade from before 0.6.0 could not anchor), whose table the operator may have detached by hand
   (#705's archive-step residue): it is not archived, and `skip_archive` names the remedy (anchor it with
-  `adopt_partition`, attaching the table back first, or forget the row). Test `tests/330`, guard
+  `adopt_partition`, attaching the table back first, or forget the row). A detach that begins while the step
+  runs is covered too. The hold's `ACCESS SHARE` on the parent keeps a plain `DETACH` from starting but not a
+  `DETACH PARTITION ... CONCURRENTLY`, whose first transaction commits under it; a read through the parent
+  planned after that (the shape of `pgpm.archive_to_s3_ndjson` and `pgpm.archive_to_s3_parquet`) saw none of
+  the partition's rows, and the chunk was recorded as covered with 0 rows. `pgpm._archive_step` and the script
+  now ask the hold again when the strategy has returned and record nothing unless the partition is still
+  attached, which under the hold's lock means it was for the whole call; the step logs `skip_archive` with the
+  remedy and the script returns it. No new lock is taken and nothing is blocked. Last, `retire` no longer drops
+  on full coverage when a chunk recorded with `rows_archived` 0 lies over rows the partition holds (read from
+  the partition itself): it discards the partition's coverage (`archive_coverage_reset`), keeps the partition,
+  and the next tick archives it from `lo`. That is what protects a ledger an install of `main` since #1250 may
+  already carry (no release records such a chunk and keeps the table): a 0-row chunk recorded for a table that
+  was detached, then attached back. **A custom `archive_fn` that reports `rows_archived` 0 without counting must
+  report `null` instead**, or its partitions are no longer dropped while they hold rows. The check believes a
+  count where there is one, so a chunk recorded with a `null` or non-zero count for a table that was detached
+  is not caught; to find any chunk recorded for a relation that is outside its parent now, before attaching
+  such a table back, run `select l.parent_table, l.child_name, l.lo, l.hi, l.rows_archived from
+  pgpm.archive_ledger l where l.retired_at is null and l.child_oid is not null and exists (select 1 from
+  pg_class c where c.oid = l.child_oid) and not exists (select 1 from pg_inherits i where i.inhrelid =
+  l.child_oid and i.inhparent = l.parent_table)` and delete the rows it lists for a table you detached by hand
+  (a table `retire` itself detached and has yet to drop is listed too; leave its rows). Test `tests/330`, guard
   `bench/retirement_mark_needs_dispatch.sh`, mutations `retirement_mark_vouches_alone`,
-  `archive_hold_vouches_detached_retirement`, `retirement_mark_readers_whole` and
-  `archive_hold_passes_unanchored`.
+  `archive_hold_vouches_detached_retirement`, `retirement_mark_readers_whole`,
+  `archive_hold_passes_unanchored`, `archive_step_records_without_second_ask`,
+  `archive_whole_records_without_second_ask` and `retire_drops_on_contradicted_coverage`.
 
 - **A retired chunk's bound with no offset is read on the grid's clock, not the caller's** (#1264).
   `pgpm._over_retired_chunks`, which decides the partitions the archive step and `retain()` hold over a retired
