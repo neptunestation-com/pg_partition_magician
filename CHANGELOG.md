@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+- **The child-by-oid lint reads a cast to regclass in every spelling of the cast** (#1287).
+  `scripts/check_archive_child_by_oid.py`'s rule 1 refuses a relation found by a name built at run time, and
+  matched that as the three tokens `)` `::` `regclass`, so the same cast written
+  `(v_nsp || '.' || v_rel)::pg_catalog.regclass`, `CAST(... AS regclass)` or `regclass(...)` passed with no
+  violation, and so did the name cast through text on the way (`(...)::text::regclass`) and a local holding a
+  relname cast any of those ways. The rule now reads the cast, not one spelling of it: `x::regclass`,
+  `CAST(x AS regclass)` and `regclass(x)`, the type schema-qualified, quoted or an array of it, and nothing but
+  a lone identifier, literal, parameter or array element may be its operand (an expression, a call, a
+  parenthesis, a `CASE ... END` or an `ARRAY[...]` may not). A value cast to a number type last
+  (`(x)::oid::regclass`) is an oid again and may be cast; a cast to anything else on the way is part of the
+  cast. Still not seen (the checker's docstring says why, and `tests/archive/db/49` is the net): a lone
+  identifier that holds text, the implicit cast of text handed to a regclass parameter or assigned to a
+  regclass local, a cast to a domain over regclass, a `CASE ... END` operand that holds a dollar-quoted literal
+  or an identifier spelled `"end"`, and a type name written as a Unicode escape
+  (`::U&"\0072egclass"`), which the lexer does not decode. Guard `bench/lint_child_by_oid_cast_spellings.sh`,
+  mutations `archive_child_by_oid_cast_qualified_unread`, `archive_child_by_oid_cast_as_unread`,
+  `archive_child_by_oid_cast_call_unread`, `archive_child_by_oid_cast_chain_unread` and
+  `archive_child_by_oid_cast_case_unread`.
+
+- **The child-by-oid lint reads three more spellings of a relation's name** (#1180). Rule 1 passed a function
+  that found a relation by the name column read as data out of its `pg_class` row
+  (`where to_jsonb(c) ->> 'relname' = v_rel`), by its rendered identity
+  (`(pg_identify_object('pg_class'::regclass, c.oid, 0)).identity = v_rel`), or by a set operation over a name
+  standing alone in its select list (`select c.relname, c.oid ... intersect select v_rel, c2.oid ...`). A
+  literal that names a name column (`'relname'`, a path `'{relname}'`, a jsonpath `'$.relname'`) is now the
+  column wherever it stands, the whole field read with it; `pg_identify_object()`,
+  `pg_identify_object_as_address()` and `pg_describe_object()` render a name as a cast-made regclass does (the
+  fields that hold one: `identity`, `name`, `object_names`; not `type`, `schema` or `object_args`); and a name
+  may not stand in the select list of a query that a `UNION`, `INTERSECT` or `EXCEPT` compares, by the
+  grammar's precedence (`UNION ALL` compares nothing, and `INTERSECT` binds tighter, so the first query of
+  `a UNION ALL b INTERSECT c` is allowed). Each may still be read alone off a row found by oid and
+  reported. Documented as limits rather than chased (the checker's docstring; `tests/archive/db/49` is the
+  net): a row walked as key-value pairs, a field name computed at run time or spelled inside a larger literal,
+  a name inside a definition another call renders, and `pg_get_object_address()` handed the name in parts. The
+  issue stays open for the spellings listed there. Same guard, mutations
+  `archive_child_by_oid_data_read_unread`, `archive_child_by_oid_identity_unread` and
+  `archive_child_by_oid_set_operation_unread`.
+
 - **`stop_check.py` judges the stopping thresholds on exact values** (#1288). It read precision >= 0.7, fell
   rate <= 0.3 and coverage >= 0.9 off the two-decimal figures `pass_metrics.py` writes into the record, so a
   pass at 16/23 = 0.696 precision (printed 0.70), 7/23 = 0.304 fell rate (0.30) and a finder at 26/29 = 0.897

@@ -27,20 +27,42 @@ names to refuse (rule 1's last paragraph):
      c.oid::regclass::text = v_rel` finds a relation by its rendered name with no name column in sight). A
      regtype counts the same way (`c.reltype::regtype::text`, regtypeout()): a relation's row type renders as
      the relation's own name, resolved by search_path alike, and a lexer cannot tell a row type from another
-     type. Cast on to anything but text first (`'int8'::regtype::oid`), either is a number again. The
-     rule is the INVERSE of a list of forbidden places, because each list gained a spelling per round (#1154: a
+     type. Cast on to anything but text first (`'int8'::regtype::oid`), either is a number again. A name
+     column named as DATA is the name column, read out of a row value by its name (#1180: `where to_jsonb(c)
+     ->> 'relname' = v_rel`): a literal that names one (`'relname'`, a path `'{relname}'`, a jsonpath
+     `'$.relname'`) is read as the column wherever it stands, a RAISE's own format string apart, and the
+     reference is the whole read (the field operators `->`, `->>`, `#>`, `#>>` from the value they read on,
+     `j['relname']`, a json[b]_extract_path[_text]() call). And an object's identity is its name as
+     pg_identify_object(), pg_identify_object_as_address() or pg_describe_object() render it (#1180:
+     `(pg_identify_object('pg_class'::regclass, c.oid, 0)).identity = v_rel`), the call with the field read
+     off it; a field that holds no name (`.type`, `.schema`, `.object_args`) is none.
+     The rule is the INVERSE of a list of forbidden places, because each list gained a spelling per round (#1154: a
      simple CASE in an ORDER BY, `order by case c.relname when k.relname then 0 else 1 end limit 1`, has no
      operator token and was in no clause the list named). A name may stand in exactly two places, read off a
      row found otherwise: ALONE as an item of the select list of a statement's own query (not a subquery's: an
      outer query can filter on what a subquery projects under any name, P1-02 of #1150's verification), under
      its own name, or alone as an argument of a RAISE; in either, also as a bare argument of quote_ident(),
      format() or json_build_object() that is the whole item. Casts and grouping parentheses go with it
-     (`(c.relname)::text` alone is still alone). Anywhere else is refused: a WHERE, ON, HAVING, USING, ORDER BY
-     or GROUP BY clause, a CASE, an operator or a call in a select item (which a positional ORDER BY can sort
-     by), an alias, a plpgsql expression. No NATURAL JOIN, which compares same-named columns without naming
-     one. A local a name is selected INTO (item for target) may not be compared, stand in a lookup clause, go to
-     format(), to_regclass() or regclassin(), or be cast to regclass. And nothing is cast to regclass from a
-     parenthesised expression (`(v_nsp || '.' || v_rel)::regclass`).
+     (`(c.relname)::text` alone is still alone). Not in the select list of a query that is an operand of
+     UNION, INTERSECT or EXCEPT, though, which compare it with the other operand's column without an operator
+     (#1180: `select c.relname, c.oid into v_name, v_oid from pg_class c intersect select p_name::name, c2.oid
+     from pg_class c2`); UNION ALL compares nothing, and by the grammar's precedence (INTERSECT binds tighter)
+     the first query of `a UNION ALL b INTERSECT c` is an operand of UNION ALL only. Anywhere else is refused: a WHERE,
+     ON, HAVING, USING, ORDER BY or GROUP BY clause, a CASE, an operator or a call in a select item (which a
+     positional ORDER BY can sort by), an alias, a plpgsql expression. No NATURAL JOIN, which compares
+     same-named columns without naming one. A local a name is selected INTO (item for target) may not be
+     compared, stand in a lookup clause, go to format(), to_regclass() or regclassin(), or be cast to regclass.
+     And nothing but a lone identifier, literal or parameter (or an element of one, `v_oids[1]`) is cast to
+     regclass: an expression, a call, a parenthesis, a CASE ... END or an ARRAY[...] cast to it is a relation
+     found by a name built at run time (`(v_nsp || '.' || v_rel)::regclass`, `case when ... then v_nsp || '.' ||
+     v_rel end::regclass`, PR #1323's V-01). A cast is a cast in every
+     spelling the grammar has (#1287: only `)::regclass` was read): `x::regclass`, CAST(x AS regclass) and
+     regclass(x), the type schema-qualified or quoted (`::pg_catalog.regclass`, `:: pg_catalog . "regclass"`)
+     or an array of it (`::regclass[]`), for the built name and for the local alike. Casts on the way are part
+     of the cast: through anything but a number type the value is still the name (`(a || b)::text::regclass`
+     is refused, `v_rel::text::regclass` is the local cast), and cast by `::` to a number type last (`oid`, the
+     integer types) it is an oid again, which may be cast (`(x)::oid::regclass`, as before; CAST(x AS oid) is
+     a parenthesis like any other to this rule, refused as it always was).
      One place compares rendered names on purpose: archive._refuse_foreign_read (#1055) renders the relations
      this backend holds after a read and refuses the read when one is a namesake of the relation it was by. Its
      rendered names reach only that refusal, so a rendered regclass is not refused in its body (its name columns
@@ -71,15 +93,32 @@ statement by any way but INTO a local named item for target: selected into a rec
 by a function, passed to one as an argument (whose parameter the callee may compare: caught there only if the
 callee compares a name column or a p_child), or copied from the local into another (`v2 := v_rel`). A name
 spliced into dynamic SQL text other than through format() (`'lock table ' || quote_ident(v_rel)`), and a
-`::regclass` cast of a lone identifier holding text: the module casts oids that way (`v_stray::regclass`), and
-a lexer cannot tell their types apart. For the same reason, a regclass the text did not make by a cast: a
-regclass-typed parameter, local or column rendered by a cast of its own (`p_parent::text`,
+cast to regclass, in any spelling of it, of a lone identifier holding text: the module casts oids that way
+(`v_stray::regclass`), and a lexer cannot tell their types apart. For the same reason, a regclass the text did
+not make by a cast: a regclass-typed parameter, local or column rendered by a cast of its own (`p_parent::text`,
 `cfg.parent_table::text`), and a regclass rendered inside an array or a row
-(`array_agg(c.oid::regclass)::text`). A cast-made regclass or regtype that reaches its rendering through any
+(`array_agg(c.oid::regclass)::text`). A cast the text does not spell: text is cast to regclass implicitly
+wherever a regclass is expected, so a name built at run time and handed to a regclass parameter
+(`pg_relation_size(v_nsp || '.' || v_rel)`) or assigned to a regclass local (`v_x := v_nsp || '.' || v_rel`) is
+not seen. Nor is a cast to a DOMAIN over regclass (`create domain archive.d as regclass`, then `(v_nsp || '.' ||
+v_rel)::archive.d` or CAST(... AS archive.d)), which resolves the name as regclass does: the cast is read by the
+type's name, and a lexer does not follow a domain to its base type (PR #1323's V-02). Nor a CASE ... END
+cast to regclass whose CASE holds a dollar-quoted literal (`case when p_nsp = $q$archive$q$ then v_nsp || '.'
+|| v_rel end::regclass`: the walk from END back to its CASE stops at the literal's delimiter) or an identifier
+spelled "end" (`case when "end" is null then ... end::regclass`: the lexer reads the quoted word as the bare
+END and counts a second one); either way the END is read as a lone identifier (PR #1323's verification of 1a041fb). A cast-made regclass or regtype that reaches its rendering through any
 expression other than the forms rule 1 follows (further casts, CAST ... AS, grouping parentheses, || and a
 rendering call around it): `coalesce(c.oid::regclass)::text = v_rel`, the same under greatest(), a CASE or a
-scalar subquery, or format() of coalesce(). A lexical rule gains a spelling per round; the dynamic guard
-(tests/archive/db/49, run by bench/archive_key_by_resolved_oid.sh) is the net for these, whatever their spelling.
+scalar subquery, or format() of coalesce(). A name column read without its name: a row walked as key-value
+pairs (`jsonb_each_text(to_jsonb(c))`), a field picked by position or out of the row's text, a field name
+computed at run time (`->> ('rel' || 'name')`) or spelled inside a larger literal (`to_jsonb(c) @>
+('{"relname": "' || v_rel || '"}')::jsonb`). A relation's name inside a definition some other call renders
+(pg_get_indexdef(), pg_get_constraintdef(), pg_get_viewdef()), and a relation found by a catalog call that takes
+its name in parts (`pg_get_object_address('table', array[v_nsp, v_rel], '{}')`). An identifier written as a
+Unicode escape (`::U&"\\0072egclass"`, `c.U&"\\0072elname"`): the lexer this check shares with
+scripts/check_archive_object_keys.py does not decode one. A lexical rule gains a spelling per round; the
+dynamic guard (tests/archive/db/49, run by bench/archive_key_by_resolved_oid.sh) is the net for these, whatever
+their spelling.
 A by-name read in dynamic SQL from parameters (`format('%I.%I', p_schema,
 p_table)`): the module does that for its own pg_temp snapshot table, so the rule could not be exception-free
 there. tests/archive/db/49 proves the contract itself on both exports, with a second session moving the parent
@@ -90,11 +129,13 @@ between the hold and the key.
   ./scripts/check_archive_child_by_oid.py --selftest   # prove each rule fails when its defect is present
 """
 
+import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_archive_object_keys import NOT_CALLS, PARAM_MODES, executed_as_code, lex  # noqa: E402
+from check_archive_object_keys import (EXTRACT_FUNCS, FIELD_OPS, NOT_CALLS, PARAM_MODES,  # noqa: E402
+                                       _literal_sql, executed_as_code, lex)
 
 ROOT = Path(__file__).resolve().parent.parent
 TARGET = "pgpm_archive/install.sql"
@@ -127,6 +168,25 @@ TEXT_TYPES = {"text", "varchar", "name", "bpchar", "char", "character", "citext"
 # cannot tell a row type from another type, so every regtype a cast makes counts. And their output functions.
 NAME_TYPES = {"regclass", "regtype"}
 NAME_OUTS = {"regclassout", "regtypeout"}
+# The type a cast makes a relation of, and the types that make its operand a number first: cast to one of these
+# last, the value is an oid again and no name. Any other type on the way (text, a domain, cstring) leaves it the
+# name it was.
+RELATION_TYPE = "regclass"
+NUMBER_TYPES = {"oid", "int", "int2", "int4", "int8", "integer", "smallint", "bigint"}
+# A literal that names a name column as data, the way a row value is read by field name (#1180): the key
+# `'relname'`, a text[] path `'{relname}'`, a jsonpath `'$.relname'`, the name double-quoted or not. A JSON key
+# is case-sensitive and to_jsonb() spells a column as the catalog does, so `'Relname'` is no such field.
+NAMES_NAME_COLUMN = re.compile(r'(?:(?:strict|lax)\s+)?(?:\$\s*\.\s*)?(\{\s*)?("?)(?:'
+                               + "|".join(sorted(NAME_COLUMNS)) + r')\2(?(1)\s*\})')
+# The levels of a RAISE, between the word and its format string.
+RAISE_LEVELS = {"debug", "log", "info", "notice", "warning", "exception"}
+# The calls that render an object's identity, a relation's among them, as its (schema-qualified) name.
+IDENTITY_FNS = {"pg_identify_object", "pg_identify_object_as_address", "pg_describe_object"}
+# The fields of their rows that hold the name: pg_identify_object()'s name and identity (for a table, `evt` and
+# `a.evt`), and pg_identify_object_as_address()'s object_names (`{a,evt}`). Its type, schema and object_args do not.
+IDENTITY_FIELDS = {"identity", "name", "object_names"}
+# The set operations that compare a select list with another's. UNION ALL keeps every row and compares nothing.
+SET_OPS = {"union", "intersect", "except"}
 RENDER_FNS = {"text", "varchar", "name", "bpchar", "format", "concat", "concat_ws", "quote_literal", "quote_nullable",
               "to_json", "to_jsonb", "json_build_object", "jsonb_build_object", "json_build_array",
               "jsonb_build_array"}
@@ -214,6 +274,16 @@ def match_open(toks, q):
     depth = 0
     for j in range(q, -1, -1):
         depth += (toks[j][1] == ")") - (toks[j][1] == "(")
+        if depth == 0:
+            return j
+    return 0
+
+
+def match_bracket(toks, q):
+    """The index of the bracket that the `]` at q closes (or 0)."""
+    depth = 0
+    for j in range(q, -1, -1):
+        depth += (toks[j][1] == "]") - (toks[j][1] == "[")
         if depth == 0:
             return j
     return 0
@@ -328,6 +398,190 @@ def rendered_regclass(toks):
     return out
 
 
+def value_start(toks, j):
+    """operand_start for the value a cast to regclass is of, which may also end in a subscript or in a two-word
+    type (`v[1]`, `(f(x))[2]`, `x::character varying`): the first token of the operand a cast ending at token j
+    applies to."""
+    s = j
+    while toks[s][1] in TYPE_TAILS and s > 0:
+        s -= 1                                        # `character varying`: the type the cast before it is to
+    while toks[s][1] == "]" and s > 0:
+        s = match_bracket(toks, s) - 1                # a subscript: the operand is what it subscripts
+    if toks[s][1] == ")":
+        s = match_open(toks, s)
+        if is_call(toks, s):
+            s -= 1
+    elif toks[s] == ("ID", "end", toks[s][2]):
+        s = match_case(toks, s)                       # CASE ... END, an expression closed by a keyword
+    if s >= 2 and toks[s - 1][1] == "::":
+        return value_start(toks, s - 2)
+    return s
+
+
+def match_case(toks, q):
+    """The index of the CASE that the END at q closes, counting the CASEs nested in it, or q itself when no CASE
+    of the same statement opens it."""
+    depth = 0
+    for j in range(q, -1, -1):
+        if toks[j][1] == ";" or toks[j][0] == "DOLLAR":
+            break
+        if toks[j][0] == "ID":
+            depth += (toks[j][1] == "end") - (toks[j][1] == "case")
+            if depth == 0:
+                return j
+    return q
+
+
+def identities(toks):
+    """[(s, e)]: every call that renders an object's identity as its name (IDENTITY_FNS), with the field read off
+    it when the call is a parenthesised row: `(pg_identify_object(...)).identity` is one value (#1180). A field
+    that holds no name (IDENTITY_FIELDS: `.type`, `.schema`, `.object_args`) is no name either (PR #1323's
+    review): `(pg_identify_object(...)).type = 'table'` is not a lookup by name. The row read whole, or in a FROM
+    clause under an alias, is still a name: this check does not follow an alias to the field it reads."""
+    out = []
+    for k, (kind, text, _) in enumerate(toks):
+        if kind == "ID" and last_part(text) in IDENTITY_FNS and tok(toks, k + 1)[1] == "(":
+            s, e = k, match_close(toks, k + 1)
+            if tok(toks, s - 1)[1] == "(" and tok(toks, e + 1)[1] == ")" and not is_call(toks, s - 1) \
+                    and tok(toks, e + 2)[1] == "." and tok(toks, e + 3)[0] == "ID":
+                if last_part(tok(toks, e + 3)[1]) not in IDENTITY_FIELDS:
+                    continue                          # the object's type, schema or arguments, no name
+                s, e = s - 1, e + 3
+            out.append((s, e))
+    return out
+
+
+def named_as_data(toks):
+    """[(s, e)]: every read of a name column named as DATA (#1180), a literal that names one (NAMES_NAME_COLUMN)
+    wherever it stands. The reference is the whole read: a field operator's from the value it reads on
+    (`to_jsonb(c) ->> 'relname'`), a subscript's (`j['relname']`), a json[b]_extract_path[_text]() call's; the
+    literal alone anywhere else. A RAISE's own format string is its message, not a value, and is none."""
+    out = []
+    for k, (kind, text, _) in enumerate(toks):
+        if kind != "STR" or not NAMES_NAME_COLUMN.fullmatch(_literal_sql(text).strip()):
+            continue
+        if "raise" in (tok(toks, k - 1)[1], tok(toks, k - 2)[1] if tok(toks, k - 1)[1] in RAISE_LEVELS else ""):
+            continue
+        s, e = k, k
+        op = next((o for o in FIELD_OPS if k > len(o) and tuple(t[1] for t in toks[k - len(o):k]) == o), None)
+        p = enclosing_open(toks, k)
+        if op is not None:
+            s = operand_start(toks, k - len(op) - 1)
+        elif k >= 2 and toks[k - 1][1] == "[" and tok(toks, k + 1)[1] == "]":
+            s, e = operand_start(toks, k - 2), k + 1
+        elif p > 0 and is_call(toks, p) and last_part(toks[p - 1][1]) in EXTRACT_FUNCS:
+            s, e = p - 1, match_close(toks, p)
+        out.append((s, e))
+    return out
+
+
+def cast_source(toks, s, e):
+    """What the value toks[s..e] is where it is cast to regclass: ("lone", its index) for one identifier, literal
+    or parameter, subscripted or not, whose type a lexer cannot know (the docstring's limit), reached through any
+    `::` casts but one to a number type; ("number", None) when the last `::` cast on it is to a number type, an
+    oid again;
+    ("built", None) for anything else, an expression, a call, a parenthesis, a CASE or an ARRAY[...] constructor: a
+    name built at run time."""
+    while s <= e:
+        while toks[e][1] == "]" and e > s:            # v_oids[1]: the element of a lone array
+            e = max(match_bracket(toks, e), s) - 1
+        if s <= e and toks[e] == ("ID", "array", toks[e][2]) and tok(toks, e + 1)[1] == "[":
+            return "built", None                      # ARRAY[a || b]: what it holds is built
+        if s == e:
+            return ("lone", s) if toks[s][0] in ("ID", "STR", "PARAM") else ("built", None)
+        depth, c = 0, None
+        for j in range(s, e + 1):
+            depth += (toks[j][1] == "(") - (toks[j][1] == ")")
+            if depth == 0 and toks[j][1] == "::":
+                c = j                                 # the last cast at the value's own depth
+        if c is None or c == s or value_start(toks, c - 1) != s or tok(toks, c + 1)[0] != "ID" \
+                or any(t[1] not in TYPE_TAILS | {"[", "]"} for t in toks[c + 2:e + 1]):
+            return "built", None
+        if last_part(toks[c + 1][1]) in NUMBER_TYPES:
+            return "number", None
+        e = c - 1
+    return "built", None
+
+
+def regclass_casts(toks):
+    """[(k, what, at)]: every cast to regclass the text spells, in each spelling the grammar has (#1287: rule 1
+    read `)::regclass` alone), with what is cast (cast_source): `x::regclass`, CAST(x AS regclass) and the call
+    form regclass(x), the type however qualified or quoted, with spaces around its dots, or as an array. k is
+    the type's token and at the lone operand's."""
+    out = []
+    for k, (kind, text, _) in enumerate(toks):
+        if kind != "ID" or last_part(text) != RELATION_TYPE:
+            continue
+        q, e = k, k
+        while tok(toks, q - 1)[1] == "." and tok(toks, q - 2)[0] == "ID":
+            q -= 2                                    # `pg_catalog . regclass` lexes as three tokens
+        while tok(toks, e + 1)[1] == "[" and tok(toks, e + 2)[1] == "]":
+            e += 2                                    # regclass[]: every element is cast
+        if tok(toks, q - 1)[1] == "::":
+            span = value_start(toks, q - 2), q - 2
+        elif tok(toks, q - 1)[1] == "as" and tok(toks, e + 1)[1] == ")" \
+                and last_part(tok(toks, match_open(toks, e + 1) - 1)[1]) == "cast":
+            span = match_open(toks, e + 1) + 1, q - 2
+        elif tok(toks, k + 1)[1] == "(":
+            span = k + 2, match_close(toks, k + 1) - 1
+        else:
+            continue                                  # a parameter's, a local's or a column's type, not a cast
+        out.append((k,) + cast_source(toks, *span))
+    return out
+
+
+def set_operation(toks, a, b):
+    """The set operation (SET_OPS) that compares the rows of the query whose select-list item is toks[a:b], at its
+    own depth in its own statement, or None. By the grammar's precedence (PR #1323's review): INTERSECT binds
+    tighter than UNION and EXCEPT, which associate left, so a query is compared by an INTERSECT beside it, or by
+    the UNION or EXCEPT that joins its INTERSECT group to what precedes, or by any UNION or EXCEPT after that
+    group, whose left operand then holds its rows. UNION ALL compares nothing: `a UNION ALL b INTERSECT c`
+    keeps every row of a."""
+    def op_at(j):
+        if toks[j][0] == "ID" and toks[j][1] in SET_OPS:
+            return toks[j][1], tok(toks, j + 1)[1] == "all"
+        return None
+
+    after, depth, j = [], 0, b
+    while j < len(toks):
+        kind, t, _ = toks[j]
+        if t == "(":
+            depth += 1
+        elif t == ")":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and (t == ";" or kind == "DOLLAR" or (kind == "ID" and t == "loop")):
+            break
+        elif depth == 0 and op_at(j):
+            after.append(op_at(j))
+        j += 1
+    before, depth, j = [], 0, a - 1
+    while j >= 0:
+        kind, t, _ = toks[j]
+        if t == ")":
+            depth += 1
+        elif t == "(":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and (t == ";" or kind == "DOLLAR" or (kind == "ID" and t in ("loop", "begin"))):
+            break
+        elif depth == 0 and op_at(j):
+            before.insert(0, op_at(j))
+        j -= 1
+    ops, i = before + after, len(before)               # this query is the operand between ops[i - 1] and ops[i]
+    near = ([ops[i - 1]] if i else []) + ops[i:i + 1]
+    if any(w == "intersect" for w, _ in near):
+        return "intersect"
+    level = [o for o in ops if o[0] != "intersect"]    # the operators joining INTERSECT groups
+    joined = level[len([o for o in before if o[0] != "intersect"]) - 1:] if before else level
+    for w, all_rows in joined:
+        if (w, all_rows) != ("union", True):
+            return w
+    return None
+
+
 def contexts(toks):
     """(clause_at, sub_at, start_at), per token: the clause in force, whether the query it belongs to is a
     subquery, and the index of the word that opened that clause. A CASE ... END is a frame of its own, so its
@@ -419,13 +673,18 @@ def alone_in(toks, item, s, e):
 def name_read(toks, s, e, ctx, what):
     """Why rule 1 refuses the name-bearing value toks[s..e], or None where it may stand: alone as an item of a
     statement's own select list or of a RAISE, or as a bare argument of quote_ident(), format() or
-    json_build_object() there. Anywhere else is refused; the reasons only say which place it is."""
+    json_build_object() there, of a query no set operation compares with another. Anywhere else is refused; the
+    reasons only say which place it is."""
     s, e = widen(toks, s, e)
     item = message_item(toks, s, e, ctx)
-    if item is not None and alone_in(toks, item, s, e):
-        return None
     prev, nxt = tok(toks, s - 1), tok(toks, e + 1)
     clause_at, sub_at, _ = ctx
+    if item is not None and alone_in(toks, item, s, e):
+        op = set_operation(toks, *item) if clause_at[s] == "select" else None
+        if op is None:
+            return None
+        return (f"{what} stands in the select list of a query under {op.upper()}, which compares it with the other "
+                f"query's column")
     if prev[1] in COMPARE_OPS or nxt[1] in COMPARE_OPS or (nxt[0] == "ID" and nxt[1] in COMPARE_WORDS):
         return f"{what} is compared"
     if clause_at[s] in LOOKUP_CLAUSES:
@@ -444,10 +703,14 @@ def name_read(toks, s, e, ctx, what):
 
 
 def name_lookups(toks):
-    """([(k, why, rendered)], clause_at, rendered spans): every name-bearing value rule 1 refuses, anywhere in the
-    file (the caller tells the resolver's body and the rendered-name site apart), with whether it is a rendered
-    regclass; the clause in force at each token, which the INTO pass reuses; and every span that renders a
-    regclass as text."""
+    """([(k, why, rendered)], clause_at, rendered spans, other spans): every name-bearing value rule 1 refuses,
+    anywhere in the file (the caller tells the resolver's body and the rendered-name site apart), with whether it
+    is a rendered name; the clause in force at each token, which the INTO pass reuses; every span that renders a
+    regclass as text; and every other span that bears a name without a name column's token (an object's
+    identity, a name column read as data)."""
+    def shown(s, e):
+        return " ".join(t[1] for t in toks[s:e + 1])[:60]
+
     ctx = contexts(toks)
     found = []
     for k, (kind, text, _) in enumerate(toks):
@@ -463,11 +726,21 @@ def name_lookups(toks):
     spans = rendered_regclass(toks)
     for s, e in spans:
         typ = "regtype" if any(last_part(t[1]) in ("regtype", "regtypeout") for t in toks[s:e + 1]) else "regclass"
-        what = f"a {typ} rendered as text (" + " ".join(t[1] for t in toks[s:e + 1])[:60] + ")"
+        what = f"a {typ} rendered as text ({shown(s, e)})"
         why = name_read(toks, s, e, ctx, what)
         if why:
             found.append((s, why, True))
-    return found, ctx[0], spans
+    said = identities(toks)
+    for s, e in said:
+        why = name_read(toks, s, e, ctx, f"an object's identity rendered as text ({shown(s, e)})")
+        if why:
+            found.append((s, why, True))
+    data = named_as_data(toks)
+    for s, e in data:
+        why = name_read(toks, s, e, ctx, f"a name column read as data ({shown(s, e)})")
+        if why:
+            found.append((s, why, False))
+    return found, ctx[0], spans, said + data
 
 
 def split_top(toks, a, b):
@@ -499,8 +772,9 @@ def run_end(toks, start, e, stops):
 
 def tainted_locals(toks, a, b, rendered_at=frozenset()):
     """{local: the INTO token's index}: every variable a statement of the body toks[a:b] selects a name column,
-    or a regclass rendered as text (the token indices in rendered_at), INTO, item for target (`select c.oid,
-    c.relname into v_oid, v_rel` marks v_rel only)."""
+    or a name borne otherwise (a regclass rendered as text, an object's identity, a name column read as data:
+    the token indices in rendered_at), INTO, item for target (`select c.oid, c.relname into v_oid, v_rel` marks
+    v_rel only)."""
     out, k = {}, a
     stops = {"from", "where", "group", "order", "limit", "union", "loop", "into", "having"}
     while k < b:
@@ -585,12 +859,14 @@ def check_text(src):
     if (CHILD, ["name"]) not in rparams:
         v.append(f"{RESOLVER} takes no name-typed {CHILD}: the resolver is not the one this check knows")
 
-    # rule 1: the name columns and the rendered regclasses, then the locals one was selected into, then a cast of
-    # an expression to regclass
+    # rule 1: the name columns, the rendered names and the name columns read as data, then the locals one was
+    # selected into, then a cast to regclass of anything but a lone value, in every spelling of the cast
     inside = 0
-    found, clause_at, spans = name_lookups(toks)
-    rendered_at = {j for s, e in spans for j in range(s, e + 1)}
+    found, clause_at, spans, others = name_lookups(toks)
+    rendered_at = {j for s, e in spans + others for j in range(s, e + 1)}
     witnessed = sum(1 for s, _ in spans if scope_of(defs, s) == RENDERED_NAME_SITE)
+    casts = regclass_casts(toks)
+    cast_alone = {at for _, what, at in casts if what == "lone"}
     for name, _, a, b, _ in defs:
         if name == RESOLVER or a is None:
             continue
@@ -607,10 +883,10 @@ def check_text(src):
                     found.append((k, f"{held} stands in the {clause_at[k].upper()} clause of a query", False))
                 elif callee in ("format", "to_regclass", "regclassin"):
                     found.append((k, f"{held} is handed to {callee}(), to name a relation again", False))
-                elif nxt[1] == "::" and toks[k + 2][1] == "regclass":
+                elif k in cast_alone:
                     found.append((k, f"{held} is cast to regclass, to name a relation again", False))
-    for k, (kind, text, _) in enumerate(toks):
-        if text == "::" and 0 < k < len(toks) - 1 and toks[k + 1][1] == "regclass" and toks[k - 1][1] == ")":
+    for k, what, _ in casts:
+        if what == "built":
             found.append((k, "an expression is cast to regclass, a relation found by a name built at run time",
                           False))
     for k, why, rendered in sorted(set(found)):
@@ -974,6 +1250,110 @@ RENDERED_ORDER_CASE = plant("  select c.oid into v_oid from pg_class c\n"
 RENDERED_INTO_FORMATTED = plant("  select c.oid::regclass::text into v_rel from pg_class c where c.oid = p_parent;\n"
                                 "  execute format('lock table %s in access share mode', v_rel);",
                                 params="p_parent regclass")
+# #1287 (F12r-08): the cast of a name built at run time, in every spelling of the cast the grammar has. The first
+# is the one spelling the rule read; each of the others resolves the same name at run time (checked on PG 15).
+BUILT = "v_nsp || '.' || v_rel"
+BUILT_CASTS = {
+    label: plant(f"  v_x := {expr};", params="p_parent regclass")
+    for label, expr in ((f"({BUILT})::pg_catalog.regclass", f"({BUILT})::pg_catalog.regclass"),
+                        (f"({BUILT}):: pg_catalog . \"regclass\"", f"({BUILT}):: pg_catalog . \"regclass\""),
+                        (f"cast({BUILT} as regclass)", f"cast({BUILT} as regclass)"),
+                        (f"CAST(({BUILT}) AS pg_catalog.regclass)", f"CAST(({BUILT}) AS pg_catalog.regclass)"),
+                        (f"regclass({BUILT})", f"regclass({BUILT})"),
+                        (f"pg_catalog.regclass({BUILT})", f"pg_catalog.regclass({BUILT})"),
+                        (f"({BUILT})::text::regclass", f"({BUILT})::text::regclass"),
+                        (f"({BUILT})::character varying::regclass", f"({BUILT})::character varying::regclass"),
+                        (f"cast(cast({BUILT} as text) as regclass)", f"cast(cast({BUILT} as text) as regclass)"),
+                        (f"case when v_nsp is not null then {BUILT} end::regclass (V-01)",
+                         f"case when v_nsp is not null then {BUILT} end::regclass"),
+                        (f"case when v_nsp is not null then {BUILT} end::text::regclass (V-01)",
+                         f"case when v_nsp is not null then {BUILT} end::text::regclass"),
+                        ("cast(v_nsp as oid)::regclass", "cast(v_nsp as oid)::regclass"),
+                        (f"(array[{BUILT}]::regclass[])[1]", f"(array[{BUILT}]::regclass[])[1]"),
+                        (f"(cast(array[{BUILT}] as regclass[]))[1]", f"(cast(array[{BUILT}] as regclass[]))[1]"),
+                        ("format('%I.%I', v_nsp, v_rel)::regclass", "format('%I.%I', v_nsp, v_rel)::regclass"),
+                        ("(parse_ident(v_nsp))[2]::regclass", "(parse_ident(v_nsp))[2]::regclass"))}
+# ... and the local a name was selected INTO, cast the same ways
+LOCAL_CASTS = {
+    label: plant("  select c.relname into v_rel from pg_class c where c.oid = p_parent;\n"
+                 f"  v_x := {expr};", params="p_parent regclass")
+    for label, expr in (("v_rel::regclass", "v_rel::regclass"),
+                        ("v_rel::pg_catalog.regclass", "v_rel::pg_catalog.regclass"),
+                        ("cast(v_rel as regclass)", "cast(v_rel as regclass)"),
+                        ("regclass(v_rel)", "regclass(v_rel)"),
+                        ("v_rel::text::regclass", "v_rel::text::regclass"))}
+# the control: a lone identifier, literal or array element in each spelling (the docstring's limit: a lexer cannot
+# tell an oid from text), and a value cast to a number type last, which is an oid again
+LONE_CASTS = plant("  v_x := v_oid::regclass; v_x := v_oid::pg_catalog.regclass; v_x := cast(v_oid as regclass);\n"
+                   "  v_x := regclass(v_oid); v_x := 'pg_class'::regclass; v_x := cast('pg_class' as regclass);\n"
+                   "  v_x := v_rec.oid::regclass; v_x := v_rec.oids[1]::regclass;\n"
+                   "  v_x := (v_nsp || '1')::oid::regclass; v_x := cast((v_nsp || '1')::oid as regclass);\n"
+                   "  v_x := regclass((v_nsp || '1')::int8);", params="p_parent regclass")
+# #1180 (F12r-06): a relation found by its name with no name column's token and no cast: the column named as
+# data, an object's rendered identity, and a set operation comparing a name that stands alone in its select list
+NAMED_AS_DATA = {
+    label: plant(f"  select c.oid into v_oid from pg_class c where {pred};", params="p_parent regclass")
+    for label, pred in (("to_jsonb(c) ->> 'relname' = v_rel", "to_jsonb(c) ->> 'relname' = v_rel"),
+                        ("row_to_json(c)::jsonb #>> '{relname}' = v_rel", "row_to_json(c)::jsonb #>> '{relname}' = v_rel"),
+                        ("(to_jsonb(c))['relname'] = to_jsonb(v_rel)", "(to_jsonb(c))['relname'] = to_jsonb(v_rel)"),
+                        ("jsonb_extract_path_text(to_jsonb(c), 'relname') = v_rel",
+                         "jsonb_extract_path_text(to_jsonb(c), 'relname') = v_rel"),
+                        ("jsonb_path_query_first(to_jsonb(c), '$.relname') = to_jsonb(v_rel)",
+                         "jsonb_path_query_first(to_jsonb(c), '$.relname') = to_jsonb(v_rel)"))}
+IDENTITY = {
+    label: plant(f"  select c.oid into v_oid from pg_class c where {pred};", params="p_parent regclass")
+    for label, pred in (("(pg_identify_object('pg_class'::regclass, c.oid, 0)).identity = v_rel",
+                         "(pg_identify_object('pg_class'::regclass, c.oid, 0)).identity = v_rel"),
+                        ("pg_describe_object('pg_class'::regclass, c.oid, 0) = 'table ' || v_rel",
+                         "pg_describe_object('pg_class'::regclass, c.oid, 0) = 'table ' || v_rel"),
+                        ("(pg_identify_object(...)).name = v_rel",
+                         "(pg_identify_object('pg_class'::regclass, c.oid, 0)).name = v_rel"),
+                        ("(pg_identify_object_as_address(...)).object_names = array[v_nsp, v_rel]::text[]",
+                         "(pg_identify_object_as_address('pg_class'::regclass, c.oid, 0)).object_names"
+                         " = array[v_nsp, v_rel]::text[]"))}
+SET_COMPARED = {
+    label: plant(f"  {stmt}", params="p_parent regclass")
+    for label, stmt in (("INTERSECT, the name in the first operand",
+                         "select c.relname, c.oid into v_rel, v_oid from pg_class c\n"
+                         "  intersect select v_nsp, c2.oid from pg_class c2;"),
+                        ("INTERSECT, the name in the second operand",
+                         "select v_nsp, c2.oid into v_rel, v_oid from pg_class c2\n"
+                         "  intersect select c.relname, c.oid from pg_class c;"),
+                        ("EXCEPT",
+                         "select c.relname, c.oid into v_rel, v_oid from pg_class c\n"
+                         "  except select v_nsp, c2.oid from pg_class c2;"),
+                        ("UNION",
+                         "select c.relname into v_rel from pg_class c where c.oid = p_parent union select v_nsp;"),
+                        ("INTERSECT, the name in an INTERSECT under a UNION ALL",
+                         "select v_nsp into v_rel union all select c.relname from pg_class c\n"
+                         "  intersect select v_nsp;"),
+                        ("UNION, after a UNION ALL that holds the name",
+                         "select c.relname into v_rel from pg_class c union all select v_nsp union select v_nsp;"))}
+# PR #1323's review: the grammar's precedence. INTERSECT binds tighter, so the name in the first operand of
+# `a UNION ALL b INTERSECT c`, or in the last of `a INTERSECT b UNION ALL c`, is compared by nothing; and an
+# object's type or schema read off pg_identify_object() is no name
+PRECEDENCE_CLEAN = plant(
+    "  select c.relname into v_rel from pg_class c where c.oid = p_parent\n"
+    "  union all select v_nsp intersect select v_nsp;\n"
+    "  select v_nsp into v_rel intersect select v_nsp\n"
+    "  union all select c.relname from pg_class c where c.oid = p_parent;", params="p_parent regclass")
+IDENTITY_FIELD_CLEAN = plant(
+    "  select c.oid into v_oid from pg_class c\n"
+    "   where (pg_identify_object('pg_class'::regclass, c.oid, 0)).type = 'table'\n"
+    "     and (pg_identify_object('pg_class'::regclass, c.oid, 0)).schema = 'archive' and c.oid = p_parent;",
+    params="p_parent regclass")
+# the control: each read alone, off a row found by oid, and reported; a UNION ALL, which compares nothing; a set
+# operation of another statement or of a subquery; and a RAISE whose format string happens to spell a name column
+READ_AS_DATA_REPORTED = plant(
+    "  select to_jsonb(c) ->> 'relname', (pg_identify_object('pg_class'::regclass, c.oid, 0)).identity\n"
+    "    into v_rel, v_nsp from pg_class c where c.oid = p_parent;\n"
+    "  raise notice '% %', v_rel, v_nsp;\n"
+    "  select c.relname into v_rel from pg_class c where c.oid = p_parent\n"
+    "  union all select c.relname from pg_class c where c.oid = p_parent;\n"
+    "  for v_rec in select c.oid from pg_class c where c.oid = p_parent union select 0 loop\n"
+    "    select c.relname into v_rel from pg_class c where c.oid in (select v_rec.oid intersect select v_rec.oid);\n"
+    "  end loop;\n"
+    "  raise notice 'relname';", params="p_parent regclass")
 # the inverse's other places: a select item that compares the name, sorted by position; a function of the name
 # in an ORDER BY; a name in a plpgsql expression; and the shapes it still allows
 POSITIONAL = plant("  select c.oid, case c.relname when v_rel then 0 else 1 end into v_oid, v_x from pg_class c\n"
@@ -1077,6 +1457,29 @@ def selftest():
            False, "a regclass rendered as text (c.oid :: regclass :: text) stands in the ORDER clause")
     expect("a rendered regclass selected INTO a local, the local spliced by format() into a LOCK",
            RENDERED_INTO_FORMATTED, False, "is handed to format()")
+    expect("LIVENESS for #1287: the one spelling the rule read, (v_nsp || '.' || v_rel)::regclass", EXPRESSION_CAST,
+           False, "an expression is cast to regclass")
+    for label, src in BUILT_CASTS.items():
+        expect(f"#1287: a name built at run time cast as {label}", src, False, "an expression is cast to regclass")
+    for label, src in LOCAL_CASTS.items():
+        expect(f"#1287: a relname selected INTO a local, the local cast as {label}", src, False,
+               "v_rel, which holds a relname selected into it, is cast to regclass")
+    expect("a lone identifier, literal or array element cast to regclass in each spelling, and a number cast to it",
+           LONE_CASTS, True)
+    for label, src in NAMED_AS_DATA.items():
+        expect(f"#1180: a lookup by the name column named as data, {label}", src, False, "a name column read as data")
+    for label, src in IDENTITY.items():
+        expect(f"#1180: a lookup by the object's identity, {label}", src, False,
+               "an object's identity rendered as text")
+    for label, src in SET_COMPARED.items():
+        expect(f"#1180: a name alone in a select list a set operation compares: {label}", src, False,
+               f"c.relname stands in the select list of a query under {label.split(',')[0]}")
+    expect("a name read as data or as an identity and reported, a UNION ALL, another statement's set operation",
+           READ_AS_DATA_REPORTED, True)
+    expect("PR #1323's review: a name under UNION ALL beside an INTERSECT of other queries, by precedence",
+           PRECEDENCE_CLEAN, True)
+    expect("PR #1323's review: an object's type and schema read off pg_identify_object() are no name",
+           IDENTITY_FIELD_CLEAN, True)
     expect("a select item comparing relname by a simple CASE, the query sorted by its position", POSITIONAL, False,
            "relname stands in an expression of a select item")
     expect("a function of relname in an ORDER BY", ORDER_FUNCTION, False, "relname stands in the ORDER clause")
