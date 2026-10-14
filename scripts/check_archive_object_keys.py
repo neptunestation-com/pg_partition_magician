@@ -71,7 +71,8 @@ check passed. So the last rule is the inverse one: a prefix reference that is no
 three rules is assembly anyway, UNLESS it is
 
   * declared (`p_prefix text`, a column's definition, a function's header), or the target of an
-    assignment or the label of a named argument (`p_prefix => x`);
+    assignment or the label of a named argument (`p_prefix => x`). A type word after an item of a
+    select or RETURNING list is the item's alias (`select c.prefix text`), not a declaration;
   * handed whole, as one argument, to a function this file defines (`archive._owned_key(p_parent,
     cfg.prefix, ...)`), which is how it reaches the one function that assembles;
   * compared or tested: it touches a comparison operator (`=`, `<>`, `<`, `~`, ...), is followed by IS,
@@ -394,6 +395,9 @@ def functions(toks):
             words, mode = [t for t in p if t[0] == "ID"], "in"
             while words and words[0][1] in PARAM_MODES:
                 mode = words.pop(0)[1]
+            # the mode may follow the name instead (`k out text`, which PostgreSQL accepts too)
+            if len(words) > 2 and words[1][1] in PARAM_MODES:
+                mode = words.pop(1)[1]
             # a name is followed by its type; a lone word is a nameless parameter's type
             names.append((words[0][1] if len(words) > 1 else None, mode))
         while j < len(toks) and toks[j][0] != "DOLLAR" and toks[j][1] != ";":
@@ -408,7 +412,8 @@ def functions(toks):
 def receivers(params, arg, named):
     """Every spelling one overload's body can read an argument by (#1279), given the argument's position
     in the call, or the name it is passed under: the receiving parameter's name when it has one, and its
-    number. A call's arguments are the input parameters in order, so an OUT parameter takes no position.
+    number. A call's arguments are the input parameters in order, so an OUT parameter takes no position,
+    its mode written before its name or after it.
     `$n` counts every parameter in a plpgsql body and the input ones alone in a SQL body, and the body's
     language is not read, so both numbers are returned. An argument past the last parameter belongs to a
     trailing VARIADIC one."""
@@ -721,7 +726,9 @@ def _scan_once(toks, defined, carriers, unread=frozenset()):
         if not (PREFIX_NAME.match(text) or carried(text)):
             continue
         refs += 1
-        if nxt[1] in TYPE_WORDS or nxt[1] in ("=>", ":="):
+        # a type word after it in a select or RETURNING list is an alias (`select c.prefix text`), not a type
+        listed = (parens[-1] if parens else stmt).get("clause") in ("select", "returning")
+        if (nxt[1] in TYPE_WORDS and not listed) or nxt[1] in ("=>", ":="):
             continue  # a declaration, the label of a named argument, or the target of an assignment
         # a field selected out of a parenthesised row, `(cfg).prefix`, is a reference from the row on
         judge(operand_start(k - 2) if prev[1] == "." else k, k, line, text)
@@ -1205,6 +1212,23 @@ create or replace function archive._quoted_key(p_parent regclass, p_child name) 
   select archive._quoted_join(c.prefix, p_child) from archive.config c where c.parent_table = p_parent;
 $$;
 """)
+# Real instances: PR #1314's verification (V-01, V-02). A type word after a select item is its alias, not a
+# declaration; and an OUT parameter whose mode follows its name takes no position in a call either.
+ALIASED_TYPE_WORD_SECOND = _standing_second(
+    "archive._alias_key",
+    "return (select u.text || p_child from (select c.prefix text from archive.config c where c.parent_table = p_parent) u);")
+OUT_AFTER_NAME_SECOND = with_extra(r"""
+create or replace function archive._out_join(k out text, p_a text, p_b name) language plpgsql as $f$
+begin
+  k := p_a || '/' || p_b;
+end $f$;
+create or replace function archive._out_key(p_parent regclass, p_child name) returns text language plpgsql as $f$
+declare cfg archive.config;
+begin
+  select * into cfg from archive.config where parent_table = p_parent;
+  return archive._out_join(cfg.prefix, p_child);
+end $f$;
+""")
 # Everything a prefix may do, and still one key function: handed whole (by position, by name, by number, in
 # a FROM clause), compared and tested, stored by an upsert, reported by RAISE. And a `$1` in the text an
 # EXECUTE runs is its USING argument, not the first parameter of the function, which here carries the prefix.
@@ -1332,6 +1356,10 @@ def selftest():
            ("archive._rows_key (line", "): p_base"))
     expect("the prefix handed to a helper of this file whose body is single-quoted", UNREAD_BODY_SECOND, False,
            ("archive._quoted_key (line", "): c.prefix passed to archive._quoted_join(), whose body is not dollar-quoted"))
+    expect("V-01: a second assembly from the prefix aliased `text` in a derived table", ALIASED_TYPE_WORD_SECOND,
+           False, ("archive._alias_key (line", "): a subquery selecting the prefix standing between `from`"))
+    expect("V-02: a second assembly in a helper whose OUT parameter's mode follows its name", OUT_AFTER_NAME_SECOND,
+           False, ("archive._out_join (line", "): p_a concatenated with ||"))
     expect("the prefix handed whole, compared, stored and reported, and a $1 that is a USING argument",
            STANDING_CLEAN, True, owner="archive._owned_key")
     expect("the one assembling function never claims", NO_CLAIM, False, "never names archive.object_key_owner")

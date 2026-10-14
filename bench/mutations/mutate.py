@@ -11680,6 +11680,26 @@ MUTATIONS["archive_keys_unread_body_followed"] = (
     [('        if j < len(toks) and toks[j][0] == "DOLLAR":\n', "        if j <= len(toks):\n", 1)],
 )
 MUTATION_SRC["archive_keys_unread_body_followed"] = "scripts/check_archive_object_keys.py"
+MUTATIONS["archive_keys_type_word_alias_skipped"] = (
+    "bench/archive_keys_inverse_rule.sh",
+    "Pre-V-01 (PR #1314) scripts/check_archive_object_keys.py: a prefix reference followed by text, name, "
+    "varchar or character is skipped as a declaration wherever it stands, so a select item aliased with one "
+    "(`(select c.prefix text from archive.config c ...) || p_child`, or a derived table selecting `c.prefix text`) "
+    "is no reference at all and the second key built from it passes. One site, the declaration test.",
+    [('        if (nxt[1] in TYPE_WORDS and not listed) or nxt[1] in ("=>", ":="):\n',
+      '        if nxt[1] in TYPE_WORDS or nxt[1] in ("=>", ":="):\n', 1)],
+)
+MUTATION_SRC["archive_keys_type_word_alias_skipped"] = "scripts/check_archive_object_keys.py"
+MUTATIONS["archive_keys_mode_after_name_unread"] = (
+    "bench/archive_keys_inverse_rule.sh",
+    "Pre-V-02 (PR #1314) scripts/check_archive_object_keys.py: a parameter's mode is read only before its name, "
+    "so a helper declared (k out text, p_a text, p_b name) is read as three inputs, cfg.prefix handed first is "
+    "followed into k instead of p_a, and `k := p_a || p_b` assembles a second key the lint passes. One site, "
+    "the mode written after a name.",
+    [("            if len(words) > 2 and words[1][1] in PARAM_MODES:\n"
+      "                mode = words.pop(1)[1]\n", "", 1)],
+)
+MUTATION_SRC["archive_keys_mode_after_name_unread"] = "scripts/check_archive_object_keys.py"
 # Issues #1154 and #1180: scripts/check_archive_child_by_oid.py's rule 1 is the inverse rule, a name read only
 # alone in a select item or a RAISE argument, and it reads a regclass rendered as text as a name. One mutation per
 # issue, each taking out one clause of the fix; bench/lint_child_by_oid_inverse.sh catches both, on fixtures built

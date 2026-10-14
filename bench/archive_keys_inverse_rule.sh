@@ -38,6 +38,10 @@
 #   archive_keys_unread_body_followed      -- a function whose body is not dollar-quoted counts as one the
 #                                             checker follows, so a helper written `as 'select $1 || $2'`
 #                                             is handed the prefix and assembles a key out of its sight
+#   archive_keys_type_word_alias_skipped   -- a select item aliased `text`, `name`, `varchar` or `character`
+#                                             is skipped as a declaration again (PR #1314's V-01)
+#   archive_keys_mode_after_name_unread    -- a mode written after the name (`k out text`) is not read, so
+#                                             every later parameter shifts one position (V-02)
 #
 # Usage: archive_keys_inverse_rule.sh <container> <db> [check_archive_object_keys.py]
 # The container and database are accepted for the shape bench/discriminate.sh calls every guard with and are
@@ -181,6 +185,8 @@ for helper, header, lang, hbody, call, what in [
          "archive.k_join_named(p_base => cfg.prefix, p_child => p_child)", "a named parameter read as $2"),
         ("archive.k_join_out", "(out o_key text, text, name)", "plpgsql", "begin o_key := $2 || $3; end",
          "archive.k_join_out(cfg.prefix, p_child)", "a plpgsql parameter numbered past an OUT one"),
+        ("archive.k_join_out_after", "(k out text, p_a text, p_b name)", "plpgsql", "begin k := p_a || p_b; end",
+         "archive.k_join_out_after(cfg.prefix, p_child)", "a parameter placed after an OUT one written `k out text`"),
         ("archive.k_join_alias", "(text, name) returns text", "plpgsql",
          "declare v_base alias for $1; begin return v_base || $2; end",
          "archive.k_join_alias(cfg.prefix, p_child)", "a parameter renamed by ALIAS FOR $1"),
@@ -217,6 +223,9 @@ for fn, body, decl, what in [
          "with u as (update archive.config set parent_table = parent_table where parent_table = p_parent\n"
          "             returning prefix as p)\n  select u.p || p_child into v_key from u;\n  return v_key;",
          None, "a RETURNING item"),
+        ("archive.k_alias_text",
+         "return (select c.prefix text from archive.config c where c.parent_table = p_parent) || p_child;", None,
+         "a select item aliased with a type word, `select c.prefix text` (an alias, not a declaration)"),
         ("archive.k_select_all",
          "for v_key in select all prefix from archive.config where parent_table = p_parent loop\n"
          "    return v_key || p_child;\n  end loop;", None, "a SELECT ALL item (ALL tests nothing there)"),
