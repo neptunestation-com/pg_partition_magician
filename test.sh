@@ -1318,6 +1318,7 @@ run_perf() {
     "bench/transmute_staging_squatter_remedy.sh pgpm_perf381"
     "bench/regrain_capture_fn_any_schema.sh pgpm_perf379"
     "bench/transmute_child_holders_by_grid.sh pgpm_perf382"
+    "bench/review_tooling_verdicts.sh pgpm_perf394"
   )
   local selected=()
   local n=${#guards[@]} idx

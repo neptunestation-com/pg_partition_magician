@@ -14139,6 +14139,49 @@ MUTATIONS["hypertable_cutover_older_copy_key_index_takes_any"] = (
 )
 MUTATION_SRC["hypertable_cutover_older_copy_key_index_takes_any"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_cutover_older_copy_key_index_takes_any"] = "timescale"
+# #1288, #1289, #1290: the review loop's judging scripts, each put back to the reading it was found making.
+MUTATIONS["stop_check_precision_on_rounded_figure"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Pre-#1288 stop_check.py: the record's `exact:` fractions are parsed and checked against the figures but "
+    "not used, so recall, precision and fell rate are judged on the two-decimal figures again and a pass at "
+    "16/23 = 0.696 precision and 7/23 = 0.304 fell rate reads 0.70 >= 0.7 and 0.30 <= 0.3, met. One clause, "
+    "the assignment of the exact values. The guard's (a) catches it (precision and fell rate NOT met at the "
+    "edge; the 17/23 control converges).",
+    [('        r["recall"], r["precision"], r["strict"], r["fell"] = (exact["recall"], exact["precision"], exact["strict"],\n'
+      '                                                                exact["fell"])\n',
+      '        r["recall"], r["precision"], r["strict"], r["fell"] = (r["recall"], r["precision"], r["strict"],\n'
+      '                                                                r["fell"])\n', 1)],
+)
+MUTATION_SRC["stop_check_precision_on_rounded_figure"] = "scripts/review/stop_check.py"
+MUTATIONS["stop_check_coverage_on_rounded_minimum"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Pre-#1288 stop_check.py's coverage gate: judged on the coverage line's two-decimal minimum instead of its "
+    "count of finders at 0.90, so a finder at 26/29 = 0.897, printed 0.90, reads as at the gate and the pass "
+    "qualifies for the lens cycle. One clause, coverage_ok's header branch. The guard's (a) catches it.",
+    [('        return r["coverage_of"] > 0 and r["coverage_at"] == r["coverage_of"]\n',
+      '        return r["coverage"] is not None and r["coverage"] >= 0.9\n', 1)],
+)
+MUTATION_SRC["stop_check_coverage_on_rounded_minimum"] = "scripts/review/stop_check.py"
+MUTATIONS["pass_metrics_unverified_reads_fell"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Pre-#1289 pass_metrics.py: a candidate with no verdict, or with a verdict string none of finding, fell, "
+    "known_open (a \"known-open\" typo), is routed to fell, listed under Fell in verification and counted in "
+    "the fell rate the stopping criteria read, and nothing is left for the CLI to refuse. One clause, the "
+    "bucket's default. The guard's (b) catches it (fell rows, the fell rate, the record's sections, the CLI).",
+    [('        bucket = {"finding": findings, "fell": fell, "known_open": known}.get(v.get("verdict"))\n',
+      '        bucket = {"finding": findings, "fell": fell, "known_open": known}.get(v.get("verdict"), fell)\n', 1)],
+)
+MUTATION_SRC["pass_metrics_unverified_reads_fell"] = "scripts/review/pass_metrics.py"
+MUTATIONS["decisions_queue_skips_malformed_line"] = (
+    "bench/review_tooling_verdicts.sh",
+    "Pre-#1290 decisions_queue.parse(): every line not starting with the three characters `- D` is skipped, "
+    "so a BLOCKING entry written indented, under a `*` bullet or with a lower-case id is neither read nor "
+    "refused, `pending` exits 0 and stop_check.py lets the loop go on. One clause, the skip. The guard's (c) "
+    "catches it (each variant refused, exit 2; the exact shape still blocks and the header still parses).",
+    [('        if loop is None and not ENTRY_LIKE.match(ln):\n',
+      '        if not ln.startswith("- D"):\n', 1)],
+)
+MUTATION_SRC["decisions_queue_skips_malformed_line"] = "scripts/review/decisions_queue.py"
 
 
 # Issue #1272: the remedy every retain_disown row logs (pgpm._disown_retirement, its one writer) is the whole repair the
