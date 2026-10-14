@@ -7669,8 +7669,20 @@ drop function if exists pgpm._snapshot_wait(xid8, text, text, text);
 -- wait). Left out are the sessions with no role (usesysid null: autovacuum and auxiliary processes, which serve no
 -- reader) and an autovacuum worker the caller can see is one. A session drops out once its snapshot is released (its
 -- backend_xmin cleared, as a READ COMMITTED one is between statements) or its transaction ends. Other databases'
--- sessions, which cannot read this table, and a hot standby's, which pg_stat_activity does not show, are not
--- consulted.
+-- sessions, which cannot read this table, and a hot standby's, which pg_stat_activity does not show, are never
+-- listed. But other databases' TRANSACTIONS still count, through the xmin (next).
+--
+-- WHAT IT CANNOT TELL APART (#1263). backend_xmin is cluster-wide: a snapshot's xmin is the oldest xid running
+-- ANYWHERE when it was taken. So while a transaction older than the reference runs in any database (another
+-- database's, or a prepared transaction), every snapshot taken anywhere has an xmin at or before the reference,
+-- and a READ COMMITTED statement of this database that began after the copies committed, and sees them, is listed
+-- with the rest. It is waited for all the same, because nothing a caller can read tells it from one that cannot
+-- see the copies: a REPEATABLE READ transaction begun after the copies that imported a snapshot exported before
+-- them (its exporter since committed) shows the same backend_xmin, backend_xid, state, wait event, transaction and
+-- statement start (tests/333 builds the pair). Passing the one passes the other, which would read the regrained
+-- range empty. CREATE INDEX CONCURRENTLY waits the same way, its reference xmin being cluster-wide too. So such a
+-- transaction defers the swap for as long as it runs, and the refusal at the budget names it (database, pid, xid)
+-- instead of calling the sessions it holds back readers that would find the range empty.
 --
 -- A SESSION THAT WAITS ON THIS ONE (round 8) can never release its snapshot before this transaction commits, so it
 -- is never waited for: waiting would be a cycle the deadlock detector cannot see (this wait polls in pg_sleep, not
@@ -7717,10 +7729,14 @@ drop function if exists pgpm._snapshot_wait(xid8, text, text, text);
 --
 -- THE BUDGET is the caller's lock_timeout, as for every lock the swap takes. When it runs out with a session still
 -- listed the step raises 'pg_partition_magician: <p_what> deferred: N snapshot(s) older than the copies still open
--- (oldest: pid P, open T; pids ...)': maintain logs that as skip_regrain and the next tick tries again, regrain()
--- and the cutover refuse with it, rolled back whole. It never goes ahead. lock_timeout 0 (the session default,
--- under which a hand regrain() runs) waits for as long as they take, as the DETACH would wait for a reader holding
--- a lock. So a client that holds a snapshot across its call (a dblink caller waiting for the call, a wrapper that
+-- (oldest: pid P, open T; pids ...)' and 'a reader in one would find <p_range> empty'. When a transaction older than an
+-- earlier transaction's reference is still running, the head closes after 'open T)' and goes on 'a transaction older
+-- than the copies is still running in database D (pid H, xid X, open T)' (a prepared one: 'prepared transaction G'
+-- for the pid), why the listed sessions cannot be told apart, and then '(pids ...)': the holder before the unbounded
+-- list, and maintain's skip_regrain row keeps the message through that clause (past its usual 200 characters). maintain logs that as skip_regrain and
+-- the next tick tries again, regrain() and the cutover refuse with it, rolled back whole. It never goes ahead.
+-- lock_timeout 0 (the session default, under which a hand regrain() runs) waits for as long as they take, as the
+-- DETACH would wait for a reader holding a lock. So a client that holds a snapshot across its call (a dblink caller waiting for the call, a wrapper that
 -- holds one) is a reader the swap must wait for: call these from a direct session.
 --
 -- What it cannot cover, CREATE INDEX CONCURRENTLY's own last-mile window: what this transaction itself writes. A
@@ -7747,7 +7763,7 @@ declare
   v_by_xid boolean;
   v_limit xid;
   v_still int[]; v_blocked int[]; v_chained int[]; v_queue text; v_passed int[] := '{}'; v_n int; v_pid int;
-  v_open text; v_new int; v_older int[]; v_marked boolean := false;
+  v_open text; v_holder text; v_new int; v_older int[]; v_marked boolean := false;
   v_sleep float8 := 0.005;
 begin
   -- the copies' own transaction: an earlier one (wait for snapshots at or before it) or this one (wait for every
@@ -7826,6 +7842,39 @@ begin
       v_pid := v_still[1];
       select coalesce(date_trunc('second', clock_timestamp() - a.xact_start)::text, 'not visible to this role')
         into v_open from pg_stat_activity a where a.pid = v_pid;
+      -- THE FLOOR HOLDER (#1263): against an earlier transaction's reference, the oldest transaction still running
+      -- at or before it, in any database (a session's, or a prepared one). While it runs, every snapshot taken in the
+      -- cluster has an xmin at or before it, so the listed sessions include snapshots that see the copies, and
+      -- nothing a caller can read tells those from one that does not (see WHAT IT CANNOT TELL APART, above): the
+      -- refusal names it rather than calling every listed session a reader that would find the range empty.
+      -- Against this transaction's own xid there is none to name: every snapshot open while it runs is listed
+      -- whatever else runs.
+      v_holder := null;
+      if v_by_xid then
+        select h.what into v_holder
+          from (select format('in database %s (pid %s, xid %s, open %s)', coalesce(d.datname::text, '(none)'), a.pid,
+                              a.backend_xid, coalesce(date_trunc('second', clock_timestamp() - a.xact_start)::text,
+                                                      'not visible to this role')) as what,
+                       age(a.backend_xid) as old
+                  from pg_stat_activity a left join pg_database d on d.oid = a.datid
+                 where a.backend_xid is not null
+                   and a.pid <> pg_backend_pid()
+                   and age(a.backend_xid) >= age(v_limit)
+                union all
+                select format('in database %s (prepared transaction %L, xid %s, prepared %s)', p.database, p.gid,
+                              p.transaction, date_trunc('second', clock_timestamp() - p.prepared)),
+                       age(p.transaction)
+                  from pg_prepared_xacts p
+                 where age(p.transaction) >= age(v_limit)) h
+         order by h.old desc
+         limit 1;
+      end if;
+      if v_holder is not null then
+        -- the holder comes BEFORE the pid list, which has no bound: maintain logs this through a bounded left(), and
+        -- the clause it exists for (which transaction to end) must reach that row however many sessions are listed
+        raise exception 'pg_partition_magician: % deferred: % snapshot(s) older than the copies still open (oldest: pid %, open %); a transaction older than the copies is still running %: while it runs every snapshot of the cluster has an xmin at or before it, so these cannot be told from snapshots that miss the copies (a reader in one of those would find % empty after the swap), and the swap waits for them all (pids %). %. Nothing was swapped: maintain retries a regrain on its next tick, and a call by hand is refused and can be run again once that transaction has ended and these have released their snapshots (a READ COMMITTED statement releases its own when it finishes).',
+          p_what, v_n, v_pid, v_open, v_holder, p_range, array_to_string(v_still, ', '), p_where;
+      end if;
       raise exception 'pg_partition_magician: % deferred: % snapshot(s) older than the copies still open (oldest: pid %, open %; pids %); a reader in one would find % empty after the swap. %. Nothing was swapped: maintain retries a regrain on its next tick, and a call by hand is refused and can be run again once those transactions have ended (from a direct session: a caller that holds a snapshot across the call is one of them).',
         p_what, v_n, v_pid, v_open, array_to_string(v_still, ', '), p_range, p_where;
     end if;
@@ -13507,7 +13556,13 @@ begin
     exception when others then
       v_regrain := 'deferred';
       v_note := v_note || ' regrain_deferred';
-      insert into pgpm.log (parent_table, action, method) values (p_parent, 'skip_regrain', left(sqlerrm, 200));
+      -- 200 characters, as every skip row keeps, or (#1263) through the end of the floor-holder clause of
+      -- _snapshot_wait's deferral, which names the transaction to end (database, pid or prepared gid, xid) after a
+      -- head of up to about 150 characters: the remedy the row exists to carry. The clause ends at the text found
+      -- here, and comes before the pid list, so what is kept is bounded (about 600 with the longest gid)
+      insert into pgpm.log (parent_table, action, method)
+      values (p_parent, 'skip_regrain',
+              left(sqlerrm, greatest(200, strpos(sqlerrm, '): while it runs every snapshot of the cluster'))));
     end;
   end if;
 
