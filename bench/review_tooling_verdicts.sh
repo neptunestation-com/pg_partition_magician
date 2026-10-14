@@ -58,6 +58,7 @@ fi
 #       indented, under a `*` bullet or with a lower-case id was never read and the loop went on. The controls:
 #       the exact shape blocks, and the header's prose with a default entry parses with nothing pending.
 #         decisions_queue_skips_malformed_line    a line not starting "- D" skipped again
+#         decisions_queue_pipe_only_at_line_start a `|` past position zero above the first heading missed again
 python3 - "$R" <<'PY' || fail=1
 import contextlib, io, json, os, subprocess, sys, tempfile
 R = sys.argv[1]
@@ -234,6 +235,12 @@ with tempfile.TemporaryDirectory() as d:
     for label, line in (("indented", "  -" + tail), ("a * bullet", "*" + tail), ("a lower-case id", "- d02" + tail[4:])):
         rc, seen = pending(body + line), stop_reads(body + line)
         say(rc == 2 and seen == "refused", f"(c) {label} BLOCKING entry is refused", f"pending exit {rc}, parse {seen}")
+    # above the first loop heading: the bare header parses, and a `|`-field line there is refused, not prose
+    head = "\n".join(decisions_queue.HEADER) + "\n"
+    say(pending(head) == 0, "LIVENESS: (c) the bare header, no loop heading yet, parses", "")
+    line = "Pending | BLOCKING | cut release v0.7.0\n"
+    rc, seen = pending(head + line), stop_reads(head + line)
+    say(rc == 2 and seen == "refused", "(c) a `|` line above the first loop heading is refused", f"pending exit {rc}, parse {seen}")
 sys.exit(1 if fail else 0)
 PY
 

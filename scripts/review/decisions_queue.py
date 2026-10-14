@@ -75,7 +75,9 @@ def parse(text):
         # that reads as one (a list item of any bullet or indent, a D<nn> id in either case, a `|` field), is an
         # entry of the exact shape or the file is refused: a BLOCKING entry Markdown renders the same but this
         # parse skipped was never read, and the loop went on past it (#1290).
-        if loop is None and not ENTRY_LIKE.match(ln):
+        # search, not match: the list-item and id alternatives anchor themselves with `^`, and a `|` anywhere in
+        # the line is an entry's field separator, so it must be found past position zero too
+        if loop is None and not ENTRY_LIKE.search(ln):
             continue
         m = ENTRY.match(ln.rstrip())
         if not m:
@@ -315,6 +317,16 @@ def selftest():
             except QueueError:
                 pass
         assert "One line per decision" in good.split("## Loop", 1)[0] and len(parse(good)) == 6, "the header's prose parses"
+        # above the first loop heading too, a line with a `|` field anywhere is an entry, never prose (a `|` past
+        # position zero was missed when the pattern was matched rather than searched)
+        head = "\n".join(HEADER) + "\n"
+        assert parse(head) == [], "the bare header parses"
+        for broken in ("Pending | BLOCKING | cut release\n", "  * D01 | 2026-10-11 | BLOCKING | x | issue - | PR - | open\n"):
+            try:
+                parse(head + broken)
+                raise AssertionError(f"malformed header-region line accepted: {broken!r}")
+            except QueueError:
+                pass
         # the CLI: pending exits 1 on the open BLOCKING entry, 0 once it is resolved
         sink = io.StringIO()
         with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):

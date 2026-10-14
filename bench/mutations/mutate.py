@@ -14197,10 +14197,20 @@ MUTATIONS["decisions_queue_skips_malformed_line"] = (
     "so a BLOCKING entry written indented, under a `*` bullet or with a lower-case id is neither read nor "
     "refused, `pending` exits 0 and stop_check.py lets the loop go on. One clause, the skip. The guard's (c) "
     "catches it (each variant refused, exit 2; the exact shape still blocks and the header still parses).",
-    [('        if loop is None and not ENTRY_LIKE.match(ln):\n',
+    [('        if loop is None and not ENTRY_LIKE.search(ln):\n',
       '        if not ln.startswith("- D"):\n', 1)],
 )
 MUTATION_SRC["decisions_queue_skips_malformed_line"] = "scripts/review/decisions_queue.py"
+MUTATIONS["decisions_queue_pipe_only_at_line_start"] = (
+    "bench/review_tooling_verdicts.sh",
+    "#1290's refusal with the entry-like pattern matched at position zero instead of searched: its `|` "
+    "alternative carries no `^` of its own, so above the first loop heading a line such as `Pending | BLOCKING "
+    "| cut release` is taken for header prose and skipped, `pending` exits 0 and the loop goes on (the "
+    "codex review thread on #1322). One clause, search back to match. The guard's (c) catches it.",
+    [('        if loop is None and not ENTRY_LIKE.search(ln):\n',
+      '        if loop is None and not ENTRY_LIKE.match(ln):\n', 1)],
+)
+MUTATION_SRC["decisions_queue_pipe_only_at_line_start"] = "scripts/review/decisions_queue.py"
 MUTATIONS["land_stall_counts_existing_summaries"] = (
     "bench/review_tooling_verdicts.sh",
     "land.sh's stall detector before 2026-10-14: a required summary with no check-run on the merge group's "
