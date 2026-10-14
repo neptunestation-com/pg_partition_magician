@@ -7626,6 +7626,19 @@ exception when invalid_parameter_value then
 end;
 $$;
 
+-- _text_time_epoch_on_unit (#1312): is a text_time epoch itself a whole number of its encoding's unit (a
+-- second, or a millisecond) from 1970-01-01 00:00:00+00? A whole-month grid's bounds are midnight on the 1st
+-- in partition_tz whatever its anchor (_grid_floor's calendar branch), and every zone offset PostgreSQL knows
+-- is whole seconds, so every such bound is a whole second from 1970: it is a whole number of units from the
+-- epoch exactly when the epoch is on the unit. A null epoch is the Unix epoch (pgpm.config's default reading).
+-- Asked by _text_time_unit_contract of a whole-month partition_step at transmute, and by _regrain_step_shape
+-- of a registered whole-month grid and of a whole-month target.
+create or replace function pgpm._text_time_epoch_on_unit(p_unit text, p_epoch timestamptz)
+returns boolean language sql stable as $$
+  select mod(extract(epoch from coalesce(p_epoch, '1970-01-01 00:00:00+00'::timestamptz)) * 1000000,
+             case p_unit when 'ms' then 1000 else 1000000 end) = 0
+$$;
+
 -- The remedy every off-unit grid refusal names (#1117, #1039, #1139): a reconversion, said with the door it
 -- has. untransmute hands the original table back only while every row is still in its monolith (see
 -- untransmute's one-way door); a live grid an older install registered is usually past that, and then pgpm
@@ -7802,6 +7815,32 @@ begin
           case v_enc_prec when 0 then 'second' else 'millisecond' end,
           pgpm._reconvert_remedy(p_parent, 'an anchor and a step that are whole '
             || case v_enc_prec when 0 then 'seconds' else 'milliseconds' end);
+      end if;
+      -- #1312: and a whole-month step's bounds, which are not the anchor plus whole steps but midnight on
+      -- the 1st whatever the anchor, a whole second (see _text_time_epoch_on_unit). Against a text_time
+      -- epoch that is not itself on the unit they are off it, however the anchor sits: on a registered
+      -- whole-month grid (transmute refuses it now; an install before that registered it, anchor whole units
+      -- from the epoch, so the test above passed it) every bound of the grid and of any regrain of it, and
+      -- on a fixed grid every fine bound of a whole-month target. A 1-month regrain of such a grid copied by
+      -- floored bounds and reconciled by unfloored ones, and the swap brought back rows deleted mid-run. A
+      -- fixed grid with a fixed target is the anchor plus whole steps, on the unit, and is not refused.
+      if cfg.control_kind = 'text_time' and not pgpm._text_time_epoch_on_unit(cfg.text_time_unit, cfg.text_time_epoch) then
+        if extract(year from cfg.partition_step::interval) * 12 + extract(month from cfg.partition_step::interval) <> 0 then
+          raise exception 'pg_partition_magician: cannot regrain % -- its grid is not on its control column %''s encoded unit: it is a text_time key, which encodes whole %s from %, which is not itself a whole %, and its registered partition_step % is a whole number of months, which puts every bound at midnight on the 1st whatever the anchor, so every bound of the grid and of any regrain of it is encoded by flooring it to that unit, and a row deleted mid-regrain could come back at the swap. An install that did not hold a whole-month text_time grid''s epoch to the unit registered it. %',
+            p_parent, quote_ident(cfg.control_column),
+            case v_enc_prec when 0 then 'second' else 'millisecond' end, pgpm._ts_text(v_enc_epoch),
+            case v_enc_prec when 0 then 'second' else 'millisecond' end, cfg.partition_step,
+            pgpm._reconvert_remedy(p_parent, 'a fixed step (whole '
+              || case v_enc_prec when 0 then 'seconds' else 'milliseconds' end
+              || ', with an anchor a whole number of them from the epoch), or a p_tt_epoch that is a whole '
+              || case v_enc_prec when 0 then 'second' else 'millisecond' end);
+        elsif v_months <> 0 then
+          raise exception 'pg_partition_magician: regrain target step % for % is a whole number of months, but its control column % is a text_time key, which encodes whole %s from %, which is not itself a whole % -- every fine cell''s bound would be midnight on the 1st, encoded by flooring it to that unit, so the copy would place a row in one cell while the run''s reconcile applies a change made to it during the run to another (a row deleted mid-regrain would come back at the swap); give a fixed step that is a multiple of 1 %',
+            p_step, p_parent, quote_ident(cfg.control_column),
+            case v_enc_prec when 0 then 'second' else 'millisecond' end, pgpm._ts_text(v_enc_epoch),
+            case v_enc_prec when 0 then 'second' else 'millisecond' end,
+            case v_enc_prec when 0 then 'second' else 'millisecond' end;
+        end if;
       end if;
       select b.r_unit into v_enc_unit
         from pgpm._time_unit_breach('timestamptz'::regtype, v_enc_prec, p_step, null) b;
@@ -9501,9 +9540,13 @@ $$;
 -- flooring whatever is finer, so a grid whose boundaries fall between two units is recorded in pgpm.part at
 -- one instant and written to the catalog at an earlier one: an anchor half a second off an ObjectId grid put
 -- every recorded bound half a second above the catalog's, and a row in that half second sat in a partition
--- whose recorded range does not hold its time. Every boundary is the anchor plus whole steps, so it is a whole
--- number of units from the epoch exactly when the anchor is and the step is (a month or a day is whole
--- seconds in every zone PostgreSQL knows, so the step's sub-second part is the only one that can fail).
+-- whose recorded range does not hold its time. A FIXED step's every boundary is the anchor plus whole steps,
+-- so it is a whole number of units from the epoch exactly when the anchor is and the step is. A whole-MONTH
+-- step's is not (#1312): its boundaries are midnight on the 1st whatever the anchor, so with an epoch off the
+-- unit (1970-01-01 00:00:00.5+00 on a seconds encoding) and an anchor whole seconds from that epoch, every
+-- month bound was floored half a second below the bound pgpm.part records, and a regrain of it brought back
+-- rows deleted while it ran. So a whole-month step also needs the epoch itself on the unit
+-- (_text_time_epoch_on_unit); a fixed step does not, and is left alone.
 create or replace function pgpm._text_time_unit_contract(p_parent regclass, p_control name, p_step text,
                                                          p_anchor text, p_unit text, p_epoch timestamptz)
 returns void language plpgsql stable as $$
@@ -9515,6 +9558,15 @@ begin
       p_parent, quote_ident(p_control), p_step, p_anchor,
       case p_unit when 'ms' then 'millisecond' else 'second' end, pgpm._ts_text(p_epoch),
       case p_unit when 'ms' then 'millisecond' else 'second' end, pgpm._ts_text(p_epoch);
+  end if;
+  if extract(year from p_step::interval) * 12 + extract(month from p_step::interval) <> 0
+     and not pgpm._text_time_epoch_on_unit(p_unit, p_epoch) then
+    raise exception 'pg_partition_magician: cannot partition % on % with step % -- a whole-month step puts every partition bound at midnight on the 1st whatever the anchor, which is a whole second, but its text_time encoding counts whole %s from %, which is not itself a whole %, so every bound would be encoded by flooring to that unit and written to the catalog at an earlier instant than pgpm records for it: rows in that gap would sit in a partition whose recorded range does not hold their time, and a regrain could bring back a row deleted while it ran. Give a fixed step (a whole number of %s, with an anchor a whole number of them from %), or a p_tt_epoch that is a whole % (which decodes every key earlier by the fraction dropped), then re-run transmute.',
+      p_parent, quote_ident(p_control), p_step,
+      case p_unit when 'ms' then 'millisecond' else 'second' end, pgpm._ts_text(p_epoch),
+      case p_unit when 'ms' then 'millisecond' else 'second' end,
+      case p_unit when 'ms' then 'millisecond' else 'second' end, pgpm._ts_text(p_epoch),
+      case p_unit when 'ms' then 'millisecond' else 'second' end;
   end if;
 end;
 $$;

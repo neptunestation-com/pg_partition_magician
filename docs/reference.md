@@ -363,7 +363,8 @@ Parameters:
   payload (32-bit timestamp + 128 bits of random) as a single number, not the timestamp alone.
 - `p_tt_epoch` -- **text_time only**, default `'1970-01-01 00:00:00+00'` (standard Unix epoch). The
   zero-point the decoded count is measured from. Only formats with a non-standard epoch (KSUID:
-  `'2014-05-13 16:53:20+00'`) need to set this.
+  `'2014-05-13 16:53:20+00'`) need to set this. With a whole-month step it must itself be a whole number of
+  `p_tt_unit` (see the refusals below).
 - `p_force_text_time` -- skip the text_time plausibility refusal (see below).
 - `p_bound_headroom` -- push the monolith's upper bound `hi` this many grid steps further out. The bound
   `CHECK` refuses writes at or past `hi` for the whole conversion, so raise this if the frontier could
@@ -454,7 +455,10 @@ encoding a bound in it never ends), a `p_tt_alphabet` whose length does not matc
 repeats a character, a non-positive `p_tt_width`, a negative `p_tt_discard_bits`, a `p_anchor` or a step
 that is not a whole number of the encoding's unit (`p_tt_unit`) from `p_tt_epoch`, such as
 `'2000-01-01 00:00:00.5+00'` on a seconds grid like ObjectId's (every bound is encoded by flooring to the
-unit, so the bounds pgpm records would sit above the catalog's), an alphabet the control
+unit, so the bounds pgpm records would sit above the catalog's), a whole-month step when `p_tt_epoch` is not
+itself a whole number of the unit, such as `'1970-01-01 00:00:00.5+00'` on a seconds grid (a month's bounds are
+midnight on the 1st whatever the anchor, so they are off the unit even with an anchor a whole number of units
+from that epoch; give a fixed step, or a `p_tt_epoch` on the unit), an alphabet the control
 column's collation does not order the way base-`p_tt_radix` place value does (KSUID's base62 on an
 `en_US` column, any alphabet with digits under an ICU collation with numeric ordering such as
 `und-u-kn-true`, or an alphabet holding a two-letter contraction of the collation, such as hex under
@@ -3236,7 +3240,12 @@ ObjectId key, finer or coarser than the unit: each fine bound is encoded by floo
 run would copy a row into one cell and apply a change made to it during the run to another, and a row
 deleted mid-regrain would come back at the swap; and for the same reason any target at all on such a key
 whose registered `partition_anchor` or `partition_step` is itself off the unit, which an older install could
-register (see the remedy below); likewise any target at all on a `time` key whose registered
+register (see the remedy below); likewise, on a `text_time` key whose `text_time_epoch` is not itself a whole
+unit (such as `'1970-01-01 00:00:00.5+00'` on a seconds encoding), any target at all when the registered
+`partition_step` is a whole number of months, and a whole-month target on a fixed grid: a month's bounds are
+midnight on the 1st whatever the anchor, so they are off the unit however the anchor sits, and transmute
+refuses such a grid now, but an older install could register it (the same remedy; a fixed grid with a fixed
+target is the anchor plus whole steps and is not refused); likewise any target at all on a `time` key whose registered
 `partition_anchor` or `partition_step` is off the column's unit (a `date` grid anchored other than 00:00 UTC,
 a `timestamptz(0)` grid anchored off the second), which an install from before `transmute` held a time grid
 to its column's unit could register, and any fixed target (days, hours) on a `date` or `timestamp` key whose
