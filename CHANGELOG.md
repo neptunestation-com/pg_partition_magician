@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- **`untransmute` and `uninstall.sql` drop a moved regrain capture function** (#1271).
+  `pgpm._regrain_capture_names` looked the recorded capture function up by its oid only inside the delta's
+  current schema, so once the delta (`ALTER TABLE ... SET SCHEMA`) or the function (`ALTER FUNCTION ... SET
+  SCHEMA`) had been moved it resolved to nothing, and both exits dropped the delta and left the `SECURITY
+  DEFINER` function behind, against the reference's "found by oid". The resolver now finds the function by its
+  oid wherever it lives and returns its schema as `fn_nsp`, and untransmute and uninstall.sql drop it there,
+  never in the delta's schema, so a function of yours under the capture's name beside the delta is left
+  alone. The install and the uninstall script have to be this release's for that: this `uninstall.sql` still
+  runs against an older install, but asks that install's resolver, so a moved function is left there as before
+  (re-run `install.sql` first), and an older `uninstall.sql` run against this install drops the capture's
+  name in the delta's schema, which after a move is not the recorded function. `tests/338` is the acceptance
+  test; `bench/regrain_capture_fn_any_schema.sh` runs it against `regrain_capture_fn_in_delta_schema` (the
+  lookup confined again), `untransmute_capture_fn_dropped_in_delta_schema` and
+  `uninstall_capture_fn_dropped_in_delta_schema` (each exit's drop in the delta's schema), and
+  `uninstall_capture_fn_nsp_read_bare` (the script stopping on an older install's three-column resolver).
+  alone. `tests/338` is the acceptance test; `bench/regrain_capture_fn_any_schema.sh` runs it against
+  `regrain_capture_fn_in_delta_schema` (the lookup confined again) and
+  `untransmute_capture_fn_dropped_in_delta_schema` (the drop in the delta's schema).
 - **A direct archive_fn strategy call keys the chunk it read** (#814, the archive bullet). Within one direct call of
   `pgpm.archive_to_s3_ndjson` or `pgpm.archive_to_s3_parquet`, the range read and the recorded-chunk check parsed
   `p_lo` in the caller's session while `archive._object_stem` parsed it under its own pinned `TimeZone` and

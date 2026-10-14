@@ -5970,15 +5970,25 @@ $$;
 -- derived names are taken only on the evidence that they ARE pgpm's: a pgpm_regrain_capture trigger on one
 -- of the parent's partitions firing the function under the derived name (the trigger is how a pre-#496
 -- capture writes there). Never on the name alone. nsp is the delta's schema when it exists, else the
--- parent's (the schema the next prepare mints in). The two are resolved independently, so a function
--- dropped by hand does not lose the delta.
+-- parent's (the schema the next prepare mints in); fn_nsp is the function's own schema when it exists, else
+-- the parent's. The two are resolved independently, so a function dropped by hand does not lose the delta,
+-- and each is found by its oid wherever it lives (#1271): the function used to be looked for only in the
+-- delta's schema, so once either had been moved by SET SCHEMA it resolved to null, and untransmute and
+-- uninstall.sql dropped the delta and left the SECURITY DEFINER function behind. A caller that drops the
+-- function names it with fn_nsp, never nsp.
+--
+-- fn_nsp is an OUT parameter added after the others, which changes the row type, so an older install's
+-- function is dropped first (CREATE OR REPLACE cannot change it). Every caller is plpgsql and nothing
+-- depends on it in the catalog.
+drop function if exists pgpm._regrain_capture_names(regclass);
 create or replace function pgpm._regrain_capture_names(
-  p_parent regclass, out nsp name, out delta name, out fn name
+  p_parent regclass, out nsp name, out delta name, out fn name, out fn_nsp name
 ) returns record language plpgsql stable as $$
 declare cfg record; v_nsp name; v_rel name; d record;
 begin
   select * into d from pgpm._regrain_capture_derive(p_parent);
   nsp := d.nsp;
+  fn_nsp := d.nsp;
   select regrain_delta_oid, regrain_capture_fn_oid into cfg from pgpm.config where parent_table = p_parent;
   if not found then return; end if;
   if cfg.regrain_delta_oid is null and cfg.regrain_capture_fn_oid is null then
@@ -6002,9 +6012,9 @@ begin
     if found then nsp := v_nsp; delta := v_rel; end if;
   end if;
   if cfg.regrain_capture_fn_oid is not null then
-    select p.proname into v_rel from pg_proc p
-     where p.oid = cfg.regrain_capture_fn_oid and p.pronamespace = (select oid from pg_namespace where nspname = nsp);
-    if found then fn := v_rel; end if;
+    select n.nspname, p.proname into v_nsp, v_rel
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace where p.oid = cfg.regrain_capture_fn_oid;
+    if found then fn_nsp := v_nsp; fn := v_rel; end if;
   end if;
 end;
 $$;
@@ -12933,7 +12943,7 @@ declare
   v_seqgrantdefs text[];                              -- #1076: the parent identity sequences' grants, for the restored ones
   v_ra record;                                        -- #656/#670: one identity column's refreshed (next, max, min)
   v_idkinds text[];   -- #308: 'a' (ALWAYS) or 'd' (BY DEFAULT) per v_idcols entry, same order
-  r pgpm.dropped_fk%rowtype; v_cdelta name; v_cfn name; v_cnsp name;
+  r pgpm.dropped_fk%rowtype; v_cdelta name; v_cfn name; v_cnsp name; v_cfnsp name;
   v_trgdefs text[] := '{}'; v_tdef text;   -- #277
   v_trgnames text[] := '{}'; v_trgstates text[] := '{}';   -- #499: tgname and tgenabled, index-aligned with v_trgdefs
   v_sq record;   -- #573: serial sequences the parent owns, handed back before it is dropped
@@ -12971,7 +12981,7 @@ begin
   -- resolve the regrain change-capture names (#267) NOW, while the parent and its config row still exist:
   -- they come from the oids recorded there at prepare (#496), or failing that from the parent's own name,
   -- and both are gone by the time the drop below runs.
-  select nsp, delta, fn into v_cnsp, v_cdelta, v_cfn from pgpm._regrain_capture_names(p_parent);
+  select nsp, delta, fn, fn_nsp into v_cnsp, v_cdelta, v_cfn, v_cfnsp from pgpm._regrain_capture_names(p_parent);
   -- #969: and they are dropped at the end, with the copies a regrain in flight leaves, which a table handed to a
   -- new owner may have left with the old one. Asked before anything is changed, so the new owner's untransmute
   -- refuses with the hand-over step rather than failing 'must be owner of table' at that drop.
@@ -13466,9 +13476,10 @@ begin
   -- the per-parent regrain change-capture apparatus (#267) is a side relation, not a partition, so the
   -- parent's DROP above does not take it. Drop it here or untransmute leaves it orphaned. Names were
   -- resolved up front, before the parent went away.
-  -- #555: where they are, not the parent's schema; #955: only what pgpm.config recorded, never a namesake
+  -- #555: where they are, not the parent's schema; #955: only what pgpm.config recorded, never a namesake;
+  -- #1271: each in its OWN schema, since either may have been moved without the other
   if v_cdelta is not null then execute format('drop table if exists %I.%I', v_cnsp, v_cdelta); end if;
-  if v_cfn is not null then execute format('drop function if exists %I.%I()', v_cnsp, v_cfn); end if;
+  if v_cfn is not null then execute format('drop function if exists %I.%I()', v_cfnsp, v_cfn); end if;
 
   -- forget all pgpm state for this table (matched by the dropped parent's oid, which p_parent still
   -- carries), and log the reversal against the restored table.

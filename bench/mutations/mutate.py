@@ -13976,6 +13976,53 @@ MUTATIONS["archive_recorded_bounds_unread"] = (
 )
 MUTATION_SRC["archive_recorded_bounds_unread"] = "pgpm_archive/install.sql"
 
+# Issue #1271: _regrain_capture_names finds the recorded capture function by its oid wherever it lives and returns
+# its own schema (fn_nsp), which untransmute and uninstall.sql drop it in. Caught by tests/338 through
+# bench/regrain_capture_fn_any_schema.sh.
+MUTATIONS["regrain_capture_fn_in_delta_schema"] = (
+    "bench/regrain_capture_fn_any_schema.sh",
+    "Pre-#1271 _regrain_capture_names: the recorded capture function is looked up by its oid only inside the "
+    "delta's current schema, so once the delta (ALTER TABLE ... SET SCHEMA) or the function (ALTER FUNCTION ... SET "
+    "SCHEMA) has been moved it resolves to null, and untransmute and uninstall.sql drop the delta and leave the "
+    "SECURITY DEFINER function behind. One clause, the schema the lookup is confined to. tests/338 parts A, B, D "
+    "and E catch it (the recorded function survives each exit).",
+    [("      from pg_proc p join pg_namespace n on n.oid = p.pronamespace where p.oid = cfg.regrain_capture_fn_oid;\n",
+      "      from pg_proc p join pg_namespace n on n.oid = p.pronamespace where p.oid = cfg.regrain_capture_fn_oid\n"
+      "       and n.nspname = nsp;\n", 1)],
+)
+MUTATIONS["untransmute_capture_fn_dropped_in_delta_schema"] = (
+    "bench/regrain_capture_fn_any_schema.sh",
+    "The resolver fixed but untransmute's drop site not: the function is resolved wherever it lives and then "
+    "dropped by name in the DELTA's schema, so after a move the recorded function survives and an operator's "
+    "function of the capture's name beside the delta is dropped in its place. One site, the schema of the drop. "
+    "tests/338 parts A and B catch it (the recorded function survives, the operator's is gone).",
+    [("  if v_cfn is not null then execute format('drop function if exists %I.%I()', v_cfnsp, v_cfn); end if;\n",
+      "  if v_cfn is not null then execute format('drop function if exists %I.%I()', v_cnsp, v_cfn); end if;\n", 1)],
+)
+# The same issue's other exit, pgpm_core/uninstall.sql, which the wrapper takes as the file under test for these
+# two (it recognises them by MUTATION_SRC, as bench/recorded_identity.sh does).
+MUTATIONS["uninstall_capture_fn_dropped_in_delta_schema"] = (
+    "bench/regrain_capture_fn_any_schema.sh",
+    "The resolver fixed but uninstall.sql's drop site not: the function is resolved wherever it lives and then "
+    "dropped by name, CASCADE, in the DELTA's schema, so after a move the recorded function survives the uninstall "
+    "and an operator's function of the capture's name beside the delta is dropped in its place. One site, the "
+    "schema of the drop. tests/338 parts D and E catch it (the recorded function survives, the operator's is gone).",
+    [("        execute format('drop function if exists %I.%I() cascade', v_fnsp, v_fn);\n",
+      "        execute format('drop function if exists %I.%I() cascade', v_nsp, v_fn);\n", 1)],
+)
+MUTATION_SRC["uninstall_capture_fn_dropped_in_delta_schema"] = "pgpm_core/uninstall.sql"
+MUTATIONS["uninstall_capture_fn_nsp_read_bare"] = (
+    "bench/regrain_capture_fn_any_schema.sh",
+    "uninstall.sql reading the resolver's fn_nsp as a bare column: against an install whose resolver predates "
+    "fn_nsp (the script is run against installs older than itself) the read is 42703, which none of the script's "
+    "handlers catch, so the uninstall stops and under --single-transaction removes nothing. One clause, the read "
+    "through to_jsonb with the delta's schema as the older resolver's answer. tests/338 part F catches it (the "
+    "script does not run to its end against the three-column resolver, and the control's capture is not dropped).",
+    [("      select x.nsp, x.delta, x.fn, coalesce(to_jsonb(x) ->> 'fn_nsp', x.nsp)\n",
+      "      select x.nsp, x.delta, x.fn, x.fn_nsp\n", 1)],
+)
+MUTATION_SRC["uninstall_capture_fn_nsp_read_bare"] = "pgpm_core/uninstall.sql"
+
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a

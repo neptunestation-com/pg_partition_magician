@@ -76,11 +76,15 @@ $$;
 -- resolver every caller uses (the oids pgpm.config recorded at prepare, or failing those the names
 -- derived from the parent), which is why this block has to run BEFORE the schema drop.
 do $$
-declare r record; v_nsp name; v_delta name; v_fn name; v_copies_q text;
+declare r record; v_nsp name; v_delta name; v_fn name; v_fnsp name; v_copies_q text;
 begin
   for r in select parent_table from pgpm.config loop
     begin
-      select nsp, delta, fn into v_nsp, v_delta, v_fn from pgpm._regrain_capture_names(r.parent_table);
+      -- #1271: the function in its own schema (fn_nsp), which is not the delta's once either has been moved.
+      -- Read through to_jsonb so this script still runs against an install whose resolver predates fn_nsp;
+      -- that one looked for the function only in the delta's schema, so nsp is the schema it answered for.
+      select x.nsp, x.delta, x.fn, coalesce(to_jsonb(x) ->> 'fn_nsp', x.nsp)
+        into v_nsp, v_delta, v_fn, v_fnsp from pgpm._regrain_capture_names(r.parent_table) x;
       -- A parent dropped without untransmute has no relation to derive the names from (the lookup
       -- returns nulls, and %I refuses a null). Its partitions went with it, and the trigger with
       -- them, so what it may have left is an inert table and function this script cannot name.
@@ -105,7 +109,7 @@ begin
       -- #955: only what pgpm.config recorded (the resolver leaves the names null otherwise), never a relation
       -- or function of the operator's that happens to carry the derived name.
       if v_fn is not null then
-        execute format('drop function if exists %I.%I() cascade', v_nsp, v_fn);
+        execute format('drop function if exists %I.%I() cascade', v_fnsp, v_fn);
       end if;
       if v_delta is not null then
         execute format('drop table if exists %I.%I', v_nsp, v_delta);
@@ -118,7 +122,7 @@ begin
       -- may not be allowed to drop them; say what is left rather than leaving it silently.
       when insufficient_privilege then
         raise warning 'pg_partition_magician: could not drop the regrain change capture of % (%). Left behind: table %.%, function %.%() and any pgpm_regrain_capture trigger it drives, and the in-flight regrain''s not-yet-attached copies (%). Drop them as their owner.',
-          r.parent_table, sqlerrm, v_nsp, v_delta, v_nsp, v_fn, coalesce(v_copies_q, 'none');
+          r.parent_table, sqlerrm, v_nsp, v_delta, v_fnsp, v_fn, coalesce(v_copies_q, 'none');
     end;
   end loop;
 exception
