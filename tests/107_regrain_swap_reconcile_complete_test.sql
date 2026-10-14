@@ -19,6 +19,11 @@
 -- LAST, so it carries the highest pgpm_seq and is the first thing a bounded drain leaves behind. The
 -- swap then proceeds with 120,002 captured keys against a batch of 1000: 121 passes, 21 past the bound.
 --
+-- The writer is started only once no transaction at or before the run's last copy still runs anywhere in
+-- the cluster ("the horizon", below): the swap first waits for every snapshot older than its copies
+-- (#1241), and a writer whose snapshot a neighbouring file's open transaction had dragged back to before
+-- them was waited for THERE, never reaching the lock this probe is about (#1309).
+--
 -- Every negative below ("no late row is missing", "the deleted row is not resurrected") is paired with
 -- a witness that the condition it denies was present: the writer's recorded observation of the swap's
 -- ungranted lock, and the reconcile log showing more than 100 passes at the swap whose consumed-row
@@ -26,7 +31,7 @@
 -- with the bound put back, and `./test.sh discriminate` requires it to FAIL there.
 create extension if not exists pgtap;
 create extension if not exists dblink;
-select plan(19);
+select plan(21);
 
 -- ================================ the fixture ================================
 -- A [0, 200000) monolith: 1000 rows at the bottom and one at 199999, so it spans two 100000-steps and
@@ -67,12 +72,48 @@ select is((select count(*)::int from pgpm.log
             where parent_table = 'public.rs'::regclass and action = 'regrain_reconcile'), 0,
   'GUARD: no reconcile pass has run yet, so every pass counted below belongs to the swap');
 
+-- ================================ the horizon ================================
+-- The swap waits, BEFORE it asks for the DETACH's lock, for every snapshot of this database that cannot see
+-- the copies: every other session whose backend_xmin is at or before the run's last copy write
+-- (config.regrain_written_xid; pgpm._snapshot_wait, #1241). The writer below holds ONE snapshot for the
+-- whole of its DO block, and the probe needs the swap to go past that wait and block on the lock, so the
+-- writer's snapshot has to be newer than the copies. Starting the writer after the copies committed does
+-- not make it so. A snapshot's xmin is the oldest transaction still running anywhere in the CLUSTER, and
+-- this file does not have the cluster to itself: the suite runs three other files beside it, each in its
+-- own database, and autovacuum's ANALYZE takes an xid too. A neighbour's transaction that began before the
+-- last copy and is still open when the writer starts puts the writer's xmin at or before the copies. The
+-- swap then waits for the writer's snapshot while the writer waits to see the swap's lock request, a
+-- standoff that only the writer's 60 s budget ends: every change is still reconciled, and the one thing
+-- lost is the witness that they landed during the wait on the DETACH (#1309: that witness failing alone,
+-- the file taking 65 s instead of 5).
+--
+-- So wait for the state itself instead of assuming it: a fresh snapshot whose xmin is past the last copy.
+-- The oldest running xid only moves forward, so once one snapshot shows it every later one does, the
+-- writer's included: no race is left between this wait and the writer's start. READ COMMITTED takes a new
+-- snapshot for every statement of the loop, and pg_current_snapshot() is not a statistics view, so
+-- nothing here is read stale. The budget (300 s, longer than a whole channel of the suite) is a backstop
+-- against a transaction that never ends; what the wait is FOR is asserted after it, and the writer's own
+-- snapshot is asserted below, once it is in place.
+do $$
+declare
+  v_written xid8 := (select regrain_written_xid from pgpm.config where parent_table = 'public.rs'::regclass);
+begin
+  for i in 1 .. 6000 loop
+    exit when v_written is null or pg_snapshot_xmin(pg_current_snapshot()) > v_written;
+    perform pg_sleep(0.05);
+  end loop;
+end $$;
+select ok((select regrain_written_xid is not null and pg_snapshot_xmin(pg_current_snapshot()) > regrain_written_xid
+             from pgpm.config where parent_table = 'public.rs'::regclass),
+  'GUARD: the run recorded its last copy and no transaction at or before it still runs anywhere in the cluster, so every snapshot taken from here on is newer than the copies');
+
 -- ================================ the writer ================================
 -- One DO block is one transaction: the sentinel's ROW EXCLUSIVE is held from its INSERT to the block's
 -- end, and every late change commits together with the observation that the swap was already waiting.
 create table public.rs_witness (waiters int, seen_at timestamptz);
 
 select dblink_connect('writer', 'dbname=' || current_database());
+create table public.rs_writer as select pid from dblink('writer', 'select pg_backend_pid()') as t(pid int);
 select dblink_send_query('writer', $w$
 do $b$
 declare v_waiters int := 0;
@@ -112,6 +153,13 @@ select ok(exists (select 1 from pg_locks
                    where relation = 'public.rs'::regclass and mode = 'RowExclusiveLock'
                      and granted and pid <> pg_backend_pid()),
   'LIVENESS: the writer holds ROW EXCLUSIVE on the parent before the swap tick starts');
+-- The predicate the swap's snapshot wait applies (backend_xmin at or before the last copy), read for the
+-- writer itself, now that its DO block and so its snapshot are open: the horizon wait above is what makes
+-- this true, and this is what makes the swap go to its DETACH rather than wait for the writer's snapshot.
+select ok((select a.backend_xmin is not null and age(a.backend_xmin) < age(c.regrain_written_xid::xid)
+             from pg_stat_activity a, pgpm.config c
+            where a.pid = (select pid from public.rs_writer) and c.parent_table = 'public.rs'::regclass),
+  'GUARD: the writer holds a snapshot, and it is newer than the run''s last copy: the swap''s snapshot wait does not list it, so what the swap waits for is the writer''s lock');
 
 -- ================================ the swap ================================
 -- No lock_timeout here: this is the operator-driven path the issue names, which waits for the DETACH.

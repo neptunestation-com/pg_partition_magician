@@ -304,6 +304,24 @@
   spelled. Guard `bench/archive_key_base_canonical.sh` (tests/archive/db/52); mutations
   `archive_key_base_spelled_as_stored`, `archive_recorded_chunk_ledger_spelled`.
 
+- **The regrain swap tests wait for the snapshot horizon they assumed** (#1309). `tests/107` (the witness
+  that the writer saw the swap's ungranted `ACCESS EXCLUSIVE`) and `tests/328` (test 74 of part I, tests 115
+  to 117 of part O) failed about every second merge group on code that touched neither, and passed on a
+  re-run. One cause for all of them, and none of it in pgpm: each file starts a session after a regrain's
+  copies have committed and assumes its snapshot is newer than the copies, but a snapshot's xmin is the
+  oldest transaction still running anywhere in the cluster, and the suite runs three other files beside
+  each, in databases of their own. While a neighbour's transaction that began before the run's last copy
+  stayed open, `pgpm._snapshot_wait` (#1241) listed that session, as it should: in `tests/107` the swap
+  waited for the writer's snapshot while the writer waited to see the swap's lock request, for the
+  writer's whole 60 s budget; in `tests/328` the hand `regrain_step` refused for two snapshots where the
+  test names one (its own session's, collecting the result), or refused for the queued DDL before the
+  reader had queued behind it (part O, and part Q's tick, which lost the same race more rarely). Each site
+  now waits, before it starts those sessions, for the state it assumed (a fresh snapshot whose xmin is past
+  `config.regrain_written_xid`; the oldest running xid only moves forward, so nothing is left to race),
+  says so in a `GUARD`, and `tests/107` and part O read the wait's own predicate for the session concerned.
+  No assertion was removed or loosened, and the two guards (`bench/regrain_swap_reconcile.sh`,
+  `bench/regrain_swap_waits_for_older_snapshots.sh`) still fail against each of their eighteen mutations.
+
 - **The regrain swap and the hypertable cutover wait for snapshots older than their copies** (#1241). A
   `REPEATABLE READ` reader whose snapshot predated a regrain's copies, and which first read the table after the
   swap (so it held no lock the `DETACH` waited on), read the fine children, whose rows its snapshot cannot see,
