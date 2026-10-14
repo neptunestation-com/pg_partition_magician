@@ -14618,9 +14618,9 @@ MUTATIONS["untransmute_rows_by_count"] = (
     "fixture names (b1 .. b100), which a table that lost rows and gained as many strangers satisfies. The exact "
     "pre-#1286 assertion; the guard's defect leaves a stranger in place of b17 after the untransmute.",
     [("""select is(
-  (select array_agg(id || ':' || body || ':' || (extract(epoch from newest - created_at) / 60)::int order by id)
+  (select array_agg(id || ':' || body || ':' || (newest - created_at) order by id)
      from public.rt, (select max(created_at) as newest from public.rt) n),
-  (select array_agg(g || ':b' || g || ':' || (g - 1) order by g) from generate_series(1, 100) g),
+  (select array_agg(g || ':b' || g || ':' || make_interval(mins => g - 1) order by g) from generate_series(1, 100) g),
   'all rows are preserved');
 """, """select is(
   (select count(*)::int from public.rt),
@@ -14628,6 +14628,20 @@ MUTATIONS["untransmute_rows_by_count"] = (
 """, 1)],
 )
 MUTATION_SRC["untransmute_rows_by_count"] = "tests/27_untransmute_test.sql"
+MUTATIONS["untransmute_rows_offset_by_minute"] = (
+    "bench/tests_fail_on_defect.sh",
+    "PR #1320's first round of tests/27: each row's distance behind the newest row rounded to whole minutes, so "
+    "b17 handed back with its id and body but created_at 20 seconds off (another key; rt's is (created_at, id)) "
+    "passes. One clause, the comparison of the distance. The guard's second tests/27 defect makes that swap.",
+    [("""  (select array_agg(id || ':' || body || ':' || (newest - created_at) order by id)
+     from public.rt, (select max(created_at) as newest from public.rt) n),
+  (select array_agg(g || ':b' || g || ':' || make_interval(mins => g - 1) order by g) from generate_series(1, 100) g),
+""", """  (select array_agg(id || ':' || body || ':' || (extract(epoch from newest - created_at) / 60)::int order by id)
+     from public.rt, (select max(created_at) as newest from public.rt) n),
+  (select array_agg(g || ':b' || g || ':' || (g - 1) order by g) from generate_series(1, 100) g),
+""", 1)],
+)
+MUTATION_SRC["untransmute_rows_offset_by_minute"] = "tests/27_untransmute_test.sql"
 
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long

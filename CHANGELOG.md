@@ -16,9 +16,11 @@
 
 - **`tests/27` names the rows `untransmute` hands back** (#1286). 'all rows are preserved' was `count(*) = 100`
   over rows the fixture names (`b1` to `b100`), which a table that lost rows and gained as many strangers
-  satisfies. It now compares every row as its id, its body and its minutes behind the newest row with the
-  fixture's own. `bench/tests_fail_on_defect.sh` judges the file with a stranger in place of `b17` after the
-  untransmute, the same 100 rows by count (mutation `untransmute_rows_by_count`).
+  satisfies. It now compares every row as its id, its body and its exact distance behind the newest row with
+  the fixture's own, so the key `(created_at, id)` is pinned up to a shift of every row alike.
+  `bench/tests_fail_on_defect.sh` judges the file with a stranger in place of `b17` after the untransmute, the
+  same 100 rows by count (mutation `untransmute_rows_by_count`), and with `b17` handed back 20 seconds off its
+  key (mutation `untransmute_rows_offset_by_minute`, the distance rounded to whole minutes).
 
 - **`bench/ci_runs_lint_jobs.sh` requires that `./test.sh ci` fails when its lint track fails** (#1280). Its
   check that `ci` runs the lint track accepted the block on the spelling of a `"$0" lint` command, so a `ci` that
