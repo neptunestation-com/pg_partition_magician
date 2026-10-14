@@ -2535,7 +2535,11 @@ byte-budget chunker: never archive a whole large partition as one giant operatio
   read from another relation (`child_oid`), as a partition's coverage, so a partition re-created under the
   dropped one's own name (the name pgpm would give it) does not start past rows nothing archived. A chunk
   whose partition was dropped outside `retire()` (by hand) is marked retired by the step that finds its
-  relation gone (`archive_chunk_retired`) and holds the range the same way.
+  relation gone (`archive_chunk_retired`) and holds the range the same way. Which partitions a retired chunk
+  holds is the same answer from every session: a bound with no offset (one an older install stored
+  verbatim from a strategy's `covered_hi`) is read as wall time on the grid's clock, `config.partition_tz`, one
+  shaped by a DateStyle as `ISO, MDY`, and a zone abbreviation in the `Default` set (`IST` is Israel's), never in
+  the caller's `TimeZone`, `DateStyle` or `timezone_abbreviations`.
 - `config.archive_batch` (default **1**; `null` = unbounded) caps how many *different* partitions
   one `_archive_step` call touches -- the same shape as `retain_batch` (nullable `int`, `null`
   means unlimited, caps attempts not successes), but a different default, and for a reason worth

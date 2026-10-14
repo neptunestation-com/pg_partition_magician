@@ -5247,18 +5247,48 @@ $$;
 -- every attached partition and that is no row at all. When an attached lo has no key, there is no floor and every
 -- retired row is read, as before.
 --
+-- THE GRID'S CLOCK (#1264). Every bound is compared as pgpm._native_bound_key gives it, never with a cast in the
+-- caller's session: a retired row an older install wrote can carry a bound with no offset (before #977 a
+-- strategy's covered_hi was stored verbatim, and no upgrade rewrites a retired row, the record of the only copy),
+-- and read with ::timestamptz such text named a different instant in every zone, so the same call held a
+-- partition from pg_cron's UTC session and not from an operator's Asia/Kolkata one, which then archived it over
+-- the retired range.
+--
 -- other_names lists the names those chunks were recorded under when they are not the partition's own (null when
 -- every one is). That is the shape a partition renamed before an upgrade leaves, its ledger rows left under the
 -- old name: the upgrade cannot tell that from a partition dropped by hand (both are a name no relation and no
 -- pgpm.part row has), marks the rows retired, and holds the live renamed partition. The skip row names the remedy
 -- that is safe only then. A chunk with no child_name (a row written before pgpm recorded one) is described as
 -- such rather than raising: format's %I refuses a null.
+-- A native bound's position as a number, read the same from every session (#1264): the value for an id kind, and
+-- for a time kind the epoch of the instant the text names, with text that names no zone read as wall time in
+-- p_tz (the grid's config.partition_tz, the zone its cells are computed and named in, and the one
+-- _col_to_native reads a naive column's wall time in), text shaped by a DateStyle read as ISO, MDY, the style
+-- _ts_text writes every bound in, and a zone abbreviation (a pre-#500 render under DateStyle SQL or Postgres
+-- ends in one, '01/01/2026 03:00:00 IST') read in the Default set, where IST is Israel's +02 and not, as under
+-- the India set an operator may run with, +05:30. Text that carries its offset (every bound pgpm writes since
+-- #500) is the instant it names under any zone, so this changes nothing for it. The SET clauses scope the zone
+-- this call sets to the call: the caller's session keeps its own.
+create or replace function pgpm._native_bound_key(p_kind text, p_text text, p_tz text)
+returns numeric language plpgsql stable
+  set timezone = 'UTC'
+  set datestyle = 'ISO, MDY'
+  set timezone_abbreviations = 'Default'
+as $$
+begin
+  if p_text is null then return null; end if;
+  if p_kind = 'id' then return p_text::numeric; end if;
+  perform set_config('TimeZone', p_tz, true);
+  return extract(epoch from p_text::timestamptz);
+end;
+$$;
+
 drop function if exists pgpm._over_retired_chunks(regclass);
 create or replace function pgpm._over_retired_chunks(p_parent regclass)
 returns table(child_name name, lo text, hi text, chunks text, other_names text) language plpgsql stable as $$
-declare v_ncast text; v_floor numeric; v_unkeyed boolean;
+declare v_kind text; v_tz text; v_floor numeric; v_unkeyed boolean;
 begin
-  select pgpm._native_type(c.control_kind) into v_ncast from pgpm.config c where c.parent_table = p_parent;
+  select c.control_kind, c.partition_tz into v_kind, v_tz from pgpm.config c where c.parent_table = p_parent;
   if not found then return; end if;
   -- the floor: no retired chunk ending at or below the lowest attached lo can overlap an attached partition
   select min(pgpm._native_order_key(p.lo)), bool_or(pgpm._native_order_key(p.lo) is null)
@@ -5267,13 +5297,18 @@ begin
   if v_unkeyed is null then return; end if;   -- no attached partition, nothing to hold
   if v_unkeyed then v_floor := null; end if;  -- a lo with no key gives no floor: every retired row is read
   return query execute format(
-    'with led as materialized (select l.lo, l.hi, l.child_name, l.s3_key, l.child_oid
+    'with led as materialized (select l.lo, l.hi, l.child_name, l.s3_key, l.child_oid,
+                                      pgpm._native_bound_key(%1$L, l.lo, %4$L) as lo_k,
+                                      pgpm._native_bound_key(%1$L, l.hi, %4$L) as hi_k
                                 from pgpm.archive_ledger l
                                 where l.parent_table = %2$L::regclass and l.retired_at is not null
                                   and (%3$L::numeric is null
                                        or pgpm._native_order_key(l.hi) > %3$L::numeric
                                        or pgpm._native_order_key(l.hi) is null)),
-          mine as materialized (select p.child_name, p.lo, p.hi from pgpm.part p
+          mine as materialized (select p.child_name, p.lo, p.hi,
+                                       pgpm._native_bound_key(%1$L, p.lo, %4$L) as lo_k,
+                                       pgpm._native_bound_key(%1$L, p.hi, %4$L) as hi_k
+                                  from pgpm.part p
                                  where p.parent_table = %2$L::regclass and p.attached)
      select m.child_name, m.lo, m.hi,
             string_agg(format(''[%%s, %%s) recorded for %%s%%s at %%s'', l.lo, l.hi,
@@ -5287,13 +5322,13 @@ begin
                                    then '', whose relation no longer exists,''
                                    else '', which pgpm cannot tie to the relation holding that name now,'' end,
                               coalesce(l.s3_key, ''no object key'')),
-                       ''; '' order by l.lo::%1$s),
+                       ''; '' order by l.lo_k),
             string_agg(distinct quote_ident(l.child_name), '', '')
               filter (where l.child_name is distinct from m.child_name)
-       from mine m join led l on l.lo::%1$s < m.hi::%1$s and l.hi::%1$s > m.lo::%1$s
-      where m.lo::%1$s < (select max(x.hi::%1$s) from led x)
+       from mine m join led l on l.lo_k < m.hi_k and l.hi_k > m.lo_k
+      where m.lo_k < (select max(x.hi_k) from led x)
       group by m.child_name, m.lo, m.hi',
-    v_ncast, p_parent::text, v_floor);
+    v_kind, p_parent::text, v_floor, v_tz);
 end;
 $$;
 

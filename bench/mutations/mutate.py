@@ -11883,6 +11883,46 @@ MUTATIONS["retired_hi_key_idx_before_column"] = (
       "\n-- A RETIRED CHUNK'S ROW IS THE RECORD OF THE ONLY COPY (issue #1141).", 1)],
 )
 
+# Issue #1264: _over_retired_chunks compares every bound as pgpm._native_bound_key gives it, a bound that names no
+# zone read on the grid's clock (config.partition_tz) under ISO, MDY, never in the caller's session.
+# bench/over_retired_chunks_grid_zone.sh runs tests/334 against the mutant.
+_G1264 = "bench/over_retired_chunks_grid_zone.sh"
+MUTATIONS["over_retired_chunks_session_zone"] = (
+    _G1264,
+    "Pre-#1264 _over_retired_chunks: a retired chunk's bound with no offset (a pre-#977 strategy's covered_hi, kept "
+    "verbatim) is read in the caller's TimeZone, so the same call holds a partition from pg_cron's UTC session and "
+    "not from an operator's Asia/Kolkata one, which then archives it over the retired range. One site, the zone the "
+    "bounds are read in. tests/334 parts B to E catch it.",
+    [("  select c.control_kind, c.partition_tz into v_kind, v_tz from pgpm.config c where c.parent_table = p_parent;\n",
+      "  select c.control_kind, current_setting('TimeZone') into v_kind, v_tz from pgpm.config c where c.parent_table = p_parent;\n",
+      1)],
+)
+MUTATIONS["native_bound_key_utc"] = (
+    _G1264,
+    "Issue #1264, the plausible-but-wrong fix: a bound with no offset is read as UTC whatever the grid's zone, so on a "
+    "grid registered east or west of UTC every session agrees on the wrong instant, and a chunk ending three hours "
+    "below a Tokyo grid's partition holds it. One clause, the grid's zone. tests/334 parts A to E catch it.",
+    [("  perform set_config('TimeZone', p_tz, true);\n  return extract(epoch from p_text::timestamptz);\n",
+      "  return extract(epoch from p_text::timestamptz);\n", 1)],
+)
+MUTATIONS["native_bound_key_session_datestyle"] = (
+    _G1264,
+    "Issue #1264's DateStyle half: the bound's parse is not pinned to ISO, MDY, so a DateStyle-shaped bound a pre-#500 "
+    "session wrote ('11/03/2026') reads as 3 November from an MDY session and 11 March from a DMY one, and the call "
+    "holds a different partition over it. One clause. tests/334 parts C and E catch it.",
+    [("  set timezone = 'UTC'\n  set datestyle = 'ISO, MDY'\n  set timezone_abbreviations = 'Default'\n",
+      "  set timezone = 'UTC'\n  set timezone_abbreviations = 'Default'\n", 1)],
+)
+MUTATIONS["native_bound_key_session_abbreviations"] = (
+    _G1264,
+    "Issue #1264, PR #1305's first head (V-01): the bound's parse pins TimeZone and DateStyle but not "
+    "timezone_abbreviations, so a pre-#500 render that names its zone by abbreviation ('01/01/2026 03:00:00 IST') "
+    "is Israel's +02 from a session on the Default set and India's +05:30 from one on the India set, and the call "
+    "holds the first partition from the one and not from the other. One clause. tests/334 part H catches it.",
+    [("  set datestyle = 'ISO, MDY'\n  set timezone_abbreviations = 'Default'\nas $$\n",
+      "  set datestyle = 'ISO, MDY'\nas $$\n", 1)],
+)
+
 
 # Issue #627: the retain horizon's time part is instant arithmetic, and a retain with no calendar part takes no
 # wall-clock round trip at all. bench/retain_horizon_ambiguous_wall_time.sh runs tests/311 against the mutant.
