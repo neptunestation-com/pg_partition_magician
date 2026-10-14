@@ -368,7 +368,12 @@ say "conversion: transmute(id) + freeze the monolith, then observe pgpm auto-reg
 pgss_reset
 rm -f "$RESULTS/pgb_convert".*
 
-N0=$(q "select count(*) from bench.events")   # history rows -- all land in the monolith at cutover (conservation anchor)
+# The conservation anchor: the history rows, which all land in the monolith at cutover. Their count AND a
+# digest of the rows themselves (the sum of a 64-bit hash of each whole row, so order-free and exact), so
+# the gate in 4f judges WHICH rows survived the swap, not how many: a lost row and an invented one in the
+# range keep the count and change the digest (#1282). The same expression is in 4f; both read every row.
+HIST0=$(q "select count(*), coalesce(sum(hashtextextended(row(e.id, e.created_at, e.user_id, e.kind, e.payload)::text, 0)::numeric), 0) from bench.events e")
+IFS='|' read -r N0 HIST_DIGEST0 <<<"$HIST0"
 echo "  firing pgpm.transmute('bench.events','id', step $BENCH_ID_STEP, paused=>false)..."
 transmute_t0=$(q "select extract(epoch from clock_timestamp())")
 q "call pgpm.transmute('bench.events','id', ${BENCH_ID_STEP}::bigint, $BENCH_OBTAIN, p_paused => false, p_regrain_batch => $BENCH_DRAIN_BATCH)" >/dev/null
@@ -540,14 +545,18 @@ echo "  ambient-workload latency through the conversion: $(cat "$RESULTS/convert
 
 # 4f. CONSERVATION GATE: every history row (id < B) must still be present after the regrain swap. regrain
 # COPIES then DROPs the source, so a missed row would silently vanish -- assert it did not, and record
-# whether the monolith was fully regrained (0 coarse children) for the report / rung verdict.
-REGRAIN_CONSERVED=na; REGRAIN_HIST_AFTER=na; REGRAIN_COARSE_FINAL=na
+# whether the monolith was fully regrained (0 coarse children) for the report / rung verdict. The rows are
+# judged by identity: the count and the digest of the rows (the anchor's expression, before transmute) must
+# both match, since a count alone is kept by a swap that loses one row and invents another (#1282).
+REGRAIN_CONSERVED=na; REGRAIN_HIST_AFTER=na; REGRAIN_COARSE_FINAL=na; REGRAIN_HIST_SAME=na
 if [ "$BENCH_REGRAIN" = "1" ]; then
-  REGRAIN_HIST_AFTER=$(q "select count(*) from bench.events where id < $MONO_HI")
+  HIST1=$(q "select count(*), coalesce(sum(hashtextextended(row(e.id, e.created_at, e.user_id, e.kind, e.payload)::text, 0)::numeric), 0) from bench.events e where id < $MONO_HI")
+  IFS='|' read -r REGRAIN_HIST_AFTER HIST_DIGEST_AFTER <<<"$HIST1"
+  REGRAIN_HIST_SAME=$([ "$HIST_DIGEST_AFTER" = "$HIST_DIGEST0" ] && echo yes || echo no)
   REGRAIN_COARSE_FINAL=$(q "select coalesce((select coarse_partitions from pgpm.status() where parent='bench.events'::regclass),-1)")
-  echo "  conservation: history rows id<$MONO_HI  before=$N0  after=$REGRAIN_HIST_AFTER ; coarse_partitions=$REGRAIN_COARSE_FINAL"
-  if [ "$REGRAIN_HIST_AFTER" != "$N0" ]; then
-    echo "  FAIL: regrain changed the history row count ($N0 -> $REGRAIN_HIST_AFTER) -- rows lost/duplicated. CORRECTNESS DEFECT."
+  echo "  conservation: history rows id<$MONO_HI  before=$N0  after=$REGRAIN_HIST_AFTER  same rows=$REGRAIN_HIST_SAME ; coarse_partitions=$REGRAIN_COARSE_FINAL"
+  if [ "$REGRAIN_HIST_AFTER" != "$N0" ] || [ "$HIST_DIGEST_AFTER" != "$HIST_DIGEST0" ]; then
+    echo "  FAIL: regrain changed the history rows (count $N0 -> $REGRAIN_HIST_AFTER, same rows: $REGRAIN_HIST_SAME) -- rows lost, invented or rewritten. CORRECTNESS DEFECT."
     REGRAIN_CONSERVED=0
   elif [ "$REGRAIN_COARSE_FINAL" != "0" ]; then
     echo "  PARTIAL: all $N0 history rows conserved, but $REGRAIN_COARSE_FINAL coarse child(ren) remain (regrain did not finish in-window; see cap/stall)."
@@ -619,7 +628,7 @@ say "report"
   echo "- regrain: $(q "select count(*) from pgpm.log where parent_table='bench.events'::regclass and action='regrain_copy'") copy microbatches, $(q "select coalesce(sum(rows),0) from pgpm.log where parent_table='bench.events'::regclass and action='regrain_copy'") rows copied, $(q "select coalesce(sum(rows),0) from pgpm.log where parent_table='bench.events'::regclass and action='regrain'") fine children created (swap), $(q "select count(*) from pgpm.log where parent_table='bench.events'::regclass and action='skip_regrain'") skips"
   echo "- obtain: $(q "select count(*) from pgpm.log where parent_table='bench.events'::regclass and action='obtain'") succeeded, $(q "select count(*) from pgpm.log where parent_table='bench.events'::regclass and action='skip_obtain'") deferred under lock contention"
   echo "- coarse (un-regrained) children remaining: \`$REGRAIN_COARSE_FINAL\` (0 = history fully regrained into fine partitions)"
-  echo "- **row conservation**: history rows \`id < $MONO_HI\` = \`$REGRAIN_HIST_AFTER\` (expected \`$N0\`) -> $([ "$REGRAIN_CONSERVED" = 1 ] && echo 'CONSERVED ✅' || ([ "$REGRAIN_CONSERVED" = partial ] && echo 'conserved (regrain partial)' || echo "MISMATCH ❌"))"
+  echo "- **row conservation**: history rows \`id < $MONO_HI\` = \`$REGRAIN_HIST_AFTER\` (expected \`$N0\`), the same rows by digest: \`$REGRAIN_HIST_SAME\` -> $([ "$REGRAIN_CONSERVED" = 1 ] && echo 'CONSERVED ✅' || ([ "$REGRAIN_CONSERVED" = partial ] && echo 'conserved (regrain partial)' || echo "MISMATCH ❌"))"
   echo "- regrain rate trace: \`drain.progress.csv\` (observed_s, default_rows, partitions, coarse, regrain_copies, rows_copied, last_regrain_age_s, budget, ambient_waiters, ambient_baseline, surge_active)"
   echo
   if [ "$have_pgfr" = "1" ]; then

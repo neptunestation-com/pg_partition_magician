@@ -68,7 +68,8 @@ ambient workload, and *observes*. Three phases:
 
 The report compares client tps + p50/p95/p99 latency across the three phases, summarizes pgpm's own
 conversion (regrain/obtain from `pgpm.log`), and asserts **row conservation** (every history row still
-present after the swap). The system-metric time-series (WAL, checkpoints, `pg_stat_io`, wait/lock
+present after the swap, judged by a digest of the rows as well as their count, so a lost row and an
+invented one do not cancel). The system-metric time-series (WAL, checkpoints, `pg_stat_io`, wait/lock
 events) is **pg_flight_recorder's** job: it records them continuously and server-side, and the report
 slices its series to the conversion window. So degradation *while pgpm converts the table under load*
 is visible without the harness hand-rolling gauges.
@@ -306,8 +307,8 @@ exposed as two phases so writes keep arriving across them. Three observed phases
 An exact total-row count can't be asserted while the workload mutates rows, so
 `bench.workload_step_fh` only ever touches users `1..49000` and reserves users
 `49001..50000` as an **immutable cohort** spread across all of history. The harness
-asserts that cohort is unchanged across the migration: a clean "no rows lost or
-duplicated" check even under continuous insert/update/delete. (Delta-reconcile
+asserts that cohort is unchanged across the migration, by its count and a digest of its rows: a
+clean "no rows lost, invented or rewritten" check even under continuous insert/update/delete. (Delta-reconcile
 *correctness* is covered by the pgTAP suite, `tests/timescale/db/10`; the bench measures
 at-scale behavior and load, not correctness.)
 

@@ -1320,6 +1320,8 @@ run_perf() {
     "bench/regrain_capture_fn_any_schema.sh pgpm_perf379"
     "bench/transmute_child_holders_by_grid.sh pgpm_perf382"
     "bench/review_tooling_verdicts.sh pgpm_perf394"
+    "bench/harness_calls_resolve.sh pgpm_perf389"
+    "bench/harness_conservation_identity.sh pgpm_perf390"
   )
   local selected=()
   local n=${#guards[@]} idx

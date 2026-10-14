@@ -14644,6 +14644,38 @@ MUTATIONS["untransmute_rows_offset_by_minute"] = (
 MUTATION_SRC["untransmute_rows_offset_by_minute"] = "tests/27_untransmute_test.sql"
 
 
+# pass 12 G24 (#1281, #1282): the at-scale harnesses. Their scripts are the source; each guard reads a mutant
+# of one of them in place of this checkout's copy.
+MUTATIONS["fh_cutover_regrain_batch"] = (
+    "bench/harness_calls_resolve.sh",
+    "Pre-#1281 bench/run_fh.sh: its from_hypertable_cutover call names the batch p_regrain_batch, the name #291's "
+    "rename sweep gave transmute's parameter, though the cutover's is still p_drain_batch. No overload accepts "
+    "the call, so every run of the hypertable benchmark dies 'procedure ... does not exist' after its copy. One "
+    "site, the one argument name.",
+    [("p_obtain => $BENCH_OBTAIN, p_drain_batch => $BENCH_DRAIN_BATCH, p_paused => false",
+      "p_obtain => $BENCH_OBTAIN, p_regrain_batch => $BENCH_DRAIN_BATCH, p_paused => false", 1)],
+)
+MUTATION_SRC["fh_cutover_regrain_batch"] = "bench/run_fh.sh"
+MUTATIONS["run_conservation_by_count"] = (
+    "bench/harness_conservation_identity.sh",
+    "Pre-#1282 bench/run.sh: the 4f conservation gate fails the run only when the count of history rows changed, "
+    "so a regrain swap that loses row 5 and holds a stranger row 50 in the range, or rewrites a row in place, "
+    "reports the history conserved. One clause, the digest comparison; the anchor still takes the digest and "
+    "the gate still prints it.",
+    [("  if [ \"$REGRAIN_HIST_AFTER\" != \"$N0\" ] || [ \"$HIST_DIGEST_AFTER\" != \"$HIST_DIGEST0\" ]; then\n",
+      "  if [ \"$REGRAIN_HIST_AFTER\" != \"$N0\" ]; then\n", 1)],
+)
+MUTATION_SRC["run_conservation_by_count"] = "bench/run.sh"
+MUTATIONS["fh_conservation_by_count"] = (
+    "bench/harness_conservation_identity.sh",
+    "Pre-#1282 bench/run_fh.sh: the 4d conservation gate passes the immutable cohort when its count is unchanged, "
+    "so a migration that loses one cohort row and invents another, or rewrites one, reports CONSERVATION OK. One "
+    "clause, the digest comparison; the anchor still takes the digest and the report still prints it.",
+    [("if [ \"$ANCHOR0\" = \"$ANCHOR1\" ] && [ \"$ANCHOR_DIGEST1\" = \"$ANCHOR_DIGEST0\" ]; then",
+      "if [ \"$ANCHOR0\" = \"$ANCHOR1\" ]; then", 1)],
+)
+MUTATION_SRC["fh_conservation_by_count"] = "bench/run_fh.sh"
+
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a
 # cost), and discriminate.sh's --shard=I/N interleaves that list, so the heavy ones spread over the

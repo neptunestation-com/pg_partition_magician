@@ -193,7 +193,11 @@ assert_workload_healthy baseline
 say "conversion: from_hypertable_copy under load (track_changes=$BENCH_TRACK_CHANGES) -> cutover -> regrain"
 pgss_reset; rm -f "$RESULTS/pgb_convert".*
 TRACK=$([ "$BENCH_TRACK_CHANGES" = "1" ] && echo true || echo false)
-ANCHOR0=$(q "select count(*) from bench.events where user_id >= $ANCHOR_USER_LO")   # immutable cohort, pre-convert
+# The immutable cohort, pre-convert: its count AND a digest of its rows (the sum of a 64-bit hash of each
+# whole row, order-free and exact), so 4d judges WHICH rows survived, not how many: a lost cohort row and an
+# invented one keep the count and change the digest (#1282). The same expression is in 4d.
+COHORT0=$(q "select count(*), coalesce(sum(hashtextextended(row(e.id, e.created_at, e.user_id, e.kind, e.payload)::text, 0)::numeric), 0) from bench.events e where user_id >= $ANCHOR_USER_LO")
+IFS='|' read -r ANCHOR0 ANCHOR_DIGEST0 <<<"$COHORT0"
 echo "  conservation anchor: $ANCHOR0 rows for users >= $ANCHOR_USER_LO (workload never touches them)"
 convert_start=$(q "select to_char(now(),'YYYY-MM-DD HH24:MI:SS')")
 
@@ -284,7 +288,7 @@ SQL
 fi
 echo "  firing from_hypertable_cutover('bench.events','created_at', interval '$BENCH_FH_INTERVAL', p_predrain => $PREDRAIN, p_paused => false)..."
 cut_t0=$(q "select extract(epoch from clock_timestamp())")
-q "call pgpm.from_hypertable_cutover('bench.events','created_at', interval '$BENCH_FH_INTERVAL', p_obtain => $BENCH_OBTAIN, p_regrain_batch => $BENCH_DRAIN_BATCH, p_paused => false, p_predrain => $PREDRAIN)" >/dev/null
+q "call pgpm.from_hypertable_cutover('bench.events','created_at', interval '$BENCH_FH_INTERVAL', p_obtain => $BENCH_OBTAIN, p_drain_batch => $BENCH_DRAIN_BATCH, p_paused => false, p_predrain => $PREDRAIN)" >/dev/null
 cut_secs=$(awk -v a="$cut_t0" -v b="$(q "select extract(epoch from clock_timestamp())")" 'BEGIN{printf "%.1f", b-a}')
 echo "  cutover complete in ${cut_secs}s -- bench.events is now relkind '$(q "select relkind from pg_class where oid='bench.events'::regclass")' (p=partitioned)"
 if [ -n "$probe_pid" ]; then
@@ -302,10 +306,13 @@ if [ -n "$probe_pid" ]; then
   echo "  cutover ACCESS EXCLUSIVE window: ${LOCK_WINDOW_S}s  (at-lock residual: ${AT_LOCK_RESIDUAL}; whole cutover call ${cut_secs}s)"
 fi
 
-# 4d. conservation: the immutable cohort must be unchanged through the online migration
-ANCHOR1=$(q "select count(*) from bench.events where user_id >= $ANCHOR_USER_LO")
-if [ "$ANCHOR0" = "$ANCHOR1" ]; then echo "  CONSERVATION OK: anchor cohort $ANCHOR0 == $ANCHOR1 (no rows lost/duplicated through the online migration)"; CONS=ok
-else echo "  CONSERVATION FAIL: anchor cohort $ANCHOR0 -> $ANCHOR1 (rows lost/duplicated). CORRECTNESS DEFECT."; CONS=fail; fi
+# 4d. conservation: the immutable cohort must be unchanged through the online migration, by identity: its
+# count and the digest of its rows (the anchor's expression) must both match (#1282)
+COHORT1=$(q "select count(*), coalesce(sum(hashtextextended(row(e.id, e.created_at, e.user_id, e.kind, e.payload)::text, 0)::numeric), 0) from bench.events e where user_id >= $ANCHOR_USER_LO")
+IFS='|' read -r ANCHOR1 ANCHOR_DIGEST1 <<<"$COHORT1"
+ANCHOR_SAME=$([ "$ANCHOR_DIGEST1" = "$ANCHOR_DIGEST0" ] && echo yes || echo no)
+if [ "$ANCHOR0" = "$ANCHOR1" ] && [ "$ANCHOR_DIGEST1" = "$ANCHOR_DIGEST0" ]; then echo "  CONSERVATION OK: anchor cohort $ANCHOR0 == $ANCHOR1, the same rows by digest (no rows lost, invented or rewritten through the online migration)"; CONS=ok
+else echo "  CONSERVATION FAIL: anchor cohort $ANCHOR0 -> $ANCHOR1, same rows: $ANCHOR_SAME (rows lost, invented or rewritten). CORRECTNESS DEFECT."; CONS=fail; fi
 HT_LEFT=$(q "select count(*) from timescaledb_information.hypertables where hypertable_name='events'")
 echo "  hypertable catalog rows for 'events' remaining: $HT_LEFT (expect 0)"
 
@@ -431,7 +438,7 @@ say "report"
   echo "- conversion window: \`$convert_start\` -> \`$convert_end\`"
   echo "- copy: ${copy_secs}s online, copied $DEST_ROWS rows; $DELTA_PENDING in-flight changes (insert/update/delete) captured by the trigger and reconciled at cutover; progress in \`copy.progress.csv\`"
   echo "- cutover: ${cut_secs}s total call (online pre-drain + index pre-build + the brief ACCESS EXCLUSIVE window; see 'cutover lock window' below for the blocking window alone)"
-  echo "- **conservation** (immutable cohort users >= $ANCHOR_USER_LO): before=$ANCHOR0 after=$ANCHOR1 -> $([ "$CONS" = ok ] && echo 'CONSERVED ✅' || echo 'MISMATCH ❌')"
+  echo "- **conservation** (immutable cohort users >= $ANCHOR_USER_LO): before=$ANCHOR0 after=$ANCHOR1, the same rows by digest: $ANCHOR_SAME -> $([ "$CONS" = ok ] && echo 'CONSERVED ✅' || echo 'MISMATCH ❌')"
   echo "- hypertable catalog rows remaining: $HT_LEFT (0 = torn down)"
   if [ "$BENCH_REGRAIN" = "1" ]; then
     echo "- regrain: $(q "select count(*) from pgpm.log where parent_table='bench.events'::regclass and action='regrain_copy'") copy microbatches, coarse children remaining: \`$REGRAIN_COARSE_FINAL\` (0 = monolith fully split into '$BENCH_FH_INTERVAL' partitions); trace in \`regrain.progress.csv\`"
