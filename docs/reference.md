@@ -462,7 +462,8 @@ column's collation does not order the way base-`p_tt_radix` place value does (KS
 samples as not matching the declared shape and `p_force_text_time` is not set; a `time`, `uuidv7` or `text_time` control's newest
 value lies (or decodes to) more than one partition step plus one hour past `now()` and `p_force_frontier` is not set
 (a future-dated row would pin the monolith's permanent `hi` there); a `time` control's newest value is
-`infinity`, which no partition can hold (`p_force_frontier` does not override this); a `numeric` `id`
+`infinity` or its oldest value is `-infinity`, which no partition can hold (`p_force_frontier` does not override
+this; delete or correct those rows and re-run); a `numeric` `id`
 control holds `NaN`, `Infinity` or `-Infinity`, for the same reason (delete or correct those rows and re-run); an `id`
 control column cannot hold the grid's bounds: a `numeric` with a negative scale holds only multiples of its
 unit (100 for `numeric(6,-2)`), so a `p_step` or `p_anchor` that is not one is refused, since the cutover's
