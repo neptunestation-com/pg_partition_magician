@@ -13164,6 +13164,55 @@ MUTATIONS["regrain_isolation_serializable_only"] = (
       "    raise exception 'pg_partition_magician: % must run in a READ COMMITTED transaction (this one is %): ", 1)],
 )
 
+# #1261 (pass 12 F3-03): a regrain copy is made without the parent's NOT VALID CHECK (and NOT NULL) constraints,
+# the swap adds each back NOT VALID before the ATTACH, and the drift check leaves them out on the parent's side.
+# bench/regrain_not_valid_check.sh runs tests/331 against each mutant.
+MUTATIONS["regrain_copy_validates_not_valid_check"] = (
+    "bench/regrain_not_valid_check.sh",
+    "Pre-#1261 _regrain_copy_make: the copy keeps every CHECK LIKE ... INCLUDING CONSTRAINTS gave it, the parent's "
+    "NOT VALID one as a validated one, so the first row written before that CHECK, which the parent still serves, "
+    "fails its copy batch with 23514 on every tick and the run is wedged until regrain_cancel. One site, the drop "
+    "after the LIKE. tests/331 catches it: (A) regrain_history dies 23514 and never swaps, (B) the run restarts "
+    "and then dies on row 7 every tick, (C) never swaps, and (D) on PostgreSQL 18 dies 23502 on the NOT NULL.",
+    [("""  for r in
+    select c.conname
+      from pg_constraint k
+      join pg_constraint c on c.conrelid = format('%I.%I', p_nsp, p_name)::regclass and c.contype = k.contype
+     where k.conrelid = p_parent and k.contype in ('c', 'n') and not k.convalidated
+       and to_jsonb(k) ->> 'conenforced' is distinct from 'false'
+       and case when k.contype = 'c' then c.conname = k.conname
+                else (select a.attname from pg_attribute a where a.attrelid = k.conrelid and a.attnum = k.conkey[1])
+                   = (select a.attname from pg_attribute a where a.attrelid = c.conrelid and a.attnum = c.conkey[1]) end
+  loop
+    execute format('alter table %I.%I drop constraint %I', p_nsp, p_name, r.conname);
+  end loop;
+""", "", 1)],
+)
+MUTATIONS["regrain_drift_excuses_validated_copy_check"] = (
+    "bench/regrain_not_valid_check.sh",
+    "The plausible-but-wrong #1261 drift rule: a CHECK the parent holds NOT VALID is left out on BOTH sides by "
+    "name, as #633 leaves out a NOT VALID key, so a copy made while the parent's CHECK was validated keeps it "
+    "validated after the parent drops it and re-adds it NOT VALID. A row made violating in between is then "
+    "reconciled into that copy and refused, 23514, on every tick, where the run should restart and copy afresh. "
+    "One site, the drift check's CHECK arm. tests/331 part C catches it.",
+    [("""       and not (k.conrelid = p_parent and not k.convalidated            -- #1261: the swap's to carry
+                and to_jsonb(k) ->> 'conenforced' is distinct from 'false')
+""", """       and not exists (select 1 from pg_constraint nv
+                        where nv.conrelid = p_parent and nv.contype = 'c' and not nv.convalidated
+                          and to_jsonb(nv) ->> 'conenforced' is distinct from 'false' and nv.conname = k.conname)
+""", 1)],
+)
+MUTATIONS["regrain_drift_compares_not_valid_check"] = (
+    "bench/regrain_not_valid_check.sh",
+    "#1261 with the drift check untaught: it still compares the parent's NOT VALID CHECK with every copy, and no "
+    "copy is made with one, so every copy of a parent holding a NOT VALID CHECK reads as drift; the probe copy "
+    "differs the same way, so the tick refuses to restart, every tick, until regrain_cancel. One site, the "
+    "parent-side exclusion in the drift check's CHECK arm. tests/331 parts A, B and C catch it.",
+    [("""       and not (k.conrelid = p_parent and not k.convalidated            -- #1261: the swap's to carry
+                and to_jsonb(k) ->> 'conenforced' is distinct from 'false')
+""", "", 1)],
+)
+
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a

@@ -2095,7 +2095,13 @@ while the copy, the reconcile and the swap's `ATTACH` all need the parent's curr
 constraints. Every tick that resumes a run compares each copy's columns (name, type, collation, `NOT
 NULL`, generated), `CHECK` constraints (name and expression) and outgoing foreign keys (definition; a
 `NOT VALID` key on the parent is carried by the swap rather than onto the copy, so it is not compared, nor is a
-copy's key under that key's own name and definition, made while it was still validated) with the parent's first. A copy made
+copy's key under that key's own name and definition, made while it was still validated) with the parent's first. A
+`NOT VALID` `CHECK` on the parent (and, on PostgreSQL 18, a `NOT VALID` `NOT NULL`) is carried by the swap too: the
+copy is made without it, so a row written before it that the parent still serves is copied, and the swap adds it to
+each copy `NOT VALID` just before the `ATTACH`, which adopts it without a scan, so every fine child holds it as the
+parent does and refuses a new violating write. It is not compared on the parent's side; a copy that holds it
+validated (made while the parent's was, before it was dropped and re-added `NOT VALID`) is drift and restarts the
+run, since it would refuse a row the parent now accepts. A copy made
 before a key was added would otherwise reach the swap without it, and `ATTACH` would validate the key by
 scanning the copy under the swap's lock; restarted, every copy is made again carrying the key, validated
 while it is empty. It also compares the source with what the run recorded when it began copying

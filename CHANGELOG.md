@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **A regrain copies the rows a `NOT VALID` `CHECK` tolerates** (#1261). `_regrain_copy_make` made each copy `LIKE`
+  the parent `INCLUDING CONSTRAINTS`, which gave the copy the parent's `NOT VALID` `CHECK` as a validated one, so a
+  row written before the `CHECK`, which the table still serves, failed every copy batch of its sub-range with
+  23514: `regrain()` and `regrain_history()` raised, and auto-regrain logged `skip_regrain` on every tick with
+  capture and the `TRUNCATE` refusal left on the source, until `regrain_cancel`. The copy is now made without the
+  parent's enforced `NOT VALID` `CHECK` constraints (and, on PostgreSQL 18, its `NOT VALID` `NOT NULL`s), the swap
+  adds each back `NOT VALID` just before the `ATTACH`, which adopts it without a scan, and the drift check leaves
+  them out on the parent's side. A copy holding one validated (made while the parent's was, before it was dropped
+  and re-added `NOT VALID`) used to pass the drift check, by expression, and refuse a row reconciled into it on
+  every tick; it is drift now, and the run restarts. A run already in flight whose copies hold one validated
+  restarts once after the upgrade. Test `tests/331`, guard `bench/regrain_not_valid_check.sh`, mutations
+  `regrain_copy_validates_not_valid_check`, `regrain_drift_excuses_validated_copy_check` and
+  `regrain_drift_compares_not_valid_check`.
+
 - **Every regrain driver refuses a `REPEATABLE READ` or `SERIALIZABLE` transaction** (#1258). `transmute`,
   `untransmute` and `from_hypertable` refused a stricter isolation level; `regrain()`, `regrain_history()` and
   `regrain_step()` did not, and every read they make then goes through the transaction's first snapshot.
