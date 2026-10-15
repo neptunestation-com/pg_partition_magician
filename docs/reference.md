@@ -2662,7 +2662,9 @@ byte-budget chunker: never archive a whole large partition as one giant operatio
   coverage, logged `archive_coverage_reset`, and archives it again from its `lo`, after which it retires as any
   other. Every bound pgpm writes now carries its offset, so this happens once per such partition. An orphan chunk
   of that shape is discarded rather than placed, and the upgrade that marks retired chunks places one by its other
-  bound.
+  bound, or, when neither bound names an instant, by the partition it was recorded for: never retired while that
+  partition is attached. A gone partition's chunk of that shape is marked retired with its bounds shown as
+  written in the `archive_chunk_retired` row.
 - `config.archive_batch` (default **1**; `null` = unbounded) caps how many *different* partitions
   one `_archive_step` call touches -- the same shape as `retain_batch` (nullable `int`, `null`
   means unlimited, caps attempts not successes), but a different default, and for a reason worth

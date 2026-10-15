@@ -41,7 +41,7 @@ set timezone = 'UTC';
 \endif
 \i :archive_whole_script
 
-select plan(35);
+select plan(43);
 
 create schema t346;
 create table t346.calls (n serial primary key, parent regclass, p_child name, p_lo text, p_hi text);
@@ -88,13 +88,14 @@ select pgpm.set_archive_fn(p, 't346.strategy(regclass, name, text, text)')
 
 create table t346.mono as
   select distinct on (p.parent_table) p.parent_table as parent, p.child_name, p.lo, p.hi
-    from pgpm.part p where p.parent_table::text in ('t346.a', 't346.b', 't346.w', 't346.f', 't346.d')
+    from pgpm.part p where p.parent_table::text in ('t346.a', 't346.b', 't346.w', 't346.f', 't346.d', 't346.e')
    order by p.parent_table, p.lo::timestamptz;
 select child_name as a_mono, lo as a_lo, hi as a_hi from t346.mono where parent = 't346.a'::regclass \gset
 select child_name as b_mono, lo as b_lo, hi as b_hi from t346.mono where parent = 't346.b'::regclass \gset
 select child_name as w_mono, lo as w_lo, hi as w_hi from t346.mono where parent = 't346.w'::regclass \gset
 select child_name as f_mono, lo as f_lo, hi as f_hi from t346.mono where parent = 't346.f'::regclass \gset
 select lo as d_lo from t346.mono where parent = 't346.d'::regclass \gset
+select child_name as e_mono, lo as e_lo, hi as e_hi from t346.mono where parent = 't346.e'::regclass \gset
 
 select is((select string_agg(distinct partition_tz, ',') from pgpm.config where parent_table::text like 't346.%'),
           'UTC', 'GUARD: every grid is registered in UTC');
@@ -102,21 +103,53 @@ select is((select string_agg(distinct partition_tz, ',') from pgpm.config where 
 -- ==================== (F) _mark_retired_chunks, first: no other parent has logged a retain_drop yet ====================
 -- A retain_drop logged over [P, P + 1 h), as retire() logs one. e_in, archived from it before the drop with a hi an
 -- Asia/Tokyo session wrote, half an hour past P on its own clock, is that partition's chunk; e_out, after it, is not.
+-- And e's own live monolith, attached and tracked, far from that range, carries the two chunks an older pgpm left
+-- (PR #1351's round-2 verification, P1-01): the first from its lo to a verbatim covered_hi, the second resuming from
+-- that verbatim text, so neither of the second's bounds names an instant and it cannot be placed by its bounds.
 select pgpm._ts_text(now() - interval '10 hours') as e_p \gset
+select t346.wall(:'e_hi'::timestamptz - interval '1 hour', 'UTC') as e_c2_lo \gset
 insert into pgpm.log (parent_table, action, lo, hi)
   values ('t346.e', 'retain_drop', :'e_p', pgpm._ts_text(:'e_p'::timestamptz + interval '1 hour'));
-insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, rows_archived, archived_at) values
-  ('t346.e', :'e_p', t346.wall(:'e_p'::timestamptz + interval '30 minutes', 'Asia/Tokyo'), 'e_in', 1, now() - interval '1 day'),
+insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, rows_archived, archived_at, child_oid) values
+  ('t346.e', :'e_p', t346.wall(:'e_p'::timestamptz + interval '30 minutes', 'Asia/Tokyo'), 'e_in', 1, now() - interval '1 day', null),
   ('t346.e', pgpm._ts_text(:'e_p'::timestamptz + interval '1 hour'), pgpm._ts_text(:'e_p'::timestamptz + interval '2 hours'),
-   'e_out', 1, now() - interval '1 day');
+   'e_out', 1, now() - interval '1 day', null),
+  ('t346.e', :'e_lo', :'e_c2_lo', :'e_mono', 0, now() - interval '1 day', to_regclass('t346.' || :'e_mono')::oid),
+  ('t346.e', :'e_c2_lo', t346.wall(:'e_hi'::timestamptz - interval '30 minutes', 'UTC'), :'e_mono', 0, now() - interval '1 day',
+   to_regclass('t346.' || :'e_mono')::oid);
 select ok(t346.wall(:'e_p'::timestamptz + interval '30 minutes', 'Asia/Tokyo')::timestamptz > :'e_p'::timestamptz + interval '1 hour',
           'LIVENESS: read in UTC, e_in''s legacy hi lies past the dropped range');
+select ok((select bool_and(not pgpm._native_named('time', lo) and not pgpm._native_named('time', hi))
+             from pgpm.archive_ledger where parent_table = 't346.e'::regclass and lo = :'e_c2_lo')
+          and (select attached from pgpm.part where parent_table = 't346.e'::regclass and child_name = :'e_mono'),
+          'LIVENESS: neither bound of the live monolith''s second chunk names an instant, and the monolith is attached');
 select pgpm._mark_retired_chunks();
-select is((select string_agg(child_name || ':' || (retired_at is not null), ',' order by lo::timestamptz)
-             from pgpm.archive_ledger where parent_table = 't346.e'::regclass),
+select is((select string_agg(child_name || ':' || (retired_at is not null), ',' order by child_name, lo)
+             from pgpm.archive_ledger where parent_table = 't346.e'::regclass and child_name in ('e_in', 'e_out')),
           'e_in:true,e_out:false',
           'from UTC _mark_retired_chunks marks e_in, whose lo lies inside the logged drop, and not e_out');
-delete from pgpm.archive_ledger where parent_table = 't346.e'::regclass;
+select is((select array_agg(lo order by lo) from pgpm.archive_ledger
+            where parent_table = 't346.e'::regclass and child_name = :'e_mono' and retired_at is null),
+          array[:'e_lo', :'e_c2_lo'],
+          'and leaves both chunks of the live monolith live, the one it cannot place by its bounds included');
+delete from pgpm.archive_ledger where parent_table = 't346.e'::regclass and child_name in ('e_in', 'e_out');
+
+-- _mark_gone_chunks, which every archive step runs before its candidates, on a chunk of a relation that is gone whose
+-- bounds a pre-#500 session rendered under DateStyle 'SQL, DMY' (P1-02): it is marked, and its log row shows the
+-- bounds as written, instead of a cast that raises out of the step on every tick.
+create table t346.e_gone (x int);
+select 't346.e_gone'::regclass::oid as e_gone_oid \gset
+drop table t346.e_gone;
+insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, rows_archived, child_oid, archived_at)
+  values ('t346.e', '15/10/2025 00:00:00 UTC', '16/10/2025 00:00:00 UTC', 'e_gone', 1, :'e_gone_oid'::oid, now() - interval '1 day');
+select throws_ok($$select '15/10/2025 00:00:00 UTC'::timestamptz$$, '22008', NULL,
+                 'LIVENESS: the gone chunk''s lo does not parse under this session''s DateStyle');
+select lives_ok($$select pgpm._mark_gone_chunks('t346.e')$$, '_mark_gone_chunks does not raise on it');
+select is((select lo || ' .. ' || hi || ' ' || rows from pgpm.log where parent_table = 't346.e'::regclass
+            and action = 'archive_chunk_retired'),
+          '15/10/2025 00:00:00 UTC .. 16/10/2025 00:00:00 UTC 1',
+          'it marks the gone chunk, logged archive_chunk_retired with its bounds as written');
+delete from pgpm.archive_ledger where parent_table = 't346.e'::regclass and child_name = 'e_gone';
 
 -- ==================== the legacy chunks, then the monoliths age past retain 0 ====================
 insert into t346.archived select 't346.a', ts, body from t346.a where body <> 'late';
@@ -140,7 +173,7 @@ insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, rows_archived
 select pgpm._install_write_block(m.parent, m.child_name) from t346.mono m where m.parent::text <> 't346.d';
 select pg_sleep(2.5);
 select ok((select bool_and(not pgpm._native_gt('time', m.hi, pgpm._retain_boundary(c)))
-             from t346.mono m join pgpm.config c on c.parent_table = m.parent),
+             from t346.mono m join pgpm.config c on c.parent_table = m.parent where c.retain is not null),
           'LIVENESS: every monolith is past the retention horizon, so retain() reaches it');
 
 -- ==================== (A) the issue's shape: UTC wall time, retain() from America/New_York ====================
@@ -199,6 +232,15 @@ select sum(pgpm.retain(p)) from unnest(array['t346.a', 't346.b', 't346.w']::regc
 select is((select string_agg(m.parent::text, ',' order by m.parent::text) from t346.mono m
             where exists (select 1 from pgpm.log l where l.parent_table = m.parent and l.action = 'retain_drop' and l.hi = m.hi)),
           't346.a,t346.b,t346.w', 'retain() then drops all three monoliths, every row archived');
+-- e, whose live monolith kept both its legacy chunks through the marking pass, is archived again from lo too
+select is(pgpm._archive_step('t346.e'), 1, 'LIVENESS: the archive step recorded one chunk for e');
+select is((select c.p_lo || ' / ' || (select rows from pgpm.log where parent_table = 't346.e'::regclass
+                                       and action = 'archive_coverage_reset' and method like '%names no instant by itself%')
+             from t346.calls c where c.parent = 't346.e'::regclass),
+          :'e_lo' || ' / 2',
+          'e''s monolith is handed to the strategy from its lo, both legacy chunks discarded, and it is not held');
+select ok(not exists (select 1 from pgpm.log where parent_table = 't346.e'::regclass and action = 'skip_archive_retired_range'),
+          'no partition of e is held over a retired range');
 
 -- ==================== (E) the archive step's orphan discard, from Pacific/Kiritimati ====================
 set timezone = 'Pacific/Kiritimati';

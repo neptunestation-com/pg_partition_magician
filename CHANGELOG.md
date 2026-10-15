@@ -12,10 +12,13 @@
   late), so such coverage now proves nothing: the gate refuses it from every session, and `_next_archive_chunk` and
   `scripts/archive_partition_whole.sql` discard the partition's live coverage (`archive_coverage_reset`) and archive
   it again from `lo`. The archive step's orphan discard (#511) drops an orphan of that shape instead of casting it,
-  and the upgrade's `_mark_retired_chunks` places one by its other bound (`pgpm._native_named` says which text
-  names its instant). Test `tests/346`; guard `bench/archive_coverage_unnamed_bound.sh`; mutations
+  and the upgrade's `_mark_retired_chunks` places one by its other bound, or by the partition it was recorded for
+  when neither bound names its instant (`pgpm._native_named` says which text does). `_mark_gone_chunks`, which every
+  archive step runs first, no longer casts such a bound for its log row, so a pre-#500 render no longer raises out
+  of the step every tick. Test `tests/346`; guard `bench/archive_coverage_unnamed_bound.sh`; mutations
   `archive_fully_covered_unnamed_counted`, `archive_fully_covered_grid_zone`, `next_archive_chunk_unnamed_resumed`,
-  `archive_whole_unnamed_resumed`, `archive_orphan_discard_unnamed_kept` and `mark_retired_chunks_unnamed_placed`.
+  `archive_whole_unnamed_resumed`, `archive_orphan_discard_unnamed_kept`, `mark_retired_chunks_unnamed_placed`,
+  `mark_retired_chunks_unplaced_live_marked` and `mark_gone_chunks_casts_unnamed`.
 
 - **`land.sh` enqueues through the `enqueuePullRequest` mutation and stops on an unresolved review thread.**
   It asked for the enqueue with `gh pr merge`, and on 2026-10-15 #1350, green and CLEAN, sat unqueued after two

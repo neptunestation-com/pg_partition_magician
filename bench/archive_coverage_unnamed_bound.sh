@@ -20,13 +20,18 @@
 # pgpm_archive_next_partition_whole) is handed to the test file as its archive_whole_script psql variable over the
 # tree's core; anything else is the core install, with the tree's script.
 #
-# SIX mutations are required to fail against it (bench/mutations/mutate.py):
+# EIGHT mutations are required to fail against it (bench/mutations/mutate.py):
 #   archive_fully_covered_unnamed_counted -- the gate counts such a hi, read in the caller's zone. Parts A to C.
 #   archive_fully_covered_grid_zone       -- the gate reads it on the grid's clock (PR #1351's first head). Part B.
 #   next_archive_chunk_unnamed_resumed    -- the archive step resumes from it. Part D.
 #   archive_whole_unnamed_resumed         -- the script resumes from it. Part G.
 #   archive_orphan_discard_unnamed_kept   -- the orphan discard keeps an orphan it cannot place. Part E.
 #   mark_retired_chunks_unnamed_placed    -- the upgrade places a chunk by such a hi, in its session's zone. Part F.
+#   mark_retired_chunks_unplaced_live_marked -- the upgrade marks a live partition's unplaceable chunk on any later
+#                                           drop. Parts F and D.
+#   mark_gone_chunks_casts_unnamed        -- _mark_gone_chunks casts a pre-#500 bound for its log row and raises. Part F.
+# next_archive_chunk_unnamed_resumed restores a wedge rather than the data loss: with the gate still refusing, a
+# resume from the unnamed watermark leaves the partition uncovered for good, which part D's remedy checks catch.
 #
 # Runs on the plain core image (pgtap and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path inside the
 # container, and TAP_GUARD_INSTALL the core install's and TAP_GUARD_SCRIPT the script's, for a worktree mounted

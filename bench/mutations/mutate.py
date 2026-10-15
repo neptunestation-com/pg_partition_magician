@@ -12356,6 +12356,24 @@ MUTATIONS["archive_orphan_discard_unnamed_kept"] = (
     [("                 else true end\n      group by o.child_name',\n",
       "                 else false end\n      group by o.child_name',\n", 1)],
 )
+MUTATIONS["mark_retired_chunks_unplaced_live_marked"] = (
+    _G1336,
+    "PR #1351's second head (its round-2 verification, P1-01): _mark_retired_chunks marks a chunk with neither bound "
+    "naming an instant on any later retain_drop of the parent, so a live, attached partition's second pre-#977 chunk "
+    "is marked retired by a drop over a disjoint range and the partition is held over its own coverage for good "
+    "(skip_archive_retired_range). One clause. tests/346 parts F and D catch it.",
+    [("                                else not exists (select 1 from pgpm.part p where p.parent_table = %2$L::regclass\n"
+      "                                                    and p.child_name = l.child_name and p.attached) end\n",
+      "                                else true end\n", 1)],
+)
+MUTATIONS["mark_gone_chunks_casts_unnamed"] = (
+    _G1336,
+    "Pre-#1336 _mark_gone_chunks (P1-02): the archive_chunk_retired row's range casts every gone chunk's bounds, so a "
+    "pre-#500 render ('15/10/2025 00:00:00 UTC' under SQL, DMY) raises out of it, and out of every archive step of the "
+    "parent, every tick. One clause, the lo's guard. tests/346 part F catches it.",
+    [("            coalesce(min(case when pgpm._native_named(%4$L, lo) then lo::%1$s end)::text, min(lo)) as lo,\n",
+      "            min(lo::%1$s)::text as lo,\n", 1)],
+)
 MUTATIONS["mark_retired_chunks_unnamed_placed"] = (
     _G1336,
     "Pre-#1336 _mark_retired_chunks (the upgrade's #1141 pass): a chunk whose hi names no instant is placed by that hi "

@@ -4991,22 +4991,25 @@ begin
     -- by parent first, in materialized CTEs, so the native casts never meet another parent's bounds (#973);
     -- a bound that does not cast leaves this parent's rows unmarked rather than failing the install. A bound that
     -- names no instant by itself (#1336, _native_named) is never cast: the chunk is placed by its other bound alone
-    -- (its lo inside the dropped range, or its hi), and one with neither is marked, holding a partition over it
-    -- rather than leaving the record of the only copy to be read as live coverage.
+    -- (its lo inside the dropped range, or its hi), and a dropped range with such a bound places nothing. A chunk
+    -- with neither bound named is placed by the partition it was recorded for instead: marked once a drop was logged
+    -- after it, unless that name is an attached partition pgpm still tracks, whose own coverage it then is (the
+    -- archive step discards it and archives the partition again from lo).
     begin
       execute format(
-        'with led as materialized (select lo, hi, archived_at, pgpm._native_named(%3$L, lo) as lo_n,
+        'with led as materialized (select lo, hi, archived_at, child_name, pgpm._native_named(%3$L, lo) as lo_n,
                                           pgpm._native_named(%3$L, hi) as hi_n
                                      from pgpm.archive_ledger where parent_table = %2$L::regclass and retired_at is null),
               dropped as materialized (select lo, hi, at from pgpm.log
                                         where parent_table = %2$L::regclass and action = ''retain_drop''
-                                          and lo is not null and hi is not null),
+                                          and pgpm._native_named(%3$L, lo) and pgpm._native_named(%3$L, hi)),
               hit as (select l.lo, min(d.at) as at from led l join dropped d
                         on d.at >= l.archived_at
                        and case when l.lo_n and l.hi_n then d.lo::%1$s <= l.lo::%1$s and l.hi::%1$s <= d.hi::%1$s
                                 when l.lo_n then d.lo::%1$s <= l.lo::%1$s and l.lo::%1$s < d.hi::%1$s
                                 when l.hi_n then d.lo::%1$s < l.hi::%1$s and l.hi::%1$s <= d.hi::%1$s
-                                else true end
+                                else not exists (select 1 from pgpm.part p where p.parent_table = %2$L::regclass
+                                                    and p.child_name = l.child_name and p.attached) end
                        group by l.lo)
          update pgpm.archive_ledger a set retired_at = hit.at from hit
           where a.parent_table = %2$L::regclass and a.lo = hit.lo and a.retired_at is null',
@@ -5048,7 +5051,9 @@ end $$;
 -- What this cannot tell apart: a partition restored from a dump is a new relation with the old one's rows,
 -- so chunks its earlier incarnation archived read as a dropped relation's, and the restored partition is
 -- held by _archive_step like any partition over a retired chunk. That is the safe side of not knowing: the
--- objects already hold its rows. Oid reuse after wraparound would read a dropped relation as present.
+-- objects already hold its rows. Oid reuse after wraparound would read a dropped relation as present. The log row's
+-- range casts only bounds that name their instant (#1336, _native_named); another is shown as written, so a pre-#500
+-- render ('15/10/2025 00:00:00 UTC' under SQL, DMY) cannot raise out of every archive step that calls this.
 create or replace function pgpm._mark_gone_chunks(p_parent regclass, p_child name default null)
 returns int language plpgsql as $$
 declare cfg pgpm.config; r record; v_n int := 0;
@@ -5064,9 +5069,11 @@ begin
                            or (l.child_oid is null and l.child_name is not null
                                and to_regclass(format(''%%I.%%I'', pgpm._child_nsp(l.parent_table, l.child_name), l.child_name)) is null))
                    returning l.child_name, l.child_oid, l.lo, l.hi)
-     select child_name, child_oid, count(*) as chunks, min(lo::%1$s)::text as lo, max(hi::%1$s)::text as hi
+     select child_name, child_oid, count(*) as chunks,
+            coalesce(min(case when pgpm._native_named(%4$L, lo) then lo::%1$s end)::text, min(lo)) as lo,
+            coalesce(max(case when pgpm._native_named(%4$L, hi) then hi::%1$s end)::text, max(hi)) as hi
        from gone group by child_name, child_oid',
-    pgpm._native_type(cfg.control_kind), p_parent::text, p_child)
+    pgpm._native_type(cfg.control_kind), p_parent::text, p_child, cfg.control_kind)
   loop
     insert into pgpm.log (parent_table, action, lo, hi, rows, method)
       values (p_parent, 'archive_chunk_retired', r.lo, r.hi, r.chunks,
