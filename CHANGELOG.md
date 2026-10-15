@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **`bench/ci_runs_lint_jobs.sh` requires that `./test.sh ci` fails when its lint track fails** (#1280). Its
+  check that `ci` runs the lint track accepted the block on the spelling of a `"$0" lint` command, so a `ci` that
+  ran the track and dropped its failure (the `*) ci_failed="$ci_failed lint"` arm emptied) printed `ci: PASS`
+  over a red Lint summary, #1183's symptom, and passed the guard. The guard now runs test.sh's `ci` block with
+  `$0` a stub that passes every track but lint: it must call the lint track, exit 0 with `ci: PASS` when that
+  track passes, and exit non-zero with a `ci: FAIL` line naming lint when it fails. A planted `ci` that drops
+  the failure is one of its controls, and the mutation `ci_drops_lint_failure` empties that arm in `test.sh`.
+  Test-harness only; no SQL changed.
+
 - **The child-by-oid lint reads a cast to regclass in every spelling of the cast** (#1287).
   `scripts/check_archive_child_by_oid.py`'s rule 1 refuses a relation found by a name built at run time, and
   matched that as the three tokens `)` `::` `regclass`, so the same cast written
