@@ -15,7 +15,15 @@
   `_retain_recall`'s re-attach, which attached a table that took a detached partition's name the same way, now
   checks that the relation it attached is the one it vouched for. `bench/retire_locks_by_oid.sh` runs `tests/345`
   (mutations `retire_lock_answer_ignored`, `regrain_swap_attach_unlocked`, `retain_recall_attach_unchecked` and
-  `lock_oid_vanished_name_null`).
+  `lock_oid_vanished_name_null`). A lock pins a relation's name but not its schema's, so a statement that names
+  a relation and then waits for a lock of its own reached a same-named table a schema swap put there meanwhile:
+  `retire()`'s one-step `DROP` dropped it and its crossing `DELETE` deleted its rows, the write block's
+  `CREATE TRIGGER` blocked it and left the partition writable, and the regrain reconcile and the hypertable drain
+  steps read and wrote it. `pgpm._reached_or_raise` checks each such statement after it ran and rolls it back
+  (mutations `retire_drop_unverified`, `retire_crossing_unverified`, `write_block_create_unverified`,
+  `write_block_enable_unverified`, `untransmute_gate_unverified`, `regrain_reconcile_unverified`; for the drains,
+  `bench/hypertable_drain_schema_swap.sh` runs `tests/timescale/db/345`, mutations
+  `hypertable_drain_appends_unverified` and `hypertable_drain_delta_unverified`).
 
 - **A live chunk whose bound names no instant proves no coverage, so retain() no longer drops a partly archived
   partition on one** (#1336, bullet 8). Before #977 the archive step checked a strategy's `covered_hi` with a cast

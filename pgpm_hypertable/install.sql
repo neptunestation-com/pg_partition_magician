@@ -1346,6 +1346,7 @@ create or replace function pgpm.from_hypertable_drain_delta_step(
 declare
   v_nsp name; v_rel name; v_dest name;
   v_delta regclass;   -- the recorded delta, by oid, wherever it lives (#1057); spliced as %s, its own rendering
+  v_delta_txt text;
   v_keycols_q text; v_dkey_q text; v_skey_q text; v_cols_q text;
   v_ctl_type text; v_min_ctl text; v_max_ctl text; v_watermark bigint; v_keys bigint;
   v_seq name;   -- the delta's ordering column, found as its identity column (#1074)
@@ -1397,8 +1398,9 @@ begin
   -- the same index the cutover adopts); no separate throwaway index is built here.
 
   -- batch boundary: the ordering value of the p_batch-th oldest delta row (or max when fewer remain)
+  v_delta_txt := v_delta::text;   -- #1335 b10: the name both statements on the delta go through, checked below
   execute format('select coalesce((select %1$I from %2$s order by %1$I offset %3$s limit 1), (select max(%1$I) from %2$s))',
-                 v_seq, v_delta, greatest(p_batch - 1, 0)) into v_watermark;
+                 v_seq, v_delta_txt, greatest(p_batch - 1, 0)) into v_watermark;
   if v_watermark is null then return 0; end if;   -- delta empty
 
   -- materialize this batch's distinct keys authoritatively by DELETING them: delete-returning is the source
@@ -1412,7 +1414,7 @@ begin
   execute format('create temp table pg_temp.pgpm_dbatch on commit drop as
                   with d as (delete from %s where %I <= %s returning %s)
                   select distinct %s from d',
-                 v_delta, v_seq, v_watermark, v_keycols_q, v_keycols_q);
+                 v_delta_txt, v_seq, v_watermark, v_keycols_q, v_keycols_q);
   get diagnostics v_keys = row_count;
 
   -- bound the source read to the batch's touched control range, as literal constants, for chunk exclusion
@@ -1432,6 +1434,12 @@ begin
     execute format('insert into %I.%I (%s) select %s from %I.%I s where %s in (select %s from pg_temp.pgpm_dbatch)',
                    v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel, v_skey_q, v_keycols_q);
   end if;
+  -- #1335 b10: every statement above names the source and the copy by name and waits for its lock behind their
+  -- other holders; a schema renamed during a wait sends it to a namesake. Checked once the batch has run; raised,
+  -- the batch rolls back.
+  perform pgpm._reached_or_raise(p_hypertable, format('%I.%I', v_nsp, v_rel), 'from_hypertable_drain_delta_step, reading the source,');
+  perform pgpm._reached_or_raise(pgpm._scratch_rel(p_hypertable, 'hypertable_dest'), format('%I.%I', v_nsp, v_dest), 'from_hypertable_drain_delta_step, writing the copy,');
+  perform pgpm._reached_or_raise(v_delta, v_delta_txt, 'from_hypertable_drain_delta_step, consuming the delta,');
   -- #1241: the copy's last write, its delete included (a key deleted from the source leaves no row to date it)
   perform pgpm._scratch_written(p_hypertable);
   return v_keys;
@@ -1575,6 +1583,11 @@ begin
   execute format('insert into %I.%I (%s) select %s from %I.%I where %s and %I <= %L::%s order by %I',
                  v_nsp, v_dest, v_cols_q, v_cols_q, v_nsp, v_rel,
                  v_past, p_control, v_hi, v_ctl_type, p_control);
+  -- #1335 b10: every statement above names the source and the copy by name and waits for its lock behind their
+  -- other holders; a schema renamed during a wait sends it to a namesake. Checked once the batch has run; raised,
+  -- the batch rolls back.
+  perform pgpm._reached_or_raise(p_hypertable, format('%I.%I', v_nsp, v_rel), 'from_hypertable_drain_appends_step, reading the source,');
+  perform pgpm._reached_or_raise(pgpm._scratch_rel(p_hypertable, 'hypertable_dest'), format('%I.%I', v_nsp, v_dest), 'from_hypertable_drain_appends_step, writing the copy,');
   perform pgpm._scratch_written(p_hypertable);   -- #1241: the copy's last write, for the cutover's wait
   return v_hi;
 end $$;
@@ -2339,11 +2352,15 @@ begin
   -- source about to go, and replayed below once the copy has its name. See _from_hypertable_carried_ddl.
   v_carried_ddl := pgpm._from_hypertable_carried_ddl(p_hypertable);
   execute format('drop table %I.%I', v_nsp, v_rel);   -- also drops the change-capture trigger, if any
+  -- #1335 b10: the source's lock pins its name, not its schema's, and the statements since waited for locks of their
+  -- own: a schema renamed in such a wait sends this DROP to a namesake, and the swap rolls back whole
+  perform pgpm._reached_or_raise(p_hypertable, null, format('from_hypertable_cutover(%s), dropping the source,', p_hypertable));
   if v_track then
     -- the trigger went with the source; drop the now-orphaned delta table and trigger function. This is
     -- inside the swap transaction, so an aborted cutover leaves the apparatus intact with the source.
     -- #1057: the delta the copy recorded, by its oid, in whatever schema it sits now.
     execute format('drop table %s', v_delta);
+    perform pgpm._reached_or_raise(v_delta, null, format('from_hypertable_cutover(%s), dropping the delta,', p_hypertable));   -- #1335 b10
   end if;
   -- #955: the function the copy recorded, by its oid, never <rel>_pgpm_delta_fn rendered from the current name,
   -- which after a RENAME of the hypertable is an operator's function, or nothing. #1057: whether or not the
@@ -2355,6 +2372,7 @@ begin
   -- #955: the copy is the table now and the delta and its function are gone: none of them is scratch any more
   delete from pgpm.scratch where parent_oid = p_hypertable::oid;
   execute format('alter table %I.%I rename to %I', v_nsp, v_dest, v_rel);
+  perform pgpm._reached_or_raise(v_dest_oid, format('%I.%I', v_nsp, v_rel), format('from_hypertable_cutover(%s), renaming the copy into its place,', p_hypertable));   -- #1335 b10
   -- adopt the pre-built unique indexes as the original PK/UNIQUE constraints (metadata-only; USING INDEX
   -- also renames the adopted index to the constraint name)
   for v_i in 1 .. coalesce(array_length(v_key_names, 1), 0) loop
