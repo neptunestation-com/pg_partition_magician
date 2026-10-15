@@ -7,7 +7,8 @@
 -- the one-step `drop table <schema>.<name>`, which resolved the name a third time and dropped the stranger, rows
 -- and all, reported true and logged retain_drop. A DROP TABLE that waits for its lock re-resolves its name the same
 -- way, and so does ATTACH PARTITION, which is how the regrain swap attached a table that took a renamed copy's
--- name, and dropped the source whose rows only the copy held.
+-- name, and dropped the source whose rows only the copy held, and how _retain_recall attached a table that took
+-- a detached partition's name in its place.
 --
 -- THE CONTRACT.
 --   PART A  retire() on a time grid (nothing locks the partition before its own lock), the partition renamed aside
@@ -21,17 +22,21 @@
 --           (INCLUDING ALL, so its bound CHECK too) created under its name while the swap waits for the copy: the
 --           copy pgpm recorded is the one attached (found by oid wherever it sits, #707), so the table's range
 --           holds the copied rows, and the stranger is attached to nothing and keeps its rows.
+--   PART D  the sibling: _retain_recall's re-attach of a partition its retirement detached (retention loosened
+--           since), the partition renamed aside and a table LIKE it created under its name while the ATTACH
+--           waits: the stranger is not attached (fail_retain_reattach, the mark kept), and the table serves none
+--           of its rows.
 -- Every concurrent order is set by a lock queue: a second session ('h345') holds ACCESS EXCLUSIVE on the target, a
 -- third ('r345') makes the call, and a server-side poll (snapshot cleared every iteration) sees the call waiting
 -- for its lock on the target's oid before the holder renames, creates and commits.
 --
 -- ASYMMETRIC FIXTURES. A's partition holds 3 rows and its stranger 2; B's partition holds 4; C's copy holds ids
--- 10..490 (49 rows) and its stranger 2 rows (7, 8). Every check names the relation by oid and its rows by value.
--- retire() and regrain_step are functions, not committing procedures; no refusal here is a raise.
+-- 10..490 (49 rows) and its stranger 2 rows (7, 8); D's partition ids 1..2500 and its stranger 2 rows (7, 8). Every check names the relation by oid and its rows by value.
+-- retire(), regrain_step and _retain_recall are functions, not committing procedures; no throws_* here.
 create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
-select plan(28);
+select plan(36);
 
 -- the call in session r345 is waiting, ungranted, for p_mode on p_oid: one statement per sample, snapshot cleared
 create function pg_temp.waits_for(p_oid oid, p_mode text) returns boolean language plpgsql as $$
@@ -178,6 +183,49 @@ select ok(exists (select 1 from pg_inherits where inhrelid = :'c_oid'::oid and i
 select ok(not exists (select 1 from pg_inherits where inhrelid = :'c_squat'::oid),
   'the stranger is attached to nothing');
 select is(pg_temp.ids_of(:'c_squat'), array[7, 8]::bigint[], 'and keeps its rows 7, 8');
+
+-- ======================= (D) the sibling: the recall re-attaches the partition, not a table under its name =========
+-- The state retire() leaves once its dispatched detach has landed (marked, the dispatch recorded, detached), with
+-- retention then loosened so it no longer reaches the partition: _retain_recall re-attaches it on its bounds.
+create table public.r345d (id bigint primary key, payload text);
+insert into public.r345d select g, 'd' from generate_series(1, 2500) g;
+call pgpm.transmute('public.r345d', 'id', 1000, p_paused => true);
+insert into public.r345d values (20000, 'frontier');
+select child_name as d_name, child_oid as d_oid from pgpm.part where parent_table = 'public.r345d'::regclass and lo = '0' \gset
+update pgpm.part set retiring_at = now(), retiring_oid = child_oid, detach_dispatched_oid = child_oid
+ where parent_table = 'public.r345d'::regclass and child_name = :'d_name';
+select format('alter table public.r345d detach partition public.%I', :'d_name') as d_detach \gset
+:d_detach;
+select is((select (count(*), min(id), max(id))::text from only public.:"d_name"), '(2500,1,2500)',
+  'fixture: D''s partition, detached by its retirement, holds ids 1..2500');
+select max(id) as d_mark from pgpm.log \gset
+
+select dblink_exec('h345', 'begin') as d1 \gset
+select dblink_exec('h345', format('lock table public.%I in access exclusive mode', :'d_name')) as d2 \gset
+select dblink_send_query('r345', $$select pgpm._retain_recall('public.r345d', true)::text$$) as d3 \gset
+select ok(pg_temp.waits_for(:'d_oid'::oid, 'AccessExclusiveLock'),
+  'LIVENESS: the recall''s re-attach waits for ACCESS EXCLUSIVE on the partition''s oid');
+select dblink_exec('h345', format('alter table public.%I rename to r345d_aside', :'d_name')) as d4 \gset
+select dblink_exec('h345', format('create table public.%I (like public.r345d_aside including all)', :'d_name')) as d5 \gset
+select dblink_exec('h345', format('insert into public.%I values (7, %L), (8, %L)', :'d_name', 'stranger', 'stranger')) as d6 \gset
+select o as d_squat from dblink('h345', format('select %L::regclass::oid', 'public.' || quote_ident(:'d_name'))) as t(o oid) \gset
+select dblink_exec('h345', 'commit') as d7 \gset
+select x as d_ret from dblink_get_result('r345', false) as t(x text) \gset
+select count(*) as d_drained from dblink_get_result('r345', false) as t(x text) \gset
+select ok(:'d_squat'::oid <> :'d_oid'::oid, 'LIVENESS: the partition''s name denotes another relation now, the stranger');
+select ok(not exists (select 1 from pg_inherits where inhrelid = :'d_squat'::oid),
+  'the stranger is attached to nothing');
+select is((select array_agg(id order by id) from public.r345d where id < 3000), null,
+  'and the table''s [0, 3000) serves none of its rows (nor any other)');
+select is((select array_agg(action order by id) from pgpm.log where id > :d_mark and parent_table = 'public.r345d'::regclass),
+  array['fail_retain_reattach']::text[], 'the recall logged fail_retain_reattach, not retain_reattach');
+select ok((select retiring_at is not null and detach_dispatched_oid = :'d_oid'::oid from pgpm.part
+            where parent_table = 'public.r345d'::regclass and child_name = :'d_name'),
+  'and kept the retirement''s mark and its record, so nothing reads the partition as taken back');
+select is(pg_temp.ids_of(:'d_oid'), (select array_agg(g::bigint order by g) from generate_series(1, 2500) g),
+  'the partition, renamed aside, keeps ids 1..2500');
+update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
+ where parent_table = 'public.r345d'::regclass and child_name = :'d_name';
 
 select dblink_disconnect('h345') as dh \gset
 select dblink_disconnect('r345') as dr \gset

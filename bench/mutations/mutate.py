@@ -15113,6 +15113,16 @@ MUTATIONS["regrain_swap_attach_unlocked"] = (
     [("    perform pgpm._lock_oid_or_raise(v_copy, 'access exclusive', true, format('regrain_step(%s), attaching its copies,', p_parent));\n",
       "", 1)],
 )
+MUTATIONS["retain_recall_attach_unchecked"] = (
+    "bench/retire_locks_by_oid.sh",
+    "Issue #1335 bullet 10, the recall's site: _retain_recall re-attaches a partition its retirement detached by "
+    "`%I.%I` and does not ask whether the relation the ATTACH reached is the one its identity check vouched for. "
+    "ATTACH PARTITION re-resolves the name once its lock is granted, so a table created under the name while it "
+    "waited is attached in the partition's place, logged retain_reattach, and the retirement's mark cleared. One "
+    "clause, the postcondition's test. tests/345 part D catches it.",
+    [("      if not exists (select 1 from pg_inherits i where i.inhrelid = v_now and i.inhparent = p_parent) then\n",
+      "      if false and not exists (select 1 from pg_inherits i where i.inhrelid = v_now and i.inhparent = p_parent) then\n", 1)],
+)
 
 def main() -> int:
     if sys.argv[1:] == ["--late-survivors"]:
