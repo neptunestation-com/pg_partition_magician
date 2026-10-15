@@ -3910,6 +3910,27 @@ begin
 end;
 $$;
 
+-- _reached_or_raise(): THE STATEMENT, CHECKED AFTER IT RAN (#1335 bullet 10, round 2). A lock on a relation pins its
+-- own name against a rename, not its schema's: ALTER SCHEMA ... RENAME takes no relation lock. So a statement that
+-- names a relation pgpm identified and then waits for a lock of its own (a DROP behind a reader, a DELETE behind a
+-- SHARE holder, a CREATE TRIGGER behind a writer) resolves the name again once granted, and a schema renamed aside
+-- with a namesake schema and table committed during that wait is what it reaches. No question asked before the
+-- statement can close that window; the answer after it can, because the statement has not committed, and raised it
+-- rolls back with the caller's transaction or block. p_name_q is the name the statement went through, as rendered:
+-- it must still denote p_rel. Null for a DROP of p_rel, which must be gone.
+create or replace function pgpm._reached_or_raise(p_rel regclass, p_name_q text, p_what text)
+returns void language plpgsql as $$
+begin
+  if p_name_q is null and exists (select 1 from pg_class c where c.oid = p_rel) then
+    raise exception 'pg_partition_magician: % dropped another relation than % (oid %), which stands: one that took its name while the DROP waited for its lock (its schema renamed, and another created under the old name); rolled back',
+      p_what, p_rel, p_rel::oid;
+  elsif p_name_q is not null and to_regclass(p_name_q) is distinct from p_rel then
+    raise exception 'pg_partition_magician: % went through the name %, which denotes % now, not oid %: a schema was renamed while the statement waited for its lock, and it reached the relation of that name; rolled back',
+      p_what, p_name_q, coalesce(to_regclass(p_name_q)::oid::text, 'nothing'), p_rel::oid;
+  end if;
+end;
+$$;
+
 -- DROP TABLE of a relation pgpm identified by oid, through _lock_oid: the DROP takes a name too, and a table created
 -- under it while the DROP waited for its lock was what it dropped. The lock is taken first, and the name rendered
 -- under it. A relation dropped meanwhile is already what the caller wanted; one that kept moving is refused.
@@ -3966,7 +3987,7 @@ declare
   cfg pgpm.config; v_nsp name; v_boundary text; r record;
   v_referenced boolean; v_child regclass; v_now regclass; v_why text;
   v_cross text[]; v_coltype text; v_lo_lit text; v_hi_lit text; v_deleted int; v_reason text;
-  v_chunks bigint; v_rel regclass; v_attached boolean; v_pending boolean;
+  v_chunks bigint; v_rel regclass; v_attached boolean; v_pending boolean; v_parent_txt text;
 begin
   -- #951: refused before anything is read or committed; no argument here has a null meaning
   perform pgpm._refuse_null_arguments('retire', json_build_object('p_parent', p_parent, 'p_child', p_child));
@@ -4262,11 +4283,13 @@ begin
           -- unblocked. Disabling triggers wholesale is NOT an option -- that would switch off the RI
           -- triggers whose actions are the entire point of doing this as a DELETE.
           perform pgpm._remove_write_block(p_parent, p_child);
+          v_parent_txt := p_parent::text;   -- #1335 b10: the name the DELETE goes through, checked after it
           execute format(
             'delete from %s where %I >= %L and %I < %L and %I = any (%L::text[]::%s[])',
-            p_parent::text, cfg.control_column, v_lo_lit, cfg.control_column, v_hi_lit,
+            v_parent_txt, cfg.control_column, v_lo_lit, cfg.control_column, v_hi_lit,
             cfg.control_column, v_cross, v_coltype);
           get diagnostics v_deleted = row_count;
+          perform pgpm._reached_or_raise(p_parent, v_parent_txt, format('retire(%s, %s), deleting the crossing keys,', p_parent, quote_ident(p_child)));
           perform pgpm._install_write_block(p_parent, p_child);
           -- Logged loudly and separately: this fires referential actions on tables pgpm was not
           -- handed, which is the one thing retirement does beyond its own partition.
@@ -4353,6 +4376,9 @@ begin
     -- is recorded before the drop it makes room for.
     perform pgpm._regrain_reclaim(p_parent, p_child, r.lo, r.hi);
     execute format('drop table %s', v_rel::text);   -- #1335 b10: the locked relation, by the name it has under the lock
+    -- and the DROP checked: it waits for ACCESS EXCLUSIVE behind any reader, and a schema renamed during that wait
+    -- makes it reach a namesake (_reached_or_raise); raised here, the drop rolls back with this block
+    perform pgpm._reached_or_raise(v_rel, null, format('retire(%s, %s)', p_parent, quote_ident(p_child)));
     -- #1141: from here the chunks' objects are the only copy of these rows; the ledger says so, in the
     -- transaction of the drop, and no coverage reset or reader takes a marked row for a live partition's
     update pgpm.archive_ledger set retired_at = now()
@@ -4680,6 +4706,7 @@ begin
     -- And logged (#710, see above).
     if v_enabled <> 'A' then
       execute format('alter table %I.%I enable always trigger pgpm_write_block', v_nsp, p_child);
+      perform pgpm._reached_or_raise(v_child, format('%I.%I', v_nsp, p_child), 'the write block''s ENABLE ALWAYS');   -- #1335 b10
       insert into pgpm.log (parent_table, action, lo, hi, method)
         values (p_parent, 'write_block_reenable', r.lo, r.hi,
                 format('%I.%I: pgpm_write_block was %s and is ENABLE ALWAYS again (retention''s fence)',
@@ -4697,6 +4724,9 @@ begin
   -- fence, and a row that gets past it lands in a partition whose archive coverage is already complete
   -- and is dropped unarchived.
   execute format('alter table %I.%I enable always trigger pgpm_write_block', v_nsp, p_child);
+  -- #1335 b10: CREATE TRIGGER waits for SHARE ROW EXCLUSIVE behind every writer of the partition, and a schema renamed
+  -- during that wait puts the block on a namesake, leaving the partition writable under coverage that says otherwise
+  perform pgpm._reached_or_raise(v_child, format('%I.%I', v_nsp, p_child), 'the write block''s CREATE TRIGGER');
 end;
 $$;
 
@@ -6879,6 +6909,7 @@ declare
   v_reltuples real; v_delta_has_rows boolean;   -- the delta's row estimate, and whether it holds a row (#710)
   v_dnsp name;            -- the delta's own schema, by its recorded oid (#555), not the parent's current one
   v_src regclass;         -- the source the rows are reread from, as pgpm.part recorded it (#768)
+  v_sub_txt text; v_src_txt text;   -- #1335 b10: their names, rendered once per batch and checked after it
   v_seq name;             -- the delta's ordering column, found as its identity column (#1074)
   v_seq_q text;           -- the same, quoted for the batch predicate
   v_kshaped text;         -- does a delta row's key decode: _text_time_shaped of it, or true (#709)
@@ -7057,15 +7088,20 @@ begin
     -- before either statement and before the delta is consumed, so every captured key waits for the
     -- tick after the copy has its name back.
     v_sub_rel := pgpm._regrain_copy_rel(p_parent, v_sub_name, 'reconcile captured changes into');
+    v_sub_txt := v_sub_rel::text; v_src_txt := v_src::text;
     execute format(
       'delete from %s d where %s in (select %s from %I.%I k where %s and %s = %L)',
-      v_sub_rel::text, v_dkey_q, v_keycols_q, v_dnsp, v_delta, v_batch, v_kfloor, r.sub_lo)
+      v_sub_txt, v_dkey_q, v_keycols_q, v_dnsp, v_delta, v_batch, v_kfloor, r.sub_lo)
       using v_seqs, v_rows;
     execute format(
       'insert into %s (%s) select %s from %s s where %s in (select %s from %I.%I k where %s and %s = %L)',
-      v_sub_rel::text, v_cols_q, v_cols_q, v_src::text, v_skey_q, v_keycols_q, v_dnsp, v_delta, v_batch,
+      v_sub_txt, v_cols_q, v_cols_q, v_src_txt, v_skey_q, v_keycols_q, v_dnsp, v_delta, v_batch,
       v_kfloor, r.sub_lo)
       using v_seqs, v_rows;
+    -- #1335 b10: either statement waits for its lock behind the copy's or the source's other holders, and a schema
+    -- renamed during the wait sends it to a namesake; checked once both have run, and raised, the batch rolls back
+    perform pgpm._reached_or_raise(v_sub_rel, v_sub_txt, format('the regrain reconcile of %s, writing a copy,', p_parent));
+    perform pgpm._reached_or_raise(v_src, v_src_txt, format('the regrain reconcile of %s, reading the source,', p_parent));
   end loop;
 
   -- #709: the keys that do not decode, placed as the copy placed their rows, by ENCODED value: each goes to the
@@ -7109,16 +7145,21 @@ begin
         continue;
       end if;
       v_sub_rel := pgpm._regrain_copy_rel(p_parent, r.child_name, 'reconcile captured changes into');
+      v_sub_txt := v_sub_rel::text; v_src_txt := v_src::text;
       execute format(
         'delete from %s d where %s in (select %s from %I.%I k where %s and not %s and %s >= %L and %s < %L)',
-        v_sub_rel::text, v_dkey_q, v_keycols_q, v_dnsp, v_delta, v_batch, v_kshaped,
+        v_sub_txt, v_dkey_q, v_keycols_q, v_dnsp, v_delta, v_batch, v_kshaped,
         v_ctl_q, r.lo_lit, v_ctl_q, r.hi_lit)
         using v_seqs, v_rows;
       execute format(
         'insert into %s (%s) select %s from %s s where %s in (select %s from %I.%I k where %s and not %s and %s >= %L and %s < %L)',
-        v_sub_rel::text, v_cols_q, v_cols_q, v_src::text, v_skey_q, v_keycols_q, v_dnsp, v_delta, v_batch, v_kshaped,
+        v_sub_txt, v_cols_q, v_cols_q, v_src_txt, v_skey_q, v_keycols_q, v_dnsp, v_delta, v_batch, v_kshaped,
         v_ctl_q, r.lo_lit, v_ctl_q, r.hi_lit)
         using v_seqs, v_rows;
+      -- #1335 b10: either statement waits for its lock behind the copy's or the source's other holders, and a schema
+      -- renamed during the wait sends it to a namesake; checked once both have run, and raised, the batch rolls back
+      perform pgpm._reached_or_raise(v_sub_rel, v_sub_txt, format('the regrain reconcile of %s, writing a copy,', p_parent));
+      perform pgpm._reached_or_raise(v_src, v_src_txt, format('the regrain reconcile of %s, reading the source,', p_parent));
     end loop;
   end if;
 
@@ -12175,7 +12216,7 @@ begin
   -- would fire again on the next write, and an ENABLE ALWAYS or ENABLE REPLICA one would silently change
   -- when it fires under session_replication_role. So the name and the state ride alongside, index-aligned
   -- by the same ORDER BY, and 7b re-applies every non-default state after the replay.
-  execute format('lock table %s in access exclusive mode', p_parent::text);
+  perform pgpm._lock_oid_or_raise(p_parent, 'access exclusive', false, 'transmute');   -- #1335 b10: by oid
   select coalesce(array_agg(pg_get_triggerdef(oid) order by tgname), '{}'),
          coalesce(array_agg(tgname::text order by tgname), '{}'),
          coalesce(array_agg(tgenabled::text order by tgname), '{}')
@@ -13275,6 +13316,7 @@ declare
   cfg pgpm.config; v_nsp name; v_rel name; v_monreg regclass; v_restored regclass;
   v_mon name; v_mon_lo text; v_mon_hi text; v_outside boolean;
   v_gate_q text; v_door text;   -- #443: the outside-rows check and its refusal, asked twice
+  v_gate_rel text;
   v_idcols name[]; v_idmax bigint[]; v_col name; v_m bigint; v_i int; v_idnext numeric[]; v_seq regclass;
   v_idmin bigint[]; v_mmin bigint; v_idopts text[];   -- #670: min(identity) and the sequence options, per column
   v_idseqs name[];                                    -- #877: each parent identity sequence's name, read under the lock
@@ -13362,8 +13404,9 @@ begin
   -- Built once and asked twice (#443): here, unlocked, as the cheap refusal that takes no lock a writer
   -- would feel when the door is already shut; and again under ACCESS EXCLUSIVE just before the DETACH,
   -- which is the answer that is acted on.
+  v_gate_rel := p_parent::text;   -- #1335 b10: the name the gate reads through, checked after its second asking
   v_gate_q := format('select exists (select 1 from %s where %I >= %L or %I < %L)',
-                 p_parent::text, cfg.control_column, pgpm._encode(cfg.control_kind, v_mon_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
+                 v_gate_rel, cfg.control_column, pgpm._encode(cfg.control_kind, v_mon_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
                  cfg.control_column, pgpm._encode(cfg.control_kind, v_mon_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));
   v_door := format('pg_partition_magician: cannot untransmute %s -- rows now live outside the original monolith (a forward partition past B, a backdated stray, or a regraining has split it), so a metadata-only reverse would lose data. This is a one-way door once the frontier crosses B or a regrain has split the monolith.',
                    p_parent::text);
@@ -13431,9 +13474,12 @@ begin
   -- one probe of partitions that are empty whenever it passes, the trigger capture and the identity read
   -- below, all catalog reads or index descents. Named through p_parent, whose ACCESS SHARE from the first
   -- check is held to the end of this transaction and so pins the name against a concurrent rename.
-  execute format('lock table %s in access exclusive mode', p_parent::text);
+  -- #1335 b10: by oid; and the gate's name checked once it has been asked under the lock, since the ACCESS SHARE above
+  -- pins the parent's own name but not its schema's, and the gate's text named the parent before this waited
+  perform pgpm._lock_oid_or_raise(p_parent, 'access exclusive', false, 'untransmute');
   perform pgpm._refuse_detach_pending(p_parent);   -- #1157, final: a detach that set its flag while this waited
   execute v_gate_q into v_outside;
+  perform pgpm._reached_or_raise(p_parent, v_gate_rel, format('untransmute(%s), asking the gate under its lock,', p_parent));
   if v_outside then
     raise exception '%', v_door;
   end if;

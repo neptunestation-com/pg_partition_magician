@@ -1723,6 +1723,16 @@ it identified earlier: the regrain swap's attach of each copy, the recall's re-a
 partition, the archive hold on the parent, the drops of regrain and hypertable scratch tables, and the first
 locks of `regrain`, `transmute`, `untransmute`, the conversion reaper and the hypertable cutover and drains.
 
+A lock pins a relation's own name, not its schema's: `ALTER SCHEMA ... RENAME` takes no relation lock. So a
+statement that names a relation and then waits for a lock of its own (the `DROP` behind a reader of the
+partition, the crossing `DELETE` behind a `SHARE` holder of the parent, the write block's `CREATE TRIGGER`
+behind a writer) reaches whatever a schema renamed during that wait, with a same-named schema and table put in
+its place, holds under the name. Each such statement is checked after it ran, before anything commits: the
+name it went through must still denote the relation pgpm identified, and a `DROP` must have removed that
+relation. When the check fails the statement is rolled back: `retire` logs `fail_retain_drop` or
+`fail_retain_crossing` and returns false, or raises from the write block, and `untransmute`, the regrain
+reconcile and the hypertable drain steps raise, naming the name and the relation it now denotes.
+
 The name is resolved in the partition's **own** schema, the schema of the relation `child_oid` records,
 not in the parent's. `ALTER TABLE <parent> SET SCHEMA` moves only the parent: the partitions it already
 has stay where they were, and the ones pgpm creates afterwards go in the parent's new schema. The
