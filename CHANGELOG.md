@@ -2,20 +2,20 @@
 
 ## [Unreleased]
 
-- **A live chunk's bound with no offset is read on the grid's clock too, so retain() no longer drops a partly
-  archived partition from a session west of the grid** (#1336, bullet 8). #1264 moved only the reader of RETIRED
-  ledger rows onto the grid's clock. A live row an older install wrote carries the same offset-less `hi` (before
-  #977 a strategy's `covered_hi` was stored verbatim), and `pgpm._archive_fully_covered`, `retire()`'s drop gate,
-  still read it with `max(hi::timestamptz)` in the caller's `TimeZone`: a monolith of a UTC grid archived three
-  hours short of its `hi` was kept by `retain()` from UTC and dropped by `retain()` from America/New_York, with
-  the row no strategy was handed. Every reader of a ledger bound now reads it as `_over_retired_chunks` does,
-  through `pgpm._native_bound_ts` (wall time in `config.partition_tz`): the coverage watermark of
-  `_archive_fully_covered`, `_next_archive_chunk` and `scripts/archive_partition_whole.sql`
-  (`pgpm._max_hi_native(kind, tz)`), `_discard_contradicted_coverage`'s check of a 0-row chunk, the archive step's
-  discard of coverage under an untracked name (#511), and the upgrade's `_mark_retired_chunks`. Test `tests/346`;
-  guard `bench/archive_coverage_grid_zone.sh`; mutations `archive_fully_covered_session_zone`,
-  `next_archive_chunk_session_zone`, `contradicted_coverage_session_zone`, `archive_orphan_discard_session_zone`,
-  `mark_retired_chunks_session_zone` and `archive_whole_resume_session_zone`.
+- **A live chunk whose bound names no instant proves no coverage, so retain() no longer drops a partly archived
+  partition on one** (#1336, bullet 8). Before #977 the archive step checked a strategy's `covered_hi` with a cast
+  in whatever session ran it and stored the text as written, so a live ledger row can carry a `hi` with no offset,
+  and the zone it was checked in was recorded nowhere. `pgpm._archive_fully_covered`, `retire()`'s drop gate, read
+  it with `max(hi::timestamptz)` in the caller's `TimeZone`: a monolith of a UTC grid archived three hours short of
+  its `hi` was kept by `retain()` from UTC and dropped by `retain()` from America/New_York, with the row no strategy
+  was handed. No single reading is safe (on the grid's clock, a chunk an Asia/Tokyo session checked reads nine hours
+  late), so such coverage now proves nothing: the gate refuses it from every session, and `_next_archive_chunk` and
+  `scripts/archive_partition_whole.sql` discard the partition's live coverage (`archive_coverage_reset`) and archive
+  it again from `lo`. The archive step's orphan discard (#511) drops an orphan of that shape instead of casting it,
+  and the upgrade's `_mark_retired_chunks` places one by its other bound (`pgpm._native_named` says which text
+  names its instant). Test `tests/346`; guard `bench/archive_coverage_unnamed_bound.sh`; mutations
+  `archive_fully_covered_unnamed_counted`, `archive_fully_covered_grid_zone`, `next_archive_chunk_unnamed_resumed`,
+  `archive_whole_unnamed_resumed`, `archive_orphan_discard_unnamed_kept` and `mark_retired_chunks_unnamed_placed`.
 
 - **`land.sh` enqueues through the `enqueuePullRequest` mutation and stops on an unresolved review thread.**
   It asked for the enqueue with `gh pr merge`, and on 2026-10-15 #1350, green and CLEAN, sat unqueued after two

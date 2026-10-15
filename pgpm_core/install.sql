@@ -1495,15 +1495,6 @@ create or replace function pgpm._max_hi_native(p_kind text)
 returns text language sql immutable as $$
   select case when p_kind = 'id' then 'max(hi::numeric)::text' else 'pgpm._ts_text(max(hi::timestamptz))' end;
 $$;
--- The same read over pgpm.archive_ledger, whose hi an install before #977 stored as the strategy wrote it (#1336):
--- each row read as pgpm._native_bound_ts reads it, on the grid's clock (p_tz, config.partition_tz), never in the
--- caller's zone. Every coverage watermark (_next_archive_chunk, _archive_fully_covered,
--- scripts/archive_partition_whole.sql) reads through it.
-create or replace function pgpm._max_hi_native(p_kind text, p_tz text)
-returns text language sql stable as $$
-  select case when p_kind = 'id' then 'max(hi::numeric)::text'
-              else format('pgpm._ts_text(max(pgpm._native_bound_ts(hi, %L)))', p_tz) end;
-$$;
 
 -- A native value handed to pgpm from OUTSIDE (an archive_fn's covered_hi) as the canonical text of what THIS
 -- session reads it as (#977): the same rendering _max_hi_native gives the ledger's watermark, so a chunk's hi
@@ -4924,44 +4915,16 @@ create table if not exists pgpm.archive_ledger (
 );
 create index if not exists archive_ledger_parent_child_hi_idx on pgpm.archive_ledger (parent_table, child_name, hi desc);
 
--- A stored native bound read the same from every session (#1264): for a time kind the instant the text names, with
--- text that names no zone read as wall time in p_tz (the grid's config.partition_tz, the zone its cells are computed
--- and named in, and the one _col_to_native reads a naive column's wall time in), text shaped by a DateStyle read as
--- ISO, MDY, the style _ts_text writes every bound in, and a zone abbreviation (a pre-#500 render under DateStyle SQL
--- or Postgres ends in one, '01/01/2026 03:00:00 IST') read in the Default set, where IST is Israel's +02 and not, as
--- under the India set an operator may run with, +05:30. Text that carries its offset (every bound pgpm writes since
--- #500) is the instant it names under any zone, so this changes nothing for it. The SET clauses scope the zone this
--- call sets to the call: the caller's session keeps its own. _native_bound_key is its position as a number (the
--- value itself for an id kind), _native_bound_text its canonical text.
---
--- EVERY READER OF A STORED BOUND (#1336), not only of a retired one: a live ledger row an older install wrote
--- carries the same offset-less hi (#977 fixed the write, and no upgrade rewrites a row), and _archive_fully_covered
--- read it in the caller's zone, so retain() from America/New_York dropped a partly archived partition of a UTC grid
--- with rows no strategy was handed. The coverage watermark (_max_hi_native's two-argument form),
--- _discard_contradicted_coverage, the archive step's orphan discard, _mark_retired_chunks and _over_retired_chunks
--- all read the ledger through these.
-create or replace function pgpm._native_bound_ts(p_text text, p_tz text)
-returns timestamptz language plpgsql stable
-  set timezone = 'UTC'
-  set datestyle = 'ISO, MDY'
-  set timezone_abbreviations = 'Default'
-as $$
-begin
-  perform set_config('TimeZone', p_tz, true);
-  return p_text::timestamptz;
-end;
-$$;
-create or replace function pgpm._native_bound_key(p_kind text, p_text text, p_tz text)
-returns numeric language plpgsql stable as $$
-begin
-  if p_text is null then return null; end if;
-  if p_kind = 'id' then return p_text::numeric; end if;
-  return extract(epoch from pgpm._native_bound_ts(p_text, p_tz));
-end;
-$$;
-create or replace function pgpm._native_bound_text(p_kind text, p_text text, p_tz text)
-returns text language sql stable as $$
-  select case when p_kind = 'id' then p_text else pgpm._ts_text(pgpm._native_bound_ts(p_text, p_tz)) end;
+-- Does a stored native bound name its value by itself, the same in every session (#1336)? An id kind's always does;
+-- a time kind's only as _ts_text writes it, ISO 8601 year first with an explicit numeric offset (or 'infinity'),
+-- which is every bound pgpm writes since #500 and every covered_hi since #977. Anything else names a different
+-- instant per reading session: before #977 a strategy's covered_hi was stored as written ('2026-10-15 06:00:00')
+-- after a check in whatever session ran the archive step (pg_cron's, an operator's), and that session's TimeZone
+-- and DateStyle were recorded nowhere, so no reading, the caller's or the grid's, is provably the one checked.
+create or replace function pgpm._native_named(p_kind text, p_text text)
+returns boolean language sql immutable as $$
+  select p_kind = 'id' or p_text ~ ('^(-?infinity|[0-9]{4,}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?'
+                                     || '[+-][0-9]{2}(:[0-9]{2}){0,2}( BC)?)$');
 $$;
 
 -- A native bound's position as a number (#1163): the value itself for an id kind's text, the epoch for a time
@@ -5021,29 +4984,33 @@ $$;
 create or replace function pgpm._mark_retired_chunks() returns int language plpgsql as $$
 declare r record; v_n int := 0; v_k int;
 begin
-  for r in select distinct l.parent_table, c.control_kind, c.partition_tz
+  for r in select distinct l.parent_table, c.control_kind
              from pgpm.archive_ledger l join pgpm.config c on c.parent_table = l.parent_table
             where l.retired_at is null
   loop
-    -- by parent first, in materialized CTEs, so the native reads never meet another parent's bounds (#973), each
-    -- on the grid's clock (#1336, _native_bound_key: these are the rows an older install wrote); a bound that does
-    -- not read leaves this parent's rows unmarked rather than failing the install
+    -- by parent first, in materialized CTEs, so the native casts never meet another parent's bounds (#973);
+    -- a bound that does not cast leaves this parent's rows unmarked rather than failing the install. A bound that
+    -- names no instant by itself (#1336, _native_named) is never cast: the chunk is placed by its other bound alone
+    -- (its lo inside the dropped range, or its hi), and one with neither is marked, holding a partition over it
+    -- rather than leaving the record of the only copy to be read as live coverage.
     begin
       execute format(
-        'with led as materialized (select lo, archived_at, pgpm._native_bound_key(%1$L, lo, %3$L) as lo_k,
-                                          pgpm._native_bound_key(%1$L, hi, %3$L) as hi_k
+        'with led as materialized (select lo, hi, archived_at, pgpm._native_named(%3$L, lo) as lo_n,
+                                          pgpm._native_named(%3$L, hi) as hi_n
                                      from pgpm.archive_ledger where parent_table = %2$L::regclass and retired_at is null),
-              dropped as materialized (select at, pgpm._native_bound_key(%1$L, lo, %3$L) as lo_k,
-                                              pgpm._native_bound_key(%1$L, hi, %3$L) as hi_k
-                                         from pgpm.log
+              dropped as materialized (select lo, hi, at from pgpm.log
                                         where parent_table = %2$L::regclass and action = ''retain_drop''
                                           and lo is not null and hi is not null),
               hit as (select l.lo, min(d.at) as at from led l join dropped d
-                        on d.lo_k <= l.lo_k and l.hi_k <= d.hi_k and d.at >= l.archived_at
+                        on d.at >= l.archived_at
+                       and case when l.lo_n and l.hi_n then d.lo::%1$s <= l.lo::%1$s and l.hi::%1$s <= d.hi::%1$s
+                                when l.lo_n then d.lo::%1$s <= l.lo::%1$s and l.lo::%1$s < d.hi::%1$s
+                                when l.hi_n then d.lo::%1$s < l.hi::%1$s and l.hi::%1$s <= d.hi::%1$s
+                                else true end
                        group by l.lo)
          update pgpm.archive_ledger a set retired_at = hit.at from hit
           where a.parent_table = %2$L::regclass and a.lo = hit.lo and a.retired_at is null',
-        r.control_kind, r.parent_table::text, r.partition_tz);
+        pgpm._native_type(r.control_kind), r.parent_table::text, r.control_kind);
       get diagnostics v_k = row_count;
       v_n := v_n + v_k;
     exception when data_exception then
@@ -5207,6 +5174,43 @@ create index if not exists archive_ledger_retired_hi_key_idx
 -- the watermark rather than re-reading from lo is sound only while the write block has been on the
 -- child since the first chunk, which _enforce_write_blocks guarantees (issue #452): it never lifts a
 -- block from a covered child, and discards coverage it finds on an unblocked one.
+-- LIVE COVERAGE WHOSE BOUND NAMES NO INSTANT VOUCHES FOR NOTHING (#1336; pgpm._native_named says why such a bound
+-- exists). Read in any one zone it can lie past rows no strategy was handed: a UTC grid's chunk an Asia/Tokyo
+-- session checked as ending at 21:00Z reads as 06:00Z the next day on the grid's clock, nine hours of rows later.
+-- So it opens no drop gate (_archive_fully_covered asks _coverage_unnamed) and starts no chunk: _next_archive_chunk
+-- and scripts/archive_partition_whole.sql discard the partition's live coverage first (_discard_unnamed_coverage,
+-- logged archive_coverage_reset, the #452 reset's shape) and archive it again from lo, under the block it has kept
+-- throughout. That costs a read and a write and loses nothing. The first chunk goes to the key the discarded first
+-- chunk had, which no ledger row records any more, so a strategy that refuses to overwrite a recorded chunk
+-- (pgpm_archive's) admits it.
+create or replace function pgpm._coverage_unnamed(p_parent regclass, p_child name)
+returns boolean language sql stable as $$
+  select exists (
+    select 1 from pgpm.archive_ledger l join pgpm.config c on c.parent_table = l.parent_table
+     where l.parent_table = p_parent and l.child_name = p_child and l.retired_at is null
+       and (l.child_oid is null
+            or l.child_oid = to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)
+       and not (pgpm._native_named(c.control_kind, l.lo) and pgpm._native_named(c.control_kind, l.hi)));
+$$;
+create or replace function pgpm._discard_unnamed_coverage(p_parent regclass, p_child name)
+returns int language plpgsql as $$
+declare v_rel oid; v_n int; v_lo text; v_hi text;
+begin
+  if not pgpm._coverage_unnamed(p_parent, p_child) then return 0; end if;
+  v_rel := to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid;
+  delete from pgpm.archive_ledger l
+   where l.parent_table = p_parent and l.child_name = p_child and l.retired_at is null
+     and (l.child_oid is null or l.child_oid = v_rel);
+  get diagnostics v_n = row_count;
+  select p.lo, p.hi into v_lo, v_hi from pgpm.part p where p.parent_table = p_parent and p.child_name = p_child;
+  insert into pgpm.log (parent_table, action, lo, hi, rows, method)
+    values (p_parent, 'archive_coverage_reset', v_lo, v_hi, v_n,
+            format('%s archived chunk(s) were recorded for %I.%I, and a bound of one of them names no instant by itself (a covered_hi an older pgpm stored as its strategy wrote it, without an offset), so no session can tell how far the coverage reaches; discarded, and the partition archives again from %s',
+                   v_n, pgpm._child_nsp(p_parent, p_child), p_child, v_lo));
+  return v_n;
+end;
+$$;
+
 create or replace function pgpm._next_archive_chunk(p_parent regclass, p_child name)
 returns table(lo text, hi text)
 language plpgsql as $$
@@ -5223,6 +5227,7 @@ begin
   select p.lo, p.hi into v_child_lo, v_child_hi from pgpm.part p
    where p.parent_table = p_parent and p.child_name = p_child;
   if not found then raise exception 'pg_partition_magician: %.% is not a tracked partition', p_parent, p_child; end if;
+  perform pgpm._discard_unnamed_coverage(p_parent, p_child);   -- #1336: never resume from a bound that names no instant
 
   -- hi is stored as text; a plain max() would compare lexicographically ('91' > '1000'), not
   -- numerically/temporally -- cast to the native type first, the same fix archive._file_watermark
@@ -5232,10 +5237,10 @@ begin
   -- relation's now); a row with no oid (recorded before the column) is matched by name alone.
   -- A row with no child_oid is matched by name: after the upgrade's backfill no row written before the column is
   -- left both unmarked and oid-less, and every row pgpm writes since carries one, so only a row written by hand
-  -- can be null here. Each hi is read on the grid's clock (#1336, _native_bound_ts): a pre-#977 one can name no zone.
+  -- can be null here.
   execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null
                     and (child_oid is null or child_oid = %L::oid)',
-                 pgpm._max_hi_native(cfg.control_kind, cfg.partition_tz), p_parent::text, p_child,
+                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,
                  to_regclass(format('%I.%I', v_nsp, p_child))::oid)
     into v_lo;
   v_lo := coalesce(v_lo, v_child_lo);
@@ -5359,16 +5364,17 @@ begin
 
   select p.hi into v_child_hi from pgpm.part p where p.parent_table = p_parent and p.child_name = p_child;
   if not found then raise exception 'pg_partition_magician: %.% is not a tracked partition', p_parent, p_child; end if;
+  if pgpm._coverage_unnamed(p_parent, p_child) then return false; end if;   -- #1336: it proves no reach
 
   -- hi is text; cast to the native type before max()'ing, same reasoning (and the same fix) as
   -- _next_archive_chunk above -- a plain max() would compare lexicographically. Retired chunks are left out
   -- for its reason too (#1141): read as a same-named re-created partition's coverage, they opened retire()'s
   -- drop gate on rows no strategy was handed. And so is a chunk read from another relation of the name, by
   -- child_oid, as there.
-  -- (a null child_oid: see _next_archive_chunk, above). Each hi is read on the grid's clock (#1336, _native_bound_ts).
+  -- (a null child_oid: see _next_archive_chunk, above)
   execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null
                     and (child_oid is null or child_oid = %L::oid)',
-                 pgpm._max_hi_native(cfg.control_kind, cfg.partition_tz), p_parent::text, p_child,
+                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,
                  to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)
     into v_watermark;
 
@@ -5420,10 +5426,9 @@ begin
             where l.parent_table = p_parent and l.child_name = p_child and l.retired_at is null
               and (l.child_oid is null or l.child_oid = v_rel) and l.rows_archived = 0
   loop
-    -- the chunk's bounds as stored, read on the grid's clock (#1336): a pre-#977 hi can name no zone
     execute format('select exists (select 1 from %I.%I where %I >= %L and %I < %L)',
-                   v_nsp, p_child, cfg.control_column, pgpm._encode(cfg.control_kind, pgpm._native_bound_text(cfg.control_kind, r.lo, cfg.partition_tz), cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
-                   cfg.control_column, pgpm._encode(cfg.control_kind, pgpm._native_bound_text(cfg.control_kind, r.hi, cfg.partition_tz), cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz))
+                   v_nsp, p_child, cfg.control_column, pgpm._encode(cfg.control_kind, r.lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
+                   cfg.control_column, pgpm._encode(cfg.control_kind, r.hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz))
       into v_has;
     continue when not v_has;
     delete from pgpm.archive_ledger l
@@ -5540,6 +5545,29 @@ $$;
 -- pgpm.part row has), marks the rows retired, and holds the live renamed partition. The skip row names the remedy
 -- that is safe only then. A chunk with no child_name (a row written before pgpm recorded one) is described as
 -- such rather than raising: format's %I refuses a null.
+-- A native bound's position as a number, read the same from every session (#1264): the value for an id kind, and
+-- for a time kind the epoch of the instant the text names, with text that names no zone read as wall time in
+-- p_tz (the grid's config.partition_tz, the zone its cells are computed and named in, and the one
+-- _col_to_native reads a naive column's wall time in), text shaped by a DateStyle read as ISO, MDY, the style
+-- _ts_text writes every bound in, and a zone abbreviation (a pre-#500 render under DateStyle SQL or Postgres
+-- ends in one, '01/01/2026 03:00:00 IST') read in the Default set, where IST is Israel's +02 and not, as under
+-- the India set an operator may run with, +05:30. Text that carries its offset (every bound pgpm writes since
+-- #500) is the instant it names under any zone, so this changes nothing for it. The SET clauses scope the zone
+-- this call sets to the call: the caller's session keeps its own.
+create or replace function pgpm._native_bound_key(p_kind text, p_text text, p_tz text)
+returns numeric language plpgsql stable
+  set timezone = 'UTC'
+  set datestyle = 'ISO, MDY'
+  set timezone_abbreviations = 'Default'
+as $$
+begin
+  if p_text is null then return null; end if;
+  if p_kind = 'id' then return p_text::numeric; end if;
+  perform set_config('TimeZone', p_tz, true);
+  return extract(epoch from p_text::timestamptz);
+end;
+$$;
+
 drop function if exists pgpm._over_retired_chunks(regclass);
 create or replace function pgpm._over_retired_chunks(p_parent regclass)
 returns table(child_name name, lo text, hi text, chunks text, other_names text) language plpgsql stable as $$
@@ -5788,25 +5816,26 @@ begin
   -- because the step below does not archive a partition over a retired chunk's range. Nor is a chunk whose
   -- relation no longer exists, whoever dropped it: those are marked retired first (pgpm._mark_gone_chunks).
   perform pgpm._mark_gone_chunks(p_parent);
-  -- The overlap is judged on the grid's clock (#1336, _native_bound_key), the parent's rows filtered first (#973),
-  -- and the tracked partitions keyed only when there is an orphan to judge.
+  -- The orphans first, materialized (#973). One whose bound names no instant by itself (#1336, _native_named) is never
+  -- cast: it cannot be shown to overlap nothing, so it is discarded, the side that loses no row.
   for r in execute format(
-    'with orphan as materialized (select l.child_name, l.lo, l.hi, pgpm._native_bound_key(%3$L, l.lo, %4$L) as lo_k,
-                                         pgpm._native_bound_key(%3$L, l.hi, %4$L) as hi_k
+    'with orphan as materialized (select l.parent_table, l.child_name, l.lo, l.hi,
+                                         pgpm._native_named(%3$L, l.lo) and pgpm._native_named(%3$L, l.hi) as named
                                     from pgpm.archive_ledger l
                                    where l.parent_table = %2$L::regclass
                                      and l.child_name is not null
                                      and l.retired_at is null
                                      and not exists (select 1 from pgpm.part p
-                                                      where p.parent_table = l.parent_table and p.child_name = l.child_name)),
-          tracked as materialized (select pgpm._native_bound_key(%3$L, t.lo, %4$L) as lo_k,
-                                          pgpm._native_bound_key(%3$L, t.hi, %4$L) as hi_k
-                                     from pgpm.part t where t.parent_table = %2$L::regclass and exists (select 1 from orphan))
-     select o.child_name, count(*) as chunks, min(o.lo::%1$s)::text as lo, max(o.hi::%1$s)::text as hi
+                                                      where p.parent_table = l.parent_table and p.child_name = l.child_name))
+     select o.child_name, count(*) as chunks, coalesce(min(case when o.named then o.lo::%1$s end)::text, min(o.lo)) as lo,
+            coalesce(max(case when o.named then o.hi::%1$s end)::text, max(o.hi)) as hi
        from orphan o
-      where exists (select 1 from tracked t where o.lo_k < t.hi_k and o.hi_k > t.lo_k)
+      where case when o.named then exists (select 1 from pgpm.part t
+                                            where t.parent_table = o.parent_table
+                                              and o.lo::%1$s < t.hi::%1$s and o.hi::%1$s > t.lo::%1$s)
+                 else true end
       group by o.child_name',
-    v_ncast, p_parent::text, cfg.control_kind, cfg.partition_tz)
+    v_ncast, p_parent::text, cfg.control_kind)
   loop
     -- by name, as the query above grouped: a retired chunk under the same name stays (#1141)
     delete from pgpm.archive_ledger where parent_table = p_parent and child_name = r.child_name and retired_at is null;
