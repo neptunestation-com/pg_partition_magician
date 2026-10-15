@@ -14247,6 +14247,41 @@ MUTATIONS["flake_check_empty_log_reads_unknown"] = (
     [("  if ! grep -q '[^[:space:]]' <<<\"$log\"; then\n", '  if false; then\n', 1)],
 )
 MUTATION_SRC["flake_check_empty_log_reads_unknown"] = "scripts/review/flake_check.sh"
+MUTATIONS["land_enqueue_by_merge_command"] = (
+    "bench/review_tooling_verdicts.sh",
+    "land.sh before 2026-10-15: enqueue() asks for the enqueue with `gh pr merge <pr> --merge`, which on this "
+    "repository's merge queue can be accepted and queue nothing (#1350, green and CLEAN, sat unqueued after two "
+    "requests; one enqueuePullRequest mutation queued it at once). One clause, the request. The guard's (f) "
+    "catches it (no mutation issued, the stub's queue never reads QUEUED).",
+    [('    enqueue_request "$1" || true\n', '    gh pr merge "$1" --repo "$REPO" "--$METHOD" >/dev/null 2>&1 || true\n', 1)],
+)
+MUTATION_SRC["land_enqueue_by_merge_command"] = "scripts/review/land.sh"
+MUTATIONS["land_enqueue_ignores_threads"] = (
+    "bench/review_tooling_verdicts.sh",
+    "land.sh before 2026-10-15: a PR held BLOCKED by an unresolved review thread is asked to enqueue five times "
+    "and the run exits 6, \"rerun\", which cannot help (#1350 at 20:43Z). One clause, the thread check. The "
+    "guard's (f) catches it (no exit 7, the held PR asked to enqueue).",
+    [('  threads_clear "$1"\n', '', 1)],
+)
+MUTATION_SRC["land_enqueue_ignores_threads"] = "scripts/review/land.sh"
+MUTATIONS["land_threads_first_page_only"] = (
+    "bench/review_tooling_verdicts.sh",
+    "land.sh's thread check reading only the first page of review threads (first:100 truncates silently, "
+    "CLAUDE.md), so an unresolved thread past it reads as none. One clause, the paging. The guard's (f) catches "
+    "it (a thread on the second page does not stop the run).",
+    [("    [ \"$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage' <<<\"$json\")\" = true ] || break\n",
+      '    break\n', 1)],
+)
+MUTATION_SRC["land_threads_first_page_only"] = "scripts/review/land.sh"
+MUTATIONS["land_enqueue_hides_refusal"] = (
+    "bench/review_tooling_verdicts.sh",
+    "land.sh's enqueue request saying nothing of a refusal: GitHub's error text and the PR's mergeStateStatus "
+    "unprinted, so \"Something went wrong\" and a refusal read alike in the log. One clause, the refusal's line. "
+    "The guard's (f) catches it (the refusal's message and BLOCKED not printed).",
+    [('  say "  the queue refused: ${err:-$out} (mergeStateStatus $(gh pr view "$1" --repo "$REPO" --json mergeStateStatus --jq .mergeStateStatus 2>/dev/null))"\n',
+      '', 1)],
+)
+MUTATION_SRC["land_enqueue_hides_refusal"] = "scripts/review/land.sh"
 
 
 # Issue #1272: the remedy every retain_disown row logs (pgpm._disown_retirement, its one writer) is the whole repair the

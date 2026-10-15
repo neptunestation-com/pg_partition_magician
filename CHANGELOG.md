@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **`land.sh` enqueues through the `enqueuePullRequest` mutation and stops on an unresolved review thread.**
+  It asked for the enqueue with `gh pr merge`, and on 2026-10-15 #1350, green and CLEAN, sat unqueued after two
+  such requests while one mutation queued it at once (#1257 lost hours the same way on 2026-10-12); the request
+  is now the mutation, still up to five times with the queue entry confirmed, and a refusal prints GitHub's
+  error text and the PR's `mergeStateStatus`. A PR held by an unresolved review thread was asked five times and
+  the run exited 6, "rerun", which cannot help; every page of the PR's review threads is now read first, and
+  an unresolved one stops the run with the new exit 7, naming each thread by path:line and its first 200
+  characters. Guard `bench/review_tooling_verdicts.sh` section (f), mutations `land_enqueue_by_merge_command`,
+  `land_enqueue_ignores_threads`, `land_threads_first_page_only` and `land_enqueue_hides_refusal`.
+
 - **Five timescale test files ask for leftover scratch records by the hypertables' oids** (#1283).
   `pgpm.scratch` keys a copy's records by the hypertable's oid, and `tests/timescale/db/65`, 66, 58, 60 and 69
   looked for leftovers by casting the table's name to `regclass` after the cutover, when the name already
