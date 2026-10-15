@@ -982,9 +982,11 @@ run_archive() {
   # claim row left unlocked before the ledger lookup.
   echo "--- a direct archive_fn call racing a tick on the same chunk is refused guard (issue #1069) ---"
   bash "$(dirname "$0")/bench/archive_recorded_chunk_tick_race.sh" pgpm_test-archive pgpm_g1race || fail=1
-  # The read-back guard (#1093) re-runs tests/archive/db/08 for the same reason: the clean-code half of the pair
-  # bench/discriminate.sh completes with archive_fn_parquet_readback_trusted.
-  echo "--- tests/archive/db/08 reads its Parquet objects back guard (issue #1093) ---"
+  # The read-back guard (#1093, #1284) re-runs tests/archive/db/08, 16 and 44 for the same reason: the clean-code
+  # half of the pairs bench/discriminate.sh completes with each file's read-back weakened to its pre-fix shape
+  # (archive_fn_parquet_readback_trusted, archive_fn_ndjson_readback_by_count,
+  # archive_key_parquet_readback_by_presence, archive_extres_parquet_by_prefix).
+  echo "--- tests/archive/db/08, 16 and 44 read their objects back by identity guard (issues #1093, #1284) ---"
   bash "$(dirname "$0")/bench/archive_fn_s3_readback.sh" pgpm_test-archive pgpm_perf123 || fail=1
   # The key-by-resolved-oid guard (#1064) re-runs tests/archive/db/49 for the same reason, and runs
   # scripts/check_archive_child_by_oid.py on the module: the clean-code half of the pair bench/discriminate.sh

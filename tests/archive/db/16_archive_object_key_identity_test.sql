@@ -91,6 +91,17 @@ begin
 end;
 $$;
 
+-- Whether the object at p_key is the Parquet file of p_parent's rows in [p_lo, p_hi), byte for byte: the file
+-- archive._pq_to_parquet_range encodes from the rows that range holds now (nothing writes them after the tick),
+-- under the table's own compress setting. Identity, not size (issue #1284): a file of half the chunk's rows is
+-- still larger than the 10-row file that used to overwrite it, and is not the chunk's file.
+create function t16.parquet_object_holds(p_parent regclass, p_key text, p_lo text, p_hi text) returns boolean
+language sql as $$
+  select t16.fetch_object(p_parent, p_key)
+         = archive._pq_to_parquet_range(p_parent, 'id', p_lo, p_hi,
+                                        (select compress from archive.config where parent_table = p_parent));
+$$;
+
 -- ======================= PART A: pgpm.archive_to_s3_ndjson =======================
 
 -- ids -10000..-1 land in the monolith [-10000, 0); ids 10000..10009 in the premade [10000, 20000).
@@ -207,7 +218,9 @@ select isnt(
   (select s3_key from pgpm.archive_ledger where parent_table = 'public.negkp'::regclass and lo = '10000'),
   'parquet: the [-10000, 0) and [10000, 20000) ledger rows name two different objects');
 
--- The object at the [-10000, 0) key is the 1000-row file, not the 10-row file that used to overwrite it.
+-- The object at the [-10000, 0) key is the file of the 1000 rows -1000..-1, not the 10-row file that used to
+-- overwrite it, and the one at the [10000, 20000) key the file of its 10: each read back and compared, byte for
+-- byte, with the Parquet file of its ledger row's range.
 create temp table t16_pq as
   select octet_length(t16.fetch_object('public.negkp',
            (select s3_key from pgpm.archive_ledger where parent_table = 'public.negkp'::regclass and lo = '-10000'))) as neg_bytes,
@@ -215,8 +228,11 @@ create temp table t16_pq as
            (select s3_key from pgpm.archive_ledger where parent_table = 'public.negkp'::regclass and lo = '10000'))) as pos_bytes;
 select diag(format('parquet: the [-10000, 0) object is %s bytes, the [10000, 20000) object %s bytes', neg_bytes, pos_bytes))
   from t16_pq;
-select ok((select neg_bytes > pos_bytes from t16_pq),
-  'parquet: the object recorded for [-10000, 0) is the larger, 1000-row file, not the 10-row file that shared its key');
+select is(
+  (select string_agg(lo || ':' || t16.parquet_object_holds(parent_table, s3_key, lo, hi), ',' order by lo::bigint)
+     from pgpm.archive_ledger where parent_table = 'public.negkp'::regclass and lo::bigint in (-10000, 10000)),
+  '-10000:true,10000:true',
+  'parquet: the object recorded for [-10000, 0) is the file of its 1000 rows and the one for [10000, 20000) the file of its 10, not the 10-row file that shared its key');
 
 -- ======================= PART C: the key shape the stem produces =======================
 

@@ -203,11 +203,16 @@ select is(
   array[(select array_agg(g::bigint) from generate_series(1, 1200) g)::text, '{2001,2002,2003,2004,2005}'],
   'the NDJSON objects the tick wrote hold exactly the rows of the partitions they archived');
 
+-- byte for byte the Parquet file of each ledger row's [lo, hi), as the export below is (issue #1284): a prefix
+-- check passed against a transport that PUT only the magic PAR1 while ledgering 1200 and 5 rows
 select is(
-  (select array_agg(left(encode(t44.fetch('public.p44', s3_key), 'escape'), 4) order by lo::numeric)
+  (select array_agg(lo || ':' || (t44.fetch('public.p44', s3_key)
+                                  = archive._pq_to_parquet_range('public.p44', 'id', lo, hi,
+                                      (select compress from archive.config where parent_table = 'public.p44'::regclass)))
+                    order by lo::numeric)
      from pgpm.archive_ledger where parent_table = 'public.p44'::regclass),
-  array['PAR1', 'PAR1'],
-  'and both Parquet objects the tick wrote are there and are Parquet files');
+  array['0:true', '2000:true'],
+  'and both Parquet objects the tick wrote are byte for byte the Parquet files of the monolith''s 1200 rows and [2000, 3000)''s 5');
 
 select is((select (to_s3, to_s3_parquet, abort_sweep)::text from direct), '(ok,ok,ok)',
   'archive.to_s3 and archive.to_s3_parquet, called under search_path app, both export, and the multipart abort sweep they clean up with runs there too');

@@ -14642,6 +14642,43 @@ MUTATIONS["untransmute_rows_offset_by_minute"] = (
 """, 1)],
 )
 MUTATION_SRC["untransmute_rows_offset_by_minute"] = "tests/27_untransmute_test.sql"
+# pass 12 G26 (#1284): three archive test files that read their objects back by less than identity, each back to
+# the shape that passed. Judged by bench/archive_fn_s3_readback.sh, each file against its planted transport defect.
+MUTATIONS["archive_fn_ndjson_readback_by_count"] = (
+    "bench/archive_fn_s3_readback.sh",
+    "Pre-#1284 tests/archive/db/08: its NDJSON objects are judged by line count, so a transport that writes "
+    "\"id\":1 on every line (count, rows_archived and digest unchanged) passes. One site, the read-back helper "
+    "Part A's three chunks and Part D's direct call share, which compares the object's line count with the "
+    "range's row count in place of the two multisets of rows.",
+    [("    select (select count(*) from (select r from obj except all select r from src) a)\n"
+      "         + (select count(*) from (select r from src except all select r from obj) b)$q$, p_parent)\n",
+      "    select abs((select count(*) from obj) - (select count(*) from src))$q$, p_parent)\n", 1)],
+)
+MUTATION_SRC["archive_fn_ndjson_readback_by_count"] = "tests/archive/db/08_archive_fn_s3_test.sql"
+MUTATIONS["archive_key_parquet_readback_by_presence"] = (
+    "bench/archive_fn_s3_readback.sh",
+    "Pre-#1284 tests/archive/db/16 Part B: the Parquet object at each chunk's key is judged by something other "
+    "than identity with the chunk's file, so a strategy that encodes only the top 5% of the range (500 of "
+    "[-10000, 0)'s 1000 rows) passes. One site, the read-back helper, which asks only that an object is there.",
+    [("  select t16.fetch_object(p_parent, p_key)\n"
+      "         = archive._pq_to_parquet_range(p_parent, 'id', p_lo, p_hi,\n"
+      "                                        (select compress from archive.config where parent_table = p_parent));\n",
+      "  select t16.fetch_object(p_parent, p_key) is not null;\n", 1)],
+)
+MUTATION_SRC["archive_key_parquet_readback_by_presence"] = "tests/archive/db/16_archive_object_key_identity_test.sql"
+MUTATIONS["archive_extres_parquet_by_prefix"] = (
+    "bench/archive_fn_s3_readback.sh",
+    "Pre-#1284 tests/archive/db/44 Part B: the two Parquet objects the ticks write under search_path app are "
+    "checked by the PAR1 prefix, so a transport that PUTs only those four bytes while ledgering 1200 and 5 rows "
+    "passes. One site, the comparison inside that assertion.",
+    [("  (select array_agg(lo || ':' || (t44.fetch('public.p44', s3_key)\n"
+      "                                  = archive._pq_to_parquet_range('public.p44', 'id', lo, hi,\n"
+      "                                      (select compress from archive.config where parent_table = 'public.p44'::regclass)))\n"
+      "                    order by lo::numeric)\n",
+      "  (select array_agg(lo || ':' || (left(encode(t44.fetch('public.p44', s3_key), 'escape'), 4) = 'PAR1')\n"
+      "                    order by lo::numeric)\n", 1)],
+)
+MUTATION_SRC["archive_extres_parquet_by_prefix"] = "tests/archive/db/44_archive_extension_resolution_test.sql"
 
 
 # pass 12 G24 (#1281, #1282): the at-scale harnesses. Their scripts are the source; each guard reads a mutant

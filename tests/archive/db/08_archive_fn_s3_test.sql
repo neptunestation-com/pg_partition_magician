@@ -10,7 +10,7 @@
 -- pgpm._archive_step, ledgered into pgpm.archive_ledger WITH s3_key/etag actually populated
 -- (the gap #237's own comment flagged: "s3_key/etag stay null until a real strategy (#239)
 -- has something to put there"), and the uploaded object is real -- fetched straight back
--- from MinIO and its row count checked, not just the ledger's own bookkeeping trusted.
+-- from MinIO and compared with the rows of its range, not just the ledger's own bookkeeping trusted.
 --
 -- retain_batch is forced to 0 on both fixtures so pgpm.maintain()'s own pgpm.retain() call never
 -- drops what this test wants to keep inspecting via pgpm.part/_archive_fully_covered afterward --
@@ -21,6 +21,11 @@
 -- uploaded the 4-byte magic PAR1 and reported 5000 rows. Each Parquet object is now fetched from MinIO
 -- and compared, byte for byte, with the file of the rows its range holds (as tests/archive/db/15 and 31
 -- read theirs back): Part B per ledger row, Parts C and D for their direct calls.
+--
+-- And the NDJSON objects of the bigint-keyed tables are read back by identity (issue #1284). Part A and Part D
+-- used to count an object's lines (5000, 50) and never read Part A's two 5-row chunks at all, so a transport
+-- that wrote "id":1 on every line kept every count and passed. Each of those objects is now compared, row for
+-- row, with the rows its range holds: every ledger row of Part A, and Part D's direct call.
 select plan(22);
 
 -- --- Part A: pgpm.archive_to_s3_ndjson -------------------------------------------------
@@ -66,7 +71,7 @@ select ok(
 -- fetch the monolith's uploaded object straight back from MinIO: proof the object genuinely
 -- holds every row, not just what the ledger claims.
 create schema pgpm_test08;
-create function pgpm_test08.fetch_ndjson_row_count(p_parent regclass, p_key text) returns int
+create function pgpm_test08.fetch_ndjson_text(p_parent regclass, p_key text) returns text
 language plpgsql as $$
 declare cfg archive.config; v_key_id text; v_secret text; v_resp http_response;
 begin
@@ -77,7 +82,25 @@ begin
   if v_resp.status not between 200 and 299 then
     raise exception 'fetch of % failed: HTTP %', p_key, v_resp.status;
   end if;
-  return (select count(*) from regexp_split_to_table(v_resp.content, e'\n') l where l <> '');
+  return v_resp.content;
+end;
+$$;
+
+-- Whether the NDJSON object at p_key holds exactly p_parent's rows in [p_lo, p_hi), by identity: each line read
+-- as a jsonb row, against to_jsonb of every row that range holds now (nothing writes them after the export),
+-- compared as multisets both ways, so a line lost, a line added, a line repeated or a line that names another
+-- row (its id, its payload) each makes it false. A count could not tell any of those from the real object.
+create function pgpm_test08.ndjson_object_holds(p_parent regclass, p_key text, p_lo text, p_hi text) returns boolean
+language plpgsql as $$
+declare v_body text := pgpm_test08.fetch_ndjson_text(p_parent, p_key); v_differ bigint;
+begin
+  execute format($q$
+    with obj as (select l::jsonb as r from regexp_split_to_table($1, e'\n') l where l <> ''),
+         src as (select to_jsonb(t) as r from %s t where t.id >= $2::numeric and t.id < $3::numeric)
+    select (select count(*) from (select r from obj except all select r from src) a)
+         + (select count(*) from (select r from src except all select r from obj) b)$q$, p_parent)
+    into v_differ using v_body, p_lo, p_hi;
+  return v_differ = 0;
 end;
 $$;
 
@@ -98,9 +121,11 @@ end;
 $$;
 
 select is(
-  pgpm_test08.fetch_ndjson_row_count('public.a8'::regclass,
-    (select s3_key from pgpm.archive_ledger where parent_table = 'public.a8'::regclass and lo = '0')),
-  5000, 'the monolith''s uploaded NDJSON object round-trips exactly 5000 lines');
+  (select string_agg(lo || ':' || rows_archived || ':' || pgpm_test08.ndjson_object_holds(parent_table, s3_key, lo, hi),
+                     ',' order by lo::bigint)
+     from pgpm.archive_ledger where parent_table = 'public.a8'::regclass),
+  '0:5000:true,6000:5:true,7000:5:true',
+  'each NDJSON object, fetched back from MinIO, holds exactly its chunk''s rows by identity: the monolith''s ids 1..5000 and the two live 5s');
 
 -- The object at p_key, fetched straight back from MinIO. pgsql-http hands binary content back as text;
 -- text_to_bytea reverses that byte for byte.
@@ -265,9 +290,9 @@ select ok(
   (select rows_archived = 50 and s3_key like '%.ndjson' and etag is not null from a8pascal_ndjson_result),
   'NDJSON archive of a PascalCase (quoted-identifier) table succeeds');
 
-select is(
-  pgpm_test08.fetch_ndjson_row_count('public."A8Pascal"'::regclass, (select s3_key from a8pascal_ndjson_result)),
-  50, 'the uploaded NDJSON object for the PascalCase table round-trips all 50 rows -- proof the GET signs the same quoted key correctly too, not just the PUT');
+select ok(
+  pgpm_test08.ndjson_object_holds('public."A8Pascal"'::regclass, (select s3_key from a8pascal_ndjson_result), '0', '51'),
+  'the uploaded NDJSON object for the PascalCase table holds exactly its 50 rows by identity -- proof the GET signs the same quoted key correctly too, not just the PUT');
 
 create temporary table a8pascal_parquet_result as
 select (r).* from (select pgpm.archive_to_s3_parquet('public."A8Pascal"'::regclass, 'unused', '0', '51') r) s;
