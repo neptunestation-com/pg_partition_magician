@@ -19,6 +19,16 @@ fragments; never prefix-match `pgpm.log.action`; `throws_*` pinned around commit
 
 ## Order of work (TDD)
 
+0. Sweep the sibling sites before you design the fix. Grep all three modules (`pgpm_core/install.sql`,
+   `pgpm_archive/install.sql`, `pgpm_hypertable/install.sql`) for every other site of the issue's
+   MECHANISM (the shape, not the function name: a lock by a name vouched for earlier, a bound read
+   through the session's settings, a remedy text copied into a second refusal), and write the list to your
+   scratch directory as `sites.md`: file:line, function, and covered by this PR or left, with the reason
+   for a left one (unreachable, with the proof; a different contract; a known-open issue by number). The
+   PR body carries the table. Both Tier 1 the pass-12 backlog held were sibling copies of mechanisms that
+   phase fixed at one site (#1335 bullet 10 beside #1295, #1336 bullet 8 beside #1305; lessons #1341 item
+   21): the per-PR finder reads the diff's units and their callers, and a sibling elsewhere in the file is
+   neither. A left site without a reason is a defect the claims verifier will build.
 1. Run the issue's reproduction against your worktree's install first, in a fresh database in the
    harness container, and watch it fail. If it passes, or fails at a `LIVENESS:`/fixture step, say so in
    your report: the reproduction is unsound and your own test becomes the acceptance test. Do not "fix"
@@ -61,7 +71,7 @@ Commit with a Conventional Commits message that ends with the trailer
 `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>` (this one, whatever model a session reminder
 names; pass 3 landed two PRs with another), push your branch, and open the PR with
 `gh pr create --head <branch>` (always pass `--head`). The body: what the defect was, what the fix
-changes and exactly what it guarantees (which sites it covers), `Closes #<issue>` for a whole issue or
+changes and exactly what it guarantees (the sites table from step 0, covered and left), `Closes #<issue>` for a whole issue or
 `Addresses #<issue> (bullet k)` for one bullet of an issue with others still open (GitHub's closing-keyword
 parser ignores the qualifier, so `Fixes #N bullet 3` closes all of N; #1035), the acceptance (test file,
 guard, mutation), the `Size:` line and any caveat about the issue's reproduction, ending with
