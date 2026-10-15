@@ -64,6 +64,15 @@ lexical scan: comment lines, `RAISE` statements, everything else):
 Half of the raw line growth is comments, which the minifier strips. The executable-line growth (2,900 to 8,125 at the
 time, 8,205 after the last pull) matches the minified growth, so the 2.8x is not comment inflation.
 
+**Correction (2026-10-15).** The 4% figure for message text counts the `raise` LINE alone. A message in this file
+runs over the lines that follow it, so those lines were counted as code. Measured as whole statements on the
+minified text, `raise exception` is 86 KB (18% of the file, 11% at `v0.6.0`), and with `pgpm.log` inserts and
+notices, message text is 111 KB and accounts for 87 KB (26%) of the growth. The "47% code" row above is
+overstated by about the same amount. See `docs/core-growth-analysis-2026-10-15.md`, section 2, and
+`scripts/core_growth.py report`, which measures it. The same note revisits section 5 (the clone detector could not
+see a block copied under new variable names; measured so, the growth is LESS self-similar than the original code)
+and section 9 (the structural carry it calls unchecked exists in `pgpm_hypertable`).
+
 New versus existing functions (5,608 added code lines): 3,262 (58%) in about 150 new functions, 2,346 (42%) inside
 functions that already existed. Public functions went 36 to 39 (`adopt_partition`, `hand_over_scratch`,
 `set_partition_tz`), internal helpers 45 to 181, tables 7 to 11. Functions overall: 79 to 229 (re-run).

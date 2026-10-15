@@ -104,6 +104,21 @@ jobs:
           # database.dev's column is the Test Suite's informational dbdev-cap job
           PGPM_DBDEV_CAP=warn scripts/build_dbdev_package.sh pgpm_core/install.sql dist/minifier-check.sql
 
+  core-growth:
+    name: Core growth measures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # scripts/core_growth.py is the measurement behind docs/core-growth-analysis-2026-10-15.md: where
+      # an install file's minified bytes are (message text, repeated call shapes, renamed copies of a
+      # block, upgrade statements). The first analysis was built from throwaway scripts, and two of its
+      # figures were wrong in ways nothing could re-run (a `raise` counted by its first line alone; a
+      # clone detector blind to a block copied under new variable names). --selftest runs each measure
+      # on an embedded fixture with known answers and on a re-broken copy, and requires each to move,
+      # so a measure that has gone blind fails here rather than shaping the next size decision.
+      - name: Each size measure must discriminate on its fixture
+        run: python3 scripts/core_growth.py --selftest
+
   track-filters:
     name: Track path filters
     runs-on: ubuntu-latest
