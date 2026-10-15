@@ -1712,6 +1712,17 @@ whose bare `DROP TABLE schema.child` has nothing else between it and the write b
 partition. `retire` checks both, independently, and a disagreement with **either** refuses; the `method`
 column names whichever anchor disagreed, so a stale dispatch and a stale catalog row are distinguishable.
 
+The check holds through the lock `retire` takes next. `LOCK TABLE` takes a name and resolves it again once
+the lock is granted, so a rename of the partition and a table created under its name, committed while
+`retire` waits for that lock, used to leave the lock on the new table, and the one-step `DROP` then dropped
+it. `retire` now asks the lock manager whether the lock it holds is on the partition it vouched for, and
+when it is not (the name was taken, or denotes nothing, by the time the wait ended) logs
+`fail_retain_identity` with a `method` saying the name stopped denoting that OID while `retire` waited, and
+returns false. The same lock-by-OID check guards the other places pgpm locks, attaches or drops a relation
+it identified earlier: the regrain swap's attach of each copy, the recall's re-attach of a detached
+partition, the archive hold on the parent, the drops of regrain and hypertable scratch tables, and the first
+locks of `regrain`, `transmute`, `untransmute`, the conversion reaper and the hypertable cutover and drains.
+
 The name is resolved in the partition's **own** schema, the schema of the relation `child_oid` records,
 not in the parent's. `ALTER TABLE <parent> SET SCHEMA` moves only the parent: the partitions it already
 has stay where they were, and the ones pgpm creates afterwards go in the parent's new schema. The

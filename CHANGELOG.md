@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **A lock taken by name is checked against the relation it was meant for** (#1335 bullet 10). `retire()` vouched
+  for a partition by name and then locked it by name, and `LOCK TABLE` resolves the name again once the lock is
+  granted: a rename of the partition and a table created under its name, committed while `retire()` waited, left
+  the lock on that table, and the one-step `DROP` dropped it, rows and all, and reported `retain_drop`. The regrain
+  swap's `ATTACH` of a copy did the same: a copy renamed aside and a table like it created under its name was
+  what it attached, and the source whose rows only the copy held was dropped. `pgpm._lock_oid` takes the lock
+  through a name and asks `pg_locks` whether it is on the oid the caller vouched for; `retire()` refuses
+  otherwise (`fail_retain_identity`, false), and the swap, the recall's re-attach, the archive hold, the drops of
+  regrain and hypertable scratch tables (`pgpm._drop_by_oid`) and the first locks of `regrain`, `transmute`,
+  `untransmute`, `_transmute_reap` and the hypertable cutover and drains go through it too.
+  `bench/retire_locks_by_oid.sh` runs `tests/345` (mutations `retire_lock_answer_ignored` and
+  `regrain_swap_attach_unlocked`).
+
 - **A live chunk whose bound names no instant proves no coverage, so retain() no longer drops a partly archived
   partition on one** (#1336, bullet 8). Before #977 the archive step checked a strategy's `covered_hi` with a cast
   in whatever session ran it and stored the text as written, so a live ledger row can carry a `hi` with no offset,

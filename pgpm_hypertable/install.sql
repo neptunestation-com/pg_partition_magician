@@ -1021,7 +1021,7 @@ begin
   end if;
   v_prev := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');
   if v_prev is not null then
-    execute format('drop table %s', v_prev::text);
+    perform pgpm._drop_by_oid(v_prev, format('from_hypertable_copy(%s), dropping the previous delta,', p_hypertable));   -- #1335 b10
   end if;
   if not p_track_changes then
     delete from pgpm.scratch where parent_oid = p_hypertable::oid and kind in ('hypertable_delta', 'hypertable_delta_fn');
@@ -1200,7 +1200,7 @@ begin
   -- replaces the hypertable's previous copy.
   v_prev := pgpm._scratch_rel(p_hypertable, 'hypertable_dest');
   if v_prev is not null then
-    execute format('drop table %s', v_prev::text);
+    perform pgpm._drop_by_oid(v_prev, format('from_hypertable_copy(%s), dropping the previous copy,', p_hypertable));   -- #1335 b10
   end if;
   execute format('create table %I.%I (like %I.%I including defaults including constraints including generated including comments)',
                  v_nsp, v_dest, v_nsp, v_rel);
@@ -1367,7 +1367,12 @@ begin
   end if;
   -- #1158: the copy first, before this batch touches the delta or the source (see from_hypertable_cutover,
   -- which holds SHARE on the copy from its read of it to the swap and then wants the delta and the source).
-  execute format('lock table %I.%I in row exclusive mode', v_nsp, v_dest);
+  -- #1335 b10: and by the copy's oid, so the batch below, which names the copy, writes the copy and not a table
+  -- that took its name while this waited
+  if not pgpm._lock_oid(pgpm._scratch_rel(p_hypertable, 'hypertable_dest'), 'row exclusive', true, v_nsp, v_dest) then
+    raise exception 'pg_partition_magician: from_hypertable_drain_delta_step(%): %.% stopped denoting the copy pgpm recorded while this step waited for its lock; refusing to drain into it',
+      p_hypertable, quote_ident(v_nsp), quote_ident(v_dest);
+  end if;
   -- #873: the batch's keys leave the delta below and their rows are re-read from the source as this caller,
   -- so under row-level security that filters it a hidden row's change would be consumed and never applied.
   perform pgpm._refuse_filtered_reads(p_hypertable, 'drain changes from hypertable',
@@ -1539,7 +1544,10 @@ begin
   end if;
   -- #1158: the copy first, before this batch reads the source (see from_hypertable_cutover, which holds SHARE
   -- on the copy from its read of it to the swap and then wants the source).
-  execute format('lock table %I.%I in row exclusive mode', v_nsp, v_dest);
+  if not pgpm._lock_oid(pgpm._scratch_rel(p_hypertable, 'hypertable_dest'), 'row exclusive', true, v_nsp, v_dest) then   -- #1335 b10
+    raise exception 'pg_partition_magician: from_hypertable_drain_appends_step(%): %.% stopped denoting the copy pgpm recorded while this step waited for its lock; refusing to drain into it',
+      p_hypertable, quote_ident(v_nsp), quote_ident(v_dest);
+  end if;
   select format_type(atttypid, atttypmod) into v_ctl_type
     from pg_attribute where attrelid = p_hypertable and attname = p_control and not attisdropped;
   select string_agg(quote_ident(attname), ', ' order by attnum) into v_cols_q
@@ -1813,7 +1821,7 @@ begin
   -- p_lock_timeout, set just above) and read; a drain called later waits for the swap and then finds the
   -- copy gone. Every drain takes the copy (ROW EXCLUSIVE) before anything else in a transaction, so it never
   -- waits here holding the source or the delta, which the swap lock below wants. By oid, as the swap lock is.
-  execute format('lock table %s in share mode', v_dest_oid::text);
+  perform pgpm._lock_oid_or_raise(v_dest_oid, 'share', false, 'from_hypertable_cutover');   -- #1335 b10: by oid
   -- Read the destination here, under that lock but BEFORE the swap lock: what is read here is what the
   -- under-lock work would read, and reading it here keeps an O(rows) seqscan of the dest OUT of the locked
   -- window (#174). Two things, one scan: the append-only catch-up watermark (max control; new appends after
@@ -1961,8 +1969,8 @@ begin
   -- transaction and rolls back whole, the online copy and any drained batches survive, and re-running
   -- the cutover once the name is sorted out costs only the index pre-builds. Adapting -- taking the
   -- source's new name and carrying on -- would silently migrate a table the operator did not name.
-  execute format('lock table %s in access exclusive mode', p_hypertable::text);
-  if to_regclass(format('%I.%I', v_nsp, v_rel)) is distinct from p_hypertable then
+  if not pgpm._lock_oid(p_hypertable, 'access exclusive', false)   -- #1335 b10: and the lock manager asked
+     or to_regclass(format('%I.%I', v_nsp, v_rel)) is distinct from p_hypertable then
     raise exception 'pg_partition_magician: from_hypertable_cutover(%) resolved % .% at the start, but that name is oid % now -- something renamed or replaced the source while the cutover was preparing; refusing to drop a relation it did not identify. Re-run the cutover once the name is settled.',
       p_hypertable, quote_ident(v_nsp), quote_ident(v_rel),
       coalesce(to_regclass(format('%I.%I', v_nsp, v_rel))::oid::text, 'nothing');
@@ -1975,8 +1983,8 @@ begin
   -- this procedure was ever called. Nothing in this module records what from_hypertable_copy built,
   -- so there is no earlier identity to compare against -- that needs the module-wide oid recording
   -- #422 sketches, which this change does not do.
-  execute format('lock table %s in access exclusive mode', v_dest_oid::text);
-  if to_regclass(format('%I.%I', v_nsp, v_dest)) is distinct from v_dest_oid then
+  if not pgpm._lock_oid(v_dest_oid, 'access exclusive', false)   -- #1335 b10
+     or to_regclass(format('%I.%I', v_nsp, v_dest)) is distinct from v_dest_oid then
     raise exception 'pg_partition_magician: from_hypertable_cutover(%) found destination % .% as oid % at the start, but that name is oid % now -- something replaced the copy while the cutover was preparing; refusing to rename an unverified relation into %.',
       p_hypertable, quote_ident(v_nsp), quote_ident(v_dest), v_dest_oid::oid,
       coalesce(to_regclass(format('%I.%I', v_nsp, v_dest))::oid::text, 'nothing'), quote_ident(v_rel);
@@ -1988,7 +1996,7 @@ begin
   -- is the hypertable's owner's, or this refuses (42501) and the swap rolls back whole. A copy owned by another
   -- role than the source therefore never reaches the sequence carry or the owner carry below.
   if v_track then
-    execute format('lock table %s in access exclusive mode', v_delta);
+    perform pgpm._lock_oid_or_raise(v_delta, 'access exclusive', false, 'from_hypertable_cutover');   -- #1335 b10
   end if;
   perform pgpm._from_hypertable_scratch_follow(p_hypertable, 'from_hypertable_cutover');
   -- THE SHAPE, UNDER THE LOCK (#738). The check up front saw the source as it was then, and the source has
