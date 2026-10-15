@@ -358,5 +358,113 @@ out=$(fc new "$work/empty.log"); rc=$?
 check "$([ "$rc" = 3 ] && grep -q "could not read the log" <<<"$out" && ! grep -q UNKNOWN <<<"$out" && echo 0 || echo 1)" \
   "(e) an empty log says it could not be read (exit 3), not UNKNOWN" "exit $rc: ${out:0:70}"
 
+# ---------------------------------------------------------------- (f) land.sh's enqueue request and thread stop
+#   land.sh's enqueue() asked for the enqueue with `gh pr merge <pr> --merge`, which on this repository's merge
+#   queue does not reliably queue a PR: on 2026-10-15 #1350, green and CLEAN, sat unqueued after two requests,
+#   and one enqueuePullRequest mutation queued it at once (#1257 lost hours the same way on 2026-10-12). And a
+#   PR held BLOCKED by an unresolved review thread was asked five times over and the run exited 6, "rerun",
+#   which cannot help (#1350 at 20:43Z). Driven through land.sh's own functions with a stub `gh` that answers
+#   from fixtures, records every call it receives, and behaves as the queue did that day: `gh pr merge` is
+#   accepted and queues nothing, the mutation queues the PR. The controls: the stub really records, and with
+#   every thread resolved the enqueue goes on to a request; the page-two fixture's first page alone is clean.
+#     land_enqueue_by_merge_command           the request is `gh pr merge` again
+#     land_enqueue_ignores_threads            the thread check skipped, so a held PR is asked five times
+#     land_threads_first_page_only            only the first page of threads read
+#     land_enqueue_hides_refusal              a refused request prints nothing of what GitHub said
+lfn() { # <name>: land.sh's function <name>: a body opened at the line's end closes on a `}` line of its own,
+         # a short one (`f() { cmd; }`, maybe continued) on the first line ending `; }`
+  awk -v n="$1" 'index($0, n "() {") == 1 { on = 1; long = ($0 ~ /\(\) *\{ *(#.*)?$/) }
+    on { print; if (long ? /^\}/ : /; \}$/) exit }' "$R/land.sh"
+}
+efn=""
+for f in say in_queue threads_clear enqueue_request enqueue; do efn+="$(lfn "$f")"$'\n'; done
+if ! grep -q '^enqueue() *{' <<<"$efn" || ! grep -q '^in_queue() *{' <<<"$efn"; then
+  bad "fixture: land.sh defines enqueue() and in_queue()" "not found"
+else
+  calls="$work/gh_calls"; qstate="$work/queue_state"
+  # gh pr view <n> --json <f> --jq <e> | gh pr merge ... | gh api graphql -f query=<q> --jq <e>
+  gh() {
+    local q="" jqx="" sub="" body rc=0
+    printf '%s\n' "$*" >> "$calls"
+    sub="$1 $2"
+    while [ $# -gt 0 ]; do
+      case "$1" in -f) q=${2#query=}; shift 2;; --jq) jqx=$2; shift 2;; *) shift;; esac
+    done
+    case "$sub" in
+      "pr merge") return 0;;   # accepted, and on 2026-10-15 nothing was queued
+      "pr view")
+        case "$jqx" in
+          *mergeStateStatus*) body='{"mergeStateStatus":"BLOCKED"}';;
+          *) body='{"id":"PR_kwDO1350"}';;
+        esac;;
+      "api graphql")
+        case "$q" in
+          *reviewThreads*after:*) body=$(cat "$THREADS2");;
+          *reviewThreads*) body=$(cat "$THREADS1");;
+          *enqueuePullRequest*)
+            if [ "$ENQ" = refuse ]; then
+              body='{"data":{"enqueuePullRequest":null},"errors":[{"type":"UNPROCESSABLE","message":"Pull request is in unstable status"}]}'; rc=1
+            else
+              echo QUEUED > "$qstate"; body='{"data":{"enqueuePullRequest":{"mergeQueueEntry":{"state":"QUEUED","position":1}}}}'
+            fi;;
+          *mergeQueueEntry*)
+            if [ -s "$qstate" ]; then body="{\"data\":{\"repository\":{\"pullRequest\":{\"state\":\"OPEN\",\"mergeQueueEntry\":{\"state\":\"$(cat "$qstate")\"}}}}}"
+            else body='{"data":{"repository":{"pullRequest":{"state":"OPEN","mergeQueueEntry":null}}}}'; fi;;
+          *) echo "stub gh: unknown query $q" >&2; return 1;;
+        esac;;
+      *) echo "stub gh: unknown command $sub" >&2; return 1;;
+    esac
+    if [ -n "$jqx" ]; then jq -r "$jqx" <<<"$body"; else printf '%s\n' "$body"; fi
+    return "$rc"
+  }
+  sleep() { :; }   # the request pauses 20 to 60 s between asks; the stub answers at once
+  eval "$efn"
+  REPO=o/r; METHOD=merge; export REPO METHOD   # land.sh's globals, read by the eval'd functions
+  th() { printf '{"isResolved":%s,"path":"%s","line":%s,"comments":{"nodes":[{"body":"%s"}]}}' "$1" "$2" "$3" "$4"; }
+  page() { printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":%s,"endCursor":"%s"},"nodes":[%s]}}}}}\n' "$1" "$2" "$3"; }
+  page false "" "$(th true scripts/review/land.sh 286 "resolved: use the mutation"),$(th true CHANGELOG.md 3 "resolved too")" > "$work/clean.json"
+  page false "" "$(th true CHANGELOG.md 3 "resolved"),$(th false pgpm_core/install.sql 4242 "P1 Badge  The retire lock is taken by name after the identity check, so a swapped table is dropped")" > "$work/held.json"
+  page true c1 "$(th true CHANGELOG.md 3 "resolved"),$(th true docs/guide.md 9 "resolved")" > "$work/p1.json"
+  page false "" "$(th false bench/review_tooling_verdicts.sh 77 "P2 Badge  The second page holds this thread")" > "$work/p2.json"
+  run_enqueue() { : > "$calls"; : > "$qstate"; out=$( (enqueue 1350) 2>&1 ); rc=$?; }
+
+  : > "$calls"; out=$(gh pr view 1350 --repo o/r --json id --jq .id)
+  check "$([ "$out" = PR_kwDO1350 ] && grep -q '^pr view 1350' "$calls" && echo 0 || echo 1)" \
+    "LIVENESS: (f) the stub answers and records the call it receives" "$out, $(grep -c . "$calls") call(s)"
+
+  THREADS1="$work/clean.json"; THREADS2="$work/clean.json"; ENQ=ok; run_enqueue
+  check "$(grep -q -e 'enqueuePullRequest' -e '^pr merge' "$calls" && echo 0 || echo 1)" \
+    "LIVENESS: (f) with every thread resolved the enqueue goes on to a request" "exit $rc, $(grep -c . "$calls") call(s)"
+  check "$([ "$rc" = 0 ] && [ "$(cat "$qstate")" = QUEUED ] && echo 0 || echo 1)" \
+    "(f) the enqueue took: the stub's queue reads QUEUED" "exit $rc, queue '$(cat "$qstate")'"
+  check "$(grep -qF 'enqueuePullRequest(input:{pullRequestId:"PR_kwDO1350"}' "$calls" && ! grep -q '^pr merge' "$calls" && echo 0 || echo 1)" \
+    "(f) the request is the enqueuePullRequest mutation, never gh pr merge" "$(grep -c enqueuePullRequest "$calls") mutation(s), $(grep -c '^pr merge' "$calls") merge command(s)"
+
+  n_open=$(jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)] | length' "$work/held.json")
+  check "$([ "$n_open" = 1 ] && echo 0 || echo 1)" "LIVENESS: (f) the held fixture has one unresolved thread among two" "$n_open unresolved"
+  THREADS1="$work/held.json"; THREADS2="$work/held.json"; run_enqueue
+  check "$([ "$rc" = 7 ] && echo 0 || echo 1)" "(f) an unresolved thread stops the run with exit 7" "exit $rc"
+  check "$(grep -q 'pgpm_core/install.sql:4242  P1 Badge The retire lock' <<<"$out" && ! grep -q 'CHANGELOG.md:3' <<<"$out" && echo 0 || echo 1)" \
+    "(f) the stop names the unresolved thread (path:line, its text), not the resolved one" "${out:0:70}"
+  check "$(! grep -q -e 'enqueuePullRequest' -e '^pr merge' "$calls" && echo 0 || echo 1)" \
+    "(f) a held PR is never asked to enqueue" "$(grep -c -e 'enqueuePullRequest' -e '^pr merge' "$calls") request(s)"
+
+  n_open=$(jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)] | length' "$work/p1.json")
+  check "$([ "$n_open" = 0 ] && jq -e '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage' "$work/p1.json" >/dev/null && echo 0 || echo 1)" \
+    "LIVENESS: (f) page one alone is clean and says another page follows" "$n_open unresolved on page one"
+  THREADS1="$work/p1.json"; THREADS2="$work/p2.json"; run_enqueue
+  check "$([ "$rc" = 7 ] && grep -q 'bench/review_tooling_verdicts.sh:77' <<<"$out" && echo 0 || echo 1)" \
+    "(f) a thread on the second page stops the run too" "exit $rc"
+  check "$(grep -qF 'reviewThreads(first:100,after:"c1")' "$calls" && echo 0 || echo 1)" \
+    "(f) the second page is asked for after the first page's cursor" "$(grep -c reviewThreads "$calls") thread read(s)"
+
+  THREADS1="$work/clean.json"; THREADS2="$work/clean.json"; ENQ=refuse; run_enqueue
+  n_req=$(grep -c -e 'enqueuePullRequest' -e '^pr merge' "$calls")
+  check "$([ "$n_req" -ge 1 ] && echo 0 || echo 1)" "LIVENESS: (f) the refusing stub was asked to enqueue" "$n_req request(s), exit $rc"
+  check "$(grep -q 'Pull request is in unstable status' <<<"$out" && grep -q 'mergeStateStatus BLOCKED' <<<"$out" && echo 0 || echo 1)" \
+    "(f) a refusal prints GitHub's message and the PR's mergeStateStatus" "$(grep -m1 refused <<<"$out" | cut -c1-70)"
+  unset -f gh sleep
+fi
+
 if [ "$fail" = 0 ]; then echo "review_tooling_verdicts: PASS"; else echo "review_tooling_verdicts: FAIL"; fi
 exit "$fail"

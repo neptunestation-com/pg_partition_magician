@@ -44,7 +44,9 @@
 # and kept); 4 a CI failure that is not a known flake, or the queue refused; 5 gh/git failure; 6 a wait
 # timed out (checks, a run, or the queue), an enqueue that never took after five requests (GitHub
 # answered "Something went wrong" to #703's twice), or main moved under a queued PR and made it DIRTY
-# (the rerun's rebase repairs it): nothing is wrong, rerun the same command.
+# (the rerun's rebase repairs it): nothing is wrong, rerun the same command; 7 the PR has an unresolved review
+# thread (each is printed, path:line and its first 200 characters): a rerun cannot help until a hand reads,
+# answers and resolves it.
 # Run it from the repository root of a clean checkout. It never touches the checkout's own branch.
 set -uo pipefail
 MIN=20; REBASE_ONLY=""; BATCH=""
@@ -277,14 +279,49 @@ ensure_green() { # <pr>: wait for the head's checks, rerunning a known flake; ex
   done
 }
 
+threads_clear() { # <pr>: exit 7 when the PR has an unresolved review thread, naming each; return 0 otherwise
+  # An unresolved thread (a chatgpt-codex-connector review, usually) keeps the PR BLOCKED and the queue refuses
+  # it however often it is asked: on 2026-10-15 #1350 had one, five requests did not take and the run exited
+  # 6, "rerun", which cannot help. Every page is read (first:100 truncates silently, CLAUDE.md).
+  local after="" json found="" page
+  while :; do
+    json=$(gh api graphql -f query="{repository(owner:\"${REPO%/*}\",name:\"${REPO#*/}\"){pullRequest(number:$1){reviewThreads(first:100${after}){pageInfo{hasNextPage endCursor} nodes{isResolved path line comments(first:1){nodes{body}}}}}}}" 2>/dev/null) \
+      || { say "  could not read #$1's review threads; enqueueing without the check"; return 0; }
+    page=$(jq -r '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)
+             | "    \(.path // "?"):\(.line // "?")  \((.comments.nodes[0].body // "") | gsub("\\s+"; " ") | .[0:200])"' <<<"$json")
+    [ -z "$page" ] || found+="$page"$'\n'
+    [ "$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage' <<<"$json")" = true ] || break
+    after=",after:\"$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor' <<<"$json")\""
+  done
+  [ -z "$found" ] && return 0
+  echo "STOPPED at #$1: unresolved review thread(s); read each, fix or rebut it, reply and resolve it, then rerun:"
+  printf '%s' "$found"
+  exit 7
+}
+
+enqueue_request() { # <pr>: one enqueuePullRequest mutation; says what GitHub answered, and on a refusal the PR's
+                    # mergeStateStatus, so "Something went wrong" and a refusal read apart in the log
+  local id out entry err
+  id=$(gh pr view "$1" --repo "$REPO" --json id --jq .id 2>/dev/null) || { say "  could not read #$1's node id"; return 1; }
+  out=$(gh api graphql -f query="mutation{enqueuePullRequest(input:{pullRequestId:\"$id\"}){mergeQueueEntry{state position}}}" 2>&1)
+  entry=$(grep '^{' <<<"$out" | jq -r '.data.enqueuePullRequest.mergeQueueEntry // empty | "\(.state), position \(.position)"' 2>/dev/null)
+  if [ -n "$entry" ]; then say "  the queue answered: $entry"; return 0; fi
+  err=$(grep '^{' <<<"$out" | jq -r '[.errors[]?.message] | join("; ")' 2>/dev/null)
+  say "  the queue refused: ${err:-$out} (mergeStateStatus $(gh pr view "$1" --repo "$REPO" --json mergeStateStatus --jq .mergeStateStatus 2>/dev/null))"
+  return 1
+}
+
 enqueue() { # <pr>: request the enqueue and confirm the entry exists; up to five requests, with a growing
             # pause, because a request can be dropped without a word (the first live batch, #647) or answered
-            # "Something went wrong" (a GraphQL error: #703 got two in a row and sat unqueued, #713)
-  local i s out
+            # "Something went wrong" (a GraphQL error: #703 got two in a row and sat unqueued, #713). The request
+            # is the enqueuePullRequest mutation, not `gh pr merge`: on 2026-10-15 #1350, green and CLEAN, sat
+            # unqueued after two `gh pr merge` requests and one mutation queued it at once (#1257 lost hours the
+            # same way on 2026-10-12). A PR with an unresolved review thread stops first, exit 7 (threads_clear).
+  local i s
+  threads_clear "$1"
   for i in 1 2 3 4 5; do
     say "  enqueueing #$1 (request $i of 5)"
-    out=$(gh pr merge "$1" --repo "$REPO" "--$METHOD" 2>&1) || true
-    grep -v "merge strategy" <<<"$out" | grep -v '^$' || true
+    enqueue_request "$1" || true
     sleep $((10 + 10 * i))
     s=$(in_queue "$1")
     case "$s" in
