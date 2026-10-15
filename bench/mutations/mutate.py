@@ -12852,8 +12852,10 @@ MUTATIONS["hypertable_drain_delta_step_takes_delta_first"] = (
       "  -- #1335 b10: and by the copy's oid, so the batch below, which names the copy, writes the copy and not a table\n"
       "  -- that took its name while this waited\n"
       "  if not pgpm._lock_oid(pgpm._scratch_rel(p_hypertable, 'hypertable_dest'), 'row exclusive', true, v_nsp, v_dest) then\n"
+      "    -- a name that denotes nothing now (the cutover swapped the copy in) keeps the SQLSTATE LOCK TABLE raised\n"
       "    raise exception 'pg_partition_magician: from_hypertable_drain_delta_step(%): %.% stopped denoting the copy pgpm recorded while this step waited for its lock; refusing to drain into it',\n"
-      "      p_hypertable, quote_ident(v_nsp), quote_ident(v_dest);\n"
+      "      p_hypertable, quote_ident(v_nsp), quote_ident(v_dest)\n"
+      "      using errcode = case when to_regclass(format('%I.%I', v_nsp, v_dest)) is null then 'undefined_table' else 'P0001' end;\n"
       "  end if;\n",
       "  -- which holds SHARE on the copy from its read of it to the swap and then wants the delta and the source).\n", 1)],
 )

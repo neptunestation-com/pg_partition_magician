@@ -1370,8 +1370,10 @@ begin
   -- #1335 b10: and by the copy's oid, so the batch below, which names the copy, writes the copy and not a table
   -- that took its name while this waited
   if not pgpm._lock_oid(pgpm._scratch_rel(p_hypertable, 'hypertable_dest'), 'row exclusive', true, v_nsp, v_dest) then
+    -- a name that denotes nothing now (the cutover swapped the copy in) keeps the SQLSTATE LOCK TABLE raised
     raise exception 'pg_partition_magician: from_hypertable_drain_delta_step(%): %.% stopped denoting the copy pgpm recorded while this step waited for its lock; refusing to drain into it',
-      p_hypertable, quote_ident(v_nsp), quote_ident(v_dest);
+      p_hypertable, quote_ident(v_nsp), quote_ident(v_dest)
+      using errcode = case when to_regclass(format('%I.%I', v_nsp, v_dest)) is null then 'undefined_table' else 'P0001' end;
   end if;
   -- #873: the batch's keys leave the delta below and their rows are re-read from the source as this caller,
   -- so under row-level security that filters it a hidden row's change would be consumed and never applied.
@@ -1545,8 +1547,10 @@ begin
   -- #1158: the copy first, before this batch reads the source (see from_hypertable_cutover, which holds SHARE
   -- on the copy from its read of it to the swap and then wants the source).
   if not pgpm._lock_oid(pgpm._scratch_rel(p_hypertable, 'hypertable_dest'), 'row exclusive', true, v_nsp, v_dest) then   -- #1335 b10
+    -- a name that denotes nothing now (the cutover swapped the copy in) keeps the SQLSTATE LOCK TABLE raised
     raise exception 'pg_partition_magician: from_hypertable_drain_appends_step(%): %.% stopped denoting the copy pgpm recorded while this step waited for its lock; refusing to drain into it',
-      p_hypertable, quote_ident(v_nsp), quote_ident(v_dest);
+      p_hypertable, quote_ident(v_nsp), quote_ident(v_dest)
+      using errcode = case when to_regclass(format('%I.%I', v_nsp, v_dest)) is null then 'undefined_table' else 'P0001' end;
   end if;
   select format_type(atttypid, atttypmod) into v_ctl_type
     from pg_attribute where attrelid = p_hypertable and attname = p_control and not attisdropped;
