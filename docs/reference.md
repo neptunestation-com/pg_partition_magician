@@ -2652,10 +2652,19 @@ byte-budget chunker: never archive a whole large partition as one giant operatio
   dropped one's own name (the name pgpm would give it) does not start past rows nothing archived. A chunk
   whose partition was dropped outside `retire()` (by hand) is marked retired by the step that finds its
   relation gone (`archive_chunk_retired`) and holds the range the same way. Which partitions a retired chunk
-  holds is the same answer from every session: a bound with no offset (one an older install stored
-  verbatim from a strategy's `covered_hi`) is read as wall time on the grid's clock, `config.partition_tz`, one
-  shaped by a DateStyle as `ISO, MDY`, and a zone abbreviation in the `Default` set (`IST` is Israel's), never in
-  the caller's `TimeZone`, `DateStyle` or `timezone_abbreviations`. A LIVE chunk whose bound names no instant by
+  holds is the same answer from every session, and never narrower than the chunk. A retired chunk's bound that
+  names no instant by itself (one an older install stored as a strategy wrote its `covered_hi`, in a session
+  whose zone nothing recorded) is read at its widest: as wall time under both day-month orders, a `lo` at
+  UTC+14 and a `hi` at UTC-12, whatever zone the text names; text no DateStyle parses reaches without
+  bound, and the call never raises on it. So such a chunk can hold a partition next to it,
+  pgpm's own included, for as long as the row stays as written; the skip row then names the chunk's `lo` and
+  the remedy: once you know the instant the bound names (for a partition's last chunk, usually the `hi` of the
+  `retain_drop` row `pgpm.log` has for it), write it with its offset (`update pgpm.archive_ledger set hi =
+  '<instant>+00' where parent_table = '<parent>'::regclass and lo = '<that lo>'`, and likewise for a `lo`), and
+  the chunk holds only what its range overlaps. A partition's own bound with no offset is read as wall time on
+  the grid's clock, `config.partition_tz`, one shaped by a DateStyle as `ISO, MDY`, and a zone abbreviation in
+  the `Default` set (`IST` is Israel's), never in the caller's `TimeZone`, `DateStyle` or
+  `timezone_abbreviations`. A LIVE chunk whose bound names no instant by
   itself (an older pgpm stored a strategy's `covered_hi` as written, checked in whatever session ran the archive
   step, whose zone nothing recorded) proves no coverage: `retire()` does not drop the partition on it from any
   session, and the archive step (and `scripts/archive_partition_whole.sql`) discards that partition's live
@@ -3999,7 +4008,7 @@ having to enumerate them, and no failure can hide inside a prefix match on a suc
 | `skip_transmute_reap` | `maintain_all`'s sweep found an abandoned conversion but could not take the table's lock within 5 s (a long transaction holds it), so it left the bound and the claim in place for the next tick rather than queue every read and write of the table behind it; `method` carries the lock timeout |
 | `write_block_reenable` | a partition's retention write block was found disabled, `ENABLE REPLICA` or origin-only and was put back `ENABLE ALWAYS` (see [`maintain`](#maintain)); `method` names the partition and the state it found. Logged once per re-enable |
 | `skip_write_block_lift` | a partition retention no longer reaches kept its write block, because `pgpm.archive_ledger` already covers it and that coverage is only true while nothing can write to it. Logged once per partition, on the first tick that would otherwise have lifted the block; `method` says how to make the partition writable again (see [`maintain`](#maintain)) |
-| `skip_archive_retired_range` | the archive step left out a partition whose range overlaps a chunk `retire()` marked retired: archived, its first chunk would go to that chunk's object key, over the only copy of the dropped rows. Logged once per partition; `method` names the retired chunks, their object keys and the remedy (export the partition with `archive.to_s3`, then detach and drop it and delete its `pgpm.part` row). The tick archives the parent's next partition instead, and `retire` never drops this one (see [the archive step](#byte-budget-chunked-archiving)) |
+| `skip_archive_retired_range` | the archive step left out a partition whose range overlaps a chunk `retire()` marked retired: archived, its first chunk would go to that chunk's object key, over the only copy of the dropped rows. Logged once per partition; `method` names the retired chunks, their object keys and the remedy (export the partition with `archive.to_s3`, then detach and drop it and delete its `pgpm.part` row), and, for a chunk whose bound names no instant and is held at its widest, its `lo` and the ledger update that writes the bound with its offset. The tick archives the parent's next partition instead, and `retire` never drops this one (see [the archive step](#byte-budget-chunked-archiving)) |
 | `fail_restore_incoming_fk` / `fail_validate_incoming_fk` | a preserve-FK re-add failed / a validation was blocked by an orphan, or either did not get its table's lock in time |
 | `fail_retain_drop` / `fail_retain_detach` / `fail_retain_crossing` / `fail_detach_reap` | an unexpected `DROP` failure, or a partition detached by something other than pgpm, which `retire` leaves alone / no `pgpm_detach` job to dispatch the detach to (run `pgpm.schedule()`) / a `NO ACTION`/`RESTRICT` FK blocked the crossing delete / finalizing an abandoned detach failed (including its 5 s lock wait running out behind a reader of the partition, retried next tick). In every case the partition is left whole and `method` carries the error |
 | `fail_retain_reattach` | a partition retention no longer reaches, which its dispatched detach had already taken out of the parent, could not be re-attached (a lock timeout, or something else now holds its range). The table and its rows are left whole, `method` carries the error, and the next tick tries again. Counts in `status().retain_drop_failures` |

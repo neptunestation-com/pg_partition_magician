@@ -12265,44 +12265,57 @@ MUTATIONS["retired_hi_key_idx_before_column"] = (
       "\n-- A RETIRED CHUNK'S ROW IS THE RECORD OF THE ONLY COPY (issue #1141).", 1)],
 )
 
-# Issue #1264: _over_retired_chunks compares every bound as pgpm._native_bound_key gives it, a bound that names no
-# zone read on the grid's clock (config.partition_tz) under ISO, MDY, never in the caller's session.
-# bench/over_retired_chunks_grid_zone.sh runs tests/334 against the mutant.
+# Issue #1264: _over_retired_chunks compares every bound as a key, never with a cast in the caller's session: a
+# partition's own bound that names no zone is read by pgpm._native_bound_key on the grid's clock (config.partition_tz)
+# under ISO, MDY and the Default abbreviations, and a retired chunk's that names no instant at its widest (#1336,
+# pgpm._native_bound_reach). bench/over_retired_chunks_grid_zone.sh runs tests/334 against the mutant. Since #1336 a
+# retired bound with no offset no longer reaches _native_bound_key, so the first four guard the partition side
+# (tests/334 part I, whose pgpm.part rows an operator's hand rewrote).
 _G1264 = "bench/over_retired_chunks_grid_zone.sh"
 MUTATIONS["over_retired_chunks_session_zone"] = (
     _G1264,
-    "Pre-#1264 _over_retired_chunks: a retired chunk's bound with no offset (a pre-#977 strategy's covered_hi, kept "
-    "verbatim) is read in the caller's TimeZone, so the same call holds a partition from pg_cron's UTC session and "
-    "not from an operator's Asia/Kolkata one, which then archives it over the retired range. One site, the zone the "
-    "bounds are read in. tests/334 parts B to E catch it.",
+    "Pre-#1264 _over_retired_chunks: a partition's own bound with no offset (an operator's hand edit) is read in "
+    "the caller's TimeZone, so the same call holds a partition from a Tokyo session and not from a UTC one, which "
+    "then archives it over the retired range. One site, the zone the bounds are read in. tests/334 part I catches "
+    "it.",
     [("  select c.control_kind, c.partition_tz into v_kind, v_tz from pgpm.config c where c.parent_table = p_parent;\n",
       "  select c.control_kind, current_setting('TimeZone') into v_kind, v_tz from pgpm.config c where c.parent_table = p_parent;\n",
       1)],
 )
 MUTATIONS["native_bound_key_utc"] = (
     _G1264,
-    "Issue #1264, the plausible-but-wrong fix: a bound with no offset is read as UTC whatever the grid's zone, so on a "
-    "grid registered east or west of UTC every session agrees on the wrong instant, and a chunk ending three hours "
-    "below a Tokyo grid's partition holds it. One clause, the grid's zone. tests/334 parts A to E catch it.",
+    "Issue #1264, the plausible-but-wrong fix: a partition's own bound with no offset is read as UTC whatever the "
+    "grid's zone, so on a Tokyo grid every session agrees on a lo nine hours late, and the partition is not held over "
+    "a retired chunk in its first hours. One clause, the grid's zone. tests/334 part I catches it.",
     [("  perform set_config('TimeZone', p_tz, true);\n  return extract(epoch from p_text::timestamptz);\n",
       "  return extract(epoch from p_text::timestamptz);\n", 1)],
 )
 MUTATIONS["native_bound_key_session_datestyle"] = (
     _G1264,
-    "Issue #1264's DateStyle half: the bound's parse is not pinned to ISO, MDY, so a DateStyle-shaped bound a pre-#500 "
-    "session wrote ('11/03/2026') reads as 3 November from an MDY session and 11 March from a DMY one, and the call "
-    "holds a different partition over it. One clause. tests/334 parts C and E catch it.",
+    "Issue #1264's DateStyle half: the bound's parse is not pinned to ISO, MDY, so a partition's DateStyle-shaped "
+    "bound a pre-#500 session wrote ('12/01/2026') reads as 1 December from an MDY session and 12 January from a DMY "
+    "one, and the call holds a different partition over the retired chunks. One clause. tests/334 part I catches "
+    "it.",
     [("  set timezone = 'UTC'\n  set datestyle = 'ISO, MDY'\n  set timezone_abbreviations = 'Default'\n",
       "  set timezone = 'UTC'\n  set timezone_abbreviations = 'Default'\n", 1)],
 )
 MUTATIONS["native_bound_key_session_abbreviations"] = (
     _G1264,
     "Issue #1264, PR #1305's first head (V-01): the bound's parse pins TimeZone and DateStyle but not "
-    "timezone_abbreviations, so a pre-#500 render that names its zone by abbreviation ('01/01/2026 03:00:00 IST') "
-    "is Israel's +02 from a session on the Default set and India's +05:30 from one on the India set, and the call "
-    "holds the first partition from the one and not from the other. One clause. tests/334 part H catches it.",
+    "timezone_abbreviations, so a partition's pre-#500 render that names its zone by abbreviation "
+    "('12/31/2025 17:00:00 IST') is Israel's +02 from a session on the Default set and India's +05:30 from one on "
+    "the India set, and the call holds the partition over a retired chunk from the one and not from the other. One "
+    "clause. tests/334 part I catches it.",
     [("  set datestyle = 'ISO, MDY'\n  set timezone_abbreviations = 'Default'\nas $$\n",
       "  set datestyle = 'ISO, MDY'\nas $$\n", 1)],
+)
+MUTATIONS["native_bound_reach_one_datestyle"] = (
+    _G1264,
+    "Issue #1336's widening half-done: a retired chunk's bound that names no instant is widened over every zone but "
+    "read under MDY alone, so a pre-#500 render a DMY session wrote ('11/03/2026', 11 March) reads as 3 November and "
+    "the partition holding March is not held over it. One clause, the DMY reading. tests/334 parts A to E catch it.",
+    [("  foreach v_ds in array array['ISO, MDY', 'ISO, DMY'] loop\n",
+      "  foreach v_ds in array array['ISO, MDY'] loop\n", 1)],
 )
 
 # Issue #1336 (bullet 8): a live ledger bound that names no instant by itself (pgpm._native_named: a pre-#977
@@ -12382,6 +12395,41 @@ MUTATIONS["mark_retired_chunks_unnamed_placed"] = (
     "tests/346 part F catches it.",
     [("                                when l.lo_n then d.lo::%1$s <= l.lo::%1$s and l.lo::%1$s < d.hi::%1$s\n",
       "                                when l.lo_n then d.lo::%1$s <= l.lo::%1$s and l.hi::%1$s <= d.hi::%1$s\n", 1)],
+)
+
+# Issue #1336, the sibling of bullet 8 (PR #1351 left it): a RETIRED chunk's bound that names no instant by itself is
+# read at its widest by pgpm._native_bound_reach (a lo at UTC+14, a hi at UTC-12, under MDY and DMY), so the
+# partitions _over_retired_chunks holds, and the archive step, retain() and scripts/archive_partition_whole.sql leave
+# alone, include every one its text could reach. bench/over_retired_chunks_unnamed_widest.sh runs tests/347.
+_G1336W = "bench/over_retired_chunks_unnamed_widest.sh"
+MUTATIONS["over_retired_chunks_unnamed_grid_clock"] = (
+    _G1336W,
+    "#1264's rule (PR #1305): a retired chunk's bound that names no instant is read on the grid's clock, so a hi a "
+    "New York session wrote on a UTC grid reads five hours early, below its own lo, the partition an operator "
+    "re-created over the chunk is not held, and the archive step PUTs it over the retired chunk's object. One "
+    "clause, the widening. tests/347 parts A to G catch it.",
+    [("  if p_text is null or pgpm._native_named(p_kind, p_text) then\n    begin\n",
+      "  if true then\n    begin\n", 1)],
+)
+MUTATIONS["native_bound_reach_unparsed_raises"] = (
+    _G1336W,
+    "#1351's P1-02, in _over_retired_chunks: a retired chunk's bound that no DateStyle parses (a strategy's covered_hi "
+    "in another encoding) falls back to the pinned cast, which raises 22008 out of the call, so every archive step "
+    "and retain() of the parent raises, every tick. One clause, the unplaceable bound's reach. tests/347 part G "
+    "catches it.",
+    [("  if v is null then return case when p_latest then 'Infinity' else '-Infinity' end::numeric; end if;\n",
+      "  if v is null then return pgpm._native_bound_key(p_kind, p_text, p_tz); end if;\n", 1)],
+)
+MUTATIONS["over_retired_chunks_unnamed_session_zone"] = (
+    _G1336W,
+    "Pre-#1264 retired rows: a retired chunk's bounds are read with ::timestamptz in the caller's TimeZone, so the "
+    "call holds the re-created partition from a New York session and not from UTC, pg_cron's, whose archive step "
+    "then PUTs it over the retired chunk's object. One site, the reading of the retired rows. tests/347 parts A to "
+    "G catch it.",
+    [("                                      pgpm._native_bound_reach(%1$L, l.lo, %4$L, false) as lo_k,\n"
+      "                                      pgpm._native_bound_reach(%1$L, l.hi, %4$L, true) as hi_k,\n",
+      "                                      extract(epoch from l.lo::timestamptz) as lo_k,\n"
+      "                                      extract(epoch from l.hi::timestamptz) as hi_k,\n", 1)],
 )
 
 
