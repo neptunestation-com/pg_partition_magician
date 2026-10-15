@@ -33,6 +33,9 @@ insert into public.a58 values
 create table public.b58 (ts timestamptz not null, v int);
 select create_hypertable('public.b58', 'ts', chunk_time_interval => interval '1 day');
 insert into public.b58 values (now() - interval '3 days', 7), (now() - interval '2 hours', 8);
+-- each hypertable's own oid, the key of its pgpm.scratch records, taken while the names are still its own (#1283)
+create table pg_temp.ht58 as
+  select c.relname::text as ht, c.oid from pg_class c where c.oid in ('public.a58'::regclass, 'public.b58'::regclass);
 create table public.p58 (ts timestamptz not null, v int);
 insert into public.p58 values (now() - interval '1 hour', 1);
 
@@ -139,7 +142,9 @@ select is(
   'p/0:00:00:00/10,20,30', 'LIVENESS: from_hypertable with the boundary values (obtain 0, retain 0) migrates a58');
 select is((select count(*)::int from timescaledb_information.hypertables where hypertable_name in ('a58', 'b58')), 0,
   'LIVENESS: neither table is a hypertable any more');
-select is((select count(*)::int from pgpm.scratch where parent_oid in ('public.a58'::regclass::oid, 'public.b58'::regclass::oid)), 0,
-  'LIVENESS: and no scratch record is left for either');
+-- by the hypertables' oids: the swap gives their names to the migrated tables, which no record names
+select is((select string_agg(h.ht || ':' || s.kind, ',' order by h.ht, s.kind)
+             from pgpm.scratch s join pg_temp.ht58 h on h.oid = s.parent_oid), null,
+  'LIVENESS: and no scratch record is left for either, under the hypertables'' oids taken at the start');
 
 select * from finish();

@@ -57,6 +57,11 @@ insert into public.e69 values (current_date - 40, 31), (current_date - 20, 32), 
 create table public.u69 (ts timestamptz(0) not null, v int);
 select create_hypertable('public.u69', 'ts', chunk_time_interval => interval '1 day');
 insert into public.u69 select date_trunc('second', now() - g * interval '20 hours'), 40 + g from generate_series(1, 3) g;
+-- each hypertable's own oid, the key of its pgpm.scratch records, taken while the names are still its own (#1283)
+create table pg_temp.ht69 as
+  select c.relname::text as ht, c.oid from pg_class c
+   where c.oid in ('public.a69'::regclass, 'public.b69'::regclass, 'public.d69'::regclass,
+                   'public.t69'::regclass, 'public.e69'::regclass, 'public.u69'::regclass);
 create table public.p69 (ts timestamptz not null, v int);
 insert into public.p69 values (now() - interval '1 hour', 1);
 create table public.p69d (d date not null, v int);
@@ -223,10 +228,10 @@ select is(
   'p/00:00:00.5/10,20', 'with the column widened as the message says, from_hypertable re-run with the same step migrates t69');
 select is((select count(*)::int from timescaledb_information.hypertables where hypertable_name in ('a69', 'b69', 'd69', 't69', 'e69', 'u69')), 0,
   'none of the six is a hypertable any more');
-select is((select count(*)::int from pgpm.scratch where parent_oid in ('public.a69'::regclass::oid, 'public.b69'::regclass::oid,
-                                                                    'public.d69'::regclass::oid, 'public.t69'::regclass::oid, 'public.e69'::regclass::oid,
-                                                                    'public.u69'::regclass::oid)), 0,
-  'and no scratch record is left for any');
+-- by the hypertables' oids: the swap gives their names to the migrated tables, which no record names
+select is((select string_agg(h.ht || ':' || s.kind, ',' order by h.ht, s.kind)
+             from pgpm.scratch s join pg_temp.ht69 h on h.oid = s.parent_oid), null,
+  'and no scratch record is left for any, under the hypertables'' oids taken at the start');
 select is((select count(*)::int from pgpm.handoff), 0,
   'and no handoff was left behind by a refused one');
 

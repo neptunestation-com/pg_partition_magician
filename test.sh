@@ -625,6 +625,11 @@ run_timescale() {
     echo "--- tests/timescale/db/33 fails when the cutover keeps the capture function (issue #1091) ---"
     bash "$(dirname "$0")/bench/tests_fail_on_defect.sh" pgpm_test-timescale pgpm_perf121 \
       /repo/tests/timescale/db/33_from_hypertable_cutover_carries_access_test.sql || fail=1
+    # #1283's guard, the same way: it runs tests/timescale/db/58, 60, 65, 66 and 69 against the clean module and
+    # against a swap that keeps the hypertable's scratch records, the clean-code half of the pairs discriminate.sh
+    # completes with the ts*_scratch_left_by_new_table_oid mutations.
+    echo "--- the timescale files ask for leftover scratch records by the hypertables' oids (issue #1283) ---"
+    bash "$(dirname "$0")/bench/hypertable_tests_scratch_by_hypertable_oid.sh" pgpm_test-timescale pgpm_perf391 || fail=1
 
     echo "--- discriminate (timescale-scoped mutations) ---"
     bash "$(dirname "$0")/bench/discriminate.sh" --track=timescale pgpm_test-timescale || fail=1

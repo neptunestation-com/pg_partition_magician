@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **Five timescale test files ask for leftover scratch records by the hypertables' oids** (#1283).
+  `pgpm.scratch` keys a copy's records by the hypertable's oid, and `tests/timescale/db/65`, 66, 58, 60 and 69
+  looked for leftovers by casting the table's name to `regclass` after the cutover, when the name already
+  resolves to the migrated table, which no record names. Against a swap that kept every record of the dropped
+  hypertables each check stayed ok, with 6, 3, 2, 7 and 6 records left. Each file now takes its hypertables'
+  oids before anything is migrated and names what is left under them as `<table>:<kind>`; `tests/65` also
+  witnesses its six records under those oids before the swap. `bench/hypertable_tests_scratch_by_hypertable_oid.sh`
+  runs each file against the clean module and against a swap that keeps the records, and requires the named
+  check to read `not ok` there (mutations `ts65_scratch_left_by_new_table_oid` and its four siblings). A test
+  change only: the cutover itself is untouched.
+
 - **Three archive tests read the objects they wrote back by identity** (#1284). `tests/archive/db/08` read its
   bigint-keyed NDJSON objects back by line count (5000 for the monolith, 50 for the PascalCase table) and never
   read Part A's two 5-row chunks, so a transport that wrote `"id":1` on every line passed; `tests/archive/db/16`

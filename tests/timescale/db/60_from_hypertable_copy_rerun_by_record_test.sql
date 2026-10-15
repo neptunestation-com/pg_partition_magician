@@ -39,6 +39,10 @@ insert into g60a.b60 select now() - g * interval '5 hours', g, g * 10 from gener
 create table g60a.c60 (ts timestamptz not null, id int not null, v int, primary key (id, ts));
 select create_hypertable('g60a.c60', 'ts', chunk_time_interval => interval '1 day');
 insert into g60a.c60 select now() - g * interval '5 hours', g, g * 10 from generate_series(1, 3) g;
+-- each hypertable's own oid, the key of its pgpm.scratch records, taken while the names are still its own (#1283)
+create table pg_temp.ht60 as
+  select c.relname::text as ht, c.oid from pg_class c
+   where c.oid in ('g60a.a60'::regclass, 'g60a.b60'::regclass, 'g60a.c60'::regclass);
 
 call pgpm.from_hypertable_copy('g60a.a60', 'ts', p_track_changes => true);
 call pgpm.from_hypertable_copy('g60a.b60', 'ts', p_track_changes => true);
@@ -137,8 +141,9 @@ select is((select string_agg(id::text || '=' || v::text, ',' order by id) from g
           'b60 holds its rows and the append made after the re-run');
 select is((select string_agg(id::text || '=' || v::text, ',' order by id) from g60a.c60r), '2=20,3=30',
           'c60r holds its rows, the delete made after the re-run applied');
-select is((select count(*)::int from pgpm.scratch
-            where parent_oid in ('g60b.a60'::regclass, 'g60c.b60'::regclass, 'g60a.c60r'::regclass)),
-          0, 'and the cutovers left no scratch record behind');
+-- by the hypertables' oids: the swap gives their names to the migrated tables, which no record names
+select is((select string_agg(h.ht || ':' || s.kind, ',' order by h.ht, s.kind)
+             from pgpm.scratch s join pg_temp.ht60 h on h.oid = s.parent_oid),
+          null, 'and the cutovers left no scratch record behind under the hypertables'' oids taken at the start');
 
 select * from finish();
