@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- **The hypertable benchmark reaches its cutover again** (#1281). `bench/run_fh.sh` called
+  `from_hypertable_cutover(..., p_regrain_batch => ...)`, the name #291's rename sweep gave transmute's batch,
+  though the cutover's parameter is still `p_drain_batch`, so every run died "procedure ... does not exist"
+  right after its online copy and never measured the cutover, conservation or regrain. The call names
+  `p_drain_batch`. Guard `bench/harness_calls_resolve.sh` installs the core and hypertable modules and holds
+  every `pgpm.` call in `bench/run*.sh` to the catalog: a routine the tree installs, of the kind the call
+  needs (`call` a procedure, anything else a function), and an argument list one overload accepts by position
+  and by name, with the resolution rule checked against the server on six calls. Mutation
+  `fh_cutover_regrain_batch`.
+- **The benchmarks' conservation gates judge rows by identity, not by count** (#1282). `bench/run.sh`'s step 4f
+  promised that every history row is still present after the regrain swap, and `bench/run_fh.sh`'s step 4d that
+  the immutable cohort is unchanged through the migration, but each compared a `count(*)` before with one
+  after, so a run that lost one row and invented another (or rewrote one) reported the rows conserved. Each
+  anchor now takes the count and a digest of the rows (the sum of a 64-bit hash of each whole row) in one
+  scan, and the gate fails the run unless both match; the report says whether the rows are the same. Guard
+  `bench/harness_conservation_identity.sh` runs each harness's own anchor and gate regions over a lost row
+  and a stranger, a rewritten row, an untouched table and (for the cohort) churn outside it. Mutations
+  `run_conservation_by_count`, `fh_conservation_by_count`.
+
 - **`tests/72` asks a role its policy does not name what it reads through the converted parent** (#1285). Its
   one row-level-security check asked `t72_reader`, the role `tenant_iso` names, for a count of 400 over five
   tenants of 400 rows each, so a `transmute` that replayed the policy `TO PUBLIC` passed all fifteen
