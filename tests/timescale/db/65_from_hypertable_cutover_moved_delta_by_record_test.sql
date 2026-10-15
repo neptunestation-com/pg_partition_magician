@@ -20,10 +20,13 @@
 --     It must hold 1=10,2=222,4=444,5=555,6=60.
 --   b65 (ids 1..3): the recorded delta dropped by hand, nothing written since; the cutover runs append-only and
 --     must still drop the recorded capture function.
--- Every recorded object is named by the oid recorded before anything moved, and asserted gone by that oid.
+-- Every recorded object is named by the oid recorded before anything moved, and asserted gone by that oid,
+-- and so is every record: pgpm.scratch keys them by the HYPERTABLE's oid, which the swap retires (the names
+-- a65 and b65 then resolve to the migrated tables, which no record names), so the hypertables' oids are taken
+-- before the swap and the records are asked for by them (#1283).
 -- WITNESSES: before each drain and the cutover, the moved delta holds the keys the round wrote (so an empty
 -- delta afterwards was the drain's work), and the recorded objects exist where the fixture put them.
-select plan(17);
+select plan(18);
 
 create schema g65a;
 create schema g65side;
@@ -34,6 +37,14 @@ insert into g65a.a65 select now() - g * interval '5 hours', g, g * 10 from gener
 create table g65a.b65 (ts timestamptz not null, id int not null, v int, primary key (id, ts));
 select create_hypertable('g65a.b65', 'ts', chunk_time_interval => interval '1 day');
 insert into g65a.b65 select now() - g * interval '5 hours', g, g * 10 from generate_series(1, 3) g;
+-- each hypertable's own oid, the key of its pgpm.scratch records, taken while the names are still its own
+create table pg_temp.ht65 as
+  select c.relname::text as ht, c.oid from pg_class c where c.oid in ('g65a.a65'::regclass, 'g65a.b65'::regclass);
+-- the records still keyed by either hypertable's oid, as ht:kind, in that order
+create function pg_temp.records65() returns text language sql as $$
+  select string_agg(h.ht || ':' || s.kind, ',' order by h.ht, s.kind)
+    from pgpm.scratch s join pg_temp.ht65 h on h.oid = s.parent_oid
+$$;
 
 call pgpm.from_hypertable_copy('g65a.a65', 'ts', p_track_changes => true);
 call pgpm.from_hypertable_copy('g65a.b65', 'ts', p_track_changes => true);
@@ -110,6 +121,10 @@ select is(pg_temp.delta65() || ' | ' || (select string_agg(id::text || '=' || v:
 -- W3, then the cutovers (a65's without its pre-drain, so the under-lock reconcile reads the moved delta)
 update g65a.a65 set v = 555 where id = 5;
 select ok(pg_temp.delta65() like '%5,5', 'LIVENESS: W3 reached the moved delta, for the cutover to read under its lock');
+select is(pg_temp.records65(),
+          'a65:hypertable_delta,a65:hypertable_delta_fn,a65:hypertable_dest,'
+          'b65:hypertable_delta,b65:hypertable_delta_fn,b65:hypertable_dest',
+          'LIVENESS: each hypertable''s copy, delta and function are recorded under its own oid, for the swap to forget');
 call pgpm.from_hypertable_cutover('g65a.a65', 'ts', interval '1 day', p_predrain => false);
 call pgpm.from_hypertable_cutover('g65a.b65', 'ts', interval '1 day');
 
@@ -125,8 +140,8 @@ select is(pg_temp.alive65('a65'), null,
           'the swap dropped a65''s moved delta and its capture function by their recorded oids');
 select is(pg_temp.alive65('b65'), null,
           'the swap dropped b65''s capture function by its recorded oid, its delta already gone');
-select is((select count(*)::int from pgpm.scratch where parent_oid in ('g65a.a65'::regclass, 'g65a.b65'::regclass)),
-          0, 'and no scratch record is left');
+select is(pg_temp.records65(), null,
+          'and no scratch record is left under either hypertable''s oid, taken before the swap');
 select is((select string_agg(id::text, ',') from g65a.a65_pgpm_delta), '99',
           'the operator''s table under the delta''s minted name keeps its row: never read, emptied or dropped');
 select is((select string_agg(c.relname::text, ',' order by c.relname) from pg_class c

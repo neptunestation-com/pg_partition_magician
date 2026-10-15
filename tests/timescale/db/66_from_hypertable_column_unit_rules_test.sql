@@ -21,7 +21,10 @@
 -- refusal that left one table's state in another's place would show. WITNESSES: transmute refuses each
 -- argument on a plain table of the same column type with the same message, so the module asks transmute's
 -- rules and not new ones; and the boundary values each rule allows (a whole-month step on a date, a
--- whole-second anchor off midnight on a timestamptz(0)) migrate the three tables afterwards.
+-- whole-second anchor off midnight on a timestamptz(0)) migrate the three tables afterwards, leaving no
+-- pgpm.scratch record under any of the three hypertables' oids. The swap retires those oids (the names then
+-- resolve to the migrated tables, which no record names), so they are taken at the start and the records
+-- asked for by them (#1283).
 select plan(20);
 
 create table public.d66 (d date not null, v int);
@@ -34,6 +37,10 @@ create table public.e66 (d date not null, v int);
 select create_hypertable('public.e66', 'd', chunk_time_interval => interval '7 days');
 insert into public.e66 values (current_date - 40, 7), (current_date - 20, 8), (current_date - 10, 9),
                               (current_date - 2, 10);
+-- each hypertable's own oid, the key of its pgpm.scratch records, taken while the names are still its own
+create table pg_temp.ht66 as
+  select c.relname::text as ht, c.oid from pg_class c
+   where c.oid in ('public.d66'::regclass, 'public.t66'::regclass, 'public.e66'::regclass);
 create table public.p66d (d date not null, v int);
 insert into public.p66d values (current_date - 1, 1);
 create table public.p66t (ts timestamptz(0) not null, v int);
@@ -133,8 +140,9 @@ select is(
   '946684801/946771200', 'LIVENESS: t66''s grid keeps its 00:00:01 anchor and d66''s its 2000-01-02 one, as given');
 select is((select count(*)::int from timescaledb_information.hypertables where hypertable_name in ('d66', 't66', 'e66')), 0,
   'LIVENESS: none of the three is a hypertable any more');
-select is((select count(*)::int from pgpm.scratch where parent_oid in ('public.d66'::regclass::oid, 'public.t66'::regclass::oid, 'public.e66'::regclass::oid)), 0,
-  'LIVENESS: and no scratch record is left for any');
+select is((select string_agg(h.ht || ':' || s.kind, ',' order by h.ht, s.kind)
+             from pgpm.scratch s join pg_temp.ht66 h on h.oid = s.parent_oid), null,
+  'LIVENESS: and no scratch record is left for any of the three, under the hypertables'' oids taken at the start');
 select is((select count(*)::int from pgpm.handoff), 0,
   'LIVENESS: and no handoff was left behind by a refused one');
 

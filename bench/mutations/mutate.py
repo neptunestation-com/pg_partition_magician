@@ -14679,6 +14679,65 @@ MUTATIONS["archive_extres_parquet_by_prefix"] = (
       "                    order by lo::numeric)\n", 1)],
 )
 MUTATION_SRC["archive_extres_parquet_by_prefix"] = "tests/archive/db/44_archive_extension_resolution_test.sql"
+# #1283 (pass 12 G25): five timescale files asked for leftover pgpm.scratch records by casting the table's name
+# to regclass after the cutover, when it names the migrated table, not the hypertable the records are keyed by.
+# Judged by bench/hypertable_tests_scratch_by_hypertable_oid.sh, each the check's pre-fix query under its
+# current description.
+MUTATIONS["ts65_scratch_left_by_new_table_oid"] = (
+    "bench/hypertable_tests_scratch_by_hypertable_oid.sh",
+    "Pre-#1283 tests/timescale/db/65: 'no scratch record is left' asks pgpm.scratch for the oids 'g65a.a65' and "
+    "'g65a.b65' resolve to after both cutovers, the migrated tables', which no record carries, so a swap that "
+    "keeps all six records of the dropped hypertables passes (F10-02).",
+    [("""select is(pg_temp.records65(), null,
+""", """select is((select string_agg(s.kind, ',') from pgpm.scratch s where s.parent_oid in ('g65a.a65'::regclass, 'g65a.b65'::regclass)), null,
+""", 1)],
+)
+MUTATION_SRC["ts65_scratch_left_by_new_table_oid"] = "tests/timescale/db/65_from_hypertable_cutover_moved_delta_by_record_test.sql"
+MUTATION_TRACK["ts65_scratch_left_by_new_table_oid"] = "timescale"
+MUTATIONS["ts66_scratch_left_by_new_table_oid"] = (
+    "bench/hypertable_tests_scratch_by_hypertable_oid.sh",
+    "Pre-#1283 tests/timescale/db/66: its LIVENESS witness that no scratch record is left asks for the oids "
+    "d66, t66 and e66 resolve to after the migrations, the migrated tables', so a swap that keeps the three "
+    "copies' records passes (F10-03). One clause, the records' key.",
+    [("""             from pgpm.scratch s join pg_temp.ht66 h on h.oid = s.parent_oid), null,
+""", """             from pgpm.scratch s join pg_temp.ht66 h on to_regclass('public.' || h.ht) = s.parent_oid), null,
+""", 1)],
+)
+MUTATION_SRC["ts66_scratch_left_by_new_table_oid"] = "tests/timescale/db/66_from_hypertable_column_unit_rules_test.sql"
+MUTATION_TRACK["ts66_scratch_left_by_new_table_oid"] = "timescale"
+MUTATIONS["ts58_scratch_left_by_new_table_oid"] = (
+    "bench/hypertable_tests_scratch_by_hypertable_oid.sh",
+    "Pre-#1283 tests/timescale/db/58: its LIVENESS witness that no scratch record is left asks for the oids a58 "
+    "and b58 resolve to after the migrations, the migrated tables', so a swap that keeps both copies' records "
+    "passes. One clause, the records' key.",
+    [("""             from pgpm.scratch s join pg_temp.ht58 h on h.oid = s.parent_oid), null,
+""", """             from pgpm.scratch s join pg_temp.ht58 h on to_regclass('public.' || h.ht) = s.parent_oid), null,
+""", 1)],
+)
+MUTATION_SRC["ts58_scratch_left_by_new_table_oid"] = "tests/timescale/db/58_from_hypertable_argument_rules_test.sql"
+MUTATION_TRACK["ts58_scratch_left_by_new_table_oid"] = "timescale"
+MUTATIONS["ts60_scratch_left_by_new_table_oid"] = (
+    "bench/hypertable_tests_scratch_by_hypertable_oid.sh",
+    "Pre-#1283 tests/timescale/db/60: 'the cutovers left no scratch record behind' asks for the oids g60b.a60, "
+    "g60c.b60 and g60a.c60r resolve to after the cutovers, the migrated tables', so a swap that keeps the seven "
+    "records of the dropped hypertables passes.",
+    [("""             from pgpm.scratch s join pg_temp.ht60 h on h.oid = s.parent_oid),
+""", """             from pgpm.scratch s join pg_temp.ht60 h on s.parent_oid in ('g60b.a60'::regclass, 'g60c.b60'::regclass, 'g60a.c60r'::regclass)),
+""", 1)],
+)
+MUTATION_SRC["ts60_scratch_left_by_new_table_oid"] = "tests/timescale/db/60_from_hypertable_copy_rerun_by_record_test.sql"
+MUTATION_TRACK["ts60_scratch_left_by_new_table_oid"] = "timescale"
+MUTATIONS["ts69_scratch_left_by_new_table_oid"] = (
+    "bench/hypertable_tests_scratch_by_hypertable_oid.sh",
+    "Pre-#1283 tests/timescale/db/69: 'no scratch record is left for any' asks for the oids the six names resolve "
+    "to after the migrations, the migrated tables', so a swap that keeps the six copies' records passes. One "
+    "clause, the records' key.",
+    [("""             from pgpm.scratch s join pg_temp.ht69 h on h.oid = s.parent_oid), null,
+""", """             from pgpm.scratch s join pg_temp.ht69 h on to_regclass('public.' || h.ht) = s.parent_oid), null,
+""", 1)],
+)
+MUTATION_SRC["ts69_scratch_left_by_new_table_oid"] = "tests/timescale/db/69_from_hypertable_mixed_step_and_unit_remedy_test.sql"
+MUTATION_TRACK["ts69_scratch_left_by_new_table_oid"] = "timescale"
 
 
 # pass 12 G24 (#1281, #1282): the at-scale harnesses. Their scripts are the source; each guard reads a mutant
