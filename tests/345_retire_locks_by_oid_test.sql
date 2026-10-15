@@ -26,6 +26,8 @@
 --           since), the partition renamed aside and a table LIKE it created under its name while the ATTACH
 --           waits: the stranger is not attached (fail_retain_reattach, the mark kept), and the table serves none
 --           of its rows.
+--   PART E  pgpm._lock_oid itself: asked through a vouched name that denotes nothing, while this backend already
+--           holds the lock, it answers false, never null (a null reads as "not refused" to every caller).
 -- Every concurrent order is set by a lock queue: a second session ('h345') holds ACCESS EXCLUSIVE on the target, a
 -- third ('r345') makes the call, and a server-side poll (snapshot cleared every iteration) sees the call waiting
 -- for its lock on the target's oid before the holder renames, creates and commits.
@@ -36,7 +38,7 @@
 create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
-select plan(36);
+select plan(38);
 
 -- the call in session r345 is waiting, ungranted, for p_mode on p_oid: one statement per sample, snapshot cleared
 create function pg_temp.waits_for(p_oid oid, p_mode text) returns boolean language plpgsql as $$
@@ -226,6 +228,19 @@ select is(pg_temp.ids_of(:'d_oid'), (select array_agg(g::bigint order by g) from
   'the partition, renamed aside, keeps ids 1..2500');
 update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null
  where parent_table = 'public.r345d'::regclass and child_name = :'d_name';
+
+-- ======================= (E) the helper: a vouched name that denotes nothing is a refusal, never a null =========
+-- This backend already holds ACCESS SHARE on r345c, so the lock manager alone would answer yes; the name it is asked
+-- through names a schema that does not exist, as a schema renamed after the lock would. The answer must be false:
+-- every caller tests `if not pgpm._lock_oid(...)`, and a null there is a branch not taken, the caller going on.
+begin;
+lock table only public.r345c in access share mode;
+select ok(exists (select 1 from pg_locks l where l.locktype = 'relation' and l.relation = 'public.r345c'::regclass
+                    and l.pid = pg_backend_pid() and l.mode = 'AccessShareLock' and l.granted),
+  'LIVENESS: E: this backend holds ACCESS SHARE on the relation, so the witness alone answers yes');
+select is(pgpm._lock_oid('public.r345c'::regclass, 'access share', true, 'r345_no_such_schema', 'r345c'), false,
+  'E: asked through a name that denotes nothing, _lock_oid answers false, not null');
+commit;
 
 select dblink_disconnect('h345') as dh \gset
 select dblink_disconnect('r345') as dr \gset

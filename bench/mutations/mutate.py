@@ -15125,6 +15125,15 @@ MUTATIONS["retain_recall_attach_unchecked"] = (
     [("      if not exists (select 1 from pg_inherits i where i.inhrelid = v_now and i.inhparent = p_parent) then\n",
       "      if false and not exists (select 1 from pg_inherits i where i.inhrelid = v_now and i.inhparent = p_parent) then\n", 1)],
 )
+MUTATIONS["lock_oid_vanished_name_null"] = (
+    "bench/retire_locks_by_oid.sh",
+    "PR #1353 review (codex P1): pgpm._lock_oid compares the vouched name's resolution with the oid without a "
+    "null guard, so a name that denotes nothing once the lock is held (its schema renamed after the lock, which "
+    "takes no relation lock) answers NULL, and every caller's `if not pgpm._lock_oid(...)` reads that as not "
+    "refused and goes on naming the stale name. One clause, the coalesce. tests/345 part E catches it.",
+    [("      return p_nsp is null or coalesce(to_regclass(v_name_q) = p_rel, false);",
+      "      return p_nsp is null or to_regclass(v_name_q) = p_rel;", 1)],
+)
 
 def main() -> int:
     if sys.argv[1:] == ["--late-survivors"]:

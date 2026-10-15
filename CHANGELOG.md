@@ -14,7 +14,8 @@
   `untransmute`, `_transmute_reap` and the hypertable cutover and drains go through it too.
   `_retain_recall`'s re-attach, which attached a table that took a detached partition's name the same way, now
   checks that the relation it attached is the one it vouched for. `bench/retire_locks_by_oid.sh` runs `tests/345`
-  (mutations `retire_lock_answer_ignored`, `regrain_swap_attach_unlocked` and `retain_recall_attach_unchecked`).
+  (mutations `retire_lock_answer_ignored`, `regrain_swap_attach_unlocked`, `retain_recall_attach_unchecked` and
+  `lock_oid_vanished_name_null`).
 
 - **A live chunk whose bound names no instant proves no coverage, so retain() no longer drops a partly archived
   partition on one** (#1336, bullet 8). Before #977 the archive step checked a strategy's `covered_hi` with a cast

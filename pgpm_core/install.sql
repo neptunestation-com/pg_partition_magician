@@ -3889,7 +3889,7 @@ begin
                 where l.locktype = 'relation' and l.relation = p_rel::oid and l.pid = pg_backend_pid() and l.granted
                   and l.mode = replace(initcap(p_mode), ' ', '') || 'Lock'
                   and l.database = (select d.oid from pg_database d where d.datname = current_database())) then
-      return p_nsp is null or to_regclass(v_name_q) = p_rel;
+      return p_nsp is null or coalesce(to_regclass(v_name_q) = p_rel, false);   -- a name gone is no answer: false
     end if;
     exit when p_nsp is not null;
   end loop;
