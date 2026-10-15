@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **Three archive tests read the objects they wrote back by identity** (#1284). `tests/archive/db/08` read its
+  bigint-keyed NDJSON objects back by line count (5000 for the monolith, 50 for the PascalCase table) and never
+  read Part A's two 5-row chunks, so a transport that wrote `"id":1` on every line passed; `tests/archive/db/16`
+  Part B judged the Parquet object at the `[-10000, 0)` key by size, so a strategy that encoded 500 of the
+  chunk's 1000 rows passed; and `tests/archive/db/44` checked its two Parquet tick objects by the `PAR1` prefix,
+  so a transport that uploaded those four bytes alone passed. Each NDJSON object of 08 (Part A's three chunks,
+  Part D's direct call) is now compared row for row with the rows of its range, and each Parquet object of 16
+  Part B and 44 Part B byte for byte with the Parquet file of its ledger row's range.
+  `bench/archive_fn_s3_readback.sh` now judges all three files, each against its planted transport defect
+  (mutations `archive_fn_ndjson_readback_by_count`, `archive_key_parquet_readback_by_presence` and
+  `archive_extres_parquet_by_prefix`). A test change only: `pgpm_archive` itself is untouched.
+
 - **The hypertable benchmark reaches its cutover again** (#1281). `bench/run_fh.sh` called
   `from_hypertable_cutover(..., p_regrain_batch => ...)`, the name #291's rename sweep gave transmute's batch,
   though the cutover's parameter is still `p_drain_batch`, so every run died "procedure ... does not exist"
