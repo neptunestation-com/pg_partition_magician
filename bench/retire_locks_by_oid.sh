@@ -7,12 +7,13 @@
 # the lock is granted, so a rename of the partition and a table created under its old name, committed while
 # retire() waited, left the lock on that table, and the one-step DROP took it, rows and all, and reported the drop.
 # ATTACH PARTITION re-resolves its name the same way, which is how the regrain swap attached a table that took a
-# renamed copy's name and dropped the source whose rows only the copy held. pgpm._lock_oid asks the lock manager
+# renamed copy's name and dropped the source whose rows only the copy held, and how _retain_recall attached a
+# table that took a detached partition's name in its place. pgpm._lock_oid asks the lock manager
 # whether the lock is on the oid the caller vouched for. The file is the acceptance test; this wrapper exists so
 # the mutations have a guard the discriminate track can run against the mutant, in the shape of
 # bench/retain_recall_moved_parent.sh.
 #
-# TWO mutations are required to fail against it (bench/mutations/mutate.py):
+# THREE mutations are required to fail against it (bench/mutations/mutate.py):
 #   retire_lock_answer_ignored    -- retire() takes the lock through _lock_oid and ignores the answer, the
 #                                    pre-fix shape: the partition is dropped with no lock on it while the
 #                                    stranger holds the name (part A), and a rename with nothing in its place
@@ -20,6 +21,9 @@
 #   regrain_swap_attach_unlocked  -- the swap ATTACHes a copy by the name its oid had when the statement was
 #                                    built, with no lock on the oid first: the stranger is attached and the
 #                                    copied rows leave the table (part C).
+#   retain_recall_attach_unchecked -- the recall does not ask whether the relation its ATTACH reached is the one
+#                                    it vouched for: the stranger is attached in the partition's place and the
+#                                    retirement's mark cleared (part D).
 #
 # Runs on the plain core image (pgtap, dblink and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path
 # inside the container, for a worktree mounted somewhere other than /repo.
