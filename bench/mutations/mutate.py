@@ -153,8 +153,8 @@ $$;
 
 # from_hypertable_cutover's two lock-then-verify halves (#422), each mutated separately so a guard
 # failure names which one went missing.
-HT_CUTOVER_SOURCE_VERIFY = """  execute format('lock table %s in access exclusive mode', p_hypertable::text);
-  if to_regclass(format('%I.%I', v_nsp, v_rel)) is distinct from p_hypertable then
+HT_CUTOVER_SOURCE_VERIFY = """  if not pgpm._lock_oid(p_hypertable, 'access exclusive', false)   -- #1335 b10: and the lock manager asked
+     or to_regclass(format('%I.%I', v_nsp, v_rel)) is distinct from p_hypertable then
     raise exception 'pg_partition_magician: from_hypertable_cutover(%) resolved % .% at the start, but that name is oid % now -- something renamed or replaced the source while the cutover was preparing; refusing to drop a relation it did not identify. Re-run the cutover once the name is settled.',
       p_hypertable, quote_ident(v_nsp), quote_ident(v_rel),
       coalesce(to_regclass(format('%I.%I', v_nsp, v_rel))::oid::text, 'nothing');
@@ -162,8 +162,8 @@ HT_CUTOVER_SOURCE_VERIFY = """  execute format('lock table %s in access exclusiv
 
 """
 
-HT_CUTOVER_DEST_VERIFY = """  execute format('lock table %s in access exclusive mode', v_dest_oid::text);
-  if to_regclass(format('%I.%I', v_nsp, v_dest)) is distinct from v_dest_oid then
+HT_CUTOVER_DEST_VERIFY = """  if not pgpm._lock_oid(v_dest_oid, 'access exclusive', false)   -- #1335 b10
+     or to_regclass(format('%I.%I', v_nsp, v_dest)) is distinct from v_dest_oid then
     raise exception 'pg_partition_magician: from_hypertable_cutover(%) found destination % .% as oid % at the start, but that name is oid % now -- something replaced the copy while the cutover was preparing; refusing to rename an unverified relation into %.',
       p_hypertable, quote_ident(v_nsp), quote_ident(v_dest), v_dest_oid::oid,
       coalesce(to_regclass(format('%I.%I', v_nsp, v_dest))::oid::text, 'nothing'), quote_ident(v_rel);
@@ -329,7 +329,7 @@ TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the N
   -- the LIKE: a NOT VALID or NO INHERIT CHECK, or a generated control column, committed since the preflight
   -- is refused in the preflight's words and rolls the cutover back to the resumable phase-2 state, where it
   -- used to fail the LIKE or the ATTACH raw. Under this phase's lock_timeout, like every wait in it.
-  execute format('lock table %s in access share mode', p_parent::text);
+  perform pgpm._lock_oid_or_raise(p_parent, 'access share', false, 'transmute');   -- #1335 b10: by oid, pinning the name
   perform pgpm._transmute_refuse_generated_control(p_parent, p_control);
   perform pgpm._transmute_refuse_uncarried_constraints(p_parent);
 
@@ -2626,7 +2626,7 @@ begin
         "whole regrain after all its copying. Removes only the LOCK statement and the comment explaining "
         "it; tests/149's liveness witnesses (capture lock held mid-copy, the write waiting while regrain() "
         "runs) still pass on the mutant, and its outcome and row-identity assertions are what catch it.",
-        [(re.compile(r"^  -- #580: take SHARE on the parent.*?\n  execute format\('lock table only %s in share mode', p_parent::text\);\n",
+        [(re.compile(r"^  -- #580: take SHARE on the parent.*?\n  perform pgpm\._lock_oid_or_raise\(p_parent, 'share', true, 'regrain'\);[^\n]*\n",
                      re.MULTILINE | re.DOTALL), "", 1)],
     ),
     "grid_session_timezone": (
@@ -2683,7 +2683,7 @@ begin
         "The identity anchors stay, so only the re-mint is missing: tests/124 section (B)'s column list, "
         "its 'not the same relation' check and its lives_ok are what catch it.",
         [("  if exists (select 1 from pg_class where oid = cfg.regrain_delta_oid) then\n"
-          "    execute format('drop table %s', cfg.regrain_delta_oid::regclass::text);\n"
+          "    perform pgpm._drop_by_oid(cfg.regrain_delta_oid::regclass, format('regrain_step(%s), dropping the previous delta,', p_parent));   -- #1335 b10\n"
           "  end if;\n"
           "  execute format('create table %I.%I as select %s from %s with no data', v_nsp, v_delta, v_keycols_q, p_parent::text);\n",
           "  if to_regclass(format('%I.%I', v_nsp, v_delta)) is null then\n"
@@ -5455,8 +5455,8 @@ $$;''',
         "the source behind the capture trigger's SHARE ROW EXCLUSIVE holding the parent lock, and the swap's "
         "DETACH waits on it: the pre-#580 40P01 is back with a lock statement still in place. One site. "
         "tests/149's completion-without-40P01 assertion catches it, as it catches the lock's removal.",
-        [("  execute format('lock table only %s in share mode', p_parent::text);\n",
-          "  execute format('lock table only %s in share update exclusive mode', p_parent::text);\n", 1)],
+        [("  perform pgpm._lock_oid_or_raise(p_parent, 'share', true, 'regrain');",
+          "  perform pgpm._lock_oid_or_raise(p_parent, 'share update exclusive', true, 'regrain');", 1)],
     ),
     "text_time_collation_default_trusted": (
         "bench/text_time_default_collation.sh",
@@ -8868,7 +8868,7 @@ select ok(
           "  if false and v_held is not null and v_held is distinct from pgpm._scratch_rel(p_hypertable, 'hypertable_dest') then\n", 1),
          ("  v_prev := pgpm._scratch_rel(p_hypertable, 'hypertable_dest');\n"
           "  if v_prev is not null then\n"
-          "    execute format('drop table %s', v_prev::text);\n"
+          "    perform pgpm._drop_by_oid(v_prev, format('from_hypertable_copy(%s), dropping the previous copy,', p_hypertable));   -- #1335 b10\n"
           "  end if;\n",
           "  execute format('drop table if exists %I.%I', v_nsp, v_dest);   -- MUTANT: by name\n", 1)],
     ),
@@ -8881,7 +8881,7 @@ select ok(
           "  if false and v_held is not null and v_held is distinct from pgpm._scratch_rel(p_hypertable, 'hypertable_delta') then\n", 1),
          ("  v_prev := pgpm._scratch_rel(p_hypertable, 'hypertable_delta');\n"
           "  if v_prev is not null then\n"
-          "    execute format('drop table %s', v_prev::text);\n"
+          "    perform pgpm._drop_by_oid(v_prev, format('from_hypertable_copy(%s), dropping the previous delta,', p_hypertable));   -- #1335 b10\n"
           "  end if;\n",
           "  if p_track_changes then execute format('drop table if exists %I.%I', v_nsp, v_delta); end if;   -- MUTANT: by name\n", 1)],
     ),
@@ -10433,7 +10433,7 @@ MUTATIONS["archive_hold_unlocked"] = (
     "out instead: a strategy reading through the parent finds none of the table's rows and [lo, hi) is recorded as "
     "covered. One site, the helper's LOCK. tests/325 parts A, B and D catch it (a strategy call and a 0-row ledger "
     "row for the detached table; retain() drops ids 7, 42 and 88 once it is attached back).",
-    [("  execute format('lock table only %s in access share mode', p_parent);\n", "", 1)],
+    [("  if not pgpm._lock_oid(p_parent, 'access share') then\n    return false;\n  end if;\n", "", 1)],
 )
 MUTATIONS["archive_hold_recheck_by_snapshot"] = (
     "bench/archive_hold_detach_in_flight.sh",
@@ -12813,7 +12813,8 @@ MUTATIONS["retire_checks_before_lock"] = (
     "CONCURRENTLY whose first transaction commits while retire() waits later on (behind the regrain lock, here) is "
     "never seen, and the DROP takes the table pending the operator's detach. One site, the lock before the checks. "
     "The acceptance reproduction (P1-02) and tests/327 part R catch it.",
-    [("    execute format('lock table only %s in share update exclusive mode', v_rel::text);\n", "    null;\n", 1)],
+    [("  if v_rel is not null and not pgpm._lock_oid(v_rel, 'share update exclusive', true, v_nsp, p_child) then\n",
+      "  if false and v_rel is not null and not pgpm._lock_oid(v_rel, 'share update exclusive', true, v_nsp, p_child) then\n", 1)],
 )
 
 # Issue #1158: from_hypertable_cutover takes SHARE on the copy before it reads the copy's watermark and
@@ -12826,7 +12827,7 @@ MUTATIONS["hypertable_cutover_reads_copy_unlocked"] = (
     "a drain batch that commits between that read and the swap lock is caught up a second time on a keyless "
     "hypertable (tests/timescale/db/64 (K): 1,2,3,4,100,100,101,101,102) and leaves a tracking copy's baseline "
     "stale ((T): the swap refused). One clause: the cutover's SHARE on the copy.",
-    [("  execute format('lock table %s in share mode', v_dest_oid::text);\n", "", 1)],
+    [("  perform pgpm._lock_oid_or_raise(v_dest_oid, 'share', false, 'from_hypertable_cutover');   -- #1335 b10: by oid\n", "", 1)],
 )
 MUTATION_SRC["hypertable_cutover_reads_copy_unlocked"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_cutover_reads_copy_unlocked"] = "timescale"
@@ -12848,7 +12849,12 @@ MUTATIONS["hypertable_drain_delta_step_takes_delta_first"] = (
     "a cutover holds SHARE on the copy it holds the delta the swap locks next, and the two deadlock "
     "(tests/timescale/db/64 (E): one of them dies 40P01). One clause: the step's lock on the copy.",
     [("  -- which holds SHARE on the copy from its read of it to the swap and then wants the delta and the source).\n"
-      "  execute format('lock table %I.%I in row exclusive mode', v_nsp, v_dest);\n",
+      "  -- #1335 b10: and by the copy's oid, so the batch below, which names the copy, writes the copy and not a table\n"
+      "  -- that took its name while this waited\n"
+      "  if not pgpm._lock_oid(pgpm._scratch_rel(p_hypertable, 'hypertable_dest'), 'row exclusive', true, v_nsp, v_dest) then\n"
+      "    raise exception 'pg_partition_magician: from_hypertable_drain_delta_step(%): %.% stopped denoting the copy pgpm recorded while this step waited for its lock; refusing to drain into it',\n"
+      "      p_hypertable, quote_ident(v_nsp), quote_ident(v_dest);\n"
+      "  end if;\n",
       "  -- which holds SHARE on the copy from its read of it to the swap and then wants the delta and the source).\n", 1)],
 )
 MUTATION_SRC["hypertable_drain_delta_step_takes_delta_first"] = "pgpm_hypertable/install.sql"
@@ -15084,6 +15090,29 @@ def listing_order():
         )
     return sorted(MUTATIONS.items(), key=lambda kv: -MUTATION_COST.get(kv[0], MUTATION_COST_DEFAULT))
 
+
+# #1335 bullet 10: bench/retire_locks_by_oid.sh runs tests/345. A lock (or an ATTACH, or a DROP) taken by NAME is
+# re-resolved once granted, so a table created under the name while it waited is what it reaches; pgpm._lock_oid
+# asks the lock manager whether the lock is on the oid the caller vouched for.
+MUTATIONS["retire_lock_answer_ignored"] = (
+    "bench/retire_locks_by_oid.sh",
+    "Issue #1335 bullet 10: retire() still takes its SHARE UPDATE EXCLUSIVE lock through _lock_oid, but ignores the "
+    "answer, the shape before the fix: a rename of the partition and a table created under its name while retire() "
+    "waits leave the lock on that table, and retire() goes on to the one-step DROP with no lock on the partition it "
+    "judged. One clause, the refusal's condition. tests/345 parts A and B catch it.",
+    [("  if v_rel is not null and not pgpm._lock_oid(v_rel, 'share update exclusive', true, v_nsp, p_child) then\n",
+      "  if v_rel is not null and pgpm._lock_oid(v_rel, 'share update exclusive', true, v_nsp, p_child) is null then\n", 1)],
+)
+MUTATIONS["regrain_swap_attach_unlocked"] = (
+    "bench/retire_locks_by_oid.sh",
+    "Issue #1335 bullet 10, the sibling site: the regrain swap ATTACHes each copy by the name its oid has when the "
+    "statement is built, without locking the oid first. ATTACH PARTITION re-resolves the name once its lock is "
+    "granted, so a copy renamed aside and a table LIKE it created under its name while the swap waits is what it "
+    "attaches, and the source whose rows only the copy held is dropped. One statement, the lock before the attach. "
+    "tests/345 part C catches it.",
+    [("    perform pgpm._lock_oid_or_raise(v_copy, 'access exclusive', true, format('regrain_step(%s), attaching its copies,', p_parent));\n",
+      "", 1)],
+)
 
 def main() -> int:
     if sys.argv[1:] == ["--late-survivors"]:

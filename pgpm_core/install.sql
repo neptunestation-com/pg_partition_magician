@@ -3851,6 +3851,80 @@ $$;
 
 select pgpm._disown_unvouched_retirements();
 
+-- _lock_oid(): LOCK TABLE, answered by OID (#1335 bullet 10; the shared form of what #422, #1030, #1062 and #1295
+-- each wrote for one site). LOCK TABLE takes a NAME, and resolves it again once the lock is granted, so the lock is
+-- on whatever the name denotes when the wait ends: the relation renamed aside and a table created under its old
+-- name, committed while the lock waited, leave the lock on that table, and every later statement that names the
+-- relation reaches that table too (retire() dropped it, rows and all, and reported the drop). No question of the
+-- name alone can tell, so the lock manager is asked: true only when this backend holds p_mode on p_rel, granted. A
+-- lock so held pins p_rel's name against every rename and drop (each needs ACCESS EXCLUSIVE) to the transaction's
+-- end, so a statement that renders p_rel's name after this returned true reaches p_rel.
+--
+-- Two ways to choose the name. With p_nsp and p_name, the name a caller vouched for: that name is locked, and true
+-- also requires it to denote p_rel under the lock (a schema renamed meanwhile takes no relation lock), so a caller
+-- that goes on naming p_nsp.p_name reaches p_rel. A name that stopped denoting p_rel is not followed: that is the
+-- caller's refusal to make. Without them, p_rel's own name read from pg_class, for a caller that means the relation
+-- wherever it is: a rename during the wait is followed, three tries, and false means it was dropped, or kept
+-- moving. A name that denotes nothing once the wait ends (42P01, 3F000), or a relation LOCK cannot take (42809), is
+-- no lock rather than an error; a missing privilege still raises, as the LOCK TABLE each site used to run did.
+create or replace function pgpm._lock_oid(p_rel regclass, p_mode text, p_only boolean default true,
+                                          p_nsp name default null, p_name name default null)
+returns boolean language plpgsql as $$
+declare v_name_q text;
+begin
+  for v_try in 1 .. 3 loop
+    if p_nsp is not null then
+      v_name_q := format('%I.%I', p_nsp, p_name);
+    else
+      select format('%I.%I', n.nspname, c.relname) into v_name_q
+        from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_rel;
+      if not found then return false; end if;
+    end if;
+    begin
+      execute format('lock table %s %s in %s mode', case when p_only then 'only' else '' end, v_name_q, p_mode);
+    exception when undefined_table or invalid_schema_name or wrong_object_type then
+      null;   -- the name denotes nothing LOCK can take now: no lock on p_rel, answered just below
+    end;
+    if exists (select 1 from pg_catalog.pg_locks l
+                where l.locktype = 'relation' and l.relation = p_rel::oid and l.pid = pg_backend_pid() and l.granted
+                  and l.mode = replace(initcap(p_mode), ' ', '') || 'Lock'
+                  and l.database = (select d.oid from pg_database d where d.datname = current_database())) then
+      return p_nsp is null or to_regclass(v_name_q) = p_rel;
+    end if;
+    exit when p_nsp is not null;
+  end loop;
+  return false;
+end;
+$$;
+
+-- The same, for a caller with nothing to log and no partial work to keep: refuses, before anything is done under the
+-- lock. Raised at the statement that used to be the LOCK TABLE, where a lock_timeout already raises, so it leaves no
+-- state a lock timeout at that point does not.
+create or replace function pgpm._lock_oid_or_raise(p_rel regclass, p_mode text, p_only boolean, p_what text)
+returns void language plpgsql as $$
+begin
+  if not pgpm._lock_oid(p_rel, p_mode, p_only) then
+    raise exception 'pg_partition_magician: % could not take its % lock on % (oid %): the relation was dropped while the call waited, or renamed each time the call locked it by name; refusing to go on without the lock. Re-run it',
+      p_what, p_mode, p_rel, p_rel::oid;
+  end if;
+end;
+$$;
+
+-- DROP TABLE of a relation pgpm identified by oid, through _lock_oid: the DROP takes a name too, and a table created
+-- under it while the DROP waited for its lock was what it dropped. The lock is taken first, and the name rendered
+-- under it. A relation dropped meanwhile is already what the caller wanted; one that kept moving is refused.
+create or replace function pgpm._drop_by_oid(p_rel regclass, p_what text)
+returns void language plpgsql as $$
+begin
+  if pgpm._lock_oid(p_rel, 'access exclusive') then
+    execute format('drop table %s', p_rel::text);
+  elsif exists (select 1 from pg_class c where c.oid = p_rel) then
+    raise exception 'pg_partition_magician: % could not take its lock on % (oid %): renamed each time the call locked it by name; refusing to drop it by a name that may denote another relation. Re-run it',
+      p_what, p_rel, p_rel::oid;
+  end if;
+end;
+$$;
+
 -- retire(): the sanctioned single-partition drop (issue #195) -- retain()'s per-partition body,
 -- public and claim-guarded, so an external assistant (e.g. an archive-then-drop scanner) or several
 -- cooperating ones can drive retirement themselves through the same protocol retain() uses: claim,
@@ -3995,9 +4069,19 @@ begin
   -- which the lock refreshes, so a caller in REPEATABLE READ, whose own snapshot predates the detach, still sees
   -- it; and it stops at a link pending detach, so "attached" here means attached and not pending. pg_inherits
   -- through the statement's snapshot then only tells a pending partition (still listed) from a detached one.
+  --
+  -- AND THE LOCK ON THE RELATION VOUCHED FOR (#1335 bullet 10). Taken by name, it was re-resolved once granted:
+  -- the partition renamed aside and a table created under its name while this waited left the lock on that table,
+  -- the questions below were asked of the unlocked original, and the one-step DROP took the stranger, rows and all.
+  -- So the lock manager is asked (_lock_oid), and a name that stopped denoting v_rel during the wait is refused the
+  -- way the identity check above refuses it: it will not go back to meaning the partition on a later tick.
   v_rel := to_regclass(format('%I.%I', v_nsp, p_child));
-  if v_rel is not null then
-    execute format('lock table only %s in share update exclusive mode', v_rel::text);
+  if v_rel is not null and not pgpm._lock_oid(v_rel, 'share update exclusive', true, v_nsp, p_child) then
+    insert into pgpm.log (parent_table, action, lo, hi, method)
+      values (p_parent, 'fail_retain_identity', r.lo, r.hi,
+              format('%I.%I stopped denoting oid %s while retire() waited for its lock on it (it was renamed or dropped, or its name taken); refusing to detach or drop it',
+                     v_nsp, p_child, v_rel::oid));
+    return false;
   end if;
   v_attached := v_rel is not null
     and exists (select 1 from pg_partition_ancestors(v_rel) a where a.relid = p_parent::oid);
@@ -4268,7 +4352,7 @@ begin
     -- lost on a copy leaves the source whole and this retirement retried next tick, and so the cancel
     -- is recorded before the drop it makes room for.
     perform pgpm._regrain_reclaim(p_parent, p_child, r.lo, r.hi);
-    execute format('drop table %I.%I', v_nsp, p_child);
+    execute format('drop table %s', v_rel::text);   -- #1335 b10: the locked relation, by the name it has under the lock
     -- #1141: from here the chunks' objects are the only copy of these rows; the ledger says so, in the
     -- transaction of the drop, and no coverage reset or reader takes a marked row for a live partition's
     update pgpm.archive_ledger set retired_at = now()
@@ -4411,6 +4495,13 @@ begin
                      p_parent::text, v_nsp, r.child_name,
                      pgpm._encode(cfg.control_kind, r.lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
                      pgpm._encode(cfg.control_kind, r.hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));
+      -- #1335 bullet 10: the ATTACH took the name, re-resolved once its lock was granted, so a table created under
+      -- it while the ATTACH waited (the partition renamed aside) is what it attached. Then the name no longer
+      -- denotes v_now, nor is v_now attached; raised, the attach of the stranger rolls back with this block.
+      if not exists (select 1 from pg_inherits i where i.inhrelid = v_now and i.inhparent = p_parent) then
+        raise exception 'pg_partition_magician: %.% stopped denoting oid % while the re-attach waited for its lock; the relation now under that name was not attached',
+          v_nsp, r.child_name, v_now::oid;
+      end if;
       for v_check in
         select c.conname from pg_constraint c
          where c.conrelid = v_now and c.contype = 'c' and c.conislocal and c.coninhcount = 0
@@ -5764,7 +5855,10 @@ $$;
 create or replace function pgpm._archive_hold_partition(p_parent regclass, p_child_oid oid, p_retiring_at timestamptz)
 returns boolean language plpgsql as $$
 begin
-  execute format('lock table only %s in access share mode', p_parent);
+  -- #1335 bullet 10: by oid, so a parent renamed while this waited is held, never a table that took its name
+  if not pgpm._lock_oid(p_parent, 'access share') then
+    return false;
+  end if;
   return p_child_oid is not null
      and exists (select 1 from pg_partition_ancestors(p_child_oid::regclass) a where a.relid = p_parent::oid);
 end;
@@ -6480,7 +6574,7 @@ begin
     execute format('drop function %s', cfg.regrain_capture_fn_oid::regprocedure::text);
   end if;
   if exists (select 1 from pg_class where oid = cfg.regrain_delta_oid) then
-    execute format('drop table %s', cfg.regrain_delta_oid::regclass::text);
+    perform pgpm._drop_by_oid(cfg.regrain_delta_oid::regclass, format('regrain_step(%s), dropping the previous delta,', p_parent));   -- #1335 b10
   end if;
   execute format('create table %I.%I as select %s from %s with no data', v_nsp, v_delta, v_keycols_q, p_parent::text);
   -- monotonic ordering column so a reconcile pass can batch the oldest captures first: a batch is the
@@ -7138,7 +7232,7 @@ begin
   else
     select c.oid::regclass into v_rel from pg_class c where c.oid = v_oid;
     if v_rel is not null then
-      execute format('drop table %s', v_rel::text);
+      perform pgpm._drop_by_oid(v_rel, format('dropping the regrain copy %I.%I of %s', p_nsp, p_child, p_parent));   -- #1335 b10
     end if;
   end if;
   delete from pgpm.part where parent_table = p_parent and child_name = p_child and not attached;
@@ -9326,6 +9420,9 @@ begin
     p_parent::text, v_ncast, v_lo, v_ncast, v_ncast, v_hi, v_ncast, v_ncast)
   loop
     v_copy := pgpm._regrain_copy_rel(p_parent, r.child_name, 'attach');   -- #707: by recorded oid
+    -- #1335 b10: and locked by it, so the ATTACH below and every statement before it name the copy, not a table that
+    -- took its name while they waited (the parent's ACCESS EXCLUSIVE, from the DETACH, is already held: same order)
+    perform pgpm._lock_oid_or_raise(v_copy, 'access exclusive', true, format('regrain_step(%s), attaching its copies,', p_parent));
     -- #633: the parent's NOT VALID outgoing keys, NOT VALID on the copy, so the ATTACH adopts each as it is.
     -- On PostgreSQL 18 restore_incoming_fks leaves one on a managed table that references another managed
     -- one while an orphan keeps it from validating. The copy is made with the parent's VALIDATED keys only
@@ -9491,7 +9588,7 @@ begin
   -- Taken after, a regrain() queued behind a maintain tick's swap would hold SHARE on the parent while
   -- the swap's DETACH waited on it for ACCESS EXCLUSIVE.
   perform pgpm._regrain_lock(p_parent);
-  execute format('lock table only %s in share mode', p_parent::text);
+  perform pgpm._lock_oid_or_raise(p_parent, 'share', true, 'regrain');   -- #1335 b10: by oid
   loop
     v_status := pgpm.regrain_step(p_parent, v_child, p_target_step, null);
     if v_status like 'swapped:%' then return split_part(v_status, ':', 2)::int; end if;
@@ -11930,7 +12027,7 @@ begin
   -- the LIKE: a NOT VALID or NO INHERIT CHECK, or a generated control column, committed since the preflight
   -- is refused in the preflight's words and rolls the cutover back to the resumable phase-2 state, where it
   -- used to fail the LIKE or the ATTACH raw. Under this phase's lock_timeout, like every wait in it.
-  execute format('lock table %s in access share mode', p_parent::text);
+  perform pgpm._lock_oid_or_raise(p_parent, 'access share', false, 'transmute');   -- #1335 b10: by oid, pinning the name
   perform pgpm._transmute_refuse_generated_control(p_parent, p_control);
   perform pgpm._transmute_refuse_uncarried_constraints(p_parent);
 
@@ -12895,7 +12992,9 @@ begin
     end if;
     begin
       -- #1166: the lock first, then the claim as it stands under it; see the header
-      execute format('lock table %s in access exclusive mode', r.parent_table::text);
+      if not pgpm._lock_oid(r.parent_table, 'access exclusive', false) then   -- #1335 b10: by oid
+        raise sqlstate 'PGPMR';   -- dropped, or kept moving, while the sweep waited: the next tick looks again
+      end if;
       select * into v_claim from pgpm.transmute_inflight
        where parent_table = r.parent_table for update skip locked;
       if not found or pgpm._session_alive(v_claim.owner_pid, v_claim.owner_backend_start) then
@@ -13182,7 +13281,7 @@ declare
   v_seqgrantdefs text[];                              -- #1076: the parent identity sequences' grants, for the restored ones
   v_ra record;                                        -- #656/#670: one identity column's refreshed (next, max, min)
   v_idkinds text[];   -- #308: 'a' (ALWAYS) or 'd' (BY DEFAULT) per v_idcols entry, same order
-  r pgpm.dropped_fk%rowtype; v_cdelta name; v_cfn name; v_cnsp name; v_cfnsp name;
+  r pgpm.dropped_fk%rowtype; v_cdelta name; v_cfn name; v_cnsp name; v_cfnsp name; v_cdelta_reg regclass;
   v_trgdefs text[] := '{}'; v_tdef text;   -- #277
   v_trgnames text[] := '{}'; v_trgstates text[] := '{}';   -- #499: tgname and tgenabled, index-aligned with v_trgdefs
   v_sq record;   -- #573: serial sequences the parent owns, handed back before it is dropped
@@ -13214,6 +13313,10 @@ begin
     raise exception 'pg_partition_magician: untransmute(%) must run in a READ COMMITTED transaction (this one is %): its outside-rows check is repeated under ACCESS EXCLUSIVE and needs a snapshot taken after that lock is granted, which a stricter isolation level cannot provide',
       p_parent, current_setting('transaction_isolation');
   end if;
+  -- #1335 bullet 10: the first lock on the parent, by oid. The gate below is SQL text naming the parent, built once
+  -- and run twice; its first run was the first lock, by name, and a table that took the name while that waited is
+  -- what both runs read. Held to the end, this pins the name every later statement renders.
+  perform pgpm._lock_oid_or_raise(p_parent, 'access share', true, 'untransmute');
 
   select n.nspname, c.relname into v_nsp, v_rel
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
@@ -13221,6 +13324,9 @@ begin
   -- they come from the oids recorded there at prepare (#496), or failing that from the parent's own name,
   -- and both are gone by the time the drop below runs.
   select nsp, delta, fn, fn_nsp into v_cnsp, v_cdelta, v_cfn, v_cfnsp from pgpm._regrain_capture_names(p_parent);
+  if v_cdelta is not null then   -- #1335 b10: dropped at the end by this oid, not by the name
+    v_cdelta_reg := to_regclass(format('%I.%I', v_cnsp, v_cdelta));
+  end if;
   -- #969: and they are dropped at the end, with the copies a regrain in flight leaves, which a table handed to a
   -- new owner may have left with the old one. Asked before anything is changed, so the new owner's untransmute
   -- refuses with the hand-over step rather than failing 'must be owner of table' at that drop.
@@ -13717,7 +13823,7 @@ begin
   -- resolved up front, before the parent went away.
   -- #555: where they are, not the parent's schema; #955: only what pgpm.config recorded, never a namesake;
   -- #1271: each in its OWN schema, since either may have been moved without the other
-  if v_cdelta is not null then execute format('drop table if exists %I.%I', v_cnsp, v_cdelta); end if;
+  if v_cdelta_reg is not null then perform pgpm._drop_by_oid(v_cdelta_reg, 'untransmute, dropping the regrain delta,'); end if;
   if v_cfn is not null then execute format('drop function if exists %I.%I()', v_cfnsp, v_cfn); end if;
 
   -- forget all pgpm state for this table (matched by the dropped parent's oid, which p_parent still

@@ -310,10 +310,12 @@ run_version() {  # <pg_version>
     local -a parallel=() serial=() alone=()
     for f in tests/*.sql; do
       local b; b="$(basename "$f")"; n=$((n + 1))
-      if [ "$b" = "333_snapshot_wait_foreign_floor_holder_test.sql" ]; then
+      if [ "$b" = "333_snapshot_wait_foreign_floor_holder_test.sql" ] || [ "$b" = "345_retire_locks_by_oid_test.sql" ]; then
         # Holds a transaction open in another database for seconds, which holds back the xmin of every
         # snapshot in the cluster, so every other file's regrain swap would defer behind it (#1263). It
         # runs in its own clone like the rest, but after them and one at a time, never beside them.
+        # 345 holds one open while its own regrain swap waits behind it, and that swap waits out every
+        # older snapshot in the cluster, another file's included (#1335 bullet 10).
         alone+=("$n:$b")
         continue
       fi
@@ -1319,6 +1321,7 @@ run_perf() {
     "bench/regrain_not_valid_check.sh pgpm_perf369"
     "bench/check_time_monotonic_session_zone.sh pgpm_perf373"
     "bench/adopt_partition_isolation.sh pgpm_perf370"
+    "bench/retire_locks_by_oid.sh pgpm_perf400"
     "bench/snapshot_wait_foreign_floor_holder.sh pgpm_perf371"
     "bench/install_keeps_surface_grants.sh pgpm_perf375"
     "bench/retirement_mark_needs_dispatch.sh pgpm_perf367"
