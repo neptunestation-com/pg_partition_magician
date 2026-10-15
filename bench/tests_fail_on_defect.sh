@@ -184,6 +184,14 @@ PY
       SEL=" 141 "; F141="$ONLY" ;;
     # pass 11's novel seed S7 (#1226): tests/303, defined with its defect at the end of this file
     303_adopt_partition_test.sql:*|*:tests/303_adopt_partition_test.sql) SEL=" 303 "; F303="$ONLY" ;;
+    # pass 12 G27 (#1285, #1286): tests/72 and 27, defined with their defects at the end of this file
+    72_transmute_attributes_test.sql:*|*:tests/72_transmute_attributes_test.sql) SEL=" 72 "; F72="$ONLY" ;;
+    27_untransmute_test.sql:*|*:tests/27_untransmute_test.sql) SEL=" 27 "; F27="$ONLY" ;;
+    # pass 12 G25: its arms go on the lines below this one (see "HOW A LATER FILE IS ADDED" at the end).
+    # (end of pass 12 G25's arms)
+    #
+    # pass 12 G26: its arms go on the lines below this one.
+    # (end of pass 12 G26's arms)
     *) g19_only "$base" "$src" ||
          { say FAIL "GUARD: the file to judge is one of the files this guard knows" "$ONLY -> '${src}'"; exit 1; } ;;
   esac
@@ -1110,6 +1118,127 @@ insert into public.t303a values (58, 'not seeded');
     say FAIL "fixture: planted the defect: 58 for 55 after part A's retention" "$T303 moved; fix the pattern"; fail=1
   fi
 fi
+
+# pass 12 G27 ------------------------------------------------------------------------------------------------
+# Issues #1285 and #1286: a file that asked only the role that agrees, and one more that counted.
+#   tests/72  asked what the role its policy NAMES reads through the converted parent, as a count of 400 over
+#             five tenants of 400 rows each, and never asked a role the policy does not name: a transmute that
+#             replays the policy TO PUBLIC passed all fifteen assertions, and so would one whose policy admits
+#             another 400 rows;
+#   tests/27  asserted 'all rows are preserved' across an untransmute as count(*) = 100, over rows its own
+#             fixture names (b1 .. b100).
+# The defects, one per site, each judged alone:
+#   policy_replayed_to_public   this checkout's install.sql whose transmute captures every policy's roles as
+#                               `public`: every role reads what the policy admits (tests/72's unnamed role);
+#   policy_replayed_other_rows  this checkout's install.sql whose transmute replays a policy's USING expression
+#                               as `id <= 400`: the named role reads 400 rows, the count the file used to take,
+#                               320 of them another tenant's (tests/72's named role);
+#   tests/27, two defects       spliced into the file right after its untransmute, like tests/267's ROWS site,
+#                               100 rows as before either way: row b17 lost and a stranger in its place under
+#                               the same id; and (PR #1320's round 2) b17 lost and handed back with its id and
+#                               body but created_at 20 seconds later, another key (rt's is (created_at, id)).
+# LIVENESS, behavioural, read from the database each file leaves: what t72_reader and t72_writer read through
+# ev72, as <tenants>:<rows> (the file's two later inserts are tenant 1's, so 402); and rt's rows, with b17
+# and the stranger counted (the file's own later insert makes 101), and b17's seconds after b18.
+# The mutations (bench/mutations/mutate.py), each the site's pre-fix shape:
+#   transmute_rls_unnamed_role_unasked -- tests/72 never asks t72_writer what it reads
+#   transmute_rls_named_role_by_count  -- tests/72's reader back to a count of 400
+#   untransmute_rows_by_count          -- tests/27's 'all rows are preserved' back to count(*) = 100
+#   untransmute_rows_offset_by_minute  -- tests/27's distance behind the newest row rounded to whole minutes
+#
+# HOW A LATER FILE IS ADDED (the files of pass 12 after these two append here, in this shape and nothing else).
+# Each later group has its own marked insertion points, two in the dispatch and two at the end, with unchanged
+# lines between one group's and the next, so two groups' additions never touch the same lines:
+#   1. one arm per file in the dispatch above, between that group's two marker lines:
+#        <base name>:*|*:<path from the repository root>) SEL=" <n> "; F<n>="$ONLY" ;;
+#   2. one block per file at the end of this file, between that group's two marker lines, starting with:
+#        T<n>="<path from the repository root>"; F<n>="${F<n>:-$ROOT/$T<n>}"
+#        [ -z "$ONLY" ] && SEL="${SEL}<n> "
+#        if sel <n>; then ... fi
+#      and inside it a CONTROL (judge_on the clean install, pass), the defect planted with plant (install.sql)
+#      or plant_file (any file), a DEFECT (judge_on, fail) and a LIVENESS read of the defect (expect_v).
+#      A file that needs another track's container leaves the second line out, so it is judged only when
+#      named, as ts33 is (its clean-code run is then a call of this script in that track of test.sh); one of
+#      the timescale track also joins the TCP rule under the dispatch (`if sel ts33`) and judges with a
+#      helper that loads its module, as ts_judge_on does.
+T72="tests/72_transmute_attributes_test.sql"; F72="${F72:-$ROOT/$T72}"
+T27="tests/27_untransmute_test.sql"; F27="${F27:-$ROOT/$T27}"
+[ -z "$ONLY" ] && SEL="${SEL}72 27 "
+
+# ---- tests/72: what each role reads through the converted parent ---------------------------------------------
+# ev72_reads <role>: the tenants and the rows <role> reads through ev72, in the database tests/72 left.
+ev72_reads() {
+  printf '%s' "set role $1; select coalesce(string_agg(distinct tenant::text, ',' order by tenant::text), 'none')
+                       || ':' || count(*) from public.ev72"
+}
+if sel 72; then
+  judge_on "$ROOT/pgpm_core/install.sql" "CONTROL: $T72 passes against the clean install" pass "$F72"
+  expect_v "clean, t72_reader, which the policy names, reads tenant 1" "1:402" "$(ev72_reads t72_reader)"
+  expect_v "clean, t72_writer, which it does not name, reads none" "none:0" "$(ev72_reads t72_writer)"
+  if plant policy_replayed_to_public \
+       "  for v_pol in
+    select polname, polcmd, polpermissive,
+           case when polroles = '{0}'::oid[] then 'public'
+" "  for v_pol in
+    select polname, polcmd, polpermissive,
+           case when true then 'public'
+"; then
+    judge_on "$work/policy_replayed_to_public.sql" "DEFECT: $T72 fails when the policy is replayed TO PUBLIC" fail "$F72"
+    expect_v "defect, t72_writer reads tenant 1's rows too" "1:402" "$(ev72_reads t72_writer)"
+  else
+    say FAIL "fixture: planted the defect: transmute replays every policy to public" "install.sql moved; fix the pattern"; fail=1
+  fi
+  if plant policy_replayed_other_rows \
+       "      case when v_pol.qual is not null then ' using (' || v_pol.qual || ')' else '' end,
+" "      case when v_pol.qual is not null then ' using (id <= 400)' else '' end,
+"; then
+    judge_on "$work/policy_replayed_other_rows.sql" "DEFECT: $T72 fails when the policy admits another 400 rows" fail "$F72"
+    expect_v "defect, t72_reader reads 400 rows of tenants 1 and 2" "1,2:400" "$(ev72_reads t72_reader)"
+  else
+    say FAIL "fixture: planted the defect: transmute replays another USING expression" "install.sql moved; fix the pattern"; fail=1
+  fi
+  # tests/72 leaves its three roles behind (they are cluster-wide, and it cannot know who else holds them);
+  # here nothing else does once the database is gone, and a role another database still uses stays.
+  q -d postgres -q -c "drop database if exists $DB" </dev/null >/dev/null 2>&1
+  q -d postgres -q -c "drop role if exists t72_owner, t72_reader, t72_writer" </dev/null >/dev/null 2>&1
+fi
+
+# ---- tests/27: the rows untransmute hands back, by identity ---------------------------------------------------
+RT27_UNTRANSMUTE="  'untransmute reverses it');
+"
+RT27="select count(*) || '/' || count(*) filter (where body = 'b17')
+        || '/' || count(*) filter (where body = 'not seeded') from public.rt"
+# <seconds b17 is after b18>/<rows named b17>/<rows>: 60 seconds as the fixture wrote them
+RT27_KEY="select extract(epoch from (select created_at from public.rt where body = 'b17')
+                              - (select created_at from public.rt where body = 'b18'))::int
+        || '/' || (select count(*) from public.rt where body = 'b17') || '/' || (select count(*) from public.rt)"
+if sel 27; then
+  judge_on "$ROOT/pgpm_core/install.sql" "CONTROL: $T27 passes against the clean install" pass "$F27"
+  expect_v "clean, rt holds b17 and no stranger, 101 rows" "101/1/0" "$RT27"
+  expect_v "clean, b17 is 60 s after b18, as written" "60/1/101" "$RT27_KEY"
+  if plant_file "$F27" "$work/t27_row_swapped.sql" "$RT27_UNTRANSMUTE" "${RT27_UNTRANSMUTE}delete from public.rt where body = 'b17';
+insert into public.rt (id, created_at, body) values (17, now() - interval '3 days', 'not seeded');
+"; then
+    judge_on "$ROOT/pgpm_core/install.sql" "DEFECT: $T27 fails when rt loses b17 for a stranger" fail "$work/t27_row_swapped.sql"
+    expect_v "defect, rt lost b17 and holds a stranger, 101 rows" "101/0/1" "$RT27"
+  else
+    say FAIL "fixture: planted the defect: a stranger for b17 after rt's untransmute" "$T27 moved; fix the pattern"; fail=1
+  fi
+  if plant_file "$F27" "$work/t27_key_shifted.sql" "$RT27_UNTRANSMUTE" "${RT27_UNTRANSMUTE}delete from public.rt where body = 'b17' returning id, created_at, body \\gset b17_
+insert into public.rt (id, created_at, body) values (:b17_id, :'b17_created_at'::timestamptz + interval '20 seconds', :'b17_body');
+"; then
+    judge_on "$ROOT/pgpm_core/install.sql" "DEFECT: $T27 fails when b17 comes back 20 s off its key" fail "$work/t27_key_shifted.sql"
+    expect_v "defect, b17 is back, 80 s after b18 rather than 60" "80/1/101" "$RT27_KEY"
+  else
+    say FAIL "fixture: planted the defect: b17 back 20 s off its key after rt's untransmute" "$T27 moved; fix the pattern"; fail=1
+  fi
+fi
+
+# pass 12 G25: its blocks go on the lines below this one.
+# (end of pass 12 G25's blocks)
+#
+# pass 12 G26: its blocks go on the lines below this one.
+# (end of pass 12 G26's blocks)
 
 if [ "$fail" = 0 ]; then say PASS "every judged test file fails against its defect" "${SEL# }"
 else say FAIL "every judged test file fails against its defect" "${SEL# }"; fi

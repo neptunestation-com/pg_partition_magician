@@ -33,9 +33,15 @@ select lives_ok(
 select is(
   (select relkind::text from pg_class where oid = 'public.rt'::regclass),
   'r', 'rt is an ordinary (un-partitioned) table again');
+-- By identity (#1286): each row as <id>:<body>:<its exact distance behind the newest row>, the fixture's
+-- b1 .. b100 with ids 1 .. 100, one minute apart. A count of 100 is also what a table that lost rows and
+-- gained as many strangers comes to. The distance is the interval itself, never rounded: the key is
+-- (created_at, id), so a row handed back with its id and body but created_at 20 seconds off is another row.
 select is(
-  (select count(*)::int from public.rt),
-  100, 'all rows are preserved');
+  (select array_agg(id || ':' || body || ':' || (newest - created_at) order by id)
+     from public.rt, (select max(created_at) as newest from public.rt) n),
+  (select array_agg(g || ':b' || g || ':' || make_interval(mins => g - 1) order by g) from generate_series(1, 100) g),
+  'all rows are preserved');
 select is(
   (select count(*)::int from pg_constraint where conrelid = 'public.rt'::regclass and contype = 'p'),
   1, 'the primary key is restored');
