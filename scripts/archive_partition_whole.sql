@@ -65,8 +65,8 @@
 -- particular release), plus pgpm._archive_contract_breach (issue #454; the five-argument form that takes the
 -- parent and holds an id grid's covered_hi to the control column's type, issue #1071), pgpm._native_text (issue
 -- #977) and pgpm._refuse_filtered_reads (issue #873) for the contract check, the ledger's canonical
--- hi and the row-level security refusal, pgpm._max_hi_native (issue #500) for the canonical resume
--- watermark, pgpm._child_nsp (issue #727) for the partition's own schema, pgpm.archive_ledger.retired_at and
+-- hi and the row-level security refusal, pgpm._max_hi_native (issue #500; its two-argument form, issue #1336) for the
+-- canonical resume watermark, pgpm._child_nsp (issue #727) for the partition's own schema, pgpm.archive_ledger.retired_at and
 -- pgpm._over_retired_chunks and pgpm.archive_ledger.child_oid (issue #1141) to leave retired chunks and the partitions over them alone, pgpm._part_detached_by_hand (issue #705) and pgpm._archive_hold_partition to leave a table the operator detached by hand alone, before or during the call (issue #1159), pgpm._archive_unheld_reason to say why a partition pgpm's own retirement detached, or a row with no recorded oid, is not archived, and pgpm._archive_left_reason to say why a range read while a DETACH ... CONCURRENTLY began is not recorded (issue #1259), plus pgpm.part.child_oid for the identity check below (issue #421; added after this
 -- script, so an older core needs that check removed along with the column reference). Not part of pgpm_core/install.sql and never will be without a real feature proposal
 -- and its own issue/PR -- this is scratch space for an operator to paste into a session and run,
@@ -190,10 +190,11 @@ begin
   -- under SQL, DMY), and once the partition was retired _archive_step's #511 discard query cast that lo
   -- under the default DateStyle and raised on every tick (issue #1054). A retired chunk is no live
   -- partition's coverage, as _next_archive_chunk reads it (#1141), and neither is a chunk read from another
-  -- relation of the name (its child_oid is not this relation's).
+  -- relation of the name (its child_oid is not this relation's). Each hi is read on the grid's clock, as there
+  -- (#1336): a hi a pgpm before #977 recorded can name no zone.
   execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null
                     and (child_oid is null or child_oid = %L::oid)',
-                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, r.child_name, v_now::oid)
+                 pgpm._max_hi_native(cfg.control_kind, cfg.partition_tz), p_parent::text, r.child_name, v_now::oid)
     into v_resume_lo;
   v_resume_lo := coalesce(v_resume_lo, r.lo);
 

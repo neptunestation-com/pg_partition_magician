@@ -630,19 +630,25 @@ ARCHIVE_LEDGER_ORPHAN_SWEEP = """  -- COVERAGE UNDER A NAME NO LONGER TRACKED IS
   -- because the step below does not archive a partition over a retired chunk's range. Nor is a chunk whose
   -- relation no longer exists, whoever dropped it: those are marked retired first (pgpm._mark_gone_chunks).
   perform pgpm._mark_gone_chunks(p_parent);
+  -- The overlap is judged on the grid's clock (#1336, _native_bound_key), the parent's rows filtered first (#973),
+  -- and the tracked partitions keyed only when there is an orphan to judge.
   for r in execute format(
-    'select l.child_name, count(*) as chunks, min(l.lo::%1$s)::text as lo, max(l.hi::%1$s)::text as hi
-       from pgpm.archive_ledger l
-      where l.parent_table = %2$L::regclass
-        and l.child_name is not null
-        and l.retired_at is null
-        and not exists (select 1 from pgpm.part p
-                         where p.parent_table = l.parent_table and p.child_name = l.child_name)
-        and exists (select 1 from pgpm.part t
-                     where t.parent_table = l.parent_table
-                       and l.lo::%1$s < t.hi::%1$s and l.hi::%1$s > t.lo::%1$s)
-      group by l.child_name',
-    v_ncast, p_parent::text)
+    'with orphan as materialized (select l.child_name, l.lo, l.hi, pgpm._native_bound_key(%3$L, l.lo, %4$L) as lo_k,
+                                         pgpm._native_bound_key(%3$L, l.hi, %4$L) as hi_k
+                                    from pgpm.archive_ledger l
+                                   where l.parent_table = %2$L::regclass
+                                     and l.child_name is not null
+                                     and l.retired_at is null
+                                     and not exists (select 1 from pgpm.part p
+                                                      where p.parent_table = l.parent_table and p.child_name = l.child_name)),
+          tracked as materialized (select pgpm._native_bound_key(%3$L, t.lo, %4$L) as lo_k,
+                                          pgpm._native_bound_key(%3$L, t.hi, %4$L) as hi_k
+                                     from pgpm.part t where t.parent_table = %2$L::regclass and exists (select 1 from orphan))
+     select o.child_name, count(*) as chunks, min(o.lo::%1$s)::text as lo, max(o.hi::%1$s)::text as hi
+       from orphan o
+      where exists (select 1 from tracked t where o.lo_k < t.hi_k and o.hi_k > t.lo_k)
+      group by o.child_name',
+    v_ncast, p_parent::text, cfg.control_kind, cfg.partition_tz)
   loop
     -- by name, as the query above grouped: a retired chunk under the same name stays (#1141)
     delete from pgpm.archive_ledger where parent_table = p_parent and child_name = r.child_name and retired_at is null;
@@ -10381,7 +10387,7 @@ MUTATIONS["archive_whole_resume_session_render"] = (
     "skip_archive logged).",
     [("""  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null
                     and (child_oid is null or child_oid = %L::oid)',
-                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, r.child_name, v_now::oid)""",
+                 pgpm._max_hi_native(cfg.control_kind, cfg.partition_tz), p_parent::text, r.child_name, v_now::oid)""",
       """  execute format('select max(hi::%s)::text from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null
                     and (child_oid is null or child_oid = %L::oid)',
                  v_ncast, p_parent::text, r.child_name, v_now::oid)""", 1)],
@@ -11894,11 +11900,11 @@ MUTATIONS["archive_retired_orphan_discard"] = (
     "of the retired rows. One site, the discard's retired_at filter, in the query that picks the orphans and in the "
     "DELETE that discards them (either alone leaves the other holding). tests/309 part A catches it (the retired "
     "chunk's row and object are replaced by the late rows).",
-    [("        and l.child_name is not null\n"
-      "        and l.retired_at is null\n"
-      "        and not exists (select 1 from pgpm.part p\n",
-      "        and l.child_name is not null\n"
-      "        and not exists (select 1 from pgpm.part p\n", 1),
+    [("                                     and l.child_name is not null\n"
+      "                                     and l.retired_at is null\n"
+      "                                     and not exists (select 1 from pgpm.part p\n",
+      "                                     and l.child_name is not null\n"
+      "                                     and not exists (select 1 from pgpm.part p\n", 1),
      ("    delete from pgpm.archive_ledger where parent_table = p_parent and child_name = r.child_name and retired_at is null;\n"
       "    insert into pgpm.log (parent_table, action, lo, hi, rows, method)\n"
       "      values (p_parent, 'archive_coverage_reset', r.lo, r.hi, r.chunks,\n",
@@ -11957,11 +11963,11 @@ MUTATIONS["archive_retired_coverage_counted"] = (
     "part B catches it.",
     [("  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null\n"
       "                    and (child_oid is null or child_oid = %L::oid)',\n"
-      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
+      "                 pgpm._max_hi_native(cfg.control_kind, cfg.partition_tz), p_parent::text, p_child,\n"
       "                 to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)\n",
       "  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L\n"
       "                    and (child_oid is null or child_oid = %L::oid)',\n"
-      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
+      "                 pgpm._max_hi_native(cfg.control_kind, cfg.partition_tz), p_parent::text, p_child,\n"
       "                 to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)\n", 1)],
 )
 MUTATIONS["archive_retired_next_chunk_resumes"] = (
@@ -11971,11 +11977,11 @@ MUTATIONS["archive_retired_next_chunk_resumes"] = (
     "past rows nothing has archived. One clause. tests/309 part B catches it.",
     [("  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L and retired_at is null\n"
       "                    and (child_oid is null or child_oid = %L::oid)',\n"
-      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
+      "                 pgpm._max_hi_native(cfg.control_kind, cfg.partition_tz), p_parent::text, p_child,\n"
       "                 to_regclass(format('%I.%I', v_nsp, p_child))::oid)\n",
       "  execute format('select %s from pgpm.archive_ledger where parent_table = %L::regclass and child_name = %L\n"
       "                    and (child_oid is null or child_oid = %L::oid)',\n"
-      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
+      "                 pgpm._max_hi_native(cfg.control_kind, cfg.partition_tz), p_parent::text, p_child,\n"
       "                 to_regclass(format('%I.%I', v_nsp, p_child))::oid)\n", 1)],
 )
 MUTATIONS["archive_retired_reoccupied_archived"] = (
@@ -12036,10 +12042,10 @@ MUTATIONS["archive_successor_coverage_counted"] = (
     "hand reads the dropped relation's chunks as its own coverage and retire() may drop rows nothing archived. One "
     "clause, the oid match. tests/309 part G catches it.",
     [("                    and (child_oid is null or child_oid = %L::oid)',\n"
-      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
+      "                 pgpm._max_hi_native(cfg.control_kind, cfg.partition_tz), p_parent::text, p_child,\n"
       "                 to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)\n",
       "                    ',\n"
-      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
+      "                 pgpm._max_hi_native(cfg.control_kind, cfg.partition_tz), p_parent::text, p_child,\n"
       "                 to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)\n", 1)],
 )
 MUTATIONS["archive_successor_next_chunk_resumes"] = (
@@ -12048,10 +12054,10 @@ MUTATIONS["archive_successor_next_chunk_resumes"] = (
     "hand resumes from the dropped relation's watermark, past rows nothing archived. One clause, the oid match. "
     "tests/309 part G catches it.",
     [("                    and (child_oid is null or child_oid = %L::oid)',\n"
-      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
+      "                 pgpm._max_hi_native(cfg.control_kind, cfg.partition_tz), p_parent::text, p_child,\n"
       "                 to_regclass(format('%I.%I', v_nsp, p_child))::oid)\n",
       "                    ',\n"
-      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
+      "                 pgpm._max_hi_native(cfg.control_kind, cfg.partition_tz), p_parent::text, p_child,\n"
       "                 to_regclass(format('%I.%I', v_nsp, p_child))::oid)\n", 1)],
 )
 MUTATIONS["archive_ledger_oid_unrecorded"] = (
@@ -12277,8 +12283,8 @@ MUTATIONS["native_bound_key_utc"] = (
     "Issue #1264, the plausible-but-wrong fix: a bound with no offset is read as UTC whatever the grid's zone, so on a "
     "grid registered east or west of UTC every session agrees on the wrong instant, and a chunk ending three hours "
     "below a Tokyo grid's partition holds it. One clause, the grid's zone. tests/334 parts A to E catch it.",
-    [("  perform set_config('TimeZone', p_tz, true);\n  return extract(epoch from p_text::timestamptz);\n",
-      "  return extract(epoch from p_text::timestamptz);\n", 1)],
+    [("  perform set_config('TimeZone', p_tz, true);\n  return p_text::timestamptz;\n",
+      "  return p_text::timestamptz;\n", 1)],
 )
 MUTATIONS["native_bound_key_session_datestyle"] = (
     _G1264,
@@ -12297,6 +12303,68 @@ MUTATIONS["native_bound_key_session_abbreviations"] = (
     [("  set datestyle = 'ISO, MDY'\n  set timezone_abbreviations = 'Default'\nas $$\n",
       "  set datestyle = 'ISO, MDY'\nas $$\n", 1)],
 )
+
+# Issue #1336 (bullet 8): every other reader of a stored ledger bound reads it as _over_retired_chunks does, on the
+# grid's clock through pgpm._native_bound_ts, never in the caller's session. One mutation per reader, each putting
+# the session read back at that reader alone. bench/archive_coverage_grid_zone.sh runs tests/346 against the mutant.
+_G1336 = "bench/archive_coverage_grid_zone.sh"
+MUTATIONS["archive_fully_covered_session_zone"] = (
+    _G1336,
+    "Pre-#1336 _archive_fully_covered: the live coverage watermark is max(hi::timestamptz) in the caller's TimeZone, "
+    "so a pre-#977 offset-less hi three hours short of the monolith's hi reads past it from America/New_York and "
+    "retain() there drops the partly archived monolith with a row no strategy was handed. One clause, the "
+    "watermark's zone. tests/346 parts A and F catch it.",
+    [("                 pgpm._max_hi_native(cfg.control_kind, cfg.partition_tz), p_parent::text, p_child,\n"
+      "                 to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)\n",
+      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
+      "                 to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)\n", 1)],
+)
+MUTATIONS["next_archive_chunk_session_zone"] = (
+    _G1336,
+    "Pre-#1336 _next_archive_chunk: the resume watermark reads a pre-#977 offset-less hi in the caller's TimeZone, "
+    "so from UTC or New York it lies past the monolith's hi and the partition reads as already covered (from a zone "
+    "east of the grid's, the next chunk would start past rows nothing archived). One clause, the watermark's zone. "
+    "tests/346 part B catches it.",
+    [("                 pgpm._max_hi_native(cfg.control_kind, cfg.partition_tz), p_parent::text, p_child,\n"
+      "                 to_regclass(format('%I.%I', v_nsp, p_child))::oid)\n",
+      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
+      "                 to_regclass(format('%I.%I', v_nsp, p_child))::oid)\n", 1)],
+)
+MUTATIONS["contradicted_coverage_session_zone"] = (
+    _G1336,
+    "Pre-#1336 _discard_contradicted_coverage: a 0-row chunk's pre-#977 offset-less hi is encoded in the caller's "
+    "TimeZone, so from Pacific/Kiritimati its range is empty, the row it holds is not seen, and retire() drops the "
+    "partition with it. One clause, the hi's read. tests/346 part C catches it.",
+    [("pgpm._encode(cfg.control_kind, pgpm._native_bound_text(cfg.control_kind, r.hi, cfg.partition_tz),",
+      "pgpm._encode(cfg.control_kind, r.hi,", 1)],
+)
+MUTATIONS["archive_orphan_discard_session_zone"] = (
+    _G1336,
+    "Pre-#1336 orphan discard (#511) in _archive_step: the overlap of an untracked name's chunks with a tracked "
+    "partition is judged in the caller's TimeZone, so from Pacific/Kiritimati an orphan whose offset-less hi reaches "
+    "into the monolith on the grid's clock is kept. One value, the zone the bounds are read in. tests/346 part D "
+    "catches it.",
+    [("    v_ncast, p_parent::text, cfg.control_kind, cfg.partition_tz)\n",
+      "    v_ncast, p_parent::text, cfg.control_kind, current_setting('TimeZone'))\n", 1)],
+)
+MUTATIONS["mark_retired_chunks_session_zone"] = (
+    _G1336,
+    "Pre-#1336 _mark_retired_chunks (the upgrade's #1141 pass): a chunk's offset-less hi is read in the install "
+    "session's TimeZone, so from UTC a chunk inside a logged retain_drop on the grid's clock reads past it and is "
+    "left unmarked, for the backfill to attribute to a partition re-created under the name. One value, the zone. "
+    "tests/346 part E catches it.",
+    [("        r.control_kind, r.parent_table::text, r.partition_tz);\n",
+      "        r.control_kind, r.parent_table::text, current_setting('TimeZone'));\n", 1)],
+)
+MUTATIONS["archive_whole_resume_session_zone"] = (
+    _G1336,
+    "Pre-#1336 scripts/archive_partition_whole.sql: the resume watermark reads a pre-#977 offset-less hi in the "
+    "caller's TimeZone, so from America/New_York the strategy is handed the partition from past its hi, not from "
+    "where the legacy chunk ends. One clause, the watermark's zone. tests/346 part F catches it.",
+    [("                 pgpm._max_hi_native(cfg.control_kind, cfg.partition_tz), p_parent::text, r.child_name, v_now::oid)",
+      "                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, r.child_name, v_now::oid)", 1)],
+)
+MUTATION_SRC["archive_whole_resume_session_zone"] = "scripts/archive_partition_whole.sql"
 
 
 # Issue #627: the retain horizon's time part is instant arithmetic, and a retain with no calendar part takes no

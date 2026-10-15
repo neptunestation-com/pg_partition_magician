@@ -2655,7 +2655,11 @@ byte-budget chunker: never archive a whole large partition as one giant operatio
   holds is the same answer from every session: a bound with no offset (one an older install stored
   verbatim from a strategy's `covered_hi`) is read as wall time on the grid's clock, `config.partition_tz`, one
   shaped by a DateStyle as `ISO, MDY`, and a zone abbreviation in the `Default` set (`IST` is Israel's), never in
-  the caller's `TimeZone`, `DateStyle` or `timezone_abbreviations`.
+  the caller's `TimeZone`, `DateStyle` or `timezone_abbreviations`. A live chunk's bounds are read the same way
+  wherever pgpm reads the ledger: the coverage watermark `retire()` drops on and the next chunk resumes from
+  (also in `scripts/archive_partition_whole.sql`), the check of a chunk recorded with 0 rows, the archive step's
+  discard of coverage under an untracked name, and the upgrade that marks retired chunks, so `retain()` from any
+  session drops a partition only once its coverage reaches its `hi` on the grid's clock.
 - `config.archive_batch` (default **1**; `null` = unbounded) caps how many *different* partitions
   one `_archive_step` call touches -- the same shape as `retain_batch` (nullable `int`, `null`
   means unlimited, caps attempts not successes), but a different default, and for a reason worth
