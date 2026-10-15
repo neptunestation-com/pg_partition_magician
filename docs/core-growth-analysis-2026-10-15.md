@@ -36,7 +36,7 @@ next size question starts from a command. Everything below is `v0.6.0` against `
 - function bytes by family of name, with the share that is message or log text;
 - bytes outside every function body, by statement kind;
 - the share of tokens that lie in a window of W tokens that ANOTHER function also contains, with identifiers,
-  literals and numbers wildcarded;
+  literals and numbers wildcarded, and with two specs, that share for the functions the first spec does not have;
 - message text: count, length, and the bytes inside a 12-word phrase that two or more messages share;
 - call shapes and queries written out in full at every site.
 
@@ -89,8 +89,12 @@ Share of tokens that lie in a window of W tokens that another function also cont
 | 16 tokens | 46.4% | 37.7% |
 | 20 tokens | 36.4% | 26.0% |
 
-In absolute terms at 20 tokens: 7,942 shared tokens of 21,790 at 0.6.0; 16,396 of 62,942 on main. Of the 41,152
-tokens added, 8,454 (21%) are in a window another function also has, against 36% of the base. The style of
+The added code measured on its own, not by subtracting one snapshot from another (the two revisions are not
+append-only, so a difference of totals says nothing about which tokens are shared): the 152 functions on main
+whose name 0.6.0 does not have hold 29,253 tokens, 46% of main, and at 20 tokens 6,108 of them (20.9%) lie in a
+window another function also has, against 36.4% for the whole of 0.6.0 and 30.3% for the 80 functions main still
+shares a name with. (`report` prints the split. An existing function's added tokens are counted with its old ones,
+so the split understates the new code slightly, in the direction that favours the user's hypothesis.) The style of
 extracting a small helper per fix (80 functions to 232, median 14 minified lines) did what it was meant to: the new
 code repeats itself less than the old code did. What it could not do is make 150 distinct mechanisms share shape.
 

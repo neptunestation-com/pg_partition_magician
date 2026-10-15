@@ -188,12 +188,11 @@ def functions(src):
             t = TAG_RE.search(lines[j])
             if t:
                 tag = t.group(0)
-                rest = lines[j][t.end():]
-                if tag in rest:  # opened and closed on one line (a one-line sql body)
+                if tag in lines[j][t.end():]:  # opened and closed on one line (a one-line sql body)
                     break
             j += 1
         else:
-            j += 1
+            # j is the line after the opener (the loop advanced past it): the closer may be right there
             while j < n and tag not in lines[j]:
                 j += 1
         end = min(j, n - 1)
@@ -376,11 +375,21 @@ def report(specs):
     for k in rows[-1][1]:
         print(f"  {k:38s} " + "  |  ".join(f"{n:4d} x {b:7,}" for _s, d in rows for n, b in [d[k]]))
     print("== clones: tokens in a window another function also contains, identifiers wildcarded")
+    base_names = {f[0] for f in functions(data[0][1])} if len(data) > 1 else set()
     for w in (12, 16, 20):
         cells = []
         for s, src in data:
-            sh, tot, _per = clones(src, w)
+            sh, tot, per = clones(src, w)
             cells.append(f"{s}: {sh:,}/{tot:,} ({pct(sh, tot)})")
+            if base_names and s != data[0][0]:
+                # the added code itself: functions whose name the first spec does not have, measured
+                # against everything in this spec (an edited function's added tokens stay with its old ones)
+                new = [v for k, v in per.items() if k not in base_names]
+                old = [v for k, v in per.items() if k in base_names]
+                cells.append(f"[new fns {sum(a for a, _ in new):,}/{sum(b for _, b in new):,} "
+                             f"({pct(sum(a for a, _ in new), sum(b for _, b in new))}); "
+                             f"fns also in {data[0][0].split(':')[0]} {sum(a for a, _ in old):,}/{sum(b for _, b in old):,} "
+                             f"({pct(sum(a for a, _ in old), sum(b for _, b in old))})]")
         print(f"  window {w}: " + "   ".join(cells))
     print("== messages (raise text and `message = format` text)")
     for s, src in data:
@@ -457,6 +466,11 @@ return 'done';
 end;
 $$;
 create or replace function pgpm.delta() returns int language sql as $$ select 1 $$;
+create or replace function pgpm.epsilon() returns int language sql as $$
+select 2 $$;
+create or replace function pgpm.zeta() returns int language sql as $$
+select 3;
+$$;
 select pgpm.delta();
 """
 
@@ -471,11 +485,17 @@ def selftest():
     src, _ = minify(FIXTURE, "<fixture>")
     # functions: four, found by tag; gamma's nested $f$ does not end it early; delta is one line
     fs = functions(src)
-    check([f[0] for f in fs] == ["pgpm._regrain_alpha", "pgpm._transmute_beta", "pgpm.gamma", "pgpm.delta"],
+    check([f[0] for f in fs] == ["pgpm._regrain_alpha", "pgpm._transmute_beta", "pgpm.gamma", "pgpm.delta",
+                                 "pgpm.epsilon", "pgpm.zeta"],
           f"functions: names {[f[0] for f in fs]}")
     gamma = next(f for f in fs if f[0] == "pgpm.gamma")
     check("return 'done'" in gamma[3], "functions: a nested $f$ ended pgpm.gamma early")
-    check(fs[-1][1] == fs[-1][2], "functions: the one-line sql body did not end on its own line")
+    by = {f[0]: f for f in fs}
+    check(by["pgpm.delta"][1] == by["pgpm.delta"][2], "functions: the one-line sql body did not end on its own line")
+    # epsilon closes on the line right after its opener; a scanner that skips that line swallows zeta into it
+    check(by["pgpm.epsilon"][2] == by["pgpm.epsilon"][1] + 1 and "select 3" not in by["pgpm.epsilon"][3],
+          f"functions: a closer on the line after the opener was skipped: {by['pgpm.epsilon'][1:3]}")
+    check(by["pgpm.zeta"][2] == by["pgpm.zeta"][1] + 2, f"functions: zeta spans {by['pgpm.zeta'][1:3]}")
     # statements: the whole raise, continuation line included, not the raise line alone
     st = statements(src)
     first = next(m for m in re.finditer(r"(?im)^\s*raise exception", src))
@@ -493,7 +513,7 @@ def selftest():
     check(sum(v for k, v in c0.items() if k != "total") == c0["total"], "bytes: classes do not sum to total")
     # families: alpha and beta land in their families, gamma and delta in other, and the sum is every function byte
     fam = families(src)
-    check(set(fam) == {"regrain", "transmute/untransmute", "other"} and fam["other"][2] == 2, f"families: {fam}")
+    check(set(fam) == {"regrain", "transmute/untransmute", "other"} and fam["other"][2] == 4, f"families: {fam}")
     check(sum(v[0] for v in fam.values()) == sum(len(f[3]) for f in fs), "families: bytes do not sum to function bytes")
     check(fam["regrain"][1] > 0 and fam["transmute/untransmute"][1] > 0, "families: message share missing")
     # toplevel: the drop, the alter, the create table and the install-time select, none of the bodies
