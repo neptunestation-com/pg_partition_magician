@@ -90,7 +90,12 @@ share the defect; does the guard assert the contract or an implementation spelli
 back THIS defect (the acceptance reproduction fails on the mutant) or a cousin; and does a CAVEAT in the body
 hold up: a race the body calls "tiny" or "not instrumentable" is a claim to build, not a disclaimer to accept
 (the lever phase before pass 10 accepted #1049's and #1053's "tiny race against a transaction's first write"
-and the backlog verification then built it as a Tier 1, #1057 bullet 3). Each path you can make fail
+and the backlog verification then built it as a Tier 1, #1057 bullet 3). Build at least one SIBLING site whatever you expect: from the PR's sites
+table, the left site (or, with none left, the covered site) most likely to share the defect, or from your own
+grep of the three modules for the mechanism's shape when the body has no table; a sibling the head passes is a
+claim that classifies `not_reproduced`, and that is the evidence the table is right (lessons #1341 item 21:
+both Tier 1 of the pass-12 backlog were siblings of a site that phase fixed, and no verifier had built one).
+Your `reason` names every sibling built and its class. Each path you can make fail
 is a claim directory `<claims>/V/V-NN/` under the reproduction contract (it will be classified against the
 base and the head: a path that fails on both is `pre_existing` in the PR's surface). Write the verdict as
 `{"closing": {"verdict": "holds" | "partial", "reason": "...", "claims": ["V-01", ...]}}`: `partial` when a

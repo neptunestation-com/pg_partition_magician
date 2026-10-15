@@ -377,7 +377,10 @@ the base, pass on the head, and fail again on the mutant, since a mutation that 
 reproduction fail has put back some defect but not this one, and the guard it certifies is not a guard for
 this fix. A claims verifier then tries to disprove the closing claim by reaching the issue's consequence
 through a path the diff does not cover (a sibling call site, the resume or upgrade path, the other module's
-copy of the mechanism), and builds every caveat the body states, since a race the body calls tiny is a claim and
+copy of the mechanism), builds at least one sibling site of the mechanism from the fixer's sites table
+(every fixer greps the three modules for the mechanism's other sites and the body names each one, covered or
+left; both Tier 1 of the pass-12 backlog were siblings of a site that phase fixed, lessons #1341 item 21), and
+builds every caveat the body states, since a race the body calls tiny is a claim and
 not a disclaimer (the trial accepted one and the backlog verification then built it as a Tier 1); each path it
 can make fail is a claim. The other half is a finder under the
 fresh-surface lens and one more, on a slice that is the units the diff touches plus the units that call them

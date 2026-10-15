@@ -64,6 +64,9 @@ coordinator judges its claims worth the budget (a tooling PR that changes what a
   (`gh issue list --state open --label bug --limit 200 --json number,title,body > $W/open.json`). Its job is
   to disprove the PR's closing claim: reach the issue's consequence through a path the diff does not cover,
   and build every caveat the body states (a race it calls tiny is a claim, not a disclaimer: #1057 bullet 3).
+  It builds at least one sibling site of the mechanism, from the PR's sites table (the fixer's step 0) or its
+  own grep when the body has none, and its verdict's reason names each sibling built (lessons #1341 item 21).
+  A body with no sites table on a PR that touches an install file is itself a finding for the comment.
 
 ## 3. Classify (mechanical)
 

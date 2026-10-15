@@ -54,7 +54,9 @@ four of the five tier-9 PRs, each a rule landed late, met code that arrived afte
 re-anchor round), and its fixer still re-runs the track on the rebased head before the report; when several fixers must extend
 one guard script's dispatch, one fixer owns the dispatch and the others append under it; a retirement fixture clears any failed-dispatch mark
 it leaves before its section ends, since one detach in flight is database-wide and a leftover mark makes every later
-referenced retirement in the same database wait silently (tests/327 part C clears part B's, lever phase before pass 12). Record
+referenced retirement in the same database wait silently (tests/327 part C clears part B's, lever phase before pass 12); and every brief names the mechanism's SHAPE for
+the fixer's sibling sweep (`fixer.md` step 0), not only the function the finding named, since the PR body's sites
+table is what the claims verifier builds a sibling from (lessons #1341 item 21). Record
 each PR the fixers report in `$WORK/prs.tsv` with its test, guard and mutation names.
 
 ## 3. Gate, then land in order
