@@ -13,7 +13,7 @@
 # the mutations have a guard the discriminate track can run against the mutant, in the shape of
 # bench/retain_recall_moved_parent.sh.
 #
-# TEN mutations are required to fail against it (bench/mutations/mutate.py):
+# THIRTEEN mutations are required to fail against it (bench/mutations/mutate.py):
 #   retire_lock_answer_ignored    -- retire() takes the lock through _lock_oid and ignores the answer, the
 #                                    pre-fix shape: the partition is dropped with no lock on it while the
 #                                    stranger holds the name (part A), and a rename with nothing in its place
@@ -26,11 +26,14 @@
 #                                    retirement's mark cleared (part D).
 #   lock_oid_vanished_name_null   -- _lock_oid answers NULL, not false, when its vouched name denotes nothing
 #                                    under a lock already held, and callers read that as not refused (part E).
-#   retire_drop_unverified, retire_crossing_unverified, write_block_create_unverified, write_block_enable_unverified,
-#   untransmute_gate_unverified, regrain_reconcile_unverified
-#                                 -- the check after each statement that names a relation and then waits for a
-#                                    lock of its own is gone, so a schema renamed during the wait sends it to a
-#                                    namesake (parts F, G, H, H2, J and K).
+#   retire_drop_unverified, delete_checked_unverified, truncate_checked_unverified, write_block_create_unverified,
+#   write_block_enable_unverified, regrain_rename_unverified, scratch_owner_follow_unverified
+#                                 -- the check of a write's EFFECT on the vouched oid is gone, so a schema renamed
+#                                    during the statement's lock wait, swapped back or not inside it, sends it to a
+#                                    namesake (parts F, G, G2, L, L2, H, H2, N and O).
+#   untransmute_gate_named_before_lock, regrain_reconcile_unlocked
+#                                 -- a read made through a name rendered before its wait, or without the lock by
+#                                    oid that keeps it from waiting (parts J and K).
 #
 # Runs on the plain core image (pgtap, dblink and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path
 # inside the container, for a worktree mounted somewhere other than /repo.

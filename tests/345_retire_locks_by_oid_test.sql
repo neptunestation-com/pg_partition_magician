@@ -30,19 +30,33 @@
 --           holds the lock, it answers false, never null (a null reads as "not refused" to every caller).
 -- A lock pins a relation's own name, never its schema's (ALTER SCHEMA ... RENAME takes no relation lock), so a
 -- statement that names a relation and then waits for a lock of its own reaches whatever a schema swap committed
--- during the wait put under that name. Each of these is checked after it ran (pgpm._reached_or_raise):
+-- during the wait put under that name. A write is checked after it ran by its EFFECT on the relation's oid (the
+-- name can be swapped back inside the statement, during a wait of its own); a read is made after a lock by oid,
+-- through the name rendered under it:
 --   PART F  retire()'s one-step DROP, waiting behind a reader: false, fail_retain_drop, the namesake and the partition
 --           both standing, the pgpm.part row kept.
 --   PART G  retire()'s crossing DELETE, waiting behind a SHARE holder: fail_retain_crossing, the namesake keeps both
 --           rows, nothing deleted from the parent either.
+--   PART G2 the same DELETE, the schema swapped away during its lock wait and back during its RI check, so the name
+--           denotes the parent again when it ends: judged by the rows it deleted, fail_retain_crossing, the namesake
+--           keeps both rows.
 --   PART H  the write block's CREATE TRIGGER, waiting behind a writer: retire() refuses, the namesake carries no
 --           trigger and keeps its rows, the partition stands with the row written meanwhile.
 --   PART H2 the same for the ENABLE ALWAYS of a block disabled by hand, against a namesake carrying a trigger of
 --           pgpm's name: retire() refuses, the namesake's trigger left disabled.
---   PART J  untransmute's gate, built before its ACCESS EXCLUSIVE wait: refused under the lock, the forward row
---           written meanwhile still served.
---   PART K  the regrain reconcile, waiting for a copy, the delta in a schema of its own: refused, the namesake copy
---           keeps its row of the captured key, the delta keeps the change.
+--   PART J  untransmute's gate, asked again under its ACCESS EXCLUSIVE lock through the parent's name rendered
+--           then: refused at the door, the forward row written meanwhile still served.
+--   PART K  the regrain reconcile, waiting for a copy, the delta in a schema of its own: the copy and the source
+--           locked by oid first and followed, so the change reaches the copy pgpm recorded and the namesake copy keeps
+--           its row of the captured key.
+--   PART L  regrain_cancel's TRUNCATE of the delta, waiting behind a captured write: refused, judged by the delta's
+--           relfilenode; the namesake keeps its rows, the delta its captured key.
+--   PART L2 the same, the schema swapped away during the wait and back inside the TRUNCATE (the namesake's BEFORE
+--           TRUNCATE trigger waits): refused all the same.
+--   PART N  regrain_step's RENAME of a one-step source, waiting behind a writer: refused, judged by the name the
+--           source's oid carries; the namesake keeps its name, pgpm.part its row.
+--   PART O  the scratch owner hand-over's ALTER ... OWNER, waiting behind a reader: refused, judged by the owner
+--           the scratch relation's oid carries; the namesake stays its creator's.
 -- Every concurrent order is set by a lock queue: a second session ('h345') holds ACCESS EXCLUSIVE on the target, a
 -- third ('r345') makes the call, and a server-side poll (snapshot cleared every iteration) sees the call waiting
 -- for its lock on the target's oid before the holder renames, creates and commits.
@@ -53,7 +67,7 @@
 create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
-select plan(74);
+select plan(103);
 
 -- the call in session r345 is waiting, ungranted, for p_mode on p_oid: one statement per sample, snapshot cleared
 create function pg_temp.waits_for(p_oid oid, p_mode text) returns boolean language plpgsql as $$
@@ -81,6 +95,7 @@ begin
 end $$;
 
 select dblink_connect('h345', format('dbname=%s user=postgres', current_database())) as h \gset
+select dblink_connect('g345', format('dbname=%s user=postgres', current_database())) as g \gset
 select dblink_connect('r345', format('dbname=%s user=postgres', current_database())) as r \gset
 select set_config('pgpm345.r_pid', (select pid::text from dblink('r345', 'select pg_backend_pid()') as t(pid int)), false) as r_pid \gset
 
@@ -108,6 +123,14 @@ create table public.g345_ref (id bigint, ts timestamptz, foreign key (id, ts) re
 insert into public.g345_ref select id, ts from g345s.r where id = 2;
 call pgpm.transmute('g345s.r', 'ts', interval '1 second', p_obtain => 4, p_retain => interval '1 second', p_paused => true, p_incoming_fks => 'preserve');
 select pgpm.restore_incoming_fks('g345s.r') as g_restored \gset
+create schema g2345s;
+create table g2345s.r (id bigint, ts timestamptz not null, payload text, primary key (id, ts));
+insert into g2345s.r
+select g, date_trunc('second', clock_timestamp()) - interval '10 seconds' + make_interval(secs => g / 1000.0), 'g' from generate_series(1, 3) g;
+create table public.g2345_ref (id bigint, ts timestamptz, foreign key (id, ts) references g2345s.r (id, ts) on delete cascade);
+insert into public.g2345_ref select id, ts from g2345s.r where id = 2;
+call pgpm.transmute('g2345s.r', 'ts', interval '1 second', p_obtain => 4, p_retain => interval '1 second', p_paused => true, p_incoming_fks => 'preserve');
+select pgpm.restore_incoming_fks('g2345s.r') as g2_restored \gset
 create schema h345s;
 create table h345s.r (id bigint, ts timestamptz not null, payload text, primary key (id, ts));
 insert into h345s.r
@@ -119,7 +142,7 @@ insert into w345s.r
 select g, clock_timestamp() - interval '10 seconds' + make_interval(secs => g / 1000.0), 'w' from generate_series(1, 3) g;
 call pgpm.transmute('w345s.r', 'ts', interval '1 second', p_obtain => 4, p_retain => interval '1 second', p_paused => true);
 select max(p.hi) as fgh_hi from pgpm.part p join pgpm.config c on c.parent_table = p.parent_table and c.monolith_oid = p.child_oid
- where p.parent_table in ('f345s.r'::regclass, 'g345s.r'::regclass, 'h345s.r'::regclass, 'w345s.r'::regclass) \gset
+ where p.parent_table in ('f345s.r'::regclass, 'g345s.r'::regclass, 'h345s.r'::regclass, 'w345s.r'::regclass, 'g2345s.r'::regclass) \gset
 
 select p.child_name as a_name, p.hi as a_hi, p.child_oid as a_oid from pgpm.part p
   join pgpm.config c on c.parent_table = p.parent_table and c.monolith_oid = p.child_oid
@@ -312,9 +335,9 @@ select is(pg_temp.ids_of(:'f_oid'), array[1, 2, 3]::bigint[], 'F: the partition,
 select ok(exists (select 1 from pgpm.part where parent_table = :'f_parent'::oid and child_oid = :'f_oid'::oid),
   'F: and keeps its pgpm.part row');
 select ok(exists (select 1 from pgpm.log where id > :f_mark and parent_table = :'f_parent'::oid and action = 'fail_retain_drop'
-                   and method like '%dropped another relation than %')
+                   and method like '%dropping the partition, reached another relation than the one it identified%')
           and not exists (select 1 from pgpm.log where id > :f_mark and parent_table = :'f_parent'::oid and action = 'retain_drop'),
-  'F: logged fail_retain_drop saying the DROP reached another relation, and no retain_drop');
+  'F: logged fail_retain_drop saying the DROP reached another relation than the partition, and no retain_drop');
 
 -- ======================= (G) a schema renamed while retire()'s crossing DELETE waits for its lock ===============
 -- On the referenced path retire() deletes the referenced rows of the retiring range through the parent's name; the
@@ -345,9 +368,12 @@ select is(pg_temp.ids_of(:'g_squat'), array[2, 9]::bigint[], 'G: the stranger ke
 select is((select array_agg(id order by id) from public.g345_ref), array[2]::bigint[],
   'G: and the referencing row is untouched: nothing was deleted from the parent either');
 select ok(exists (select 1 from pgpm.log where id > :g_mark and parent_table = :'g_parent'::oid and action = 'fail_retain_crossing'
-                   and method like '%went through the name %')
+                   and method like '%deleting the crossing keys, reached another relation than the one it identified%')
           and not exists (select 1 from pgpm.log where id > :g_mark and parent_table = :'g_parent'::oid and action = 'retain_crossing'),
-  'G: logged fail_retain_crossing naming the name it went through, and no retain_crossing');
+  'G: logged fail_retain_crossing saying the DELETE reached another relation, and no retain_crossing');
+-- a retirement this part's call may have marked (it does when the DELETE is not refused) is cleared, so the next
+-- part's retire() does not yield to it as the older one in flight
+update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null where parent_table = :'g_parent'::oid;
 
 -- ======================= (H) a schema renamed while the write block's CREATE TRIGGER waits for its lock ==========
 -- retire() puts the write block on before it drops; CREATE TRIGGER waits for SHARE ROW EXCLUSIVE behind a writer.
@@ -366,7 +392,7 @@ select dblink_exec('h345', format('insert into h345s.%I values (7, now(), %L), (
 select o as h_squat from dblink('h345', format('select %L::regclass::oid', 'h345s.' || quote_ident(:'h_name'))) as t(o oid) \gset
 select dblink_exec('h345', 'commit') as h8 \gset
 select count(*) as h_rows from dblink_get_result('r345', false) as t(x text) \gset
-select ok(dblink_error_message('r345') like '%the write block''s CREATE TRIGGER went through the name %',
+select ok(dblink_error_message('r345') like '%the write block''s CREATE TRIGGER reached another relation than the one it identified%',
   'H: retire() refuses, saying the write block''s CREATE TRIGGER reached another relation');
 select count(*) as h_drained from dblink_get_result('r345', false) as t(x text) \gset
 select ok(:'h_squat'::oid <> :'h_oid'::oid, 'LIVENESS: H: the partition''s name denotes the stranger now');
@@ -400,7 +426,7 @@ select dblink_exec('h345', format('alter table w345s.%I disable trigger pgpm_wri
 select o as w_squat from dblink('h345', format('select %L::regclass::oid', 'w345s.' || quote_ident(:'w_name'))) as t(o oid) \gset
 select dblink_exec('h345', 'commit') as w10 \gset
 select count(*) as w_rows from dblink_get_result('r345', false) as t(x text) \gset
-select ok(dblink_error_message('r345') like '%the write block''s ENABLE ALWAYS went through the name %',
+select ok(dblink_error_message('r345') like '%the write block''s ENABLE ALWAYS reached another relation than the one it identified%',
   'H2: retire() refuses, saying the write block''s ENABLE ALWAYS reached another relation');
 select count(*) as w_drained from dblink_get_result('r345', false) as t(x text) \gset
 select ok(:'w_squat'::oid <> :'w_oid'::oid, 'LIVENESS: H2: the partition''s name denotes the namesake now');
@@ -410,8 +436,9 @@ select is(pg_temp.ids_of(:'w_oid'), array[1, 2, 3, 4]::bigint[],
   'H2: the partition stands with ids 1..3 and the row written while retire() waited, 4');
 
 -- ======================= (J) a schema renamed while untransmute's gate waits for its lock ========================
--- The gate is SQL text naming the parent, built before the lock and asked again under it; a forward row written
--- while it waits is outside the monolith, and the door must stay shut.
+-- The gate reads through the parent's name, asked once before the lock and again under it; a forward row written
+-- while it waits is outside the monolith, and the door must stay shut. Rendered under the lock, the second asking
+-- waits for nothing of the parent, so it reads the parent wherever its schema now is.
 create schema j345s;
 create table j345s.t (id bigint primary key, payload text);
 insert into j345s.t select g, 'j' from generate_series(1, 250) g;
@@ -427,8 +454,8 @@ select dblink_exec('h345', 'create schema j345s') as j5 \gset
 select dblink_exec('h345', 'create table j345s.t (id bigint, payload text)') as j6 \gset
 select dblink_exec('h345', 'commit') as j7 \gset
 select count(*) as j_rows from dblink_get_result('r345', false) as t(x text) \gset
-select ok(dblink_error_message('r345') like '%untransmute(%), asking the gate under its lock, went through the name %',
-  'J: untransmute refuses, saying the gate under its lock read another relation');
+select ok(dblink_error_message('r345') like '%cannot untransmute % -- rows now live outside the original monolith%',
+  'J: untransmute refuses at its door: the gate, asked under its lock through the parent''s name rendered then, saw the forward row');
 select count(*) as j_drained from dblink_get_result('r345', false) as t(x text) \gset
 select ok(exists (select 1 from pg_partitioned_table where partrelid = :'j_parent'::oid),
   'J: the table is still partitioned and managed');
@@ -477,15 +504,199 @@ select dblink_exec('h345', format('insert into k345s.%I values (25, %L)', :'k_sr
 select o as k_squat from dblink('h345', format('select %L::regclass::oid', 'k345s.' || quote_ident(:'k_copy_name'))) as t(o oid) \gset
 select dblink_exec('h345', 'commit') as k10 \gset
 select count(*) as k_rows from dblink_get_result('r345', false) as t(x text) \gset
-select ok(dblink_error_message('r345') like '%the regrain reconcile of % went through the name %',
-  'K: the tick refuses, saying the reconcile reached another relation');
+select is(dblink_error_message('r345'), 'OK',
+  'K: the tick completes: the reconcile locked the copy and the source by oid and followed them to the renamed schema');
 select count(*) as k_drained from dblink_get_result('r345', false) as t(x text) \gset
 select ok(:'k_squat'::oid <> :'k_copy'::oid, 'LIVENESS: K: the copy''s name denotes the namesake now');
 select is((select array_agg(payload) from k345s.:"k_copy_name"), array['stranger copy'],
   'K: the namesake copy keeps its row 25: the batch''s key deleted nothing from it');
-select ok((select count(*) from k345d.:"k_delta_name" where id = 25) > 0,
-  'K: and the delta keeps the captured insert, for the next tick to apply to the copy pgpm recorded');
+select is(pg_temp.ids_of(:'k_copy') @> array[25::bigint], true,
+  'K: the copy pgpm recorded received the captured insert of id 25');
+
+-- ======================= (G2) the crossing DELETE, the schema swapped away during its wait and back inside it ======
+-- Swapped back while the DELETE, executing on the namesake, waits for its RI check (ROW SHARE on the namesake's
+-- referencing table, behind an ACCESS EXCLUSIVE holder): the name denotes the parent again when the DELETE ends, so
+-- only the rows it deleted can tell (PR #1353 round 2, P1-02).
+select p.child_name as g2_name from pgpm.part p
+  join pgpm.config c on c.parent_table = p.parent_table and c.monolith_oid = p.child_oid
+ where p.parent_table = 'g2345s.r'::regclass \gset
+select 'g2345s.r'::regclass::oid as g2_parent \gset
+select ts as g2_key_ts from g2345s.r where id = 2 \gset
+select max(id) as g2_mark from pgpm.log \gset
+select dblink_exec('h345', 'begin') as g21 \gset
+select dblink_exec('h345', 'lock table only g2345s.r in share mode') as g22 \gset
+select dblink_send_query('r345', format('select pgpm.retire(%L, %L)::text', 'g2345s.r', :'g2_name')) as g23 \gset
+select ok(pg_temp.waits_for(:'g2_parent'::oid, 'RowExclusiveLock'),
+  'LIVENESS: G2: the crossing DELETE waits for ROW EXCLUSIVE on the parent''s oid, behind the SHARE holder');
+select dblink_exec('g345', 'alter schema g2345s rename to g2345s_aside') as g24 \gset
+select dblink_exec('g345', 'create schema g2345s') as g25 \gset
+select dblink_exec('g345', 'create table g2345s.r (id bigint, ts timestamptz, payload text, primary key (id, ts))') as g26 \gset
+select dblink_exec('g345', 'create table g2345s.ref2 (id bigint, ts timestamptz, foreign key (id, ts) references g2345s.r (id, ts))') as g27 \gset
+select dblink_exec('g345', format('insert into g2345s.r values (2, %L, %L), (9, %L, %L)', :'g2_key_ts', 'stranger', :'g2_key_ts'::timestamptz + interval '1 hour', 'stranger')) as g28 \gset
+select o as g2_squat from dblink('g345', 'select ''g2345s.r''::regclass::oid') as t(o oid) \gset
+select o as g2_ref2 from dblink('g345', 'select ''g2345s.ref2''::regclass::oid') as t(o oid) \gset
+select dblink_exec('g345', 'begin') as g29 \gset
+select dblink_exec('g345', 'lock table g2345s.ref2 in access exclusive mode') as g210 \gset
+select dblink_exec('h345', 'commit') as g211 \gset
+select ok(pg_temp.waits_for(:'g2_ref2'::oid, 'RowShareLock'),
+  'LIVENESS: G2: the DELETE, executing on the namesake, waits for its RI check on the namesake''s referencing table');
+alter schema g2345s rename to g2345s_squat;
+alter schema g2345s_aside rename to g2345s;
+select ok('g2345s.r'::regclass::oid = :'g2_parent'::oid, 'LIVENESS: G2: the name denotes the parent again, inside the DELETE');
+select dblink_exec('g345', 'commit') as g212 \gset
+select count(*) as g2_rows from dblink_get_result('r345', false) as t(x text) \gset
+select count(*) as g2_drained from dblink_get_result('r345', false) as t(x text) \gset
+select is(pg_temp.ids_of(:'g2_squat'), array[2, 9]::bigint[], 'G2: the namesake keeps both its rows, the one on the crossing key too');
+select ok(exists (select 1 from pgpm.log where id > :g2_mark and parent_table = :'g2_parent'::oid and action = 'fail_retain_crossing'
+                   and method like '%deleting the crossing keys, reached another relation than the one it identified%')
+          and not exists (select 1 from pgpm.log where id > :g2_mark and parent_table = :'g2_parent'::oid and action = 'retain_crossing'),
+  'G2: logged fail_retain_crossing, judged by the rows the DELETE took, and no retain_crossing');
+update pgpm.part set retiring_at = null, retiring_oid = null, detach_dispatched_oid = null where parent_table = :'g2_parent'::oid;
+
+-- ======================= (L) regrain_cancel's TRUNCATE of the delta, a schema renamed during its wait ===============
+create schema l345s;
+create table l345s.t (id bigint primary key, payload text);
+insert into l345s.t select g * 10, 'l' from generate_series(1, 99) g;
+call pgpm.transmute('l345s.t', 'id', 1000, p_paused => true);
+insert into l345s.t values (20000, 'frontier');
+select is(pgpm.regrain_step('l345s.t', (select child_name from pgpm.part
+    where parent_table = 'l345s.t'::regclass and attached and lo = '0'), '500', 1000), 'prepared',
+  'fixture: L''s regrain is prepared: capture and its delta exist');
+select regrain_delta_oid as l_delta, (select relname from pg_class where oid = regrain_delta_oid) as l_delta_name
+  from pgpm.config where parent_table = 'l345s.t'::regclass \gset
+insert into l345s.t values (25, 'captured');
+select dblink_exec('h345', 'begin') as l1 \gset
+select dblink_exec('h345', format('lock table l345s.%I in row exclusive mode', :'l_delta_name')) as l2 \gset
+select dblink_send_query('r345', $$select pgpm.regrain_cancel('l345s.t')::text$$) as l3 \gset
+select ok(pg_temp.waits_for(:'l_delta'::oid, 'AccessExclusiveLock'),
+  'LIVENESS: L: regrain_cancel''s TRUNCATE waits for ACCESS EXCLUSIVE on the delta''s oid, behind the holder');
+select dblink_exec('h345', 'alter schema l345s rename to l345s_aside') as l4 \gset
+select dblink_exec('h345', 'create schema l345s') as l5 \gset
+select dblink_exec('h345', format('create table l345s.%I (id bigint)', :'l_delta_name')) as l6 \gset
+select dblink_exec('h345', format('insert into l345s.%I values (1), (2)', :'l_delta_name')) as l7 \gset
+select o as l_squat from dblink('h345', format('select %L::regclass::oid', 'l345s.' || quote_ident(:'l_delta_name'))) as t(o oid) \gset
+select dblink_exec('h345', 'commit') as l8 \gset
+select count(*) as l_rows from dblink_get_result('r345', false) as t(x text) \gset
+select ok(dblink_error_message('r345') like '%regrain_cancel(%), emptying the delta, reached another relation than the one it identified%',
+  'L: regrain_cancel refuses, saying its TRUNCATE reached another relation');
+select count(*) as l_drained from dblink_get_result('r345', false) as t(x text) \gset
+select ok(:'l_squat'::oid <> :'l_delta'::oid, 'LIVENESS: L: the delta''s name denotes the namesake now');
+select is(pg_temp.ids_of(:'l_squat'), array[1, 2]::bigint[], 'L: the namesake keeps its rows 1 and 2');
+select ok((select count(*) from l345s_aside.:"l_delta_name" where id = 25) > 0, 'L: the delta pgpm recorded keeps its captured key 25');
+
+-- ======================= (L2) the same TRUNCATE, the schema swapped away during its wait and back inside it =========
+-- The namesake carries a BEFORE TRUNCATE trigger that waits on a table another session holds: the TRUNCATE has
+-- resolved the namesake when the schemas are swapped back, so only the delta's own relfilenode can tell.
+create schema m345s;
+create table m345s.t (id bigint primary key, payload text);
+insert into m345s.t select g * 10, 'm' from generate_series(1, 99) g;
+call pgpm.transmute('m345s.t', 'id', 1000, p_paused => true);
+insert into m345s.t values (20000, 'frontier');
+select is(pgpm.regrain_step('m345s.t', (select child_name from pgpm.part
+    where parent_table = 'm345s.t'::regclass and attached and lo = '0'), '500', 1000), 'prepared',
+  'fixture: L2''s regrain is prepared');
+select regrain_delta_oid as m_delta, (select relname from pg_class where oid = regrain_delta_oid) as m_delta_name
+  from pgpm.config where parent_table = 'm345s.t'::regclass \gset
+insert into m345s.t values (25, 'captured');
+create table public.m345_gate (x int);
+select 'public.m345_gate'::regclass::oid as m_gate \gset
+select dblink_exec('h345', 'begin') as m1 \gset
+select dblink_exec('h345', format('lock table m345s.%I in row exclusive mode', :'m_delta_name')) as m2 \gset
+select dblink_send_query('r345', $$select pgpm.regrain_cancel('m345s.t')::text$$) as m3 \gset
+select ok(pg_temp.waits_for(:'m_delta'::oid, 'AccessExclusiveLock'),
+  'LIVENESS: L2: regrain_cancel''s TRUNCATE waits for ACCESS EXCLUSIVE on the delta''s oid, behind the holder');
+select dblink_exec('g345', 'alter schema m345s rename to m345s_aside') as m4 \gset
+select dblink_exec('g345', 'create schema m345s') as m5 \gset
+select dblink_exec('g345', format('create table m345s.%I (id bigint)', :'m_delta_name')) as m6 \gset
+select dblink_exec('g345', format('insert into m345s.%I values (1), (2)', :'m_delta_name')) as m7 \gset
+select dblink_exec('g345', $q$create function m345s.m345_wait() returns trigger language plpgsql as $f$ begin perform count(*) from public.m345_gate; return null; end $f$$q$) as m8 \gset
+select dblink_exec('g345', format('create trigger m345_wait before truncate on m345s.%I for each statement execute function m345s.m345_wait()', :'m_delta_name')) as m9 \gset
+select o as m_squat from dblink('g345', format('select %L::regclass::oid', 'm345s.' || quote_ident(:'m_delta_name'))) as t(o oid) \gset
+select dblink_exec('g345', 'begin') as m10 \gset
+select dblink_exec('g345', 'lock table public.m345_gate in access exclusive mode') as m11 \gset
+select dblink_exec('h345', 'commit') as m12 \gset
+select ok(pg_temp.waits_for(:'m_gate'::oid, 'AccessShareLock'),
+  'LIVENESS: L2: the TRUNCATE, executing on the namesake, waits inside its BEFORE TRUNCATE trigger');
+alter schema m345s rename to m345s_squat;
+alter schema m345s_aside rename to m345s;
+select ok(to_regclass(format('m345s.%I', :'m_delta_name'))::oid = :'m_delta'::oid,
+  'LIVENESS: L2: the delta''s name denotes the delta again, inside the TRUNCATE');
+select dblink_exec('g345', 'commit') as m13 \gset
+select count(*) as m_rows from dblink_get_result('r345', false) as t(x text) \gset
+select ok(dblink_error_message('r345') like '%regrain_cancel(%), emptying the delta, reached another relation than the one it identified%',
+  'L2: regrain_cancel refuses, judged by the delta''s relfilenode, not by its name');
+select count(*) as m_drained from dblink_get_result('r345', false) as t(x text) \gset
+select is(pg_temp.ids_of(:'m_squat'), array[1, 2]::bigint[], 'L2: the namesake keeps its rows 1 and 2');
+select ok((select count(*) from m345s.:"m_delta_name" where id = 25) > 0, 'L2: the delta pgpm recorded keeps its captured key 25');
+
+-- ======================= (N) regrain_step's RENAME of the source, a schema renamed while it waits =================
+-- A child exactly one step wide is renamed to its coarse-form name on the first tick (#266); the RENAME waits for
+-- ACCESS EXCLUSIVE behind the source's writers.
+create schema n345s;
+create table n345s.t (id bigint primary key, payload text);
+insert into n345s.t select g * 10, 'n' from generate_series(1, 99) g;
+call pgpm.transmute('n345s.t', 'id', 1000, p_paused => true);
+insert into n345s.t values (20000, 'frontier');
+select child_name as n_name, child_oid as n_oid from pgpm.part where parent_table = 'n345s.t'::regclass and lo = '0' \gset
+select dblink_exec('h345', 'begin') as n1 \gset
+select dblink_exec('h345', 'insert into n345s.t values (15, ''written'')') as n2 \gset
+select dblink_send_query('r345', format($q$select pgpm.regrain_step('n345s.t', %L, '500', 1000)$q$, :'n_name')) as n3 \gset
+select ok(pg_temp.waits_for(:'n_oid'::oid, 'AccessExclusiveLock'),
+  'LIVENESS: N: the RENAME of the source waits for ACCESS EXCLUSIVE on its oid, behind the writer');
+select dblink_exec('h345', 'alter schema n345s rename to n345s_aside') as n4 \gset
+select dblink_exec('h345', 'create schema n345s') as n5 \gset
+select dblink_exec('h345', format('create table n345s.%I (id bigint)', :'n_name')) as n6 \gset
+select o as n_squat from dblink('h345', format('select %L::regclass::oid', 'n345s.' || quote_ident(:'n_name'))) as t(o oid) \gset
+select dblink_exec('h345', 'commit') as n7 \gset
+select count(*) as n_rows from dblink_get_result('r345', false) as t(x text) \gset
+select ok(dblink_error_message('r345') like '%regrain_step(%), renaming the source for its split, reached another relation than the one it identified%',
+  'N: the tick refuses, saying its RENAME reached another relation');
+select count(*) as n_drained from dblink_get_result('r345', false) as t(x text) \gset
+select ok(:'n_squat'::oid <> :'n_oid'::oid, 'LIVENESS: N: the source''s name denotes the namesake now');
+select is((select relname::text from pg_class where oid = :'n_squat'::oid), :'n_name'::text, 'N: the namesake keeps its name');
+select is((select child_name::text from pgpm.part where parent_table = 'n345s_aside.t'::regclass and child_oid = :'n_oid'::oid),
+  :'n_name'::text, 'N: and pgpm.part still records the source under its own name');
+
+-- ======================= (O) the scratch owner hand-over, a schema renamed while its ALTER ... OWNER waits ==========
+-- A table handed to a new owner has its scratch relations follow (#950, #969); the ALTER waits for ACCESS EXCLUSIVE
+-- behind a reader of the scratch relation.
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'r345o') then create role r345o; end if;
+end $$;
+create schema o345s;
+create table o345s.t (id bigint primary key, payload text);
+insert into o345s.t select g * 10, 'o' from generate_series(1, 99) g;
+call pgpm.transmute('o345s.t', 'id', 1000, p_paused => true);
+insert into o345s.t values (20000, 'frontier');
+select is(pgpm.regrain_step('o345s.t', (select child_name from pgpm.part
+    where parent_table = 'o345s.t'::regclass and attached and lo = '0'), '500', 1000), 'prepared',
+  'fixture: O''s regrain is prepared: its delta is a scratch relation of the table');
+select regrain_delta_oid as o_delta, (select relname from pg_class where oid = regrain_delta_oid) as o_delta_name
+  from pgpm.config where parent_table = 'o345s.t'::regclass \gset
+alter table o345s.t owner to r345o;
+select dblink_exec('h345', 'begin') as o1 \gset
+select n as o_read from dblink('h345', format('select count(*)::int from o345s.%I', :'o_delta_name')) as t(n int) \gset
+select dblink_send_query('r345', $$select pgpm.regrain_cancel('o345s.t')::text$$) as o2 \gset
+select ok(pg_temp.waits_for(:'o_delta'::oid, 'AccessExclusiveLock'),
+  'LIVENESS: O: the hand-over''s ALTER ... OWNER waits for ACCESS EXCLUSIVE on the delta''s oid, behind the reader');
+select dblink_exec('h345', 'alter schema o345s rename to o345s_aside') as o3 \gset
+select dblink_exec('h345', 'create schema o345s') as o4 \gset
+select dblink_exec('h345', format('create table o345s.%I (id bigint)', :'o_delta_name')) as o5 \gset
+select o as o_squat from dblink('h345', format('select %L::regclass::oid', 'o345s.' || quote_ident(:'o_delta_name'))) as t(o oid) \gset
+select dblink_exec('h345', 'commit') as o6 \gset
+select count(*) as o_rows from dblink_get_result('r345', false) as t(x text) \gset
+select ok(dblink_error_message('r345') like '%handing a scratch relation to r345o, reached another relation than the one it identified%',
+  'O: the hand-over refuses, saying its ALTER ... OWNER reached another relation');
+select count(*) as o_drained from dblink_get_result('r345', false) as t(x text) \gset
+select ok(:'o_squat'::oid <> :'o_delta'::oid, 'LIVENESS: O: the delta''s name denotes the namesake now');
+select is((select pg_get_userbyid(relowner)::text from pg_class where oid = :'o_squat'::oid), 'postgres',
+  'O: the namesake stays its creator''s');
+select is((select pg_get_userbyid(relowner)::text from pg_class where oid = :'o_delta'::oid), 'postgres',
+  'O: and the delta, the hand-over rolled back, is handed over by a later call');
+reassign owned by r345o to postgres;
+drop role r345o;
 
 select dblink_disconnect('h345') as dh \gset
 select dblink_disconnect('r345') as dr \gset
+select dblink_disconnect('g345') as dg \gset
 select * from finish();

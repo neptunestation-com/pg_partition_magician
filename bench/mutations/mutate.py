@@ -8300,12 +8300,10 @@ select ok(
         "the parent moves mid-regrain the cancel empties an unrelated relation of that name in the new "
         "schema and leaves the real delta holding its captured changes. One site. tests/237 part C catches "
         "it on both tables.",
-        [("  select nsp, delta into v_dnsp, v_delta from pgpm._regrain_capture_names(p_parent);\n"
-          "  if v_delta is not null then   -- #955: the recorded delta, or nothing\n"
-          "    execute format('truncate %I.%I', v_dnsp, v_delta);\n",
+        [("  select nsp, delta into v_dnsp, v_delta from pgpm._regrain_capture_names(p_parent);\n  if v_delta is not null then   -- #955: the recorded delta, or nothing\n    -- #1335 b10: by its oid, and checked by its effect: the TRUNCATE waits for ACCESS EXCLUSIVE behind a captured write\n    perform pgpm._truncate_checked(to_regclass(format('%I.%I', v_dnsp, v_delta)), format('regrain_cancel(%s), emptying the delta,', p_parent));\n",
           "  select delta into v_delta from pgpm._regrain_capture_names(p_parent);\n"
           "  if v_delta is not null and to_regclass(format('%I.%I', v_nsp, v_delta)) is not null then\n"
-          "    execute format('truncate %I.%I', v_nsp, v_delta);\n", 1)],
+          "    perform pgpm._truncate_checked(to_regclass(format('%I.%I', v_nsp, v_delta)), format('regrain_cancel(%s), emptying the delta,', p_parent));\n", 1)],
     ),
     "regrain_upgrade_guard_parent_schema": (
         "bench/regrain_moved_parent_identity.sh",
@@ -11037,8 +11035,8 @@ MUTATIONS["regrain_delta_purge_null_blind"] = (
     "reconciling:N on every tick after the copy has finished, until regrain_cancel. tests/291 catches it: the "
     "tick after the copy reads reconciling:4, not swapped:10, no regrain_delta_purge row is logged, and the run "
     "never swaps.",
-    [("  execute format('delete from %I.%I where (%3$s >= %4$L and %3$s < %5$L) is not true',\n",
-      "  execute format('delete from %I.%I where not (%3$s >= %4$L and %3$s < %5$L)',\n", 1)],
+    [("format('(%1$s >= %2$L and %1$s < %3$L) is not true', quote_ident(cfg.control_column),",
+      "format('not (%1$s >= %2$L and %1$s < %3$L)', quote_ident(cfg.control_column),", 1)],
 )
 MUTATIONS["hypertable_capture_fast_path_unlocked"] = (
     "bench/hypertable_capture_delta_held.sh",
@@ -12641,9 +12639,9 @@ MUTATIONS["untransmute_detach_pending_unchecked"] = (
     "reads through the parent, and the DROP of the parent takes it with its rows while pgpm.log records the "
     "reverse. The issue's reproduction and tests/312 part A catch it.",
     [("  perform pgpm._refuse_detach_pending(p_parent);\n"
-      "  execute v_gate_q into v_outside;\n"
+      "  execute format('select exists (select 1 from %s where %s)', p_parent::text, v_gate_q) into v_outside;\n"
       "  -- #873: the gate reads through the parent",
-      "  execute v_gate_q into v_outside;\n"
+      "  execute format('select exists (select 1 from %s where %s)', p_parent::text, v_gate_q) into v_outside;\n"
       "  -- #873: the gate reads through the parent", 1),
      ("  perform pgpm._refuse_detach_pending(p_parent);   -- #1157, final: a detach that set its flag while this waited\n",
       "", 1)],
@@ -15137,54 +15135,74 @@ MUTATIONS["lock_oid_vanished_name_null"] = (
 
 # PR #1353 round 2: a lock pins a relation's name, never its schema's, so each statement that waits for a lock of
 # its own after naming a relation is checked after it ran (pgpm._reached_or_raise). One mutation per check.
+
+# PR #1353 round 3: each write is checked after it ran by its EFFECT on the vouched oid (a name check after the
+# statement is fooled by a schema swapped back while the statement waits inside itself), and each read is made after
+# a lock by oid through the name rendered under it. One mutation per check or lock.
 MUTATIONS["retire_drop_unverified"] = (
     "bench/retire_locks_by_oid.sh",
-    "retire()'s one-step DROP is not checked after it ran: it waits for ACCESS EXCLUSIVE behind a reader, and a schema renamed during that wait (a namesake schema and table committed in its place) makes it drop the namesake, rows and all, report true and delete the pgpm.part row of the partition that stands (PR #1353 round 2, V-01)." + " One clause. tests/345 part F catches it.",
-    [("    perform pgpm._reached_or_raise(v_rel, null, format('retire(%s, %s)', p_parent, quote_ident(p_child)));\n", "", 1)],
+    "retire()'s one-step DROP is not checked by its effect: it waits for ACCESS EXCLUSIVE behind a reader, and a schema renamed during that wait makes it drop a namesake, rows and all, report true and delete the pgpm.part row of the partition that stands (PR #1353 round 2, V-01). One clause. tests/345 part F catches it.",
+    [("    perform pgpm._effect_or_raise(not exists (select 1 from pg_class c where c.oid = v_rel), v_rel,\n                                  format('retire(%s, %s), dropping the partition,', p_parent, quote_ident(p_child)));\n", '', 1)],
 )
-MUTATIONS["retire_crossing_unverified"] = (
+MUTATIONS["delete_checked_unverified"] = (
     "bench/retire_locks_by_oid.sh",
-    "retire()'s crossing DELETE is not checked after it ran: it waits for ROW EXCLUSIVE behind a SHARE holder, and a schema renamed during that wait sends it to a namesake of the parent, whose rows on the crossing key it deletes and reports as retain_crossing (PR #1353 round 2, V-02)." + " One clause. tests/345 part G catches it.",
-    [("          perform pgpm._reached_or_raise(p_parent, v_parent_txt, format('retire(%s, %s), deleting the crossing keys,', p_parent, quote_ident(p_child)));\n", "", 1)],
+    "pgpm._delete_checked does not look at the rows its DELETE took: retire()'s crossing DELETE (and the reclaim's and the purge's DELETE of the delta) reaches a namesake a schema rename put under the name during its wait, deletes its rows, and reports them as the parent's, whether or not the name is swapped back before the statement ends (V-02, P1-02). One clause. tests/345 parts G and G2 catch it.",
+    [('  perform pgpm._effect_or_raise(v_stray = 0, p_rel, p_what);\n', '', 1)],
+)
+MUTATIONS["truncate_checked_unverified"] = (
+    "bench/retire_locks_by_oid.sh",
+    "pgpm._truncate_checked does not look at the delta's relfilenode: regrain_cancel's TRUNCATE (and the swap's) empties a namesake a schema rename put under the name while it waited behind a captured write, with the schemas swapped back or not, and returns as if it had emptied its own delta (P2-02). One clause. tests/345 parts L and L2 catch it.",
+    [("  perform pgpm._effect_or_raise((select c.relfilenode from pg_class c where c.oid = p_rel) is distinct from v_rfn\n    or (pg_relation_size(p_rel) = 0\n        and pg_xact_status(((pg_current_xact_id()::text::bigint >> 32 << 32)\n                            + (select c.xmin::text::bigint from pg_class c where c.oid = p_rel))::text::xid8) = 'in progress'),\n    p_rel, p_what);\n", '', 1)],
 )
 MUTATIONS["write_block_create_unverified"] = (
     "bench/retire_locks_by_oid.sh",
-    "_install_write_block's CREATE TRIGGER is not checked after it ran: it waits for SHARE ROW EXCLUSIVE behind a writer, and a schema renamed during that wait puts the block on a namesake, so retire() drops a partition that was never write-blocked." + " One clause. tests/345 part H catches it.",
-    [("  perform pgpm._reached_or_raise(v_child, format('%I.%I', v_nsp, p_child), 'the write block''s CREATE TRIGGER');\n", "", 1)],
-)
-MUTATIONS["untransmute_gate_unverified"] = (
-    "bench/retire_locks_by_oid.sh",
-    "untransmute's gate, SQL text naming the parent built before its ACCESS EXCLUSIVE wait, is not checked after its second asking: a schema renamed during the wait makes it read a namesake, find no row outside the monolith, and the reverse drops the parent with a forward row in it." + " One clause. tests/345 part J catches it.",
-    [("  perform pgpm._reached_or_raise(p_parent, v_gate_rel, format('untransmute(%s), asking the gate under its lock,', p_parent));\n", "", 1)],
-)
-MUTATIONS["hypertable_drain_appends_unverified"] = (
-    "bench/hypertable_drain_schema_swap.sh",
-    "from_hypertable_drain_appends_step's batch is not checked after it ran: a schema renamed while it waits for the source sends it to namesakes of the source and the copy, rows read from one table pgpm was never handed and written into another." + " One check. tests/timescale/db/345 part A catches it.",
-    [("  perform pgpm._reached_or_raise(p_hypertable, format('%I.%I', v_nsp, v_rel), 'from_hypertable_drain_appends_step, reading the source,');\n  perform pgpm._reached_or_raise(pgpm._scratch_rel(p_hypertable, 'hypertable_dest'), format('%I.%I', v_nsp, v_dest), 'from_hypertable_drain_appends_step, writing the copy,');\n", "", 1)],
-)
-MUTATION_SRC["hypertable_drain_appends_unverified"] = "pgpm_hypertable/install.sql"
-MUTATION_TRACK["hypertable_drain_appends_unverified"] = "timescale"
-MUTATIONS["hypertable_drain_delta_unverified"] = (
-    "bench/hypertable_drain_schema_swap.sh",
-    "from_hypertable_drain_delta_step's batch is not checked after it ran: a schema renamed while it waits for the delta sends it to namesakes of the delta, the source and the copy, a namesake delta's keys consumed and a namesake copy written." + " One check. tests/timescale/db/345 part B catches it.",
-    [("  perform pgpm._reached_or_raise(p_hypertable, format('%I.%I', v_nsp, v_rel), 'from_hypertable_drain_delta_step, reading the source,');\n  perform pgpm._reached_or_raise(pgpm._scratch_rel(p_hypertable, 'hypertable_dest'), format('%I.%I', v_nsp, v_dest), 'from_hypertable_drain_delta_step, writing the copy,');\n  perform pgpm._reached_or_raise(v_delta, v_delta_txt, 'from_hypertable_drain_delta_step, consuming the delta,');\n", "", 1)],
-)
-MUTATION_SRC["hypertable_drain_delta_unverified"] = "pgpm_hypertable/install.sql"
-MUTATION_TRACK["hypertable_drain_delta_unverified"] = "timescale"
-MUTATIONS["regrain_reconcile_unverified"] = (
-    "bench/retire_locks_by_oid.sh",
-    "_regrain_reconcile's batches are not checked after they ran: the copy's DELETE waits for ROW EXCLUSIVE behind a "
-    "holder of the copy, and a schema renamed during that wait (the delta in a schema of its own, #555) applies the "
-    "batch's real keys to namesakes of the copy and the source and consumes the delta's rows, so the copy pgpm "
-    "recorded never gets the change. The per-batch check, in both loops. tests/345 part K catches it.",
-    [("    perform pgpm._reached_or_raise(v_sub_rel, v_sub_txt, format('the regrain reconcile of %s, writing a copy,', p_parent));\n    perform pgpm._reached_or_raise(v_src, v_src_txt, format('the regrain reconcile of %s, reading the source,', p_parent));\n", "", 1), ("      perform pgpm._reached_or_raise(v_sub_rel, v_sub_txt, format('the regrain reconcile of %s, writing a copy,', p_parent));\n      perform pgpm._reached_or_raise(v_src, v_src_txt, format('the regrain reconcile of %s, reading the source,', p_parent));\n", "", 1)],
+    "_install_write_block's CREATE TRIGGER is not checked by its effect: it waits for SHARE ROW EXCLUSIVE behind a writer, and a schema renamed during that wait puts the block on a namesake, so retire() drops a partition that was never write-blocked. One clause. tests/345 part H catches it.",
+    [("  perform pgpm._effect_or_raise(exists (select 1 from pg_trigger t where t.tgrelid = v_child and t.tgname = 'pgpm_write_block'\n                                         and t.tgenabled = 'A'), v_child, 'the write block''s CREATE TRIGGER');\n", '', 1)],
 )
 MUTATIONS["write_block_enable_unverified"] = (
     "bench/retire_locks_by_oid.sh",
-    "_install_write_block's ENABLE ALWAYS of a block disabled by hand is not checked after it ran: it waits for SHARE "
-    "ROW EXCLUSIVE behind a writer, and a schema renamed during that wait enables a namesake's trigger of pgpm's name "
-    "while the partition's block stays disabled. One clause. tests/345 part H2 catches it.",
-    [("      perform pgpm._reached_or_raise(v_child, format('%I.%I', v_nsp, p_child), 'the write block''s ENABLE ALWAYS');   -- #1335 b10\n", "", 1)],
+    "_install_write_block's ENABLE ALWAYS of a block disabled by hand is not checked by its effect: a schema renamed while it waits enables a namesake's trigger of pgpm's name while the partition's block stays disabled. One clause. tests/345 part H2 catches it.",
+    [("      perform pgpm._effect_or_raise(exists (select 1 from pg_trigger t where t.tgrelid = v_child and t.tgname = 'pgpm_write_block'\n                                                 and t.tgenabled = 'A'), v_child, 'the write block''s ENABLE ALWAYS');   -- #1335 b10\n", '', 1)],
+)
+MUTATIONS["untransmute_gate_named_before_lock"] = (
+    "bench/retire_locks_by_oid.sh",
+    "untransmute's gate, under its ACCESS EXCLUSIVE lock, asked through the name read at the top of the call, before the wait: a schema renamed during the wait makes it read a namesake, find no row outside the monolith, and refuse nothing at its door. One clause, the rendering of the second asking. tests/345 part J catches it.",
+    [("  perform pgpm._refuse_detach_pending(p_parent);   -- #1157, final: a detach that set its flag while this waited\n  execute format('select exists (select 1 from %s where %s)', p_parent::text, v_gate_q) into v_outside;\n", "  perform pgpm._refuse_detach_pending(p_parent);   -- #1157, final: a detach that set its flag while this waited\n  execute format('select exists (select 1 from %s where %s)', to_regclass(format('%I.%I', v_nsp, v_rel))::text, v_gate_q) into v_outside;\n", 1)],
+)
+MUTATIONS["regrain_reconcile_unlocked"] = (
+    "bench/retire_locks_by_oid.sh",
+    "_regrain_reconcile writes each copy without locking it by oid first: the copy's DELETE waits for ROW EXCLUSIVE behind a holder of the copy, and a schema renamed during the wait (the delta in a schema of its own, #555) applies the batch's keys to a namesake copy. The copy's lock, in both loops. tests/345 part K catches it.",
+    [("\n    perform pgpm._lock_oid_or_raise(v_sub_rel, 'row exclusive', true, format('the regrain reconcile of %s', p_parent));\n", '\n', 1), ("\n      perform pgpm._lock_oid_or_raise(v_sub_rel, 'row exclusive', true, format('the regrain reconcile of %s', p_parent));\n", '\n', 1)],
+)
+MUTATIONS["hypertable_drain_delta_unlocked"] = (
+    "bench/hypertable_drain_schema_swap.sh",
+    "from_hypertable_drain_delta_step consumes the delta without locking it by oid first: the batch's read waits behind a holder of the delta, and a schema renamed during the wait consumes a namesake delta's rows. One clause. tests/timescale/db/345 part B catches it.",
+    [("  perform pgpm._lock_oid_or_raise(v_delta, 'row exclusive', true, 'from_hypertable_drain_delta_step');\n", '', 1)],
+)
+MUTATION_SRC["hypertable_drain_delta_unlocked"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_drain_delta_unlocked"] = "timescale"
+MUTATIONS["hypertable_drain_appends_source_by_name"] = (
+    "bench/hypertable_drain_schema_swap.sh",
+    "from_hypertable_drain_appends_step's insert reads the source through the name it read at its start, not its oid's "
+    "rendering: a schema renamed while the step waited for the source makes it copy a namesake's rows into the copy. "
+    "One clause, the source operand of the insert. tests/timescale/db/345 part A catches it.",
+    [("  execute format('insert into %s (%s) select %s from %s where %s and %I <= %L::%s order by %I',\n                 v_dest_reg, v_cols_q, v_cols_q, p_hypertable,\n", "  execute format('insert into %s (%s) select %s from %s where %s and %I <= %L::%s order by %I',\n                 v_dest_reg, v_cols_q, v_cols_q, format('%I.%I', v_nsp, v_rel),\n", 1)],
+)
+MUTATION_SRC["hypertable_drain_appends_source_by_name"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_drain_appends_source_by_name"] = "timescale"
+MUTATIONS["regrain_rename_unverified"] = (
+    "bench/retire_locks_by_oid.sh",
+    "regrain_step's RENAME of a one-step source for its split is not checked by its effect: it waits for ACCESS "
+    "EXCLUSIVE behind the source's writers, and a schema renamed during that wait renames a namesake, while pgpm.part "
+    "records the source under the new name it does not carry. One clause. tests/345 part N catches it.",
+    [("    perform pgpm._effect_or_raise((select c.relname from pg_class c where c.oid = v_child) = v_src_name, v_child,\n                                  format('regrain_step(%s), renaming the source for its split,', p_parent));\n", "", 1)],
+)
+MUTATIONS["scratch_owner_follow_unverified"] = (
+    "bench/retire_locks_by_oid.sh",
+    "_scratch_owner_follow's ALTER TABLE ... OWNER of a scratch relation is not checked by its effect: it waits for "
+    "ACCESS EXCLUSIVE behind a reader, and a schema renamed during that wait hands a namesake, a table pgpm was never "
+    "handed, to the parent's owner. One clause. tests/345 part O catches it.",
+    [("      perform pgpm._effect_or_raise((select c.relowner from pg_class c where c.oid = r.oid) = v_want, r.oid,\n                                    format('%s, handing a scratch relation to %I,', p_what, v_want_n));\n", "", 1)],
 )
 
 def main() -> int:

@@ -6,13 +6,13 @@
 # names again once its own lock is granted. A lock pins a relation's own name, never its schema's (ALTER SCHEMA
 # ... RENAME takes no relation lock), so a schema renamed aside while a statement waits, with namesakes of those
 # tables put under the old name, sent the step to the namesakes: rows consumed from a table pgpm was never handed
-# and written into another. The step now checks, once its batch has run, that each name it went through still
-# denotes the relation it identified (pgpm._reached_or_raise), and refuses, rolling the batch back. The file drives
-# each race deterministically with dblink sessions.
+# and written into another. The step now locks the copy, the source and the delta by oid before its first statement
+# on them and names them by their oids' renderings, so no statement waits for its own target and each reaches the
+# relation pgpm recorded. The file drives each race deterministically with dblink sessions.
 #
 # The mutations it is required to fail against (bench/mutations/mutate.py):
-#   hypertable_drain_appends_unverified -- from_hypertable_drain_appends_step without its check: part A
-#   hypertable_drain_delta_unverified   -- from_hypertable_drain_delta_step without its check: part B
+#   hypertable_drain_appends_source_by_name -- the appends step reads the source through its vouched name: part A
+#   hypertable_drain_delta_unlocked   -- from_hypertable_drain_delta_step without its lock on the delta: part B
 #
 # Usage: hypertable_drain_schema_swap.sh <container> <db> [pgpm_hypertable/install.sql]
 # Runs on the TIMESCALE track's container (supabase/postgres + TimescaleDB), which is why its mutations sit
@@ -22,7 +22,7 @@
 set -uo pipefail
 C="${1:?container}"; DB="${2:?db}"; HT="${3:-/repo/pgpm_hypertable/install.sql}"
 TEST_FILE="${HYPERTABLE_DRAIN_SCHEMA_SWAP_TEST_FILE:-/repo/tests/timescale/db/345_from_hypertable_drain_schema_swap_test.sql}"
-LABEL="a drain step refuses a name its schema rename moved"
+LABEL="a drain step follows its relations by oid"
 fail=0
 
 q() { docker exec -e PGPASSWORD=postgres "$C" psql -h 127.0.0.1 -U postgres "$@"; }
