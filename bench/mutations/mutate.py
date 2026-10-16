@@ -630,19 +630,26 @@ ARCHIVE_LEDGER_ORPHAN_SWEEP = """  -- COVERAGE UNDER A NAME NO LONGER TRACKED IS
   -- because the step below does not archive a partition over a retired chunk's range. Nor is a chunk whose
   -- relation no longer exists, whoever dropped it: those are marked retired first (pgpm._mark_gone_chunks).
   perform pgpm._mark_gone_chunks(p_parent);
+  -- The orphans first, materialized (#973). One whose bound names no instant by itself (#1336, _native_named) is never
+  -- cast: it cannot be shown to overlap nothing, so it is discarded, the side that loses no row.
   for r in execute format(
-    'select l.child_name, count(*) as chunks, min(l.lo::%1$s)::text as lo, max(l.hi::%1$s)::text as hi
-       from pgpm.archive_ledger l
-      where l.parent_table = %2$L::regclass
-        and l.child_name is not null
-        and l.retired_at is null
-        and not exists (select 1 from pgpm.part p
-                         where p.parent_table = l.parent_table and p.child_name = l.child_name)
-        and exists (select 1 from pgpm.part t
-                     where t.parent_table = l.parent_table
-                       and l.lo::%1$s < t.hi::%1$s and l.hi::%1$s > t.lo::%1$s)
-      group by l.child_name',
-    v_ncast, p_parent::text)
+    'with orphan as materialized (select l.parent_table, l.child_name, l.lo, l.hi,
+                                         pgpm._native_named(%3$L, l.lo) and pgpm._native_named(%3$L, l.hi) as named
+                                    from pgpm.archive_ledger l
+                                   where l.parent_table = %2$L::regclass
+                                     and l.child_name is not null
+                                     and l.retired_at is null
+                                     and not exists (select 1 from pgpm.part p
+                                                      where p.parent_table = l.parent_table and p.child_name = l.child_name))
+     select o.child_name, count(*) as chunks, coalesce(min(case when o.named then o.lo::%1$s end)::text, min(o.lo)) as lo,
+            coalesce(max(case when o.named then o.hi::%1$s end)::text, max(o.hi)) as hi
+       from orphan o
+      where case when o.named then exists (select 1 from pgpm.part t
+                                            where t.parent_table = o.parent_table
+                                              and o.lo::%1$s < t.hi::%1$s and o.hi::%1$s > t.lo::%1$s)
+                 else true end
+      group by o.child_name',
+    v_ncast, p_parent::text, cfg.control_kind)
   loop
     -- by name, as the query above grouped: a retired chunk under the same name stays (#1141)
     delete from pgpm.archive_ledger where parent_table = p_parent and child_name = r.child_name and retired_at is null;
@@ -11894,11 +11901,11 @@ MUTATIONS["archive_retired_orphan_discard"] = (
     "of the retired rows. One site, the discard's retired_at filter, in the query that picks the orphans and in the "
     "DELETE that discards them (either alone leaves the other holding). tests/309 part A catches it (the retired "
     "chunk's row and object are replaced by the late rows).",
-    [("        and l.child_name is not null\n"
-      "        and l.retired_at is null\n"
-      "        and not exists (select 1 from pgpm.part p\n",
-      "        and l.child_name is not null\n"
-      "        and not exists (select 1 from pgpm.part p\n", 1),
+    [("                                     and l.child_name is not null\n"
+      "                                     and l.retired_at is null\n"
+      "                                     and not exists (select 1 from pgpm.part p\n",
+      "                                     and l.child_name is not null\n"
+      "                                     and not exists (select 1 from pgpm.part p\n", 1),
      ("    delete from pgpm.archive_ledger where parent_table = p_parent and child_name = r.child_name and retired_at is null;\n"
       "    insert into pgpm.log (parent_table, action, lo, hi, rows, method)\n"
       "      values (p_parent, 'archive_coverage_reset', r.lo, r.hi, r.chunks,\n",
@@ -12165,7 +12172,7 @@ MUTATIONS["archive_retired_backfill_untimed"] = (
     "The upgrade backfill marks every chunk inside a range a retain_drop was logged over, including one archived "
     "after that drop, which is coverage of the partition re-created there, not a retired chunk. One clause. "
     "tests/309 part E catches it.",
-    [(" and d.at >= l.archived_at", "", 1)],
+    [("                        on d.at >= l.archived_at\n", "                        on true\n", 1)],
 )
 
 
@@ -12296,6 +12303,85 @@ MUTATIONS["native_bound_key_session_abbreviations"] = (
     "holds the first partition from the one and not from the other. One clause. tests/334 part H catches it.",
     [("  set datestyle = 'ISO, MDY'\n  set timezone_abbreviations = 'Default'\nas $$\n",
       "  set datestyle = 'ISO, MDY'\nas $$\n", 1)],
+)
+
+# Issue #1336 (bullet 8): a live ledger bound that names no instant by itself (pgpm._native_named: a pre-#977
+# strategy's covered_hi, checked in an unrecorded session zone and stored as written) proves no coverage. The gate
+# refuses it, the resume discards it and re-archives from lo, the orphan discard drops it, and the upgrade's
+# _mark_retired_chunks places it by its other bound. bench/archive_coverage_unnamed_bound.sh runs tests/346 against each.
+_G1336 = "bench/archive_coverage_unnamed_bound.sh"
+MUTATIONS["archive_fully_covered_unnamed_counted"] = (
+    _G1336,
+    "Pre-#1336 _archive_fully_covered: a live chunk whose hi names no instant is counted, read with "
+    "max(hi::timestamptz) in the caller's TimeZone, so retain() from a session west of the writer's reads it past the "
+    "monolith's hi and drops it with a row no strategy was handed. One clause, the refusal. tests/346 parts A, B "
+    "and C catch it.",
+    [("  if pgpm._coverage_unnamed(p_parent, p_child) then return false; end if;   -- #1336: it proves no reach\n", "", 1)],
+)
+MUTATIONS["archive_fully_covered_grid_zone"] = (
+    _G1336,
+    "Issue #1336's plausible-but-wrong fix (PR #1351's first head): the gate reads a live chunk's offset-less hi on "
+    "the grid's clock, config.partition_tz, so a chunk an Asia/Tokyo session checked on a UTC grid reads nine hours "
+    "late and retain() from UTC, the grid's own zone, drops the monolith with late in it. The refusal replaced by "
+    "that reading. tests/346 part B catches it.",
+    [("  if pgpm._coverage_unnamed(p_parent, p_child) then return false; end if;   -- #1336: it proves no reach\n", "", 1),
+     ("                 pgpm._max_hi_native(cfg.control_kind), p_parent::text, p_child,\n"
+      "                 to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)\n",
+      "                 format('pgpm._ts_text(to_timestamp(max(pgpm._native_bound_key(%L, hi, %L))::float8))',\n"
+      "                        cfg.control_kind, cfg.partition_tz), p_parent::text, p_child,\n"
+      "                 to_regclass(format('%I.%I', pgpm._child_nsp(p_parent, p_child), p_child))::oid)\n", 1)],
+)
+MUTATIONS["next_archive_chunk_unnamed_resumed"] = (
+    _G1336,
+    "Pre-#1336 _next_archive_chunk: the next chunk resumes from a watermark that names no instant, read in the "
+    "caller's TimeZone, so from America/New_York a monolith whose legacy chunk ends three hours short of its hi reads "
+    "as covered and is never re-archived, or is resumed past rows nothing archived. One statement, the discard. "
+    "tests/346 part D catches it.",
+    [("  perform pgpm._discard_unnamed_coverage(p_parent, p_child);   -- #1336: never resume from a bound that names no instant\n",
+      "", 1)],
+)
+MUTATIONS["archive_whole_unnamed_resumed"] = (
+    _G1336,
+    "Pre-#1336 scripts/archive_partition_whole.sql: the script resumes from a watermark that names no instant, read "
+    "in the caller's TimeZone, so from UTC a chunk an Asia/Tokyo session checked reads past the monolith's hi and the "
+    "strategy is handed a range starting past it. One statement, the discard. tests/346 part G catches it.",
+    [("  perform pgpm._discard_unnamed_coverage(p_parent, r.child_name);\n", "", 1)],
+)
+MUTATION_SRC["archive_whole_unnamed_resumed"] = "scripts/archive_partition_whole.sql"
+MUTATIONS["archive_orphan_discard_unnamed_kept"] = (
+    _G1336,
+    "Pre-#1336 orphan discard (#511): an orphan whose bound names no instant is kept unless a reading shows it "
+    "overlapping, so from Pacific/Kiritimati one reaching into the monolith on any western reading is left to collide "
+    "with the partition's own first chunk. One value. tests/346 part E catches it.",
+    [("                 else true end\n      group by o.child_name',\n",
+      "                 else false end\n      group by o.child_name',\n", 1)],
+)
+MUTATIONS["mark_retired_chunks_unplaced_live_marked"] = (
+    _G1336,
+    "PR #1351's second head (its round-2 verification, P1-01): _mark_retired_chunks marks a chunk with neither bound "
+    "naming an instant on any later retain_drop of the parent, so a live, attached partition's second pre-#977 chunk "
+    "is marked retired by a drop over a disjoint range and the partition is held over its own coverage for good "
+    "(skip_archive_retired_range). One clause. tests/346 parts F and D catch it.",
+    [("                                else not exists (select 1 from pgpm.part p where p.parent_table = %2$L::regclass\n"
+      "                                                    and p.child_name = l.child_name and p.attached) end\n",
+      "                                else true end\n", 1)],
+)
+MUTATIONS["mark_gone_chunks_casts_unnamed"] = (
+    _G1336,
+    "Pre-#1336 _mark_gone_chunks (P1-02): the archive_chunk_retired row's range casts every gone chunk's bounds, so a "
+    "pre-#500 render ('15/10/2025 00:00:00 UTC' under SQL, DMY) raises out of it, and out of every archive step of the "
+    "parent, every tick. One clause, the lo's guard. tests/346 part F catches it.",
+    [("            coalesce(min(case when pgpm._native_named(%4$L, lo) then lo::%1$s end)::text, min(lo)) as lo,\n",
+      "            min(lo::%1$s)::text as lo,\n", 1)],
+)
+MUTATIONS["mark_retired_chunks_unnamed_placed"] = (
+    _G1336,
+    "Pre-#1336 _mark_retired_chunks (the upgrade's #1141 pass): a chunk whose hi names no instant is placed by that hi "
+    "read in the install session's TimeZone, so from UTC a chunk an Asia/Tokyo session wrote reads past the dropped "
+    "range and is left unmarked, for the backfill to attribute to a partition re-created under the name. One clause. "
+    "tests/346 part F catches it.",
+    [("                                when l.lo_n then d.lo::%1$s <= l.lo::%1$s and l.lo::%1$s < d.hi::%1$s\n",
+      "                                when l.lo_n then d.lo::%1$s <= l.lo::%1$s and l.hi::%1$s <= d.hi::%1$s\n", 1)],
 )
 
 

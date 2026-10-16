@@ -1303,6 +1303,7 @@ run_perf() {
     "bench/forget_missing_logs_object_keys.sh pgpm_perf334"
     "bench/over_retired_chunks_range_first.sh pgpm_perf333"
     "bench/over_retired_chunks_grid_zone.sh pgpm_perf372"
+    "bench/archive_coverage_unnamed_bound.sh pgpm_perf402"
     "bench/transmute_reap_reread.sh pgpm_perf336"
     "bench/set_regrain_restated_target.sh pgpm_perf335"
     "bench/regrain_registered_grid_off_unit.sh pgpm_perf355"

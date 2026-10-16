@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- **A live chunk whose bound names no instant proves no coverage, so retain() no longer drops a partly archived
+  partition on one** (#1336, bullet 8). Before #977 the archive step checked a strategy's `covered_hi` with a cast
+  in whatever session ran it and stored the text as written, so a live ledger row can carry a `hi` with no offset,
+  and the zone it was checked in was recorded nowhere. `pgpm._archive_fully_covered`, `retire()`'s drop gate, read
+  it with `max(hi::timestamptz)` in the caller's `TimeZone`: a monolith of a UTC grid archived three hours short of
+  its `hi` was kept by `retain()` from UTC and dropped by `retain()` from America/New_York, with the row no strategy
+  was handed. No single reading is safe (on the grid's clock, a chunk an Asia/Tokyo session checked reads nine hours
+  late), so such coverage now proves nothing: the gate refuses it from every session, and `_next_archive_chunk` and
+  `scripts/archive_partition_whole.sql` discard the partition's live coverage (`archive_coverage_reset`) and archive
+  it again from `lo`. The archive step's orphan discard (#511) drops an orphan of that shape instead of casting it,
+  and the upgrade's `_mark_retired_chunks` places one by its other bound, or by the partition it was recorded for
+  when neither bound names its instant (`pgpm._native_named` says which text does). `_mark_gone_chunks`, which every
+  archive step runs first, no longer casts such a bound for its log row, so a pre-#500 render no longer raises out
+  of the step every tick. Test `tests/346`; guard `bench/archive_coverage_unnamed_bound.sh`; mutations
+  `archive_fully_covered_unnamed_counted`, `archive_fully_covered_grid_zone`, `next_archive_chunk_unnamed_resumed`,
+  `archive_whole_unnamed_resumed`, `archive_orphan_discard_unnamed_kept`, `mark_retired_chunks_unnamed_placed`,
+  `mark_retired_chunks_unplaced_live_marked` and `mark_gone_chunks_casts_unnamed`.
+
 - **`land.sh` enqueues through the `enqueuePullRequest` mutation and stops on an unresolved review thread.**
   It asked for the enqueue with `gh pr merge`, and on 2026-10-15 #1350, green and CLEAN, sat unqueued after two
   such requests while one mutation queued it at once (#1257 lost hours the same way on 2026-10-12); the request
