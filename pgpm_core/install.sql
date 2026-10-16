@@ -5539,12 +5539,16 @@ $$;
 -- every attached partition and that is no row at all. When an attached lo has no key, there is no floor and every
 -- retired row is read, as before.
 --
--- THE GRID'S CLOCK (#1264). Every bound is compared as pgpm._native_bound_key gives it, never with a cast in the
--- caller's session: a retired row an older install wrote can carry a bound with no offset (before #977 a
--- strategy's covered_hi was stored verbatim, and no upgrade rewrites a retired row, the record of the only copy),
--- and read with ::timestamptz such text named a different instant in every zone, so the same call held a
--- partition from pg_cron's UTC session and not from an operator's Asia/Kolkata one, which then archived it over
--- the retired range.
+-- THE SAME ANSWER FROM EVERY SESSION (#1264), AND NEVER NARROWER THAN THE CHUNK (#1336). Every bound is compared as
+-- a key, never with a cast in the caller's session. A retired row an older install wrote can carry a bound that
+-- names no instant by itself (pgpm._native_named: before #977 a strategy's covered_hi was stored as written, and no
+-- upgrade rewrites a retired row, the record of the only copy). Read with ::timestamptz it named a different
+-- instant in every session, so the call held a partition from pg_cron's UTC session and not from an Asia/Kolkata
+-- one. Read on the grid's clock (#1264's fix) it is still one guess at a zone nothing recorded: a hi a session
+-- west of the grid wrote read hours early, below its own lo, and a partition re-created over the chunk was
+-- archived to its key. So such a bound is read at its widest (pgpm._native_bound_reach), and the partition's own
+-- bounds, which pgpm writes with their offset, on the grid's clock (pgpm._native_bound_key). A hold that widening
+-- alone causes can be lasting; the skip row names the remedy (unnamed lists those chunks' lo).
 --
 -- other_names lists the names those chunks were recorded under when they are not the partition's own (null when
 -- every one is). That is the shape a partition renamed before an upgrade leaves, its ledger rows left under the
@@ -5575,9 +5579,43 @@ begin
 end;
 $$;
 
+-- A RETIRED chunk's bound as a key at its widest (#1336): the earliest instant its text can name for a lo
+-- (p_latest false), the latest for a hi. Text that names its instant (pgpm._native_named) is that instant. Any
+-- other text was written in a session whose TimeZone and DateStyle nothing recorded, so it is read as wall time
+-- under each DateStyle that parses it (MDY and DMY: every pre-#500 render carries a four-digit year), ignoring any
+-- zone it names, and placed in the zone furthest along: UTC+14 for a lo, UTC-12 for a hi. Nothing narrower is
+-- safe: the chunk is the record of the only copy of its rows, and a partition it does not hold is archived to its
+-- key. Text nothing parses (a strategy's covered_hi in another encoding, a named shape with month 13) could be
+-- anywhere, so it reaches as far as a bound can, -Infinity for a lo and Infinity for a hi, rather than raising out of
+-- every archive step and retain() of the parent (#1351's P1-02). The SET clauses keep the DateStyle it sets to the call.
+create or replace function pgpm._native_bound_reach(p_kind text, p_text text, p_tz text, p_latest boolean)
+returns numeric language plpgsql stable set datestyle = 'ISO, MDY' set timezone_abbreviations = 'Default' as $$
+declare v numeric; v_w numeric; v_ds text;
+begin
+  if p_text is null or pgpm._native_named(p_kind, p_text) then
+    begin
+      return pgpm._native_bound_key(p_kind, p_text, p_tz);
+    exception when data_exception then null;   -- the shape of a bound but no value: unplaceable
+    end;
+  else
+    foreach v_ds in array array['ISO, MDY', 'ISO, DMY'] loop
+      perform set_config('DateStyle', v_ds, true);
+      begin
+        v_w := extract(epoch from p_text::timestamp);
+        v := case when p_latest then greatest(v, v_w) else least(v, v_w) end;
+      exception when data_exception then null;
+      end;
+    end loop;
+  end if;
+  if v is null then return case when p_latest then 'Infinity' else '-Infinity' end::numeric; end if;
+  return v + case when p_latest then 43200 else -50400 end;
+end;
+$$;
+
 drop function if exists pgpm._over_retired_chunks(regclass);
 create or replace function pgpm._over_retired_chunks(p_parent regclass)
-returns table(child_name name, lo text, hi text, chunks text, other_names text) language plpgsql stable as $$
+returns table(child_name name, lo text, hi text, chunks text, other_names text, unnamed text)
+language plpgsql stable as $$
 declare v_kind text; v_tz text; v_floor numeric; v_unkeyed boolean;
 begin
   select c.control_kind, c.partition_tz into v_kind, v_tz from pgpm.config c where c.parent_table = p_parent;
@@ -5590,8 +5628,9 @@ begin
   if v_unkeyed then v_floor := null; end if;  -- a lo with no key gives no floor: every retired row is read
   return query execute format(
     'with led as materialized (select l.lo, l.hi, l.child_name, l.s3_key, l.child_oid,
-                                      pgpm._native_bound_key(%1$L, l.lo, %4$L) as lo_k,
-                                      pgpm._native_bound_key(%1$L, l.hi, %4$L) as hi_k
+                                      pgpm._native_bound_reach(%1$L, l.lo, %4$L, false) as lo_k,
+                                      pgpm._native_bound_reach(%1$L, l.hi, %4$L, true) as hi_k,
+                                      not (pgpm._native_named(%1$L, l.lo) and pgpm._native_named(%1$L, l.hi)) as wide
                                 from pgpm.archive_ledger l
                                 where l.parent_table = %2$L::regclass and l.retired_at is not null
                                   and (%3$L::numeric is null
@@ -5616,7 +5655,8 @@ begin
                               coalesce(l.s3_key, ''no object key'')),
                        ''; '' order by l.lo_k),
             string_agg(distinct quote_ident(l.child_name), '', '')
-              filter (where l.child_name is distinct from m.child_name)
+              filter (where l.child_name is distinct from m.child_name),
+            string_agg(quote_literal(l.lo), '', '' order by l.lo_k) filter (where l.wide)
        from mine m join led l on l.lo_k < m.hi_k and l.hi_k > m.lo_k
       where m.lo_k < (select max(x.hi_k) from led x)
       group by m.child_name, m.lo, m.hi',
@@ -5864,11 +5904,14 @@ begin
                       and lo = r.lo and hi = r.hi) then
       insert into pgpm.log (parent_table, action, lo, hi, method)
         values (p_parent, 'skip_archive_retired_range', r.lo, r.hi,
-                format('%I.%I holds [%s, %s), over chunk(s) pgpm.archive_ledger marks retired: %s. Marked because the relation they were read from no longer exists (dropped by retire() or by hand) or, when an upgrade marked them, because nothing vouches where their rows are, so their objects are the only copy pgpm can vouch for. Archived, its first chunk would go to the same object key (a strategy keys a chunk by parent and lo), so it is not archived, and with no coverage retire() will not drop it. If its rows are not the chunks'' rows, export them with archive.to_s3 (keyed by the partition''s own name), then detach and drop it and delete its pgpm.part row%s',
+                format('%I.%I holds [%s, %s), over chunk(s) pgpm.archive_ledger marks retired: %s. Marked because the relation they were read from no longer exists (dropped by retire() or by hand) or, when an upgrade marked them, because nothing vouches where their rows are, so their objects are the only copy pgpm can vouch for. Archived, its first chunk would go to the same object key (a strategy keys a chunk by parent and lo), so it is not archived, and with no coverage retire() will not drop it. If its rows are not the chunks'' rows, export them with archive.to_s3 (keyed by the partition''s own name), then detach and drop it and delete its pgpm.part row%s%s',
                        pgpm._child_nsp(p_parent, r.child_name), r.child_name, r.lo, r.hi, r.chunks,
                        case when r.other_names is not null then format(
                          '. If they are, because %I is the relation those chunks were read from, renamed (an upgrade cannot tell that from a drop), the rows are in a live partition: once you have confirmed it holds them, delete the retired rows recorded under %s (delete from pgpm.archive_ledger where parent_table = %L::regclass and child_name = <that name> and retired_at is not null) and it archives afresh',
-                         r.child_name, r.other_names, p_parent::text) else '' end));
+                         r.child_name, r.other_names, p_parent::text) else '' end,
+                       case when r.unnamed is not null then format(
+                         '. The chunk(s) at lo %s carry a bound that names no instant by itself (an older pgpm stored a strategy''s covered_hi as written, in a session whose zone nothing recorded), so each holds every partition its text could reach in any zone from UTC-12 to UTC+14 and either day-month order (and one whose text no DateStyle parses, every partition past its other bound). Once you know the instant a bound names, write it with its offset (update pgpm.archive_ledger set hi = ''<instant>+00'' where parent_table = %L::regclass and lo = <that lo>; the same for a lo) and the chunk holds only what its range overlaps',
+                         r.unnamed, p_parent::text) else '' end));
     end if;
   end loop;
 

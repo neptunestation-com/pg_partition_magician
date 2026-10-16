@@ -13,16 +13,21 @@
 # bench/retain_recall_moved_parent.sh. Each failed assertion is printed as its `not ok` line, which is what
 # discriminate.sh's starved() reads, so a mutant that failed only a LIVENESS witness is not certified as a catch.
 #
-# FOUR mutations are required to fail against it (bench/mutations/mutate.py):
-#   over_retired_chunks_session_zone     -- the bounds are read in the caller's TimeZone again, the pre-fix
-#                                           shape. Parts B to E.
+# Since #1336 a retired chunk's bound that names no instant is read at its widest (pgpm._native_bound_reach), and
+# the first four mutations below guard the partition's own bounds, which stay on the grid's clock (part I, whose
+# pgpm.part rows an operator's hand rewrote). FIVE mutations are required to fail against it
+# (bench/mutations/mutate.py):
+#   over_retired_chunks_session_zone     -- a partition's bound with no offset is read in the caller's TimeZone
+#                                           again, the pre-fix shape. Part I.
 #   native_bound_key_utc                 -- the plausible-but-wrong fix: a bound with no offset is read as UTC,
-#                                           not on the grid's clock. Parts A to E (the grid is Asia/Tokyo's).
+#                                           not on the grid's clock. Part I (the grid is Asia/Tokyo's).
 #   native_bound_key_session_datestyle   -- the parse is not pinned to ISO, MDY, so a DateStyle-shaped bound
-#                                           reads by the caller's DateStyle. Parts C and E.
+#                                           reads by the caller's DateStyle. Part I.
 #   native_bound_key_session_abbreviations -- the parse is not pinned to the Default abbreviations, so 'IST' in a
 #                                           legacy bound is India's +05:30 from a session on the India set.
-#                                           Part H.
+#                                           Part I.
+#   native_bound_reach_one_datestyle     -- a retired bound that names no instant is widened under MDY alone, so
+#                                           a DMY render's March reads as November. Parts A to E.
 #
 # Runs on the plain core image (pgtap and pg_prove). TAP_GUARD_TEST_FILE overrides the test file's path inside the
 # container, for a worktree mounted somewhere other than /repo.

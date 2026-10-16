@@ -30,6 +30,22 @@
   characters. Guard `bench/review_tooling_verdicts.sh` section (f), mutations `land_enqueue_by_merge_command`,
   `land_enqueue_ignores_threads`, `land_threads_first_page_only` and `land_enqueue_hides_refusal`.
 
+- **A retired chunk whose bound names no instant holds every partition its text could reach** (#1336, the sibling
+  of bullet 8). `pgpm._over_retired_chunks` read a retired ledger row's offset-less bound on the grid's clock
+  (#1264), one guess at a zone nothing recorded: a `hi` a session west of the grid wrote read hours early, below
+  its own `lo`, so a partition an operator re-created over the chunk was not held, and the archive step handed it
+  to the strategy, which PUT it over the retired chunk's object, the only copy of the dropped rows, before the
+  ledger refused the row, every tick. Such a bound is now read at its widest (`pgpm._native_bound_reach`): wall
+  time under MDY and DMY, a `lo` at UTC+14 and a `hi` at UTC-12, and text nothing parses without bound, where
+  the pinned parse raised 22008 out of every archive step and `retain()` of the parent. The archive step,
+  `retain()` and `scripts/archive_partition_whole.sql` hold through it. A partition only the widening holds
+  stays held until the operator writes the bound with its offset, the remedy `skip_archive_retired_range` now
+  names; a partition's own bounds stay on the grid's clock. Test `tests/347` (and `tests/334`, rewritten to this
+  contract with a part I for the partition's bounds); guard `bench/over_retired_chunks_unnamed_widest.sh`;
+  mutations `over_retired_chunks_unnamed_grid_clock`, `over_retired_chunks_unnamed_session_zone`,
+  `native_bound_reach_unparsed_raises` and, on `bench/over_retired_chunks_grid_zone.sh`,
+  `native_bound_reach_one_datestyle`.
+
 - **Five timescale test files ask for leftover scratch records by the hypertables' oids** (#1283).
   `pgpm.scratch` keys a copy's records by the hypertable's oid, and `tests/timescale/db/65`, 66, 58, 60 and 69
   looked for leftovers by casting the table's name to `regclass` after the cutover, when the name already
