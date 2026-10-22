@@ -102,18 +102,46 @@ begin
 end;
 $$;
 
--- Drop regrain's change capture from every managed parent's schema. The delta table and its
--- trigger function are deliberately persistent per parent (a completed regrain keeps them for the
--- next one), and nothing in them depends on pgpm: the function's body names only the delta table.
--- So the schema drop below leaves all three, and a trigger left on a child mid-regrain keeps
--- appending to a delta table nothing will ever drain. untransmute drops the same two objects the
--- same way; this is the other exit. The names come from pgpm._regrain_capture_names, the single
--- resolver every caller uses (the oids pgpm.config recorded at prepare, or failing those the names
--- derived from the parent), which is why this block has to run BEFORE the schema drop.
+-- Put back every incoming foreign key transmute(..., p_incoming_fks => 'preserve') dropped and pgpm has
+-- not restored yet, then drop the schema, or refuse. Such a key is dropped at the cutover and re-added by a
+-- later maintenance tick, and a paused table (transmute's default) gets no ticks, so it can sit dropped
+-- indefinitely with pgpm.dropped_fk as the only record of it; the schema drop used to take that record and
+-- the key was gone for good, with no warning. restore_incoming_fks is the path maintain takes, so the key
+-- comes back exactly as a tick would bring it, NOT VALID on a plain referencer. It runs after the regrain
+-- sweep at the start of the block, whose regrain_cancel removes the one thing its gate waits for (a
+-- not-yet-attached child).
+--
+-- A key it cannot restore (an orphan written while RI was off, on a referencer Postgres will only re-add
+-- validating; a column since dropped) is REFUSED on rather than lost: the exception stops the schema drop,
+-- and under --single-transaction rolls the whole script back. Its message carries the DDL and the reason,
+-- because the rollback also takes the pgpm.log row restore_incoming_fks wrote. Deleting the key's row from
+-- pgpm.dropped_fk is how an operator says they accept losing it. A record whose referencing table or parent
+-- no longer exists is not refused on (there is no key left to lose), nor is one whose key is live again
+-- under its name, against its parent, because the operator re-added it by hand.
+--
+-- The schema drop is inside this block, not after it, so a client that carries on past an error (psql
+-- without ON_ERROR_STOP and without --single-transaction, a SQL editor) cannot reach the drop around the
+-- refusal, nor around a refusal of pgpm._uninstall_drop's in any sweep of the block.
 do $$
-declare r record; v_nsp name; v_delta name; v_fn name; v_fnsp name; v_copies_q text; v_delta_oid oid; v_fn_oid oid;
+declare
+  r record; v_mark bigint; v_left_q text; v_unvalidated_q text; v_fn name; v_done oid[] := '{}';
+  v_nsp name; v_delta name; v_fnsp name; v_copies_q text; v_delta_oid oid; v_fn_oid oid;
 begin
-  for r in select parent_table from pgpm.config loop
+  if to_regnamespace('pgpm') is null then return; end if;          -- a re-run: nothing left to remove
+
+  -- Drop regrain's change capture from every managed parent's schema. The delta table and its
+  -- trigger function are deliberately persistent per parent (a completed regrain keeps them for the
+  -- next one), and nothing in them depends on pgpm: the function's body names only the delta table.
+  -- So the schema drop below leaves all three, and a trigger left on a child mid-regrain keeps
+  -- appending to a delta table nothing will ever drain. untransmute drops the same two objects the
+  -- same way; this is the other exit. The names come from pgpm._regrain_capture_names, the single
+  -- resolver every caller uses (the oids pgpm.config recorded at prepare, or failing those the names
+  -- derived from the parent), which is why this sweep has to run BEFORE the schema drop. It is the first
+  -- step of the schema drop's block (#1357), so a refusal in it (pgpm._uninstall_drop's) stops the drop
+  -- whatever the client does, as the key refusal below does. An install that predates regrain change
+  -- capture has no pgpm._regrain_capture_names, and nothing for this sweep to remove.
+  for r in select parent_table from pgpm.config
+            where to_regprocedure('pgpm._regrain_capture_names(regclass)') is not null loop
     begin
       -- #1271: the function in its own schema (fn_nsp), which is not the delta's once either has been moved.
       -- Read through to_jsonb so this script still runs against an install whose resolver predates fn_nsp;
@@ -157,40 +185,7 @@ begin
           r.parent_table, sqlerrm, v_nsp, v_delta, v_fnsp, v_fn, coalesce(v_copies_q, 'none');
     end;
   end loop;
-exception
-  -- undefined_table: pgpm.config is already gone, so this is a re-run; `drop schema if exists`
-  --   below makes a re-run a no-op, and this block has to as well.
-  -- undefined_function: an install that predates regrain change capture has no
-  --   pgpm._regrain_capture_names, and nothing for this block to remove.
-  when undefined_table then null;
-  when undefined_function then null;
-end;
-$$;
 
--- Put back every incoming foreign key transmute(..., p_incoming_fks => 'preserve') dropped and pgpm has
--- not restored yet, then drop the schema, or refuse. Such a key is dropped at the cutover and re-added by a
--- later maintenance tick, and a paused table (transmute's default) gets no ticks, so it can sit dropped
--- indefinitely with pgpm.dropped_fk as the only record of it; the schema drop used to take that record and
--- the key was gone for good, with no warning. restore_incoming_fks is the path maintain takes, so the key
--- comes back exactly as a tick would bring it, NOT VALID on a plain referencer. It runs after the block
--- above, whose regrain_cancel removes the one thing its gate waits for (a not-yet-attached child).
---
--- A key it cannot restore (an orphan written while RI was off, on a referencer Postgres will only re-add
--- validating; a column since dropped) is REFUSED on rather than lost: the exception stops the schema drop,
--- and under --single-transaction rolls the whole script back. Its message carries the DDL and the reason,
--- because the rollback also takes the pgpm.log row restore_incoming_fks wrote. Deleting the key's row from
--- pgpm.dropped_fk is how an operator says they accept losing it. A record whose referencing table or parent
--- no longer exists is not refused on (there is no key left to lose), nor is one whose key is live again
--- under its name, against its parent, because the operator re-added it by hand.
---
--- The schema drop is inside this block, not after it, so a client that carries on past an error (psql
--- without ON_ERROR_STOP and without --single-transaction, a SQL editor) cannot reach the drop around the
--- refusal.
-do $$
-declare
-  r record; v_mark bigint; v_left_q text; v_unvalidated_q text; v_fn name; v_done oid[] := '{}';
-begin
-  if to_regnamespace('pgpm') is null then return; end if;          -- a re-run: nothing left to remove
   begin
     select coalesce(max(id), 0) into v_mark from pgpm.log;
     for r in select distinct d.parent_table from pgpm.dropped_fk d

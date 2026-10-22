@@ -11,10 +11,12 @@
   (locked by oid first, so a drop that waited follows the table to wherever its schema went), a function by the
   name its oid has at the statement, and either way the oid must be gone after it, or the uninstall stops, rolled
   back. Against an install older than `pgpm._drop_by_oid` a table is dropped as a function is, so a namesake is
-  refused rather than followed. `tests/348` is the acceptance test; `bench/uninstall_drops_by_oid.sh` runs it
-  against `uninstall_regrain_delta_dropped_by_name`, `uninstall_drop_lock_not_followed`,
-  `uninstall_drop_effect_unchecked`, `uninstall_scratch_copy_dropped_by_name` and
-  `uninstall_comment_sweep_delta_by_loop_name`.
+  refused rather than followed. The regrain capture sweep now runs inside the schema drop's block, so that refusal
+  stops the drop even from a client that carries on past an error (plain `psql -f`), as the key refusal does.
+  `tests/348` is the acceptance test; `bench/uninstall_drops_by_oid.sh` runs it against
+  `uninstall_regrain_delta_dropped_by_name`, `uninstall_drop_lock_not_followed`, `uninstall_drop_effect_unchecked`,
+  `uninstall_scratch_copy_dropped_by_name`, `uninstall_comment_sweep_delta_by_loop_name` and
+  `uninstall_regrain_sweep_own_block`.
 
 - **A lock taken by name is checked against the relation it was meant for** (#1335 bullet 10). `retire()` vouched
   for a partition by name and then locked it by name, and `LOCK TABLE` resolves the name again once the lock is

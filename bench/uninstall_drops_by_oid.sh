@@ -11,7 +11,7 @@
 # sessions. This wrapper exists so the mutations have a guard the discriminate track can run against the mutant,
 # in the shape of bench/uninstall_scratch_by_record.sh.
 #
-# FIVE mutations are required to fail against it (bench/mutations/mutate.py), all of uninstall.sql:
+# SIX mutations are required to fail against it (bench/mutations/mutate.py), all of uninstall.sql:
 #   uninstall_regrain_delta_dropped_by_name    -- the reported site: the regrain delta by the name read first (S1, S2)
 #   uninstall_drop_lock_not_followed           -- a table dropped by the name its oid has at the statement, with no
 #                                                 lock by oid first: the uninstall refuses where it must follow (S1)
@@ -19,6 +19,8 @@
 #                                                 function's lock drops a namesake (S6)
 #   uninstall_scratch_copy_dropped_by_name     -- the record sweep's copy by its name before the wait (S3)
 #   uninstall_comment_sweep_delta_by_loop_name -- the comment sweep's delta by the loop's names (S4)
+#   uninstall_regrain_sweep_own_block          -- the regrain sweep in a block of its own again, so its refusal
+#                                                 does not stop the schema drop under plain psql -f (S7)
 #
 # The third argument is the UNINSTALL script under test, not an install: pgpm_core/install.sql is what gets
 # installed, always. It is a path inside the container, which the file reads with psql's \ir. Runs on the plain

@@ -15250,6 +15250,29 @@ MUTATIONS["uninstall_comment_sweep_delta_by_loop_name"] = (
       "      execute format('drop table %I.%I', r.nsp, r.delta);\n", 1)],
 )
 MUTATION_SRC["uninstall_comment_sweep_delta_by_loop_name"] = "pgpm_core/uninstall.sql"
+MUTATIONS["uninstall_regrain_sweep_own_block"] = (
+    "bench/uninstall_drops_by_oid.sh",
+    "The regrain capture sweep in a DO block of its own again, ahead of the schema drop's (PR #1359 review, P1-02): "
+    "a refusal of pgpm._uninstall_drop's in it ends only that block, so a client that carries on past an error "
+    "(plain psql -f) reports the refusal and then drops schema pgpm, the only record of the capture function and "
+    "delta the refusal left, and running the script again cannot finish. One split, at the end of the sweep. "
+    "tests/348 S7 catches it (the pgpm schema is gone after the refused plain run).",
+    [("""  end loop;
+
+  begin
+    select coalesce(max(id), 0) into v_mark from pgpm.log;
+""", """  end loop;
+end;
+$$;
+do $$
+declare
+  r record; v_mark bigint; v_left_q text; v_unvalidated_q text; v_fn name; v_done oid[] := '{}';
+begin
+  begin
+    select coalesce(max(id), 0) into v_mark from pgpm.log;
+""", 1)],
+)
+MUTATION_SRC["uninstall_regrain_sweep_own_block"] = "pgpm_core/uninstall.sql"
 MUTATIONS["regrain_rename_unverified"] = (
     "bench/retire_locks_by_oid.sh",
     "regrain_step's RENAME of a one-step source for its split is not checked by its effect: it waits for ACCESS "

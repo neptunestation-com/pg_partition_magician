@@ -16,6 +16,9 @@
 --   PHASE 1  (S6) the record sweep's DROP FUNCTION of a recorded capture function waits for the function's lock
 --            behind a COMMENT, and the schema is swapped meanwhile: the uninstall refuses, P0001, naming the oid,
 --            and the namesake function keeps its trigger.
+--   PHASE 1b (S7) the same refusal in the regrain sweep's DROP FUNCTION, the script run as plain psql -f (no
+--            ON_ERROR_STOP, no transaction): the refusal stops the schema drop all the same, pgpm.config still
+--            records what it left, and the next run drops it.
 --   PHASE 2, one uninstall, five lock waits, each a schema swapped while the uninstall waits:
 --     S1  the reported site: the recorded regrain delta of a cancelled regrain, its DROP waiting behind a reader.
 --     S2  an in-flight regrain's capture (delta and function moved to a schema of their own), the names read before
@@ -44,7 +47,7 @@ create extension if not exists pgtap;
 create extension if not exists dblink;
 set client_min_messages = warning;
 
-select plan(48);
+select plan(58);
 
 create table public.u348_witness (tag text primary key, waited boolean, squat oid);
 
@@ -85,6 +88,17 @@ end $$;
 create function pg_temp.triggers_of(p_fn oid) returns text[] language sql as $$
   select array_agg(t.tgrelid::regclass::text || ':' || t.tgname order by t.tgname) from pg_trigger t where t.tgfoid = p_fn
 $$;
+
+-- what pgpm.config records of a parent's capture, as [function, delta]; null when pgpm is gone (read dynamically,
+-- so a run that dropped the schema fails the check below rather than ending the file)
+create function pg_temp.recorded_capture(p_parent regclass) returns oid[] language plpgsql as $$
+declare v oid[];
+begin
+  if to_regclass('pgpm.config') is null then return null; end if;
+  execute 'select array[regrain_capture_fn_oid, regrain_delta_oid] from pgpm.config where parent_table = $1'
+    into v using p_parent;
+  return v;
+end $$;
 
 -- arm holder p_conn: open its transaction, take p_lock, and send the poll-swap-commit round trip
 create function pg_temp.arm(p_conn text, p_lock text, p_tag text, p_oid oid, p_fn boolean, p_swap text, p_name text)
@@ -182,7 +196,18 @@ create trigger h6_pgpm_delta_trg after insert on u348g_src.h6 for each row execu
 select pgpm._scratch_record('u348g_src.h6', 'hypertable_delta_fn', 'u348g.h6_pgpm_delta_fn()'::regprocedure::oid);
 select 'u348g.h6_pgpm_delta_fn()'::regprocedure::oid as s6_fn, 'u348g_src.h6'::regclass::oid as s6_ht \gset
 
-select is(array[:'s1_prep', :'s2_prep'], array['prepared', 'prepared'], 'fixture: both regrains of [0, 1000) prepared');
+-- S7: a cancelled regrain whose capture function a plain psql run's DROP FUNCTION waits for
+create schema u348h;
+create table u348h.t (id bigint primary key, payload text);
+insert into u348h.t select g * 10, 'h' from generate_series(1, 99) g;
+call pgpm.transmute('u348h.t', 'id', 1000, p_paused => true);
+insert into u348h.t values (20000, 'frontier');
+select pgpm.regrain_step('u348h.t', (select child_name from pgpm.part where parent_table = 'u348h.t'::regclass and attached and lo = '0'), '500', 1000) as s7_prep \gset
+select pgpm.regrain_cancel('u348h.t') as s7_cancel \gset
+select regrain_delta_oid as s7_delta, regrain_capture_fn_oid as s7_fn, (select proname from pg_proc where oid = regrain_capture_fn_oid) as s7_fname
+  from pgpm.config where parent_table = 'u348h.t'::regclass \gset
+
+select is(array[:'s1_prep', :'s2_prep', :'s7_prep'], array['prepared', 'prepared', 'prepared'], 'fixture: the three regrains of [0, 1000) prepared');
 select is(
   (select array_agg(c.parent_table::text || ':' || (c.regrain_cursor is null)::text || ':'
                     || (select n.nspname from pg_class r join pg_namespace n on n.oid = r.relnamespace where r.oid = c.regrain_delta_oid)
@@ -239,6 +264,35 @@ select is(pg_temp.triggers_of((select squat from public.u348_witness where tag =
   'S6: the namesake function survives, with the operator''s trigger on u348g.mine');
 select is(pg_temp.triggers_of(:'s6_fn'::oid), array['u348g_src.h6:h6_pgpm_delta_trg'],
   'S6: and the recorded function, now u348g_aside, is as it was, firing on the hypertable');
+
+-- ======================================================================================================
+-- PHASE 1b (S7): the same refusal in the regrain sweep, from a client that carries on past an error (psql -f with
+-- neither ON_ERROR_STOP nor --single-transaction): it must stop the schema drop all the same
+-- ======================================================================================================
+select pg_temp.arm('h348_7', format('comment on function %s is %L', :'s7_fn'::oid::regprocedure, 'held'), 's7', :'s7_fn', true,
+  format('alter schema u348h rename to u348h_aside; create schema u348h; '
+         'create function u348h.%I() returns trigger language plpgsql as $f$ begin return new; end $f$; '
+         'create table u348h.mine (id bigint); '
+         'create trigger mine_trg before insert on u348h.mine for each row execute function u348h.%I()', :'s7_fname', :'s7_fname'),
+  format('u348h.%I()', :'s7_fname')) as h7 \gset
+\set ON_ERROR_STOP 0
+\ir :uninstall
+\set ON_ERROR_STOP 1
+select is(:'LAST_ERROR_SQLSTATE'::text, 'P0001', 'S7: the plain run refused with a raised exception');
+select ok(strpos(:'LAST_ERROR_MESSAGE'::text,
+    format('refusing to uninstall: dropping the regrain capture function of u348h.t, oid %s, reached another object under its name', :'s7_fn')) > 0,
+  'S7: at the regrain capture function, naming its oid');
+select is(pg_temp.disarm('h348_7'), 'true', 'S7: the holder''s round trip completed');
+select ok((select waited from public.u348_witness where tag = 's7'),
+  'LIVENESS: S7''s DROP FUNCTION waited for ACCESS EXCLUSIVE on the recorded capture function''s oid behind the COMMENT');
+select ok((select squat is not null and squat <> :'s7_fn'::oid from public.u348_witness where tag = 's7'),
+  'LIVENESS: S7''s function name denotes the namesake when the wait ends');
+select isnt(to_regnamespace('pgpm'), null, 'S7: the refusal stopped the schema drop, though the client carried on past it');
+select is(pg_temp.recorded_capture(to_regclass('u348h_aside.t')),
+  array[:'s7_fn'::oid, :'s7_delta'::oid],
+  'S7: and pgpm.config still records the capture function and delta the refusal left, for the next run to drop');
+select is(pg_temp.triggers_of((select squat from public.u348_witness where tag = 's7')), array['u348h.mine:mine_trg'],
+  'S7: the namesake function keeps the operator''s trigger');
 
 -- ======================================================================================================
 -- PHASE 2: one uninstall, five waits, a schema swapped during each
@@ -360,9 +414,15 @@ select is((select count(*)::int from pg_proc where oid = :'s6_fn'::oid), 0,
 select is(pg_temp.triggers_of((select squat from public.u348_witness where tag = 's6')), array['u348g.mine:mine_trg'],
   'S6: and left the namesake with its trigger');
 
+-- S7, after the second uninstall
+select is((select count(*)::int from pg_proc where oid = :'s7_fn'::oid) + (select count(*)::int from pg_class where oid = :'s7_delta'::oid), 0,
+  'S7: the next run dropped the recorded capture function and delta, in u348h_aside');
+select is(pg_temp.triggers_of((select squat from public.u348_witness where tag = 's7')), array['u348h.mine:mine_trg'],
+  'S7: and left the namesake with its trigger');
+
 select * from finish();
 
 drop table public.u348_witness;
 drop function public.u348_hold(text, int, oid, boolean, text, text);
 drop schema u348a_aside, u348a, u348b, u348b_cap, u348b_cap_aside, u348c, u348c_aside, u348c_src, u348d1, u348d2,
-  u348d2_aside, u348e1, u348e2, u348e2_aside, u348e_src, u348g, u348g_aside, u348g_src cascade;
+  u348d2_aside, u348e1, u348e2, u348e2_aside, u348e_src, u348g, u348g_aside, u348g_src, u348h, u348h_aside cascade;
