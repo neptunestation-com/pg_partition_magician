@@ -1712,6 +1712,32 @@ whose bare `DROP TABLE schema.child` has nothing else between it and the write b
 partition. `retire` checks both, independently, and a disagreement with **either** refuses; the `method`
 column names whichever anchor disagreed, so a stale dispatch and a stale catalog row are distinguishable.
 
+The check holds through the lock `retire` takes next. `LOCK TABLE` takes a name and resolves it again once
+the lock is granted, so a rename of the partition and a table created under its name, committed while
+`retire` waits for that lock, used to leave the lock on the new table, and the one-step `DROP` then dropped
+it. `retire` now asks the lock manager whether the lock it holds is on the partition it vouched for, and
+when it is not (the name was taken, or denotes nothing, by the time the wait ended) logs
+`fail_retain_identity` with a `method` saying the name stopped denoting that OID while `retire` waited, and
+returns false. The same lock-by-OID check guards the other places pgpm locks, attaches or drops a relation
+it identified earlier: the regrain swap's attach of each copy, the recall's re-attach of a detached
+partition, the archive hold on the parent, the drops of regrain and hypertable scratch tables, and the first
+locks of `regrain`, `transmute`, `untransmute`, the conversion reaper and the hypertable cutover and drains.
+
+A lock pins a relation's own name, not its schema's: `ALTER SCHEMA ... RENAME` takes no relation lock. So a
+statement that names a relation and then waits for a lock of its own (the `DROP` behind a reader of the
+partition, the crossing `DELETE` behind a `SHARE` holder of the parent, the write block's `CREATE TRIGGER`
+behind a writer) reaches whatever a schema renamed during that wait, with a same-named schema and table put in
+its place, holds under the name, and it can wait again inside itself (an RI check, a trigger) while the schemas
+are swapped back. So each such write is checked after it ran, before anything commits, by what it did to the
+relation pgpm identified, by OID: a `DROP` must have removed it, every row a `DELETE` took must be its (or its
+partitions'), a `TRUNCATE` must have given it a new file, a trigger must be on it, a rename or a change of
+owner must show on it. When the check fails the
+statement is rolled back: `retire` logs `fail_retain_drop` or `fail_retain_crossing` and returns false, or raises
+from the write block, and `regrain_cancel`, the regrain swap's and reclaim's emptying of the delta raise, saying the
+statement reached another relation. A read has no effect to check: the regrain reconcile, `untransmute`'s gate under
+its lock and the hypertable drain steps first lock the relation by OID and then name it through the name it has
+under that lock, so the read waits for nothing of its own and reaches the relation wherever its schema now is.
+
 The name is resolved in the partition's **own** schema, the schema of the relation `child_oid` records,
 not in the parent's. `ALTER TABLE <parent> SET SCHEMA` moves only the parent: the partitions it already
 has stay where they were, and the ones pgpm creates afterwards go in the parent's new schema. The

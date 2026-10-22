@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+- **A lock taken by name is checked against the relation it was meant for** (#1335 bullet 10). `retire()` vouched
+  for a partition by name and then locked it by name, and `LOCK TABLE` resolves the name again once the lock is
+  granted: a rename of the partition and a table created under its name, committed while `retire()` waited, left
+  the lock on that table, and the one-step `DROP` dropped it, rows and all, and reported `retain_drop`. The regrain
+  swap's `ATTACH` of a copy did the same: a copy renamed aside and a table like it created under its name was
+  what it attached, and the source whose rows only the copy held was dropped. `pgpm._lock_oid` takes the lock
+  through a name and asks `pg_locks` whether it is on the oid the caller vouched for; `retire()` refuses
+  otherwise (`fail_retain_identity`, false), and the swap, the archive hold, the drops of
+  regrain and hypertable scratch tables (`pgpm._drop_by_oid`) and the first locks of `regrain`, `transmute`,
+  `untransmute`, `_transmute_reap` and the hypertable cutover and drains go through it too.
+  `_retain_recall`'s re-attach, which attached a table that took a detached partition's name the same way, now
+  checks that the relation it attached is the one it vouched for. `bench/retire_locks_by_oid.sh` runs `tests/345`
+  (mutations `retire_lock_answer_ignored`, `regrain_swap_attach_unlocked`, `retain_recall_attach_unchecked` and
+  `lock_oid_vanished_name_null`). A lock pins a relation's name but not its schema's, so a statement that names
+  a relation and then waits for a lock of its own reached a same-named table a schema swap put there meanwhile:
+  `retire()`'s one-step `DROP` dropped it and its crossing `DELETE` deleted its rows, the write block's
+  `CREATE TRIGGER` blocked it and left the partition writable, and the regrain reconcile and the hypertable drain
+  steps read and wrote it, `regrain_cancel`, the swap and the reclaim emptied a namesake of the delta, the regrain's
+  rename of a one-step source renamed it, and the scratch owner hand-over gave it away. Each write
+  is checked after it ran by its effect on the relation's oid (`pgpm._effect_or_raise`, `_delete_checked`,
+  `_truncate_checked`), which a schema swapped back inside the statement cannot fake, and rolled back on a mismatch;
+  each read locks its relation by oid first and names it as it is under that lock (mutations `retire_drop_unverified`,
+  `delete_checked_unverified`, `truncate_checked_unverified`, `write_block_create_unverified`,
+  `write_block_enable_unverified`, `regrain_rename_unverified`, `scratch_owner_follow_unverified`,
+  `untransmute_gate_named_before_lock`, `regrain_reconcile_unlocked`; for the drains,
+  `bench/hypertable_drain_schema_swap.sh` runs `tests/timescale/db/345`, mutations
+  `hypertable_drain_appends_source_by_name` and `hypertable_drain_delta_unlocked`).
+
 - **A live chunk whose bound names no instant proves no coverage, so retain() no longer drops a partly archived
   partition on one** (#1336, bullet 8). Before #977 the archive step checked a strategy's `covered_hi` with a cast
   in whatever session ran it and stored the text as written, so a live ledger row can carry a `hi` with no offset,
