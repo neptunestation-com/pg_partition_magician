@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **`uninstall.sql` drops what pgpm recorded by its oid** (#1357). The script read the names of regrain's delta and
+  capture function, and of `from_hypertable`'s scratch copy, delta and function, and dropped them by those names
+  after a wait: `regrain_cancel`'s, an earlier drop's, or the `DROP`'s own for its lock behind a reader. A schema
+  renamed aside with a same-named schema and table committed during that wait was what the `DROP` reached, so the
+  uninstall dropped a table of the operator's, rows and all, and left pgpm's. Every such drop now goes through
+  `pgpm._uninstall_drop`, which the script creates in `pgpm` for its own run: a table through `pgpm._drop_by_oid`
+  (locked by oid first, so a drop that waited follows the table to wherever its schema went), a function by the
+  name its oid has at the statement, and either way the oid must be gone after it, or the uninstall stops, rolled
+  back. Against an install older than `pgpm._drop_by_oid` a table is dropped as a function is, so a namesake is
+  refused rather than followed. `tests/348` is the acceptance test; `bench/uninstall_drops_by_oid.sh` runs it
+  against `uninstall_regrain_delta_dropped_by_name`, `uninstall_drop_lock_not_followed`,
+  `uninstall_drop_effect_unchecked`, `uninstall_scratch_copy_dropped_by_name` and
+  `uninstall_comment_sweep_delta_by_loop_name`.
+
 - **A lock taken by name is checked against the relation it was meant for** (#1335 bullet 10). `retire()` vouched
   for a partition by name and then locked it by name, and `LOCK TABLE` resolves the name again once the lock is
   granted: a rename of the partition and a table created under its name, committed while `retire()` waited, left

@@ -168,6 +168,10 @@ from any `from_hypertable_copy` never cut over: the `<table>_pgpm_dest` table (a
 hypertable's rows) with its indexes and the foreign keys it holds, found by the record the copy keeps on
 it, and dropped while the hypertable it was copied from still exists, since that still holds every row.
 The copy, the delta and the function are found by oid, so one you renamed or moved since is still found.
+Each of them, and regrain's delta and function too, is dropped by its oid, wherever it is when the drop runs. A
+drop that waits for its lock (behind a reader of the table) and finds, when the wait ends, another table or
+function of yours under the name because the schema was renamed meanwhile stops the uninstall instead: it is
+rolled back, and running the script again finishes it.
 Left: every transmuted table, still a partitioned table under its original name, with all of its
 partitions and rows. Nothing else pgpm made remains in your schema, with one exception that a `WARNING`
 names: a never-cut-over copy whose hypertable you have since dropped, because it may hold the only copy

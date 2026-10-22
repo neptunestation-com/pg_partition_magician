@@ -1326,6 +1326,7 @@ run_perf() {
     "bench/check_time_monotonic_session_zone.sh pgpm_perf373"
     "bench/adopt_partition_isolation.sh pgpm_perf370"
     "bench/retire_locks_by_oid.sh pgpm_perf400"
+    "bench/uninstall_drops_by_oid.sh pgpm_perf406"
     "bench/snapshot_wait_foreign_floor_holder.sh pgpm_perf371"
     "bench/install_keeps_surface_grants.sh pgpm_perf375"
     "bench/retirement_mark_needs_dispatch.sh pgpm_perf367"
