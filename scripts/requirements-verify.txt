@@ -3,7 +3,9 @@
 # writer, run by test.sh's archive track (./test.sh archive).
 psycopg2-binary
 pyarrow
-duckdb
+# Pinned below 2: DuckDB 2.0.0 (2026-10) removed Relation.fetchone(), which the archive guards' "DuckDB reads
+# the file" checks call, and turned the archive job red on every PR. Lift the pin with the call sites.
+duckdb<2
 # DuckDB's Python client hands back a TIMESTAMP WITH TIME ZONE value as an aware datetime and needs pytz
 # to build one; a timestamptz leaf reads as that type since it carries LogicalType TIMESTAMP(isAdjustedToUTC=true).
 pytz
