@@ -67,18 +67,81 @@ exception
 end;
 $$;
 
--- Drop regrain's change capture from every managed parent's schema. The delta table and its
--- trigger function are deliberately persistent per parent (a completed regrain keeps them for the
--- next one), and nothing in them depends on pgpm: the function's body names only the delta table.
--- So the schema drop below leaves all three, and a trigger left on a child mid-regrain keeps
--- appending to a delta table nothing will ever drain. untransmute drops the same two objects the
--- same way; this is the other exit. The names come from pgpm._regrain_capture_names, the single
--- resolver every caller uses (the oids pgpm.config recorded at prepare, or failing those the names
--- derived from the parent), which is why this block has to run BEFORE the schema drop.
+-- Every table and function the blocks below drop because pgpm's records name it (regrain's change capture,
+-- from_hypertable's scratch) is dropped through this, by its oid (#1357). A name rendered before a wait is whatever
+-- stands under it when the wait ends, and these drops come after waits: regrain_cancel's, an earlier drop's, the
+-- DROP's own for its lock. A schema renamed aside and a namesake schema and table committed meanwhile made this
+-- script drop the operator's table, rows and all, and leave pgpm's. A table goes through pgpm._drop_by_oid (#1335
+-- bullet 10: locked by oid first, its name rendered under that lock); a function, which LOCK cannot take, by the
+-- name its oid has at the statement. Either way the oid must be gone after, or the DROP reached a namesake and the
+-- script stops, rolled back. Against an install older than pgpm._drop_by_oid a table is dropped as the function is,
+-- so a namesake is refused rather than followed. Created in pgpm, whose drop at the end takes it with the rest.
 do $$
-declare r record; v_nsp name; v_delta name; v_fn name; v_fnsp name; v_copies_q text;
 begin
-  for r in select parent_table from pgpm.config loop
+  if to_regnamespace('pgpm') is null then return; end if;          -- a re-run: nothing left to remove
+  create or replace function pgpm._uninstall_drop(p_obj oid, p_fn boolean, p_what text)
+  returns void language plpgsql as $f$
+  begin
+    if p_fn then
+      if not exists (select 1 from pg_proc p where p.oid = p_obj) then return; end if;
+      execute format('drop function %s cascade', p_obj::regprocedure::text);
+    elsif not exists (select 1 from pg_class c where c.oid = p_obj) then
+      return;
+    elsif to_regprocedure('pgpm._drop_by_oid(regclass,text)') is not null then
+      perform pgpm._drop_by_oid(p_obj::regclass, p_what);
+    else
+      execute format('drop table %s', p_obj::regclass::text);
+    end if;
+    if exists (select 1 from pg_class c where c.oid = p_obj and not p_fn)
+       or exists (select 1 from pg_proc p where p.oid = p_obj and p_fn) then
+      raise exception 'pg_partition_magician: refusing to uninstall: dropping %, oid %, reached another object under its name (a schema was renamed while the drop waited for a lock, and another object stood under the name). The drop is rolled back and the uninstall stopped; run this script again',
+        p_what, p_obj;
+    end if;
+  end;
+  $f$;
+end;
+$$;
+
+-- Put back every incoming foreign key transmute(..., p_incoming_fks => 'preserve') dropped and pgpm has
+-- not restored yet, then drop the schema, or refuse. Such a key is dropped at the cutover and re-added by a
+-- later maintenance tick, and a paused table (transmute's default) gets no ticks, so it can sit dropped
+-- indefinitely with pgpm.dropped_fk as the only record of it; the schema drop used to take that record and
+-- the key was gone for good, with no warning. restore_incoming_fks is the path maintain takes, so the key
+-- comes back exactly as a tick would bring it, NOT VALID on a plain referencer. It runs after the regrain
+-- sweep at the start of the block, whose regrain_cancel removes the one thing its gate waits for (a
+-- not-yet-attached child).
+--
+-- A key it cannot restore (an orphan written while RI was off, on a referencer Postgres will only re-add
+-- validating; a column since dropped) is REFUSED on rather than lost: the exception stops the schema drop,
+-- and under --single-transaction rolls the whole script back. Its message carries the DDL and the reason,
+-- because the rollback also takes the pgpm.log row restore_incoming_fks wrote. Deleting the key's row from
+-- pgpm.dropped_fk is how an operator says they accept losing it. A record whose referencing table or parent
+-- no longer exists is not refused on (there is no key left to lose), nor is one whose key is live again
+-- under its name, against its parent, because the operator re-added it by hand.
+--
+-- The schema drop is inside this block, not after it, so a client that carries on past an error (psql
+-- without ON_ERROR_STOP and without --single-transaction, a SQL editor) cannot reach the drop around the
+-- refusal, nor around a refusal of pgpm._uninstall_drop's in any sweep of the block.
+do $$
+declare
+  r record; v_mark bigint; v_left_q text; v_unvalidated_q text; v_fn name; v_done oid[] := '{}';
+  v_nsp name; v_delta name; v_fnsp name; v_copies_q text; v_delta_oid oid; v_fn_oid oid;
+begin
+  if to_regnamespace('pgpm') is null then return; end if;          -- a re-run: nothing left to remove
+
+  -- Drop regrain's change capture from every managed parent's schema. The delta table and its
+  -- trigger function are deliberately persistent per parent (a completed regrain keeps them for the
+  -- next one), and nothing in them depends on pgpm: the function's body names only the delta table.
+  -- So the schema drop below leaves all three, and a trigger left on a child mid-regrain keeps
+  -- appending to a delta table nothing will ever drain. untransmute drops the same two objects the
+  -- same way; this is the other exit. The names come from pgpm._regrain_capture_names, the single
+  -- resolver every caller uses (the oids pgpm.config recorded at prepare, or failing those the names
+  -- derived from the parent), which is why this sweep has to run BEFORE the schema drop. It is the first
+  -- step of the schema drop's block (#1357), so a refusal in it (pgpm._uninstall_drop's) stops the drop
+  -- whatever the client does, as the key refusal below does. An install that predates regrain change
+  -- capture has no pgpm._regrain_capture_names, and nothing for this sweep to remove.
+  for r in select parent_table from pgpm.config
+            where to_regprocedure('pgpm._regrain_capture_names(regclass)') is not null loop
     begin
       -- #1271: the function in its own schema (fn_nsp), which is not the delta's once either has been moved.
       -- Read through to_jsonb so this script still runs against an install whose resolver predates fn_nsp;
@@ -89,6 +152,9 @@ begin
       -- returns nulls, and %I refuses a null). Its partitions went with it, and the trigger with
       -- them, so what it may have left is an inert table and function this script cannot name.
       if v_nsp is null then continue; end if;
+      -- #1357: the two objects, by the oids those names denote now, before anything below waits; the drops go by these
+      v_delta_oid := to_regclass(quote_ident(v_nsp) || '.' || quote_ident(v_delta));
+      v_fn_oid := to_regprocedure(quote_ident(v_fnsp) || '.' || quote_ident(v_fn) || '()');
       -- An in-flight regrain's fine copies are standalone tables in the parent's schema, recorded
       -- only in pgpm.part (attached = false), so the schema drop takes the one record that says what
       -- they are and leaves the tables. Abandon the regrain the way untransmute and the operator's
@@ -103,17 +169,11 @@ begin
          or exists (select 1 from pgpm.config where parent_table = r.parent_table and regrain_cursor is not null) then
         perform pgpm.regrain_cancel(r.parent_table);
       end if;
-      -- Existence is checked first only to spare the operator a "does not exist, skipping" notice
-      -- for every parent that never regrained. The trigger depends on the function, so the cascade
-      -- is what removes it; the delta table depends on nothing.
+      -- The trigger depends on the function, so the cascade is what removes it; the delta table depends on nothing.
       -- #955: only what pgpm.config recorded (the resolver leaves the names null otherwise), never a relation
-      -- or function of the operator's that happens to carry the derived name.
-      if v_fn is not null then
-        execute format('drop function if exists %I.%I() cascade', v_fnsp, v_fn);
-      end if;
-      if v_delta is not null then
-        execute format('drop table if exists %I.%I', v_nsp, v_delta);
-      end if;
+      -- or function of the operator's that happens to carry the derived name. A null oid drops nothing.
+      perform pgpm._uninstall_drop(v_fn_oid, true, format('the regrain capture function of %s', r.parent_table));
+      perform pgpm._uninstall_drop(v_delta_oid, false, format('the regrain delta of %s', r.parent_table));
     exception
       -- Best-effort per parent, like the cron block above: one parent's trouble must not stop the
       -- uninstall or the sweep of the other parents. Only the condition this script can actually
@@ -125,40 +185,7 @@ begin
           r.parent_table, sqlerrm, v_nsp, v_delta, v_fnsp, v_fn, coalesce(v_copies_q, 'none');
     end;
   end loop;
-exception
-  -- undefined_table: pgpm.config is already gone, so this is a re-run; `drop schema if exists`
-  --   below makes a re-run a no-op, and this block has to as well.
-  -- undefined_function: an install that predates regrain change capture has no
-  --   pgpm._regrain_capture_names, and nothing for this block to remove.
-  when undefined_table then null;
-  when undefined_function then null;
-end;
-$$;
 
--- Put back every incoming foreign key transmute(..., p_incoming_fks => 'preserve') dropped and pgpm has
--- not restored yet, then drop the schema, or refuse. Such a key is dropped at the cutover and re-added by a
--- later maintenance tick, and a paused table (transmute's default) gets no ticks, so it can sit dropped
--- indefinitely with pgpm.dropped_fk as the only record of it; the schema drop used to take that record and
--- the key was gone for good, with no warning. restore_incoming_fks is the path maintain takes, so the key
--- comes back exactly as a tick would bring it, NOT VALID on a plain referencer. It runs after the block
--- above, whose regrain_cancel removes the one thing its gate waits for (a not-yet-attached child).
---
--- A key it cannot restore (an orphan written while RI was off, on a referencer Postgres will only re-add
--- validating; a column since dropped) is REFUSED on rather than lost: the exception stops the schema drop,
--- and under --single-transaction rolls the whole script back. Its message carries the DDL and the reason,
--- because the rollback also takes the pgpm.log row restore_incoming_fks wrote. Deleting the key's row from
--- pgpm.dropped_fk is how an operator says they accept losing it. A record whose referencing table or parent
--- no longer exists is not refused on (there is no key left to lose), nor is one whose key is live again
--- under its name, against its parent, because the operator re-added it by hand.
---
--- The schema drop is inside this block, not after it, so a client that carries on past an error (psql
--- without ON_ERROR_STOP and without --single-transaction, a SQL editor) cannot reach the drop around the
--- refusal.
-do $$
-declare
-  r record; v_mark bigint; v_left_q text; v_unvalidated_q text; v_fn name; v_done oid[] := '{}';
-begin
-  if to_regnamespace('pgpm') is null then return; end if;          -- a re-run: nothing left to remove
   begin
     select coalesce(max(id), 0) into v_mark from pgpm.log;
     for r in select distinct d.parent_table from pgpm.dropped_fk d
@@ -230,18 +257,16 @@ begin
       v_done := v_done || r.obj;
       begin
         if r.kind = 'hypertable_delta_fn' then
-          if exists (select 1 from pg_proc where oid = r.obj) then
-            execute format('drop function %s cascade', r.obj::regprocedure::text);
-          end if;
+          perform pgpm._uninstall_drop(r.obj, true, format('from_hypertable''s %s of the hypertable with oid %s', r.kind, r.parent_oid));
         elsif not exists (select 1 from pg_class where oid = r.obj) then
           null;
         elsif r.kind = 'hypertable_delta' then
-          execute format('drop table %s', r.obj::regclass::text);
+          perform pgpm._uninstall_drop(r.obj, false, format('from_hypertable''s %s of the hypertable with oid %s', r.kind, r.parent_oid));
         elsif not exists (select 1 from pg_class where oid = r.parent_oid) then
           raise warning 'pg_partition_magician: left behind %, a from_hypertable copy that was never cut over: the hypertable it was copied from (oid %) no longer exists, so this table may hold the only copy of those rows. Drop it once you have checked.',
             r.obj::regclass::text, r.parent_oid;
         else
-          execute format('drop table %s', r.obj::regclass::text);
+          perform pgpm._uninstall_drop(r.obj, false, format('from_hypertable''s %s of the hypertable with oid %s', r.kind, r.parent_oid));
         end if;
       exception
         when insufficient_privilege or dependent_objects_still_exist then
@@ -272,7 +297,7 @@ begin
   -- its three objects by hand. A copy pgpm.scratch records is the record sweep's above, by oid (#985): this
   -- sweep is for a delta the record does not name, and skips what that sweep handled.
   for r in
-    select n.nspname as nsp, c.relname as delta
+    select n.nspname as nsp, c.relname as delta, c.oid as rel
       from pg_description d
       join pg_class c on c.oid = d.objoid
       join pg_namespace n on n.oid = c.relnamespace
@@ -284,11 +309,13 @@ begin
   loop
     v_fn := left(r.delta, -11) || '_pgpm_delta_fn';
     begin
-      -- Existence first only to spare a "does not exist, skipping" notice; the delta depends on nothing.
-      if to_regprocedure(format('%I.%I()', r.nsp, v_fn)) is not null then
-        execute format('drop function %I.%I() cascade', r.nsp, v_fn);
-      end if;
-      execute format('drop table %I.%I', r.nsp, r.delta);
+      -- #1357: by oid, as the record sweep's. The loop read every row's names before the first drop of it waited, so
+      -- the function is looked for beside the delta where its oid sits now; the delta depends on nothing.
+      perform pgpm._uninstall_drop(
+        (select to_regprocedure(quote_ident(n.nspname) || '.' || quote_ident(v_fn) || '()')
+           from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = r.rel),
+        true, format('from_hypertable''s change capture function %I.%I()', r.nsp, v_fn));
+      perform pgpm._uninstall_drop(r.rel, false, format('from_hypertable''s change capture %I.%I', r.nsp, r.delta));
     exception
       -- Best-effort per copy, as the regrain sweep above: the objects belong to whoever ran the copy, and
       -- the role running this script may not be allowed to drop them. Say what is left.
@@ -315,7 +342,7 @@ begin
   -- is for a copy the record does not name, and skips what that sweep handled.
   for r in
     select n.nspname as nsp, c.relname as dest,
-           substring(d.description from '^pgpm from_hypertable copy of ([0-9]+)$')::oid as src
+           substring(d.description from '^pgpm from_hypertable copy of ([0-9]+)$')::oid as src, c.oid as rel
       from pg_description d
       join pg_class c on c.oid = d.objoid
       join pg_namespace n on n.oid = c.relnamespace
@@ -331,7 +358,7 @@ begin
       continue;
     end if;
     begin
-      execute format('drop table %I.%I', r.nsp, r.dest);
+      perform pgpm._uninstall_drop(r.rel, false, format('the from_hypertable copy %I.%I', r.nsp, r.dest));   -- #1357: by oid
     exception
       -- Best-effort per copy, as the sweeps above: the copy belongs to whoever ran it, and something of the
       -- operator's (a view) may depend on it. Say what is left.

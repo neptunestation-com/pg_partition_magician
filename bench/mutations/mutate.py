@@ -4570,7 +4570,7 @@ $$;''',
         "the operator did. tests/timescale/db/48's look-alike (public.u773_c_pgpm_dest beside public.u773_c, "
         "no record) is dropped with its rows.",
         [("""    select n.nspname as nsp, c.relname as dest,
-           substring(d.description from '^pgpm from_hypertable copy of ([0-9]+)$')::oid as src
+           substring(d.description from '^pgpm from_hypertable copy of ([0-9]+)$')::oid as src, c.oid as rel
       from pg_description d
       join pg_class c on c.oid = d.objoid
       join pg_namespace n on n.oid = c.relnamespace
@@ -4579,7 +4579,7 @@ $$;''',
        and c.relkind = 'r' and right(c.relname, 10) = '_pgpm_dest'
 """, """    select n.nspname as nsp, c.relname as dest,
            coalesce(substring(d.description from '^pgpm from_hypertable copy of ([0-9]+)$')::oid,
-                    to_regclass(format('%I.%I', n.nspname, left(c.relname, -10)))::oid) as src
+                    to_regclass(format('%I.%I', n.nspname, left(c.relname, -10)))::oid) as src, c.oid as rel
       from pg_class c
       join pg_namespace n on n.oid = c.relnamespace
       left join pg_description d on d.objoid = c.oid and d.classoid = 'pg_class'::regclass and d.objsubid = 0
@@ -14588,9 +14588,10 @@ MUTATIONS["uninstall_capture_fn_dropped_in_delta_schema"] = (
     "The resolver fixed but uninstall.sql's drop site not: the function is resolved wherever it lives and then "
     "dropped by name, CASCADE, in the DELTA's schema, so after a move the recorded function survives the uninstall "
     "and an operator's function of the capture's name beside the delta is dropped in its place. One site, the "
-    "schema of the drop. tests/338 parts D and E catch it (the recorded function survives, the operator's is gone).",
-    [("        execute format('drop function if exists %I.%I() cascade', v_fnsp, v_fn);\n",
-      "        execute format('drop function if exists %I.%I() cascade', v_nsp, v_fn);\n", 1)],
+    "schema of the drop (since #1357, the schema the function's oid is looked up in before the drops). tests/338 "
+    "parts D and E catch it (the recorded function survives, the operator's is gone).",
+    [("      v_fn_oid := to_regprocedure(quote_ident(v_fnsp) || '.' || quote_ident(v_fn) || '()');\n",
+      "      v_fn_oid := to_regprocedure(quote_ident(v_nsp) || '.' || quote_ident(v_fn) || '()');\n", 1)],
 )
 MUTATION_SRC["uninstall_capture_fn_dropped_in_delta_schema"] = "pgpm_core/uninstall.sql"
 MUTATIONS["uninstall_capture_fn_nsp_read_bare"] = (
@@ -15190,6 +15191,88 @@ MUTATIONS["hypertable_drain_appends_source_by_name"] = (
 )
 MUTATION_SRC["hypertable_drain_appends_source_by_name"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_drain_appends_source_by_name"] = "timescale"
+# Issue #1357: uninstall.sql drops what pgpm's records name by its oid (pgpm._uninstall_drop, which the script
+# creates in pgpm: a table through pgpm._drop_by_oid, a function by the name its oid has at the statement, the oid
+# gone after either). bench/uninstall_drops_by_oid.sh runs tests/348 against a mutant uninstall.sql; one mutation per
+# clause of the helper and per kind of site.
+MUTATIONS["uninstall_regrain_delta_dropped_by_name"] = (
+    "bench/uninstall_drops_by_oid.sh",
+    "Pre-#1357 uninstall.sql at the reported site: the recorded regrain delta is dropped by the name read before "
+    "regrain_cancel and before the DROP's own lock wait, so a schema renamed aside with a namesake schema and table "
+    "committed during either wait makes the uninstall drop the operator's table, rows and all, and leave the delta. "
+    "One statement. tests/348 S1 (the namesake's ids 1, 2) and S2 (its id 5) catch it.",
+    [("      perform pgpm._uninstall_drop(v_delta_oid, false, format('the regrain delta of %s', r.parent_table));\n",
+      "      if v_delta is not null then execute format('drop table if exists %I.%I', v_nsp, v_delta); end if;\n", 1)],
+)
+MUTATION_SRC["uninstall_regrain_delta_dropped_by_name"] = "pgpm_core/uninstall.sql"
+MUTATIONS["uninstall_drop_lock_not_followed"] = (
+    "bench/uninstall_drops_by_oid.sh",
+    "pgpm._uninstall_drop drops a table by the name its oid has at the statement, without pgpm._drop_by_oid's lock by "
+    "oid first: the DROP waits for its lock under that name, a schema swapped meanwhile puts the namesake under it, "
+    "and the effect check can only roll the uninstall back, so a reader of pgpm's delta during an uninstall makes "
+    "it refuse rather than drop the delta where its schema went. One clause. tests/348 S1 catches it (the uninstall "
+    "stops; the recorded delta survives).",
+    [("""    elsif to_regprocedure('pgpm._drop_by_oid(regclass,text)') is not null then
+      perform pgpm._drop_by_oid(p_obj::regclass, p_what);
+""", "", 1)],
+)
+MUTATION_SRC["uninstall_drop_lock_not_followed"] = "pgpm_core/uninstall.sql"
+MUTATIONS["uninstall_drop_effect_unchecked"] = (
+    "bench/uninstall_drops_by_oid.sh",
+    "pgpm._uninstall_drop does not ask whether the oid is gone after its DROP: a DROP FUNCTION that waited for the "
+    "function's own lock re-resolves the name once granted, and a schema swapped during the wait makes it drop the "
+    "namesake, CASCADE taking the operator's triggers, while the recorded function survives. One clause, the check. "
+    "tests/348 S6 catches it (no refusal).",
+    [("""    if exists (select 1 from pg_class c where c.oid = p_obj and not p_fn)
+       or exists (select 1 from pg_proc p where p.oid = p_obj and p_fn) then
+""", """    if false then
+""", 1)],
+)
+MUTATION_SRC["uninstall_drop_effect_unchecked"] = "pgpm_core/uninstall.sql"
+MUTATIONS["uninstall_scratch_copy_dropped_by_name"] = (
+    "bench/uninstall_drops_by_oid.sh",
+    "Pre-#1357 uninstall.sql's record sweep: a recorded from_hypertable copy is dropped by the name its oid has "
+    "before the DROP's lock wait, so a schema swapped during the wait makes it drop a namesake with its rows. One "
+    "statement, the copy's branch. tests/348 S3 catches it (the namesake's ids 7, 8, 9).",
+    [("""          perform pgpm._uninstall_drop(r.obj, false, format('from_hypertable''s %s of the hypertable with oid %s', r.kind, r.parent_oid));
+        end if;
+""", """          execute format('drop table %s', r.obj::regclass::text);
+        end if;
+""", 1)],
+)
+MUTATION_SRC["uninstall_scratch_copy_dropped_by_name"] = "pgpm_core/uninstall.sql"
+MUTATIONS["uninstall_comment_sweep_delta_by_loop_name"] = (
+    "bench/uninstall_drops_by_oid.sh",
+    "Pre-#1357 uninstall.sql's comment sweep: an unrecorded tracking copy's delta is dropped by the names the loop "
+    "read before an earlier iteration's DROP waited, so a schema swapped during that wait makes it drop a namesake "
+    "with its rows. One statement. tests/348 S4 catches it (the namesake's id 31).",
+    [("      perform pgpm._uninstall_drop(r.rel, false, format('from_hypertable''s change capture %I.%I', r.nsp, r.delta));\n",
+      "      execute format('drop table %I.%I', r.nsp, r.delta);\n", 1)],
+)
+MUTATION_SRC["uninstall_comment_sweep_delta_by_loop_name"] = "pgpm_core/uninstall.sql"
+MUTATIONS["uninstall_regrain_sweep_own_block"] = (
+    "bench/uninstall_drops_by_oid.sh",
+    "The regrain capture sweep in a DO block of its own again, ahead of the schema drop's (PR #1359 review, P1-02): "
+    "a refusal of pgpm._uninstall_drop's in it ends only that block, so a client that carries on past an error "
+    "(plain psql -f) reports the refusal and then drops schema pgpm, the only record of the capture function and "
+    "delta the refusal left, and running the script again cannot finish. One split, at the end of the sweep. "
+    "tests/348 S7 catches it (the pgpm schema is gone after the refused plain run).",
+    [("""  end loop;
+
+  begin
+    select coalesce(max(id), 0) into v_mark from pgpm.log;
+""", """  end loop;
+end;
+$$;
+do $$
+declare
+  r record; v_mark bigint; v_left_q text; v_unvalidated_q text; v_fn name; v_done oid[] := '{}';
+begin
+  begin
+    select coalesce(max(id), 0) into v_mark from pgpm.log;
+""", 1)],
+)
+MUTATION_SRC["uninstall_regrain_sweep_own_block"] = "pgpm_core/uninstall.sql"
 MUTATIONS["regrain_rename_unverified"] = (
     "bench/retire_locks_by_oid.sh",
     "regrain_step's RENAME of a one-step source for its split is not checked by its effect: it waits for ACCESS "
