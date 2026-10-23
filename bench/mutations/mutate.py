@@ -6884,7 +6884,8 @@ select is(
         "plan included: no stale-data witness, no frontier check, no forward partition past the monolith.",
         [
             ("select plan(10);\n", "select plan(7);\n", 1),
-            ("""create temporary table _before_tt as select count(*) as n from public.tt_search;
+            ("""-- the rows themselves, not their count (#1374): a lost row and an invented one cancel in a count
+create temporary table _before_tt as select * from public.tt_search;
 
 -- LIVENESS WITNESS: the drought is really present. The frontier and forward-partition checks below are
 -- of the form "obtain still reaches past now()", which would also pass against a fixture that was never
@@ -6894,7 +6895,8 @@ select cmp_ok(
   '>', interval '2 months',
   'the newest backfilled cuid is well outside the 2-month (p_obtain x step) lookahead about to be configured'
 );
-""", """create temporary table _before_tt as select count(*) as n from public.tt_search;
+""", """-- the rows themselves, not their count (#1374): a lost row and an invented one cancel in a count
+create temporary table _before_tt as select * from public.tt_search;
 """, 1),
             ("""
 -- The check above holds on the day of the transmute even with text_time dropped from _frontier_native's
@@ -6939,7 +6941,8 @@ select ok(
 -- property carrying over to both.
 """, 1),
             ("select plan(15);\n", "select plan(9);\n", 1),
-            ("""create temporary table _before_ulid as select count(*) as n from public.tt_ulid;
+            ("""-- the rows themselves, not their count (#1374): a lost row and an invented one cancel in a count
+create temporary table _before_ulid as select * from public.tt_ulid;
 
 -- LIVENESS WITNESS: the drought is really present (every check below would pass on a fresh fixture).
 select cmp_ok(
@@ -6947,7 +6950,8 @@ select cmp_ok(
   '>', interval '2 months',
   'ULID: the newest backfilled row is well outside the 2-month (p_obtain x step) lookahead'
 );
-""", """create temporary table _before_ulid as select count(*) as n from public.tt_ulid;
+""", """-- the rows themselves, not their count (#1374): a lost row and an invented one cancel in a count
+create temporary table _before_ulid as select * from public.tt_ulid;
 """, 1),
             (""");
 select ok(
@@ -6964,7 +6968,8 @@ select ok(
 );
 """, """);
 """, 1),
-            ("""create temporary table _before_ksuid as select count(*) as n from public.tt_ksuid;
+            ("""-- the rows themselves, not their count (#1374): a lost row and an invented one cancel in a count
+create temporary table _before_ksuid as select * from public.tt_ksuid;
 
 -- LIVENESS WITNESS: the drought is really present (every check below would pass on a fresh fixture).
 select cmp_ok(
@@ -6973,7 +6978,8 @@ select cmp_ok(
   '>', interval '2 months',
   'KSUID: the newest backfilled row is well outside the 2-month (p_obtain x step) lookahead'
 );
-""", """create temporary table _before_ksuid as select count(*) as n from public.tt_ksuid;
+""", """-- the rows themselves, not their count (#1374): a lost row and an invented one cancel in a count
+create temporary table _before_ksuid as select * from public.tt_ksuid;
 """, 1),
             (""");
 select ok(
@@ -15204,6 +15210,524 @@ MUTATIONS["fh_conservation_by_count"] = (
       "if [ \"$ANCHOR0\" = \"$ANCHOR1\" ]; then", 1)],
 )
 MUTATION_SRC["fh_conservation_by_count"] = "bench/run_fh.sh"
+
+# pass 13 G12 (#1374, #1375): core tests that asserted conservation by count (or by a sample of ids: tests/338,
+# 261, 319 and 108) where the claim is which rows, parents or constraint. Each mutation is one site's pre-fix shape,
+# and bench/tests_identity_not_count.sh plants the wrong state that shape accepts right before that site's assertion.
+MUTATIONS["t51_unique_constraint_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/51: 'the UNIQUE constraint survived the round trip' counts the table's UNIQUE "
+    "constraints (one), so a round trip that hands uq_rt back without uq_rt_key (ts, id), another UNIQUE "
+    "standing, passes. The guard drops uq_rt_key and adds UNIQUE (body) before the assertion.",
+    [("""select is(
+  (select array_agg(conname || ' ' || pg_get_constraintdef(oid) order by conname) from pg_constraint
+    where conrelid = 'public.uq_rt'::regclass and contype in ('p', 'u')),
+  array['uq_rt_key UNIQUE (ts, id)'], 'the UNIQUE constraint survived the round trip');
+""",
+      """select is(
+  (select count(*)::int from pg_constraint where conrelid = 'public.uq_rt'::regclass and contype = 'u'),
+  1, 'the UNIQUE constraint survived the round trip');
+""", 1),
+    ],
+)
+MUTATION_SRC["t51_unique_constraint_by_count"] = "tests/51_unique_constraint_untransmute_test.sql"
+MUTATIONS["t51_round_trip_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/51: 'all rows conserved through the round trip' is count(*) = 25, which a table that "
+    "lost row 1 and holds a row 26 the source never had satisfies. The guard makes that swap before the "
+    "assertion.",
+    [("""select is(
+  (select array_agg(id || ':' || body || ':' || extract(epoch from newest - ts)::bigint order by id)
+     from public.uq_rt, (select max(ts) as newest from public.uq_rt) n),
+  (select array_agg(g || ':b' || g || ':' || (g - 1) * 86400 order by g) from generate_series(1, 25) g),
+  'all rows conserved through the round trip');
+""",
+      """select is((select count(*)::int from public.uq_rt), 25, 'all rows conserved through the round trip');
+""", 1),
+    ],
+)
+MUTATION_SRC["t51_round_trip_rows_by_count"] = "tests/51_unique_constraint_untransmute_test.sql"
+MUTATIONS["t52_keyless_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/52: the keyless table's 'all rows conserved through the parent' is count(*) = 40, which "
+    "a table holding device 1 twice and no device 40 satisfies. The guard plants that state before the "
+    "assertion.",
+    [("""select is(
+  (select array_agg(device || ':' || (ts::date - d0) || ':' || val order by device, ts, val)
+     from public.kl, (select min(ts)::date - 1 as d0 from public.kl) m),
+  (select array_agg(g || ':' || g || ':' || (g * 1.5)::float8 order by g) from generate_series(1, 40) g),
+  'all rows conserved through the parent');
+""",
+      """select is((select count(*)::int from public.kl), 40, 'all rows conserved through the parent');
+""", 1),
+    ],
+)
+MUTATION_SRC["t52_keyless_rows_by_count"] = "tests/52_keyless_transmute_test.sql"
+MUTATIONS["t67_rename_tick_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/67: 'the rename tick moved no rows and lost none' is count(*) = 401, which a table that "
+    "lost row 1 and holds a row 500 satisfies. The guard makes that swap before the assertion.",
+    [("""select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from public.rnd t
+     full join (select g::bigint as id, 'p' || g as payload from generate_series(1, 400) g
+                union all select 20000, 'frontier') e on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], 'the rename tick moved no rows and lost none');
+""",
+      """select is((select count(*)::int from public.rnd), 401,
+  'the rename tick moved no rows and lost none');
+""", 1),
+    ],
+)
+MUTATION_SRC["t67_rename_tick_rows_by_count"] = "tests/67_regrain_name_collision_test.sql"
+MUTATIONS["t69_cancelled_source_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/69: after regrain_cancel 'the source still holds every row' is count(*) = 251, which a "
+    "ca4 that lost row 10 and holds a row 2505 satisfies. The guard makes that swap before the assertion.",
+    [("""select is((select array_agg(id || ':' || payload order by id) from public.ca4),
+  (select array_agg(g * 10 || ':p' || g order by g) from generate_series(1, 250) g) || '20000:frontier'::text,
+  'and the parent is untouched: the source still holds every row');
+""",
+      """select is((select count(*)::int from public.ca4), 251,
+  'and the parent is untouched: the source still holds every row');
+""", 1),
+    ],
+)
+MUTATION_SRC["t69_cancelled_source_rows_by_count"] = "tests/69_regrain_capture_apparatus_test.sql"
+MUTATIONS["t70_resumed_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/70: the resumed conversion's 'with every row intact' is count(*) = 2500, which a ph1 "
+    "that lost row 1 and holds a row 4999 satisfies. The guard makes that swap before the assertion.",
+    [("""select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from public.ph1 t
+     full join (select g::bigint as id, 'v' || g as v from generate_series(1, 2500) g) e on e.id = t.id and e.v = t.v
+    where e.id is null or t.id is null),
+  null::text[], 'with every row intact');
+""",
+      """select is((select count(*)::int from public.ph1), 2500, 'with every row intact');
+""", 1),
+    ],
+)
+MUTATION_SRC["t70_resumed_rows_by_count"] = "tests/70_transmute_phases_test.sql"
+MUTATIONS["t74_aged_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/74: 'a regrain does NOT destroy aged rows' is count(*) = 2001, which an ag74 that lost "
+    "aged row 1 and holds a row 2001 satisfies. The guard makes that swap (past the write block) before the "
+    "assertion.",
+    [("""select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from public.ag74 t
+     full join (select g::bigint as id, lpad(g::text, 100, 'x') as payload from generate_series(1, 2000) g
+                union all select 20000, 'frontier') e on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], 'a regrain does NOT destroy aged rows while archive coverage is incomplete');
+""",
+      """select is((select count(*)::int from public.ag74), 2001,
+  'a regrain does NOT destroy aged rows while archive coverage is incomplete');
+""", 1),
+    ],
+)
+MUTATION_SRC["t74_aged_rows_by_count"] = "tests/74_regrain_archive_gate_test.sql"
+MUTATIONS["t74_partly_aged_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/74: the partly aged child's rows below the horizon, count(*) = 999 where id < 1000, "
+    "which a pa74 that lost row 5 and holds a row 0 satisfies. The guard makes that swap before the assertion "
+    "and undoes it after.",
+    [("""select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from (select * from public.pa74 where id < 1000) t
+     full join (select g::bigint as id, lpad(g::text, 100, 'x') as payload from generate_series(1, 999) g) e
+       on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], 'a PARTIALLY aged child keeps the rows below the horizon instead of silently dropping them');
+""",
+      """select is((select count(*)::int from public.pa74 where id < 1000), 999,
+  'a PARTIALLY aged child keeps the rows below the horizon instead of silently dropping them');
+""", 1),
+    ],
+)
+MUTATION_SRC["t74_partly_aged_rows_by_count"] = "tests/74_regrain_archive_gate_test.sql"
+MUTATIONS["t74_regrained_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/74: 'nothing is lost either side of the boundary' is count(*) = 2001, which a pa74 that "
+    "lost row 1500 and holds a row 2500 satisfies. The guard makes that swap before the assertion.",
+    [("""select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from public.pa74 t
+     full join (select g::bigint as id, lpad(g::text, 100, 'x') as payload from generate_series(1, 2000) g
+                union all select 20000, 'frontier') e on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], 'and the rest of it regrains normally, so nothing is lost either side of the boundary');
+""",
+      """select is((select count(*)::int from public.pa74), 2001,
+  'and the rest of it regrains normally, so nothing is lost either side of the boundary');
+""", 1),
+    ],
+)
+MUTATION_SRC["t74_regrained_rows_by_count"] = "tests/74_regrain_archive_gate_test.sql"
+MUTATIONS["t79_status_parents_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/79: 'status() returns a row for EVERY managed table' compares status()'s row count with "
+    "config's, which a status() listing one table twice and another not at all satisfies. The guard puts such "
+    "a status() in place for the assertion.",
+    [("""select is((select array_agg(parent::oid order by parent::oid) from pgpm.status()),
+  (select array_agg(parent_table::oid order by parent_table::oid) from pgpm.config),
+  'status() returns a row for EVERY managed table -- one dead parent no longer takes them all down');
+""",
+      """select is((select count(*)::int from pgpm.status()), (select count(*)::int from pgpm.config),
+  'status() returns a row for EVERY managed table -- one dead parent no longer takes them all down');
+""", 1),
+    ],
+)
+MUTATION_SRC["t79_status_parents_by_count"] = "tests/79_status_survives_dropped_parent_test.sql"
+MUTATIONS["t79_orphan_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/79: the orphan's 'with every one of its rows intact' is count(*) = 5000, which an orphan "
+    "that lost row 1 and holds a row 5001 satisfies. The guard makes that swap before the assertion.",
+    [("""select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from public.orph79_p0000000000000000000_to_0000000000000006000 t
+     full join (select g::bigint as id, 'p' || g as payload from generate_series(1, 5000) g) e
+       on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], 'with every one of its rows intact');
+""",
+      """select is((select count(*)::int from public.orph79_p0000000000000000000_to_0000000000000006000), 5000,
+  'with every one of its rows intact');
+""", 1),
+    ],
+)
+MUTATION_SRC["t79_orphan_rows_by_count"] = "tests/79_status_survives_dropped_parent_test.sql"
+MUTATIONS["t80_converted_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/80: 'every row survived the conversion' is count(*) = 501, which an ofk that lost row 1 "
+    "and holds a row 999 satisfies. The guard makes that swap before the assertion.",
+    [("""select is(
+  (select array_agg(coalesce('lost ' || b.id, 'stray ' || t.id) order by coalesce(b.id, t.id))
+     from (select * from public.ofk where payload <> 'valid reference') t
+     full join _ofk_before b on b.id = t.id and b.ref_id = t.ref_id and b.payload = t.payload
+    where b.id is null or t.id is null)
+  || (select array_agg('inserted ' || ref_id) from public.ofk where payload = 'valid reference'),
+  array['inserted 2'], 'every row survived the conversion, plus the one valid insert');
+""",
+      """select is((select count(*)::int from public.ofk), 501,
+  'every row survived the conversion, plus the one valid insert');
+""", 1),
+    ],
+)
+MUTATION_SRC["t80_converted_rows_by_count"] = "tests/80_transmute_outgoing_fk_test.sql"
+MUTATIONS["t88_text_time_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/88: 'row count conserved' compares count(*) with a snapshot of the count, which a "
+    "tt_search that lost its 'oldest' row and holds an invented one satisfies. The exact pre-fix shape: the "
+    "snapshot of the count and the comparison with it. The guard makes that swap before the assertion.",
+    [("""select is(
+  (select array_agg(r::text order by r::text collate "C") from public.tt_search r),
+  (select array_agg(b::text order by b::text collate "C") from _before_tt b),
+  'row count conserved across the text_time migration, and every row as it was'
+);
+""",
+      """select is(
+  (select count(*) from public.tt_search)::bigint,
+  (select n from _before_tt)::bigint, 'row count conserved across the text_time migration'
+);
+""", 1),
+     ("""create temporary table _before_tt as select * from public.tt_search;
+""",
+      """create temporary table _before_tt as select count(*) as n from public.tt_search;
+""", 1),
+    ],
+)
+MUTATION_SRC["t88_text_time_rows_by_count"] = "tests/88_text_time_transmute_test.sql"
+MUTATIONS["t91_ulid_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/91: the ULID table's 'row count conserved' compares count(*) with a snapshot of the "
+    "count, which a tt_ulid that lost its 'oldest' row and holds an invented one satisfies. The exact pre-fix "
+    "shape: the snapshot of the count and the comparison with it. The guard makes that swap.",
+    [("""select is(
+  (select array_agg(r::text order by r::text collate "C") from public.tt_ulid r),
+  (select array_agg(b::text order by b::text collate "C") from _before_ulid b),
+  'ULID: row count conserved across the migration, and every row as it was'
+);
+""",
+      """select is(
+  (select count(*) from public.tt_ulid)::bigint, (select n from _before_ulid)::bigint,
+  'ULID: row count conserved across the migration'
+);
+""", 1),
+     ("""create temporary table _before_ulid as select * from public.tt_ulid;
+""",
+      """create temporary table _before_ulid as select count(*) as n from public.tt_ulid;
+""", 1),
+    ],
+)
+MUTATION_SRC["t91_ulid_rows_by_count"] = "tests/91_text_time_ulid_ksuid_transmute_test.sql"
+MUTATIONS["t91_ksuid_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/91: the KSUID table's 'row count conserved' compares count(*) with a snapshot of the "
+    "count, which a tt_ksuid that lost its 'oldest' row and holds an invented one satisfies. The exact "
+    "pre-fix shape: the snapshot of the count and the comparison with it. The guard makes that swap.",
+    [("""select is(
+  (select array_agg(r::text order by r::text collate "C") from public.tt_ksuid r),
+  (select array_agg(b::text order by b::text collate "C") from _before_ksuid b),
+  'KSUID: row count conserved across the migration, and every row as it was'
+);
+""",
+      """select is(
+  (select count(*) from public.tt_ksuid)::bigint, (select n from _before_ksuid)::bigint,
+  'KSUID: row count conserved across the migration'
+);
+""", 1),
+     ("""create temporary table _before_ksuid as select * from public.tt_ksuid;
+""",
+      """create temporary table _before_ksuid as select count(*) as n from public.tt_ksuid;
+""", 1),
+    ],
+)
+MUTATION_SRC["t91_ksuid_rows_by_count"] = "tests/91_text_time_ulid_ksuid_transmute_test.sql"
+MUTATIONS["t105_progress_parents_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/105: 'progress() with no argument returns one row per managed table' compares row "
+    "counts, which a progress() listing one table twice and another not at all satisfies. The guard puts such "
+    "a progress() in place for the assertion.",
+    [("""select is((select array_agg(parent::oid order by parent::oid) from pgpm.progress()),
+  (select array_agg(parent_table::oid order by parent_table::oid) from pgpm.config),
+  'progress() with no argument returns one row per managed table');
+""",
+      """select is((select count(*)::int from pgpm.progress()), (select count(*)::int from pgpm.config),
+  'progress() with no argument returns one row per managed table');
+""", 1),
+    ],
+)
+MUTATION_SRC["t105_progress_parents_by_count"] = "tests/105_progress_freeze_test.sql"
+MUTATIONS["t105_progress_dead_parent_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/105: the dead-parent case's 'a row for EVERY managed table' compares row counts, which a "
+    "progress() listing one table twice and another not at all satisfies. The guard puts such a progress() in "
+    "place.",
+    [("""select is((select array_agg(parent::oid order by parent::oid) from pgpm.progress()),
+  (select array_agg(parent_table::oid order by parent_table::oid) from pgpm.config),
+  'progress() still returns a row for EVERY managed table with a dead parent among them');
+""",
+      """select is((select count(*)::int from pgpm.progress()), (select count(*)::int from pgpm.config),
+  'progress() still returns a row for EVERY managed table with a dead parent among them');
+""", 1),
+    ],
+)
+MUTATION_SRC["t105_progress_dead_parent_by_count"] = "tests/105_progress_freeze_test.sql"
+MUTATIONS["t108_status_parents_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/108: 'status() still returns a row for every managed table' compares row counts, which a "
+    "status() listing one table twice and another not at all satisfies. The guard puts such a status() in "
+    "place.",
+    [("""select is((select array_agg(parent::oid order by parent::oid) from pgpm.status()),
+  (select array_agg(parent_table::oid order by parent_table::oid) from pgpm.config),
+  'status() still returns a row for every managed table');
+""",
+      """select ok((select count(*) from pgpm.status()) = (select count(*) from pgpm.config),
+  'status() still returns a row for every managed table');
+""", 1),
+    ],
+)
+MUTATION_SRC["t108_status_parents_by_count"] = "tests/108_retain_sign_test.sql"
+MUTATIONS["t115_overshoot_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/115: 'overshoot: all 7 rows are still in the monolith' is count(*) = 7 where id < 1000, "
+    "which a monolith that lost row 3 and holds a row 8 satisfies. The guard makes that swap (past the write "
+    "block) and undoes it after.",
+    [("""select is((select array_agg(id || ':' || payload order by id) from public.ac115 where id < 1000),
+  (select array_agg(g || ':p' || g order by g) from generate_series(1, 7) g),
+  'overshoot: all 7 rows are still in the monolith');
+""",
+      """select is((select count(*)::int from public.ac115 where id < 1000), 7,
+  'overshoot: all 7 rows are still in the monolith');
+""", 1),
+    ],
+)
+MUTATION_SRC["t115_overshoot_rows_by_count"] = "tests/115_archive_contract_test.sql"
+MUTATIONS["t115_wedged_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/115: 'and still holds all 7 rows' is count(*) = 7 where id < 1000, which a monolith that "
+    "lost row 3 and holds a row 8 satisfies. The guard makes that swap (past the write block) and undoes it "
+    "after.",
+    [("""select is((select array_agg(id || ':' || payload order by id) from public.ac115 where id < 1000),
+  (select array_agg(g || ':p' || g order by g) from generate_series(1, 7) g),
+  'and still holds all 7 rows: four bad strategies and five ticks archived nothing and dropped nothing');
+""",
+      """select is((select count(*)::int from public.ac115 where id < 1000), 7,
+  'and still holds all 7 rows: four bad strategies and five ticks archived nothing and dropped nothing');
+""", 1),
+    ],
+)
+MUTATION_SRC["t115_wedged_rows_by_count"] = "tests/115_archive_contract_test.sql"
+MUTATIONS["t121_aged_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/121: '(a) all 999 rows below the old horizon survive' is count(*) = 999 where id < 1000, "
+    "which an rl121 that lost row 500 and holds a row 0 satisfies. The guard makes that swap (past capture) "
+    "and undoes it.",
+    [("""select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from (select * from public.rl121 where id < 1000) t
+     full join (select g::bigint as id, 'p' || g as payload from generate_series(1, 999) g) e
+       on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], '(a) all 999 rows below the old horizon survive');
+""",
+      """select is((select count(*)::int from public.rl121 where id < 1000), 999,
+  '(a) all 999 rows below the old horizon survive');
+""", 1),
+    ],
+)
+MUTATION_SRC["t121_aged_rows_by_count"] = "tests/121_regrain_recheck_aged_at_swap_test.sql"
+MUTATIONS["t295_history_rows_by_count"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/295: 'the rest of the history is intact' is count(*) = 241 over a key (id, pgpm_seq) "
+    "whose ids repeat, which a ps295 that lost (110, 11) and holds a twin (120, 999) satisfies. The guard "
+    "makes that swap.",
+    [("""select is(
+  (select array_agg(coalesce('lost ' || e.id || ':' || e.pgpm_seq, 'stray ' || t.id || ':' || t.pgpm_seq)
+                    order by coalesce(e.id, t.id), coalesce(e.pgpm_seq, t.pgpm_seq))
+     from (select * from public.ps295 where id >= 100 and id < 3000) t
+     full join (select g * 10::bigint as id, g::bigint as pgpm_seq, 'x' as payload from generate_series(10, 250) g) e
+       on e.id = t.id and e.pgpm_seq = t.pgpm_seq and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], 'and the rest of the history is intact (ids 100 to 2500)');
+""",
+      """select is(
+  (select count(*)::int from public.ps295 where id >= 100 and id < 3000), 241,
+  'and the rest of the history is intact (ids 100 to 2500)');
+""", 1),
+    ],
+)
+MUTATION_SRC["t295_history_rows_by_count"] = "tests/295_regrain_key_column_named_pgpm_seq_test.sql"
+MUTATIONS["t338_restored_rows_endpoints_a"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1375 tests/338: '(A) the restored table keeps its rows, 1 to 120' looks at ids 1, 120 and 121 only, "
+    "so an a338 that lost rows 2 to 119 passes. The guard deletes them before the assertion.",
+    [("""select is((select array_agg(id || ':' || payload order by id) from public.a338),
+  (select array_agg(g || ':a' order by g) from generate_series(1, 120) g),
+  '(A) the restored table keeps its rows, 1 to 120');
+""",
+      """select is((select array_agg(id order by id) from public.a338 where id in (1, 120, 121)), array[1, 120]::bigint[],
+  '(A) the restored table keeps its rows, 1 to 120');
+""", 1),
+    ],
+)
+MUTATION_SRC["t338_restored_rows_endpoints_a"] = "tests/338_regrain_capture_fn_any_schema_test.sql"
+MUTATIONS["t338_restored_rows_endpoints_b"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1375 tests/338: '(B) the restored table keeps its rows, 1 to 70' looks at ids 1, 70 and 71 only, so "
+    "a b338 that lost row 35 passes. The guard deletes it before the assertion.",
+    [("""select is((select array_agg(id || ':' || payload order by id) from public.b338),
+  (select array_agg(g || ':b' order by g) from generate_series(1, 70) g),
+  '(B) the restored table keeps its rows, 1 to 70');
+""",
+      """select is((select array_agg(id order by id) from public.b338 where id in (1, 70, 71)), array[1, 70]::bigint[],
+  '(B) the restored table keeps its rows, 1 to 70');
+""", 1),
+    ],
+)
+MUTATION_SRC["t338_restored_rows_endpoints_b"] = "tests/338_regrain_capture_fn_any_schema_test.sql"
+MUTATIONS["t338_uninstalled_rows_endpoints_d"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1375 tests/338: '(D) the uninstalled table keeps its rows, 1 to 90' looks at ids 1, 90 and 91 only, "
+    "so a d338 that lost row 45 passes. The guard deletes it before the assertion.",
+    [("""select is((select array_agg(id || ':' || payload order by id) from public.d338),
+  (select array_agg(g || ':d' order by g) from generate_series(1, 90) g),
+  '(D) the uninstalled table keeps its rows, 1 to 90');
+""",
+      """select is((select array_agg(id order by id) from public.d338 where id in (1, 90, 91)), array[1, 90]::bigint[],
+  '(D) the uninstalled table keeps its rows, 1 to 90');
+""", 1),
+    ],
+)
+MUTATION_SRC["t338_uninstalled_rows_endpoints_d"] = "tests/338_regrain_capture_fn_any_schema_test.sql"
+MUTATIONS["t93_fan_out_by_ledger_rows"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1374 tests/93: archive_batch = null's fan-out across every eligible partition is count(*) = 3 "
+    "ledger rows, which three chunks of fewer partitions satisfy. The guard credits [6000, 7000)'s chunk to "
+    "the monolith before the assertion: three rows, two partitions.",
+    [("""select is(
+  (select array_agg(l.child_name order by l.lo::numeric) from pgpm.archive_ledger l
+    where l.parent_table = 'public.ab93'::regclass),
+  (select array_agg(p.child_name order by p.lo::numeric) from pgpm.part p
+    where p.parent_table = 'public.ab93'::regclass and p.lo::numeric in (0, 6000, 7000)),
+  'archive_batch = null restores fan-out across every eligible partition in one tick');
+""",
+      """select is(
+  (select count(*)::int from pgpm.archive_ledger where parent_table = 'public.ab93'::regclass),
+  3, 'archive_batch = null restores fan-out across every eligible partition in one tick');
+""", 1),
+    ],
+)
+MUTATION_SRC["t93_fan_out_by_ledger_rows"] = "tests/93_archive_batch_test.sql"
+MUTATIONS["t108_rows_after_regrain_sampled"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1375 tests/108: 'the rest remain' looks at five sentinel ids only, so an rs108r that lost row 40000 "
+    "and holds a row 55000 passes. The guard makes that swap before the assertion.",
+    [("""select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from public.rs108r t
+     full join (select g::bigint as id, 'x' as payload from generate_series(30000, 50000) g
+                union all select 65000, 'frontier') e on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], 'the rows below the legitimate horizon are gone and the rest remain');
+""",
+      """select is(
+  (select array_agg(id order by id) from public.rs108r where id in (1, 29999, 30000, 50000, 65000)),
+  array[30000, 50000, 65000]::bigint[],
+  'the rows below the legitimate horizon are gone and the rest remain');
+""", 1),
+    ],
+)
+MUTATION_SRC["t108_rows_after_regrain_sampled"] = "tests/108_retain_sign_test.sql"
+MUTATIONS["t261_rows_after_swap_sampled_a"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1375 tests/261: (A)'s 'every row reads as inserted after the swap' looks at seven ids only, so an "
+    "rt261 that lost row 120 and holds a row 250 passes. The guard makes that swap before the assertion.",
+    [("""select is((select array_agg(id || ':' || note order by id) from public.rt261),
+          (select array_agg(g || ':old' || g order by g) from generate_series(1, 200) g) || '450:frontier'::text,
+          'every row reads as inserted after the swap');
+""",
+      """select is((select array_agg(id || ':' || note order by id) from public.rt261 where id in (1, 45, 50, 55, 150, 200, 450)),
+          array['1:old1', '45:old45', '50:old50', '55:old55', '150:old150', '200:old200', '450:frontier'],
+          'every row reads as inserted after the swap');
+""", 1),
+    ],
+)
+MUTATION_SRC["t261_rows_after_swap_sampled_a"] = "tests/261_regrain_step_retarget_in_flight_test.sql"
+MUTATIONS["t261_rows_after_swap_sampled_b"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1375 tests/261: (B)'s 'every row reads as inserted after it' looks at six ids only, so an rh261 "
+    "that lost row 75 and holds a row 299 passes. The guard makes that swap before the assertion.",
+    [("""select is((select array_agg(id || ':' || note order by id) from public.rh261),
+          (select array_agg(g || ':old' || g order by g) from generate_series(1, 200) g) || '450:frontier'::text,
+          'every row reads as inserted after it');
+""",
+      """select is((select array_agg(id || ':' || note order by id) from public.rh261 where id in (1, 19, 20, 21, 150, 200)),
+          array['1:old1', '19:old19', '20:old20', '21:old21', '150:old150', '200:old200'],
+          'every row reads as inserted after it');
+""", 1),
+    ],
+)
+MUTATION_SRC["t261_rows_after_swap_sampled_b"] = "tests/261_regrain_step_retarget_in_flight_test.sql"
+MUTATIONS["t319_rows_after_swap_sampled"] = (
+    "bench/tests_identity_not_count.sh",
+    "Pre-#1375 tests/319: '(A) every row reads as inserted after the swap' looks at seven ids only, so an "
+    "ra319 that lost row 120 and holds a row 250 passes. The guard makes that swap before the assertion.",
+    [("""select is((select array_agg(id || ':' || note order by id) from public.ra319),
+          (select array_agg(g || ':old' || g order by g) from generate_series(1, 200) g) || '450:frontier'::text,
+          '(A) every row reads as inserted after the swap');
+""",
+      """select is((select array_agg(id || ':' || note order by id) from public.ra319 where id in (1, 49, 50, 51, 199, 200, 450)),
+          array['1:old1', '49:old49', '50:old50', '51:old51', '199:old199', '200:old200', '450:frontier'],
+          '(A) every row reads as inserted after the swap');
+""", 1),
+    ],
+)
+MUTATION_SRC["t319_rows_after_swap_sampled"] = "tests/319_set_regrain_restated_target_test.sql"
 
 # How long a mutation takes bench/discriminate.sh to prove, in seconds, for the ones that take long
 # enough to matter. `--list` prints the catalogue heaviest first (stable: catalogue order within a

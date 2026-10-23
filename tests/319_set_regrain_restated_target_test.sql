@@ -79,8 +79,9 @@ select is((select array_agg(lo || '-' || hi order by lo::numeric) from pgpm.part
 select is((select array_agg(left(method, 80) order by id) from pgpm.log
             where parent_table = 'public.ra319'::regclass and action = 'skip_regrain'), null,
           '(A) no tick of the run was refused');
-select is((select array_agg(id || ':' || note order by id) from public.ra319 where id in (1, 49, 50, 51, 199, 200, 450)),
-          array['1:old1', '49:old49', '50:old50', '51:old51', '199:old199', '200:old200', '450:frontier'],
+-- every row, not a sample of ids (#1375): a swap that lost a row between the sampled ones would pass a sample
+select is((select array_agg(id || ':' || note order by id) from public.ra319),
+          (select array_agg(g || ':old' || g order by g) from generate_series(1, 200) g) || '450:frontier'::text,
           '(A) every row reads as inserted after the swap');
 
 -- ======================================================================================================

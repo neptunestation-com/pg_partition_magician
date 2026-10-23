@@ -1359,6 +1359,7 @@ run_perf() {
     "bench/transmute_reused_key_shape.sh pgpm_perf420"
     "bench/archive_log_bounds_canonical.sh pgpm_perf424"
     "bench/archive_remedy_encoded_bounds.sh pgpm_perf425"
+    "bench/tests_identity_not_count.sh pgpm_perf426"
   )
   local selected=()
   local n=${#guards[@]} idx

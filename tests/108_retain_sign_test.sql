@@ -258,7 +258,9 @@ select is((select count(*) from public.rs108h where id = 3501), 1::bigint,
   'and it landed');
 
 -- status() is the diagnostic, so it must not be the thing that dies
-select ok((select count(*) from pgpm.status()) = (select count(*) from pgpm.config),
+-- by identity (#1374): each parent config holds, once, not merely as many rows
+select is((select array_agg(parent::oid order by parent::oid) from pgpm.status()),
+  (select array_agg(parent_table::oid order by parent_table::oid) from pgpm.config),
   'status() still returns a row for every managed table');
 select is((select retain from pgpm.status() where parent = 'public.rs108h'::regclass), '-5000',
   'status() shows the offending value');
@@ -335,9 +337,13 @@ select is(
   (select array_agg(distinct lo order by lo) from pgpm.log
     where parent_table = 'public.rs108r'::regclass and action = 'regrain_aged'),
   array['0', '10000', '20000'], 'the 3 below-horizon sub-ranges were skipped as aged, by lo');
+-- every row, not the sentinels alone (#1375): the rows lost and the rows the fixture never wrote, both none
 select is(
-  (select array_agg(id order by id) from public.rs108r where id in (1, 29999, 30000, 50000, 65000)),
-  array[30000, 50000, 65000]::bigint[],
-  'the rows below the legitimate horizon are gone and the rest remain');
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from public.rs108r t
+     full join (select g::bigint as id, 'x' as payload from generate_series(30000, 50000) g
+                union all select 65000, 'frontier') e on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], 'the rows below the legitimate horizon are gone and the rest remain');
 
 select * from finish();

@@ -24,7 +24,7 @@ select plan(37);
 -- 1000 rows over a step of 250: monolith [0, 1250), five sub-ranges. Frontier sentinel 5000 with retain
 -- 4000 puts the horizon at 1000, so [0, 250) .. [750, 1000) are aged and only [1000, 1250) is copied.
 create table public.rl121 (id bigint primary key, payload text);
-insert into public.rl121 select g, 'x' from generate_series(1, 1000) g;
+insert into public.rl121 select g, 'p' || g from generate_series(1, 1000) g;
 call pgpm.transmute('public.rl121', 'id', 250, p_retain => 4000, p_regrain_batch => 1000);
 select pgpm.obtain('public.rl121');
 insert into public.rl121 values (5000, 'frontier');
@@ -67,8 +67,14 @@ select ok((select attached from pgpm.part where parent_table = 'public.rl121'::r
 select is((select array_agg(id order by id) from public.rl121 where id in (1, 250, 500, 750, 999)),
   array[1, 250, 500, 750, 999]::bigint[],
   '(a) and every sampled aged row is still visible through the parent, by identity');
-select is((select count(*)::int from public.rl121 where id < 1000), 999,
-  '(a) all 999 rows below the old horizon survive');
+-- by identity (#1374): the rows lost and the rows the fixture never wrote, each named, both none
+select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from (select * from public.rl121 where id < 1000) t
+     full join (select g::bigint as id, 'p' || g as payload from generate_series(1, 999) g) e
+       on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], '(a) all 999 rows below the old horizon survive');
 select is((select regrain_cursor from pgpm.config where parent_table = 'public.rl121'::regclass), '1250',
   '(a) the cursor is untouched, so the run stays resumable rather than restarting');
 select is(

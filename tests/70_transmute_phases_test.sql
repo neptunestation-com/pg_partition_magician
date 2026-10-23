@@ -31,7 +31,7 @@ select is((select count(*)::int from pg_constraint
 -- Fresh computation for this table would give [0, 3000). The recorded bound says [0, 5000). If transmute
 -- resumes it honours 5000; if it starts over it produces 3000.
 create table public.ph1 (id bigint primary key, v text);
-insert into public.ph1 select g, 'x' from generate_series(1, 2500) g;
+insert into public.ph1 select g, 'v' || g from generate_series(1, 2500) g;
 alter table public.ph1 add constraint pgpm_monolith_bound check (id >= 0 and id < 5000) not valid;
 insert into pgpm.transmute_inflight (parent_table, nsp, rel, control_kind, lo, hi)
   values ('public.ph1'::regclass, 'public', 'ph1', 'id', '0', '5000');
@@ -45,7 +45,13 @@ select ok(
 select is((select relkind::text from pg_class where oid = 'public.ph1'::regclass), 'p',
   'and it completes: the table is partitioned');
 
-select is((select count(*)::int from public.ph1), 2500, 'with every row intact');
+-- by identity (#1374): the rows lost and the rows the source never had, each named, both none
+select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from public.ph1 t
+     full join (select g::bigint as id, 'v' || g as v from generate_series(1, 2500) g) e on e.id = t.id and e.v = t.v
+    where e.id is null or t.id is null),
+  null::text[], 'with every row intact');
 
 select cmp_ok((select count(*) from pgpm.log
                 where parent_table = 'public.ph1'::regclass and action = 'transmute_resume'),

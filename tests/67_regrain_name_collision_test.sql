@@ -92,7 +92,7 @@ select is(
 -- regrain() loops inside one transaction, but a feathered regrain is one regrain_step per tick, so the
 -- rename has to be visible to the NEXT call. Drive it a step at a time and pin the hand-off.
 create table public.rnd (id bigint primary key, payload text);
-insert into public.rnd select g, 'x' from generate_series(1, 400) g;
+insert into public.rnd select g, 'p' || g from generate_series(1, 400) g;
 call pgpm.transmute('public.rnd', 'id', 1000);
 insert into public.rnd values (20000, 'frontier');
 
@@ -108,7 +108,13 @@ select ok(
   to_regclass('public.rnd_p0000000000000000000_to_0000000000000001000') is not null,
   'the source table itself was renamed, not copied');
 
-select is((select count(*)::int from public.rnd), 401,
-  'the rename tick moved no rows and lost none');
+-- by identity (#1374): the rows lost and the rows the fixture never wrote, each named, both none
+select is(
+  (select array_agg(coalesce('lost ' || e.id, 'stray ' || t.id) order by coalesce(e.id, t.id))
+     from public.rnd t
+     full join (select g::bigint as id, 'p' || g as payload from generate_series(1, 400) g
+                union all select 20000, 'frontier') e on e.id = t.id and e.payload = t.payload
+    where e.id is null or t.id is null),
+  null::text[], 'the rename tick moved no rows and lost none');
 
 select * from finish();
