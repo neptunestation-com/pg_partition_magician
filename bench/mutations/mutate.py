@@ -15486,6 +15486,20 @@ MUTATIONS["archive_log_bounds_session_render"] = (
     [("returns text language sql stable set datestyle = 'ISO, MDY' as $$\n  select p_val::text;\n",
       "returns text language sql stable as $$\n  select p_val::text;\n", 1)],
 )
+# Issue #1371: the ATTACH every skip_archive remedy spells carries the bounds encoded for the control column.
+# bench/archive_remedy_encoded_bounds.sh runs tests/358 against the mutant.
+MUTATIONS["archive_remedy_bounds_unencoded"] = (
+    "bench/archive_remedy_encoded_bounds.sh",
+    "Pre-#1371 remedies: pgpm._attach_back_sql spells pgpm.part's native bounds in FOR VALUES, so on a uuidv7 grid "
+    "the ATTACH the three skip_archive remedies tell the operator to type is refused (invalid input syntax for type "
+    "uuid) and on a text_time grid its bounds hold none of the table's rows. One clause, the encoding. tests/358 parts "
+    "U and T catch it.",
+    [("    pgpm._encode(cfg.control_kind, p_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, "
+      "cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),\n"
+      "    pgpm._encode(cfg.control_kind, p_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, "
+      "cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));\n",
+      "    p_lo, p_hi);\n", 1)],
+)
 
 def main() -> int:
     if sys.argv[1:] == ["--late-survivors"]:

@@ -5988,6 +5988,24 @@ begin
 end;
 $$;
 
+-- The ATTACH PARTITION a skip_archive remedy tells the operator to type to put p_nsp.p_child back under p_parent on
+-- its pgpm.part bounds, [p_lo, p_hi) native (#1371): each bound encoded for the control column, as every ATTACH pgpm
+-- runs spells it (and _disown_retirement's remedy, #1272). A uuidv7 or text_time column's partition bounds are its own
+-- values, so the native text typed as one is refused ('invalid input syntax for type uuid') or names other bounds.
+create or replace function pgpm._attach_back_sql(p_parent regclass, p_nsp name, p_child name, p_lo text, p_hi text)
+returns text language plpgsql stable as $$
+declare cfg pgpm.config;
+begin
+  select * into cfg from pgpm.config where parent_table = p_parent;
+  return format('ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM (%L) TO (%L)', p_parent, p_nsp, p_child,
+    pgpm._encode(cfg.control_kind, p_lo, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz),
+    pgpm._encode(cfg.control_kind, p_hi, cfg.text_time_prefix, cfg.text_time_width, cfg.text_time_radix, cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));
+exception when others then
+  return format('ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM ... TO ..., its bounds [%s, %s) as the column''s values (they could not be encoded here: %s)',
+                p_parent, p_nsp, p_child, p_lo, p_hi, sqlerrm);
+end;
+$$;
+
 -- _archive_unheld_reason: why an archive candidate _archive_hold_partition did not hold is not archived, with the
 -- remedy, for the two candidates the hold refuses that only an operator can resolve: a partition pgpm's own
 -- retirement detached (the record of pgpm's dispatch names p_rel, the relation the name resolves to,
@@ -6005,13 +6023,13 @@ declare v_nsp name;
 begin
   v_nsp := pgpm._child_nsp(p_parent, p_child);
   if p_child_oid is null and not pgpm._detach_dispatched(p_parent, p_child, p_rel) then
-    return format('pgpm.part''s row for %I.%I over [%s, %s) records no oid (an upgrade from before child_oid could not anchor it), so pgpm cannot tell that the relation is a partition of %s and does not hand it to a strategy; not archived and nothing recorded, and retire() keeps it while the range is uncovered. If it is a partition of %s, anchor the row (select pgpm.adopt_partition(%L, %L)) and the next tick archives it; if it was detached by hand, first attach it back on its bounds (ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM (%L) TO (%L)), or, to keep it as yours, forget the row (delete from pgpm.part where parent_table = %L::regclass and child_name = %L)',
+    return format('pgpm.part''s row for %I.%I over [%s, %s) records no oid (an upgrade from before child_oid could not anchor it), so pgpm cannot tell that the relation is a partition of %s and does not hand it to a strategy; not archived and nothing recorded, and retire() keeps it while the range is uncovered. If it is a partition of %s, anchor the row (select pgpm.adopt_partition(%L, %L)) and the next tick archives it; if it was detached by hand, first attach it back on its bounds (%s), or, to keep it as yours, forget the row (delete from pgpm.part where parent_table = %L::regclass and child_name = %L)',
                   v_nsp, p_child, p_lo, p_hi, p_parent, p_parent, p_parent::text, format('%I.%I', v_nsp, p_child),
-                  p_parent, v_nsp, p_child, p_lo, p_hi, p_parent::text, p_child);
+                  pgpm._attach_back_sql(p_parent, v_nsp, p_child, p_lo, p_hi), p_parent::text, p_child);
   end if;
   if not pgpm._detach_dispatched(p_parent, p_child, p_rel) then return null; end if;
-  return format('%I.%I was detached from %s by a retirement of pgpm''s before its range [%s, %s) was archived (archiving was configured after the retirement began), so a strategy reading the range through the parent would read none of its rows; not archived and nothing recorded, and retire() keeps the table while the range is uncovered. To archive it, once it is no longer pending a detach attach it back on its bounds (ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM (%L) TO (%L)); the archive step then archives it and retire() completes the retirement',
-                v_nsp, p_child, p_parent, p_lo, p_hi, p_parent, v_nsp, p_child, p_lo, p_hi);
+  return format('%I.%I was detached from %s by a retirement of pgpm''s before its range [%s, %s) was archived (archiving was configured after the retirement began), so a strategy reading the range through the parent would read none of its rows; not archived and nothing recorded, and retire() keeps the table while the range is uncovered. To archive it, once it is no longer pending a detach attach it back on its bounds (%s); the archive step then archives it and retire() completes the retirement',
+                v_nsp, p_child, p_parent, p_lo, p_hi, pgpm._attach_back_sql(p_parent, v_nsp, p_child, p_lo, p_hi));
 end;
 $$;
 
@@ -6028,8 +6046,8 @@ returns text language plpgsql stable as $$
 declare v_nsp name;
 begin
   v_nsp := pgpm._child_nsp(p_parent, p_child);
-  return format('%I.%I stopped being an attached partition of %s while the archive strategy ran on its chunk [%s, %s) (a DETACH PARTITION ... CONCURRENTLY began: once its first transaction commits, a read through the parent sees none of the partition''s rows), so what the strategy returned is not coverage: nothing recorded, and retire() keeps the table while the range is uncovered. Whatever the strategy wrote for the chunk is written again if the chunk is archived later. Once the detach is finished the table is yours, left standing; to have it archived and retired after all, attach it back on its bounds (ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM (%L) TO (%L)) and the next tick archives the chunk',
-                v_nsp, p_child, p_parent, p_chunk_lo, p_chunk_hi, p_parent, v_nsp, p_child, p_lo, p_hi);
+  return format('%I.%I stopped being an attached partition of %s while the archive strategy ran on its chunk [%s, %s) (a DETACH PARTITION ... CONCURRENTLY began: once its first transaction commits, a read through the parent sees none of the partition''s rows), so what the strategy returned is not coverage: nothing recorded, and retire() keeps the table while the range is uncovered. Whatever the strategy wrote for the chunk is written again if the chunk is archived later. Once the detach is finished the table is yours, left standing; to have it archived and retired after all, attach it back on its bounds (%s) and the next tick archives the chunk',
+                v_nsp, p_child, p_parent, p_chunk_lo, p_chunk_hi, pgpm._attach_back_sql(p_parent, v_nsp, p_child, p_lo, p_hi));
 end;
 $$;
 
