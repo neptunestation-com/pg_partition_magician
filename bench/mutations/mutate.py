@@ -6499,12 +6499,13 @@ $$;''',
     ),
     "transmute_key_immediate": (
         "bench/transmute_key_deferrability.sh",
-        "Issue #731 put back: step 8 re-creates the reused key on the parent as a bare ADD PRIMARY KEY / "
-        "ADD UNIQUE, which still adopts a DEFERRABLE monolith key, so every forward partition's clone is "
+        "Issue #731 put back: step 8 re-creates the reused key on the parent without its deferral clause, "
+        "which still adopts a DEFERRABLE monolith key, so every forward partition's clone is "
         "immediate and a one-statement key swap the table accepted before fails with a duplicate key. Both "
-        "branches (the primary key and the unique constraint) lose the clause, the one site that carries "
-        "it. tests/188's flag, forward-partition and swap assertions on dpk and duq catch it.",
-        [("coalesce(v_key_defer, '')", "''", 2)],
+        "kinds (the primary key and the unique constraint) lose the clause in _transmute_key_ddl, the one "
+        "routine that carries it (#766). tests/188's flag, forward-partition and swap assertions on dpk and duq catch it.",
+        [("  return left(v_def, length(v_def) - length(v_sfx)) || coalesce(' WITH (' || v_with_q || ')', '') || v_sfx;\n",
+          "  return left(v_def, length(v_def) - length(v_sfx)) || coalesce(' WITH (' || v_with_q || ')', '');\n", 1)],
     ),
     # Issue #726, one mutation per site the helper serves, so each is proven caught on its own.
     "orphan_guard_id_label_19_digits": (
@@ -7316,11 +7317,11 @@ select ok(
         "key and the reused unique constraint. tests/208's name, upsert and adoption assertions in parts A "
         "to D catch it.",
         [("    execute format('alter table %s rename constraint %I to %I', v_monreg::text, v_key_name, 'pgpm_key_' || v_key_idx);\n",
-          "    null;\n", 1),
-         ("add constraint %I primary key (%s)%s', v_parent::text, v_key_name,",
-          "add primary key (%s)%s', v_parent::text,", 1),
-         ("add constraint %I unique (%s)%s', v_parent::text, v_key_name,",
-          "add unique (%s)%s', v_parent::text,", 1)],
+          "", 1),
+         ("    execute format('alter table only %s add constraint %I %s', v_parent::text, v_key_name, v_key_def);\n",
+          "    execute format('alter table only %s add %s', v_parent::text, v_key_def);\n", 1),
+         ("(select c.conindid::regclass::text from pg_constraint c where c.conrelid = v_parent and c.conname = v_key_name)",
+          "(select c.conindid::regclass::text from pg_constraint c where c.conrelid = v_parent and c.contype in ('p', 'u'))", 1)],
     ),
     "untransmute_key_name_kept": (
         "bench/cutover_key_name.sh",
@@ -7344,8 +7345,8 @@ select ok(
         "the name (ON CONFLICT ON CONSTRAINT <name> fails with 42704) and a DEFERRABLE one is immediate on "
         "every forward partition. One site, the constraint branch switched off, which leaves exactly the "
         "pre-fix loop; tests/225's name, upsert, deferral and definition assertions catch it.",
-        [("      if found then\n        if right(v_ucon_def, length(v_ucon_sfx)) is distinct from v_ucon_sfx then\n",
-          "      if false then\n        if right(v_ucon_def, length(v_ucon_sfx)) is distinct from v_ucon_sfx then\n", 1)],
+        [("      if found then\n        execute format('alter table %s rename constraint %I to %I', v_monreg::text, v_ucon_name,",
+          "      if false then\n        execute format('alter table %s rename constraint %I to %I', v_monreg::text, v_ucon_name,", 1)],
     ),
     "untransmute_unique_names_one": (
         "bench/cutover_secondary_unique_constraint.sh",
@@ -9460,6 +9461,60 @@ select is((select count(*) || '/' || string_agg(device_id::text, ',' order by de
         [("  p_covered := p_reach is not null and pgpm._native_gt(p_kind, p_reach, p_lo)\n"
           "               and (p_dead_reach is null or not pgpm._native_gt(p_kind, p_dead_reach, p_lo));\n",
           "  p_covered := p_reach is not null and pgpm._native_gt(p_kind, p_reach, p_lo);\n", 1)],
+    ),
+    # Issue #766 bullets 1 and 2: step 8 declares the reused key with its whole definition.
+    "transmute_key_redeclared_from_columns": (
+        "bench/transmute_reused_key_shape.sh",
+        "Issue #766 put back: step 8 declares the reused key on the parent from its column list (and its "
+        "deferrability) and lets the ADD recurse onto the monolith, the pre-fix shape: a PRIMARY KEY ... INCLUDE "
+        "matches no index of the monolith and fails the cutover with 'multiple primary keys' after phases 1 "
+        "and 2 committed the bound, and a UNIQUE NULLS NOT DISTINCT key is built a second time on the monolith, "
+        "plain on the parent and every forward partition. One site, step 8; 9b's unique constraints keep "
+        "theirs. tests/356 parts A to E catch it.",
+        [("  select c.conname, c.conindid, pgpm._transmute_key_ddl(c.oid)\n",
+          "  select c.conname, c.conindid,\n"
+          "         case c.contype when 'p' then 'primary key' else 'unique' end\n"
+          "         || ' (' || (select string_agg(quote_ident(x), ', ') from unnest(v_pkcols) x) || ')'\n"
+          "         || case when c.condeferrable and c.condeferred then ' deferrable initially deferred'\n"
+          "                 when c.condeferrable then ' deferrable' else '' end\n", 1),
+         ("    execute format('alter table only %s add constraint %I %s', v_parent::text, v_key_name, v_key_def);\n"
+          "    execute format('alter index %s attach partition %s',\n"
+          "                   (select c.conindid::regclass::text from pg_constraint c where c.conrelid = v_parent and c.conname = v_key_name),\n"
+          "                   v_key_idx::regclass::text);\n",
+          "    execute format('alter table %s add constraint %I %s', v_parent::text, v_key_name, v_key_def);\n", 1)],
+    ),
+    "regrain_key_include_refused": (
+        "bench/transmute_reused_key_shape.sh",
+        "Issue #766's consequence for regrain: the change capture's nullable-key refusal reads every column of "
+        "the reused key's index, its INCLUDE columns with them, so a parent whose key carries a nullable "
+        "INCLUDE column (which step 8 now gives it) cannot be regrained at all. One clause, the indnkeyatts "
+        "slice in the refusal. tests/356 parts D and E catch it.",
+        [("   where i.indexrelid = v_keyidx and k.ord <= i.indnkeyatts and not a.attnotnull;\n",
+          "   where i.indexrelid = v_keyidx and not a.attnotnull;\n", 1)],
+    ),
+    "regrain_copy_joins_include_columns": (
+        "bench/transmute_reused_key_shape.sh",
+        "Issue #766's consequence for regrain: the copy's anti-join on the reused key joins every column of its "
+        "index, the INCLUDE columns with them, so a resumed batch re-copies a row whose INCLUDE value is NULL "
+        "and fails on the copy's key. One clause, the indnkeyatts slice in regrain_step's equijoin. tests/356 "
+        "parts D and E catch it.",
+        [("      join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum\n"
+          "     where i.indexrelid = v_keyidx and k.ord <= i.indnkeyatts;\n",
+          "      join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum\n"
+          "     where i.indexrelid = v_keyidx;\n", 1)],
+    ),
+    "regrain_capture_keys_include_columns": (
+        "bench/transmute_reused_key_shape.sh",
+        "Issue #766's consequence for regrain: the change capture's delta, and the drift check that compares "
+        "it, are keyed by every column of the reused key's index, the INCLUDE columns with them, so a change "
+        "to an INCLUDE value of a row already copied is reconciled under the wrong key and the run fails on "
+        "the copy's key. Both sites, so capture and drift still agree. tests/356 part E catches it.",
+        [("    join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum\n"
+          "   where i.indexrelid = v_keyidx and k.ord <= i.indnkeyatts;\n",
+          "    join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum\n"
+          "   where i.indexrelid = v_keyidx;\n", 1),
+         ("   where i.indexrelid = p_keyidx and k.ord <= i.indnkeyatts;\n",
+          "   where i.indexrelid = p_keyidx;\n", 1)],
     ),
 }
 

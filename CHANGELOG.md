@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **`transmute` carries the reused key with its whole definition** (#766 bullets 1 and 2). The cutover declared
+  the reused primary key or unique constraint on the parent from its column list and deferrability alone, so a
+  `PRIMARY KEY ... INCLUDE` matched no index of the monolith and failed the cutover with "multiple primary keys"
+  after phases 1 and 2 had committed the write-rejecting bound, on every retry, and a `UNIQUE NULLS NOT
+  DISTINCT` key was built a second time on the monolith under the cutover's lock and lost on the parent and
+  every forward partition, which then accepted the duplicate `(NULL, ...)` rows the table refused. The key is
+  now declared with `pgpm._transmute_key_ddl`'s definition (`pg_get_constraintdef`'s, with the index's storage
+  parameters), the routine step 9b's secondary unique constraints already went through, on the parent alone,
+  and the monolith's index is attached under it, so it is adopted in place and nothing is built. A regrain of
+  such a parent reads the key's KEY columns only: its INCLUDE columns were refused as nullable key columns,
+  joined on by the copy and keyed into the change capture. `tests/356` is the acceptance test;
+  `bench/transmute_reused_key_shape.sh` runs it against `transmute_key_redeclared_from_columns`,
+  `regrain_key_include_refused`, `regrain_copy_joins_include_columns` and `regrain_capture_keys_include_columns`.
+
 - **A direct strategy call reads a uuidv7 or text_time bound at the column's unit** (#1369). `archive._grid_bound`
   read a bound as the control column makes of it only for a `date` column. A `uuidv7` or `text_time` column drops
   what is below its encoding's unit too (a millisecond, or a second for ObjectId and KSUID), so a direct

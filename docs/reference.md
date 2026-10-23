@@ -299,9 +299,11 @@ Parameters:
 - `p_control` -- the partition-key column. It **must be `NOT NULL`** (a partition key cannot be null;
   `pgpm` never scans to enforce it). A key is not required: if the **primary key** includes the control
   column, `pgpm` reuses it in place and never rewrites it; if there is no primary key and a **unique
-  constraint** includes the control column, that is reused instead (either way with its deferrability:
-  a `DEFERRABLE` or `INITIALLY DEFERRED` key stays so on the parent and on every partition, the forward
-  ones included); if there is neither, the table is partitioned **keyless** (no key synthesized). A
+  constraint** includes the control column, that is reused instead (either way with its whole definition:
+  its `INCLUDE` columns, `NULLS NOT DISTINCT`, the index's storage parameters and its deferrability, so a
+  `DEFERRABLE` or `INITIALLY DEFERRED` key stays so on the parent and on every partition, the forward
+  ones included, and the monolith's index is adopted in place, never built again); if there is neither,
+  the table is partitioned **keyless** (no key synthesized). A
   **primary key that *excludes* the control column is refused** (no rewrite), whatever other unique
   constraints the table has: it could not be carried onto the parent, and `pgpm` will not adopt a
   different key and leave it behind on the monolith, where it would enforce nothing for new rows. The error names the constraint and the control column. A *bare*
