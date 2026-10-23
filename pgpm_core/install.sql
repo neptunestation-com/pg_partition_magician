@@ -3663,8 +3663,8 @@ begin
                       '^FOR VALUES FROM \(''((?:[^'']|'''')*)''\) TO \(''((?:[^'']|'''')*)''\)$')
     into v_m from pg_class c where c.oid = p_rel;
   select * into cfg from pgpm.config where parent_table = p_parent;
-  if v_m is null or not found then return false; end if;
   cfg := pgpm._control_followed(cfg);
+  if v_m is null or cfg.parent_table is null then return false; end if;
   return coalesce(pgpm._native_text(cfg.control_kind, pgpm._col_to_native(cfg, replace(v_m[1], '''''', '''')))
                     = pgpm._native_text(cfg.control_kind, p_lo)
               and pgpm._native_text(cfg.control_kind, pgpm._col_to_native(cfg, replace(v_m[2], '''''', '''')))
