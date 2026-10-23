@@ -17,7 +17,9 @@
 # read as text, its full-line comments dropped (a guard named only in prose is not run), and inside each
 # run_<track>() body a guard counts as run when it is an entry of run_perf's guard list (the data the perf
 # track iterates) or the script a `bash` command line runs. A guard named in an echo, or in a
-# commented-out call, is not run.
+# commented-out call, is not run. And only a body test.sh DISPATCHES counts (#1385): a run_<name> function
+# called from test.sh's top level (its text with every run_*() body cut out), or from the body of one that is,
+# transitively. A guard whose only call sits in a run_* function nothing calls is run by no track.
 #   LIVENESS  MUTATIONS names at least 200 guards, so a clean result is not a scan of nothing;
 #   LIVENESS  the scan credits a known guard of each shape it reads: tap_verdict.sh (perf's list),
 #             hypertable_cutover_conservation.sh (run_timescale's bash call), archive_lz77_memory.sh
@@ -30,6 +32,8 @@
 #   clean_run_perf_entry_dropped      -- write_block_identity.sh's perf-list entry deleted: pre-#917
 #   clean_run_timescale_call_commented -- hypertable_late_appends.sh's run_timescale call commented out,
 #                                        so only a comment names it
+#   clean_run_in_undispatched_function -- write_block_identity.sh's only run moved into a run_* function
+#                                        test.sh never calls (pre-#1385 this guard credited it)
 #
 # Usage: guards_run_on_clean_code.sh <container> <db> [test.sh]
 # With no third argument it reads this checkout's test.sh; with one it reads THAT file, which is how
@@ -62,11 +66,35 @@ GUARD = r"(bench/[A-Za-z0-9_.-]+\.sh)"
 CALL = re.compile(r"(?:^|[\s;&|(])bash\s+\"?(?:\$\(dirname \"\$0\"\)/|\$ROOT/|\./)?" + GUARD)
 ENTRY = re.compile(r"^\s*\"" + GUARD + r"(?:\s[^\"]*)?\"\s*$")
 
+# A command that calls a run_<name> function: at the start of a line or after `;`, `&&`, `||`, `|`, `(`, `then`,
+# `do` or `else`, and followed by an argument or the end of the command (a definition, `run_x() {`, is not one).
+DISPATCH = re.compile(r"(?:^\s*|[;&|(]\s*|\b(?:then|do|else)\s+)run_(\w+)(?=\s|$|[;&|)])", re.M)
+
+def dispatched(text):
+    """The run_<name> functions test.sh calls: from its top level (the text with every run_*() body cut out),
+    then from the body of any function already called, until nothing new is reached (#1385)."""
+    def calls(t):
+        return {c.group(1) for ln in t.splitlines() if not ln.lstrip().startswith("#")
+                for c in DISPATCH.finditer(ln)}
+    bodies = {m.group(1): m.group(2) for m in re.finditer(r"^run_(\w+)\(\) *\{(.*?)\n\}", text, re.S | re.M)}
+    todo = calls(re.sub(r"^run_\w+\(\) *\{.*?\n\}", "", text, flags=re.S | re.M))
+    seen = set()
+    while todo:
+        f = todo.pop()
+        if f not in seen:
+            seen.add(f)
+            todo |= calls(bodies.get(f, ""))
+    return seen
+
 def run_guards(text):
-    """{guard: track} for every guard a run_<track>() body runs, as the text stands."""
+    """{guard: track} for every guard a run_<track>() body runs, as the text stands, counting only the
+    bodies test.sh dispatches: a run_* function nothing calls runs nothing (#1385)."""
     run = {}
+    called = dispatched(text)
     for m in re.finditer(r"^run_(\w+)\(\) *\{(.*?)\n\}", text, re.S | re.M):
         track, in_list = m.group(1), False
+        if track not in called:
+            continue
         for line in m.group(2).splitlines():
             if line.lstrip().startswith("#"):
                 continue
@@ -95,20 +123,36 @@ planted = '''run_alpha() {
   echo "--- bench/only_echo.sh ---"
   bash "$(dirname "$0")/bench/called.sh" c db || fail=1
   if out=$(bash "$(dirname "$0")/bench/called_in_subst.sh" c db 2>&1); then :; fi
+  rc=0; run_delta || rc=1
 }
 run_beta() {
     # bash "$(dirname "$0")/bench/commented_call.sh" c db || fail=1
   if bash "$(dirname "$0")/bench/called_in_if.sh" c db; then :; fi
 }
+run_delta() {
+  bash "$(dirname "$0")/bench/called_transitively.sh" c db || fail=1
+}
+run_gamma() {
+  bash "$(dirname "$0")/bench/never_dispatched.sh" c db || fail=1
+}
+# run_gamma
+echo "run_gamma is not a track"
+if [ "$TRACK" = "alpha" ]; then
+  run_alpha
+fi
+for t in 1; do run_beta "$t"; done
 '''
 got = run_guards(planted)
 want_run = {"bench/in_list.sh", "bench/in_list_extra.sh", "bench/called.sh",
-            "bench/called_in_subst.sh", "bench/called_in_if.sh"}
+            "bench/called_in_subst.sh", "bench/called_in_if.sh", "bench/called_transitively.sh"}
 want_not = {"bench/only_comment.sh", "bench/only_echo.sh", "bench/commented_call.sh"}
 say(want_run <= set(got), "CONTROL: a list entry and a bash call (bare, in if, in out=$()) are run",
     f"{len(want_run & set(got))} of {len(want_run)}")
 say(not (want_not & set(got)), "CONTROL: a comment, an echo, a commented-out call are not run",
     ", ".join(sorted(want_not & set(got))) or "none credited")
+say(dispatched(planted) == {"alpha", "beta", "delta"} and "bench/never_dispatched.sh" not in got,
+    "CONTROL: a run_* function nothing calls runs nothing (#1385)",
+    f"dispatched {sorted(dispatched(planted))}")
 
 guards = sorted({g for g, _, _ in mutate.MUTATIONS.values()})
 say(len(guards) >= 200, "LIVENESS: MUTATIONS names the guards discriminate.sh drives",
