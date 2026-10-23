@@ -1317,6 +1317,7 @@ run_perf() {
     "bench/write_block_skips_hand_detached.sh pgpm_perf316"
     "bench/bound_contract_remedy.sh pgpm_perf318"
     "bench/liveness_witness_labels.sh pgpm_perf322"
+    "bench/probe_overlap_witness.sh pgpm_perf429"
     "bench/transmute_claim_owner_under_set_role.sh pgpm_perf325"
     "bench/retain_horizon_ambiguous_wall_time.sh pgpm_perf326"
     "bench/archive_retired_chunk_kept.sh pgpm_perf324"
@@ -1371,7 +1372,7 @@ run_perf() {
     "bench/verify_parquet_tests_see_rows.sh pgpm_perf427"
     "bench/fix_phase_assign_commands.sh pgpm_perf433"
     "bench/screenshot_chrome_override.sh pgpm_perf434"
-    "bench/fix_phase_assign_commands.sh pgpm_perf433"
+    "bench/fix_phase_assign_commands.sh pgpm_perf437"
   )
   local selected=()
   local n=${#guards[@]} idx

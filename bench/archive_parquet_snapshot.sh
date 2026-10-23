@@ -140,12 +140,15 @@ ok = True
 
 def check(name, detail, cond):
     global ok
-    print(("PASS  " if cond else "FAIL  ") + f"{label + ': ' + name:<58} {detail}")
+    # A LIVENESS: prefix leads the line, ahead of the run label: bench/discriminate.sh's starved() reads
+    # only the head of a FAIL line, so behind the label it would read the witness as a defect check (#1380).
+    head = "LIVENESS: " if name.startswith("LIVENESS: ") else ""
+    print(("PASS  " if cond else "FAIL  ") + f"{head + label + ': ' + name[len(head):]:<58} {detail}")
     ok = ok and cond
 
 
 # Liveness first: an empty file would satisfy both negatives below.
-check("pyarrow read rows at all", f"{t.num_rows} rows", t.num_rows > 0)
+check("LIVENESS: pyarrow read rows at all", f"{t.num_rows} rows", t.num_rows > 0)
 check("footer num_rows is the row count read", f"{pf.metadata.num_rows} vs {t.num_rows}",
       pf.metadata.num_rows == t.num_rows)
 check("id = tag on every row",

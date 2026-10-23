@@ -150,7 +150,7 @@ for _ in $(seq 1 90); do
   if docker exec "$C" grep -q '^READY' "$PLOG" 2>/dev/null; then ready=true; break; fi
   sleep 1
 done
-check "the probe attached and is delivering events" "$ready" "true"
+check "LIVENESS: the probe attached and is delivering events" "$ready" "true"
 if [ "$ready" != true ]; then
   echo "      --- probe log ---"; docker exec "$C" cat "$PLOG" 2>&1 | sed 's/^/      /'
   docker exec "$C" pkill -INT -f lock_probe.py >/dev/null 2>&1

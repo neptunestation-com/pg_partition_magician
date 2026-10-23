@@ -89,7 +89,7 @@ say(res["b3"][0] == "invalid_repro", "LIVENESS: a repro.sql failing only LIVENES
 say(res["b2"][0] == "candidate", "LIVENESS: a repro.sh failing its defect check is a candidate", res["b2"][0])
 ran = "not ok - LIVENESS: the tick never reached" in res["b1"][1].get("tail", "")
 say(ran, "LIVENESS: the repro.sh ran and echoed its premise failure", f"echoed={ran}")
-say(res["b1"][0] == "invalid_repro", "(b) a repro.sh failing only LIVENESS: is invalid_repro", res["b1"][0])
+say(res["b1"][0] == "invalid_repro", "(b) a repro.sh failing only its LIVENESS premise is invalid_repro", res["b1"][0])
 
 say(res["c2"][0] == "invalid_repro", "LIVENESS: a failing GUARD: premise alone is invalid_repro", res["c2"][0])
 c1_printed = "not ok 2 - guard trigger is gone" in res["c1"][1].get("tail", "")
