@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- **A direct strategy call reads a uuidv7 or text_time bound at the column's unit** (#1369). `archive._grid_bound`
+  read a bound as the control column makes of it only for a `date` column. A `uuidv7` or `text_time` column drops
+  what is below its encoding's unit too (a millisecond, or a second for ObjectId and KSUID), so a direct
+  `archive_to_s3_ndjson` or `archive_to_s3_parquet` call for `[2024-01-02 00:00:00, 00:00:00.0005)` on a uuidv7 grid
+  passed the empty-range check, encoded both bounds to one uuid, read no row, and PUT an empty object at `lo`'s
+  chunk key, reporting 0 rows; and a `lo` inside a unit was keyed by the instant, a key no tick gives the chunk. The
+  bound is now read as the start of its unit, so such a range is refused as empty and a `lo` inside a unit is keyed
+  by the unit's start. `bench/archive_direct_call_encoded_unit.sh` runs `tests/archive/db/56` (mutation
+  `archive_encoded_bound_read_as_instant`).
+
+- **`archive.configure`'s `p_prefix` refusal no longer prints a value holding an `@`** (#1368). The refusal of a
+  prefix with a `.` or `..` segment printed the value raw, so `'user:password@host/../'` put the password in the
+  client's error and the server log, which `pgpm_archive/README.md` says no `archive.configure` refusal does. It
+  now asks `archive._configure_hides`, the decision the endpoint and bucket refusals take through
+  `archive._configure_shown`: a value holding an `@` is not shown, and one without is quoted as given.
+  `bench/archive_configure_prefix_shown.sh` runs `tests/archive/db/55` (mutation
+  `archive_prefix_refusal_shows_userinfo`).
+
 - **Every job of a summarised workflow gates its summary** (#1381). `lint.yml`'s `core-growth` job (the
   `scripts/core_growth.py --selftest` that fails a size measure gone blind) was in neither the `Lint summary`'s
   `needs` nor its result checks, so a red selftest left the one lint check `main` requires green, printing "Every

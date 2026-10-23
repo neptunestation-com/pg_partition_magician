@@ -1024,6 +1024,14 @@ run_archive() {
   # pairs bench/discriminate.sh completes with each encoder keying its object by the caller's spelling of lo again.
   echo "--- a direct archive_fn strategy call keys the chunk it read, in any DateStyle or zone guard (issue #814) ---"
   bash "$(dirname "$0")/bench/archive_direct_call_bounds.sh" pgpm_test-archive pgpm_perf396 || fail=1
+  # The prefix-refusal guard (#1368) re-runs tests/archive/db/55 for the same reason: the clean-code half of the pair
+  # bench/discriminate.sh completes with the p_prefix refusal printing a value that holds an '@' again.
+  echo "--- archive.configure's p_prefix refusal prints no value holding an '@' guard (issue #1368) ---"
+  bash "$(dirname "$0")/bench/archive_configure_prefix_shown.sh" pgpm_test-archive pgpm_perf422 || fail=1
+  # The encoded-unit guard (#1369) re-runs tests/archive/db/56 for the same reason: the clean-code half of the pair
+  # bench/discriminate.sh completes with a uuidv7 or text_time bound read as its instant again.
+  echo "--- a direct strategy call reads an encoded grid's bound at its unit guard (issue #1369) ---"
+  bash "$(dirname "$0")/bench/archive_direct_call_encoded_unit.sh" pgpm_test-archive pgpm_perf423 || fail=1
 
   $DC --profile "$prof" down -v
   if [ "$fail" -ne 0 ]; then echo "archive track: FAIL"; return 1; fi

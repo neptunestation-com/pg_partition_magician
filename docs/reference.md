@@ -3000,12 +3000,16 @@ reads its `p_lo` and `p_hi` once, on the grid's clock: a bound that carries an o
 offset-less one is read in the table's `partition_tz` (never the session's `TimeZone`), the spelling is read
 under the session's `DateStyle`, and an `id` bound is read as a number, at its least scale. On a `date`
 control column a bound is the start of the day it falls in on that clock, because a `date` keeps a bound's day
-and drops the rest. The empty-range check, the range it reads,
+and drops the rest; on a `uuidv7` or `text_time` grid it is the start of the unit it falls in (the millisecond,
+or the second of an ObjectId or KSUID key), because the read compares the column with the bound encoded and the
+encoding drops what is below the unit. The empty-range check, the range it reads,
 the recorded-chunk check and the key all take that one reading: from a `SQL, DMY` session a `p_lo` of
 `02/01/2024 00:00:00+00` reads the rows of 2 January and is keyed `2024010200000000`; on a `date` grid
 `'2024-01-02'` is keyed `2024010200000000`, the cell's start, from a New York session as from a UTC one,
 `'2024-01-02 00:00:00+09'` (15:00 UTC on 1 January) reads the whole 1 January cell and is keyed
-`2024010100000000`, and two instants of one day are refused as an empty range; and
+`2024010100000000`, and two instants of one day are refused as an empty range; on a `uuidv7` grid
+`['2024-01-02 00:00:00', '2024-01-02 00:00:00.0005')` is refused as an empty range, and a `p_lo` of
+`2024-01-02 00:00:00.0005+00` is keyed `2024010200000000`, the millisecond's start; and
 `'0100'` on an `id` grid is keyed `100`, as a tick keys that chunk. The result's `covered_hi` is `p_hi` as
 passed. Objects uploaded before this key
 shape stay where they are: each `pgpm.archive_ledger` row records the key its object was written to, and

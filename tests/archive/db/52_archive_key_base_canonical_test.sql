@@ -162,7 +162,7 @@ create table t52.h (id bigint primary key, payload text not null);
 insert into t52.h values (1, 'h'), (2, 'h'), (11, 'h');
 call pgpm.transmute('t52.h', 'id', 10::bigint, p_paused => true);
 select throws_like(format($$ select archive.configure('t52.h', 'archive-test-bucket', p_endpoint => 'http://minio:9000', p_prefix => %L) $$, :'p' || 'x/../'),
-  '%p_prefix ' || :'p' || 'x/../ has a "." or ".." segment%',
+  '%p_prefix ''' || :'p' || 'x/../'' has a "." or ".." segment%',
   'C: archive.configure refuses a prefix with a ".." segment, naming it');
 select is((select count(*)::int from archive.config where parent_table = 't52.h'::regclass), 0,
   'C: and stores nothing');

@@ -53,8 +53,9 @@ are handed, and refuses the spellings below before it writes anything:
   `.`, `%2E` or `%2e`.
 - **Refused, naming `p_bucket`**: a bucket holding a `/` (a key path goes in `p_prefix`), a `?`, a `#`
   or whitespace, or one that is empty, `.` or `..`.
+- **Refused, naming `p_prefix`**: a prefix with a `.` or `..` segment (`x/../`, `./x/`).
 - **Never shown**: no refusal `archive.configure` raises quotes a value that holds an `@`, whichever
-  check raises it. A refused value with no `@` in it is quoted as given.
+  check raises it, the `p_prefix` refusal included. A refused value with no `@` in it is quoted as given.
 
 That list is the limit of what `archive.configure` checks about the endpoint and the bucket. Any other
 spelling the client or the store cannot take is accepted there and fails loudly at the first request,
