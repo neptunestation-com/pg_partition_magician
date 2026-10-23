@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+- **The child-by-oid lint refuses a name column cast to regclass where it stands alone** (#1386).
+  `scripts/check_archive_child_by_oid.py` lets a relation's name stand alone in a select list or a `RAISE`, and
+  took every cast around it as part of that value, a cast to regclass included, so `select c.relname::regclass
+  into v_x` and `cast(c.relname as regclass)`, the name resolved again through `search_path`, passed while
+  `regclass(c.relname)` was refused. A cast to regclass or regtype is now no part of the value, in any spelling,
+  and is refused as the lookup by name it is; the same holds for a regclass rendered as text and cast back
+  (`c.oid::regclass::text::regclass`). A name column cast to text alone is still clean. Lint only; no SQL
+  changed. Guard `bench/lint_child_by_oid_cast_spellings.sh`, mutations `archive_child_by_oid_name_cast_alone`
+  and `archive_child_by_oid_rendered_recast_alone`.
+
+- **The changelog residue check refuses two versions of one bullet that differ, and reads every line Markdown
+  gives a bullet** (#1387). `scripts/check_changelog_residue.py` refused two versions of one bullet kept side by
+  side only when they were word for word the same, so a bullet reworded between rounds and kept twice by a
+  keep-both resolution passed whenever the rounds differed by a word. It now also refuses two bullets at least 80%
+  alike word for word in order (no two distinct bullets in any version of the file in its history are 75% alike).
+  And it read a bullet only over its indented lines, so a stale tail glued on as an unindented line (a lazy
+  continuation) or kept as an indented paragraph after a blank line or after a code block fenced inside the
+  item, each the same list item to Markdown, was no bullet's text and passed; it now reads them all. Lint only.
+  Guard `bench/lint_changelog_residue_spellings.sh`, mutations `changelog_residue_near_copy_unread`,
+  `changelog_residue_lazy_line_unread`, `changelog_residue_paragraph_unread` and
+  `changelog_residue_fence_ends_item`.
+
 - **The hypertable module reaches what pgpm recorded by its oid after a lock wait** (#1366). The cutover and a re-run
   of `from_hypertable_copy` dropped the recorded capture function by the name its oid rendered to, and `DROP
   FUNCTION` looks the name up again once it has the function's lock: the function or its schema renamed aside with

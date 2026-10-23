@@ -43,7 +43,9 @@ names to refuse (rule 1's last paragraph):
      outer query can filter on what a subquery projects under any name, P1-02 of #1150's verification), under
      its own name, or alone as an argument of a RAISE; in either, also as a bare argument of quote_ident(),
      format() or json_build_object() that is the whole item. Casts and grouping parentheses go with it
-     (`(c.relname)::text` alone is still alone). Not in the select list of a query that is an operand of
+     (`(c.relname)::text` alone is still alone), but a cast to regclass or regtype does not, in any spelling:
+     it is the lookup by name itself, the name resolved through search_path (#1386: `select c.relname::regclass
+     into v_x` and CAST(c.relname AS regclass) are refused as regclass(c.relname) always was). Not in the select list of a query that is an operand of
      UNION, INTERSECT or EXCEPT, though, which compare it with the other operand's column without an operator
      (#1180: `select c.relname, c.oid into v_name, v_oid from pg_class c intersect select p_name::name, c2.oid
      from pg_class c2`); UNION ALL compares nothing, and by the grammar's precedence (INTERSECT binds tighter)
@@ -306,11 +308,33 @@ def enclosing_open(toks, k):
     return -1
 
 
+def name_cast(toks, s, e):
+    """The type of NAME_TYPES the value toks[s..e] is cast to next, by `::` (the type qualified or not, with spaces
+    around its dot or not) or as the operand of CAST( ... AS type ), or None. Such a cast is no part of the value:
+    it is the lookup by name itself, the name resolved through search_path (#1386)."""
+    if tok(toks, e + 1)[1] == "::" and tok(toks, e + 2)[0] == "ID":
+        q = e + 2
+        while tok(toks, q + 1)[1] == "." and tok(toks, q + 2)[0] == "ID":
+            q += 2                                    # `pg_catalog . regclass` lexes as three tokens
+        to = last_part(toks[q][1])
+        return to if to in NAME_TYPES else None
+    if tok(toks, s - 1)[1] == "(" and last_part(tok(toks, s - 2)[1]) == "cast" and tok(toks, e + 1)[1] == "as":
+        q = match_close(toks, s - 1) - 1
+        while tok(toks, q)[1] == "]" and tok(toks, q - 1)[1] == "[":
+            q -= 2                                    # AS regclass[]
+        to = last_part(tok(toks, q)[1])
+        return to if to in NAME_TYPES else None
+    return None
+
+
 def widen(toks, s, e):
     """[s, e] widened over the casts after it (`::text`, `::character varying`, `::text[]`), over a CAST( ... AS
     type ) around it and over parentheses that only group it, so `(c.relname)::text` is one value, judged by what
-    stands around it."""
+    stands around it. Never over a cast to regclass or regtype (name_cast): `c.relname::regclass` alone in a
+    select list is a relation found by its name, not a name read off a row (#1386)."""
     while True:
+        if name_cast(toks, s, e):
+            return s, e
         if tok(toks, e + 1)[1] == "::" and tok(toks, e + 2)[0] == "ID":
             e += 2
             while tok(toks, e + 1)[1] in TYPE_TAILS:
@@ -368,6 +392,8 @@ def rendered_regclass(toks):
             continue                                  # a parameter's or a column's type, not a cast
         rendered = False
         while True:
+            if rendered and name_cast(toks, s, e):
+                break                                 # the rendered name resolved again: no part of it (#1386)
             if tok(toks, e + 1)[1] == "::" and tok(toks, e + 2)[0] == "ID":
                 to = last_part(tok(toks, e + 2)[1])
                 if not rendered and to not in TEXT_TYPES | NAME_TYPES:
@@ -676,6 +702,9 @@ def name_read(toks, s, e, ctx, what):
     json_build_object() there, of a query no set operation compares with another. Anywhere else is refused; the
     reasons only say which place it is."""
     s, e = widen(toks, s, e)
+    to = name_cast(toks, s, e)
+    if to:
+        return f"{what} is cast to {to}: the relation is found by its name, resolved through search_path"
     item = message_item(toks, s, e, ctx)
     prev, nxt = tok(toks, s - 1), tok(toks, e + 1)
     clause_at, sub_at, _ = ctx
@@ -1289,6 +1318,40 @@ LONE_CASTS = plant("  v_x := v_oid::regclass; v_x := v_oid::pg_catalog.regclass;
                    "  v_x := v_rec.oid::regclass; v_x := v_rec.oids[1]::regclass;\n"
                    "  v_x := (v_nsp || '1')::oid::regclass; v_x := cast((v_nsp || '1')::oid as regclass);\n"
                    "  v_x := regclass((v_nsp || '1')::int8);", params="p_parent regclass")
+# #1386 (F13-03): a name column cast to regclass where it otherwise stands alone, a select item or a RAISE or
+# format() argument: the cast is the lookup by name, the relname resolved through search_path, so it is no part of
+# the value that may stand alone. The same in each spelling, and to regtype (the row type found by the name)
+NAME_CASTS = {
+    label: plant(f"  {stmt}", params="p_parent regclass")
+    for label, stmt in (("select c.relname::regclass into v_x",
+                         "select c.relname::regclass into v_x from pg_class c where c.oid = p_parent;"),
+                        ("select cast(c.relname as regclass) into v_x",
+                         "select cast(c.relname as regclass) into v_x from pg_class c where c.oid = p_parent;"),
+                        ("select c.relname:: pg_catalog . \"regclass\" into v_x",
+                         "select c.relname:: pg_catalog . \"regclass\" into v_x from pg_class c where c.oid = p_parent;"),
+                        ("select (c.relname)::text::pg_catalog.regclass into v_x",
+                         "select (c.relname)::text::pg_catalog.regclass into v_x from pg_class c where c.oid = p_parent;"),
+                        ("select cast(c.relname::text as regclass[]) into v_x",
+                         "select (cast(c.relname::text as regclass[]))[1] into v_x from pg_class c where c.oid = p_parent;"),
+                        ("select t.table_name::regclass into v_x",
+                         "select t.table_name::regclass into v_x from information_schema.tables t limit 1;"),
+                        ("select format('%s', c.relname::regclass) into v_rel",
+                         "select format('%s', c.relname::regclass) into v_rel from pg_class c where c.oid = p_parent;"),
+                        ("raise notice '%', v_rec.relname::regclass",
+                         "for v_rec in select c.relname from pg_class c where c.oid = p_parent loop\n"
+                         "    raise notice '%', v_rec.relname::regclass;\n  end loop;"))}
+# ... and its sibling in rendered_regclass(): a rendered regclass or regtype cast back to one, the rendered name
+# resolved again, was taken as part of the rendering, which may stand alone too
+RENDERED_RECAST = {
+    label: plant(f"  select {expr} into v_x from pg_class c where c.oid = p_parent;", params="p_parent regclass")
+    for label, expr in (("c.oid::regclass::text::regclass", "c.oid::regclass::text::regclass"),
+                        ("cast(c.oid::regclass::text as regclass)", "cast(c.oid::regclass::text as regclass)"),
+                        ("c.reltype::regtype::text::regtype", "c.reltype::regtype::text::regtype"))}
+NAME_TYPE_CAST = plant("  select c.relname::regtype into v_oid from pg_class c where c.oid = p_parent;",
+                       params="p_parent regclass")
+# the control: a name column cast to text alone, in each spelling, is still a name read off a row and reported
+NAME_CAST_TO_TEXT = plant("  select c.relname::text, cast(c.relname as varchar), (c.relname)::character varying[]\n"
+                          "    into v_rel, v_nsp, v_rec from pg_class c where c.oid = p_parent;", params="p_parent regclass")
 # #1180 (F12r-06): a relation found by its name with no name column's token and no cast: the column named as
 # data, an object's rendered identity, and a set operation comparing a name that stands alone in its select list
 NAMED_AS_DATA = {
@@ -1466,6 +1529,15 @@ def selftest():
                "v_rel, which holds a relname selected into it, is cast to regclass")
     expect("a lone identifier, literal or array element cast to regclass in each spelling, and a number cast to it",
            LONE_CASTS, True)
+    for label, src in NAME_CASTS.items():
+        expect(f"#1386: a name column cast to regclass where it stands alone, {label}", src, False,
+               "is cast to regclass: the relation is found by its name")
+    expect("#1386: a name column cast to regtype, the row type found by the name", NAME_TYPE_CAST, False,
+           "c.relname is cast to regtype")
+    for label, src in RENDERED_RECAST.items():
+        expect(f"#1386's sibling: a rendered name cast back where it stands alone, {label}", src, False,
+               "rendered as text (c.")
+    expect("a name column cast to text alone, in each spelling, is a name read off a row", NAME_CAST_TO_TEXT, True)
     for label, src in NAMED_AS_DATA.items():
         expect(f"#1180: a lookup by the name column named as data, {label}", src, False, "a name column read as data")
     for label, src in IDENTITY.items():
