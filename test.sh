@@ -612,6 +612,12 @@ run_timescale() {
     # the clean-code half of the pairs discriminate.sh completes with its two mutants.
     echo "--- a drain step refuses a name a schema rename moved while it waited (issue #1335 bullet 10) ---"
     bash "$(dirname "$0")/bench/hypertable_drain_schema_swap.sh" pgpm_test-timescale pgpm_perf401 || fail=1
+    # #1366's and #1356's guards, the same way: they re-run tests/timescale/db/346 and 347 against the real install,
+    # the clean-code half of the pairs discriminate.sh completes with their nine mutants.
+    echo "--- the module reaches what pgpm recorded by oid after a wait (issue #1366) ---"
+    bash "$(dirname "$0")/bench/hypertable_by_oid_after_wait.sh" pgpm_test-timescale pgpm_perf413 || fail=1
+    echo "--- the drains never read an empty namesake as converged (issue #1356) ---"
+    bash "$(dirname "$0")/bench/hypertable_drain_probe_by_oid.sh" pgpm_test-timescale pgpm_perf414 || fail=1
     # #1241's hypertable guard, the same way: it re-runs tests/timescale/db/67 against the real install, the clean-code
     # half of the pair discriminate.sh completes with its mutant.
     echo "--- the cutover waits for snapshots older than its copy before it swaps (issue #1241) ---"

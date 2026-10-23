@@ -2002,8 +2002,8 @@ MUTATIONS = {
         "check refuses the swap: both cutovers of tests/timescale/db/35 fail, keyless and keyed.",
         [("  v_watermark text;   -- the column's own text (#791), never a timestamptz: see _from_hypertable_ctl_text\n",
           "  v_watermark timestamptz;   -- MUTANT: a naive watermark goes through the session TimeZone\n", 1),
-         ("coalesce(sum(%s), 0), pgpm._from_hypertable_ctl_text(max(%I)) from %I.%I', v_fp_q, p_control",
-          "coalesce(sum(%s), 0), max(%I) from %I.%I', v_fp_q, p_control", 1),
+         ("coalesce(sum(%s), 0), pgpm._from_hypertable_ctl_text(max(%I)) from %s', v_fp_q, p_control",
+          "coalesce(sum(%s), 0), max(%I) from %s', v_fp_q, p_control", 1),
          ("pgpm._from_hypertable_past(p_control, v_watermark, p_inclusive => true)",
           "pgpm._from_hypertable_past(p_control, v_watermark::text, p_inclusive => true)", 1),
          ("pgpm._from_hypertable_past(p_control, v_watermark), v_fp_q)",
@@ -8475,7 +8475,7 @@ select ok(
         "check then refuses the swap). tests/timescale/db/47 part D catches it.",
         [("from pg_temp.pgpm_dbatch", "from pgpm_dbatch", 4),
          ("      analyze pg_temp.pgpm_htail;\n", "      analyze pgpm_htail;\n", 1),
-         ("select %s from pg_temp.pgpm_htail s where", "select %s from pgpm_htail s where", 1)],
+         ("select %2$s from pg_temp.pgpm_htail s where", "select %2$s from pgpm_htail s where", 1)],
     ),
     "transmute_null_arguments_accepted": (
         "bench/null_arguments_refused.sh",
@@ -8965,7 +8965,9 @@ select ok(
         "tests/timescale/db/49 stage B catches it (the refusal is not its own).",
         [("  v_dest := pgpm._from_hypertable_scratch(p_hypertable, 'hypertable_dest');   -- #955: by record (drain_appends)\n"
           "  if v_dest is null then\n",
-          "  v_dest := v_rel || '_pgpm_dest';   -- MUTANT: by name\n  if to_regclass(format('%I.%I', v_nsp, v_dest)) is null then\n", 1)],
+          "  v_dest := (select c.relname from pg_class c where c.oid = p_hypertable) || '_pgpm_dest';\n"
+          "  if to_regclass(format('%I.%I', (select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace"
+          " where c.oid = p_hypertable), v_dest)) is null then\n", 1)],
     ),
     "hypertable_cutover_dest_by_name": (
         "bench/scratch_relations.sh",
@@ -8989,10 +8991,8 @@ select ok(
         "Pre-#955 from_hypertable_cutover: the swap drops <rel>_pgpm_delta_fn() by the hypertable's CURRENT name, "
         "so after a RENAME since the copy it drops an operator's function of the new name and leaves the "
         "copy's. tests/timescale/db/49 stage B catches it.",
-        [("  if v_trgfn_oid is not null and exists (select 1 from pg_proc where oid = v_trgfn_oid) then\n"
-          "    execute format('drop function %s', v_trgfn_oid::regprocedure::text);\n"
-          "  end if;\n",
-          "  execute format('drop function if exists %I.%I()', v_nsp, v_rel || '_pgpm_delta_fn');   -- MUTANT: by name\n", 1)],
+        [("  perform pgpm._from_hypertable_drop_fn(v_trgfn_oid, format('from_hypertable_cutover(%I.%I), dropping the capture function,', v_nsp, v_rel));\n",
+          "  execute format('drop function if exists %I.%I()', v_nsp, v_rel || '_pgpm_delta_fn');\n", 1)],
     ),
     "hypertable_swap_keeps_scratch_record": (
         "bench/scratch_relations.sh",
@@ -12893,9 +12893,8 @@ MUTATIONS["hypertable_drain_appends_reads_before_copy_lock"] = (
     "copy, so called while a cutover holds SHARE on the copy and waits for the source it holds a read of both, "
     "and the two deadlock (tests/timescale/db/64 (D): the drain waits on the source, one of them dies 40P01). "
     "One clause: the procedure's first lock on the copy.",
-    [("  execute format('lock table %I.%I in row exclusive mode', v_nsp, v_dest);\n"
-      "  -- the initial frontier: the copy watermark (max control in the dest). Read once; each step advances it.\n",
-      "  -- the initial frontier: the copy watermark (max control in the dest). Read once; each step advances it.\n", 1)],
+    [("  v_copy := pgpm._from_hypertable_lock_copy(p_hypertable, 'from_hypertable_drain_appends');\n",
+      "  v_copy := pgpm._scratch_rel(p_hypertable, 'hypertable_dest');\n", 1)],
 )
 MUTATION_SRC["hypertable_drain_appends_reads_before_copy_lock"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_drain_appends_reads_before_copy_lock"] = "timescale"
@@ -13125,10 +13124,10 @@ MUTATIONS["hypertable_cutover_capture_fn_drop_tracking_only"] = (
     "Pre-#1057 from_hypertable_cutover: the swap drops the recorded capture function only on the tracking path, "
     "so a copy whose delta was dropped by hand is cut over append-only and its capture function outlives the "
     "records the swap deletes. tests/timescale/db/65 catches it (b65's function survives).",
-    [("  if v_trgfn_oid is not null and exists (select 1 from pg_proc where oid = v_trgfn_oid) then\n"
-      "    execute format('drop function %s', v_trgfn_oid::regprocedure::text);\n",
-      "  if v_track and v_trgfn_oid is not null and exists (select 1 from pg_proc where oid = v_trgfn_oid) then\n"
-      "    execute format('drop function %s', v_trgfn_oid::regprocedure::text);\n", 1)],
+    [("  perform pgpm._from_hypertable_drop_fn(v_trgfn_oid, format('from_hypertable_cutover(%I.%I), dropping the capture function,', v_nsp, v_rel));\n",
+      "  if v_track then\n"
+      "    perform pgpm._from_hypertable_drop_fn(v_trgfn_oid, format('from_hypertable_cutover(%I.%I), dropping the capture function,', v_nsp, v_rel));\n"
+      "  end if;\n", 1)],
 )
 MUTATION_SRC["hypertable_cutover_capture_fn_drop_tracking_only"] = "pgpm_hypertable/install.sql"
 MUTATION_TRACK["hypertable_cutover_capture_fn_drop_tracking_only"] = "timescale"
@@ -15500,6 +15499,111 @@ MUTATIONS["archive_remedy_bounds_unencoded"] = (
       "cfg.text_time_unit, cfg.text_time_alphabet, cfg.text_time_discard_bits, cfg.text_time_epoch, cfg.partition_tz));\n",
       "    p_lo, p_hi);\n", 1)],
 )
+
+# Issue #1366: the hypertable module reaches what pgpm recorded by oid after a lock wait (the capture function's drops
+# checked by its oid, the drains' locks on the copy and the source by oid, the cutover's reads and writes of the copy
+# and the source by their oids' renderings). bench/hypertable_by_oid_after_wait.sh runs tests/timescale/db/346 against
+# a mutant module; one mutation per clause.
+MUTATIONS["hypertable_capture_fn_drop_unchecked"] = (
+    "bench/hypertable_by_oid_after_wait.sh",
+    "_from_hypertable_drop_fn does not ask whether the recorded oid is gone after its DROP FUNCTION: the DROP waits "
+    "for the function's lock and looks the name up again once granted, so a function or schema renamed aside with a "
+    "namesake committed during the wait makes the cutover (and the copy's re-run) drop the operator's function and "
+    "leave pgpm's behind with its record deleted. One clause. tests/timescale/db/346 parts A and B catch it.",
+    [("""  if exists (select 1 from pg_proc f where f.oid = p_fn) then
+    raise exception 'pg_partition_magician: % reached another function than the one pgpm recorded (oid %): the function or its schema was renamed while the DROP waited for its lock, and another function stood under the name; rolled back. Re-run it',
+      p_what, p_fn;
+  end if;
+""", "", 1)],
+)
+MUTATION_SRC["hypertable_capture_fn_drop_unchecked"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_capture_fn_drop_unchecked"] = "timescale"
+MUTATIONS["hypertable_drain_delta_step_source_unlocked"] = (
+    "bench/hypertable_by_oid_after_wait.sh",
+    "from_hypertable_drain_delta_step reconciles its batch from the source without locking it by oid first: the "
+    "reconcile's INSERT ... SELECT waits for the source behind a holder and, after a schema swap, reads a namesake, "
+    "so the copy takes the namesake's row for a key the batch consumed. One clause. tests/timescale/db/346 part C "
+    "catches it.",
+    [("  perform pgpm._lock_oid_or_raise(p_hypertable, 'access share', true, 'from_hypertable_drain_delta_step');\n", "", 1)],
+)
+MUTATION_SRC["hypertable_drain_delta_step_source_unlocked"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_drain_delta_step_source_unlocked"] = "timescale"
+MUTATIONS["hypertable_drain_copy_unlocked"] = (
+    "bench/hypertable_by_oid_after_wait.sh",
+    "_from_hypertable_lock_copy hands the drains the recorded copy without locking it: the append drain's watermark "
+    "read then waits for the copy under the name it rendered and, after a schema swap, reads an empty namesake, whose "
+    "NULL watermark makes the step copy every source row into the copy a second time. One clause. "
+    "tests/timescale/db/346 part D catches it.",
+    [("  if v_copy is not null and pgpm._lock_oid(v_copy, 'row exclusive', true) then\n",
+      "  if v_copy is not null then\n", 1)],
+)
+MUTATION_SRC["hypertable_drain_copy_unlocked"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_drain_copy_unlocked"] = "timescale"
+MUTATIONS["hypertable_cutover_baseline_by_name"] = (
+    "bench/hypertable_by_oid_after_wait.sh",
+    "from_hypertable_cutover reads its conservation baseline and the append-only watermark from the copy by the name "
+    "read at its start: a schema swapped to an empty namesake copy while the cutover waits for the copy's lock, and "
+    "swapped back while it waits for the source, gives a zero baseline and a NULL watermark, so a keyless catch-up "
+    "re-inserts every copied row and the conservation check agrees. One clause. tests/timescale/db/346 part E "
+    "catches it.",
+    [("pgpm._from_hypertable_ctl_text(max(%I)) from %s', v_fp_q, p_control, v_dest_oid)\n",
+      "pgpm._from_hypertable_ctl_text(max(%I)) from %I.%I', v_fp_q, p_control, v_nsp, v_dest)\n", 1)],
+)
+MUTATION_SRC["hypertable_cutover_baseline_by_name"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_cutover_baseline_by_name"] = "timescale"
+MUTATIONS["hypertable_cutover_reconcile_by_name"] = (
+    "bench/hypertable_by_oid_after_wait.sh",
+    "from_hypertable_cutover's change-tracking reconcile deletes the dirty keys from the copy by the name read at "
+    "its start: a schema swapped while the cutover waits for the delta sends the delete to a namesake copy, and the "
+    "copy pgpm recorded keeps its stale rows. One clause. tests/timescale/db/346 part F catches it.",
+    [("    execute format('with w as (delete from %s d where %s in (%s) returning %s as h) select count(*), coalesce(sum(h), 0) from w',\n"
+      "                   v_dest_oid, v_dkey_q, v_subsel_q, v_fp_q) into v_n, v_h;\n",
+      "    execute format('with w as (delete from %I.%I d where %s in (%s) returning %s as h) select count(*), coalesce(sum(h), 0) from w',\n"
+      "                   v_nsp, v_dest, v_dkey_q, v_subsel_q, v_fp_q) into v_n, v_h;\n", 1)],
+)
+MUTATION_SRC["hypertable_cutover_reconcile_by_name"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_cutover_reconcile_by_name"] = "timescale"
+MUTATIONS["hypertable_cutover_nomatch_by_name"] = (
+    "bench/hypertable_by_oid_after_wait.sh",
+    "from_hypertable_cutover's untracked-write check (#654) compares the source's fresh rows with the copy named by "
+    "the name read at its start: after a schema swap during its wait for the delta it compares them with a namesake "
+    "copy, refusing a sound swap or passing a wrong one. One clause. tests/timescale/db/346 part F catches it.",
+    [("      v_nomatch_q := format('not exists (select 1 from %s d where %s = %s and row(%s)::text = row(%s)::text)',\n"
+      "                          v_dest_oid, ",
+      "      v_nomatch_q := format('not exists (select 1 from %I.%I d where %s = %s and row(%s)::text = row(%s)::text)',\n"
+      "                          v_nsp, v_dest, ", 1)],
+)
+MUTATION_SRC["hypertable_cutover_nomatch_by_name"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_cutover_nomatch_by_name"] = "timescale"
+# Issue #1356: the drains' residual probes and the append step's watermark probe lock their relation by oid before
+# they name it. bench/hypertable_drain_probe_by_oid.sh runs tests/timescale/db/347 against a mutant module.
+MUTATIONS["hypertable_drain_appends_probe_unlocked"] = (
+    "bench/hypertable_drain_probe_by_oid.sh",
+    "from_hypertable_drain_appends asks whether anything is past the watermark without locking the source by oid "
+    "first: the EXISTS waits for the source under the name it rendered and, after a schema swap to an empty namesake, "
+    "reads it as converged. One clause. tests/timescale/db/347 part A catches it.",
+    [("    perform pgpm._lock_oid_or_raise(p_hypertable, 'access share', true, 'from_hypertable_drain_appends');\n", "", 1)],
+)
+MUTATION_SRC["hypertable_drain_appends_probe_unlocked"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_drain_appends_probe_unlocked"] = "timescale"
+MUTATIONS["hypertable_drain_delta_probe_unlocked"] = (
+    "bench/hypertable_drain_probe_by_oid.sh",
+    "from_hypertable_drain_delta asks whether anything is left in the delta without locking it by oid first: the "
+    "EXISTS waits for the delta under the name it rendered and, after a schema swap to an empty namesake, reads it "
+    "as converged. One clause. tests/timescale/db/347 part B catches it.",
+    [("    perform pgpm._lock_oid_or_raise(v_delta, 'row exclusive', true, 'from_hypertable_drain_delta');\n", "", 1)],
+)
+MUTATION_SRC["hypertable_drain_delta_probe_unlocked"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_drain_delta_probe_unlocked"] = "timescale"
+MUTATIONS["hypertable_drain_appends_step_source_unlocked"] = (
+    "bench/hypertable_drain_probe_by_oid.sh",
+    "from_hypertable_drain_appends_step probes the source for its batch's upper bound without locking it by oid "
+    "first: the probe waits for the source under the name it rendered and, after a schema swap to an empty "
+    "namesake, returns its input watermark (nothing past it). One clause. tests/timescale/db/347 part C catches it.",
+    [("  perform pgpm._lock_oid_or_raise(p_hypertable, 'access share', true, 'from_hypertable_drain_appends_step');\n", "", 1)],
+)
+MUTATION_SRC["hypertable_drain_appends_step_source_unlocked"] = "pgpm_hypertable/install.sql"
+MUTATION_TRACK["hypertable_drain_appends_step_source_unlocked"] = "timescale"
 
 def main() -> int:
     if sys.argv[1:] == ["--late-survivors"]:
