@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **The fix-phase skill's command for the highest guard database gives the highest** (#1372). It sorted
+  `pgpm_perfNNN` on field 3 of a split on `f`, which has no field 3, so sort compared whole lines lexically and
+  printed `pgpm_perf99` where the highest was `pgpm_perf406`: a coordinator following it assigned fixers databases
+  `test.sh` already used. It sorts on field 2, numerically. `bench/fix_phase_assign_commands.sh` runs both of the
+  skill's assignment commands as written, on planted names whose lexical and numeric maxima differ and on this
+  checkout. Mutation `fix_phase_guard_db_sorts_empty_key`.
+
 - **The regrain swap detaches the source it identified** (#1362). `regrain_step`'s swap ran `alter table <parent>
   detach partition <source>` with both names rendered before the `DETACH` waited for `ACCESS EXCLUSIVE` on the
   table behind a reader, and resolved them again once granted: a schema renamed aside during the wait, with a
