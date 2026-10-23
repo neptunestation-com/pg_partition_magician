@@ -16556,6 +16556,17 @@ MUTATIONS["flake_check_not_acquired_steps_unread"] = (
     [('  [ "$steps" = 0 ] || { all_runner=0; break; }\n', '', 1)],
 )
 MUTATION_SRC["flake_check_not_acquired_steps_unread"] = "scripts/review/flake_check.sh"
+MUTATIONS["upgrade_create_body_column_no_backfill"] = (
+    "bench/upgrade_in_place.sh",
+    "#1383: a column added to pgpm.config's `create table` body with no `add column if not exists` line at all, "
+    "the defect bench/upgrade_in_place.sh's header names first. A fresh install has it, so the pgTAP suite stays "
+    "green; an install from before it, upgraded by re-running the file, never gets it. Before #1383 the guard "
+    "passed it: DEGRADE_COLS did not name the column and the #417 precondition reads only the backfill lines, so "
+    "the degrade kept it and the catalog matched. Its precondition against the release must fail, by name.",
+    [("create table if not exists pgpm.config (\n  parent_table     regclass    primary key,\n",
+      "create table if not exists pgpm.config (\n  parent_table     regclass    primary key,\n"
+      "  obtain_note      text,\n", 1)],
+)
 
 def main() -> int:
     if sys.argv[1:] == ["--late-survivors"]:
