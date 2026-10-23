@@ -1347,6 +1347,8 @@ run_perf() {
     "bench/retire_locks_by_oid.sh pgpm_perf400"
     "bench/uninstall_drops_by_oid.sh pgpm_perf406"
     "bench/transmute_by_oid.sh pgpm_perf410"
+    "bench/regrain_swap_detach_by_oid.sh pgpm_perf407"
+    "bench/regrain_copy_by_oid.sh pgpm_perf408"
     "bench/snapshot_wait_foreign_floor_holder.sh pgpm_perf371"
     "bench/install_keeps_surface_grants.sh pgpm_perf375"
     "bench/retirement_mark_needs_dispatch.sh pgpm_perf367"
