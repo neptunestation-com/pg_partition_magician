@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **The fix-phase skill's command for the highest guard database gives the highest** (#1372). It sorted
+  `pgpm_perfNNN` on field 3 of a split on `f`, which has no field 3, so sort compared whole lines lexically and
+  printed `pgpm_perf99` where the highest was `pgpm_perf406`: a coordinator following it assigned fixers databases
+  `test.sh` already used. It sorts on field 2, numerically. `bench/fix_phase_assign_commands.sh` runs both of the
+  skill's assignment commands as written, on planted names whose lexical and numeric maxima differ and on this
+  checkout. Mutation `fix_phase_guard_db_sorts_empty_key`.
+
 - **A lock guard's overlap witness can fail** (#1379). The probes of `bench/maintain_lock.sh` and
   `bench/regrain_outgoing_fk_lock.sh` set `saw := true` after their poll loop, unconditionally, so "LIVENESS: the
   probe overlapped a running tick" (and "... a running swap") read true when the poll ran out of turns having seen
