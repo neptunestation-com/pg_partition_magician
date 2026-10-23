@@ -22,21 +22,33 @@
 #      `with:` options the table records, and some command of the function carries the local words the
 #      table names (the tool, at the version the action pins); an action or an option the table does not
 #      know FAILS, so a bumped action is a revisit of its local equivalent, not a silent divergence;
-#   5. test.sh's `ci` block, RUN (not read) with $0 a stub script whose every track passes except lint,
-#      whose exit status the run chooses, calls the stub's lint track, and its verdict follows that track:
-#      with the lint track passing it exits 0 and prints `ci: PASS`, and with the lint track failing it
-#      exits non-zero and prints a `ci: FAIL` line naming lint, never `ci: PASS` (#1280: the spelling of
-#      a "$0" lint command was accepted before, so a `ci` that ran the track and dropped its failure, PASS
-#      over a red Lint summary, which is #1183's symptom, passed this guard). The block runs from a
-#      scratch directory, its TMPDIR there too, so nothing it calls by a relative path is this checkout.
+#   5. test.sh's `ci` block, RUN (not read), with $0 a stub script that passes every track except lint
+#      and runs the lint track as test.sh's own code: run_lint() and the `if [ "$TRACK" = "lint" ]` block
+#      out of the test.sh under test, with each lint_job_<id>() replaced by a stub that records its call
+#      and, for the one job the run chooses, fails at its FIRST command and would pass at its last (every
+#      tool run_lint asks for is a stub on PATH). With no job failing, the lint track called each needed
+#      job exactly once and `ci` exits 0 printing `ci: PASS`; with any ONE job failing, `ci` exits non-zero
+#      and prints a `ci: FAIL` line naming lint, never `ci: PASS`. So a job failing turns `ci` red through
+#      run_lint's loop, its verdict and the lint track's exit, not just through `ci`'s own arm (#1382:
+#      this check used to stub the whole lint track, and with run_lint's list and the job bodies read as
+#      text, a run_lint whose loop called no job and reported each PASS passed it; #1280 before that: the
+#      spelling of a "$0" lint command was accepted, so a `ci` that dropped the track's failure passed).
+#      The block runs from a scratch directory, its TMPDIR there too, so nothing it calls by a relative
+#      path is this checkout.
 #   LIVENESS  lint.yml's summary needs at least 8 jobs, their `run:` steps hold at least 20 commands,
-#             test.sh has at least 8 lint_job_ functions, and its ci block called the stub for at least
-#             8 tracks, so a clean result is not a scan of nothing and check 5 ran the real block;
+#             test.sh has at least 8 lint_job_ functions, its ci block called the stub for at least 8
+#             tracks, and the lint track it ran called at least 8 job stubs, so a clean result is not a
+#             scan of nothing and check 5 ran the real block and the real lint track;
 #   CONTROL   on a planted workflow and test.sh, a dropped command, a command only in a comment, a
 #             missing function, a stale function, a list missing a job, an unknown action version, a
-#             changed action option, a `ci` that names the lint track only in an echo and a `ci` that
-#             runs the lint track and drops its failure each fail, and the planted pair as written
-#             passes, so each check can fail and none fails on its own.
+#             changed action option, a `ci` that names the lint track only in an echo, a `ci` that runs
+#             the lint track and drops its failure, a run_lint that calls no job, one that drops a job's
+#             failure, one that runs a job without errexit, and a lint track that drops run_lint's status
+#             each fail, and the planted pair as written passes, so each check can fail and none fails on
+#             its own.
+#
+# Which jobs lint.yml has is not this guard's question: it takes the summary's `needs` as the list, and
+# bench/summary_gates_every_job.sh holds that list to the workflow's jobs (#1381).
 #
 # The mutations it is required to fail against (bench/mutations/mutate.py):
 #   ci_lint_job_dropped     -- the track-filters job's function and its run_lint entry deleted: pre-#1183
@@ -44,6 +56,10 @@
 #   ci_skips_lint_track     -- `ci` no longer runs the lint track: pre-#1183's `ci`
 #   ci_drops_lint_failure   -- `ci` runs the lint track and its failure arm records nothing, so it prints
 #                              `ci: PASS` over a failed lint track (#1280)
+#   run_lint_drops_job_failure -- run_lint's failure arm prints FAIL and records nothing, so the lint
+#                              track passes with a job red (#1382)
+#   run_lint_job_without_errexit -- run_lint runs each job in a child bash without -e, so a job whose
+#                              first command fails and whose last passes is reported PASS (#1382)
 #
 # Usage: ci_runs_lint_jobs.sh <container> <db> [test.sh]
 # With no third argument it reads this checkout's test.sh; with one it reads THAT file, which is how
@@ -144,26 +160,61 @@ def read_test_sh(ts):
     return jobs, fns
 
 
-# $0 for a run of test.sh's ci block: it records each track it is asked for, fails the lint track with the
-# status the run chooses, and passes every other track, so the only thing that differs between two runs is
-# whether the lint track failed.
+# $0 for a run of test.sh's ci block: it records each track it is asked for, runs the lint track as the test.sh
+# under test runs it (the script lint_script() builds, every tool it asks for a stub on PATH), and passes every
+# other track, so the only thing that differs between two runs is which lint job, if any, failed.
 CI_STUB = """#!/usr/bin/env bash
 printf '%s\\n' "${1:-}" >> "$CI_STUB_LOG"
-if [ "${1:-}" = lint ]; then exit "$CI_STUB_LINT_RC"; fi
+if [ "${1:-}" = lint ]; then PATH="$CI_STUB_TOOLS:$PATH" exec bash "$CI_STUB_LINT"; fi
 exit 0
 """
 
 
-def run_ci(block, lint_rc):
-    """Run a ci block with $0 the stub. Returns (exit status, output lines, the tracks it called)."""
+def job_fn(job):
+    return "lint_job_" + job.replace("-", "_")
+
+
+def lint_script(ts, needs):
+    """The lint track out of a test.sh, as a script: its run_lint() and its `lint` block, under test.sh's own
+    `set -euo pipefail`, with each needed job's function a stub. Returns (script or None, tools, why not)."""
+    rl = re.search(r"^run_lint\(\) *\{\n.*?\n\}$", ts, re.S | re.M)
+    blk = re.search(r'^if \[ "\$TRACK" = "lint" \]; then\n.*?\n^fi$', ts, re.S | re.M)
+    if not rl or not blk:
+        return None, [], ("test.sh has no run_lint()" if not rl else
+                          "test.sh has no `if [ \"$TRACK\" = \"lint\" ]; then ... fi` block")
+    tools = sorted(set(re.findall(r'\btool="?([A-Za-z0-9_.+-]+)"?', rl.group(0))))
+    # A stub records its call, then fails at its FIRST command when it is the chosen job; its last command
+    # passes, so a job run without errexit (or in a condition) reads as passed.
+    stubs = "".join(f"""{job_fn(j)}() {{
+  printf '%s\\n' {shlex.quote(j)} >> "$LINT_JOB_LOG"
+  if [ "${{LINT_FAIL_JOB:-}}" = {shlex.quote(j)} ]; then false; fi
+  true
+}}
+""" for j in needs)
+    return "set -euo pipefail\n" + stubs + rl.group(0) + "\nTRACK=lint\n" + blk.group(0) + "\n", tools, ""
+
+
+def run_ci(block, lint, tools, fail_job):
+    """Run a ci block with $0 the stub, the lint track `lint`, and `fail_job` (or none) failing. Returns (exit
+    status, output lines, the tracks it called, the lint jobs the lint track called)."""
     with tempfile.TemporaryDirectory() as d:
         stub = os.path.join(d, "test.sh")
         with open(stub, "w") as f:
             f.write(CI_STUB)
         os.chmod(stub, 0o755)
-        log = os.path.join(d, "tracks")
+        with open(os.path.join(d, "lint.sh"), "w") as f:
+            f.write(lint)
+        os.mkdir(os.path.join(d, "tools"))
+        for t in tools:
+            tp = os.path.join(d, "tools", t)
+            with open(tp, "w") as f:
+                f.write("#!/bin/sh\nexit 0\n")
+            os.chmod(tp, 0o755)
+        log, jobs = os.path.join(d, "tracks"), os.path.join(d, "jobs")
         open(log, "w").close()
-        env = dict(os.environ, TRACK="ci", TMPDIR=d, CI_STUB_LOG=log, CI_STUB_LINT_RC=str(lint_rc))
+        open(jobs, "w").close()
+        env = dict(os.environ, TRACK="ci", TMPDIR=d, CI_STUB_LOG=log, CI_STUB_LINT=os.path.join(d, "lint.sh"),
+                   CI_STUB_TOOLS=os.path.join(d, "tools"), LINT_JOB_LOG=jobs, LINT_FAIL_JOB=fail_job or "")
         try:
             p = subprocess.run(["bash", "-c", "set -euo pipefail\n" + block, stub], cwd=d, env=env,
                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
@@ -171,32 +222,40 @@ def run_ci(block, lint_rc):
         except subprocess.TimeoutExpired:
             rc, out = None, ["(timed out)"]
         tracks = open(log).read().split()
-    return rc, out, tracks
+        ran = open(jobs).read().split()
+    return rc, out, tracks, ran
 
 
-def ci_verdicts(ts):
-    """Violations of check 5, and the tracks the ci block called with every track passing."""
+def ci_verdicts(ts, needs):
+    """Violations of check 5, the tracks the ci block called and the lint jobs it ran, every job passing."""
     m = re.search(r'^if \[ "\$TRACK" = "ci" \]; then\n.*?\n^fi$', ts, re.S | re.M)
     if not m:
-        return ["test.sh has no `if [ \"$TRACK\" = \"ci\" ]; then ... fi` block"], []
+        return ["test.sh has no `if [ \"$TRACK\" = \"ci\" ]; then ... fi` block"], [], []
+    lint, tools, why = lint_script(ts, needs)
+    if lint is None:
+        return [why], [], []
     v = []
-    rc, out, ok_tracks = run_ci(m.group(0), 0)
+    rc, out, ok_tracks, ok_ran = run_ci(m.group(0), lint, tools, None)
     if "lint" not in ok_tracks:
         v.append(f"test.sh's ci block never runs the lint track (it called the stub for: {' '.join(ok_tracks) or 'nothing'})")
     if rc != 0 or not any(ln.startswith("ci: PASS") for ln in out) or any(ln.startswith("ci: FAIL") for ln in out):
-        v.append(f"with every track passing, test.sh's ci block does not exit 0 with `ci: PASS` (exit {rc}: "
-                 f"{' | '.join(out[-3:])})")
-    rc, out, tracks = run_ci(m.group(0), 1)
-    if "lint" in tracks and (rc in (0, None) or any(ln.startswith("ci: PASS") for ln in out)
-                             or not any(re.match(r"ci: FAIL\b.*\blint\b", ln) for ln in out)):
-        v.append(f"with the lint track failing, test.sh's ci block does not fail naming it (exit {rc}: "
-                 f"{' | '.join(out[-3:])}), so it can report PASS over a red Lint summary")
-    return v, ok_tracks
+        v.append(f"with every track and lint job passing, test.sh's ci block does not exit 0 with `ci: PASS` "
+                 f"(exit {rc}: {' | '.join(out[-3:])})")
+    if "lint" in ok_tracks and sorted(ok_ran) != sorted(needs):
+        v.append(f"the lint track did not call each lint job once (called: {' '.join(ok_ran) or 'none'}; "
+                 f"needed: {' '.join(needs)})")
+    for j in needs:
+        rc, out, tracks, ran = run_ci(m.group(0), lint, tools, j)
+        if "lint" in tracks and (rc in (0, None) or any(ln.startswith("ci: PASS") for ln in out)
+                                 or not any(re.match(r"ci: FAIL\b.*\blint\b", ln) for ln in out)):
+            v.append(f"with lint job {j} failing, test.sh's ci block does not fail naming lint (exit {rc}: "
+                     f"{' | '.join(out[-3:])}), so it can report PASS over a red Lint summary")
+    return v, ok_tracks, ok_ran
 
 
 def check(lint, ts):
     """Violations of test.sh's lint track against lint.yml. Also returns (needs, run command count, fns,
-    the tracks its ci block called)."""
+    the tracks its ci block called, the lint jobs its lint track called)."""
     v = []
     jobs_yml = lint.get("jobs") or {}
     needs = (jobs_yml.get("summary") or {}).get("needs") or []
@@ -242,9 +301,9 @@ def check(lint, ts):
         miss = in_order(want, have)
         if miss is not None:
             v.append(f"lint.yml job {j}: CI runs `{' '.join(miss)}`, which its function does not, in order")
-    cv, ci_tracks = ci_verdicts(ts)
+    cv, ci_tracks, ci_ran = ci_verdicts(ts, needs)
     v += cv
-    return v, needs, nrun, fns, ci_tracks
+    return v, needs, nrun, fns, ci_tracks, ci_ran
 
 
 # CONTROL: the checks on a planted pair, before they are trusted with the real one.
@@ -273,7 +332,25 @@ run_lint() {
     alpha
     beta
   )
+  local job fn tool failed=""
+  for job in "${lint_jobs[@]}"; do
+    fn="lint_job_${job//-/_}"
+    tool="python3"
+    if ! command -v "$tool" >/dev/null 2>&1; then echo "SKIPPED  $job"; continue; fi
+    if bash -e -o pipefail -c "$(declare -f "$fn"); $fn"; then
+      echo "PASS  lint.yml job $job"
+    else
+      echo "FAIL  lint.yml job $job"
+      failed="$failed $job"
+    fi
+  done
+  if [ -n "$failed" ]; then echo "lint track: FAIL --$failed"; return 1; fi
+  echo "lint track: PASS"
 }
+if [ "$TRACK" = "lint" ]; then
+  lint_rc=0; run_lint || lint_rc=$?
+  exit "$lint_rc"
+fi
 if [ "$TRACK" = "ci" ]; then
   failed=""
   rc=0; "$0" lint || rc=$?
@@ -301,6 +378,11 @@ variants = {
     "a `ci` that only echoes the lint track": (P_YML, P_TS.replace('rc=0; "$0" lint || rc=$?', 'echo "$0" lint')),
     "a `ci` that runs the lint track and drops its failure": (
         P_YML, P_TS.replace('[ "$rc" = 0 ] || failed="$failed lint"', '[ "$rc" = 0 ] || :')),
+    "a run_lint that calls no job": (
+        P_YML, P_TS.replace('if bash -e -o pipefail -c "$(declare -f "$fn"); $fn"; then', 'if true; then')),
+    "a run_lint that drops a job's failure": (P_YML, P_TS.replace('      failed="$failed $job"\n', '')),
+    "a run_lint that runs a job without errexit": (P_YML, P_TS.replace('bash -e -o pipefail -c', 'bash -o pipefail -c')),
+    "a lint track that drops run_lint's status": (P_YML, P_TS.replace('exit "$lint_rc"', 'exit 0')),
 }
 y = copy.deepcopy(P_YML)
 y["jobs"]["beta"]["steps"][1]["uses"] = "ludeeus/action-shellcheck@v9"
@@ -318,12 +400,13 @@ say(len(caught) == len(variants), "CONTROL: each planted divergence fails",
 
 lint = yaml.safe_load(open(sys.argv[1]))
 ts = open(sys.argv[2]).read()
-v, needs, nrun, fns, ci_tracks = check(lint, ts)
+v, needs, nrun, fns, ci_tracks, ci_ran = check(lint, ts)
 say(len(needs) >= 8, "LIVENESS: lint.yml's Lint summary needs its lint jobs", f"{len(needs)} jobs")
 say(nrun >= 20, "LIVENESS: those jobs' run steps hold the commands CI runs", f"{nrun} commands")
 say(len(fns) >= 8, "LIVENESS: the scan reads test.sh's lint_job_ functions", f"{len(fns)} functions")
 say(len(ci_tracks) >= 8, "LIVENESS: test.sh's ci block ran, calling the stub per track",
     " ".join(ci_tracks) or "no track")
+say(len(ci_ran) >= 8, "LIVENESS: the lint track it ran called the lint job stubs", f"{len(ci_ran)} calls")
 say(not v, "test.sh's ci runs every lint.yml job and fails when one fails",
     f"{len(needs)} jobs, {len(v)} divergence(s)")
 for line in v:
