@@ -15389,6 +15389,17 @@ MUTATIONS["flake_check_not_acquired_steps_unread"] = (
     [('  [ "$steps" = 0 ] || { all_runner=0; break; }\n', '', 1)],
 )
 MUTATION_SRC["flake_check_not_acquired_steps_unread"] = "scripts/review/flake_check.sh"
+MUTATIONS["fh_conservation_before_regrain_only"] = (
+    "bench/harness_conservation_identity.sh",
+    "Pre-#1384 bench/run_fh.sh: the cohort is judged after the cutover and never after step 4e's regrain (copy, "
+    "swap, drop the source), so a regrain that loses cohort row 5 and invents a stranger 50 is reported CONSERVED. "
+    "One clause, the post-regrain read's failure verdict; the read and its message stay.",
+    [("CONSERVATION FAIL after the regrain: anchor cohort $ANCHOR0 -> $ANCHOR1, same rows: $ANCHOR_SAME (rows lost, "
+      "invented or rewritten). CORRECTNESS DEFECT.\"; CONS=fail; fi\n",
+      "CONSERVATION FAIL after the regrain: anchor cohort $ANCHOR0 -> $ANCHOR1, same rows: $ANCHOR_SAME (rows lost, "
+      "invented or rewritten). CORRECTNESS DEFECT.\"; fi\n", 1)],
+)
+MUTATION_SRC["fh_conservation_before_regrain_only"] = "bench/run_fh.sh"
 MUTATIONS["upgrade_create_body_column_no_backfill"] = (
     "bench/upgrade_in_place.sh",
     "#1383: a column added to pgpm.config's `create table` body with no `add column if not exists` line at all, "

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **`bench/run_fh.sh` judges its cohort after the regrain too** (#1384). Its conservation gate read the
+  immutable cohort after the cutover and step 4e then regrained the migrated monolith (copy into fine children,
+  swap, drop the source) with nothing read after it, so a regrain that lost or rewrote cohort rows was reported
+  CONSERVED in the section whose window includes it. A new step 4f reads the cohort again by the same digest
+  after the regrain and fails the run on a mismatch, and the report's after-figures are that read's.
+  `bench/harness_conservation_identity.sh` runs the harness from 4d to its report with a lossy regrain in place
+  of the driver. Mutation `fh_conservation_before_regrain_only`.
+
 - **`bench/upgrade_in_place.sh` sees a new column with no backfill line** (#1383). It degrades only the columns
   its `DEGRADE_COLS` names, and its #417 precondition derives the columns that must be named from the backfill
   lines, so a column added to a `create table` body with no backfill line at all, the defect its header names
