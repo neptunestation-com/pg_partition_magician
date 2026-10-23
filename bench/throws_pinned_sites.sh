@@ -14,7 +14,9 @@
 # clause were all no site, each passed on its pinned neighbour. Any statement can reach a COMMIT, so
 # throws_pinned.sh no longer reads the statement: every throws_* is a site. Two more spellings decided
 # "not a site" by text, and are held here too: a `--` inside a literal earlier on the line read as a comment
-# around the assertion, and a double-quoted assertion name ("throws_ok") was not read as one.
+# around the assertion, and a double-quoted assertion name ("throws_ok") was not read as one. And one decided
+# "not probed": a `:name` inside a /* */ comment in the pattern read as a psql variable, so the site was reported
+# unevaluable (`NULL /* :expected */`).
 # And (#1235, B06-02) its closing summary restated any failure as an unprefixed FAIL, so a run whose only
 # failure was its LIVENESS: zero-site premise, which its own comment calls "not evidence", read to
 # discriminate.sh's starved() as a catch.
@@ -42,6 +44,7 @@
 #                                       a UESCAPE name is no site again
 #   throws_pinned_comment_by_spelling -- a `--` anywhere before the assertion on its line read as a comment again
 #   throws_pinned_quoted_form        -- the assertion's name read unquoted only again
+#   throws_pinned_var_in_comment     -- a :name inside a /* */ comment of the pattern read as a psql variable
 #   throws_pinned_summary_not_restated -- throws_pinned.sh's closing FAIL summary without its restated
 #                                       `N ran, M failed` tail, the pre-#1235 verdict starved() certified
 #
@@ -82,6 +85,7 @@ STATEMENTS=(
 LINES=(
   "select is(1, 1, 'a -- b'); select throws_ok(\$\$ call pgpm.transmute('public.t1182', 'id', 10) \$\$, NULL, 'unpinned, after a literal holding --');"
   "select \"throws_ok\"(\$\$ call pgpm.transmute('public.t1182', 'id', 10) \$\$, NULL, 'unpinned, the assertion name quoted');"
+  "select throws_ok(\$\$ call pgpm.transmute('public.t1182', 'id', 10) \$\$, NULL /* :expected */, 'unpinned, a comment holding :name');"
 )
 PINNED="select throws_ok(\$\$ call pgpm.transmute('public.t1182', 'id', 10) \$\$, 'P0001', NULL, 'pinned, the plain spelling');"
 

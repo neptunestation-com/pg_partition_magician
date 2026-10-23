@@ -13615,6 +13615,16 @@ MUTATIONS["throws_pinned_quoted_form"] = (
       "CALL = re.compile(r'\\bthrows_(' + \"|\".join(re.escape(f) for f in forms) + r')\\s*\\(', re.I)\n", 1)],
 )
 MUTATION_SRC["throws_pinned_quoted_form"] = "bench/throws_pinned.sh"
+MUTATIONS["throws_pinned_var_in_comment"] = (
+    "bench/throws_pinned_sites.sh",
+    "bench/throws_pinned.sh's psql_var() reading a pattern's /* */ comments as text, so throws_ok($$ call "
+    "pgpm.transmute(...) $$, NULL /* :expected */, desc) reads as a pattern built from a psql variable, is reported "
+    "unevaluable and never probed, and the file passes on its pinned neighbour (#1235, review thread on PR #1395). "
+    "One clause, the block-comment skip.",
+    [("        elif text.startswith(\"/*\", i):\n            depth, i = 1, i + 2   # nested, as the server reads them\n",
+      "        elif False:\n            depth, i = 1, i + 2   # nested, as the server reads them\n", 1)],
+)
+MUTATION_SRC["throws_pinned_var_in_comment"] = "bench/throws_pinned.sh"
 MUTATIONS["throws_pinned_summary_not_restated"] = (
     "bench/throws_pinned_sites.sh",
     "Pre-#1235 bench/throws_pinned.sh (B06-02): the closing FAIL summary is a plain verdict rather than a restated "
@@ -15211,6 +15221,7 @@ MUTATION_COST = {
     "throws_pinned_site_by_name": 16,
     "throws_pinned_comment_by_spelling": 16,
     "throws_pinned_quoted_form": 16,
+    "throws_pinned_var_in_comment": 16,
     "throws_pinned_summary_not_restated": 16,
     "archive_lz77_hash_scratch": 240,
     "archive_deflate_raises": 112,

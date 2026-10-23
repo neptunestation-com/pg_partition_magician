@@ -67,7 +67,8 @@
 #                             site at all and the file passed on the pinned neighbour alone (#1182)
 # and bench/throws_pinned_sites.sh holds THIS script to finding every site over planted files, and to its
 # restated summary (mutations throws_pinned_site_by_spelling, throws_pinned_site_by_name,
-# throws_pinned_comment_by_spelling, throws_pinned_quoted_form, throws_pinned_summary_not_restated).
+# throws_pinned_comment_by_spelling, throws_pinned_quoted_form, throws_pinned_var_in_comment,
+# throws_pinned_summary_not_restated).
 #
 # Usage: throws_pinned.sh <container> <db> [test file]
 # With no third argument it probes every tests/**/*.sql in the repository. With one it probes THAT
@@ -200,8 +201,9 @@ PSQL_VAR = re.compile(r""":(?:'(\w+)'|"(\w+)"|([A-Za-z_]\w*))""")
 def psql_var(text):
     """The name of the first psql variable text interpolates, outside its literals and comments: :'name',
     :"name" or a bare :name (#1235: tests/184 and tests/315 build a pattern from a bare :name), never the :: of
-    a cast (a slice bound written as a name, a[lo:hi], reads as one too, and is reported, not passed). None
-    when there is none. psql leaves a variable its session never set as written, so in the probe's
+    a cast (a slice bound written as a name, a[lo:hi], reads as one too, and is reported, not passed). A
+    comment, -- or /* */ (#1235: `NULL /* :expected */` once read as a variable, and the unpinned site was
+    reported rather than probed), interpolates nothing. None when there is none. psql leaves a variable its session never set as written, so in the probe's
     session each is a syntax error rather than the value its own file gave it."""
     i, n = 0, len(text)
     while i < n:
@@ -225,6 +227,16 @@ def psql_var(text):
         elif text.startswith("--", i):
             j = text.find("\n", i)
             i = n if j < 0 else j
+            continue
+        elif text.startswith("/*", i):
+            depth, i = 1, i + 2   # nested, as the server reads them
+            while i < n and depth:
+                if text.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif text.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
             continue
         i += 1
     return None

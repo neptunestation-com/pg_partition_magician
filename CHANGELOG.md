@@ -10,11 +10,11 @@
   `COMMIT`, so the statement is no longer read: every assertion is re-issued around the committing stand-in and
   must reject it (832 sites in the tree, up from 308; none accepted it). An assertion after a literal holding `--`
   on its line, and one whose name is double-quoted, are sites too; a bare `:name` in a pattern reads as
-  unevaluable. The closing summary now restates the per-site verdicts (`N ran, M failed`), so a run that failed
-  only its zero-site premise is refused by `discriminate.sh` as starved rather than certified as a catch.
-  `bench/throws_pinned_sites.sh` plants each shape; mutations `throws_ok_helper_unpinned`,
-  `throws_pinned_site_by_name`, `throws_pinned_comment_by_spelling`, `throws_pinned_quoted_form` and
-  `throws_pinned_summary_not_restated`.
+  unevaluable (one inside a comment does not). The closing summary now restates the per-site verdicts (`N ran,
+  M failed`), so a run that failed only its zero-site premise is refused by `discriminate.sh` as starved rather
+  than certified as a catch. `bench/throws_pinned_sites.sh` plants each shape; mutations
+  `throws_ok_helper_unpinned`, `throws_pinned_site_by_name`, `throws_pinned_comment_by_spelling`,
+  `throws_pinned_quoted_form`, `throws_pinned_var_in_comment` and `throws_pinned_summary_not_restated`.
 
 - **The child-by-oid lint refuses a name column cast to regclass where it stands alone** (#1386).
   `scripts/check_archive_child_by_oid.py` lets a relation's name stand alone in a select list or a `RAISE`, and
