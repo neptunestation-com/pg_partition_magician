@@ -15273,7 +15273,7 @@ MUTATIONS["delete_checked_unverified"] = (
 MUTATIONS["truncate_checked_unverified"] = (
     "bench/retire_locks_by_oid.sh",
     "pgpm._truncate_checked does not look at the delta's relfilenode: regrain_cancel's TRUNCATE (and the swap's) empties a namesake a schema rename put under the name while it waited behind a captured write, with the schemas swapped back or not, and returns as if it had emptied its own delta (P2-02). One clause. tests/345 parts L and L2 catch it.",
-    [("  perform pgpm._effect_or_raise((select c.relfilenode from pg_class c where c.oid = p_rel) is distinct from v_rfn\n    or (pg_relation_size(p_rel) = 0\n        and pg_xact_status(((pg_current_xact_id()::text::bigint >> 32 << 32)\n                            + (select a.xmin::text::bigint from pg_attribute a where a.attrelid = p_rel and a.attnum = -1))::text::xid8) = 'in progress'),\n    p_rel, p_what);\n", '', 1)],
+    [("  perform pgpm._effect_or_raise((select c.relfilenode from pg_class c where c.oid = p_rel) is distinct from v_rfn\n    or (pg_relation_size(p_rel) = 0 and v_held),\n    p_rel, p_what);\n", '', 1)],
 )
 MUTATIONS["write_block_create_unverified"] = (
     "bench/retire_locks_by_oid.sh",
@@ -15461,10 +15461,23 @@ MUTATIONS["truncate_checked_inplace_by_catalog_write"] = (
     "relation is empty and this transaction wrote its pg_class row, as it does for a delta it created; but a GRANT "
     "writes that row too, and the swap tick grants a new writer of the table INSERT on the delta (#496). A "
     "never-written delta (no page to empty) under that grant passes while the TRUNCATE, waiting behind a reader, "
-    "empties a namesake a schema swap put under its name, and the swap commits. One clause, which row's creator is "
-    "asked. tests/350 part E catches it.",
-    [("(select a.xmin::text::bigint from pg_attribute a where a.attrelid = p_rel and a.attnum = -1)",
-      "(select c.xmin::text::bigint from pg_class c where c.oid = p_rel)", 1)],
+    "empties a namesake a schema swap put under its name, and the swap commits. One clause, what the in-place branch "
+    "asks. tests/350 part E catches it.",
+    [("    or (pg_relation_size(p_rel) = 0 and v_held),\n",
+      "    or (pg_relation_size(p_rel) = 0\n"
+      "        and pg_xact_status(((pg_current_xact_id()::text::bigint >> 32 << 32)\n"
+      "                            + (select c.xmin::text::bigint from pg_class c where c.oid = p_rel))::text::xid8) = 'in progress'),\n", 1)],
+)
+MUTATIONS["truncate_checked_inplace_by_creation"] = (
+    "bench/regrain_copy_by_oid.sh",
+    "PR #1400 review (codex): pgpm._truncate_checked accepts an in-place TRUNCATE only for a relation this transaction "
+    "created. PostgreSQL also truncates in place a relation whose file this transaction already replaced, so two "
+    "regrain_cancel calls in one transaction, on a delta an earlier one created, refused the second as a TRUNCATE "
+    "that reached another relation. One clause, what the in-place branch asks. tests/350 part E2 catches it.",
+    [("    or (pg_relation_size(p_rel) = 0 and v_held),\n",
+      "    or (pg_relation_size(p_rel) = 0\n"
+      "        and pg_xact_status(((pg_current_xact_id()::text::bigint >> 32 << 32)\n"
+      "                            + (select a.xmin::text::bigint from pg_attribute a where a.attrelid = p_rel and a.attnum = -1))::text::xid8) = 'in progress'),\n", 1)],
 )
 
 def main() -> int:
