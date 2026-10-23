@@ -15,7 +15,7 @@
 -- same partitions over the same chunks from every session's TimeZone, DateStyle and abbreviation set. A bound with
 -- an offset is the instant it names. A RETIRED chunk's bound that names no instant by itself was written in a
 -- session nothing recorded, so it is read at its widest (#1336; tests/347 holds the rest of that contract): its
--- wall time under MDY and under DMY, a lo 168 hours east and a hi 168 hours west of UTC (#1363), whatever zone
+-- wall time under MDY and under DMY, a lo 169 hours east and a hi 168 hours west of UTC (#1363), whatever zone
 -- the text names. A PARTITION's own bound with no offset (pgpm writes none, an operator's hand might) is wall time
 -- in the grid's own zone, config.partition_tz; a DateStyle-shaped one reads as ISO, MDY, the style _ts_text writes
 -- every bound in; a zone abbreviation (a pre-#500 render under DateStyle SQL ends in one) reads in the Default set

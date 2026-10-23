@@ -2680,11 +2680,15 @@ byte-budget chunker: never archive a whole large partition as one giant operatio
   relation gone (`archive_chunk_retired`) and holds the range the same way. Which partitions a retired chunk
   holds is the same answer from every session, and never narrower than the chunk. A retired chunk's bound that
   names no instant by itself (one an older install stored as a strategy wrote its `covered_hi`, in a session
-  whose zone nothing recorded) is read at its widest: as wall time under both day-month orders, a `lo` 168
-  hours east of UTC and a `hi` 168 hours west, whatever zone the text names. That is every offset a session can
-  take (a POSIX `TimeZone` reaches 167:59:60 either side, `'XYZ167:59:60'` being UTC-168, and tzdata's LMT
-  passes -12 and +14), not only today's civil zones. Text no DateStyle parses reaches without
-  bound, and the call never raises on it. So such a chunk can hold the partitions within a week of it,
+  whose zone nothing recorded) is read at its widest: as wall time under both day-month orders, a `lo` 169
+  hours east of UTC and a `hi` 168 hours west, whatever zone the text names. That is the furthest offset a
+  `TimeZone` string can give a session: a POSIX offset reaches 167:59:60 either side (`'XYZ167:59:60'` is
+  UTC-168), and a DST name without an offset of its own is an hour east of that (`'XYZ-167:59:60DEF'` is UTC+169
+  in summer). tzdata's LMT passes -12 and +14 too. PostgreSQL does not range-check the offsets inside a zone
+  file, but no file tzdata ships is 16 hours or more from UTC. Text no DateStyle parses reaches without
+  bound, and the call never raises on it. A bound written with an offset of 16 hours or more (a session that far
+  out renders one, `'2025-12-19 10:00:00-20'`, and `timestamptz` input refuses it) is read as the instant it
+  names, never cast. pgpm itself writes an instant that far out in the caller's zone in UTC. So such a chunk can hold the partitions within a week of it,
   pgpm's own included, for as long as the row stays as written; the skip row then names the chunk's `lo` and
   the remedy: once you know the instant the bound names (for a partition's last chunk, usually the `hi` of the
   `retain_drop` row `pgpm.log` has for it), write it with its offset (`update pgpm.archive_ledger set hi =

@@ -12,15 +12,16 @@
 -- ledger's (parent_table, lo) refuses the row, every tick.
 --
 -- THE CONTRACT. Such a bound is read at its widest: a lo at the earliest instant its text can name, a hi at the
--- latest, as wall time under either day-month order, at any offset a session can take, to 168 hours either side of
--- UTC (#1363; tests/354 holds the extremes). Never narrower, and the same from every session. A partition only the widening holds is held until the operator writes the bound with
--- its offset, the remedy the skip row names (part E types it).
+-- latest, as wall time under either day-month order, at any offset a session can take, to 168 hours west of UTC
+-- and 169 east (#1363; tests/354 holds the extremes). Never narrower, and the same from every session. A partition
+-- only the widening holds is held until the operator writes the bound with its offset, the remedy the skip row
+-- names (part E types it).
 --
 -- THE FIXTURE. A UTC grid with hand-made hour partitions in December 2025 and pgpm's own from 6 January 03:00Z:
 --   gone_hi  [8 Dec 12:00Z, '2025-12-08 08:00:00')  hi is New York's wall time for 13:00Z; at its widest (168 hours
 --                                   west) it ends at 15 Dec 08:00Z, so it holds t_redo [8 Dec 12, 13) and
 --                                   h07 [15 Dec 07, 08), not h08 [15 Dec 08, 09)
---   gone_lo  ['2025-12-22 09:30:00', 22 Dec 01:00Z)  lo is Tokyo's wall time for 00:30Z; at its widest (168 hours
+--   gone_lo  ['2025-12-22 10:30:00', 22 Dec 02:00Z)  lo is Tokyo's wall time for 01:30Z; at its widest (169 hours
 --                                   east) it starts at 15 Dec 09:30Z, so it holds h09 [15 Dec 09, 10), not h08
 -- Expected: t_redo and h07 over gone_hi, h09 over gone_lo; h08 and pgpm's partitions held by nothing. Part G
 -- holds that a bound the session cannot parse, or nothing parses, never raises out of the call.
@@ -57,8 +58,8 @@ update pgpm.config set archive_batch = null, retain_batch = null where parent_ta
 -- the dropped hours' records, and their objects, the only copy of their rows
 insert into pgpm.archive_ledger (parent_table, lo, hi, child_name, s3_key, rows_archived, retired_at, child_oid) values
   ('t347.t', '2025-12-08 12:00:00+00', '2025-12-08 08:00:00', 'gone_hi', 't347.t/2025-12-08 12:00:00+00', 2, now(), 4290000301),
-  ('t347.t', '2025-12-22 09:30:00', '2025-12-22 01:00:00+00', 'gone_lo', 't347.t/2025-12-22 09:30:00', 1, now(), 4290000302);
-insert into t347.objects values ('t347.t/2025-12-08 12:00:00+00', 'old1,old2'), ('t347.t/2025-12-22 09:30:00', 'old3');
+  ('t347.t', '2025-12-22 10:30:00', '2025-12-22 02:00:00+00', 'gone_lo', 't347.t/2025-12-22 10:30:00', 1, now(), 4290000302);
+insert into t347.objects values ('t347.t/2025-12-08 12:00:00+00', 'old1,old2'), ('t347.t/2025-12-22 10:30:00', 'old3');
 -- the operator's hours, by plain DDL, adopted
 create table t347.t_redo partition of t347.t for values from ('2025-12-08 12:00:00+00') to ('2025-12-08 13:00:00+00');
 create table t347.h07 partition of t347.t for values from ('2025-12-15 07:00:00+00') to ('2025-12-15 08:00:00+00');
@@ -76,7 +77,7 @@ create function t347.held() returns text language sql as $$
     from pgpm._over_retired_chunks('t347.t') o;
 $$;
 \set gone_hi '[2025-12-08 12:00:00+00, 2025-12-08 08:00:00) recorded for gone_hi, whose relation no longer exists, at t347.t/2025-12-08 12:00:00+00 | ''2025-12-08 12:00:00+00'''
-\set gone_lo '[2025-12-22 09:30:00, 2025-12-22 01:00:00+00) recorded for gone_lo, whose relation no longer exists, at t347.t/2025-12-22 09:30:00 | ''2025-12-22 09:30:00'''
+\set gone_lo '[2025-12-22 10:30:00, 2025-12-22 02:00:00+00) recorded for gone_lo, whose relation no longer exists, at t347.t/2025-12-22 10:30:00 | ''2025-12-22 10:30:00'''
 select format('h07: %s', :'gone_hi') || E'\n' || format('h09: %s', :'gone_lo') || E'\n' || format('t_redo: %s', :'gone_hi')
   as expected \gset
 
@@ -90,7 +91,7 @@ select is((select partition_tz from pgpm.config where parent_table = 't347.t'::r
 
 -- A. The same partitions over the same chunks from every session, each of which reads the bounds another way.
 select ok('2025-12-08 08:00:00'::timestamptz < '2025-12-08 12:00:00+00'::timestamptz
-          and '2025-12-22 09:30:00'::timestamptz > '2025-12-22 01:00:00+00'::timestamptz,
+          and '2025-12-22 10:30:00'::timestamptz > '2025-12-22 02:00:00+00'::timestamptz,
           'LIVENESS: read in UTC, the grid''s own zone, gone_hi ends below its lo and gone_lo starts past its hi');
 select is(t347.held(), :'expected', 'from UTC: t_redo and h07 over gone_hi, h09 over gone_lo, h08 over nothing');
 set timezone = 'America/New_York';
@@ -98,8 +99,8 @@ select ok('2025-12-08 08:00:00'::timestamptz = '2025-12-08 13:00:00+00'::timesta
           'LIVENESS: read in New York, gone_hi ends at 13:00Z, before h07');
 select is(t347.held(), :'expected', 'from America/New_York the call holds the same partitions over the same chunks');
 set timezone = 'Asia/Tokyo';
-select ok('2025-12-22 09:30:00'::timestamptz = '2025-12-22 00:30:00+00'::timestamptz,
-          'LIVENESS: read in Tokyo, gone_lo starts at 00:30Z, past h09');
+select ok('2025-12-22 10:30:00'::timestamptz = '2025-12-22 01:30:00+00'::timestamptz,
+          'LIVENESS: read in Tokyo, gone_lo starts at 01:30Z, past h09');
 select is(t347.held(), :'expected', 'from Asia/Tokyo the call holds the same partitions over the same chunks');
 set timezone = 'Pacific/Kiritimati';
 set datestyle = 'SQL, DMY';
@@ -120,7 +121,7 @@ select pgpm._archive_step('t347.t');
 select is((select is_called from t347.overwrites), false,
           'B: the strategy never PUT over an object it had written, so the retired chunks'' objects are untouched');
 select is((select string_agg(format('%s=%s', key, body), '; ' order by key) from t347.objects),
-          't347.t/2025-12-08 12:00:00+00=old1,old2; t347.t/2025-12-15 08:00:00+00=h08a,h08b; t347.t/2025-12-22 09:30:00=old3',
+          't347.t/2025-12-08 12:00:00+00=old1,old2; t347.t/2025-12-15 08:00:00+00=h08a,h08b; t347.t/2025-12-22 10:30:00=old3',
           'B: the step archived h08 alone, and both retired objects still hold the dropped rows');
 select is((select string_agg(lo, ', ' order by lo) from pgpm.log
             where parent_table = 't347.t'::regclass and action = 'skip_archive_retired_range'),
@@ -152,18 +153,18 @@ select is((select string_agg(payload, ',' order by payload) from t347.t where ts
           'h07a,h09a,late1,late2,late3', 'C: the held hours keep their rows');
 
 -- E. The remedy, typed: the operator writes each bound with the offset of the instant it names (New York's 08:00 is
--- 13:00Z, Tokyo's 09:30 is 00:30Z). gone_hi still holds t_redo, the partition really over it; h07 and h09 are let go.
+-- 13:00Z, Tokyo's 10:30 is 01:30Z). gone_hi still holds t_redo, the partition really over it; h07 and h09 are let go.
 update pgpm.archive_ledger set hi = '2025-12-08 13:00:00+00'
  where parent_table = 't347.t'::regclass and lo = '2025-12-08 12:00:00+00';
-update pgpm.archive_ledger set lo = '2025-12-22 00:30:00+00'
- where parent_table = 't347.t'::regclass and lo = '2025-12-22 09:30:00';
+update pgpm.archive_ledger set lo = '2025-12-22 01:30:00+00'
+ where parent_table = 't347.t'::regclass and lo = '2025-12-22 10:30:00';
 select is(t347.held(),
           't_redo: [2025-12-08 12:00:00+00, 2025-12-08 13:00:00+00) recorded for gone_hi, whose relation no longer exists, at t347.t/2025-12-08 12:00:00+00 | none',
           'E: with both bounds written with their offsets, only t_redo is held, and over a chunk read as recorded');
 select pgpm._archive_step('t347.t');
 select is((select string_agg(format('%s=%s', key, body), '; ' order by key) from t347.objects),
           't347.t/2025-12-08 12:00:00+00=old1,old2; t347.t/2025-12-15 07:00:00+00=h07a; t347.t/2025-12-15 08:00:00+00=h08a,h08b; '
-            || 't347.t/2025-12-15 09:00:00+00=h09a; t347.t/2025-12-22 09:30:00=old3',
+            || 't347.t/2025-12-15 09:00:00+00=h09a; t347.t/2025-12-22 10:30:00=old3',
           'E: the next step archives h07 and h09, and still not t_redo');
 select is((select is_called from t347.overwrites), false, 'E: and no PUT landed over an object already written');
 select is(pgpm.retain('t347.t'), 2, 'LIVENESS: E: retain() dropped two partitions');
