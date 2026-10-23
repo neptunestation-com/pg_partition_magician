@@ -329,7 +329,9 @@ TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the N
   -- the LIKE: a NOT VALID or NO INHERIT CHECK, or a generated control column, committed since the preflight
   -- is refused in the preflight's words and rolls the cutover back to the resumable phase-2 state, where it
   -- used to fail the LIKE or the ATTACH raw. Under this phase's lock_timeout, like every wait in it.
-  perform pgpm._lock_oid_or_raise(p_parent, 'access share', false, 'transmute');   -- #1335 b10: by oid, pinning the name
+  -- #1367: through the preflight's name, which every name the cutover makes is derived from and which nothing held
+  -- still between the phases: a RENAME committed since was undone by the renames below. Refused, not followed.
+  perform pgpm._lock_named_or_raise(p_parent, 'access share', false, v_nsp, v_rel, 'transmute');
   perform pgpm._transmute_refuse_generated_control(p_parent, p_control);
   perform pgpm._transmute_refuse_uncarried_constraints(p_parent);
 
@@ -362,6 +364,7 @@ TRANSMUTE_CUTOVER_HOIST = """  -- #344: everything below that only touches the N
       end if;
       raise;
   end;
+  perform pgpm._nsp_held_or_raise(v_nspoid, v_nsp, 'transmute');   -- #1367: the CREATE's wait for a holder
   v_parent := format('%I.%I', v_nsp, v_staging)::regclass;
   execute format('alter table %s drop constraint if exists pgpm_monolith_bound', v_parent::text);
   -- 0b (owner, RLS). After the LIKE, under its ACCESS SHARE (see 0b).
@@ -14695,11 +14698,12 @@ MUTATIONS["regrain_capture_fn_in_delta_schema"] = (
 MUTATIONS["untransmute_capture_fn_dropped_in_delta_schema"] = (
     "bench/regrain_capture_fn_any_schema.sh",
     "The resolver fixed but untransmute's drop site not: the function is resolved wherever it lives and then "
-    "dropped by name in the DELTA's schema, so after a move the recorded function survives and an operator's "
-    "function of the capture's name beside the delta is dropped in its place. One site, the schema of the drop. "
+    "looked up for its drop by name in the DELTA's schema, so after a move the recorded function survives and an "
+    "operator's function of the capture's name beside the delta is dropped in its place. One site, the schema of "
+    "the lookup untransmute drops by (#1367 moved the drop onto the oid that lookup finds). "
     "tests/338 parts A and B catch it (the recorded function survives, the operator's is gone).",
-    [("  if v_cfn is not null then execute format('drop function if exists %I.%I()', v_cfnsp, v_cfn); end if;\n",
-      "  if v_cfn is not null then execute format('drop function if exists %I.%I()', v_cnsp, v_cfn); end if;\n", 1)],
+    [("    v_cfn_reg := to_regprocedure(format('%I.%I()', v_cfnsp, v_cfn));\n",
+      "    v_cfn_reg := to_regprocedure(format('%I.%I()', v_cnsp, v_cfn));\n", 1)],
 )
 # The same issue's other exit, pgpm_core/uninstall.sql, which the wrapper takes as the file under test for these
 # two (it recognises them by MUTATION_SRC, as bench/recorded_identity.sh does).
@@ -15406,6 +15410,69 @@ MUTATIONS["scratch_owner_follow_unverified"] = (
     "ACCESS EXCLUSIVE behind a reader, and a schema renamed during that wait hands a namesake, a table pgpm was never "
     "handed, to the parent's owner. One clause. tests/345 part O catches it.",
     [("      perform pgpm._effect_or_raise((select c.relowner from pg_class c where c.oid = r.oid) = v_want, r.oid,\n                                    format('%s, handing a scratch relation to %I,', p_what, v_want_n));\n", "", 1)],
+)
+
+# Issues #1364, #1355, #1367: bench/transmute_by_oid.sh runs tests/351, 352 and 353. transmute, transmute_abort and
+# the incoming-key helpers named the tables they acted on by names rendered before a lock wait, and transmute's
+# cutover made its names from its unlocked preflight's reading of the table's name. One mutation per lock, per check.
+MUTATIONS["transmute_abort_drop_unlocked"] = (
+    "bench/transmute_by_oid.sh",
+    "Pre-#1364 transmute_abort: the DROP of pgpm_monolith_bound is named before its own wait for ACCESS EXCLUSIVE, "
+    "with no lock by the claim's oid first, so a schema swapped while it waits behind a reader sends it to a "
+    "namesake: the namesake loses its constraint of that name, the claim is deleted and the abort logged, and the "
+    "claimed table keeps its write-rejecting bound. One clause, the lock. tests/351 catches it.",
+    [("    perform pgpm._lock_oid_or_raise(p_parent, 'access exclusive', false, 'transmute_abort');\n", "", 1)],
+)
+MUTATIONS["transmute_bound_add_unlocked"] = (
+    "bench/transmute_by_oid.sh",
+    "Pre-#1355 _transmute phase 1: the ADD of pgpm_monolith_bound is named before its own wait for ACCESS EXCLUSIVE "
+    "behind a reader, so a schema swapped during the wait puts the write-rejecting CHECK on a namesake and commits "
+    "it. One clause, the lock by oid before the ADD. tests/352 part A catches it.",
+    [("    perform pgpm._lock_oid_or_raise(p_parent, 'access exclusive', true, 'transmute');\n", "", 1)],
+)
+MUTATIONS["transmute_validate_unlocked"] = (
+    "bench/transmute_by_oid.sh",
+    "_transmute phase 2's VALIDATE named before its own wait for SHARE UPDATE EXCLUSIVE, the #1355 shape: a schema "
+    "swapped during the wait validates a namesake's constraint of the bound's name and leaves the table's NOT VALID. "
+    "One clause, the lock by oid before the VALIDATE. tests/352 part B catches it.",
+    [("    perform pgpm._lock_oid_or_raise(p_parent, 'share update exclusive', true, 'transmute');\n", "", 1)],
+)
+MUTATIONS["transmute_preflight_read_unlocked"] = (
+    "bench/transmute_by_oid.sh",
+    "_transmute's preflight without its first lock through the name it read: its first read of the table waits behind "
+    "an ACCESS EXCLUSIVE holder and reads a namesake a schema swap put under the name, so the bound is sized from the "
+    "namesake's rows, committed on the table, and its VALIDATE fails, leaving the claim and the bound. One clause. "
+    "tests/352 part C catches it.",
+    [("  perform pgpm._lock_named_or_raise(p_parent, 'access share', true, v_nsp, v_rel, 'transmute');\n", "", 1)],
+)
+MUTATIONS["transmute_cutover_lock_follows_rename"] = (
+    "bench/transmute_by_oid.sh",
+    "Pre-#1367 _transmute cutover: its first lock follows the table by oid instead of refusing a name that stopped "
+    "denoting it, so a RENAME committed between phase 2 and the cutover is undone by the cutover's renames, made from "
+    "the preflight's name. One clause, the lock's name. tests/353 part A catches it.",
+    [("  perform pgpm._lock_named_or_raise(p_parent, 'access share', false, v_nsp, v_rel, 'transmute');\n",
+      "  perform pgpm._lock_oid_or_raise(p_parent, 'access share', false, 'transmute');\n", 1)],
+)
+MUTATIONS["transmute_cutover_schema_unasked"] = (
+    "bench/transmute_by_oid.sh",
+    "The schema is not asked again after the cutover's waits for other objects' locks (#1367): a schema swapped "
+    "while 7a waits for an outgoing key's referenced table sends the trigger and policy replays, which name the "
+    "table in the schema the preflight read, to a namesake, and the conversion commits without them. One clause, "
+    "_nsp_held_or_raise's question. tests/353 part B catches it.",
+    [("  if (select n.nspname from pg_namespace n where n.oid = p_nspoid) is distinct from p_nsp then\n",
+      "  if false then\n", 1)],
+)
+MUTATIONS["incoming_key_effect_unchecked"] = (
+    "bench/transmute_by_oid.sh",
+    "An incoming key's ADD, DROP or VALIDATE on its referencing table is not checked by its effect on that table's "
+    "oid: restore_incoming_fks's ADD, waiting behind a writer while the referencing table's schema is swapped, puts "
+    "the key on a namesake and marks the record restored. One clause, _con_effect_or_raise's check. tests/353 part C "
+    "catches it.",
+    [("  perform pgpm._effect_or_raise(\n"
+      "    coalesce((select p_state <> 'absent' and (p_state <> 'validated' or c.convalidated)\n"
+      "                     and (p_ref is null or c.confrelid = p_ref)\n"
+      "                from pg_constraint c where c.conrelid = p_rel and c.conname = p_con), p_state = 'absent'),\n"
+      "    p_rel, p_what);\n", "  null;\n", 1)],
 )
 
 def main() -> int:

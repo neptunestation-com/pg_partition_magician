@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+- **`transmute_abort` drops the bound on the table its claim names** (#1364). It rendered the table's name and
+  then waited for `ACCESS EXCLUSIVE` behind a reader, and the `DROP CONSTRAINT` resolved the name again once
+  granted: a schema renamed during the wait, with a same-named schema and table put in its place, sent the drop
+  to that table, while the abort deleted the claim and logged `bound dropped, table restored`, and the claimed
+  table kept its write-rejecting bound with nothing left to record it. The abort now locks the table by the
+  claim's oid first (`pgpm._lock_oid_or_raise`, which follows a rename) and names it under that lock. Test
+  `tests/351`; guard `bench/transmute_by_oid.sh`; mutation `transmute_abort_drop_unlocked`.
+
+- **`transmute`'s phases reach the table they identified, by oid** (#1355). Phase 1's `ADD CONSTRAINT
+  pgpm_monolith_bound ... NOT VALID` named the table before waiting for its `ACCESS EXCLUSIVE` behind a
+  reader, so a schema swapped during the wait put the write-rejecting bound on a same-named table and
+  committed it; phase 2's `VALIDATE` validated a namesake's constraint of that name the same way. Each phase
+  now locks the table by oid before its statement, and the preflight takes the table's first lock through the
+  name it read (`pgpm._lock_named_or_raise`), refusing, with nothing committed, a name that stopped denoting
+  the table while it waited. The same mechanism's other sites are checked by their effect on the oid
+  (`pgpm._con_effect_or_raise`): the incoming keys `transmute` drops and `untransmute` drops and re-adds, and
+  `restore_incoming_fks`, `validate_incoming_fks` and `suspend_incoming_fks`, each of which waits for the
+  referencing table's lock; a re-add that reached a namesake had marked the record restored, and
+  `_forget_dangling_fks` then forgot the key for good. Test `tests/352` (and `tests/353` part C); guard
+  `bench/transmute_by_oid.sh`; mutations `transmute_bound_add_unlocked`, `transmute_validate_unlocked`,
+  `transmute_preflight_read_unlocked` and `incoming_key_effect_unchecked`.
+
+- **`transmute`'s cutover refuses a table renamed since its preflight** (#1367). The cutover built the staging
+  parent's name, the monolith's and its second `RENAME` from the schema and name the unlocked preflight read,
+  after phases 1 and 2 had let go of the table, so a `RENAME` committed in between was undone: the converted
+  table came back under the old name. Its first lock is now taken through that name, and a table renamed (or
+  whose schema was renamed) since is refused, with the claim and the validated bound kept; `transmute` re-run
+  on the table's name now resumes from them. After each of the cutover's waits for another relation's lock
+  the schema is asked again (`pgpm._nsp_held_or_raise`), and the policies and publication memberships it
+  replays by name, the outgoing keys and the sequences it hands over are checked by oid, so a schema swapped
+  while it waited sends nothing to a namesake; `untransmute` asks the same of its captured statements. Test
+  `tests/353`; guard `bench/transmute_by_oid.sh`; mutations `transmute_cutover_lock_follows_rename` and
+  `transmute_cutover_schema_unasked`.
+
 - **`transmute` carries the reused key with its whole definition** (#766 bullets 1 and 2). The cutover declared
   the reused primary key or unique constraint on the parent from its column list and deferrability alone, so a
   `PRIMARY KEY ... INCLUDE` matched no index of the monolith and failed the cutover with "multiple primary keys"
