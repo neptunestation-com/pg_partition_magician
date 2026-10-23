@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **`bench/upgrade_in_place.sh` sees a new column with no backfill line** (#1383). It degrades only the columns
+  its `DEGRADE_COLS` names, and its #417 precondition derives the columns that must be named from the backfill
+  lines, so a column added to a `create table` body with no backfill line at all, the defect its header names
+  first, was in neither: the degraded install kept it and the catalog "matched a fresh install exactly", while an
+  install from before the column, upgraded by the same file, never got it. The guard now also installs the
+  release it upgrades from (v0.6.0) alone and fails, naming it, any column a fresh install has on a table that
+  release had, which the release lacks and the list omits. Mutation `upgrade_create_body_column_no_backfill`.
+
 - **Three review-loop verdicts read what they claim to** (#1389). `land.sh`'s `verify_tree` found a duplicate
   guard database to renumber by substring, so a duplicate `pgpm_perf33` before a `pgpm_perf332` rewrote the
   unrelated guard's database and kept the duplicate; it now renumbers the last whole name and stops when a name

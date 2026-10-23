@@ -211,6 +211,8 @@ upgrade_in_place|W|all degrade-list columns exist when fresh
 upgrade_in_place|W|every backfill line parsed
 upgrade_in_place|W|found no backfill lines at all
 upgrade_in_place|D|DEGRADE_COLS names every backfilled column
+upgrade_in_place|W|catalog read, columns added since it seen
+upgrade_in_place|D|DEGRADE_COLS names every column added since
 upgrade_in_place|D|the upgrade backfilled child_oid, to each child.s own oid
 upgrade_from_release|W|the origin really is
 upgrade_from_release|W|the origin carries all

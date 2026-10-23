@@ -92,7 +92,11 @@
 # column is an opportunity to forget -- and for a long time only the first check existed, which is
 # how the list came to sit at 15 entries against 25 backfill lines with nothing reporting anything
 # (issue #417). Ten backfill lines were exercised by nobody, including the two that carry #405's
-# claim that a crashed transmute stays reapable.
+# claim that a crashed transmute stays reapable. And a THIRD, because the second derives the columns that
+# must be listed from the backfill lines, so the column with no backfill line at all (the defect named
+# first above) was in neither and this guard passed it (#1383): every column a fresh install has on a table
+# the newest release (v0.6.0) already had, and that release lacks, must be listed, so the degrade drops it
+# and the catalog comparison proves an upgrade adds it back.
 #
 # Usage: upgrade_in_place.sh <container> <db> [install.sql]
 # The install path defaults to the real one; bench/discriminate.sh passes a MUTANT copy instead, to
@@ -261,6 +265,65 @@ unlisted="${unlisted% }"
 check "DEGRADE_COLS names every backfilled column" "${unlisted:-none}" "none"
 if [ -n "$unlisted" ]; then
   echo "      add them to DEGRADE_COLS; their backfill lines are exercised by nothing until you do"; exit 1
+fi
+
+# The release install.sql assertion 8 upgrades from, fetched here because the next precondition reads it too.
+# v0.6.0 is the newest release (see assertion 8 for why it is also the in-flight stage's origin).
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+OUT="$ROOT/bench/results"        # gitignored
+ORIGIN_TAG="v0.6.0"
+ORIGIN_SQL="$OUT/upgrade-in-place-origin-$ORIGIN_TAG.sql"
+mkdir -p "$OUT"
+if ! git -C "$ROOT" rev-parse -q --verify "refs/tags/$ORIGIN_TAG^{commit}" >/dev/null 2>&1; then
+  if ! out=$(git -C "$ROOT" fetch --no-tags --depth=1 origin tag "$ORIGIN_TAG" 2>&1); then
+    echo "FAIL  fixture: could not fetch tag $ORIGIN_TAG; the release origin is missing and verifies nothing"
+    printf '%s\n' "$out" | sed 's/^/      /'; exit 1
+  fi
+fi
+if ! git -C "$ROOT" show "$ORIGIN_TAG:pgpm_core/install.sql" > "$ORIGIN_SQL" 2>/tmp/up_inflight_show.err \
+   || [ ! -s "$ORIGIN_SQL" ]; then
+  echo "FAIL  fixture: git show $ORIGIN_TAG:pgpm_core/install.sql produced nothing; the release origin verifies nothing"
+  sed 's/^/      /' /tmp/up_inflight_show.err; exit 1
+fi
+
+# PRECONDITION, the column with NO backfill line (#1383). The check above derives the columns that must be
+# listed from the backfill lines, so it cannot see the defect this guard's header names first: a column added
+# to a `create table` body with no backfill line at all is in neither the lines nor the list, the degrade keeps
+# it, and the catalog matches while an install from before the column, upgraded by this file, never gets it.
+# So the list is also held to the release: every column a fresh install has on a table the release already
+# had, and the release lacks, is a column an upgrade from it must add, so DEGRADE_COLS must name it, and the
+# degrade then proves its backfill line exists. Columns of tables the release did not have are not asked
+# for: `create table if not exists` makes the whole table on an upgrade from it. Read from the catalog of the
+# release installed alone, not parsed out of its file. Not a premise label, for the reason the check above
+# gives: mutation upgrade_create_body_column_no_backfill exists to fail it.
+REL="${DB}_release"
+TABLE_COLS_SQL="select n.nspname||'.'||c.relname||':'||a.attname from pg_attribute a
+                  join pg_class c on c.oid = a.attrelid join pg_namespace n on n.oid = c.relnamespace
+                 where n.nspname = 'pgpm' and c.relkind in ('r', 'p') and a.attnum > 0 and not a.attisdropped"
+docker exec "$C" psql -U postgres -q -c "drop database if exists $REL" >/dev/null 2>&1
+docker exec "$C" psql -U postgres -q -c "create database $REL" >/dev/null 2>&1
+if ! docker exec -i -e PGOPTIONS='-c client_min_messages=warning' "$C" \
+       psql -U postgres -q -d "$REL" -v ON_ERROR_STOP=1 -f - < "$ORIGIN_SQL" >/tmp/up_release.log 2>&1; then
+  echo "FAIL  fixture: the release install ($ORIGIN_TAG) did not complete"; sed 's/^/      /' /tmp/up_release.log; exit 1
+fi
+q "$REL" "$TABLE_COLS_SQL" | LC_ALL=C sort > /tmp/up_release_cols.txt
+docker exec "$C" psql -U postgres -q -c "drop database if exists $REL" >/dev/null 2>&1
+q "$FRESH" "$TABLE_COLS_SQL" | LC_ALL=C sort > /tmp/up_fresh_cols.txt
+cut -d: -f1 /tmp/up_release_cols.txt | sort -u > /tmp/up_release_tables.txt
+since_release=$(LC_ALL=C comm -13 /tmp/up_release_cols.txt /tmp/up_fresh_cols.txt \
+  | while IFS=: read -r t c; do grep -qxF "$t" /tmp/up_release_tables.txt && echo "$t:$c"; done)
+# LIVENESS: both catalogs were read, and the comparison sees the columns added since the release (it already
+# has a dozen, regrain_source_mark among them), or "none unlisted" would be a comparison of nothing.
+check "LIVENESS: the $ORIGIN_TAG catalog read, columns added since it seen" \
+  "$([ "$(grep -c : /tmp/up_release_cols.txt)" -gt 20 ] && grep -qxF pgpm.config:regrain_source_mark <<<"$since_release" && echo yes)" "yes"
+unlisted=$(printf '%s\n' "$since_release" | grep ':' | while read -r col; do
+  printf '%s\n' "$DEGRADE_COLS" | grep -qxF "$col" || printf '%s ' "$col"
+done)
+unlisted="${unlisted% }"
+check "DEGRADE_COLS names every column added since $ORIGIN_TAG" "${unlisted:-none}" "none"
+# Not an exit: the run goes on, so its other assertions still report on this install.sql.
+if [ -n "$unlisted" ]; then
+  echo "      an upgrade from $ORIGIN_TAG must add each; give it a backfill line and a DEGRADE_COLS entry"
 fi
 
 # The backfilled columns a fresh install declares NOT NULL, read from the fresh oracle (#1003). The
@@ -489,24 +552,9 @@ fi
 
 # ---------------------------------------------------------------------------- a regrain in flight, from a release (#878)
 # ASSERTION 8. A real origin, not a degrade (see the header). v0.6.0 is the newest release whose install.sql
-# has no config.regrain_source_mark; asserted below rather than assumed, so a stale choice fails loudly.
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="$ROOT/bench/results"        # gitignored
+# has no config.regrain_source_mark; asserted below rather than assumed, so a stale choice fails loudly. Its
+# install.sql ($ORIGIN_SQL) was fetched before the preconditions, which read its catalog too (#1383).
 IDB="${DB}_inflight"
-ORIGIN_TAG="v0.6.0"
-ORIGIN_SQL="$OUT/upgrade-in-place-origin-$ORIGIN_TAG.sql"
-mkdir -p "$OUT"
-if ! git -C "$ROOT" rev-parse -q --verify "refs/tags/$ORIGIN_TAG^{commit}" >/dev/null 2>&1; then
-  if ! out=$(git -C "$ROOT" fetch --no-tags --depth=1 origin tag "$ORIGIN_TAG" 2>&1); then
-    echo "FAIL  fixture: could not fetch tag $ORIGIN_TAG; the in-flight regrain stage has no origin and verifies nothing"
-    printf '%s\n' "$out" | sed 's/^/      /'; exit 1
-  fi
-fi
-if ! git -C "$ROOT" show "$ORIGIN_TAG:pgpm_core/install.sql" > "$ORIGIN_SQL" 2>/tmp/up_inflight_show.err \
-   || [ ! -s "$ORIGIN_SQL" ]; then
-  echo "FAIL  fixture: git show $ORIGIN_TAG:pgpm_core/install.sql produced nothing; the in-flight regrain stage verifies nothing"
-  sed 's/^/      /' /tmp/up_inflight_show.err; exit 1
-fi
 docker exec "$C" psql -U postgres -q -c "drop database if exists $IDB" >/dev/null 2>&1
 docker exec "$C" psql -U postgres -q -c "create database $IDB" >/dev/null 2>&1
 if ! docker exec -i -e PGOPTIONS='-c client_min_messages=warning' "$C" \
