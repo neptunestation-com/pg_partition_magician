@@ -3239,13 +3239,18 @@ $$;
 -- another than the one a tick gives that chunk, and ['2024-01-02 03:00', '2024-01-02 18:00') was a range to
 -- the empty-range check and no row to the read, which PUT an empty object at the 2 January cell's key. A
 -- timestamp or timestamptz column compares the literal whole, so its reading is the instant itself.
+-- A uuidv7 or text_time column drops the rest too (#1369): the read compares it with pgpm._encode of the bound,
+-- which keeps the encoding's unit (a millisecond for uuidv7, a second for ObjectId) and drops what is below it,
+-- so its reading is the start of the unit, the bound encoded and decoded again. Read as the instant, a range
+-- inside one millisecond passed the empty-range check, both bounds encoded to one uuid, the read found no row,
+-- and the call PUT an empty object at lo's chunk key; and a lo inside a unit was keyed by the instant.
 --
 -- Rendered by pgpm._ts_text in the CALLER's zone, as every native time text pgpm hands a strategy is: the
 -- offset in the text makes the instant exact, and archive._object_stem's own pin is what takes the zone out
 -- of the key (#551).
 create or replace function archive._grid_bound(p_parent regclass, p_column name, p_kind text, p_tz text, p_text text)
 returns text language plpgsql as $$
-declare v_at timestamptz;
+declare v_at timestamptz; c pgpm.config;
 begin
   if p_kind = 'id' then return archive._bound_native('id', p_text, null); end if;
   v_at := archive._bound_native(p_kind, p_text, p_tz)::timestamptz;
@@ -3254,6 +3259,14 @@ begin
                   where a.attrelid = p_parent and a.attname = p_column
                     and a.atttypid = 'date'::regtype and not a.attisdropped) then
     v_at := date_trunc('day', v_at, coalesce(p_tz, 'UTC'));
+  end if;
+  if p_kind in ('uuidv7', 'text_time') then
+    select * into c from pgpm.config where parent_table = p_parent;
+    v_at := pgpm._decode(p_kind,
+              pgpm._encode(p_kind, pgpm._ts_text(v_at), c.text_time_prefix, c.text_time_width, c.text_time_radix,
+                           c.text_time_unit, c.text_time_alphabet, c.text_time_discard_bits, c.text_time_epoch),
+              c.text_time_prefix, c.text_time_width, c.text_time_radix, c.text_time_unit, c.text_time_alphabet,
+              c.text_time_discard_bits, c.text_time_epoch)::timestamptz;
   end if;
   return pgpm._ts_text(v_at);
 end;

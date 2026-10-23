@@ -14608,6 +14608,20 @@ MUTATIONS["archive_prefix_refusal_shows_userinfo"] = (
     [("    if archive._configure_hides(p_prefix) then\n", "    if false then\n", 1)],
 )
 MUTATION_SRC["archive_prefix_refusal_shows_userinfo"] = "pgpm_archive/install.sql"
+# #1369: archive._grid_bound reads a uuidv7 or text_time bound as the start of the unit the column's encoding
+# keeps, as it reads a date column's as the day. Caught by tests/archive/db/56 through
+# bench/archive_direct_call_encoded_unit.sh (against the archive image and MinIO).
+MUTATIONS["archive_encoded_bound_read_as_instant"] = (
+    "bench/archive_direct_call_encoded_unit.sh",
+    "Pre-#1369 archive._grid_bound: a uuidv7 or text_time bound is read as its instant, not as the start of the "
+    "unit the column's encoding keeps, so a direct strategy call's [2024-01-02 00:00:00, 00:00:00.0005) on a "
+    "uuidv7 grid passes the empty-range check, encodes both bounds to one uuid, reads no row and PUTs an empty "
+    "object at lo's chunk key, and a lo inside a unit is keyed by the instant, a key no tick gives the chunk. One "
+    "clause, the unit. tests/archive/db/56 catches it in parts A to C (the sub-unit ranges are not refused, and "
+    "the objects land at the instant's key).",
+    [("  if p_kind in ('uuidv7', 'text_time') then\n", "  if false then\n", 1)],
+)
+MUTATION_SRC["archive_encoded_bound_read_as_instant"] = "pgpm_archive/install.sql"
 
 # Issue #1271: _regrain_capture_names finds the recorded capture function by its oid wherever it lives and returns
 # its own schema (fn_nsp), which untransmute and uninstall.sql drop it in. Caught by tests/338 through
