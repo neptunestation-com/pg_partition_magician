@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **`archive.configure`'s `p_prefix` refusal no longer prints a value holding an `@`** (#1368). The refusal of a
+  prefix with a `.` or `..` segment printed the value raw, so `'user:password@host/../'` put the password in the
+  client's error and the server log, which `pgpm_archive/README.md` says no `archive.configure` refusal does. It
+  now asks `archive._configure_hides`, the decision the endpoint and bucket refusals take through
+  `archive._configure_shown`: a value holding an `@` is not shown, and one without is quoted as given.
+  `bench/archive_configure_prefix_shown.sh` runs `tests/archive/db/55` (mutation
+  `archive_prefix_refusal_shows_userinfo`).
+
 - **Every job of a summarised workflow gates its summary** (#1381). `lint.yml`'s `core-growth` job (the
   `scripts/core_growth.py --selftest` that fails a size measure gone blind) was in neither the `Lint summary`'s
   `needs` nor its result checks, so a red selftest left the one lint check `main` requires green, printing "Every
