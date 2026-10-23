@@ -17,10 +17,10 @@
 #                                    namesake of a dropped partition holds the other parent's retirement off (part B).
 #   disown_namesake_mark_kept     -- the install pass leaves an older retire()'s mark on the namesake in place, so
 #                                    the cell is still refused on identity after the upgrade (part C).
-#   child_oid_backfill_by_relname -- the #421 backfill adopts the first namesake in any schema, and retire() drops
-#                                    the operator's table as the cell's (part D).
-#   child_nsp_fallback_by_relname -- _child_nsp's fallback takes the first namesake's schema for an unanchored row,
-#                                    and retire() drops the operator's table (part E).
+#   child_oid_backfill_by_relname -- the #421 backfill adopts a namesake without asking for the row's range, and
+#                                    retire() drops the operator's table as the cell's (parts D and F).
+#   child_nsp_fallback_by_relname -- _child_nsp's fallback takes a namesake's schema for an unanchored row without
+#                                    asking for the row's range, and retire() drops the operator's table (E and F).
 #
 # Runs on the plain core image (pgtap and pg_prove; the test brings its own stand-in for pg_cron's
 # catalog). The file re-runs install.sql through the psql variable `install`, set here to the copy under test.

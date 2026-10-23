@@ -27,11 +27,14 @@
 --           partition, the namesake standing with its row.
 --   PART E  _child_nsp for an unanchored row, the namesake listed first: the parent's schema, and retire()'s
 --           one-step DROP takes the partition there, never the namesake.
+--   PART F  an unanchored row whose own partition was dropped by hand, the SOLE partition of the parent carrying its
+--           name an operator's table in another schema over another range: neither the backfill nor _child_nsp
+--           takes it (its bound is not the row's range), and retire() drops nothing; the table keeps both rows.
 --
 -- ASYMMETRIC FIXTURES. A's cell [100, 200) holds ids 101 and 102, the operator's table one row (5005); B's dropped
 -- cell held 2 rows, its namesake holds 7007, and the other parent's aged cell holds 3 rows (301, 302, 303). C's cell
 -- holds 121 and 122, its namesake 8008; D's cell 131 and 132, its namesake 9009; E's cell 141 and 142, its namesake
--- 9505.
+-- 9505; F's dropped cell held 151 and 152, its namesake holds 9701 and 9702.
 --
 -- install.sql is re-run with \ir, relative to this file; the psql variable `install` overrides the path.
 \if :{?install}
@@ -41,7 +44,7 @@
 -- retire() is a function, not a committing procedure; no throws_* here.
 create extension if not exists pgtap;
 set client_min_messages = warning;
-select plan(42);
+select plan(47);
 
 -- pg_cron's job table, stood in for (as tests/171 and tests/194 do): the dispatch has to be real for the armed
 -- command to be read and run
@@ -223,7 +226,28 @@ select ok((select i.inhrelid from pg_inherits i join pg_class c on c.oid = i.inh
           and exists (select 1 from pg_inherits where inhparent = 'public.rd355'::regclass and inhrelid = :d_cell_oid),
   'LIVENESS: D''s two relations named the cell are partitions of the parent, the operator''s listed first by name');
 
--- the upgrade, over C's and D's states
+-- ============================ PART F: the sole namesake, over another range ============================
+create schema rf355_ops;
+create table public.rf355 (id bigint primary key, payload text);
+insert into public.rf355 values (151, 'a'), (152, 'b');
+call pgpm.transmute('public.rf355', 'id', 100, p_obtain => 6, p_retain => 300, p_paused => false);
+insert into public.rf355 values (600, 'frontier');
+select child_name as f_cell from pgpm.part where parent_table = 'public.rf355'::regclass and lo = '100' \gset
+-- fixture: the row as an install older than child_oid left it, its partition dropped by hand, and the operator's own
+-- table attached under the name in another schema over another range
+update pgpm.part set child_oid = null where parent_table = 'public.rf355'::regclass and child_name = :'f_cell';
+drop table public.:"f_cell";
+create table rf355_ops.:"f_cell" (id bigint primary key, payload text);
+insert into rf355_ops.:"f_cell" values (9701, 'operator'), (9702, 'operator');
+alter table public.rf355 attach partition rf355_ops.:"f_cell" for values from (9700) to (9800);
+select to_regclass(format('rf355_ops.%I', :'f_cell'))::oid as f_ops_oid \gset
+select ok((select count(*) = 1 and bool_and(i.inhrelid = :f_ops_oid) from pg_inherits i join pg_class c on c.oid = i.inhrelid
+            where i.inhparent = 'public.rf355'::regclass and c.relname = :'f_cell')
+          and (select child_oid is null and attached and lo = '100' and hi = '200' from pgpm.part
+                where parent_table = 'public.rf355'::regclass and child_name = :'f_cell'),
+  'LIVENESS: F''s unanchored [100, 200) row has one namesake partition, the operator''s, over [9700, 9800)');
+
+-- the upgrade, over C's, D's and F's states
 select coalesce(max(id), 0) as log_mark from pgpm.log \gset
 \ir :install
 set client_min_messages = warning;
@@ -263,6 +287,15 @@ select ok(not exists (select 1 from pg_class where oid = :d_cell_oid), 'D: the a
 select ok(exists (select 1 from pg_inherits where inhparent = 'public.rd355'::regclass and inhrelid = :d_ops_oid)
           and (select string_agg(id::text, ',' order by id) from public.rd355 where id < 600 or id >= 9000) = '9009',
   'D: the namesake stands with its row, and the cell''s two rows are gone');
+
+select is((select child_oid from pgpm.part where parent_table = 'public.rf355'::regclass and child_name = :'f_cell'),
+  null::oid, 'F: the upgrade does not anchor the row to the operator''s table');
+select is(pgpm._child_nsp('public.rf355', :'f_cell'), 'public'::name,
+  'F: the unanchored row resolves in the parent''s schema, not the namesake''s');
+select is(pgpm.retire('public.rf355', :'f_cell'), false, 'F: retire() of the aged cell drops nothing');
+select ok(exists (select 1 from pg_inherits where inhparent = 'public.rf355'::regclass and inhrelid = :f_ops_oid)
+          and (select string_agg(id::text, ',' order by id) from public.rf355 where id >= 9700) = '9701,9702',
+  'F: the operator''s table stands, a partition with both its rows');
 
 -- ============================ PART E: _child_nsp for an unanchored row ============================
 -- The operator's schema is created before the parent's, so the namesake comes first both in pg_inherits (the freed

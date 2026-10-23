@@ -13,8 +13,9 @@
   repairs what an older install left by the same choice: a run of `install.sql` clears a mark recorded on another
   relation than the partition's (logged `retain_disown`, the job disarmed if it still held that relation's
   detach), so the cell is no longer refused for good; the `child_oid` backfill of a row older than the anchor,
-  and `_child_nsp` for an unanchored row, take the namesake in the parent's schema or the only one, where they
-  took whichever came first and `retire()` then dropped the operator's table, rows and all.
+  and `_child_nsp` for an unanchored row, take only the partition carrying the row's range as well as its name
+  (`pgpm._part_bound_is`), where they took whichever namesake came first, or the only one, and `retire()` then
+  dropped the operator's table, rows and all.
   `bench/retire_referenced_by_anchor.sh` runs `tests/355` (mutations `retire_referenced_by_relname`,
   `retire_yield_by_relname`, `disown_namesake_mark_kept`, `child_oid_backfill_by_relname` and
   `child_nsp_fallback_by_relname`).

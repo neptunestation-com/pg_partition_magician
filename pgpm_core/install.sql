@@ -572,18 +572,8 @@ end $$;
 -- table is accounted for, so obtain forgets and rebuilds it (#981: forget_missing clears only rows whose
 -- PARENT is gone, so it never reached these).
 --
--- AND ONLY THE PARTITION THE OLDER INSTALL MEANT (#1365). Two partitions of one parent can carry the name in different
--- schemas (an operator's, attached over a range pgpm does not hold), and the relname alone adopted whichever came
--- first, so retire() dropped the operator's table as the cell's. An install that predates this anchor resolved a row
--- as <the parent's schema>.<child_name>, so the namesake there is the one adopted; elsewhere only a sole namesake
--- (a moved parent's partitions stay where they were, #727), and two with neither in the parent's schema none.
-update pgpm.part p set child_oid = i.inhrelid
-  from pg_inherits i join pg_class c on c.oid = i.inhrelid
- where i.inhparent = p.parent_table and c.relname = p.child_name
-   and p.attached and p.child_oid is null
-   and (c.relnamespace = (select pc.relnamespace from pg_class pc where pc.oid = p.parent_table)
-        or not exists (select 1 from pg_inherits i2 join pg_class c2 on c2.oid = i2.inhrelid
-                        where i2.inhparent = p.parent_table and c2.relname = p.child_name and i2.inhrelid <> i.inhrelid));
+-- The attached rows are adopted further down, beside pgpm._part_bound_is, which they need (#1365); the monolith's
+-- anchor after them.
 update pgpm.part p set child_oid = to_regclass(format('%I.%I', n.nspname, p.child_name))::oid
   from pg_class c join pg_namespace n on n.oid = c.relnamespace
  where c.oid = p.parent_table and not p.attached and p.child_oid is null;
@@ -600,19 +590,6 @@ update pgpm.part p set child_oid = to_regclass(format('%I.%I', n.nspname, p.chil
 create table if not exists pgpm.regrain_lock (
   parent_table regclass not null primary key
 );
--- Backfill config.monolith_oid (#672), once per row, from the one fact an older install still carries: the
--- monolith is the only partition that EXISTED BEFORE ITS PARENT. transmute builds the parent in its cutover,
--- from the table that becomes the monolith, and every forward partition and fine child is created after it,
--- so the monolith is the one attached partition with an oid below the parent's. Adopted only when exactly
--- one qualifies, so a table whose monolith retention has already retired, or a regrain has already replaced,
--- is left null (no attached partition predates the parent) and untransmute refuses it. oids wrap at 2^32;
--- a wrap between the table's creation and its conversion leaves this null as well, which fails closed.
-update pgpm.config c set monolith_oid = m.child_oid
-  from (select p.parent_table, min(p.child_oid) as child_oid
-          from pgpm.part p join pg_inherits i on i.inhrelid = p.child_oid and i.inhparent = p.parent_table
-         where p.attached and p.child_oid < p.parent_table::oid
-         group by p.parent_table having count(*) = 1) m
- where m.parent_table = c.parent_table and c.monolith_oid is null;
 
 -- In-flight conversions (issue #275). transmute runs in three transactions -- add the bound, validate it,
 -- cut over -- so that the O(rows) validation scan is not held under the ACCESS EXCLUSIVE lock the ADD
@@ -3670,6 +3647,58 @@ exception when others then
 end;
 $$;
 
+-- _part_bound_is: whether partition p_rel's bound is the range [p_lo, p_hi) of p_parent's grid (#1365). An unanchored
+-- pgpm.part row (no child_oid: an install older than #421, or one its backfill could not resolve) has nothing but its
+-- name and its range to tell its partition from a table of the operator's under the same name in another schema,
+-- attached over another range, and the name alone took that table, which retire() then dropped as the cell's. Two
+-- partitions of one parent never share a range, so a partition carrying the row's name AND its range is the row's,
+-- in whatever schema (a moved parent's stay where they were, #727). The bound is read as adopt_partition reads it,
+-- through the grid's own decoding, under an ISO DateStyle so a timestamp bound renders in a form that parses back;
+-- anything it cannot read is not the row's.
+create or replace function pgpm._part_bound_is(p_parent regclass, p_rel oid, p_lo text, p_hi text)
+returns boolean language plpgsql stable set datestyle = 'ISO, YMD' as $$
+declare cfg pgpm.config; v_m text[];
+begin
+  select regexp_match(pg_get_expr(c.relpartbound, c.oid),
+                      '^FOR VALUES FROM \(''((?:[^'']|'''')*)''\) TO \(''((?:[^'']|'''')*)''\)$')
+    into v_m from pg_class c where c.oid = p_rel;
+  select * into cfg from pgpm.config where parent_table = p_parent;
+  if v_m is null or not found then return false; end if;
+  cfg := pgpm._control_followed(cfg);
+  return coalesce(pgpm._native_text(cfg.control_kind, pgpm._col_to_native(cfg, replace(v_m[1], '''''', '''')))
+                    = pgpm._native_text(cfg.control_kind, p_lo)
+              and pgpm._native_text(cfg.control_kind, pgpm._col_to_native(cfg, replace(v_m[2], '''''', '''')))
+                    = pgpm._native_text(cfg.control_kind, p_hi), false);
+exception when others then
+  return false;
+end;
+$$;
+
+-- The #421 backfill of an ATTACHED row (see the one for a not-yet-attached regrain child, near the top): resolved
+-- through pg_inherits, so what gets adopted is a partition OF THIS PARENT by construction, and only the one carrying
+-- the row's range as well as its name (_part_bound_is, #1365). A row whose partition was dropped by hand stays
+-- unanchored rather than adopting a namesake. Here rather than beside its sibling because it needs the grid's
+-- decoding; nothing between reads child_oid.
+update pgpm.part p set child_oid = i.inhrelid
+  from pg_inherits i join pg_class c on c.oid = i.inhrelid
+ where i.inhparent = p.parent_table and c.relname = p.child_name
+   and p.attached and p.child_oid is null
+   and pgpm._part_bound_is(p.parent_table, i.inhrelid, p.lo, p.hi);
+
+-- Backfill config.monolith_oid (#672), once per row, from the one fact an older install still carries: the
+-- monolith is the only partition that EXISTED BEFORE ITS PARENT. transmute builds the parent in its cutover,
+-- from the table that becomes the monolith, and every forward partition and fine child is created after it,
+-- so the monolith is the one attached partition with an oid below the parent's. Adopted only when exactly
+-- one qualifies, so a table whose monolith retention has already retired, or a regrain has already replaced,
+-- is left null (no attached partition predates the parent) and untransmute refuses it. oids wrap at 2^32;
+-- a wrap between the table's creation and its conversion leaves this null as well, which fails closed.
+update pgpm.config c set monolith_oid = m.child_oid
+  from (select p.parent_table, min(p.child_oid) as child_oid
+          from pgpm.part p join pg_inherits i on i.inhrelid = p.child_oid and i.inhparent = p.parent_table
+         where p.attached and p.child_oid < p.parent_table::oid
+         group by p.parent_table having count(*) = 1) m
+ where m.parent_table = c.parent_table and c.monolith_oid is null;
+
 -- WHICH SCHEMA A PARTITION LIVES IN (issue #727): its own, read off the relation pgpm recorded. A
 -- partition's schema is not its parent's. ALTER TABLE <parent> SET SCHEMA moves the parent and leaves every
 -- partition where it was, and pgpm tracks the parent by oid, so the table stays managed. The lifecycle
@@ -3687,8 +3716,8 @@ $$;
 --   child_oid           the schema of the relation pgpm recorded for this row (#421), wherever it is now.
 --   pg_inherits         an unanchored row (child_oid null: an install older than #421, or a backfill that
 --                       could not resolve it) takes the schema of the partition OF THIS PARENT that carries
---                       the name, so a moved parent's legacy rows are reached too: the one in the parent's
---                       schema, else the sole one, by the #421 backfill's rule (#1365); with two elsewhere, none.
+--                       the name AND the row's range (_part_bound_is, #1365), so a moved parent's legacy rows
+--                       are reached too and a namesake of the operator's over another range never is.
 --   the parent          a row whose relation is gone takes the parent's schema, the answer every step gave
 --                       before this, so a vanished partition is reported as the identity failure it is.
 create or replace function pgpm._child_nsp(p_parent regclass, p_child name)
@@ -3698,13 +3727,13 @@ returns name language sql stable as $$
        join pg_class c on c.oid = p.child_oid
        join pg_namespace n on n.oid = c.relnamespace
       where p.parent_table = p_parent and p.child_name = p_child),
-    (select n.nspname from pg_inherits i
-       join pg_class c on c.oid = i.inhrelid
+    (select n.nspname from pgpm.part p
+       join pg_inherits i on i.inhparent = p.parent_table
+       join pg_class c on c.oid = i.inhrelid and c.relname = p.child_name
        join pg_namespace n on n.oid = c.relnamespace
-      where i.inhparent = p_parent and c.relname = p_child
-        and (c.relnamespace = (select pc.relnamespace from pg_class pc where pc.oid = p_parent)
-             or not exists (select 1 from pg_inherits i2 join pg_class c2 on c2.oid = i2.inhrelid
-                             where i2.inhparent = p_parent and c2.relname = p_child and i2.inhrelid <> i.inhrelid))),
+      where p.parent_table = p_parent and p.child_name = p_child
+        and pgpm._part_bound_is(p_parent, i.inhrelid, p.lo, p.hi)
+      limit 1),
     (select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent));
 $$;
 

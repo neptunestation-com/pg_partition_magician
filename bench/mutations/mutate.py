@@ -2249,14 +2249,7 @@ MUTATIONS = {
         "running longest, and no fresh install anywhere in the suite can show it. What must FAIL "
         "here is the child_oid assertion by name; a mutant that dropped the column instead would "
         "fail the catalog hash and look like a catch for the wrong reason.",
-        [("update pgpm.part p set child_oid = i.inhrelid\n"
-          "  from pg_inherits i join pg_class c on c.oid = i.inhrelid\n"
-          " where i.inhparent = p.parent_table and c.relname = p.child_name\n"
-          "   and p.attached and p.child_oid is null\n"
-          "   and (c.relnamespace = (select pc.relnamespace from pg_class pc where pc.oid = p.parent_table)\n"
-          "        or not exists (select 1 from pg_inherits i2 join pg_class c2 on c2.oid = i2.inhrelid\n"
-          "                        where i2.inhparent = p.parent_table and c2.relname = p.child_name and i2.inhrelid <> i.inhrelid));\n",
-          "", 1)],
+        [('update pgpm.part p set child_oid = i.inhrelid\n  from pg_inherits i join pg_class c on c.oid = i.inhrelid\n where i.inhparent = p.parent_table and c.relname = p.child_name\n   and p.attached and p.child_oid is null\n   and pgpm._part_bound_is(p.parent_table, i.inhrelid, p.lo, p.hi);\n', "", 1)],
     ),
     "upgrade_monolith_oid_backfill_noop": (
         "bench/upgrade_in_place.sh",
@@ -5653,13 +5646,13 @@ $$;''',
        join pg_class c on c.oid = p.child_oid
        join pg_namespace n on n.oid = c.relnamespace
       where p.parent_table = p_parent and p.child_name = p_child),
-    (select n.nspname from pg_inherits i
-       join pg_class c on c.oid = i.inhrelid
+    (select n.nspname from pgpm.part p
+       join pg_inherits i on i.inhparent = p.parent_table
+       join pg_class c on c.oid = i.inhrelid and c.relname = p.child_name
        join pg_namespace n on n.oid = c.relnamespace
-      where i.inhparent = p_parent and c.relname = p_child
-        and (c.relnamespace = (select pc.relnamespace from pg_class pc where pc.oid = p_parent)
-             or not exists (select 1 from pg_inherits i2 join pg_class c2 on c2.oid = i2.inhrelid
-                             where i2.inhparent = p_parent and c2.relname = p_child and i2.inhrelid <> i.inhrelid))),
+      where p.parent_table = p_parent and p.child_name = p_child
+        and pgpm._part_bound_is(p_parent, i.inhrelid, p.lo, p.hi)
+      limit 1),
     (select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent));
 """, """  select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_parent;
 """, 1)],
@@ -15326,19 +15319,21 @@ MUTATIONS["disown_namesake_mark_kept"] = (
 )
 MUTATIONS["child_oid_backfill_by_relname"] = (
     "bench/retire_referenced_by_anchor.sh",
-    "PR #1392 V-02: the #421 child_oid backfill adopts the first partition of the parent that carries the row's name, "
-    "in any schema, the pre-fix shape: an operator's namesake listed first becomes the row's anchor, and retire()'s "
-    "one-step DROP takes it, rows and all. One clause. tests/355 part D catches it.",
-    [('   and p.attached and p.child_oid is null\n   and (c.relnamespace = (select pc.relnamespace from pg_class pc where pc.oid = p.parent_table)\n        or not exists (select 1 from pg_inherits i2 join pg_class c2 on c2.oid = i2.inhrelid\n                        where i2.inhparent = p.parent_table and c2.relname = p.child_name and i2.inhrelid <> i.inhrelid));\n',
+    "PR #1392 V-02 and round 2: the #421 child_oid backfill adopts a partition of the parent that carries the row's "
+    "name without asking whether it carries the row's range, the pre-fix shape: an operator's namesake in another "
+    "schema, listed first or the only one, becomes the row's anchor, and retire()'s one-step DROP takes it, rows and "
+    "all. One clause, the bound. tests/355 parts D and F catch it.",
+    [('   and p.attached and p.child_oid is null\n   and pgpm._part_bound_is(p.parent_table, i.inhrelid, p.lo, p.hi);\n',
       '   and p.attached and p.child_oid is null;\n', 1)],
 )
 MUTATIONS["child_nsp_fallback_by_relname"] = (
     "bench/retire_referenced_by_anchor.sh",
     "PR #1392: _child_nsp's fallback for an unanchored row takes the schema of the first partition of the parent that "
-    "carries the name (limit 1, no order), the pre-fix shape: a namesake in another schema that comes first is what "
-    "retire()'s one-step DROP takes. One clause. tests/355 part E catches it.",
-    [('      where i.inhparent = p_parent and c.relname = p_child\n        and (c.relnamespace = (select pc.relnamespace from pg_class pc where pc.oid = p_parent)\n             or not exists (select 1 from pg_inherits i2 join pg_class c2 on c2.oid = i2.inhrelid\n                             where i2.inhparent = p_parent and c2.relname = p_child and i2.inhrelid <> i.inhrelid))),\n',
-      '      where i.inhparent = p_parent and c.relname = p_child\n      limit 1),\n', 1)],
+    "carries the name (limit 1, no order) without asking whether it carries the row's range, the pre-fix shape: a "
+    "namesake in another schema is what retire()'s one-step DROP takes. One clause, the bound. tests/355 parts E and "
+    "F catch it.",
+    [('      where p.parent_table = p_parent and p.child_name = p_child\n        and pgpm._part_bound_is(p_parent, i.inhrelid, p.lo, p.hi)\n      limit 1),\n',
+      '      where p.parent_table = p_parent and p.child_name = p_child\n      limit 1),\n', 1)],
 )
 
 def main() -> int:
