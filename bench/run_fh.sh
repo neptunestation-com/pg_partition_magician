@@ -406,6 +406,15 @@ SQL
   kill "$regrain_load_pid" 2>/dev/null || true; wait "$regrain_load_pid" 2>/dev/null || true
   printf '%s\n' "$(pctiles regrain)" > "$RESULTS/regrain.pctiles.txt"
   echo "  regrain-phase latency (load on forward partitions): $(cat "$RESULTS/regrain.pctiles.txt")"
+
+  # 4f. conservation through the regrain too: 4e copies the migrated monolith into fine children, swaps them in
+  # and drops the source, so the cohort is read again, by the 4d expression, and judged against the pre-convert
+  # anchor; a mismatch here fails the run whatever 4d said, and the report's after-figures are this read's (#1384).
+  COHORT2=$(q "select count(*), coalesce(sum(hashtextextended(row(e.id, e.created_at, e.user_id, e.kind, e.payload)::text, 0)::numeric), 0) from bench.events e where user_id >= $ANCHOR_USER_LO")
+  IFS='|' read -r ANCHOR1 ANCHOR_DIGEST1 <<<"$COHORT2"
+  [ "$ANCHOR_DIGEST1" = "$ANCHOR_DIGEST0" ] || ANCHOR_SAME=no
+  if [ "$ANCHOR_DIGEST1" = "$ANCHOR_DIGEST0" ] && [ "$ANCHOR1" = "$ANCHOR0" ]; then echo "  CONSERVATION OK after the regrain: anchor cohort $ANCHOR0 == $ANCHOR1, the same rows by digest"
+  else echo "  CONSERVATION FAIL after the regrain: anchor cohort $ANCHOR0 -> $ANCHOR1, same rows: $ANCHOR_SAME (rows lost, invented or rewritten). CORRECTNESS DEFECT."; CONS=fail; fi
 fi
 convert_end=$(q "select to_char(now(),'YYYY-MM-DD HH24:MI:SS')")
 
@@ -438,7 +447,7 @@ say "report"
   echo "- conversion window: \`$convert_start\` -> \`$convert_end\`"
   echo "- copy: ${copy_secs}s online, copied $DEST_ROWS rows; $DELTA_PENDING in-flight changes (insert/update/delete) captured by the trigger and reconciled at cutover; progress in \`copy.progress.csv\`"
   echo "- cutover: ${cut_secs}s total call (online pre-drain + index pre-build + the brief ACCESS EXCLUSIVE window; see 'cutover lock window' below for the blocking window alone)"
-  echo "- **conservation** (immutable cohort users >= $ANCHOR_USER_LO): before=$ANCHOR0 after=$ANCHOR1, the same rows by digest: $ANCHOR_SAME -> $([ "$CONS" = ok ] && echo 'CONSERVED ✅' || echo 'MISMATCH ❌')"
+  echo "- **conservation** (immutable cohort users >= $ANCHOR_USER_LO, read after the cutover$([ "$BENCH_REGRAIN" = "1" ] && echo ' and again after the regrain')): before=$ANCHOR0 after=$ANCHOR1, the same rows by digest: $ANCHOR_SAME -> $([ "$CONS" = ok ] && echo 'CONSERVED ✅' || echo 'MISMATCH ❌')"
   echo "- hypertable catalog rows remaining: $HT_LEFT (0 = torn down)"
   if [ "$BENCH_REGRAIN" = "1" ]; then
     echo "- regrain: $(q "select count(*) from pgpm.log where parent_table='bench.events'::regclass and action='regrain_copy'") copy microbatches, coarse children remaining: \`$REGRAIN_COARSE_FINAL\` (0 = monolith fully split into '$BENCH_FH_INTERVAL' partitions); trace in \`regrain.progress.csv\`"
