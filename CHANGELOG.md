@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **`bench/guards_run_on_clean_code.sh` credits only the tracks `test.sh` runs** (#1385). It counted a guard as
+  run against the unmodified code when any `run_<track>()` body named it, though `test.sh` runs a track only by
+  calling its function, so a guard whose only call sat in a `run_*` function nothing called (run against its
+  mutants alone, the #917 state) passed. A body now counts only when `test.sh` calls its function from the top
+  level, or from a body that is itself called. Mutation `clean_run_in_undispatched_function`.
+
 - **`bench/run_fh.sh` judges its cohort after the regrain too** (#1384). Its conservation gate read the
   immutable cohort after the cutover and step 4e then regrained the migrated monolith (copy into fine children,
   swap, drop the source) with nothing read after it, so a regrain that lost or rewrote cohort rows was reported

@@ -16567,6 +16567,19 @@ MUTATIONS["fh_conservation_before_regrain_only"] = (
       "invented or rewritten). CORRECTNESS DEFECT.\"; fi\n", 1)],
 )
 MUTATION_SRC["fh_conservation_before_regrain_only"] = "bench/run_fh.sh"
+MUTATIONS["clean_run_in_undispatched_function"] = (
+    "bench/guards_run_on_clean_code.sh",
+    "#1385: write_block_identity.sh's one clean-code run moved out of run_perf's list into a run_* function of "
+    "its own that test.sh never calls, so no track runs it against the unmodified module and only its mutants "
+    "exercise it (the #917 state). Before #1385 the guard credited any guard named in any run_*() body, called or "
+    "not. Two sites: the list entry, and the function placed before run_discriminate.",
+    [('    "bench/write_block_identity.sh pgpm_wbident"\n', '', 1),
+     ("\nrun_discriminate() {\n",
+      "\nrun_identity_guards() {\n"
+      "  bash \"$(dirname \"$0\")/bench/write_block_identity.sh\" pgpm_test-15 pgpm_wbident || return 1\n"
+      "}\n\nrun_discriminate() {\n", 1)],
+)
+MUTATION_SRC["clean_run_in_undispatched_function"] = "test.sh"
 MUTATIONS["upgrade_create_body_column_no_backfill"] = (
     "bench/upgrade_in_place.sh",
     "#1383: a column added to pgpm.config's `create table` body with no `add column if not exists` line at all, "
