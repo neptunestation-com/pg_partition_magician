@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+- **Every job of a summarised workflow gates its summary** (#1381). `lint.yml`'s `core-growth` job (the
+  `scripts/core_growth.py --selftest` that fails a size measure gone blind) was in neither the `Lint summary`'s
+  `needs` nor its result checks, so a red selftest left the one lint check `main` requires green, printing "Every
+  lint job passed.", and `./test.sh lint`, held to the same `needs`, never ran it. The summary now needs and judges
+  it, and the lint track runs it. `bench/summary_gates_every_job.sh` holds each of the three required summaries to
+  its workflow's jobs: every other job is needed (test.yml's informational `dbdev-cap` is the one named
+  exception), the summary runs `if: always()`, and its steps, run with the results rendered, pass with every need
+  succeeding and fail with any one failed, cancelled or skipped. Mutations `lint_summary_misses_core_growth` and
+  `lint_summary_waits_unjudged`.
+
+- **`bench/ci_runs_lint_jobs.sh` runs the lint track it vouches for** (#1382). It read `run_lint`'s job list and
+  the `lint_job_` bodies as text and stubbed the whole lint track out of `ci`, so a `run_lint` whose loop called
+  no job, or dropped a job's failure, and reported each PASS passed its "fails when one fails". Its `ci` run now
+  executes `run_lint` and the `lint` track's block out of the `test.sh` under test, each job a stub that fails at
+  its first command when chosen: every job must be called once, and `ci` must fail naming lint with any one of
+  them failing. Mutations `run_lint_drops_job_failure` and `run_lint_job_without_errexit`.
+
 - **`uninstall.sql` drops what pgpm recorded by its oid** (#1357). The script read the names of regrain's delta and
   capture function, and of `from_hypertable`'s scratch copy, delta and function, and dropped them by those names
   after a wait: `regrain_cancel`'s, an earlier drop's, or the `DROP`'s own for its lock behind a reader. A schema

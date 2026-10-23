@@ -13439,6 +13439,44 @@ MUTATIONS["ci_drops_lint_failure"] = (
     [('    *) ci_failed="$ci_failed lint" ;;\n', "    *) ;;\n", 1)],
 )
 MUTATION_SRC["ci_drops_lint_failure"] = "test.sh"
+# Issue #1382: the guard runs the lint track itself, run_lint() and its `lint` block out of test.sh with each job a
+# stub, so what run_lint does with a job's failure is judged, not the spelling of its loop. Both mutate test.sh.
+MUTATIONS["run_lint_drops_job_failure"] = (
+    "bench/ci_runs_lint_jobs.sh",
+    "run_lint's failure arm prints FAIL for the job and records nothing, so the lint track ends `lint track: PASS` "
+    "and exits 0 with a job red, and `./test.sh ci` prints PASS over a red Lint summary. The pre-#1382 guard read "
+    "run_lint's list and stubbed the whole track, so it passed this. One site, the arm.",
+    [('      failed="$failed $job"\n', "", 1)],
+)
+MUTATION_SRC["run_lint_drops_job_failure"] = "test.sh"
+MUTATIONS["run_lint_job_without_errexit"] = (
+    "bench/ci_runs_lint_jobs.sh",
+    "run_lint runs each job's function in a child bash without -e, so a job whose first command fails and whose "
+    "last passes is reported PASS: the reason the child shell exists (GitHub runs a run: block with bash -e). The "
+    "pre-#1382 guard never ran run_lint, so it passed this. One clause, the -e.",
+    [('if bash -e -o pipefail -c "$(declare -f "$fn"); $fn"; then\n',
+      'if bash -o pipefail -c "$(declare -f "$fn"); $fn"; then\n', 1)],
+)
+MUTATION_SRC["run_lint_job_without_errexit"] = "test.sh"
+# Issue #1381: every job of a summarised workflow is gated by its summary (bench/summary_gates_every_job.sh). Both
+# mutate lint.yml; the guard reads the mutant in place of the workflow of the same name.
+MUTATIONS["lint_summary_misses_core_growth"] = (
+    "bench/summary_gates_every_job.sh",
+    "Pre-#1381: lint.yml's Lint summary neither needs nor judges the core-growth job, so a red "
+    "scripts/core_growth.py --selftest leaves the one lint check main requires green ('Every lint job passed.'), "
+    "and test.sh's run_lint, held to the same needs, never runs it. One clause at its two sites, the need and its "
+    "check.",
+    [("minifier, core-growth, track-filters,", "minifier, track-filters,", 1),
+     ('          [ "${{ needs.core-growth.result }}" = "success" ] || { echo "core-growth failed"; exit 1; }\n', "", 1)],
+)
+MUTATION_SRC["lint_summary_misses_core_growth"] = ".github/workflows/lint.yml"
+MUTATIONS["lint_summary_waits_unjudged"] = (
+    "bench/summary_gates_every_job.sh",
+    "lint.yml's Lint summary needs the core-growth job and never reads its result: it waits for the job and prints "
+    "'Every lint job passed.' whatever it did, so a red selftest still lands. One site, the check.",
+    [('          [ "${{ needs.core-growth.result }}" = "success" ] || { echo "core-growth failed"; exit 1; }\n', "", 1)],
+)
+MUTATION_SRC["lint_summary_waits_unjudged"] = ".github/workflows/lint.yml"
 
 # Issue #1182: bench/throws_pinned.sh recognises a site by the procedure its statement CALLs, not by the text
 # `call pgpm.`. Two mutations, one per guard: the first is a test-file mutation like its siblings (the real guard

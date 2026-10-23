@@ -1318,6 +1318,7 @@ run_perf() {
     "bench/transmute_child_names_under_lock.sh pgpm_perf337"
     "bench/obtain_walk_reads_rows_once.sh pgpm_perf332"
     "bench/ci_runs_lint_jobs.sh pgpm_perf351"
+    "bench/summary_gates_every_job.sh pgpm_perf432"
     "bench/throws_pinned_sites.sh pgpm_perf350"
     "bench/wrapper_premise_rule.sh pgpm_perf344"
     "bench/regrain_swap_waits_for_older_snapshots.sh pgpm_perf365"
@@ -1619,6 +1620,9 @@ lint_job_minifier() {
   python3 scripts/minify_sql.py --selftest
   PGPM_DBDEV_CAP=warn scripts/build_dbdev_package.sh pgpm_core/install.sql dist/minifier-check.sql
 }
+lint_job_core_growth() {
+  python3 scripts/core_growth.py --selftest
+}
 lint_job_track_filters() {
   python3 scripts/check_track_filters.py --selftest
   python3 scripts/check_track_filters.py
@@ -1669,6 +1673,7 @@ run_lint() {
     quoted-splices
     archive-object-keys
     minifier
+    core-growth
     track-filters
     review-tooling-selftest
     shellcheck
