@@ -5310,6 +5310,50 @@ $$;''',
         [("  'LIVENESS: (A) the parent and the monolith holding ids 1..150 are both in pgpm_t296_<database>');\n",
           "  'A LIVENESS: the parent and the monolith holding ids 1..150 are both in pgpm_t296_<database>');\n", 1)],
     ),
+    "witness_label_py_run_label_first": (
+        "bench/liveness_witness_labels.sh",
+        "Pre-#1380 bench/archive_to_s3_compress.sh (F7-02): the decoder half's Python check() prints the run "
+        "label ahead of the name, `FAIL  single: LIVENESS: rows were read at all`, where bench/discriminate.sh's "
+        "starved() (which reads only the head of a FAIL line) cannot see the prefix, so a run whose export read "
+        "no rows and failed only that witness is certified as a catch. One site: the helper's format.",
+        [("    print((\"PASS  \" if cond else \"FAIL  \") + f\"{head + label + ': ' + name[len(head):]:<58} {detail}\")\n",
+          "    print((\"PASS  \" if cond else \"FAIL  \") + f\"{label + ': ' + name:<58} {detail}\")\n", 1)],
+    ),
+    "witness_label_py_unprefixed": (
+        "bench/liveness_witness_labels.sh",
+        "Pre-#1380 bench/archive_parquet_snapshot.sh (F7-03): the decoder half's liveness witness, the check "
+        "its own comment calls it (an empty racy file satisfies both negatives after it), prints with no "
+        "LIVENESS: prefix, so a mutant whose racy files decode to zero rows fails only that witness and "
+        "bench/discriminate.sh certifies it as a catch. One site: the label's prefix.",
+        [('check("LIVENESS: pyarrow read rows at all", f"{t.num_rows} rows", t.num_rows > 0)\n',
+          'check("pyarrow read rows at all", f"{t.num_rows} rows", t.num_rows > 0)\n', 1)],
+    ),
+    "witness_label_probe_attached_unprefixed": (
+        "bench/liveness_witness_labels.sh",
+        "Pre-#1380 bench/lock_trace.sh (F7-05): the premise that the eBPF probe attached and is delivering "
+        "events, which fails before the guard exits 1 having captured nothing, prints with no LIVENESS: "
+        "prefix, so a mutant run whose probe missed READY is certified by discriminate.sh --track=locktrace "
+        "as catching maintain_no_commits_trace. One site: the label's prefix.",
+        [('check "LIVENESS: the probe attached and is delivering events" "$ready" "true"\n',
+          'check "the probe attached and is delivering events" "$ready" "true"\n', 1)],
+    ),
+    "probe_witness_unconditional_maintain": (
+        "bench/probe_overlap_witness.sh",
+        "Pre-#1379 bench/maintain_lock.sh (F7-01): the probe records saw := true after its poll loop as well, "
+        "so the witness reads true whether the poll found maintain_all or ran out of turns having seen "
+        "nothing, and 'LIVENESS: the probe overlapped a running tick' cannot fail (the #416 shape "
+        "bench/restore_fk_lock.sh retired). One site: the unconditional assignment back.",
+        [("    commit;\n  end loop;\n  perform pg_sleep(0.5);",
+          "    commit;\n  end loop;\n  saw := true;\n  perform pg_sleep(0.5);", 1)],
+    ),
+    "probe_witness_unconditional_rofk": (
+        "bench/probe_overlap_witness.sh",
+        "Pre-#1379 bench/regrain_outgoing_fk_lock.sh (F8-04): the probe records saw := true after its poll "
+        "loop as well, so 'LIVENESS: the probe overlapped a running swap' reads true when the poll never saw "
+        "regrain_step. One site: the unconditional assignment back.",
+        [("    commit;\n  end loop;\n  while not exists(select 1 from public.done) loop\n",
+          "    commit;\n  end loop;\n  saw := true;\n  while not exists(select 1 from public.done) loop\n", 1)],
+    ),
     "discriminate_counts_uninstallable": (
         "bench/discriminate_installs.sh",
         "Pre-#601 bench/discriminate.sh: a mutant is never installed before its guard runs, so a mutation "
@@ -9634,6 +9678,13 @@ MUTATION_SRC = {
     "witness_label_on_defect_check": "bench/upgrade_in_place.sh",
     "witness_label_precondition_word": "bench/upgrade_unanchored_cell.sh",
     "witness_label_test_tag_before_prefix": "tests/296_regrain_children_tablespace_test.sql",
+    # #1380: a Python helper's premise, and lock_trace's attach premise, where starved() cannot read them.
+    "witness_label_py_run_label_first": "bench/archive_to_s3_compress.sh",
+    "witness_label_py_unprefixed": "bench/archive_parquet_snapshot.sh",
+    "witness_label_probe_attached_unprefixed": "bench/lock_trace.sh",
+    # #1379: a lock guard's probe records its overlap witness whether or not the poll saw the work.
+    "probe_witness_unconditional_maintain": "bench/maintain_lock.sh",
+    "probe_witness_unconditional_rofk": "bench/regrain_outgoing_fk_lock.sh",
     "discriminate_counts_uninstallable": "bench/discriminate.sh",
     "discriminate_list_on_stdin": "bench/discriminate.sh",
     "discriminate_counts_liveness_only": "bench/discriminate.sh",
